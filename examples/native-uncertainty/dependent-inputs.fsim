@@ -1,0 +1,22 @@
+(fsim-uncertainty-study
+  :version 1
+  :project "../heatsink-fan/heatsink-fan.fsim"
+  :samples 16
+  :seed 29
+  :wall-time 900s
+  :method quasi-monte-carlo
+  :qmc (owen-scrambled-sobol :replicates 4 :samples-per-replicate 4)
+  :correlation (gaussian-copula
+    :latent-correlation ((1 0.4 0.2) (0.4 1 0.5) (0.2 0.5 1)))
+  :qoi "temperature-max"
+  :geometry (
+    (mesh :role "heatsink" :path "../heatsink-fan/heatsink.stl"
+      :unit "m" :max-hole-edges 0))
+  :materials ("../../data/reference-project/aa6061.fsmcdpk")
+  :interfaces ()
+  :parameters (
+    (uniform :name "fan-speed" :target fan-speed-ratio :entity "heatsink-bank"
+      :low 0.6 :high 0.8)
+    (uniform :name "power" :target power :entity "metal" :low 2.8W :high 3.2W)
+    (uniform :name "inlet" :target air-inlet-temperature :entity "metal"
+      :low 293.15K :high 303.15K)))

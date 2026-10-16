@@ -1,0 +1,126 @@
+frankensim.matdb-source.v1
+surface_a	90 wt% PTFE plus 10 wt% carbon fiber	coaxial hydraulic-piston sealing ring backed by an NBR O-ring of 70 Shore A hardness	source material label PTFE CF10; supplier lot resin fiber dimensions manufacture and surface finish unstated	1	piston-seal-sliding-surface-finish-unstated
+surface_b	hydraulic-cylinder steel inner bore	steel grade alloy heat treatment coating state and measured test-surface finish unstated	source identifies the counterface only as the cylinder steel surface; coating must not be inferred from recommended catalog roughness	1	cylinder-inner-bore-coating-and-finish-unstated
+context	source-linked-CITGO-Anti-Wear-Hydraulic-Oil-Grade-32-lot-and-formulation-unstated	-	hydraulic-cylinder-opposed-chamber-pressure-and-atmosphere-unstated	mounted-coaxial-piston-seal-15pct-o-ring-radial-deformation-table-2-resistive-film-measurement
+observation	table-2-velocity-sweep	PTFE CF10 piston seal against source-grade-and-coating-unspecified steel cylinder bore in source-linked anti-wear hydraulic oil ISO VG 32	Deaconescu and Deaconescu 2020 Table 2 velocity block; voltage drop across the oil-film resistance converted with Equation 11, Ra=10 megaohm, and CR=63.735 megaohm per micrometer	Table 2 reports only the displayed voltage and computed film thickness. Repeats raw traces dispersion confidence calibration uncertainty PTFE constituent grades supplier lot process exact seal geometry test-bore steel grade coating finish metrology oil lot additive formulation opposed-chamber state leakage friction force wear and life are absent. The paper's maximum 3.5 percent comparison error is between measured and Equation 6 theoretical thicknesses, not measurement uncertainty. Reference 29 identifies CITGO Anti-Wear Hydraulic Oil Grade 32; the paper does not separately print a tested-fluid lot
+observation	table-2-pressure-sweep	PTFE CF10 piston seal against source-grade-and-coating-unspecified steel cylinder bore in source-linked anti-wear hydraulic oil ISO VG 32	Deaconescu and Deaconescu 2020 Table 2 pressure block; voltage drop across the oil-film resistance converted with Equation 11, Ra=10 megaohm, and CR=63.735 megaohm per micrometer	Table 2 repeats 8.3 micrometers at 100 bar, 333 K, and 0.2 m/s in the velocity and pressure blocks. Both source rows remain separate provenance-linked claims rather than being treated as independent replicates. Repeats raw traces dispersion confidence calibration uncertainty PTFE constituent grades supplier lot process exact seal geometry test-bore steel grade coating finish metrology oil lot additive formulation opposed-chamber state leakage friction force wear and life are absent
+observation	table-2-temperature-sweep	PTFE CF10 piston seal against source-grade-and-coating-unspecified steel cylinder bore in source-linked anti-wear hydraulic oil ISO VG 32	Deaconescu and Deaconescu 2020 Table 2 temperature block; voltage drop across the oil-film resistance converted with Equation 11, Ra=10 megaohm, and CR=63.735 megaohm per micrometer	This block prints 8.1 micrometers at the same nominal 100 bar, 333 K, and 0.2 m/s condition where two other Table 2 blocks print 8.3 micrometers. The conflict remains separate with Unstated uncertainty; it is not averaged or widened into an invented interval. The 293 K and 313 K CF10 cells are dashes and no claims are created. Test-bore coating state and measured finish remain unknown
+scalar	velocity-020-film-thickness	table-2-velocity-sweep	fluid-film-thickness	0.0000083	m	constant
+uncertainty	velocity-020-film-thickness	unstated	-	-	-	-
+validity	velocity-020-film-thickness	working_pressure	10000000	10000000	Pa
+validity	velocity-020-film-thickness	oil_temperature	333	333	K
+validity	velocity-020-film-thickness	piston_speed	0.2	0.2	m/s
+validity	velocity-020-film-thickness	source_measured_voltage_drop	0.186	0.186	V
+validity	velocity-020-film-thickness	source_o_ring_shore_a_scale_reading	70	70	1
+validity	velocity-020-film-thickness	source_o_ring_initial_radial_deformation_fraction	0.15	0.15	1
+validity	velocity-020-film-thickness	source_film_thickness_derived_by_resistive_method	1	1	1
+validity	velocity-020-film-thickness	source_series_resistance	10000000	10000000	Ohm
+validity	velocity-020-film-thickness	source_cylinder_material_steel	1	1	1
+validity	velocity-020-film-thickness	source_cylinder_bore_grade_known	0	0	1
+validity	velocity-020-film-thickness	source_cylinder_bore_coating_state_known	0	0	1
+validity	velocity-020-film-thickness	source_cylinder_bore_measured_finish_known	0	0	1
+validity	velocity-020-film-thickness	source_ptfe_cf10_supplier_lot_process_known	0	0	1
+validity	velocity-020-film-thickness	source_oil_lot_and_formulation_known	0	0	1
+validity	velocity-020-film-thickness	source_replicates_dispersion_confidence_known	0	0	1
+scalar	velocity-050-film-thickness	table-2-velocity-sweep	fluid-film-thickness	0.0000108	m	constant
+uncertainty	velocity-050-film-thickness	unstated	-	-	-	-
+validity	velocity-050-film-thickness	working_pressure	10000000	10000000	Pa
+validity	velocity-050-film-thickness	oil_temperature	333	333	K
+validity	velocity-050-film-thickness	piston_speed	0.5	0.5	m/s
+validity	velocity-050-film-thickness	source_measured_voltage_drop	0.143	0.143	V
+validity	velocity-050-film-thickness	source_o_ring_shore_a_scale_reading	70	70	1
+validity	velocity-050-film-thickness	source_o_ring_initial_radial_deformation_fraction	0.15	0.15	1
+validity	velocity-050-film-thickness	source_film_thickness_derived_by_resistive_method	1	1	1
+validity	velocity-050-film-thickness	source_series_resistance	10000000	10000000	Ohm
+validity	velocity-050-film-thickness	source_cylinder_material_steel	1	1	1
+validity	velocity-050-film-thickness	source_cylinder_bore_grade_known	0	0	1
+validity	velocity-050-film-thickness	source_cylinder_bore_coating_state_known	0	0	1
+validity	velocity-050-film-thickness	source_cylinder_bore_measured_finish_known	0	0	1
+validity	velocity-050-film-thickness	source_ptfe_cf10_supplier_lot_process_known	0	0	1
+validity	velocity-050-film-thickness	source_oil_lot_and_formulation_known	0	0	1
+validity	velocity-050-film-thickness	source_replicates_dispersion_confidence_known	0	0	1
+scalar	pressure-50-film-thickness	table-2-pressure-sweep	fluid-film-thickness	0.0000089	m	constant
+uncertainty	pressure-50-film-thickness	unstated	-	-	-	-
+validity	pressure-50-film-thickness	working_pressure	5000000	5000000	Pa
+validity	pressure-50-film-thickness	oil_temperature	333	333	K
+validity	pressure-50-film-thickness	piston_speed	0.2	0.2	m/s
+validity	pressure-50-film-thickness	source_measured_voltage_drop	0.173	0.173	V
+validity	pressure-50-film-thickness	source_o_ring_shore_a_scale_reading	70	70	1
+validity	pressure-50-film-thickness	source_o_ring_initial_radial_deformation_fraction	0.15	0.15	1
+validity	pressure-50-film-thickness	source_film_thickness_derived_by_resistive_method	1	1	1
+validity	pressure-50-film-thickness	source_series_resistance	10000000	10000000	Ohm
+validity	pressure-50-film-thickness	source_cylinder_material_steel	1	1	1
+validity	pressure-50-film-thickness	source_cylinder_bore_grade_known	0	0	1
+validity	pressure-50-film-thickness	source_cylinder_bore_coating_state_known	0	0	1
+validity	pressure-50-film-thickness	source_cylinder_bore_measured_finish_known	0	0	1
+validity	pressure-50-film-thickness	source_ptfe_cf10_supplier_lot_process_known	0	0	1
+validity	pressure-50-film-thickness	source_oil_lot_and_formulation_known	0	0	1
+validity	pressure-50-film-thickness	source_replicates_dispersion_confidence_known	0	0	1
+scalar	pressure-100-film-thickness	table-2-pressure-sweep	fluid-film-thickness	0.0000083	m	constant
+uncertainty	pressure-100-film-thickness	unstated	-	-	-	-
+validity	pressure-100-film-thickness	working_pressure	10000000	10000000	Pa
+validity	pressure-100-film-thickness	oil_temperature	333	333	K
+validity	pressure-100-film-thickness	piston_speed	0.2	0.2	m/s
+validity	pressure-100-film-thickness	source_measured_voltage_drop	0.186	0.186	V
+validity	pressure-100-film-thickness	source_o_ring_shore_a_scale_reading	70	70	1
+validity	pressure-100-film-thickness	source_o_ring_initial_radial_deformation_fraction	0.15	0.15	1
+validity	pressure-100-film-thickness	source_film_thickness_derived_by_resistive_method	1	1	1
+validity	pressure-100-film-thickness	source_series_resistance	10000000	10000000	Ohm
+validity	pressure-100-film-thickness	source_cylinder_material_steel	1	1	1
+validity	pressure-100-film-thickness	source_cylinder_bore_grade_known	0	0	1
+validity	pressure-100-film-thickness	source_cylinder_bore_coating_state_known	0	0	1
+validity	pressure-100-film-thickness	source_cylinder_bore_measured_finish_known	0	0	1
+validity	pressure-100-film-thickness	source_ptfe_cf10_supplier_lot_process_known	0	0	1
+validity	pressure-100-film-thickness	source_oil_lot_and_formulation_known	0	0	1
+validity	pressure-100-film-thickness	source_replicates_dispersion_confidence_known	0	0	1
+scalar	pressure-150-film-thickness	table-2-pressure-sweep	fluid-film-thickness	0.0000069	m	constant
+uncertainty	pressure-150-film-thickness	unstated	-	-	-	-
+validity	pressure-150-film-thickness	working_pressure	15000000	15000000	Pa
+validity	pressure-150-film-thickness	oil_temperature	333	333	K
+validity	pressure-150-film-thickness	piston_speed	0.2	0.2	m/s
+validity	pressure-150-film-thickness	source_measured_voltage_drop	0.222	0.222	V
+validity	pressure-150-film-thickness	source_o_ring_shore_a_scale_reading	70	70	1
+validity	pressure-150-film-thickness	source_o_ring_initial_radial_deformation_fraction	0.15	0.15	1
+validity	pressure-150-film-thickness	source_film_thickness_derived_by_resistive_method	1	1	1
+validity	pressure-150-film-thickness	source_series_resistance	10000000	10000000	Ohm
+validity	pressure-150-film-thickness	source_cylinder_material_steel	1	1	1
+validity	pressure-150-film-thickness	source_cylinder_bore_grade_known	0	0	1
+validity	pressure-150-film-thickness	source_cylinder_bore_coating_state_known	0	0	1
+validity	pressure-150-film-thickness	source_cylinder_bore_measured_finish_known	0	0	1
+validity	pressure-150-film-thickness	source_ptfe_cf10_supplier_lot_process_known	0	0	1
+validity	pressure-150-film-thickness	source_oil_lot_and_formulation_known	0	0	1
+validity	pressure-150-film-thickness	source_replicates_dispersion_confidence_known	0	0	1
+scalar	pressure-200-film-thickness	table-2-pressure-sweep	fluid-film-thickness	0.0000025	m	constant
+uncertainty	pressure-200-film-thickness	unstated	-	-	-	-
+validity	pressure-200-film-thickness	working_pressure	20000000	20000000	Pa
+validity	pressure-200-film-thickness	oil_temperature	333	333	K
+validity	pressure-200-film-thickness	piston_speed	0.2	0.2	m/s
+validity	pressure-200-film-thickness	source_measured_voltage_drop	0.591	0.591	V
+validity	pressure-200-film-thickness	source_o_ring_shore_a_scale_reading	70	70	1
+validity	pressure-200-film-thickness	source_o_ring_initial_radial_deformation_fraction	0.15	0.15	1
+validity	pressure-200-film-thickness	source_film_thickness_derived_by_resistive_method	1	1	1
+validity	pressure-200-film-thickness	source_series_resistance	10000000	10000000	Ohm
+validity	pressure-200-film-thickness	source_cylinder_material_steel	1	1	1
+validity	pressure-200-film-thickness	source_cylinder_bore_grade_known	0	0	1
+validity	pressure-200-film-thickness	source_cylinder_bore_coating_state_known	0	0	1
+validity	pressure-200-film-thickness	source_cylinder_bore_measured_finish_known	0	0	1
+validity	pressure-200-film-thickness	source_ptfe_cf10_supplier_lot_process_known	0	0	1
+validity	pressure-200-film-thickness	source_oil_lot_and_formulation_known	0	0	1
+validity	pressure-200-film-thickness	source_replicates_dispersion_confidence_known	0	0	1
+scalar	temperature-333-film-thickness	table-2-temperature-sweep	fluid-film-thickness	0.0000081	m	constant
+uncertainty	temperature-333-film-thickness	unstated	-	-	-	-
+validity	temperature-333-film-thickness	working_pressure	10000000	10000000	Pa
+validity	temperature-333-film-thickness	oil_temperature	333	333	K
+validity	temperature-333-film-thickness	piston_speed	0.2	0.2	m/s
+validity	temperature-333-film-thickness	source_measured_voltage_drop	0.19	0.19	V
+validity	temperature-333-film-thickness	source_o_ring_shore_a_scale_reading	70	70	1
+validity	temperature-333-film-thickness	source_o_ring_initial_radial_deformation_fraction	0.15	0.15	1
+validity	temperature-333-film-thickness	source_film_thickness_derived_by_resistive_method	1	1	1
+validity	temperature-333-film-thickness	source_series_resistance	10000000	10000000	Ohm
+validity	temperature-333-film-thickness	source_cylinder_material_steel	1	1	1
+validity	temperature-333-film-thickness	source_cylinder_bore_grade_known	0	0	1
+validity	temperature-333-film-thickness	source_cylinder_bore_coating_state_known	0	0	1
+validity	temperature-333-film-thickness	source_cylinder_bore_measured_finish_known	0	0	1
+validity	temperature-333-film-thickness	source_ptfe_cf10_supplier_lot_process_known	0	0	1
+validity	temperature-333-film-thickness	source_oil_lot_and_formulation_known	0	0	1
+validity	temperature-333-film-thickness	source_replicates_dispersion_confidence_known	0	0	1

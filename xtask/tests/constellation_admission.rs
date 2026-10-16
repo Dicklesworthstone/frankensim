@@ -1,0 +1,2438 @@
+//! G0/G4/G5 source-level contract tests for the zero-dependency constellation
+//! admission core (bead `frankensim-sj31i.50.1`).
+
+#[path = "../src/constellation_admission.rs"]
+mod admission;
+
+use admission::{
+    AdmissionBudgets, AdmissionContext, AdmissionContextSpec, AdmissionMachine, AdmissionRule,
+    AdmissionState, AdmissionTransition, AdmittedPhase, AnchorObservation, AuthorityId,
+    BudgetCharge, CancellationCause, CommandClass, ComputeBudget, CxBinding, DeadlineBudget,
+    DiagnosticPhase, DrainObligations, ExecutableCapability, ExecutableSlot, FetchAuthority,
+    IndeterminateReason, IoBudget, MAX_ADMISSION_BYTES, MAX_ADMISSION_EVENTS,
+    MAX_EXECUTABLE_CAPABILITIES, MAX_PATH_CAPABILITIES, NetworkBudget, PathCapability, PathSlot,
+    PublicationAuthority, PublicationFailureReason, PublicationSuccessEvidence, RefusalReason,
+    StateKind, TerminalPhase, TransitionKind, TrustAnchorState, transition_kind_may_apply,
+};
+
+const DEADLINE: u64 = 100;
+
+fn id(byte: u8) -> AuthorityId {
+    AuthorityId::try_from_bytes([byte; 32]).expect("nonzero fixture identity")
+}
+
+fn online_budgets() -> AdmissionBudgets {
+    AdmissionBudgets::new(
+        DeadlineBudget::new(id(4), DEADLINE),
+        ComputeBudget {
+            work_units: 10,
+            memory_bytes: 20,
+        },
+        IoBudget {
+            processes: 2,
+            files: 4,
+            output_bytes: 100,
+        },
+        NetworkBudget {
+            requests: 3,
+            bytes: 200,
+        },
+        2,
+    )
+}
+
+fn online_context_with(
+    budgets: AdmissionBudgets,
+    trust_anchor: TrustAnchorState,
+    reverse_capabilities: bool,
+) -> AdmissionContext {
+    let mut paths = vec![
+        PathCapability::new(PathSlot::WorkspaceRoot, id(10)),
+        PathCapability::new(PathSlot::ConstellationLock, id(11)),
+        PathCapability::new(PathSlot::DestinationRoot, id(12)),
+        PathCapability::new(PathSlot::PublicationTarget, id(13)),
+    ];
+    let mut executables = vec![ExecutableCapability::new(ExecutableSlot::Git, id(20))];
+    if reverse_capabilities {
+        paths.reverse();
+        executables.reverse();
+    }
+    AdmissionContext::try_new(AdmissionContextSpec {
+        request_identity: id(1),
+        command: CommandClass::Bootstrap,
+        fetch: FetchAuthority::PinnedTransport { capability: id(30) },
+        publication: PublicationAuthority::BootstrapReceipt { capability: id(13) },
+        cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
+        budgets,
+        trust_anchor,
+        path_capabilities: &paths,
+        executable_capabilities: &executables,
+    })
+    .expect("valid online context")
+}
+
+fn online_context() -> AdmissionContext {
+    online_context_with(
+        online_budgets(),
+        TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        false,
+    )
+}
+
+fn offline_verify_context() -> AdmissionContext {
+    read_only_context(CommandClass::VerifyOnly)
+}
+
+fn read_only_context(command: CommandClass) -> AdmissionContext {
+    let mut paths = vec![PathCapability::new(PathSlot::WorkspaceRoot, id(10))];
+    if !matches!(command, CommandClass::Diagnostic) {
+        paths.push(PathCapability::new(PathSlot::ConstellationLock, id(11)));
+    }
+    let mut executables = Vec::new();
+    if !matches!(command, CommandClass::Diagnostic) {
+        executables.push(ExecutableCapability::new(ExecutableSlot::Git, id(20)));
+    }
+    if matches!(
+        command,
+        CommandClass::ShellVerifyOnly | CommandClass::ShellSnapshot
+    ) {
+        executables.push(ExecutableCapability::new(ExecutableSlot::Shell, id(21)));
+    }
+    AdmissionContext::try_new(AdmissionContextSpec {
+        request_identity: id(1),
+        command,
+        fetch: FetchAuthority::Offline,
+        publication: PublicationAuthority::Prohibited,
+        cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
+        budgets: AdmissionBudgets::new(
+            DeadlineBudget::new(id(4), DEADLINE),
+            ComputeBudget {
+                work_units: 10,
+                memory_bytes: 20,
+            },
+            IoBudget {
+                processes: 2,
+                files: 4,
+                output_bytes: 100,
+            },
+            NetworkBudget {
+                requests: 0,
+                bytes: 0,
+            },
+            2,
+        ),
+        trust_anchor: TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        path_capabilities: &paths,
+        executable_capabilities: &executables,
+    })
+    .expect("valid offline context")
+}
+
+fn publication_for_command(command: CommandClass) -> PublicationAuthority {
+    match command {
+        CommandClass::Bootstrap | CommandClass::ShellBootstrap => {
+            PublicationAuthority::BootstrapReceipt { capability: id(13) }
+        }
+        CommandClass::LockConstellation => {
+            PublicationAuthority::ConstellationLock { capability: id(13) }
+        }
+        CommandClass::DsrQuality | CommandClass::DsrBuild | CommandClass::RchProbe => {
+            PublicationAuthority::ProofReceipt { capability: id(13) }
+        }
+        CommandClass::Diagnostic
+        | CommandClass::VerifyOnly
+        | CommandClass::Snapshot
+        | CommandClass::ShellVerifyOnly
+        | CommandClass::ShellSnapshot => PublicationAuthority::Prohibited,
+    }
+}
+
+fn try_context_for_command_and_publication(
+    command: CommandClass,
+    publication: PublicationAuthority,
+    reverse: bool,
+) -> Result<AdmissionContext, admission::AdmissionError> {
+    let mut paths = vec![PathCapability::new(PathSlot::WorkspaceRoot, id(10))];
+    if !matches!(command, CommandClass::Diagnostic) {
+        paths.push(PathCapability::new(PathSlot::ConstellationLock, id(11)));
+    }
+    if matches!(
+        command,
+        CommandClass::Bootstrap | CommandClass::ShellBootstrap
+    ) {
+        paths.push(PathCapability::new(PathSlot::DestinationRoot, id(12)));
+        paths.push(PathCapability::new(PathSlot::SourceCache, id(14)));
+    }
+    if matches!(
+        command,
+        CommandClass::DsrQuality | CommandClass::DsrBuild | CommandClass::RchProbe
+    ) {
+        paths.push(PathCapability::new(PathSlot::OutputRoot, id(12)));
+    }
+
+    if !matches!(publication, PublicationAuthority::Prohibited) {
+        paths.push(PathCapability::new(PathSlot::PublicationTarget, id(13)));
+    }
+
+    let mut executables = Vec::new();
+    if !matches!(command, CommandClass::Diagnostic) {
+        executables.push(ExecutableCapability::new(ExecutableSlot::Git, id(20)));
+    }
+    match command {
+        CommandClass::ShellVerifyOnly
+        | CommandClass::ShellSnapshot
+        | CommandClass::ShellBootstrap => {
+            executables.push(ExecutableCapability::new(ExecutableSlot::Shell, id(21)));
+        }
+        CommandClass::DsrQuality | CommandClass::DsrBuild => {
+            executables.push(ExecutableCapability::new(ExecutableSlot::Dsr, id(21)));
+        }
+        CommandClass::RchProbe => {
+            executables.push(ExecutableCapability::new(ExecutableSlot::Rch, id(21)));
+        }
+        CommandClass::Diagnostic
+        | CommandClass::VerifyOnly
+        | CommandClass::Snapshot
+        | CommandClass::Bootstrap
+        | CommandClass::LockConstellation => {}
+    }
+
+    let online = matches!(
+        command,
+        CommandClass::Bootstrap | CommandClass::ShellBootstrap | CommandClass::RchProbe
+    );
+    let fetch = if online {
+        FetchAuthority::PinnedTransport { capability: id(30) }
+    } else {
+        FetchAuthority::Offline
+    };
+    let network = if online {
+        NetworkBudget {
+            requests: 3,
+            bytes: 200,
+        }
+    } else {
+        NetworkBudget {
+            requests: 0,
+            bytes: 0,
+        }
+    };
+    if reverse {
+        paths.reverse();
+        executables.reverse();
+    }
+    AdmissionContext::try_new(AdmissionContextSpec {
+        request_identity: id(1),
+        command,
+        fetch,
+        publication,
+        cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
+        budgets: AdmissionBudgets::new(
+            DeadlineBudget::new(id(4), DEADLINE),
+            ComputeBudget {
+                work_units: 10,
+                memory_bytes: 20,
+            },
+            IoBudget {
+                processes: 2,
+                files: 4,
+                output_bytes: 100,
+            },
+            network,
+            2,
+        ),
+        trust_anchor: TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        path_capabilities: &paths,
+        executable_capabilities: &executables,
+    })
+}
+
+fn context_for_command(command: CommandClass, reverse: bool) -> AdmissionContext {
+    try_context_for_command_and_publication(command, publication_for_command(command), reverse)
+        .expect("valid command context")
+}
+
+fn preflight(machine: &mut AdmissionMachine) {
+    machine
+        .apply(AdmissionTransition::Preflight {
+            snapshot: id(50),
+            anchor: AnchorObservation::Observed {
+                identity: id(40),
+                generation: 7,
+            },
+            at_tick: 1,
+        })
+        .expect("preflight");
+}
+
+fn admit(machine: &mut AdmissionMachine) {
+    preflight(machine);
+    machine
+        .apply(AdmissionTransition::StabilityRecheck {
+            snapshot: id(50),
+            anchor: AnchorObservation::Observed {
+                identity: id(40),
+                generation: 7,
+            },
+            at_tick: 2,
+        })
+        .expect("stable recheck");
+}
+
+fn begin_read_only_completion(machine: &mut AdmissionMachine) {
+    machine
+        .apply(AdmissionTransition::BeginReadOnlyCompletion {
+            quiescence: id(70),
+            at_tick: 3,
+        })
+        .expect("read-only quiescence");
+}
+
+fn complete_read_only(machine: &mut AdmissionMachine) {
+    begin_read_only_completion(machine);
+    machine
+        .apply(AdmissionTransition::CompleteReadOnly {
+            snapshot: id(50),
+            anchor: AnchorObservation::Observed {
+                identity: id(40),
+                generation: 7,
+            },
+            receipt: id(80),
+            at_tick: 4,
+        })
+        .expect("stable read-only completion");
+}
+
+fn publication_success_evidence(
+    machine: &AdmissionMachine,
+    fence: AuthorityId,
+    receipt: AuthorityId,
+    observation: AuthorityId,
+) -> PublicationSuccessEvidence {
+    let publication_capability = match machine.context().publication() {
+        PublicationAuthority::BootstrapReceipt { capability }
+        | PublicationAuthority::ConstellationLock { capability }
+        | PublicationAuthority::ProofReceipt { capability } => capability,
+        PublicationAuthority::Prohibited => {
+            panic!("publication success evidence requires publication authority")
+        }
+    };
+    PublicationSuccessEvidence::new(
+        machine.context().request_identity(),
+        machine.attempt(),
+        publication_capability,
+        fence,
+        receipt,
+        observation,
+    )
+}
+
+fn fixture_publication_success() -> PublicationSuccessEvidence {
+    PublicationSuccessEvidence::new(id(1), 0, id(13), id(71), id(60), id(72))
+}
+
+fn authorize_publication(machine: &mut AdmissionMachine) {
+    machine
+        .apply(AdmissionTransition::BeginPublication {
+            quiescence: id(70),
+            at_tick: 3,
+        })
+        .expect("publication preparation");
+    machine
+        .apply(AdmissionTransition::PublicationRecheck {
+            snapshot: id(50),
+            anchor: AnchorObservation::Observed {
+                identity: id(40),
+                generation: 7,
+            },
+            fence: id(71),
+            at_tick: 4,
+        })
+        .expect("publication recheck");
+    machine
+        .apply(AdmissionTransition::AuthorizePublication {
+            receipt: id(60),
+            at_tick: 5,
+        })
+        .expect("publication authorization");
+}
+
+fn complete_publication(machine: &mut AdmissionMachine) -> PublicationSuccessEvidence {
+    authorize_publication(machine);
+    let success = publication_success_evidence(machine, id(71), id(60), id(72));
+    machine
+        .apply(AdmissionTransition::FinalizePublication { success })
+        .expect("publication finalization");
+    success
+}
+
+fn assert_rejected_without_mutation(
+    machine: &mut AdmissionMachine,
+    transition: AdmissionTransition,
+    rule: AdmissionRule,
+) {
+    let before = machine.encode_canonical().expect("encode before refusal");
+    let before_state = machine.state();
+    let before_consumption = machine.consumption();
+    let before_events = machine.events().len();
+    let error = machine
+        .apply(transition)
+        .expect_err("transition must refuse");
+    assert_eq!(error.rule(), rule);
+    assert_eq!(machine.state(), before_state);
+    assert_eq!(machine.consumption(), before_consumption);
+    assert_eq!(machine.events().len(), before_events);
+    assert_eq!(
+        machine.encode_canonical().expect("encode after refusal"),
+        before,
+        "a refused transition must be transactionally invisible"
+    );
+}
+
+#[test]
+fn g0_legal_path_binds_preflight_work_recheck_and_one_publication() {
+    let mut machine = AdmissionMachine::try_new(online_context()).expect("machine");
+    assert_eq!(
+        machine.state(),
+        AdmissionState::Diagnostic(DiagnosticPhase::Created)
+    );
+
+    admit(&mut machine);
+    for charge in [
+        BudgetCharge::Work(10),
+        BudgetCharge::Memory(20),
+        BudgetCharge::Processes(2),
+        BudgetCharge::Files(4),
+        BudgetCharge::Output(100),
+        BudgetCharge::Network {
+            requests: 3,
+            bytes: 200,
+        },
+    ] {
+        machine
+            .apply(AdmissionTransition::Charge { charge, at_tick: 3 })
+            .expect("exact-cap charge");
+    }
+    machine
+        .apply(AdmissionTransition::BeginPublication {
+            quiescence: id(70),
+            at_tick: 4,
+        })
+        .expect("close work before publication");
+    machine
+        .apply(AdmissionTransition::PublicationRecheck {
+            snapshot: id(50),
+            anchor: AnchorObservation::Observed {
+                identity: id(40),
+                generation: 7,
+            },
+            fence: id(71),
+            at_tick: 5,
+        })
+        .expect("publication recheck");
+    machine
+        .apply(AdmissionTransition::AuthorizePublication {
+            receipt: id(60),
+            at_tick: 6,
+        })
+        .expect("publication authorization");
+    let success = publication_success_evidence(&machine, id(71), id(60), id(72));
+    machine
+        .apply(AdmissionTransition::FinalizePublication { success })
+        .expect("publication finalization");
+
+    assert_eq!(
+        machine.state(),
+        AdmissionState::Admitted(AdmittedPhase::Published {
+            receipt: id(60),
+            success,
+        })
+    );
+    assert!(machine.state().attempt_is_finalized());
+    for (sequence, event) in machine.events().iter().enumerate() {
+        assert_eq!(usize::from(event.sequence()), sequence);
+        assert_eq!(event.attempt(), 0);
+    }
+    assert_rejected_without_mutation(
+        &mut machine,
+        AdmissionTransition::FinalizePublication { success },
+        AdmissionRule::IllegalTransition,
+    );
+}
+
+#[test]
+fn g0_publication_success_evidence_is_mandatory_transaction_bound_and_replay_exact() {
+    let success = fixture_publication_success();
+    assert_eq!(success.request_identity(), id(1));
+    assert_eq!(success.attempt(), 0);
+    assert_eq!(success.publication_capability(), id(13));
+    assert_eq!(success.fence(), id(71));
+    assert_eq!(success.receipt(), id(60));
+    assert_eq!(success.observation(), id(72));
+    assert_eq!(
+        AuthorityId::try_from_bytes([0; 32])
+            .expect_err("zero cannot inhabit publication success evidence")
+            .rule(),
+        AdmissionRule::ZeroIdentity
+    );
+
+    let mut wrong_phase = AdmissionMachine::try_new(online_context()).expect("active machine");
+    admit(&mut wrong_phase);
+    assert_rejected_without_mutation(
+        &mut wrong_phase,
+        AdmissionTransition::FinalizePublication { success },
+        AdmissionRule::IllegalTransition,
+    );
+
+    let mut machine = AdmissionMachine::try_new(online_context()).expect("publishing machine");
+    admit(&mut machine);
+    authorize_publication(&mut machine);
+    assert_rejected_without_mutation(
+        &mut machine,
+        AdmissionTransition::FinalizeTerminal { receipt: id(60) },
+        AdmissionRule::IllegalTransition,
+    );
+
+    for invalid in [
+        PublicationSuccessEvidence::new(id(99), 0, id(13), id(71), id(60), id(72)),
+        PublicationSuccessEvidence::new(id(1), 1, id(13), id(71), id(60), id(72)),
+        PublicationSuccessEvidence::new(id(1), 0, id(14), id(71), id(60), id(72)),
+        PublicationSuccessEvidence::new(id(1), 0, id(13), id(70), id(60), id(72)),
+        PublicationSuccessEvidence::new(id(1), 0, id(13), id(71), id(61), id(72)),
+    ] {
+        assert_rejected_without_mutation(
+            &mut machine,
+            AdmissionTransition::FinalizePublication { success: invalid },
+            AdmissionRule::PublicationSuccessEvidenceMismatch,
+        );
+    }
+
+    let mut retried = AdmissionMachine::try_new(online_context()).expect("retried machine");
+    retried
+        .apply(AdmissionTransition::Refuse {
+            reason: RefusalReason::PolicyDenied,
+            observation: id(90),
+        })
+        .expect("first attempt refusal");
+    retried
+        .apply(AdmissionTransition::FinalizeTerminal { receipt: id(80) })
+        .expect("first attempt finalization");
+    retried
+        .apply(AdmissionTransition::Retry {
+            next_cx: CxBinding::try_new(id(5), id(6), id(4), 8).expect("fresh retry Cx"),
+            at_tick: 1,
+        })
+        .expect("second attempt");
+    admit(&mut retried);
+    authorize_publication(&mut retried);
+    assert_eq!(retried.attempt(), 1);
+    assert_rejected_without_mutation(
+        &mut retried,
+        AdmissionTransition::FinalizePublication {
+            success: fixture_publication_success(),
+        },
+        AdmissionRule::PublicationSuccessEvidenceMismatch,
+    );
+    let retried_success = publication_success_evidence(&retried, id(71), id(60), id(73));
+    retried
+        .apply(AdmissionTransition::FinalizePublication {
+            success: retried_success,
+        })
+        .expect("fresh attempt-bound success evidence");
+
+    machine
+        .apply(AdmissionTransition::FinalizePublication { success })
+        .expect("exact success evidence finalizes publication");
+    assert_eq!(
+        machine.state(),
+        AdmissionState::Admitted(AdmittedPhase::Published {
+            receipt: id(60),
+            success,
+        })
+    );
+    assert_eq!(
+        machine.history().last(),
+        Some(&AdmissionTransition::FinalizePublication { success })
+    );
+
+    let bytes = machine
+        .encode_canonical()
+        .expect("published canonical receipt");
+    let replay = AdmissionMachine::decode_recorded(&bytes).expect("published receipt replay");
+    assert_eq!(replay.state(), machine.state());
+    assert_eq!(replay.history(), machine.history());
+    assert_eq!(
+        &bytes[bytes.len() - 32..],
+        success.observation().as_bytes(),
+        "success observation is the final canonically retained field"
+    );
+
+    let mut zero_observation = bytes.clone();
+    let observation_at = zero_observation.len() - 32;
+    zero_observation[observation_at..].fill(0);
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&zero_observation)
+            .expect_err("zero publication-success observation must refuse")
+            .rule(),
+        AdmissionRule::ZeroIdentity
+    );
+
+    let mut mutated_binding = bytes;
+    let evidence_receipt_at = mutated_binding.len() - 64;
+    mutated_binding[evidence_receipt_at] ^= 1;
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&mutated_binding)
+            .expect_err("mutated success binding must not replay")
+            .rule(),
+        AdmissionRule::ImpossibleHistory
+    );
+}
+
+#[test]
+fn g0_every_budget_is_exact_cap_and_n_plus_one_is_transactional() {
+    let cases = [
+        (BudgetCharge::Work(10), BudgetCharge::Work(1)),
+        (BudgetCharge::Memory(20), BudgetCharge::Memory(1)),
+        (BudgetCharge::Processes(2), BudgetCharge::Processes(1)),
+        (BudgetCharge::Files(4), BudgetCharge::Files(1)),
+        (BudgetCharge::Output(100), BudgetCharge::Output(1)),
+        (
+            BudgetCharge::Network {
+                requests: 3,
+                bytes: 200,
+            },
+            BudgetCharge::Network {
+                requests: 1,
+                bytes: 1,
+            },
+        ),
+    ];
+    for (exact, over) in cases {
+        let mut machine = AdmissionMachine::try_new(online_context()).expect("machine");
+        admit(&mut machine);
+        machine
+            .apply(AdmissionTransition::Charge {
+                charge: exact,
+                at_tick: 3,
+            })
+            .expect("n charge");
+        assert_rejected_without_mutation(
+            &mut machine,
+            AdmissionTransition::Charge {
+                charge: over,
+                at_tick: 3,
+            },
+            AdmissionRule::BudgetExceeded,
+        );
+    }
+
+    let max_budgets = AdmissionBudgets::new(
+        DeadlineBudget::new(id(4), DEADLINE),
+        ComputeBudget {
+            work_units: u64::MAX,
+            memory_bytes: 1,
+        },
+        IoBudget {
+            processes: 1,
+            files: 1,
+            output_bytes: 1,
+        },
+        NetworkBudget {
+            requests: 1,
+            bytes: 1,
+        },
+        1,
+    );
+    let mut overflow = AdmissionMachine::try_new(online_context_with(
+        max_budgets,
+        TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        false,
+    ))
+    .expect("machine");
+    admit(&mut overflow);
+    overflow
+        .apply(AdmissionTransition::Charge {
+            charge: BudgetCharge::Work(u64::MAX),
+            at_tick: 3,
+        })
+        .expect("maximum exact charge");
+    assert_rejected_without_mutation(
+        &mut overflow,
+        AdmissionTransition::Charge {
+            charge: BudgetCharge::Work(1),
+            at_tick: 3,
+        },
+        AdmissionRule::BudgetOverflow,
+    );
+}
+
+#[test]
+fn g0_deadline_is_inclusive_and_uses_only_the_bound_clock_tick() {
+    let mut machine = AdmissionMachine::try_new(online_context()).expect("machine");
+    machine
+        .apply(AdmissionTransition::Preflight {
+            snapshot: id(50),
+            anchor: AnchorObservation::Observed {
+                identity: id(40),
+                generation: 7,
+            },
+            at_tick: DEADLINE,
+        })
+        .expect("deadline tick is admitted inclusively");
+    assert_rejected_without_mutation(
+        &mut machine,
+        AdmissionTransition::StabilityRecheck {
+            snapshot: id(50),
+            anchor: AnchorObservation::Observed {
+                identity: id(40),
+                generation: 7,
+            },
+            at_tick: DEADLINE + 1,
+        },
+        AdmissionRule::DeadlineExceeded,
+    );
+}
+
+#[test]
+fn g0_clock_ticks_never_regress_and_poll_work_is_bounded() {
+    let mut machine = AdmissionMachine::try_new(online_context()).expect("machine");
+    machine
+        .apply(AdmissionTransition::Preflight {
+            snapshot: id(50),
+            anchor: AnchorObservation::Observed {
+                identity: id(40),
+                generation: 7,
+            },
+            at_tick: 10,
+        })
+        .expect("preflight");
+    assert_rejected_without_mutation(
+        &mut machine,
+        AdmissionTransition::PollCancellation {
+            work_since_last_poll: 1,
+            at_tick: 9,
+        },
+        AdmissionRule::ClockRegression,
+    );
+    machine
+        .apply(AdmissionTransition::PollCancellation {
+            work_since_last_poll: 8,
+            at_tick: 10,
+        })
+        .expect("exact poll interval");
+    assert_rejected_without_mutation(
+        &mut machine,
+        AdmissionTransition::PollCancellation {
+            work_since_last_poll: 9,
+            at_tick: 11,
+        },
+        AdmissionRule::PollIntervalExceeded,
+    );
+    assert_eq!(machine.last_observed_tick(), Some(10));
+}
+
+#[test]
+fn g0_transition_table_is_total_and_exact_phase_guards_do_not_mutate() {
+    let states = [
+        StateKind::Diagnostic,
+        StateKind::Unanchored,
+        StateKind::Admitted,
+        StateKind::Refused,
+        StateKind::Cancelled,
+        StateKind::Indeterminate,
+    ];
+    let actions = [
+        TransitionKind::Preflight,
+        TransitionKind::StabilityRecheck,
+        TransitionKind::Charge,
+        TransitionKind::Refuse,
+        TransitionKind::RequestCancellation,
+        TransitionKind::Drain,
+        TransitionKind::FinalizeTerminal,
+        TransitionKind::DeclareIndeterminate,
+        TransitionKind::BeginPublication,
+        TransitionKind::PublicationRecheck,
+        TransitionKind::FinalizePublication,
+        TransitionKind::Retry,
+        TransitionKind::PollCancellation,
+        TransitionKind::AuthorizePublication,
+        TransitionKind::PublicationFailed,
+        TransitionKind::BeginReadOnlyCompletion,
+        TransitionKind::CompleteReadOnly,
+    ];
+    let mut decisions = 0usize;
+    for state in states {
+        for action in actions {
+            let _decision = transition_kind_may_apply(state, action);
+            decisions += 1;
+        }
+    }
+    assert_eq!(decisions, 102);
+    assert!(!transition_kind_may_apply(
+        StateKind::Indeterminate,
+        TransitionKind::Retry
+    ));
+    assert!(!transition_kind_may_apply(
+        StateKind::Refused,
+        TransitionKind::FinalizePublication
+    ));
+
+    let mut machine = AdmissionMachine::try_new(online_context()).expect("machine");
+    for transition in [
+        AdmissionTransition::StabilityRecheck {
+            snapshot: id(50),
+            anchor: AnchorObservation::Unavailable,
+            at_tick: 1,
+        },
+        AdmissionTransition::BeginPublication {
+            quiescence: id(70),
+            at_tick: 1,
+        },
+        AdmissionTransition::FinalizeTerminal { receipt: id(80) },
+        AdmissionTransition::FinalizePublication {
+            success: fixture_publication_success(),
+        },
+        AdmissionTransition::RequestCancellation {
+            cause: CancellationCause::Requested,
+            obligations: DrainObligations::default(),
+            observation: id(90),
+        },
+        AdmissionTransition::DeclareIndeterminate {
+            reason: IndeterminateReason::EffectOutcomeUnknown,
+            observation: id(90),
+        },
+    ] {
+        assert_rejected_without_mutation(
+            &mut machine,
+            transition,
+            AdmissionRule::IllegalTransition,
+        );
+    }
+}
+
+#[test]
+fn g0_publication_prohibited_commands_complete_only_after_stable_post_work_recheck() {
+    for command in [
+        CommandClass::Diagnostic,
+        CommandClass::VerifyOnly,
+        CommandClass::Snapshot,
+        CommandClass::ShellVerifyOnly,
+        CommandClass::ShellSnapshot,
+    ] {
+        let mut machine =
+            AdmissionMachine::try_new(read_only_context(command)).expect("read-only machine");
+        admit(&mut machine);
+        complete_read_only(&mut machine);
+        assert_eq!(
+            machine.state(),
+            AdmissionState::Admitted(AdmittedPhase::Completed { receipt: id(80) }),
+            "{command:?}"
+        );
+        assert!(machine.state().attempt_is_finalized(), "{command:?}");
+        assert!(machine.history().iter().all(|transition| !matches!(
+            transition.kind(),
+            TransitionKind::BeginPublication
+                | TransitionKind::PublicationRecheck
+                | TransitionKind::AuthorizePublication
+                | TransitionKind::FinalizePublication
+        )));
+        let bytes = machine.encode_canonical().expect("read-only receipt");
+        let recorded = AdmissionMachine::decode_recorded(&bytes).expect("read-only replay");
+        assert_eq!(recorded.state(), machine.state());
+        assert_eq!(recorded.history(), machine.history());
+        assert_rejected_without_mutation(
+            &mut machine,
+            AdmissionTransition::Charge {
+                charge: BudgetCharge::Work(0),
+                at_tick: 5,
+            },
+            AdmissionRule::IllegalTransition,
+        );
+    }
+
+    let mut publishing = AdmissionMachine::try_new(online_context()).expect("publishing machine");
+    admit(&mut publishing);
+    assert_rejected_without_mutation(
+        &mut publishing,
+        AdmissionTransition::BeginReadOnlyCompletion {
+            quiescence: id(70),
+            at_tick: 3,
+        },
+        AdmissionRule::ReadOnlyCompletionForbidden,
+    );
+}
+
+#[test]
+fn g0_every_command_authority_pair_has_exact_structural_refusal_or_success_liveness() {
+    let commands = [
+        CommandClass::Diagnostic,
+        CommandClass::VerifyOnly,
+        CommandClass::Snapshot,
+        CommandClass::Bootstrap,
+        CommandClass::LockConstellation,
+        CommandClass::DsrQuality,
+        CommandClass::DsrBuild,
+        CommandClass::RchProbe,
+        CommandClass::ShellVerifyOnly,
+        CommandClass::ShellSnapshot,
+        CommandClass::ShellBootstrap,
+    ];
+    let authorities = [
+        PublicationAuthority::Prohibited,
+        PublicationAuthority::BootstrapReceipt { capability: id(13) },
+        PublicationAuthority::ConstellationLock { capability: id(13) },
+        PublicationAuthority::ProofReceipt { capability: id(13) },
+    ];
+    let mut admitted = 0usize;
+    let mut refused = 0usize;
+    let mut prohibited_publication_commands = 0usize;
+
+    for command in commands {
+        let required = publication_for_command(command);
+        for publication in authorities {
+            let result = try_context_for_command_and_publication(command, publication, false);
+            if publication == required {
+                let context = result.unwrap_or_else(|error| {
+                    panic!("{command:?} x {publication:?} must admit: {error:?}")
+                });
+                let mut machine = AdmissionMachine::try_new(context).expect("live matrix machine");
+                admit(&mut machine);
+                match publication {
+                    PublicationAuthority::Prohibited => {
+                        complete_read_only(&mut machine);
+                        assert!(matches!(
+                            machine.state(),
+                            AdmissionState::Admitted(AdmittedPhase::Completed { .. })
+                        ));
+                    }
+                    PublicationAuthority::BootstrapReceipt { .. }
+                    | PublicationAuthority::ConstellationLock { .. }
+                    | PublicationAuthority::ProofReceipt { .. } => {
+                        let success = complete_publication(&mut machine);
+                        assert_eq!(
+                            machine.state(),
+                            AdmissionState::Admitted(AdmittedPhase::Published {
+                                receipt: id(60),
+                                success,
+                            })
+                        );
+                    }
+                }
+                assert!(machine.state().attempt_is_finalized());
+                let bytes = machine.encode_canonical().expect("matrix terminal receipt");
+                let replay = AdmissionMachine::decode_recorded(&bytes)
+                    .expect("matrix terminal receipt replay");
+                assert_eq!(replay.state(), machine.state());
+                assert_eq!(replay.history(), machine.history());
+                admitted += 1;
+            } else {
+                let error = result.expect_err("wrong authority must fail structural admission");
+                let expected_rule = if matches!(publication, PublicationAuthority::Prohibited) {
+                    AdmissionRule::PublicationRequiredForCommand
+                } else {
+                    AdmissionRule::PublicationForbiddenForCommand
+                };
+                assert_eq!(error.rule(), expected_rule, "{command:?} x {publication:?}");
+                if matches!(publication, PublicationAuthority::Prohibited) {
+                    prohibited_publication_commands += 1;
+                }
+                refused += 1;
+            }
+        }
+    }
+
+    assert_eq!(admitted, commands.len());
+    assert_eq!(refused, commands.len() * authorities.len() - admitted);
+    assert_eq!(prohibited_publication_commands, 6);
+}
+
+#[test]
+fn g0_read_only_exact_phases_classify_every_transition_without_mutating_rejections() {
+    #[derive(Debug, Clone, Copy)]
+    enum Phase {
+        Active,
+        CompletionPending,
+        Completed,
+    }
+
+    fn machine_at(phase: Phase) -> AdmissionMachine {
+        let mut machine =
+            AdmissionMachine::try_new(offline_verify_context()).expect("read-only machine");
+        admit(&mut machine);
+        if matches!(phase, Phase::CompletionPending | Phase::Completed) {
+            begin_read_only_completion(&mut machine);
+        }
+        if matches!(phase, Phase::Completed) {
+            machine
+                .apply(AdmissionTransition::CompleteReadOnly {
+                    snapshot: id(50),
+                    anchor: AnchorObservation::Observed {
+                        identity: id(40),
+                        generation: 7,
+                    },
+                    receipt: id(80),
+                    at_tick: 4,
+                })
+                .expect("read-only completion");
+        }
+        machine
+    }
+
+    fn fixture(kind: TransitionKind) -> AdmissionTransition {
+        match kind {
+            TransitionKind::Preflight => AdmissionTransition::Preflight {
+                snapshot: id(50),
+                anchor: AnchorObservation::Observed {
+                    identity: id(40),
+                    generation: 7,
+                },
+                at_tick: 5,
+            },
+            TransitionKind::StabilityRecheck => AdmissionTransition::StabilityRecheck {
+                snapshot: id(50),
+                anchor: AnchorObservation::Observed {
+                    identity: id(40),
+                    generation: 7,
+                },
+                at_tick: 5,
+            },
+            TransitionKind::Charge => AdmissionTransition::Charge {
+                charge: BudgetCharge::Work(0),
+                at_tick: 5,
+            },
+            TransitionKind::Refuse => AdmissionTransition::Refuse {
+                reason: RefusalReason::PolicyDenied,
+                observation: id(90),
+            },
+            TransitionKind::RequestCancellation => AdmissionTransition::RequestCancellation {
+                cause: CancellationCause::Requested,
+                obligations: DrainObligations::default(),
+                observation: id(90),
+            },
+            TransitionKind::Drain => AdmissionTransition::Drain {
+                completed: DrainObligations::default(),
+                observation: id(90),
+            },
+            TransitionKind::FinalizeTerminal => {
+                AdmissionTransition::FinalizeTerminal { receipt: id(90) }
+            }
+            TransitionKind::DeclareIndeterminate => AdmissionTransition::DeclareIndeterminate {
+                reason: IndeterminateReason::EffectOutcomeUnknown,
+                observation: id(90),
+            },
+            TransitionKind::BeginPublication => AdmissionTransition::BeginPublication {
+                quiescence: id(90),
+                at_tick: 5,
+            },
+            TransitionKind::PublicationRecheck => AdmissionTransition::PublicationRecheck {
+                snapshot: id(50),
+                anchor: AnchorObservation::Observed {
+                    identity: id(40),
+                    generation: 7,
+                },
+                fence: id(90),
+                at_tick: 5,
+            },
+            TransitionKind::FinalizePublication => AdmissionTransition::FinalizePublication {
+                success: fixture_publication_success(),
+            },
+            TransitionKind::Retry => AdmissionTransition::Retry {
+                next_cx: CxBinding::try_new(id(5), id(6), id(4), 8).expect("fresh Cx"),
+                at_tick: 5,
+            },
+            TransitionKind::PollCancellation => AdmissionTransition::PollCancellation {
+                work_since_last_poll: 0,
+                at_tick: 5,
+            },
+            TransitionKind::AuthorizePublication => AdmissionTransition::AuthorizePublication {
+                receipt: id(90),
+                at_tick: 5,
+            },
+            TransitionKind::PublicationFailed => AdmissionTransition::PublicationFailed {
+                reason: PublicationFailureReason::CommitOutcomeUnknown,
+                observation: id(90),
+            },
+            TransitionKind::BeginReadOnlyCompletion => {
+                AdmissionTransition::BeginReadOnlyCompletion {
+                    quiescence: id(90),
+                    at_tick: 5,
+                }
+            }
+            TransitionKind::CompleteReadOnly => AdmissionTransition::CompleteReadOnly {
+                snapshot: id(50),
+                anchor: AnchorObservation::Observed {
+                    identity: id(40),
+                    generation: 7,
+                },
+                receipt: id(90),
+                at_tick: 5,
+            },
+        }
+    }
+
+    let actions = [
+        TransitionKind::Preflight,
+        TransitionKind::StabilityRecheck,
+        TransitionKind::Charge,
+        TransitionKind::Refuse,
+        TransitionKind::RequestCancellation,
+        TransitionKind::Drain,
+        TransitionKind::FinalizeTerminal,
+        TransitionKind::DeclareIndeterminate,
+        TransitionKind::BeginPublication,
+        TransitionKind::PublicationRecheck,
+        TransitionKind::FinalizePublication,
+        TransitionKind::Retry,
+        TransitionKind::PollCancellation,
+        TransitionKind::AuthorizePublication,
+        TransitionKind::PublicationFailed,
+        TransitionKind::BeginReadOnlyCompletion,
+        TransitionKind::CompleteReadOnly,
+    ];
+    let cases: &[(Phase, &[TransitionKind])] = &[
+        (
+            Phase::Active,
+            &[
+                TransitionKind::Charge,
+                TransitionKind::RequestCancellation,
+                TransitionKind::DeclareIndeterminate,
+                TransitionKind::PollCancellation,
+                TransitionKind::BeginReadOnlyCompletion,
+            ],
+        ),
+        (
+            Phase::CompletionPending,
+            &[
+                TransitionKind::RequestCancellation,
+                TransitionKind::DeclareIndeterminate,
+                TransitionKind::CompleteReadOnly,
+            ],
+        ),
+        (Phase::Completed, &[]),
+    ];
+    for (phase, allowed) in cases {
+        for action in actions {
+            let mut machine = machine_at(*phase);
+            let before = machine.encode_canonical().expect("before exact phase");
+            let result = machine.apply(fixture(action));
+            assert_eq!(
+                result.is_ok(),
+                allowed.contains(&action),
+                "{phase:?} x {action:?}: {result:?}"
+            );
+            if result.is_err() {
+                assert_eq!(
+                    machine.encode_canonical().expect("after exact refusal"),
+                    before,
+                    "{phase:?} x {action:?} mutated"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g4_post_work_read_only_drift_is_indeterminate_and_never_successful() {
+    let mut machine =
+        AdmissionMachine::try_new(offline_verify_context()).expect("read-only machine");
+    admit(&mut machine);
+    begin_read_only_completion(&mut machine);
+    machine
+        .apply(AdmissionTransition::CompleteReadOnly {
+            snapshot: id(51),
+            anchor: AnchorObservation::Observed {
+                identity: id(40),
+                generation: 7,
+            },
+            receipt: id(80),
+            at_tick: 4,
+        })
+        .expect("changed post-work observation is a legal uncertain fact");
+    assert_eq!(
+        machine.state(),
+        AdmissionState::Indeterminate {
+            rule: AdmissionRule::PostEffectStabilityChanged,
+            phase: TerminalPhase::Pending,
+        }
+    );
+    assert_eq!(
+        machine
+            .events()
+            .last()
+            .and_then(admission::AdmissionEvent::terminal_rule),
+        Some(AdmissionRule::PostEffectStabilityChanged)
+    );
+    machine
+        .apply(AdmissionTransition::FinalizeTerminal { receipt: id(81) })
+        .expect("uncertain read-only finalization");
+    assert!(machine.state().attempt_is_finalized());
+}
+
+#[test]
+fn g5_reason_families_are_closed_domain_separated_and_replay_exactly() {
+    for reason in [
+        RefusalReason::InputRejected,
+        RefusalReason::SourceRejected,
+        RefusalReason::CapabilityRejected,
+        RefusalReason::ExecutableRejected,
+        RefusalReason::BudgetInfeasible,
+        RefusalReason::DeadlineElapsed,
+        RefusalReason::PolicyDenied,
+    ] {
+        let mut machine = AdmissionMachine::try_new(online_context()).expect("machine");
+        machine
+            .apply(AdmissionTransition::Refuse {
+                reason,
+                observation: id(90),
+            })
+            .expect("typed refusal");
+        assert_eq!(
+            machine.state(),
+            AdmissionState::Refused {
+                rule: reason.rule(),
+                phase: TerminalPhase::Pending,
+            }
+        );
+        let bytes = machine.encode_canonical().expect("refusal bytes");
+        assert_eq!(
+            AdmissionMachine::decode_recorded(&bytes)
+                .expect("refusal replay")
+                .history(),
+            machine.history()
+        );
+        let mut cross_family = bytes;
+        let reason_at = cross_family.len() - 33;
+        cross_family[reason_at] = IndeterminateReason::EffectOutcomeUnknown as u8;
+        assert_eq!(
+            AdmissionMachine::decode_recorded(&cross_family)
+                .expect_err("indeterminate tag cannot become a refusal")
+                .rule(),
+            AdmissionRule::UnknownTag
+        );
+    }
+
+    for reason in [
+        IndeterminateReason::EffectOutcomeUnknown,
+        IndeterminateReason::DrainIncomplete,
+        IndeterminateReason::DrainObservationUnavailable,
+        IndeterminateReason::FinalizationOutcomeUnknown,
+        IndeterminateReason::PostEffectStabilityChanged,
+    ] {
+        let mut machine = AdmissionMachine::try_new(online_context()).expect("machine");
+        admit(&mut machine);
+        machine
+            .apply(AdmissionTransition::DeclareIndeterminate {
+                reason,
+                observation: id(90),
+            })
+            .expect("typed uncertainty");
+        assert_eq!(
+            machine.state(),
+            AdmissionState::Indeterminate {
+                rule: reason.rule(),
+                phase: TerminalPhase::Pending,
+            }
+        );
+        let bytes = machine.encode_canonical().expect("uncertainty bytes");
+        assert_eq!(
+            AdmissionMachine::decode_recorded(&bytes)
+                .expect("uncertainty replay")
+                .history(),
+            machine.history()
+        );
+        let mut cross_family = bytes;
+        let reason_at = cross_family.len() - 33;
+        cross_family[reason_at] = PublicationFailureReason::CommitFailed as u8;
+        assert_eq!(
+            AdmissionMachine::decode_recorded(&cross_family)
+                .expect_err("publication tag cannot become generic uncertainty")
+                .rule(),
+            AdmissionRule::UnknownTag
+        );
+    }
+
+    for reason in [
+        PublicationFailureReason::CommitFailed,
+        PublicationFailureReason::CommitOutcomeUnknown,
+        PublicationFailureReason::DurabilityUnknown,
+        PublicationFailureReason::ReceiptFinalizationUnknown,
+    ] {
+        let mut machine = AdmissionMachine::try_new(online_context()).expect("machine");
+        admit(&mut machine);
+        machine
+            .apply(AdmissionTransition::BeginPublication {
+                quiescence: id(70),
+                at_tick: 3,
+            })
+            .expect("publication preparation");
+        machine
+            .apply(AdmissionTransition::PublicationRecheck {
+                snapshot: id(50),
+                anchor: AnchorObservation::Observed {
+                    identity: id(40),
+                    generation: 7,
+                },
+                fence: id(71),
+                at_tick: 4,
+            })
+            .expect("publication recheck");
+        machine
+            .apply(AdmissionTransition::AuthorizePublication {
+                receipt: id(60),
+                at_tick: 5,
+            })
+            .expect("publication authorization");
+        machine
+            .apply(AdmissionTransition::PublicationFailed {
+                reason,
+                observation: id(90),
+            })
+            .expect("typed publication uncertainty");
+        assert_eq!(
+            machine.state(),
+            AdmissionState::Indeterminate {
+                rule: reason.rule(),
+                phase: TerminalPhase::Pending,
+            }
+        );
+        let bytes = machine
+            .encode_canonical()
+            .expect("publication failure bytes");
+        assert_eq!(
+            AdmissionMachine::decode_recorded(&bytes)
+                .expect("publication failure replay")
+                .history(),
+            machine.history()
+        );
+        let mut cross_family = bytes;
+        let reason_at = cross_family.len() - 33;
+        cross_family[reason_at] = RefusalReason::InputRejected as u8;
+        assert_eq!(
+            AdmissionMachine::decode_recorded(&cross_family)
+                .expect_err("refusal tag cannot become publication uncertainty")
+                .rule(),
+            AdmissionRule::UnknownTag
+        );
+    }
+}
+
+#[test]
+fn g4_cancellation_requires_request_drain_finalize_and_retry_preserves_spend() {
+    let mut machine = AdmissionMachine::try_new(online_context()).expect("machine");
+    admit(&mut machine);
+    machine
+        .apply(AdmissionTransition::Charge {
+            charge: BudgetCharge::Work(6),
+            at_tick: 3,
+        })
+        .expect("work reservation");
+    machine
+        .apply(AdmissionTransition::RequestCancellation {
+            cause: CancellationCause::Requested,
+            obligations: DrainObligations {
+                processes: 2,
+                files: 1,
+                outputs: 1,
+            },
+            observation: id(70),
+        })
+        .expect("cancel request");
+
+    assert_rejected_without_mutation(
+        &mut machine,
+        AdmissionTransition::RequestCancellation {
+            cause: CancellationCause::ParentScope,
+            obligations: DrainObligations::default(),
+            observation: id(71),
+        },
+        AdmissionRule::IllegalTransition,
+    );
+    assert_rejected_without_mutation(
+        &mut machine,
+        AdmissionTransition::FinalizeTerminal { receipt: id(80) },
+        AdmissionRule::DrainIncomplete,
+    );
+    assert_rejected_without_mutation(
+        &mut machine,
+        AdmissionTransition::Drain {
+            completed: DrainObligations {
+                processes: 3,
+                files: 0,
+                outputs: 0,
+            },
+            observation: id(72),
+        },
+        AdmissionRule::DrainOverrun,
+    );
+    machine
+        .apply(AdmissionTransition::Drain {
+            completed: DrainObligations {
+                processes: 1,
+                files: 1,
+                outputs: 0,
+            },
+            observation: id(73),
+        })
+        .expect("partial drain");
+    machine
+        .apply(AdmissionTransition::Drain {
+            completed: DrainObligations {
+                processes: 1,
+                files: 0,
+                outputs: 1,
+            },
+            observation: id(74),
+        })
+        .expect("complete drain");
+    machine
+        .apply(AdmissionTransition::FinalizeTerminal { receipt: id(80) })
+        .expect("cancel finalization");
+    machine
+        .apply(AdmissionTransition::Retry {
+            next_cx: CxBinding::try_new(id(5), id(6), id(4), 8).expect("fresh retry Cx"),
+            at_tick: 4,
+        })
+        .expect("retry");
+    machine
+        .apply(AdmissionTransition::Refuse {
+            reason: RefusalReason::BudgetInfeasible,
+            observation: id(90),
+        })
+        .expect("definitive pre-effect retry refusal");
+    machine
+        .apply(AdmissionTransition::FinalizeTerminal { receipt: id(81) })
+        .expect("refusal finalization");
+    assert!(matches!(
+        machine.state(),
+        AdmissionState::Refused {
+            rule: AdmissionRule::BudgetInfeasible,
+            phase: TerminalPhase::Finalized,
+        }
+    ));
+
+    let stale_cx = machine.current_cx();
+    assert_rejected_without_mutation(
+        &mut machine,
+        AdmissionTransition::Retry {
+            next_cx: stale_cx,
+            at_tick: 4,
+        },
+        AdmissionRule::RetryCxNotFresh,
+    );
+    assert_rejected_without_mutation(
+        &mut machine,
+        AdmissionTransition::Retry {
+            next_cx: CxBinding::try_new(id(6), id(5), id(4), 8)
+                .expect("role-swapped stale retry Cx"),
+            at_tick: 4,
+        },
+        AdmissionRule::RetryCxNotFresh,
+    );
+    machine
+        .apply(AdmissionTransition::Retry {
+            next_cx: CxBinding::try_new(id(7), id(8), id(4), 8).expect("fresh retry Cx"),
+            at_tick: 4,
+        })
+        .expect("bounded retry");
+    assert_eq!(machine.attempt(), 2);
+    assert_eq!(machine.consumption().retries, 2);
+    assert_eq!(machine.consumption().work_units, 6);
+    assert_eq!(machine.context().request_identity(), id(1));
+    assert_eq!(machine.current_cx().cx(), id(7));
+    assert_eq!(machine.current_cx().cancellation(), id(8));
+    assert_eq!(
+        machine.state(),
+        AdmissionState::Diagnostic(DiagnosticPhase::Created)
+    );
+}
+
+#[test]
+fn g4_indeterminate_never_reuses_the_old_authority() {
+    let mut machine = AdmissionMachine::try_new(online_context()).expect("machine");
+    admit(&mut machine);
+    machine
+        .apply(AdmissionTransition::DeclareIndeterminate {
+            reason: IndeterminateReason::DrainIncomplete,
+            observation: id(90),
+        })
+        .expect("uncertainty declaration");
+    machine
+        .apply(AdmissionTransition::FinalizeTerminal { receipt: id(80) })
+        .expect("indeterminate record finalization");
+    assert!(matches!(
+        machine.state(),
+        AdmissionState::Indeterminate {
+            phase: TerminalPhase::Finalized,
+            ..
+        }
+    ));
+    assert_rejected_without_mutation(
+        &mut machine,
+        AdmissionTransition::Retry {
+            next_cx: CxBinding::try_new(id(5), id(6), id(4), 8).expect("fresh retry Cx"),
+            at_tick: 4,
+        },
+        AdmissionRule::IndeterminateRetryForbidden,
+    );
+}
+
+#[test]
+fn g4_cleanup_uncertainty_escapes_cancellation_only_as_indeterminate() {
+    let mut machine = AdmissionMachine::try_new(online_context()).expect("machine");
+    admit(&mut machine);
+    machine
+        .apply(AdmissionTransition::RequestCancellation {
+            cause: CancellationCause::InjectedFault,
+            obligations: DrainObligations {
+                processes: 1,
+                files: 1,
+                outputs: 1,
+            },
+            observation: id(70),
+        })
+        .expect("cancel request");
+    machine
+        .apply(AdmissionTransition::DeclareIndeterminate {
+            reason: IndeterminateReason::DrainIncomplete,
+            observation: id(90),
+        })
+        .expect("failed cleanup remains uncertain");
+    machine
+        .apply(AdmissionTransition::FinalizeTerminal { receipt: id(80) })
+        .expect("finalize uncertainty record");
+    assert_eq!(
+        machine.state(),
+        AdmissionState::Indeterminate {
+            rule: AdmissionRule::DrainIncomplete,
+            phase: TerminalPhase::Finalized,
+        }
+    );
+}
+
+#[test]
+fn g4_post_work_instability_and_commit_failure_never_become_refused() {
+    let mut unstable = AdmissionMachine::try_new(online_context()).expect("machine");
+    admit(&mut unstable);
+    unstable
+        .apply(AdmissionTransition::Charge {
+            charge: BudgetCharge::Work(1),
+            at_tick: 3,
+        })
+        .expect("charged work");
+    unstable
+        .apply(AdmissionTransition::BeginPublication {
+            quiescence: id(70),
+            at_tick: 4,
+        })
+        .expect("publication preparation");
+    unstable
+        .apply(AdmissionTransition::PublicationRecheck {
+            snapshot: id(51),
+            anchor: AnchorObservation::Observed {
+                identity: id(40),
+                generation: 7,
+            },
+            fence: id(71),
+            at_tick: 5,
+        })
+        .expect("changed snapshot is a legal indeterminate observation");
+    assert_eq!(
+        unstable.state(),
+        AdmissionState::Indeterminate {
+            rule: AdmissionRule::PublicationStabilityChanged,
+            phase: TerminalPhase::Pending,
+        }
+    );
+
+    let mut failed_commit = AdmissionMachine::try_new(online_context()).expect("machine");
+    admit(&mut failed_commit);
+    failed_commit
+        .apply(AdmissionTransition::BeginPublication {
+            quiescence: id(70),
+            at_tick: 3,
+        })
+        .expect("publication preparation");
+    failed_commit
+        .apply(AdmissionTransition::PublicationRecheck {
+            snapshot: id(50),
+            anchor: AnchorObservation::Observed {
+                identity: id(40),
+                generation: 7,
+            },
+            fence: id(71),
+            at_tick: 4,
+        })
+        .expect("publication fence");
+    failed_commit
+        .apply(AdmissionTransition::AuthorizePublication {
+            receipt: id(60),
+            at_tick: 5,
+        })
+        .expect("single-use authorization");
+    failed_commit
+        .apply(AdmissionTransition::PublicationFailed {
+            reason: PublicationFailureReason::CommitOutcomeUnknown,
+            observation: id(90),
+        })
+        .expect("failed external commit is indeterminate");
+    assert!(matches!(
+        failed_commit.state(),
+        AdmissionState::Indeterminate {
+            phase: TerminalPhase::Pending,
+            ..
+        }
+    ));
+    let failed_bytes = failed_commit
+        .encode_canonical()
+        .expect("failed publication receipt");
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&failed_bytes)
+            .expect("failed publication replay")
+            .state(),
+        failed_commit.state()
+    );
+}
+
+#[test]
+fn g0_event_capacity_always_retains_a_terminal_path() {
+    let mut machine = AdmissionMachine::try_new(online_context()).expect("machine");
+    for _ in 0..MAX_ADMISSION_EVENTS - 2 {
+        machine
+            .apply(AdmissionTransition::Charge {
+                charge: BudgetCharge::Work(0),
+                at_tick: 1,
+            })
+            .expect("headroom-preserving event");
+    }
+    assert_rejected_without_mutation(
+        &mut machine,
+        AdmissionTransition::Charge {
+            charge: BudgetCharge::Work(0),
+            at_tick: 1,
+        },
+        AdmissionRule::TerminalHeadroomRequired,
+    );
+    machine
+        .apply(AdmissionTransition::Refuse {
+            reason: RefusalReason::BudgetInfeasible,
+            observation: id(90),
+        })
+        .expect("terminal fact uses reserved headroom");
+    machine
+        .apply(AdmissionTransition::FinalizeTerminal { receipt: id(80) })
+        .expect("terminal finalization uses final slot");
+    assert_eq!(machine.events().len(), MAX_ADMISSION_EVENTS);
+    assert!(machine.state().attempt_is_finalized());
+}
+
+#[test]
+fn g0_unanchored_and_mismatched_anchors_never_admit_work() {
+    let mut unanchored = AdmissionMachine::try_new(online_context_with(
+        online_budgets(),
+        TrustAnchorState::Unanchored,
+        false,
+    ))
+    .expect("unanchored machine");
+    unanchored
+        .apply(AdmissionTransition::Preflight {
+            snapshot: id(50),
+            anchor: AnchorObservation::Observed {
+                identity: id(40),
+                generation: 7,
+            },
+            at_tick: 1,
+        })
+        .expect("unanchored observation is a terminal no-authority fact");
+    assert_eq!(
+        unanchored.state(),
+        AdmissionState::Unanchored(TerminalPhase::Pending)
+    );
+    assert_rejected_without_mutation(
+        &mut unanchored,
+        AdmissionTransition::Charge {
+            charge: BudgetCharge::Work(1),
+            at_tick: 2,
+        },
+        AdmissionRule::IllegalTransition,
+    );
+
+    let mut mismatch = AdmissionMachine::try_new(online_context()).expect("machine");
+    mismatch
+        .apply(AdmissionTransition::Preflight {
+            snapshot: id(50),
+            anchor: AnchorObservation::Observed {
+                identity: id(41),
+                generation: 7,
+            },
+            at_tick: 1,
+        })
+        .expect("legal observation deterministically refuses");
+    assert_eq!(
+        mismatch.state(),
+        AdmissionState::Refused {
+            rule: AdmissionRule::TrustAnchorMismatch,
+            phase: TerminalPhase::Pending,
+        }
+    );
+}
+
+#[test]
+fn g0_offline_authority_is_independent_of_numeric_network_budget() {
+    let mut offline = AdmissionMachine::try_new(offline_verify_context()).expect("machine");
+    assert_rejected_without_mutation(
+        &mut offline,
+        AdmissionTransition::Charge {
+            charge: BudgetCharge::Network {
+                requests: 0,
+                bytes: 0,
+            },
+            at_tick: 1,
+        },
+        AdmissionRule::NetworkAuthorityDenied,
+    );
+
+    let paths = [
+        PathCapability::new(PathSlot::WorkspaceRoot, id(10)),
+        PathCapability::new(PathSlot::ConstellationLock, id(11)),
+    ];
+    let executables = [ExecutableCapability::new(ExecutableSlot::Git, id(20))];
+    let error = AdmissionContext::try_new(AdmissionContextSpec {
+        request_identity: id(1),
+        command: CommandClass::VerifyOnly,
+        fetch: FetchAuthority::PinnedTransport { capability: id(30) },
+        publication: PublicationAuthority::Prohibited,
+        cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
+        budgets: online_budgets(),
+        trust_anchor: TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        path_capabilities: &paths,
+        executable_capabilities: &executables,
+    })
+    .expect_err("verify-only cannot inherit fetch authority");
+    assert_eq!(error.rule(), AdmissionRule::NetworkForbiddenForCommand);
+}
+
+#[test]
+fn g5_canonical_receipt_replays_without_recreating_authority() {
+    let mut machine = AdmissionMachine::try_new(online_context()).expect("machine");
+    admit(&mut machine);
+    machine
+        .apply(AdmissionTransition::RequestCancellation {
+            cause: CancellationCause::InjectedFault,
+            obligations: DrainObligations::default(),
+            observation: id(70),
+        })
+        .expect("cancel request");
+    machine
+        .apply(AdmissionTransition::Drain {
+            completed: DrainObligations::default(),
+            observation: id(71),
+        })
+        .expect("explicit zero-obligation drain");
+    machine
+        .apply(AdmissionTransition::FinalizeTerminal { receipt: id(80) })
+        .expect("cancel finalization");
+    let bytes = machine.encode_canonical().expect("canonical receipt");
+    let recorded = AdmissionMachine::decode_recorded(&bytes).expect("inert replay");
+    assert_eq!(recorded.canonical_bytes(), bytes);
+    assert_eq!(recorded.request_identity(), id(1));
+    assert_eq!(recorded.command(), CommandClass::Bootstrap);
+    assert_eq!(recorded.context(), machine.context());
+    assert_eq!(recorded.state(), machine.state());
+    assert_eq!(recorded.consumption(), machine.consumption());
+    assert_eq!(recorded.attempt(), machine.attempt());
+    assert_eq!(recorded.current_cx(), machine.current_cx());
+    assert_eq!(recorded.last_observed_tick(), machine.last_observed_tick());
+    assert_eq!(recorded.history(), machine.history());
+    assert_eq!(recorded.events(), machine.events());
+
+    let left = AdmissionMachine::try_new(online_context_with(
+        online_budgets(),
+        TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        false,
+    ))
+    .expect("left");
+    let right = AdmissionMachine::try_new(online_context_with(
+        online_budgets(),
+        TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        true,
+    ))
+    .expect("right");
+    assert_eq!(
+        left.encode_canonical().expect("left bytes"),
+        right.encode_canonical().expect("right bytes"),
+        "capability insertion order cannot change request identity bytes"
+    );
+
+    let shell_context = |reverse: bool| {
+        let paths = [
+            PathCapability::new(PathSlot::WorkspaceRoot, id(10)),
+            PathCapability::new(PathSlot::ConstellationLock, id(11)),
+        ];
+        let mut executables = vec![
+            ExecutableCapability::new(ExecutableSlot::Git, id(20)),
+            ExecutableCapability::new(ExecutableSlot::Shell, id(21)),
+        ];
+        if reverse {
+            executables.reverse();
+        }
+        AdmissionContext::try_new(AdmissionContextSpec {
+            request_identity: id(1),
+            command: CommandClass::ShellVerifyOnly,
+            fetch: FetchAuthority::Offline,
+            publication: PublicationAuthority::Prohibited,
+            cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
+            budgets: AdmissionBudgets::new(
+                DeadlineBudget::new(id(4), DEADLINE),
+                ComputeBudget {
+                    work_units: 1,
+                    memory_bytes: 1,
+                },
+                IoBudget {
+                    processes: 1,
+                    files: 1,
+                    output_bytes: 1,
+                },
+                NetworkBudget {
+                    requests: 0,
+                    bytes: 0,
+                },
+                0,
+            ),
+            trust_anchor: TrustAnchorState::Anchored {
+                identity: id(40),
+                generation: 7,
+            },
+            path_capabilities: &paths,
+            executable_capabilities: &executables,
+        })
+        .expect("shell context")
+    };
+    let shell_left = AdmissionMachine::try_new(shell_context(false)).expect("shell left");
+    let shell_right = AdmissionMachine::try_new(shell_context(true)).expect("shell right");
+    assert_eq!(
+        shell_left.encode_canonical().expect("shell left bytes"),
+        shell_right.encode_canonical().expect("shell right bytes"),
+        "executable insertion order cannot change canonical bytes"
+    );
+}
+
+#[test]
+fn g5_codec_round_trips_every_payload_family() {
+    let mut published = AdmissionMachine::try_new(online_context()).expect("machine");
+    admit(&mut published);
+    published
+        .apply(AdmissionTransition::PollCancellation {
+            work_since_last_poll: 8,
+            at_tick: 3,
+        })
+        .expect("poll");
+    for charge in [
+        BudgetCharge::Work(1),
+        BudgetCharge::Memory(2),
+        BudgetCharge::Processes(1),
+        BudgetCharge::Files(1),
+        BudgetCharge::Output(3),
+        BudgetCharge::Network {
+            requests: 1,
+            bytes: 4,
+        },
+    ] {
+        published
+            .apply(AdmissionTransition::Charge { charge, at_tick: 3 })
+            .expect("charge payload");
+    }
+    published
+        .apply(AdmissionTransition::BeginPublication {
+            quiescence: id(70),
+            at_tick: 4,
+        })
+        .expect("prepare");
+    published
+        .apply(AdmissionTransition::PublicationRecheck {
+            snapshot: id(50),
+            anchor: AnchorObservation::Observed {
+                identity: id(40),
+                generation: 7,
+            },
+            fence: id(71),
+            at_tick: 5,
+        })
+        .expect("fence");
+    published
+        .apply(AdmissionTransition::AuthorizePublication {
+            receipt: id(60),
+            at_tick: 6,
+        })
+        .expect("authorize");
+    let success = publication_success_evidence(&published, id(71), id(60), id(72));
+    published
+        .apply(AdmissionTransition::FinalizePublication { success })
+        .expect("finalize");
+    let published_bytes = published.encode_canonical().expect("published bytes");
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&published_bytes)
+            .expect("published replay")
+            .state(),
+        published.state()
+    );
+
+    let mut unavailable = AdmissionMachine::try_new(online_context()).expect("machine");
+    unavailable
+        .apply(AdmissionTransition::Preflight {
+            snapshot: id(50),
+            anchor: AnchorObservation::Unavailable,
+            at_tick: 1,
+        })
+        .expect("unavailable anchor refusal");
+    unavailable
+        .apply(AdmissionTransition::FinalizeTerminal { receipt: id(80) })
+        .expect("refusal finalization");
+    let unavailable_bytes = unavailable.encode_canonical().expect("unavailable bytes");
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&unavailable_bytes)
+            .expect("unavailable replay")
+            .state(),
+        unavailable.state()
+    );
+
+    let mut retried = AdmissionMachine::try_new(online_context()).expect("machine");
+    retried
+        .apply(AdmissionTransition::Refuse {
+            reason: RefusalReason::BudgetInfeasible,
+            observation: id(90),
+        })
+        .expect("explicit refusal");
+    retried
+        .apply(AdmissionTransition::FinalizeTerminal { receipt: id(80) })
+        .expect("refusal finalization");
+    let retry_cx = CxBinding::try_new(id(5), id(6), id(4), 8).expect("retry Cx");
+    retried
+        .apply(AdmissionTransition::Retry {
+            next_cx: retry_cx,
+            at_tick: 1,
+        })
+        .expect("retry");
+    let retried_bytes = retried.encode_canonical().expect("retried bytes");
+    let retried_record = AdmissionMachine::decode_recorded(&retried_bytes).expect("retried replay");
+    assert_eq!(retried_record.context().cx(), online_context().cx());
+    assert_eq!(retried_record.current_cx(), retry_cx);
+    assert_eq!(retried_record.attempt(), 1);
+    assert_eq!(retried_record.history(), retried.history());
+
+    let mut declared = AdmissionMachine::try_new(online_context()).expect("machine");
+    admit(&mut declared);
+    declared
+        .apply(AdmissionTransition::DeclareIndeterminate {
+            reason: IndeterminateReason::DrainIncomplete,
+            observation: id(90),
+        })
+        .expect("uncertainty declaration");
+    declared
+        .apply(AdmissionTransition::FinalizeTerminal { receipt: id(81) })
+        .expect("uncertainty finalization");
+    let declared_bytes = declared.encode_canonical().expect("declared bytes");
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&declared_bytes)
+            .expect("declared replay")
+            .state(),
+        declared.state()
+    );
+
+    for cut in 0..published_bytes.len() {
+        assert!(
+            AdmissionMachine::decode_recorded(&published_bytes[..cut]).is_err(),
+            "transition-rich truncation at byte {cut} must refuse"
+        );
+    }
+}
+
+#[test]
+fn g5_decoder_rejects_schema_truncation_tags_history_and_trailing_bytes() {
+    let machine = AdmissionMachine::try_new(online_context()).expect("machine");
+    let bytes = machine.encode_canonical().expect("canonical bytes");
+
+    let mut bad_magic = bytes.clone();
+    bad_magic[0] ^= 0xff;
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&bad_magic)
+            .expect_err("unknown magic")
+            .rule(),
+        AdmissionRule::UnknownMagic
+    );
+
+    let mut bad_version = bytes.clone();
+    bad_version[8] = bad_version[8].wrapping_add(1);
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&bad_version)
+            .expect_err("unknown version")
+            .rule(),
+        AdmissionRule::UnknownSchema
+    );
+
+    let mut bad_schema = bytes.clone();
+    let first_schema_byte = 8 + 2 + 2;
+    bad_schema[first_schema_byte] ^= 1;
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&bad_schema)
+            .expect_err("unknown schema")
+            .rule(),
+        AdmissionRule::UnknownSchema
+    );
+
+    let domain_length_at = 8 + 2 + 2 + admission::ADMISSION_SCHEMA.len();
+    let first_domain_byte = domain_length_at + 2;
+    let mut bad_domain = bytes.clone();
+    bad_domain[first_domain_byte] ^= 1;
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&bad_domain)
+            .expect_err("unknown domain")
+            .rule(),
+        AdmissionRule::UnknownSchema
+    );
+
+    let mut bad_domain_length = bytes.clone();
+    bad_domain_length[domain_length_at..domain_length_at + 2]
+        .copy_from_slice(&u16::MAX.to_le_bytes());
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&bad_domain_length)
+            .expect_err("oversized declared domain")
+            .rule(),
+        AdmissionRule::TruncatedEncoding
+    );
+
+    let request_at = first_domain_byte + admission::ADMISSION_DOMAIN.len();
+    let mut zero_request = bytes.clone();
+    zero_request[request_at..request_at + 32].fill(0);
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&zero_request)
+            .expect_err("zero request identity")
+            .rule(),
+        AdmissionRule::ZeroIdentity
+    );
+
+    let mut unknown_command = bytes.clone();
+    unknown_command[request_at + 32] = 0xff;
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&unknown_command)
+            .expect_err("unknown command tag")
+            .rule(),
+        AdmissionRule::UnknownTag
+    );
+
+    let oversized = vec![0; MAX_ADMISSION_BYTES + 1];
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&oversized)
+            .expect_err("oversized envelope")
+            .rule(),
+        AdmissionRule::EncodedInputTooLarge
+    );
+
+    for cut in 0..bytes.len() {
+        assert!(
+            AdmissionMachine::decode_recorded(&bytes[..cut]).is_err(),
+            "truncation at byte {cut} must refuse"
+        );
+    }
+
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&trailing)
+            .expect_err("trailing byte")
+            .rule(),
+        AdmissionRule::TrailingBytes
+    );
+
+    let mut unknown_transition = bytes.clone();
+    let count_at = unknown_transition.len() - 2;
+    unknown_transition[count_at..].copy_from_slice(&1u16.to_le_bytes());
+    unknown_transition.push(0xff);
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&unknown_transition)
+            .expect_err("unknown transition")
+            .rule(),
+        AdmissionRule::UnknownTag
+    );
+
+    let mut excessive_events = bytes.clone();
+    let excessive_event_count =
+        u16::try_from(MAX_ADMISSION_EVENTS + 1).expect("event fixture count fits canonical u16");
+    excessive_events[count_at..].copy_from_slice(&excessive_event_count.to_le_bytes());
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&excessive_events)
+            .expect_err("excessive event count")
+            .rule(),
+        AdmissionRule::EventLimitExceeded
+    );
+
+    let mut impossible_history = bytes;
+    let count_at = impossible_history.len() - 2;
+    impossible_history[count_at..].copy_from_slice(&1u16.to_le_bytes());
+    impossible_history.push(TransitionKind::FinalizeTerminal as u8);
+    impossible_history.extend_from_slice(id(80).as_bytes());
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&impossible_history)
+            .expect_err("impossible history")
+            .rule(),
+        AdmissionRule::ImpossibleHistory
+    );
+
+    let canonical = AdmissionMachine::try_new(online_context())
+        .expect("machine")
+        .encode_canonical()
+        .expect("canonical context");
+    let mut workspace_row = vec![PathSlot::WorkspaceRoot as u8];
+    workspace_row.extend_from_slice(id(10).as_bytes());
+    let mut lock_row = vec![PathSlot::ConstellationLock as u8];
+    lock_row.extend_from_slice(id(11).as_bytes());
+    let workspace_at = canonical
+        .windows(workspace_row.len())
+        .position(|window| window == workspace_row.as_slice())
+        .expect("workspace capability row");
+    let lock_at = canonical
+        .windows(lock_row.len())
+        .position(|window| window == lock_row.as_slice())
+        .expect("lock capability row");
+    let mut reordered = canonical;
+    reordered[workspace_at..workspace_at + workspace_row.len()].copy_from_slice(&lock_row);
+    reordered[lock_at..lock_at + lock_row.len()].copy_from_slice(&workspace_row);
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&reordered)
+            .expect_err("noncanonical capability ordering")
+            .rule(),
+        AdmissionRule::NonCanonicalEncoding
+    );
+}
+
+#[test]
+fn g0_all_command_classes_have_canonical_capability_matrices_and_exact_row_caps() {
+    for command in [
+        CommandClass::Diagnostic,
+        CommandClass::VerifyOnly,
+        CommandClass::Snapshot,
+        CommandClass::Bootstrap,
+        CommandClass::LockConstellation,
+        CommandClass::DsrQuality,
+        CommandClass::DsrBuild,
+        CommandClass::RchProbe,
+        CommandClass::ShellVerifyOnly,
+        CommandClass::ShellSnapshot,
+        CommandClass::ShellBootstrap,
+    ] {
+        let left = AdmissionMachine::try_new(context_for_command(command, false))
+            .expect("forward command matrix");
+        let right = AdmissionMachine::try_new(context_for_command(command, true))
+            .expect("reverse command matrix");
+        assert_eq!(left.context().command(), command);
+        assert_eq!(
+            left.encode_canonical().expect("forward matrix"),
+            right.encode_canonical().expect("reverse matrix"),
+            "{command:?} capability order"
+        );
+    }
+
+    let below = online_context();
+    assert_eq!(below.path_capabilities().len(), MAX_PATH_CAPABILITIES - 1);
+    assert_eq!(
+        below.executable_capabilities().len(),
+        MAX_EXECUTABLE_CAPABILITIES - 1
+    );
+    let exact = context_for_command(CommandClass::ShellBootstrap, false);
+    assert_eq!(exact.path_capabilities().len(), MAX_PATH_CAPABILITIES);
+    assert_eq!(
+        exact.executable_capabilities().len(),
+        MAX_EXECUTABLE_CAPABILITIES
+    );
+
+    let mut too_many_paths = exact.path_capabilities().to_vec();
+    too_many_paths.push(PathCapability::new(PathSlot::WorkspaceRoot, id(99)));
+    let error = AdmissionContext::try_new(AdmissionContextSpec {
+        request_identity: id(1),
+        command: CommandClass::ShellBootstrap,
+        fetch: FetchAuthority::PinnedTransport { capability: id(30) },
+        publication: PublicationAuthority::BootstrapReceipt { capability: id(13) },
+        cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
+        budgets: online_budgets(),
+        trust_anchor: TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        path_capabilities: &too_many_paths,
+        executable_capabilities: exact.executable_capabilities(),
+    })
+    .expect_err("path N+1");
+    assert_eq!(error.rule(), AdmissionRule::TooManyPathCapabilities);
+
+    let mut too_many_executables = exact.executable_capabilities().to_vec();
+    too_many_executables.push(ExecutableCapability::new(ExecutableSlot::Git, id(99)));
+    let error = AdmissionContext::try_new(AdmissionContextSpec {
+        request_identity: id(1),
+        command: CommandClass::ShellBootstrap,
+        fetch: FetchAuthority::PinnedTransport { capability: id(30) },
+        publication: PublicationAuthority::BootstrapReceipt { capability: id(13) },
+        cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
+        budgets: online_budgets(),
+        trust_anchor: TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        path_capabilities: exact.path_capabilities(),
+        executable_capabilities: &too_many_executables,
+    })
+    .expect_err("executable N+1");
+    assert_eq!(error.rule(), AdmissionRule::TooManyExecutableCapabilities);
+}
+
+#[test]
+fn g0_context_rejects_duplicate_missing_and_mismatched_capabilities() {
+    let duplicate_paths = [
+        PathCapability::new(PathSlot::WorkspaceRoot, id(10)),
+        PathCapability::new(PathSlot::WorkspaceRoot, id(11)),
+        PathCapability::new(PathSlot::ConstellationLock, id(12)),
+        PathCapability::new(PathSlot::DestinationRoot, id(13)),
+        PathCapability::new(PathSlot::PublicationTarget, id(14)),
+    ];
+    let executables = [ExecutableCapability::new(ExecutableSlot::Git, id(20))];
+    let error = AdmissionContext::try_new(AdmissionContextSpec {
+        request_identity: id(1),
+        command: CommandClass::Bootstrap,
+        fetch: FetchAuthority::PinnedTransport { capability: id(30) },
+        publication: PublicationAuthority::BootstrapReceipt { capability: id(14) },
+        cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
+        budgets: online_budgets(),
+        trust_anchor: TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        path_capabilities: &duplicate_paths,
+        executable_capabilities: &executables,
+    })
+    .expect_err("duplicate path slot");
+    assert_eq!(error.rule(), AdmissionRule::DuplicatePathCapability);
+
+    let missing_paths = [
+        PathCapability::new(PathSlot::WorkspaceRoot, id(10)),
+        PathCapability::new(PathSlot::ConstellationLock, id(11)),
+        PathCapability::new(PathSlot::DestinationRoot, id(12)),
+    ];
+    let error = AdmissionContext::try_new(AdmissionContextSpec {
+        request_identity: id(1),
+        command: CommandClass::Bootstrap,
+        fetch: FetchAuthority::PinnedTransport { capability: id(30) },
+        publication: PublicationAuthority::BootstrapReceipt { capability: id(13) },
+        cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
+        budgets: online_budgets(),
+        trust_anchor: TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        path_capabilities: &missing_paths,
+        executable_capabilities: &executables,
+    })
+    .expect_err("missing publication target");
+    assert_eq!(error.rule(), AdmissionRule::MissingPathCapability);
+
+    let paths = [
+        PathCapability::new(PathSlot::WorkspaceRoot, id(10)),
+        PathCapability::new(PathSlot::ConstellationLock, id(11)),
+        PathCapability::new(PathSlot::DestinationRoot, id(12)),
+        PathCapability::new(PathSlot::PublicationTarget, id(13)),
+    ];
+    let error = AdmissionContext::try_new(AdmissionContextSpec {
+        request_identity: id(1),
+        command: CommandClass::Bootstrap,
+        fetch: FetchAuthority::PinnedTransport { capability: id(30) },
+        publication: PublicationAuthority::BootstrapReceipt { capability: id(99) },
+        cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
+        budgets: online_budgets(),
+        trust_anchor: TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        path_capabilities: &paths,
+        executable_capabilities: &executables,
+    })
+    .expect_err("publication capability mismatch");
+    assert_eq!(error.rule(), AdmissionRule::PublicationCapabilityMismatch);
+}
+
+#[test]
+fn g0_invalid_capability_permutations_choose_one_canonical_first_rule() {
+    let context_error = |paths: &[PathCapability]| {
+        AdmissionContext::try_new(AdmissionContextSpec {
+            request_identity: id(1),
+            command: CommandClass::Bootstrap,
+            fetch: FetchAuthority::PinnedTransport { capability: id(30) },
+            publication: PublicationAuthority::BootstrapReceipt { capability: id(13) },
+            cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
+            budgets: online_budgets(),
+            trust_anchor: TrustAnchorState::Anchored {
+                identity: id(40),
+                generation: 7,
+            },
+            path_capabilities: paths,
+            executable_capabilities: &[ExecutableCapability::new(ExecutableSlot::Git, id(20))],
+        })
+        .expect_err("invalid capability rows")
+    };
+
+    let mixed_a = [
+        PathCapability::new(PathSlot::OutputRoot, id(12)),
+        PathCapability::new(PathSlot::WorkspaceRoot, id(10)),
+        PathCapability::new(PathSlot::WorkspaceRoot, id(11)),
+    ];
+    let mixed_b = [mixed_a[2], mixed_a[0], mixed_a[1]];
+    let left = context_error(&mixed_a);
+    let right = context_error(&mixed_b);
+    assert_eq!(left.rule(), AdmissionRule::DuplicatePathCapability);
+    assert_eq!(right.rule(), left.rule());
+    assert_eq!(right.remedies(), left.remedies());
+
+    let unexpected_a = [
+        PathCapability::new(PathSlot::OutputRoot, id(12)),
+        PathCapability::new(PathSlot::WorkspaceRoot, id(10)),
+    ];
+    let unexpected_b = [unexpected_a[1], unexpected_a[0]];
+    let left = context_error(&unexpected_a);
+    let right = context_error(&unexpected_b);
+    assert_eq!(left.rule(), AdmissionRule::UnexpectedPathCapability);
+    assert_eq!(right.rule(), left.rule());
+    assert_eq!(right.remedies(), left.remedies());
+}
+
+#[test]
+fn g0_command_classes_reject_unexpected_authority_slots() {
+    let paths = [
+        PathCapability::new(PathSlot::WorkspaceRoot, id(10)),
+        PathCapability::new(PathSlot::ConstellationLock, id(11)),
+        PathCapability::new(PathSlot::PublicationTarget, id(12)),
+    ];
+    let executables = [ExecutableCapability::new(ExecutableSlot::Git, id(20))];
+    let error = AdmissionContext::try_new(AdmissionContextSpec {
+        request_identity: id(1),
+        command: CommandClass::VerifyOnly,
+        fetch: FetchAuthority::Offline,
+        publication: PublicationAuthority::Prohibited,
+        cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
+        budgets: AdmissionBudgets::new(
+            DeadlineBudget::new(id(4), DEADLINE),
+            ComputeBudget {
+                work_units: 1,
+                memory_bytes: 1,
+            },
+            IoBudget {
+                processes: 1,
+                files: 1,
+                output_bytes: 1,
+            },
+            NetworkBudget {
+                requests: 0,
+                bytes: 0,
+            },
+            0,
+        ),
+        trust_anchor: TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        path_capabilities: &paths,
+        executable_capabilities: &executables,
+    })
+    .expect_err("verify-only cannot carry a publication path capability");
+    assert_eq!(error.rule(), AdmissionRule::UnexpectedPathCapability);
+
+    let paths = [
+        PathCapability::new(PathSlot::WorkspaceRoot, id(10)),
+        PathCapability::new(PathSlot::ConstellationLock, id(11)),
+    ];
+    let executables = [
+        ExecutableCapability::new(ExecutableSlot::Git, id(20)),
+        ExecutableCapability::new(ExecutableSlot::Rch, id(21)),
+    ];
+    let error = AdmissionContext::try_new(AdmissionContextSpec {
+        request_identity: id(1),
+        command: CommandClass::VerifyOnly,
+        fetch: FetchAuthority::Offline,
+        publication: PublicationAuthority::Prohibited,
+        cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
+        budgets: AdmissionBudgets::new(
+            DeadlineBudget::new(id(4), DEADLINE),
+            ComputeBudget {
+                work_units: 1,
+                memory_bytes: 1,
+            },
+            IoBudget {
+                processes: 1,
+                files: 1,
+                output_bytes: 1,
+            },
+            NetworkBudget {
+                requests: 0,
+                bytes: 0,
+            },
+            0,
+        ),
+        trust_anchor: TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        path_capabilities: &paths,
+        executable_capabilities: &executables,
+    })
+    .expect_err("verify-only cannot inherit an RCH executable");
+    assert_eq!(error.rule(), AdmissionRule::UnexpectedExecutableCapability);
+
+    let error = AdmissionContext::try_new(AdmissionContextSpec {
+        request_identity: id(1),
+        command: CommandClass::ShellVerifyOnly,
+        fetch: FetchAuthority::Offline,
+        publication: PublicationAuthority::Prohibited,
+        cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
+        budgets: AdmissionBudgets::new(
+            DeadlineBudget::new(id(4), DEADLINE),
+            ComputeBudget {
+                work_units: 1,
+                memory_bytes: 1,
+            },
+            IoBudget {
+                processes: 1,
+                files: 1,
+                output_bytes: 1,
+            },
+            NetworkBudget {
+                requests: 0,
+                bytes: 0,
+            },
+            0,
+        ),
+        trust_anchor: TrustAnchorState::Anchored {
+            identity: id(40),
+            generation: 7,
+        },
+        path_capabilities: &paths,
+        executable_capabilities: &[ExecutableCapability::new(ExecutableSlot::Git, id(20))],
+    })
+    .expect_err("shell adapter requires an explicit shell capability");
+    assert_eq!(error.rule(), AdmissionRule::MissingExecutableCapability);
+}

@@ -1,0 +1,24 @@
+frankensim-equilibrium-design-v1
+preload_limits 4 128 16384
+sensitivity_limits 4 16384 16384 1e-9
+design_limits 8 8 16 8
+cases 3
+case load-0.8N 1 2
+load 0 0 0.8
+target 0 0 0.0003190067261188236 0.0002 1
+target 1 0 0.00006085959643287059 0.0002 1
+case load-1.6N 1 2
+load 0 0 1.6
+target 0 0 0.0004212400757625386 0.0002 1
+target 1 0 0.00013472559545424769 0.0002 1
+case load-2.5N 1 2
+load 0 0 2.5
+target 0 0 0.0005284197010700035 0.0002 1
+target 1 0 0.0002182948179357998 0.0002 1
+variables 3
+variable support-N-per-m 400 400 200 1000 1
+bind spring-stiffness 0
+variable contact-N-per-m2 100000000 100000000 20000000 400000000 1
+bind contact-stiffness 0
+variable gap-m 0.0001 0.0002 0.00001 0.0005 1
+bind contact-gap 0

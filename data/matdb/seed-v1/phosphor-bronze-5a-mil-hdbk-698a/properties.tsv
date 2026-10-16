@@ -1,0 +1,11 @@
+frankensim.matdb-source.v1
+observation	mil698a-table-xv-510	Phosphor bronze 5 percent A (alloy 510, UNS C51000 class, Sn 4.2-5.8, P 0.03-0.35)	MIL-HDBK-698A Table XV wrought-alloy physical properties row 510 at 68 F	Source row verbatim: density 0.320 lb/cu-in at 68 F, modulus of elasticity in tension 16e6 psi, modulus of rigidity 6e6 psi; SI rows below are unit conversions of those printed values (0.320 lb/in3 x 27679.9 = 8857.6 kg/m3; 16e6 psi = 110316 MPa; 6e6 psi = 41369 MPa); the handbook wrought-typical modulus sits below the NIST Monograph 177 annealed dynamic fit (118.2 GPa at 5 pct Sn, sibling pack phosphor-bronze-c51000-nist-mono177) — cold work and measurement method differ, so both are retained with their own provenance rather than averaged; handbook-secondary tier without confidence semantics, so runtime uncertainty stays Unstated
+scalar	density	mil698a-table-xv-510	density	8857.6	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293	293	K
+scalar	young-modulus	mil698a-table-xv-510	young_modulus	110316	MPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	temperature	293	293	K
+scalar	shear-modulus	mil698a-table-xv-510	shear_modulus	41369	MPa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	temperature	293	293	K

@@ -1,0 +1,49 @@
+[package]
+name = "fs-feec"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "FEEC core: cochains on tet complexes, Whitney forms, Hodge stars, exact-sequence assembly (d transposes through mass matrices)."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[features]
+# I13.2a (ambition [F]): terminal-relative winding topology stays
+# default-off until its independent reproduction and promotion deck exist.
+terminal-relative = ["dep:fs-blake3", "dep:fs-ports"]
+# I13.2b (ambition [M]): exact integral topology remains default-off and
+# inherits the terminal-relative schema boundary.
+moonshot-integral-topology = ["terminal-relative"]
+
+[dependencies]
+fs-blake3 = { path = "../fs-blake3", optional = true }
+fs-ports = { path = "../fs-ports", optional = true }
+fs-ivl = { path = "../fs-ivl" }
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+fs-qty = { path = "../fs-qty" }
+fs-rep-mesh = { path = "../fs-rep-mesh" }
+fs-soa = { path = "../fs-soa" }
+fs-sparse = { path = "../fs-sparse" }
+
+[dev-dependencies]
+fs-obs = { path = "../fs-obs" }
+fs-propcheck = { path = "../fs-propcheck" }
+fs-rand = { path = "../fs-rand" }
+fs-roofline = { path = "../fs-roofline" }
+
+[[test]]
+name = "terminal_relative"
+path = "tests/terminal_relative.rs"
+required-features = ["terminal-relative"]
+
+[[test]]
+name = "integral_topology"
+path = "tests/integral_topology.rs"
+required-features = ["moonshot-integral-topology"]
+
+[lints]
+workspace = true

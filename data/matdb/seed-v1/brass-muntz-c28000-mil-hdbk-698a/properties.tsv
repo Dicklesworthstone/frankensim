@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	mil698a-table-xv-280	Muntz metal 60-40 brass (CDA alloy number 280), wrought	MIL-HDBK-698A Table XV wrought-alloy physical properties: liquidus/solidus melting points (deg F), density at 68 F (lb/cu in), thermal conductivity at 68 F (Btu/sq ft/ft/hr/F)	Alloy identified in the table by CDA number only (names are not printed in Table XV); K = (F - 32)/1.8 + 273.15; density at 27679.905 (kg/m3)/(lb/in3); thermal conductivity at 1.730735 (W/m/K)/(Btu ft/(hr ft2 F)); a printed density RANGE is carried as two typed scalars (range low/high), never averaged; no uncertainty semantics printed, so runtime uncertainty stays Unstated.
+scalar	melting-liquidus	mil698a-table-xv-280	melting_point_liquidus	1177.59	K	constant
+uncertainty	melting-liquidus	unstated	-	-	-	-
+validity	melting-liquidus	temperature	293	293	K
+scalar	melting-solidus	mil698a-table-xv-280	melting_point_solidus	1172.04	K	constant
+uncertainty	melting-solidus	unstated	-	-	-	-
+validity	melting-solidus	temperature	293	293	K
+scalar	density-low	mil698a-table-xv-280	density_printed_range_low	8387.0	kg/m3	constant
+uncertainty	density-low	unstated	-	-	-	-
+validity	density-low	temperature	293	293	K
+scalar	thermal-conductivity	mil698a-table-xv-280	thermal_conductivity	122.9	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	temperature	293	293	K

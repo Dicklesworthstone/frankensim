@@ -1,0 +1,41 @@
+frankensim.matdb-source.v1
+observation	mil5j-table-2710b-full-hard	AISI 301 stainless steel sheet and strip, full hard (AMS 5519); properties also applicable to AISI 302 full hard (AMS 5906) per the table footnote	MIL-HDBK-5J Table 2.7.1.0(b) design values, B basis (at least 90 percent of the population expected to equal or exceed the value with 95 percent confidence, per the handbook's section 9.1.6)	Room-temperature aerospace DESIGN values at B basis; the cold-rolling texture makes the tension/compression asymmetry DIRECTION-RESOLVED and opposite-signed: longitudinal Fcy (648.1 MPa) sits FAR BELOW Fty (1054.9) while long-transverse Fcy (1130.7) EXCEEDS Fty (979.1) — the handbook notes yield strength, particularly in compression, and longitudinal modulus may be raised appreciably by thermal stress relief at 500-800 F; SI conversions at 6.894757 MPa/ksi; moduli direction-resolved (E 26.0e3 ksi L / 28.0e3 LT); elongation is the Table 2.7.1.0(c) minimum for full hard, thickness >= 0.016 in (9 percent LT); density shared with the alloy family at 0.286 lb/in3 = 7916.5 kg/m3; no confidence semantics beyond the stated basis, so runtime uncertainty stays Unstated
+scalar	tensile-ultimate-l	mil5j-table-2710b-full-hard	tensile_ultimate_l_b_basis	1275.5	MPa	constant
+uncertainty	tensile-ultimate-l	unstated	-	-	-	-
+validity	tensile-ultimate-l	temperature	294	294	K
+scalar	tensile-ultimate-lt	mil5j-table-2710b-full-hard	tensile_ultimate_lt_b_basis	1282.4	MPa	constant
+uncertainty	tensile-ultimate-lt	unstated	-	-	-	-
+validity	tensile-ultimate-lt	temperature	294	294	K
+scalar	tensile-yield-l	mil5j-table-2710b-full-hard	tensile_yield_l_b_basis	1054.9	MPa	constant
+uncertainty	tensile-yield-l	unstated	-	-	-	-
+validity	tensile-yield-l	temperature	294	294	K
+scalar	tensile-yield-lt	mil5j-table-2710b-full-hard	tensile_yield_lt_b_basis	979.1	MPa	constant
+uncertainty	tensile-yield-lt	unstated	-	-	-	-
+validity	tensile-yield-lt	temperature	294	294	K
+scalar	compressive-yield-l	mil5j-table-2710b-full-hard	compressive_yield_l_b_basis	648.1	MPa	constant
+uncertainty	compressive-yield-l	unstated	-	-	-	-
+validity	compressive-yield-l	temperature	294	294	K
+scalar	compressive-yield-lt	mil5j-table-2710b-full-hard	compressive_yield_lt_b_basis	1130.7	MPa	constant
+uncertainty	compressive-yield-lt	unstated	-	-	-	-
+validity	compressive-yield-lt	temperature	294	294	K
+scalar	shear-ultimate	mil5j-table-2710b-full-hard	shear_ultimate_b_basis	689.5	MPa	constant
+uncertainty	shear-ultimate	unstated	-	-	-	-
+validity	shear-ultimate	temperature	294	294	K
+scalar	young-modulus-l	mil5j-table-2710b-full-hard	young_modulus_l	179.3	GPa	constant
+uncertainty	young-modulus-l	unstated	-	-	-	-
+validity	young-modulus-l	temperature	294	294	K
+scalar	young-modulus-lt	mil5j-table-2710b-full-hard	young_modulus_lt	193.1	GPa	constant
+uncertainty	young-modulus-lt	unstated	-	-	-	-
+validity	young-modulus-lt	temperature	294	294	K
+scalar	shear-modulus	mil5j-table-2710b-full-hard	shear_modulus	72.4	GPa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	temperature	294	294	K
+scalar	poisson-ratio	mil5j-table-2710b-full-hard	poisson_ratio	0.27	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	temperature	294	294	K
+scalar	density	mil5j-table-2710b-full-hard	density	7916.5	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	294	294	K
+scalar	elongation-lt	mil5j-table-2710b-full-hard	elongation_lt_minimum	9	%	constant
+uncertainty	elongation-lt	unstated	-	-	-	-
+validity	elongation-lt	temperature	294	294	K

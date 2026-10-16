@@ -1,0 +1,2234 @@
+//! Prewarped bilinear discretization of a fitted model to runtime
+//! filter forms: factored section cascade (first-order + biquad
+//! sections summed in PARALLEL, mirroring the pole-residue structure)
+//! and discrete state-space.
+//!
+//! Bilinear map `s = K (z - 1)/(z + 1)` with `K = omega_pw /
+//! tan(omega_pw * T / 2)` (prewarp: the continuous and discrete
+//! responses agree EXACTLY at `omega_pw`; `K -> 2/T` as `omega_pw ->
+//! 0`). The improper `s*e` term maps to `e*K (z-1)/(z+1)` — a proper
+//! first-order z-section, so improper continuous models are exactly
+//! representable after discretization.
+//!
+//! Sections are PARALLEL (summed), not cascaded products: parallel
+//! form preserves the per-resonance structure the pole-residue model
+//! carries, keeps coefficient sensitivity local to each resonance, and
+//! makes the quantization report per-section attributable.
+
+use crate::model::{PoleTerm, RationalModel};
+use fs_math::c64::C64;
+use fs_math::det;
+
+/// One second-order (or degenerate first-order) parallel section:
+/// `(b0 + b1 z^-1 + b2 z^-2) / (1 + a1 z^-1 + a2 z^-2)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Biquad {
+    /// Numerator coefficients.
+    pub b: [f64; 3],
+    /// Denominator coefficients (`a0 == 1` implied).
+    pub a: [f64; 2],
+}
+
+impl Biquad {
+    /// Frequency response at `z = e^{i*omega*t_s}`.
+    #[must_use]
+    pub fn eval(&self, omega: f64, t_s: f64) -> C64 {
+        let zi = C64::new(det::cos(omega * t_s), -det::sin(omega * t_s));
+        let zi2 = zi * zi;
+        let num = C64::from_re(self.b[0]) + zi.scale(self.b[1]) + zi2.scale(self.b[2]);
+        let den = C64::ONE + zi.scale(self.a[0]) + zi2.scale(self.a[1]);
+        num * den.recip()
+    }
+
+    /// The same response with coefficients rounded through f32 — the
+    /// quantization-sensitivity probe.
+    #[must_use]
+    pub fn eval_f32_quantized(&self, omega: f64, t_s: f64) -> C64 {
+        let q = Biquad {
+            b: [
+                f64::from(self.b[0] as f32),
+                f64::from(self.b[1] as f32),
+                f64::from(self.b[2] as f32),
+            ],
+            a: [f64::from(self.a[0] as f32), f64::from(self.a[1] as f32)],
+        };
+        q.eval(omega, t_s)
+    }
+
+    /// Section poles inside the unit circle?
+    #[must_use]
+    pub fn is_stable(&self) -> bool {
+        // Jury criterion for 1 + a1 z^-1 + a2 z^-2.
+        let (a1, a2) = (self.a[0], self.a[1]);
+        a2.abs() < 1.0 && (a1.abs() < 1.0 + a2)
+    }
+}
+
+/// A parallel bank of sections plus the sample interval.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DigitalFilter {
+    /// Parallel sections (their responses SUM).
+    pub sections: Vec<Biquad>,
+    /// Constant (direct) term.
+    pub direct: f64,
+    /// Sample interval [s].
+    pub t_s: f64,
+    /// Prewarp frequency actually used [rad/s] (0 = none).
+    pub prewarp: f64,
+}
+
+impl DigitalFilter {
+    /// Total response at angular frequency `omega`.
+    #[must_use]
+    pub fn eval(&self, omega: f64) -> C64 {
+        let mut acc = C64::from_re(self.direct);
+        for s in &self.sections {
+            acc = acc + s.eval(omega, self.t_s);
+        }
+        acc
+    }
+
+    /// Total response with every section's coefficients f32-quantized.
+    #[must_use]
+    pub fn eval_f32_quantized(&self, omega: f64) -> C64 {
+        let mut acc = C64::from_re(f64::from(self.direct as f32));
+        for s in &self.sections {
+            acc = acc + s.eval_f32_quantized(omega, self.t_s);
+        }
+        acc
+    }
+
+    /// All sections stable? The exact lossless differentiator the
+    /// improper `e` term maps to (`b1 = -b0`, pole exactly at
+    /// `z = -1`) is marginally stable BY DESIGN and is admitted.
+    #[must_use]
+    pub fn is_stable(&self) -> bool {
+        self.sections
+            .iter()
+            .all(|s| s.is_stable() || is_lossless_differentiator(s))
+    }
+
+    /// Zero DF-II memory for every parallel section.
+    #[must_use]
+    pub fn zero_state(&self) -> DigitalFilterState {
+        DigitalFilterState {
+            w: vec![[0.0; 2]; self.sections.len()],
+        }
+    }
+
+    /// Scale every numerator (and the direct term) by `gain`.
+    pub fn scale(&mut self, gain: f64) {
+        self.direct *= gain;
+        for section in &mut self.sections {
+            section.b[0] *= gain;
+            section.b[1] *= gain;
+            section.b[2] *= gain;
+        }
+    }
+
+    /// Peak `|H(ω)|` on a caller grid.
+    ///
+    /// Returns a non-finite value instead of silently omitting a non-finite
+    /// frequency or response sample from the grid maximum.
+    #[must_use]
+    pub fn peak_abs(&self, omegas: &[f64]) -> f64 {
+        let mut peak = 0.0_f64;
+        for &omega in omegas {
+            if !omega.is_finite() {
+                return f64::NAN;
+            }
+            let magnitude = self.eval(omega).abs();
+            if !magnitude.is_finite() {
+                return magnitude;
+            }
+            peak = peak.max(magnitude);
+        }
+        peak
+    }
+
+    /// Uniformly scale so `max |H|` on `omegas` does not exceed `bound`.
+    ///
+    /// This is the scattering-form passivity projection `|R| ≤ 1`. It
+    /// is not impedance-form residue repair; use
+    /// [`realize_tabulated_impedance`] for `Re Z ≥ 0`.
+    ///
+    /// Returns the peak magnitude before scaling. A negative or non-finite
+    /// bound leaves the filter unchanged.
+    pub fn enforce_abs_bound(&mut self, omegas: &[f64], bound: f64) -> f64 {
+        let peak = self.peak_abs(omegas);
+        if peak > bound && bound >= 0.0 && bound.is_finite() && peak.is_finite() {
+            self.scale(bound / peak);
+        }
+        peak
+    }
+
+    /// Advance one sample through the parallel bank.
+    ///
+    /// Each section is transposed direct form II. Arithmetic order is
+    /// section index then coefficient index. A non-finite result
+    /// refuses without committing the section memories.
+    ///
+    /// # Errors
+    /// [`DiscretizeError::NonFiniteRuntimeValue`] or a state/section
+    /// length mismatch.
+    pub fn step(&self, state: &mut DigitalFilterState, input: f64) -> Result<f64, DiscretizeError> {
+        let output = self.validate_step(state, input)?;
+        self.commit_step(state, input);
+        Ok(output)
+    }
+
+    fn validate_step(
+        &self,
+        state: &DigitalFilterState,
+        input: f64,
+    ) -> Result<f64, DiscretizeError> {
+        require_finite_scalar("input", input)?;
+        if state.w.len() != self.sections.len() {
+            return Err(DiscretizeError::InvalidRuntimeDimensions {
+                field: "filter_state",
+                expected: self.sections.len(),
+                actual: state.w.len(),
+            });
+        }
+        let mut output = self.direct * input;
+        for (i, section) in self.sections.iter().enumerate() {
+            let [w1, w2] = state.w[i];
+            let w0 = input - section.a[0] * w1 - section.a[1] * w2;
+            let y = section.b[0] * w0 + section.b[1] * w1 + section.b[2] * w2;
+            if !w0.is_finite() {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "biquad_w",
+                    index: Some(i),
+                });
+            }
+            if !y.is_finite() {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "biquad_y",
+                    index: Some(i),
+                });
+            }
+            output += y;
+        }
+        require_finite_scalar("output", output)?;
+        Ok(output)
+    }
+
+    fn commit_step(&self, state: &mut DigitalFilterState, input: f64) {
+        // `validate_step` deliberately leaves state untouched. Once every
+        // section and the complete sum are finite, recompute only the new
+        // memories and commit them in place. This preserves the public
+        // no-partial-commit invariant without returning to a per-sample
+        // allocation.
+        for (section, memory) in self.sections.iter().zip(&mut state.w) {
+            let [w1, w2] = *memory;
+            let w0 = input - section.a[0] * w1 - section.a[1] * w2;
+            *memory = [w0, w1];
+        }
+    }
+}
+
+/// Per-section DF-II memory of a [`DigitalFilter`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct DigitalFilterState {
+    w: Vec<[f64; 2]>,
+}
+
+/// Driving-point reflectance `R = (Z − Zc) / (Z + Zc)`.
+///
+/// This is the scattering map of any 1-D characteristic port
+/// (a duct, a transmission line, a pulse tube), not an instrument
+/// primitive.
+#[must_use]
+pub fn reflectance(impedance: C64, z_characteristic: f64) -> C64 {
+    let zc = C64::from_re(z_characteristic);
+    (impedance - zc) * (impedance + zc).recip()
+}
+
+/// Multiply tabulated `H(ω)` by `exp(i · sign · ω · τ)` in this
+/// crate's `e^{+iωt}` convention. `sign = +1` peels a pure delay of
+/// `τ` seconds from a delayed response.
+///
+/// # Errors
+/// Length mismatch or a non-finite argument.
+pub fn modulate_delay(
+    omega: &[f64],
+    h: &[C64],
+    tau_s: f64,
+    sign: f64,
+) -> Result<Vec<C64>, DiscretizeError> {
+    if omega.len() != h.len() {
+        return Err(DiscretizeError::InvalidRuntimeDimensions {
+            field: "modulate_delay",
+            expected: omega.len(),
+            actual: h.len(),
+        });
+    }
+    require_finite_scalar("tau_s", tau_s)?;
+    require_finite_scalar("delay_sign", sign)?;
+    let mut out = Vec::with_capacity(h.len());
+    for (i, (&w, &hi)) in omega.iter().zip(h.iter()).enumerate() {
+        require_finite_scalar("omega", w).map_err(|_| DiscretizeError::NonFiniteRuntimeValue {
+            field: "omega",
+            index: Some(i),
+        })?;
+        if !hi.re.is_finite() || !hi.im.is_finite() {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "h",
+                index: Some(i),
+            });
+        }
+        let phase = sign * w * tau_s;
+        if !phase.is_finite() {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "delay_phase",
+                index: Some(i),
+            });
+        }
+        let rot = C64::new(det::cos(phase), det::sin(phase));
+        let sample = hi * rot;
+        if !sample.re.is_finite() || !sample.im.is_finite() {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "modulated_response",
+                index: Some(i),
+            });
+        }
+        out.push(sample);
+    }
+    Ok(out)
+}
+
+/// Fit tabulated `H(iω)` (this crate's `e^{+iωt}` convention) and
+/// bilinear-discretize it to a parallel [`DigitalFilter`].
+///
+/// A TMM impedance, a BEM radiation load, and a mobility are the
+/// same object: a tabulated driving-point response. Conjugate
+/// `e^{-iωt}` acoustics data before calling.
+///
+/// # Errors
+/// Vector-fitting or bilinear refusals.
+pub fn realize_tabulated(
+    omega: &[f64],
+    h: &[C64],
+    t_s: f64,
+    opts: &crate::vf::FitOptions,
+    prewarp: f64,
+) -> Result<DigitalFilter, RealizeError> {
+    let fit = crate::vf::vector_fit(omega, h, opts).map_err(RealizeError::Fit)?;
+    bilinear(&fit.model, t_s, prewarp).map_err(RealizeError::Discretize)
+}
+
+/// Fit tabulated **impedance** `Z(iω)`, convex-repair passivity, then
+/// bilinear-discretize.
+///
+/// `repair_passivity` is the impedance-form primitive (`Re Z ≥ 0`).
+/// A raw fit that is already passive is returned unchanged. Repair
+/// exhaustion keeps the raw stable fit — it does not invent residues.
+/// The repair band spans the complete sampled frequency range regardless
+/// of input sample order.
+///
+/// Conjugate `e^{-iωt}` acoustics data before calling.
+///
+/// # Errors
+/// Vector-fitting or bilinear refusals. Passivity repair failure is
+/// not an error; the unrepaired model is discretized.
+pub fn realize_tabulated_impedance(
+    omega: &[f64],
+    z: &[C64],
+    t_s: f64,
+    opts: &crate::vf::FitOptions,
+    prewarp: f64,
+) -> Result<DigitalFilter, RealizeError> {
+    let fit = crate::vf::vector_fit(omega, z, opts).map_err(RealizeError::Fit)?;
+    let mut model = fit.model;
+    let lo = omega.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = omega.iter().copied().fold(0.0_f64, f64::max);
+    if hi > lo
+        && model.is_stable()
+        && let Ok((repaired, _)) = crate::passivity::repair_passivity(&model, (lo, hi))
+    {
+        model = repaired;
+    }
+    bilinear(&model, t_s, prewarp).map_err(RealizeError::Discretize)
+}
+
+/// Typed failure from tabulated-response realization.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RealizeError {
+    /// Identification refused.
+    Fit(crate::vf::VfError),
+    /// Bilinear map refused.
+    Discretize(DiscretizeError),
+}
+
+impl core::fmt::Display for RealizeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Fit(e) => write!(f, "tabulated realization fit refused: {e}"),
+            Self::Discretize(e) => write!(f, "tabulated realization discretize refused: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RealizeError {}
+
+/// A known bulk delay followed by a causal [`DigitalFilter`].
+///
+/// This is the time-domain characteristic port of any 1-D waveguide:
+/// peel `exp(-iωτ)` out of a driving-point reflectance, fit the
+/// residual, and run `delay ⊕ filter` at the sample rate. A bore, a
+/// muffler, an HVAC run, and a pulse tube share this object.
+#[derive(Debug, Clone)]
+pub struct DelayedFilter {
+    buf: Vec<f64>,
+    write: usize,
+    delay_int: usize,
+    frac: f64,
+    filter: DigitalFilter,
+    state: DigitalFilterState,
+    /// Residual (or full) impulse response. Empty means the IIR bank.
+    fir: Vec<f64>,
+    last: f64,
+    /// Dispersion stage: shared first-order allpass coefficient
+    /// (empty state vectors = stage inert).
+    disp_a: f64,
+    /// Per-section previous input of the allpass cascade.
+    disp_x1: Vec<f64>,
+    /// Per-section previous output of the allpass cascade.
+    disp_y1: Vec<f64>,
+}
+
+impl DelayedFilter {
+    /// Build a line whose delay is `delay_samples` (must be at least 2
+    /// and strictly inside the allocated buffer).
+    ///
+    /// # Errors
+    /// A delay that does not fit, or a non-finite/non-positive sample
+    /// interval on the filter.
+    pub fn new(delay_samples: f64, filter: DigitalFilter) -> Result<Self, DiscretizeError> {
+        if !(delay_samples >= 2.0 && delay_samples.is_finite()) {
+            return Err(DiscretizeError::InvalidRuntimeDimensions {
+                field: "delay_samples",
+                expected: 2,
+                actual: delay_samples.max(0.0) as usize,
+            });
+        }
+        if !(filter.t_s > 0.0 && filter.t_s.is_finite()) {
+            return Err(DiscretizeError::BadSampleInterval);
+        }
+        let delay_int = delay_samples.floor() as usize;
+        let frac = delay_samples - delay_int as f64;
+        const BUFFER_PADDING: usize = 4;
+        let max_delay = (isize::MAX as usize / core::mem::size_of::<f64>()) - BUFFER_PADDING;
+        if delay_int > max_delay {
+            return Err(DiscretizeError::RuntimeDimensionOverflow { n: delay_int });
+        }
+        let n = delay_int + BUFFER_PADDING;
+        Ok(Self {
+            buf: vec![0.0; n],
+            write: 0,
+            delay_int,
+            frac,
+            state: filter.zero_state(),
+            filter,
+            fir: Vec::new(),
+            last: 0.0,
+            disp_a: 0.0,
+            disp_x1: Vec::new(),
+            disp_y1: Vec::new(),
+        })
+    }
+
+    /// Add a DISPERSION stage (music bead 3ez8g.7.2): a cascade of
+    /// `sections` identical first-order allpasses
+    /// `H(z) = (a + z^-1)/(1 + a z^-1)` applied to the line output.
+    /// `|H| = 1` EXACTLY at every frequency, so the stage is passive
+    /// BY STRUCTURE — it can reshape the loop's phase (stiff-string
+    /// dispersion) but can never pump energy; the existing passivity
+    /// enforcement on the residual filter is untouched. A negative
+    /// `a` delays low frequencies more than high ones (group delay
+    /// `(1-a^2)/(1+2a cos Ω+a^2)`), which is the stiff-string
+    /// direction: sharp upper partials.
+    ///
+    /// # Errors
+    /// A non-finite or unit-circle-touching coefficient (`|a| >= 1`
+    /// is unstable), zero sections, or a section count that cannot be
+    /// represented by the allpass state vectors.
+    pub fn with_dispersion(mut self, a: f64, sections: usize) -> Result<Self, DiscretizeError> {
+        if !(a.is_finite() && a.abs() < 1.0) {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "dispersion_coefficient",
+                index: None,
+            });
+        }
+        if sections == 0 {
+            return Err(DiscretizeError::InvalidRuntimeDimensions {
+                field: "dispersion_sections",
+                expected: 1,
+                actual: 0,
+            });
+        }
+        let max_sections = isize::MAX as usize / core::mem::size_of::<f64>();
+        if sections > max_sections {
+            return Err(DiscretizeError::RuntimeDimensionOverflow { n: sections });
+        }
+        self.disp_a = a;
+        self.disp_x1 = vec![0.0; sections];
+        self.disp_y1 = vec![0.0; sections];
+        Ok(self)
+    }
+
+    /// Group delay [samples] of ONE first-order allpass section
+    /// `H(z) = (a + z^-1)/(1 + a z^-1)` at normalized frequency
+    /// `omega_norm = 2 pi f / fs` — the closed form the dispersion
+    /// design solves against.
+    #[must_use]
+    pub fn first_order_allpass_group_delay(a: f64, omega_norm: f64) -> f64 {
+        (1.0 - a * a) / (1.0 + 2.0 * a * omega_norm.cos() + a * a)
+    }
+
+    fn validate_dispersion(&self, input: f64) -> Result<f64, DiscretizeError> {
+        let a = self.disp_a;
+        let mut x = input;
+        for k in 0..self.disp_x1.len() {
+            let y = a * (x - self.disp_y1[k]) + self.disp_x1[k];
+            if !y.is_finite() {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "dispersion_output",
+                    index: Some(k),
+                });
+            }
+            x = y;
+        }
+        Ok(x)
+    }
+
+    fn commit_dispersion(&mut self, input: f64) -> f64 {
+        let a = self.disp_a;
+        let mut x = input;
+        for k in 0..self.disp_x1.len() {
+            let y = a * (x - self.disp_y1[k]) + self.disp_x1[k];
+            self.disp_x1[k] = x;
+            self.disp_y1[k] = y;
+            x = y;
+        }
+        x
+    }
+
+    /// A characteristic port whose reflectance is a tabulated impulse
+    /// response (delay included). This is the exact linear scattering
+    /// map of a sampled `R(ω)`, not a rational fit.
+    ///
+    /// # Errors
+    /// Non-finite samples, a non-finite/non-positive sample interval, or an
+    /// IR shorter than 4 samples.
+    pub fn from_impulse_response(t_s: f64, ir: Vec<f64>) -> Result<Self, DiscretizeError> {
+        if !(t_s > 0.0 && t_s.is_finite()) {
+            return Err(DiscretizeError::BadSampleInterval);
+        }
+        if ir.len() < 4 {
+            return Err(DiscretizeError::InvalidRuntimeDimensions {
+                field: "impulse_response",
+                expected: 4,
+                actual: ir.len(),
+            });
+        }
+        for (i, &h) in ir.iter().enumerate() {
+            if !h.is_finite() {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "impulse_response",
+                    index: Some(i),
+                });
+            }
+        }
+        let filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 0.0,
+            t_s,
+            prewarp: 0.0,
+        };
+        Ok(Self {
+            buf: vec![0.0; ir.len()],
+            write: 0,
+            delay_int: 0,
+            frac: 0.0,
+            state: filter.zero_state(),
+            filter,
+            fir: ir,
+            last: 0.0,
+            disp_a: 0.0,
+            disp_x1: Vec::new(),
+            disp_y1: Vec::new(),
+        })
+    }
+
+    /// Fit the delay-peeled response `H(ω) exp(+iωτ)` and build the
+    /// line. `delay_samples = τ / t_s`.
+    ///
+    /// # Errors
+    /// Peeling, fitting, bilinear, or delay-buffer refusals.
+    pub fn from_tabulated(
+        omega: &[f64],
+        h: &[C64],
+        delay_samples: f64,
+        t_s: f64,
+        opts: &crate::vf::FitOptions,
+        prewarp: f64,
+    ) -> Result<Self, RealizeError> {
+        let peeled =
+            modulate_delay(omega, h, delay_samples * t_s, 1.0).map_err(RealizeError::Discretize)?;
+        let filter = realize_tabulated(omega, &peeled, t_s, opts, prewarp)?;
+        Self::new(delay_samples, filter).map_err(RealizeError::Discretize)
+    }
+
+    /// The FIR-mode outgoing-wave history, oldest first (empty in IIR
+    /// mode). This is the PHYSICAL in-flight wave state a fingering
+    /// change must carry (D17 lift seam for characteristic lines).
+    #[must_use]
+    pub fn history(&self) -> Vec<f64> {
+        if self.fir.is_empty() {
+            return Vec::new();
+        }
+        let n = self.buf.len();
+        (0..n).map(|k| self.buf[(self.write + k) % n]).collect()
+    }
+
+    /// Build an exact-FIR line whose ring buffer is PRE-LOADED with a
+    /// prior line's history (oldest first; truncated or zero-padded at
+    /// the OLD end to fit) — the D17 state lift for a reflectance swap:
+    /// in-flight waves persist, the new taps govern future reflections.
+    ///
+    /// # Errors
+    /// As [`DelayedFilter::from_impulse_response`], plus a non-finite history
+    /// sample.
+    pub fn from_impulse_response_with_history(
+        t_s: f64,
+        ir: Vec<f64>,
+        history: &[f64],
+    ) -> Result<Self, DiscretizeError> {
+        let mut line = Self::from_impulse_response(t_s, ir)?;
+        let n = line.buf.len();
+        let take = history.len().min(n);
+        let history_start = history.len() - take;
+        if let Some(offset) = history[history_start..]
+            .iter()
+            .position(|value| !value.is_finite())
+        {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "history",
+                index: Some(history_start + offset),
+            });
+        }
+        // Copy the NEWEST `take` samples so the most recent waves land
+        // just behind the write cursor.
+        for (k, &v) in history[history_start..].iter().enumerate() {
+            let slot = (line.write + (n - take) + k) % n;
+            line.buf[slot] = v;
+        }
+        Ok(line)
+    }
+
+    /// Push one outgoing sample into the line and return the delayed,
+    /// filtered incoming sample.
+    /// A refusal leaves the delay, filter, and dispersion memories unchanged.
+    ///
+    /// # Errors
+    /// A non-finite outgoing sample, FIR/IIR filter result, or dispersion
+    /// result.
+    pub fn push(&mut self, outgoing: f64) -> Result<f64, DiscretizeError> {
+        require_finite_scalar("outgoing", outgoing)?;
+        let n = self.buf.len();
+        if !self.fir.is_empty() {
+            // Fused inner loop (music bead 3ez8g.15, strict mode): tap k
+            // reads the candidate outgoing sample first, then
+            // buf[..write] REVERSED and buf[write+1..] REVERSED. Splitting
+            // into two contiguous runs removes the per-tap modulo while
+            // keeping the accumulation order IDENTICAL — bit-for-bit with
+            // the modulo loop by construction (proven by the equivalence
+            // test against a retained reference implementation).
+            let mut acc = 0.0;
+            let split = (self.write + 1).min(self.fir.len());
+            let (head_taps, tail_taps) = self.fir.split_at(split);
+            if let Some((&first_tap, remaining_taps)) = head_taps.split_first() {
+                acc += first_tap * outgoing;
+                for (&h, &b) in remaining_taps
+                    .iter()
+                    .zip(self.buf[..self.write].iter().rev())
+                {
+                    acc += h * b;
+                }
+            }
+            for (&h, &b) in tail_taps
+                .iter()
+                .zip(self.buf[self.write + 1..].iter().rev())
+            {
+                acc += h * b;
+            }
+            if !acc.is_finite() {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "fir_output",
+                    index: None,
+                });
+            }
+            self.validate_dispersion(acc)?;
+            self.buf[self.write] = outgoing;
+            self.write = (self.write + 1) % n;
+            let dispersed = self.commit_dispersion(acc);
+            self.last = dispersed;
+            return Ok(dispersed);
+        }
+        let i1 = (self.write + n - self.delay_int) % n;
+        let i0 = (i1 + n - 1) % n;
+        let delayed = (1.0 - self.frac) * self.buf[i1] + self.frac * self.buf[i0];
+        let filtered = self.filter.validate_step(&self.state, delayed)?;
+        self.validate_dispersion(filtered)?;
+        self.filter.commit_step(&mut self.state, delayed);
+        self.buf[self.write] = outgoing;
+        self.write = (self.write + 1) % n;
+        self.last = self.commit_dispersion(filtered);
+        Ok(self.last)
+    }
+
+    /// Incoming wave from the previous [`Self::push`].
+    #[must_use]
+    pub fn incoming(&self) -> f64 {
+        self.last
+    }
+
+    /// Scale the residual so `|H(ω)|` equals `target_abs`.
+    ///
+    /// A self-oscillating loop needs the speaking-frequency loop gain,
+    /// not only an impulse-correct fit. An invalid or unrepresentable pin
+    /// request leaves coefficients and runtime state unchanged.
+    pub fn pin_magnitude_at(&mut self, omega: f64, target_abs: f64) {
+        if !(omega.is_finite() && target_abs >= 0.0 && target_abs.is_finite()) {
+            return;
+        }
+        if !self.fir.is_empty() {
+            let h = fir_dtft(&self.fir, omega, self.filter.t_s).abs();
+            if !(h > 1.0e-12 && h.is_finite()) {
+                return;
+            }
+            let gain = target_abs / h;
+            if !gain.is_finite()
+                || (target_abs > 0.0 && gain == 0.0)
+                || self.fir.iter().any(|sample| !(*sample * gain).is_finite())
+            {
+                return;
+            }
+            for sample in &mut self.fir {
+                *sample *= gain;
+            }
+            self.last = 0.0;
+            return;
+        }
+        let h = self.filter.eval(omega).abs();
+        if !(h > 1.0e-12 && h.is_finite()) {
+            return;
+        }
+        let gain = target_abs / h;
+        if !gain.is_finite()
+            || (target_abs > 0.0 && gain == 0.0)
+            || !(self.filter.direct * gain).is_finite()
+            || self.filter.sections.iter().any(|section| {
+                section
+                    .b
+                    .iter()
+                    .any(|coefficient| !(*coefficient * gain).is_finite())
+            })
+        {
+            return;
+        }
+        self.filter.direct *= gain;
+        for section in &mut self.filter.sections {
+            section.b[0] *= gain;
+            section.b[1] *= gain;
+            section.b[2] *= gain;
+        }
+        self.state = self.filter.zero_state();
+        self.last = 0.0;
+    }
+
+    /// Project the residual so `|H(ω)| ≤ 1` on `omegas`.
+    ///
+    /// A passive 1-D scatterer cannot return more than it is sent.
+    /// Call this after [`Self::pin_magnitude_at`] so a speaking-frequency
+    /// gain pin cannot create an active band elsewhere. An empty/non-finite
+    /// grid, a non-finite evaluated response, or an already-passive response
+    /// leaves runtime state unchanged.
+    pub fn enforce_scattering_passivity(&mut self, omegas: &[f64]) {
+        if omegas.is_empty() || omegas.iter().any(|omega| !omega.is_finite()) {
+            return;
+        }
+        if !self.fir.is_empty() {
+            let mut peak = 0.0_f64;
+            for &omega in omegas {
+                let magnitude = fir_dtft(&self.fir, omega, self.filter.t_s).abs();
+                if !magnitude.is_finite() {
+                    return;
+                }
+                peak = peak.max(magnitude);
+            }
+            if !(peak > 1.0 && peak.is_finite()) {
+                return;
+            }
+            let gain = 1.0 / peak;
+            for sample in &mut self.fir {
+                *sample *= gain;
+            }
+            self.last = 0.0;
+            return;
+        }
+        let peak = self.filter.enforce_abs_bound(omegas, 1.0);
+        if !(peak > 1.0 && peak.is_finite()) {
+            return;
+        }
+        self.state = self.filter.zero_state();
+        self.last = 0.0;
+    }
+}
+
+fn fir_dtft(ir: &[f64], omega: f64, t_s: f64) -> C64 {
+    let mut acc = C64::ZERO;
+    for (k, &h) in ir.iter().enumerate() {
+        let phase = -omega * t_s * k as f64;
+        acc = acc + C64::new(h * det::cos(phase), h * det::sin(phase));
+    }
+    acc
+}
+
+fn is_lossless_differentiator(s: &Biquad) -> bool {
+    // Exact bitwise structural match against the section `bilinear`
+    // emits for the e-term — an identity check, not a numeric
+    // comparison, so strict equality is the correct operator.
+    #[allow(clippy::float_cmp)]
+    fn exact(s: &Biquad) -> bool {
+        s.b[1] == -s.b[0] && s.b[2] == 0.0 && s.a == [1.0, 0.0]
+    }
+    exact(s)
+}
+
+/// Typed discretization failure.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiscretizeError {
+    /// A sampled/prewarp frequency sits at or beyond Nyquist, or the
+    /// Tustin solve is singular.
+    BeyondNyquist {
+        /// Offending frequency [rad/s].
+        omega: f64,
+        /// Nyquist [rad/s].
+        nyquist: f64,
+    },
+    /// Non-finite or non-positive sample interval.
+    BadSampleInterval,
+    /// A prewarp frequency is negative or non-finite.
+    BadPrewarpFrequency {
+        /// Offending prewarp frequency [rad/s].
+        omega: f64,
+    },
+    /// A public state-space field does not match the declared state
+    /// dimension.
+    InvalidRuntimeDimensions {
+        /// Field whose length is inconsistent.
+        field: &'static str,
+        /// Required number of scalar entries.
+        expected: usize,
+        /// Supplied number of scalar entries.
+        actual: usize,
+    },
+    /// A declared runtime dimension cannot be represented by its required
+    /// storage layout.
+    RuntimeDimensionOverflow {
+        /// Offending runtime dimension.
+        n: usize,
+    },
+    /// A runtime input, coefficient, state coordinate, or computed result is
+    /// not finite.
+    NonFiniteRuntimeValue {
+        /// Value source.
+        field: &'static str,
+        /// Coordinate for vector/matrix fields; absent for scalars.
+        index: Option<usize>,
+    },
+    /// The proper state-space step cannot silently omit the Tustin
+    /// differentiator represented by `e_leftover`.
+    UnrealizedImproperTerm {
+        /// Coefficient requiring a separate differentiator section.
+        e_leftover: f64,
+    },
+    /// The discrete frequency-response solve is singular at the requested
+    /// frequency.
+    SingularStateSpaceResponse {
+        /// Elimination step whose pivot vanished.
+        pivot: usize,
+    },
+}
+
+impl core::fmt::Display for DiscretizeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DiscretizeError::BeyondNyquist { omega, nyquist } => {
+                write!(
+                    f,
+                    "frequency {omega} rad/s at/beyond nyquist {nyquist} rad/s"
+                )
+            }
+            DiscretizeError::BadSampleInterval => {
+                write!(f, "sample interval must be positive and finite")
+            }
+            DiscretizeError::BadPrewarpFrequency { omega } => write!(
+                f,
+                "prewarp frequency {omega} rad/s must be finite and non-negative"
+            ),
+            DiscretizeError::InvalidRuntimeDimensions {
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "runtime state-space field {field} has length {actual}, expected {expected}"
+            ),
+            DiscretizeError::RuntimeDimensionOverflow { n } => {
+                write!(
+                    f,
+                    "runtime dimension {n} cannot be represented by required storage"
+                )
+            }
+            DiscretizeError::NonFiniteRuntimeValue { field, index } => match index {
+                Some(index) => write!(f, "runtime value {field}[{index}] must be finite"),
+                None => write!(f, "runtime value {field} must be finite"),
+            },
+            DiscretizeError::UnrealizedImproperTerm { e_leftover } => write!(
+                f,
+                "runtime state-space step cannot realize e_leftover={e_leftover}; use the separate differentiator section"
+            ),
+            DiscretizeError::SingularStateSpaceResponse { pivot } => write!(
+                f,
+                "discrete state-space frequency-response solve is singular at pivot {pivot}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DiscretizeError {}
+
+fn validated_bilinear_parameters(
+    t_s: f64,
+    omega_pw: f64,
+) -> Result<(f64, f64, f64), DiscretizeError> {
+    if !(t_s > 0.0 && t_s.is_finite()) {
+        return Err(DiscretizeError::BadSampleInterval);
+    }
+    if !(omega_pw >= 0.0 && omega_pw.is_finite()) {
+        return Err(DiscretizeError::BadPrewarpFrequency { omega: omega_pw });
+    }
+
+    // Canonicalize IEEE -0.0 so the stored provenance for the unwarped map is
+    // bit-stable. For a positive subnormal prewarp, the angle multiplication
+    // can underflow to zero; use the analytic K -> 2/T limit in that case.
+    let omega_pw = if omega_pw == 0.0 { 0.0 } else { omega_pw };
+    let nyquist = core::f64::consts::PI / t_s;
+    if omega_pw >= nyquist {
+        return Err(DiscretizeError::BeyondNyquist {
+            omega: omega_pw,
+            nyquist,
+        });
+    }
+    let angle = omega_pw * t_s / 2.0;
+    let k = if angle == 0.0 {
+        2.0 / t_s
+    } else {
+        omega_pw / det::tan(angle)
+    };
+    if !(k > 0.0 && k.is_finite()) {
+        return Err(DiscretizeError::NonFiniteRuntimeValue {
+            field: "bilinear_constant",
+            index: None,
+        });
+    }
+    Ok((k, nyquist, omega_pw))
+}
+
+fn validate_rational_model(model: &RationalModel) -> Result<(), DiscretizeError> {
+    require_finite_scalar("model_direct", model.d)?;
+    require_finite_scalar("model_improper", model.e)?;
+    for (index, term) in model.terms.iter().enumerate() {
+        let finite = match term {
+            PoleTerm::Real { pole, residue } => pole.is_finite() && residue.is_finite(),
+            PoleTerm::Pair { pole, residue } => {
+                pole.re.is_finite()
+                    && pole.im.is_finite()
+                    && residue.re.is_finite()
+                    && residue.im.is_finite()
+            }
+        };
+        if !finite {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "model_term",
+                index: Some(index),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Bilinear-transform the model at sample interval `t_s` with prewarp
+/// at `omega_pw` (pass 0 for the unwarped `K = 2/T` map).
+///
+/// # Errors
+/// [`DiscretizeError`] when the sample interval is not positive and finite,
+/// the prewarp frequency is negative, non-finite, or at/beyond Nyquist, or
+/// the input/derived filter coefficients are non-finite.
+/// Stable continuous poles are not sampled sinusoids:
+/// Tustin maps the complete open left half-plane inside the unit circle.
+pub fn bilinear(
+    model: &RationalModel,
+    t_s: f64,
+    omega_pw: f64,
+) -> Result<DigitalFilter, DiscretizeError> {
+    let (k, _nyquist, omega_pw) = validated_bilinear_parameters(t_s, omega_pw)?;
+    validate_rational_model(model)?;
+    let mut sections = Vec::new();
+    for t in &model.terms {
+        match *t {
+            PoleTerm::Real { pole, residue } => {
+                // r/(s-p), s = K(z-1)/(z+1):
+                //   r (1 + z^-1) / ((K - p) + (-K - p) z^-1)
+                let a0 = k - pole;
+                sections.push(Biquad {
+                    b: [residue / a0, residue / a0, 0.0],
+                    a: [(-k - pole) / a0, 0.0],
+                });
+            }
+            PoleTerm::Pair { pole, residue } => {
+                // Pair as a real second-order s-section:
+                //   (beta1 s + beta0) / (s^2 + alpha1 s + alpha0)
+                let (a_re, b_im) = (pole.re, pole.im);
+                let (rho, sigma) = (residue.re, residue.im);
+                let beta1 = 2.0 * rho;
+                let beta0 = -2.0 * (rho * a_re + sigma * b_im);
+                let alpha1 = -2.0 * a_re;
+                let alpha0 = a_re * a_re + b_im * b_im;
+                // Substitute and clear (z+1)^2:
+                //   num = beta1 K (z^2 - 1) + beta0 (z+1)^2
+                //   den = K^2 (z-1)^2 + alpha1 K (z^2 - 1) + alpha0 (z+1)^2
+                let k2 = k * k;
+                let n0 = beta1 * k + beta0; // z^2
+                let n1 = 2.0 * beta0; // z^1
+                let n2 = -beta1 * k + beta0; // z^0
+                let d0 = k2 + alpha1 * k + alpha0;
+                let d1 = -2.0 * k2 + 2.0 * alpha0;
+                let d2 = k2 - alpha1 * k + alpha0;
+                sections.push(Biquad {
+                    b: [n0 / d0, n1 / d0, n2 / d0],
+                    a: [d1 / d0, d2 / d0],
+                });
+            }
+        }
+    }
+    if model.e != 0.0 {
+        // e*s -> e K (z - 1)/(z + 1): first-order, pole at z = -1
+        // nudged is NOT needed — bilinear puts it exactly at z=-1 which
+        // rings at Nyquist; standard practice keeps it exact (the
+        // section is lossless) and the band tolerance test covers it.
+        sections.push(Biquad {
+            b: [model.e * k, -model.e * k, 0.0],
+            a: [1.0, 0.0],
+        });
+    }
+    for (index, section) in sections.iter().enumerate() {
+        if section
+            .a
+            .iter()
+            .chain(&section.b)
+            .any(|coefficient| !coefficient.is_finite())
+        {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "digital_section",
+                index: Some(index),
+            });
+        }
+    }
+    Ok(DigitalFilter {
+        sections,
+        direct: model.d,
+        t_s,
+        prewarp: omega_pw,
+    })
+}
+
+/// Discrete state-space by the same bilinear map (Tustin):
+/// `Ad = (K I - A)^{-1} (K I + A)`, `Bd = sqrt(2 K) (K I - A)^{-1} B`,
+/// `Cd = sqrt(2 K) C (K I - A)^{-1}`, `Dd = D + C (K I - A)^{-1} B`.
+/// The improper `e` term is NOT representable in proper discrete
+/// state-space and is returned as the leftover coefficient for the
+/// caller to realize as the extra first-order section (as
+/// [`bilinear`] does) — a named seam, not a silent drop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscreteStateSpace {
+    /// State dimension.
+    pub n: usize,
+    /// Row-major discrete state matrix.
+    pub a: Vec<f64>,
+    /// Input map.
+    pub b: Vec<f64>,
+    /// Output map.
+    pub c: Vec<f64>,
+    /// Direct term.
+    pub d: f64,
+    /// UNREALIZED improper coefficient (see type docs).
+    pub e_leftover: f64,
+    /// Sample interval.
+    pub t_s: f64,
+}
+
+/// Mutable, allocation-free-after-construction runtime for one proper
+/// [`DiscreteStateSpace`] realization.
+///
+/// The lifetime binds the state to the exact realization used to construct it;
+/// callers cannot accidentally step that state with a different realization.
+/// A nonzero [`DiscreteStateSpace::e_leftover`] is refused at construction
+/// because silently dropping its separate differentiator section would change
+/// the transfer function.
+#[derive(Debug)]
+pub struct DiscreteStateSpaceRuntime<'realization> {
+    realization: &'realization DiscreteStateSpace,
+    state: Vec<f64>,
+    next_state: Vec<f64>,
+}
+
+/// Tustin state-space discretization (see [`DiscreteStateSpace`]).
+///
+/// # Errors
+/// As [`bilinear`], plus singular `(K I - A)` (a pole exactly at `K`,
+/// impossible for stable models since `K > 0`).
+pub fn bilinear_state_space(
+    model: &RationalModel,
+    t_s: f64,
+    omega_pw: f64,
+) -> Result<DiscreteStateSpace, DiscretizeError> {
+    let (k, nyquist, _omega_pw) = validated_bilinear_parameters(t_s, omega_pw)?;
+    validate_rational_model(model)?;
+    let ss = model.state_space();
+    let n = ss.n;
+    require_finite("continuous_a", &ss.a)?;
+    require_finite("continuous_b", &ss.b)?;
+    require_finite("continuous_c", &ss.c)?;
+    require_finite_scalar("continuous_d", ss.d)?;
+    require_finite_scalar("continuous_e", ss.e)?;
+    // M = K I - A, factored once.
+    let mut m = vec![0.0f64; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            m[i * n + j] = -ss.a[i * n + j];
+        }
+        m[i * n + i] += k;
+    }
+    require_finite("bilinear_matrix", &m)?;
+    let fact = fs_la::factor::lu(&m, n)
+        .map_err(|_| DiscretizeError::BeyondNyquist { omega: k, nyquist })?;
+    // X = M^{-1} (K I + A) column by column; Y = M^{-1} B.
+    let mut ad = vec![0.0f64; n * n];
+    for col in 0..n {
+        let mut rhs: Vec<f64> = (0..n).map(|row| ss.a[row * n + col]).collect();
+        rhs[col] += k;
+        fact.solve(&mut rhs);
+        require_finite("discrete_a_column", &rhs)?;
+        for row in 0..n {
+            ad[row * n + col] = rhs[row];
+        }
+    }
+    let mut y = ss.b.clone();
+    fact.solve(&mut y);
+    require_finite("discrete_input_solve", &y)?;
+    let g = if n == 0 {
+        0.0
+    } else {
+        let g = det::sqrt(2.0 * k);
+        require_finite_scalar("bilinear_state_scale", g)?;
+        g
+    };
+    let bd: Vec<f64> = y.iter().map(|&v| g * v).collect();
+    require_finite("discrete_b", &bd)?;
+    // Cd = g * C M^{-1}  (solve M^T z = C^T).
+    let mut z = ss.c.clone();
+    fact.solve_transpose(&mut z);
+    require_finite("discrete_output_solve", &z)?;
+    let cd: Vec<f64> = z.iter().map(|&v| g * v).collect();
+    require_finite("discrete_c", &cd)?;
+    let mut dd = ss.d;
+    for (ci, yi) in ss.c.iter().zip(&y) {
+        dd += ci * yi;
+    }
+    require_finite_scalar("discrete_d", dd)?;
+    Ok(DiscreteStateSpace {
+        n,
+        a: ad,
+        b: bd,
+        c: cd,
+        d: dd,
+        e_leftover: ss.e,
+        t_s,
+    })
+}
+
+impl DiscreteStateSpace {
+    /// Construct a zero-state runtime bound to this proper realization.
+    ///
+    /// # Errors
+    /// Returns [`DiscretizeError`] if public realization fields are malformed
+    /// or nonfinite, or if `e_leftover` requires the separate differentiator
+    /// section.
+    pub fn try_runtime(&self) -> Result<DiscreteStateSpaceRuntime<'_>, DiscretizeError> {
+        self.validate_runtime_realization()?;
+        Ok(DiscreteStateSpaceRuntime {
+            realization: self,
+            state: vec![0.0; self.n],
+            next_state: vec![0.0; self.n],
+        })
+    }
+
+    fn validate_realization(&self) -> Result<(), DiscretizeError> {
+        let matrix_len = self
+            .n
+            .checked_mul(self.n)
+            .ok_or(DiscretizeError::RuntimeDimensionOverflow { n: self.n })?;
+        require_len("a", self.a.len(), matrix_len)?;
+        require_len("b", self.b.len(), self.n)?;
+        require_len("c", self.c.len(), self.n)?;
+        require_finite("a", &self.a)?;
+        require_finite("b", &self.b)?;
+        require_finite("c", &self.c)?;
+        require_finite_scalar("d", self.d)?;
+        require_finite_scalar("e_leftover", self.e_leftover)?;
+        require_finite_scalar("t_s", self.t_s)?;
+        if self.t_s <= 0.0 {
+            return Err(DiscretizeError::BadSampleInterval);
+        }
+        Ok(())
+    }
+
+    fn validate_runtime_realization(&self) -> Result<(), DiscretizeError> {
+        self.validate_realization()?;
+        if self.e_leftover != 0.0 {
+            return Err(DiscretizeError::UnrealizedImproperTerm {
+                e_leftover: self.e_leftover,
+            });
+        }
+        Ok(())
+    }
+
+    /// Frequency response `Cd (z I - Ad)^{-1} Bd + Dd` at `z =
+    /// e^{i*omega*t_s}` (the `e_leftover` term is the caller's
+    /// section).
+    ///
+    /// # Errors
+    /// A malformed/non-finite public realization, a non-finite frequency or
+    /// phase, a singular `(z I - Ad)`, or a non-finite solve result.
+    pub fn eval(&self, omega: f64) -> Result<C64, DiscretizeError> {
+        self.validate_realization()?;
+        require_finite_scalar("omega", omega)?;
+        let phase = omega * self.t_s;
+        require_finite_scalar("frequency_phase", phase)?;
+        let n = self.n;
+        let z = C64::new(det::cos(phase), det::sin(phase));
+        let mut m = vec![C64::ZERO; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                m[i * n + j] = C64::from_re(-self.a[i * n + j]);
+            }
+            m[i * n + i] = m[i * n + i] + z;
+        }
+        let lu = fs_la::eigen_complex::lu_complex(&m, n).map_err(|failure| {
+            DiscretizeError::SingularStateSpaceResponse {
+                pivot: failure.window_hi,
+            }
+        })?;
+        let mut x: Vec<C64> = self.b.iter().map(|&v| C64::from_re(v)).collect();
+        lu.solve(&mut x);
+        if let Some(index) = x
+            .iter()
+            .position(|value| !(value.re.is_finite() && value.im.is_finite()))
+        {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "state_space_response_solve",
+                index: Some(index),
+            });
+        }
+        let mut acc = C64::from_re(self.d);
+        for (ci, xi) in self.c.iter().zip(&x) {
+            acc = acc + xi.scale(*ci);
+        }
+        if !(acc.re.is_finite() && acc.im.is_finite()) {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "state_space_response",
+                index: None,
+            });
+        }
+        Ok(acc)
+    }
+}
+
+impl DiscreteStateSpaceRuntime<'_> {
+    /// Current realization state in canonical coordinate order.
+    #[must_use]
+    pub fn state(&self) -> &[f64] {
+        &self.state
+    }
+
+    /// Advance one scalar sample using `y = Cx + D u`, followed by
+    /// `x_next = A x + B u`.
+    ///
+    /// Arithmetic order is fixed by row and coordinate index. If finite inputs
+    /// overflow, the call refuses without committing the partially computed
+    /// next state.
+    ///
+    /// # Errors
+    /// [`DiscretizeError::NonFiniteRuntimeValue`] for a nonfinite input or
+    /// computed output/state coordinate.
+    pub fn step(&mut self, input: f64) -> Result<f64, DiscretizeError> {
+        require_finite_scalar("input", input)?;
+
+        let mut output = 0.0;
+        for index in 0..self.realization.n {
+            output += self.realization.c[index] * self.state[index];
+        }
+        output += self.realization.d * input;
+        require_finite_scalar("output", output)?;
+
+        for row in 0..self.realization.n {
+            let mut value = 0.0;
+            for column in 0..self.realization.n {
+                value += self.realization.a[row * self.realization.n + column] * self.state[column];
+            }
+            value += self.realization.b[row] * input;
+            if !value.is_finite() {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "next_state",
+                    index: Some(row),
+                });
+            }
+            self.next_state[row] = value;
+        }
+        core::mem::swap(&mut self.state, &mut self.next_state);
+        Ok(output)
+    }
+}
+
+fn require_len(field: &'static str, actual: usize, expected: usize) -> Result<(), DiscretizeError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(DiscretizeError::InvalidRuntimeDimensions {
+            field,
+            expected,
+            actual,
+        })
+    }
+}
+
+fn require_finite(field: &'static str, values: &[f64]) -> Result<(), DiscretizeError> {
+    if let Some(index) = values.iter().position(|value| !value.is_finite()) {
+        Err(DiscretizeError::NonFiniteRuntimeValue {
+            field,
+            index: Some(index),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn require_finite_scalar(field: &'static str, value: f64) -> Result<(), DiscretizeError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(DiscretizeError::NonFiniteRuntimeValue { field, index: None })
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    fn first_order() -> DiscreteStateSpace {
+        DiscreteStateSpace {
+            n: 1,
+            a: vec![0.5],
+            b: vec![1.0],
+            c: vec![2.0],
+            d: 3.0,
+            e_leftover: 0.0,
+            t_s: 0.01,
+        }
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // EXACT recurrence pins (never weakened for a lint)
+    fn g0_runtime_step_matches_analytic_first_order_recurrence() {
+        let system = first_order();
+        let mut runtime = system.try_runtime().expect("proper realization");
+        assert_eq!(runtime.step(1.0).unwrap(), 3.0);
+        assert_eq!(runtime.state(), [1.0]);
+        assert_eq!(runtime.step(2.0).unwrap(), 8.0);
+        assert_eq!(runtime.state(), [2.5]);
+    }
+
+    #[test]
+    fn g0_runtime_replay_is_bitwise() {
+        let system = first_order();
+        let mut left = system.try_runtime().unwrap();
+        let mut right = system.try_runtime().unwrap();
+        for input in [1.0, -0.25, 0.0, 2.5, -4.0] {
+            assert_eq!(
+                left.step(input).unwrap().to_bits(),
+                right.step(input).unwrap().to_bits()
+            );
+            assert_eq!(left.state(), right.state());
+        }
+    }
+
+    #[test]
+    fn g0_zero_state_and_input_remain_zero() {
+        let mut system = first_order();
+        system.d = 0.0;
+        let mut runtime = system.try_runtime().unwrap();
+        assert_eq!(runtime.step(0.0).unwrap().to_bits(), 0.0f64.to_bits());
+        assert_eq!(runtime.state(), [0.0]);
+    }
+
+    #[test]
+    fn g0_runtime_refuses_malformed_nonfinite_and_improper_inputs() {
+        let mut malformed = first_order();
+        malformed.a.clear();
+        assert!(matches!(
+            malformed.try_runtime(),
+            Err(DiscretizeError::InvalidRuntimeDimensions { field: "a", .. })
+        ));
+        let mut improper = first_order();
+        improper.e_leftover = 0.25;
+        assert!(matches!(
+            improper.try_runtime(),
+            Err(DiscretizeError::UnrealizedImproperTerm { .. })
+        ));
+        let system = first_order();
+        let mut runtime = system.try_runtime().unwrap();
+        assert!(matches!(
+            runtime.step(f64::NAN),
+            Err(DiscretizeError::NonFiniteRuntimeValue { field: "input", .. })
+        ));
+        assert_eq!(runtime.state(), [0.0]);
+    }
+
+    #[test]
+    fn g0_frequency_evaluation_refuses_malformed_and_nonfinite_inputs() {
+        let mut malformed = first_order();
+        malformed.a.clear();
+        assert!(matches!(
+            malformed.eval(0.0),
+            Err(DiscretizeError::InvalidRuntimeDimensions { field: "a", .. })
+        ));
+
+        let mut nonfinite = first_order();
+        nonfinite.d = f64::NAN;
+        assert!(matches!(
+            nonfinite.eval(0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue { field: "d", .. })
+        ));
+
+        let system = first_order();
+        assert!(matches!(
+            system.eval(f64::INFINITY),
+            Err(DiscretizeError::NonFiniteRuntimeValue { field: "omega", .. })
+        ));
+        let mut overflowing_phase = first_order();
+        overflowing_phase.t_s = 2.0;
+        assert!(matches!(
+            overflowing_phase.eval(f64::MAX),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "frequency_phase",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn g0_frequency_evaluation_refuses_singular_and_nonfinite_solves() {
+        let mut singular = first_order();
+        singular.a[0] = 1.0;
+        assert!(matches!(
+            singular.eval(0.0),
+            Err(DiscretizeError::SingularStateSpaceResponse { pivot: 0 })
+        ));
+
+        let mut overflowing_solve = first_order();
+        overflowing_solve.b[0] = f64::MAX;
+        assert!(matches!(
+            overflowing_solve.eval(0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "state_space_response_solve",
+                index: Some(0)
+            })
+        ));
+
+        let mut overflowing_sum = first_order();
+        overflowing_sum.a[0] = 0.0;
+        overflowing_sum.b[0] = 1.0;
+        overflowing_sum.c[0] = f64::MAX;
+        overflowing_sum.d = f64::MAX;
+        assert!(matches!(
+            overflowing_sum.eval(0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "state_space_response",
+                index: None
+            })
+        ));
+    }
+
+    #[test]
+    fn g0_bilinear_constructors_refuse_invalid_sampling_parameters() {
+        let model = RationalModel {
+            terms: vec![PoleTerm::Real {
+                pole: -1.0,
+                residue: 1.0,
+            }],
+            d: 0.0,
+            e: 0.0,
+        };
+
+        assert!(matches!(
+            bilinear(&model, f64::INFINITY, 0.0),
+            Err(DiscretizeError::BadSampleInterval)
+        ));
+        assert!(matches!(
+            bilinear_state_space(&model, f64::INFINITY, 0.0),
+            Err(DiscretizeError::BadSampleInterval)
+        ));
+
+        for omega in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, -1.0] {
+            assert!(matches!(
+                bilinear(&model, 1.0 / 48_000.0, omega),
+                Err(DiscretizeError::BadPrewarpFrequency { .. })
+            ));
+            assert!(matches!(
+                bilinear_state_space(&model, 1.0 / 48_000.0, omega),
+                Err(DiscretizeError::BadPrewarpFrequency { .. })
+            ));
+        }
+
+        let canonical = bilinear(&model, 1.0 / 48_000.0, -0.0).unwrap();
+        assert_eq!(canonical.prewarp.to_bits(), 0.0f64.to_bits());
+
+        let subnormal_prewarp = f64::from_bits(1);
+        let sections = bilinear(&model, 1.0 / 48_000.0, subnormal_prewarp).unwrap();
+        assert!(sections.sections.iter().all(|section| {
+            section
+                .a
+                .iter()
+                .chain(&section.b)
+                .all(|value| value.is_finite())
+        }));
+        let state_space = bilinear_state_space(&model, 1.0 / 48_000.0, subnormal_prewarp).unwrap();
+        assert!(
+            state_space
+                .a
+                .iter()
+                .chain(&state_space.b)
+                .chain(&state_space.c)
+                .chain([&state_space.d, &state_space.e_leftover, &state_space.t_s])
+                .all(|value| value.is_finite())
+        );
+
+        let subnormal_interval = f64::from_bits(1);
+        assert!(matches!(
+            bilinear(&model, subnormal_interval, 0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "bilinear_constant",
+                index: None
+            })
+        ));
+        assert!(matches!(
+            bilinear_state_space(&model, subnormal_interval, 0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "bilinear_constant",
+                index: None
+            })
+        ));
+
+        let direct_only = RationalModel {
+            terms: Vec::new(),
+            d: 0.5,
+            e: 0.0,
+        };
+        let tiny_direct_interval = 2.0 / (0.75 * f64::MAX);
+        let direct_k = 2.0 / tiny_direct_interval;
+        assert!(direct_k.is_finite());
+        assert!((2.0 * direct_k).is_infinite());
+        let direct_state_space =
+            bilinear_state_space(&direct_only, tiny_direct_interval, 0.0).unwrap();
+        assert_eq!(direct_state_space.n, 0);
+        assert_eq!(direct_state_space.d, 0.5);
+
+        let malformed_models = [
+            RationalModel {
+                terms: Vec::new(),
+                d: f64::NAN,
+                e: 0.0,
+            },
+            RationalModel {
+                terms: Vec::new(),
+                d: 0.0,
+                e: f64::INFINITY,
+            },
+            RationalModel {
+                terms: vec![PoleTerm::Real {
+                    pole: f64::NAN,
+                    residue: 1.0,
+                }],
+                d: 0.0,
+                e: 0.0,
+            },
+            RationalModel {
+                terms: vec![PoleTerm::Pair {
+                    pole: C64::new(-1.0, 1.0),
+                    residue: C64::new(1.0, f64::NEG_INFINITY),
+                }],
+                d: 0.0,
+                e: 0.0,
+            },
+        ];
+        for malformed in &malformed_models {
+            assert!(matches!(
+                bilinear(malformed, 1.0 / 48_000.0, 0.0),
+                Err(DiscretizeError::NonFiniteRuntimeValue { .. })
+            ));
+            assert!(matches!(
+                bilinear_state_space(malformed, 1.0 / 48_000.0, 0.0),
+                Err(DiscretizeError::NonFiniteRuntimeValue { .. })
+            ));
+        }
+
+        let finite_overflow = RationalModel {
+            terms: vec![PoleTerm::Pair {
+                pole: C64::new(-1.0, 1.0),
+                residue: C64::new(f64::MAX, 0.0),
+            }],
+            d: 0.0,
+            e: 0.0,
+        };
+        assert!(matches!(
+            bilinear(&finite_overflow, 1.0, 0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "digital_section",
+                index: Some(0)
+            })
+        ));
+        assert!(matches!(
+            bilinear_state_space(&finite_overflow, 1.0, 0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "continuous_c",
+                index: Some(0)
+            })
+        ));
+    }
+
+    #[test]
+    fn g0_impulse_response_agrees_with_frequency_evaluation() {
+        let system = first_order();
+        let omega = 37.0;
+        let expected = system.eval(omega).unwrap();
+        let mut runtime = system.try_runtime().unwrap();
+        let mut measured = C64::ZERO;
+        for sample in 0..96 {
+            let output = runtime.step(if sample == 0 { 1.0 } else { 0.0 }).unwrap();
+            let phase = -f64::from(sample) * omega * system.t_s;
+            measured = measured + C64::new(det::cos(phase), det::sin(phase)).scale(output);
+        }
+        assert!((measured - expected).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn digital_filter_df2_matches_first_order_recurrence() {
+        let filter = DigitalFilter {
+            sections: vec![Biquad {
+                b: [1.0, 0.0, 0.0],
+                a: [-0.5, 0.0],
+            }],
+            direct: 0.0,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut state = filter.zero_state();
+        let mut y = Vec::new();
+        for k in 0..6 {
+            y.push(
+                filter
+                    .step(&mut state, if k == 0 { 1.0 } else { 0.0 })
+                    .unwrap(),
+            );
+        }
+        let expect = [1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125];
+        for (got, want) in y.iter().zip(expect) {
+            assert!((got - want).abs() < 1.0e-15);
+        }
+    }
+
+    #[test]
+    fn g0_digital_filter_refusal_does_not_commit_earlier_section_state() {
+        let valid = Biquad {
+            b: [1.0, 0.0, 0.0],
+            a: [0.0, 0.0],
+        };
+        let overflowing = Biquad {
+            b: [f64::MAX, f64::MAX, 0.0],
+            a: [0.0, 0.0],
+        };
+        let filter = DigitalFilter {
+            sections: vec![valid, overflowing],
+            direct: 0.0,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut state = DigitalFilterState {
+            w: vec![[0.25, -0.5], [1.0, 0.0]],
+        };
+        let before = state.clone();
+
+        assert!(matches!(
+            filter.step(&mut state, 1.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "biquad_y",
+                index: Some(1)
+            })
+        ));
+        assert_eq!(
+            state, before,
+            "a later section refusal must not commit earlier section memories"
+        );
+
+        let summing_filter = DigitalFilter {
+            sections: vec![
+                Biquad {
+                    b: [f64::MAX, 0.0, 0.0],
+                    a: [0.0, 0.0],
+                },
+                Biquad {
+                    b: [f64::MAX, 0.0, 0.0],
+                    a: [0.0, 0.0],
+                },
+            ],
+            direct: 0.0,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut summing_state = DigitalFilterState {
+            w: vec![[0.25, -0.5], [1.0, 0.0]],
+        };
+        let summing_before = summing_state.clone();
+
+        assert!(matches!(
+            summing_filter.step(&mut summing_state, 1.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "output",
+                index: None
+            })
+        ));
+        assert_eq!(
+            summing_state, summing_before,
+            "a non-finite aggregate output must not commit section memories"
+        );
+    }
+
+    #[test]
+    fn g0_delayed_filter_constructors_refuse_invalid_state_sources() {
+        let filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 1.0,
+            t_s: f64::INFINITY,
+            prewarp: 0.0,
+        };
+        assert!(matches!(
+            DelayedFilter::new(2.0, filter),
+            Err(DiscretizeError::BadSampleInterval)
+        ));
+
+        let filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 1.0,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        assert!(matches!(
+            DelayedFilter::new(f64::MAX, filter),
+            Err(DiscretizeError::RuntimeDimensionOverflow { .. })
+        ));
+
+        let line =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        assert!(matches!(
+            line.with_dispersion(0.5, usize::MAX),
+            Err(DiscretizeError::RuntimeDimensionOverflow { n }) if n == usize::MAX
+        ));
+
+        assert!(matches!(
+            DelayedFilter::from_impulse_response_with_history(
+                1.0 / 48_000.0,
+                vec![1.0, 0.0, 0.0, 0.0],
+                &[0.0, f64::NAN],
+            ),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "history",
+                index: Some(1)
+            })
+        ));
+
+        let truncated = DelayedFilter::from_impulse_response_with_history(
+            1.0 / 48_000.0,
+            vec![1.0, 0.0, 0.0, 0.0],
+            &[f64::NAN, 1.0, 2.0, 3.0, 4.0],
+        )
+        .unwrap();
+        assert_eq!(truncated.history(), [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn g0_delayed_filter_refusal_does_not_commit_line_state() {
+        let assert_same_state = |got: &DelayedFilter, want: &DelayedFilter| {
+            assert_eq!(got.buf, want.buf, "delay history changed after refusal");
+            assert_eq!(got.write, want.write, "write cursor changed after refusal");
+            assert_eq!(
+                got.delay_int, want.delay_int,
+                "integer delay changed after refusal"
+            );
+            assert_eq!(
+                got.frac.to_bits(),
+                want.frac.to_bits(),
+                "fractional delay changed after refusal"
+            );
+            assert_eq!(
+                got.filter, want.filter,
+                "filter coefficients changed after refusal"
+            );
+            assert_eq!(got.state, want.state, "IIR memory changed after refusal");
+            assert_eq!(got.fir, want.fir, "FIR coefficients changed after refusal");
+            assert_eq!(
+                got.last.to_bits(),
+                want.last.to_bits(),
+                "last output changed after refusal"
+            );
+            assert_eq!(
+                got.disp_a.to_bits(),
+                want.disp_a.to_bits(),
+                "dispersion coefficient changed after refusal"
+            );
+            assert_eq!(
+                got.disp_x1, want.disp_x1,
+                "dispersion input memory changed after refusal"
+            );
+            assert_eq!(
+                got.disp_y1, want.disp_y1,
+                "dispersion output memory changed after refusal"
+            );
+        };
+
+        let filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: f64::MAX,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut iir_line = DelayedFilter::new(2.0, filter).unwrap();
+        assert_eq!(iir_line.push(2.0).unwrap(), 0.0);
+        assert_eq!(iir_line.push(0.0).unwrap(), 0.0);
+        let iir_before = iir_line.clone();
+
+        assert!(matches!(
+            iir_line.push(9.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "output",
+                index: None
+            })
+        ));
+        assert_same_state(&iir_line, &iir_before);
+
+        let mut fir_line =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![f64::MAX, 0.0, 0.0, 0.0])
+                .unwrap();
+        let fir_before = fir_line.clone();
+
+        assert!(matches!(
+            fir_line.push(2.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "fir_output",
+                index: None
+            })
+        ));
+        assert_same_state(&fir_line, &fir_before);
+
+        let mut pin_line =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![2.0e-12, 0.0, 0.0, 0.0])
+                .unwrap();
+        assert_eq!(pin_line.push(1.0).unwrap(), 2.0e-12);
+        let pin_before = pin_line.clone();
+        pin_line.pin_magnitude_at(0.0, f64::MAX);
+        assert_same_state(&pin_line, &pin_before);
+
+        let pin_filter = DigitalFilter {
+            sections: vec![Biquad {
+                b: [-5.0e149, 0.0, 0.0],
+                a: [0.0, 0.0],
+            }],
+            direct: 1.0e150,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut iir_pin_line = DelayedFilter::new(2.0, pin_filter).unwrap();
+        let iir_pin_before = iir_pin_line.clone();
+        iir_pin_line.pin_magnitude_at(0.0, f64::MAX);
+        assert_same_state(&iir_pin_line, &iir_pin_before);
+
+        let smallest_positive = f64::from_bits(1);
+        let mut fir_underflow_pin =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![f64::MAX, 0.0, 0.0, 0.0])
+                .unwrap();
+        let fir_underflow_before = fir_underflow_pin.clone();
+        fir_underflow_pin.pin_magnitude_at(0.0, smallest_positive);
+        assert_same_state(&fir_underflow_pin, &fir_underflow_before);
+
+        let underflow_filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: f64::MAX,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut iir_underflow_pin = DelayedFilter::new(2.0, underflow_filter).unwrap();
+        let iir_underflow_before = iir_underflow_pin.clone();
+        iir_underflow_pin.pin_magnitude_at(0.0, smallest_positive);
+        assert_same_state(&iir_underflow_pin, &iir_underflow_before);
+
+        let mut valid_fir_pin =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![0.5, 0.0, 0.0, 0.0]).unwrap();
+        valid_fir_pin.pin_magnitude_at(0.0, 1.0);
+        assert_eq!(valid_fir_pin.fir, [1.0, 0.0, 0.0, 0.0]);
+
+        let valid_pin_filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 0.5,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut valid_iir_pin = DelayedFilter::new(2.0, valid_pin_filter).unwrap();
+        valid_iir_pin.pin_magnitude_at(0.0, 1.0);
+        assert_eq!(valid_iir_pin.filter.direct, 1.0);
+
+        let mut dispersed_fir =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![1.0, 0.0, 0.0, 0.0])
+                .unwrap()
+                .with_dispersion(0.5, 1)
+                .unwrap();
+        assert!(dispersed_fir.push(f64::MAX).unwrap().is_finite());
+        let dispersed_fir_before = dispersed_fir.clone();
+
+        assert!(matches!(
+            dispersed_fir.push(-f64::MAX),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "dispersion_output",
+                index: Some(0)
+            })
+        ));
+        assert_same_state(&dispersed_fir, &dispersed_fir_before);
+
+        let section = Biquad {
+            b: [1.0, 0.0, 0.0],
+            a: [0.0, 0.0],
+        };
+        let filter = DigitalFilter {
+            sections: vec![section],
+            direct: 0.0,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut dispersed_iir = DelayedFilter::new(2.0, filter)
+            .unwrap()
+            .with_dispersion(0.5, 1)
+            .unwrap();
+        assert_eq!(dispersed_iir.push(f64::MAX).unwrap(), 0.0);
+        assert_eq!(dispersed_iir.push(-f64::MAX).unwrap(), 0.0);
+        assert!(dispersed_iir.push(0.0).unwrap().is_finite());
+        let dispersed_iir_before = dispersed_iir.clone();
+
+        assert!(matches!(
+            dispersed_iir.push(0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "dispersion_output",
+                index: Some(0)
+            })
+        ));
+        assert_same_state(&dispersed_iir, &dispersed_iir_before);
+    }
+
+    #[test]
+    fn g0_passivity_noop_preserves_line_state_and_active_projection_scales() {
+        let mut passive_fir =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![0.5, 0.0, 0.0, 0.0]).unwrap();
+        assert_eq!(passive_fir.push(1.0).unwrap(), 0.5);
+        let passive_fir_before = passive_fir.clone();
+        passive_fir.enforce_scattering_passivity(&[0.0]);
+        assert_eq!(passive_fir.fir, passive_fir_before.fir);
+        assert_eq!(
+            passive_fir.incoming().to_bits(),
+            passive_fir_before.incoming().to_bits()
+        );
+        assert_eq!(passive_fir.history(), passive_fir_before.history());
+        passive_fir.enforce_scattering_passivity(&[]);
+        passive_fir.enforce_scattering_passivity(&[f64::NAN]);
+        assert_eq!(passive_fir.fir, passive_fir_before.fir);
+        assert_eq!(
+            passive_fir.incoming().to_bits(),
+            passive_fir_before.incoming().to_bits()
+        );
+
+        let mut overflowing_grid_fir =
+            DelayedFilter::from_impulse_response(1.0, vec![2.0, 0.0, 1.0, 0.0]).unwrap();
+        assert_eq!(overflowing_grid_fir.push(1.0).unwrap(), 2.0);
+        let overflowing_grid_before = overflowing_grid_fir.clone();
+        overflowing_grid_fir.enforce_scattering_passivity(&[0.0, f64::MAX]);
+        assert_eq!(overflowing_grid_fir.fir, overflowing_grid_before.fir);
+        assert_eq!(
+            overflowing_grid_fir.incoming().to_bits(),
+            overflowing_grid_before.incoming().to_bits()
+        );
+        assert_eq!(
+            overflowing_grid_fir.history(),
+            overflowing_grid_before.history()
+        );
+
+        let passive_filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 0.5,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut passive_iir = DelayedFilter::new(2.0, passive_filter).unwrap();
+        assert_eq!(passive_iir.push(1.0).unwrap(), 0.0);
+        assert_eq!(passive_iir.push(0.0).unwrap(), 0.0);
+        assert_eq!(passive_iir.push(0.0).unwrap(), 0.5);
+        let passive_iir_before = passive_iir.clone();
+        passive_iir.enforce_scattering_passivity(&[0.0]);
+        assert_eq!(passive_iir.filter, passive_iir_before.filter);
+        assert_eq!(passive_iir.state, passive_iir_before.state);
+        assert_eq!(
+            passive_iir.incoming().to_bits(),
+            passive_iir_before.incoming().to_bits()
+        );
+
+        let mut active_fir =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![2.0, 0.0, 0.0, 0.0]).unwrap();
+        active_fir.enforce_scattering_passivity(&[0.0]);
+        assert_eq!(active_fir.fir, [1.0, 0.0, 0.0, 0.0]);
+
+        let active_filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 2.0,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut active_iir = DelayedFilter::new(2.0, active_filter).unwrap();
+        active_iir.enforce_scattering_passivity(&[0.0]);
+        assert_eq!(active_iir.filter.direct, 1.0);
+    }
+
+    #[test]
+    fn reflectance_is_the_scattering_map() {
+        let zc = 100.0;
+        let matched = reflectance(C64::from_re(zc), zc);
+        assert!(matched.abs() < 1.0e-15);
+        let open = reflectance(C64::from_re(0.0), zc);
+        assert!((open + C64::from_re(1.0)).abs() < 1.0e-15);
+        let rigid = reflectance(C64::from_re(1.0e12), zc);
+        assert!((rigid - C64::from_re(1.0)).abs() < 1.0e-8);
+    }
+
+    #[test]
+    fn modulate_delay_peels_a_pure_delay() {
+        let tau = 0.003;
+        let omega: Vec<f64> = (1..40).map(|k| 200.0 * f64::from(k)).collect();
+        let h: Vec<C64> = omega
+            .iter()
+            .map(|&w| C64::new(det::cos(-w * tau), det::sin(-w * tau)).scale(0.8))
+            .collect();
+        let peeled = modulate_delay(&omega, &h, tau, 1.0).expect("peel");
+        for z in peeled {
+            assert!((z.re - 0.8).abs() < 1.0e-12);
+            assert!(z.im.abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn g0_modulate_delay_refuses_finite_intermediate_overflow() {
+        assert!(matches!(
+            modulate_delay(&[f64::MAX], &[C64::ONE], f64::MAX, 1.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "delay_phase",
+                index: Some(0)
+            })
+        ));
+
+        let overflowing_sample = C64::new(f64::MAX, f64::MAX);
+        assert!(matches!(
+            modulate_delay(
+                &[core::f64::consts::FRAC_PI_4],
+                &[overflowing_sample],
+                1.0,
+                1.0,
+            ),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "modulated_response",
+                index: Some(0)
+            })
+        ));
+    }
+
+    #[test]
+    fn delayed_filter_is_a_pure_delay_when_the_filter_is_one() {
+        let filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 1.0,
+            t_s: 1.0 / 8_000.0,
+            prewarp: 0.0,
+        };
+        let mut line = DelayedFilter::new(4.0, filter).expect("line");
+        let mut out = Vec::new();
+        for k in 0..8 {
+            out.push(line.push(if k == 0 { 1.0 } else { 0.0 }).unwrap());
+        }
+        assert!(out[0].abs() < 1.0e-15);
+        assert!(out[1].abs() < 1.0e-15);
+        assert!(out[2].abs() < 1.0e-15);
+        assert!(out[3].abs() < 1.0e-15);
+        assert!((out[4] - 1.0).abs() < 1.0e-15);
+        assert!(out[5].abs() < 1.0e-15);
+    }
+
+    #[test]
+    fn impulse_response_line_is_exact_convolution() {
+        let ir = vec![0.0, 0.0, 0.0, -0.8, 0.1];
+        let mut line = DelayedFilter::from_impulse_response(1.0 / 8_000.0, ir).expect("fir");
+        let mut out = Vec::new();
+        for k in 0..8 {
+            out.push(line.push(if k == 0 { 1.0 } else { 0.0 }).unwrap());
+        }
+        assert!(out[0].abs() < 1.0e-15);
+        assert!(out[1].abs() < 1.0e-15);
+        assert!(out[2].abs() < 1.0e-15);
+        assert!((out[3] + 0.8).abs() < 1.0e-15);
+        assert!((out[4] - 0.1).abs() < 1.0e-15);
+    }
+
+    #[test]
+    fn realize_tabulated_constant_is_a_direct_term() {
+        let omega: Vec<f64> = (1..80).map(|k| 50.0 * f64::from(k)).collect();
+        let h = vec![C64::from_re(0.7); omega.len()];
+        let mut opts = crate::vf::FitOptions::new(2);
+        opts.fit_e = false;
+        let filter = realize_tabulated(&omega, &h, 1.0 / 16_000.0, &opts, 0.0).expect("fit");
+        assert!((filter.direct - 0.7).abs() < 0.05);
+        assert!(filter.is_stable());
+        let mut state = filter.zero_state();
+        let y0 = filter.step(&mut state, 1.0).unwrap();
+        assert!((y0 - 0.7).abs() < 0.08);
+
+        // Tustin maps stable continuous poles throughout the open left
+        // half-plane. A low digital Nyquist therefore must not erase the
+        // fitted order before bilinearization, even when the fitted residue
+        // happens to be small for this constant-response fixture.
+        let low_rate_filter = realize_tabulated(&omega, &h, 1.0, &opts, 0.0).expect("low-rate fit");
+        // `bilinear` emits an exact zero quadratic denominator coefficient
+        // for a real first-order pole; this is a structural tag, not a
+        // numeric approximation.
+        #[allow(clippy::float_cmp)]
+        let represented_order: usize = low_rate_filter
+            .sections
+            .iter()
+            .map(|section| if section.a[1] == 0.0 { 1 } else { 2 })
+            .sum();
+        assert_eq!(represented_order, opts.order);
+        assert!(low_rate_filter.is_stable());
+    }
+
+    #[test]
+    fn enforce_abs_bound_is_scattering_passivity() {
+        let mut filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 1.4,
+            t_s: 1.0 / 8_000.0,
+            prewarp: 0.0,
+        };
+        let omegas = [100.0, 1_000.0, 4_000.0];
+        let peak = filter.enforce_abs_bound(&omegas, 1.0);
+        assert!((peak - 1.4).abs() < 1.0e-12);
+        assert!(filter.peak_abs(&omegas) <= 1.0 + 1.0e-12);
+        assert!((filter.direct - 1.0).abs() < 1.0e-12);
+
+        let before = filter.clone();
+        assert!(filter.enforce_abs_bound(&[0.0, f64::NAN], 0.5).is_nan());
+        assert_eq!(filter, before);
+
+        let peak = filter.enforce_abs_bound(&omegas, 0.0);
+        assert!((peak - 1.0).abs() < 1.0e-12);
+        assert_eq!(filter.direct, 0.0);
+        assert_eq!(filter.peak_abs(&omegas), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod fusion_equivalence {
+    use super::*;
+
+    /// The RETAINED reference: the pre-fusion modulo convolution, kept
+    /// verbatim so the strict-mode law is checkable forever.
+    fn reference_push(buf: &mut [f64], write: &mut usize, fir: &[f64], x: f64) -> f64 {
+        let n = buf.len();
+        buf[*write] = x;
+        let mut acc = 0.0;
+        for (k, &h) in fir.iter().enumerate() {
+            let idx = (*write + n - k) % n;
+            acc += h * buf[idx];
+        }
+        *write = (*write + 1) % n;
+        acc
+    }
+
+    #[test]
+    fn fused_fir_is_bitwise_identical_to_the_modulo_reference() {
+        // Deterministic splitmix64 streams; several lengths incl. the
+        // production 256..4096 class and awkward small ones.
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut rng = move || {
+            seed = seed.wrapping_add(0x9e3779b97f4a7c15);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+            (z ^ (z >> 31)) as f64 / u64::MAX as f64 - 0.5
+        };
+        for len in [4usize, 7, 64, 256, 1024] {
+            let fir: Vec<f64> = (0..len).map(|_| rng()).collect();
+            let mut line =
+                DelayedFilter::from_impulse_response(1.0 / 48_000.0, fir.clone()).expect("line");
+            let mut ref_buf = vec![0.0f64; len];
+            let mut ref_write = 0usize;
+            for step in 0..3 * len {
+                let x = rng();
+                let fused = line.push(x).expect("push");
+                let reference = reference_push(&mut ref_buf, &mut ref_write, &fir, x);
+                assert_eq!(
+                    fused.to_bits(),
+                    reference.to_bits(),
+                    "len {len} step {step}: fused {fused} vs reference {reference}"
+                );
+            }
+        }
+        println!(
+            "{{\"suite\":\"fs-vfit\",\"case\":\"fusion-fir-bitwise\",\"verdict\":\"pass\",\
+             \"lengths\":[4,7,64,256,1024]}}"
+        );
+    }
+}

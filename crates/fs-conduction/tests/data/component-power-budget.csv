@@ -1,0 +1,20 @@
+# SYNTHETIC fixture for bead f85xj.11.7 — not measured data, and not a
+# vendor artifact. It is shaped like a power-budget tool export (Rev C
+# enclosure, "steady worst case" column) so the ingestion boundary is
+# exercised on the layout a thermal reviewer is actually handed: a few
+# named components, watts, and a per-row interval where the budget owner
+# was willing to state one.
+#
+# The unit directive is mandatory and is the whole point of this file.
+# fs-conduction has no unit guard — COMPONENT_POWER_DIMS is defined and
+# never read — so a milliwatt figure handed to ComponentPower::new is
+# accepted silently and the audit balances perfectly at 1/1000 of the
+# real power. This line is the only thing standing between these digits
+# and a 1000x-wrong solve.
+#power-unit: W
+#declared-total: 18.4
+component,power,half_width,confidence
+cpu-die,11.2,0.6,0.9
+dram-stack,3.4,0.25,0.9
+pmic,2.1,0.15,0.9
+phy,1.7,,

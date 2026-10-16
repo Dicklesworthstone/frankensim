@@ -1,0 +1,7 @@
+frankensim.matdb-source.v1
+observation	source-pressure-unstated	source pressure is unstated	NASA-CR-71699 Table I-5 thermal-conductivity selected values	The published source does not state pressure; no atmospheric or standard-pressure inference is made.
+observation	nasa-cr-71699-table-i5	annealed 99.998 percent pure iron with residual electrical resistivity rho0 = 3.27e-8 ohm cm	NASA-CR-71699 Table I-5 thermal-conductivity selected values	Values from room temperature through 1200 K are derived from the named experimental sources in the table remarks. The source prints two distinct values at 1183 K; a linear curve would cross that discontinuity, so this bounded engineering interpolant stops at 1100 K instead of erasing the phase-boundary ambiguity. Its between-knot values are interpolation estimates, not source measurements or a measurement-error bound. It excludes rows explicitly marked extrapolated or estimated and does not assert density, phase, strength, or elastic properties.
+curve	thermal-conductivity-300-1100k	nasa-cr-71699-table-i5	thermal_conductivity	temperature	K	W/m/K	300:80,350:74.2,400:69.4,450:65.2,500:61.3,600:54.7,700:48.7,800:43.3,900:38,1000:32.5,1053:29.6,1100:29.7	linear
+uncertainty	thermal-conductivity-300-1100k	unstated	-	-	-	-
+validity	thermal-conductivity-300-1100k	temperature	300	1100	K
+validity	thermal-conductivity-300-1100k	source_pressure_known	0	0	1

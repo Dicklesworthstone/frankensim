@@ -1,0 +1,53 @@
+frankensim.matdb-source.v1
+observation	tga-semivolatile-content	n0602-001-nitrile-rubber-o-ring-source-formulation-and-lot-unspecified	Thermogravimetric analysis of the original dry N0602-001 nitrile O-ring material; the source says methods used 1-5 mg samples	The summary reports 10.1 percent by mass semi-volatiles as an estimate of propensity to shrink in fuel. The TGA temperature program, atmosphere, exact sample mass, specimen count, replicates, dispersion, confidence metadata, compound formulation, supplier, cure, hardness, production lot, and O-ring dimensions are not reported; source_tga_temperature_program_known=0 is mandatory
+scalar	tga-semivolatile-mass-fraction	tga-semivolatile-content	tga_semivolatile_mass_fraction	10.1	%	constant
+uncertainty	tga-semivolatile-mass-fraction	unstated	-	-	-	-
+validity	tga-semivolatile-mass-fraction	source_tga_temperature_program_known	0	0	1
+observation	fuel-absorption-partitioning	n0602-001-nitrile-rubber-o-ring-source-formulation-and-lot-unspecified	Direct thermal-desorption GC-MS on swollen N0602-001 samples across nine JP-8 fuels, one Fischer-Tropsch fuel, and 25, 37.5, 50, and 75 percent-by-volume FT blends; the source says methods used 1-5 mg samples in 1-10 mL fuel	The summary prints fuel absorbed at zero and 25 percent-by-volume aromatic content plus alkane and aromatic fuel/polymer partition coefficients. It does not report the exposure temperature, duration, pressure, exact sample/fuel allocation, replicate counts, dispersion, confidence metadata, compound formulation, supplier, cure, hardness, lot, or O-ring dimensions. Endpoint values and partition statistics remain distinct claims and do not define service compatibility
+scalar	fuel-absorbed-zero-aromatic	fuel-absorption-partitioning	absorbed_fuel_volume_fraction	8.7	%	constant
+uncertainty	fuel-absorbed-zero-aromatic	unstated	-	-	-	-
+validity	fuel-absorbed-zero-aromatic	fuel_aromatic_volume_fraction	0	0	%
+validity	fuel-absorbed-zero-aromatic	source_exposure_temperature_known	0	0	1
+validity	fuel-absorbed-zero-aromatic	source_exposure_duration_known	0	0	1
+scalar	fuel-absorbed-25pct-aromatic	fuel-absorption-partitioning	absorbed_fuel_volume_fraction	27.9	%	constant
+uncertainty	fuel-absorbed-25pct-aromatic	unstated	-	-	-	-
+validity	fuel-absorbed-25pct-aromatic	fuel_aromatic_volume_fraction	25	25	%
+validity	fuel-absorbed-25pct-aromatic	source_exposure_temperature_known	0	0	1
+validity	fuel-absorbed-25pct-aromatic	source_exposure_duration_known	0	0	1
+scalar	alkane-partition-coefficient	fuel-absorption-partitioning	jp8_alkane_fuel_polymer_partition_coefficient	0.120	1	constant
+uncertainty	alkane-partition-coefficient	unstated	-	-	-	-
+validity	alkane-partition-coefficient	fuel_aromatic_volume_fraction	0	25	%
+validity	alkane-partition-coefficient	source_exposure_temperature_known	0	0	1
+validity	alkane-partition-coefficient	source_exposure_duration_known	0	0	1
+scalar	aromatic-partition-coefficient	fuel-absorption-partitioning	jp8_aromatic_fuel_polymer_partition_coefficient	0.412	1	constant
+uncertainty	aromatic-partition-coefficient	unstated	-	-	-	-
+validity	aromatic-partition-coefficient	fuel_aromatic_volume_fraction	0	25	%
+validity	aromatic-partition-coefficient	source_exposure_temperature_known	0	0	1
+validity	aromatic-partition-coefficient	source_exposure_duration_known	0	0	1
+scalar	aromatic-to-alkane-partition-ratio	fuel-absorption-partitioning	jp8_aromatic_to_alkane_partition_ratio	3.4	1	constant
+uncertainty	aromatic-to-alkane-partition-ratio	unstated	-	-	-	-
+validity	aromatic-to-alkane-partition-ratio	fuel_aromatic_volume_fraction	0	25	%
+validity	aromatic-to-alkane-partition-ratio	source_exposure_temperature_known	0	0	1
+validity	aromatic-to-alkane-partition-ratio	source_exposure_duration_known	0	0	1
+observation	volume-swell-summary-row	n0602-001-nitrile-rubber-o-ring-source-formulation-and-lot-unspecified	Optical dilatometry and linear regression of N0602-001 volume swell against aromatic content across the source fuel matrix	The printed N0602 summary row reports swelling coefficient 0.451 and R2=0.948, while the adjacent plot prints y=0.463*x-1.167 with the same R2. The 0.451 and 0.463 slopes remain conflicting claims; neither is averaged or preferred. The approximately 57 percent overlap of 90 percent prediction intervals remains observation-only because the source prefixes it with an approximation mark. Exposure temperature, duration, exact allocation, raw points, regression uncertainty, and prediction limits are absent
+scalar	summary-row-swelling-slope	volume-swell-summary-row	jp8_volume_swell_per_aromatic_volume_fraction	0.451	1	constant
+uncertainty	summary-row-swelling-slope	unstated	-	-	-	-
+validity	summary-row-swelling-slope	fuel_aromatic_volume_fraction	0	25	%
+validity	summary-row-swelling-slope	source_exposure_temperature_known	0	0	1
+validity	summary-row-swelling-slope	source_exposure_duration_known	0	0	1
+scalar	volume-swell-r-squared	volume-swell-summary-row	jp8_volume_swell_aromatic_fraction_r_squared	0.948	1	constant
+uncertainty	volume-swell-r-squared	unstated	-	-	-	-
+validity	volume-swell-r-squared	fuel_aromatic_volume_fraction	0	25	%
+validity	volume-swell-r-squared	source_exposure_temperature_known	0	0	1
+validity	volume-swell-r-squared	source_exposure_duration_known	0	0	1
+observation	volume-swell-plot-equation	n0602-001-nitrile-rubber-o-ring-source-formulation-and-lot-unspecified	Adjacent N0602-001 optical-dilatometry plot linear model y=0.463*x-1.167, where x is aromatic content in percent by volume and y is volume swell in percent	The plot gives no coefficient uncertainty or raw numeric points. Its 0.463 slope conflicts with the summary row's 0.451 and remains separate. The -1.167 percent intercept is a regression parameter, not a certified shrinkage value for a specific zero-aromatic fuel. Exposure temperature, duration, exact allocation, raw points, regression uncertainty, and prediction limits are absent
+scalar	plot-equation-swelling-slope	volume-swell-plot-equation	jp8_volume_swell_per_aromatic_volume_fraction	0.463	1	constant
+uncertainty	plot-equation-swelling-slope	unstated	-	-	-	-
+validity	plot-equation-swelling-slope	fuel_aromatic_volume_fraction	0	25	%
+validity	plot-equation-swelling-slope	source_exposure_temperature_known	0	0	1
+validity	plot-equation-swelling-slope	source_exposure_duration_known	0	0	1
+scalar	plot-equation-zero-aromatic-intercept	volume-swell-plot-equation	jp8_volume_swell_zero_aromatic_intercept	-1.167	%	constant
+uncertainty	plot-equation-zero-aromatic-intercept	unstated	-	-	-	-
+validity	plot-equation-zero-aromatic-intercept	fuel_aromatic_volume_fraction	0	25	%
+validity	plot-equation-zero-aromatic-intercept	source_exposure_temperature_known	0	0	1
+validity	plot-equation-zero-aromatic-intercept	source_exposure_duration_known	0	0	1

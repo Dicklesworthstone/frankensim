@@ -1,0 +1,38 @@
+[package]
+name = "fs-scenario"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Typed boundary-condition and load-case algebra: dimensioned BCs, moving frames via motors, time histories, seeded stochastic ensembles, compatibility checks."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[features]
+rans-rung = []
+
+[[test]]
+name = "rans_card_gates"
+path = "tests/rans_card_gates.rs"
+required-features = ["rans-rung"]
+
+[dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-cheb = { path = "../fs-cheb" }
+fs-exec = { path = "../fs-exec" }
+fs-ga = { path = "../fs-ga" }
+fs-ivl = { path = "../fs-ivl" }
+fs-math = { path = "../fs-math" }
+fs-motion = { path = "../fs-motion" }
+fs-qty = { path = "../fs-qty" }
+fs-rand = { path = "../fs-rand" }
+
+[dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-assimilate = { path = "../fs-assimilate" }
+fs-ledger = { path = "../fs-ledger" }
+
+[lints]
+workspace = true

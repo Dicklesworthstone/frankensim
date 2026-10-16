@@ -1,0 +1,29 @@
+frankensim.matdb-source.v1
+observation	mil5j-table-269oe-h1025	17-4PH stainless steel bar (AMS 5643), condition H1025, thickness or diameter under 8.000 in	MIL-HDBK-5J Table 2.6.9.0(e) design values, S basis (specification minimum per the handbook section 9.1.6)	Room-temperature aerospace DESIGN values at S basis; longitudinal (L) direction only — the transverse strength cells for H1025 bar are PRINTED AS ELLIPSES (named absence, not transcribed); density for H1025 specifically is NOT printed (the table lists 0.282 for H900, 0.283 for H1075, 0.284 for H1150 only — named absence rather than an interpolated value); SI conversions at 6.894757 MPa/ksi; elevated-temperature behavior is published as graphs only (Figures 2.6.9.1.1-2.6.9.1.4, not digitized); bearing values (dry-pin) not transcribed; no confidence semantics beyond the stated basis, so runtime uncertainty stays Unstated
+scalar	tensile-ultimate-l	mil5j-table-269oe-h1025	tensile_ultimate_l_s_basis	1068.69	MPa	constant
+uncertainty	tensile-ultimate-l	unstated	-	-	-	-
+validity	tensile-ultimate-l	temperature	294	294	K
+scalar	tensile-yield-l	mil5j-table-269oe-h1025	tensile_yield_l_s_basis	999.74	MPa	constant
+uncertainty	tensile-yield-l	unstated	-	-	-	-
+validity	tensile-yield-l	temperature	294	294	K
+scalar	compressive-yield-l	mil5j-table-269oe-h1025	compressive_yield_l_s_basis	958.37	MPa	constant
+uncertainty	compressive-yield-l	unstated	-	-	-	-
+validity	compressive-yield-l	temperature	294	294	K
+scalar	shear-ultimate	mil5j-table-269oe-h1025	shear_ultimate_s_basis	655.0	MPa	constant
+uncertainty	shear-ultimate	unstated	-	-	-	-
+validity	shear-ultimate	temperature	294	294	K
+scalar	elongation-l	mil5j-table-269oe-h1025	elongation_l_s_basis	12	%	constant
+uncertainty	elongation-l	unstated	-	-	-	-
+validity	elongation-l	temperature	294	294	K
+scalar	young-modulus	mil5j-table-269oe-h1025	young_modulus	196.5	GPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	temperature	294	294	K
+scalar	compression-modulus	mil5j-table-269oe-h1025	compression_modulus	206.84	GPa	constant
+uncertainty	compression-modulus	unstated	-	-	-	-
+validity	compression-modulus	temperature	294	294	K
+scalar	shear-modulus	mil5j-table-269oe-h1025	shear_modulus	77.22	GPa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	temperature	294	294	K
+scalar	poisson-ratio	mil5j-table-269oe-h1025	poisson_ratio	0.27	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	temperature	294	294	K

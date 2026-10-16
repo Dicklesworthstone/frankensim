@@ -1,0 +1,22 @@
+frankensim-equilibrium-design-v1
+preload_limits 1 128 10000
+sensitivity_limits 1 0 0 0.01
+design_limits 2 1 2 2
+cases 2
+case load-a 1 1
+load 0 0 1
+target 0 0 0.015625 1 1
+case load-b 1 1
+load 0 0 1
+target 0 0 0.015625 1 1
+variables 1
+variable force-N 1 1 0.5 1.5 2
+bind actuator-force 0 0
+bind actuator-force 1 0
+constraint_limits 5
+constraints 5
+constraint force-ceiling 0 contact-force 0 at-most 0.16666666666666666 1
+constraint minimum-displacement 1 displacement 0 0 at-least 0.01171875 1
+constraint penetration 0 contact-penetration 0 at-most 0.0013020833333333333 1
+constraint spring-reaction 1 spring-force 0 at-least -2 1
+constraint settled-band 1 displacement 0 0 equal 0.015625 1

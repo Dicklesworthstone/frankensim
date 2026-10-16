@@ -1,0 +1,46 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Pilkington soda-lime silica float glass	Frozen engineering reference assembled from the named producer bulletin	This pack selects six producer facts as nominal engineering inputs for a 25–26 C frozen-coefficient calculation of generic soda-lime silica float glass. The 298.15–299.15 K query domain is author-declared; it is not source measurement coverage or a guaranteed-accuracy band. The source gives different or unstated property temperatures, retained in the per-property notes, so this is not a co-measured state and every claim requires engineering-reference-model=1 and source-temperatures-matched=0. Reference-annealed-glass=1 is an author-declared model-selection guard, not a claim that every producer fact was co-measured on an annealed specimen. The source calls its information application assistance and disclaims warranty; its figures are not uncertainty-qualified design allowables. This pack does not represent tempered or heat-strengthened glass, fracture strength, a particular pane, a temperature-qualified property law, instantaneous thermal expansion, or a physical validation result.
+observation	density	Pilkington soda-lime silica float glass	ATS-129 (04/2025), page 2, Density	Printed density is 156 lb/ft3 (2500 kg/m3). No density-test temperature, pressure, specimen or uncertainty is stated.
+observation	young-modulus	Pilkington soda-lime silica float glass	ATS-129 (04/2025), page 1, Mechanical Properties	Printed Young modulus is 10.4e6 psi (72 GPa). No modulus-test temperature, loading rate, pressure, specimen or uncertainty is stated.
+observation	poisson-ratio	Pilkington soda-lime silica float glass	ATS-129 (04/2025), page 1, Mechanical Properties	Printed Poisson ratio is 0.22. No test temperature, loading rate, pressure, specimen or uncertainty is stated.
+observation	specific-heat-capacity	Pilkington soda-lime silica float glass	ATS-129 (04/2025), page 2, Specific Heat at 75 F	Printed specific heat at 75 F is 0.21 Btu/(lbm F), reported by the source as 0.88 kJ/(kg C); 880 J/(kg K) is retained. The stated 75 F is 297.0388888888889 K, but it is not added as a common state axis because the pack's other source facts do not share it.
+observation	thermal-conductivity	Pilkington soda-lime silica float glass	ATS-129 (04/2025), page 2, Thermal Conductivity at 75 F	Printed thermal conductivity at 75 F is 6.5 Btu in/(hr F ft2), reported by the source as 0.937 W m/(m2 C); 0.937 W/(m K) is retained. The stated 75 F is 297.0388888888889 K, but it is not added as a common state axis because the pack's other source facts do not share it.
+observation	mean-linear-expansion	Pilkington soda-lime silica float glass	ATS-129 (04/2025), page 2, Coefficient of Linear Expansion (75–575 F)	Printed coefficient of linear expansion is 4.6e-6 in/(in F), reported by the source as 8.3e-6 mm/(mm C), over 75–575 F. It is retained solely as a mean coefficient over 297.0388888888889–574.8166666666667 K, not an instantaneous coefficient at any temperature or a curve.
+scalar	density	density,engineering-reference	density	2500	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+validity	density	reference_annealed_glass	1	1	1
+validity	density	temperature	298.15	299.15	K
+scalar	young-modulus	young-modulus,engineering-reference	young_modulus	72000000000	Pa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	engineering_reference_model	1	1	1
+validity	young-modulus	source_temperatures_matched	0	0	1
+validity	young-modulus	reference_annealed_glass	1	1	1
+validity	young-modulus	temperature	298.15	299.15	K
+scalar	poisson-ratio	poisson-ratio,engineering-reference	poisson_ratio	0.22	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	engineering_reference_model	1	1	1
+validity	poisson-ratio	source_temperatures_matched	0	0	1
+validity	poisson-ratio	reference_annealed_glass	1	1	1
+validity	poisson-ratio	temperature	298.15	299.15	K
+scalar	specific-heat-capacity	specific-heat-capacity,engineering-reference	specific_heat_capacity	880	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	engineering_reference_model	1	1	1
+validity	specific-heat-capacity	source_temperatures_matched	0	0	1
+validity	specific-heat-capacity	reference_annealed_glass	1	1	1
+validity	specific-heat-capacity	temperature	298.15	299.15	K
+scalar	thermal-conductivity	thermal-conductivity,engineering-reference	thermal_conductivity	0.937	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	engineering_reference_model	1	1	1
+validity	thermal-conductivity	source_temperatures_matched	0	0	1
+validity	thermal-conductivity	reference_annealed_glass	1	1	1
+validity	thermal-conductivity	temperature	298.15	299.15	K
+scalar	mean-linear-thermal-expansion-coefficient	mean-linear-expansion,engineering-reference	mean_linear_thermal_expansion_coefficient	8.3e-6	K^-1	constant
+uncertainty	mean-linear-thermal-expansion-coefficient	unstated	-	-	-	-
+validity	mean-linear-thermal-expansion-coefficient	engineering_reference_model	1	1	1
+validity	mean-linear-thermal-expansion-coefficient	source_temperatures_matched	0	0	1
+validity	mean-linear-thermal-expansion-coefficient	reference_annealed_glass	1	1	1
+validity	mean-linear-thermal-expansion-coefficient	temperature	298.15	299.15	K
+validity	mean-linear-thermal-expansion-coefficient	expansion_interval_lower	297.0388888888889	297.0388888888889	K
+validity	mean-linear-thermal-expansion-coefficient	expansion_interval_upper	574.8166666666667	574.8166666666667	K

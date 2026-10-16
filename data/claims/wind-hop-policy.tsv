@@ -1,0 +1,11 @@
+# frankensim-wind-hop-policy-v1
+# settle detector: relative windowed-RMS drift < 0.05 for 4 consecutive 25ms blocks; first settled block (control run): 6
+# minted by wind_hop_tests::mint_hop_policy_artifact (fs-couple)
+hop_block	settled_at_hop	click_metric
+2	false	0.8639
+5	false	0.5379
+8	true	0.5044
+12	true	0.5446
+16	true	0.5559
+24	true	0.5964
+32	true	0.5055

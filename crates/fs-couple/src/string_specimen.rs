@@ -1,0 +1,764 @@
+//! Uniform circular specimens lowered to the existing prestressed-string solver.
+//!
+//! This is the homogeneous isotropic Euler–Bernoulli/Kirchhoff–Carrier rung:
+//! `A = pi r²`, `I = pi r⁴/4`, `mu = rho A`, `EA = E A`, `EI = E I`.
+//! Length and radius describe the specimen at the resolved material state.
+//! Tension, support motion, modal budget, and declared losses remain mechanical
+//! inputs. Rebinding can hold tension or axial extension fixed, or solve the
+//! tension for a declared undamped fundamental. At fixed loaded length, the
+//! cross-section can hold radius or total mass fixed during material comparison.
+//! An explicitly integrated thermal eigenstrain can set fixed-support prestress.
+//! These are independent specimen comparisons, not thermal evolution.
+
+use fs_blake3::{ContentHash, DomainHasher};
+use fs_material::state_point::{
+    DENSITY_PROPERTY, IntegratedIsotropicThermalExpansion, ResolvedMaterialStatePoint,
+    YOUNG_MODULUS_PROPERTY,
+};
+use fs_qty::{Density, Dims, DynViscosity, Pressure, QuantitySpec, Time};
+use fs_scenario::PrestressedString;
+use fs_scenario::acoustic::{
+    BendingRelaxationBranch, BendingRelaxationProperties, KelvinVoigtBending, PronyBending,
+};
+
+use crate::acoustic_realize::AcousticRealizeError;
+
+/// Solid bending-viscosity parameter of `sigma = E epsilon + eta epsilon_dot`
+/// [Pa s]. This is not fluid shear viscosity or a dimensionless loss factor.
+pub const KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY: &str = "kelvin_voigt_bending_viscosity";
+
+/// Explicit long-time modulus [Pa] confirming the elastic binding's E.
+pub const EQUILIBRIUM_YOUNG_MODULUS_PROPERTY: &str = "equilibrium_young_modulus";
+/// Positive/zero modulus increment [Pa] of a single Maxwell bending arm.
+pub const RELAXING_BENDING_MODULUS_PROPERTY: &str = "relaxing_bending_modulus";
+/// Time constant [s] of that Maxwell bending arm.
+pub const BENDING_RELAXATION_TIME_PROPERTY: &str = "bending_relaxation_time";
+
+/// Cross-section constraint at the template's current loaded length.
+/// Independent of material claims and the mechanical prestress prescription.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StringGeometryConstraint {
+    /// Keep the current circular radius [m] fixed when replacing material.
+    FixedRadius(f64),
+    /// Keep total specimen mass [kg] fixed; derive `r = sqrt(m / (rho L pi))`.
+    /// Retain the prescribed mass and compute linear density directly as `m/L`;
+    /// neither is reconstructed through the rounded radius.
+    /// This compares uniform specimens at their resolved material states. It
+    /// does not transport mass, strain, or history between evolving states.
+    FixedMass(f64),
+}
+
+/// Mechanical prestress prescribed independently of material-card authority.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StringPrestress {
+    /// Applied tensile force [N], independent of the material's stiffness.
+    FixedTension(f64),
+    /// Linear elastic tension `EA * (L - L0) / L0` at the declared loaded
+    /// length `L`. Both transverse endpoints must be stationary (pinned, not
+    /// rotationally clamped). Cross-section and density describe this loaded
+    /// state; Poisson contraction is not solved.
+    FixedExtension {
+        /// Stress-free length `L0` [m] at the same material state.
+        stress_free_length_m: f64,
+        /// Caller-declared upper bound on positive engineering strain.
+        /// This is an applicability assumption, not a measured yield limit.
+        linear_strain_limit: f64,
+    },
+    /// Small-strain thermoelastic tension `EA * (epsilon_total - epsilon_th)`.
+    /// All strains refer to the same stress-free reference configuration.
+    /// Raw values are authored mechanical inputs; use the thermal binding below
+    /// to attach a sourced expansion path. Geometry describes the current state.
+    FixedThermalExtension {
+        /// Stress-free length [m] at the expansion path's reference temperature.
+        reference_stress_free_length_m: f64,
+        /// Signed integrated free linear thermal strain, not instantaneous alpha.
+        free_thermal_strain: f64,
+        /// Caller-declared bound on total, thermal and elastic strain magnitudes.
+        /// An applicability assumption, not a sourced yield limit.
+        linear_strain_limit: f64,
+    },
+    /// Solve tension for the primary, undamped pinned-pinned bending mode [Hz].
+    /// Includes bending stiffness. It does not tune a damped/nonlinear pressure
+    /// waveform or the independently detuned second polarization.
+    TargetFundamentalHz(f64),
+}
+
+/// One material-bound specimen plus its independently authored mechanical state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedStringSpecimen {
+    string: PrestressedString,
+    geometry_constraint: StringGeometryConstraint,
+    prestress: StringPrestress,
+    material: ResolvedMaterialStatePoint,
+    thermal_expansion: Option<IntegratedIsotropicThermalExpansion>,
+    area_m2: f64,
+    second_moment_m4: f64,
+    mass_kg: f64,
+    specimen_identity: ContentHash,
+}
+
+impl ResolvedStringSpecimen {
+    // Only solver resolution changes. The physical specimen identity explicitly
+    // excludes solver options; the consuming runtime admits every new frequency.
+    pub(crate) fn with_retained_modes(mut self, mode_count: usize) -> Self {
+        self.string.n_modes = mode_count;
+        self
+    }
+
+    /// Ready for `AcousticAssembly::string` and the existing string realizer.
+    #[must_use]
+    pub fn string(&self) -> PrestressedString {
+        self.string.clone()
+    }
+
+    /// Authored cross-section constraint, separate from material-card authority.
+    #[must_use]
+    pub const fn geometry_constraint(&self) -> StringGeometryConstraint {
+        self.geometry_constraint
+    }
+
+    /// Original mechanical prescription, separate from resolved material claims.
+    #[must_use]
+    pub const fn prestress(&self) -> StringPrestress {
+        self.prestress
+    }
+
+    /// Original resolved bundle, including exact card/state identities and receipts.
+    #[must_use]
+    pub const fn material(&self) -> &ResolvedMaterialStatePoint {
+        &self.material
+    }
+
+    /// Source path used by the thermal binding, separate from authored prestress.
+    /// `None` for nonthermal bindings and raw authored thermal strain.
+    #[must_use]
+    pub const fn thermal_expansion(&self) -> Option<&IntegratedIsotropicThermalExpansion> {
+        self.thermal_expansion.as_ref()
+    }
+
+    /// Uniform cross-sectional area [m²].
+    #[must_use]
+    pub const fn area_m2(&self) -> f64 {
+        self.area_m2
+    }
+
+    /// Resolved circular radius [m] used for mechanics and the radiator width.
+    /// For a mass prescription this is derived geometry, not a replacement for
+    /// the exact prescribed mass or `m/L` linear density.
+    #[must_use]
+    pub const fn radius_m(&self) -> f64 {
+        0.5 * self.string.width_m
+    }
+
+    /// Area second moment about either transverse centroidal axis [m⁴].
+    #[must_use]
+    pub const fn second_moment_m4(&self) -> f64 {
+        self.second_moment_m4
+    }
+
+    /// Mass over the complete declared length [kg].
+    #[must_use]
+    pub const fn mass_kg(&self) -> f64 {
+        self.mass_kg
+    }
+
+    /// Identity of geometry, mass and material resolution, excluding loading and
+    /// solver options. It is not an identity of the complete acoustic scenario.
+    #[must_use]
+    pub const fn specimen_identity(&self) -> ContentHash {
+        self.specimen_identity
+    }
+
+    /// Activate material-resolved Kelvin–Voigt bending loss on this specimen.
+    ///
+    /// Requires a nonnegative dimension-only `kelvin_voigt_bending_viscosity`
+    /// [Pa s] and an explicit frequency validity interval in its retained
+    /// material claim. Density, E and viscosity must all be validity-wide scalar
+    /// constants or temperature-only curves evaluated at fixed positive absolute T.
+    /// A frequency-sampled curve cannot silently become a broadband law.
+    /// Their frequency domains intersect. Other coordinates (T, moisture, etc.)
+    /// stay at the already admitted state point; no thermal evolution is implied.
+    /// The source uncertainty/observation status is retained without promotion.
+    /// One typed frequency axis admits Hz or rad/s; legacy `omega` is rad/s.
+    ///
+    /// This law replaces authored internal and heuristic bending loss, so the
+    /// template must have no Rayleigh override and zero `damping_ratio`. Air
+    /// drag remains independent. Only bending strain-rate dissipation is modeled;
+    /// nonlinear axial viscosity and amplitude-dependent loss are not supplied.
+    ///
+    /// # Errors
+    /// Missing/mismatched data, unsupported source curves, missing/empty frequency
+    /// applicability, duplicate loss prescriptions, and overflow refuse. The
+    /// realizer also checks every actual retained reference-mode frequency.
+    pub fn with_kelvin_voigt_bending_loss(mut self) -> Result<Self, AcousticRealizeError> {
+        let refuse = |what| AcousticRealizeError::InvalidDescription { what };
+        if self.string.rayleigh.is_some()
+            || self.string.damping_ratio != 0.0
+            || self.string.relaxation_bending.is_some()
+        {
+            return Err(refuse(
+                "material bending loss cannot be combined with authored internal/Rayleigh loss",
+            ));
+        }
+        let property = self
+            .material
+            .property(KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY)
+            .ok_or_else(|| refuse("material bending loss needs kelvin_voigt_bending_viscosity"))?;
+        let eta = property.value_si();
+        if property.requirement().quantity() != QuantitySpec::dimensional(DynViscosity::DIMS)
+            || !eta.is_finite()
+            || eta < 0.0
+        {
+            return Err(refuse(
+                "bending viscosity must be a nonnegative dimension-only scalar in Pa s",
+            ));
+        }
+        let mut band = property
+            .angular_frequency_band_rad_s()
+            .map_err(|_| refuse("material bending viscosity has invalid frequency-axis semantics or bounds"))?
+            .ok_or_else(|| {
+                refuse("material bending viscosity needs an explicit frequency validity band (typed Hz/rad/s or legacy omega)")
+            })?;
+        for key in [
+            DENSITY_PROPERTY,
+            YOUNG_MODULUS_PROPERTY,
+            KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
+        ] {
+            let coefficient = self.material.property(key).ok_or_else(|| {
+                refuse("material bending loss needs density, modulus and viscosity")
+            })?;
+            if !coefficient.is_constant_at_fixed_temperature() {
+                return Err(refuse(
+                    "Kelvin-Voigt string coefficients must be validity-wide scalar constants or temperature-only curves at fixed positive absolute T",
+                ));
+            }
+            if let Some((lo, hi)) = coefficient.angular_frequency_band_rad_s().map_err(|_| {
+                refuse(
+                    "material bending coefficient has invalid frequency-axis semantics or bounds",
+                )
+            })? {
+                band = (band.0.max(lo), band.1.min(hi));
+            }
+        }
+        let viscous_stiffness_n_m2_s = eta * self.second_moment_m4;
+        if !(band.0.is_finite() && band.1.is_finite() && band.0 >= 0.0 && band.1 >= band.0)
+            || !viscous_stiffness_n_m2_s.is_finite()
+            || (eta > 0.0 && viscous_stiffness_n_m2_s == 0.0)
+        {
+            return Err(refuse(
+                "material bending-loss band or derived viscous stiffness is invalid",
+            ));
+        }
+        self.string.kelvin_voigt_bending = Some(KelvinVoigtBending {
+            viscous_stiffness_n_m2_s,
+            omega_band_rad_s: band,
+            material_state_identity: Some(self.material.identity()),
+        });
+        Ok(self)
+    }
+
+    /// Bind a sourced standard-linear-solid bending law at this material state.
+    /// Requires dimension-only scalar `equilibrium_young_modulus` [Pa],
+    /// `relaxing_bending_modulus` [Pa] and `bending_relaxation_time` [s].
+    /// Equilibrium E must equal the original `young_modulus` claim: a measured
+    /// storage modulus at an arbitrary frequency cannot silently become E_inf.
+    /// All coefficients and density must be validity-wide constants or
+    /// temperature-only curves evaluated at fixed positive absolute T. The
+    /// relaxation-time claim supplies an explicit frequency band, intersected with
+    /// every coefficient's band. Source receipts and uncertainty are retained.
+    ///
+    /// The same equilibrium EA/EI and prestress remain; only bending has memory.
+    /// Plucks are initialized after full relaxation at their held shape. No
+    /// axial creep, thermal evolution, or amplitude-dependent law is supplied.
+    ///
+    /// # Errors
+    /// Refuses missing/ambiguous coefficients, frequency/other-axis curves, incompatible
+    /// quantities, duplicate loss laws and unrepresentable geometry products.
+    pub fn with_standard_linear_solid_bending_loss(self) -> Result<Self, AcousticRealizeError> {
+        self.with_prony_bending_loss(&[BendingRelaxationProperties {
+            modulus: RELAXING_BENDING_MODULUS_PROPERTY.into(),
+            relaxation_time: BENDING_RELAXATION_TIME_PROPERTY.into(),
+        }])
+    }
+
+    /// Bind a generalized Maxwell bending spectrum from explicitly selected
+    /// scalar modulus/time properties. Each time constant declares a frequency
+    /// band; every participating coefficient must be constant at the fixed
+    /// temperature, using scalars or temperature-only curves.
+    /// An empty spectrum requires the equilibrium modulus to declare the band.
+    /// Source pairs stay attached for later geometry/material rebinding.
+    /// One typed frequency axis admits Hz or rad/s; legacy `omega` is rad/s.
+    ///
+    /// # Errors
+    /// Missing/invalid coefficients, repeated source pairs, conflicting loss
+    /// laws, frequency/other-axis curves, incompatible bands or unrepresentable stiffness.
+    pub fn with_prony_bending_loss(
+        mut self,
+        properties: &[BendingRelaxationProperties],
+    ) -> Result<Self, AcousticRealizeError> {
+        let refuse = |what| AcousticRealizeError::InvalidDescription { what };
+        if self.string.rayleigh.is_some()
+            || self.string.damping_ratio != 0.0
+            || self.string.kelvin_voigt_bending.is_some()
+        {
+            return Err(refuse(
+                "relaxation bending cannot be combined with other internal/Rayleigh losses",
+            ));
+        }
+        let equilibrium = required_positive(
+            &self.material,
+            EQUILIBRIUM_YOUNG_MODULUS_PROPERTY,
+            Pressure::DIMS,
+        )?;
+        let young = required_positive(&self.material, YOUNG_MODULUS_PROPERTY, Pressure::DIMS)?;
+        if equilibrium.to_bits() != young.to_bits() {
+            return Err(refuse(
+                "relaxation bending needs the elastic binding to use the explicit equilibrium modulus",
+            ));
+        }
+        let mut terms = Vec::with_capacity(properties.len());
+        let mut keys = vec![
+            DENSITY_PROPERTY,
+            YOUNG_MODULUS_PROPERTY,
+            EQUILIBRIUM_YOUNG_MODULUS_PROPERTY,
+        ];
+        let mut band = if properties.is_empty() {
+            Some(required_omega_band(
+                &self.material,
+                EQUILIBRIUM_YOUNG_MODULUS_PROPERTY,
+            )?)
+        } else {
+            None
+        };
+        for (i, pair) in properties.iter().enumerate() {
+            if properties[..i].contains(pair) {
+                return Err(refuse("relaxation spectrum repeats a source-property pair"));
+            }
+            let tau = required_positive(&self.material, &pair.relaxation_time, Time::DIMS)?;
+            let increment = self
+                .material
+                .property(&pair.modulus)
+                .ok_or_else(|| refuse("relaxation spectrum is missing a selected modulus"))?;
+            let delta = increment.value_si();
+            if increment.requirement().quantity() != QuantitySpec::dimensional(Pressure::DIMS)
+                || !delta.is_finite()
+                || delta < 0.0
+            {
+                return Err(refuse(
+                    "relaxing bending modulus must be a nonnegative dimension-only scalar in Pa",
+                ));
+            }
+            let domain = required_omega_band(&self.material, &pair.relaxation_time)?;
+            band = Some(intersect_band(band, domain));
+            terms.push((delta, tau));
+            keys.extend([pair.modulus.as_str(), pair.relaxation_time.as_str()]);
+        }
+        for key in keys {
+            let coefficient = self.material.property(key).ok_or_else(|| {
+                refuse("relaxation bending needs every selected material coefficient")
+            })?;
+            if !coefficient.is_constant_at_fixed_temperature() {
+                return Err(refuse(
+                    "relaxation bending coefficients must be validity-wide scalar constants or temperature-only curves at fixed positive absolute T",
+                ));
+            }
+            if let Some((lo, hi)) = coefficient.angular_frequency_band_rad_s().map_err(|_| {
+                refuse("relaxation coefficient has invalid frequency-axis semantics or bounds")
+            })? {
+                band = Some(intersect_band(band, (lo, hi)));
+            }
+        }
+        let band = band.ok_or_else(|| {
+            refuse("relaxation bending needs an explicit omega applicability band")
+        })?;
+        if !(band.0.is_finite() && band.1.is_finite() && band.0 >= 0.0 && band.1 >= band.0) {
+            return Err(refuse(
+                "relaxation bending frequency bands do not intersect",
+            ));
+        }
+        let model = fs_material::visco::GeneralizedMaxwell::new(equilibrium, terms)
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        let branches = model
+            .terms
+            .iter()
+            .map(|&(delta, tau)| {
+                let stiffness = delta * self.second_moment_m4;
+                if !stiffness.is_finite() || (delta > 0.0 && stiffness == 0.0) {
+                    return Err(refuse("relaxation bending stiffness is unrepresentable"));
+                }
+                Ok(BendingRelaxationBranch {
+                    relaxing_stiffness_n_m2: stiffness,
+                    relaxation_time_s: tau,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.string.relaxation_bending = Some(PronyBending {
+            branches,
+            omega_band_rad_s: band,
+            material_state_identity: Some(self.material.identity()),
+            source_properties: Some(properties.to_vec()),
+        });
+        Ok(self)
+    }
+}
+
+/// Derive a uniform circular string's mass, stiffness, and observer width together.
+///
+/// `state` must resolve positive `density` [kg/m³] and `young_modulus` [Pa]
+/// using `fs_material::state_point::resolve_material_state_point`. The same
+/// bundle API drives disc elasticity; this string rung needs no Poisson ratio,
+/// yield stress, or unrelated optical/thermal data. Extra resolved properties
+/// and all original evidence remain available through the returned specimen.
+///
+/// The template supplies length, tension, support/polarization choices, modal
+/// budget, and declared loss parameters. Its `lin_density_kg_m`,
+/// `axial_stiffness_n`, `bending_stiffness_n_m2`, and `width_m` are replaced by
+/// the derived values, never merged into material-card authority. Losses are
+/// not inferred from material names; the existing realizer's loss and radiation
+/// approximations still apply. The diameter supplies its compact strip-radiator
+/// width; this binding does not establish circular-wire radiation accuracy.
+/// No plasticity, anisotropy, or melting is claimed.
+///
+/// # Errors
+/// Missing or quantity-schema-mismatched properties, nonpositive/nonfinite
+/// geometry/material values, invalid mechanical inputs, or unrepresentable
+/// derived quantities refuse before publishing a specimen.
+pub fn with_uniform_circular_material_state(
+    string: PrestressedString,
+    radius_m: f64,
+    state: &ResolvedMaterialStatePoint,
+) -> Result<ResolvedStringSpecimen, AcousticRealizeError> {
+    let prestress = StringPrestress::FixedTension(string.tension_n);
+    with_uniform_circular_material_and_prestress(string, radius_m, state, prestress)
+}
+
+/// Bind current circular geometry and material, then resolve one mechanical
+/// prestress prescription. The template's independent mass, stiffness, width,
+/// and tension are replaced; its supports, losses and mode budget are retained.
+///
+/// For the pinned-pinned Euler–Bernoulli model, `omega² = (T k² + EI k⁴)/mu`
+/// with `k = pi/L`. Inverting gives `T = mu (2 L f)² - EI (pi/L)²`.
+/// A target at or below the zero-tension bending frequency is outside the
+/// existing tensile-string solver. See [FHWA-HRT-14-049, chapter 2][fhwa],
+/// equations of motion for a taut string with flexural stiffness.
+///
+/// [fhwa]: https://www.fhwa.dot.gov/publications/research/infrastructure/structures/bridge/14049/003.cfm
+///
+/// Fixed extension uses a homogeneous linear elastic law and the supplied
+/// stress-free length at this state. It does not infer thermal strain, yield,
+/// creep, transverse contraction, or conservation across different specimens.
+/// The resulting specimen identity still excludes loading; `prestress()` keeps
+/// the authored prescription without merging it into the material receipts.
+///
+/// # Errors
+/// Refuses invalid geometry/material/template values, slack/compressive or
+/// unrepresentable tension, strain beyond its declared limit, and extension or
+/// pitch prescriptions with the realizer's moving-end basis.
+pub fn with_uniform_circular_material_and_prestress(
+    string: PrestressedString,
+    radius_m: f64,
+    state: &ResolvedMaterialStatePoint,
+    prestress: StringPrestress,
+) -> Result<ResolvedStringSpecimen, AcousticRealizeError> {
+    with_uniform_circular_material_and_constraints(
+        string,
+        StringGeometryConstraint::FixedRadius(radius_m),
+        state,
+        prestress,
+    )
+}
+
+/// Bind uniform temperature-induced prestress to the existing circular string.
+/// Uses `epsilon_elastic = (L-L_ref)/L_ref - integral(alpha(T) dT)` and
+/// the current resolved E and area. This is additive small-strain elasticity,
+/// as in MIT 16.20, section 3.7, equations (3.27)-(3.28):
+/// <https://web.mit.edu/16.20/homepage/3_Constitutive/Constitutive_files/module_3_no_solutions.pdf>.
+///
+/// Expansion and elasticity must share the exact current card, coordinates and
+/// axis quantity conventions; their independently resolved requirements may differ.
+/// Both receipts are retained. Current radius or mass is explicitly prescribed;
+/// transverse contraction and a thermal history during playback are not solved.
+/// A force-controlled comparison uses [`StringPrestress::FixedTension`] instead.
+///
+/// # Errors
+/// Mismatched source/state or invalid strain refuses, in addition to the usual
+/// specimen refusals. Slack/compression needs a buckling/contact solver; large
+/// thermal strain needs finite-deformation mechanics. Neither is clamped away.
+pub fn with_uniform_circular_thermal_extension(
+    string: PrestressedString,
+    geometry_constraint: StringGeometryConstraint,
+    state: &ResolvedMaterialStatePoint,
+    expansion: &IntegratedIsotropicThermalExpansion,
+    reference_stress_free_length_m: f64,
+    linear_strain_limit: f64,
+) -> Result<ResolvedStringSpecimen, AcousticRealizeError> {
+    let current = expansion.current().resolved();
+    if state.card_identity() != current.card_identity()
+        || state.query_point() != current.query_point()
+        || state.axis_quantities() != current.axis_quantities()
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "string elasticity and thermal expansion require the same current card and physical state",
+        });
+    }
+    let mut specimen = with_uniform_circular_material_and_constraints(
+        string,
+        geometry_constraint,
+        state,
+        StringPrestress::FixedThermalExtension {
+            reference_stress_free_length_m,
+            free_thermal_strain: expansion.free_linear_strain(),
+            linear_strain_limit,
+        },
+    )?;
+    specimen.thermal_expansion = Some(expansion.clone());
+    Ok(specimen)
+}
+
+/// Resolve independent cross-section and prestress constraints through the same
+/// material binding. The template always supplies the current loaded length.
+///
+/// Fixed radius changes mass when density changes. Fixed mass changes radius,
+/// axial/bending stiffness and observer width coherently; linear density is set
+/// directly to `m/L`, preserving its bits across density changes at fixed mass
+/// and length. All prestress policies apply to the resulting
+/// geometry. Thermal strain is supplied explicitly by its prestress prescription;
+/// it is never inferred from density. No conservation across time or transverse
+/// contraction is solved. The authored constraint is retained separately from the
+/// material receipts; specimen identity binds the resolved radius and mass
+/// quantities, not the choice of constraint that produced them.
+///
+/// # Errors
+/// In addition to the fixed-radius binding's refusals, rejects nonpositive or
+/// nonfinite mass and any unrepresentable derived circular geometry.
+pub fn with_uniform_circular_material_and_constraints(
+    mut string: PrestressedString,
+    geometry_constraint: StringGeometryConstraint,
+    state: &ResolvedMaterialStatePoint,
+    prestress: StringPrestress,
+) -> Result<ResolvedStringSpecimen, AcousticRealizeError> {
+    let refuse = |what| AcousticRealizeError::InvalidDescription { what };
+    let positive = |v: f64| v.is_finite() && v > 0.0;
+    let nonnegative = |v: f64| v.is_finite() && v >= 0.0;
+    if !positive(string.length_m) {
+        return Err(refuse("circular string length must be finite and positive"));
+    }
+    if string.n_modes == 0
+        || !nonnegative(string.damping_ratio)
+        || !nonnegative(string.polarization_detune)
+        || string
+            .rayleigh
+            .is_some_and(|r| !nonnegative(r.alpha_per_s) || !nonnegative(r.beta_s))
+    {
+        return Err(refuse(
+            "string modal budget or declared loss parameters are invalid",
+        ));
+    }
+    let density = required_positive(state, DENSITY_PROPERTY, Density::DIMS)?;
+    let young = required_positive(state, YOUNG_MODULUS_PROPERTY, Pressure::DIMS)?;
+    let radius_m = match geometry_constraint {
+        StringGeometryConstraint::FixedRadius(radius_m) => radius_m,
+        StringGeometryConstraint::FixedMass(mass_kg) => {
+            if !positive(mass_kg) {
+                return Err(refuse("circular string mass must be finite and positive"));
+            }
+            // Avoid forming rho*L, which can overflow before a representable
+            // cross-section is obtained. Final geometry/products are checked below.
+            (mass_kg / string.length_m / density / core::f64::consts::PI).sqrt()
+        }
+    };
+    if !positive(radius_m) {
+        return Err(refuse(
+            "circular string constraint must resolve to finite positive radius",
+        ));
+    }
+    let radius_squared = radius_m * radius_m;
+    let area_m2 = core::f64::consts::PI * radius_squared;
+    let second_moment_m4 = area_m2 * (0.25 * radius_squared);
+    // Mass is the constraint's independent variable. Reconstructing it via
+    // rho*pi*r^2 introduces density-dependent roundoff and would invalidate
+    // an otherwise unchanged mass-normalized basis during material rebinding.
+    let mass_kg = match geometry_constraint {
+        StringGeometryConstraint::FixedMass(mass_kg) => {
+            string.lin_density_kg_m = mass_kg / string.length_m;
+            mass_kg
+        }
+        StringGeometryConstraint::FixedRadius(_) => {
+            string.lin_density_kg_m = density * area_m2;
+            string.lin_density_kg_m * string.length_m
+        }
+    };
+    string.axial_stiffness_n = young * area_m2;
+    string.bending_stiffness_n_m2 = young * second_moment_m4;
+    string.width_m = 2.0 * radius_m;
+    if ![
+        area_m2,
+        second_moment_m4,
+        string.lin_density_kg_m,
+        string.axial_stiffness_n,
+        string.bending_stiffness_n_m2,
+        string.width_m,
+        mass_kg,
+    ]
+    .into_iter()
+    .all(positive)
+    {
+        return Err(refuse(
+            "circular string geometry/material products overflow or underflow",
+        ));
+    }
+    string.tension_n = resolve_prestress(&string, prestress)?;
+    let mut identity = DomainHasher::new("org.frankensim.fs-couple.circular-string-specimen.v2");
+    identity.update(state.identity().as_bytes());
+    identity.update(&string.length_m.to_bits().to_le_bytes());
+    identity.update(&radius_m.to_bits().to_le_bytes());
+    identity.update(&mass_kg.to_bits().to_le_bytes());
+    identity.update(&string.lin_density_kg_m.to_bits().to_le_bytes());
+    let resolved = ResolvedStringSpecimen {
+        string,
+        geometry_constraint,
+        prestress,
+        material: state.clone(),
+        thermal_expansion: None,
+        area_m2,
+        second_moment_m4,
+        mass_kg,
+        specimen_identity: identity.finalize(),
+    };
+    // A template may come from a previously resolved specimen. Preserve the
+    // selected law, but derive its coefficients and citation from the NEW material and
+    // geometry rather than carrying a stale mechanical coefficient forward.
+    if resolved.string.kelvin_voigt_bending.is_some() {
+        resolved.with_kelvin_voigt_bending_loss()
+    } else if let Some(law) = &resolved.string.relaxation_bending {
+        let properties = law.source_properties.clone().ok_or_else(|| {
+            refuse("rebinding a relaxation spectrum requires explicit source-property pairs")
+        })?;
+        if properties.len() != law.branches.len() {
+            return Err(refuse(
+                "relaxation branches and source-property pairs disagree",
+            ));
+        }
+        resolved.with_prony_bending_loss(&properties)
+    } else {
+        Ok(resolved)
+    }
+}
+
+fn resolve_prestress(
+    string: &PrestressedString,
+    prestress: StringPrestress,
+) -> Result<f64, AcousticRealizeError> {
+    let refuse = |what| AcousticRealizeError::InvalidDescription { what };
+    let positive = |v: f64| v.is_finite() && v > 0.0;
+    if string.moving_end && !matches!(prestress, StringPrestress::FixedTension(_)) {
+        return Err(refuse(
+            "extension and target pitch require the stationary-end sine basis",
+        ));
+    }
+    let tension = match prestress {
+        StringPrestress::FixedTension(tension) => tension,
+        StringPrestress::FixedExtension {
+            stress_free_length_m,
+            linear_strain_limit,
+        } => {
+            if !positive(stress_free_length_m) || !positive(linear_strain_limit) {
+                return Err(refuse(
+                    "stress-free length and strain limit must be positive",
+                ));
+            }
+            let strain = (string.length_m - stress_free_length_m) / stress_free_length_m;
+            if !positive(strain) || strain > linear_strain_limit {
+                return Err(refuse(
+                    "string extension is outside its tensile strain domain",
+                ));
+            }
+            string.axial_stiffness_n * strain
+        }
+        StringPrestress::FixedThermalExtension {
+            reference_stress_free_length_m,
+            free_thermal_strain,
+            linear_strain_limit,
+        } => {
+            if !positive(reference_stress_free_length_m)
+                || !positive(linear_strain_limit)
+                || !free_thermal_strain.is_finite()
+            {
+                return Err(refuse(
+                    "thermal extension requires positive reference length/limit and finite strain",
+                ));
+            }
+            let total_strain =
+                (string.length_m - reference_stress_free_length_m) / reference_stress_free_length_m;
+            let elastic_strain = total_strain - free_thermal_strain;
+            if !positive(elastic_strain)
+                || [total_strain, free_thermal_strain, elastic_strain]
+                    .iter()
+                    .any(|strain| !strain.is_finite() || strain.abs() > linear_strain_limit)
+            {
+                return Err(refuse(
+                    "thermal string strain exceeds its linear tensile domain; slack or finite deformation needs another solver",
+                ));
+            }
+            string.axial_stiffness_n * elastic_strain
+        }
+        StringPrestress::TargetFundamentalHz(frequency_hz) => {
+            if !positive(frequency_hz) {
+                return Err(refuse("target fundamental frequency must be positive Hz"));
+            }
+            let speed = 2.0 * (string.length_m * frequency_hz);
+            let wave_number = core::f64::consts::PI / string.length_m;
+            string.lin_density_kg_m * speed.powi(2)
+                - string.bending_stiffness_n_m2 * wave_number.powi(2)
+        }
+    };
+    if !positive(tension) {
+        return Err(refuse(
+            "prestress must resolve to finite positive tension; slack or bending-only states need another solver",
+        ));
+    }
+    Ok(tension)
+}
+
+fn intersect_band(band: Option<(f64, f64)>, next: (f64, f64)) -> (f64, f64) {
+    band.map_or(next, |old| (old.0.max(next.0), old.1.min(next.1)))
+}
+
+fn required_omega_band(
+    state: &ResolvedMaterialStatePoint,
+    key: &str,
+) -> Result<(f64, f64), AcousticRealizeError> {
+    state
+        .property(key)
+        .map(|property| property.angular_frequency_band_rad_s())
+        .transpose()
+        .map_err(|_| AcousticRealizeError::InvalidDescription {
+            what: "selected relaxation coefficient has invalid frequency-axis semantics or bounds",
+        })?
+        .flatten()
+        .ok_or(AcousticRealizeError::InvalidDescription {
+            what: "selected relaxation coefficient needs an explicit frequency applicability band (typed Hz/rad/s or legacy omega)",
+        })
+}
+
+fn required_positive(
+    state: &ResolvedMaterialStatePoint,
+    key: &str,
+    dims: Dims,
+) -> Result<f64, AcousticRealizeError> {
+    let Some(property) = state.property(key) else {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "circular string material is missing a required positive coefficient",
+        });
+    };
+    let value = property.value_si();
+    if property.requirement().quantity() != QuantitySpec::dimensional(dims)
+        || !value.is_finite()
+        || value <= 0.0
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "circular string coefficients require positive dimension-only SI quantities; semantic kinds and value forms cannot be erased",
+        });
+    }
+    Ok(value)
+}

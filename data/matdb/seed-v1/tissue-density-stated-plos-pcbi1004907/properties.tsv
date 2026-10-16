@@ -1,0 +1,5 @@
+frankensim.matdb-source.v1
+observation	stated-constant	Soft-tissue density as STATED (not measured) in a CC-BY source	Verbatim: "tissue (about 1.04 g/cm3)" - stated as a constant in the f0-range derivation	THE HONEST REGISTER FOR AN UNLICENSABLE MEASUREMENT CHAIN: the measured vocal-fold density lineage (Perlman & Titze ergometer work) exists only in publisher-copyrighted sources (2026-08-17 hunt, both veins) - so this row records the CC-BY STATED constant with its "about" qualifier, never a measurement; the cervid companion paper (PLoS Comput Biol 6:e1000897, also CC-BY) independently uses the same 1.04 g/cm3; consumers wanting a measured density must wait for a licensable coupon, not promote this row
+scalar	density-stated	stated-constant	density_stated_soft_tissue	1040	kg/m3	constant
+uncertainty	density-stated	unstated	-	-	-	-
+validity	density-stated	stated_not_measured	1	1	1

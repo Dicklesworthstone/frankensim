@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+surface_a	A2017 aluminum alloy; source wt% Si 0.2..0.8 Fe max 0.7 Cu 3.5..4.5 Mn 0.4..1.0 Mg max 0.1 Cr max 0.25 Zn max 0.15 Ti max 0.15 others max 0.2	solid; exact temper and stock lot unstated	electrical-discharge-machined specimen Ra 3 micrometers cleaned with isopropyl-alcohol-moistened nonwoven cloth	1	pre-boiling-a2017-ra3um-edm
+surface_b	Seiken Chemical Industry long-life coolant source sample	liquid; exact formulation and additive package unstated	commercially available as supplied; product code concentration lot and age unstated	1	approximately-1-microliter-free-surface
+context	Seiken-Chemical-Industry-long-life-coolant-source-sample	-	ambient-air-297.65-K-60pct-RH-pressure-and-composition-unstated	pre-boiling-IPA-cleaned-five-static-angle-measurements
+observation	llc-static-angle-ra3	A2017 aluminum source specimen at Ra 3 micrometers with Seiken Chemical Industry long-life coolant free surface in ambient air	Yilmaz et al. 2026 B100W contact-angle meter theta-over-2 method average of five approximately 1-microliter droplets before boiling	Source reports 102.89 degrees; Table 2 gives calculated contact-angle measurement uncertainty plus or minus 0.01 degree but no confidence semantics; the five measurements and dispersion are not published; exact A2017 temper stock lot native-oxide state beyond the cleaning procedure coolant product code concentration formulation additive package lot age air pressure/composition and elapsed time between cleaning and measurement are unstated
+scalar	static-angle	llc-static-angle-ra3	static-contact-angle	1.7957692673769656	1	constant
+uncertainty	static-angle	unstated	-	-	-	-
+validity	static-angle	ambient_temperature	297.65	297.65	K
+validity	static-angle	relative_humidity	0.6	0.6	1
+validity	static-angle	surface_roughness_ra	0.000003	0.000003	m
+validity	static-angle	nominal_droplet_volume	0.000000001	0.000000001	m^3
+validity	static-angle	source_droplet_volume_approximately_1_microliter	1	1	1
+validity	static-angle	measurements_averaged	5	5	1
+validity	static-angle	source_theta_over_2_method	1	1	1
+validity	static-angle	source_measurement_before_boiling	1	1	1
+validity	static-angle	source_surface_cleaned_with_isopropyl_alcohol	1	1	1
+validity	static-angle	source_air_pressure_known	0	0	1
+validity	static-angle	source_air_composition_known	0	0	1
+validity	static-angle	source_llc_product_code_known	0	0	1
+validity	static-angle	source_llc_formulation_known	0	0	1

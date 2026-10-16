@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	aisi-4140-qq-s-624-rc33
+redistribution	permitted	NASA NTRS record 19740002417 marks NASA-TM-X-64791 public and a work of the U.S. Government whose public use is permitted; NASA attribution retained
+citation	Montano, J. W. (1973), Low Temperature Mechanical Properties, Fractographic and Metallographic Evaluation of Several Alloy Steels, NASA-TM-X-64791, Tables I, II, and IV, NTRS 19740002417
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

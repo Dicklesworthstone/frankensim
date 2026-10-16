@@ -1,0 +1,14 @@
+frankensim.matdb-manifest.v3
+pack_id	ensinger-tecafine-pe300-natural-2017
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source-document, table-layout or prose redistribution license is asserted
+citation	Ensinger Ltd, TECAFINE PE300 natural - Stock Shapes (rods, plates, tubes), internal issue date 2017/11/23 version AA, page 1; https://www.ensinger-online.com/modules/public/sheet/createsheet.php?FILENAME=HZ_TECAFINE_PE300_natural_GB_AT_202512.pdf&FL=7&SID=2337&ZOOM=1
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	ensinger-2017-aa	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_yield_strength	tensile-yield-strength	dimensional
+property	tensile_yield_strain	tensile-yield-strain	dimensional
+axis	source_grade_tecafine_pe300_natural_2017	source-grade-tecafine-pe300-natural-2017	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_processing_condition_known	source-processing-condition-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional

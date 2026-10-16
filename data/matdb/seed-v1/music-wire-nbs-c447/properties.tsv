@@ -1,0 +1,11 @@
+frankensim.matdb-source.v1
+observation	c447-music-wire	Music wire (cold-drawn high-carbon steel, C 0.70-1.00, Mn 0.25-0.50, Si 0.10-0.30, P and S 0.025 max)	NBS Circular C447 Figure 89 tensile strength of steel wire versus diameter (Eakin) and Figure 80 density-versus-carbon formulas (Cross and Hill)	GRAPH-READ and FORMULA-DERIVED estimated tier: Figure 89 publishes curves, not a table, so the tensile rows below were read off the figure (curve 1, music wire) and carry graph-reading error; the density row EVALUATES the printed hot-rolled formula density = 7.855 - 0.032 C g/cm3 at the composition midpoint C = 0.85 pct giving 7.828 g/cm3 = 7827.8 kg/m3 (the annealed formula 7.860 - 0.04 C gives 7.826, inside the rounding); elastic moduli are NOT printed for music wire in C447 (the sibling pack music-wire-spring-moduli-fuchs-1968 carries spring-industry values with a weaker pedigree); no confidence semantics are printed, so runtime uncertainty stays Unstated
+scalar	density	c447-music-wire	density	7827.8	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293	293	K
+scalar	tensile-strength-0p01in	c447-music-wire	tensile_strength_diameter_0p01in	2620	MPa	constant
+uncertainty	tensile-strength-0p01in	unstated	-	-	-	-
+validity	tensile-strength-0p01in	wire_diameter	0.254	0.254	mm
+scalar	tensile-strength-0p20in	c447-music-wire	tensile_strength_diameter_0p20in	1790	MPa	constant
+uncertainty	tensile-strength-0p20in	unstated	-	-	-	-
+validity	tensile-strength-0p20in	wire_diameter	5.08	5.08	mm

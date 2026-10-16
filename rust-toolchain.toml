@@ -1,0 +1,16 @@
+# FrankenSim tracks nightly: edition 2024 plus nightly features used in narrow,
+# documented places (const-generic dimension arithmetic in fs-qty; portable-SIMD
+# experiments behind `experimental-portable-simd` in fs-simd). Everything else is
+# written to compile on stable so a future de-nightlying is a small diff, not a
+# rewrite. See docs/CONVENTIONS.md "Toolchain".
+# PINNED (bead go7a): a floating "nightly" resolves differently on CI
+# runners than on local/rch workers with cached toolchains, so clippy
+# lint sets drift (measured: chunks_exact->as_chunks lint failures on
+# CI that no local lane could reproduce). Bump this pin DELIBERATELY,
+# like a dependency: its own commit, announced in the tracker, full
+# gate run after. nightly-2026-07-06 == rustc 1.99.0-nightly
+# (3659db0d3 2026-07-05), the toolchain every local agent already had
+# active when the pin landed - zero cache invalidation at pin time.
+[toolchain]
+channel = "nightly-2026-07-06"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	pearlitic-gray-cast-iron-s2-s-sr-fesi
+redistribution	permitted	Creative Commons Attribution 4.0 International permits redistribution with attribution; retain the authors, title, journal, DOI, and license
+citation	Wang, G., Chen, X., Li, Y., and Liu, Z. (2018), Effects of Inoculation on the Pearlitic Gray Cast Iron with High Thermal Conductivity and Tensile Strength, Materials 11(10):1876, doi:10.3390/ma11101876
+license	CC-BY-4.0
+source	primary	properties.tsv	material-tsv-v1

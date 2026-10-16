@@ -1,0 +1,17 @@
+frankensim.matdb-manifest.v3
+pack_id	lead-liquid-transport-nasa-cr144016
+redistribution	permitted	NASA NTRS 19760003214 declares PUBLIC and GOV_PUBLIC_USE_PERMITTED; retain contractor report and underlying reference attribution; selected factual table values only
+citation	Howard University, School of Engineering (1975), Diffusion in Liquid Metal Systems, NASA-CR-144016, contract NAS8-30252, Table 10 Lead (Pb), printed page 13; https://ntrs.nasa.gov/citations/19760003214
+license	NASA-NTRS-GOV_PUBLIC_USE_PERMITTED
+source	primary	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	dynamic_viscosity	dynamic-viscosity	dimensional
+property	surface_tension	surface-tension	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_phase_liquid	source_phase_liquid	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_specimen_purity_known	source-specimen-purity-known	dimensional
+axis	source_calorie_convention_known	source-calorie-convention-known	dimensional
+axis	conversion_thermochemical_calorie	conversion-thermochemical-calorie	dimensional
+axis	source_surface_environment_known	source-surface-environment-known	dimensional

@@ -1,0 +1,8 @@
+frankensim.matdb-source.v1
+observation	fuchs-table2	Music wire, cold wound (spring industry)	Table 2 apparent resilience of spring material: music wire (cold wound) E = 30 Msi, G = 11.5 Msi (Msi = 1e6 lb/in2)	SECONDARY estimated tier: the NASA-published table states these moduli are taken from the SAE Manual on Helical Springs, so this pack records spring-industry consensus values rather than a primary measurement; SI rows below are unit conversions (30e6 psi x 6894.757 Pa/psi = 206843 MPa; 11.5e6 psi = 79290 MPa); the implied nu = E/(2G) - 1 = 0.304 is consistent with drawn steel; use the sibling pack music-wire-nbs-c447 for density and tensile strength; no confidence semantics, so runtime uncertainty stays Unstated
+scalar	young-modulus	fuchs-table2	young_modulus	206843	MPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	temperature	293	293	K
+scalar	shear-modulus	fuchs-table2	shear_modulus	79290	MPa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	temperature	293	293	K

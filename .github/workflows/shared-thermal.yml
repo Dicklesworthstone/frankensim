@@ -1,0 +1,174 @@
+name: Shared thermal kernel
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-thermal/**'
+      - 'crates/fs-material/src/sheet*'
+      - 'crates/fs-material/src/sheet/**'
+      - 'crates/fs-material/tests/sheet.rs'
+      - 'crates/fs-material/tests/sheet/**'
+      - 'crates/fs-couple/src/sheet_plate.rs'
+      - 'crates/fs-couple/tests/sheet_plate.rs'
+      - 'crates/fs-couple/examples/textile_sheet.rs'
+      - 'scripts/import_franken_textiles.py'
+      - 'scripts/tests/test_import_franken_textiles.py'
+      - 'data/matdb/textile-examples/**'
+      - 'crates/fs-material/src/thermal.rs'
+      - 'crates/fs-material/src/section_temperature*'
+      - 'crates/fs-material/src/section_temperature/**'
+      - 'crates/fs-material/src/section/thermal*'
+      - 'crates/fs-material/src/section/thermal/**'
+      - 'crates/fs-couple/src/material_assembly/concentric/thermal*'
+      - 'crates/fs-couple/src/material_assembly/concentric/thermal/**'
+      - 'crates/fs-couple/tests/heated_constrained_section.rs'
+      - 'crates/fs-couple/examples/heated_section_sound.rs'
+      - 'crates/fs-lbm/Cargo.toml'
+      - 'crates/fs-lbm/src/conjugate/enthalpy*'
+      - 'crates/fs-lbm/src/conjugate/enthalpy/**'
+      - 'crates/fs-lbm/tests/joule_enthalpy*'
+      - 'crates/fs-lbm/src/conjugate/material_coupling/interfaces.rs'
+      - 'crates/fs-lbm/examples/joule_phase_change*'
+      - 'crates/fs-lbm/examples/joule_phase_change/**'
+      - 'crates/fs-conduction/src/transient/deposition.rs'
+      - 'crates/fs-couple/src/circuit_enthalpy*'
+      - 'crates/fs-couple/src/circuit_enthalpy/**'
+      - 'crates/fs-couple/src/material_circuit*'
+      - 'crates/fs-couple/src/material_circuit/**'
+      - 'crates/fs-couple/tests/circuit_enthalpy*'
+      - 'crates/fs-couple/tests/circuit_enthalpy/**'
+      - 'crates/fs-couple/tests/circuit_material_network.rs'
+      - 'crates/fs-couple/Cargo.toml'
+      - 'crates/fs-solver/src/finite_difference.rs'
+      - '.github/workflows/shared-thermal.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile and run the actual shared kernel without workspace dependencies
+        run: |
+          rustc --edition=2024 --test crates/fs-thermal/src/lib.rs --crate-name fs_thermal -o "$RUNNER_TEMP/thermal-tests"
+          "$RUNNER_TEMP/thermal-tests" --test-threads=1
+      - name: Retain exact source for focused offline integration checks
+        if: always()
+        run: |
+          git archive HEAD Cargo.toml Cargo.lock .beads/issues.jsonl crates/fs-thermal crates/fs-material crates/fs-lbm crates/fs-conduction .github/workflows | gzip > "$RUNNER_TEMP/thermal-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shared-thermal-source
+          path: ${{ runner.temp }}/thermal-source.tar.gz
+          retention-days: 3
+  electrothermal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact tested revision
+        run: git log -1 --format='%H %s'
+      - name: Materialize pinned dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
+            # Preserve exact dependency pins; repair only this known checkout
+            # line-ending discrepancy, not any substantive upstream source.
+            python3 - <<'PY'
+          import json, pathlib, subprocess
+          root = pathlib.Path('../franken_numpy')
+          row = next(r for r in json.loads(pathlib.Path('constellation.lock').read_text())['libraries'] if r['lib'] == 'franken_numpy')
+          def git(*args):
+              return subprocess.check_output(['git', '-C', str(root), *args])
+          if git('rev-parse', 'HEAD').decode().strip() != row['git_head'] or git('config', '--local', '--get', 'frankensim.bootstrapIncomplete').strip() != b'true':
+              raise SystemExit('not the incomplete pinned NumPy clone; refusing repair')
+          name = 'legacy_numpy_code/numpy/doc/make.bat'
+          path = root / name
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit('expected an ordinary tracked batch file')
+          raw = git('cat-file', 'blob', row['git_head'] + ':' + name)
+          actual = path.read_bytes()
+          if actual == raw or actual.replace(b'\r\n', b'\n') != raw.replace(b'\r\n', b'\n'):
+              raise SystemExit('not a line-ending-only checkout discrepancy')
+          path.write_bytes(raw)
+          git('add', '--', name)
+          if git('rev-parse', ':' + name).strip() != git('rev-parse', row['git_head'] + ':' + name).strip() or path.read_bytes() != raw:
+              raise SystemExit('restoration differs from locked source or index')
+          PY
+            cargo run --manifest-path tools/bootstrap/Cargo.toml
+          fi
+      - name: Source-bound effective sheet constitutive physics
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-material --test sheet -- --test-threads=1
+      - name: Independent sheet bending on the actual DKT and modal owners
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test sheet_plate -- --test-threads=1
+      - name: Textile catalog to native material pack and physical sheet
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p test_import_franken_textiles.py -v
+          python3 scripts/import_franken_textiles.py data/matdb/textile-examples/synthetic-sheet.json synthetic-independent-sheet "$RUNNER_TEMP/textile-sheet" --citation 'Synthetic FTX integration specimen' --license 'Synthetic numerical fixture; repository license applies' --redistribution-terms 'Authored synthetic observations may be redistributed' --allow-estimates --interpolate-temperature
+          cargo run -p xtask -- matdb-pack --manifest "$RUNNER_TEMP/textile-sheet/manifest.tsv" --out "$RUNNER_TEMP/textile-sheet/material.pack"
+          cargo run -p fs-couple --example textile_sheet -- "$RUNNER_TEMP/textile-sheet/material.pack" 293.15 333.15 5 0.3 | tee "$RUNNER_TEMP/textile-sheet.log"
+      - name: Pinned real textile conductivity-only source remains partial
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --max-time 60 'https://raw.githubusercontent.com/Dicklesworthstone/franken_textiles/d9779504623f7bd8b7fd01cc70c5f6270bfac6e6/crates/ftx-pattern/src/material_catalog/thermal-measurements.json' -o "$RUNNER_TEMP/ftx-thermal.json"
+          test "$(git hash-object "$RUNNER_TEMP/ftx-thermal.json")" = ca819b4c8ff057f651075d8b9169b16d1c9327ce
+          python3 scripts/import_franken_textiles.py "$RUNNER_TEMP/ftx-thermal.json" fsri.cotton-batting.dried.2026-10-14 "$RUNNER_TEMP/textile-dried" --properties thermal_conductivity --citation 'FTX dated FSRI factual HFM transcription' --license 'Attributed factual observations; no page or image reproduction' --redistribution-terms 'Only attributed factual observations retained'
+          cargo run -p xtask -- matdb-pack --manifest "$RUNNER_TEMP/textile-dried/manifest.tsv" --out "$RUNNER_TEMP/textile-dried/material.pack"
+          cargo run -p fs-couple --example textile_sheet -- "$RUNNER_TEMP/textile-dried/material.pack" --conductivity-at 288.15 | tee "$RUNNER_TEMP/textile-source.log"
+      - name: Test actual electrical solve, material phase law and composed transport
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --no-fail-fast -p fs-lbm --features implicit-enthalpy-coupling --test joule_enthalpy --test joule_enthalpy_transport --test joule_enthalpy_composed --test joule_enthalpy_interfaces --test joule_enthalpy_implicit --test material_electrical_interface --example joule_phase_change -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/electrothermal.log"
+      - name: Heated layer expansion and fixed-end acoustic response
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo test -p fs-material --lib section_temperature -- --test-threads=1
+          cargo test -p fs-couple --test heated_constrained_section -- --test-threads=1
+          cargo test -p fs-couple --example heated_section_sound -- --test-threads=1
+      - name: Shared fallible material residual bridge
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-solver --lib finite_difference -- --test-threads=1
+      - name: Finite circuits and material-bound multi-body heat
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --no-fail-fast -p fs-couple --test circuit_enthalpy --test circuit_material_network -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/circuit-thermal.log"
+      - name: Retain integration diagnostics and resolved dependency lock
+        if: always()
+        run: |
+          git diff -- Cargo.lock > "$RUNNER_TEMP/thermal-lock.diff"
+          cp Cargo.lock "$RUNNER_TEMP/thermal-Cargo.lock"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: electrothermal-validation
+          path: |
+            ${{ runner.temp }}/electrothermal.log
+            ${{ runner.temp }}/circuit-thermal.log
+            ${{ runner.temp }}/textile-sheet.log
+            ${{ runner.temp }}/textile-source.log
+            ${{ runner.temp }}/thermal-lock.diff
+            ${{ runner.temp }}/thermal-Cargo.lock
+          retention-days: 3

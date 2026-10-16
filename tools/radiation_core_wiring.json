@@ -1,0 +1,20 @@
+{
+  "crates/fs-conduction/src/radiation.rs": {
+    "git_blob": "489795408ccce4237b351d27740690ef26eee024",
+    "edits": [
+      {
+        "old": "        let next_problem = ConductionProblem {\n            element_materials: None,\n            mesh: problem.mesh,\n            boundary: &overlaid,\n            material: problem.material,\n            source: problem.source,\n        };",
+        "new": "        // Radiation replaces boundary loads, not the solid's material laws.\n        // Retain heterogeneous assignments (including k(T)) on EVERY iterate.\n        let next_problem = ConductionProblem {\n            boundary: &overlaid,\n            ..problem\n        };"
+      }
+    ]
+  },
+  "crates/fs-conduction/tests/radiation.rs": {
+    "git_blob": "4c3c0be2a8541f1da834a7744a94f231414cde2f",
+    "edits": [
+      {
+        "old": "mod support;\n",
+        "new": "mod support;\n\n#[path = \"radiation/material_assignment.rs\"]\nmod material_assignment;\n"
+      }
+    ]
+  }
+}

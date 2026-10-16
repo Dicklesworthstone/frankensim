@@ -1,0 +1,29 @@
+[package]
+name = "fs-crump-wasm"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Browser boundary composing generic capillary-flow and reduced slab-cooling laws for US 5,121,329."
+
+[workspace]
+
+[lib]
+name = "fs_crump_wasm"
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-conduction = { path = "../fs-conduction" }
+fs-flux = { path = "../fs-flux", default-features = false }
+# fs-conduction reaches the fs-exec cone; wasm32 must select the same
+# canonical browser profile used by the other conduction-backed boundary.
+asupersync = { path = "../../../asupersync", default-features = false, features = ["wasm-browser-prod"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

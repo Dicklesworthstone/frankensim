@@ -1,0 +1,8 @@
+frankensim-felt-mallet-v1
+# Illustrative material and effective inertia, NOT measured mallet data.
+# Effective mass includes the felt head and the declared grip/shaft idealization.
+geometry,0.02,0.012,0.006,0.00002
+felt,100000,0.2,2.2,3,0.15,0.7
+conditioning,0
+# Whole-face series Kelvin stiffness [N/m] and viscosity [N s/m].
+creep,3000,6

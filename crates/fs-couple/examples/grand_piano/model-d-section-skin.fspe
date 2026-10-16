@@ -1,0 +1,14 @@
+frankensim-piano-exterior-si-v1
+source,estimated,Board section-skin study; medium and receivers are explicit estimates, not measured Model D acoustics
+obj-scale-m,1
+obj-origin,0,0,0
+max-skin-offset-m,0.02
+medium,1.2,340
+band-hz,40,300,65
+board-band-hz,300
+fit-order,8
+min-panels-per-wavelength,6
+full-scale-pa,2
+receiver-m,0.2,1,2
+receiver-m,1.2,1,2
+moving,soundboard_skin

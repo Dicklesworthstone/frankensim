@@ -1,0 +1,7 @@
+# Synthetic homogeneous orthotropic wall, not measured wood or a ply laminate.
+# Material axis 1 is axial; rotate the final value toward increasing azimuth.
+# This 3 kHz mechanical window intentionally exceeds the current audio band.
+frankensim-drum-barrel-v2
+orthotropic,12000000000,800000000,0.35,650000000,650,0.005,0
+axial_intervals,4
+band_hz,40,3000

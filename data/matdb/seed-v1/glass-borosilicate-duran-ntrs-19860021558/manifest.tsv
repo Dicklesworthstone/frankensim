@@ -1,0 +1,17 @@
+frankensim.matdb-manifest.v3
+pack_id	glass-borosilicate-duran-ntrs-19860021558
+redistribution	permitted	NASA contractor report in NTRS public-use record; retain report identity, citation, table, and URL
+citation	General Electric Company (1986), High Accuracy Fuel Flowmeter Phase II Final Report, NASA-CR-174869 (scanned cover), NTRS 19860021558, Table 3-9 Characteristics of the Paar Density Meter / Physical Properties of Duran Glass, printed page 62, https://ntrs.nasa.gov/citations/19860021558
+license	NASA-Contractor-Report-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	young_modulus	young-modulus	dimensional
+property	poisson_ratio	poisson-ratio	dimensional
+property	linear_thermal_expansion_coefficient	mean-linear-thermal-expansion-coefficient	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	glass_transition_temperature	glass-transition-temperature	absolute-temperature
+property	thermal_shock_resistance_temperature	thermal-shock-resistance-temperature-difference	temperature-difference
+axis	temperature	temperature	absolute-temperature
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_specimen_condition_known	source-specimen-condition-known	dimensional

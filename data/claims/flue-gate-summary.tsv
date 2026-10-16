@@ -1,0 +1,13 @@
+# frankensim-flue-gate-summary-v1
+# derived from instrument-claims.json (blake2b-128 54dc9a7fa5eb281f6f9eaf4de5128ae7); regenerate when flue or jet rows change (gated by flue_gates.rs)
+filling	image	qoi	gate	live_default	exactness	owners	evidence_count	evidence_refs
+jet	lbm-jetlab-2d	edge-tone-stage-i-strouhal	ungated	no	X-Est	fs-aeroac,fs-lbm	0
+jet	lbm-slot-jet-3d	broadband-refusal-boundary	green	no	X-Est	fs-aeroac,fs-lbm	4	test:crates/fs-aeroac/tests/jetcard.rs::jc_014_refusal_boundary_card_mints_from_the_archived_campaign_receipts; test:crates/fs-aeroac/tests/jetcard.rs::jc_013_nyquist_edge_peaks_are_parity_artifacts_and_cannot_back_a_card; receipt:crates/fs-aeroac/tests/receipts/jet-card-refusal-boundary.json; receipt:crates/fs-aeroac/tests/receipts/slot-jet-3d-re-sweep-rung1.98.jsonl
+flue	jet-island-char-line	overblowing-ladder	green	no	X-Est	fs-couple,fs-aeroac	2	test:crates/fs-couple/tests/flue_gates.rs::fg_003_overblowing_ladder_walks_fundamental_to_octave; contract:crates/fs-couple/CONTRACT.md
+flue	jet-island-char-line	self-sustained-limit-cycle	green	no	X-Est	fs-couple	2	test:crates/fs-couple/tests/flue_gates.rs::fg_003_overblowing_ladder_walks_fundamental_to_octave; test:crates/fs-couple/tests/flue_gates.rs::fg_002_energy_ledger_closes_to_roundoff_every_block
+flue	jet-island-char-line	voicing-direction	green	no	X-Est	fs-couple	1	test:crates/fs-couple/tests/flue_gates.rs::fg_004_voicing_gestures_move_onset_and_duty_in_the_expected_direction
+flue	jet-island-char-line	card-admission-refusal	green	no	X-Exact	fs-couple,fs-aeroac	2	test:crates/fs-couple/tests/flue_gates.rs::fg_001_no_card_refuses_and_a_refusal_boundary_card_cannot_drive; test:crates/fs-couple/tests/flue_gates.rs::fg_007_claims_outside_the_card_validity_region_are_refused
+flue	jet-island-char-line	broadband-flute-noise	refused	no	X-Est	fs-couple,fs-aeroac	2	receipt:crates/fs-aeroac/tests/receipts/jet-card-refusal-boundary.json; receipt:crates/fs-aeroac/tests/receipts/slot-jet-3d-re-sweep-parity.jsonl
+flue	organ-rank	voice-independence	green	no	X-Exact	fs-couple	1	test:crates/fs-couple/tests/flue_gates.rs::fg_005_rank_voices_are_independent_and_order_free
+flue	organ-rank	replay-voice-identity	green	no	X-Exact	fs-couple,fs-rand	1	test:crates/fs-couple/tests/flue_gates.rs::fg_006_replay_is_bitwise_and_keyed_by_voice_identity
+flue	tmm-pipe	open-pipe-mode-cents	ungated	no	X-Consist	fs-duct	0

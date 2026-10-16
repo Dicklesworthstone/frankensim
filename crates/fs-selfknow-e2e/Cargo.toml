@@ -1,0 +1,37 @@
+[package]
+name = "fs-selfknow-e2e"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Structure & self-knowledge end-to-end battery: interface types, symmetry harvesting, spectral health, the abstraction ladder, explanation objects, and value-of-information — Layer 4 exercised as a whole with ledgered evidence and fail-safe assertions."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+
+[dev-dependencies]
+asupersync = { path = "../../../asupersync", features = ["test-internals"] }
+fs-adjoint = { path = "../fs-adjoint", features = ["explanation-objects"] }
+fs-iface = { path = "../fs-iface" }
+fs-ledger = { path = "../fs-ledger" }
+fs-plan = { path = "../fs-plan", features = ["voi-queries"] }
+fs-spectral = { path = "../fs-spectral" }
+fs-surrogate = { path = "../fs-surrogate", features = ["abstraction-ladder"] }
+fs-symmetry = { path = "../fs-symmetry" }
+
+[features]
+# [S] suite, but gated so nightly lanes opt in explicitly.
+selfknow-e2e = []
+
+[lints]
+workspace = true
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "suite"
+required-features = ["selfknow-e2e"]

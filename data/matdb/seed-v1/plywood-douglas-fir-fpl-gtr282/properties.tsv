@@ -1,0 +1,44 @@
+frankensim.matdb-source.v1
+observation	gtr282-table12-2-douglas-fir	Douglas-fir plywood sheathing products	USDA FPL GTR-282 Table 12-2, printed page 12-4	Reports selected static-bending product properties from Biblis (2000): specific gravity 0.53; MOE 7.45 GPa; MOR 41.37 MPa; fiber stress at proportional limit is printed with a GPa header but the paired 5,700 psi value converts to 39.3001 MPa (stored as 39.3 MPa); rail shear 3.8 MPa; glue-line shear 1.4 MPa. The table does not state panel layup, test moisture, grade, temperature, or bending direction; these are product test results, not structural design allowables. No isotropic or design correction is inferred.
+scalar	specific-gravity	gtr282-table12-2-douglas-fir	specific_gravity	0.53	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+scalar	bending-moe	gtr282-table12-2-douglas-fir	bending_moe	7.45	GPa	constant
+uncertainty	bending-moe	unstated	-	-	-	-
+scalar	bending-mor	gtr282-table12-2-douglas-fir	bending_mor	41.37	MPa	constant
+uncertainty	bending-mor	unstated	-	-	-	-
+scalar	fiber-stress-proportional-limit	gtr282-table12-2-douglas-fir	fiber_stress_proportional_limit	39.3	MPa	constant
+uncertainty	fiber-stress-proportional-limit	unstated	-	-	-	-
+scalar	rail-shear-strength	gtr282-table12-2-douglas-fir	rail_shear_strength	3.8	MPa	constant
+uncertainty	rail-shear-strength	unstated	-	-	-	-
+scalar	glue-line-shear-strength	gtr282-table12-2-douglas-fir	glue_line_shear_strength	1.4	MPa	constant
+uncertainty	glue-line-shear-strength	unstated	-	-	-	-
+validity	specific-gravity	source_test_temperature_known	0	0	1
+validity	specific-gravity	source_moisture_condition_known	0	0	1
+validity	specific-gravity	source_panel_layup_known	0	0	1
+validity	specific-gravity	source_grade_known	0	0	1
+validity	specific-gravity	source_bending_direction_known	0	0	1
+validity	bending-moe	source_test_temperature_known	0	0	1
+validity	bending-moe	source_moisture_condition_known	0	0	1
+validity	bending-moe	source_panel_layup_known	0	0	1
+validity	bending-moe	source_grade_known	0	0	1
+validity	bending-moe	source_bending_direction_known	0	0	1
+validity	bending-mor	source_test_temperature_known	0	0	1
+validity	bending-mor	source_moisture_condition_known	0	0	1
+validity	bending-mor	source_panel_layup_known	0	0	1
+validity	bending-mor	source_grade_known	0	0	1
+validity	bending-mor	source_bending_direction_known	0	0	1
+validity	fiber-stress-proportional-limit	source_test_temperature_known	0	0	1
+validity	fiber-stress-proportional-limit	source_moisture_condition_known	0	0	1
+validity	fiber-stress-proportional-limit	source_panel_layup_known	0	0	1
+validity	fiber-stress-proportional-limit	source_grade_known	0	0	1
+validity	fiber-stress-proportional-limit	source_bending_direction_known	0	0	1
+validity	rail-shear-strength	source_test_temperature_known	0	0	1
+validity	rail-shear-strength	source_moisture_condition_known	0	0	1
+validity	rail-shear-strength	source_panel_layup_known	0	0	1
+validity	rail-shear-strength	source_grade_known	0	0	1
+validity	rail-shear-strength	source_bending_direction_known	0	0	1
+validity	glue-line-shear-strength	source_test_temperature_known	0	0	1
+validity	glue-line-shear-strength	source_moisture_condition_known	0	0	1
+validity	glue-line-shear-strength	source_panel_layup_known	0	0	1
+validity	glue-line-shear-strength	source_grade_known	0	0	1
+validity	glue-line-shear-strength	source_bending_direction_known	0	0	1

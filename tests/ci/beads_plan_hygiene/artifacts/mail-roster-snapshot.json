@@ -1,0 +1,317 @@
+[
+  {
+    "name": "RusticSpire",
+    "program": "ox-alpha",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Execute remaining beads tasks in optimal logical order; coordinate with other agents on build contention",
+    "inception_ts": "2026-08-23T15:28:32.702127Z",
+    "last_active_ts": "2026-08-23T15:28:32.702127Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "FoggyBison",
+    "program": "ox-alpha",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Execute remaining beads tasks in optimal logical order; coordinate with other agents on build contention",
+    "inception_ts": "2026-08-23T15:27:45.784193Z",
+    "last_active_ts": "2026-08-23T15:27:45.784193Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "AmberGlacier",
+    "program": "ox-alpha",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Execute remaining beads tasks in optimal logical order; coordinate with other agents on build contention",
+    "inception_ts": "2026-08-23T15:27:45.589157Z",
+    "last_active_ts": "2026-08-23T15:27:45.589157Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "NobleLantern",
+    "program": "omp",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Execute remaining frankensim beads in dependency order: triage, claim, implement, verify, close",
+    "inception_ts": "2026-08-23T15:26:42.969827Z",
+    "last_active_ts": "2026-08-23T15:26:42.969827Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "BoldSummit",
+    "program": "omp",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Execute remaining frankensim beads in optimal logical order; coordinate with fellow agents; avoid build contention; use rch for builds.",
+    "inception_ts": "2026-08-23T01:32:56.869156Z",
+    "last_active_ts": "2026-08-23T01:32:56.869156Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "GentleBay",
+    "program": "omp",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Bead execution session: triage ready work via bv robot flags, claim highest-impact bead, implement with focused patches, verify via rch/dsr lanes.",
+    "inception_ts": "2026-08-23T01:30:45.789229Z",
+    "last_active_ts": "2026-08-23T01:30:45.789229Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "CopperOx",
+    "program": "unknown",
+    "model": "unknown",
+    "task_description": "",
+    "inception_ts": "2026-08-23T01:11:03.685453Z",
+    "last_active_ts": "2026-08-23T01:11:03.685453Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "RubyLotus",
+    "program": "unknown",
+    "model": "unknown",
+    "task_description": "",
+    "inception_ts": "2026-08-23T01:11:03.634266Z",
+    "last_active_ts": "2026-08-23T01:11:03.634266Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "CyanBarn",
+    "program": "unknown",
+    "model": "unknown",
+    "task_description": "",
+    "inception_ts": "2026-08-23T00:57:14.980604Z",
+    "last_active_ts": "2026-08-23T00:57:14.980604Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "GrayBarn",
+    "program": "unknown",
+    "model": "unknown",
+    "task_description": "",
+    "inception_ts": "2026-08-23T00:57:14.914805Z",
+    "last_active_ts": "2026-08-23T00:57:14.914805Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "TanPanther",
+    "program": "omp",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Beads burn-down: pick highest-impact actionable beads, implement, verify, coordinate with other agents",
+    "inception_ts": "2026-08-23T00:22:27.490487Z",
+    "last_active_ts": "2026-08-23T00:22:27.490487Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "PinkSpire",
+    "program": "omp",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Continuing frankensim bead execution: triage with bv robot mode, implement highest-impact P0 beads, coordinate with other agents, use rch for builds.",
+    "inception_ts": "2026-08-23T00:20:11.929021Z",
+    "last_active_ts": "2026-08-23T00:20:11.929021Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "MaroonElm",
+    "program": "omp",
+    "model": "ox-alpha",
+    "task_description": "Bead execution session: triage with bv robot flags, pick highest-impact actionable bead, implement, verify, keep process overhead minimal.",
+    "inception_ts": "2026-08-23T00:20:07.781798Z",
+    "last_active_ts": "2026-08-23T00:20:07.781798Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "AzureBluff",
+    "program": "omp",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Executing remaining beads tasks in optimal order; coordinating to avoid build contention; using RCH for builds.",
+    "inception_ts": "2026-08-23T00:18:23.882838Z",
+    "last_active_ts": "2026-08-23T00:18:23.882838Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "CloudyFinch",
+    "program": "unknown",
+    "model": "unknown",
+    "task_description": "",
+    "inception_ts": "2026-08-23T00:08:11.084110Z",
+    "last_active_ts": "2026-08-23T00:08:11.084110Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "PurpleDune",
+    "program": "omp",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Executing remaining beads in optimal order per operator directive: triage via bv robot flags, implement top-impact bead (currently frankensim-ext-theorem-foundry-infra-zxob), coordinate with fellow agents to avoid build contention, use rch for all builds.",
+    "inception_ts": "2026-08-22T23:56:15.807416Z",
+    "last_active_ts": "2026-08-22T23:56:15.807416Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "AmberFalcon",
+    "program": "omp",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Pick up highest-impact ready beads (bv triage), implement with focused patches, verify via RCH/DSR, close beads with honest evidence.",
+    "inception_ts": "2026-08-22T23:55:24.754912Z",
+    "last_active_ts": "2026-08-22T23:55:24.754912Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "RoseForest",
+    "program": "omp",
+    "model": "ox-alpha",
+    "task_description": "Bead execution lane: verify/close frankensim-sj31i.52.5.2 on posted fresh-pass evidence, then pick up newly unblocked snapshot-v2 children",
+    "inception_ts": "2026-08-22T23:53:29.948614Z",
+    "last_active_ts": "2026-08-22T23:53:29.948614Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "PlumValley",
+    "program": "ox-alpha",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Execute remaining beads tasks in optimal order; coordinate with peer agents; use rch for builds",
+    "inception_ts": "2026-08-22T23:52:12.894016Z",
+    "last_active_ts": "2026-08-22T23:52:12.894016Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "PinkMill",
+    "program": "omp",
+    "model": "ox-alpha",
+    "task_description": "Executing remaining frankensim beads tasks in optimal order; using rch for builds; coordinating to avoid build contention",
+    "inception_ts": "2026-08-22T22:55:47.476685Z",
+    "last_active_ts": "2026-08-22T22:55:47.476685Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "MistyTiger",
+    "program": "omp",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Executing remaining frankensim beads tasks in optimal order; picking highest-impact ready beads via bv robot triage",
+    "inception_ts": "2026-08-22T22:21:16.662745Z",
+    "last_active_ts": "2026-08-22T22:21:16.662745Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "GentleRabbit",
+    "program": "beads-execution",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Executing remaining frankensim beads in priority order; coordinating with fellow agents via mail",
+    "inception_ts": "2026-08-22T22:20:24.120876Z",
+    "last_active_ts": "2026-08-22T22:20:24.120876Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "RedSwan",
+    "program": "omp",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Executing remaining frankensim beads in impact order; will reserve files before edits and acquire build slots before workspace-wide builds",
+    "inception_ts": "2026-08-22T22:19:57.272239Z",
+    "last_active_ts": "2026-08-22T22:19:57.272239Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "NobleMountain",
+    "program": "omp",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Continue frankensim beads backlog execution: triage with bv robot flags, claim highest-impact ready bead, implement, verify",
+    "inception_ts": "2026-08-22T19:46:43.248883Z",
+    "last_active_ts": "2026-08-22T19:46:43.248883Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "TurquoiseBeacon",
+    "program": "omp",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Reality-check then execute highest-impact open beads via bv triage",
+    "inception_ts": "2026-08-22T16:54:27.261016Z",
+    "last_active_ts": "2026-08-22T16:54:27.261016Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "MagentaSpring",
+    "program": "ox-alpha",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "",
+    "inception_ts": "2026-08-22T15:38:03.077262Z",
+    "last_active_ts": "2026-08-22T15:38:03.077262Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "PinkMarsh",
+    "program": "omp",
+    "model": "ox-alpha",
+    "task_description": "Repair check-identities gate to ZERO at HEAD (frankensim-m3h2e)",
+    "inception_ts": "2026-08-22T15:16:18.710644Z",
+    "last_active_ts": "2026-08-22T15:16:18.710644Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "AmberRidge",
+    "program": "omp",
+    "model": "ox-alpha",
+    "task_description": "Cross-project bead execution: picking unclaimed ready P0/P1 product-spine beads outside apps/wright-flyer; coordinating with active agents (NobleLion on solver-state identity, wright-flyer agent).",
+    "inception_ts": "2026-08-22T15:14:26.682487Z",
+    "last_active_ts": "2026-08-22T15:14:26.682487Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "CrimsonOx",
+    "program": "omp",
+    "model": "ox-alpha",
+    "task_description": "Repair frankensim-m3h2e: check-identities red at HEAD (272 violations). Will reserve files once scope is mapped.",
+    "inception_ts": "2026-08-22T15:11:49.732482Z",
+    "last_active_ts": "2026-08-22T15:11:49.732482Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "AmberGull",
+    "program": "unknown",
+    "model": "unknown",
+    "task_description": "",
+    "inception_ts": "2026-08-22T04:30:00.714119Z",
+    "last_active_ts": "2026-08-22T04:30:00.714119Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "AirTrafficControl",
+    "program": "mcp-agent-mail",
+    "model": "atc-executor",
+    "task_description": "ATC automated control plane",
+    "inception_ts": "2026-08-22T04:30:00.692643Z",
+    "last_active_ts": "2026-08-22T04:30:00.692643Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "IcyCardinal",
+    "program": "antigravity",
+    "model": "gemini-3.7-flash",
+    "task_description": "Wright Flyer UI/UX and game simulation overhaul",
+    "inception_ts": "2026-08-22T04:23:08.339500Z",
+    "last_active_ts": "2026-08-22T04:23:08.339500Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "MossyOriole",
+    "program": "omp",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Deep code investigation of apps/wright-flyer (Wright Flyer browser sim) visual + gameplay layer to produce a dramatic UI/UX overhaul plan (realistic dunes/sky/gulls/camp, Wilbur POV with Orville ground crew). Read-only investigation phase; three scout subagents running.",
+    "inception_ts": "2026-08-22T04:23:02.863772Z",
+    "last_active_ts": "2026-08-22T04:23:02.863772Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "NobleLion",
+    "program": "unknown",
+    "model": "unknown",
+    "task_description": "",
+    "inception_ts": "2026-08-22T04:06:20.841477Z",
+    "last_active_ts": "2026-08-22T04:06:20.841477Z",
+    "contact_policy": "auto"
+  },
+  {
+    "name": "CopperDune",
+    "program": "Wright Flyer app overhaul (Tracks 0-4) — LANDED and browser-verified: shadows/ACES/unified sun, terrain LOD + PBR sand + Big Hill, ocean/foam, wind systems (streamers/flag/smoke/flutter), dolly + preroll plumes, Daniels flash, gull v2/flybys/distant flock, onboard Wilbur, landing dust, WebAudio mix, mission-card integration. Also fixed the airframe yaw mapping (nose local +z -> flight world +x) in flyerScene.ts.",
+    "model": "openrouter/stealth/ox-alpha",
+    "task_description": "Post-overhaul coordination: figure lane is NobleLion's; lateral payload v2 filed as frankensim-4pa2k.",
+    "inception_ts": "2026-08-22T04:05:54.801298Z",
+    "last_active_ts": "2026-08-22T04:05:54.801298Z",
+    "contact_policy": "auto"
+  }
+]

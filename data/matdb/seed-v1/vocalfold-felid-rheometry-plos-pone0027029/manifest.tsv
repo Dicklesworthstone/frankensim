@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	vocalfold-felid-rheometry-plos-pone0027029
+redistribution	permitted	Creative Commons Attribution License per the article; retain authors, journal, DOI
+citation	Klemuk S.A., Riede T., Walsh E.J., Titze I.R. (2011), Adapted to Roar: Functional Morphology of Tiger and Lion Vocal Folds, PLoS ONE 6(11):e27029; https://doi.org/10.1371/journal.pone.0027029; shear rheometry + tensile sections
+license	CC-BY-4.0
+source	primary	properties.tsv	material-tsv-v1

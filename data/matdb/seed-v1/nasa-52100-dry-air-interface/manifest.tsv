@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	nasa-20150020881-aisi-52100-dry-air-sliding-interface
+redistribution	permitted	NTRS 20150020881 is public and marks the NASA-authored work Public Use Permitted; retain NASA and ASLE-paper attribution; factual data only, no figure reproduction
+citation	Buckley, Swikert, and Johnson, Friction Wear and Evaporation Rates of Various Materials in Vacuum to 10^-7 mm Hg, ASLE Transactions 5(1), 1962, NTRS 20150020881
+license	Work of the US Government; Public Use Permitted per NTRS 20150020881; attribution retained
+source	primary	interface.tsv	interface-tsv-v1

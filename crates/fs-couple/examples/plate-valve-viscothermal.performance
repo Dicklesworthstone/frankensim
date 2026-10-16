@@ -1,0 +1,81 @@
+frankensim-plate-valve-performance-v1
+audio 96000 9602 0.01
+ambient 293.15 101325 0
+tube 0.25 0.007 baffled-low-ka 1000 0.002 1048576 viscothermal 100 1000 12 8
+observation baffled-outlet 0 0 0.2 8 32 1000
+plate clamped 0 0 0.2 450 0 0.5
+aperture 0.0002 0.25 0.1
+initial 0.0002 0
+contact 1000000000000 2 0.5 0.0002
+source illustrative-not-measured
+sections 1
+section isotropic 0.0003 900 4000000000 0.3
+nodes 21
+node 0.0 0.0 1e-05 1
+node 0.004166666666666667 0.0 1e-05 0
+node 0.008333333333333333 0.0 1e-05 0
+node 0.012500000000000002 0.0 1e-05 0
+node 0.016666666666666666 0.0 1e-05 0
+node 0.020833333333333332 0.0 1e-05 0
+node 0.025000000000000005 0.0 1e-05 0
+node 0.0 0.005 0.0002 1
+node 0.004166666666666667 0.005 0.0002 0
+node 0.008333333333333333 0.005 0.0002 0
+node 0.012500000000000002 0.005 0.0002 0
+node 0.016666666666666666 0.005 0.0002 0
+node 0.020833333333333332 0.005 0.0002 0
+node 0.025000000000000005 0.005 0.0002 0
+node 0.0 0.01 0.00039 1
+node 0.004166666666666667 0.01 0.00039 0
+node 0.008333333333333333 0.01 0.00039 0
+node 0.012500000000000002 0.01 0.00039 0
+node 0.016666666666666666 0.01 0.00039 0
+node 0.020833333333333332 0.01 0.00039 0
+node 0.025000000000000005 0.01 0.00039 0
+triangles 24
+triangle 0 1 8 0 1
+triangle 0 8 7 0 1
+triangle 1 2 9 0 1
+triangle 1 9 8 0 1
+triangle 2 3 10 0 1
+triangle 2 10 9 0 1
+triangle 3 4 11 0 1
+triangle 3 11 10 0 1
+triangle 4 5 12 0 1
+triangle 4 12 11 0 1
+triangle 5 6 13 0 1
+triangle 5 13 12 0 1
+triangle 7 8 15 0 1
+triangle 7 15 14 0 1
+triangle 8 9 16 0 1
+triangle 8 16 15 0 1
+triangle 9 10 17 0 1
+triangle 9 17 16 0 1
+triangle 10 11 18 0 1
+triangle 10 18 17 0 1
+triangle 11 12 19 0 1
+triangle 11 19 18 0 1
+triangle 12 13 20 0 1
+triangle 12 20 19 0 1
+slit_edges 2
+edge 6 13
+edge 13 20
+relaxation 1
+time_limits 0.1 0.5
+memory_initial relaxed
+region 0 4000000000 0.3 0 10000 2
+branch 2000000000 0.001
+branch 1000000000 0.01
+compile_limits 10000 128
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	700
+tracks	1
+track	mouth	blowing-pressure
+initial	pressure-pa	0e0
+events	5
+event	0e0	1e-2	pressure-pa	5e0
+event	5e-3	1e-2	pressure-pa	6e0
+event	2e-2	0e0	pressure-pa	0e0
+event	4e-2	5e-3	pressure-pa	5e0
+event	6e-2	0e0	pressure-pa	0e0

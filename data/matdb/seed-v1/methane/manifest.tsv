@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	CH4
+redistribution	permitted	Work of the U.S. Government; public use permitted by the NTRS record; NASA attribution retained
+citation	McBride, B. J.; Zehe, M. J.; Gordon, S. (2002), NASA Glenn Coefficients for Calculating Thermodynamic Properties of Individual Species, NASA/TP-2002-211556, NTRS 20020085330, Appendix B CH4 gas entry and Standard States section
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	species.tsv	species-v1

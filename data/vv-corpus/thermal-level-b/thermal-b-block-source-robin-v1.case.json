@@ -1,0 +1,17 @@
+{
+  "id": "thermal-b-block-source-robin-v1",
+  "title": "Convectively cooled block with a bilinear volumetric source",
+  "notes": "No closed form exists: the P1 solution is fixed only by the discrete system. Source op order (both codes, IEEE-754 doubles): q0 * (x / ex) * (1.0 - y / ey).",
+  "mesh": { "counts": [8, 5, 3], "extent": [0.08, 0.05, 0.03] },
+  "material": { "kind": "isotropic", "k": 15.0 },
+  "source": { "kind": "poly-xy", "q0": 200000.0 },
+  "bcs": [
+    { "name": "x-lo", "face": ["x", 0.0], "kind": "robin", "h": 25.0, "t_inf_k": 300.0 },
+    { "name": "x-hi", "face": ["x", "max"], "kind": "robin", "h": 25.0, "t_inf_k": 300.0 },
+    { "name": "y-lo", "face": ["y", 0.0], "kind": "robin", "h": 25.0, "t_inf_k": 300.0 },
+    { "name": "y-hi", "face": ["y", "max"], "kind": "robin", "h": 25.0, "t_inf_k": 300.0 },
+    { "name": "z-lo", "face": ["z", 0.0], "kind": "robin", "h": 25.0, "t_inf_k": 300.0 },
+    { "name": "z-hi", "face": ["z", "max"], "kind": "robin", "h": 25.0, "t_inf_k": 300.0 }
+  ],
+  "probes": [[0, 0, 0], [4, 2, 2], [8, 5, 3], [2, 4, 1], [6, 1, 3]]
+}

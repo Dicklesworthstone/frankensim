@@ -1,0 +1,164 @@
+//! PROBE (untracked): the parked rotated four-fin heatsink shell through volumetricize.
+use asupersync::types::Budget;
+use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
+use fs_mesh::{
+    RecoveryOptions, RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy,
+    volumetricize,
+};
+use std::collections::BTreeMap;
+
+fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 1,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
+}
+
+#[test]
+fn probe_rotated_heatsink() {
+    let path = "/private/tmp/claude-501/-Users-jemanuel-projects-frankensim/a459c848-d066-48c2-99aa-d6257c0bb1f6/scratchpad/heatsink-rotated.stl";
+    let text = std::fs::read_to_string(path).expect("parked shell");
+    let mut verts: Vec<[f64; 3]> = Vec::new();
+    let mut index: BTreeMap<[u64; 3], u32> = BTreeMap::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    let mut cur: Vec<u32> = Vec::new();
+    for line in text.lines() {
+        let mut w = line.split_whitespace();
+        if w.next() == Some("vertex") {
+            let toks: Vec<&str> = w.take(3).collect();
+            // PROBE_F32: the product path (fs-io's STL reader parses and welds
+            // f32 corners, then promotes them to f64).
+            let p = if std::env::var_os("PROBE_F32").is_some() {
+                let f = |t: &str| f64::from(t.parse::<f32>().unwrap());
+                [f(toks[0]), f(toks[1]), f(toks[2])]
+            } else {
+                let f = |t: &str| t.parse::<f64>().unwrap();
+                [f(toks[0]), f(toks[1]), f(toks[2])]
+            };
+            let key = [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
+            let id = *index.entry(key).or_insert_with(|| {
+                verts.push(p);
+                (verts.len() - 1) as u32
+            });
+            cur.push(id);
+            if cur.len() == 3 {
+                tris.push([cur[0], cur[1], cur[2]]);
+                cur.clear();
+            }
+        }
+    }
+    if std::env::var_os("PROBE_BOX").is_some() {
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for p in &verts {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        let span = (0..3).map(|k| hi[k] - lo[k]).fold(0.0f64, f64::max);
+        for k in 0..3 {
+            lo[k] -= span;
+            hi[k] += span;
+        }
+        for corner in 0..8u32 {
+            verts.push([
+                if corner & 1 == 0 { lo[0] } else { hi[0] },
+                if corner & 2 == 0 { lo[1] } else { hi[1] },
+                if corner & 4 == 0 { lo[2] } else { hi[2] },
+            ]);
+        }
+        eprintln!("PROBE box corners added: {} vertices", verts.len());
+    }
+    let mut seed = [0.1155587886810283, 0.2434655989354321, 0.06936274267667861];
+    // PROBE_PLC=<dump>: replay the exact PLC a product path handed the mesher
+    // (FS_MESH_DUMP_PLC format) instead of reading the STL.
+    if let Some(dump) = std::env::var_os("PROBE_PLC") {
+        let text = std::fs::read_to_string(dump).expect("PLC dump");
+        verts.clear();
+        tris.clear();
+        for line in text.lines() {
+            let w: Vec<&str> = line.split_whitespace().collect();
+            match w.first().copied() {
+                Some("p") => verts.push([
+                    w[1].parse().unwrap(),
+                    w[2].parse().unwrap(),
+                    w[3].parse().unwrap(),
+                ]),
+                Some("s") => {
+                    seed = [
+                        w[2].parse().unwrap(),
+                        w[3].parse().unwrap(),
+                        w[4].parse().unwrap(),
+                    ];
+                }
+                Some("r") => tris.push([
+                    w[2].parse().unwrap(),
+                    w[3].parse().unwrap(),
+                    w[4].parse().unwrap(),
+                ]),
+                _ => {}
+            }
+        }
+        eprintln!("PROBE replaying PLC dump: {} vertices {} triangles", verts.len(), tris.len());
+    }
+    // PROBE_FLIP: reverse every triangle (inward orientation); PROBE_SEED=x,y,z:
+    // override the seed. Both are things the product path could change that
+    // the recovery trace cannot see.
+    if std::env::var_os("PROBE_FLIP").is_some() {
+        for t in &mut tris {
+            t.swap(1, 2);
+        }
+        eprintln!("PROBE triangles flipped");
+    }
+    if let Ok(s) = std::env::var("PROBE_SEED") {
+        let v: Vec<f64> = s.split(',').map(|x| x.trim().parse().unwrap()).collect();
+        seed = [v[0], v[1], v[2]];
+        eprintln!("PROBE seed override {seed:?}");
+    }
+    let spec = RegionSpec {
+        id: RegionId(1),
+        kind: RegionKind::Solid,
+        seed,
+        triangles: tris,
+    };
+    let policy = VolumetricPolicy {
+        length_unit: "m".to_string(),
+        recovery: RecoveryOptions {
+            max_steiner: std::env::var("PROBE_STEINER")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(4000),
+            ..RecoveryOptions::default()
+        },
+        max_vertices: verts.len(),
+        max_tets: 4_000_000,
+        refinement: None,
+    };
+    match with_cx(|cx| volumetricize(UnverifiedPlc::new(verts, vec![spec]), policy, cx)) {
+        Ok(a) => eprintln!(
+            "PROBE rotated heatsink OK: {} volume {:.6e} repair {}",
+            a.labeled().quality().to_json(),
+            a.witness()
+                .per_region_auditor
+                .iter()
+                .map(|(_, v)| *v)
+                .sum::<f64>(),
+            a.labeled().flat_repair().to_json()
+        ),
+        Err(e) => eprintln!("PROBE rotated heatsink REFUSED: {e:?}"),
+    }
+}

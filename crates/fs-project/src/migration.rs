@@ -1,0 +1,514 @@
+//! Version-bump machinery for the `.fsim` envelope, proven before it is ever
+//! needed: readers admit exactly [`crate::FSIM_VERSION`], and any older
+//! envelope must pass through [`migrate_envelope`], which re-emits canonical
+//! bytes under the current version and binds both byte strings into a
+//! [`ProjectMigrationReceipt`]. There is no implicit migration path.
+//!
+//! Version 1 is the first real schema version. The registry retains the
+//! synthetic proof rule from version 0 plus the released v1→v2 fan-system and
+//! v2→v3 conduction, v3→v4 airflow-convection, v4→v5 ambient radiation, and
+//! v5→v6 material-tolerance and v6→v7 geometry-tolerance accretions. Released migrations preserve the payload
+//! and rewrite only the envelope and internal schema declarations because the
+//! added subsections are optional; no physical input is invented.
+
+use fs_blake3::ContentHash;
+
+use crate::{FSIM_VERSION, spec::TransientInitialTemperature};
+use crate::wire::{DecodedProject, ProjectError, canonical_hash, parse_sexpr};
+
+/// The named semantic rule a migration applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationRule {
+    /// Synthetic version-0 proof rule: the payload grammar is identical and
+    /// only the envelope version is rewritten. Registered to prove the
+    /// machinery; no released artifact ever carried version 0.
+    SyntheticV0EnvelopeRewrite,
+    /// Version 1 to current: schema v2 adds optional `(fan-system ...)`,
+    /// schema v3 adds optional `(conduction ...)`, and schema v4 adds the
+    /// optional `(airflow-convection ...)` boundary law; schema v5 adds optional
+    /// ambient radiation. A version-1 document
+    /// is valid through every accretion unchanged, so this composite rule
+    /// rewrites only the envelope/schema declarations and records the
+    /// semantic steps; no fan system, seed, boundary law, or channel geometry
+    /// is invented.
+    CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
+    /// Version 2 to current: the cooling section gained the optional
+    /// `(conduction ...)` subsection at v3 (bead frankensim-s93ej.3) and the
+    /// optional `(airflow-convection ...)` boundary law at v4 and radiation at v5. Existing
+    /// version-2 documents carry no implicit conduction inputs and remain
+    /// semantically unchanged after the receipted envelope rewrite.
+    CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
+    /// Version 3 to current: the conduction boundary grammar gains the optional
+    /// `(airflow-convection ...)` law (bead frankensim-s93ej.3, conjugate
+    /// exchange). A version-3 document names no such boundary, so no branch,
+    /// inlet, channel geometry, correlation, or v5 radiation is invented by the rewrite.
+    ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
+    /// Version 4 to current adds optional ambient surface radiation (v5) and
+    /// the optional material conductivity tolerance (v6). Existing files carry
+    /// no emissivity, radiative reservoir or tolerance; none is inferred.
+    ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
+    /// Version 5 to 6 adds the optional declared conductivity tolerance on a
+    /// material binding. A version-5 document declares none, and the rewrite
+    /// never invents one: undeclared stays undeclared, not zero.
+    MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
+    /// Version 6 to 7 adds the optional declared surface-offset band on a
+    /// geometry artifact. A version-6 document declares none; none is invented.
+    GeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
+    /// Version 7 to current: schema v8 adds the optional assembly `(surface
+    /// ...)` entity, a named boundary patch of a part (for example a chip
+    /// footprint) that geometry assignments select and `power` rows may name
+    /// for surface heat input. A version-7 document declares no surfaces, so
+    /// only the envelope/schema declarations are rewritten.
+    SurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
+    /// Version 8 to current: schema v9 adds the optional cooling
+    /// `(fan-efficiency ...)` citation (fan input power) and an optional
+    /// `:region` on output requests (surface QoIs). A version-8 document
+    /// declares neither, so only the envelope/schema declarations move.
+    FanEfficiencyV9ThenNaturalConvectionV10,
+    /// Version 9 to current: schema v10 adds the `(natural-convection ...)`
+    /// thermal boundary law (a card-derived buoyant coefficient). A version-9
+    /// document declares none, so only the envelope/schema declarations move.
+    NaturalConvectionV10,
+    /// Version 10 gains optional explicit finite-time conduction. Historical
+    /// projects remain steady; no heat capacity or initial state is inferred.
+    TransientConductionV11,
+    /// Version 11 gains optional regional delivered-power histories. Historical
+    /// transient projects retain their static power rows and duty factors.
+    TransientPowerSchedulesV12,
+    /// Version 12 gains optional total-enthalpy storage. Historical projects
+    /// retain constant capacities; no phase curve, density or state is inferred.
+    TransientEnthalpyV13,
+    /// Version 13 gains optional explicit liquid-mass-fraction conductivity.
+    /// Historical enthalpy models retain their existing base conductivity.
+    TransientPhaseConductivityV14,
+    /// Version 14 gains explicitly regional initial temperatures derived from
+    /// authored enthalpy states. Historical uniform quantities stay uniform.
+    TransientRegionalInitialTemperatureV15,
+}
+
+impl MigrationRule {
+    /// Stable machine-readable label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            MigrationRule::SyntheticV0EnvelopeRewrite => "synthetic-v0-envelope-rewrite",
+            MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => {
+                "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10"
+            }
+            MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => {
+                "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10"
+            }
+            MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => {
+                "conduction-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10"
+            }
+            MigrationRule::ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => "conduction-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10",
+            MigrationRule::MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => "material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10",
+            MigrationRule::GeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => "geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10",
+            MigrationRule::SurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => "surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10",
+            MigrationRule::FanEfficiencyV9ThenNaturalConvectionV10 => "fan-efficiency-v9-then-natural-convection-v10",
+            MigrationRule::NaturalConvectionV10 => "natural-convection-v10",
+            MigrationRule::TransientConductionV11 => "transient-conduction-v11",
+            MigrationRule::TransientPowerSchedulesV12 => "transient-power-schedules-v12",
+            MigrationRule::TransientEnthalpyV13 => "transient-enthalpy-v13",
+            MigrationRule::TransientPhaseConductivityV14 => "transient-phase-conductivity-v14",
+            MigrationRule::TransientRegionalInitialTemperatureV15 => "transient-regional-initial-temperature-v15",
+        }
+    }
+
+    /// The source version this rule migrates from.
+    #[must_use]
+    pub const fn source_version(self) -> u32 {
+        match self {
+            MigrationRule::SyntheticV0EnvelopeRewrite => 0,
+            MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => 1,
+            MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => 2,
+            MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => 3,
+            MigrationRule::ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => 4,
+            MigrationRule::MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => 5,
+            MigrationRule::GeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => 6,
+            MigrationRule::SurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10 => 7,
+            MigrationRule::FanEfficiencyV9ThenNaturalConvectionV10 => 8,
+            MigrationRule::NaturalConvectionV10 => 9,
+            MigrationRule::TransientConductionV11 => 10,
+            MigrationRule::TransientPowerSchedulesV12 => 11,
+            MigrationRule::TransientEnthalpyV13 => 12,
+            MigrationRule::TransientPhaseConductivityV14 => 13,
+            MigrationRule::TransientRegionalInitialTemperatureV15 => 14,
+        }
+    }
+}
+
+/// Receipt binding one migration's exact input and output bytes to its rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectMigrationReceipt {
+    /// Version migrated from.
+    pub source_version: u32,
+    /// Version migrated to (always [`FSIM_VERSION`]).
+    pub target_version: u32,
+    /// Hash of the exact historical bytes.
+    pub old_hash: ContentHash,
+    /// Hash of the exact canonical bytes after migration.
+    pub new_hash: ContentHash,
+    /// The named rule that was applied.
+    pub rule: MigrationRule,
+}
+
+impl ProjectMigrationReceipt {
+    /// Re-verify this receipt against the exact byte strings it binds.
+    #[must_use]
+    pub fn verifies(&self, old_bytes: &[u8], new_bytes: &[u8]) -> bool {
+        self.source_version == self.rule.source_version()
+            && self.target_version == FSIM_VERSION
+            && canonical_hash(old_bytes) == self.old_hash
+            && canonical_hash(new_bytes) == self.new_hash
+    }
+}
+
+/// A migrated project: the decoded current-version document plus the receipt
+/// that proves where it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MigratedProject {
+    /// The decoded project at the current version.
+    pub decoded: DecodedProject,
+    /// The migration receipt.
+    pub receipt: ProjectMigrationReceipt,
+}
+
+/// Parse a canonical `.fsim` document, migrating an older envelope through
+/// its registered receipted rule when needed (the `auto-migration-receipt`
+/// obligation). The returned document is always the current version; the
+/// migration receipt, when one fired, is retained for the caller's ledger.
+///
+/// # Errors
+/// Returns [`ProjectError`] from the strict parser, or from
+/// [`migrate_envelope`] when the declared version has no registered rule.
+pub fn parse_sexpr_migrating(source: &str) -> Result<MigratedOrNative, ProjectError> {
+    match parse_sexpr(source) {
+        Ok(decoded) => Ok(MigratedOrNative {
+            decoded,
+            migration: None,
+        }),
+        Err(error) if error.code == "fsim-unsupported-version" => {
+            let declared = declared_envelope_version(source).ok_or_else(|| ProjectError {
+                code: "fsim-migration-shape",
+                detail: "the envelope version could not be read for migration".to_string(),
+                hint:
+                    "migrate exactly the bytes that were persisted; do not hand-edit the envelope"
+                        .to_string(),
+            })?;
+            let migrated = migrate_envelope(source, declared)?;
+            Ok(MigratedOrNative {
+                decoded: migrated.decoded,
+                migration: Some(migrated.receipt),
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// A parsed project plus the migration receipt when an older envelope was
+/// rewritten by a registered rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MigratedOrNative {
+    /// The decoded project at the current version.
+    pub decoded: DecodedProject,
+    /// The migration receipt, present exactly when a rule fired.
+    pub migration: Option<ProjectMigrationReceipt>,
+}
+
+/// Read the envelope's declared `:version` integer without full parsing.
+fn declared_envelope_version(source: &str) -> Option<u32> {
+    let prefix = source.strip_prefix("(fsim-project :version ")?;
+    let digits: String = prefix
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// Migrate an older envelope to the current version under a registered rule,
+/// refusing unknown versions. The output is strictly canonical.
+pub fn migrate_envelope(
+    source: &str,
+    declared_version: u32,
+) -> Result<MigratedProject, ProjectError> {
+    let rule = match declared_version {
+        0 => MigrationRule::SyntheticV0EnvelopeRewrite,
+        1 => MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
+        2 => MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
+        3 => MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
+        4 => MigrationRule::ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
+        5 => MigrationRule::MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
+        6 => MigrationRule::GeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
+        7 => MigrationRule::SurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10,
+        8 => MigrationRule::FanEfficiencyV9ThenNaturalConvectionV10,
+        9 => MigrationRule::NaturalConvectionV10,
+        10 => MigrationRule::TransientConductionV11,
+        11 => MigrationRule::TransientPowerSchedulesV12,
+        12 => MigrationRule::TransientEnthalpyV13,
+        13 => MigrationRule::TransientPhaseConductivityV14,
+        14 => MigrationRule::TransientRegionalInitialTemperatureV15,
+        v if v == FSIM_VERSION => {
+            return Err(ProjectError {
+                code: "fsim-migration-not-needed",
+                detail: format!("the document already declares version {v}"),
+                hint: "parse it directly; migration is only for older envelopes".to_string(),
+            });
+        }
+        v => {
+            return Err(ProjectError {
+                code: "fsim-migration-unknown-version",
+                detail: format!("no registered migration rule covers version {v}"),
+                hint: "register an explicit rule with its receipt semantics before reading this document".to_string(),
+            });
+        }
+    };
+
+    let old_prefix = format!("(fsim-project :version {declared_version}");
+    let new_prefix = format!("(fsim-project :version {FSIM_VERSION}");
+    let Some(rest) = source.strip_prefix(old_prefix.as_str()) else {
+        return Err(ProjectError {
+            code: "fsim-migration-shape",
+            detail: format!(
+                "the document does not open with `{old_prefix}` as its declared version requires"
+            ),
+            hint: "migrate exactly the bytes that were persisted; do not hand-edit the envelope"
+                .to_string(),
+        });
+    };
+    let envelope_rewritten = format!("{new_prefix}{rest}");
+    let migrated = match rule {
+        MigrationRule::SyntheticV0EnvelopeRewrite => envelope_rewritten,
+        MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10
+        | MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10
+        | MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10
+        | MigrationRule::ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10
+        | MigrationRule::MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10
+        | MigrationRule::GeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10
+        | MigrationRule::SurfaceEntityV8ThenFanEfficiencyV9ThenNaturalConvectionV10
+        | MigrationRule::FanEfficiencyV9ThenNaturalConvectionV10
+        | MigrationRule::NaturalConvectionV10
+        | MigrationRule::TransientConductionV11
+        | MigrationRule::TransientPowerSchedulesV12
+        | MigrationRule::TransientEnthalpyV13
+        | MigrationRule::TransientPhaseConductivityV14
+        | MigrationRule::TransientRegionalInitialTemperatureV15 => {
+            // The document's internal `versions.schema` field must move with
+            // the envelope: the validator admits only the current schema.
+            // The rewrite is exactly these two byte strings, never a
+            // semantic reinterpretation.
+            let old_schema = format!("(versions :schema {declared_version}");
+            let new_schema = format!("(versions :schema {FSIM_VERSION}");
+            if !envelope_rewritten.contains(old_schema.as_str()) {
+                return Err(ProjectError {
+                    code: "fsim-migration-shape",
+                    detail: format!(
+                        "the document lacks `(versions :schema {declared_version}` as its schema declaration"
+                    ),
+                    hint: "migrate exactly the bytes that were persisted; do not hand-edit the document"
+                        .to_string(),
+                });
+            }
+            envelope_rewritten.replacen(&old_schema, &new_schema, 1)
+        }
+    };
+    let decoded = parse_sexpr(&migrated)?;
+    if declared_version > 0
+        && declared_version < 7
+        && decoded
+            .spec
+            .geometry
+            .iter()
+            .flatten()
+            .any(|artifact| artifact.surface_offset.is_some())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates geometry offsets but its payload declares one"),
+            hint: "declare the offset in a current-version project; migration only preserves historical intent".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 10
+        && decoded
+            .spec
+            .cooling
+            .as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .is_some_and(|setup| {
+                setup.boundaries.iter().any(|row| {
+                    matches!(row.condition, crate::ThermalBoundaryCondition::NaturalConvection { .. })
+                })
+            })
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates natural-convection laws but its payload declares one"),
+            hint: "declare the law in a current-version project; migration only preserves historical intent".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 11
+        && decoded.spec.cooling.as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .is_some_and(|setup| setup.transient.is_some())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates transient conduction but its payload declares it"),
+            hint: "declare heat storage and time controls in a current-version project; migration preserves historical intent".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 12
+        && decoded.spec.cooling.as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .and_then(|setup| setup.transient.as_ref())
+            .is_some_and(|transient| !transient.power_schedules.is_empty())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates transient power schedules but its payload declares one"),
+            hint: "declare delivered-power histories in a current-version project; migration preserves historical static power".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 13
+        && decoded
+            .spec
+            .cooling
+            .as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .and_then(|setup| setup.transient.as_ref())
+            .is_some_and(|transient| transient.enthalpy.is_some())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates total-enthalpy storage but its payload declares it"),
+            hint: "declare enthalpy models in a current-version project; migration preserves historical heat capacities".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 15
+        && decoded
+            .spec
+            .cooling
+            .as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .and_then(|setup| setup.transient.as_ref())
+            .is_some_and(|transient| {
+                matches!(
+                    transient.initial_temperature,
+                    TransientInitialTemperature::FromRegionalEnthalpy
+                )
+            })
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates regional initial temperatures but its payload declares from-regional-enthalpy"),
+            hint: "declare regional initialization in a current-version project; migration preserves historical uniform temperatures and initial enthalpies".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 14
+        && decoded
+            .spec
+            .cooling
+            .as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .and_then(|setup| setup.transient.as_ref())
+            .and_then(|transient| transient.enthalpy.as_ref())
+            .is_some_and(|enthalpy| {
+                enthalpy.materials.iter().any(|material| material.phase_conductivity.is_some())
+            })
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates phase-dependent conductivity but its payload declares it"),
+            hint: "declare phase conductivity in a current-version project; migration preserves the original base conductivity".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 9
+        && decoded
+            .spec
+            .cooling
+            .as_ref()
+            .is_some_and(|cooling| cooling.fan_efficiency.is_some())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates fan-efficiency declarations but its payload declares one"),
+            hint: "declare the efficiency in a current-version project; migration only preserves historical intent".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 9
+        && decoded
+            .spec
+            .outputs
+            .iter()
+            .flatten()
+            .any(|output| output.region.is_some())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates output regions but its payload declares one"),
+            hint: "declare the output region in a current-version project; migration only preserves historical intent".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 8
+        && decoded
+            .spec
+            .assembly
+            .iter()
+            .flatten()
+            .any(|entity| matches!(entity, crate::EntityDecl::Surface { .. }))
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates surface entities but its payload declares one"),
+            hint: "declare the surface in a current-version project; migration only preserves historical intent".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 6
+        && decoded
+            .spec
+            .materials
+            .iter()
+            .flatten()
+            .any(|binding| binding.conductivity_tolerance.is_some())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates material tolerances but its payload declares one"),
+            hint: "declare the tolerance in a current-version project; migration only preserves historical intent".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 5
+        && decoded
+            .spec
+            .cooling
+            .as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .and_then(|conduction| conduction.radiation.as_ref())
+            .is_some()
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates ambient radiation but its payload declares radiation"),
+            hint: "declare new radiation inputs explicitly in a current-version project; migration only preserves historical physical intent".to_string(),
+        });
+    }
+    let receipt = ProjectMigrationReceipt {
+        source_version: declared_version,
+        target_version: FSIM_VERSION,
+        old_hash: canonical_hash(source.as_bytes()),
+        new_hash: canonical_hash(decoded.canonical.as_bytes()),
+        rule,
+    };
+    Ok(MigratedProject { decoded, receipt })
+}

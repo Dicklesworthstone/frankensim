@@ -1,0 +1,8 @@
+frankensim.matdb-source.v1
+observation	nasa-tp3287-cu-fusion	pure Cu cubic crystal to liquid transition at 1 bar in the NASA evaluated thermodynamic standard state	NASA/TP-3287/REV1 Table III.15 paired crystal/liquid rows at 1358 K	Fusion energy is derived from the same table and reference state: (42.787-29.649) kJ/mol = 13.138 kJ/mol, divided by 0.063546 kg/mol = 206747.867686400365 J/kg. This is the phase-transition enthalpy difference, not liquid enthalpy of formation at 298.15 K or latent heat of vaporization. Source uncertainty/covariance and assay are unstated; extra decimal places encode unit conversion rather than measurement precision. Pressure is the independent axis of these characteristic transition properties; no temperature-dependent phase-fraction, hysteresis, supercooling or kinetic law is asserted.
+scalar	melting-point	nasa-tp3287-cu-fusion	tm	1358	K	constant
+uncertainty	melting-point	unstated	-	-	-	-
+validity	melting-point	pressure	100000	100000	Pa
+scalar	latent-heat-fusion	nasa-tp3287-cu-fusion	fusion	206747.867686400365	J/kg	constant
+uncertainty	latent-heat-fusion	unstated	-	-	-	-
+validity	latent-heat-fusion	pressure	100000	100000	Pa

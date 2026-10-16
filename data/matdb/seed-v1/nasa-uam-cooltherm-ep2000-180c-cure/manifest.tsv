@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	nasa-uam-cooltherm-ep2000-180c-cure
+redistribution	permitted	NASA NTRS record 20240007451 marks the conference paper public, non-export-controlled, and government public use permitted; the exact paper, authors, campaign, epoxy identity, actual partial cure state, omitted final step, and no-claim boundary are retained
+citation	Tallerico, T., Anderson, A. D., Hurrell, M., Gutknecht, J., and Valco, M. (2024), Initial Motor Winding Insulation Lifetime Experimental Results for Electric Aircraft Applications, NASA Glenn Research Center, NTRS 20240007451, Sections III and IV-A and reference 19
+license	Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

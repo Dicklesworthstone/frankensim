@@ -1,0 +1,47 @@
+[package]
+name = "fs-rep-nurbs"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Rational B-spline charts: i128-bounded exact refinement, certified trim classification, measured closest-point brackets, and an honest SDF-routed Boolean policy."
+
+[package.metadata.frankensim]
+layer = "L2"
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec" }
+fs-geom = { path = "../fs-geom" }
+fs-ivl = { path = "../fs-ivl" }
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+asupersync = { path = "../../../asupersync" }
+fs-ad = { path = "../fs-ad" }
+fs-alloc = { path = "../fs-alloc" }
+
+[features]
+# [F]-gated per the Ambition-Tag rule: the NURBS->SDF converter ships
+# disabled until its Gauntlet tier is green.
+nurbs-sdf = []
+# [F]-gated: the SDF->NURBS refit ships disabled until its Gauntlet tier
+# is green. Depends on nurbs-sdf (the CSG acceptance closes the loop
+# through the forward converter + sampled sheaf evidence).
+nurbs-refit = ["nurbs-sdf"]
+
+[lints]
+workspace = true
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "refit"
+required-features = ["nurbs-refit"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "sdf"
+required-features = ["nurbs-sdf"]

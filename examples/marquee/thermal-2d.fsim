@@ -1,0 +1,50 @@
+(fsim-study :version 1
+  (metadata
+    :name "thermal-2d"
+    :created "2026-09-04"
+    :context-of-use "Normalized scalar thermal cooling-hole radius study"
+    :intended-decision "Explore cooling-hole radii at fixed material area"
+    :decision-gate scoping-estimate
+    :consequence advisory)
+  (versions
+    :schema 1)
+  (seeds
+    :root 1337)
+  (budgets
+    :wall-time 600 s
+    :memory 1073741824 B
+    :max-iterations 8)
+  (capabilities
+    "optimization.thermal-radii"
+    "geometry.sdf"
+    "physics.cutfem"
+  )
+  (units
+    :storage "normalized")
+  (domain
+    :type sdf-plate-with-holes
+    :bounds ((0 0) (1 1))
+    :initial-holes (
+      (hole :center (0.3 0.5) :radius 0.12)
+      (hole :center (0.7 0.5) :radius 0.18)
+    ))
+  (physics
+    :type thermal-poisson-2d-normalized
+    :mesh-level 4)
+  (scenario
+    :fixed-boundary "all-boundaries-zero"
+    :load-region "domain-unit-source"
+  )
+  (objective
+    :type compliance
+    :sense minimize
+    :unit "1")
+  (constraints
+    :volume-fraction 0.853)
+  (optimizer
+    :type projected-gradient
+    :step-size 1
+    :r-min 0.08
+    :r-max 0.2
+    :steps 8)
+)

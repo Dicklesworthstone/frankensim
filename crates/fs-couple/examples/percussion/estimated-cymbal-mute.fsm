@@ -1,0 +1,30 @@
+# Authored felt-lined translating jaws, NOT measured fingers or a product specimen.
+# Four quadrature sites partition a 0.0002 m^2 conforming footprint on EACH face.
+frankensim-compliant-mute-v1
+surface,shell
+site,0.073,-0.005,0.00005
+site,0.083,-0.005,0.00005
+site,0.073,0.005,0.00005
+site,0.083,0.005,0.00005
+# side,mass_kg,drag_Ns_m,gap_m,thickness_m,f_ref_Pa,eps_ref,p,q,crush,eps_densify,prior_strain
+jaw,above,0.025,0.15,0.00002,0.004,30000,0.2,2.2,3,0.15,0.7,0
+jaw,below,0.025,0.15,0.00002,0.004,30000,0.2,2.2,3,0.15,0.7,0
+# Whole-footprint Kelvin properties, partitioned by site area in the compiler.
+creep,above,4000,12
+creep,below,4000,12
+# Signed external forces on the actual jaws: push inward, then actively retract.
+# Motion/contact timing emerges from force, inertia, pad law and the moving cymbal.
+force,above,0,0
+force,above,0.001,0
+force,above,0.002,0.5
+force,above,0.0045,0.5
+force,above,0.005,-0.8
+force,above,0.007,-0.8
+force,above,0.008,0
+force,below,0,0
+force,below,0.001,0
+force,below,0.002,0.5
+force,below,0.0045,0.5
+force,below,0.005,-0.8
+force,below,0.007,-0.8
+force,below,0.008,0

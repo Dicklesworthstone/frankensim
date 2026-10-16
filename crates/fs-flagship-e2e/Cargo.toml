@@ -1,0 +1,34 @@
+[package]
+name = "fs-flagship-e2e"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Flagship e2e suite (bead mye.5): staged smoke/mid/full golden ledgers, cross-flagship audits, failure drills, forensic logging — the system-level Gauntlet tier."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-exec = { path = "../fs-exec" }
+fs-frame = { path = "../fs-frame" }
+fs-lbm = { path = "../fs-lbm" }
+fs-ledger = { path = "../fs-ledger" }
+fs-obs = { path = "../fs-obs" }
+fs-marquee = { path = "../fs-marquee" }
+fs-ornith = { path = "../fs-ornith" }
+fs-qty = { path = "../fs-qty" }
+fs-race = { path = "../fs-race" }
+fs-scenario = { path = "../fs-scenario" }
+fs-vessel = { path = "../fs-vessel" }
+
+[dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+# The certify-or-escalate policy the fe2e-007 model-form drill decides with
+# (already in the tree through fs-ornith's conformal band; named here so the
+# suite calls the real policy instead of re-deriving one).
+fs-surrogate = { path = "../fs-surrogate" }
+
+[lints]
+workspace = true

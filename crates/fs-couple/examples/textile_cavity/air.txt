@@ -1,0 +1,6 @@
+textile-cavity-v1
+gas mixture 293.15 101325 mole 2 N2 0.79 O2 0.21
+cavity 0.001 0.005 0.02 2000
+surface 293.15 1.02 0.3 0.1
+drive 48000 2400 240 -0.001
+limits 0.0001 0.01

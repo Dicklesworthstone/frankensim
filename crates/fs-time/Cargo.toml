@@ -1,0 +1,39 @@
+[package]
+name = "fs-time"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Structure-preserving time integration: symplectic, Lie-group, generalized-alpha, IMEX, exponential, adaptive."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-ad = { path = "../fs-ad" }
+fs-blake3 = { path = "../fs-blake3" }
+fs-exec = { path = "../fs-exec" }
+fs-ga = { path = "../fs-ga" }
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+fs-solver = { path = "../fs-solver" }
+
+[dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-casebook = { path = "../fs-casebook" }
+fs-vvreg = { path = "../fs-vvreg" }
+fsci-integrate = { path = "../../../frankenscipy/crates/fsci-integrate", version = "=0.4.0" }
+
+[features]
+# [F]-gated per the Ambition-Tag rule (bead bk0o.7, Proposal 4).
+time-slabs = []
+
+[lints]
+workspace = true
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "slabs"
+required-features = ["time-slabs"]

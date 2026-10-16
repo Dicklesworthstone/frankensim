@@ -1,0 +1,29 @@
+; From the repository root, with a fresh ledger:
+; frankensim --json study data/reference-project/cooling-sensitivity.fsim sensitivity.db
+;
+; Global main and total effects of the declared independent power and ambient
+; distributions. This is pick-freeze sensitivity, NOT Sobol quadrature or a
+; nominal adjoint. The original physical project, mesh and material card stay
+; unchanged. These distributions are examples, not inferred card tolerances.
+;
+; Two inputs cost four real native solves per row (A, B, A_with_B_power,
+; A_with_B_ambient): 64 evaluations = 16 complete rows. --budget counts individual
+; evaluations, including hybrids. An interrupted row resumes through study
+; --resume with the returned run ID and same ledger; no source files are needed.
+; Indices are Estimated only after the full design; no confidence or ranking
+; guarantee is implied by this small example, and finite indices are not clipped.
+(fsim-uncertainty-study
+  :version 1
+  :project "cooling-reference.fsim"
+  :samples 64
+  :seed 29
+  :wall-time 120s
+  :method sobol-sensitivity
+  :correlation independent
+  :qoi "temperature-max"
+  :geometry ((mesh :role "enclosure" :path "plate.stl" :unit "m" :max-hole-edges 0))
+  :materials ("aa6061.fsmcdpk")
+  :interfaces ()
+  :parameters (
+    (uniform :name "power" :target power :entity "air" :low 4W :high 6W)
+    (uniform :name "ambient" :target convection-temperature :entity "air" :low 294K :high 300K)))

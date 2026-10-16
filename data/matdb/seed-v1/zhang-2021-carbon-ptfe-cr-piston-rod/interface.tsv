@@ -1,0 +1,50 @@
+frankensim.matdb-source.v1
+surface_a	PTFE filled with about 15 percent carbon fiber	solid wear ring backed by a nitrile-rubber D-ring	GMSS Sterling seal mixed at high speed then ambient-molded sintered and turned; exact resin fiber grade and lot unstated	1	turned-inner-sealing-lip
+surface_b	stainless steel with about 50 micrometer electroplated chromium coating	base and coating phases and alloy grade unstated	chrome-coated piston rod processed by Wuhu Yinhong Hydraulic Parts; exact roughness coating lot and metrology unstated	1	chrome-coated-piston-rod-counterface
+context	Kunlun-15-aviation-hydraulic-oil	-	laboratory-at-293.15-K	new-Sterling-seals-300-reciprocations-two-experiment-average
+observation	chrome-minimum-point	GMSS Sterling carbon-fiber-filled PTFE wear ring against electroplated-chromium stainless-steel piston rod in Kunlun 15 aviation hydraulic oil	Zhang et al. 2021 Section 3.1.1 printed minimum single-seal instroke and outstroke forces	The source reports the smooth middle portion of the two-seal sensor signal was processed into a single-seal force and averaged over two experiments; no replicate values pointwise dispersion confidence level PTFE resin or fiber grade NBR grade stainless alloy counterface roughness coating thickness measurement lubricant lot full formulation stroke seal preload contact pressure leakage quantitative wear rate or lifetime is reported; about 15 percent fill and about 50 micrometer coating are source approximations; Cr and Fe transfer and seal-lip wear were observed
+observation	chrome-maximum-point	GMSS Sterling carbon-fiber-filled PTFE wear ring against electroplated-chromium stainless-steel piston rod in Kunlun 15 aviation hydraulic oil	Zhang et al. 2021 Section 3.1.1 printed maximum single-seal instroke and outstroke forces	The source reports the smooth middle portion of the two-seal sensor signal was processed into a single-seal force and averaged over two experiments; no replicate values pointwise dispersion confidence level PTFE resin or fiber grade NBR grade stainless alloy counterface roughness coating thickness measurement lubricant lot full formulation stroke seal preload contact pressure leakage quantitative wear rate or lifetime is reported; about 15 percent fill and about 50 micrometer coating are source approximations; Cr and Fe transfer and seal-lip wear were observed
+scalar	minimum-instroke	chrome-minimum-point	single-seal-instroke-friction-force-at-source-observed-minimum	97.8955	N	constant
+uncertainty	minimum-instroke	unstated	-	-	-	-
+validity	minimum-instroke	experimental_temperature	293.15	293.15	K
+validity	minimum-instroke	hydraulic_oil_pressure	10000000	10000000	Pa
+validity	minimum-instroke	reciprocating_speed	0.5	0.5	m/s
+validity	minimum-instroke	reciprocation_count	300	300	1
+validity	minimum-instroke	sensor_sampling_frequency	2400	2400	s^-1
+validity	minimum-instroke	experiments_averaged	2	2	1
+validity	minimum-instroke	seals_per_experiment	2	2	1
+validity	minimum-instroke	source_fill_fraction_approximately_15_percent	1	1	1
+validity	minimum-instroke	source_chromium_thickness_approximately_50_micrometers	1	1	1
+scalar	minimum-outstroke	chrome-minimum-point	single-seal-outstroke-friction-force-at-source-observed-minimum	75.0238	N	constant
+uncertainty	minimum-outstroke	unstated	-	-	-	-
+validity	minimum-outstroke	experimental_temperature	293.15	293.15	K
+validity	minimum-outstroke	hydraulic_oil_pressure	10000000	10000000	Pa
+validity	minimum-outstroke	reciprocating_speed	0.5	0.5	m/s
+validity	minimum-outstroke	reciprocation_count	300	300	1
+validity	minimum-outstroke	sensor_sampling_frequency	2400	2400	s^-1
+validity	minimum-outstroke	experiments_averaged	2	2	1
+validity	minimum-outstroke	seals_per_experiment	2	2	1
+validity	minimum-outstroke	source_fill_fraction_approximately_15_percent	1	1	1
+validity	minimum-outstroke	source_chromium_thickness_approximately_50_micrometers	1	1	1
+scalar	maximum-instroke	chrome-maximum-point	single-seal-instroke-friction-force-at-source-observed-maximum	516.9906	N	constant
+uncertainty	maximum-instroke	unstated	-	-	-	-
+validity	maximum-instroke	experimental_temperature	293.15	293.15	K
+validity	maximum-instroke	hydraulic_oil_pressure	35000000	35000000	Pa
+validity	maximum-instroke	reciprocating_speed	0.1	0.1	m/s
+validity	maximum-instroke	reciprocation_count	300	300	1
+validity	maximum-instroke	sensor_sampling_frequency	2400	2400	s^-1
+validity	maximum-instroke	experiments_averaged	2	2	1
+validity	maximum-instroke	seals_per_experiment	2	2	1
+validity	maximum-instroke	source_fill_fraction_approximately_15_percent	1	1	1
+validity	maximum-instroke	source_chromium_thickness_approximately_50_micrometers	1	1	1
+scalar	maximum-outstroke	chrome-maximum-point	single-seal-outstroke-friction-force-at-source-observed-maximum	404.4382	N	constant
+uncertainty	maximum-outstroke	unstated	-	-	-	-
+validity	maximum-outstroke	experimental_temperature	293.15	293.15	K
+validity	maximum-outstroke	hydraulic_oil_pressure	35000000	35000000	Pa
+validity	maximum-outstroke	reciprocating_speed	0.1	0.1	m/s
+validity	maximum-outstroke	reciprocation_count	300	300	1
+validity	maximum-outstroke	sensor_sampling_frequency	2400	2400	s^-1
+validity	maximum-outstroke	experiments_averaged	2	2	1
+validity	maximum-outstroke	seals_per_experiment	2	2	1
+validity	maximum-outstroke	source_fill_fraction_approximately_15_percent	1	1	1
+validity	maximum-outstroke	source_chromium_thickness_approximately_50_micrometers	1	1	1

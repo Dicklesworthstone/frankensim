@@ -1,0 +1,3245 @@
+//! Battery for the versioned `.fsim` project schema (bead f85xj.6.1): the
+//! reference cooling project parses and is admissible, canonical bytes are
+//! stable across both spellings, every mandatory-field omission is a named
+//! violation, unknown fields are refused, every applied default is receipted, and
+//! the version-bump machinery is proven with the synthetic migration. The
+//! broken-project corpus doubles as documentation of the error-message
+//! quality bar: every row logs its violation and fix.
+
+use fs_blake3::{ContentHash, hash_domain};
+use fs_evidence::uncertainty::{
+    EngineeringUncertaintyBudget, EngineeringUncertaintyKind, EngineeringUncertaintyTerm,
+    TermValue, UncertaintyArtifactRef,
+};
+use fs_package::{EvidencePackage, Provenance, VerifiedPackage};
+use fs_project::{
+    AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
+    ConsequenceClass, Cooling, DecisionGate, EntityDecl, Envelope, FSIM_VERSION, Fan, FanCurveDecl,
+    FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment, HalfSpaceSide,
+    InterfaceCardBinding, InterfaceState, MaterialBinding, MeshSelector, Metadata, OutputRequest,
+    PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface, RequirementDirection,
+    RequirementSeverity, RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds,
+    SolverSettings, ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, UnitsDoctrine, Vent,
+    Versions, canonical_hash, migrate_envelope, parse_json, parse_sexpr, parse_sexpr_lenient,
+    parse_sexpr_migrating, print_json, print_sexpr, project_decision_authorities,
+    project_decision_authority, requirement_source_reviews,
+};
+use fs_qty::QtyAny;
+use fs_scenario::EntityDeclaration;
+use fs_session::{DecisionAssessment, EvidenceRef};
+use fs_voi::recommend_unknown_resolutions;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JunctionTemperature;
+
+fn decision_digest(label: &str) -> ContentHash {
+    hash_domain(
+        "org.frankensim.fs-project.test.decision.v1",
+        label.as_bytes(),
+    )
+}
+
+fn decision_artifact(label: &str) -> UncertaintyArtifactRef {
+    UncertaintyArtifactRef::new(label, decision_digest(label)).expect("valid decision artifact")
+}
+
+fn decision_budget(with_unknown: bool) -> EngineeringUncertaintyBudget {
+    let terms = EngineeringUncertaintyKind::ALL
+        .into_iter()
+        .map(|kind| {
+            let value = if with_unknown && kind == EngineeringUncertaintyKind::BoundaryConditions {
+                TermValue::unknown("fan tolerance lacks a retained population authority")
+                    .expect("named unknown")
+            } else {
+                TermValue::negligible(format!("{} is exact in this fixture", kind.name()))
+                    .expect("named negligible term")
+            };
+            EngineeringUncertaintyTerm::try_new(kind, value, decision_artifact(kind.name()))
+                .expect("valid term")
+        })
+        .collect();
+    EngineeringUncertaintyBudget::try_new("t-junction-max", "kelvin", terms)
+        .expect("complete budget")
+}
+
+fn decision_package() -> VerifiedPackage {
+    EvidencePackage::new(Provenance::new(
+        "fs-project-decision-test",
+        "Cargo.lock:test",
+    ))
+    .into_verified()
+    .expect("empty deny-all package is structurally valid")
+}
+
+fn assemble_reference_decision(
+    authority: &fs_project::ProjectDecisionAuthority,
+    with_unknown: bool,
+) -> Result<DecisionAssessment<JunctionTemperature>, fs_project::ProjectDecisionError> {
+    let budget = decision_budget(with_unknown);
+    let compliance = budget
+        .assess_requirement(370.0, authority.requirement().scalar(), &[])
+        .expect("valid compliance replay");
+    let attribution = budget
+        .attribute_requirement(370.0, authority.requirement().scalar(), &[])
+        .expect("valid attribution replay");
+    let actions = recommend_unknown_resolutions(&compliance, &[]);
+    authority.try_assemble(
+        EvidenceRef::try_new(
+            "t-junction-max",
+            "kelvin",
+            "fs-evidence:certified-f64:v1",
+            decision_digest("t-junction-max"),
+        )
+        .expect("quantity evidence"),
+        compliance,
+        budget,
+        attribution,
+        actions,
+        &decision_package(),
+    )
+}
+
+fn kelvin(value: f64) -> QtyAny {
+    QtyAny::new(value, fs_project::spec::dims::TEMPERATURE)
+}
+
+fn watts(value: f64) -> QtyAny {
+    QtyAny::new(value, fs_project::spec::dims::POWER)
+}
+
+fn reference_assembly() -> Vec<EntityDecl> {
+    vec![
+        EntityDecl::Assembly {
+            name: "enclosure-asm".to_string(),
+            display: "Enclosure".to_string(),
+            expect_id: None,
+        },
+        EntityDecl::Part {
+            parent: "enclosure-asm".to_string(),
+            name: "board".to_string(),
+            display: "Main board".to_string(),
+            expect_id: None,
+        },
+        EntityDecl::Region {
+            parent: "board".to_string(),
+            name: "cpu".to_string(),
+            display: "CPU".to_string(),
+            expect_id: None,
+        },
+        EntityDecl::Region {
+            parent: "board".to_string(),
+            name: "sink-base".to_string(),
+            display: "Heat sink base".to_string(),
+            expect_id: None,
+        },
+        EntityDecl::Interface {
+            parent: "enclosure-asm".to_string(),
+            name: "cpu-sink-tim".to_string(),
+            display: "CPU to sink TIM".to_string(),
+            from: "cpu".to_string(),
+            to: "sink-base".to_string(),
+            expect_id: None,
+        },
+    ]
+}
+
+/// The reference cooling project: a small forced-convection enclosure with
+/// one board, one hot region, a heat sink interface, and a junction limit.
+fn reference_project() -> ProjectSpec {
+    ProjectSpec {
+        metadata: Some(Metadata {
+            name: "reference-cooling-v1".to_string(),
+            created: "2026-07-22".to_string(),
+            context_of_use: "design-stage screening of a fanned telecom enclosure".to_string(),
+            intended_decision: "select the heat sink and fan operating point that hold the \
+                                junction limit with margin"
+                .to_string(),
+            decision_gate: DecisionGate::DesignSelection,
+            consequence: ConsequenceClass::Reliability,
+        }),
+        versions: Some(Versions {
+            schema: FSIM_VERSION,
+            constellation: "0".repeat(64),
+            workspace: "e5c8061f4faed986b831b8978d0c8d1812e960fb".to_string(),
+        }),
+        seeds: Some(Seeds { root: 0x5EED_0001 }),
+        budgets: Some(Budgets {
+            solve_time: QtyAny::new(3600.0, fs_project::spec::dims::TIME),
+            memory_bytes: 8 * 1024 * 1024 * 1024,
+            accuracy_rel: 0.02,
+        }),
+        capabilities: Some(vec!["thermal.conduction-solve".to_string()]),
+        units: Some(UnitsDoctrine {
+            storage: "si-base".to_string(),
+            display: "engineering".to_string(),
+        }),
+        geometry: Some(vec![GeometryArtifact {
+            role: "enclosure".to_string(),
+            format: "stl".to_string(),
+            source_hash: 0x00ab_cdef_0123_4567,
+            parser_version: "0.0.1".to_string(),
+            surface_offset: None,
+        }]),
+        assignments: Some(vec![
+            GeometryAssignment {
+                artifact: "enclosure".to_string(),
+                target: "cpu".to_string(),
+                length_unit: "m".to_string(),
+                selector: MeshSelector::NamedGroup {
+                    name: "CPU".to_string(),
+                },
+                allow_overlap: false,
+            },
+            GeometryAssignment {
+                artifact: "enclosure".to_string(),
+                target: "sink-base".to_string(),
+                length_unit: "m".to_string(),
+                selector: MeshSelector::NamedGroup {
+                    name: "SINK_BASE".to_string(),
+                },
+                allow_overlap: false,
+            },
+            GeometryAssignment {
+                artifact: "enclosure".to_string(),
+                target: "cpu-sink-tim".to_string(),
+                length_unit: "m".to_string(),
+                selector: MeshSelector::NamedGroup {
+                    name: "CPU_SINK_TIM".to_string(),
+                },
+                allow_overlap: false,
+            },
+        ]),
+        assembly: Some(reference_assembly()),
+        materials: Some(vec![MaterialBinding {
+            region: "board".to_string(),
+            card: "ab".repeat(32),
+            claim: None,
+            state: "fr4/nominal".to_string(),
+            temp_lo: kelvin(233.15),
+            temp_hi: kelvin(398.15),
+            source: "matdb".to_string(),
+            conductivity_tolerance: None,
+        }]),
+        interface_cards: Some(vec![InterfaceCardBinding {
+            interface: "cpu-sink-tim".to_string(),
+            card: "cd".repeat(32),
+            claim: None,
+            source: "matdb".to_string(),
+            state: InterfaceState::Tim {
+                thickness: QtyAny::new(100e-6, fs_project::spec::dims::LENGTH),
+                thickness_half_width: QtyAny::new(10e-6, fs_project::spec::dims::LENGTH),
+            },
+        }]),
+        perfect_contacts: None,
+        power: Some(vec![PowerDissipation {
+            region: "cpu".to_string(),
+            watts: watts(35.0),
+            duty: 1.0,
+        }]),
+        cooling: Some(Cooling {
+            fans: vec![Fan {
+                name: "intake-1".to_string(),
+                flow: QtyAny::new(0.012, fs_project::spec::dims::VOLUMETRIC_FLOW),
+                static_pressure: QtyAny::new(45.0, fs_project::spec::dims::PRESSURE),
+                curve: None,
+            }],
+            vents: vec![Vent {
+                region: "sink-base".to_string(),
+                area: QtyAny::new(0.004, fs_project::spec::dims::AREA),
+            }],
+            leakage: watts(2.5),
+            airflow_leakage: None,
+            fan_system: None,
+            conduction: Some(ConductionSetup {
+                regions: vec![
+                    ConductionRegion {
+                        region: "cpu".to_string(),
+                        seed: [
+                            QtyAny::new(0.01, fs_project::spec::dims::LENGTH),
+                            QtyAny::new(0.02, fs_project::spec::dims::LENGTH),
+                            QtyAny::new(0.03, fs_project::spec::dims::LENGTH),
+                        ],
+                    },
+                    ConductionRegion {
+                        region: "sink-base".to_string(),
+                        seed: [
+                            QtyAny::new(0.04, fs_project::spec::dims::LENGTH),
+                            QtyAny::new(0.05, fs_project::spec::dims::LENGTH),
+                            QtyAny::new(0.06, fs_project::spec::dims::LENGTH),
+                        ],
+                    },
+                ],
+                boundaries: vec![
+                    ThermalBoundary {
+                        target: "sink-base".to_string(),
+                        condition: ThermalBoundaryCondition::FixedTemperature {
+                            temperature: kelvin(293.15),
+                        },
+                    },
+                    ThermalBoundary {
+                        target: "cpu".to_string(),
+                        condition: ThermalBoundaryCondition::HeatFlux {
+                            outward_flux: QtyAny::new(125.0, fs_project::spec::dims::HEAT_FLUX),
+                        },
+                    },
+                    ThermalBoundary {
+                        target: "cpu-sink-tim".to_string(),
+                        condition: ThermalBoundaryCondition::Convection {
+                            coefficient: QtyAny::new(
+                                18.0,
+                                fs_project::spec::dims::HEAT_TRANSFER_COEFFICIENT,
+                            ),
+                            reference_temperature: kelvin(298.15),
+                        },
+                    },
+                ],
+                adiabatic_remainder: false,
+                radiation: None,
+                transient: None,
+            }),
+            fan_efficiency: None,
+        }),
+        envelope: Some(Envelope {
+            ambient_lo: kelvin(273.15),
+            ambient_hi: kelvin(318.15),
+            pressure: QtyAny::new(101_325.0, fs_project::spec::dims::PRESSURE),
+        }),
+        requirements: Some(vec![ThermalLimit {
+            qoi: "t-junction-max".to_string(),
+            class: "junction".to_string(),
+            region: "cpu".to_string(),
+            direction: RequirementDirection::AtMost,
+            limit: kelvin(378.15),
+            margin: kelvin(10.0),
+            source: RequirementSource {
+                kind: RequirementSourceKind::Datasheet,
+                document: "cpu-thermal-specification".to_string(),
+                version: "rev-7".to_string(),
+                locator: "table-5:tj-max".to_string(),
+            },
+            safety_factor: SafetyFactorPolicy {
+                factor: 1.1,
+                source: RequirementSource {
+                    kind: RequirementSourceKind::InternalPolicy,
+                    document: "thermal-derating-policy".to_string(),
+                    version: "2026.1".to_string(),
+                    locator: "section-4.2".to_string(),
+                },
+            },
+            severity: RequirementSeverity::ReliabilityDerating,
+        }]),
+        solver: Some(SolverSettings {
+            fidelity: "auto".to_string(),
+            tolerance_rel: 1e-6,
+        }),
+        outputs: Some(vec![OutputRequest {
+            name: "t-junction-max".to_string(),
+            kind: "scalar".to_string(),
+            region: None,
+        }]),
+    }
+}
+
+#[test]
+fn requirement_authority_and_context_gate_are_mandatory_decision_inputs() {
+    let reference = reference_project();
+    let metadata = reference.metadata.as_ref().expect("metadata");
+    assert!(!metadata.permits_indeterminate());
+
+    let mut scoping = reference.clone();
+    let metadata = scoping.metadata.as_mut().expect("metadata");
+    metadata.decision_gate = DecisionGate::ScopingEstimate;
+    metadata.consequence = ConsequenceClass::Advisory;
+    assert!(metadata.permits_indeterminate());
+    metadata.consequence = ConsequenceClass::Reliability;
+    assert!(
+        metadata.permits_indeterminate(),
+        "reliability scoping remains explicitly non-sign-off"
+    );
+    metadata.consequence = ConsequenceClass::SafetyCritical;
+    assert!(
+        !metadata.permits_indeterminate(),
+        "safety consequence closes the exploratory escape hatch"
+    );
+
+    let mut sourceless = reference.clone();
+    sourceless.requirements.as_mut().expect("requirements")[0]
+        .source
+        .document
+        .clear();
+    assert!(
+        sourceless
+            .validate()
+            .iter()
+            .any(|finding| finding.code == "project-requirement-source-invalid")
+    );
+
+    let mut invalid_factor = reference;
+    invalid_factor.requirements.as_mut().expect("requirements")[0]
+        .safety_factor
+        .factor = 0.99;
+    assert!(
+        invalid_factor
+            .validate()
+            .iter()
+            .any(|finding| finding.code == "project-requirement-safety-factor")
+    );
+}
+
+#[test]
+fn every_reference_requirement_assembles_with_full_lineage_and_stable_identity() {
+    let project = reference_project();
+    let authorities = project_decision_authorities(&project).expect("admitted project authorities");
+    assert_eq!(
+        authorities.len(),
+        project.requirements.as_ref().expect("requirements").len()
+    );
+    let authority = &authorities[0];
+    assert_eq!(authority.requirement().scalar().qoi(), "t-junction-max");
+    assert_eq!(authority.requirement().source().kind().slug(), "datasheet");
+    assert_eq!(
+        authority.requirement().source().document(),
+        "cpu-thermal-specification"
+    );
+    assert_eq!(authority.requirement().source().version(), "rev-7");
+    assert_eq!(authority.requirement().source().locator(), "table-5:tj-max");
+    assert_eq!(
+        authority.requirement().safety_factor_source().document(),
+        "thermal-derating-policy"
+    );
+
+    let first =
+        assemble_reference_decision(authority, false).expect("reference requirement assembles");
+    let selected =
+        project_decision_authority(&project, "t-junction-max").expect("exact QoI authority exists");
+    let replayed = assemble_reference_decision(&selected, false).expect("offline replay assembles");
+    assert_eq!(first, replayed);
+    assert_eq!(first.content_hash(), replayed.content_hash());
+    assert!(first.validate_content_hash());
+    assert!(first.render_explain().contains("requirement-version=rev-7"));
+
+    let mut changed = project;
+    changed.requirements.as_mut().expect("requirements")[0]
+        .source
+        .version = "rev-8".to_string();
+    let changed = project_decision_authority(&changed, "t-junction-max")
+        .expect("changed authority remains admissible");
+    let changed =
+        assemble_reference_decision(&changed, false).expect("changed authority assembles");
+    assert_ne!(first.content_hash(), changed.content_hash());
+}
+
+#[test]
+fn identical_indeterminate_physics_is_admitted_for_scoping_and_refused_for_signoff() {
+    let mut scoping = reference_project();
+    let metadata = scoping.metadata.as_mut().expect("metadata");
+    metadata.decision_gate = DecisionGate::ScopingEstimate;
+    metadata.consequence = ConsequenceClass::Advisory;
+    let scoping =
+        project_decision_authority(&scoping, "t-junction-max").expect("scoping authority");
+    let admitted = assemble_reference_decision(&scoping, true)
+        .expect("advisory scoping retains explicit indeterminacy");
+    assert!(matches!(
+        admitted.compliance(),
+        fs_evidence::uncertainty::ComplianceVerdict::Indeterminate { .. }
+    ));
+
+    let mut signoff = reference_project();
+    let metadata = signoff.metadata.as_mut().expect("metadata");
+    metadata.decision_gate = DecisionGate::ComplianceSignoff;
+    metadata.consequence = ConsequenceClass::Reliability;
+    let signoff =
+        project_decision_authority(&signoff, "t-junction-max").expect("signoff authority");
+    let error = assemble_reference_decision(&signoff, true)
+        .expect_err("sign-off cannot use an indeterminate result");
+    assert_eq!(
+        error,
+        fs_project::ProjectDecisionError::IndeterminateRefused {
+            qoi: "t-junction-max".to_string(),
+            decision_gate: DecisionGate::ComplianceSignoff,
+            consequence: ConsequenceClass::Reliability,
+        }
+    );
+}
+
+#[test]
+fn source_version_bumps_flag_only_the_matching_requirement_authorities() {
+    let previous = reference_project().requirements.expect("requirements");
+    let mut current = previous.clone();
+    current[0].source.version = "rev-8".to_string();
+    current[0].safety_factor.source.version = "2026.2".to_string();
+
+    let reviews = requirement_source_reviews(&previous, &current);
+    assert_eq!(reviews.len(), 2);
+    assert_eq!(reviews[0].role, "requirement");
+    assert_eq!(reviews[0].previous_version, "rev-7");
+    assert_eq!(reviews[0].current_version, "rev-8");
+    assert_eq!(reviews[1].role, "safety-factor");
+    assert_eq!(reviews[1].previous_version, "2026.1");
+    assert_eq!(reviews[1].current_version, "2026.2");
+
+    let mut replacement = current;
+    replacement[0].source.document = "replacement-datasheet".to_string();
+    assert_eq!(
+        requirement_source_reviews(&previous, &replacement),
+        reviews[1..],
+        "an entirely different authority is a project diff, not a version bump"
+    );
+}
+
+#[test]
+fn the_reference_cooling_project_is_admissible_and_hash_stable() {
+    let spec = reference_project();
+    let rendered = print_sexpr(&spec).expect("reference renders");
+    let decoded = parse_sexpr(&rendered).expect("canonical bytes parse strictly");
+    assert_eq!(decoded.spec, spec);
+    assert!(
+        decoded.findings().is_empty(),
+        "reference project must be admissible: {:?}",
+        decoded.findings()
+    );
+    assert!(decoded.defaults.is_empty());
+    assert!(decoded.canonicalization.is_none());
+    // Deterministic: two renders, one hash.
+    let again = print_sexpr(&spec).expect("still renders");
+    assert_eq!(rendered, again, "canonical bytes must be deterministic");
+    assert_eq!(decoded.hash(), canonical_hash(rendered.as_bytes()));
+}
+
+#[test]
+fn canonical_bytes_are_stable_across_spellings() {
+    let spec = reference_project();
+    let sexpr = print_sexpr(&spec).expect("s-expression renders");
+    let json = print_json(&spec).expect("json renders");
+    assert_ne!(sexpr, json, "the two spellings are distinct byte strings");
+
+    let from_sexpr = parse_sexpr(&sexpr).expect("sexpr parses");
+    let from_json = parse_json(&json).expect("json parses");
+    assert_eq!(from_sexpr.spec, from_json.spec, "one semantic model");
+    assert_eq!(
+        from_sexpr.canonical, from_json.canonical,
+        "both spellings canonicalize to the same bytes"
+    );
+    assert_eq!(from_sexpr.hash(), from_json.hash(), "one canonical hash");
+}
+
+#[test]
+fn parse_render_parse_is_idempotent_across_project_variants() {
+    let mut variants = vec![reference_project()];
+    let mut no_fans = reference_project();
+    if let Some(cooling) = &mut no_fans.cooling {
+        cooling.fans.clear();
+        cooling.vents.clear();
+    }
+    variants.push(no_fans);
+    let mut pinned = reference_project();
+    if let Some(assembly) = &mut pinned.assembly {
+        let expected = EntityDeclaration::assembly("enclosure-asm")
+            .with_display_name("Enclosure")
+            .identity()
+            .token();
+        assembly[0] = EntityDecl::Assembly {
+            name: "enclosure-asm".to_string(),
+            display: "Enclosure".to_string(),
+            expect_id: Some(expected),
+        };
+    }
+    variants.push(pinned);
+    variants.push(curved_cooling_project());
+
+    for (index, spec) in variants.iter().enumerate() {
+        let first = print_sexpr(spec).expect("renders");
+        let decoded = parse_sexpr(&first).expect("parses");
+        let second = print_sexpr(&decoded.spec).expect("re-renders");
+        assert_eq!(first, second, "variant {index}: parse-render-parse drifted");
+        assert!(
+            decoded.findings().is_empty(),
+            "variant {index}: {:?}",
+            decoded.findings()
+        );
+    }
+}
+
+#[test]
+fn every_assignment_selector_round_trips_through_both_spellings() {
+    let selectors = [
+        MeshSelector::NamedGroup {
+            name: "CPU".to_string(),
+        },
+        MeshSelector::HalfSpace {
+            normal: [0.0, 0.0, 1.0],
+            offset: 1.0,
+            side: HalfSpaceSide::AtLeast,
+            tolerance: 1e-9,
+        },
+        MeshSelector::Box {
+            min: [-1.0, -2.0, -3.0],
+            max: [1.0, 2.0, 3.0],
+            tolerance: 1e-8,
+        },
+        MeshSelector::Cylinder {
+            origin: [0.0, 0.0, 0.0],
+            axis: [0.0, 0.0, 1.0],
+            radius: 0.5,
+            axial_min: -1.0,
+            axial_max: 1.0,
+            tolerance: 1e-8,
+        },
+        MeshSelector::NearestDatum {
+            point: [1.0, 2.0, 3.0],
+            max_distance: 0.25,
+            tolerance: 1e-9,
+        },
+        MeshSelector::ExplicitFaceSet {
+            faces: vec![0, 2, u32::MAX],
+            fragility_acknowledged: true,
+        },
+    ];
+
+    for selector in selectors {
+        let mut spec = reference_project();
+        spec.assignments.as_mut().expect("assignments")[0].selector = selector;
+        let sexpr = print_sexpr(&spec).expect("selector renders");
+        let from_sexpr = parse_sexpr(&sexpr).expect("selector parses");
+        assert_eq!(from_sexpr.spec, spec);
+        let json = print_json(&spec).expect("selector JSON renders");
+        let from_json = parse_json(&json).expect("selector JSON parses");
+        assert_eq!(from_json.spec, spec);
+        assert_eq!(from_json.hash(), from_sexpr.hash());
+        assert!(from_sexpr.findings().is_empty());
+    }
+}
+
+#[test]
+fn every_mandatory_section_omission_is_a_named_violation() {
+    let cases: [OmissionCase; 17] = [
+        ("project-metadata-missing", |s| s.metadata = None),
+        ("project-versions-missing", |s| s.versions = None),
+        ("project-seeds-missing", |s| s.seeds = None),
+        ("project-budgets-missing", |s| s.budgets = None),
+        ("project-capabilities-missing", |s| s.capabilities = None),
+        ("project-units-missing", |s| s.units = None),
+        ("project-geometry-missing", |s| s.geometry = None),
+        ("project-assignments-missing", |s| s.assignments = None),
+        ("project-assembly-missing", |s| s.assembly = None),
+        ("project-materials-missing", |s| s.materials = None),
+        ("project-interface-cards-missing", |s| {
+            s.interface_cards = None;
+        }),
+        ("project-power-missing", |s| s.power = None),
+        ("project-cooling-missing", |s| s.cooling = None),
+        ("project-envelope-missing", |s| s.envelope = None),
+        ("project-requirements-missing", |s| s.requirements = None),
+        ("project-solver-missing", |s| s.solver = None),
+        ("project-outputs-missing", |s| s.outputs = None),
+    ];
+    for (code, mutate) in cases {
+        assert_omission(code, mutate);
+    }
+}
+
+/// One omission case: expected code plus the section-removing mutation.
+type OmissionCase = (&'static str, fn(&mut ProjectSpec));
+
+fn assert_omission(code: &str, mutate: fn(&mut ProjectSpec)) {
+    let mut spec = reference_project();
+    mutate(&mut spec);
+    let findings = spec.validate();
+    assert!(
+        findings.iter().any(|v| v.code == code),
+        "omission did not surface `{code}`: {findings:?}"
+    );
+    for finding in &findings {
+        assert!(!finding.fix.trim().is_empty(), "{code}: fix hint is empty");
+    }
+}
+
+#[test]
+fn unknown_fields_are_refused_by_name() {
+    let rendered = print_sexpr(&reference_project()).expect("renders");
+    assert!(
+        rendered.contains("(seeds :root 0x5EED0001)"),
+        "canonical seed spelling must name its derivation role"
+    );
+    // An unknown top-level section.
+    let with_section = rendered.replacen("(metadata", "(warp-drive :q 1) (metadata", 1);
+    let decoded = parse_sexpr_lenient(&with_section).expect("still recognizable");
+    assert!(
+        decoded
+            .recognition
+            .iter()
+            .any(|v| v.code == "project-unknown-field" && v.what.contains("warp-drive")),
+        "unknown section not named: {:?}",
+        decoded.recognition
+    );
+    // An unknown keyword inside a known section.
+    let with_field = rendered.replacen(":fidelity", ":frobnicate 3 :fidelity", 1);
+    let decoded = parse_sexpr_lenient(&with_field).expect("still recognizable");
+    assert!(
+        decoded
+            .recognition
+            .iter()
+            .any(|v| v.code == "project-unknown-field" && v.what.contains("frobnicate")),
+        "unknown keyword not named: {:?}",
+        decoded.recognition
+    );
+
+    // The pre-freeze root-seed spelling is deliberate. The former keyword is
+    // neither an externally fixed technical term nor a compatibility alias:
+    // accepting it would create two spellings for one identity-bearing field.
+    let former_seed_keyword = ["mas", "ter"].concat();
+    let with_former_seed_keyword =
+        rendered.replacen(":root", &format!(":{former_seed_keyword}"), 1);
+    assert_ne!(
+        with_former_seed_keyword, rendered,
+        "fixture must target the seed keyword"
+    );
+    let decoded = parse_sexpr_lenient(&with_former_seed_keyword).expect("still recognizable");
+    assert!(
+        decoded.recognition.iter().any(|v| {
+            v.code == "project-unknown-field" && v.what.contains(&former_seed_keyword)
+        }),
+        "former seed keyword must be refused by name: {:?}",
+        decoded.recognition
+    );
+}
+
+#[test]
+fn the_duty_default_is_receipted_never_silent() {
+    let rendered = print_sexpr(&reference_project()).expect("renders");
+    let without_duty = rendered.replacen(" :duty 1.0", "", 1);
+    assert_ne!(rendered, without_duty, "fixture edit must apply");
+
+    // Lenient: applied default carries a receipt, and the re-emission
+    // carries a canonicalization receipt binding both byte strings.
+    let decoded = parse_sexpr_lenient(&without_duty).expect("lenient parse");
+    assert_eq!(decoded.defaults.len(), 1);
+    let receipt = &decoded.defaults[0];
+    assert_eq!(receipt.field, "power.dissipation[cpu].duty");
+    assert_eq!(receipt.value, "1.0");
+    assert!(!receipt.rationale.trim().is_empty());
+    let canonicalization = decoded
+        .canonicalization
+        .expect("re-emission must be receipted");
+    assert!(canonicalization.verifies(without_duty.as_bytes(), decoded.canonical.as_bytes()));
+    assert!(decoded.findings().is_empty(), "{:?}", decoded.findings());
+
+    // Strict: the same bytes refuse.
+    let refusal = parse_sexpr(&without_duty).expect_err("strict parse must refuse");
+    assert!(
+        refusal.code == "fsim-non-canonical" || refusal.code == "fsim-default-in-strict-mode",
+        "unexpected refusal {refusal:?}"
+    );
+}
+
+#[test]
+fn noncanonical_whitespace_is_refused_strictly_and_receipted_leniently() {
+    let rendered = print_sexpr(&reference_project()).expect("renders");
+    let padded = format!("{rendered} ");
+    let refusal = parse_sexpr(&padded).expect_err("strict refuses padding");
+    assert_eq!(refusal.code, "fsim-non-canonical");
+
+    let decoded = parse_sexpr_lenient(&padded).expect("lenient accepts with receipt");
+    let receipt = decoded.canonicalization.expect("receipt owed");
+    assert!(receipt.verifies(padded.as_bytes(), decoded.canonical.as_bytes()));
+    assert_eq!(decoded.canonical, rendered);
+}
+
+#[test]
+fn the_version_bump_machinery_is_proven_with_the_synthetic_migration() {
+    let rendered = print_sexpr(&reference_project()).expect("renders");
+    let v0 = rendered.replacen(
+        &format!("(fsim-project :version {FSIM_VERSION}"),
+        "(fsim-project :version 0",
+        1,
+    );
+
+    // The reader refuses the old envelope outright.
+    let refusal = parse_sexpr(&v0).expect_err("v0 must not parse directly");
+    assert_eq!(refusal.code, "fsim-unsupported-version");
+
+    // The explicit migration path re-emits canonical current-version bytes
+    // and binds both byte strings into a verifying receipt.
+    let migrated = migrate_envelope(&v0, 0).expect("registered rule migrates");
+    assert_eq!(migrated.decoded.canonical, rendered);
+    assert!(
+        migrated
+            .receipt
+            .verifies(v0.as_bytes(), migrated.decoded.canonical.as_bytes())
+    );
+    assert_eq!(migrated.receipt.source_version, 0);
+    assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
+
+    // Round trip: the migrated document parses strictly to the same spec.
+    let reparsed = parse_sexpr(&migrated.decoded.canonical).expect("migrated bytes parse");
+    assert_eq!(reparsed.spec, reference_project());
+
+    // Migration refuses what it does not cover.
+    assert_eq!(
+        migrate_envelope(&rendered, FSIM_VERSION)
+            .expect_err("no-op refused")
+            .code,
+        "fsim-migration-not-needed"
+    );
+    assert_eq!(
+        migrate_envelope(&v0, FSIM_VERSION + 1)
+            .expect_err("unknown version refused")
+            .code,
+        "fsim-migration-unknown-version"
+    );
+}
+
+#[test]
+fn v2_envelopes_migrate_to_current_without_inventing_conduction_inputs() {
+    let mut historical = reference_project();
+    historical
+        .cooling
+        .as_mut()
+        .expect("reference cooling")
+        .conduction = None;
+    let current = print_sexpr(&historical).expect("current no-conduction project renders");
+    let v2 = current
+        .replacen(
+            &format!("(fsim-project :version {FSIM_VERSION}"),
+            "(fsim-project :version 2",
+            1,
+        )
+        .replacen(
+            &format!("(versions :schema {FSIM_VERSION}"),
+            "(versions :schema 2",
+            1,
+        );
+
+    let refusal = parse_sexpr(&v2).expect_err("v2 does not parse directly as v3");
+    assert_eq!(refusal.code, "fsim-unsupported-version");
+
+    let migrated = migrate_envelope(&v2, 2).expect("registered v2 rule migrates");
+    assert_eq!(migrated.decoded.canonical, current);
+    assert_eq!(migrated.decoded.spec, historical);
+    assert!(
+        migrated
+            .decoded
+            .spec
+            .cooling
+            .as_ref()
+            .expect("cooling survives")
+            .conduction
+            .is_none(),
+        "migration must not fabricate a seed or boundary condition"
+    );
+    assert!(
+        migrated
+            .receipt
+            .verifies(v2.as_bytes(), migrated.decoded.canonical.as_bytes())
+    );
+    assert_eq!(migrated.receipt.source_version, 2);
+    assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
+    assert_eq!(
+        migrated.receipt.rule.label(),
+        "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10"
+    );
+}
+
+#[test]
+fn v3_envelopes_migrate_to_current_without_inventing_airflow_convection() {
+    // A version-3 document names only fixed-temperature / heat-flux /
+    // convection laws; the v4 rewrite must not conjure an airflow branch,
+    // inlet, channel geometry, or correlation onto any of them.
+    let historical = reference_project();
+    let current = print_sexpr(&historical).expect("current project renders");
+    let v3 = current
+        .replacen(
+            &format!("(fsim-project :version {FSIM_VERSION}"),
+            "(fsim-project :version 3",
+            1,
+        )
+        .replacen(
+            &format!("(versions :schema {FSIM_VERSION}"),
+            "(versions :schema 3",
+            1,
+        );
+    assert_ne!(v3, current, "the version rewrite must bite");
+
+    let refusal = parse_sexpr(&v3).expect_err("v3 does not parse directly as v4");
+    assert_eq!(refusal.code, "fsim-unsupported-version");
+
+    let migrated = migrate_envelope(&v3, 3).expect("registered v3 rule migrates");
+    assert_eq!(migrated.decoded.canonical, current);
+    assert_eq!(migrated.decoded.spec, historical);
+    let conduction = migrated
+        .decoded
+        .spec
+        .cooling
+        .as_ref()
+        .and_then(|cooling| cooling.conduction.as_ref())
+        .expect("the reference conduction setup survives");
+    assert!(
+        conduction.boundaries.iter().all(|boundary| !matches!(
+            boundary.condition,
+            ThermalBoundaryCondition::AirflowConvection { .. }
+        )),
+        "migration must not fabricate an airflow-convection law"
+    );
+    assert!(
+        migrated
+            .receipt
+            .verifies(v3.as_bytes(), migrated.decoded.canonical.as_bytes())
+    );
+    assert_eq!(migrated.receipt.source_version, 3);
+    assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
+    assert_eq!(
+        migrated.receipt.rule.label(),
+        "conduction-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10"
+    );
+}
+
+#[test]
+fn v4_envelopes_migrate_to_v5_without_inventing_radiation() {
+    let historical = reference_project();
+    let current = print_sexpr(&historical).expect("current project renders");
+    let v4 = current
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 4", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 4", 1);
+    assert_ne!(v4, current);
+    assert_eq!(
+        parse_sexpr(&v4)
+            .expect_err("strict current reader refuses v4")
+            .code,
+        "fsim-unsupported-version"
+    );
+    let parsed = parse_sexpr_migrating(&v4).expect("v4 migrates");
+    assert_eq!(parsed.decoded.spec, historical);
+    assert_eq!(parsed.decoded.canonical, current);
+    let receipt = parsed.migration.expect("v4 migration is receipted");
+    assert_eq!(receipt.source_version, 4);
+    assert_eq!(receipt.target_version, FSIM_VERSION);
+    assert_eq!(receipt.rule.label(), "conduction-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10");
+    assert!(receipt.verifies(v4.as_bytes(), current.as_bytes()));
+    assert!(
+        parsed
+            .decoded
+            .spec
+            .cooling
+            .as_ref()
+            .expect("cooling")
+            .conduction
+            .as_ref()
+            .expect("conduction")
+            .radiation
+            .is_none()
+    );
+    assert!(
+        parse_sexpr_migrating(&current)
+            .expect("native current")
+            .migration
+            .is_none()
+    );
+}
+
+#[test]
+fn v5_envelopes_migrate_to_v6_without_inventing_a_material_tolerance() {
+    let historical = reference_project();
+    let current = print_sexpr(&historical).expect("current project renders");
+    let v5 = current
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 5", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 5", 1);
+    assert_ne!(v5, current);
+    let parsed = parse_sexpr_migrating(&v5).expect("v5 migrates");
+    assert_eq!(parsed.decoded.spec, historical);
+    assert_eq!(parsed.decoded.canonical, current);
+    let receipt = parsed.migration.expect("v5 migration is receipted");
+    assert_eq!((receipt.source_version, receipt.target_version), (5, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10");
+    assert!(receipt.verifies(v5.as_bytes(), current.as_bytes()));
+    assert!(
+        parsed.decoded.spec.materials.iter().flatten().all(|b| b.conductivity_tolerance.is_none()),
+        "undeclared stays undeclared"
+    );
+}
+
+#[test]
+fn v6_envelopes_migrate_to_v7_without_inventing_a_surface_offset() {
+    let historical = tolerance_project();
+    let current = print_sexpr(&historical).expect("current project renders");
+    let v6 = current
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 6", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 6", 1);
+    assert_ne!(v6, current);
+    let parsed = parse_sexpr_migrating(&v6).expect("v6 with a material tolerance migrates");
+    assert_eq!(parsed.decoded.spec, historical);
+    let receipt = parsed.migration.expect("v6 migration is receipted");
+    assert_eq!((receipt.source_version, receipt.target_version), (6, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10");
+    assert!(receipt.verifies(v6.as_bytes(), current.as_bytes()));
+    assert!(parsed.decoded.spec.geometry.iter().flatten().all(|a| a.surface_offset.is_none()));
+}
+
+fn offset_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    spec.geometry.as_mut().expect("geometry")[0].surface_offset = Some(fs_project::SurfaceOffset {
+        offset_m: 5e-5,
+        basis: "drawing-general-tolerance".to_string(),
+        source: "illustrative ISO 2768-f class band for a machined part".to_string(),
+    });
+    spec
+}
+
+#[test]
+fn surface_offset_round_trips_and_refuses_partial_invalid_or_pre_v7_declarations() {
+    let spec = offset_project();
+    let sexpr = print_sexpr(&spec).expect("renders");
+    assert!(sexpr.contains(":surface-offset-m 5e-5 :offset-basis \"drawing-general-tolerance\""), "{sexpr}");
+    assert_eq!(parse_sexpr(&sexpr).expect("canonical").spec, spec);
+    assert_eq!(parse_json(&print_json(&spec).expect("json")).expect("canonical json").spec, spec);
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let partial = parse_sexpr_lenient(&sexpr.replacen(" :offset-basis \"drawing-general-tolerance\"", "", 1))
+        .expect("syntax is fine");
+    assert!(partial.findings().iter().any(|f| f.code == "project-malformed-clause"));
+    for offset in [0.0, -1e-4, 1.5, f64::NAN] {
+        let mut bad = offset_project();
+        bad.geometry.as_mut().unwrap()[0].surface_offset.as_mut().unwrap().offset_m = offset;
+        assert!(bad.validate().iter().any(|v| v.code == "project-geometry-offset-invalid"), "{offset}");
+    }
+    let false_v6 = sexpr
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 6", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 6", 1);
+    assert_eq!(parse_sexpr_migrating(&false_v6).expect_err("v6 never carried an offset").code, "fsim-migration-payload");
+}
+
+fn tolerance_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    spec.materials.as_mut().expect("materials")[0].conductivity_tolerance =
+        Some(fs_project::MaterialTolerance {
+            rel: 0.08,
+            basis: "source-discrepancy".to_string(),
+            source: "fixture card 167 W/m/K vs NIST 6061-T6 fit 154.35 W/m/K at 293 K".to_string(),
+        });
+    spec
+}
+
+#[test]
+fn material_tolerance_round_trips_in_both_spellings_and_moves_the_hash() {
+    let spec = tolerance_project();
+    let sexpr = print_sexpr(&spec).expect("renders");
+    assert!(sexpr.contains(":conductivity-tolerance-rel 0.08 :tolerance-basis \"source-discrepancy\""));
+    let decoded = parse_sexpr(&sexpr).expect("canonical s-expression");
+    assert_eq!(decoded.spec, spec);
+    let json = print_json(&spec).expect("json renders");
+    assert_eq!(parse_json(&json).expect("canonical json").spec, spec);
+    let plain = print_sexpr(&reference_project()).expect("renders");
+    assert_ne!(canonical_hash(plain.as_bytes()), canonical_hash(sexpr.as_bytes()));
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+}
+
+#[test]
+fn material_tolerance_refuses_partial_invalid_or_pre_v6_declarations() {
+    let sexpr = print_sexpr(&tolerance_project()).expect("renders");
+    // All three keys or none.
+    let partial = sexpr.replacen(" :tolerance-basis \"source-discrepancy\"", "", 1);
+    let partial = parse_sexpr_lenient(&partial).expect("syntax is fine");
+    assert!(
+        partial.findings().iter().any(|f| f.code == "project-malformed-clause"),
+        "{:?}",
+        partial.findings()
+    );
+    assert!(partial.spec.materials.as_ref().unwrap()[0].conductivity_tolerance.is_none());
+    for rel in [0.0, 1.0, -0.1, f64::NAN] {
+        let mut spec = tolerance_project();
+        spec.materials.as_mut().unwrap()[0].conductivity_tolerance.as_mut().unwrap().rel = rel;
+        assert!(
+            spec.validate().iter().any(|v| v.code == "project-material-tolerance-invalid"),
+            "rel {rel} admitted"
+        );
+    }
+    let mut unsourced = tolerance_project();
+    unsourced.materials.as_mut().unwrap()[0].conductivity_tolerance.as_mut().unwrap().source =
+        String::new();
+    assert!(unsourced.validate().iter().any(|v| v.code == "project-material-tolerance-source-invalid"));
+    // A tolerance cannot masquerade as a v5 document.
+    let false_v5 = sexpr
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 5", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 5", 1);
+    assert_eq!(
+        parse_sexpr_migrating(&false_v5).expect_err("v5 never carried a tolerance").code,
+        "fsim-migration-payload"
+    );
+}
+
+fn radiation_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    let conduction = spec
+        .cooling
+        .as_mut()
+        .expect("cooling")
+        .conduction
+        .as_mut()
+        .expect("conduction");
+    conduction.boundaries[0].condition = ThermalBoundaryCondition::Convection {
+        coefficient: QtyAny::new(10.0, fs_project::spec::dims::HEAT_TRANSFER_COEFFICIENT),
+        reference_temperature: kelvin(293.15),
+    };
+    conduction.radiation = Some(ConductionRadiation {
+        surfaces: vec![RadiatingSurface {
+            name: "black-anodized-sink".to_string(),
+            target: "sink-base".to_string(),
+            card: "ab".repeat(32),
+            claim: Some("cd".repeat(32)),
+            query_temperature: kelvin(320.0),
+            reservoir_temperature: kelvin(293.15),
+        }],
+        max_iterations: 200,
+        temperature_tolerance: kelvin(1.0e-6),
+        heat_tolerance: watts(1.0e-6),
+        relaxation: 0.5,
+    });
+    spec
+}
+
+#[test]
+fn radiation_round_trip_retains_explicit_physics_in_both_spellings() {
+    let spec = radiation_project();
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let canonical = print_sexpr(&spec).expect("radiation renders");
+    assert!(canonical.contains(":radiation (radiation :surfaces (surfaces (surface"));
+    let decoded = parse_sexpr(&canonical).expect("strict radiation parses");
+    assert_eq!(decoded.spec, spec);
+    assert!(decoded.defaults.is_empty());
+    let json = print_json(&spec).expect("JSON radiation renders");
+    let json_decoded = parse_json(&json).expect("JSON radiation parses");
+    assert_eq!(json_decoded.spec, spec);
+    assert_eq!(json_decoded.canonical, canonical);
+    let mut changed = spec.clone();
+    changed
+        .cooling
+        .as_mut()
+        .expect("cooling")
+        .conduction
+        .as_mut()
+        .expect("conduction")
+        .radiation
+        .as_mut()
+        .expect("radiation")
+        .surfaces[0]
+        .reservoir_temperature = kelvin(300.0);
+    assert_ne!(
+        canonical_hash(canonical.as_bytes()),
+        canonical_hash(print_sexpr(&changed).expect("changed project").as_bytes())
+    );
+
+    // A new physical declaration cannot masquerade as an old-schema file.
+    let false_v4 = canonical
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 4", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 4", 1);
+    assert_eq!(
+        parse_sexpr_migrating(&false_v4)
+            .expect_err("v4 never carried radiation")
+            .code,
+        "fsim-migration-payload"
+    );
+}
+
+#[test]
+fn radiation_refuses_invalid_controls_cards_and_duplicate_surfaces() {
+    let mut invalid = radiation_project();
+    let radiation = invalid
+        .cooling
+        .as_mut()
+        .expect("cooling")
+        .conduction
+        .as_mut()
+        .expect("conduction")
+        .radiation
+        .as_mut()
+        .expect("radiation");
+    radiation.max_iterations = 0;
+    radiation.relaxation = 1.01;
+    radiation.temperature_tolerance = watts(1.0e-6);
+    radiation.heat_tolerance = watts(0.0);
+    radiation.surfaces[0].card = "unresolved-card-name".to_string();
+    radiation.surfaces[0].claim = Some("ambiguous".to_string());
+    radiation.surfaces[0].query_temperature = kelvin(0.0);
+    radiation.surfaces[0].reservoir_temperature = kelvin(f64::NAN);
+    radiation.surfaces.push(radiation.surfaces[0].clone());
+    let findings = invalid.validate();
+    for expected in [
+        "project-radiation-iterations",
+        "project-radiation-relaxation",
+        "project-radiation-dims",
+        "project-radiation-tolerance",
+        "project-radiation-card",
+        "project-radiation-claim",
+        "project-radiation-temperature",
+        "project-radiation-surface-name",
+        "project-radiation-target-duplicate",
+    ] {
+        assert!(
+            findings.iter().any(|finding| finding.code == expected),
+            "missing {expected}: {findings:?}"
+        );
+    }
+    assert!(
+        findings
+            .iter()
+            .all(|finding| !finding.fix.trim().is_empty())
+    );
+    let mut unsupported = radiation_project();
+    let radiation = unsupported
+        .cooling
+        .as_mut()
+        .expect("cooling")
+        .conduction
+        .as_mut()
+        .expect("conduction")
+        .radiation
+        .as_mut()
+        .expect("radiation");
+    radiation.surfaces[0].target = "cpu".to_string();
+    assert!(
+        unsupported
+            .validate()
+            .iter()
+            .any(|finding| finding.code == "project-radiation-target-boundary")
+    );
+}
+
+#[test]
+fn radiation_wire_never_defaults_missing_controls_or_accepts_typos() {
+    let canonical = print_sexpr(&radiation_project()).expect("radiation renders");
+    for malformed in [
+        canonical.replacen(" :max-iterations 200", "", 1),
+        canonical.replacen(":max-iterations 200", ":max-iterations -1", 1),
+        canonical.replacen(":max-iterations 200", ":max-iterations 4294967296", 1),
+        canonical.replacen(":reservoir-temperature", ":reservior-temperature", 1),
+        canonical.replacen(" :relaxation 0.5", "", 1),
+    ] {
+        assert_ne!(
+            malformed, canonical,
+            "the intended field mutation must occur"
+        );
+        match parse_sexpr_lenient(&malformed) {
+            Ok(decoded) => {
+                assert!(!decoded.recognition.is_empty());
+                assert!(
+                    decoded.defaults.is_empty(),
+                    "physical radiation inputs are never defaulted"
+                );
+            }
+            Err(error) => {
+                // Missing quantities/scalars cannot be rendered as canonical
+                // physical inputs; their typed lower-layer refusal propagates.
+                assert!(matches!(error.code, "fsim-quantity" | "fsim-syntax"));
+            }
+        }
+        assert!(
+            parse_sexpr(&malformed).is_err(),
+            "strict parse refuses changed intent"
+        );
+    }
+}
+
+/// One admissible airflow-convection law on the reference project's vent.
+fn airflow_convection_law(order: u32) -> ThermalBoundary {
+    ThermalBoundary {
+        target: "sink-base".to_string(),
+        condition: ThermalBoundaryCondition::AirflowConvection {
+            branch: "sink-base".to_string(),
+            order,
+            inlet_temperature: kelvin(300.15),
+            hydraulic_diameter: QtyAny::new(0.004, fs_project::spec::dims::LENGTH),
+            flow_area: QtyAny::new(8.0e-4, fs_project::spec::dims::AREA),
+            channel_length: QtyAny::new(0.05, fs_project::spec::dims::LENGTH),
+            correlation: "convection.circular-duct-laminar-cwt".to_string(),
+        },
+    }
+}
+
+fn with_airflow_laws(laws: Vec<ThermalBoundary>) -> ProjectSpec {
+    let mut spec = reference_project();
+    let conduction = spec
+        .cooling
+        .as_mut()
+        .and_then(|cooling| cooling.conduction.as_mut())
+        .expect("reference conduction");
+    // Replace the fixed-temperature anchor on the vent region with the
+    // derived law so the target set stays disjoint.
+    conduction
+        .boundaries
+        .retain(|boundary| boundary.target != "sink-base");
+    conduction.boundaries.extend(laws);
+    spec
+}
+
+#[test]
+fn airflow_convection_law_round_trips_and_validates_clean() {
+    let spec = with_airflow_laws(vec![airflow_convection_law(0)]);
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let rendered = print_sexpr(&spec).expect("v4 law renders");
+    assert!(rendered.contains("(airflow-convection :target \"sink-base\" :branch \"sink-base\" :order 0 :inlet-temperature 300.15K"));
+    assert!(rendered.contains(":correlation \"convection.circular-duct-laminar-cwt\")"));
+    let decoded = parse_sexpr(&rendered).expect("v4 law parses");
+    assert_eq!(decoded.spec, spec, "wire round trip must be exact");
+    assert_eq!(
+        decoded.canonical, rendered,
+        "the writer output is canonical"
+    );
+    assert!(decoded.spec.validate().is_empty());
+}
+
+#[test]
+fn airflow_convection_law_hostile_declarations_refuse_by_name() {
+    let codes = |spec: &ProjectSpec| {
+        spec.validate()
+            .into_iter()
+            .map(|finding| finding.code)
+            .collect::<Vec<_>>()
+    };
+    // A branch that is not a declared vent region.
+    let mut unknown_branch = airflow_convection_law(0);
+    if let ThermalBoundaryCondition::AirflowConvection { branch, .. } =
+        &mut unknown_branch.condition
+    {
+        *branch = "leakage".to_string();
+    }
+    assert!(
+        codes(&with_airflow_laws(vec![unknown_branch]))
+            .contains(&"project-conduction-airflow-branch"),
+    );
+    // Two laws on one branch sharing a stream-wise order.
+    let mut second = airflow_convection_law(0);
+    second.target = "cpu-sink-tim".to_string();
+    let duplicate = with_airflow_laws(vec![airflow_convection_law(0), second]);
+    assert!(codes(&duplicate).contains(&"project-conduction-airflow-order"));
+    // Distinct orders on one branch are admissible.
+    let mut second_ok = airflow_convection_law(1);
+    second_ok.target = "cpu-sink-tim".to_string();
+    let chained = with_airflow_laws(vec![airflow_convection_law(0), second_ok]);
+    assert!(
+        !codes(&chained)
+            .iter()
+            .any(|code| code.starts_with("project-conduction-airflow")),
+        "{:?}",
+        codes(&chained)
+    );
+    // An inlet outside the envelope's ambient range.
+    let mut hot_inlet = airflow_convection_law(0);
+    if let ThermalBoundaryCondition::AirflowConvection {
+        inlet_temperature, ..
+    } = &mut hot_inlet.condition
+    {
+        *inlet_temperature = kelvin(350.0);
+    }
+    assert!(
+        codes(&with_airflow_laws(vec![hot_inlet]))
+            .contains(&"project-conduction-airflow-inlet-envelope"),
+    );
+    // A correlation id that is not an fs-convection card.
+    let mut unknown_card = airflow_convection_law(0);
+    if let ThermalBoundaryCondition::AirflowConvection { correlation, .. } =
+        &mut unknown_card.condition
+    {
+        *correlation = "convection.made-up".to_string();
+    }
+    assert!(
+        codes(&with_airflow_laws(vec![unknown_card]))
+            .contains(&"project-conduction-airflow-correlation"),
+    );
+    // Non-positive channel geometry and a wrong dimension.
+    let mut flat = airflow_convection_law(0);
+    if let ThermalBoundaryCondition::AirflowConvection {
+        flow_area,
+        hydraulic_diameter,
+        ..
+    } = &mut flat.condition
+    {
+        *flow_area = QtyAny::new(0.0, fs_project::spec::dims::AREA);
+        *hydraulic_diameter = QtyAny::new(0.004, fs_project::spec::dims::AREA);
+    }
+    let flat_codes = codes(&with_airflow_laws(vec![flat]));
+    assert!(flat_codes.contains(&"project-conduction-airflow-range"));
+    assert!(flat_codes.contains(&"project-conduction-boundary-dims"));
+    // The wire refuses a malformed stream-wise order.
+    let rendered =
+        print_sexpr(&with_airflow_laws(vec![airflow_convection_law(0)])).expect("renders");
+    let negative = rendered.replacen(":order 0", ":order -1", 1);
+    assert_ne!(negative, rendered);
+    let decoded = parse_sexpr_lenient(&negative).expect("structurally parses");
+    assert!(
+        decoded
+            .spec
+            .validate()
+            .iter()
+            .chain(decoded.recognition.iter())
+            .any(|finding| finding.code == "project-malformed-clause")
+    );
+}
+
+#[test]
+fn entity_identity_pins_catch_drift() {
+    // A correct pin is silent.
+    let expected = EntityDeclaration::assembly("enclosure-asm")
+        .with_display_name("Enclosure")
+        .identity()
+        .token();
+    let mut pinned = reference_project();
+    pinned.assembly.as_mut().expect("assembly")[0] = EntityDecl::Assembly {
+        name: "enclosure-asm".to_string(),
+        display: "Enclosure".to_string(),
+        expect_id: Some(expected),
+    };
+    assert!(pinned.validate().is_empty(), "{:?}", pinned.validate());
+
+    // A stale pin is a named violation, not a silent rebind.
+    let mut drifted = reference_project();
+    drifted.assembly.as_mut().expect("assembly")[0] = EntityDecl::Assembly {
+        name: "enclosure-asm".to_string(),
+        display: "Enclosure".to_string(),
+        expect_id: Some("assembly:0000000000000000".to_string()),
+    };
+    let findings = drifted.validate();
+    assert!(
+        findings
+            .iter()
+            .any(|v| v.code == "project-entity-id-mismatch"),
+        "{findings:?}"
+    );
+}
+
+/// One corpus row: label, deliberately broken project, expected code.
+type CorpusRow = (&'static str, ProjectSpec, &'static str);
+
+/// Each corpus row is one deliberately broken project; the log doubles as
+/// documentation of the error-message quality bar.
+fn broken_corpus() -> Vec<CorpusRow> {
+    vec![
+        (
+            "empty-capabilities",
+            {
+                let mut s = reference_project();
+                s.capabilities = Some(Vec::new());
+                s
+            },
+            "project-capabilities-empty",
+        ),
+        (
+            "empty-power-map",
+            {
+                let mut s = reference_project();
+                s.power = Some(Vec::new());
+                s
+            },
+            "project-power-empty",
+        ),
+        (
+            "wrong-power-dims",
+            {
+                let mut s = reference_project();
+                s.power = Some(vec![PowerDissipation {
+                    region: "cpu".to_string(),
+                    watts: kelvin(35.0),
+                    duty: 1.0,
+                }]);
+                s
+            },
+            "project-power-dims",
+        ),
+        (
+            "duty-out-of-range",
+            {
+                let mut s = reference_project();
+                s.power.as_mut().expect("power")[0].duty = 1.5;
+                s
+            },
+            "project-duty-range",
+        ),
+        (
+            "inverted-ambient-range",
+            {
+                let mut s = reference_project();
+                let envelope = s.envelope.as_mut().expect("envelope");
+                envelope.ambient_lo = kelvin(350.0);
+                envelope.ambient_hi = kelvin(300.0);
+                s
+            },
+            "project-envelope-range",
+        ),
+    ]
+}
+
+fn broken_corpus_references() -> Vec<CorpusRow> {
+    vec![
+        (
+            "orphan-region-reference",
+            {
+                let mut s = reference_project();
+                s.power.as_mut().expect("power")[0].region = "ghost".to_string();
+                s
+            },
+            "project-ref-unknown",
+        ),
+        (
+            "parent-declared-after-child",
+            {
+                let mut s = reference_project();
+                let assembly = s.assembly.as_mut().expect("assembly");
+                assembly.swap(0, 1);
+                s
+            },
+            "project-entity-parent-unknown",
+        ),
+        (
+            "duplicate-entity-name",
+            {
+                let mut s = reference_project();
+                let assembly = s.assembly.as_mut().expect("assembly");
+                let duplicate = assembly[2].clone();
+                assembly.push(duplicate);
+                s
+            },
+            "project-entity-duplicate",
+        ),
+        (
+            "interface-card-on-unknown-interface",
+            {
+                let mut s = reference_project();
+                s.interface_cards.as_mut().expect("cards")[0].interface = "ghost-tim".to_string();
+                s
+            },
+            "project-ref-unknown",
+        ),
+        (
+            "malformed-card-hash",
+            {
+                let mut s = reference_project();
+                s.materials.as_mut().expect("materials")[0].card = "not-a-hash".to_string();
+                s
+            },
+            "project-material-card",
+        ),
+        (
+            "wrong-schema-version",
+            {
+                let mut s = reference_project();
+                s.versions.as_mut().expect("versions").schema = 99;
+                s
+            },
+            "project-schema-version-mismatch",
+        ),
+        (
+            "non-si-storage",
+            {
+                let mut s = reference_project();
+                s.units.as_mut().expect("units").storage = "imperial".to_string();
+                s
+            },
+            "project-units-storage",
+        ),
+        (
+            "bad-output-kind",
+            {
+                let mut s = reference_project();
+                s.outputs.as_mut().expect("outputs")[0].kind = "hologram".to_string();
+                s
+            },
+            "project-output-kind",
+        ),
+        (
+            "vacuous-tolerance",
+            {
+                let mut s = reference_project();
+                s.solver.as_mut().expect("solver").tolerance_rel = 0.0;
+                s
+            },
+            "project-solver-tolerance",
+        ),
+    ]
+}
+
+#[test]
+fn the_broken_project_corpus_logs_every_violation_with_its_fix() {
+    eprintln!("RESULT\tCASE\tCODE\tFIX");
+    let mut corpus = broken_corpus();
+    corpus.extend(broken_corpus_references());
+    for (label, spec, expected_code) in &corpus {
+        let findings = spec.validate();
+        if let Some(violation) = findings.iter().find(|v| v.code == *expected_code) {
+            eprintln!("PASS\t{label}\t{}\t{}", violation.code, violation.fix);
+            assert!(
+                !violation.fix.trim().is_empty() && !violation.what.trim().is_empty(),
+                "{label}: violation must carry what+fix"
+            );
+        } else {
+            eprintln!("FAIL\t{label}\t{expected_code}\t-");
+            panic!("{label}: expected `{expected_code}`, got {findings:?}");
+        }
+    }
+}
+
+#[test]
+fn claim_pins_travel_through_both_spellings_and_validate_as_hex() {
+    // A pinned binding round-trips canonically in both spellings and
+    // reaches the same canonical hash.
+    let mut spec = reference_project();
+    spec.materials.as_mut().expect("materials")[0].claim = Some("ef".repeat(32));
+    spec.interface_cards.as_mut().expect("interface cards")[0].claim = Some("1234".repeat(16));
+
+    let sexpr = print_sexpr(&spec).expect("pinned project renders");
+    assert!(sexpr.contains(":claim"));
+    let decoded = parse_sexpr(&sexpr).expect("pinned project parses strictly");
+    assert_eq!(decoded.spec, spec);
+    assert!(decoded.spec.validate().is_empty());
+
+    let json = print_json(&spec).expect("json renders");
+    let from_json = parse_json(&json).expect("json parses");
+    assert_eq!(
+        from_json.hash(),
+        decoded.hash(),
+        "one hash across spellings"
+    );
+
+    // An absent pin renders no `:claim` field at all (absence is the
+    // canonical spelling of "no pin"), so pre-pin documents are untouched.
+    let unpinned = print_sexpr(&reference_project()).expect("renders");
+    assert!(!unpinned.contains(":claim"));
+
+    // A malformed pin is a named structural violation on each binding kind.
+    let mut bad = reference_project();
+    bad.materials.as_mut().expect("materials")[0].claim = Some("zz".repeat(32));
+    bad.interface_cards.as_mut().expect("interface cards")[0].claim = Some("abc".to_string());
+    let violations = bad.validate();
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.code == "project-material-claim")
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.code == "project-interface-claim")
+    );
+}
+
+#[test]
+fn material_state_source_and_uncertainty_authority_are_fail_closed() {
+    let mut invalid = reference_project();
+    let material = &mut invalid.materials.as_mut().expect("materials")[0];
+    material.state.clear();
+    material.source = " matdb".to_string();
+    invalid.interface_cards.as_mut().expect("interface cards")[0].source =
+        "registry\nmirror".to_string();
+
+    let findings = invalid.validate();
+    for (code, fix) in [
+        (
+            "project-material-state-invalid",
+            "exact manufactured-state identity",
+        ),
+        ("project-material-source-invalid", "custody channel"),
+        ("project-interface-source-invalid", "custody channel"),
+    ] {
+        let finding = findings
+            .iter()
+            .find(|finding| finding.code == code)
+            .unwrap_or_else(|| panic!("missing `{code}` in {findings:?}"));
+        assert!(
+            finding.fix.contains(fix),
+            "`{code}` must give an actionable fix: {finding:?}"
+        );
+    }
+
+    // Binding-side uncertainty overrides do not exist in schema v1. A user
+    // seeking a tighter band must provide a new sourced matdb claim, whose
+    // provenance and content identity then travel through ordinary `:claim`
+    // selection. An override-looking keyword is therefore refused by name.
+    let canonical = print_sexpr(&reference_project()).expect("project renders");
+    let attempted_override = canonical.replacen(
+        ":source \"matdb\"",
+        ":uncertainty-half-width 0.001 :source \"matdb\"",
+        1,
+    );
+    assert_ne!(
+        attempted_override, canonical,
+        "fixture must target one material binding"
+    );
+    let decoded = parse_sexpr_lenient(&attempted_override).expect("document remains recognizable");
+    assert!(
+        decoded.recognition.iter().any(|finding| {
+            finding.code == "project-unknown-field"
+                && finding.what.contains("uncertainty-half-width")
+        }),
+        "binding-side uncertainty narrowing must not be silently accepted: {:?}",
+        decoded.recognition
+    );
+}
+
+#[test]
+fn interface_classes_round_trip_with_typed_manufactured_state() {
+    let states = [
+        InterfaceState::BoltedWithPattern {
+            bolt_count: 4,
+            torque: QtyAny::new(2.5, fs_project::spec::dims::TORQUE),
+            torque_half_width: QtyAny::new(0.2, fs_project::spec::dims::TORQUE),
+            pattern: "four-corner-m3".to_string(),
+        },
+        InterfaceState::Adhesive {
+            thickness: QtyAny::new(75e-6, fs_project::spec::dims::LENGTH),
+            thickness_half_width: QtyAny::new(15e-6, fs_project::spec::dims::LENGTH),
+        },
+        InterfaceState::Tim {
+            thickness: QtyAny::new(100e-6, fs_project::spec::dims::LENGTH),
+            thickness_half_width: QtyAny::new(10e-6, fs_project::spec::dims::LENGTH),
+        },
+        InterfaceState::DryContact {
+            pressure: QtyAny::new(1.5e6, fs_project::spec::dims::PRESSURE),
+            pressure_half_width: QtyAny::new(0.25e6, fs_project::spec::dims::PRESSURE),
+            finish: "machined-ra-1.6um".to_string(),
+        },
+        InterfaceState::GapWithFluid {
+            gap: QtyAny::new(0.5e-3, fs_project::spec::dims::LENGTH),
+            gap_half_width: QtyAny::new(0.05e-3, fs_project::spec::dims::LENGTH),
+            fluid: "dry-air".to_string(),
+        },
+    ];
+
+    for state in states {
+        let mut spec = reference_project();
+        spec.interface_cards.as_mut().expect("interface cards")[0].state = state.clone();
+        assert!(
+            spec.validate().is_empty(),
+            "{} state must be structurally admissible: {:?}",
+            state.class_name(),
+            spec.validate()
+        );
+        let encoded = print_sexpr(&spec).expect("state renders");
+        let decoded = parse_sexpr(&encoded).expect("state parses canonically");
+        assert_eq!(
+            decoded.spec.interface_cards.expect("interface cards")[0].state,
+            state
+        );
+    }
+}
+
+#[test]
+fn interface_state_refuses_vacuous_bands_and_cross_class_fields() {
+    let mut invalid = reference_project();
+    invalid.interface_cards.as_mut().expect("interface cards")[0].state =
+        InterfaceState::BoltedWithPattern {
+            bolt_count: 0,
+            torque: QtyAny::new(1.0, fs_project::spec::dims::TORQUE),
+            torque_half_width: QtyAny::new(1.0, fs_project::spec::dims::TORQUE),
+            pattern: String::new(),
+        };
+    let findings = invalid.validate();
+    for code in [
+        "project-interface-bolt-count",
+        "project-interface-state-range",
+        "project-interface-state-label",
+    ] {
+        assert!(
+            findings.iter().any(|finding| finding.code == code),
+            "missing `{code}` in {findings:?}"
+        );
+    }
+
+    let canonical = print_sexpr(&reference_project()).expect("project renders");
+    let cross_class = canonical.replacen(":class \"tim\"", ":class \"tim\" :fluid \"dry-air\"", 1);
+    let decoded = parse_sexpr_lenient(&cross_class).expect("document remains recognizable");
+    assert!(
+        decoded
+            .recognition
+            .iter()
+            .any(|finding| finding.code == "project-interface-state-field"),
+        "class-foreign parameters must never be silently discarded: {:?}",
+        decoded.recognition
+    );
+}
+
+#[test]
+fn deliberate_perfect_contact_round_trips_and_conflicts_fail_closed() {
+    let mut spec = reference_project();
+    spec.interface_cards = Some(Vec::new());
+    spec.perfect_contacts = Some(vec![PerfectContactBinding {
+        interface: "cpu-sink-tim".to_string(),
+        authority: "thermal-policy:rev-7".to_string(),
+        rationale: "screening idealization approved for this design study".to_string(),
+    }]);
+
+    assert!(
+        spec.validate().is_empty(),
+        "explicit project intent is structurally valid even though binding will refuse unsupported solver authority: {:?}",
+        spec.validate()
+    );
+    let sexpr = print_sexpr(&spec).expect("perfect-contact project renders");
+    assert!(sexpr.contains("(perfect-contacts (contact"));
+    assert!(sexpr.contains(":authority \"thermal-policy:rev-7\""));
+    let from_sexpr = parse_sexpr(&sexpr).expect("perfect-contact project parses");
+    assert_eq!(from_sexpr.spec, spec);
+    let json = print_json(&spec).expect("perfect-contact JSON renders");
+    let from_json = parse_json(&json).expect("perfect-contact JSON parses");
+    assert_eq!(from_json.spec, spec);
+    assert_eq!(from_json.hash(), from_sexpr.hash());
+
+    let mut conflict = spec.clone();
+    conflict.interface_cards = reference_project().interface_cards;
+    let findings = conflict.validate();
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.code == "project-interface-law-conflict"),
+        "card-backed and perfect-contact laws must never coexist: {findings:?}"
+    );
+
+    let perfect = spec
+        .perfect_contacts
+        .as_mut()
+        .expect("perfect contacts")
+        .first_mut()
+        .expect("perfect contact");
+    perfect.authority = " thermal-policy:rev-7".to_string();
+    perfect.rationale.clear();
+    let findings = spec.validate();
+    for code in [
+        "project-perfect-contact-authority-invalid",
+        "project-perfect-contact-rationale-invalid",
+    ] {
+        assert!(
+            findings.iter().any(|finding| finding.code == code),
+            "missing `{code}` in {findings:?}"
+        );
+    }
+}
+
+// ---- Declared fan curve + airflow leakage accretion (frankensim-frn2i) ----
+
+fn flow_q(value: f64) -> QtyAny {
+    QtyAny::new(value, fs_project::spec::dims::VOLUMETRIC_FLOW)
+}
+
+fn pascals(value: f64) -> QtyAny {
+    QtyAny::new(value, fs_project::spec::dims::PRESSURE)
+}
+
+fn declared_fan_curve() -> FanCurveDecl {
+    FanCurveDecl {
+        points: vec![
+            FanCurvePoint {
+                flow: flow_q(0.0),
+                static_pressure: pascals(60.0),
+            },
+            FanCurvePoint {
+                flow: flow_q(0.008),
+                static_pressure: pascals(50.0),
+            },
+            FanCurvePoint {
+                flow: flow_q(0.02),
+                static_pressure: pascals(0.0),
+            },
+        ],
+        pressure_tolerance_rel: 0.08,
+        tolerance_basis: FanToleranceBasis::Manufacturer,
+        source: "Synthetic fixture curve; not manufacturer performance data".to_string(),
+        source_id: "fixture-fan-curve-v1".to_string(),
+        min_flow: flow_q(0.002),
+    }
+}
+
+fn curved_cooling_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    let cooling = spec.cooling.as_mut().expect("reference has cooling");
+    cooling.fans[0].curve = Some(declared_fan_curve());
+    cooling.airflow_leakage = Some(AirflowLeakage {
+        area: QtyAny::new(0.0015, fs_project::spec::dims::AREA),
+    });
+    spec
+}
+
+fn with_broken_curve(mutate: impl FnOnce(&mut FanCurveDecl)) -> ProjectSpec {
+    let mut spec = curved_cooling_project();
+    let curve = spec.cooling.as_mut().expect("cooling present").fans[0]
+        .curve
+        .as_mut()
+        .expect("curve present");
+    mutate(curve);
+    spec
+}
+
+#[test]
+fn a_declared_fan_curve_and_airflow_leakage_round_trip_hash_stable() {
+    let spec = curved_cooling_project();
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+
+    let rendered = print_sexpr(&spec).expect("renders");
+    let decoded = parse_sexpr(&rendered).expect("strict parse");
+    assert_eq!(
+        decoded.spec, spec,
+        "curve/leakage must survive the round trip"
+    );
+    assert!(decoded.findings().is_empty(), "{:?}", decoded.findings());
+    assert!(
+        decoded.defaults.is_empty(),
+        "explicit min-flow needs no default"
+    );
+    assert_eq!(decoded.hash(), canonical_hash(decoded.canonical.as_bytes()));
+
+    let json = print_json(&spec).expect("renders json");
+    let from_json = parse_json(&json).expect("json parses");
+    assert_eq!(from_json.spec, spec, "both spellings reach one spec");
+    assert_eq!(from_json.hash(), decoded.hash(), "one canonical identity");
+}
+
+#[test]
+fn the_min_flow_default_is_receipted_never_silent() {
+    let rendered = print_sexpr(&curved_cooling_project()).expect("renders");
+    let start = rendered
+        .find(" :min-flow ")
+        .expect("fixture declares min-flow");
+    let end = start
+        + rendered[start..]
+            .find(" :points")
+            .expect("points follows min-flow in canonical order");
+    let without_min_flow = format!("{}{}", &rendered[..start], &rendered[end..]);
+    assert_ne!(rendered, without_min_flow, "fixture edit must apply");
+
+    let decoded = parse_sexpr_lenient(&without_min_flow).expect("lenient parse");
+    assert_eq!(decoded.defaults.len(), 1);
+    let receipt = &decoded.defaults[0];
+    assert_eq!(receipt.field, "cooling.fans[intake-1].curve.min-flow");
+    assert_eq!(
+        receipt.value, "0 m^3/s",
+        "defaults to the first point's flow"
+    );
+    assert!(!receipt.rationale.trim().is_empty());
+    assert!(decoded.findings().is_empty(), "{:?}", decoded.findings());
+    let canonicalization = decoded
+        .canonicalization
+        .expect("re-emission must be receipted");
+    assert!(canonicalization.verifies(without_min_flow.as_bytes(), decoded.canonical.as_bytes()));
+
+    let refusal = parse_sexpr(&without_min_flow).expect_err("strict parse must refuse");
+    assert!(
+        refusal.code == "fsim-non-canonical" || refusal.code == "fsim-default-in-strict-mode",
+        "unexpected refusal {refusal:?}"
+    );
+}
+
+#[test]
+fn a_bad_tolerance_basis_is_refused_by_enum() {
+    let rendered = print_sexpr(&curved_cooling_project()).expect("renders");
+    let bad = rendered.replacen("\"manufacturer\"", "\"vibes\"", 1);
+    assert_ne!(rendered, bad, "fixture edit must apply");
+    let decoded = parse_sexpr_lenient(&bad).expect("lenient parse");
+    assert!(
+        decoded
+            .findings()
+            .iter()
+            .any(|violation| violation.code == "project-field-enum"),
+        "{:?}",
+        decoded.findings()
+    );
+}
+
+fn broken_cooling_corpus() -> Vec<(&'static str, ProjectSpec, &'static str)> {
+    vec![
+        (
+            "single-point-fan-curve",
+            with_broken_curve(|curve| {
+                curve.points.truncate(1);
+                curve.min_flow = flow_q(0.0);
+            }),
+            "project-fan-curve-shape",
+        ),
+        (
+            "non-monotone-fan-curve-flow",
+            with_broken_curve(|curve| curve.points[1].flow = flow_q(0.03)),
+            "project-fan-curve-shape",
+        ),
+        (
+            "rising-pressure-fan-curve",
+            with_broken_curve(|curve| curve.points[1].static_pressure = pascals(80.0)),
+            "project-fan-curve-shape",
+        ),
+        (
+            "fan-curve-min-flow-outside-span",
+            with_broken_curve(|curve| curve.min_flow = flow_q(0.5)),
+            "project-fan-curve-shape",
+        ),
+        (
+            "fan-curve-tolerance-out-of-range",
+            with_broken_curve(|curve| curve.pressure_tolerance_rel = 1.5),
+            "project-fan-curve-tolerance",
+        ),
+        (
+            "fan-curve-unsourced",
+            with_broken_curve(|curve| curve.source = "  ".to_string()),
+            "project-fan-curve-source",
+        ),
+        (
+            "fan-curve-wrong-dims",
+            with_broken_curve(|curve| curve.points[0].flow = pascals(0.0)),
+            "project-fan-curve-dims",
+        ),
+        (
+            "airflow-leakage-wrong-dims",
+            {
+                let mut s = curved_cooling_project();
+                s.cooling.as_mut().expect("cooling").airflow_leakage =
+                    Some(AirflowLeakage { area: watts(3.0) });
+                s
+            },
+            "project-airflow-leakage-dims",
+        ),
+        (
+            "wrong-fan-flow-dims",
+            {
+                let mut s = reference_project();
+                s.cooling.as_mut().expect("cooling").fans[0].flow = kelvin(300.0);
+                s
+            },
+            "project-fan-dims",
+        ),
+        (
+            "wrong-vent-area-dims",
+            {
+                let mut s = reference_project();
+                s.cooling.as_mut().expect("cooling").vents[0].area = watts(4.0);
+                s
+            },
+            "project-vent-dims",
+        ),
+        (
+            "wrong-thermal-leakage-dims",
+            {
+                let mut s = reference_project();
+                s.cooling.as_mut().expect("cooling").leakage = kelvin(2.5);
+                s
+            },
+            "project-leakage-dims",
+        ),
+    ]
+}
+
+#[test]
+fn the_broken_cooling_corpus_logs_every_violation_with_its_fix() {
+    eprintln!("RESULT\tCASE\tCODE\tFIX");
+    for (label, spec, expected_code) in &broken_cooling_corpus() {
+        let findings = spec.validate();
+        if let Some(violation) = findings.iter().find(|v| v.code == *expected_code) {
+            eprintln!("PASS\t{label}\t{}\t{}", violation.code, violation.fix);
+            assert!(
+                !violation.fix.trim().is_empty() && !violation.what.trim().is_empty(),
+                "{label}: violation must carry what+fix"
+            );
+        } else {
+            eprintln!("FAIL\t{label}\t{expected_code}\t-");
+            panic!("{label}: expected `{expected_code}`, got {findings:?}");
+        }
+    }
+}
+
+/// The reference project plus a chip-footprint surface on the board part,
+/// selected by a box and carrying the power (fsim v8).
+fn surface_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    spec.assembly.as_mut().expect("assembly").push(EntityDecl::Surface {
+        parent: "board".to_string(),
+        name: "die-footprint".to_string(),
+        display: "CPU die footprint".to_string(),
+        expect_id: None,
+    });
+    spec.assignments.as_mut().expect("assignments").push(GeometryAssignment {
+        artifact: "enclosure".to_string(),
+        target: "die-footprint".to_string(),
+        length_unit: "m".to_string(),
+        selector: MeshSelector::Box { min: [0.01, 0.01, -1e-6], max: [0.03, 0.03, 1e-6], tolerance: 0.0 },
+        allow_overlap: true,
+    });
+    spec.power.as_mut().expect("power")[0].region = "die-footprint".to_string();
+    spec
+}
+
+#[test]
+fn surface_entities_round_trip_validate_and_refuse_misuse() {
+    let spec = surface_project();
+    let sexpr = print_sexpr(&spec).expect("renders");
+    assert!(sexpr.contains("(surface :parent \"board\" :name \"die-footprint\" :display \"CPU die footprint\")"), "{sexpr}");
+    assert_eq!(parse_sexpr(&sexpr).expect("canonical").spec, spec);
+    assert_eq!(parse_json(&print_json(&spec).expect("json")).expect("canonical json").spec, spec);
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    // A surface needs a geometry assignment, like a region or interface.
+    let mut unbound = surface_project();
+    unbound.assignments.as_mut().unwrap().retain(|a| a.target != "die-footprint");
+    assert!(unbound.validate().iter().any(|v| v.code == "project-assignment-target-unbound"), "{:?}", unbound.validate());
+    // A surface's parent must be a part, never a region.
+    let mut orphan = surface_project();
+    if let Some(EntityDecl::Surface { parent, .. }) = orphan.assembly.as_mut().unwrap().last_mut() {
+        *parent = "cpu".to_string();
+    }
+    assert!(orphan.validate().iter().any(|v| v.code == "project-entity-parent-unknown"), "{:?}", orphan.validate());
+    // A surface is not a volume: it needs no conduction seed (no seed rule fires).
+    assert!(!spec.validate().iter().any(|v| v.code.starts_with("project-conduction-seed")));
+}
+
+#[test]
+fn v7_envelopes_migrate_to_v8_and_refuse_a_pre_v8_surface() {
+    let historical = reference_project();
+    let current = print_sexpr(&historical).expect("current project renders");
+    let v7 = current
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 7", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 7", 1);
+    assert_ne!(v7, current);
+    let parsed = parse_sexpr_migrating(&v7).expect("v7 migrates");
+    assert_eq!(parsed.decoded.spec, historical);
+    let receipt = parsed.migration.expect("v7 migration is receipted");
+    assert_eq!((receipt.source_version, receipt.target_version), (7, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10");
+    assert!(receipt.verifies(v7.as_bytes(), current.as_bytes()));
+    let with_surface = print_sexpr(&surface_project()).expect("renders");
+    let false_v7 = with_surface
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 7", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 7", 1);
+    assert_eq!(parse_sexpr_migrating(&false_v7).expect_err("v7 never carried a surface").code, "fsim-migration-payload");
+}
+
+/// The surface project plus a cited fan efficiency and a surface-scoped
+/// output (fsim v9).
+fn fan_efficiency_project() -> ProjectSpec {
+    let mut spec = surface_project();
+    spec.cooling.as_mut().expect("cooling").fan_efficiency = Some(fs_project::spec::FanEfficiency {
+        total: 0.3,
+        half_width: 0.05,
+        source: "illustrative fan datasheet".to_string(),
+        source_id: "fan-efficiency-example-v1".to_string(),
+    });
+    spec.outputs.as_mut().expect("outputs").push(OutputRequest {
+        name: "surface-mean-temperature".to_string(),
+        kind: "scalar".to_string(),
+        region: Some("die-footprint".to_string()),
+    });
+    spec
+}
+
+#[test]
+fn fan_efficiency_and_output_regions_round_trip_validate_and_refuse_misuse() {
+    let spec = fan_efficiency_project();
+    let sexpr = print_sexpr(&spec).expect("renders");
+    assert!(sexpr.contains("(fan-efficiency :total 0.3 :half-width 0.05 :source \"illustrative fan datasheet\" :source-id \"fan-efficiency-example-v1\")"), "{sexpr}");
+    assert!(sexpr.contains(":region \"die-footprint\")"), "{sexpr}");
+    assert_eq!(parse_sexpr(&sexpr).expect("canonical").spec, spec);
+    assert_eq!(parse_json(&print_json(&spec).expect("json")).expect("canonical json").spec, spec);
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let code_of = |mutate: fn(&mut ProjectSpec)| {
+        let mut bad = fan_efficiency_project();
+        mutate(&mut bad);
+        bad.validate().into_iter().map(|v| v.code).collect::<Vec<_>>()
+    };
+    assert!(code_of(|s| s.outputs.as_mut().unwrap().last_mut().unwrap().region = Some("cpu".to_string()))
+        .contains(&"project-output-region"));
+    assert!(code_of(|s| s.cooling.as_mut().unwrap().fan_efficiency.as_mut().unwrap().half_width = 0.3)
+        .contains(&"project-fan-efficiency-range"));
+    assert!(code_of(|s| s.cooling.as_mut().unwrap().fan_efficiency.as_mut().unwrap().source_id = " ".to_string())
+        .contains(&"project-fan-efficiency-source"));
+}
+
+#[test]
+fn v8_envelopes_migrate_to_v9_and_refuse_pre_v9_payloads() {
+    let historical = surface_project();
+    let current = print_sexpr(&historical).expect("current project renders");
+    let down = |text: &str| {
+        text.replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 8", 1)
+            .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 8", 1)
+    };
+    let v8 = down(&current);
+    assert_ne!(v8, current);
+    let parsed = parse_sexpr_migrating(&v8).expect("a v8 surface project migrates");
+    assert_eq!(parsed.decoded.spec, historical);
+    let receipt = parsed.migration.expect("v8 migration is receipted");
+    assert_eq!((receipt.source_version, receipt.target_version), (8, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "fan-efficiency-v9-then-natural-convection-v10");
+    assert!(receipt.verifies(v8.as_bytes(), current.as_bytes()));
+    let false_v8 = down(&print_sexpr(&fan_efficiency_project()).expect("renders"));
+    assert_eq!(parse_sexpr_migrating(&false_v8).expect_err("v8 never carried a fan efficiency").code, "fsim-migration-payload");
+}
+
+/// The reference project with its convection law replaced by a natural-
+/// convection law (fsim v10).
+fn natural_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().expect("conduction");
+    setup.boundaries[0].condition = ThermalBoundaryCondition::NaturalConvection {
+        characteristic_length: QtyAny::new(0.06, fs_project::spec::dims::LENGTH),
+        ambient_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+        correlation: "convection.churchill-chu-vertical-plate".to_string(),
+    };
+    spec
+}
+
+#[test]
+fn natural_convection_laws_round_trip_validate_and_refuse_misuse() {
+    let spec = natural_project();
+    let sexpr = print_sexpr(&spec).expect("renders");
+    assert!(sexpr.contains("(natural-convection :target "), "{sexpr}");
+    assert!(sexpr.contains(":correlation \"convection.churchill-chu-vertical-plate\""), "{sexpr}");
+    assert_eq!(parse_sexpr(&sexpr).expect("canonical").spec, spec);
+    assert_eq!(parse_json(&print_json(&spec).expect("json")).expect("canonical json").spec, spec);
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let mut cold = natural_project();
+    if let ThermalBoundaryCondition::NaturalConvection { ambient_temperature, .. } =
+        &mut cold.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition
+    {
+        ambient_temperature.value = 200.0;
+    }
+    assert!(cold.validate().iter().any(|v| v.code == "project-conduction-natural-ambient-envelope"));
+    let mut flat = natural_project();
+    if let ThermalBoundaryCondition::NaturalConvection { characteristic_length, .. } =
+        &mut flat.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition
+    {
+        characteristic_length.value = 0.0;
+    }
+    assert!(flat.validate().iter().any(|v| v.code == "project-conduction-natural-range"));
+}
+
+#[test]
+fn v9_envelopes_migrate_to_v10_and_refuse_a_pre_v10_natural_law() {
+    let historical = reference_project();
+    let current = print_sexpr(&historical).expect("renders");
+    let down = |text: &str| {
+        text.replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 9", 1)
+            .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 9", 1)
+    };
+    let v9 = down(&current);
+    let parsed = parse_sexpr_migrating(&v9).expect("v9 migrates");
+    assert_eq!(parsed.decoded.spec, historical);
+    let receipt = parsed.migration.expect("receipted");
+    assert_eq!((receipt.source_version, receipt.target_version), (9, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "natural-convection-v10");
+    assert!(receipt.verifies(v9.as_bytes(), current.as_bytes()));
+    let false_v9 = down(&print_sexpr(&natural_project()).expect("renders"));
+    assert_eq!(parse_sexpr_migrating(&false_v9).expect_err("v9 had no natural law").code, "fsim-migration-payload");
+}
+
+fn transient_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.transient = Some(fs_project::ConductionTransient {
+        initial_temperature: fs_project::TransientInitialTemperature::Uniform(kelvin(293.15)),
+        horizon: QtyAny::new(10.0, fs_project::spec::dims::TIME),
+        max_step: QtyAny::new(1.0, fs_project::spec::dims::TIME),
+        max_steps: 30,
+        energy_tolerance: QtyAny::new(1e-6, fs_project::spec::dims::ENERGY),
+        capacities: setup.regions.iter().map(|row| fs_project::TransientRegionCapacity {
+            region: row.region.clone(),
+            volumetric_heat_capacity: QtyAny::new(2e6, fs_project::spec::dims::VOLUMETRIC_HEAT_CAPACITY),
+            source: "manufactured constant capacity for numerical verification".to_string(),
+        }).collect(),
+        enthalpy: None,
+        power_schedules: Vec::new(),
+    });
+    spec
+}
+
+#[test]
+fn g0_transient_intent_round_trips_and_admits_complete_time_and_capacity_data() {
+    let spec = transient_project();
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let sexpr = print_sexpr(&spec).unwrap();
+    assert!(sexpr.contains(":transient (transient :initial-temperature "));
+    assert_eq!(parse_sexpr(&sexpr).unwrap().spec, spec);
+    assert_eq!(parse_json(&print_json(&spec).unwrap()).unwrap().spec, spec);
+    let original_hash = canonical_hash(sexpr.as_bytes());
+    let mut changed = spec.clone();
+    changed.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap().capacities[0].volumetric_heat_capacity.value *= 2.0;
+    assert_ne!(original_hash, canonical_hash(print_sexpr(&changed).unwrap().as_bytes()));
+    for (label, mutate, expected) in [
+        ("capacity coverage", 0, "project-conduction-transient-capacity-coverage"),
+        ("capacity units", 1, "project-conduction-transient-capacity"),
+        ("capacity source", 2, "project-conduction-transient-capacity"),
+        ("fine grid work", 3, "project-conduction-transient-steps"),
+        ("time units", 4, "project-conduction-transient-quantity"),
+        ("duplicate region", 5, "project-conduction-transient-capacity-region"),
+    ] {
+        let mut bad = spec.clone();
+        let policy = bad.cooling.as_mut().unwrap().conduction.as_mut().unwrap().transient.as_mut().unwrap();
+        match mutate {
+            0 => { policy.capacities.pop(); }
+            1 => policy.capacities[0].volumetric_heat_capacity.dims = fs_project::spec::dims::POWER,
+            2 => policy.capacities[0].source.clear(),
+            3 => policy.max_steps = 29,
+            4 => policy.horizon.dims = fs_project::spec::dims::LENGTH,
+            _ => policy.capacities[1].region = policy.capacities[0].region.clone(),
+        }
+        assert!(bad.validate().iter().any(|row| row.code == expected), "{label}: {:?}", bad.validate());
+    }
+    let ignored = sexpr.replace(":max-steps 30", ":max-steps 30 :implicit-capacity true");
+    let decoded = parse_sexpr_lenient(&ignored).unwrap();
+    assert!(decoded.findings().iter().any(|row| row.code == "project-unknown-field"));
+}
+
+#[test]
+fn g0_v10_migration_preserves_natural_convection_and_never_invents_transient_storage() {
+    let historical = natural_project();
+    let current = print_sexpr(&historical).unwrap();
+    let down = |text: &str| text
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 10", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 10", 1);
+    let old = down(&current);
+    let migrated = parse_sexpr_migrating(&old).unwrap();
+    assert_eq!(migrated.decoded.spec, historical);
+    let receipt = migrated.migration.unwrap();
+    assert_eq!((receipt.source_version, receipt.target_version), (10, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "transient-conduction-v11");
+    assert!(receipt.verifies(old.as_bytes(), current.as_bytes()));
+    let hidden_storage = down(&print_sexpr(&transient_project()).unwrap());
+    assert_eq!(parse_sexpr_migrating(&hidden_storage).unwrap_err().code, "fsim-migration-payload");
+}
+
+fn power_schedule(region: &str, intervals: &[(f64, f64)]) -> fs_project::TransientRegionPower {
+    fs_project::TransientRegionPower {
+        region: region.to_string(),
+        source: "sourced workload oracle".to_string(),
+        steps: intervals.iter().map(|&(until, watts)| fs_project::TransientPowerStep {
+            until: QtyAny::new(until, fs_project::spec::dims::TIME),
+            watts: QtyAny::new(watts, fs_project::spec::dims::POWER),
+        }).collect(),
+    }
+}
+
+fn scheduled_transient_project() -> ProjectSpec {
+    let mut project = transient_project();
+    let time = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap();
+    time.horizon.value = 2.0;
+    time.max_step.value = 0.5;
+    time.max_steps = 18;
+    time.power_schedules = vec![
+        power_schedule("cpu", &[(0.25, 10.0), (1.25, 0.0), (2.0, 20.0)]),
+        power_schedule("sink-base", &[(0.5, 5.0), (2.0, 0.0)]),
+    ];
+    project
+}
+
+#[test]
+fn g0_transient_power_round_trips_with_every_regional_switch_on_the_time_grid() {
+    let project = scheduled_transient_project();
+    assert!(project.validate().is_empty(), "{:?}", project.validate());
+    let time = project.cooling.as_ref().unwrap().conduction.as_ref().unwrap()
+        .transient.as_ref().unwrap();
+    assert_eq!(time.coarse_step_ends_s().unwrap(),
+        vec![0.25, 0.5, 0.875, 1.25, 1.625, 2.0]);
+    let sexpr = print_sexpr(&project).unwrap();
+    assert!(sexpr.contains(":power-schedules (power-schedules (schedule :region \"cpu\""));
+    let decoded = parse_sexpr(&sexpr).unwrap();
+    assert_eq!(decoded.spec, project);
+    let json = parse_json(&print_json(&project).unwrap()).unwrap();
+    assert_eq!(json.spec, project);
+    assert_eq!(json.hash(), decoded.hash());
+    let mut changed = project.clone();
+    changed.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap().power_schedules[0].steps[0].watts.value = 11.0;
+    assert_ne!(canonical_hash(print_sexpr(&changed).unwrap().as_bytes()), decoded.hash());
+
+    let static_project = transient_project();
+    let static_time = static_project.cooling.as_ref().unwrap().conduction.as_ref().unwrap()
+        .transient.as_ref().unwrap();
+    let expected: Vec<_> = (1..=10).map(|ordinal| {
+        if ordinal == 10 { 10.0 } else { 10.0 * (ordinal as f64 / 10.0) }
+    }).collect();
+    assert_eq!(static_time.coarse_step_ends_s().unwrap(), expected);
+    assert!(!print_sexpr(&static_project).unwrap().contains("power-schedules"));
+}
+
+#[test]
+fn g0_transient_power_refuses_invalid_workloads_and_counts_event_aligned_work() {
+    for (variant, expected) in [
+        ("unseeded region", "project-conduction-transient-power-region"),
+        ("duplicate region", "project-conduction-transient-power-region"),
+        ("missing source", "project-conduction-transient-power-source"),
+        ("empty intervals", "project-conduction-transient-power-step"),
+        ("repeated endpoint", "project-conduction-transient-power-step"),
+        ("wrong time units", "project-conduction-transient-power-step"),
+        ("negative power", "project-conduction-transient-power-step"),
+        ("nonfinite power", "project-conduction-transient-power-step"),
+        ("wrong power units", "project-conduction-transient-power-step"),
+        ("uncovered tail", "project-conduction-transient-power-horizon"),
+        ("combined cap", "project-conduction-transient-steps"),
+        ("tiny time step", "project-conduction-transient-steps"),
+    ] {
+        let mut project = scheduled_transient_project();
+        let time = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .transient.as_mut().unwrap();
+        match variant {
+            "unseeded region" => time.power_schedules[0].region = "board".to_string(),
+            "duplicate region" => time.power_schedules[1].region = "cpu".to_string(),
+            "missing source" => time.power_schedules[0].source.clear(),
+            "empty intervals" => time.power_schedules[0].steps.clear(),
+            "repeated endpoint" => time.power_schedules[0].steps[1].until.value = 0.25,
+            "wrong time units" => time.power_schedules[0].steps[0].until.dims = fs_project::spec::dims::LENGTH,
+            "negative power" => time.power_schedules[0].steps[0].watts.value = -1.0,
+            "nonfinite power" => time.power_schedules[0].steps[0].watts.value = f64::INFINITY,
+            "wrong power units" => time.power_schedules[0].steps[0].watts.dims = fs_project::spec::dims::ENERGY,
+            "uncovered tail" => time.power_schedules[0].steps[2].until.value = 1.75,
+            "combined cap" => time.max_steps = 17,
+            "tiny time step" => time.max_step.value = f64::MIN_POSITIVE,
+            _ => unreachable!(),
+        }
+        assert!(project.validate().iter().any(|row| row.code == expected),
+            "{variant}: {:?}", project.validate());
+    }
+}
+
+#[test]
+fn g0_transient_power_never_discards_an_unrepresentably_short_pulse() {
+    let mut project = scheduled_transient_project();
+    let time = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap();
+    let after_one = f64::from_bits(1.0_f64.to_bits() + 1);
+    time.power_schedules = vec![power_schedule("cpu", &[(1.0, 0.0), (after_one, 10.0), (2.0, 0.0)])];
+    assert_eq!(time.coarse_step_ends_s().unwrap_err().code,
+        "project-conduction-transient-time-resolution");
+    time.power_schedules.clear();
+    time.horizon.value = f64::from_bits(1);
+    assert_eq!(time.coarse_step_ends_s().unwrap_err().code,
+        "project-conduction-transient-time-resolution");
+}
+
+#[test]
+fn g0_v11_migration_preserves_static_transients_and_refuses_hidden_workloads() {
+    let historical = transient_project();
+    let current = print_sexpr(&historical).unwrap();
+    let down = |text: &str| text
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 11", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 11", 1);
+    let old = down(&current);
+    let migrated = parse_sexpr_migrating(&old).unwrap();
+    assert_eq!(migrated.decoded.spec, historical);
+    let receipt = migrated.migration.unwrap();
+    assert_eq!((receipt.source_version, receipt.target_version), (11, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "transient-power-schedules-v12");
+    assert!(receipt.verifies(old.as_bytes(), current.as_bytes()));
+    let hidden = down(&print_sexpr(&scheduled_transient_project()).unwrap());
+    assert_eq!(parse_sexpr_migrating(&hidden).unwrap_err().code, "fsim-migration-payload");
+}
+
+fn enthalpy_project() -> ProjectSpec {
+    use fs_project::spec::dims;
+    let mut project = scheduled_transient_project();
+    let time = project
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap();
+    time.initial_temperature = fs_project::TransientInitialTemperature::Uniform(kelvin(300.0));
+    time.enthalpy = Some(fs_project::TransientEnthalpy {
+        materials: time
+            .capacities
+            .iter()
+            .enumerate()
+            .map(|(index, row)| fs_project::TransientRegionEnthalpy {
+                region: row.region.clone(),
+                material_card_identity: ContentHash([100 + index as u8; 32]),
+                source: "explicit manufactured phase chart; numerical verification only"
+                    .to_string(),
+                reference_density: QtyAny::new(1200.0, dims::DENSITY),
+                initial_specific_enthalpy: QtyAny::new(
+                    150.0 + index as f64 * 10.0,
+                    dims::SPECIFIC_ENTHALPY,
+                ),
+                knots: [
+                    (0.0, 290.0, 0.0),
+                    (100.0, 300.0, 0.0),
+                    (200.0, 300.0, 1.0),
+                    (300.0, 310.0, 1.0),
+                ]
+                .into_iter()
+                .map(
+                    |(enthalpy, temperature, fraction)| fs_project::TransientEnthalpyKnot {
+                        specific_enthalpy: QtyAny::new(enthalpy, dims::SPECIFIC_ENTHALPY),
+                        temperature: kelvin(temperature),
+                        liquid_mass_fraction: fraction,
+                    },
+                )
+                .collect(),
+                phase_conductivity: None,
+            })
+            .collect(),
+        max_newton_iterations: 40,
+        max_backtracks: 12,
+    });
+    time.capacities.clear();
+    project
+}
+
+#[test]
+fn g0_enthalpy_round_trips_explicit_plateau_states_and_sourced_models() {
+    let shipped = parse_sexpr(include_str!(
+        "../../../data/reference-project/cooling-enthalpy.fsim"
+    ))
+    .unwrap();
+    assert!(shipped.findings().is_empty(), "{:?}", shipped.findings());
+    let radiative = parse_sexpr(include_str!(
+        "../../../data/reference-project/cooling-enthalpy-radiation.fsim"
+    ))
+    .unwrap();
+    assert!(radiative.findings().is_empty(), "{:?}", radiative.findings());
+    let project = enthalpy_project();
+    assert!(project.validate().is_empty(), "{:?}", project.validate());
+    let sexpr = print_sexpr(&project).unwrap();
+    assert!(sexpr.contains(":capacities (capacities) :enthalpy (enthalpy "));
+    let decoded = parse_sexpr(&sexpr).unwrap();
+    let json = parse_json(&print_json(&project).unwrap()).unwrap();
+    assert_eq!(decoded.spec, project);
+    assert_eq!(json.spec, project);
+    assert_eq!(decoded.hash(), json.hash());
+    assert!(decoded.findings().is_empty());
+    let time = project
+        .cooling
+        .as_ref()
+        .unwrap()
+        .conduction
+        .as_ref()
+        .unwrap()
+        .transient
+        .as_ref()
+        .unwrap();
+    for (index, material) in time.enthalpy.as_ref().unwrap().materials.iter().enumerate() {
+        let curve = material.phase_curve().unwrap();
+        let initial = material.initial_specific_enthalpy.value;
+        let state = curve.state_at_specific_enthalpy(initial).unwrap();
+        assert_eq!(state.temperature_k(), 300.0);
+        assert!((state.liquid_mass_fraction() - (0.5 + index as f64 * 0.1)).abs() < 1e-14);
+        assert_eq!(
+            curve
+                .temperature_derivative_at_specific_enthalpy(initial)
+                .unwrap(),
+            0.0
+        );
+        assert!(
+            curve
+                .knots()
+                .iter()
+                .all(|knot| knot.bulk_density_kg_m3 == 1200.0)
+        );
+    }
+    // A plateau's equal temperature does not erase its distinct stored energy.
+    let mut changed = project.clone();
+    changed
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap()
+        .enthalpy
+        .as_mut()
+        .unwrap()
+        .materials[0]
+        .initial_specific_enthalpy
+        .value = 175.0;
+    assert!(changed.validate().is_empty());
+    assert_ne!(
+        canonical_hash(print_sexpr(&changed).unwrap().as_bytes()),
+        decoded.hash()
+    );
+    let unknown = sexpr.replace(
+        ":max-newton-iterations 40",
+        ":max-newton-iterations 40 :infer-latent-heat true",
+    );
+    assert!(
+        parse_sexpr_lenient(&unknown)
+            .unwrap()
+            .findings()
+            .iter()
+            .any(|row| row.code == "project-unknown-field")
+    );
+}
+
+#[test]
+fn g0_enthalpy_admits_explicit_solid_and_liquid_charts_without_phase_smoothing() {
+    for fraction in [0.0, 1.0] {
+        let mut project = enthalpy_project();
+        let enthalpy = project
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap()
+            .transient
+            .as_mut()
+            .unwrap()
+            .enthalpy
+            .as_mut()
+            .unwrap();
+        enthalpy.max_backtracks = 0;
+        for material in &mut enthalpy.materials {
+            material.knots = vec![material.knots[0].clone(), material.knots[3].clone()];
+            for knot in &mut material.knots {
+                knot.liquid_mass_fraction = fraction;
+            }
+            material.initial_specific_enthalpy.value = 150.0;
+        }
+        assert!(project.validate().is_empty(), "{:?}", project.validate());
+        assert_eq!(
+            parse_sexpr(&print_sexpr(&project).unwrap()).unwrap().spec,
+            project
+        );
+    }
+}
+
+#[test]
+fn g0_enthalpy_refuses_invalid_units_curves_coverage_and_nonlinear_controls() {
+    use fs_project::spec::dims;
+    for (variant, expected) in [
+        (
+            "unknown region",
+            "project-conduction-transient-enthalpy-region",
+        ),
+        (
+            "duplicate region",
+            "project-conduction-transient-enthalpy-region",
+        ),
+        (
+            "missing region",
+            "project-conduction-transient-enthalpy-coverage",
+        ),
+        (
+            "empty source",
+            "project-conduction-transient-enthalpy-source",
+        ),
+        (
+            "zero identity",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "density units",
+            "project-conduction-transient-enthalpy-density",
+        ),
+        (
+            "zero density",
+            "project-conduction-transient-enthalpy-density",
+        ),
+        (
+            "nonfinite density",
+            "project-conduction-transient-enthalpy-density",
+        ),
+        ("one knot", "project-conduction-transient-enthalpy-knots"),
+        (
+            "too many knots",
+            "project-conduction-transient-enthalpy-knots",
+        ),
+        (
+            "enthalpy units",
+            "project-conduction-transient-enthalpy-knot-dims",
+        ),
+        (
+            "temperature units",
+            "project-conduction-transient-enthalpy-knot-dims",
+        ),
+        (
+            "nonfinite enthalpy",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "repeated enthalpy",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "decreasing temperature",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "decreasing fraction",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "nonfinite fraction",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "fraction outside domain",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "partial transition",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "single-phase plateau",
+            "project-conduction-transient-enthalpy-curve",
+        ),
+        (
+            "zero Newton budget",
+            "project-conduction-transient-enthalpy-budget",
+        ),
+        (
+            "large Newton budget",
+            "project-conduction-transient-enthalpy-budget",
+        ),
+        (
+            "large backtrack budget",
+            "project-conduction-transient-enthalpy-budget",
+        ),
+    ] {
+        let mut project = enthalpy_project();
+        let enthalpy = project
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap()
+            .transient
+            .as_mut()
+            .unwrap()
+            .enthalpy
+            .as_mut()
+            .unwrap();
+        match variant {
+            "unknown region" => enthalpy.materials[0].region = "unseeded".to_string(),
+            "duplicate region" => {
+                enthalpy.materials[1].region = enthalpy.materials[0].region.clone()
+            }
+            "missing region" => {
+                enthalpy.materials.pop();
+            }
+            "empty source" => enthalpy.materials[0].source = "  ".to_string(),
+            "zero identity" => enthalpy.materials[0].material_card_identity = ContentHash([0; 32]),
+            "density units" => {
+                enthalpy.materials[0].reference_density.dims = dims::VOLUMETRIC_HEAT_CAPACITY
+            }
+            "zero density" => enthalpy.materials[0].reference_density.value = 0.0,
+            "nonfinite density" => enthalpy.materials[0].reference_density.value = f64::INFINITY,
+            "one knot" => enthalpy.materials[0].knots.truncate(1),
+            "too many knots" => {
+                enthalpy.materials[0].knots = vec![enthalpy.materials[0].knots[0].clone(); 4097]
+            }
+            "enthalpy units" => {
+                enthalpy.materials[0].knots[0].specific_enthalpy.dims = dims::ENERGY
+            }
+            "temperature units" => enthalpy.materials[0].knots[0].temperature.dims = dims::TIME,
+            "nonfinite enthalpy" => {
+                enthalpy.materials[0].knots[0].specific_enthalpy.value = f64::NAN
+            }
+            "repeated enthalpy" => enthalpy.materials[0].knots[1].specific_enthalpy.value = 0.0,
+            "decreasing temperature" => enthalpy.materials[0].knots[2].temperature.value = 299.0,
+            "decreasing fraction" => {
+                enthalpy.materials[0].knots[1].liquid_mass_fraction = 0.7;
+                enthalpy.materials[0].knots[2].liquid_mass_fraction = 0.6;
+            }
+            "nonfinite fraction" => enthalpy.materials[0].knots[1].liquid_mass_fraction = f64::NAN,
+            "fraction outside domain" => enthalpy.materials[0].knots[1].liquid_mass_fraction = -0.1,
+            "partial transition" => enthalpy.materials[0].knots[0].liquid_mass_fraction = 0.1,
+            "single-phase plateau" => {
+                for knot in &mut enthalpy.materials[0].knots {
+                    knot.liquid_mass_fraction = 0.0;
+                }
+            }
+            "zero Newton budget" => enthalpy.max_newton_iterations = 0,
+            "large Newton budget" => enthalpy.max_newton_iterations = 1001,
+            "large backtrack budget" => enthalpy.max_backtracks = 65,
+            _ => unreachable!(),
+        }
+        let findings = project.validate();
+        assert!(
+            findings
+                .iter()
+                .any(|row| row.code == expected && !row.fix.is_empty()),
+            "{variant}: {findings:?}"
+        );
+    }
+}
+
+#[test]
+fn g0_enthalpy_requires_consistent_initial_energy_and_exclusive_storage() {
+    use fs_project::spec::dims;
+    for (value, dimension) in [
+        (150.0, dims::ENERGY),
+        (f64::NAN, dims::SPECIFIC_ENTHALPY),
+        (-1.0, dims::SPECIFIC_ENTHALPY),
+        (50.0, dims::SPECIFIC_ENTHALPY),
+    ] {
+        let mut project = enthalpy_project();
+        project
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap()
+            .transient
+            .as_mut()
+            .unwrap()
+            .enthalpy
+            .as_mut()
+            .unwrap()
+            .materials[0]
+            .initial_specific_enthalpy = QtyAny::new(value, dimension);
+        assert!(
+            project
+                .validate()
+                .iter()
+                .any(|row| row.code == "project-conduction-transient-enthalpy-initial-state")
+        );
+    }
+    let mut project = enthalpy_project();
+    let old_capacities = transient_project()
+        .cooling
+        .unwrap()
+        .conduction
+        .unwrap()
+        .transient
+        .unwrap()
+        .capacities;
+    project
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap()
+        .capacities = old_capacities;
+    assert!(
+        project
+            .validate()
+            .iter()
+            .any(|row| row.code == "project-conduction-transient-storage-conflict")
+    );
+}
+
+#[test]
+fn g0_v12_migration_preserves_capacities_and_refuses_hidden_enthalpy() {
+    let historical = scheduled_transient_project();
+    let current = print_sexpr(&historical).unwrap();
+    let down = |text: &str| {
+        text.replacen(
+            &format!("(fsim-project :version {FSIM_VERSION}"),
+            "(fsim-project :version 12",
+            1,
+        )
+        .replacen(
+            &format!("(versions :schema {FSIM_VERSION}"),
+            "(versions :schema 12",
+            1,
+        )
+    };
+    let old = down(&current);
+    let migrated = parse_sexpr_migrating(&old).unwrap();
+    assert_eq!(migrated.decoded.spec, historical);
+    assert!(
+        migrated
+            .decoded
+            .spec
+            .cooling
+            .unwrap()
+            .conduction
+            .unwrap()
+            .transient
+            .unwrap()
+            .enthalpy
+            .is_none()
+    );
+    let receipt = migrated.migration.unwrap();
+    assert_eq!(
+        (receipt.source_version, receipt.target_version),
+        (12, FSIM_VERSION)
+    );
+    assert_eq!(receipt.rule.label(), "transient-enthalpy-v13");
+    assert!(receipt.verifies(old.as_bytes(), current.as_bytes()));
+    let hidden = down(&print_sexpr(&enthalpy_project()).unwrap());
+    assert_eq!(
+        parse_sexpr_migrating(&hidden).unwrap_err().code,
+        "fsim-migration-payload"
+    );
+}
+
+fn phase_conductivity_project() -> ProjectSpec {
+    let mut project = enthalpy_project();
+    project
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap()
+        .enthalpy
+        .as_mut()
+        .unwrap()
+        .materials[0]
+        .phase_conductivity = Some(fs_project::TransientPhaseConductivity {
+        solid_multiplier: 1.0,
+        liquid_multiplier: 0.2,
+        source: "synthetic phase scaling, independent of the base conductivity card".to_string(),
+    });
+    project
+}
+
+#[test]
+fn g0_phase_conductivity_round_trips_and_binds_the_declared_mass_fraction_law() {
+    let shipped = parse_sexpr(include_str!(
+        "../../../data/reference-project/cooling-enthalpy-phase-conductivity.fsim"
+    ))
+    .unwrap();
+    assert!(shipped.findings().is_empty(), "{:?}", shipped.findings());
+    let project = phase_conductivity_project();
+    assert!(project.validate().is_empty(), "{:?}", project.validate());
+    let sexpr = print_sexpr(&project).unwrap();
+    assert!(sexpr.contains(
+        ":phase-conductivity (phase-conductivity :law \"linear-liquid-mass-fraction\" :solid-multiplier 1.0 :liquid-multiplier 0.2 :source "
+    ));
+    let decoded = parse_sexpr(&sexpr).unwrap();
+    let json = parse_json(&print_json(&project).unwrap()).unwrap();
+    assert_eq!(decoded.spec, project);
+    assert_eq!(json.spec, project);
+    assert_eq!(decoded.hash(), json.hash());
+    assert_eq!(project.materials, enthalpy_project().materials);
+    for field in ["solid", "liquid", "source"] {
+        let mut changed = project.clone();
+        let materials = &mut changed
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap()
+            .transient
+            .as_mut()
+            .unwrap()
+            .enthalpy
+            .as_mut()
+            .unwrap()
+            .materials;
+        assert!(materials[1].phase_conductivity.is_none());
+        let law = materials[0].phase_conductivity.as_mut().unwrap();
+        let model = law.model().unwrap();
+        assert!((model.multiplier_at(0.25).unwrap() - 0.8).abs() < 1e-14);
+        match field {
+            "solid" => law.solid_multiplier = 2.0,
+            "liquid" => law.liquid_multiplier = 0.4,
+            "source" => law.source.push_str("; revised basis"),
+            _ => unreachable!(),
+        }
+        assert_ne!(
+            decoded.hash(),
+            parse_sexpr(&print_sexpr(&changed).unwrap()).unwrap().hash()
+        );
+    }
+}
+
+#[test]
+fn g0_phase_conductivity_refuses_invalid_multipliers_sources_and_wire_laws() {
+    for (solid, liquid, source, code) in [
+        (0.0, 1.0, "declared", "project-conduction-transient-phase-conductivity"),
+        (-1.0, 1.0, "declared", "project-conduction-transient-phase-conductivity"),
+        (f64::NAN, 1.0, "declared", "project-conduction-transient-phase-conductivity"),
+        (f64::INFINITY, 1.0, "declared", "project-conduction-transient-phase-conductivity"),
+        (1.0, 0.0, "declared", "project-conduction-transient-phase-conductivity"),
+        (1.0, -1.0, "declared", "project-conduction-transient-phase-conductivity"),
+        (1.0, f64::NAN, "declared", "project-conduction-transient-phase-conductivity"),
+        (1.0, f64::INFINITY, "declared", "project-conduction-transient-phase-conductivity"),
+        (1.0, 1.0, "  ", "project-conduction-transient-phase-conductivity-source"),
+    ] {
+        let mut project = phase_conductivity_project();
+        let material = &mut project
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap()
+            .transient
+            .as_mut()
+            .unwrap()
+            .enthalpy
+            .as_mut()
+            .unwrap()
+            .materials[0];
+        material.phase_conductivity = Some(fs_project::TransientPhaseConductivity {
+            solid_multiplier: solid,
+            liquid_multiplier: liquid,
+            source: source.to_string(),
+        });
+        assert!(material.phase_conductivity.as_ref().unwrap().model().is_err());
+        let findings = project.validate();
+        assert!(findings.iter().any(|row| row.code == code), "{findings:?}");
+    }
+    let valid = print_sexpr(&phase_conductivity_project()).unwrap();
+    for (before, after) in [
+        ("linear-liquid-mass-fraction", "linear-liquid-volume-fraction"),
+        (":law \"linear-liquid-mass-fraction\" ", ""),
+        (":solid-multiplier 1.0", ":solid-multiplier 1.0m"),
+        (":liquid-multiplier 0.2", ":liquid-multiplier 0.2 :liquid-multiplier 0.3"),
+        (":source \"synthetic phase scaling, independent of the base conductivity card\"", ""),
+    ] {
+        let malformed = valid.replacen(before, after, 1);
+        assert_ne!(valid, malformed);
+        assert!(parse_sexpr(&malformed).is_err());
+        let findings = parse_sexpr_lenient(&malformed).unwrap().findings();
+        assert!(!findings.is_empty(), "{malformed}");
+    }
+}
+
+#[test]
+fn g0_v13_migration_preserves_storage_and_refuses_hidden_phase_conductivity() {
+    let down = |text: &str| {
+        text.replacen(
+            &format!("(fsim-project :version {FSIM_VERSION}"),
+            "(fsim-project :version 13",
+            1,
+        )
+        .replacen(
+            &format!("(versions :schema {FSIM_VERSION}"),
+            "(versions :schema 13",
+            1,
+        )
+    };
+    for project in [transient_project(), enthalpy_project()] {
+        let current = print_sexpr(&project).unwrap();
+        let old = down(&current);
+        let migrated = parse_sexpr_migrating(&old).unwrap();
+        assert_eq!(migrated.decoded.spec, project);
+        let receipt = migrated.migration.unwrap();
+        assert_eq!((receipt.source_version, receipt.target_version), (13, FSIM_VERSION));
+        assert_eq!(receipt.rule.label(), "transient-phase-conductivity-v14");
+        assert!(receipt.verifies(old.as_bytes(), current.as_bytes()));
+    }
+    let hidden = down(&print_sexpr(&phase_conductivity_project()).unwrap());
+    assert_eq!(parse_sexpr_migrating(&hidden).unwrap_err().code, "fsim-migration-payload");
+}
+
+fn regional_initial_project() -> ProjectSpec {
+    let mut project = enthalpy_project();
+    let time = project
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap();
+    time.initial_temperature = fs_project::TransientInitialTemperature::FromRegionalEnthalpy;
+    let materials = &mut time.enthalpy.as_mut().unwrap().materials;
+    // The same chart gives a solid body at 295 K and a liquid body at 305 K.
+    // Their temperatures and phases follow the separately declared energies.
+    materials[0].initial_specific_enthalpy.value = 50.0;
+    materials[1].initial_specific_enthalpy.value = 250.0;
+    project
+}
+
+#[test]
+fn g0_regional_initialization_round_trips_distinct_body_states() {
+    let project = regional_initial_project();
+    assert!(project.validate().is_empty(), "{:?}", project.validate());
+    let sexpr = print_sexpr(&project).unwrap();
+    assert!(sexpr.contains(":initial-temperature from-regional-enthalpy :horizon "));
+    let decoded = parse_sexpr(&sexpr).unwrap();
+    let json = parse_json(&print_json(&project).unwrap()).unwrap();
+    assert_eq!(decoded.spec, project);
+    assert_eq!(json.spec, project);
+    assert_eq!(decoded.hash(), json.hash());
+    let time = project
+        .cooling
+        .as_ref()
+        .unwrap()
+        .conduction
+        .as_ref()
+        .unwrap()
+        .transient
+        .as_ref()
+        .unwrap();
+    assert_eq!(time.initial_temperature.uniform_temperature(), None);
+    for (index, material) in time.enthalpy.as_ref().unwrap().materials.iter().enumerate() {
+        let state = material
+            .phase_curve()
+            .unwrap()
+            .state_at_specific_enthalpy(material.initial_specific_enthalpy.value)
+            .unwrap();
+        assert_eq!(state.temperature_k(), [295.0, 305.0][index]);
+        assert_eq!(state.liquid_mass_fraction(), [0.0, 1.0][index]);
+    }
+
+    let mut changed = project.clone();
+    changed
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap()
+        .enthalpy
+        .as_mut()
+        .unwrap()
+        .materials[0]
+        .initial_specific_enthalpy.value = 75.0;
+    assert_ne!(
+        decoded.hash(),
+        parse_sexpr(&print_sexpr(&changed).unwrap()).unwrap().hash()
+    );
+
+    // Explicit regional mode also preserves distinct phase fractions when
+    // both bodies start at the same temperature on the latent plateau.
+    let uniform = enthalpy_project();
+    let mut plateau = uniform.clone();
+    plateau
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap()
+        .initial_temperature = fs_project::TransientInitialTemperature::FromRegionalEnthalpy;
+    assert!(plateau.validate().is_empty(), "{:?}", plateau.validate());
+    let plateau_text = print_sexpr(&plateau).unwrap();
+    assert_eq!(parse_sexpr(&plateau_text).unwrap().spec, plateau);
+    assert_eq!(uniform.cooling.as_ref().unwrap().conduction.as_ref().unwrap()
+        .transient.as_ref().unwrap().enthalpy,
+        plateau.cooling.as_ref().unwrap().conduction.as_ref().unwrap()
+        .transient.as_ref().unwrap().enthalpy);
+    assert_ne!(canonical_hash(plateau_text.as_bytes()),
+        canonical_hash(print_sexpr(&uniform).unwrap().as_bytes()));
+}
+
+#[test]
+fn g0_regional_initialization_retains_storage_state_and_unit_admission() {
+    use fs_project::{TransientInitialTemperature, spec::dims};
+
+    let mut capacity = transient_project();
+    capacity
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .transient
+        .as_mut()
+        .unwrap()
+        .initial_temperature = TransientInitialTemperature::FromRegionalEnthalpy;
+    assert!(capacity.validate().iter().any(|row|
+        row.code == "project-conduction-transient-initial-temperature-mode"));
+
+    for initial in [
+        QtyAny::new(50.0, dims::ENERGY),
+        QtyAny::new(f64::NAN, dims::SPECIFIC_ENTHALPY),
+        QtyAny::new(f64::INFINITY, dims::SPECIFIC_ENTHALPY),
+        QtyAny::new(-1.0, dims::SPECIFIC_ENTHALPY),
+        QtyAny::new(301.0, dims::SPECIFIC_ENTHALPY),
+    ] {
+        let mut project = regional_initial_project();
+        project
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap()
+            .transient
+            .as_mut()
+            .unwrap()
+            .enthalpy
+            .as_mut()
+            .unwrap()
+            .materials[0]
+            .initial_specific_enthalpy = initial;
+        let findings = project.validate();
+        assert!(findings.iter().any(|row|
+            row.code == "project-conduction-transient-enthalpy-initial-state"),
+            "{initial:?}: {findings:?}");
+    }
+
+    let mut project = regional_initial_project();
+    let time = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap();
+    time.initial_temperature = TransientInitialTemperature::Uniform(kelvin(300.0));
+    assert_eq!(time.initial_temperature.uniform_temperature(), Some(kelvin(300.0)));
+    assert!(project.validate().iter().any(|row|
+        row.code == "project-conduction-transient-enthalpy-initial-state"));
+
+    for temperature in [
+        QtyAny::new(300.0, dims::LENGTH),
+        kelvin(0.0),
+        kelvin(-1.0),
+        kelvin(f64::NAN),
+        kelvin(f64::INFINITY),
+    ] {
+        let mut project = transient_project();
+        project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .transient.as_mut().unwrap().initial_temperature =
+            TransientInitialTemperature::Uniform(temperature);
+        assert!(project.validate().iter().any(|row|
+            row.code == "project-conduction-transient-quantity"));
+    }
+
+    let mut missing = regional_initial_project();
+    missing.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap().enthalpy.as_mut().unwrap().materials.pop();
+    assert!(missing.validate().iter().any(|row|
+        row.code == "project-conduction-transient-enthalpy-coverage"));
+
+    let valid = print_sexpr(&regional_initial_project()).unwrap();
+    for replacement in [
+        ":initial-temperature from-regions",
+        ":initial-temperature \"from-regional-enthalpy\"",
+        "",
+    ] {
+        let malformed = valid.replacen(
+            ":initial-temperature from-regional-enthalpy", replacement, 1);
+        assert_ne!(malformed, valid);
+        assert!(parse_sexpr(&malformed).is_err(), "{malformed}");
+    }
+}
+
+#[test]
+fn g0_v14_migration_preserves_uniform_initial_state_and_refuses_regional_payload() {
+    let down = |text: &str| {
+        text.replacen(
+            &format!("(fsim-project :version {FSIM_VERSION}"),
+            "(fsim-project :version 14",
+            1,
+        )
+        .replacen(
+            &format!("(versions :schema {FSIM_VERSION}"),
+            "(versions :schema 14",
+            1,
+        )
+    };
+    for project in [
+        transient_project(),
+        enthalpy_project(),
+        phase_conductivity_project(),
+    ] {
+        let current = print_sexpr(&project).unwrap();
+        let old = down(&current);
+        let migrated = parse_sexpr_migrating(&old).unwrap();
+        assert_eq!(migrated.decoded.spec, project);
+        let time = migrated.decoded.spec.cooling.as_ref().unwrap().conduction.as_ref().unwrap()
+            .transient.as_ref().unwrap();
+        assert!(time.initial_temperature.uniform_temperature().is_some());
+        let receipt = migrated.migration.unwrap();
+        assert_eq!((receipt.source_version, receipt.target_version), (14, FSIM_VERSION));
+        assert_eq!(receipt.rule.label(), "transient-regional-initial-temperature-v15");
+        assert!(receipt.verifies(old.as_bytes(), current.as_bytes()));
+    }
+    let hidden = down(&print_sexpr(&regional_initial_project()).unwrap());
+    assert_eq!(parse_sexpr_migrating(&hidden).unwrap_err().code, "fsim-migration-payload");
+}

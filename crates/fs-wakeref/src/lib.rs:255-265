@@ -1,0 +1,8 @@
+{
+  "project_key": "/Users/jemanuel/projects/frankensim",
+  "agent_name": "RusticSpire",
+  "paths": ["crates/fs-wakeref/**"],
+  "exclusive": true,
+  "reason": "unblock strict clippy for fs-vpm cone (frankensim-nkwkt)",
+  "ttl_seconds": 7200
+}

@@ -1,0 +1,39 @@
+[package]
+name = "fs-project"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The versioned .fsim project schema (bead f85xj.6.1): the user-facing contract for the ratified thermal-design-assurance vertical, with the Five Explicits mandatory, defaults rare and receipted, typed violations, isomorphic s-expression/JSON spellings over fs-ir's AST, canonical bytes for hashing, and migration receipts."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-airflow = { path = "../fs-airflow" }
+fs-blake3 = { path = "../fs-blake3" }
+fs-conduction = { path = "../fs-conduction" }
+fs-convection = { path = "../fs-convection" }
+fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec" }
+fs-io = { path = "../fs-io" }
+fs-ivl = { path = "../fs-ivl" }
+fs-ir = { path = "../fs-ir" }
+fs-material = { path = "../fs-material" }
+fs-matdb = { path = "../fs-matdb" }
+fs-package = { path = "../fs-package" }
+fs-qty = { path = "../fs-qty" }
+fs-regime = { path = "../fs-regime" }
+fs-rep-mesh = { path = "../fs-rep-mesh" }
+fs-scenario = { path = "../fs-scenario" }
+fs-session = { path = "../fs-session" }
+fs-voi = { path = "../fs-voi" }
+
+[dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-conduction = { path = "../fs-conduction" }
+fs-geom = { path = "../fs-geom" }
+
+[lints]
+workspace = true

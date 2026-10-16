@@ -1,0 +1,37 @@
+frankensim.matdb-source.v1
+observation	nasa-cr174869-table3-9-duran	Duran (borosilicate) glass	NASA-CR-174869 scanned report, Table 3-9 Characteristics of the Paar Density Meter / Physical Properties of Duran Glass, printed page 62	Density 2.23 g/cm3 converted to 2230 kg/m3; elastic modulus 67.8 GPa; Poisson ratio 0.22 at 20 deg C; mean linear expansion coefficient 3.2e-6 per deg C over 20 to 300 deg C, not a measured local derivative throughout that interval; thermal conductivity 1.168 W/(m-K); specific heat 0.18 cal/(g-K) at 20 deg C converted using the explicitly selected thermochemical calorie convention 1 cal/(g-K)=4184 J/(kg-K) to 753.12 J/(kg-K); glass transition 530 deg C absolute temperature and DIN 52325 sudden-change resistance delta-T=250 deg C (250 K temperature difference). The scanned cover identifies NASA-CR-174869; NTRS identity is 19860021558. Tensile strength claims are withheld because of a source unit conflict: under Safety Factor=5 the table pairs fire-bright 7.8 MPa with 11,400 psia (about 78.6 MPa), and cut-surface 3.9 MPa with 5,700 psia (about 39.3 MPa). Neither column is selected or corrected without corroboration; neither measured ultimate-strength nor structural-allowable semantics or a test method is inferred. The table does not supply specimen preparation, humidity, pressure or uncertainty; no correction is inferred. A transition temperature or shock difference does not specify the test's ambient temperature.
+scalar	density	nasa-cr174869-table3-9-duran	density	2230	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+scalar	young-modulus	nasa-cr174869-table3-9-duran	young_modulus	67.8	GPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+scalar	poisson-ratio	nasa-cr174869-table3-9-duran	poisson_ratio	0.22	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	temperature	293.15	293.15	K
+scalar	mean-linear-thermal-expansion-coefficient	nasa-cr174869-table3-9-duran	linear_thermal_expansion_coefficient	3.2e-6	K^-1	constant
+uncertainty	mean-linear-thermal-expansion-coefficient	unstated	-	-	-	-
+validity	mean-linear-thermal-expansion-coefficient	temperature	293.15	573.15	K
+scalar	thermal-conductivity	nasa-cr174869-table3-9-duran	thermal_conductivity	1.168	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+scalar	specific-heat-capacity	nasa-cr174869-table3-9-duran	specific_heat_capacity	753.12	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	temperature	293.15	293.15	K
+scalar	glass-transition-temperature	nasa-cr174869-table3-9-duran	glass_transition_temperature	803.15	K	constant
+uncertainty	glass-transition-temperature	unstated	-	-	-	-
+scalar	thermal-shock-resistance-temperature-difference	nasa-cr174869-table3-9-duran	thermal_shock_resistance_temperature	250	K	constant
+uncertainty	thermal-shock-resistance-temperature-difference	unstated	-	-	-	-
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_specimen_condition_known	0	0	1
+validity	young-modulus	source_test_temperature_known	0	0	1
+validity	young-modulus	source_specimen_condition_known	0	0	1
+validity	poisson-ratio	source_test_temperature_known	1	1	1
+validity	poisson-ratio	source_specimen_condition_known	0	0	1
+validity	mean-linear-thermal-expansion-coefficient	source_test_temperature_known	1	1	1
+validity	mean-linear-thermal-expansion-coefficient	source_specimen_condition_known	0	0	1
+validity	thermal-conductivity	source_test_temperature_known	0	0	1
+validity	thermal-conductivity	source_specimen_condition_known	0	0	1
+validity	specific-heat-capacity	source_test_temperature_known	1	1	1
+validity	specific-heat-capacity	source_specimen_condition_known	0	0	1
+validity	glass-transition-temperature	source_test_temperature_known	0	0	1
+validity	glass-transition-temperature	source_specimen_condition_known	0	0	1
+validity	thermal-shock-resistance-temperature-difference	source_test_temperature_known	0	0	1
+validity	thermal-shock-resistance-temperature-difference	source_specimen_condition_known	0	0	1

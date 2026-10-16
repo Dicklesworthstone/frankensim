@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	schott-borofloat33-reference
+redistribution	permitted	Selected attributed numerical facts and original notes only; the SCHOTT source documents and their table layouts are not redistributed or licensed
+citation	SCHOTT, BOROFLOAT 33 Technical Data, page 1, and BOROFLOAT 33 Thermal Properties, 2014, page 1; https://media.schott.com/api/public/content/69b4abd8191246e3869c46c717f07b29?download=true&v=3b812f89 ; https://media.schott.com/api/public/content/4fd51376b9d54a68b47be78fadfdd32d?download=true&v=1fc0ea9c
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	engineering-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	young_modulus	young-modulus	dimensional
+property	poisson_ratio	poisson-ratio	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	mean_linear_thermal_expansion_coefficient	mean-linear-thermal-expansion-coefficient	dimensional
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_temperatures_matched	source-temperatures-matched	dimensional
+axis	reference_annealed_glass	reference-annealed-glass	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	expansion_interval_lower	expansion-interval-lower	absolute-temperature
+axis	expansion_interval_upper	expansion-interval-upper	absolute-temperature

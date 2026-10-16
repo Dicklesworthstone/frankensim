@@ -1,0 +1,13 @@
+frankensim.matdb-manifest.v3
+pack_id	roechling-polystone-g-natural-reference
+redistribution	permitted	Selected attributed numerical facts and original notes only; the Röchling source document and its table layout are not redistributed or licensed
+citation	Röchling Industrial, Polystone G natural PE-HD/PE 300 Technical Data Sheet, PIM-ID 591262, release 2024-07-17 version 12.0, print 2026-05-05, https://www.roechling.com/fileadmin/assets/Polystone%C2%AE%20G%20natural%20%E2%80%93%20Technical%20Data%20Sheet%20%28EN%29.pdf; product page https://www.roechling.com/de/industrial/werkstoffe/thermoplastics/industrial-plastics/pe/pe-hd-pe-300/polystone-g-natural-591262
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	roechling-polystone-g-natural	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_temperatures_matched	source-temperatures-matched	dimensional
+axis	reference_roechling_polystone_g_natural	reference-roechling-polystone-g-natural	dimensional
+axis	temperature	temperature	absolute-temperature

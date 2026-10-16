@@ -1,0 +1,23 @@
+frankensim.matdb-source.v1
+observation	tn2893-vacuum-dwell	Aluminum 2024-T4 double-cantilever reeds in vacuum	Resonant-dwell material damping, Table 4 beam damping measurements in vacuum (0.2 mm Hg, 70 F), 0.100 inch thick beams, damping coefficient g = 1/Q	The source measured material damping independent of stress amplitude from 4800 to 19200 psi and frequency dependent from 15 to 1500 cps, in quantitative agreement with the Zener thermal-relaxation theory g = (alpha^2 E T / c) omega tau / (1 + omega^2 tau^2); each row below pins the low-stress Table 4 value of g at the actual measured frequency for the 0.100 inch beams; thickness moves the Zener relaxation frequency as tau proportional to h^2 (the 0.200 inch beam at 76 Hz measured 2.41e-4 and the 0.050 inch beam at 315 Hz measured 8.15e-4); air damping measured up to 10x greater than material damping, so these vacuum rows are the material property; no confidence semantics are printed, so runtime uncertainty stays Unstated
+scalar	loss-factor-15hz	tn2893-vacuum-dwell	loss_factor_15hz	0.00292	1	constant
+uncertainty	loss-factor-15hz	unstated	-	-	-	-
+validity	loss-factor-15hz	frequency	15.18	15.18	Hz
+scalar	loss-factor-30hz	tn2893-vacuum-dwell	loss_factor_30hz	0.002027	1	constant
+uncertainty	loss-factor-30hz	unstated	-	-	-	-
+validity	loss-factor-30hz	frequency	30.30	30.30	Hz
+scalar	loss-factor-70hz	tn2893-vacuum-dwell	loss_factor_70hz	0.000955	1	constant
+uncertainty	loss-factor-70hz	unstated	-	-	-	-
+validity	loss-factor-70hz	frequency	71.60	71.60	Hz
+scalar	loss-factor-150hz	tn2893-vacuum-dwell	loss_factor_150hz	0.000502	1	constant
+uncertainty	loss-factor-150hz	unstated	-	-	-	-
+validity	loss-factor-150hz	frequency	153.2	153.2	Hz
+scalar	loss-factor-300hz	tn2893-vacuum-dwell	loss_factor_300hz	0.000236	1	constant
+uncertainty	loss-factor-300hz	unstated	-	-	-	-
+validity	loss-factor-300hz	frequency	306.5	306.5	Hz
+scalar	loss-factor-700hz	tn2893-vacuum-dwell	loss_factor_700hz	0.000114	1	constant
+uncertainty	loss-factor-700hz	unstated	-	-	-	-
+validity	loss-factor-700hz	frequency	716.2	716.2	Hz
+scalar	loss-factor-1500hz	tn2893-vacuum-dwell	loss_factor_1500hz	0.0000485	1	constant
+uncertainty	loss-factor-1500hz	unstated	-	-	-	-
+validity	loss-factor-1500hz	frequency	1572	1572	Hz

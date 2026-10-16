@@ -1,0 +1,35 @@
+frankensim.matdb-source.v1
+observation	thermic-cga-conductivity-fit	nasa-larc-thermic-peek-plate-grade-and-process-unspecified	NASA LaRC THERMIC transient test on one PEEK plate; instrumented 7.9 mm diameter by 12.7 mm plugs; Type K thermocouples; 1D Crank-Nicolson model; Continuous Genetic Algorithm fit using all three center-plug thermocouples	k(T)=c0+c1*T+c2*T^2+c3*T^3 in W/(m K); c0..c3=-4.0607e-2,1.8749e-3,-4.4753e-6,3.9027e-9; strict admitted range 300-525 K at source-described atmospheric pressure; Results and Abstract state 300-525 K while Concluding Remarks says 300-550 K, so the narrower repeated range governs; four thermocouple-subset estimates differed by about 3 percent, but this is not a stated confidence interval; chosen all-thermocouple fit was about 35 percent below prior laser-flash values; source does not identify PEEK grade, supplier, crystallinity, filler, or processing history
+observation	larc-dsc-specific-heat-fit	nasa-larc-thermic-peek-plate-grade-and-process-unspecified	NASA LaRC differential-scanning-calorimeter measurements fitted as the known specific-heat input to the PEEK thermal model	cp(T)=1.0477e-5*T^3-6.1332e-3*T^2+3.3066*T+3.3606e2 in J/(kg K); the paper does not label Equation 2 inline, but J/(kg K) is the SI unit required by Equation 1's dimensional balance with k in W/(m K), density in kg/m3, x in m, and t in s; exact-point evaluations are admitted only over the thermal model's stricter 300-525 K range; source reports no residual, dispersion, confidence level, degrees of freedom, PEEK grade, supplier, crystallinity, filler, or processing history
+observation	commercial-lab-density	nasa-larc-thermic-peek-plate-grade-and-process-unspecified	Commercial-laboratory density measurement used as the known constant-density input to the NASA PEEK thermal model	NASA reports 1264 kg/m3 and cites Netzsch report 621004797 dated July 2019; test temperature, pressure, method details, dispersion, confidence metadata, PEEK grade, supplier, crystallinity, filler, and processing history are not reported
+scalar	thermal-conductivity-300K	thermic-cga-conductivity-fit	thermal_conductivity	0.2244589	W/m/K	constant
+uncertainty	thermal-conductivity-300K	unstated	-	-	-	-
+validity	thermal-conductivity-300K	temperature	300	300	K
+validity	thermal-conductivity-300K	source_pressure_atmospheric	1	1	1
+scalar	thermal-conductivity-400K	thermic-cga-conductivity-fit	thermal_conductivity	0.2430778	W/m/K	constant
+uncertainty	thermal-conductivity-400K	unstated	-	-	-	-
+validity	thermal-conductivity-400K	temperature	400	400	K
+validity	thermal-conductivity-400K	source_pressure_atmospheric	1	1	1
+scalar	thermal-conductivity-500K	thermic-cga-conductivity-fit	thermal_conductivity	0.2658555	W/m/K	constant
+uncertainty	thermal-conductivity-500K	unstated	-	-	-	-
+validity	thermal-conductivity-500K	temperature	500	500	K
+validity	thermal-conductivity-500K	source_pressure_atmospheric	1	1	1
+scalar	thermal-conductivity-525K	thermic-cga-conductivity-fit	thermal_conductivity	0.2749438234375	W/m/K	constant
+uncertainty	thermal-conductivity-525K	unstated	-	-	-	-
+validity	thermal-conductivity-525K	temperature	525	525	K
+validity	thermal-conductivity-525K	source_pressure_atmospheric	1	1	1
+scalar	specific-heat-capacity-300K	larc-dsc-specific-heat-fit	specific_heat_capacity	1058.931	J/kg/K	constant
+uncertainty	specific-heat-capacity-300K	unstated	-	-	-	-
+validity	specific-heat-capacity-300K	temperature	300	300	K
+scalar	specific-heat-capacity-400K	larc-dsc-specific-heat-fit	specific_heat_capacity	1347.916	J/kg/K	constant
+uncertainty	specific-heat-capacity-400K	unstated	-	-	-	-
+validity	specific-heat-capacity-400K	temperature	400	400	K
+scalar	specific-heat-capacity-500K	larc-dsc-specific-heat-fit	specific_heat_capacity	1765.685	J/kg/K	constant
+uncertainty	specific-heat-capacity-500K	unstated	-	-	-	-
+validity	specific-heat-capacity-500K	temperature	500	500	K
+scalar	specific-heat-capacity-525K	larc-dsc-specific-heat-fit	specific_heat_capacity	1897.616390625	J/kg/K	constant
+uncertainty	specific-heat-capacity-525K	unstated	-	-	-	-
+validity	specific-heat-capacity-525K	temperature	525	525	K
+scalar	density-source-temperature-unspecified	commercial-lab-density	density	1264	kg/m3	constant
+uncertainty	density-source-temperature-unspecified	unstated	-	-	-	-
+validity	density-source-temperature-unspecified	source_test_temperature_known	0	0	1

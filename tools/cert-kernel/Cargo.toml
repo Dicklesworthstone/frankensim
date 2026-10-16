@@ -1,0 +1,42 @@
+[package]
+name = "frankensim-cert-kernel"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "Isolated N-version certified-arithmetic cross-check for fs-ivl."
+publish = false
+
+# This is deliberately a nested development workspace. The production
+# workspace never depends on this kernel; the optional fs-ivl edge exists only
+# so the standalone comparison binary can confront both implementations.
+[workspace]
+
+[features]
+default = ["crosscheck"]
+crosscheck = ["dep:fs-ivl"]
+
+[dependencies]
+fs-ivl = { path = "../../crates/fs-ivl", optional = true }
+
+[[bin]]
+name = "frankensim-cert-kernel"
+path = "src/main.rs"
+required-features = ["crosscheck"]
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+similar_names = "allow"
+many_single_char_names = "allow"
+unreadable_literal = "allow"
+doc_markdown = "allow"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"

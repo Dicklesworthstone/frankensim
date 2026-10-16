@@ -1,0 +1,22 @@
+frankensim.matdb-manifest.v3
+pack_id	mcam-proteus-homopolymer-pp-natural-2023
+redistribution	permitted	Selected attributed numerical facts and original notes only; the MCAM source document and its table layout are not redistributed or licensed
+citation	Mitsubishi Chemical Advanced Materials, Proteus Homopolymer PP Natural Product Datasheet, issue/revision 2023-02-17, pages 1–2; https://www.mcam.com/mam/datasheets/PE-Proteus%C2%AE%20Homopolymer%20PP%20Natural_en_US.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	mcam-2023-proteus-pp-natural	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_yield_strain	tensile-yield-strain	dimensional
+property	mean_linear_thermal_expansion_coefficient	mean-linear-thermal-expansion-coefficient	dimensional
+axis	source_grade_proteus_pp_natural_2023	source-grade-proteus-pp-natural-2023	dimensional
+axis	dry_material	dry-material	dimensional
+axis	source_specimen_form_known	source-specimen-form-known	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_test_speed_known	source-test-speed-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	test_speed	test-speed	dimensional
+axis	expansion_interval_lower	expansion-interval-lower	absolute-temperature
+axis	expansion_interval_upper	expansion-interval-upper	absolute-temperature

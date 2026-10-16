@@ -1,0 +1,8 @@
+{
+  "project_key": "/Users/jemanuel/projects/frankensim",
+  "agent_name": "BluePrairie",
+  "paths": ["crates/fs-vvreg/src/corpus.rs", "crates/fs-vvreg/tests/acoustic.rs"],
+  "ttl_seconds": 7200,
+  "exclusive": true,
+  "reason": "frankensim-4pghb"
+}

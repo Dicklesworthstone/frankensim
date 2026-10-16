@@ -1,0 +1,44 @@
+frankensim.matdb-source.v1
+observation	wh-clear-wood	Sugar maple (Acer saccharum) clear straight-grained specimens	FPL-GTR-282 chapter 5 tabulated averages (static bending MOE; compression-derived elastic ratios; experimentally determined Poisson ratios)	Average clear straight-grained small-specimen values at approximately 12 percent moisture content; the elastic-ratio and Poisson tables derive from samples of a few species and the source warns values vary within and between species; the source reports representative coefficients of variation separately in its Table 5-6 without per-value confidence metadata, so runtime uncertainty stays Unstated; bending MOE is printed with span-to-depth 14 shear deflection included and the chapter states it may be increased by 10 percent to remove that effect, which is how the derived young_modulus_longitudinal row is computed; axis convention: L longitudinal (grain), R radial, T tangential, matching the instrument-axis-convention file in this directory; Table 5-3a specific gravity is ovendry-weight over volume-at-12-percent basis, so density = 1000 * SG * 1.12 kg/m3 at 12 percent moisture content
+scalar	et-over-el	wh-clear-wood	et_over_el	0.065	1	constant
+uncertainty	et-over-el	unstated	-	-	-	-
+validity	et-over-el	moisture_content	12	12	%
+scalar	er-over-el	wh-clear-wood	er_over_el	0.132	1	constant
+uncertainty	er-over-el	unstated	-	-	-	-
+validity	er-over-el	moisture_content	12	12	%
+scalar	glr-over-el	wh-clear-wood	glr_over_el	0.111	1	constant
+uncertainty	glr-over-el	unstated	-	-	-	-
+validity	glr-over-el	moisture_content	12	12	%
+scalar	glt-over-el	wh-clear-wood	glt_over_el	0.063	1	constant
+uncertainty	glt-over-el	unstated	-	-	-	-
+validity	glt-over-el	moisture_content	12	12	%
+scalar	nu-lr	wh-clear-wood	nu_lr	0.424	1	constant
+uncertainty	nu-lr	unstated	-	-	-	-
+validity	nu-lr	moisture_content	12	12	%
+scalar	nu-lt	wh-clear-wood	nu_lt	0.476	1	constant
+uncertainty	nu-lt	unstated	-	-	-	-
+validity	nu-lt	moisture_content	12	12	%
+scalar	nu-rt	wh-clear-wood	nu_rt	0.774	1	constant
+uncertainty	nu-rt	unstated	-	-	-	-
+validity	nu-rt	moisture_content	12	12	%
+scalar	nu-tr	wh-clear-wood	nu_tr	0.349	1	constant
+uncertainty	nu-tr	unstated	-	-	-	-
+validity	nu-tr	moisture_content	12	12	%
+scalar	nu-rl	wh-clear-wood	nu_rl	0.065	1	constant
+uncertainty	nu-rl	unstated	-	-	-	-
+validity	nu-rl	moisture_content	12	12	%
+scalar	nu-tl	wh-clear-wood	nu_tl	0.037	1	constant
+uncertainty	nu-tl	unstated	-	-	-	-
+validity	nu-tl	moisture_content	12	12	%
+scalar	moe-bending	wh-clear-wood	modulus_of_elasticity_bending	12600	MPa	constant
+uncertainty	moe-bending	unstated	-	-	-	-
+validity	moe-bending	moisture_content	12	12	%
+scalar	young-modulus-longitudinal	wh-clear-wood	young_modulus_longitudinal	13860.0	MPa	constant
+uncertainty	young-modulus-longitudinal	unstated	-	-	-	-
+validity	young-modulus-longitudinal	moisture_content	12	12	%
+scalar	specific-gravity	wh-clear-wood	specific_gravity	0.63	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+validity	specific-gravity	moisture_content	12	12	%
+scalar	density-12pct	wh-clear-wood	density	705.6	kg/m3	constant
+uncertainty	density-12pct	unstated	-	-	-	-
+validity	density-12pct	moisture_content	12	12	%

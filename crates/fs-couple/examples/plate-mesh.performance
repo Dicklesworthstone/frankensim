@@ -1,0 +1,107 @@
+frankensim-plate-performance-v1
+audio 48000 4801 1.0
+observer 1.2 1.0
+limits 8 0.9 100.0 1000000.0 32
+mechanics simply-supported 0.0 0.02 5.0 700.0 3
+sections 2
+section 0.003 700.0 7000000000.0 7000000000.0 0.3 2692307692.307692 0.0
+section 0.004 600.0 11000000000.0 1400000000.0 0.3 800000000.0 0.35
+nodes 30
+node 0.00 0.000
+node 0.08 0.000
+node 0.16 0.000
+node 0.24 0.000
+node 0.32 0.000
+node 0.40 0.000
+node 0.00 0.075
+node 0.08 0.075
+node 0.16 0.075
+node 0.24 0.075
+node 0.32 0.075
+node 0.40 0.075
+node 0.00 0.150
+node 0.08 0.150
+node 0.16 0.150
+node 0.24 0.150
+node 0.32 0.150
+node 0.40 0.150
+node 0.00 0.225
+node 0.08 0.225
+node 0.16 0.225
+node 0.24 0.225
+node 0.32 0.225
+node 0.40 0.225
+node 0.00 0.300
+node 0.08 0.300
+node 0.16 0.300
+node 0.24 0.300
+node 0.32 0.300
+node 0.40 0.300
+triangles 40
+triangle 0 1 7 0
+triangle 0 7 6 0
+triangle 1 2 8 0
+triangle 1 8 7 0
+triangle 2 3 9 0
+triangle 2 9 8 0
+triangle 3 4 10 1
+triangle 3 10 9 1
+triangle 4 5 11 1
+triangle 4 11 10 1
+triangle 6 7 13 0
+triangle 6 13 12 0
+triangle 7 8 14 0
+triangle 7 14 13 0
+triangle 8 9 15 0
+triangle 8 15 14 0
+triangle 9 10 16 1
+triangle 9 16 15 1
+triangle 10 11 17 1
+triangle 10 17 16 1
+triangle 12 13 19 0
+triangle 12 19 18 0
+triangle 13 14 20 0
+triangle 13 20 19 0
+triangle 14 15 21 0
+triangle 14 21 20 0
+triangle 15 16 22 1
+triangle 15 22 21 1
+triangle 16 17 23 1
+triangle 16 23 22 1
+triangle 18 19 25 0
+triangle 18 25 24 0
+triangle 19 20 26 0
+triangle 19 26 25 0
+triangle 20 21 27 0
+triangle 20 27 26 0
+triangle 21 22 28 1
+triangle 21 28 27 1
+triangle 22 23 29 1
+triangle 22 29 28 1
+supports 18
+support 0
+support 1
+support 2
+support 3
+support 4
+support 5
+support 6
+support 11
+support 12
+support 17
+support 18
+support 23
+support 24
+support 25
+support 26
+support 27
+support 28
+support 29
+footprint 2
+weight 14 0.7
+weight 15 0.3
+initial_force_n 1.0
+events 3
+force 37 0.0
+force 1701 -0.4
+force 1738 0.0

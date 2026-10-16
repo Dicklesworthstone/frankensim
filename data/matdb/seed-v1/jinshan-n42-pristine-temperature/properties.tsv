@@ -1,0 +1,67 @@
+frankensim.matdb-source.v1
+observation	table-1-pristine-n42-temperature-endpoints	jinshan-magnetic-materials-commercial-n42-sintered-ndfeb-pristine-wire-cut-10x10x6-mm-lot-unspecified	Chang et al. 2025 Section 2 and Table 1; commercial N42 sintered NdFeB from Jinshan Magnetic Materials Co., wire-cut to source-described 10 mm x 10 mm x 6 mm cubes, retained as pristine N42 and measured with a NIM 6500C permanent magnetic measuring instrument	Table 1 reports intrinsic coercivity Hcj, remanence Br, and maximum energy product at 25 degC and 120 degC. CGS values are exactly normalized with 1 G=1e-4 T and 1 Oe=1000/(4*pi) A/m. The paper calls the 10 mm x 10 mm x 6 mm pieces cubes despite unequal dimensions. Supplier production lot, composition, original sinter schedule, magnetization protocol, coating state, wire-cut orientation, temperature-control method, field-sweep protocol, repeats, dispersion, and uncertainty are absent. The pristine N42 row did not receive the authors' 800 degC/5 h plus 550 degC/2 h treatment; that distinct state is N42-HT. Figure 10 includes plotted 80 degC curves, but no curve points are digitized or admitted
+scalar	remanence-25degC	table-1-pristine-n42-temperature-endpoints	remanent_flux_density	1.275	T	constant
+uncertainty	remanence-25degC	unstated	-	-	-	-
+validity	remanence-25degC	temperature	25	25	degC
+validity	remanence-25degC	source_instrument_nim_6500c	1	1	1
+validity	remanence-25degC	source_authors_heat_treatment_applied	0	0	1
+validity	remanence-25degC	source_supplier_production_lot_known	0	0	1
+validity	remanence-25degC	source_composition_known	0	0	1
+validity	remanence-25degC	source_temperature_control_method_known	0	0	1
+scalar	intrinsic-coercivity-25degC	table-1-pristine-n42-temperature-endpoints	intrinsic_coercive_field_strength	960.5000815595882	kA/m	constant
+uncertainty	intrinsic-coercivity-25degC	unstated	-	-	-	-
+validity	intrinsic-coercivity-25degC	temperature	25	25	degC
+validity	intrinsic-coercivity-25degC	source_instrument_nim_6500c	1	1	1
+validity	intrinsic-coercivity-25degC	source_authors_heat_treatment_applied	0	0	1
+validity	intrinsic-coercivity-25degC	source_supplier_production_lot_known	0	0	1
+validity	intrinsic-coercivity-25degC	source_composition_known	0	0	1
+validity	intrinsic-coercivity-25degC	source_temperature_control_method_known	0	0	1
+scalar	maximum-energy-product-25degC	table-1-pristine-n42-temperature-endpoints	maximum_magnetic_energy_product	319.4239707854339	kJ/m3	constant
+uncertainty	maximum-energy-product-25degC	unstated	-	-	-	-
+validity	maximum-energy-product-25degC	temperature	25	25	degC
+validity	maximum-energy-product-25degC	source_instrument_nim_6500c	1	1	1
+validity	maximum-energy-product-25degC	source_authors_heat_treatment_applied	0	0	1
+validity	maximum-energy-product-25degC	source_supplier_production_lot_known	0	0	1
+validity	maximum-energy-product-25degC	source_composition_known	0	0	1
+validity	maximum-energy-product-25degC	source_temperature_control_method_known	0	0	1
+scalar	remanence-120degC	table-1-pristine-n42-temperature-endpoints	remanent_flux_density	1.118	T	constant
+uncertainty	remanence-120degC	unstated	-	-	-	-
+validity	remanence-120degC	temperature	120	120	degC
+validity	remanence-120degC	source_instrument_nim_6500c	1	1	1
+validity	remanence-120degC	source_authors_heat_treatment_applied	0	0	1
+validity	remanence-120degC	source_supplier_production_lot_known	0	0	1
+validity	remanence-120degC	source_composition_known	0	0	1
+validity	remanence-120degC	source_temperature_control_method_known	0	0	1
+scalar	intrinsic-coercivity-120degC	table-1-pristine-n42-temperature-endpoints	intrinsic_coercive_field_strength	411.4155278925494	kA/m	constant
+uncertainty	intrinsic-coercivity-120degC	unstated	-	-	-	-
+validity	intrinsic-coercivity-120degC	temperature	120	120	degC
+validity	intrinsic-coercivity-120degC	source_instrument_nim_6500c	1	1	1
+validity	intrinsic-coercivity-120degC	source_authors_heat_treatment_applied	0	0	1
+validity	intrinsic-coercivity-120degC	source_supplier_production_lot_known	0	0	1
+validity	intrinsic-coercivity-120degC	source_composition_known	0	0	1
+validity	intrinsic-coercivity-120degC	source_temperature_control_method_known	0	0	1
+scalar	maximum-energy-product-120degC	table-1-pristine-n42-temperature-endpoints	maximum_magnetic_energy_product	233.0824141580807	kJ/m3	constant
+uncertainty	maximum-energy-product-120degC	unstated	-	-	-	-
+validity	maximum-energy-product-120degC	temperature	120	120	degC
+validity	maximum-energy-product-120degC	source_instrument_nim_6500c	1	1	1
+validity	maximum-energy-product-120degC	source_authors_heat_treatment_applied	0	0	1
+validity	maximum-energy-product-120degC	source_supplier_production_lot_known	0	0	1
+validity	maximum-energy-product-120degC	source_composition_known	0	0	1
+validity	maximum-energy-product-120degC	source_temperature_control_method_known	0	0	1
+observation	table-2-pristine-n42-temperature-coefficients	jinshan-magnetic-materials-commercial-n42-sintered-ndfeb-pristine-wire-cut-10x10x6-mm-lot-unspecified	Chang et al. 2025 Table 2 and printed endpoint-ratio formulas for remanence alpha and intrinsic-coercivity beta between 25 degC and 120 degC	The source prints alpha=-0.129 percent/degC and beta=-0.602 percent/degC. These are normalized to -0.00129 K^-1 and -0.00602 K^-1. Rounded Table 1 endpoints do not reproduce both printed coefficients exactly, so the Table 2 coefficients remain distinct source claims rather than values recomputed from rounded endpoints. They are interval-average coefficients, not continuous constitutive laws, reversible recoil limits, or authorization to extrapolate outside 25-120 degC. No coefficient uncertainty, covariance, irreversible-loss boundary, recoil permeability, or raw demagnetization points are reported
+scalar	remanence-temperature-coefficient	table-2-pristine-n42-temperature-coefficients	remanence_temperature_coefficient	-0.00129	K-1	constant
+uncertainty	remanence-temperature-coefficient	unstated	-	-	-	-
+validity	remanence-temperature-coefficient	temperature	25	120	degC
+validity	remanence-temperature-coefficient	source_coefficient_uses_25c_and_120c_endpoints	1	1	1
+validity	remanence-temperature-coefficient	source_rounded_endpoints_reproduce_printed_coefficient_exactly	0	0	1
+validity	remanence-temperature-coefficient	source_authors_heat_treatment_applied	0	0	1
+validity	remanence-temperature-coefficient	source_supplier_production_lot_known	0	0	1
+validity	remanence-temperature-coefficient	source_composition_known	0	0	1
+scalar	intrinsic-coercivity-temperature-coefficient	table-2-pristine-n42-temperature-coefficients	coercivity_temperature_coefficient	-0.00602	K-1	constant
+uncertainty	intrinsic-coercivity-temperature-coefficient	unstated	-	-	-	-
+validity	intrinsic-coercivity-temperature-coefficient	temperature	25	120	degC
+validity	intrinsic-coercivity-temperature-coefficient	source_coefficient_uses_25c_and_120c_endpoints	1	1	1
+validity	intrinsic-coercivity-temperature-coefficient	source_rounded_endpoints_reproduce_printed_coefficient_exactly	0	0	1
+validity	intrinsic-coercivity-temperature-coefficient	source_authors_heat_treatment_applied	0	0	1
+validity	intrinsic-coercivity-temperature-coefficient	source_supplier_production_lot_known	0	0	1
+validity	intrinsic-coercivity-temperature-coefficient	source_composition_known	0	0	1

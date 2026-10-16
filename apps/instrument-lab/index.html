@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Struck — instruments from first principles · FrankenSim</title>
+  <meta name="description" content="A drum kit and a concert grand simulated from geometry, materials and contact by FrankenSim, graded against real recordings. Hear the offline reference renders, then play the live WebAssembly engines." />
+  <meta name="theme-color" content="#08090c" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <meta property="og:title" content="Struck — instruments from first principles" />
+  <meta property="og:description" content="A drum kit and a concert grand computed from geometry, materials and contact, and graded against real recordings." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="%VITE_SITE_URL%" />
+  <meta property="og:image" content="%VITE_SITE_URL%og.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="Nothing here was recorded: an 18-inch crash cymbal and a snare drum painted with their simulated velocity fields a few milliseconds after the stick lands." />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Struck — instruments from first principles" />
+  <meta name="twitter:description" content="A drum kit and a concert grand computed from geometry, materials and contact, and graded against real recordings." />
+  <meta name="twitter:image" content="%VITE_SITE_URL%twitter.png" />
+  <meta name="twitter:image:alt" content="An 18-inch crash cymbal and a snare drum painted with their simulated velocity fields." />
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="topbar">
+    <a class="brand" href="#top"><b>Struck</b><span>FrankenSim instrument lab</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="#two-ways">Two ways</a>
+      <a href="#strandbar">Strandbar</a>
+      <a href="#kit">Drum kit</a>
+      <a class="is-live" href="#live-kit">Play the kit</a>
+      <a class="is-live" href="#live-piano">Play the piano</a>
+      <a href="#piano">Grand piano</a>
+      <a class="is-live" href="#player">Player piano</a>
+      <a href="#real">Real vs ours</a>
+      <a href="#method">Method</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <!-- ================================================================ HERO -->
+    <section class="hero" id="top">
+      <div class="wrap hero-grid">
+        <div>
+          <p class="eyebrow">FrankenSim · physical acoustics</p>
+          <h1>Nothing here<br />was <em>recorded.</em></h1>
+          <p class="lede">A concert grand and a drum kit, computed from geometry, materials and contact. Strings get their partials from tension, stiffness and mass; the soundboard gets its modes from finite elements; drum heads and cymbals are vibrating plates on a fine grid. A felt hammer, a stick or a beater collides with them, and the air carries the result to a microphone placed at a point in space.</p>
+          <p class="lede">Two ways to hear it: <em class="b">offline reference renders</em> that took up to 41 minutes per clip, and a <em class="v">live engine</em> compiled to WebAssembly that you can play in this tab. The only recordings on this page are the real instruments we <a href="#real">grade ourselves against</a>, and they are clearly marked.</p>
+          <div class="btn-row">
+            <button class="btn primary" id="hero-play" type="button" aria-describedby="hero-play-note">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor" /></svg>
+              <span>Hear the offline grand</span>
+            </button>
+            <a class="btn live" href="#live-piano">Play it live</a>
+            <a class="btn ghost" href="#piano-silent-anchor">Hear strings nobody struck</a>
+          </div>
+          <p class="small muted" id="hero-play-note" style="margin-top: 12px">Satie, <i>Gymnopédie No. 1</i> (1888), bars 1–2 and 5–9 · two pressure microphones 1 m above a Model D–derived soundboard · <span id="hero-render-note">offline render</span></p>
+          <dl class="stats hero-facts" id="hero-facts"></dl>
+        </div>
+        <div class="hero-stage">
+          <div class="stage aspect-4x3" id="hero-stage" aria-label="The simulated Model D soundboard with its ribs, bridges and 88 string courses">
+            <div class="stage-top"><span class="tag offline">Offline reference</span><span class="tag plain" id="hero-clock">0.00 s</span></div>
+            <div class="stage-hud"><span>Soundboard geometry: <b>FE mesh, 17 ribs, 2 bridges</b></span><span id="hero-hud-right">lit points: the 88 bridge stations where each key drives the board</span></div>
+          </div>
+          <div class="kbd" id="hero-kbd" aria-hidden="true"></div>
+          <div class="chart" style="margin-top: 10px"><canvas id="hero-scope" width="1200" height="150" aria-label="Pressure at the left microphone, in pascals"></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ TWO WAYS -->
+    <section id="two-ways">
+      <div class="wrap">
+        <header>
+          <div class="rule"></div>
+          <p class="eyebrow">Two ways to hear it</p>
+          <h2>The same physics at two budgets.</h2>
+          <p class="lede">The offline reference spends minutes per second of sound so that nothing is cut short. The live engine runs the same equations on a smaller description, fast enough to play. They are labelled everywhere, and the live engines report their measured distance from the reference.</p>
+        </header>
+        <div class="versus">
+          <div>
+            <span class="tag offline">Offline reference</span>
+            <h3>Rendered here, at research fidelity</h3>
+            <p class="muted small">Native Rust, single-threaded per clip, run on a workstation and encoded to AAC for this page.</p>
+            <ul id="versus-offline">
+              <li><span>Grand piano</span>all 88 keys / 234 strings every step · 18,167 string partials · 128 soundboard modes to 2.4 kHz · 192 kHz mechanics</li>
+              <li><span>Drum kit</span>one finite-difference plate solver for every head and cymbal · up to 7,589 grid points per surface · 48–288 kHz · von Kármán shells · 18 snare wires in contact with the head</li>
+              <li><span>Cost</span>the 19 s grand-piano clip took 41 minutes (128× slower than real time)</li>
+              <li><span>Microphone</span>pressure in pascals at a point, never normalized</li>
+            </ul>
+          </div>
+          <div>
+            <span class="tag live">Live · WebAssembly</span>
+            <h3>Computed in your browser, as you play</h3>
+            <p class="muted small">Each engine runs in its own Web Worker (one per drum piece) and streams to an AudioWorklet that mixes them on the audio clock. Nothing is sampled or pre-recorded.</p>
+            <ul id="versus-live">
+              <li><span>Drum kit</span>the offline kit's own plate solver, snare wires and clamped hi-hat included, on a grid 2–8× coarser, chosen per piece for each device · a piece that has gone quiet is not stepped</li>
+              <li><span>Piano</span>the reference's own equations, for the sounding keys only · on the largest soundboard this device keeps up with, up to the offline render's 128 coordinates · 16 keys held with the pedal down at about 2× real time</li>
+              <li><span>Not live</span>the finest drum detail (a coarser grid loses some above a few kHz), and the strings of keys you are not playing</li>
+              <li><span>Latency</span>about 35–45 ms measured headlessly, including the output device</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ STRANDBAR -->
+    <section id="strandbar">
+      <div class="wrap">
+        <header>
+          <div class="rule"></div>
+          <p class="eyebrow"><span class="tag offline">Offline reference</span> <span class="tag live">Live · WebAssembly</span></p>
+          <h2>One groove, two simulations, one switch.</h2>
+          <p class="lede">The piano riff and four-on-the-floor of Todd Terje's <i>Strandbar</i>, played on FrankenSim's concert grand and drum kit. Two versions run on one clock: the studio render, computed offline at full resolution, and the same piano and drums computed in this tab while you listen. Flip the switch as it plays; nothing else changes.</p>
+        </header>
+        <div id="strandbar-root" class="live-root" style="min-height: 560px"></div>
+      </div>
+    </section>
+
+    <!-- ============================================================ DRUM KIT -->
+    <section id="kit">
+      <div class="wrap">
+        <header>
+          <div class="rule"></div>
+          <p class="eyebrow"><span class="tag offline">Offline reference</span></p>
+          <h2>A drum kit, every piece from one solver.</h2>
+          <p class="lede">Kick, snare, toms, hi-hat, crash and ride are one object here: a thin plate on a fine grid. A drum head is a film under tension, clamped at its rim; a cymbal is a bronze shell with a free edge that bends, stretches and trades energy between its vibrations (von Kármán coupling), which is what turns a strike into a wash. Stick, beater, snare wires and hi-hat rims meet the surfaces through contact laws; the air inside a drum couples its two heads. The sizes copy a real kit recorded with overhead microphones, and each piece is played next to its recording below.</p>
+        </header>
+        <div id="kit-root" class="live-root" style="min-height: 520px"></div>
+      </div>
+    </section>
+
+    <!-- ============================================================ LIVE KIT -->
+    <section id="live-kit">
+      <div class="wrap">
+        <header>
+          <div class="rule live"></div>
+          <p class="eyebrow"><span class="tag live">Live · WebAssembly</span></p>
+          <h2>Play a drum kit that is being solved as you hit it.</h2>
+          <p class="lede">Strike any head or cymbal where you like: the stick lands at that spot on the same plate solver as the kit above, computed in this tab. The colours are the surface's own velocity field, the wave you hear spreading from where you hit. Keys work too: B kick, S snare, T and F toms, H hi-hat, C crash, R ride.</p>
+        </header>
+        <div id="live-kit-root" class="live-root" style="min-height: 420px"></div>
+      </div>
+    </section>
+
+    <!-- ============================================================ LIVE PIANO -->
+    <section id="live-piano">
+      <div class="wrap">
+        <header>
+          <div class="rule live"></div>
+          <p class="eyebrow"><span class="tag live">Live · WebAssembly</span></p>
+          <h2>A grand piano you can play — with its strings visible.</h2>
+          <p class="lede">Each key launches a hysteretic felt hammer into stiff strings with the published Steinway scale's lengths, tensions and stiffness. Every string you play shares one soundboard. Press nearer the front of a key to strike harder.</p>
+        </header>
+        <div id="live-piano-root" class="live-root" data-mount="piano"></div>
+      </div>
+    </section>
+
+    <!-- ============================================================ PIANO (offline) -->
+    <section id="piano">
+      <div class="wrap">
+        <header>
+          <div class="rule"></div>
+          <p class="eyebrow"><span class="tag offline">Offline reference</span></p>
+          <h2>A concert grand, all 234 strings at once.</h2>
+          <p class="lede">The string scale is the published RT-0425 model of a Steinway D: 88 courses with lengths, linear densities, tensions and bending stiffness. The soundboard is a ribbed orthotropic spruce plate transcribed from published Model D drawings. Every string of every key stays in the simulation all the time, which is why the effects below need no "resonance layer".</p>
+        </header>
+        <div class="stack">
+          <article class="panel" data-group="piano-silent" id="piano-silent-anchor">
+            <div class="panel-head"><h3>The strings nobody struck</h3></div>
+            <p class="muted">Hold C4, E4 and G4 down silently, so that their dampers lift without a hammer moving. Then strike C3 staccato and let it go. C3's dampers stop its own strings, but the shared bridge has already passed energy into the undamped C-major strings, and they keep singing. Compare it with the same strike alone, and with the pedal down, which lifts every damper. Use “Listen closer” to raise only the playback level of the quiet tail.</p>
+            <div class="clip-host"></div>
+          </article>
+          <article class="panel" data-group="piano-ladder">
+            <div class="panel-head"><h3>pp, mf, ff: the felt hardens</h3></div>
+            <p class="muted">Hammer felt is stiffer the more it is squeezed, so a faster hammer stays in contact for less time. A shorter contact feeds energy into higher partials, which is why ff is brighter and not just louder. Beside the clips is the bridge velocity under the key: the force that actually reaches the soundboard.</p>
+            <div class="grid wide-left" style="margin-top: 14px">
+              <div class="clip-host"></div>
+              <figure>
+                <div class="chart"><canvas data-chart="bridge" width="900" height="520" aria-label="Bridge velocity for three hammer speeds"></canvas></div>
+                <div class="legend" data-legend="bridge"></div>
+                <figcaption>Vertical bridge velocity under A3 for the first 30 ms. Each curve is scaled to its own peak and offset so that the shapes can be compared. The repeating pattern is the string's period, 4.5 ms for A3.</figcaption>
+              </figure>
+            </div>
+          </article>
+          <article class="panel" data-group="piano-octaves">
+            <div class="panel-head"><h3>Why piano octaves are wider than 2:1</h3></div>
+            <p class="muted">A steel string is a little stiff, so its partials run sharp: <span class="num">fₙ = n·f₁·√(1+Bn²)/√(1+B)</span>. The effect grows up the keyboard. With exact 2:1 first partials, A5's second partial lands 5.5 Hz (5.4 cents) above A6. Stretch tuning moves them together <em>by changing each string's tension</em>, not by retuning an oscillator. The clips play A4+A5, then A5+A6 from 2.6 s. The plot zooms into the rendered sound near 1760 Hz, where the two tunings differ.</p>
+            <div class="grid wide-left" style="margin-top: 14px">
+              <div class="clip-host"></div>
+              <div class="stack">
+                <figure>
+                  <div class="chart"><canvas data-chart="beats" width="900" height="420" aria-label="Spectrum of the rendered sound near 1760 hertz for both tunings, with the scale's predicted partial positions"></canvas></div>
+                  <div class="legend" data-legend="beats"></div>
+                  <figcaption>The last 2.65 s of each clip, zoomed to 1752–1774 Hz; dotted marks are where the string scale puts A6's first partial and A5's second. Equal-tempered: two separate clusters about 5.5 Hz apart, as predicted. Stretch-tuned: one cluster where both predictions coincide (1767.35 Hz). Each cluster is itself split by about 0.9 Hz, because the model's three unison strings are detuned by ±0.8 cents. That split makes both clips wobble about once a second, and it masks the 5.5 Hz octave beat by ear.</figcaption>
+                </figure>
+                <figure>
+                  <div class="chart"><canvas data-chart="stretch" width="900" height="420" aria-label="Stretch tuning curve in cents for all 88 keys"></canvas></div>
+                  <figcaption>Stretch relative to equal-tempered first partials (cents), and the inharmonicity B of every key (right axis, log), both computed from the dumped string scale.</figcaption>
+                </figure>
+              </div>
+            </div>
+          </article>
+          <div class="grid two">
+            <article class="panel" data-group="piano-register">
+              <div class="panel-head"><h3>The bottom and the top</h3></div>
+              <p class="muted">A0 is a single 2.01 m wound string with partials so stretched that the 20th lies more than a semitone sharp of 20·f₁. C6 has three short plain strings and a much shorter hammer contact.</p>
+              <div class="clip-host"></div>
+            </article>
+            <article class="panel" id="mixer">
+              <div class="panel-head"><h3>Solo the soundboard</h3><div class="tags"><span class="tag offline">Exact modal sum</span></div></div>
+              <p class="muted">A2 at 2.5 m/s, split into the pressure that each loaded soundboard mode contributes at the microphone. Mute and solo the modes: the signed sum of every channel is the rendered sound to 10⁻¹⁴, including the cancellation between modes.</p>
+              <div data-mixer></div>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ PLAYER PIANO -->
+    <section id="player">
+      <div class="wrap">
+        <header>
+          <div class="rule live"></div>
+          <p class="eyebrow"><span class="tag live">Live · WebAssembly</span></p>
+          <h2>A player piano and drum machine for any MIDI file.</h2>
+          <p class="lede">A MIDI file is only a list of keys and strokes; it usually reaches you through a handful of recorded samples, and sounds like it. Here it is punched into a paper roll that plays FrankenSim's concert grand and drum kit, computed in this tab. Each note launches a felt hammer into real strings on one shared soundboard; each drum note lands a stick on a simulated head or cymbal. Pick a roll, or drop in a MIDI file of your own.</p>
+        </header>
+        <div id="player-root" class="live-root" style="min-height: 900px"></div>
+      </div>
+    </section>
+
+    <!-- ============================================================ REAL vs OURS -->
+    <section id="real">
+      <div class="wrap">
+        <header>
+          <div class="rule"></div>
+          <p class="eyebrow">Graded against real instruments</p>
+          <h2>How close is it to the real thing?</h2>
+          <p class="lede">Sounding plausible is easy to fake, so we put FrankenSim's renders next to real recordings of the same notes, from the University of Iowa's free instrument samples: a Steinway &amp; Sons Model B grand. We measured the same things on both, and the headline gap sits next to a ruler made only of the real piano: how much it changes between two dynamics. The drum kit is graded the same way, piece by piece, in its own section.</p>
+        </header>
+        <div id="verisim-root" class="live-root" style="min-height: 640px"></div>
+        <div class="panel subsection" style="margin-top: 22px">
+          <h3>What the comparison shows</h3>
+          <ul class="findings" id="verisim-findings"></ul>
+
+          <p class="small muted" style="margin-top: 14px">Method: both signals are high-passed at 40–70 Hz to remove room rumble, and each pair is aligned at its note onset, measured against the recording's own noise floor. Partial frequencies come from a 1 s window, and B is fitted from (fₙ/n)² = f₀²(1+Bn²) over partials above the noise floor. Decay rates are linear fits of each partial over 0.2–2.6 s (0.2–2.0 s at C6). The Iowa piano was recorded with two microphones 8 inches above the bass and treble strings in a normal room; the bass-side channel is used, because averaging two spaced microphones can cancel partials. FrankenSim's piano is heard at one point 1 m above its board with no room, so some differences belong to the two listening positions rather than the instruments. Playback gets the same high-pass and an early-loudness match, and nothing else. The analysis is <code>tools/verisim.py</code>.</p>
+        </div>
+        <div class="panel subsection" style="margin-top: 22px">
+          <h3>Why it sounds different: tracing each gap to what the model leaves out</h3>
+          <p class="muted small" style="margin: 8px 0 16px; max-width: 92ch">A score says how far apart two sounds are, not why. Here each difference is followed back along the chain hammer → string → bridge → soundboard → air → microphone. Some links can be checked inside the simulation, which records the bridge's motion as well as the sound. Then one physical mechanism is switched on at a time and the note is rendered again. A suspicion counts as confirmed only when that experiment moves the measured gap.</p>
+          <div id="diagnosis-root" class="diag-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ METHOD -->
+    <section id="method">
+      <div class="wrap">
+        <header>
+          <div class="rule"></div>
+          <p class="eyebrow">Method and honesty</p>
+          <h2>What is computed, what is estimated, what is absent.</h2>
+          <p class="lede">These instruments are descriptions, not instrument code. A drum is a short list of radii, thicknesses, moduli and tensions; the piano is composed out of FrankenSim's general physics crates (plates and shells, modal solvers, contact, port-Hamiltonian integration, boundary elements), and the kit out of one plate solver, fs-vkplate. The same crates serve the project's thermal, structural and fluid work.</p>
+        </header>
+        <div class="grid two">
+          <div class="panel">
+            <h3>The instrument is a description</h3>
+            <p class="muted small" style="margin: 8px 0 12px">The kit's snare, verbatim from <code>crates/fs-vkplate/src/kit.rs</code>. Edit a number and the solver builds a different drum.</p>
+            <pre class="spec" id="spec-drum"></pre>
+            <p class="muted small" style="margin: 14px 0 12px">The crash: radius, bow and bell thickness, rise and grid. Thickness and height become functions of radius; the solver lays them on the grid.</p>
+            <pre class="spec" id="spec-cymbal"></pre>
+            <p class="muted small" style="margin: 14px 0 12px">Six of the grand piano's 88 string courses, as the solver read them. Frequencies follow from these numbers; none is typed in.</p>
+            <div class="table-scroll" tabindex="0" aria-label="Piano string scale excerpt"><table id="scale-table"></table></div>
+          </div>
+          <div class="stack">
+            <div class="panel">
+              <h3>Three kinds of number</h3>
+              <div class="stack" style="margin-top: 14px">
+                <div><h4>Published, transcribed from sources</h4><div class="chips" style="margin-top: 8px"><span class="chip pub">RT-0425 string scale (84 courses)</span><span class="chip pub">Model D board outline, ribs, bridges</span><span class="chip pub">Spruce &amp; maple elastic constants</span><span class="chip pub">B20 bronze constants</span><span class="chip pub">Kit sizes (Salamander Drumkit)</span><span class="chip pub">Per-key hammer mass &amp; stiffness laws</span></div></div>
+                <div><h4>Estimated, labelled in every run log</h4><div class="chips" style="margin-top: 8px"><span class="chip est">Head tensions (tuned to the recording)</span><span class="chip est">Loss from the recordings' decay times</span><span class="chip est">Felt crush &amp; relaxation</span><span class="chip est">Cymbal thickness &amp; rise</span><span class="chip est">Stick, beater &amp; felt laws</span><span class="chip est">Snare wire mass, tension, preload</span><span class="chip est">Hi-hat rim contact</span><span class="chip est">Four extrapolated end keys</span></div></div>
+                <div><h4>Not modelled</h4><div class="chips" style="margin-top: 8px"><span class="chip not">Piano room &amp; lid</span><span class="chip not">Drum shells, hoops &amp; rims</span><span class="chip not">Cavity modes (kit)</span><span class="chip not">Hi-hat friction</span><span class="chip not">Wire radiation</span><span class="chip not">Sympathetic buzz between kit pieces</span><span class="chip not">Microphone capsule</span><span class="chip not">Real-time offline engine</span></div></div>
+              </div>
+            </div>
+            <div class="panel">
+              <h3>It says no</h3>
+              <p class="muted small" style="margin: 8px 0 14px">Real refusals from this campaign. A render that cannot be supported is refused rather than quietly approximated.</p>
+              <div class="stack" id="refusals"></div>
+            </div>
+          </div>
+        </div>
+        <div class="panel subsection" style="margin-top: 22px">
+          <h3>Numbers behind this page</h3>
+          <p class="muted small" style="margin: 8px 0 14px">Every offline clip carries its exact command, run time and energy closure in its “Run evidence” drawer. Totals:</p>
+          <dl class="stats" id="method-stats"></dl>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="site">
+    <div class="wrap">
+      <p>Built from <a href="https://github.com/Dicklesworthstone/frankensim">FrankenSim</a> at commit <code id="commit">—</code>. Offline clips were rendered natively with the <code>percussion</code> and <code>grand_piano</code> examples in <code>crates/fs-couple/examples</code>. The live engines are in <code>apps/instrument-lab/engine-kit</code> (the drum kit) and <code>engine-piano</code>.</p>
+      <p>Audio is pressure in pascals multiplied by one fixed playback gain per comparison; no clip was normalized, equalized or reverberated. Nobody has formally adjudicated these sounds against real instruments, and no realism claim is made beyond what each panel states.</p>
+    </div>
+  </footer>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

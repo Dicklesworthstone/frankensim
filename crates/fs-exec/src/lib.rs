@@ -1,0 +1,106 @@
+//! fs-exec — Two-lane executor: latency lane on asupersync, work-stealing
+//! tile lane, `Cx` contract. Layer: L0.
+//!
+//! The beating heart of L0 (plan §5.2), in two lanes:
+//!
+//! - **Latency lane** ([`LatencyLane`]): asupersync's native async
+//!   scheduling for orchestration — ledger I/O, IR interpretation, progress
+//!   streaming. Thin by design; asupersync's request → drain → finalize
+//!   cancellation protocol applies unmodified.
+//! - **Throughput lane** ([`TilePool`]): a work-stealing fork-join pool
+//!   whose units of work are TILES. Per-worker deques seeded with
+//!   weight-proportional contiguous tile runs (the P/E-asymmetry hook),
+//!   CCD-local-first steal order derived from fs-substrate topology, and
+//!   FIXED-SLOT reductions folded in tile order — results are bit-identical
+//!   across worker counts and steal schedules by construction (Decalogue
+//!   P2).
+//!
+//! The contract every kernel programs against (plan Appendix B):
+//! [`TileKernel`] (`tiles() -> TilePlan`, `run(tile, &Cx) ->
+//! ControlFlow<Cancelled, Out>` with `Out: Reduce`) and [`Cx`] — the
+//! cancellation gate polled at tile boundaries, the tile-scoped fs-alloc
+//! arena, the [`StreamKey`] RNG identity keyed by `(seed, kernel_id, tile,
+//! iteration)` (never by worker), the budget slice, and the [`ExecMode`].
+//!
+//! Failure containment: a panicking tile is caught, siblings drain via the
+//! gate, and the run returns a structured [`RunError`] with full tile
+//! provenance — never a process abort mid-campaign (Decalogue P10/P7).
+//!
+//! On top of the lanes, the three executor behaviors most HPC runtimes
+//! lack (plan §5.2): speculative races with loser-cancellation and
+//! deterministic victory ([`Racer`]), resumable/forkable solvers with
+//! bit-exact pause-serialize-resume ([`solver`]), and the statistical-
+//! preemption kill-handle registry ([`KillRegistry`], Bet 8's machinery).
+//!
+//! See CONTRACT.md for invariants, determinism class, cancellation
+//! behavior, and no-claim boundaries.
+
+mod admit;
+mod budget_accountant;
+mod crew;
+mod cx;
+mod fault;
+pub mod freeze;
+mod invocation;
+mod kernel;
+mod kill;
+mod latency;
+mod pool;
+mod race;
+pub mod reduce;
+pub mod solver;
+mod tune;
+
+pub use admit::{AdmittedStorage, Concat, LeaseAdmittedOut};
+pub use budget_accountant::{AdmittedBudget, BudgetConsumption, BudgetRefusal};
+pub use cx::{
+    Budget, CancelGate, Cancelled, Cx, DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN,
+    DRAIN_FINALIZE_REPORT_IDENTITY_VERSION, DrainFinalizeError, DrainFinalizeReport, DrainTracker,
+    DrainWorker, ExecMode, RunId, StreamKey, TileFailure,
+};
+pub use fault::{FaultPlanError, TILE_FAULT_PLAN_VERSION, TileFaultPlan};
+pub use freeze::{
+    CommittedFreeze, FREEZE_COMMITMENT_IDENTITY_DOMAIN, FREEZE_NONCE_IDENTITY_DOMAIN,
+    FREEZE_RECEIPT_IDENTITY_DOMAIN, FREEZE_REGISTRY_IDENTITY_DOMAIN, FreezeBoundaryLabels,
+    FreezeDisposition, FreezeNonce, FreezeOwnerBinding, FreezeResumeInputs, SnapshotFreezeError,
+    SnapshotFreezePermit, SnapshotFreezeReceipt, SnapshotFreezeRegistry, SnapshotSealError,
+};
+pub use invocation::{
+    ChildBudget, ChildFinalizationEvidence, ChildFinalizer, ChildReceipt, CostUnits,
+    EvaluationUnits, FINALIZATION_REPORT_VERSION, FinalizableChildBudget, FinalizationObservation,
+    FinalizationPublication, FinalizationReport, FinalizationResources, FinalizedChildReceipt,
+    INVOCATION_RECEIPT_MAX_CHILDREN, INVOCATION_RECEIPT_VERSION, InvocationAdmission,
+    InvocationAdmitter, InvocationBudget, InvocationDisposition, InvocationError, InvocationLimits,
+    InvocationMemoryRefusal, InvocationMemoryReservation, InvocationPlanBinding, InvocationPoll,
+    InvocationPublicationScope, InvocationReceipt, InvocationResources, MemoryBytes, OutputBytes,
+    PollUnits, PreparedPublication, PublicationCommitError, ReceiptSemanticError, Time, TimeSource,
+    UnfinishedChild, UnfinishedChildAuthority, VirtualClock, WallClock, WorkUnits,
+};
+pub use kernel::{KernelRunner, Reduce, TileKernel, TilePlan};
+pub use kill::{CandidateId, KillRegistry, UnregisteredKill};
+pub use latency::{LaneError, LatencyLane};
+pub use pool::{
+    CompletionKernelRunner, CrewScopeError, LocalTaskCaps, ParkedTilePool, PoolConfig, RunError,
+    RunReport, TILEPOOL_COMPLETION_WITNESS_NO_CLAIMS, TILEPOOL_COMPLETION_WITNESS_VERSION,
+    TilePool, TilePoolCompletionDisposition, TilePoolCompletionWitness,
+    TilePoolCompletionWitnessError, TilePoolInvocationPermit, TilePoolRequestPhase, WitnessedRun,
+    victim_order, weighted_ranges,
+};
+pub use race::{BranchOutcome, BranchReport, NoWinner, RaceBranch, RaceRun, Racer, RacerConfig};
+pub use tune::{
+    GEMM_KERNEL_PREFIX, GemmBlockPlan, GemmExecutionIdentity, GemmTuneKey, PreparedGemmDecision,
+    PreparedGemmRow, ScheduleKind, ThroughputUnit, TuneError, TuneEvidence, TuneObservation,
+    TuneRow, TuneSource, Tuner, TuningDecision, TuningDecisionHistory, WallTimeSummary, WorkUnit,
+};
+
+/// Crate version, re-exported for provenance stamping (the Five Explicits'
+/// "versions" pillar reaches down to individual crates).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn version_is_stamped() {
+        assert!(!super::VERSION.is_empty());
+    }
+}

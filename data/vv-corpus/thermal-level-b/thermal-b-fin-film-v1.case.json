@@ -1,0 +1,17 @@
+{
+  "id": "thermal-b-fin-film-v1",
+  "title": "Three-dimensional rectangular fin: Dirichlet base, film (Robin) on every exposed face",
+  "notes": "Unlike the Level-A fin row, no one-dimensional fin model enters: the reference is the full three-dimensional P1 field, so tip/edge/corner film effects are part of the compared solution.",
+  "mesh": { "counts": [16, 2, 4], "extent": [0.04, 0.004, 0.01] },
+  "material": { "kind": "isotropic", "k": 170.0 },
+  "source": { "kind": "none" },
+  "bcs": [
+    { "name": "base", "face": ["x", 0.0], "kind": "dirichlet", "t_k": 350.0 },
+    { "name": "tip", "face": ["x", "max"], "kind": "robin", "h": 60.0, "t_inf_k": 295.0 },
+    { "name": "y-lo", "face": ["y", 0.0], "kind": "robin", "h": 60.0, "t_inf_k": 295.0 },
+    { "name": "y-hi", "face": ["y", "max"], "kind": "robin", "h": 60.0, "t_inf_k": 295.0 },
+    { "name": "z-lo", "face": ["z", 0.0], "kind": "robin", "h": 60.0, "t_inf_k": 295.0 },
+    { "name": "z-hi", "face": ["z", "max"], "kind": "robin", "h": 60.0, "t_inf_k": 295.0 }
+  ],
+  "probes": [[8, 1, 2], [16, 1, 2], [4, 0, 4], [12, 2, 0], [16, 2, 4]]
+}

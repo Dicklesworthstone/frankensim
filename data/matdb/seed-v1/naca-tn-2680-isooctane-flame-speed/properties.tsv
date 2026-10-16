@@ -1,0 +1,218 @@
+frankensim.matdb-source.v1
+observation	supplier-minimum-purity	naca-tn-2680-2-2-4-trimethylpentane-minimum-99-6-molpct-supplier-and-lot-unspecified	Supplier minimum-purity statement retained by NACA TN 2680	The supplier claimed a minimum purity of 99.6 mole percent. The report does not identify the supplier, lot, analytical method, measured assay, impurity composition, storage history, or uncertainty, so the lower-bound statement is not promoted to an exact composition
+scalar	supplier-minimum-purity	supplier-minimum-purity	minimum_reported_fuel_mole_fraction_purity	99.6	%	constant
+uncertainty	supplier-minimum-purity	unstated	-	-	-	-
+validity	supplier-minimum-purity	source_fuel_supplier_identity_known	0	0	1
+validity	supplier-minimum-purity	source_fuel_lot_known	0	0	1
+validity	supplier-minimum-purity	source_exact_assay_known	0	0	1
+observation	table-i-experimental-maxima	naca-tn-2680-2-2-4-trimethylpentane-minimum-99-6-molpct-supplier-and-lot-unspecified	Schlieren photographs of atmospheric-pressure Bunsen-type flames reduced by the total-area method; experimental maximum-flame-speed rows transcribed from NACA TN 2680 Table I	The report states that each maximum occurred at an equivalence ratio between 1.0 and 1.1 but does not identify the exact maximizing ratio per row. The atmospheric pressure was an experiment-wide average of 744 mm mercury, transcribed here as 99.2 kPa at source-supported precision, not a per-row reading. The 0.210 oxygen-fraction runs used laboratory service air containing approximately 0.4 volume percent water; because the value is approximate it remains observation-only. Other oxygen-nitrogen mixtures were supplier analyzed to plus or minus 0.1 volume percent. Repeated rows at the same nominal condition remain separate observations-in-table claims. Raw photographs, row-level pressure, dispersion, confidence metadata, supplier, lot, exact assay, and impurity composition are absent. These are mixture-and-apparatus observations, not geometry-free bulk-material constants or a continuous flame-speed law
+scalar	max-u-311-o210-r1000-d1256	table-i-experimental-maxima	maximum_laminar_flame_speed	34.6	cm/s	constant
+uncertainty	max-u-311-o210-r1000-d1256	unstated	-	-	-	-
+validity	max-u-311-o210-r1000-d1256	initial_mixture_temperature	311	311	K
+validity	max-u-311-o210-r1000-d1256	oxygen_mole_fraction_in_oxygen_nitrogen	0.210	0.210	1
+validity	max-u-311-o210-r1000-d1256	stream_flow_reynolds_number	1000	1000	1
+validity	max-u-311-o210-r1000-d1256	burner_inside_diameter	1.256	1.256	cm
+validity	max-u-311-o210-r1000-d1256	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-311-o210-r1000-d1256	source_pressure_per_row_known	0	0	1
+validity	max-u-311-o210-r1000-d1256	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-311-o210-r1000-d1256	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-311-o210-r1000-d1256	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-311-o210-r1000-d1256	source_oxidizer_analysis_half_width_known	0	0	1
+validity	max-u-311-o210-r1000-d1256	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-311-o210-r1000-d1256	source_fuel_lot_known	0	0	1
+scalar	max-u-311-o250-r1000-d0838	table-i-experimental-maxima	maximum_laminar_flame_speed	52.1	cm/s	constant
+uncertainty	max-u-311-o250-r1000-d0838	unstated	-	-	-	-
+validity	max-u-311-o250-r1000-d0838	initial_mixture_temperature	311	311	K
+validity	max-u-311-o250-r1000-d0838	oxygen_mole_fraction_in_oxygen_nitrogen	0.250	0.250	1
+validity	max-u-311-o250-r1000-d0838	stream_flow_reynolds_number	1000	1000	1
+validity	max-u-311-o250-r1000-d0838	burner_inside_diameter	0.838	0.838	cm
+validity	max-u-311-o250-r1000-d0838	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-311-o250-r1000-d0838	source_pressure_per_row_known	0	0	1
+validity	max-u-311-o250-r1000-d0838	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-311-o250-r1000-d0838	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-311-o250-r1000-d0838	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-311-o250-r1000-d0838	source_oxidizer_analysis_absolute_half_width	0.1	0.1	%
+validity	max-u-311-o250-r1000-d0838	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-311-o250-r1000-d0838	source_fuel_lot_known	0	0	1
+scalar	max-u-311-o294-r1600-d0838	table-i-experimental-maxima	maximum_laminar_flame_speed	72.2	cm/s	constant
+uncertainty	max-u-311-o294-r1600-d0838	unstated	-	-	-	-
+validity	max-u-311-o294-r1600-d0838	initial_mixture_temperature	311	311	K
+validity	max-u-311-o294-r1600-d0838	oxygen_mole_fraction_in_oxygen_nitrogen	0.294	0.294	1
+validity	max-u-311-o294-r1600-d0838	stream_flow_reynolds_number	1600	1600	1
+validity	max-u-311-o294-r1600-d0838	burner_inside_diameter	0.838	0.838	cm
+validity	max-u-311-o294-r1600-d0838	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-311-o294-r1600-d0838	source_pressure_per_row_known	0	0	1
+validity	max-u-311-o294-r1600-d0838	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-311-o294-r1600-d0838	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-311-o294-r1600-d0838	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-311-o294-r1600-d0838	source_oxidizer_analysis_absolute_half_width	0.1	0.1	%
+validity	max-u-311-o294-r1600-d0838	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-311-o294-r1600-d0838	source_fuel_lot_known	0	0	1
+scalar	max-u-311-o294-r0900-d0617	table-i-experimental-maxima	maximum_laminar_flame_speed	67.2	cm/s	constant
+uncertainty	max-u-311-o294-r0900-d0617	unstated	-	-	-	-
+validity	max-u-311-o294-r0900-d0617	initial_mixture_temperature	311	311	K
+validity	max-u-311-o294-r0900-d0617	oxygen_mole_fraction_in_oxygen_nitrogen	0.294	0.294	1
+validity	max-u-311-o294-r0900-d0617	stream_flow_reynolds_number	900	900	1
+validity	max-u-311-o294-r0900-d0617	burner_inside_diameter	0.617	0.617	cm
+validity	max-u-311-o294-r0900-d0617	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-311-o294-r0900-d0617	source_pressure_per_row_known	0	0	1
+validity	max-u-311-o294-r0900-d0617	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-311-o294-r0900-d0617	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-311-o294-r0900-d0617	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-311-o294-r0900-d0617	source_oxidizer_analysis_absolute_half_width	0.1	0.1	%
+validity	max-u-311-o294-r0900-d0617	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-311-o294-r0900-d0617	source_fuel_lot_known	0	0	1
+scalar	max-u-311-o347-r1200-d0617	table-i-experimental-maxima	maximum_laminar_flame_speed	89.1	cm/s	constant
+uncertainty	max-u-311-o347-r1200-d0617	unstated	-	-	-	-
+validity	max-u-311-o347-r1200-d0617	initial_mixture_temperature	311	311	K
+validity	max-u-311-o347-r1200-d0617	oxygen_mole_fraction_in_oxygen_nitrogen	0.347	0.347	1
+validity	max-u-311-o347-r1200-d0617	stream_flow_reynolds_number	1200	1200	1
+validity	max-u-311-o347-r1200-d0617	burner_inside_diameter	0.617	0.617	cm
+validity	max-u-311-o347-r1200-d0617	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-311-o347-r1200-d0617	source_pressure_per_row_known	0	0	1
+validity	max-u-311-o347-r1200-d0617	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-311-o347-r1200-d0617	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-311-o347-r1200-d0617	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-311-o347-r1200-d0617	source_oxidizer_analysis_absolute_half_width	0.1	0.1	%
+validity	max-u-311-o347-r1200-d0617	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-311-o347-r1200-d0617	source_fuel_lot_known	0	0	1
+scalar	max-u-311-o496-r1800-d0297	table-i-experimental-maxima	maximum_laminar_flame_speed	152.2	cm/s	constant
+uncertainty	max-u-311-o496-r1800-d0297	unstated	-	-	-	-
+validity	max-u-311-o496-r1800-d0297	initial_mixture_temperature	311	311	K
+validity	max-u-311-o496-r1800-d0297	oxygen_mole_fraction_in_oxygen_nitrogen	0.496	0.496	1
+validity	max-u-311-o496-r1800-d0297	stream_flow_reynolds_number	1800	1800	1
+validity	max-u-311-o496-r1800-d0297	burner_inside_diameter	0.297	0.297	cm
+validity	max-u-311-o496-r1800-d0297	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-311-o496-r1800-d0297	source_pressure_per_row_known	0	0	1
+validity	max-u-311-o496-r1800-d0297	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-311-o496-r1800-d0297	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-311-o496-r1800-d0297	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-311-o496-r1800-d0297	source_oxidizer_analysis_absolute_half_width	0.1	0.1	%
+validity	max-u-311-o496-r1800-d0297	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-311-o496-r1800-d0297	source_fuel_lot_known	0	0	1
+scalar	max-u-367-o210-r1000-d1256	table-i-experimental-maxima	maximum_laminar_flame_speed	44.8	cm/s	constant
+uncertainty	max-u-367-o210-r1000-d1256	unstated	-	-	-	-
+validity	max-u-367-o210-r1000-d1256	initial_mixture_temperature	367	367	K
+validity	max-u-367-o210-r1000-d1256	oxygen_mole_fraction_in_oxygen_nitrogen	0.210	0.210	1
+validity	max-u-367-o210-r1000-d1256	stream_flow_reynolds_number	1000	1000	1
+validity	max-u-367-o210-r1000-d1256	burner_inside_diameter	1.256	1.256	cm
+validity	max-u-367-o210-r1000-d1256	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-367-o210-r1000-d1256	source_pressure_per_row_known	0	0	1
+validity	max-u-367-o210-r1000-d1256	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-367-o210-r1000-d1256	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-367-o210-r1000-d1256	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-367-o210-r1000-d1256	source_oxidizer_analysis_half_width_known	0	0	1
+validity	max-u-367-o210-r1000-d1256	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-367-o210-r1000-d1256	source_fuel_lot_known	0	0	1
+scalar	max-u-422-o210-r1000-d1256-a	table-i-experimental-maxima	maximum_laminar_flame_speed	56.1	cm/s	constant
+uncertainty	max-u-422-o210-r1000-d1256-a	unstated	-	-	-	-
+validity	max-u-422-o210-r1000-d1256-a	initial_mixture_temperature	422	422	K
+validity	max-u-422-o210-r1000-d1256-a	oxygen_mole_fraction_in_oxygen_nitrogen	0.210	0.210	1
+validity	max-u-422-o210-r1000-d1256-a	stream_flow_reynolds_number	1000	1000	1
+validity	max-u-422-o210-r1000-d1256-a	burner_inside_diameter	1.256	1.256	cm
+validity	max-u-422-o210-r1000-d1256-a	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-422-o210-r1000-d1256-a	source_pressure_per_row_known	0	0	1
+validity	max-u-422-o210-r1000-d1256-a	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-422-o210-r1000-d1256-a	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-422-o210-r1000-d1256-a	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-422-o210-r1000-d1256-a	source_oxidizer_analysis_half_width_known	0	0	1
+validity	max-u-422-o210-r1000-d1256-a	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-422-o210-r1000-d1256-a	source_fuel_lot_known	0	0	1
+scalar	max-u-422-o210-r1000-d1256-b	table-i-experimental-maxima	maximum_laminar_flame_speed	59.0	cm/s	constant
+uncertainty	max-u-422-o210-r1000-d1256-b	unstated	-	-	-	-
+validity	max-u-422-o210-r1000-d1256-b	initial_mixture_temperature	422	422	K
+validity	max-u-422-o210-r1000-d1256-b	oxygen_mole_fraction_in_oxygen_nitrogen	0.210	0.210	1
+validity	max-u-422-o210-r1000-d1256-b	stream_flow_reynolds_number	1000	1000	1
+validity	max-u-422-o210-r1000-d1256-b	burner_inside_diameter	1.256	1.256	cm
+validity	max-u-422-o210-r1000-d1256-b	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-422-o210-r1000-d1256-b	source_pressure_per_row_known	0	0	1
+validity	max-u-422-o210-r1000-d1256-b	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-422-o210-r1000-d1256-b	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-422-o210-r1000-d1256-b	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-422-o210-r1000-d1256-b	source_oxidizer_analysis_half_width_known	0	0	1
+validity	max-u-422-o210-r1000-d1256-b	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-422-o210-r1000-d1256-b	source_fuel_lot_known	0	0	1
+scalar	max-u-422-o210-r0700-d0838	table-i-experimental-maxima	maximum_laminar_flame_speed	57.4	cm/s	constant
+uncertainty	max-u-422-o210-r0700-d0838	unstated	-	-	-	-
+validity	max-u-422-o210-r0700-d0838	initial_mixture_temperature	422	422	K
+validity	max-u-422-o210-r0700-d0838	oxygen_mole_fraction_in_oxygen_nitrogen	0.210	0.210	1
+validity	max-u-422-o210-r0700-d0838	stream_flow_reynolds_number	700	700	1
+validity	max-u-422-o210-r0700-d0838	burner_inside_diameter	0.838	0.838	cm
+validity	max-u-422-o210-r0700-d0838	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-422-o210-r0700-d0838	source_pressure_per_row_known	0	0	1
+validity	max-u-422-o210-r0700-d0838	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-422-o210-r0700-d0838	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-422-o210-r0700-d0838	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-422-o210-r0700-d0838	source_oxidizer_analysis_half_width_known	0	0	1
+validity	max-u-422-o210-r0700-d0838	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-422-o210-r0700-d0838	source_fuel_lot_known	0	0	1
+scalar	max-u-422-o250-r1400-d0838	table-i-experimental-maxima	maximum_laminar_flame_speed	83.1	cm/s	constant
+uncertainty	max-u-422-o250-r1400-d0838	unstated	-	-	-	-
+validity	max-u-422-o250-r1400-d0838	initial_mixture_temperature	422	422	K
+validity	max-u-422-o250-r1400-d0838	oxygen_mole_fraction_in_oxygen_nitrogen	0.250	0.250	1
+validity	max-u-422-o250-r1400-d0838	stream_flow_reynolds_number	1400	1400	1
+validity	max-u-422-o250-r1400-d0838	burner_inside_diameter	0.838	0.838	cm
+validity	max-u-422-o250-r1400-d0838	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-422-o250-r1400-d0838	source_pressure_per_row_known	0	0	1
+validity	max-u-422-o250-r1400-d0838	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-422-o250-r1400-d0838	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-422-o250-r1400-d0838	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-422-o250-r1400-d0838	source_oxidizer_analysis_absolute_half_width	0.1	0.1	%
+validity	max-u-422-o250-r1400-d0838	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-422-o250-r1400-d0838	source_fuel_lot_known	0	0	1
+scalar	max-u-422-o294-r0900-d0617-a	table-i-experimental-maxima	maximum_laminar_flame_speed	108.0	cm/s	constant
+uncertainty	max-u-422-o294-r0900-d0617-a	unstated	-	-	-	-
+validity	max-u-422-o294-r0900-d0617-a	initial_mixture_temperature	422	422	K
+validity	max-u-422-o294-r0900-d0617-a	oxygen_mole_fraction_in_oxygen_nitrogen	0.294	0.294	1
+validity	max-u-422-o294-r0900-d0617-a	stream_flow_reynolds_number	900	900	1
+validity	max-u-422-o294-r0900-d0617-a	burner_inside_diameter	0.617	0.617	cm
+validity	max-u-422-o294-r0900-d0617-a	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-422-o294-r0900-d0617-a	source_pressure_per_row_known	0	0	1
+validity	max-u-422-o294-r0900-d0617-a	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-422-o294-r0900-d0617-a	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-422-o294-r0900-d0617-a	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-422-o294-r0900-d0617-a	source_oxidizer_analysis_absolute_half_width	0.1	0.1	%
+validity	max-u-422-o294-r0900-d0617-a	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-422-o294-r0900-d0617-a	source_fuel_lot_known	0	0	1
+scalar	max-u-422-o294-r0900-d0617-b	table-i-experimental-maxima	maximum_laminar_flame_speed	102.1	cm/s	constant
+uncertainty	max-u-422-o294-r0900-d0617-b	unstated	-	-	-	-
+validity	max-u-422-o294-r0900-d0617-b	initial_mixture_temperature	422	422	K
+validity	max-u-422-o294-r0900-d0617-b	oxygen_mole_fraction_in_oxygen_nitrogen	0.294	0.294	1
+validity	max-u-422-o294-r0900-d0617-b	stream_flow_reynolds_number	900	900	1
+validity	max-u-422-o294-r0900-d0617-b	burner_inside_diameter	0.617	0.617	cm
+validity	max-u-422-o294-r0900-d0617-b	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-422-o294-r0900-d0617-b	source_pressure_per_row_known	0	0	1
+validity	max-u-422-o294-r0900-d0617-b	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-422-o294-r0900-d0617-b	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-422-o294-r0900-d0617-b	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-422-o294-r0900-d0617-b	source_oxidizer_analysis_absolute_half_width	0.1	0.1	%
+validity	max-u-422-o294-r0900-d0617-b	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-422-o294-r0900-d0617-b	source_fuel_lot_known	0	0	1
+scalar	max-u-422-o347-r1400-d0617	table-i-experimental-maxima	maximum_laminar_flame_speed	138.0	cm/s	constant
+uncertainty	max-u-422-o347-r1400-d0617	unstated	-	-	-	-
+validity	max-u-422-o347-r1400-d0617	initial_mixture_temperature	422	422	K
+validity	max-u-422-o347-r1400-d0617	oxygen_mole_fraction_in_oxygen_nitrogen	0.347	0.347	1
+validity	max-u-422-o347-r1400-d0617	stream_flow_reynolds_number	1400	1400	1
+validity	max-u-422-o347-r1400-d0617	burner_inside_diameter	0.617	0.617	cm
+validity	max-u-422-o347-r1400-d0617	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-422-o347-r1400-d0617	source_pressure_per_row_known	0	0	1
+validity	max-u-422-o347-r1400-d0617	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-422-o347-r1400-d0617	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-422-o347-r1400-d0617	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-422-o347-r1400-d0617	source_oxidizer_analysis_absolute_half_width	0.1	0.1	%
+validity	max-u-422-o347-r1400-d0617	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-422-o347-r1400-d0617	source_fuel_lot_known	0	0	1
+scalar	max-u-422-o496-r1800-d0297	table-i-experimental-maxima	maximum_laminar_flame_speed	229.9	cm/s	constant
+uncertainty	max-u-422-o496-r1800-d0297	unstated	-	-	-	-
+validity	max-u-422-o496-r1800-d0297	initial_mixture_temperature	422	422	K
+validity	max-u-422-o496-r1800-d0297	oxygen_mole_fraction_in_oxygen_nitrogen	0.496	0.496	1
+validity	max-u-422-o496-r1800-d0297	stream_flow_reynolds_number	1800	1800	1
+validity	max-u-422-o496-r1800-d0297	burner_inside_diameter	0.297	0.297	cm
+validity	max-u-422-o496-r1800-d0297	average_atmospheric_pressure	99.2	99.2	kPa
+validity	max-u-422-o496-r1800-d0297	source_pressure_per_row_known	0	0	1
+validity	max-u-422-o496-r1800-d0297	source_equivalence_ratio_at_maximum_exact_known	0	0	1
+validity	max-u-422-o496-r1800-d0297	source_maximum_equivalence_ratio_lower_bound	1.0	1.0	1
+validity	max-u-422-o496-r1800-d0297	source_maximum_equivalence_ratio_upper_bound	1.1	1.1	1
+validity	max-u-422-o496-r1800-d0297	source_oxidizer_analysis_absolute_half_width	0.1	0.1	%
+validity	max-u-422-o496-r1800-d0297	source_fuel_supplier_identity_known	0	0	1
+validity	max-u-422-o496-r1800-d0297	source_fuel_lot_known	0	0	1

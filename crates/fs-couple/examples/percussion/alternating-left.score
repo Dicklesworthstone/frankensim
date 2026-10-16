@@ -1,0 +1,9 @@
+frankensim-stick-score-v1
+# Independent left-hand schedule; use an explicitly selected second stick.
+tempo,0,240
+shape,tap,0,0
+shape,tap,0.003,2
+shape,tap,0.006,0
+shape,tap,0.009,-1
+shape,tap,0.012,0
+roll,0.5,1,4,tap,0.8

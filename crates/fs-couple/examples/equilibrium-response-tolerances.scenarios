@@ -1,0 +1,8 @@
+frankensim-equilibrium-scenarios-v1
+scenarios 3
+scenario low-load
+offset load-N -0.1
+scenario nominal
+offset load-N 0
+scenario high-load
+offset load-N 0.1

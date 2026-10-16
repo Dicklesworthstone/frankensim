@@ -1,0 +1,19 @@
+[package]
+name = "fs-mms"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "G1 harness: manufactured-solution refinement ladders, deterministic convergence-order fitting, the 0.2 slope gate for primal and adjoint orders, and the declared lintable MMS battery matrix."
+
+[package.metadata.frankensim]
+layer = "L1"
+
+[dependencies]
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

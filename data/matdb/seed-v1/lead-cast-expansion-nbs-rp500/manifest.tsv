@@ -1,0 +1,14 @@
+frankensim.matdb-manifest.v3
+pack_id	lead-cast-expansion-nbs-rp500
+redistribution	permitted	NIST hosts this unmarked Bureau of Standards Journal of Research article; NIST Copyrights and Disclaimers identifies unmarked NIST-site information as public information that may be distributed or copied, with attribution requested
+citation	Hidnert, P. and Sweeney, W. T. (1932), Thermal Expansion of Lead, Bureau of Standards Journal of Research 9, Research Paper RP500, Table 2 printed p.706 and Summary printed p.709; https://nvlpubs.nist.gov/nistpubs/jres/9/jresv9n5p703_A2b.pdf
+license	NIST-Public-Information-Attribution-Requested
+source	nbs-rp500-table2-sample1144-heating	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	mean_linear_expansion_coefficient_from_20c	mean-linear-expansion-coefficient-from-20c	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_reference_temperature	source-reference-temperature	absolute-temperature
+axis	source_range_end_temperature	source-range-end-temperature	absolute-temperature
+axis	source_sample_id	source-sample-id	dimensional
+axis	source_heating	source-heating	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional

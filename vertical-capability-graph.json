@@ -1,0 +1,212 @@
+{
+  "schema": "frankensim-vertical-capability-graph-v1",
+  "graph_authority": ".beads/issues.jsonl",
+  "program_label": "extreal",
+  "program_id_prefix": "frankensim-extreal-program-f85xj",
+  "purpose": "Checked projection from product capabilities to implementing Beads work; dependency edges and status remain authoritative only in Beads.",
+  "no_claim": "Membership identifies work relevant to a capability, not proof that the work is complete or that the capability deserves a maturity promotion.",
+  "linked_gates": ["frankensim-ty23", "frankensim-v6dn"],
+  "off_path_policy_bead": "frankensim-extreal-program-f85xj.16.3",
+  "capability_bindings": [
+    {
+      "capability_id": "campaign.quality-diversity",
+      "implementing_beads": [
+        "frankensim-epic-ascent-7tv.17",
+        "frankensim-epic-ascent-7tv.21.2",
+        "frankensim-epic-ascent-7tv.24"
+      ]
+    },
+    {
+      "capability_id": "evidence.colour-algebra",
+      "implementing_beads": [
+        "frankensim-extreal-program-f85xj.2.5",
+        "frankensim-extreal-program-f85xj.2.6",
+        "frankensim-extreal-program-f85xj.2.8",
+        "frankensim-extreal-program-f85xj.8.1",
+        "frankensim-extreal-program-f85xj.8.2"
+      ]
+    },
+    {
+      "capability_id": "evidence.packaging",
+      "implementing_beads": [
+        "frankensim-extreal-program-f85xj.2.12",
+        "frankensim-extreal-program-f85xj.2.13",
+        "frankensim-extreal-program-f85xj.6.10"
+      ]
+    },
+    {
+      "capability_id": "geometry.chart-conversion",
+      "implementing_beads": [
+        "frankensim-extreal-program-f85xj.2.18",
+        "frankensim-extreal-program-f85xj.2.19",
+        "frankensim-extreal-program-f85xj.11.2",
+        "frankensim-extreal-program-f85xj.11.3"
+      ]
+    },
+    {
+      "capability_id": "geometry.import-formats",
+      "implementing_beads": [
+        "frankensim-ext-cad-step-interchange-8uxb",
+        "frankensim-extreal-program-f85xj.6.3",
+        "frankensim-extreal-program-f85xj.6.11",
+        "frankensim-extreal-program-f85xj.11.2",
+        "frankensim-leapfrog-2026-program-i94v.2.2.10",
+        "frankensim-leapfrog-2026-program-i94v.2.2.11"
+      ]
+    },
+    {
+      "capability_id": "geometry.topology-certificates",
+      "implementing_beads": [
+        "frankensim-extreal-program-f85xj.2.14",
+        "frankensim-extreal-program-f85xj.2.15",
+        "frankensim-extreal-program-f85xj.2.16",
+        "frankensim-extreal-program-f85xj.2.17",
+        "frankensim-extreal-program-f85xj.11.4"
+      ]
+    },
+    {
+      "capability_id": "governance.capability-maturity",
+      "implementing_beads": [
+        "frankensim-extreal-program-f85xj.16.1",
+        "frankensim-extreal-program-f85xj.16.2",
+        "frankensim-extreal-program-f85xj.16.4"
+      ]
+    },
+    {
+      "capability_id": "governance.claim-integrity",
+      "implementing_beads": [
+        "frankensim-extreal-program-f85xj.2.1",
+        "frankensim-extreal-program-f85xj.2.2",
+        "frankensim-extreal-program-f85xj.2.3",
+        "frankensim-extreal-program-f85xj.2.4"
+      ]
+    },
+    {
+      "capability_id": "gradients.adjoint-verification",
+      "implementing_beads": [
+        "frankensim-epic-flux-tfz.24",
+        "frankensim-extreal-program-f85xj.2.20",
+        "frankensim-extreal-program-f85xj.2.21",
+        "frankensim-extreal-program-f85xj.2.22",
+        "frankensim-extreal-program-f85xj.2.23",
+        "frankensim-extreal-program-f85xj.2.26",
+        "frankensim-extreal-program-f85xj.2.27",
+        "frankensim-extreal-program-f85xj.5.10"
+      ]
+    },
+    {
+      "capability_id": "ledger.design-ledger",
+      "implementing_beads": [
+        "frankensim-epic-helm-gp3.1",
+        "frankensim-fs-ledger-latent-failures-xys1z",
+        "frankensim-extreal-program-f85xj.6.1",
+        "frankensim-extreal-program-f85xj.6.5"
+      ]
+    },
+    {
+      "capability_id": "numerics.certified-arithmetic",
+      "implementing_beads": [
+        "frankensim-epic-bedrock-6ys.12",
+        "frankensim-extreal-program-f85xj.3.1",
+        "frankensim-extreal-program-f85xj.3.2",
+        "frankensim-extreal-program-f85xj.3.6"
+      ]
+    },
+    {
+      "capability_id": "numerics.sparse-assembly",
+      "implementing_beads": [
+        "frankensim-epic-bedrock-6ys.9",
+        "frankensim-epic-bedrock-6ys.18.7",
+        "frankensim-extreal-program-f85xj.5.1",
+        "frankensim-extreal-program-f85xj.4.2"
+      ]
+    },
+    {
+      "capability_id": "solvers.krylov",
+      "implementing_beads": [
+        "frankensim-epic-flux-tfz.10",
+        "frankensim-extreal-program-f85xj.2.24",
+        "frankensim-extreal-program-f85xj.2.25",
+        "frankensim-extreal-program-f85xj.2.28",
+        "frankensim-extreal-program-f85xj.5.7"
+      ]
+    },
+    {
+      "capability_id": "thermal.conduction-solve",
+      "implementing_beads": [
+        "frankensim-extreal-program-f85xj.5.1",
+        "frankensim-extreal-program-f85xj.4.2",
+        "frankensim-extreal-program-f85xj.5.10"
+      ]
+    },
+    {
+      "capability_id": "wasm.browser-flagships",
+      "implementing_beads": [
+        "frankensim-extreal-program-f85xj.2.35",
+        "frankensim-extreal-program-f85xj.2.38",
+        "frankensim-extreal-program-f85xj.2.39",
+        "frankensim-extreal-program-f85xj.2.40",
+        "frankensim-extreal-program-f85xj.2.41",
+        "frankensim-extreal-program-f85xj.6.12"
+      ]
+    }
+  ],
+  "seam_owners": [
+    {
+      "seam": "schema-scenario",
+      "owner": "jemanuel",
+      "responsibility": "The versioned project schema must preserve persistent scenario identities and the Five Explicits across validation and migration.",
+      "beads": [
+        "frankensim-extreal-program-f85xj.6.1",
+        "frankensim-extreal-program-f85xj.17.1",
+        "frankensim-extreal-program-f85xj.17.7"
+      ]
+    },
+    {
+      "seam": "physics-evidence",
+      "owner": "jemanuel",
+      "responsibility": "Physics QoIs must carry numerical, model-form, experimental, and regime authority without promotion laundering.",
+      "beads": [
+        "frankensim-extreal-program-f85xj.5.10",
+        "frankensim-extreal-program-f85xj.8.1",
+        "frankensim-extreal-program-f85xj.8.2",
+        "frankensim-extreal-program-f85xj.8.7"
+      ]
+    },
+    {
+      "seam": "corpus-scorecard",
+      "owner": "jemanuel",
+      "responsibility": "Retained corpus identities, validity domains, uncertainties, and limitations must survive into the public scorecard.",
+      "beads": [
+        "frankensim-extreal-program-f85xj.4.1",
+        "frankensim-extreal-program-f85xj.4.4",
+        "frankensim-extreal-program-f85xj.4.8",
+        "frankensim-extreal-program-f85xj.6.10"
+      ]
+    },
+    {
+      "seam": "cli-session",
+      "owner": "jemanuel",
+      "responsibility": "CLI operations must enter governed sessions with deterministic budgets, cancellation, checkpointing, idempotency, and structured output.",
+      "beads": [
+        "frankensim-extreal-program-f85xj.6.2",
+        "frankensim-extreal-program-f85xj.6.5",
+        "frankensim-extreal-program-f85xj.6.11"
+      ]
+    }
+  ],
+  "retained_triage_receipt": {
+    "command": "bv --robot-plan --label extreal",
+    "generated_at": "2026-07-22T21:19:43Z",
+    "data_hash": "5ba7d5d6e7f40830",
+    "scope_label": "extreal",
+    "issue_count": 178,
+    "open": 122,
+    "closed": 55,
+    "blocked_count": 1,
+    "health": 63,
+    "total_actionable": 68,
+    "total_blocked": 61,
+    "documented_shape": ["summary", "tracks", "status", "data_hash"]
+  }
+}

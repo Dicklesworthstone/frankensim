@@ -1,0 +1,67 @@
+(fsim-study :version 1
+  (metadata
+    :name "mesh-checked-stress-2d"
+    :created "2026-09-25"
+    :context-of-use "2-D plane-strain mesh-checked sampled stress software example; not calibrated material or an engineering allowable"
+    :intended-decision "Accept same-area compliance descent only when every declared grid satisfies the unchanged sampled stress limit"
+    :decision-gate scoping-estimate
+    :consequence advisory)
+  (versions :schema 1)
+  (seeds :root 1337)
+  (budgets
+    :wall-time 300.0 s
+    :memory 536870912 B
+    :max-iterations 2)
+  (capabilities
+    "optimization.marquee-topopt"
+    "geometry.sdf"
+    "physics.cutfem"
+  )
+  (units :storage "SI")
+  (domain
+    :type sdf-plate-with-holes
+    :bounds ((0.0 0.0) (1.0 1.0))
+    :initial-holes (
+      (hole :center (0.35 0.5) :radius 0.12)
+      (hole :center (0.65 0.5) :radius 0.12)
+    ))
+  (physics
+    :type elasticity-2d
+    :mesh-level 3
+    :youngs-modulus-pa 2.0
+    :poissons-ratio 0.3)
+  (scenario
+    :fixed-boundary left
+    :load-region right
+    :load-traction-pa 1.0
+    :load-direction (0.0 -1.0)
+    :load-band (0.375 0.625))
+  (objective :type compliance :sense minimize :unit "J")
+  (constraints :volume-fraction 0.75)
+  (optimizer
+    :type level-set-compliance
+    :move-cells 0.1
+    :band-cells 6.0
+    :ell0 0.0
+    :mu-al 4.0
+    :sobolev-alpha 2.0
+    :nucleation-period 0
+    :hole-radius-cells 1.5
+    :steps 2
+    :constraint-mode projected-stress
+    :area-tolerance-m2 0.0001
+    :max-projection-shift 2.0
+    :max-area-evaluations 64
+    :max-candidates 16
+    :contraction 0.5
+    :min-relative-improvement 0.00000001
+    :cg-poll-iters 1
+    :sampled-stress-limit-pa 20.0
+    :stress-tolerance-pa 0.0
+    :mesh-check (refinement
+      :extra-levels 1
+      :absolute-compliance-tolerance-j 0.000001
+      :relative-compliance-tolerance 0.05
+      :area-tolerance-m2 0.005)
+  )
+)

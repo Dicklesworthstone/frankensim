@@ -1,0 +1,14 @@
+{"comment": "Martin & Moyce (1952), 'Part IV: An experimental study of the collapse of liquid columns on a rigid horizontal plane', Phil. Trans. R. Soc. Lond. A 244, 312-324. Dimensionless surge-front position for the square-based water column (n^2 = 2 geometry, 2.25 in base). T = t*sqrt(2g/a); Z = x/a. Values are the DIGITIZED points commonly used across the LBM/SPH validation literature; digitization uncertainty is a few percent — treat as a report-only reference curve at coarse lattice resolution (the hard gate is the same monotone+envelope band the 2-D battery uses)."}
+{"t_star": 0.41, "z": 1.11}
+{"t_star": 0.84, "z": 1.44}
+{"t_star": 1.19, "z": 1.78}
+{"t_star": 1.43, "z": 2.11}
+{"t_star": 1.63, "z": 2.44}
+{"t_star": 1.83, "z": 2.78}
+{"t_star": 2.00, "z": 3.11}
+{"t_star": 2.20, "z": 3.44}
+{"t_star": 2.32, "z": 3.67}
+{"t_star": 2.51, "z": 4.00}
+{"t_star": 2.66, "z": 4.33}
+{"t_star": 2.83, "z": 4.67}
+{"t_star": 2.95, "z": 5.00}

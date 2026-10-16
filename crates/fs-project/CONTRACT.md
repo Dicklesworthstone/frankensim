@@ -1,0 +1,650 @@
+# CONTRACT: fs-project
+
+The versioned `.fsim` project schema (bead f85xj.6.1): the user-facing
+contract for the ratified thermal-design-assurance vertical
+(`frankensim-vertical-ratification-v1`). One semantic model, two spellings,
+canonical bytes, typed violations, receipted defaults, and explicit migration
+receipts. The `bind` module (bead f85xj.6.4) adds validate-time resolution of
+material/interface bindings against matdb cards: envelope-vs-domain refusal,
+surfaced uncertainty, retained usage receipts, and pin-only resolution of
+conflicting claims. The `assignment` module (bead f85xj.6.3) compiles
+persisted mesh-index-free selectors to persistent `EntityId` tokens, resolves
+them against caller-supplied promoted meshes through `fs-io`, and retains the
+exact lower-layer reports.
+Bead f85xj.17.2 makes the material side of that schema fail closed: every
+binding carries an exact manufactured state, admitted temperature range, and
+visible source channel, while uncertainty remains owned by the selected
+sourced matdb claim rather than an override on the binding.
+Bead f85xj.17.3 begins the interface side of the same boundary: every
+card-backed interface carries one typed manufactured-state class
+(bolted-with-pattern, adhesive, TIM, dry contact, or fluid-filled gap), with
+explicit uncertainty half-widths on continuous state parameters. The state is
+validated, canonical, identity-bearing through the project bytes, and visible
+in the deterministic resolution table. A separate `PerfectContactBinding`
+records deliberate idealized contact with an explicit authority and rationale;
+it never masquerades as a matdb card or zero-resistance receipt, and binding
+refuses until the conduction layer has an authoritative perfect-contact
+operator.
+Bead f85xj.17.6 extends the same canonical project identity with mandatory
+requirement authority and typed context-of-use gating: requirement/policy
+sources carry exact document versions and locators, and an explicitly
+indeterminate decision is usable only in an advisory scoping context.
+
+## Purpose and layer
+
+Layer L6 (HELM). Depends on `fs-ir` (AST + both concrete syntaxes),
+`fs-scenario` (entity identities, `Violation`), `fs-matdb` (cards, receipted
+queries), `fs-io` (deterministic mesh assignments), `fs-ivl` (exact geometric
+predicates `orient3d`/`orient2d` for containment-bound interface lowering),
+`fs-rep-mesh` (promoted finite meshes), `fs-exec` (cancellation context),
+`fs-qty`, `fs-blake3`, `fs-evidence`/`fs-package`/`fs-voi` (retained decision
+inputs), and `fs-session` (the generic L6 `DecisionAssessment` projection).
+This crate persists project intent and resolves its card and geometry
+bindings; it runs no solves and admits no scenarios itself.
+
+## Public types and semantics
+
+- `study::parse_study_strict` admits executable study declarations only when
+  their parsed AST equals the complete canonical spelling of the recognized
+  `StudySpec`. Whitespace and comments may vary; ignored, defaulted, repeated,
+  reordered or unsupported fields return `study-noncanonical-declaration`.
+  This prevents the legacy draft readers from silently changing execution
+  intent. It does not replace the subsequent model/geometry/budget admission
+  in `fs-cli`. Normalized scalar thermal compliance requires dimensionless
+  unit `1`; elasticity compliance keeps its energy-dimension check. The existing
+  permissive study readers remain available for inspecting drafts.
+- `ProjectSpec` carries every section of the cooling vertical's contract:
+  `Metadata` (name, created, context of use, intended decision,
+  `DecisionGate`, `ConsequenceClass`), the Five
+  Explicits (`Versions`, `Seeds`, `Budgets`, capabilities list,
+  `UnitsDoctrine`), `GeometryArtifact` references (imported quarantine-receipt
+  ids — geometry never lives inline), `EntityDecl`
+  assembly/part/region/interface declarations with persistent identities,
+  mandatory `GeometryAssignment` rows (one declared artifact, persistent
+  region/interface target, explicit coordinate unit, one `MeshSelector`, and
+  overlap policy),
+  `MaterialBinding` matdb card refs (state, admitted temperature range,
+  source, optional `claim` pin), `InterfaceCardBinding` TIM/contact card refs
+  (optional `claim` pin) plus a typed `InterfaceState`: bolted joints declare
+  exact bolt count/pattern and torque with half-width; adhesive and TIM rows
+  declare thickness with half-width; dry contact declares pressure with
+  half-width and finish; fluid gaps declare separation with half-width and
+  fluid identity. `PerfectContactBinding` is a mutually exclusive interface
+  law declaration carrying a versioned policy/design/user authority and
+  rationale. Those strings are canonical recorded provenance, not
+  authenticated evidence. `PowerDissipation`
+  rows, `Cooling` (fans/vents/leakage; declared-empty lists are facts,
+  omission is a violation; a fan may carry an optional sourced
+  `FanCurveDecl` — at least two points, strictly increasing flow,
+  non-increasing pressure, declared tolerance with a `FanToleranceBasis`,
+  and a stall boundary — and the section may carry an optional
+  `AirflowLeakage` open area, distinct from the thermal watts sink; absence
+  of either is a declaration the flow-network stage must refuse, never
+  repair). Cooling may also carry an optional `ConductionSetup`: one explicit
+  interior length-quantity seed per volumetric region, typed fixed-temperature,
+  outward-heat-flux, convection, or airflow-convection boundary laws keyed by
+  assignment target, and an explicit adiabatic-remainder decision. Its absence
+  remains loadable but is a typed execution gap; this layer never invents a
+  seed or boundary condition. An `AirflowConvection` law (schema v4) declares
+  no coefficient and no reference temperature: it names a declared vent
+  branch, a per-branch unique stream-wise order, an inlet temperature inside
+  the envelope's ambient range, positive channel hydraulic diameter, flow
+  area, and length, and an `fs-convection` card id that must exist in that
+  crate's catalog. Structural validation checks exactly those facts
+  (`project-conduction-airflow-*` findings); deriving the coefficient, marching
+  the air, and closing the solid/air fixed point are solve-stage authority,
+  not this layer's. Optional `ConductionRadiation` (schema v5) adds named
+  `RadiatingSurface` rows to existing convective exterior targets: an immutable
+  surface-finish card hash, optional exact emissivity claim pin, explicit
+  material query and reservoir temperatures, and positive iteration, Kelvin,
+  watt, and relaxation controls. The material card owns the manufactured state
+  and claim validity. Every surface sees its own isothermal reservoir with
+  view factor one; mutual irradiation and occlusion are outside this input
+  model. Unknown, repeated, missing, and malformed inputs produce named
+  findings. Migration from v1 through v4 preserves absence of radiation and
+  never infers emissivity from a bulk-conductivity card. The remaining sections
+  are `Envelope`, sourced `ThermalLimit`
+  requirements
+  with explicit QoI, direction, effective limit, guard margin, severity,
+  versioned base authority, and an already-applied `SafetyFactorPolicy` with
+  its own versioned source, `SolverSettings`, and `OutputRequest`s. Sections
+  are `Option`s so
+  recognition stays lenient and validation can name every omission at once.
+- `Seeds.root` and canonical `(seeds :root 0x...)` name the root of every
+  logical RNG derivation. There is one spelling: the superseded keyword was
+  refused as unknown during pre-freeze v1 and stays refused under the frozen
+  schema (now v2 per `schema-policy.json`), never retained as an
+  identity-ambiguous compatibility alias.
+- `Metadata::permits_indeterminate()` is the context gate consumed by the
+  decision layer: only `ScopingEstimate` with a non-safety-critical consequence
+  returns true. Design-selection/compliance-signoff and every safety-critical
+  consequence require a determinate assessment.
+- `RequirementSource` identifies an exact standard, datasheet, internal
+  policy, or user declaration by document, version, and locator.
+  `requirement_source_reviews(previous, current)` deterministically reports a
+  version change only when the QoI/region/role/source kind/document/locator
+  identity is unchanged; replacing the authority is a broader project diff,
+  not mislabeled as a version bump.
+- `SafetyFactorPolicy.factor` is finite and at least one. The policy source
+  owns how it was applied; `ThermalLimit::limit` is the effective value already
+  consumed by compliance evaluation. L6 never invents a generic
+  multiply/divide rule for temperature or other quantities.
+- `project_decision_authorities(project)` first requires full ordinary
+  `ProjectSpec` admission, refuses duplicate requirement QoIs, then returns one
+  deterministic `ProjectDecisionAuthority` per requirement-bearing QoI sorted
+  by QoI. The authority hashes the complete thermal requirement declaration
+  (class, region, direction, effective limit, margin, both sources, factor, and
+  severity), retains both human-auditable source lineages in
+  `DecisionRequirement`, and derives an exact `ContextOfUse` artifact from the
+  complete metadata decision frame. `ProjectDecisionAuthority::try_assemble`
+  delegates all cross-artifact checks to `fs-session` before applying the
+  project gate: only non-safety-critical scoping may return an explicit
+  indeterminate assessment; design selection, compliance sign-off, and
+  safety-critical contexts return typed `IndeterminateRefused`.
+- `ProjectSpec::validate() -> Vec<Violation>` (the fs-scenario
+  code/what/fix triple): empty output is the definition of admissible. Every
+  mandatory section omission has a stable `project-*-missing` code; empty
+  load-bearing collections, dimension mismatches (checked against the six-base
+  SI vectors in `spec::dims`), inverted ranges, malformed card hashes, duty
+  range, unknown entity references, duplicate names, and out-of-order parents
+  all carry named codes with fix hints.
+- Entity identities: `resolve_entities` recomputes `fs_scenario::EntityId`s
+  from the declarations (parents before children; interfaces reference two
+  regions under an assembly). An optional `:id` pin is verified against the
+  recomputation and drift is `project-entity-id-mismatch` — a pin proves
+  byte-equal derivation inputs, never physical sameness. Display names are
+  outside identity, exactly as in fs-scenario.
+- A `MaterialBinding` may carry an optional `MaterialTolerance` (schema v6):
+  a relative conductivity half-width in (0,1) with a mandatory basis and
+  source, all three keys or none. It is an engineering declaration with
+  provenance, not a validated statistical bound. Absence means undeclared,
+  never zero, and the solve stage propagates a declared tolerance into the
+  Parameters budget term.
+- A `GeometryArtifact` may carry an optional `SurfaceOffset` (schema v7): a
+  uniform normal-offset half-width in metres with a mandatory basis and
+  source, all three keys or none. The solve stage propagates it into the
+  Geometry budget term.
+- The assembly may declare `EntityDecl::Surface` (schema v8,
+  `(surface :parent :name :display)`): a named exterior boundary patch of a
+  part, identity kind `Surface`. It needs one geometry assignment (for
+  example a `(box ...)` footprint), and has no conduction seed or material.
+  A `power` row naming a surface is heat entering uniformly through it. A
+  thermal boundary row may target it. Migration from v7 is an envelope
+  rewrite; a pre-v8 payload that declares a surface is refused
+  (`fsim-migration-payload`).
+- The cooling section may cite a fan total efficiency (schema v9,
+  `(fan-efficiency :total :half-width :source :source-id)`). The whole
+  interval must lie inside (0, 1] (`project-fan-efficiency-range`) and the
+  citation must be non-empty (`project-fan-efficiency-source`). An
+  `OutputRequest` may carry `:region`, which must name a declared surface
+  (`project-output-region`). Migration from v8 is an envelope rewrite; a
+  pre-v9 payload declaring either is refused.
+- A thermal boundary may be `NaturalConvection` (schema v10,
+  `(natural-convection :target :characteristic-length :ambient-temperature
+  :correlation)`): its coefficient is derived at solve time from the named
+  natural-convection card at the solved mean wall-to-ambient difference. The
+  length must be positive (`project-conduction-natural-range`) and the
+  ambient inside the envelope (`project-conduction-natural-ambient-envelope`).
+  Migration from v9 is an envelope rewrite; a pre-v10 payload declaring one is
+  refused.
+- Wire: `lower`/`recognize` map `ProjectSpec` to and from the `fs_ir::Node`
+  envelope `(fsim-project :version 14 ...)`. `print_sexpr`/`parse_sexpr` and
+  `print_json`/`parse_json` are the two spellings; `parse_sexpr_lenient`
+  accepts noncanonical bytes and omitted defaultable fields, issuing a
+  `CanonicalizationReceipt` (both hashes, `verifies()`) and `DefaultReceipt`s.
+  The strict parsers refuse noncanonical input (`fsim-non-canonical`, first
+  difference position) and applied defaults (`fsim-default-in-strict-mode`).
+  The canonical `assignments` section spells named-group, half-space, box,
+  cylinder, nearest-datum, and explicit-face-set selectors without depending
+  on imported face ordinals except where the explicitly fragile
+  `explicit-face-set` variant is intentionally chosen and acknowledged.
+- Canonical bytes are the checked s-expression render; `canonical_hash`
+  hashes them under `org.frankensim.fs-project.canonical.v1`. The JSON
+  spelling parses to the same AST, so both spellings reach one hash.
+- `ConductionSetup.transient` (schema v11, q61wp.49) declares uniform initial
+  temperature, final time, maximum coarse step, a combined coarse/fine step
+  cap, an absolute per-step energy tolerance and one sourced volumetric heat
+  capacity per named conduction region. All physical inputs carry SI dimensions;
+  nonpositive/nonfinite data, missing/repeated capacities, empty sources and a
+  cap below `3 * ceil(horizon / max-step)` refuse. The production grid and its
+  nested half grid therefore fit the same declared cap, at most 10,000 steps.
+  Canonical bytes bind capacities and all time controls. Migration from v10
+  preserves its natural-convection law and the absence of storage; a pre-v11
+  payload declaring transient inputs refuses. G0 cases in `tests/project.rs`
+  exercise both spellings, physical/source/work refusals, identity changes and
+  this migration boundary. Capacity declarations remain engineering data, not
+  material-card receipts or inferred probability distributions.
+- Optional `ConductionTransient.power_schedules` (schema v12) supplies sourced
+  piecewise-constant delivered watts for seeded volume regions. Each schedule
+  replaces that region's static `watts * duty`; no duty is applied twice and
+  unscheduled regions retain their static power. Surface schedules, repeated
+  regions, missing sources, negative/nonfinite watts, wrong units, unordered
+  endpoints and a final endpoint unequal to the horizon refuse. The shared
+  `coarse_step_ends_s()` method aligns every regional switch, partitions each
+  segment by `ceil(duration / max_step)`, and checks the combined coarse/fine
+  cap before allocating an oversized grid. It requires a representable midpoint
+  in every interval, so a short pulse is retained or refused, never skipped.
+  Empty schedules retain the original uniform coarse grid. Both wire spellings
+  bind all delivered watts, sources and switch times. Migration from v11 keeps
+  static power unchanged; a pre-v12 payload carrying a schedule refuses.
+- Optional `ConductionTransient.enthalpy` (schema v13, MR19/MR48) replaces
+  constant-capacity storage with one explicitly sourced enthalpy chart per
+  conduction region. It binds an attributed nonzero material-card identity,
+  positive reference density in kg/m³, initial specific enthalpy in J/kg,
+  and 2..=4096 specific-enthalpy/temperature/liquid-mass-fraction knots.
+  `TransientRegionEnthalpy::phase_curve()` uses fs-material's existing
+  equilibrium chart admission: enthalpy increases strictly, temperature and
+  fraction do not decrease, and genuine isothermal latent plateaus retain
+  their full enthalpy span. Explicit all-solid/all-liquid charts use its
+  single-phase ingress and require strictly increasing temperatures; a
+  melting chart spans fully solid to fully liquid. The declared reference
+  density is held fixed at every knot for the stationary reference domain.
+  Every initial enthalpy must lie inside its chart and resolve to a positive
+  absolute temperature. A declared uniform temperature must match each region
+  within a 64-epsilon relative roundoff allowance; equal plateau temperatures
+  can retain different regional stored energies and phase fractions. Both storage models together refuse rather than adding
+  latent heat twice. Missing, repeated or unknown regions, invalid dimensions,
+  nonfinite data and missing sources refuse before execution. Newton work is
+  bounded to 1..=1000 iterations and 0..=64 line-search halvings per iteration;
+  zero halvings permits only the full step. Time-grid and workload rules are
+  shared with the constant-capacity model. G0 cases in `tests/project.rs`
+  cover both spellings, phase/units/source/work/initial-state refusals and
+  receipted v12 migration; migration retains existing capacities and schedules
+  and refuses pre-v13 declarations of enthalpy. These are explicit engineering
+  models: the cited card identity authenticates no data and creates no
+  material-query receipt. Transport, nonlinear conductivity, boundary support,
+  cancellation and accepted-step energy checks remain execution responsibilities;
+  schema admission claims no physical validation, moving geometry, advection,
+  pressure work or energetic internal-variable evolution.
+- Optional `TransientRegionEnthalpy.phase_conductivity` (schema v14) declares
+  `TransientPhaseConductivity`: strictly positive finite dimensionless solid
+  and liquid multipliers and a nonempty source. Its only wire law is
+  `linear-liquid-mass-fraction`; missing/unknown laws and dimensional multiplier
+  values refuse. `model()` uses the existing conduction law, which multiplies
+  each element's base conductivity tensor at mean nodal temperature by
+  `solid_multiplier + (liquid_multiplier - solid_multiplier) * mean(f_liquid)`.
+  The fraction is the mean of the element's nodal liquid **mass** fractions;
+  no volume-fraction mixture, phase-density effect or tensor reorientation is
+  inferred. The base tensor retains its temperature dependence, validity and
+  card receipts; the separately sourced multiplier supplies no card authority.
+  Regions without a declaration retain their base conductivity. Both wire
+  spellings bind the law, multipliers and source. V13 migration preserves all
+  previous storage and base-conductivity inputs, and pre-v14 payloads carrying
+  phase-dependent conductivity refuse. The runnable synthetic
+  `cooling-enthalpy-phase-conductivity.fsim` composes this declaration with
+  existing enthalpy, startup-pulse, Robin and gray-radiation inputs.
+- `ConductionTransient.initial_temperature` (schema v15, MR20) is
+  `TransientInitialTemperature::Uniform(QtyAny)` or
+  `TransientInitialTemperature::FromRegionalEnthalpy`. A uniform quantity
+  retains the historical `:initial-temperature 300.0K` spelling and requires
+  every enthalpy region to resolve to that same temperature. The explicit
+  `:initial-temperature from-regional-enthalpy` symbol instead uses each
+  region's separately declared initial specific enthalpy and phase chart,
+  allowing a hot body and cold support to start at distinct temperatures.
+  No scalar temperature is ignored and no regional temperature or latent
+  fraction is inferred from another body. The mode is legal only with
+  total-enthalpy storage: constant capacities still require a uniform quantity.
+  Initial enthalpies must remain finite J/kg inside their valid charts, each
+  yielding positive absolute temperature; exact region coverage and all
+  previous storage/source/budget rules remain in force.
+  `uniform_temperature()` on the enum returns the authored quantity or
+  `None` for explicitly regional initialization. Both wire spellings bind the
+  mode and individual initial states. G0 cases in `tests/project.rs` cover
+  unequal initial body states, equal-temperature latent states, invalid
+  storage/mode/units, unchanged uniform semantics and v14 migration.
+  Migration rewrites only the version fields, retaining all historical
+  uniform temperatures and regional enthalpies; pre-v15 payloads declaring
+  regional initialization refuse. Actual heat exchange, conductivity-domain
+  checks and conservation remain execution responsibilities.
+- `FSIM_VERSION = 15`. Readers refuse other versions
+  (`fsim-unsupported-version`); `migrate_envelope` is the only path from an
+  older envelope, applies a registered `MigrationRule`, and returns a
+  `ProjectMigrationReceipt` (old/new hashes + rule, `verifies()`). The
+  registered rules preserve released v1–v6 inputs through named optional
+  accretions; a synthetic version-0 proof rule also exercises the machinery.
+- The defaultable fields are exactly two, and every applied default is
+  receipted: power-row `duty` (`1.0`, continuous dissipation is the
+  conservative assumption) and a declared fan curve's `min-flow` (the
+  curve's first point: no stall margin is claimed beyond the declared
+  data); everything else is mandatory.
+- `bind::resolve_bindings(&ProjectSpec, &CardLibrary, &BindingRequirements)
+  -> MaterialResolution` (bead f85xj.6.4): every declared region must bind
+  exactly one `fs_matdb::MaterialCard` (manufactured state spelled exactly as
+  the card's `MaterialStateId`) and every declared interface exactly one law:
+  one `InterfaceSystemCard` or one explicit perfect-contact declaration.
+  Card-backed laws resolve normally. Perfect-contact intent occupies the law
+  slot but returns `project-perfect-contact-unsupported`, publishes no
+  interface row or receipt, and cannot proceed to a solve until
+  `fs-conduction` supplies a verified explicit operator. Per required
+  property, the resolver uses matdb's shared `query_envelope`: it checks both
+  endpoints, continuous curve support and every competing claim's intersection
+  with the admitted range, requiring one selected claim throughout. Exact-only
+  curve samples cannot cover a nondegenerate range, even with a pin. A conflict
+  confined to interior temperatures still refuses and names the candidates.
+  Every value arrives as matdb
+  `Evidence` + `PropertyUsageReceipt`; receipts are retained
+  (`RetainedReceipt`: receipt, canonical bytes, content hash, context) for
+  ledger retention and later `verify_receipt` replay. `render_table()` is the
+  deterministic region -> card -> property -> uncertainty -> receipts log.
+  Every resolved property also retains an owner-neutral `RegimeAuditCard`
+  whose name binds the exact project card hash and selected matdb claim hash,
+  whose version binds the portable property-usage receipt schema, and whose
+  validity is cloned from that immutable selected claim.
+  `MaterialResolution::regime_audit_cards()` returns the sorted, deduplicated
+  registry for final product-output admission. It does not invent discrepancy,
+  ambition, calibration, or validation authority.
+  `BindingRequirements::thermal_steady_v1()` pins the cooling vertical's
+  property set (`thermal-conductivity`,
+  `area-specific-thermal-contact-resistance`, axis `T`), drift-tested against
+  `fs-conduction`'s constants.
+- Conflicting-claims doctrine: when a card carries coexisting conflicting
+  claims, resolution refuses (`project-binding-claims-conflict`, listing every
+  candidate hash) unless the project file records an explicit `:claim <hex>`
+  pin, which resolves through matdb's receipted pinned-claim query. There is
+  no auto-pick path, and `PreferObservationBacked` is deliberately never used
+  by the resolver. A pin never bypasses validity.
+- The per-region required range is the envelope's ambient range with its
+  ceiling raised to every declared thermal limit on that region (data must be
+  valid up to the limit being judged); an interface must be covered wherever
+  either side region can operate. The binding's admitted range must cover the
+  required range (`project-material-envelope-uncovered`), and the card's
+  claims must cover the admitted range (`project-binding-domain-uncovered` —
+  the extrapolation refusal, surfaced at validate time).
+- Uncertainty surfacing: `Unstated` uncertainty is an `Advisory`
+  (`binding-uncertainty-unstated`) up front, never a refusal and never
+  laundered — it caps downstream evidence at Estimated and the table says so.
+  `ResolvedProperty::uncertainty` is copied exactly from the selected matdb
+  claim. Schema v1 intentionally has no binding-side uncertainty override:
+  an override-looking wire keyword is refused as unknown. Tightening therefore
+  requires a new matdb claim with its own provenance and content identity,
+  followed by ordinary explicit `:claim` selection when claims conflict.
+- `assignment::resolve_geometry_assignments(&ProjectSpec,
+  &ImportedMeshLibrary, AssignmentLimits, &Cx) -> GeometryResolution`
+  resolves declarations first, compiles project-local targets to the actual
+  `EntityId::token()` strings, then delegates every artifact's selector plan
+  to `fs_io::resolve_mesh_assignments`. `ImportedMeshLibrary::insert`
+  computes its own domain-separated key from the exact `GeometryArtifact`
+  row; callers cannot supply a mismatched map key. Every successful
+  `ResolvedGeometryArtifact` retains fs-io's report unchanged, its exact
+  canonical JSON bytes, a domain-separated report hash, and the declared-name
+  to `EntityId` correspondence. `render_table()` surfaces entity, artifact,
+  source identity, unit, selector fingerprint, selected face count, area,
+  optional enclosed volume, bounds, and report hash.
+- `assignment::resolve_conduction_interface_pairs` is the explicit
+  scenario-to-E05_3 topology seam. It reruns assignment resolution while
+  holding the same immutable `ImportedMeshLibrary`, indexes only explicit
+  metre (`m`) source faces per declared target, and binds each coincident
+  boundary triangle to the unique outward-oriented source face that
+  CONTAINS it under `fs-ivl` exact predicates (`orient3d` for supporting-plane
+  membership and `orient2d` after dropping the dominant normal axis for
+  closed-triangle edge-side containment over the represented `f64`
+  coordinates: the production volumetricizer's facet recovery may insert
+  Steiner points and re-triangulate a declared facet, so a retained trace
+  triangle is a refinement of the imported face — executed on the canonical
+  two-solid fixture, whose joint recovers as a four-triangle fan; off-plane
+  recovery points and coordinates outside the predicates' finite
+  preliminary-arithmetic domain refuse without tolerance matching). Each
+  region's covering face winding must agree with its
+  `ConductionMesh` boundary slot's outward normal. Every exact coincident
+  matching-P1 pair reported by `fs_conduction::ThermalInterfaces` must be
+  claimed by exactly one declared interface; that interface's own selector
+  must select a face containing the same triangle. Every declared interface
+  must lower at least once. Success retains the oriented `from`/`to` slots
+  plus covering source artifact/source-identity/face ordinals for both
+  regions and the interface selector. It does not select a card or
+  construct an operator.
+
+## Invariants
+
+- Parse-render-parse is byte-idempotent for canonical documents in both
+  spellings, and `print_sexpr` is deterministic.
+- The strict parsers accept exactly the canonical bytes; the lenient parser
+  never accepts silently (receipt or violation for every relaxation).
+- Unknown sections and unknown keywords are refused by name
+  (`project-unknown-field`), so typos cannot silently drop intent.
+- Recognition never panics on malformed clause shapes; it degrades to named
+  violations with placeholder values that validation then rejects.
+- `Violation.fix` is non-empty for every emitted code (tested via the broken
+  corpus).
+- Every declared region/interface has exactly one geometry assignment; every
+  declared geometry artifact has at least one assignment; roles and targets
+  are unique where required. Geometry reports publish atomically only after
+  every artifact succeeds, so refusal or cancellation exposes no partial
+  assignment result.
+- The adapter preserves fs-io assignment order and rejects any returned
+  subject/order mismatch before retention. Project-wide request and selected
+  face counts are checked against the explicit `AssignmentLimits`.
+- Conduction interface lowering never treats Soup face ordinals as
+  `ConductionMesh` boundary slots. Exact coordinate bits, outward orientation,
+  declaration coverage, and interface-selector coverage are all required;
+  any ambiguity, uncovered candidate, unused declaration, budget exhaustion,
+  or cancellation publishes no pair rows.
+
+## Error model
+
+Two tiers, exactly as in fs-scenario/fs-ir: wire-layer refusals are
+`ProjectError { code, detail, hint }` (syntax, non-project shape, unsupported
+version, non-canonical bytes, strict-mode defaults, quantity spelling,
+migration refusals); semantic findings are `Violation` triples collected by
+`validate()`/`DecodedProject::findings()`. Binding resolution reports the
+same triples (`project-binding-*` / `project-material-*` /
+`project-interface-*` codes, each with an actionable fix; matdb's own
+refusal text travels in `what`) plus non-refusing `Advisory` rows; it is
+total over garbage input, naming preconditions instead of panicking.
+Internal `expect` is limited to infallible writes to `String`.
+Geometry-assignment preflight and adapter failures use the same
+`Violation` triple (`project-assignment-*`); fs-io refusal codes, `what`, and
+`fix` propagate without changing their lower-layer meaning, with the geometry
+role added as context. Refusal and cancellation leave `artifacts` empty.
+Conduction lowering adds `project-conduction-interface-*` violations and
+leaves `pairs` empty on every refusal.
+
+## Determinism class
+
+Fully deterministic: pure functions of the input bytes/spec and explicitly
+supplied card/mesh libraries; canonical rendering has one spelling; hashing
+is domain-separated BLAKE3 over exact bytes. Mesh resolution inherits
+fs-io's deterministic face-order and selector-fingerprint contract. No
+clocks, no RNG, no environment reads. Conduction pair order is
+fs-conduction's deterministic exact candidate order; source provenance rows
+are sorted before publication.
+
+## Cancellation behavior
+
+Static document recognition and validation do not take a cancellation
+context; their descriptions are bounded by the caller's document admission
+layer. Geometry assignment resolution takes an explicit `Cx`, polls before
+entry, at artifact boundaries, and inside fs-io's bounded face/selector tile
+loops. Cancellation is a typed `mesh-assignment-cancelled` violation and
+publishes no partial report. A validation budget/plan triad (fs-scenario
+style) remains deferred until real projects show the structural loader can be
+large.
+Conduction lowering additionally polls while indexing selected source faces
+and traversing coincident candidates. It returns
+`project-conduction-interface-cancelled`, retains the completed work count,
+and publishes no partial pair table.
+
+## Unsafe boundary
+
+None. Workspace `deny(unsafe_code)` lint applies.
+
+## Feature flags
+
+None.
+
+## Conformance tests
+
+`tests/bind.rs` (f85xj.6.4): the reference project binds fully — three
+resolved bindings, six retained receipts, each replayed via
+`verify_receipt` and byte-decoded via `from_bytes_verified`, with the full
+chain logged in the table; envelope-outside-card-domain refuses at validate;
+an admitted range narrower than the envelope refuses with both ranges named;
+Unstated uncertainty warns without refusing; conflicting claims refuse
+without a pin (no resolved row exists — auto-pick impossible) and resolve to
+exactly the pinned claim with the `pinned-claim` receipt policy; pin
+refusals (unknown, out-of-domain, malformed) are typed; a range stitched
+from two claims refuses; card-unknown, state-mismatch, non-region target,
+duplicate, unbound-region/interface, wrong-dims, and missing-property each
+carry their named code with a fix; missing sections name the precondition;
+and the property constants drift-test against `fs-conduction`.
+MR13 G0 cases additionally exercise the real material and interface resolver:
+endpoint-only curve samples refuse with or without a pin, explicitly admitted
+linear interpolation succeeds with replayable receipts, and an interior-only
+interface conflict refuses until an explicit full-range claim is pinned.
+The f85xj.17.2 closeout assertions additionally prove that empty,
+whitespace-padded, or control-bearing manufactured-state/source fields refuse;
+direct resolver callers cannot bypass source validation; the resolved
+uncertainty equals the selected claim's uncertainty exactly; and an attempted
+binding-side uncertainty override is an unknown-field refusal rather than a
+silent narrowing path.
+The f85xj.17.3 perfect-contact assertions prove canonical s-expression/JSON
+round trips, typed authority/rationale validation, card/perfect law conflicts,
+coverage without a false unbound finding, typed unsupported-operator refusal,
+and atomic absence of any fabricated interface property row or receipt.
+
+`tests/project.rs`: the reference cooling project renders, parses strictly,
+is admissible, and hash-stable; canonical bytes are identical across both
+spellings; parse-render-parse idempotence across variants (empty cooling
+lists, identity pins); all seventeen mandatory-section omissions surface their
+named violations; unknown section and keyword refusal; the receipted duty
+default with canonicalization receipt (and strict-mode refusal of the same
+bytes); noncanonical whitespace refusal/receipt; the synthetic v0 migration
+round trip with verifying receipt plus refusal of no-op and unknown-version
+migrations; entity identity pins accepting the recomputed token and refusing
+a stale one; a declared fan curve plus airflow-leakage area round-tripping
+hash-stable through both spellings with the receipted `min-flow` default,
+`project-field-enum` refusal of an unknown tolerance basis, and an
+eleven-row broken-cooling corpus covering curve shape/tolerance/source/dims,
+airflow-leakage dims, and the fan/vent/thermal-leakage dims rows; and the
+broken-project corpus (14 rows) logging every violation
+with its fix as the error-message quality bar.
+The f85xj.17.6 battery additionally proves sourced requirement and factor
+lineage round-trip in both spellings, sourceless/invalid-factor refusal,
+advisory-scoping versus design/sign-off/safety context gating, and exact
+version-bump review for both the requirement and safety-factor authorities.
+It also assembles every reference-project requirement into an offline-stable
+DecisionAssessment identity, proves source-version drift changes that identity,
+and runs identical indeterminate physics through the scoping-admit and
+sign-off-refuse paths.
+
+`tests/assignment.rs` (f85xj.6.3): a promoted cube resolves named groups to
+the exact persistent region/interface identities; retained fs-io JSON and its
+domain hash replay exactly; re-tessellation changes source/report material
+while preserving the project entity and physical area; dangling and
+wrong-kind targets, unit mismatch, empty selection, and unacknowledged
+explicit-face fragility refuse without partial publication; pre-cancelled
+resolution is atomic. `tests/project.rs` additionally round-trips all six
+selector variants in both canonical spellings, including the maximum `u32`
+explicit face index.
+The f85xj.17.3 assignment battery also constructs two disconnected tetrahedra
+with duplicated matching-P1 traces, proves exact source-face orientation
+lowers the declared interface to the correct `from`/`to` boundary slots, and
+proves wrong orientation, source-face budget exhaustion, and pre-cancellation
+refuse atomically.
+
+## No-claim boundaries
+
+- An admissible `.fsim` document proves the project is well-formed and
+  internally consistent. It does NOT prove the referenced geometry artifacts,
+  matdb cards, or capabilities exist, are compatible, or are validated —
+  geometry existence and selector checks require
+  `assignment::resolve_geometry_assignments`, not structural schema
+  validation. That resolver checks only the caller-supplied promoted
+  `ImportedMeshLibrary`: its computed keys bind an entry to one exact project
+  geometry row, but WHO supplied the mesh is the caller's trust channel.
+  Card existence and coverage ARE checked by `bind::resolve_bindings`, but
+  only against the
+  caller-supplied `CardLibrary`: the library keys cards by their own content
+  hashes (a key cannot lie about its card), while WHO supplied the collection
+  is the caller's trust channel — resolution proves binding coverage, never
+  card authenticity or scientific truth of the underlying claims.
+- A successful conduction interface mapping proves exact-arithmetic
+  containment of each retained boundary triangle in one outward-oriented
+  imported source face per region, plus selector coverage, for the supplied
+  finite meshes. It does not authenticate the importer, prove the finite
+  mesh is the intended continuum/CAD assembly, establish material or
+  contact-law authority, support nonmatching/mortar contact, bind recovery
+  points that were rounded off the exact source plane (those refuse), or
+  construct `InterfaceResistance`, `InterfaceSurface`, or
+  `ThermalInterfaces`.
+- Binding resolution is temperature-axis-only in v1: cards whose claims
+  depend on further validity axes refuse (`project-binding-axis`) rather
+  than being partially resolved. The required ceiling uses DECLARED thermal
+  limits, not solved temperatures — a solve exceeding its limit fails its
+  requirement; the resolver only guarantees the material data covers the
+  range over which that judgment is made. The declared `source` channel on a
+  binding is recorded into the table, not authenticated against claim
+  provenance.
+- A pinned-claim receipt proves the pin resolves and evaluates identically
+  on replay; WHO pinned it is proven by the project file's canonical bytes
+  (the pin is part of the hashed document), so a verifier must cross-check
+  `receipt.selected` against the project's pin, exactly as matdb's CONTRACT
+  states.
+- The optional `claim` pin was added to version 1 before the schema freeze
+  (.16.5). The schema has since FROZEN and is now at version 3
+  (`schema-policy.json` row `project.fsim`, current_version 3; v1 and v2
+  migrate with receipts);
+  absence of the field remains the canonical spelling of "no pin", and
+  pre-pin v1 documents were byte-identical under the extended grammar
+  before their receipted migration.
+- The mandatory `assignments` section was also added to version 1 before
+  the freeze. Unlike the optional claim pin, this intentionally makes old
+  pre-freeze documents incomplete: they must declare one selector per
+  region/interface before becoming admissible again. No compatibility shim
+  invents geometric intent.
+- Entity identity pins prove byte-equal derivation inputs at declaration
+  time; unequal pins prove nothing about physical sameness (re-exports change
+  bytes), which is why drift is a violation to adjudicate, not an automatic
+  rebind.
+- The schema does not persist fs-scenario's full `EntityCatalog`/
+  `BindingTable` receipts (rebind chains, correspondences, evidence tiers);
+  the fs-scenario CONTRACT's delegation of catalog+binding persistence to
+  this crate is met for declarations and will extend to receipt chains when
+  the import path (.6.3) produces them.
+- `source_hash` on geometry artifacts reproduces `fs_io::ImportReceipt`'s
+  current 64-bit FNV field: deterministic correlation, not
+  collision-resistant authentication; the HELM-side BLAKE3-class upgrade is
+  tracked upstream. The adapter's BLAKE3 source identity binds that field and
+  the complete geometry row exactly, but cannot strengthen the importer's
+  underlying FNV collision guarantee or authenticate the supplied mesh.
+- The schema freeze (e16, bead .16.5) HAS happened: `project.fsim` is a
+  frozen record in `schema-policy.json` at version 3, enforced by
+  `xtask check-schemas` (version constant read from source, migration
+  obligation `auto-migration-receipt`, proven by the synthetic-migration
+  test). Accretion follows the policy row: optional fields with receipted
+  defaults may be added only if every prior document stays loadable with a
+  stable canonical hash. Because there is no crates.io release yet, the
+  freeze binds the tree and the `check-all` gate, not a published artifact.
+- Validation is structural and dimensional; it makes no physics claim (a
+  well-formed project can still describe an unsolvable or nonsensical study).
+- A declared `FanCurveDecl` is a caller/manufacturer declaration with a
+  named source; admitting it proves nothing about the physical fan. Its
+  structural checks mirror, but do not replace, `fs-airflow`'s own curve
+  admission at lowering time. The `AirflowLeakage` area is a declared
+  effective opening, not a measured leakage model, and the schema does not
+  decide which discharge model consumes it.
+- The f85xj.17.3 finite-mesh audit finds bounded proximity candidates between
+  resolved region tessellations; it does not certify continuum contact,
+  physical-law completeness, or authenticated transforms. The explicit
+  perfect-contact declaration proves only that the idealization and its stated
+  authority/rationale are present in canonical project bytes. It does not
+  define a zero-resistance discretization, create a matdb claim, authenticate
+  the named authority, or bypass `fs-conduction`'s exact-coincident-face
+  refusal. Constructing `fs-conduction::InterfaceFacePair`s and the
+  scenario-to-mesh/contact lowering seam remain required before the bead can
+  close. Mechanical preload and stiffness are staged schema consumers, not
+  claims of this thermal state record.
+- A versioned requirement source proves which bytes/edition/locator the caller
+  declared, not that the clause was transcribed correctly, applies to this
+  product, or is legally authoritative. `UserDeclaration` is intentionally the
+  weakest source family and never masquerades as a standard or datasheet.
+- The retained safety factor records lineage only. Because its owner-specific
+  application rule is not recomputed here, the schema does not independently
+  prove that the effective limit was derived correctly; that cross-check
+  belongs to the future standards/policy registry integration.
+- The decision adapter content-addresses the caller-declared project fields and
+  checks consistency with lower artifacts. It does not retrieve or authenticate
+  the named source documents, prove that a clause applies, validate the
+  safety-factor derivation, recompute compliance, or upgrade the lower-layer
+  evidence color. A scoping admission preserves `Indeterminate`; it is not
+  compliance-signoff authority.

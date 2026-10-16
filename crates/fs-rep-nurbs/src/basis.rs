@@ -1,0 +1,1990 @@
+//! The scalar abstraction and B-spline basis machinery, written ONCE and
+//! instantiated at both `f64` (fast path) and [`crate::Rat`] (the exact
+//! path the refinement-exactness claims are proved in).
+
+use crate::NurbsError;
+use crate::rat::Rat;
+use fs_exec::Cx;
+
+/// Defensive ceiling on Cox-de Boor triangular work in the measured basis
+/// APIs. Exact caller-budget consumption remains successor work.
+pub const BASIS_MAX_WORK_UNITS: u128 = 16_777_216;
+
+// Cancellation-aware knot work polls after at most this many logical
+// validation, span, initialization, triangle, or finite-check operations. The
+// caller still owns request -> drain -> finalize; these primitives only
+// observe the shared gate.
+const KNOT_CANCELLATION_STRIDE: usize = 64;
+const KNOT_COPY_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
+
+// Conservative price for finite/order/run/multiplicity/clamping validation of
+// one public knot entry. This intentionally overcounts the simple comparisons:
+// admission must happen before any full scan, not after three nominally cheap
+// passes over untrusted storage.
+const KNOT_VALIDATION_WORK_PER_ENTRY: u128 = 16;
+
+/// The field the spline algebra runs over.
+pub trait Scalar:
+    Copy
+    + PartialEq
+    + PartialOrd
+    + core::fmt::Debug
+    + core::ops::Add<Output = Self>
+    + core::ops::Sub<Output = Self>
+    + core::ops::Mul<Output = Self>
+    + core::ops::Div<Output = Self>
+    + core::ops::Neg<Output = Self>
+{
+    /// Additive identity.
+    fn zero() -> Self;
+    /// Multiplicative identity.
+    fn one() -> Self;
+    /// Lift a small integer.
+    fn from_int(v: i64) -> Self;
+    /// Whether this value belongs to the finite numeric domain admitted by
+    /// spline structure. Exact scalar domains return `true`; floating and dual
+    /// domains must reject NaN and infinities.
+    fn is_finite(self) -> bool;
+    /// Whether a positive rational weight is numerically representable without
+    /// an immediate zero-denominator hazard. Exact domains may accept every
+    /// positive value. Floating domains must reject subnormal weights because
+    /// multiplying them by an ordinary basis value can underflow to zero even
+    /// when every source value is finite.
+    fn is_admissible_weight(self) -> bool {
+        self.is_finite() && self > Self::zero()
+    }
+    /// Whether dividing a homogeneous numerator by an admitted weight stays in
+    /// this scalar's finite Cartesian domain. Exact domains can answer without
+    /// performing a potentially huge intermediate division.
+    fn quotient_is_finite(self, denominator: Self) -> bool {
+        (self / denominator).is_finite()
+    }
+}
+
+impl Scalar for f64 {
+    fn zero() -> Self {
+        0.0
+    }
+    fn one() -> Self {
+        1.0
+    }
+    fn from_int(v: i64) -> Self {
+        #[allow(clippy::cast_precision_loss)]
+        {
+            v as f64
+        }
+    }
+    fn is_finite(self) -> bool {
+        self.is_finite()
+    }
+    fn is_admissible_weight(self) -> bool {
+        self.is_normal() && self > 0.0
+    }
+}
+
+impl Scalar for Rat {
+    fn zero() -> Self {
+        Rat::int(0)
+    }
+    fn one() -> Self {
+        Rat::int(1)
+    }
+    fn from_int(v: i64) -> Self {
+        Rat::int(v)
+    }
+    fn is_finite(self) -> bool {
+        true
+    }
+    fn quotient_is_finite(self, _denominator: Self) -> bool {
+        true
+    }
+}
+
+/// A clamped knot vector for degree-p splines.
+///
+/// The representation is sealed after construction. Callers can inspect it
+/// through [`Self::knots`] and [`Self::degree`], but cannot mutate around a
+/// successful validation:
+///
+/// ```compile_fail
+/// use fs_rep_nurbs::KnotVector;
+/// let mut knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).unwrap();
+/// knots.knots.clear();
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnotVector<S: Scalar> {
+    /// Non-decreasing knots (first/last with multiplicity p+1).
+    pub(crate) knots: Vec<S>,
+    /// Polynomial degree.
+    pub(crate) degree: usize,
+}
+
+/// A validate-once borrow of one exact immutable knot-vector snapshot.
+///
+/// The borrow is the authority: safe Rust cannot mutate or replace the source
+/// while this view is live, so no content hash or recomputed token is needed to
+/// detect stale structure.
+#[derive(Debug, Clone, Copy)]
+pub struct AdmittedKnotVector<'a, S: Scalar> {
+    inner: &'a KnotVector<S>,
+}
+
+/// Transactional terminal state of cancellation-aware knot-vector
+/// construction.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum KnotConstructionRun<S: Scalar> {
+    /// Validation completed and the sealed knot vector is safe to publish.
+    Complete {
+        /// Newly validated knot-vector generation.
+        knots: KnotVector<S>,
+    },
+    /// Cancellation was observed; the unpublished owned candidate was dropped.
+    Cancelled,
+}
+
+/// Transactional terminal state of a cancellation-aware fallible knot copy.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum KnotCloneRun<S: Scalar> {
+    /// The complete sealed copy of the exact source representation.
+    Complete {
+        /// Copied knot-vector generation.
+        knots: KnotVector<S>,
+    },
+    /// Cancellation was observed; all partial copy storage was dropped.
+    Cancelled,
+}
+
+/// Transactional terminal state of cancellation-aware structural admission.
+#[must_use]
+#[derive(Debug, Clone, Copy)]
+pub enum KnotAdmissionRun<'a, S: Scalar> {
+    /// The exact immutable source snapshot was fully validated.
+    Complete {
+        /// Lifetime-bound authority for the validated generation.
+        admitted: AdmittedKnotVector<'a, S>,
+    },
+    /// Cancellation was observed; no admitted authority was published.
+    Cancelled,
+}
+
+/// Transactional terminal state of cancellation-aware owning knot-domain
+/// lookup.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum KnotDomainRun<S: Scalar> {
+    /// Structural validation completed and the exact parameter domain is safe
+    /// to publish.
+    Complete {
+        /// Inclusive lower and upper parameter endpoints.
+        domain: (S, S),
+    },
+    /// Cancellation was observed; no domain endpoints were published.
+    Cancelled,
+}
+
+/// Transactional terminal state of cancellation-aware knot-span lookup.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnotSpanRun {
+    /// The complete source-span index for the requested parameter.
+    Complete {
+        /// Knot span using Piegl–Tiller A2.1 endpoint semantics.
+        span: usize,
+    },
+    /// Cancellation was observed; no span index was published.
+    Cancelled,
+}
+
+/// Transactional terminal state of one cancellation-aware basis evaluation.
+#[must_use]
+#[derive(Debug, Clone, PartialEq)]
+pub enum BasisRun<S: Scalar> {
+    /// The complete nonzero basis row is safe to publish.
+    Complete {
+        /// Knot span containing the requested parameter.
+        span: usize,
+        /// `degree + 1` nonzero basis values in ascending control index.
+        values: Vec<S>,
+    },
+    /// Cancellation was observed at a bounded poll; no partial row escapes.
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KnotValidationOutcome {
+    Complete,
+    Cancelled,
+}
+
+fn knot_poll_due(
+    operations_since_poll: &mut usize,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> bool {
+    *operations_since_poll += 1;
+    if *operations_since_poll < KNOT_CANCELLATION_STRIDE {
+        return false;
+    }
+    *operations_since_poll = 0;
+    should_cancel()
+}
+
+fn preflight_knot_copy<S: Scalar>(knot_count: usize) -> Result<(), NurbsError> {
+    let work_units = (knot_count as u128)
+        .checked_add(2)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "knot-vector copy work accounting overflows u128".to_string(),
+        })?;
+    if work_units > BASIS_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "knot-vector copy requests {work_units} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+    let retained_bytes = (knot_count as u128)
+        .checked_mul(core::mem::size_of::<S>() as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "knot-vector copy retained-byte accounting overflows u128".to_string(),
+        })?;
+    if retained_bytes > KNOT_COPY_MAX_RETAINED_BYTES {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "knot-vector copy retains {retained_bytes} output bytes above defensive ceiling {KNOT_COPY_MAX_RETAINED_BYTES}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+impl<S: Scalar> KnotVector<S> {
+    pub(crate) fn validation_work_for(
+        knot_count: usize,
+        degree: usize,
+    ) -> Result<u128, NurbsError> {
+        (knot_count as u128)
+            .checked_mul(KNOT_VALIDATION_WORK_PER_ENTRY)
+            .and_then(|work| work.checked_add(degree as u128))
+            .ok_or_else(|| NurbsError::Domain {
+                what: "knot-scan work accounting overflows u128".to_string(),
+            })
+    }
+
+    pub(crate) fn validation_work(&self) -> Result<u128, NurbsError> {
+        Self::validation_work_for(self.knots.len(), self.degree)
+    }
+
+    fn span_search_work(&self) -> u128 {
+        self.control_count() as u128
+    }
+
+    fn basis_operation_work(&self) -> Result<u128, NurbsError> {
+        let order = self
+            .degree
+            .checked_add(1)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "basis order overflows usize".to_string(),
+            })?;
+        (self.degree as u128)
+            .checked_mul(order as u128)
+            .map(|product| product / 2)
+            .and_then(|work| work.checked_add(order as u128))
+            .and_then(|work| work.checked_add(self.span_search_work()))
+            .ok_or_else(|| NurbsError::Domain {
+                what: "basis-work accounting overflows u128".to_string(),
+            })
+    }
+
+    pub(crate) fn enforce_work(units: u128, operation: &str) -> Result<(), NurbsError> {
+        if units > BASIS_MAX_WORK_UNITS {
+            return Err(NurbsError::Domain {
+                what: format!(
+                    "{operation} requests {units} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validated_domain(&self) -> (S, S) {
+        (
+            self.knots[self.degree],
+            self.knots[self.knots.len() - 1 - self.degree],
+        )
+    }
+
+    fn span_after_validation(&self, t: S) -> Result<usize, NurbsError> {
+        match self.span_after_validation_with_poll(t, || false)? {
+            KnotSpanRun::Complete { span } => Ok(span),
+            KnotSpanRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling knot-span lookup observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    fn span_after_validation_with_poll(
+        &self,
+        t: S,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> Result<KnotSpanRun, NurbsError> {
+        let (lo, hi) = self.validated_domain();
+        if !t.is_finite() || t < lo || t > hi {
+            return Err(NurbsError::Domain {
+                what: format!("parameter {t:?} outside {lo:?}..{hi:?}"),
+            });
+        }
+        if should_cancel() {
+            return Ok(KnotSpanRun::Cancelled);
+        }
+        let mut operations_since_poll = 0usize;
+        let n = self.control_count() - 1;
+        let span = if t == hi {
+            // Validation guarantees at least one non-empty span, so this walk
+            // cannot underflow.
+            let mut s = n;
+            while self.knots[s] == self.knots[s + 1] {
+                s -= 1;
+                if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(KnotSpanRun::Cancelled);
+                }
+            }
+            s
+        } else {
+            let mut span = self.degree;
+            while span < n && self.knots[span + 1] <= t {
+                span += 1;
+                if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(KnotSpanRun::Cancelled);
+                }
+            }
+            span
+        };
+        if should_cancel() {
+            return Ok(KnotSpanRun::Cancelled);
+        }
+        Ok(KnotSpanRun::Complete { span })
+    }
+
+    /// Validate the sealed fields before any indexing algorithm uses them.
+    /// This remains allocation-free defense for crate-internal construction;
+    /// public callers cannot mutate the representation after construction.
+    pub(crate) fn validate_live(&self) -> Result<(), NurbsError> {
+        match self.validate_live_with_poll(|| false)? {
+            KnotValidationOutcome::Complete => Ok(()),
+            KnotValidationOutcome::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling knot validation observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    pub(crate) fn validate_live_with_poll(
+        &self,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> Result<KnotValidationOutcome, NurbsError> {
+        let endpoint_multiplicity =
+            self.degree
+                .checked_add(1)
+                .ok_or_else(|| NurbsError::Structure {
+                    what: format!("degree {} overflows knot-count arithmetic", self.degree),
+                })?;
+        let minimum_knots =
+            endpoint_multiplicity
+                .checked_mul(2)
+                .ok_or_else(|| NurbsError::Structure {
+                    what: format!("degree {} overflows knot-count arithmetic", self.degree),
+                })?;
+        if self.degree == 0 || self.knots.len() < minimum_knots {
+            return Err(NurbsError::Structure {
+                what: format!(
+                    "degree {} needs at least {minimum_knots} knots, got {}",
+                    self.degree,
+                    self.knots.len()
+                ),
+            });
+        }
+        if should_cancel() {
+            return Ok(KnotValidationOutcome::Cancelled);
+        }
+
+        let mut operations_since_poll = 0usize;
+        for &knot in &self.knots {
+            if !knot.is_finite() {
+                return Err(NurbsError::Structure {
+                    what: "knots must be finite".to_string(),
+                });
+            }
+            if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(KnotValidationOutcome::Cancelled);
+            }
+        }
+        if should_cancel() {
+            return Ok(KnotValidationOutcome::Cancelled);
+        }
+        operations_since_poll = 0;
+
+        for window in self.knots.windows(2) {
+            if window[1] < window[0] {
+                return Err(NurbsError::Structure {
+                    what: "knots must be non-decreasing".to_string(),
+                });
+            }
+            if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(KnotValidationOutcome::Cancelled);
+            }
+        }
+        if should_cancel() {
+            return Ok(KnotValidationOutcome::Cancelled);
+        }
+        operations_since_poll = 0;
+
+        let mut run_start = 0usize;
+        while run_start < self.knots.len() {
+            let mut run_end = run_start + 1;
+            while run_end < self.knots.len() && self.knots[run_end] == self.knots[run_start] {
+                run_end += 1;
+                if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(KnotValidationOutcome::Cancelled);
+                }
+            }
+            let multiplicity = run_end - run_start;
+            let endpoint = run_start == 0 || run_end == self.knots.len();
+            if (endpoint && multiplicity != endpoint_multiplicity)
+                || (!endpoint && multiplicity > endpoint_multiplicity)
+            {
+                return Err(NurbsError::Structure {
+                    what: format!(
+                        "knot multiplicity {multiplicity} is invalid for degree {}",
+                        self.degree
+                    ),
+                });
+            }
+            if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(KnotValidationOutcome::Cancelled);
+            }
+            run_start = run_end;
+        }
+        if should_cancel() {
+            return Ok(KnotValidationOutcome::Cancelled);
+        }
+        operations_since_poll = 0;
+
+        for offset in 0..self.degree {
+            if self.knots[offset + 1] != self.knots[0]
+                || self.knots[self.knots.len() - 2 - offset] != self.knots[self.knots.len() - 1]
+            {
+                return Err(NurbsError::Structure {
+                    what: "knot vector must be clamped (end multiplicity degree+1)".to_string(),
+                });
+            }
+            if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(KnotValidationOutcome::Cancelled);
+            }
+        }
+        if self.knots[self.degree] == self.knots[self.knots.len() - 1 - self.degree] {
+            return Err(NurbsError::Structure {
+                what: "knot vector has an empty parametric domain (lo == hi)".to_string(),
+            });
+        }
+        if should_cancel() {
+            return Ok(KnotValidationOutcome::Cancelled);
+        }
+        Ok(KnotValidationOutcome::Complete)
+    }
+
+    /// Validate and construct.
+    ///
+    /// # Errors
+    /// [`NurbsError::Structure`] on ordering/clamping defects, or
+    /// [`NurbsError::Domain`] when validation work exceeds the defensive cap.
+    pub fn new(knots: Vec<S>, degree: usize) -> Result<Self, NurbsError> {
+        let mut never_cancel = || false;
+        match Self::new_with_poll(knots, degree, &mut never_cancel)? {
+            Some(knots) => Ok(knots),
+            None => Err(NurbsError::Domain {
+                what: "non-cancelling knot-vector construction observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    /// Validate and construct with bounded cancellation polling.
+    ///
+    /// Constant-time degree/length checks and the complete static validation
+    /// work refusal precede cancellation. One `Cx` then spans finite-value,
+    /// ordering, multiplicity, clamping, and nonempty-domain validation plus
+    /// final owned publication. Cancellation drops the caller-transferred knot
+    /// storage without exposing a partially validated owner. Individual scalar
+    /// comparisons and destruction are not preemptible. This primitive does
+    /// not consume the `Cx` budget or own request -> drain -> finalize
+    /// semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous constructor's structural or work refusal when
+    /// it wins before an observed cancellation.
+    pub fn new_with_cx(
+        knots: Vec<S>,
+        degree: usize,
+        cx: &Cx<'_>,
+    ) -> Result<KnotConstructionRun<S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        match Self::new_with_poll(knots, degree, &mut should_cancel)? {
+            Some(knots) => Ok(KnotConstructionRun::Complete { knots }),
+            None => Ok(KnotConstructionRun::Cancelled),
+        }
+    }
+
+    pub(crate) fn new_with_poll(
+        knots: Vec<S>,
+        degree: usize,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<Option<Self>, NurbsError> {
+        let endpoint_multiplicity = degree.checked_add(1).ok_or_else(|| NurbsError::Structure {
+            what: format!("degree {degree} overflows knot-count arithmetic"),
+        })?;
+        let minimum_knots =
+            endpoint_multiplicity
+                .checked_mul(2)
+                .ok_or_else(|| NurbsError::Structure {
+                    what: format!("degree {degree} overflows knot-count arithmetic"),
+                })?;
+        if degree == 0 || knots.len() < minimum_knots {
+            return Err(NurbsError::Structure {
+                what: format!(
+                    "degree {degree} needs at least {} knots, got {}",
+                    minimum_knots,
+                    knots.len()
+                ),
+            });
+        }
+        let validation_work = Self::validation_work_for(knots.len(), degree)?;
+        Self::enforce_work(validation_work, "knot-vector construction")?;
+        let candidate = KnotVector { knots, degree };
+        match candidate.validate_live_with_poll(should_cancel)? {
+            KnotValidationOutcome::Complete => Ok(Some(candidate)),
+            KnotValidationOutcome::Cancelled => Ok(None),
+        }
+    }
+
+    /// Borrow the immutable knot entries.
+    #[must_use]
+    pub fn knots(&self) -> &[S] {
+        &self.knots
+    }
+
+    /// Polynomial degree.
+    #[must_use]
+    pub const fn degree(&self) -> usize {
+        self.degree
+    }
+
+    /// Refuse an invalid parameter in constant time before any structural scan
+    /// or allocation-bearing basis work. Public sealed owners establish these
+    /// endpoint invariants at construction; the checked indexing keeps this
+    /// defensive for crate-internal candidates as well.
+    pub(crate) fn preflight_parameter(
+        &self,
+        parameter: S,
+        operation: &str,
+    ) -> Result<(), NurbsError> {
+        if !parameter.is_finite() {
+            return Err(NurbsError::Domain {
+                what: format!("{operation} parameter must be finite"),
+            });
+        }
+        let Some(&lo) = self.knots.get(self.degree) else {
+            return Err(NurbsError::Structure {
+                what: format!("{operation} knot vector has no lower domain endpoint"),
+            });
+        };
+        let Some(hi_index) = self
+            .knots
+            .len()
+            .checked_sub(1)
+            .and_then(|last| last.checked_sub(self.degree))
+        else {
+            return Err(NurbsError::Structure {
+                what: format!("{operation} knot vector has no upper domain endpoint"),
+            });
+        };
+        let Some(&hi) = self.knots.get(hi_index) else {
+            return Err(NurbsError::Structure {
+                what: format!("{operation} knot vector has no upper domain endpoint"),
+            });
+        };
+        if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+            return Err(NurbsError::Structure {
+                what: format!("{operation} knot vector has an invalid parametric domain"),
+            });
+        }
+        if parameter < lo || parameter > hi {
+            return Err(NurbsError::Domain {
+                what: format!("{operation} parameter {parameter:?} outside {lo:?}..{hi:?}"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Fallibly copy this sealed knot vector without revalidating unchanged
+    /// entries.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] when checked copy work/retained bytes or the
+    /// destination allocation is refused.
+    pub fn try_clone(&self) -> Result<Self, NurbsError> {
+        let mut never_cancel = || false;
+        match self.try_clone_with_poll(&mut never_cancel)? {
+            Some(knots) => Ok(knots),
+            None => Err(NurbsError::Domain {
+                what: "non-cancelling knot-vector copy observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    /// Fallibly copy this sealed knot vector with bounded cancellation polling.
+    ///
+    /// Count-derived work and a 64 MiB retained-output envelope precede
+    /// cancellation. One gate covers the fallible allocation, fixed-stride
+    /// ordered entry copy, and final publication without revalidating the
+    /// immutable source. The borrowed source is excluded from the output
+    /// envelope. The allocator call, scalar copies, and destruction are not
+    /// preemptible. This primitive does not consume the `Cx` budget or own
+    /// request -> drain -> finalize semantics. The existing `Clone`
+    /// compatibility path does not acquire these fallible/cancellable claims.
+    ///
+    /// # Errors
+    /// Returns the synchronous copy's work, retained-memory, or allocation
+    /// refusal when it wins before an observed cancellation.
+    pub fn try_clone_with_cx(&self, cx: &Cx<'_>) -> Result<KnotCloneRun<S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        match self.try_clone_with_poll(&mut should_cancel)? {
+            Some(knots) => Ok(KnotCloneRun::Complete { knots }),
+            None => Ok(KnotCloneRun::Cancelled),
+        }
+    }
+
+    fn try_clone_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<Option<Self>, NurbsError> {
+        preflight_knot_copy::<S>(self.knots.len())?;
+        if should_cancel() {
+            return Ok(None);
+        }
+        let mut knots = Vec::new();
+        knots
+            .try_reserve_exact(self.knots.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "knot-vector copy allocation was refused".to_string(),
+            })?;
+        if should_cancel() {
+            return Ok(None);
+        }
+        let mut operations_since_poll = 0usize;
+        for &knot in &self.knots {
+            knots.push(knot);
+            if knot_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(None);
+            }
+        }
+        if should_cancel() {
+            return Ok(None);
+        }
+        Ok(Some(KnotVector {
+            knots,
+            degree: self.degree,
+        }))
+    }
+
+    /// Validate this exact immutable snapshot once and bind the proof to its
+    /// borrow lifetime.
+    ///
+    /// # Errors
+    /// Returns a structured refusal when validation work exceeds the defensive
+    /// ceiling or the representation is malformed.
+    pub fn admit(&self) -> Result<AdmittedKnotVector<'_, S>, NurbsError> {
+        Self::enforce_work(self.validation_work()?, "knot-vector admission")?;
+        self.validate_live()?;
+        Ok(self.admitted_after_validation())
+    }
+
+    /// Validate this immutable source with bounded cancellation polling.
+    ///
+    /// Cheap shape and static work refusal retain their legacy precedence.
+    /// Every full validation pass polls at fixed logical-work strides and a
+    /// final checkpoint gates publication of the lifetime-bound admitted view.
+    /// Cancellation-aware ownership transfer is provided separately by
+    /// [`Self::new_with_cx`]. This method does not consume the `Cx` budget or
+    /// finalize its surrounding executor scope.
+    ///
+    /// # Errors
+    /// Returns a structured refusal when validation work exceeds the defensive
+    /// ceiling or the representation is malformed before cancellation wins.
+    pub fn admit_with_cx(&self, cx: &Cx<'_>) -> Result<KnotAdmissionRun<'_, S>, NurbsError> {
+        Self::enforce_work(self.validation_work()?, "knot-vector admission")?;
+        match self.validate_live_with_poll(|| cx.checkpoint().is_err())? {
+            KnotValidationOutcome::Complete => Ok(KnotAdmissionRun::Complete {
+                admitted: self.admitted_after_validation(),
+            }),
+            KnotValidationOutcome::Cancelled => Ok(KnotAdmissionRun::Cancelled),
+        }
+    }
+
+    pub(crate) const fn admitted_after_validation(&self) -> AdmittedKnotVector<'_, S> {
+        AdmittedKnotVector { inner: self }
+    }
+
+    /// Number of basis functions / control points.
+    #[must_use]
+    pub fn control_count(&self) -> usize {
+        self.knots
+            .len()
+            .checked_sub(self.degree)
+            .and_then(|count| count.checked_sub(1))
+            .unwrap_or(0)
+    }
+
+    /// The parametric domain `[u_min, u_max]`, after structural admission.
+    ///
+    /// # Errors
+    /// [`NurbsError::Structure`] when the knot vector was mutated into an
+    /// invalid shape; [`NurbsError::Domain`] when the defensive live-scan work
+    /// ceiling is exceeded.
+    pub fn domain(&self) -> Result<(S, S), NurbsError> {
+        self.admit().map(|admitted| admitted.domain())
+    }
+
+    /// Validate this owning knot vector and publish its parameter domain with
+    /// bounded cancellation polling.
+    ///
+    /// Checked validation-work refusal precedes the first checkpoint. One gate
+    /// then spans fixed-stride structural validation and final endpoint-pair
+    /// publication. Cancellation publishes neither partial admitted authority
+    /// nor one endpoint. This primitive does not consume the `Cx` budget or
+    /// finalize its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous domain lookup's work or structural refusal when
+    /// it wins before an observed cancellation.
+    pub fn domain_with_cx(&self, cx: &Cx<'_>) -> Result<KnotDomainRun<S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.domain_with_poll(&mut should_cancel)
+    }
+
+    fn domain_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<KnotDomainRun<S>, NurbsError> {
+        Self::enforce_work(self.validation_work()?, "knot-vector admission")?;
+        match self.validate_live_with_poll(|| should_cancel())? {
+            KnotValidationOutcome::Complete => {}
+            KnotValidationOutcome::Cancelled => return Ok(KnotDomainRun::Cancelled),
+        }
+        if should_cancel() {
+            return Ok(KnotDomainRun::Cancelled);
+        }
+        Ok(KnotDomainRun::Complete {
+            domain: self.admitted_after_validation().domain(),
+        })
+    }
+
+    /// The knot span index containing `t` (Piegl–Tiller A2.1 semantics;
+    /// the end parameter maps into the last non-empty span).
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] outside the parameter domain or when defensive
+    /// live-validation/span-search work admission refuses the request.
+    pub fn span(&self, t: S) -> Result<usize, NurbsError> {
+        let total_work = self
+            .validation_work()?
+            .checked_add(self.span_search_work())
+            .ok_or_else(|| NurbsError::Domain {
+                what: "knot-span work accounting overflows u128".to_string(),
+            })?;
+        Self::enforce_work(total_work, "knot-span evaluation")?;
+        self.validate_live()?;
+        self.admitted_after_validation().span_after_preflight(t)
+    }
+
+    /// Validate this owning knot vector and resolve one span with a shared
+    /// cancellation gate.
+    ///
+    /// Aggregate validation-plus-search work refusal precedes the first
+    /// checkpoint. Cancellation then spans structural admission and the
+    /// admitted directional search. No partial admitted authority or span
+    /// index is published. This primitive does not consume the `Cx` budget or
+    /// finalize its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous owning lookup's work, structure, or parameter
+    /// refusal when it wins before an observed cancellation.
+    pub fn span_with_cx(&self, t: S, cx: &Cx<'_>) -> Result<KnotSpanRun, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.span_with_poll(t, &mut should_cancel)
+    }
+
+    fn span_with_poll(
+        &self,
+        t: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<KnotSpanRun, NurbsError> {
+        let total_work = self
+            .validation_work()?
+            .checked_add(self.span_search_work())
+            .ok_or_else(|| NurbsError::Domain {
+                what: "knot-span work accounting overflows u128".to_string(),
+            })?;
+        Self::enforce_work(total_work, "knot-span evaluation")?;
+        match self.validate_live_with_poll(|| should_cancel())? {
+            KnotValidationOutcome::Complete => self
+                .admitted_after_validation()
+                .span_with_poll(t, should_cancel),
+            KnotValidationOutcome::Cancelled => Ok(KnotSpanRun::Cancelled),
+        }
+    }
+
+    /// All nonzero basis-function values at `t` (Cox–de Boor triangle,
+    /// Piegl–Tiller A2.2): `N_{span-p..=span, p}(t)`.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] outside the parameter domain or when defensive
+    /// validation, span-search, triangular-work, or allocation admission
+    /// refuses the request.
+    pub fn basis(&self, t: S) -> Result<(usize, Vec<S>), NurbsError> {
+        let total_work = self
+            .validation_work()?
+            .checked_add(self.basis_operation_work()?)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "basis total-work accounting overflows u128".to_string(),
+            })?;
+        Self::enforce_work(total_work, "basis evaluation")?;
+        self.validate_live()?;
+        self.admitted_after_validation().basis_after_preflight(t)
+    }
+
+    /// Validate this owning knot vector and evaluate one complete nonzero
+    /// basis row with a shared cancellation gate.
+    ///
+    /// Aggregate validation-plus-basis work refusal precedes the first
+    /// checkpoint. Cancellation then spans structural admission, span search,
+    /// fallible scratch allocation, the Cox-de Boor triangle, finite checks,
+    /// and final publication. No partial admitted authority or basis row is
+    /// published. This primitive does not consume the `Cx` budget or finalize
+    /// its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous owning evaluation's work, structure, parameter,
+    /// allocation, or finite-arithmetic refusal when it wins before an
+    /// observed cancellation.
+    pub fn basis_with_cx(&self, t: S, cx: &Cx<'_>) -> Result<BasisRun<S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.basis_with_poll(t, &mut should_cancel)
+    }
+
+    fn basis_with_poll(
+        &self,
+        t: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<BasisRun<S>, NurbsError> {
+        let total_work = self
+            .validation_work()?
+            .checked_add(self.basis_operation_work()?)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "basis total-work accounting overflows u128".to_string(),
+            })?;
+        Self::enforce_work(total_work, "basis evaluation")?;
+        match self.validate_live_with_poll(|| should_cancel())? {
+            KnotValidationOutcome::Complete => self
+                .admitted_after_validation()
+                .basis_with_poll(t, should_cancel),
+            KnotValidationOutcome::Cancelled => Ok(BasisRun::Cancelled),
+        }
+    }
+}
+
+impl<'a, S: Scalar> AdmittedKnotVector<'a, S> {
+    /// The exact immutable source bound to this view.
+    #[must_use]
+    pub const fn source(&self) -> &'a KnotVector<S> {
+        self.inner
+    }
+
+    /// Borrow the validated knot entries.
+    #[must_use]
+    pub fn knots(&self) -> &'a [S] {
+        self.inner.knots()
+    }
+
+    /// Polynomial degree.
+    #[must_use]
+    pub const fn degree(&self) -> usize {
+        self.inner.degree()
+    }
+
+    /// Number of basis functions / control points.
+    #[must_use]
+    pub fn control_count(&self) -> usize {
+        self.inner.control_count()
+    }
+
+    /// The already-validated parametric domain.
+    #[must_use]
+    pub fn domain(&self) -> (S, S) {
+        self.inner.validated_domain()
+    }
+
+    /// Resolve a knot span without rescanning structure.
+    ///
+    /// # Errors
+    /// Returns a structured refusal for out-of-domain parameters or excessive
+    /// span-search work.
+    pub fn span(&self, t: S) -> Result<usize, NurbsError> {
+        KnotVector::<S>::enforce_work(
+            self.inner.span_search_work(),
+            "admitted knot-span evaluation",
+        )?;
+        self.span_after_preflight(t)
+    }
+
+    /// Resolve a knot span with bounded cancellation polling.
+    ///
+    /// Parameter and checked span-search work refusals retain their
+    /// synchronous precedence. The fixed-stride gate covers the directional
+    /// search and final span publication. This method does not consume the
+    /// `Cx` budget or finalize its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous span lookup's parameter or work refusal when it
+    /// wins before an observed cancellation.
+    pub fn span_with_cx(&self, t: S, cx: &Cx<'_>) -> Result<KnotSpanRun, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.span_with_poll(t, &mut should_cancel)
+    }
+
+    /// Resolve one admitted span while sharing a compound caller's
+    /// cancellation callback.
+    pub(crate) fn span_with_poll(
+        &self,
+        t: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<KnotSpanRun, NurbsError> {
+        KnotVector::<S>::enforce_work(
+            self.inner.span_search_work(),
+            "admitted knot-span evaluation",
+        )?;
+        self.inner.span_after_validation_with_poll(t, should_cancel)
+    }
+
+    fn span_after_preflight(&self, t: S) -> Result<usize, NurbsError> {
+        self.inner.span_after_validation(t)
+    }
+
+    /// Evaluate all nonzero basis values without rescanning the sealed source.
+    ///
+    /// # Errors
+    /// Returns a structured refusal for domain, work, allocation, or finite
+    /// arithmetic failures.
+    pub fn basis(&self, t: S) -> Result<(usize, Vec<S>), NurbsError> {
+        KnotVector::<S>::enforce_work(
+            self.inner.basis_operation_work()?,
+            "admitted basis evaluation",
+        )?;
+        self.basis_after_preflight(t)
+    }
+
+    /// Evaluate all nonzero basis values with bounded cancellation polling.
+    ///
+    /// This admitted path reuses an immutable snapshot without structural
+    /// rescanning; [`KnotVector::basis_with_cx`] provides the owning
+    /// validation-plus-evaluation peer. Cancellation is checked after cheap
+    /// request/work admission, at fixed work strides, before each allocation,
+    /// and immediately before publication. [`BasisRun::Cancelled`] carries no
+    /// partial basis row. The caller remains responsible for draining and
+    /// finalizing any surrounding executor scope; `Cx` budgets are not consumed
+    /// by this measured primitive.
+    ///
+    /// # Errors
+    /// Returns a structured refusal for domain, work, allocation, or finite
+    /// arithmetic failures that precede successful publication.
+    pub fn basis_with_cx(&self, t: S, cx: &Cx<'_>) -> Result<BasisRun<S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.basis_with_poll(t, &mut should_cancel)
+    }
+
+    /// Evaluate one admitted basis row while sharing a compound caller's
+    /// cancellation callback.
+    pub(crate) fn basis_with_poll(
+        &self,
+        t: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<BasisRun<S>, NurbsError> {
+        KnotVector::<S>::enforce_work(
+            self.inner.basis_operation_work()?,
+            "admitted basis evaluation",
+        )?;
+        self.basis_after_preflight_with_poll(t, should_cancel)
+    }
+
+    fn basis_after_preflight(&self, t: S) -> Result<(usize, Vec<S>), NurbsError> {
+        match self.basis_after_preflight_with_poll(t, || false)? {
+            BasisRun::Complete { span, values } => Ok((span, values)),
+            BasisRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling basis evaluation observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    fn basis_after_preflight_with_poll(
+        &self,
+        t: S,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> Result<BasisRun<S>, NurbsError> {
+        let inner = self.inner;
+        let p = inner.degree;
+        let order = p.checked_add(1).ok_or_else(|| NurbsError::Domain {
+            what: "basis order overflows usize".to_string(),
+        })?;
+        let (lo, hi) = inner.validated_domain();
+        if !t.is_finite() || t < lo || t > hi {
+            return Err(NurbsError::Domain {
+                what: format!("parameter {t:?} outside {lo:?}..{hi:?}"),
+            });
+        }
+        if should_cancel() {
+            return Ok(BasisRun::Cancelled);
+        }
+
+        let mut operations_since_poll = 0usize;
+        let n_last = inner.control_count() - 1;
+        let span = if t == hi {
+            // Admission guarantees a non-empty span, so this cannot underflow.
+            let mut span = n_last;
+            while inner.knots[span] == inner.knots[span + 1] {
+                span -= 1;
+                if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(BasisRun::Cancelled);
+                }
+            }
+            span
+        } else {
+            let mut span = p;
+            while span < n_last && inner.knots[span + 1] <= t {
+                span += 1;
+                if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(BasisRun::Cancelled);
+                }
+            }
+            span
+        };
+
+        let mut n = Vec::new();
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for (buffer, stage) in [
+            (&mut n, "values"),
+            (&mut left, "left workspace"),
+            (&mut right, "right workspace"),
+        ] {
+            if should_cancel() {
+                return Ok(BasisRun::Cancelled);
+            }
+            operations_since_poll = 0;
+            buffer
+                .try_reserve_exact(order)
+                .map_err(|_| NurbsError::Domain {
+                    what: format!("basis {stage} allocation was refused"),
+                })?;
+            for _ in 0..order {
+                buffer.push(S::zero());
+                if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(BasisRun::Cancelled);
+                }
+            }
+        }
+        n[0] = S::one();
+        for j in 1..=p {
+            left[j] = t - inner.knots[span + 1 - j];
+            right[j] = inner.knots[span + j] - t;
+            if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(BasisRun::Cancelled);
+            }
+            let mut saved = S::zero();
+            for r in 0..j {
+                let denom = right[r + 1] + left[j - r];
+                let temp = n[r] / denom;
+                n[r] = saved + right[r + 1] * temp;
+                saved = left[j - r] * temp;
+                if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(BasisRun::Cancelled);
+                }
+            }
+            n[j] = saved;
+        }
+        for value in &n {
+            if !value.is_finite() {
+                return Err(NurbsError::Domain {
+                    what: format!("basis evaluation at {t:?} left the finite numeric domain"),
+                });
+            }
+            if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(BasisRun::Cancelled);
+            }
+        }
+        if should_cancel() {
+            return Ok(BasisRun::Cancelled);
+        }
+        Ok(BasisRun::Complete { span, values: n })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asupersync::types::Budget;
+    use fs_exec::{CancelGate, ExecMode, StreamKey};
+
+    fn with_basis_cx<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+        let gate = CancelGate::new_clock_free();
+        if cancelled {
+            gate.request();
+        }
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 0xB4515,
+                    kernel_id: 1,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            f(&cx)
+        })
+    }
+
+    fn cancellation_fixture() -> KnotVector<f64> {
+        let degree = 16;
+        let mut knots = vec![0.0; degree + 1];
+        knots.extend(vec![1.0; degree + 1]);
+        KnotVector::new(knots, degree).expect("cancellation fixture")
+    }
+
+    fn validation_cancellation_fixture() -> KnotVector<f64> {
+        let interior_count = 256usize;
+        let mut knots = Vec::with_capacity(interior_count + 4);
+        knots.extend([0.0, 0.0]);
+        for index in 1..=interior_count {
+            #[allow(clippy::cast_precision_loss)]
+            knots.push(index as f64 / (interior_count + 1) as f64);
+        }
+        knots.extend([1.0, 1.0]);
+        KnotVector::new(knots, 1).expect("validation cancellation fixture")
+    }
+
+    #[test]
+    fn knot_construction_with_cx_is_transactional_and_exact() {
+        let expected = validation_cancellation_fixture();
+        with_basis_cx(true, |cx| {
+            assert_eq!(
+                KnotVector::new_with_cx(expected.knots.clone(), expected.degree, cx)
+                    .expect("valid pre-cancelled construction"),
+                KnotConstructionRun::Cancelled
+            );
+        });
+        with_basis_cx(false, |cx| {
+            assert_eq!(
+                KnotVector::new_with_cx(expected.knots.clone(), expected.degree, cx)
+                    .expect("active knot-vector construction"),
+                KnotConstructionRun::Complete {
+                    knots: expected.clone(),
+                }
+            );
+        });
+
+        let exact = KnotVector::new(vec![Rat::int(0), Rat::int(0), Rat::int(1), Rat::int(1)], 1)
+            .expect("exact line knots");
+        with_basis_cx(false, |cx| {
+            assert_eq!(
+                KnotVector::new_with_cx(exact.knots.clone(), exact.degree, cx)
+                    .expect("active exact construction"),
+                KnotConstructionRun::Complete {
+                    knots: exact.clone(),
+                }
+            );
+        });
+
+        with_basis_cx(true, |cx| {
+            assert!(
+                matches!(
+                    KnotVector::<f64>::new_with_cx(Vec::new(), 1, cx),
+                    Err(NurbsError::Structure { .. })
+                ),
+                "constant-time shape refusal must precede cancellation"
+            );
+        });
+    }
+
+    #[test]
+    fn knot_construction_cancels_inside_validation_and_at_publication() {
+        let source = validation_cancellation_fixture();
+        let run = |target| {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == target
+            };
+            let outcome =
+                KnotVector::new_with_poll(source.knots.clone(), source.degree, &mut should_cancel)
+                    .expect("valid cancellable construction");
+            (outcome.is_none(), polls)
+        };
+        assert_eq!(run(13), run(13));
+        assert_eq!(run(13), (true, 13));
+
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        assert!(
+            KnotVector::new_with_poll(source.knots.clone(), source.degree, &mut never_cancel,)
+                .expect("healthy construction")
+                .is_some()
+        );
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == total_polls
+        };
+        assert!(
+            KnotVector::new_with_poll(
+                source.knots.clone(),
+                source.degree,
+                &mut cancel_at_publication,
+            )
+            .expect("publication cancellation")
+            .is_none()
+        );
+        assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
+    fn knot_copy_with_cx_is_transactional_and_exact() {
+        let knots = validation_cancellation_fixture();
+        assert_eq!(knots.clone(), knots, "trait Clone compatibility remains");
+        with_basis_cx(true, |cx| {
+            assert_eq!(
+                knots.try_clone_with_cx(cx).expect("admitted copy request"),
+                KnotCloneRun::Cancelled
+            );
+        });
+        with_basis_cx(false, |cx| {
+            assert_eq!(
+                knots.try_clone_with_cx(cx).expect("active knot copy"),
+                KnotCloneRun::Complete {
+                    knots: knots.try_clone().expect("legacy knot copy"),
+                }
+            );
+        });
+
+        let exact = KnotVector::new(
+            vec![
+                Rat::int(0),
+                Rat::int(0),
+                Rat::new(1, 3),
+                Rat::new(2, 3),
+                Rat::int(1),
+                Rat::int(1),
+            ],
+            1,
+        )
+        .expect("exact multispan knots");
+        with_basis_cx(false, |cx| {
+            assert_eq!(
+                exact.try_clone_with_cx(cx).expect("active exact copy"),
+                KnotCloneRun::Complete {
+                    knots: exact.try_clone().expect("legacy exact copy"),
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn knot_copy_cancels_inside_linear_copy_and_at_publication() {
+        let knots = validation_cancellation_fixture();
+        let run = |target| {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == target
+            };
+            let outcome = knots
+                .try_clone_with_poll(&mut should_cancel)
+                .expect("bounded knot copy");
+            (outcome.is_none(), polls)
+        };
+        assert_eq!(run(3), run(3));
+        assert_eq!(run(3), (true, 3));
+
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        assert!(
+            knots
+                .try_clone_with_poll(&mut never_cancel)
+                .expect("healthy knot copy")
+                .is_some()
+        );
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == total_polls
+        };
+        assert!(
+            knots
+                .try_clone_with_poll(&mut cancel_at_publication)
+                .expect("publication cancellation")
+                .is_none()
+        );
+        assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
+    fn knot_copy_preflight_refuses_work_before_retained_bytes() {
+        let work_error = preflight_knot_copy::<f64>(BASIS_MAX_WORK_UNITS as usize)
+            .expect_err("work must refuse before retained-byte accounting");
+        assert!(matches!(
+            work_error,
+            NurbsError::Domain { ref what } if what.contains("work units above defensive ceiling")
+        ));
+
+        let scalar_bytes = core::mem::size_of::<f64>() as u128;
+        let exact_retained_count = (KNOT_COPY_MAX_RETAINED_BYTES / scalar_bytes) as usize;
+        preflight_knot_copy::<f64>(exact_retained_count)
+            .expect("the exact retained-byte ceiling is admitted");
+        let retained_count = exact_retained_count + 1;
+        assert!(
+            retained_count as u128 + 2 <= BASIS_MAX_WORK_UNITS,
+            "retained-byte fixture stays within the work envelope"
+        );
+        let memory_error = preflight_knot_copy::<f64>(retained_count)
+            .expect_err("the next scalar beyond 64 MiB must be refused");
+        assert!(matches!(
+            memory_error,
+            NurbsError::Domain { ref what } if what.contains("retains")
+        ));
+    }
+
+    #[test]
+    fn construction_admits_work_before_the_first_knot_scan() {
+        let exact_cap_count = 1_048_575usize;
+        assert_eq!(
+            KnotVector::<f64>::validation_work_for(exact_cap_count, 16).expect("exact-cap work"),
+            BASIS_MAX_WORK_UNITS
+        );
+        assert_eq!(
+            KnotVector::<f64>::validation_work_for(exact_cap_count, 17).expect("cap-plus-one work"),
+            BASIS_MAX_WORK_UNITS + 1
+        );
+
+        let over_cap = with_basis_cx(true, |cx| {
+            KnotVector::new_with_cx(vec![f64::NAN; exact_cap_count], 17, cx)
+                .expect_err("cap-plus-one construction must be refused")
+        });
+        assert!(
+            matches!(over_cap, NurbsError::Domain { .. }),
+            "work refusal must precede cancellation and the non-finite scalar scan"
+        );
+
+        let exact_cap = KnotVector::new(vec![f64::NAN; exact_cap_count], 16)
+            .expect_err("the exact-cap request reaches finite-value validation");
+        assert!(
+            matches!(exact_cap, NurbsError::Structure { .. }),
+            "an exact-cap request must reach semantic validation"
+        );
+    }
+
+    #[test]
+    fn admitted_basis_cancellation_is_transactional_and_preserves_request_precedence() {
+        let knots = cancellation_fixture();
+        let admitted = knots.admit().expect("admitted fixture");
+        with_basis_cx(true, |cx| {
+            assert_eq!(
+                knots
+                    .basis_with_cx(0.5, cx)
+                    .expect("valid owning request reaches cancellation"),
+                BasisRun::Cancelled
+            );
+            assert_eq!(
+                knots
+                    .basis_with_cx(f64::NAN, cx)
+                    .expect("owning validation cancellation precedes parameter refusal"),
+                BasisRun::Cancelled
+            );
+            assert_eq!(
+                admitted
+                    .basis_with_cx(0.5, cx)
+                    .expect("valid request reaches cancellation"),
+                BasisRun::Cancelled
+            );
+            assert!(
+                matches!(
+                    admitted.basis_with_cx(f64::NAN, cx),
+                    Err(NurbsError::Domain { .. })
+                ),
+                "constant-time request validation must precede cancellation"
+            );
+        });
+    }
+
+    #[test]
+    fn admitted_span_cancellation_is_transactional_and_preserves_request_precedence() {
+        let knots = validation_cancellation_fixture();
+        let admitted = knots.admit().expect("admitted fixture");
+        let legacy_error = admitted
+            .span(f64::NAN)
+            .expect_err("non-finite legacy parameter");
+        with_basis_cx(true, |cx| {
+            assert_eq!(
+                knots
+                    .span_with_cx(0.5, cx)
+                    .expect("valid owning request reaches cancellation"),
+                KnotSpanRun::Cancelled
+            );
+            assert_eq!(
+                knots
+                    .span_with_cx(f64::NAN, cx)
+                    .expect("owning validation cancellation precedes parameter refusal"),
+                KnotSpanRun::Cancelled
+            );
+            assert_eq!(
+                admitted
+                    .span_with_cx(0.5, cx)
+                    .expect("valid request reaches cancellation"),
+                KnotSpanRun::Cancelled
+            );
+            assert_eq!(
+                admitted
+                    .span_with_cx(f64::NAN, cx)
+                    .expect_err("parameter refusal must beat cancellation"),
+                legacy_error
+            );
+        });
+    }
+
+    #[test]
+    fn admitted_span_with_cx_matches_legacy_for_float_and_exact_scalars() {
+        let knots = KnotVector::new(vec![0.0, 0.0, 0.0, 0.25, 0.75, 1.0, 1.0, 1.0], 2)
+            .expect("quadratic multispan knots");
+        let admitted = knots.admit().expect("admitted float fixture");
+
+        let exact_knots = KnotVector::new(
+            vec![
+                Rat::int(0),
+                Rat::int(0),
+                Rat::int(0),
+                Rat::new(1, 4),
+                Rat::new(3, 4),
+                Rat::int(1),
+                Rat::int(1),
+                Rat::int(1),
+            ],
+            2,
+        )
+        .expect("exact quadratic multispan knots");
+        let exact_admitted = exact_knots.admit().expect("admitted exact fixture");
+
+        with_basis_cx(false, |cx| {
+            for parameter in [0.6, 1.0] {
+                assert_eq!(
+                    knots
+                        .span_with_cx(parameter, cx)
+                        .expect("cancellable owning float span"),
+                    KnotSpanRun::Complete {
+                        span: knots.span(parameter).expect("legacy owning float span"),
+                    }
+                );
+                assert_eq!(
+                    admitted
+                        .span_with_cx(parameter, cx)
+                        .expect("cancellable float span"),
+                    KnotSpanRun::Complete {
+                        span: admitted.span(parameter).expect("legacy float span"),
+                    }
+                );
+            }
+            for parameter in [Rat::new(3, 5), Rat::int(1)] {
+                assert_eq!(
+                    exact_knots
+                        .span_with_cx(parameter, cx)
+                        .expect("cancellable owning exact span"),
+                    KnotSpanRun::Complete {
+                        span: exact_knots
+                            .span(parameter)
+                            .expect("legacy owning exact span"),
+                    }
+                );
+                assert_eq!(
+                    exact_admitted
+                        .span_with_cx(parameter, cx)
+                        .expect("cancellable exact span"),
+                    KnotSpanRun::Complete {
+                        span: exact_admitted.span(parameter).expect("legacy exact span"),
+                    }
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn admitted_span_cancellation_replays_inside_forward_search() {
+        let knots = validation_cancellation_fixture();
+        let run = || {
+            let mut polls = 0usize;
+            let outcome = knots
+                .span_after_validation_with_poll(0.5, || {
+                    polls += 1;
+                    polls == 2
+                })
+                .expect("valid span request");
+            (outcome, polls)
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first, second);
+        assert_eq!(first, (KnotSpanRun::Cancelled, 2));
+    }
+
+    #[test]
+    fn admitted_span_final_checkpoint_gates_publication() {
+        let knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots");
+        let admitted = knots.admit().expect("admitted line knots");
+        let mut total_polls = 0usize;
+        let complete = admitted
+            .inner
+            .span_after_validation_with_poll(0.5, || {
+                total_polls += 1;
+                false
+            })
+            .expect("healthy span lookup");
+        assert_eq!(complete, KnotSpanRun::Complete { span: 1 });
+        assert_eq!(total_polls, 2);
+
+        let mut replay_polls = 0usize;
+        let cancelled = admitted
+            .inner
+            .span_after_validation_with_poll(0.5, || {
+                replay_polls += 1;
+                replay_polls == total_polls
+            })
+            .expect("final-checkpoint cancellation");
+        assert_eq!(cancelled, KnotSpanRun::Cancelled);
+        assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
+    fn owning_span_and_basis_share_the_source_validation_gate() {
+        let knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots");
+        let mut validation_polls = 0usize;
+        assert_eq!(
+            knots
+                .validate_live_with_poll(|| {
+                    validation_polls += 1;
+                    false
+                })
+                .expect("healthy source validation"),
+            KnotValidationOutcome::Complete
+        );
+
+        let mut span_polls = 0usize;
+        let span = knots
+            .span_with_poll(0.5, &mut || {
+                span_polls += 1;
+                span_polls == validation_polls + 1
+            })
+            .expect("owning span seam cancellation");
+        assert_eq!(span, KnotSpanRun::Cancelled);
+        assert_eq!(span_polls, validation_polls + 1);
+
+        let mut basis_polls = 0usize;
+        let basis = knots
+            .basis_with_poll(0.5, &mut || {
+                basis_polls += 1;
+                basis_polls == validation_polls + 1
+            })
+            .expect("owning basis seam cancellation");
+        assert_eq!(basis, BasisRun::Cancelled);
+        assert_eq!(basis_polls, validation_polls + 1);
+
+        let mut malformed = knots.clone();
+        malformed.knots.clear();
+        with_basis_cx(true, |cx| {
+            assert!(matches!(
+                malformed.span_with_cx(0.5, cx),
+                Err(NurbsError::Structure { .. })
+            ));
+            assert!(matches!(
+                malformed.basis_with_cx(0.5, cx),
+                Err(NurbsError::Structure { .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn admitted_basis_cancellation_replays_at_a_fixed_poll_ordinal() {
+        let knots = cancellation_fixture();
+        let admitted = knots.admit().expect("admitted fixture");
+        let run = || {
+            let mut polls = 0usize;
+            let outcome = admitted
+                .basis_after_preflight_with_poll(0.5, || {
+                    polls += 1;
+                    polls == 6
+                })
+                .expect("valid basis arithmetic");
+            (outcome, polls)
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first, second);
+        assert_eq!(first, (BasisRun::Cancelled, 6));
+    }
+
+    #[test]
+    fn owning_and_admitted_basis_with_cx_match_legacy_exactly() {
+        let knots = KnotVector::new(vec![0.0, 0.0, 0.0, 0.25, 0.75, 1.0, 1.0, 1.0], 2)
+            .expect("quadratic multispan knots");
+        let admitted = knots.admit().expect("admitted fixture");
+        let legacy = knots.basis(0.6).expect("legacy owning basis");
+
+        let exact_knots = KnotVector::new(
+            vec![
+                Rat::int(0),
+                Rat::int(0),
+                Rat::int(0),
+                Rat::new(1, 4),
+                Rat::new(3, 4),
+                Rat::int(1),
+                Rat::int(1),
+                Rat::int(1),
+            ],
+            2,
+        )
+        .expect("exact quadratic multispan knots");
+        let exact_admitted = exact_knots.admit().expect("admitted exact fixture");
+        let exact_legacy = exact_knots
+            .basis(Rat::new(3, 5))
+            .expect("legacy owning exact basis");
+
+        with_basis_cx(false, |cx| {
+            assert_eq!(
+                knots
+                    .basis_with_cx(0.6, cx)
+                    .expect("cancellable owning basis"),
+                BasisRun::Complete {
+                    span: legacy.0,
+                    values: legacy.1.clone(),
+                }
+            );
+            assert_eq!(
+                admitted
+                    .basis_with_cx(0.6, cx)
+                    .expect("cancellable admitted basis"),
+                BasisRun::Complete {
+                    span: legacy.0,
+                    values: legacy.1,
+                }
+            );
+            assert_eq!(
+                exact_knots
+                    .basis_with_cx(Rat::new(3, 5), cx)
+                    .expect("cancellable owning exact basis"),
+                BasisRun::Complete {
+                    span: exact_legacy.0,
+                    values: exact_legacy.1.clone(),
+                }
+            );
+            assert_eq!(
+                exact_admitted
+                    .basis_with_cx(Rat::new(3, 5), cx)
+                    .expect("cancellable admitted exact basis"),
+                BasisRun::Complete {
+                    span: exact_legacy.0,
+                    values: exact_legacy.1,
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn admitted_basis_final_checkpoint_gates_publication() {
+        let knots = cancellation_fixture();
+        let admitted = knots.admit().expect("admitted fixture");
+        let mut total_polls = 0usize;
+        let complete = admitted
+            .basis_after_preflight_with_poll(0.5, || {
+                total_polls += 1;
+                false
+            })
+            .expect("healthy basis run");
+        assert!(matches!(complete, BasisRun::Complete { .. }));
+
+        let mut replay_polls = 0usize;
+        let cancelled = admitted
+            .basis_after_preflight_with_poll(0.5, || {
+                replay_polls += 1;
+                replay_polls == total_polls
+            })
+            .expect("final-checkpoint cancellation");
+        assert_eq!(cancelled, BasisRun::Cancelled);
+        assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
+    fn knot_admission_cancellation_is_transactional_and_chains_to_basis() {
+        let knots = validation_cancellation_fixture();
+        with_basis_cx(true, |cx| {
+            assert!(matches!(
+                knots.admit_with_cx(cx).expect("valid source admission"),
+                KnotAdmissionRun::Cancelled
+            ));
+        });
+        with_basis_cx(false, |cx| {
+            let KnotAdmissionRun::Complete { admitted } = knots
+                .admit_with_cx(cx)
+                .expect("healthy cancellable admission")
+            else {
+                panic!("active context must admit the valid fixture");
+            };
+            assert!(core::ptr::eq(admitted.source(), &knots));
+            assert!(matches!(
+                admitted
+                    .basis_with_cx(0.5, cx)
+                    .expect("admitted cancellable basis"),
+                BasisRun::Complete { .. }
+            ));
+        });
+
+        let mut malformed = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("valid line");
+        malformed.knots.clear();
+        with_basis_cx(true, |cx| {
+            assert!(
+                matches!(
+                    malformed.admit_with_cx(cx),
+                    Err(NurbsError::Structure { .. })
+                ),
+                "constant-time shape refusal must precede cancellation"
+            );
+        });
+    }
+
+    #[test]
+    fn owning_domain_with_cx_is_transactional_and_exact() {
+        let knots = validation_cancellation_fixture();
+        let exact = KnotVector::new(
+            vec![
+                Rat::int(0),
+                Rat::int(0),
+                Rat::new(1, 3),
+                Rat::new(2, 3),
+                Rat::int(1),
+                Rat::int(1),
+            ],
+            1,
+        )
+        .expect("exact multispan knots");
+
+        with_basis_cx(true, |cx| {
+            assert_eq!(
+                knots
+                    .domain_with_cx(cx)
+                    .expect("valid pre-cancelled domain lookup"),
+                KnotDomainRun::Cancelled
+            );
+            assert_eq!(
+                exact
+                    .domain_with_cx(cx)
+                    .expect("valid pre-cancelled exact domain lookup"),
+                KnotDomainRun::Cancelled
+            );
+        });
+        with_basis_cx(false, |cx| {
+            assert_eq!(
+                knots.domain_with_cx(cx).expect("active domain lookup"),
+                KnotDomainRun::Complete {
+                    domain: knots.domain().expect("legacy domain"),
+                }
+            );
+            assert_eq!(
+                exact
+                    .domain_with_cx(cx)
+                    .expect("active exact domain lookup"),
+                KnotDomainRun::Complete {
+                    domain: exact.domain().expect("legacy exact domain"),
+                }
+            );
+        });
+
+        let mut malformed = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("valid line");
+        malformed.knots.clear();
+        with_basis_cx(true, |cx| {
+            assert!(matches!(
+                malformed.domain_with_cx(cx),
+                Err(NurbsError::Structure { .. })
+            ));
+        });
+
+        let line = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots");
+        let mut validation_polls = 0usize;
+        assert_eq!(
+            line.validate_live_with_poll(|| {
+                validation_polls += 1;
+                false
+            })
+            .expect("healthy validation"),
+            KnotValidationOutcome::Complete
+        );
+        let mut domain_polls = 0usize;
+        let outcome = line
+            .domain_with_poll(&mut || {
+                domain_polls += 1;
+                domain_polls == validation_polls + 1
+            })
+            .expect("domain publication cancellation");
+        assert_eq!(outcome, KnotDomainRun::Cancelled);
+        assert_eq!(domain_polls, validation_polls + 1);
+    }
+
+    #[test]
+    fn knot_validation_cancellation_replays_inside_run_scan() {
+        let knots = validation_cancellation_fixture();
+        let run = || {
+            let mut polls = 0usize;
+            let outcome = knots
+                .validate_live_with_poll(|| {
+                    polls += 1;
+                    polls == 13
+                })
+                .expect("valid structure");
+            (outcome, polls)
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first, second);
+        assert_eq!(first, (KnotValidationOutcome::Cancelled, 13));
+    }
+
+    #[test]
+    fn knot_admission_final_checkpoint_gates_authority() {
+        let knots = validation_cancellation_fixture();
+        let mut total_polls = 0usize;
+        let complete = knots
+            .validate_live_with_poll(|| {
+                total_polls += 1;
+                false
+            })
+            .expect("healthy validation");
+        assert_eq!(complete, KnotValidationOutcome::Complete);
+
+        let mut replay_polls = 0usize;
+        let cancelled = knots
+            .validate_live_with_poll(|| {
+                replay_polls += 1;
+                replay_polls == total_polls
+            })
+            .expect("final-checkpoint cancellation");
+        assert_eq!(cancelled, KnotValidationOutcome::Cancelled);
+        assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
+    fn empty_domain_knot_vector_is_rejected_not_paniced() {
+        // Regression: an all-equal knot vector passes the count / monotone /
+        // clamped checks but has an empty domain (lo == hi). `span(hi)` then
+        // underflowed its degenerate-span walk-back (usize `0 - 1`). Must refuse
+        // at construction instead.
+        assert!(KnotVector::new(vec![5.0f64; 6], 2).is_err());
+        assert!(KnotVector::new(vec![0.0f64, 0.0, 0.0, 0.0], 1).is_err());
+        // A proper clamped vector with a real domain builds and resolves the
+        // upper-endpoint span without panicking.
+        let kv = KnotVector::new(vec![0.0f64, 0.0, 0.0, 1.0, 1.0, 1.0], 2).expect("valid");
+        assert_eq!(kv.span(1.0).expect("hi is in domain"), 2);
+    }
+
+    #[test]
+    fn excessive_endpoint_and_interior_multiplicity_are_rejected() {
+        assert!(KnotVector::new(vec![0.0, 0.0, 0.0, 1.0, 1.0], 1).is_err());
+        assert!(KnotVector::new(vec![0.0, 0.0, 0.5, 0.5, 0.5, 1.0, 1.0], 1).is_err());
+    }
+
+    #[test]
+    fn non_finite_query_parameter_is_rejected() {
+        let kv = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("valid line knots");
+        assert!(kv.span(f64::NAN).is_err());
+        assert!(kv.basis(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn domain_and_basis_fail_closed_on_internal_corruption_and_quadratic_work() {
+        let mut malformed = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("valid line knots");
+        malformed.knots.clear();
+        assert!(
+            malformed.domain().is_err(),
+            "crate-internal corruption must not turn domain access into an indexing panic"
+        );
+
+        let degree = 6_000usize;
+        let mut knots = vec![0.0; degree + 1];
+        knots.extend(vec![1.0; degree + 1]);
+        let high_degree = KnotVector::new(knots, degree).expect("large but structurally valid");
+        assert!(
+            high_degree.basis(0.5).is_err(),
+            "quadratic Cox-de Boor work must be refused before entering billions of iterations"
+        );
+        with_basis_cx(true, |cx| {
+            assert!(
+                matches!(
+                    high_degree.basis_with_cx(0.5, cx),
+                    Err(NurbsError::Domain { .. })
+                ),
+                "aggregate owning basis work refusal must precede cancellation"
+            );
+        });
+
+        let interior_count = 1_000_000usize;
+        let mut many_knots = Vec::with_capacity(interior_count + 4);
+        many_knots.extend([0.0, 0.0]);
+        for index in 1..=interior_count {
+            #[allow(clippy::cast_precision_loss)]
+            many_knots.push(index as f64 / (interior_count + 1) as f64);
+        }
+        many_knots.extend([1.0, 1.0]);
+        let low_degree_many_spans = KnotVector {
+            knots: many_knots,
+            degree: 1,
+        };
+        assert!(
+            low_degree_many_spans.basis(0.5).is_err(),
+            "low polynomial degree must not bypass full knot-scan admission"
+        );
+        assert!(
+            low_degree_many_spans.span(0.5).is_err(),
+            "the public span search must share the defensive scan ceiling"
+        );
+        with_basis_cx(true, |cx| {
+            assert!(matches!(
+                low_degree_many_spans.basis_with_cx(0.5, cx),
+                Err(NurbsError::Domain { .. })
+            ));
+            assert!(matches!(
+                low_degree_many_spans.span_with_cx(0.5, cx),
+                Err(NurbsError::Domain { .. })
+            ));
+        });
+    }
+}

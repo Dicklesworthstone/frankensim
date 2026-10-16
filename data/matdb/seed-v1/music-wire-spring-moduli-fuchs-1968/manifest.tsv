@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	music-wire-spring-moduli-fuchs-1968
+redistribution	permitted	NASA-published symposium proceeding, NTRS record 19690002474 marked Public Use Permitted; WEAKEST PEDIGREE IN THIS CORPUS: the author is a university contributor and the table quotes the SAE Manual on Helical Springs, so treat as secondary spring-industry values; retain symposium, author, table number, and URL
+citation	Fuchs, H. O. (1968), Minimum-Weight Springs, 3rd Aerospace Mechanisms Symposium (JPL), NASA, Table 2 Apparent resilience of spring material; https://ntrs.nasa.gov/api/citations/19690002474/downloads/19690002474.pdf
+license	NASA-NTRS-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

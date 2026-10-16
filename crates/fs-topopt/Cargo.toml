@@ -1,0 +1,180 @@
+[package]
+name = "fs-topopt"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Density-based topology optimization: SIMP with Helmholtz filtering, Heaviside projection, exact chain-rule sensitivities, and optimality-criteria/AL drivers."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-exec = { path = "../fs-exec", optional = true }
+fs-opt = { path = "../fs-opt", optional = true }
+fs-qty = { path = "../fs-qty", optional = true }
+fs-cutfem = { path = "../fs-cutfem", optional = true }
+fs-dwr = { path = "../fs-dwr", optional = true }
+fs-ivl = { path = "../fs-ivl", optional = true }
+fs-adjoint = { path = "../fs-adjoint" }
+fs-ascent = { path = "../fs-ascent" }
+fs-feec = { path = "../fs-feec" }
+fs-la = { path = "../fs-la" }
+fs-material = { path = "../fs-material" }
+fs-math = { path = "../fs-math" }
+fs-rep-mesh = { path = "../fs-rep-mesh" }
+fs-solver = { path = "../fs-solver" }
+fs-sparse = { path = "../fs-sparse" }
+fs-spectral = { path = "../fs-spectral" }
+
+[dev-dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-rand = { path = "../fs-rand" }
+
+[features]
+# Live-IR structural Newton design; only existing workspace crates are used.
+newton-design = ["dep:fs-exec", "dep:fs-opt", "dep:fs-qty"]
+# [F]-gated per the Ambition-Tag rule (bead b7d0).
+cutfem-marquee = ["dep:fs-cutfem", "dep:fs-dwr", "dep:fs-ivl"]
+
+[lints]
+workspace = true
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "marquee"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "stress_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[example]]
+name = "elastic_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "adaptive_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[example]]
+name = "adaptive_elastic_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "sdf3_goal"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "preconditioned_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "multilevel_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[example]]
+name = "surface_loaded_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "surface_sdf3_goal"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "embedded_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[example]]
+name = "embedded_supported_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "response_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[example]]
+name = "motion_response_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "response_goal3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "projected_response_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "adaptive_response_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "reaction_response_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[example]]
+name = "reaction_response_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "response_checkpoint_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "compliance_newton"
+required-features = ["newton-design"]
+
+[[example]]
+name = "constrained_elasticity"
+required-features = ["newton-design"]
+
+[[test]]
+name = "adaptive_response_campaign"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "response_limits_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[example]]
+name = "minimum_material_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "response_limit_refinement"
+required-features = ["cutfem-marquee"]
+
+[[example]]
+name = "worst_load_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "binary_response_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[example]]
+name = "motion_stress_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "simp_newton"
+required-features = ["newton-design"]
+
+[[example]]
+name = "constrained_simp"
+required-features = ["newton-design"]
+
+[[test]]
+name = "robust_simp_newton"
+required-features = ["newton-design"]
+
+[[example]]
+name = "robust_simp"
+required-features = ["newton-design"]

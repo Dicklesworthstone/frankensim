@@ -1,0 +1,409 @@
+//! fs-sparse perf lane (bead wsbf, segment 1): compact-index CSR,
+//! sharded parallel SpMV, and tiled parallel assembly — every kernel
+//! BITWISE-equal to its serial/wide twin by construction, so the perf
+//! program never trades away the determinism contract.
+//!
+//! - [`CsrCompact`]: u32 column indices halve the per-nnz index
+//!   traffic that bounds CSR SpMV (the values stream is irreducible;
+//!   the index stream is not). `row_ptr` stays `usize` — nnz may
+//!   exceed u32 at production scale. Accumulation order is IDENTICAL
+//!   to [`Csr::spmv`] (ascending-column `mul_add` from +0.0), so
+//!   equality is bitwise, gated in conformance.
+//! - [`CsrCompact::spmv_sharded`]: disjoint contiguous row ranges
+//!   balanced by nnz prefix, scoped threads, each thread owning its
+//!   `y` slice via `split_at_mut` (write-side first-touch for NUMA).
+//!   Per-row accumulation is untouched, so the result is bitwise equal
+//!   to the serial kernel at EVERY requested thread count; requests are
+//!   capped by nonempty rows and host parallel capacity. The bead's
+//!   item-2 determinism constraint holds by construction, no golden bump.
+//! - [`Coo::assemble_parallel`]: row-range tiles bucketed in one
+//!   serial pass (preserving GLOBAL insertion order within each tile),
+//!   per-tile stable sort + accumulation on scoped threads, tiles
+//!   concatenated in order. Rows never span tiles, so every (row, col)
+//!   duplicate chain accumulates in exactly the serial order — bitwise
+//!   equal to [`Coo::assemble`] for ANY thread count (the G5
+//!   criterion, gated).
+
+use crate::{Coo, Csr};
+
+struct TileOut {
+    row_counts: Vec<usize>,
+    col_idx: Vec<usize>,
+    vals: Vec<f64>,
+    row_lo: usize,
+}
+
+fn bounded_worker_count(requested: usize, useful_rows: usize) -> usize {
+    let host_parallelism = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    requested
+        .max(1)
+        .min(useful_rows.max(1))
+        .min(host_parallelism)
+}
+
+/// CSR with compact u32 column indices (the SpMV bandwidth diet).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CsrCompact {
+    nrows: usize,
+    ncols: usize,
+    nonempty_rows: usize,
+    row_ptr: Vec<usize>,
+    col_idx: Vec<u32>,
+    vals: Vec<f64>,
+}
+
+impl CsrCompact {
+    /// Convert from canonical CSR. Panics (structured) when `ncols`
+    /// exceeds the u32 index space — the caller keeps the wide format
+    /// there; silently truncating an index would be corruption.
+    #[must_use]
+    pub fn from_csr(a: &Csr) -> CsrCompact {
+        assert!(
+            u32::try_from(a.ncols()).is_ok(),
+            "compact CSR needs ncols <= u32::MAX, got {}",
+            a.ncols()
+        );
+        let mut row_ptr = Vec::with_capacity(a.nrows() + 1);
+        let mut col_idx = Vec::with_capacity(a.nnz());
+        let mut vals = Vec::with_capacity(a.nnz());
+        let mut nonempty_rows = 0usize;
+        row_ptr.push(0usize);
+        for r in 0..a.nrows() {
+            let (cols, v) = a.row(r);
+            nonempty_rows += usize::from(!cols.is_empty());
+            for &c in cols {
+                col_idx.push(u32::try_from(c).expect("checked ncols bound"));
+            }
+            vals.extend_from_slice(v);
+            row_ptr.push(col_idx.len());
+        }
+        CsrCompact {
+            nrows: a.nrows(),
+            ncols: a.ncols(),
+            nonempty_rows,
+            row_ptr,
+            col_idx,
+            vals,
+        }
+    }
+
+    /// Row count.
+    #[must_use]
+    pub fn nrows(&self) -> usize {
+        self.nrows
+    }
+
+    /// Column count.
+    #[must_use]
+    pub fn ncols(&self) -> usize {
+        self.ncols
+    }
+
+    /// Stored nonzeros.
+    #[must_use]
+    pub fn nnz(&self) -> usize {
+        self.vals.len()
+    }
+
+    /// Serial SpMV — the same ascending-column `mul_add` accumulation
+    /// from +0.0 as [`Csr::spmv`]; bitwise equality is gated.
+    pub fn spmv(&self, x: &[f64], y: &mut [f64]) {
+        assert_eq!(x.len(), self.ncols, "spmv: x length");
+        assert_eq!(y.len(), self.nrows, "spmv: y length");
+        crate::fma::compact_spmv_dispatch(self, x, y);
+    }
+
+    /// The serial loop body — recompiled by the x86 FMA-codegen capsule
+    /// (bead nabk); MUST stay `inline(always)`.
+    #[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+    #[inline(always)]
+    pub(crate) fn spmv_body(&self, x: &[f64], y: &mut [f64]) {
+        for (r, out) in y.iter_mut().enumerate() {
+            let lo = self.row_ptr[r];
+            let hi = self.row_ptr[r + 1];
+            let mut acc = 0.0f64;
+            // Slice windows: checked-free iteration (indexed loops were
+            // MEASURED slower than the wide kernel from bounds checks).
+            for (&c, &v) in self.col_idx[lo..hi].iter().zip(&self.vals[lo..hi]) {
+                acc = v.mul_add(x[c as usize], acc);
+            }
+            *out = acc;
+        }
+    }
+
+    /// The per-shard row-range body — recompiled by the x86 FMA-codegen
+    /// capsule (bead nabk); MUST stay `inline(always)`.
+    #[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+    #[inline(always)]
+    pub(crate) fn shard_body(&self, x: &[f64], lo: usize, hi: usize, mine: &mut [f64]) {
+        for r in lo..hi {
+            let a = self.row_ptr[r];
+            let b = self.row_ptr[r + 1];
+            let mut acc = 0.0f64;
+            for (&c, &v) in self.col_idx[a..b].iter().zip(&self.vals[a..b]) {
+                acc = v.mul_add(x[c as usize], acc);
+            }
+            mine[r - lo] = acc;
+        }
+    }
+
+    /// nnz-balanced contiguous row shards for `threads` workers.
+    #[must_use]
+    pub fn shard_bounds(&self, threads: usize) -> Vec<usize> {
+        // Empty rows do not justify independent workers, and more workers than
+        // the host can run only amplify allocation and spawn overhead. The
+        // count is fixed at construction, so this hot path does not rescan
+        // every row pointer merely to rediscover it.
+        let t = bounded_worker_count(threads, self.nonempty_rows);
+        let total = self.nnz();
+        let mut bounds = Vec::with_capacity(t + 1);
+        bounds.push(0usize);
+        for target in 1..t {
+            let threshold = (target as u128) * (total as u128);
+            // Preserve the former scan's tie rule: select the FIRST row
+            // whose cumulative nnz reaches this target. `row_ptr` is
+            // monotone, including across empty rows, so this is O(log nrows)
+            // instead of a full cumulative scan per SpMV invocation.
+            let boundary = self.row_ptr[1..]
+                .partition_point(|&filled| (filled as u128) * (t as u128) < threshold)
+                + 1;
+            bounds.push(boundary);
+        }
+        bounds.push(self.nrows);
+        bounds
+    }
+
+    /// Rebuild the compact arrays with PER-SHARD FIRST-TOUCH: each
+    /// shard's slice of `col_idx`/`vals` is copied by the thread that
+    /// will stream it in [`Self::spmv_sharded`], so pages land on the
+    /// owning NUMA node (the bead's "first-touch on TR" item —
+    /// serially-built arrays throttled a 64-core Threadripper to one
+    /// node's controllers, MEASURED). Contents are bitwise identical;
+    /// only page placement changes.
+    #[must_use]
+    pub fn numa_localized(&self, threads: usize) -> CsrCompact {
+        let bounds = self.shard_bounds(threads);
+        let mut col_idx = vec![0u32; self.col_idx.len()];
+        let mut vals = vec![0.0f64; self.vals.len()];
+        std::thread::scope(|scope| {
+            let mut rest_c = col_idx.as_mut_slice();
+            let mut rest_v = vals.as_mut_slice();
+            let mut off = 0usize;
+            for w in bounds.windows(2) {
+                let (lo, hi) = (self.row_ptr[w[0]], self.row_ptr[w[1]]);
+                let take = hi - off;
+                if take == 0 {
+                    continue;
+                }
+                let (mc, tc) = rest_c.split_at_mut(take);
+                let (mv, tv) = rest_v.split_at_mut(take);
+                rest_c = tc;
+                rest_v = tv;
+                let src_c = &self.col_idx[lo..hi];
+                let src_v = &self.vals[lo..hi];
+                off = hi;
+                scope.spawn(move || {
+                    mc.copy_from_slice(src_c);
+                    mv.copy_from_slice(src_v);
+                });
+            }
+        });
+        CsrCompact {
+            nrows: self.nrows,
+            ncols: self.ncols,
+            nonempty_rows: self.nonempty_rows,
+            row_ptr: self.row_ptr.clone(),
+            col_idx,
+            vals,
+        }
+    }
+
+    /// Sharded parallel SpMV: bitwise equal to [`Self::spmv`] at every
+    /// thread count (disjoint row ranges; per-row order untouched).
+    pub fn spmv_sharded(&self, x: &[f64], y: &mut [f64], threads: usize) {
+        assert_eq!(x.len(), self.ncols, "spmv: x length");
+        assert_eq!(y.len(), self.nrows, "spmv: y length");
+        let bounds = self.shard_bounds(threads);
+        std::thread::scope(|scope| {
+            let mut rest = y;
+            let mut offset = 0usize;
+            for w in bounds.windows(2) {
+                let (lo, hi) = (w[0], w[1]);
+                let (mine, tail) = rest.split_at_mut(hi - offset);
+                rest = tail;
+                offset = hi;
+                if lo == hi {
+                    continue;
+                }
+                scope.spawn(move || {
+                    // Closures are separate codegen units: target_feature
+                    // does NOT propagate in — dispatch per shard (nabk).
+                    crate::fma::compact_shard_dispatch(self, x, lo, hi, mine);
+                });
+            }
+        });
+    }
+}
+
+impl Coo {
+    /// Tiled PARALLEL assembly, bitwise equal to [`Coo::assemble`] for
+    /// any requested `threads` (capped by nonempty rows and host parallel
+    /// capacity; rows never span tiles; each duplicate chain accumulates
+    /// in the global insertion order the serial path uses).
+    #[must_use]
+    pub fn assemble_parallel(&self, threads: usize) -> Csr {
+        let nrows = self.nrows;
+        // Row-range tiles balanced by STAGED triplet count.
+        let mut per_row = vec![0usize; nrows + 1];
+        for &r in &self.rows {
+            per_row[r + 1] += 1;
+        }
+        for r in 0..nrows {
+            per_row[r + 1] += per_row[r];
+        }
+        let useful_rows = per_row
+            .windows(2)
+            .filter(|window| window[0] != window[1])
+            .count();
+        let t = bounded_worker_count(threads, useful_rows);
+        let total = self.vals.len();
+        let mut tile_of_row = vec![0usize; nrows];
+        {
+            let mut tile = 0usize;
+            for (r, slot) in tile_of_row.iter_mut().enumerate() {
+                while tile + 1 < t
+                    && (per_row[r + 1] as u128) * (t as u128)
+                        > ((tile + 1) as u128) * (total as u128)
+                {
+                    tile += 1;
+                }
+                *slot = tile;
+            }
+        }
+        // One serial bucketing pass: global order preserved per tile.
+        let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); t];
+        for (i, &r) in self.rows.iter().enumerate() {
+            buckets[tile_of_row[r]].push(i);
+        }
+        let mut outs: Vec<Option<TileOut>> = Vec::new();
+        for _ in 0..t {
+            outs.push(None);
+        }
+        // Per-tile contiguous row ranges (tile_of_row is monotone).
+        let ranges: Vec<(usize, usize)> = (0..t)
+            .map(|tile| {
+                let lo = tile_of_row.iter().position(|&x| x == tile);
+                match lo {
+                    Some(lo) => {
+                        let hi = tile_of_row
+                            .iter()
+                            .rposition(|&x| x == tile)
+                            .map_or(lo, |p| p + 1);
+                        (lo, hi)
+                    }
+                    None => (0, 0),
+                }
+            })
+            .collect();
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for (tile, idxs) in buckets.iter().enumerate() {
+                if idxs.is_empty() {
+                    continue;
+                }
+                let (row_lo, row_hi) = ranges[tile];
+                handles.push((
+                    tile,
+                    scope.spawn(move || assemble_tile(self, idxs, row_lo, row_hi)),
+                ));
+            }
+            for (tile, h) in handles {
+                outs[tile] = Some(h.join().expect("tile worker"));
+            }
+        });
+        // Concatenate tiles in order (rows are contiguous and disjoint).
+        let mut row_ptr = vec![0usize; nrows + 1];
+        let mut col_idx = Vec::new();
+        let mut vals = Vec::new();
+        for out in outs.into_iter().flatten() {
+            for (dr, &cnt) in out.row_counts.iter().enumerate() {
+                row_ptr[out.row_lo + dr + 1] = cnt;
+            }
+            col_idx.extend_from_slice(&out.col_idx);
+            vals.extend_from_slice(&out.vals);
+        }
+        for r in 0..nrows {
+            row_ptr[r + 1] += row_ptr[r];
+        }
+        Csr::from_parts(nrows, self.ncols, row_ptr, col_idx, vals)
+    }
+}
+
+fn assemble_tile(coo: &Coo, idxs: &[usize], row_lo: usize, row_hi: usize) -> TileOut {
+    let mut order: Vec<usize> = idxs.to_vec();
+    order.sort_by_key(|&i| (coo.rows[i], coo.cols[i]));
+    let mut row_counts = vec![0usize; row_hi.saturating_sub(row_lo)];
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    let mut i = 0usize;
+    while i < order.len() {
+        let (r, c) = (coo.rows[order[i]], coo.cols[order[i]]);
+        let mut acc = coo.vals[order[i]];
+        i += 1;
+        while i < order.len() && coo.rows[order[i]] == r && coo.cols[order[i]] == c {
+            acc += coo.vals[order[i]];
+            i += 1;
+        }
+        row_counts[r - row_lo] += 1;
+        col_idx.push(c);
+        vals.push(acc);
+    }
+    TileOut {
+        row_counts,
+        col_idx,
+        vals,
+        row_lo,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_shard_bounds_preserve_empty_rows_and_exact_thresholds() {
+        // Leading, interior, and trailing empty rows surround an exact first
+        // two-way threshold (four of eight stored entries in row 2).
+        let mut coo = Coo::new(10, 8);
+        for col in 0..4 {
+            coo.push(2, col, 1.0);
+        }
+        coo.push(4, 4, 1.0);
+        for col in 0..3 {
+            coo.push(7, col, 1.0);
+        }
+        let compact = CsrCompact::from_csr(&coo.assemble());
+        assert_eq!(compact.nonempty_rows, 3);
+
+        let host_capped = bounded_worker_count(usize::MAX, compact.nonempty_rows);
+        assert_eq!(
+            compact.shard_bounds(usize::MAX),
+            match host_capped {
+                1 => vec![0, 10],
+                2 => vec![0, 3, 10],
+                3 => vec![0, 3, 8, 10],
+                _ => unreachable!("three nonempty rows cap the worker count"),
+            }
+        );
+        if bounded_worker_count(2, compact.nonempty_rows) == 2 {
+            assert_eq!(compact.shard_bounds(2), vec![0, 3, 10]);
+        }
+
+        let localized = compact.numa_localized(1);
+        assert_eq!(localized.nonempty_rows, compact.nonempty_rows);
+        assert_eq!(
+            localized.shard_bounds(usize::MAX),
+            compact.shard_bounds(usize::MAX)
+        );
+    }
+}

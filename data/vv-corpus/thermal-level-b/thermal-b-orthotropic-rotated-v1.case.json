@@ -1,0 +1,21 @@
+{
+  "id": "thermal-b-orthotropic-rotated-v1",
+  "title": "Anisotropic block: declared rotated-frame conductivity tensor with mixed Dirichlet/Robin faces",
+  "notes": "The tensor is a DECLARED symmetric-positive-definite matrix (approximately the 30-degree-about-z rotation of diag(30, 5, 1) W/mK); no trigonometry is evaluated at run time by either code. Unlisted faces are adiabatic (natural).",
+  "mesh": { "counts": [6, 4, 4], "extent": [0.06, 0.04, 0.04] },
+  "material": {
+    "kind": "tensor",
+    "k": [
+      [23.75, 10.825317547305483, 0.0],
+      [10.825317547305483, 11.25, 0.0],
+      [0.0, 0.0, 1.0]
+    ]
+  },
+  "source": { "kind": "none" },
+  "bcs": [
+    { "name": "hot", "face": ["x", 0.0], "kind": "dirichlet", "t_k": 320.0 },
+    { "name": "cold", "face": ["x", "max"], "kind": "dirichlet", "t_k": 300.0 },
+    { "name": "cooled-top", "face": ["y", "max"], "kind": "robin", "h": 15.0, "t_inf_k": 290.0 }
+  ],
+  "probes": [[3, 2, 2], [1, 1, 3], [5, 3, 1], [3, 0, 0], [2, 4, 2]]
+}

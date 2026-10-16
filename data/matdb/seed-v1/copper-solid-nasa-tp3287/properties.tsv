@@ -1,0 +1,12 @@
+frankensim.matdb-source.v1
+observation	nasa-tp3287-cu-crystal	pure cubic crystalline Cu in the thermodynamic standard state at 1 bar; evaluated element, no manufactured specimen or purity assay identified	NASA/TP-3287/REV1 Table III.15 selected thermodynamic functions; Cu attribution is CODATA 1989 in Table I	Engineering piecewise-linear interpolation of the printed crystal rows, not the separate NASA polynomial fit or new measurements. Source molar mass is 63.546 g/mol: cp in J/mol/K divided by 0.063546 kg/mol; assigned h in kJ/mol multiplied by 1000/0.063546. Reference h=0 for crystalline Cu at 298.15 K. Printed source pairs T:cp:h are 200:22.640:-2.322,298.15:24.440:0,300:24.460:0.045,400:25.339:2.538,500:25.966:5.105,600:26.479:7.728,700:26.953:10.399,800:27.448:13.119,900:28.014:15.891,1000:28.700:18.726,1100:29.553:21.637,1200:30.617:24.644,1300:31.940:27.764,1358:32.844:29.649. Source uncertainty/covariance and interpolation error bounds are unstated. Interpolated cp and h are independent approximations, not an exactly thermodynamically consistent constitutive law. The source_phase_liquid flag identifies this table phase (0=crystal,1=liquid); it is not a phase-fraction mixture law. No density, conductivity, strength, creep, wetting or optical input is inferred.
+curve	cp-crystal	nasa-tp3287-cu-crystal	cp	temperature	K	J/kg/K	200:356.27734239763,298.15:384.60327951405,300:384.91801214868,400:398.75051144053,500:408.61737953608,600:416.69027161426,700:424.14943505492,800:431.93906776194,900:440.84600132188,1000:451.64133068958,1100:465.06467755642,1200:481.80845371857,1300:502.62801749913,1358:516.85393258427	linear
+uncertainty	cp-crystal	unstated	-	-	-	-
+validity	cp-crystal	temperature	200	1358	K
+validity	cp-crystal	pressure	100000	100000	Pa
+validity	cp-crystal	source_phase_liquid	0	0	1
+curve	h-crystal	nasa-tp3287-cu-crystal	h	temperature	K	J/kg	200:-36540.45888018129,298.15:0,300:708.14842791049,400:39939.57133415164,500:80335.50498851226,600:121612.69001982815,700:163645.23337424855,800:206448.87168350484,900:250070.81484279103,1000:294684.16580115189,1100:340493.50077109493,1200:387813.55238724698,1300:436911.84338904097,1358:466575.39420262486	linear
+uncertainty	h-crystal	unstated	-	-	-	-
+validity	h-crystal	temperature	200	1358	K
+validity	h-crystal	pressure	100000	100000	Pa
+validity	h-crystal	source_phase_liquid	0	0	1

@@ -1,0 +1,9 @@
+{
+  "bestIteration": 0,
+  "bestMeanReward": 0.3194420140817625,
+  "completedIterations": 1,
+  "iterationsPlanned": 60,
+  "note": "written on every new best-mean iteration; final full receipt lands on normal completion",
+  "samplesConsumed": 218,
+  "stoppedEarly": true
+}

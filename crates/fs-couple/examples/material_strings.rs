@@ -1,0 +1,175 @@
+//! Material packs + physical geometry/loads + canonical gestures -> one coupled
+//! string/body/cavity state and the existing streamed PCM writer. No preset bank.
+#[path = "material_strings/input.rs"]
+mod input;
+#[path = "material_strings/construction.rs"]
+mod construction;
+use std::{collections::BTreeMap, error::Error, fs::{File,OpenOptions}, io::{Read,Seek,Write}, path::Path};
+use fs_couple::bowed_string::runtime::reciprocal::bank::{
+    MaterialStringSource,ReciprocalStringBank,StringBankOptions,StringBowLocation};
+use fs_couple::bowed_string::runtime::reciprocal::bank::plate::{SharedMaterialPlateBody,SharedPlateBridge};
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::MaterialBowContact;
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::{MultiBowPerformance,MultiBowPerformanceConfig};
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::force::{StringForceCoupling,StringForcePort,StringForceProgram};
+use fs_couple::bowed_string::runtime::reciprocal::plate::MaterialBodyCavity;
+use fs_couple::cavity_modal::{HelmholtzModalCavity,CavityNeckLoss};
+use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
+use fs_couple::pcm_wav::observation::PressureRenderer;
+use fs_couple::pcm_wav::stream::{Pcm16WavStream,WavStreamSummary,render_pressure_pcm16,ScheduledWavProgress};
+use fs_couple::render::schedule::force::{ForceInitialization,ForceRenderConfig,ModalForceEvent};
+use fs_couple::render::schedule::force::coupled::ModalCouplingConfig;
+use fs_couple::render::schedule::force::coupled::contact::friction::ModalFrictionConfig;
+use fs_couple::render::schedule::force::coupled::contact::friction::multiple::MultiFrictionConfig;
+use fs_couple::string_specimen::{with_uniform_circular_material_state,
+    with_uniform_circular_material_and_constraints, StringGeometryConstraint, StringPrestress,
+    KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY as ETA};
+use fs_couple::thin_plate::{with_uniform_plate_material_state,PlateMaterialModel,PlateThicknessConstraint};
+use fs_exec::{CancelGate,Cx};
+use fs_matdb::{NormalizedPack,MaterialCard,MaterialStateId,QueryPoint};
+use fs_material::gas::GasState;
+use fs_material::state_point::{ResolvedMaterialStatePoint,ScalarPropertyRequirement as Requirement,
+    ScalarAdmissibility as Admit,MaterialPropertySelection as Pick,resolve_material_state_point};
+use fs_qty::{Density,Pressure,DynViscosity,Dims};
+use fs_scenario::{PrestressedString,ThinPlate,HelmholtzCavity,gesture::{GestureSchedule,GestureTarget,GestureValue}};
+use fs_tribo::FrictionLaw;
+
+type Result<T> = std::result::Result<T,Box<dyn Error>>;
+const SHEAR: &str = "shear_modulus";
+const SHEAR_ETA: &str = "kelvin_voigt_shear_viscosity";
+fn modal_budget() -> ModalAcousticTimeBudget { ModalAcousticTimeBudget::audible_reference() }
+fn poll(gate: &CancelGate) -> Result<()> { if gate.is_requested() { Err("material-string construction cancelled".into()) } else { Ok(()) } }
+fn options(rate:u32,bow:StringBowLocation) -> StringBankOptions {
+    StringBankOptions { sample_rate_hz:rate,bow,string_budget:modal_budget(),
+        network:ModalCouplingConfig { max_modes:input::MAX_MODES,max_connections:64,max_setup_terms:262_144,
+            nyquist_guard_fraction:0.9,maximum_total_energy_j:100.0,maximum_abs_pressure_pa:1e6,
+            maximum_abs_connection_force_n:1000.0,solve_relative_tolerance:1e-10,
+            energy_absolute_tolerance_j:1e-12,energy_relative_tolerance:1e-8 },
+        friction:ModalFrictionConfig { max_iterations:96,maximum_force_n:100.0,maximum_slip_speed_m_s:10.0,
+            force_absolute_tolerance_n:1e-10,force_relative_tolerance:1e-9,sticking_tolerance_m:1e-12 } }
+}
+fn template(w:&input::Wire) -> PrestressedString {
+    // Extension-derived tension is filled by the original material/support owner.
+    let tension = match w.prestress { StringPrestress::FixedTension(t) => t, _ => 0.0 };
+    PrestressedString { length_m:w.length,tension_n:tension,lin_density_kg_m:1.0,axial_stiffness_n:1.0,
+        width_m:1.0,n_modes:w.bending_modes,damping_ratio:0.0,rayleigh:None,bending_stiffness_n_m2:0.0,
+        kelvin_voigt_bending:None,relaxation_bending:None,polarization_detune:0.0,moving_end:false }
+}
+// The retained pack includes normalization/uncertainty/rights metadata. Its ID
+// labels source identity, not a new assertion about chemistry or measured quality.
+struct CatalogEntry { pack: NormalizedPack, card: MaterialCard }
+type Catalog = BTreeMap<String,CatalogEntry>;
+fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<NormalizedPack>,
+    spec:&input::Spec, body:bool, twist:bool) -> Result<ResolvedMaterialStatePoint>
+{
+    if !catalog.contains_key(name) {
+        let pack=loader(name)?;
+        let card=MaterialCard::assemble(MaterialStateId { chemistry:format!("source-pack:{}",pack.pack_id()),
+            phase:"declared solid model".into(),process:"frozen source-pack realization".into(),revision:0 },
+            pack.claims().clone(),vec![])?;
+        catalog.insert(name.into(),CatalogEntry { pack,card });
+    }
+    let mut requirements=vec![Requirement::try_new("density",Density::DIMS,Admit::StrictlyPositive)?,
+        Requirement::try_new("young_modulus",Pressure::DIMS,Admit::StrictlyPositive)?,
+        Requirement::try_new(ETA,DynViscosity::DIMS,Admit::Finite)?];
+    if body { requirements.push(Requirement::try_new("poisson_ratio",Dims::NONE,Admit::Finite)?); }
+    if twist {
+        requirements.push(Requirement::try_new(SHEAR,Pressure::DIMS,Admit::StrictlyPositive)?);
+        requirements.push(Requirement::try_new(SHEAR_ETA,DynViscosity::DIMS,Admit::Finite)?);
+    }
+    // This compact input profile explicitly declares bare SI T and omega axes.
+    // Incompatible typed/context axes refuse in the original resolver; they are
+    // never removed, guessed, coerced or supplied from an unrelated source.
+    let query=QueryPoint::new().with("T",spec.temperature)?.with("omega",spec.omega)?;
+    Ok(resolve_material_state_point(&catalog[name].card,&query,&requirements,Pick::SingleClaimOnly)?)
+}
+struct Ready { spec: input::Spec, catalog: Catalog, performance: MultiBowPerformance }
+impl input::Spec {
+    fn compile(self,cx:&Cx<'_>,gate:&CancelGate,mut loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
+        poll(gate)?;
+        let mut catalog=Catalog::new(); let mut sources=Vec::with_capacity(self.strings.len());
+        for wire in &self.strings {
+            poll(gate)?;
+            sources.push(wire.resolve_source(&mut catalog, &mut loader, &self, gate)?);
+        }
+        let material=resolve(&self.body.pack,&mut catalog,&mut loader,&self,true,false)?;
+        let body=SharedMaterialPlateBody {
+            specimen:with_uniform_plate_material_state(ThinPlate { length_m:self.body.length,width_m:self.body.width,
+                thickness_m:1.0,density_kg_m3:1.0,e1_pa:1.0,e2_pa:1.0,nu12:0.0,g12_pa:1.0,material_angle_rad:0.0,
+                damping_ratio:0.0,thermoelastic:None,kelvin_voigt_bending:None,n_modes:self.body.modes,
+                geometric_nonlinearity:false,pretension_n_m:0.0,clamped:false },&material,PlateMaterialModel::Isotropic,
+                PlateThicknessConstraint::FixedThickness(self.body.thickness))?.with_kelvin_voigt_bending_loss()?,
+            bridges:self.strings.iter().map(|w|w.bridge).collect(),modal_budget:modal_budget(),listener_m:self.body.listener,
+        };
+        let mut contacts=Vec::with_capacity(self.schedule.tracks().len());
+        for track in self.schedule.tracks() {
+            let GestureTarget::BowStroke { string }=track.target else { return Err("non-bow track".into()); };
+            let GestureValue::Bow { station,.. }=track.initial else { return Err("non-bow value".into()); };
+            contacts.push(StringBowLocation { string:usize::from(string),station_fraction:station });
+        }
+        let settings=options(self.rate,contacts[0]);
+        let bank=match self.cavity.clone() {
+            Some(cavity)=>ReciprocalStringBank::from_material_plate_with_cavity(cx,sources,self.gas,body,cavity,
+                self.law.clone(),settings.clone(),gate)?,
+            None=>ReciprocalStringBank::from_material_plate(cx,sources,self.gas,body,self.law.clone(),settings.clone(),gate)?,
+        };
+        let additional=contacts[1..].iter().map(|location|MaterialBowContact { location:*location,
+            law:self.law.clone(),friction:settings.friction }).collect();
+        let bank=bank.with_additional_bows(additional,MultiFrictionConfig { max_ports:16,max_sweeps:128,
+            max_setup_terms:1_048_576 },gate)?;
+        let names=self.schedule.tracks().iter().map(|t|t.id.clone()).collect();
+        let mut performance=bank.into_scheduled(self.schedule.clone(),names,MultiBowPerformanceConfig {
+            samples:self.samples,max_block:self.block,max_work:input::MAX_WORK,max_events:input::MAX_CONTROLS })?;
+        if let Some(forces)=&self.forces { performance=performance.with_string_forces(forces.clone(),gate)?; }
+        performance.validate_sample_rate(self.rate)?;performance.validate_sample_count(self.samples)?;poll(gate)?;
+        Ok(Ready { spec:self,catalog,performance })
+    }
+}
+impl Ready {
+    fn write<W:Write+Seek>(&mut self,output:W,gate:&CancelGate)->Result<(W,WavStreamSummary)> {
+        let mut stream=Pcm16WavStream::new(output,self.spec.rate,self.spec.full_scale,self.spec.block)?;
+        let mut scratch=vec![0.0;self.spec.block];
+        let progress=render_pressure_pcm16(&mut self.performance,&mut stream,gate,&mut scratch,self.spec.samples)?;
+        let result=stream.finish()?;
+        if !matches!(progress,ScheduledWavProgress::Completed { .. }) {
+            return Err(format!("cancelled: only {} samples finalized",result.1.samples).into());
+        }
+        Ok(result)
+    }
+}
+fn read_bounded(path:&Path,cap:usize)->Result<Vec<u8>> {
+    let mut bytes=Vec::new();File::open(path)?.take(cap as u64+1).read_to_end(&mut bytes)?;
+    if bytes.len()>cap {return Err(format!("{} exceeds {cap} bytes",path.display()).into());} Ok(bytes)
+}
+fn main()->Result<()> {
+    let args:Vec<_>=std::env::args_os().collect();
+    if args.len()!=3 {return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav".into());}
+    let path=Path::new(&args[1]);let parent=path.parent().unwrap_or(Path::new("."));
+    let spec=input::Spec::parse(&read_bounded(path,input::MAX_INPUT_BYTES)?)?;
+    let gate=CancelGate::new_clock_free();let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let mut remaining=input::MAX_TOTAL_PACK_BYTES;
+    let mut ready=pool.scope(|arena| {
+        let cx=Cx::new(&gate,arena,fs_exec::StreamKey {seed:0,kernel_id:0,tile:0,iteration:0},
+            fs_exec::Budget::INFINITE,fs_exec::ExecMode::Deterministic);
+        spec.compile(&cx,&gate,|name| {
+            let bytes=read_bounded(&parent.join(name),input::MAX_PACK_BYTES.min(remaining))?;
+            remaining=remaining.checked_sub(bytes.len()).ok_or("material pack byte budget exceeded")?;
+            Ok(NormalizedPack::from_bytes(&bytes)?)
+        })
+    })?;
+    for (path,source) in &ready.catalog {
+        eprintln!("source={path:?}; pack={:?}; hash={}; artifact={}",source.pack.pack_id(),
+            source.pack.content_hash(),source.pack.source_artifact());
+    }
+    eprintln!("input_bytes={}; gas={:?}; preload_J={:?}",ready.spec.bytes.len(),ready.spec.gas,ready.performance.preload_energy_j());
+    // Complete source, geometry, frequency, schedule and preload admission is
+    // finished before creating output. Never overwrite any existing path.
+    let output=OpenOptions::new().write(true).create_new(true).open(&args[2])?;
+    let (_,summary)=ready.write(output,&gate).map_err(|e|format!("WAV not completed; keep/discard its partial prefix explicitly: {e}"))?;
+    eprintln!("samples={}; rate_Hz={}; clips={}; full_scale_Pa={}",summary.samples,summary.sample_rate_hz,
+        summary.clipped_samples,summary.full_scale_pa);
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "material_strings/tests.rs"]
+mod tests;

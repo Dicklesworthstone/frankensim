@@ -1,0 +1,32 @@
+frankensim-bakeoff-receipt-v1
+filling	wind-reed
+fixture	crates/fs-couple/tests/bakeoff_fracdelay.rs feedback string, slide ramp 100->80 samples/0.5s + voice ramp 100->60/0.06s, g=0.999
+shared-cards	9f68f864d77a42a2819736dbf959bc6cecb7c9f8b3f96d987df861c41c2cbf5c
+reference	slide-energy-growth	1.0485133980308732e0
+reference	slide-worst-cents	1.4227765879013128e2
+reference	slide-worst-click	1.53093529208258e0
+reference	voice-energy-growth	9.677753532234352e-1
+reference	voice-worst-cents	5.2657270264478235e0
+reference	voice-worst-click	2.2891780211735626e0
+contender	char-line-linear-frac
+owners	fs-vfit
+measured	slide-energy-growth	1.0485133980308732e0
+measured	slide-worst-cents	1.4227765879013128e2
+measured	slide-worst-click	1.53093529208258e0
+measured	voice-energy-growth	9.677753532234352e-1
+measured	voice-worst-cents	5.2657270264478235e0
+measured	voice-worst-click	2.2891780211735626e0
+budget	states=0	steps=36000	solver-iterations=0
+failure-mode	linear interpolation lowpasses near Nyquist (delay-dependent zero at fs/2); inaudible on these trajectories
+contender	char-line-thiran-1
+owners	fs-vfit
+measured	slide-energy-growth	1.2417984298440918e0
+measured	slide-worst-cents	1.6173213913319663e2
+measured	slide-worst-click	5.97430565102278e0
+measured	voice-energy-growth	5.634262713157669e0
+measured	voice-worst-cents	8.290344368677555e0
+measured	voice-worst-click	7.5298698907491e0
+budget	states=1	steps=36000	solver-iterations=0
+failure-mode	MEASURED energy pumping on the fast ramp (5.6x window growth): the allpass passivity proof is per-fixed-coefficient and does not survive coefficient updates with retained state
+outcome	keep-for-subset	char-line-thiran-1	not admitted: refused on the measured passivity law (energy pumping under fast ramps) and worse click artifacts; nothing deleted (D21)
+rationale	measured verdict: linear-frac slide 142.3 cents/click 1.53, voice 5.3/2.29; thiran slide 161.7/5.97, voice 8.3/7.53; stepped zipper baseline 141.1 cents/click 10.46. Dual-line crossfade is the shipped MM-bank lift for DISCRETE swaps, not a continuous law (recorded, not a pairwise contender). D21: nobody deleted; Thiran simply not admitted on this evidence

@@ -1,0 +1,12 @@
+frankensim.matdb-source.v1
+observation	nasa-tp3287-al-liquid	pure liquid Al in the thermodynamic standard state at 1 bar; evaluated element, no manufactured specimen or purity assay identified	NASA/TP-3287/REV1 Table III.2 selected thermodynamic functions; Al attribution is CODATA 1989 in Table I	Engineering piecewise-linear interpolation of printed liquid rows, not the separate NASA polynomial fit or new measurements. Source molar mass is 26.981539 g/mol: cp in J/mol/K divided by 0.026981539 kg/mol; assigned h in kJ/mol multiplied by 1000/0.026981539. Reference h=0 for crystalline Al at 298.15 K, so liquid h includes fusion energy. Printed source pairs T:cp:h are 933.61:31.750:28.846,1000:31.750:30.954,1100:31.750:34.129,1200:31.750:37.304,1300:31.750:40.479. This tranche stops at 1300 K and does not import the table's high-temperature continuation as stable liquid evidence. Source uncertainty/covariance and interpolation error bounds are unstated. Interpolated cp and h are independent approximations, not an exactly thermodynamically consistent constitutive law. The source_phase_liquid flag identifies this table phase (0=crystal,1=liquid); it is not a phase-fraction mixture law. No density, conductivity, viscosity, surface tension, wetting or optical input is inferred.
+curve	cp-liquid	nasa-tp3287-al-liquid	cp	temperature	K	J/kg/K	933.61:1176.73050451273,1000:1176.73050451273,1100:1176.73050451273,1200:1176.73050451273,1300:1176.73050451273	linear
+uncertainty	cp-liquid	unstated	-	-	-	-
+validity	cp-liquid	temperature	933.61	1300	K
+validity	cp-liquid	pressure	100000	100000	Pa
+validity	cp-liquid	source_phase_liquid	1	1	1
+curve	h-liquid	nasa-tp3287-al-liquid	h	temperature	K	J/kg	933.61:1069101.35852517537,1000:1147228.85154920188,1100:1264901.90200047521,1200:1382574.95245174854,1300:1500248.0029030221	linear
+uncertainty	h-liquid	unstated	-	-	-	-
+validity	h-liquid	temperature	933.61	1300	K
+validity	h-liquid	pressure	100000	100000	Pa
+validity	h-liquid	source_phase_liquid	1	1	1

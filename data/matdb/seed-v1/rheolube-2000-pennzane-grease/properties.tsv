@@ -1,0 +1,11 @@
+frankensim.matdb-source.v1
+observation	table-7-rheolube-2000	Rheolube-2000-Pennzane-SHF-X-2000-sodium-octadecylterephthalamate-bearing-grease	NASA-CP-3350 Bessette Table 7 typical grease properties at the printed conditions	The sodium octadecylterephthalamate thickener is described as approximately 20 percent of the formulation and the dropping point as approximately 260 degC; neither approximate value becomes an exact claim. Table 7 labels results typical and does not report vendor lot, manufacturing or vacuum-hardening state, measurement standards, replicate counts, dispersion, or confidence. Unworked penetration 265 and worked penetration 276 have no printed unit or method and remain observation-only. The 0.38 mm wear scar, 10 kPa oxidation-test pressure drop, and extrapolated vapor pressure are test-system or incompletely extracted results and are not admitted as bulk claims
+scalar	nlgi-grade	table-7-rheolube-2000	nlgi_consistency_grade	2	1	constant
+uncertainty	nlgi-grade	unstated	-	-	-	-
+scalar	density-25degC	table-7-rheolube-2000	density	0.89	g/cm3	constant
+uncertainty	density-25degC	unstated	-	-	-	-
+validity	density-25degC	temperature	25	25	degC
+scalar	oil-separation-24h-100degC	table-7-rheolube-2000	oil_separation_mass_fraction	3.3	%	constant
+uncertainty	oil-separation-24h-100degC	unstated	-	-	-	-
+validity	oil-separation-24h-100degC	temperature	100	100	degC
+validity	oil-separation-24h-100degC	duration	24	24	h

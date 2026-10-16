@@ -1,0 +1,173 @@
+# fs-rep-voxel — CONTRACT
+
+Occupancy/multi-material voxel charts, point clouds with normals, and
+explicit lattice/strut graphs (plan §7.2) — the discrete-representation
+side of MORPH, sharing the sparse VDB substrate with fs-rep-sdf.
+
+Ambition tags: fields/morphology/DT/clouds/lattices [S].
+
+## Purpose and layer
+
+Layer **L2** (MORPH). Runtime deps: `std`, fs-rep-sdf (`VdbGrid`),
+fs-geom (`Chart`), fs-exec (`Cx`), fs-evidence, fs-math, and the
+constellation's fnx-classes/fnx-runtime (FrankenNetworkx). Consumers:
+validity/topology certificates (wqd.23), lattice/infill homogenization
+(7tv.14), SIMP consumers.
+
+## Public types and semantics
+
+- `field`: `OccupancyField` (bool active set + immutable validated voxel
+  size/origin frame) with fallible active-set booleans
+  (union/intersect/subtract) and morphology
+  (dilate/erode/open/close, 6-connected — the manufacturing-constraint
+  primitives); `MaterialField` (u16 ids, 0 reserved for empty, per-id
+  occupancy extraction); `DensityField` (SIMP fractions, out-of-range
+  REFUSED not clamped). `OccupancyField::new` rejects non-finite frame
+  origins; frame metadata is private and exposed read-only. Boolean
+  operations reject frame mismatches before touching the receiver.
+  `voxel_of` is fallible: non-finite or out-of-`i32` world coordinates
+  never alias a boundary cell through float-cast saturation. Manual
+  `Clone` rebuilds through the active set (the substrate carries no
+  derives).
+- `dt`: `euclidean_dt(field, max_voxels)` — fallible EXACT Euclidean
+  distance transform
+  (Felzenszwalb–Huttenlocher separable lower envelopes) over the active
+  bounding box; squared distances are integer-valued in voxel units and
+  conformance checks EQUALITY against the O(n²) reference. Infinite
+  (seedless) lines are handled by envelope construction over finite
+  parabolas only. Coordinate spans are computed in `i64`, dense volume
+  in checked `u128`, and no allocation occurs unless the caller's
+  explicit voxel budget admits it. The maximum squared coordinate
+  diameter is limited to `< 2^52` voxel units so integer costs and
+  envelope decisions remain exact in `f64`. `DistanceField` layout is
+  private and read-only so inconsistent dimensions/storage cannot be
+  forged.
+- `cloud`: `PointCloud` with grid-hash radius/kNN queries (brute-force
+  verified, deterministic tie order), PCA normal estimation (smallest
+  covariance eigenvector via cyclic Jacobi), and orientation propagation
+  that SURVIVES DISCONNECTED k-NN graphs (scan-line clouds): BFS per
+  component with nearest-visited-anchor alignment on restart.
+- `lattice`: `LatticeGraph` (nodes with junction blend radii, struts
+  with cross-section radii). Coincident nodes, zero-length struts,
+  missing indices, and non-positive radii are structured refusals.
+  `to_fnx`/`from_fnx` round-trip through FrankenNetworkx with attributes
+  preserved exactly. `sdf(p)` realizes the solid as a smooth-min of
+  capsule SDFs — a continuous level set, watertight by construction;
+  per-strut realization receipts are JSON log lines.
+- `chart`: `OccupancyChart::try_new(field, max_voxels)` preflights the
+  one-cell complement halo, rejects empty fields and inadmissible dense
+  work, then implements fs-geom `Chart`: inside/outside
+  from occupancy, distance magnitude from the exact DT on both
+  polarities (complement DT inside), an exact active-center scan
+  fallback outside the DT box, and an explicitly piecewise-constant
+  center-metric representative. Cell selection jumps at voxel faces, so
+  the chart advertises no continuity, differentiability, or Lipschitz
+  authority. Finite samples carry an estimate-grade ± full-voxel-diagonal
+  resolution band for the two center substitutions; this is never promoted
+  to an `Enclosure`. A non-finite sample or bound, and any invalid world
+  query, carries explicit `NoClaim` numerical evidence.
+
+## Invariants
+
+1. **Morphology matches brute force**; algebra laws hold on fixtures
+   (opening ⊆ id removes sub-resolution spurs, closing ⊇ id,
+   `(A∪B)\B ⊆ A`, `A∩B ⊆ B`).
+2. **The DT is exact within its admitted numeric domain**, not
+   approximate: equality with the O(n²) reference on scattered+slab
+   fixtures; 1-Lipschitz in the voxel metric. Boxes whose maximum squared
+   coordinate diameter is at least `2^52` are structurally refused.
+3. **Cloud queries match brute force** (radius and kNN); sphere normals
+   are >97% outward-aligned after propagation — including on ring-sampled
+   (kNN-disconnected) clouds.
+4. **Graph round-trip is lossless**: node positions/radii bitwise, strut
+   radii exact, undirected edges deduplicated deterministically.
+5. **Realization behaves like a closed solid**: strut midpoints inside,
+   far field outside, straight probes cross the boundary an even number
+   of times.
+6. **Resolution error is honest**: finite chart samples carry only an
+   estimate-grade ±full-diagonal band. The discontinuous center metric never
+   mints an enclosure, C0, or finite Lipschitz claim.
+7. **Frames cannot be mixed silently**: occupancy booleans require equal
+   voxel size and origin, and any mismatch leaves the receiver unchanged.
+8. **Dense work is admitted before execution**: DT and complement boxes
+   use checked spans/volumes, respect an explicit maximum voxel count,
+   and reject an unrepresentable `i32` halo before iteration or allocation.
+9. **World-to-voxel conversion fails closed**: finite admissible values
+   retain floor-based cell semantics; NaN, infinity, and out-of-range
+   finite values cannot saturate to an apparently valid boundary voxel.
+
+## Error model
+
+`VoxelError`: `Parameters`, `FrameMismatch` (both frames and operation),
+`CoordinateRange` (axis/range/halo), `VoxelBudgetExceeded` (required and
+authorized voxels), `DenseVolumeOverflow` (dimensions), `EmptyOccupancy`,
+`ExactnessRangeExceeded` (squared coordinate diameter),
+`WorldCoordinateOutOfRange` (axis/world/normalized coordinate),
+`Lattice` (offending element named), `Cloud`, `Graph`. Nothing silently
+clamps, wraps, mutates after failed admission, or skips.
+
+## Determinism class
+
+**D0 on-target**: BTreeMap substrate ⇒ sorted iteration everywhere;
+fixed DT pass order; deterministic query tie-breaks (distance, index);
+BFS restarts at the lowest unvisited index.
+
+## Cancellation behavior
+
+Operations are bounded by active-set/box size; the chart polls nothing
+itself (single-voxel lookups) — P7 by boundedness. DT and complement
+construction require an explicit maximum dense voxel count. This is an
+allocation/work admission bound, not an asynchronous cancellation point.
+
+## Unsafe boundary
+
+Zero `unsafe`.
+
+## Feature flags
+
+None.
+
+## Conformance tests
+
+`tests/conformance.rs` (JSON verdicts, suite `fs-rep-voxel/conformance`):
+rv-001 morphology vs brute force + algebra + spur removal; rv-002 DT
+exactness vs O(n²) + 1-Lipschitz; rv-003 radius/kNN vs brute force +
+sphere normals (the ring fixture DELIBERATELY breaks kNN connectivity —
+it caught the propagation gap during development); rv-004 fnx
+round-trip + degenerate refusals + level-set probe parity + realization
+receipts; rv-005 the chart contract (inside/outside, DT-backed center
+distance near analytic, estimate-only resolution band, analytic one-voxel
+face counterexample, no continuity/Lipschitz authority, out-of-box fallback,
+and no-claim samples for invalid world coordinates); rv-006 non-finite-origin
+refusal, frame-mismatch/no-mutation, floor-preserving fallible coordinate
+conversion, and empty-chart refusal; rv-007 full-`i32` span and
+dense-volume budget refusal, complement halo refusal at both coordinate
+extrema, and numeric-exactness refusal; rv-008 exact voxel-cube support
+bounds.
+
+## No-claim boundaries
+
+- **The DT densifies the ACTIVE BOUNDING BOX**: memory is box volume,
+  not active count — far-flung sparse sets are refused unless the caller
+  explicitly authorizes their checked box volume. The voxel budget does
+  not promise that the host allocator can satisfy an imprudently large
+  authorization. Tiled narrow-band DT is follow-up work with
+  fs-rep-sdf's band machinery.
+- **No DT exactness claim exists at or beyond a `2^52` maximum squared
+  coordinate diameter**: those boxes return
+  `ExactnessRangeExceeded` even if their voxel count budget is large
+  enough. The limit protects integer representation and the separation
+  margin of rational lower-envelope breakpoints.
+- **Out-of-box chart queries scan active centers**: exact but O(active);
+  bulk far-field queries should go through the SDF representations.
+- **Morphology is 6-connected**: 26-connected structuring elements and
+  true Euclidean openings (via the DT) are follow-ups.
+- **Normal orientation is heuristic** (BFS + nearest-anchor): globally
+  correct on orientable, reasonably sampled surfaces; adversarial
+  topology can still fool it — fitting beads consume the normals WITH
+  their cloud provenance.
+- **Realization emits an SDF**, not a mesh: meshing goes through the
+  Rep Router to fs-rep-mesh; junction blending is smooth-min (bounded
+  overshoot), not exact fillet geometry.
+- **No FrankenNumpy views yet** (the fnp-* bridge lands with the SoA
+  bead's consumers).

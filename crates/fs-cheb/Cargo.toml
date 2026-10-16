@@ -1,0 +1,27 @@
+[package]
+name = "fs-cheb"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Chebfun-style function objects: adaptive Chebyshev expansions, spectral collocation."
+
+[package.metadata.frankensim]
+layer = "L1"
+
+[dependencies]
+fs-exec = { path = "../fs-exec" }
+fs-fft = { path = "../fs-fft" }
+fs-ivl = { path = "../fs-ivl" }
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+asupersync = { path = "../../../asupersync" }
+fs-alloc = { path = "../fs-alloc" }
+fs-casebook = { path = "../fs-casebook" }
+fsci-integrate = { path = "../../../frankenscipy/crates/fsci-integrate", version = "=0.4.0" }
+
+[lints]
+workspace = true

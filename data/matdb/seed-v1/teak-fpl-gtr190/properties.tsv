@@ -1,0 +1,23 @@
+frankensim.matdb-source.v1
+observation	wh-5-5a-teak	Teak (Tectona grandis) clear straight-grained specimens, sample origin Asia	FPL-GTR-190 Wood Handbook chapter 5 Table 5-5a metric tabulated values at 12 percent moisture content; specific gravity from the green row	Table 5-5a values are taken from world literature, NOT from FPL experiments (table footnote a, verbatim caveat retained); some property values were adjusted to 12 percent moisture content by the source; the 12-percent-row specific-gravity cell is BLANK, so only the green-row specific gravity is carried and NO density is derived (deriving one would need a moisture/volume basis the table does not print for this row — named absence); bending MOE includes span-depth-14 shear deflection per the chapter (may be increased 10 percent to remove it); Table 5-5a has NO impact-bending, compression-perpendicular, or tension-perpendicular columns (structural difference from the domestic Table 5-3a — named absence); kPa converted to MPa at 1/1000; axis convention matches instrument-axis-convention.tsv; uncertainty Unstated
+scalar	specific-gravity-green-basis	wh-5-5a-teak	specific_gravity_green_basis	0.55	1	constant
+uncertainty	specific-gravity-green-basis	unstated	-	-	-	-
+validity	specific-gravity-green-basis	moisture_content	0	200	%
+scalar	mor	wh-5-5a-teak	modulus_of_rupture	100.7	MPa	constant
+uncertainty	mor	unstated	-	-	-	-
+validity	mor	moisture_content	12	12	%
+scalar	moe-bending	wh-5-5a-teak	bending_modulus_of_elasticity	10.7	GPa	constant
+uncertainty	moe-bending	unstated	-	-	-	-
+validity	moe-bending	moisture_content	12	12	%
+scalar	work-to-max-load	wh-5-5a-teak	work_to_maximum_load	83	kJ/m3	constant
+uncertainty	work-to-max-load	unstated	-	-	-	-
+validity	work-to-max-load	moisture_content	12	12	%
+scalar	compression-parallel	wh-5-5a-teak	compression_parallel_max	58.0	MPa	constant
+uncertainty	compression-parallel	unstated	-	-	-	-
+validity	compression-parallel	moisture_content	12	12	%
+scalar	shear-parallel	wh-5-5a-teak	shear_parallel_max	13.0	MPa	constant
+uncertainty	shear-parallel	unstated	-	-	-	-
+validity	shear-parallel	moisture_content	12	12	%
+scalar	side-hardness	wh-5-5a-teak	side_hardness	4400	N	constant
+uncertainty	side-hardness	unstated	-	-	-	-
+validity	side-hardness	moisture_content	12	12	%

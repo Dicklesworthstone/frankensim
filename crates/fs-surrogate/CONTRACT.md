@@ -1,0 +1,359 @@
+# CONTRACT: fs-surrogate
+
+Learned accelerators with guarantees: surrogates permitted only inside certified
+validity bands — ML proposes, certified numerics disposes.
+
+## Purpose and layer
+
+Layer L4 (surrogate / ROM). The default core is dependency-free and pure Rust
+(an in-house symmetric eigensolver for the method of snapshots); the optional
+ladder feature depends downward on `fs-evidence`, `fs-blake3`, `fs-exec`,
+`fs-alloc`, and asupersync for evidence, content identity, bounded tile
+execution, memory admission, and live task cancellation. The independent
+`graph-escalation` feature depends downward on `fs-evidence`, `fs-ladder`, and
+`fs-blake3`; it emits ledger-ready records but never depends upward on HELM.
+
+## Public types and semantics
+
+- `pod(&[Vec<f64>], energy_threshold) -> Result<Pod, SurrogateError>` — a POD
+  reduced-order model via the method of snapshots (correlation matrix `SᵀS`,
+  symmetric eigendecomposition, modes `φₖ = Svₖ/σₖ`), retaining the fewest modes
+  capturing `energy_threshold` of the mean-centered energy.
+- `Pod` — `rank`, `energy_captured`, `project`, `reconstruct`,
+  `reconstruction_error` (the reduced-vs-full error).
+- `conformal_band(residuals, alpha) -> ConformalBand` — the distribution-free
+  split-conformal band (the `⌈(1−α)(n+1)⌉`-th smallest residual); `covers`,
+  `half_width`. `empirical_coverage(&ConformalBand, &[(pred, truth)])`.
+- `certify_or_escalate(&ConformalBand, in_validity_domain, decision_tolerance)
+  -> Decision` — revalidates the public band fields and decision tolerance at
+  evaluation time. `UseSurrogate` iff `alpha ∈ (0, 1)`, the width and tolerance
+  are finite and non-negative, the query is inside the domain, AND the band is
+  at least as tight as the tolerance; every unbounded or malformed policy state
+  returns `Escalate`.
+- Root `SurrogateError` — `NoSnapshots` / `DimMismatch` / `BadThreshold`.
+- `koopman` module (plan §9.7): `dmd(snapshots, dt, DmdRank) -> Dmd` — exact
+  DMD (`Ã = UᵀYVΣ⁻¹` on the rank-`r` POD subspace of `X`), with `step`,
+  `eigenvalues` (complex, Hessenberg + Francis double-shift QR),
+  `continuous_spectrum` (`(ln|λ|, arg λ)/dt`), `spectral_radius`,
+  `fit_residual`; `edmd(pairs, degree, ridge, dt) -> Edmd` — extended DMD over
+  all monomials of total degree `≤ degree` (ridge-regularized Gram solve),
+  state read back from the linear monomials, re-lifted every step;
+  `Forecaster` (implemented by both); `forecast_bands(model, calibration,
+  horizon, alpha, simultaneous) -> ForecastBands` — per-horizon split-conformal
+  bands on `‖x̂_h − x_h‖₂` over independent calibration trajectories,
+  Bonferroni-simultaneous on request (infinite when the calibration set is too
+  small for the level, so certify-or-escalate escalates).
+- `deim` module (plan §9.7): `deim(nonlinear_snapshots, energy, max_rank) ->
+  Deim` — uncentred POD basis + Chaturantabut–Sorensen greedy rows (no repeats;
+  the basis is truncated where a mode's residual vanishes), `reconstruct`,
+  `interpolation_error`, `error_constant = ‖(PᵀU)⁻¹‖₂`, and the a-priori
+  `error_bound(g) = ‖(PᵀU)⁻¹‖₂‖(I − UUᵀ)g‖₂`; `GalerkinDeimRom::new(snapshots,
+  …, l_apply, b, phi)` — affine POD-Galerkin ROM of `ẋ = Lx + b + φ(x)` with
+  pointwise `φ`, reduced operators precomputed once, online RHS costing
+  `O(r² + rm)` plus `m` evaluations of `φ`, RK4 `integrate`, `project`/`lift`.
+- `escalation` module (bead `frankensim-extreal-program-f85xj.10.3`; [F],
+  behind `graph-escalation`) — compatibility-preserving graph routing for the
+  `Escalate` branch. `plan_graph_escalation` accepts the current model, exact
+  `QueryContext`, exact eight-term `EngineeringUncertaintyBudget`,
+  `EscalationAdvice`, and a positive QoI reference magnitude. It requires
+  model-form dominance and delegates scientific selection to
+  `FidelityGraph::cheapest_adequate`. `EscalationPlan` retains the graph-owned
+  explanation, ordered edge walk, costs, discrepancy receipts, budget
+  identity, and an explicitly estimated post-route uncertainty.
+  `certify_or_escalate_with_graph` converts the legacy absolute band/tolerance
+  into graph-relative values through the reference magnitude and returns
+  `GraphDecision::{UseSurrogate, Escalate, Gap}` without changing the existing
+  `Decision` API. `EscalationSession` enforces strict hysteresis, a run-local
+  edge cap, and repeated-edge refusal. `EscalationCalibrationRecord` binds the
+  prediction to the actual post-run budget, cost, and run-evidence identity.
+
+- `ladder` module (addendum Proposal A, bead knh1.4; [F], behind
+  `abstraction-ladder`): a bounded abstraction ladder whose present
+  authority is ESTIMATED, not certified. `TruthModel` defines the P1
+  full-order elliptic family's DECLARED level-0 semantics; its f64 solve
+  is not an enclosure. `RbLevel` uses offline snapshots, an
+  energy-orthonormal basis, and online Galerkin evaluation of the
+  textbook residual/coercivity a-posteriori estimator. `ConceptLevel`
+  uses interpolation with total dispersion calibrated at finite probes
+  as `|concept − lower RB| + lower RB QoI estimator`; admission also
+  evaluates that quantity at the actual query and takes the larger value.
+  `Ladder::at_level(k)?.query(μ, tol)` performs AUTOMATIC BOUNDED
+  DESCENT: an RB/concept rung answers only when its estimator is within
+  tolerance; otherwise the leak is recorded and the query descends.
+  `ladder::SurrogateError` names all ladder refusals. `RbCoveragePlan`
+  retains the exact ordered battery, schema/algorithm version, and a
+  domain-separated content fingerprint of the truth family and every RB basis
+  value. `rb_coverage_scoped`
+  executes one logical parameter tile per μ and returns a complete Estimated
+  fraction or an incomplete no-claim plus deterministic prefix/progress
+  receipt. `rb_coverage` remains the smaller synchronous compatibility oracle.
+
+## Invariants
+
+- POD reproduces an exactly-representable (low-rank) snapshot set to roundoff;
+  its modes are orthonormal; the retained rank captures `>= energy_threshold`.
+- The conformal band achieves at least its nominal `(1−α)` empirical coverage on
+  exchangeable held-out data.
+- `certify_or_escalate` uses the surrogate ONLY when trustworthy (finite valid
+  policy + in-domain + band tight enough). In particular, the intentionally
+  unbounded `+∞` band and every non-finite or negative decision tolerance fail
+  closed even when an IEEE-754 comparison such as `+∞ <= +∞` would be true. A
+  fleet of queries costs strictly less than all-high-fidelity whenever any query
+  is served by the surrogate.
+- Graph escalation is authorized only when both the directional advice and the
+  exact eight-term budget identify model fidelity as the work to buy. QoI
+  mismatch, non-positive/non-finite reference magnitude, absolute/relative
+  tolerance mismatch, absent current model, absent evidence, no adequate
+  route, and cost-budget exhaustion all return a content-addressed gap with
+  deterministic probe suggestions. A graph query that selects the current
+  model produces a no-op gap rather than an "escalation."
+- `EscalationPlan` is sealed and nonempty. Its ordered steps are the exact path
+  in the graph recommendation, and its identity binds the complete graph
+  explanation: graph/budget/QoI/regime, costs, assessed discrepancies, evidence
+  receipts, unresolved edges, and operational tie-breaks. Cost never creates
+  epistemic authority.
+- `EscalationGap` binds the exact advice, attempted reference magnitude, graph,
+  budget, QoI/context, candidate edges, and suggestions. A tolerance,
+  hysteresis, cap, or repeated-edge refusal after route computation also binds
+  the candidate plan identity, so distinct failed requests cannot collapse to
+  one ledger key.
+- Post-route uncertainty is an ESTIMATE. It replaces only an independent
+  model-form term with the selected model's maximum adequate pairwise
+  discrepancy. Unknown/unbounded totals, covariance-coupled model form,
+  missing discrepancy prediction, and finite-arithmetic overflow remain typed
+  `Indeterminate`; none are laundered into a finite prediction.
+- A run can issue a graph edge at most once. After a plan, the hysteresis latch
+  stays closed until the accepted surrogate width falls below the strict rearm
+  boundary. A route exceeding the configured edge cap is refused atomically:
+  no edge is recorded as consumed.
+- Every ladder-emitted color is `Estimated` and passes the shared
+  `fs-evidence` payload validator. RB answers carry the f64-evaluated
+  QoI estimator as dispersion; concept answers carry the larger of the probe
+  maximum and query-local cross-rung discrepancy PLUS lower-rung QoI
+  dispersion, so agreement with an inaccurate RB cannot erase its
+  uncertainty. Level 0 carries
+  infinite dispersion because an unproved floating-point solve makes no
+  spread claim.
+- Ladder state is sealed. Truth dimension, training range, basis,
+  calibrated dispersion, rung collection, family identity, and answer
+  evidence cannot be mutated or forged through public fields. Every rung
+  is bound to one identity containing the truth dimension and exact
+  floating-point range endpoints.
+- Public ladder arithmetic and lookup operations are fallible. Queries
+  reject non-finite/non-coercive/out-of-range inputs before lookup, and
+  generated training/probe grids must be strictly increasing in f64.
+- Ladder construction preflights nonempty, capped, strictly decreasing
+  requested RB dimensions plus checked aggregate memory/work budgets
+  before the first snapshot. After orthogonalization, actual retained
+  dimensions must also strictly decrease before a rung is stored.
+  Coverage batteries are nonempty and capped on both axes, their Cartesian
+  product, and conservative aggregate work. Each parameter performs at most
+  one descent (including at most one truth fallback), and the resulting RB
+  estimators classify every requested tolerance without repeating solves.
+- Production coverage validates and retains exact IEEE-754 input bits, rung
+  dimensions, family, numerical-ladder fingerprint, Cartesian count, and a
+  conservative work envelope that dominates the same logical units recorded by
+  the kernel meter before execution.
+  The caller supplies a coverage-scoped or cap-compatible bounded
+  `OperationMemoryLease` whose hard limit is at most 512 MiB. A worst-case
+  coverage-owned scratch charge is reserved before slots or workers are
+  created; TilePool root metadata and arena chunks charge the same lease, so
+  their combined tracked live set cannot exceed that limit. Results commit to
+  unique parameter slots only after their final checkpoint; final aggregation
+  is ascending by parameter index and ignores out-of-order completions beyond
+  the first gap. Kernel and slot storage are destroyed before the matching
+  scratch charge is released. Exact battery axes are immutable shared slices
+  allocated when the caller constructs the plan; the receipt shares those
+  slices instead of copying their payload into run-local scratch.
+- Incomplete coverage cannot expose a fraction through its type. Its receipt
+  contains only the longest fully committed parameter prefix and the first
+  unfinished parameter's operational progress, together with an absorbing
+  `NumericalCertificate::no_claim()`. Coverage outcomes are opaque: callers
+  have read-only complete/incomplete accessors and cannot construct arbitrary
+  coverage, authority, no-claim, or finalization evidence. Worker-dependent
+  coverage-owned scratch declarations remain run diagnostics and never enter
+  the semantic receipt. They exclude separately charged TilePool metadata and
+  arena chunks; the returned cumulative lease snapshot records the shared
+  accounting state and can include other users of a cloned lease.
+
+## Error model
+
+Structured `SurrogateError`. Ladder construction, energy, compliance,
+training, lookup, level selection, querying, and coverage return named
+errors for invalid shapes/values/ranges/grids, singular or non-finite
+derived arithmetic, resource excess, exact lease refusal, and structured
+allocator/executor failure. Cooperative cancellation returns the drained partial
+run/receipt; numerical and executor errors return their typed error after
+drain but do not currently claim a replay receipt. The non-ladder conformal
+helper still panics on nonsensical inputs (empty residuals, `α ∉ (0,1)`).
+Graph routing expresses policy refusal as `EscalationGap`, not a panic.
+`EscalationPolicy::try_new` refuses non-finite/inverted hysteresis and zero
+edge caps. Calibration admission refuses QoI/unit mismatch and invalid actual
+cost.
+
+## Determinism class
+
+Fully deterministic for synchronous work. A completed scoped coverage outcome,
+including its finalized semantic receipt, is bit-identical across worker counts
+and steal schedules because each parameter has a unique slot and final integer
+aggregation is in parameter order. The semantic receipt excludes timing, steal,
+and worker-dependent scratch data. With one worker, an explicitly
+injected cancellation at the same logical checkpoint replays the same retained
+prefix. Shared task-budget consumption and wall-time cancellation under
+multiple workers are schedule-dependent; any resulting prefix remains
+operational no-claim evidence rather than a deterministic scientific result.
+Graph planning, gap construction, anti-thrash transitions, canonical bytes,
+and calibration identities are deterministic for the same graph, resolver
+answers, budgets, and call sequence. Resolver acquisition and persistence are
+outside this pure module.
+
+## Cancellation behavior
+
+The POD/conformal API and `rb_coverage` compatibility wrapper remain
+synchronous; `rb_coverage` has the explicit smaller
+`MAX_SYNCHRONOUS_COVERAGE_WORK_UNITS` cap and no interruption claim.
+Graph planning and calibration are bounded synchronous metadata operations;
+they launch no solver work. The consuming HELM scope owns cancellation and
+drain for each planned edge.
+
+`rb_coverage_scoped` requires a live asupersync `Cx`, `TilePool`, external
+`CancelGate`, declared `RunId`/per-tile `Budget`, and a bounded operation memory
+lease whose hard limit does not exceed 512 MiB. It polls both the tile gate and
+ambient task at every parameter/rung
+phase boundary and after at most 256 logical scalar updates inside allocation
+initialization, validation, assembly, Thomas solves, dense elimination,
+reconstruction, residual/Riesz work, and tolerance classification. A request
+raises the shared gate, all workers drain and join, scratch is released, and
+only then is an incomplete no-claim returned. A final ambient checkpoint occurs
+after drain, followed by an external gate read before a coverage fraction can
+be published. Because both request sources are monotone, a successful call can
+linearize at the earlier final ambient checkpoint; either observation can still
+force an incomplete outcome.
+
+## Unsafe boundary
+
+None. `#![deny(unsafe_code)]` via the workspace lint.
+
+## Feature flags
+
+- `abstraction-ladder` [F] (default OFF) — the estimated, leak-alarmed
+  abstraction ladder (knh1.4/y6yv, Proposal A; `dep:fs-evidence`,
+  `dep:fs-blake3`,
+  `dep:fs-exec`, `dep:fs-alloc`, `dep:asupersync`); gates the `ladder`
+  integration target.
+- `graph-escalation` [F] (default OFF) — graph-aware routing, gap reports,
+  anti-thrash state, and planner-calibration records
+  (`dep:fs-evidence`, `dep:fs-ladder`, `dep:fs-blake3`).
+
+## Conformance tests
+
+`tests/surrogate.rs` (10 cases): POD reproduces a low-rank set exactly;
+orthonormal modes; energy-based rank + reduced error; bad-input rejection; the
+conformal band achieves nominal coverage; certify-or-escalate uses the surrogate
+only when trustworthy; malformed/unbounded policy inputs fail closed while the
+finite inclusive tolerance boundary remains admissible; the policy reduces cost
+vs all-high-fidelity; determinism.
+
+`tests/rom.rs` (5 cases): exact DMD recovers an embedded linear spectrum
+(damped rotation 0.95e^{±0.3i}, 0.8, 0.6 in ℝ⁴⁰) to 1e-9 with its continuous
+growth/frequency; degree-2 EDMD is EXACT on the Koopman-invariant system
+`x⁺ = λx, y⁺ = μy + cx²` and its spectrum contains `λ, μ, λ²`; on the nonlinear
+stall-softening pitch model, cubic EDMD halves the linear model's forecast
+error and simultaneous 90% conformal bands cover ≥ 0.85 of 200 fresh
+trajectories, wired to certify-or-escalate; a POD-Galerkin+DEIM Allen–Cahn ROM
+(n = 200, ≤ 16 modes, ≤ 16 sample rows) tracks the full model on an UNSEEN
+initial condition within 1% relative error over 500 RK4 steps, and the DEIM
+a-priori bound holds on every training snapshot; DEIM replay is bit-identical.
+
+`tests/ladder.rs` (feature-gated): f64 RB estimator containment on the
+elliptic fixture, bounded descent, Estimated-only payload authority,
+deterministic replay, structured hostile-input refusals, representable
+grid and family binding, requested/retained fidelity descent,
+lower-rung uncertainty inheritance, pre-training memory/work limits,
+bounded coverage batteries, complete scoped replay across worker counts,
+content-bound plans, work-envelope/meter agreement, pre-cancel and
+external-gate cancellation, deterministic logical-work storms across worker
+counts, nonzero single-worker retained-prefix replay, final-publication refusal,
+bounded observation latency, unbounded/over-cap/undersized lease refusal,
+memory/arena quiescence, and successful pool reuse.
+
+`tests/escalation.rs` (feature-gated): cheapest adequate routing for the
+recirculation QoI fixture; absolute-to-relative tolerance conversion;
+compatibility use-surrogate path; no-edge, unknown-model, wrong-advice,
+wrong-dominance, invalid-reference, and budget-blocked gaps; strict hysteresis,
+repeated-edge refusal, multi-step edge cap; deterministic plan/gap identity;
+and prediction-versus-actual calibration identity.
+
+## No-claim boundaries
+
+- The classical ROM core is POD, exact DMD, polynomial EDMD, and
+  POD-Galerkin+DEIM with the conformal / certify-or-escalate guardrail. NEURAL
+  OPERATORS (Fourier neural operators, DeepONets via FrankenTorch) are staged;
+  BALANCED TRUNCATION for LTI subsystems lives in fs-wing's ROM scheduler, not
+  here.
+- DMD/EDMD spectra describe the FITTED operator. Monomial dictionaries are not
+  Koopman-invariant in general, so EDMD spectra can carry spurious
+  (polluted) eigenvalues; no spectral claim is made for nonlinear systems —
+  only forecasts and their conformal bands are claims. DEIM's a-priori bound
+  needs the projection error of the true nonlinear term, so online ROM error is
+  a measured/conformally banded quantity, not a guarantee; only pointwise
+  nonlinearities are hyper-reduced (stencil maps staged).
+- The eigensolvers are small dense Jacobi / Francis QR; POD picks the smaller of
+  the snapshot and spatial Gram matrices. The production path for large
+  snapshot matrices is fs-la randomized/TSQR SVD.
+- The conformal band is SPLIT-conformal (exchangeable data); the anytime-valid
+  e-value formulation with online recalibration under drift is the
+  conformal-hardening follow-on.
+- Continuous training from the ledger, versioned/model-carded surrogate
+  artifacts, and design-family-respecting splits are downstream integrations.
+- Graph escalation does not execute a model, mutate graph evidence, or persist
+  a ledger row. It returns content-addressed reasoning for HELM to execute and
+  persist. Its predicted uncertainty and cost are calibration targets, not
+  certificates; only the actual post-run budget carries new evidence.
+
+## No-claim boundaries (ladder)
+
+- The beachhead covers the AFFINE-PARAMETRIC ELLIPTIC regime (1-D
+  fixture family here); nonlinear/transient coarse levels are the
+  research frontier and enter only as estimated-color concept rungs.
+- Level 0 is the declared FE semantics, but neither floating-point solve
+  error nor FE discretization error is enclosed here. Its Estimated
+  color therefore has infinite dispersion; there is no zero-error claim.
+- The RB residual/Riesz/solve path is evaluated in round-to-nearest f64
+  without outward rounding or independent linear-solve certificates.
+  Its textbook estimator is useful and tested for containment on this
+  fixture, but it does not authorize `Color::Verified` and descent is not
+  called certified.
+- Compliance dispersion includes both the squared energy estimator and the
+  floating reduced solve's computable Galerkin defect
+  `|f(u_rb) - a(u_rb,u_rb)|`; exact orthogonality is never assumed.
+- The concept rung's dispersion is a finite-probe MAXIMUM of
+  `|concept − lower RB| + lower RB QoI estimator`, augmented by the same
+  query-local quantity. Neither is an enclosure over the continuous range.
+  The Estimated color is load-bearing.
+- The synchronous `rb_coverage` helper is only a small compatibility oracle and
+  makes no interruption claim. Production-scale authority requires
+  `rb_coverage_scoped` and its explicit execution/memory inputs.
+- Scoped coverage's static declaration covers its bounded coverage-owned
+  vector, matrix, and progress-slot scratch. Executor root metadata and arena
+  chunks are separately charged to the same at-most-512-MiB lease, so the hard
+  limit bounds their combined tracked execution-phase live set. The returned
+  lease receipt is cumulative when the caller shares or clones that lease; it
+  is not an isolatable per-run heap census. Retained output payloads, thread
+  stacks, allocator bookkeeping, the immutable pre-existing ladder, and OS
+  scheduling latency remain outside the numerical claim. A callback or
+  dependency that ignores its supplied cancellation protocol would likewise be
+  outside claim; the current sealed arithmetic path does not do so.
+- The task-scoped executor contains per-tile kernel panics, but an OS refusal
+  while asupersync creates a scoped worker or a worker failure outside tile
+  containment follows the executor's documented panic boundary. No structured
+  coverage artifact is claimed for that executor-invariant failure.
+- A completed coverage fraction still classifies round-to-nearest f64 RB
+  estimators. It is `Estimated` with infinite dispersion, never a certificate
+  that the continuous model error lies below the requested tolerances.
+- The eventual certificate destination is an outward-rounded residual,
+  Riesz solve, reduced solve, coercivity floor, and QoI enclosure whose
+  complete arithmetic path is independently checkable. Only that path,
+  once admitted by the Gauntlet, may upgrade a rung to `Verified`.
+- Per-REGION (spatial) RB decomposition and the fs-ir at_level query
+  integration are the named growth seams.

@@ -1,0 +1,457 @@
+//! Exact block elimination for a bordered Jacobian plus one rank-one update.
+//!
+//! Gonzalez's energy correction stays in an extra scalar border. Factor each
+//! independent or block-triangular scalar/pair and the equilibrated border once,
+//! then reuse those factors for bounded refinement against the ORIGINAL equation.
+//! Neither physical coordinates nor Newton/energy tolerances are rescaled.
+use super::{PreparedStepError, dimensions, norm, zeroed};
+use crate::PhsError;
+use fs_la::LuWorkspace;
+
+const MAX_REFINEMENTS: usize = 2;
+
+#[derive(Debug, Clone, Copy)]
+struct Leaf {
+    indices: [usize; 2], // Unknown columns.
+    rows: [usize; 2], // Equation rows; need not coincide with the columns.
+    width: usize,
+    // First response row. Scalar leaves do not reserve a fictitious second state.
+    start: usize,
+}
+impl Leaf {
+    fn coordinates(&self) -> &[usize] { &self.indices[..self.width] }
+    fn equations(&self) -> &[usize] { &self.rows[..self.width] }
+}
+
+#[derive(Debug)]
+pub(super) struct Condensation {
+    n: usize,
+    leaves: Vec<Leaf>,
+    retained: Vec<usize>,
+    retained_rows: Vec<usize>,
+    triangular: bool,
+    owner: Vec<usize>,
+    pub(super) left: Vec<f64>,
+    pub(super) right: Vec<f64>,
+    pub(super) flow: Vec<f64>,
+    scaled_left: Vec<f64>,
+    scaled_right: Vec<f64>,
+    matrix: Vec<f64>,
+    rhs: Vec<f64>,
+    solution: Vec<f64>,
+    responses: Vec<f64>,
+    predecessors: Vec<(usize, usize, f64)>,
+    candidate: Vec<f64>,
+    correction: Vec<f64>,
+    error: Vec<f64>,
+    row_scale: Vec<f64>,
+    col_scale: Vec<f64>,
+    leaf_lu: Vec<LuWorkspace>,
+    border_lu: LuWorkspace,
+    refinements: usize,
+}
+
+// Exact binary scaling, including values whose exponent is subnormal. The
+// reciprocal scaling changes only the auxiliary unknown; it never rescales
+// physical state, storage, force, or the caller's original rank-one factors.
+fn exponent(x: f64) -> i32 {
+    let bits=x.abs().to_bits(); let field=(bits>>52) as i32;
+    if field==0 { -1074+63-bits.leading_zeros() as i32 } else { field-1023 }
+}
+fn scale_binary(mut x: f64, mut shift: i32) -> f64 {
+    // At most two factors are needed: finite f64 exponents span 2098 values,
+    // and the chosen shift is half the difference of two such exponents.
+    while shift>1023 { x*=f64::from_bits(2046_u64<<52); shift-=1023; }
+    while shift< -1022 { x*=f64::MIN_POSITIVE; shift+=1022; }
+    x*f64::from_bits(((shift+1023) as u64)<<52)
+}
+
+impl Condensation {
+    pub(super) fn new(n: usize, pairs: &[[usize; 2]]) -> Result<Self, PhsError> {
+        Self::with_singletons(n, pairs, &[])
+    }
+
+    fn with_singletons(n: usize, pairs: &[[usize; 2]], singletons: &[usize]) -> Result<Self, PhsError> {
+        Self::with_layout(n, pairs, singletons, &[])
+    }
+
+    fn with_pivots(n: usize, pivots: &[[usize; 2]], pairs: &[[usize; 2]]) -> Result<Self, PhsError> {
+        Self::with_layout(n, pairs, &[], pivots)
+    }
+
+    fn with_layout(n: usize, pairs: &[[usize; 2]], singletons: &[usize], pivots: &[[usize; 2]]) -> Result<Self, PhsError> {
+        let removed=pairs.len().checked_mul(2).and_then(|v|v.checked_add(singletons.len()))
+            .and_then(|v|v.checked_add(pivots.len()))
+            .filter(|&size|size>0 && size<=n)
+            .ok_or_else(||dimensions("condensed Newton leaf count"))?;
+        let mut owner = Vec::new();
+        owner.try_reserve_exact(n).map_err(|_| dimensions("condensed Newton index capacity"))?;
+        owner.resize(n, usize::MAX);
+        let mut row_owner = Vec::new();
+        row_owner.try_reserve_exact(n).map_err(|_| dimensions("condensed equation capacity"))?;
+        row_owner.resize(n, usize::MAX);
+        let mut leaves = Vec::new();
+        let mut leaf_lu = Vec::new();
+        let count=pairs.len()+singletons.len()+pivots.len(); // bounded by removed above
+        leaves.try_reserve_exact(count).map_err(|_| dimensions("condensed leaf capacity"))?;
+        leaf_lu.try_reserve_exact(count).map_err(|_| dimensions("condensed leaf capacity"))?;
+        let mut start=0;
+        // Explicit row/column pivots precede the pair blocks. The admitted
+        // eliminated block is lower triangular in this order, never assumed
+        // independent merely because each diagonal block is cheap to solve.
+        for (rows,indices,width) in pivots.iter().map(|&[row,col]|([row,0],[col,0],1))
+            .chain(pairs.iter().copied().map(|p|(p,p,2)))
+            .chain(singletons.iter().map(|&i|([i,0],[i,0],1))) {
+            for &index in &indices[..width] {
+                if index >= n || owner[index] != usize::MAX {
+                    return Err(dimensions("condensed Newton needs disjoint in-range leaves"));
+                }
+                owner[index] = leaves.len();
+            }
+            for &row in &rows[..width] {
+                if row >= n || row_owner[row] != usize::MAX {
+                    return Err(dimensions("condensed Newton needs disjoint in-range equations"));
+                }
+                row_owner[row] = leaves.len();
+            }
+            leaves.push(Leaf {indices,rows,width,start});
+            start+=width;
+            leaf_lu.push(LuWorkspace::new(width).map_err(|_| dimensions("condensed leaf LU capacity"))?);
+        }
+        let mut retained=Vec::new();
+        retained.try_reserve_exact(n-removed).map_err(|_|dimensions("condensed retained capacity"))?;
+        retained.extend((0..n).filter(|&i|owner[i]==usize::MAX));
+        let mut retained_rows=Vec::new();
+        retained_rows.try_reserve_exact(n-removed).map_err(|_|dimensions("condensed retained equation capacity"))?;
+        retained_rows.extend((0..n).filter(|&i|row_owner[i]==usize::MAX));
+        let k = retained.len().checked_add(1).ok_or_else(|| dimensions("condensed border extent"))?;
+        let entries = k.checked_mul(k).ok_or_else(|| dimensions("condensed matrix extent"))?;
+        let response_size = k.checked_add(1).and_then(|v| v.checked_mul(removed))
+            .ok_or_else(|| dimensions("condensed responses extent"))?;
+        let mut predecessors=Vec::new();
+        if !pivots.is_empty() {
+            let capacity=removed.checked_mul(2).ok_or_else(||dimensions("condensed predecessor extent"))?;
+            predecessors.try_reserve_exact(capacity).map_err(|_|dimensions("condensed predecessor capacity"))?;
+        }
+        Ok(Self {
+            n, leaves, retained, retained_rows, owner, triangular: !pivots.is_empty(), predecessors,
+            left: zeroed(n)?, right: zeroed(n)?, flow: zeroed(n)?, scaled_left: zeroed(n)?, scaled_right: zeroed(n)?,
+            matrix: zeroed(entries)?,
+            rhs: zeroed(k)?, solution: zeroed(k)?, responses: zeroed(response_size)?,
+            candidate: zeroed(n)?, correction: zeroed(n)?, error: zeroed(n)?,
+            row_scale: zeroed(k)?, col_scale: zeroed(k)?, leaf_lu,
+            border_lu: LuWorkspace::new(k).map_err(|_| dimensions("condensed border LU capacity"))?,
+            refinements: 0,
+        })
+    }
+    pub(super) fn dimension(&self) -> usize { self.retained.len()+1 }
+
+    fn balance(&mut self) {
+        let left=self.left.iter().fold(0.0_f64,|s,x|s.max(x.abs()));
+        let right=self.right.iter().fold(0.0_f64,|s,x|s.max(x.abs()));
+        if left==0.0 || right==0.0 {
+            // The original outer product is exactly zero. A dummy y=0 avoids
+            // imposing an arbitrarily scaled, irrelevant auxiliary equation.
+            self.scaled_left.fill(0.0); self.scaled_right.fill(0.0); return;
+        }
+        let shift=(exponent(right)-exponent(left))/2;
+        let mut reversible=true;
+        for i in 0..self.n {
+            self.scaled_left[i]=scale_binary(self.left[i],shift);
+            self.scaled_right[i]=scale_binary(self.right[i],-shift);
+            reversible &= self.scaled_left[i].is_finite() && self.scaled_right[i].is_finite()
+                && scale_binary(self.scaled_left[i],-shift).to_bits()==self.left[i].to_bits()
+                && scale_binary(self.scaled_right[i],shift).to_bits()==self.right[i].to_bits();
+        }
+        // Do not discard an underflowed coefficient for better conditioning.
+        if !reversible {
+            self.scaled_left.copy_from_slice(&self.left); self.scaled_right.copy_from_slice(&self.right);
+        }
+    }
+
+    /// Solve (base + left * right^T) x = rhs. Return false without publication
+    /// on unsuitable structure, failed elimination or failed ORIGINAL backward
+    /// error after bounded refinement. The caller then factors the same full
+    /// equation. No finite coupling is dropped and no output is partly updated.
+    pub(super) fn solve<F>(&mut self, base: &[f64], rhs: &[f64], out: &mut [f64],
+        poll: &mut F) -> Result<bool, PreparedStepError>
+    where F: FnMut() -> Result<(), PreparedStepError> {
+        self.refinements=0;
+        let n=self.n;
+        if base.len()!=n*n || rhs.len()!=n || out.len()!=n {
+            return Err(dimensions("condensed Newton solve dimensions").into());
+        }
+        norm(base)?; norm(rhs)?; norm(&self.left)?; norm(&self.right)?;
+        if !self.factor(base,poll)? { return Ok(false); }
+        self.error.copy_from_slice(rhs);
+        if !self.solve_rhs(base,poll)? { return Ok(false); }
+        self.candidate.copy_from_slice(&self.correction);
+        loop {
+            match self.check(base,rhs,poll)? {
+                None => return Ok(false),
+                Some(true) => {
+                    poll()?;
+                    out.copy_from_slice(&self.candidate);
+                    return Ok(true);
+                }
+                Some(false) => {}
+            }
+            if self.refinements==MAX_REFINEMENTS { return Ok(false); }
+            if !self.solve_rhs(base,poll)? { return Ok(false); }
+            for (x,dx) in self.candidate.iter_mut().zip(&self.correction) { *x+=dx; }
+            self.refinements+=1;
+        }
+    }
+
+    fn factor<F>(&mut self, base: &[f64], poll: &mut F) -> Result<bool, PreparedStepError>
+    where F: FnMut() -> Result<(), PreparedStepError> {
+        let n=self.n; let k=self.dimension(); let last=k-1;
+        // Exact sparsity. Independent plans keep their original contract.
+        // A pivot plan additionally admits LOWER inter-leaf blocks; every one
+        // of their coefficients participates in forward substitution below.
+        // Even a subnormal UPPER coefficient needs the original full LU.
+        for (p,leaf) in self.leaves.iter().enumerate() {
+            poll()?;
+            for &row in leaf.equations() { for col in 0..n {
+                let other=self.owner[col];
+                if other!=usize::MAX && (if self.triangular {other>p} else {other!=p})
+                    && base[row*n+col]!=0.0 { return Ok(false); }
+            }}
+        }
+        self.balance(); self.matrix.fill(0.0);
+        for (i,&row) in self.retained_rows.iter().enumerate() {
+            for (j,&col) in self.retained.iter().enumerate() { self.matrix[i*k+j]=base[row*n+col]; }
+            self.matrix[i*k+last]=self.scaled_left[row];
+            self.matrix[last*k+i]=-self.scaled_right[self.retained[i]];
+        }
+        self.matrix[last*k+last]=1.0;
+        // Augment y=scaled_right^T*x. Keep D^-1 F, NOT a formed inverse. Reuse each
+        // original pivoted factor for all border columns and every later RHS.
+        for (p,leaf) in self.leaves.iter().enumerate() {
+            poll()?;
+            let mut d=[0.0;4];
+            for (i,&row) in leaf.equations().iter().enumerate() {
+                for (j,&col) in leaf.coordinates().iter().enumerate() {d[i*leaf.width+j]=base[row*n+col];}
+            }
+            if self.leaf_lu[p].factor(&d[..leaf.width*leaf.width]).is_err() { return Ok(false); }
+            self.predecessors.clear();
+            if self.triangular {
+                // Rebuild exact dependencies ONCE per leaf, not for every
+                // border column. Capacity covers both rows of the largest leaf.
+                for (side,&row) in leaf.equations().iter().enumerate() {
+                    for prior in &self.leaves[..p] {for (a,&col) in prior.coordinates().iter().enumerate() {
+                        let coefficient=base[row*n+col];
+                        if coefficient!=0.0 {self.predecessors.push((side,prior.start+a,coefficient));}
+                    }}
+                }
+            }
+            for j in 0..k {
+                if self.triangular && j%32==0 {poll()?;}
+                let mut input=[0.0;2];
+                for (side,&row) in leaf.equations().iter().enumerate() {
+                    input[side]=if j==last {self.scaled_left[row]} else {base[row*n+self.retained[j]]};
+                }
+                for &(side,earlier,coefficient) in &self.predecessors {
+                    input[side]=(-coefficient).mul_add(self.responses[earlier*(k+1)+j],input[side]);
+                }
+                let mut response=[0.0;2];
+                if self.leaf_lu[p].solve_factored_into(&input[..leaf.width],&mut response[..leaf.width]).is_err() { return Ok(false); }
+                for side in 0..leaf.width { self.responses[(leaf.start+side)*(k+1)+j]=response[side]; }
+            }
+            if self.triangular {
+                // Kinematic response rows commonly contain only the matching
+                // displacement and the energy-correction column. Scatter their
+                // EXACT nonzeros instead of doing k^2 products per momentum.
+                // No threshold, contact diagonalization or low-rank truncation.
+                for (side,&col) in leaf.coordinates().iter().enumerate() {for j in 0..k {
+                    let response=self.responses[(leaf.start+side)*(k+1)+j];
+                    if response==0.0 {continue;}
+                    for i in 0..k {
+                        let e=if i==last {-self.scaled_right[col]} else {base[self.retained_rows[i]*n+col]};
+                        if e!=0.0 {self.matrix[i*k+j]=(-e).mul_add(response,self.matrix[i*k+j]);}
+                    }
+                }}
+            } else {
+                for i in 0..k {
+                    let mut e=[0.0;2];
+                    for (side,&col) in leaf.coordinates().iter().enumerate() {
+                        e[side]=if i==last {-self.scaled_right[col]} else {base[self.retained_rows[i]*n+col]};
+                    }
+                    for j in 0..k {
+                        let at=i*k+j;
+                        for side in 0..leaf.width {
+                            self.matrix[at]=(-e[side]).mul_add(self.responses[(leaf.start+side)*(k+1)+j],self.matrix[at]);
+                        }
+                    }
+                }
+            }
+        }
+        // The auxiliary y can have vastly different units/magnitude from x.
+        // Equilibrate ONLY this algebraic solve. Store divisors instead of their
+        // inverses so tiny, representable scales do not overflow on inversion.
+        for i in 0..k {
+            poll()?;
+            let row=&mut self.matrix[i*k..(i+1)*k];
+            let scale=row.iter().fold(0.0_f64,|s,x|s.max(x.abs()));
+            if scale==0.0 || !scale.is_finite() || row.iter().any(|x|!x.is_finite()) { return Ok(false); }
+            self.row_scale[i]=scale;
+            for x in row {
+                let value=*x/scale;
+                if *x!=0.0 && value==0.0 { return Ok(false); }
+                *x=value;
+            }
+        }
+        for j in 0..k {
+            let scale=(0..k).fold(0.0_f64,|s,i|s.max(self.matrix[i*k+j].abs()));
+            if scale==0.0 || !scale.is_finite() { return Ok(false); }
+            self.col_scale[j]=scale;
+            for i in 0..k { self.matrix[i*k+j]/=scale; }
+        }
+        poll()?;
+        Ok(self.border_lu.factor(&self.matrix).is_ok())
+    }
+
+    /// Solve the current ORIGINAL-space residual in `error` into `correction`.
+    /// Matrix factors and D^-1 F are unchanged. RHS scratch can be overwritten
+    /// on any refusal; caller state and the accepted Newton candidate cannot.
+    fn solve_rhs<F>(&mut self, base: &[f64], poll: &mut F) -> Result<bool, PreparedStepError>
+    where F: FnMut() -> Result<(), PreparedStepError> {
+        let n=self.n; let k=self.dimension(); let last=k-1;
+        self.rhs.fill(0.0);
+        for (i,&row) in self.retained_rows.iter().enumerate() { self.rhs[i]=self.error[row]; }
+        for (p,leaf) in self.leaves.iter().enumerate() {
+            poll()?;
+            let mut input=[0.0;2];
+            for (side,&row) in leaf.equations().iter().enumerate() {
+                input[side]=self.error[row];
+                if self.triangular {
+                    for prior in &self.leaves[..p] {for (a,&col) in prior.coordinates().iter().enumerate() {
+                        let coefficient=base[row*n+col];
+                        if coefficient!=0.0 {
+                            input[side]=(-coefficient).mul_add(self.responses[(prior.start+a)*(k+1)+k],input[side]);
+                        }
+                    }}
+                }
+            }
+            let mut response=[0.0;2];
+            if self.leaf_lu[p].solve_factored_into(&input[..leaf.width],&mut response[..leaf.width]).is_err() { return Ok(false); }
+            for side in 0..leaf.width { self.responses[(leaf.start+side)*(k+1)+k]=response[side]; }
+            for i in 0..k {
+                for (side,&col) in leaf.coordinates().iter().enumerate() {
+                    let e=if i==last {-self.scaled_right[col]} else {base[self.retained_rows[i]*n+col]};
+                    self.rhs[i]=(-e).mul_add(response[side],self.rhs[i]);
+                }
+            }
+        }
+        for (b,scale) in self.rhs.iter_mut().zip(&self.row_scale) { *b/=scale; }
+        poll()?;
+        if self.border_lu.solve_factored_into(&self.rhs,&mut self.solution).is_err() { return Ok(false); }
+        for (x,scale) in self.solution.iter_mut().zip(&self.col_scale) { *x/=scale; }
+        for (i,&row) in self.retained.iter().enumerate() { self.correction[row]=self.solution[i]; }
+        for leaf in &self.leaves {
+            poll()?;
+            for (side,&row) in leaf.coordinates().iter().enumerate() {
+                let start=(leaf.start+side)*(k+1);
+                let mut value=self.responses[start+k];
+                for j in 0..k { value=(-self.responses[start+j]).mul_add(self.solution[j],value); }
+                self.correction[row]=value;
+            }
+        }
+        Ok(self.correction.iter().all(|x|x.is_finite()))
+    }
+
+    /// Original componentwise backward-error gate, with an FMA residual for
+    /// refinement. No normwise replacement, tolerance enlargement or diagonal
+    /// regularization can hide a failed physical-coordinate equation.
+    fn check<F>(&mut self, base: &[f64], rhs: &[f64], poll: &mut F)
+        -> Result<Option<bool>, PreparedStepError>
+    where F: FnMut() -> Result<(), PreparedStepError> {
+        let n=self.n;
+        if self.candidate.iter().any(|x|!x.is_finite()) { return Ok(None); }
+        // Check the ORIGINAL floating-point matrix used by dense fallback.
+        // Form each outer-product entry before applying it: right^T*x may
+        // overflow even when every matrix coefficient and residual is finite.
+        let mut accepted=true;
+        for row in 0..n {
+            poll()?;
+            let mut residual=rhs[row]; let mut magnitude=rhs[row].abs();
+            for col in 0..n {
+                let a=base[row*n+col]; let x=self.candidate[col];
+                let outer=self.left[row]*self.right[col];
+                residual=(-(a+outer)).mul_add(x,residual);
+                magnitude+=(a*x).abs()+(outer*x).abs();
+            }
+            let tolerance=128.0*f64::EPSILON*(n+1) as f64*magnitude;
+            if !residual.is_finite() || !tolerance.is_finite() { return Ok(None); }
+            self.error[row]=residual;
+            accepted &= residual.abs()<=tolerance;
+        }
+        Ok(Some(accepted))
+    }
+}
+
+impl super::StepWorkspace {
+    /// Exact ordered equation/unknown pivots followed by state-pair elimination.
+    ///
+    /// Each pivot is `[equation_row, unknown_column]`. Rows and columns are
+    /// independently disjoint; a row need not have the same address as its
+    /// unknown. Pivots execute in supplied order, followed by the supplied pairs.
+    /// The eliminated BASE Jacobian must be block lower triangular in this order
+    /// on every update. Nonzero lower couplings are solved by forward substitution;
+    /// any upper coupling (even subnormal), singular pivot, or failed original
+    /// backward error falls back to full LU of the SAME complete Jacobian.
+    ///
+    /// For canonical mechanics a displacement equation can eliminate its momentum
+    /// without assuming diagonal momentum damping. Acoustic pairs can follow those
+    /// pivots while retaining their reciprocal momentum coupling. The full Gonzalez
+    /// correction remains in the scalar border, and every physical unknown is
+    /// recovered. This is linear algebra, not a partitioned time integrator.
+    ///
+    /// With no pivots, pairs use the original independent-pair contract.
+    /// Both slices empty disable condensation. Finite differences ignore the plan.
+    /// Preparation allocates; solves and bounded refinement reuse scratch. Invalid
+    /// or unallocatable replacements leave the old plan intact. Different pivot
+    /// traversal can change roundoff. No deadline or speedup is certified.
+    pub fn set_condensed_pivots(&mut self, pivots: &[[usize; 2]], pairs: &[[usize; 2]]) -> Result<(), PhsError> {
+        let next=if pivots.is_empty() && pairs.is_empty() {None}
+            else {Some(Condensation::with_pivots(self.n,pivots,pairs)?)};
+        self.flow.set_column_traversal(next.is_some())?;
+        self.condensation=next;
+        Ok(())
+    }
+
+    /// Eliminate independent scalar coordinates and/or state pairs in analytic Newton.
+    ///
+    /// This extends `set_condensed_pairs` without assuming coordinates are canonical
+    /// momenta, acoustic states, or material memory. Scalar leaves are useful for
+    /// separable kinetic energy: all nonlinear displacements and history remain
+    /// in the border. Pairs and scalars must be mutually disjoint. Their actual
+    /// off-block Jacobian entries must be EXACTLY zero on every Newton update.
+    /// In particular, coupled momentum/radiation variables cannot be declared
+    /// independent just because each set separately permits elimination.
+    ///
+    /// The complete Gonzalez correction remains a scalar border. Every original
+    /// state is recovered; unsuitable structure, singular leaf factors or failed
+    /// backward error use full LU of the same Jacobian. Finite-difference stepping
+    /// ignores this plan. Both slices empty disables it. Preparation allocates;
+    /// successful/refused stepping uses only prepared scratch. A failed replacement
+    /// retains the previous plan. This is not a real-time timing certificate.
+    pub fn set_condensed_leaves(&mut self, pairs: &[[usize; 2]], singletons: &[usize]) -> Result<(), PhsError> {
+        let next=if pairs.is_empty() && singletons.is_empty() {None}
+            else {Some(Condensation::with_singletons(self.n,pairs,singletons)?)};
+        self.flow.set_column_traversal(next.is_some())?;
+        self.condensation=next;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path="condensed_tests.rs"]
+mod tests;
+#[cfg(test)]
+#[path="scalar_condensed_tests.rs"]
+mod scalar_tests;
+
+#[cfg(test)]
+#[path="pivot_condensed_tests.rs"]
+mod pivot_tests;

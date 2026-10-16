@@ -1,0 +1,38 @@
+frankensim.matdb-source.v1
+observation	gtr282-table12-3-pu1992-aspen-mill7	Aspen OSB, Pu and others (1992), mill 7	USDA FPL GTR-282 Table 12-3, printed page 12-5	Selected OSB product properties for Aspen mill 7. Specific gravity 0.65; bending MOE parallel/perpendicular 6.28/2.03 GPa; bending MOR parallel/perpendicular 32.2/30.4 MPa; internal bond 0.43 MPa. Species, reference, and mill number are retained. The table does not state panel layup, test moisture, grade, or temperature; these are product test results, not structural design allowables. Parallel and perpendicular values are distinct directions; no isotropic average is inferred.
+scalar	specific-gravity	gtr282-table12-3-pu1992-aspen-mill7	specific_gravity	0.65	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+scalar	bending-moe-parallel	gtr282-table12-3-pu1992-aspen-mill7	bending_moe_parallel	6.28	GPa	constant
+uncertainty	bending-moe-parallel	unstated	-	-	-	-
+scalar	bending-moe-perpendicular	gtr282-table12-3-pu1992-aspen-mill7	bending_moe_perpendicular	2.03	GPa	constant
+uncertainty	bending-moe-perpendicular	unstated	-	-	-	-
+scalar	bending-mor-parallel	gtr282-table12-3-pu1992-aspen-mill7	bending_mor_parallel	32.2	MPa	constant
+uncertainty	bending-mor-parallel	unstated	-	-	-	-
+scalar	bending-mor-perpendicular	gtr282-table12-3-pu1992-aspen-mill7	bending_mor_perpendicular	30.4	MPa	constant
+uncertainty	bending-mor-perpendicular	unstated	-	-	-	-
+scalar	internal-bond-strength	gtr282-table12-3-pu1992-aspen-mill7	internal_bond_strength	0.43	MPa	constant
+uncertainty	internal-bond-strength	unstated	-	-	-	-
+validity	specific-gravity	source_test_temperature_known	0	0	1
+validity	specific-gravity	source_moisture_condition_known	0	0	1
+validity	specific-gravity	source_panel_layup_known	0	0	1
+validity	specific-gravity	source_grade_known	0	0	1
+validity	bending-moe-parallel	source_test_temperature_known	0	0	1
+validity	bending-moe-parallel	source_moisture_condition_known	0	0	1
+validity	bending-moe-parallel	source_panel_layup_known	0	0	1
+validity	bending-moe-parallel	source_grade_known	0	0	1
+validity	bending-moe-perpendicular	source_test_temperature_known	0	0	1
+validity	bending-moe-perpendicular	source_moisture_condition_known	0	0	1
+validity	bending-moe-perpendicular	source_panel_layup_known	0	0	1
+validity	bending-moe-perpendicular	source_grade_known	0	0	1
+validity	bending-mor-parallel	source_test_temperature_known	0	0	1
+validity	bending-mor-parallel	source_moisture_condition_known	0	0	1
+validity	bending-mor-parallel	source_panel_layup_known	0	0	1
+validity	bending-mor-parallel	source_grade_known	0	0	1
+validity	bending-mor-perpendicular	source_test_temperature_known	0	0	1
+validity	bending-mor-perpendicular	source_moisture_condition_known	0	0	1
+validity	bending-mor-perpendicular	source_panel_layup_known	0	0	1
+validity	bending-mor-perpendicular	source_grade_known	0	0	1
+validity	internal-bond-strength	source_test_temperature_known	0	0	1
+validity	internal-bond-strength	source_moisture_condition_known	0	0	1
+validity	internal-bond-strength	source_panel_layup_known	0	0	1
+validity	internal-bond-strength	source_grade_known	0	0	1

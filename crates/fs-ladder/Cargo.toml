@@ -1,0 +1,21 @@
+[package]
+name = "fs-ladder"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Context- and QoI-specific fidelity graphs with evidenced cost/discrepancy edges, deterministic explained queries, and lossless legacy-ladder embedding."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-evidence = { path = "../fs-evidence" }
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

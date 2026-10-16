@@ -1,0 +1,20 @@
+frankensim.instrument-axis-convention.v1
+axis	L	longitudinal	along the grain (fiber direction); maps to fs_material::OrthotropicElastic axis 1 and fs-plate material axis 1 (the D11 direction)
+axis	R	radial	across the growth rings; maps to fs_material::OrthotropicElastic axis 2 and fs-plate material axis 2 (the D22 direction)
+axis	T	tangential	tangent to the growth rings; maps to fs_material::OrthotropicElastic axis 3 (out-of-plane for a quartersawn plate)
+ratio_property	et_over_el	E_T divided by E_L at the same condition (FPL-GTR-282 Table 5-1 convention)
+ratio_property	er_over_el	E_R divided by E_L at the same condition
+ratio_property	glr_over_el	G_LR divided by E_L at the same condition
+ratio_property	glt_over_el	G_LT divided by E_L at the same condition
+ratio_property	grt_over_el	G_RT divided by E_L at the same condition
+poisson_property	nu_lr	strain along R per strain along L under stress along L (first subscript = stress direction; FPL-GTR-282 Table 5-2 convention)
+poisson_property	nu_lt	strain along T per strain along L under stress along L
+poisson_property	nu_rt	strain along T per strain along R under stress along R
+poisson_property	nu_tr	strain along R per strain along T under stress along T
+poisson_property	nu_rl	strain along L per strain along R under stress along R
+poisson_property	nu_tl	strain along L per strain along T under stress along T
+modulus_property	modulus_of_elasticity_bending	static-bending MOE exactly as printed (span-to-depth 14; includes shear deflection)
+modulus_property	young_modulus_longitudinal	derived E_L = 1.10 x bending MOE per the FPL-GTR-282 chapter-5 shear-deflection correction; the value the elastic ratios apply to
+density_property	density	mass density at 12 percent moisture content, derived 1000 x SG x 1.12 for Table 5-3a specific gravities only (volume-at-12-percent basis)
+density_property	specific_gravity	exactly as printed; basis differs by table (5-3a: volume at 12 percent; 5-5a: green volume) and is recorded per observation
+consumer_contract	fs-plate	PlateSection::orthotropic maps material axis 1 = L (grain) to the plate x axis; a quartersawn top plate uses (E_L, E_R, nu_LR, G_LR)

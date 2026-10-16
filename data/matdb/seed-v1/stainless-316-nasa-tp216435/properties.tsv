@@ -1,0 +1,29 @@
+frankensim.matdb-source.v1
+observation	nasa-tp2010-216435-table23	generic 316 stainless steel	NASA/TP-2010-216435 Table 23, “316 stainless steel properties,” and Figures 41–44	This source identifies only generic “316 stainless steel” in a heat-pipe/calorimeter design analysis. It does not state a UNS designation, alloy chemistry, product form, heat treatment, specimen, test method, pressure, or measurement uncertainty. These three curves retain only literal Table 23 density, thermal-conductivity, and specific-heat rows at 273, 300, and 400 K. Piecewise-linear interpolation is an explicit bounded engineering approximation between those published knots, not an assertion that the source measured intermediate values or a source interpolation-error bound. The source’s density, conductivity, and specific-heat figure equations are not executed by this pack. The table’s separate CTE column is not admitted: this pack supplies no instantaneous expansion, mean expansion, Young modulus, Poisson ratio, enthalpy, phase law, or full thermoelastic profile. It cannot establish identity compatibility with UNS S31600, 316L, or an existing 316 reference-state pack.
+observation	density-273-400k	generic 316 stainless steel	NASA/TP-2010-216435 Table 23, density column	Literal source rows in kg/m3: 273 K: 7972.70; 300 K: 7960.74; 400 K: 7916.46. The report’s design-analysis table does not identify a density specimen, test method, pressure, heat treatment, product form, or uncertainty.
+observation	specific-heat-capacity-273-400k	generic 316 stainless steel	NASA/TP-2010-216435 Table 23, specific-heat column	Literal source rows in J/(kg K): 273 K: 456.39; 300 K: 467.69; 400 K: 502.87. The report supplies no enthalpy reference or measurement protocol; this Cp curve does not establish Cp/enthalpy consistency or a transient energy model by itself.
+observation	thermal-conductivity-273-400k	generic 316 stainless steel	NASA/TP-2010-216435 Table 23, thermal-conductivity column	Literal source rows in W/(m K): 273 K: 12.99; 300 K: 13.46; 400 K: 15.14. The report supplies no measurement direction, specimen, method, pressure, heat treatment, product form, or uncertainty; this scalar curve does not assert isotropy.
+curve	density-273-400k	nasa-tp2010-216435-table23	density	temperature	K	kg/m3	273:7972.70,300:7960.74,400:7916.46	linear
+uncertainty	density-273-400k	unstated	-	-	-	-
+validity	density-273-400k	temperature	273	400	K
+validity	density-273-400k	source_generic_316_identity	1	1	1
+validity	density-273-400k	source_uns_designation_known	0	0	1
+validity	density-273-400k	source_heat_treatment_known	0	0	1
+validity	density-273-400k	source_product_form_known	0	0	1
+validity	density-273-400k	source_pressure_known	0	0	1
+curve	specific-heat-capacity-273-400k	nasa-tp2010-216435-table23	specific_heat_capacity	temperature	K	J/kg/K	273:456.39,300:467.69,400:502.87	linear
+uncertainty	specific-heat-capacity-273-400k	unstated	-	-	-	-
+validity	specific-heat-capacity-273-400k	temperature	273	400	K
+validity	specific-heat-capacity-273-400k	source_generic_316_identity	1	1	1
+validity	specific-heat-capacity-273-400k	source_uns_designation_known	0	0	1
+validity	specific-heat-capacity-273-400k	source_heat_treatment_known	0	0	1
+validity	specific-heat-capacity-273-400k	source_product_form_known	0	0	1
+validity	specific-heat-capacity-273-400k	source_pressure_known	0	0	1
+curve	thermal-conductivity-273-400k	nasa-tp2010-216435-table23	thermal_conductivity	temperature	K	W/m/K	273:12.99,300:13.46,400:15.14	linear
+uncertainty	thermal-conductivity-273-400k	unstated	-	-	-	-
+validity	thermal-conductivity-273-400k	temperature	273	400	K
+validity	thermal-conductivity-273-400k	source_generic_316_identity	1	1	1
+validity	thermal-conductivity-273-400k	source_uns_designation_known	0	0	1
+validity	thermal-conductivity-273-400k	source_heat_treatment_known	0	0	1
+validity	thermal-conductivity-273-400k	source_product_form_known	0	0	1
+validity	thermal-conductivity-273-400k	source_pressure_known	0	0	1

@@ -1,0 +1,8 @@
+frankensim.matdb-source.v1
+observation	c447-table20-cast-c033	Cast carbon steel, C 0.33, Mn 0.77, Si 0.32, P 0.04, S 0.036	NBS Circular C447 Table 20 hardness entries (Brinell per the table note)	Scale-TYPED Brinell hardness, as-cast 141 (serial 1473) and annealed at 1700 F 143 (serial 1474); Brinell load not stated (named absence); uncertainty Unstated
+scalar	hardness-brinell-as-cast	c447-table20-cast-c033	hardness_brinell_as_cast	141	1	constant
+uncertainty	hardness-brinell-as-cast	unstated	-	-	-	-
+validity	hardness-brinell-as-cast	temperature	293	293	K
+scalar	hardness-brinell-annealed-1700f	c447-table20-cast-c033	hardness_brinell_annealed_1700f	143	1	constant
+uncertainty	hardness-brinell-annealed-1700f	unstated	-	-	-	-
+validity	hardness-brinell-annealed-1700f	temperature	293	293	K

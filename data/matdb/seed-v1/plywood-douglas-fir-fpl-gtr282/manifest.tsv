@@ -1,0 +1,17 @@
+frankensim.matdb-manifest.v3
+pack_id	plywood-douglas-fir-fpl-gtr282
+redistribution	permitted	USDA Forest Products Laboratory government report; public use permitted; retain citation and URL
+citation	USDA Forest Products Laboratory (2021), Wood Handbook: Wood as an Engineering Material, General Technical Report FPL-GTR-282, Table 12-2 (from Biblis 2000), https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr282/fpl_gtr282.pdf
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1
+property	specific_gravity	specific-gravity	dimensional
+property	bending_moe	bending-moe	dimensional
+property	bending_mor	bending-mor	dimensional
+property	fiber_stress_proportional_limit	fiber-stress-proportional-limit	dimensional
+property	rail_shear_strength	rail-shear-strength	dimensional
+property	glue_line_shear_strength	glue-line-shear-strength	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_panel_layup_known	source-panel-layup-known	dimensional
+axis	source_grade_known	source-grade-known	dimensional
+axis	source_bending_direction_known	source-bending-direction-known	dimensional

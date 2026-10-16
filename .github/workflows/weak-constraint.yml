@@ -1,0 +1,34 @@
+name: Weak-constraint assimilation
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-ascent/src/transient/variational.rs'
+      - 'crates/fs-ascent/src/transient/variational/**'
+      - 'crates/fs-ascent/examples/weak_constraint_heat.rs'
+      - 'crates/fs-ascent/src/lbfgs.rs'
+      - 'crates/fs-ascent/src/lbfgs/**'
+      - 'crates/fs-ascent/src/wolfe.rs'
+      - 'crates/fs-ascent/src/stop.rs'
+      - 'crates/fs-time/src/adaptive.rs'
+      - 'crates/fs-time/src/adaptive/**'
+      - 'crates/fs-ad/src/revolve.rs'
+      - 'crates/fs-math/src/**'
+      - 'crates/fs-blake3/src/**'
+      - 'tools/check_weak_constraint.py'
+      - '.github/workflows/weak-constraint.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  numerical-source-closure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test production RK45, adjoint, window and L-BFGS composition
+        run: python3 tools/check_weak_constraint.py

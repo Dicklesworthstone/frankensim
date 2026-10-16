@@ -1,0 +1,32 @@
+frankensim.matdb-source.v1
+observation	nasa-cr144016-table10-density	Elemental liquid lead; no named specimen or assay	NASA-CR-144016 Table 10, density row, references 7/27/28	Source temperatures are degrees Celsius and density is kg/m3: 400:10510,500:10390,600:10270,800:10040,1000:9810. The report compiles liquid-metal properties; this is not a new specimen measurement campaign. References 27/28 are Greenaway, Inst. Metals London 74 p.133 (1947), and Day/Sosman/Hostetter, Am. J. Sci.37 p.1 (1914). Pressure, specimen purity and uncertainty are unstated. Linear interpolation is a bounded engineering approximation without a source interpolation-error guarantee. No solid or across-melting density is inferred; the phase flag selects the liquid table, not a liquid-fraction law.
+observation	nasa-cr144016-table10-conductivity	Elemental liquid lead; no named specimen or assay	NASA-CR-144016 Table 10, thermal-conductivity row, reference 25	Printed conductivity unit is Cal/(m sec degC) and values at 400/500/600/800 degC are 3.6111/3.694/3.8055/4.7222. Reference 25 is Kutateladze et al., Liquid Metal Heat Transfer Media, Atomic Press, Moscow (1958). The calorie convention is NOT specified. This normalized engineering estimate explicitly selects 4.184 J per thermochemical calorie, giving 15.1088424/15.455696/15.922212/19.7576848 W/m/K; conversion convention and source ambiguity remain query context. Pressure, specimen purity and uncertainty are unstated. Linear interpolation is approximate and confined to the recorded liquid interval, with no inferred error band.
+observation	nasa-cr144016-table10-viscosity	Elemental liquid lead; no named specimen or assay	NASA-CR-144016 Table 10, viscosity row	Printed viscosity in cp (centipoise) at 441/456/551/703/844 degC is 2.116/2.059/1.700/1.349/1.185. Dynamic viscosity conversion uses 1 cP = 0.001 Pa s. The viscosity row has no individually printed reference number. Pressure, specimen purity, protocol and uncertainty are unstated. This is a compiled source row with bounded engineering linear interpolation, not an independently validated rheological law or solid/liquid mixture model.
+observation	nasa-cr144016-table10-surface	Elemental liquid lead; gas, oxide and contamination state unstated	NASA-CR-144016 Table 10, surface-tension row, reference 35	Printed surface tension unit is dyn/m and values at 350/400/450/500 degC are 44200/43800/43800/43100. Conversion uses 1 dyne = 0.00001 N, giving 0.442/0.438/0.438/0.431 N/m. Reference 35 is Rohsenow and Hartnett, Handbook of Heat Transfer, McGraw-Hill (1973). Surface gas/oxide/contamination history, pressure, specimen purity and uncertainty are unstated. This source row supports only a bounded linear engineering interpolant; it supplies no contact angle, wetting law, surface chemistry correction or uncertainty guarantee.
+curve	density-liquid	nasa-cr144016-table10-density	density	temperature	degC	kg/m3	400:10510,500:10390,600:10270,800:10040,1000:9810	linear
+uncertainty	density-liquid	unstated	-	-	-	-
+validity	density-liquid	temperature	400	1000	degC
+validity	density-liquid	source_phase_liquid	1	1	1
+validity	density-liquid	source_pressure_known	0	0	1
+validity	density-liquid	source_specimen_purity_known	0	0	1
+curve	conductivity-liquid	nasa-cr144016-table10-conductivity	thermal_conductivity	temperature	degC	W/m/K	400:15.1088424,500:15.455696,600:15.922212,800:19.7576848	linear
+uncertainty	conductivity-liquid	unstated	-	-	-	-
+validity	conductivity-liquid	temperature	400	800	degC
+validity	conductivity-liquid	source_phase_liquid	1	1	1
+validity	conductivity-liquid	source_pressure_known	0	0	1
+validity	conductivity-liquid	source_specimen_purity_known	0	0	1
+validity	conductivity-liquid	source_calorie_convention_known	0	0	1
+validity	conductivity-liquid	conversion_thermochemical_calorie	1	1	1
+curve	viscosity-liquid	nasa-cr144016-table10-viscosity	dynamic_viscosity	temperature	degC	Pa*s	441:0.002116,456:0.002059,551:0.001700,703:0.001349,844:0.001185	linear
+uncertainty	viscosity-liquid	unstated	-	-	-	-
+validity	viscosity-liquid	temperature	441	844	degC
+validity	viscosity-liquid	source_phase_liquid	1	1	1
+validity	viscosity-liquid	source_pressure_known	0	0	1
+validity	viscosity-liquid	source_specimen_purity_known	0	0	1
+curve	surface-tension-liquid	nasa-cr144016-table10-surface	surface_tension	temperature	degC	N/m	350:0.442,400:0.438,450:0.438,500:0.431	linear
+uncertainty	surface-tension-liquid	unstated	-	-	-	-
+validity	surface-tension-liquid	temperature	350	500	degC
+validity	surface-tension-liquid	source_phase_liquid	1	1	1
+validity	surface-tension-liquid	source_pressure_known	0	0	1
+validity	surface-tension-liquid	source_specimen_purity_known	0	0	1
+validity	surface-tension-liquid	source_surface_environment_known	0	0	1

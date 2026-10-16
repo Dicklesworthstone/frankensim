@@ -1,0 +1,43 @@
+# FrankenSim cargo configuration.
+#
+# ## Deliberately NO global x86-64 target-feature requirements.
+#
+# It is tempting to add it to fix the "libm-fma trap" (baseline-x86 `f64::mul_add`
+# lowers to a per-element libm `fma()` CALL, ~1 GFLOP/s, capping mul_add-heavy
+# x86 kernels — e.g. fs-feec's apply, bead cwjn). A workspace-wide requirement
+# would make every binary require FMA and bypass FrankenSim's runtime ISA
+# admission/dispatch contract, so keep the baseline portable and specialize only
+# audited leaves.
+#
+# The 2026-07-10 Threadripper run is NOT evidence that global `+fma` changes
+# ordinary `a*b + c`: its reported fs-cheb hash, 0xeea04b0a01de46cd, is the
+# no-flag radix-8/4/2 DCT value. The downstream golden was stale after fs-fft
+# commit 535aa839. Do not infer contraction semantics from that failed sentinel.
+#
+# Fix the libm-fma trap PER-KERNEL instead: put the hot `mul_add` loop
+# behind a `#[target_feature(enable = "fma")]` function (runtime
+# is_x86_feature_detected gate + scalar fallback, registered unsafe capsule)
+# whose arithmetic semantics are pinned against its scalar twin. See bead cwjn
+# and crates/fs-simd for the capsule precedent. fs-roofline already does this for
+# its FMA probe (bead xlvx).
+
+# Dependency-graph evidence for the GEMM build identity (bead fz2.6).
+#
+# Cargo feature unification can compile fs-la's dependencies (asupersync and
+# its registry closure) under different feature sets without changing any
+# other fingerprint input. Evidence-bearing perf builds must export the exact
+# single-root normal/build receipt from `cargo run -p xtask --
+# depgraph-receipt -- --package <ROOT> [target/feature flags]`; that receipt
+# wins over this salt. It is locked, metadata-resolved, Cargo-versioned, and
+# content-addresses bounded local path package trees. It remains
+# operator-observed, not independently verified against the invoking Cargo
+# process or undisclosed dynamic build-script inputs. Every other
+# in-workspace build carries this EXPLICIT DEVELOPMENT salt, which declares all
+# such builds one deliberate equivalence class (the pre-fz2.6 status quo, now
+# visible and bound into the fingerprint). A salt is never verified graph
+# evidence. Builds with neither fail closed in crates/fs-la/build.rs.
+[env]
+FRANKENSIM_DEPGRAPH_SALT = "frankensim-workspace-dev-v1"
+
+[build]
+rustflags = ["-Z", "threads=4"]

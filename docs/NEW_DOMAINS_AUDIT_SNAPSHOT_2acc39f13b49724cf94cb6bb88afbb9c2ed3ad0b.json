@@ -1,0 +1,739 @@
+{
+  "schema": "frankensim-new-domains-audit-snapshot-v1",
+  "bead_id": "frankensim-ext-audit-repin-kt1o",
+  "subject": "New-domain expansion grounded gap analysis",
+  "audited_ref": {
+    "branch": "main",
+    "commit": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+    "tree": "99dd89b6c7659601f489f85176db4c28d4bc44ae",
+    "commit_time": "2026-07-13T18:47:00-04:00",
+    "mode": "committed-source-blobs-only",
+    "worktree_dirty_at_audit": true,
+    "dirty_source_paths_included_in_claim_evidence": false
+  },
+  "audited_at": "2026-07-14T02:41:33Z",
+  "charter": {
+    "path": "COMPREHENSIVE_PLAN_TO_EXTEND_FRANKENSIM_TO_NEW_DOMAINS.md",
+    "sections": ["1.1", "1.2"],
+    "supersedes_commit": "51e50ff89e3ef8cf7eb405b8dfd0f463cf50a0cd"
+  },
+  "method": {
+    "blob_reader": "git show 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b:<path>",
+    "searcher": "git grep -E -n '<pattern>' 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b -- <scope...>",
+    "line_numbering": "nl -ba over the committed blob",
+    "worktree_policy": "No live source blob was accepted as claim evidence. Live post-snapshot Beads metadata is recorded separately under tracker_provenance."
+  },
+  "tracker_provenance": {
+    "mode": "live-post-snapshot-beads-state",
+    "observed_at": "2026-07-14T03:00:09Z",
+    "source": "beads_rust live database and current .beads/issues.jsonl export",
+    "relationship_to_audited_ref": "The five follow-up Beads and 21 E0 body pointers were created or amended after source commit 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b; they are not asserted to exist in that committed tree.",
+    "body_pointer_requirement": "Every ID in e0_bead_pointers cites frankensim-ext-audit-repin-kt1o, the exact source commit, and this artifact path in its live description body."
+  },
+  "claims": [
+    {
+      "id": "E-PGA-MOTOR",
+      "charter_row": "1.1 full SE(3) rigid-motion algebra",
+      "polarity": "exists",
+      "expected": "PGA motors provide rigid rotor/translator composition, renormalization, screw interpolation, exponential, and logarithm.",
+      "observed": "The committed PGA module exposes the complete narrow motor surface claimed by the charter.",
+      "verdict": "pass",
+      "citations": [
+        {
+          "path": "crates/fs-ga/src/pga.rs",
+          "line_start": 273,
+          "line_end": 328,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-ga/src/pga.rs",
+          "line_start": 394,
+          "line_end": 457,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [],
+      "drift_explanation": null,
+      "follow_up_bead": null
+    },
+    {
+      "id": "E-FRAME-TREE",
+      "charter_row": "1.1 time-parameterized rigid frame trees",
+      "polarity": "exists",
+      "expected": "FrameMotion includes rotating frames and FrameTree composes time-dependent world poses.",
+      "observed": "Rotating motion, local pose evaluation, and parent-chain world-pose composition are present.",
+      "verdict": "pass",
+      "citations": [
+        {
+          "path": "crates/fs-scenario/src/frame.rs",
+          "line_start": 26,
+          "line_end": 80,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-scenario/src/frame.rs",
+          "line_start": 98,
+          "line_end": 159,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [],
+      "drift_explanation": null,
+      "follow_up_bead": null
+    },
+    {
+      "id": "E-FEEC-WHITNEY-HODGE",
+      "charter_row": "1.1 discrete de Rham complex; 1.2 B5 and B12",
+      "polarity": "exists",
+      "expected": "Whitney 0-3 forms, exact incidence, and Galerkin/diagonal Hodge stars exist without claiming that incidence alone proves formulation stability.",
+      "observed": "The substrate exists, but the committed contract says exact incidence structurally kills spurious pressure and EM modes while later deferring the curl-curl and mixed solves needed to prove that statement.",
+      "verdict": "drift",
+      "citations": [
+        {
+          "path": "crates/fs-feec/src/whitney.rs",
+          "line_start": 1,
+          "line_end": 12,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-feec/src/hodge.rs",
+          "line_start": 1,
+          "line_end": 45,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-feec/CONTRACT.md",
+          "line_start": 7,
+          "line_end": 13,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-feec/CONTRACT.md",
+          "line_start": 295,
+          "line_end": 308,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [],
+      "drift_explanation": "The implementation evidence supports exact algebraic-complex identities, not a blanket no-spurious-mode theorem.",
+      "follow_up_bead": "frankensim-ext-epic-gov-rjoq.4"
+    },
+    {
+      "id": "E-FEEC-VECFAM",
+      "charter_row": "1.1 Nedelec and Raviart-Thomas families",
+      "polarity": "exists",
+      "expected": "First-kind Nedelec and Raviart-Thomas tetrahedral families exist for r=1..4 with grad, curl, and div chain maps.",
+      "observed": "The family builders and all three chain-map surfaces are present; the refreshed range extends past the stale charter endpoint to line 1139.",
+      "verdict": "pass",
+      "citations": [
+        {
+          "path": "crates/fs-feec/src/highorder/vecfam.rs",
+          "line_start": 1,
+          "line_end": 30,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-feec/src/highorder/vecfam.rs",
+          "line_start": 362,
+          "line_end": 408,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-feec/src/highorder/vecfam.rs",
+          "line_start": 693,
+          "line_end": 740,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-feec/src/highorder/vecfam.rs",
+          "line_start": 987,
+          "line_end": 1139,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [],
+      "drift_explanation": null,
+      "follow_up_bead": null
+    },
+    {
+      "id": "E-FEEC-COHOMOLOGY",
+      "charter_row": "1.1 computable cohomology",
+      "polarity": "exists",
+      "expected": "Exact Betti bookkeeping, Hodge decomposition, harmonic bases, circulation, and harmonic deflation are implemented.",
+      "observed": "All named fixture-scale cohomology operations are present.",
+      "verdict": "pass",
+      "citations": [
+        {
+          "path": "crates/fs-feec/src/betti.rs",
+          "line_start": 1,
+          "line_end": 83,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-feec/src/cohomology.rs",
+          "line_start": 1,
+          "line_end": 20,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-feec/src/cohomology.rs",
+          "line_start": 144,
+          "line_end": 300,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [],
+      "drift_explanation": null,
+      "follow_up_bead": null
+    },
+    {
+      "id": "E-SHEAF-WATERTIGHTNESS",
+      "charter_row": "1.1 cellular-sheaf watertightness",
+      "polarity": "exists",
+      "expected": "The committed geometry layer implements coboundaries, a gauge solve, interval-backed seam checks, and an independent ray-parity falsifier, while reserving H1/topological-obstruction language for a proved non-exact cocycle class.",
+      "observed": "The seam checker and falsifier exist, but watertightness never evaluates delta0, delta1, cocycle membership, or cohomology. Any interval-proven interface mismatch is labeled obstruction, including the retained two-patch pure-coboundary test even though that graph has H1 = 0.",
+      "verdict": "drift",
+      "citations": [
+        {
+          "path": "crates/fs-geom/src/sheaf.rs",
+          "line_start": 1,
+          "line_end": 19,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-geom/src/sheaf.rs",
+          "line_start": 256,
+          "line_end": 438,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-geom/src/sheaf.rs",
+          "line_start": 482,
+          "line_end": 521,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-geom/src/lib.rs",
+          "line_start": 41,
+          "line_end": 45,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-geom/tests/sheaf.rs",
+          "line_start": 157,
+          "line_end": 179,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [],
+      "drift_explanation": "The base verdict proves an interval-bounded interface violation, not H1. Its coboundary_share is a midpoint-mean graph-gauge explained-variance statistic; the feature-gated Hodge split is not wired into watertightness, and the sample-row delta0 is dimensionally distinct from the edge-row delta0_edges used with delta1.",
+      "follow_up_bead": "frankensim-ext-epic-gov-rjoq.5"
+    },
+    {
+      "id": "E-SEPARATION-BALL-SCOPE",
+      "charter_row": "1.1 positive-gap separation; 1.2 B1 and B3",
+      "polarity": "exists",
+      "expected": "Certified positive-gap separation exists, while general Minkowski sums and penetration depth remain absent.",
+      "observed": "The ball-only Minkowski wrapper, clamped clearance field, and certified separation interval are present with an explicit general-sum no-claim.",
+      "verdict": "pass",
+      "citations": [
+        {
+          "path": "crates/fs-query/src/lib.rs",
+          "line_start": 611,
+          "line_end": 617,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-query/src/lib.rs",
+          "line_start": 619,
+          "line_end": 732,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-query/CONTRACT.md",
+          "line_start": 117,
+          "line_end": 121,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [
+        {
+          "engine": "git grep -E -n",
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "scope_paths": ["crates/fs-query/src"],
+          "pattern": "pub (fn|struct|trait) .*(minkowski_sum|penetration_depth)",
+          "command": "git grep -E -n 'pub (fn|struct|trait) .*(minkowski_sum|penetration_depth)' 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b -- crates/fs-query/src",
+          "result": "absent",
+          "matches": 0,
+          "exit_code": 1
+        }
+      ],
+      "drift_explanation": null,
+      "follow_up_bead": null
+    },
+    {
+      "id": "E-CONTACT-SEED",
+      "charter_row": "1.1 IPC barrier seed; 1.2 B3",
+      "polarity": "exists",
+      "expected": "A deformable-versus-fixed-SDF barrier seed exists and explicitly defers rigorous curved-SDF CCD without claiming unconditional trajectory nonintersection.",
+      "observed": "The fixed-obstacle seed and CCD deferral exist, but the module header still calls trajectories intersection-free by construction.",
+      "verdict": "drift",
+      "citations": [
+        {
+          "path": "crates/fs-solid/src/contact.rs",
+          "line_start": 3,
+          "line_end": 13,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-solid/src/contact.rs",
+          "line_start": 140,
+          "line_end": 159,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-solid/src/contact.rs",
+          "line_start": 368,
+          "line_end": 388,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [],
+      "drift_explanation": "The implementation requires an admissible initial state and sampled trial checks; rigorous curved-SDF CCD is successor scope.",
+      "follow_up_bead": "frankensim-ext-epic-gov-rjoq.2"
+    },
+    {
+      "id": "E-CUTFEM-SCALAR",
+      "charter_row": "1.1 scalar CutFEM seed; 1.2 B6",
+      "polarity": "exists",
+      "expected": "A constant-coefficient 2-D scalar Poisson/diffusion seed exists without constituting a transient thermal-domain stack.",
+      "observed": "The scalar assembly and CG solve are present; the contract leaves time-dependent problems unimplemented and separately describes later vector elasticity work.",
+      "verdict": "pass",
+      "citations": [
+        {
+          "path": "crates/fs-cutfem/src/fem.rs",
+          "line_start": 373,
+          "line_end": 455,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-cutfem/src/fem.rs",
+          "line_start": 552,
+          "line_end": 580,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-cutfem/CONTRACT.md",
+          "line_start": 5,
+          "line_end": 14,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-cutfem/CONTRACT.md",
+          "line_start": 327,
+          "line_end": 328,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [],
+      "drift_explanation": null,
+      "follow_up_bead": null
+    },
+    {
+      "id": "B2-B10-TIME-GAPS",
+      "charter_row": "1.2 B2 and B10",
+      "polarity": "absent",
+      "expected": "SE(3) motor states, event location, broad adjoints, and sparse generalized-alpha/IMEX remain absent while SO(3) quaternion integration exists.",
+      "observed": "The implementation and contract retain all named gaps, but the crate-level module documentation falsely advertises Lie-group SE(3)/SO(3).",
+      "verdict": "drift",
+      "citations": [
+        {
+          "path": "crates/fs-time/src/lib.rs",
+          "line_start": 4,
+          "line_end": 8,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-time/src/lie.rs",
+          "line_start": 1,
+          "line_end": 58,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-time/CONTRACT.md",
+          "line_start": 145,
+          "line_end": 156,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [
+        {
+          "engine": "git grep -E -n",
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "scope_paths": ["crates/fs-time/src"],
+          "pattern": "pub (struct|enum|trait|fn) [A-Za-z0-9_]*(SE3|Motor)|pub fn [A-Za-z0-9_]*event",
+          "command": "git grep -E -n 'pub (struct|enum|trait|fn) [A-Za-z0-9_]*(SE3|Motor)|pub fn [A-Za-z0-9_]*event' 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b -- crates/fs-time/src",
+          "result": "absent",
+          "matches": 0,
+          "exit_code": 1
+        }
+      ],
+      "drift_explanation": "Committed public documentation contradicts the implemented SO(3)-only surface and its own no-claim boundaries.",
+      "follow_up_bead": "frankensim-ext-epic-gov-rjoq.1"
+    },
+    {
+      "id": "E-COUPLE-DIRAC-SEED",
+      "charter_row": "1.1 Dirac ports; 1.2 B9",
+      "polarity": "exists",
+      "expected": "Scalar port kinds, lossless Dirac interconnection, caller-fed energy auditing, and scalar Aitken exist without implying whole partitioned-system passivity.",
+      "observed": "The narrow seed exists and B9 remains, but module and contract prose broadly call coupling passive by construction.",
+      "verdict": "drift",
+      "citations": [
+        {
+          "path": "crates/fs-couple/src/lib.rs",
+          "line_start": 5,
+          "line_end": 27,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-couple/src/lib.rs",
+          "line_start": 73,
+          "line_end": 195,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-couple/CONTRACT.md",
+          "line_start": 3,
+          "line_end": 4,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-couple/CONTRACT.md",
+          "line_start": 69,
+          "line_end": 78,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [],
+      "drift_explanation": "Only the Dirac interface power balance is lossless by construction; component, discretization, transfer, iteration, source, dissipation, and accounting-window obligations remain external.",
+      "follow_up_bead": "frankensim-ext-epic-gov-rjoq.3"
+    },
+    {
+      "id": "E-CYCLIC-SYMMETRY",
+      "charter_row": "1.1 Cn representation theory",
+      "polarity": "exists",
+      "expected": "Cyclic-group DFT block diagonalization, symmetrization, residuals, and perturbation bounds exist; dihedral and approximately-circulant operators remain deferred.",
+      "observed": "The implemented surface and no-claim boundary match the charter.",
+      "verdict": "pass",
+      "citations": [
+        {
+          "path": "crates/fs-symmetry/src/lib.rs",
+          "line_start": 20,
+          "line_end": 22,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-symmetry/src/lib.rs",
+          "line_start": 90,
+          "line_end": 322,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-symmetry/CONTRACT.md",
+          "line_start": 72,
+          "line_end": 79,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [],
+      "drift_explanation": null,
+      "follow_up_bead": null
+    },
+    {
+      "id": "E-QTY-FIVE-BASE",
+      "charter_row": "1.1 units; 1.2 B8",
+      "polarity": "exists",
+      "expected": "The snapshot uses five base dimensions m, kg, s, K, A, includes viscosity/temperature/current aliases, and excludes amount of substance.",
+      "observed": "Dims is [i8;5], Qty has five const parameters, Pa-s/K/A aliases exist, and mol/cd are explicit no-claims; raw mechanical material parameters remain visible.",
+      "verdict": "pass",
+      "citations": [
+        {
+          "path": "crates/fs-qty/src/lib.rs",
+          "line_start": 8,
+          "line_end": 12,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-qty/src/lib.rs",
+          "line_start": 37,
+          "line_end": 39,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-qty/src/lib.rs",
+          "line_start": 130,
+          "line_end": 160,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-qty/src/lib.rs",
+          "line_start": 372,
+          "line_end": 381,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-material/src/elastic.rs",
+          "line_start": 9,
+          "line_end": 17,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [
+        {
+          "engine": "git grep -E -n",
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "scope_paths": ["crates/fs-qty/src"],
+          "pattern": "pub (struct|type).*(Mole|AmountOfSubstance)|const MOL",
+          "command": "git grep -E -n 'pub (struct|type).*(Mole|AmountOfSubstance)|const MOL' 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b -- crates/fs-qty/src",
+          "result": "absent from implemented dimensions and public types",
+          "matches": 0,
+          "exit_code": 1
+        }
+      ],
+      "drift_explanation": null,
+      "follow_up_bead": null
+    },
+    {
+      "id": "B11-SPECTRAL-SPARSE-GAP",
+      "charter_row": "1.2 B11",
+      "polarity": "absent",
+      "expected": "fs-spectral lacks a production sparse resumable Lanczos/LOBPCG service and currently owns small dense gap/conditioning logic only.",
+      "observed": "The source is a small dense Jacobi monitor; the contract explicitly places production sparse warm-started solvers elsewhere and the manifest has no sparse/LA dependency.",
+      "verdict": "pass",
+      "citations": [
+        {
+          "path": "crates/fs-spectral/src/lib.rs",
+          "line_start": 10,
+          "line_end": 20,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-spectral/CONTRACT.md",
+          "line_start": 73,
+          "line_end": 76,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-spectral/Cargo.toml",
+          "line_start": 13,
+          "line_end": 14,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [
+        {
+          "engine": "git grep -E -n",
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "scope_paths": ["crates/fs-spectral/src"],
+          "pattern": "pub .*(Lanczos|LOBPCG)|struct .*(Lanczos|Lobpcg)",
+          "command": "git grep -E -n 'pub .*(Lanczos|LOBPCG)|struct .*(Lanczos|Lobpcg)' 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b -- crates/fs-spectral/src",
+          "result": "absent",
+          "matches": 0,
+          "exit_code": 1
+        }
+      ],
+      "drift_explanation": null,
+      "follow_up_bead": null
+    },
+    {
+      "id": "E-TOPOLS-LEVELSET",
+      "charter_row": "1.1 level-set machinery; 1.2 B7",
+      "polarity": "exists",
+      "expected": "WENO5/TVD-RK3 level-set advection, FIM redistancing, and velocity extension exist without implying a compressible/reactive-gas solver.",
+      "observed": "All three deterministic level-set kernels exist and remain scoped to signed-distance/interface transport.",
+      "verdict": "pass",
+      "citations": [
+        {
+          "path": "crates/fs-topols/src/weno.rs",
+          "line_start": 1,
+          "line_end": 12,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-topols/src/weno.rs",
+          "line_start": 102,
+          "line_end": 125,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-topols/src/fim.rs",
+          "line_start": 1,
+          "line_end": 165,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-topols/src/veloext.rs",
+          "line_start": 1,
+          "line_end": 61,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [
+        {
+          "engine": "git grep -E -n",
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "scope_paths": ["crates/fs-topols/src"],
+          "pattern": "pub .*(EquationOfState|SpeciesTransport|ReactiveFlow|EulerFlux)",
+          "command": "git grep -E -n 'pub .*(EquationOfState|SpeciesTransport|ReactiveFlow|EulerFlux)' 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b -- crates/fs-topols/src",
+          "result": "absent",
+          "matches": 0,
+          "exit_code": 1
+        }
+      ],
+      "drift_explanation": null,
+      "follow_up_bead": null
+    },
+    {
+      "id": "B12-NO-TRICOMPLEX2",
+      "charter_row": "1.2 B12",
+      "polarity": "absent",
+      "expected": "No oriented 2-D FEEC complex exists; committed Whitney, Hodge, cohomology, and vector-family APIs consume TetComplex.",
+      "observed": "All audited FEEC entry points are tetrahedral and no committed TriComplex2 symbol exists.",
+      "verdict": "pass",
+      "citations": [
+        {
+          "path": "crates/fs-feec/src/whitney.rs",
+          "line_start": 15,
+          "line_end": 35,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-feec/src/hodge.rs",
+          "line_start": 20,
+          "line_end": 40,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-feec/src/cohomology.rs",
+          "line_start": 25,
+          "line_end": 116,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        },
+        {
+          "path": "crates/fs-feec/src/highorder/vecfam.rs",
+          "line_start": 693,
+          "line_end": 724,
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "via": "git show"
+        }
+      ],
+      "searches": [
+        {
+          "engine": "git grep -E -n",
+          "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
+          "scope_paths": ["crates/fs-rep-mesh", "crates/fs-feec"],
+          "pattern": "TriComplex2",
+          "command": "git grep -E -n 'TriComplex2' 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b -- crates/fs-rep-mesh crates/fs-feec",
+          "result": "absent",
+          "matches": 0,
+          "exit_code": 1
+        }
+      ],
+      "drift_explanation": null,
+      "follow_up_bead": null
+    }
+  ],
+  "follow_up_beads": [
+    "frankensim-ext-epic-gov-rjoq.1",
+    "frankensim-ext-epic-gov-rjoq.2",
+    "frankensim-ext-epic-gov-rjoq.3",
+    "frankensim-ext-epic-gov-rjoq.4",
+    "frankensim-ext-epic-gov-rjoq.5"
+  ],
+  "e0_bead_pointers": [
+    "frankensim-ext-benchmark-vv-registry-f1gq",
+    "frankensim-ext-constitutive-graph-kagp",
+    "frankensim-ext-couple-port-schema-3feh",
+    "frankensim-ext-e0a-test-battery-32ps",
+    "frankensim-ext-e0b-test-battery-0oij",
+    "frankensim-ext-e0c-test-battery-q3wf",
+    "frankensim-ext-e0d-machine-slice-7jxk",
+    "frankensim-ext-feec-weighted-operators-vxth",
+    "frankensim-ext-ledger-package-migration-h61n",
+    "frankensim-ext-machine-ir-6iq3",
+    "frankensim-ext-manifest-fixture-r56j",
+    "frankensim-ext-matdb-core-5hmy",
+    "frankensim-ext-matdb-pack-compiler-6pne",
+    "frankensim-ext-matdb-seed-dataset-1sxe",
+    "frankensim-ext-program-risk-register-ppvs",
+    "frankensim-ext-qty-six-base-9qwi",
+    "frankensim-ext-rep-mesh-tricomplex2-cjhz",
+    "frankensim-ext-solver-nonlinear-block-qii8",
+    "frankensim-ext-theorem-foundry-infra-zxob",
+    "frankensim-ext-time-sparse-integrators-ra2q",
+    "frankensim-ext-vv-artifact-schemas-x68z"
+  ],
+  "summary": {
+    "claims": 16,
+    "pass": 11,
+    "drift": 5,
+    "unexplained_drift": 0,
+    "e0_bead_pointer_count": 21,
+    "verdict": "pass-with-explained-drift-and-follow-ups"
+  }
+}

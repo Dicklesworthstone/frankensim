@@ -1,0 +1,27 @@
+[package]
+name = "fs-oed-e2e"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "SensorForge: checked optimal-experimental-design campaign that greedily places instrument-bound Kalman sensor updates by decision-theoretic value of information, stops when modeled EVPI reaches its threshold, and allocates a first-order measurement-precision budget. Posterior and stop claims remain input-bound Estimated evidence until independently certified."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-assimilate = { path = "../fs-assimilate" }
+fs-voi = { path = "../fs-voi" }
+fs-toleralloc = { path = "../fs-toleralloc" }
+fs-evidence = { path = "../fs-evidence" }
+fs-blake3 = { path = "../fs-blake3" }
+fs-exec = { path = "../fs-exec" }
+fs-qty = { path = "../fs-qty" }
+fs-rand = { path = "../fs-rand" }
+
+[dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+
+[lints]
+workspace = true

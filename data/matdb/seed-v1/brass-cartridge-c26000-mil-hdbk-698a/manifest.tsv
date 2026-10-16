@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	brass-cartridge-c26000-mil-hdbk-698a
+redistribution	permitted	Work of the US Government (Department of Defense Military Standardization Handbook, no copyright notice); public domain; retain handbook number, date, and table numbers
+citation	MIL-HDBK-698A (1971), Copper and Copper Alloys, Department of Defense Military Standardization Handbook, 1 June 1971, Table XV Some Physical Properties of Wrought Alloys and Table XVI alloy 260 identity (Cartridge Brass 70 percent); http://everyspec.com/MIL-HDBK/MIL-HDBK-0600-0699/MIL_HDBK_698A_1846/
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

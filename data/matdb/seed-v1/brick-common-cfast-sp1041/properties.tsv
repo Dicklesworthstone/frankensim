@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	cfast-tsv-conversion-2026-09-07	FrankenSim CFAST thermal.csv SI typed-TSV conversion	FrankenSim conversion notice, 2026-09-07	On 2026-09-07, FrankenSim converted the CFAST thermal.csv record to SI typed TSV. The change is representation and units only; it does not change the source model-input status or assert a measured specimen property.
+observation	cfast-brick-common	Brick, Common (3 in), CFAST record COMBRICK	NIST CFAST model-input record; visual transcription check against NIST SP 1041 Chapter 3 page 9 thermal-properties screenshot	Source row is a CFAST textbook/model input, not a measured brick specimen or design allowable. Raw material, firing schedule, unit geometry/void fraction, moisture state, temperature, pressure, measurement method, replicates, and uncertainty are absent. CFAST raw values are 0.72 W/(m K), 835 J/(kg K), 1920 kg/m3, 0.076 m, and emissivity 0.9; SP 1041 displays 0.00072 kW/(m K), so the checked conversion is 0.00072*1000 = 0.72 W/(m K).
+scalar	thermal-conductivity	cfast-brick-common	thermal_conductivity	0.72	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_test_temperature_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_material_processing_known	0	0	1
+validity	thermal-conductivity	source_measurement_method_known	0	0	1
+scalar	specific-heat-capacity	cfast-brick-common	specific_heat_capacity	835	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_test_temperature_known	0	0	1
+validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
+validity	specific-heat-capacity	source_material_processing_known	0	0	1
+validity	specific-heat-capacity	source_measurement_method_known	0	0	1
+scalar	density	cfast-brick-common	density	1920	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_material_processing_known	0	0	1
+validity	density	source_measurement_method_known	0	0	1
+scalar	nominal-thickness	cfast-brick-common	nominal_thickness	0.076	m	constant
+uncertainty	nominal-thickness	unstated	-	-	-	-
+validity	nominal-thickness	source_is_cfast_layer_input	1	1	1
+scalar	emissivity	cfast-brick-common	emissivity	0.9	1	constant
+uncertainty	emissivity	unstated	-	-	-	-
+validity	emissivity	source_is_cfast_layer_input	1	1	1

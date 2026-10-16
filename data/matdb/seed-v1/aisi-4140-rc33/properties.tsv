@@ -1,0 +1,49 @@
+frankensim.matdb-source.v1
+observation	tensile-26p7C	AISI-4140-QQ-S-624-heat-137M186-1in-bar-Rockwell-C33	NASA-TM-X-64791 Table IV longitudinal round smooth tensile specimens at 26.7 degC	Normalized 899 degC; hardened 851 degC; oil quenched; tempered 566 degC; Table IV footnote reports averages from five smooth and five notched tensile specimens per condition and temperature
+observation	impact-26p7C	AISI-4140-QQ-S-624-heat-137M186-1in-bar-Rockwell-C33	NASA-TM-X-64791 Table IV MIL-STD-151 Charpy V-notched impact specimens at 26.7 degC	Normalized 899 degC; hardened 851 degC; oil quenched; tempered 566 degC; reported average covers four impact tests
+observation	shear-26p7C	AISI-4140-QQ-S-624-heat-137M186-1in-bar-Rockwell-C33	NASA-TM-X-64791 Table IV double-shear specimens at 26.7 degC	Normalized 899 degC; hardened 851 degC; oil quenched; tempered 566 degC; Table IV footnote reports averages from four shear specimens per condition and temperature
+observation	tensile-neg73C	AISI-4140-QQ-S-624-heat-137M186-1in-bar-Rockwell-C33	NASA-TM-X-64791 Table IV longitudinal round smooth tensile specimens at -73 degC	Normalized 899 degC; hardened 851 degC; oil quenched; tempered 566 degC; Table IV footnote reports averages from five smooth and five notched tensile specimens per condition and temperature
+observation	impact-neg73C	AISI-4140-QQ-S-624-heat-137M186-1in-bar-Rockwell-C33	NASA-TM-X-64791 Table IV MIL-STD-151 Charpy V-notched impact specimens at -73 degC	Normalized 899 degC; hardened 851 degC; oil quenched; tempered 566 degC; reported average covers four impact tests
+observation	shear-neg73C	AISI-4140-QQ-S-624-heat-137M186-1in-bar-Rockwell-C33	NASA-TM-X-64791 Table IV double-shear specimens at -73 degC	Normalized 899 degC; hardened 851 degC; oil quenched; tempered 566 degC; Table IV footnote reports averages from four shear specimens per condition and temperature
+scalar	ultimate-tensile-strength-26p7C	tensile-26p7C	ultimate_tensile_strength	1.074	GPa	constant
+uncertainty	ultimate-tensile-strength-26p7C	unstated	-	-	-	-
+validity	ultimate-tensile-strength-26p7C	temperature	26.7	26.7	degC
+scalar	yield-strength-0p2-offset-26p7C	tensile-26p7C	yield_strength_0p2_offset	0.985	GPa	constant
+uncertainty	yield-strength-0p2-offset-26p7C	unstated	-	-	-	-
+validity	yield-strength-0p2-offset-26p7C	temperature	26.7	26.7	degC
+scalar	tensile-elongation-2in-26p7C	tensile-26p7C	tensile_elongation_2in	19.4	%	constant
+uncertainty	tensile-elongation-2in-26p7C	unstated	-	-	-	-
+validity	tensile-elongation-2in-26p7C	temperature	26.7	26.7	degC
+scalar	tensile-reduction-of-area-26p7C	tensile-26p7C	tensile_reduction_of_area	62.5	%	constant
+uncertainty	tensile-reduction-of-area-26p7C	unstated	-	-	-	-
+validity	tensile-reduction-of-area-26p7C	temperature	26.7	26.7	degC
+scalar	charpy-v-notch-impact-energy-26p7C	impact-26p7C	charpy_v_notch_impact_energy	95.2	J	constant
+uncertainty	charpy-v-notch-impact-energy-26p7C	unstated	-	-	-	-
+validity	charpy-v-notch-impact-energy-26p7C	temperature	26.7	26.7	degC
+scalar	double-shear-ultimate-strength-26p7C	shear-26p7C	double_shear_ultimate_strength	0.66	GPa	constant
+uncertainty	double-shear-ultimate-strength-26p7C	unstated	-	-	-	-
+validity	double-shear-ultimate-strength-26p7C	temperature	26.7	26.7	degC
+scalar	double-shear-yield-strength-26p7C	shear-26p7C	double_shear_yield_strength	0.56	GPa	constant
+uncertainty	double-shear-yield-strength-26p7C	unstated	-	-	-	-
+validity	double-shear-yield-strength-26p7C	temperature	26.7	26.7	degC
+scalar	ultimate-tensile-strength-neg73C	tensile-neg73C	ultimate_tensile_strength	1.158	GPa	constant
+uncertainty	ultimate-tensile-strength-neg73C	unstated	-	-	-	-
+validity	ultimate-tensile-strength-neg73C	temperature	-73	-73	degC
+scalar	yield-strength-0p2-offset-neg73C	tensile-neg73C	yield_strength_0p2_offset	1.060	GPa	constant
+uncertainty	yield-strength-0p2-offset-neg73C	unstated	-	-	-	-
+validity	yield-strength-0p2-offset-neg73C	temperature	-73	-73	degC
+scalar	tensile-elongation-2in-neg73C	tensile-neg73C	tensile_elongation_2in	20.0	%	constant
+uncertainty	tensile-elongation-2in-neg73C	unstated	-	-	-	-
+validity	tensile-elongation-2in-neg73C	temperature	-73	-73	degC
+scalar	tensile-reduction-of-area-neg73C	tensile-neg73C	tensile_reduction_of_area	61.0	%	constant
+uncertainty	tensile-reduction-of-area-neg73C	unstated	-	-	-	-
+validity	tensile-reduction-of-area-neg73C	temperature	-73	-73	degC
+scalar	charpy-v-notch-impact-energy-neg73C	impact-neg73C	charpy_v_notch_impact_energy	84.6	J	constant
+uncertainty	charpy-v-notch-impact-energy-neg73C	unstated	-	-	-	-
+validity	charpy-v-notch-impact-energy-neg73C	temperature	-73	-73	degC
+scalar	double-shear-ultimate-strength-neg73C	shear-neg73C	double_shear_ultimate_strength	0.73	GPa	constant
+uncertainty	double-shear-ultimate-strength-neg73C	unstated	-	-	-	-
+validity	double-shear-ultimate-strength-neg73C	temperature	-73	-73	degC
+scalar	double-shear-yield-strength-neg73C	shear-neg73C	double_shear_yield_strength	0.60	GPa	constant
+uncertainty	double-shear-yield-strength-neg73C	unstated	-	-	-	-
+validity	double-shear-yield-strength-neg73C	temperature	-73	-73	degC

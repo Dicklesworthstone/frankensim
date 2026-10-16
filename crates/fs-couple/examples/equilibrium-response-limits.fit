@@ -1,0 +1,17 @@
+frankensim-equilibrium-design-v1
+preload_limits 4 128 16384
+sensitivity_limits 4 16384 16384 1e-9
+design_limits 1 1 1 4
+cases 1
+case force-limited-loading 1 1
+load 0 0 1.5
+target 1 0 0.0002 0.0001 1
+variables 1
+variable load-N 1.5 1 0.1 4 1
+bind actuator-force 0 0
+constraint_limits 4
+constraints 4
+constraint normal-cap 0 contact-force 0 at-most 0.8 1
+constraint indentation-cap 0 contact-penetration 0 at-most 0.00012 0.0001
+constraint support-floor 0 spring-force 0 at-least -0.2 1
+constraint travel-cap 0 displacement 1 0 at-most 0.00009 0.0001

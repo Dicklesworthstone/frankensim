@@ -1,0 +1,13 @@
+frankensim-listening-receipt-v1
+listener	pending
+session	2026-08-17
+artifact	b54127c96c2223ebb8f9fb9e9b0af499b425c96466e6dbc1be513c1c375e29b4
+artifact-ref	data/listening/vowel-ladder.provenance.json
+question	do the two notes read as a sung ooh then aah from ONE voice — vowel identity from physics alone?
+verdict	unadjudicated
+observations	the composed system's first vowels; awaiting the owner's ear
+loudness-sone	absent
+sharpness-acum	absent
+log-attack-time	-4.681241237375588e0
+spl-db	absent
+law	psychoacoustic metrics are never a substitute for human listening

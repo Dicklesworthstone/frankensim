@@ -1,0 +1,12 @@
+frankensim.matdb-source.v1
+observation	nasa-tp3287-al-crystal	pure cubic crystalline Al in the thermodynamic standard state at 1 bar; evaluated element, no manufactured specimen or purity assay identified	NASA/TP-3287/REV1 Table III.2 selected thermodynamic functions; Al attribution is CODATA 1989 in Table I	Engineering piecewise-linear interpolation of the printed crystal rows, not the separate NASA polynomial fit or new measurements. Source molar mass is 26.981539 g/mol: cp in J/mol/K divided by 0.026981539 kg/mol; assigned h in kJ/mol multiplied by 1000/0.026981539. Reference h=0 for crystalline Al at 298.15 K. Printed source pairs T:cp:h are 200:21.340:-2.256,298.15:24.200:0,300:24.234:0.045,400:25.735:2.548,500:26.911:5.181,600:28.043:7.928,700:29.345:10.796,800:31.006:13.809,900:33.210:17.015,933.61:34.105:18.146. Source uncertainty/covariance and interpolation error bounds are unstated. Interpolated cp and h are independent approximations, not an exactly thermodynamically consistent constitutive law. The source_phase_liquid flag identifies this table phase (0=crystal,1=liquid); it is not a phase-fraction mixture law. No density, conductivity, strength, creep, wetting or optical input is inferred.
+curve	cp-crystal	nasa-tp3287-al-crystal	cp	temperature	K	J/kg/K	200:790.91114854494,298.15:896.90954989632,300:898.16967075155,400:953.80030027197,500:997.38565691156,600:1039.34026891498,700:1087.59548519453,800:1149.15609521014,900:1230.84157653127,933.61:1264.0124049262	linear
+uncertainty	cp-crystal	unstated	-	-	-	-
+validity	cp-crystal	temperature	200	933.61	K
+validity	cp-crystal	pressure	100000	100000	Pa
+validity	cp-crystal	source_phase_liquid	0	0	1
+curve	h-crystal	nasa-tp3287-al-crystal	h	temperature	K	J/kg	200:-83612.72498207015,298.15:0,300:1667.80701427002,400:94434.93938577782,500:192020.18090962121,600:293830.53353628196,700:400125.43391242437,800:511794.37911232567,900:630616.3632845406,933.61:672533.91290986037	linear
+uncertainty	h-crystal	unstated	-	-	-	-
+validity	h-crystal	temperature	200	933.61	K
+validity	h-crystal	pressure	100000	100000	Pa
+validity	h-crystal	source_phase_liquid	0	0	1

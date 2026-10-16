@@ -1,0 +1,6 @@
+{
+  "schema": "frankensim-suite-known-red-v1",
+  "bead": "frankensim-fluz9",
+  "note": "Every entry is a test that is RED on purpose and ON THE RECORD: disposition blocked-upstream names the owning bead; repaired entries must be removed deliberately (the suite-receipt gate nags until they are). A test may enter this registry only with a named owner bead and an honest disposition — never to make a failure invisible.",
+  "known_red": []
+}

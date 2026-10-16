@@ -1,0 +1,16 @@
+# Authored lower-head felt pad clear of the reference wire bank. Not calibrated.
+frankensim-compliant-mute-v1
+surface,resonant
+# The complete jaw and felt stay inside this XY disk throughout axial travel.
+envelope,0.08,0.07,0.013
+site,0.075,0.065,0.0001
+site,0.085,0.075,0.0001
+jaw,below,0.025,0.15,0.00002,0.004,30000,0.2,2.2,3,0.15,0.7,0
+creep,below,4000,12
+force,below,0,0
+force,below,0.001,0
+force,below,0.002,0.5
+force,below,0.0045,0.5
+force,below,0.005,-0.8
+force,below,0.007,-0.8
+force,below,0.008,0

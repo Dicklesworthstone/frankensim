@@ -1,0 +1,36 @@
+frankensim.matdb-source.v1
+observation	nbs-rp500-table2-sample1144-heating	cast lead sample 1144: 99.9 percent lead, sand mold, Table 2 test 1 heating rows	Hidnert and Sweeney (1932), Thermal Expansion of Lead, RP500, Table 2 printed p.706	The source measured three cast samples, each about 300 mm long with a 10 mm square cross section, from room temperature to 300 deg C by micrometer microscopes. This record admits only the named sample 1144's first heating run: it is not the Table 2 pooled average, a generic lead value, or an instantaneous derivative. Its four values are range-mean linear expansion coefficients from the shared 20 deg C reference to the named end temperature. The Table 2 footnote reports sample 1144 density 11.310 g/cm3 at 25 deg C, converted exactly to 11310 kg/m3; the footnote does not state whether that density was measured before or after the heating run. The source does not state pressure, uncertainty, or a continuous density law. These sample-1144 measurements do not condition-match the separate NASA standard-state or liquid lead packs, so no cross-source heating or density-evolution model is asserted.
+observation	source-pressure-unstated	source pressure is unstated	Hidnert and Sweeney (1932), RP500, Table 2 and text	The publication identifies specimen composition, casting, test direction, temperature ranges, and apparatus but does not state pressure; no atmospheric or standard-pressure inference is made.
+scalar	density-25c-sample1144	nbs-rp500-table2-sample1144-heating	density	11310	kg/m3	constant
+uncertainty	density-25c-sample1144	unstated	-	-	-	-
+validity	density-25c-sample1144	temperature	298.15	298.15	K
+validity	density-25c-sample1144	source_sample_id	1144	1144	1
+validity	density-25c-sample1144	source_pressure_known	0	0	1
+scalar	mean-linear-expansion-coefficient-20-to-60c-sample1144-heating	nbs-rp500-table2-sample1144-heating	mean_linear_expansion_coefficient_from_20c	28.3e-6	K^-1	constant
+uncertainty	mean-linear-expansion-coefficient-20-to-60c-sample1144-heating	unstated	-	-	-	-
+validity	mean-linear-expansion-coefficient-20-to-60c-sample1144-heating	source_reference_temperature	293.15	293.15	K
+validity	mean-linear-expansion-coefficient-20-to-60c-sample1144-heating	source_range_end_temperature	333.15	333.15	K
+validity	mean-linear-expansion-coefficient-20-to-60c-sample1144-heating	source_sample_id	1144	1144	1
+validity	mean-linear-expansion-coefficient-20-to-60c-sample1144-heating	source_heating	1	1	1
+validity	mean-linear-expansion-coefficient-20-to-60c-sample1144-heating	source_pressure_known	0	0	1
+scalar	mean-linear-expansion-coefficient-20-to-100c-sample1144-heating	nbs-rp500-table2-sample1144-heating	mean_linear_expansion_coefficient_from_20c	28.6e-6	K^-1	constant
+uncertainty	mean-linear-expansion-coefficient-20-to-100c-sample1144-heating	unstated	-	-	-	-
+validity	mean-linear-expansion-coefficient-20-to-100c-sample1144-heating	source_reference_temperature	293.15	293.15	K
+validity	mean-linear-expansion-coefficient-20-to-100c-sample1144-heating	source_range_end_temperature	373.15	373.15	K
+validity	mean-linear-expansion-coefficient-20-to-100c-sample1144-heating	source_sample_id	1144	1144	1
+validity	mean-linear-expansion-coefficient-20-to-100c-sample1144-heating	source_heating	1	1	1
+validity	mean-linear-expansion-coefficient-20-to-100c-sample1144-heating	source_pressure_known	0	0	1
+scalar	mean-linear-expansion-coefficient-20-to-200c-sample1144-heating	nbs-rp500-table2-sample1144-heating	mean_linear_expansion_coefficient_from_20c	29.5e-6	K^-1	constant
+uncertainty	mean-linear-expansion-coefficient-20-to-200c-sample1144-heating	unstated	-	-	-	-
+validity	mean-linear-expansion-coefficient-20-to-200c-sample1144-heating	source_reference_temperature	293.15	293.15	K
+validity	mean-linear-expansion-coefficient-20-to-200c-sample1144-heating	source_range_end_temperature	473.15	473.15	K
+validity	mean-linear-expansion-coefficient-20-to-200c-sample1144-heating	source_sample_id	1144	1144	1
+validity	mean-linear-expansion-coefficient-20-to-200c-sample1144-heating	source_heating	1	1	1
+validity	mean-linear-expansion-coefficient-20-to-200c-sample1144-heating	source_pressure_known	0	0	1
+scalar	mean-linear-expansion-coefficient-20-to-300c-sample1144-heating	nbs-rp500-table2-sample1144-heating	mean_linear_expansion_coefficient_from_20c	31.2e-6	K^-1	constant
+uncertainty	mean-linear-expansion-coefficient-20-to-300c-sample1144-heating	unstated	-	-	-	-
+validity	mean-linear-expansion-coefficient-20-to-300c-sample1144-heating	source_reference_temperature	293.15	293.15	K
+validity	mean-linear-expansion-coefficient-20-to-300c-sample1144-heating	source_range_end_temperature	573.15	573.15	K
+validity	mean-linear-expansion-coefficient-20-to-300c-sample1144-heating	source_sample_id	1144	1144	1
+validity	mean-linear-expansion-coefficient-20-to-300c-sample1144-heating	source_heating	1	1	1
+validity	mean-linear-expansion-coefficient-20-to-300c-sample1144-heating	source_pressure_known	0	0	1

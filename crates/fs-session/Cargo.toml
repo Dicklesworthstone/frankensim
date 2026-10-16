@@ -1,0 +1,31 @@
+[package]
+name = "fs-session"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Sessions, capability tokens, and the enforcing resource governor: declared degradation ladder, idempotency keys, estimate() dry runs, errors as guidance."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec" }
+fs-govern = { path = "../fs-govern" }
+fs-ir = { path = "../fs-ir" }
+fs-la = { path = "../fs-la" }
+fs-ledger = { path = "../fs-ledger" }
+fs-package = { path = "../fs-package" }
+fs-plan = { path = "../fs-plan" }
+fs-qty = { path = "../fs-qty" }
+fs-voi = { path = "../fs-voi" }
+
+[dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-regime = { path = "../fs-regime" }
+
+[lints]
+workspace = true

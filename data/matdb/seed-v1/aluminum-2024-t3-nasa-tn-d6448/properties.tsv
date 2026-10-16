@@ -1,0 +1,23 @@
+frankensim.matdb-source.v1
+observation	tn6448-property-set	Aluminum 2024-T3 panel material	NASA TN D-6448 page 15 tabulated property set used for the thermoelastic damping calculations	The source lists the complete isotropic set in SI with imperial equivalents: density 5.25 slugs/ft3, Young modulus 10.5e6 psi, thermal expansion 23e-6 per K, specific heat 0.84 kJ/kg-K, thermal conductivity 0.126 kW/m-K, Poisson ratio 0.33, all at reference temperature 300 K; these are the Zener thermoelastic-formula inputs the visco-damping model bead consumes; the same page records that experimental results for aluminum wires reveal a peak material damping coefficient of 2.6e-3 at 83 Hz, agreeing with the theoretical thermoelastic value 2.3e-3 at 84 Hz; handbook-secondary tier without printed confidence semantics, so runtime uncertainty stays Unstated
+scalar	density	tn6448-property-set	density	2705	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	300	300	K
+scalar	young-modulus	tn6448-property-set	young_modulus	72400	MPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	temperature	300	300	K
+scalar	poisson-ratio	tn6448-property-set	poisson_ratio	0.33	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	temperature	300	300	K
+scalar	thermal-expansion	tn6448-property-set	thermal_expansion	0.000023	K-1	constant
+uncertainty	thermal-expansion	unstated	-	-	-	-
+validity	thermal-expansion	temperature	300	300	K
+scalar	specific-heat-capacity	tn6448-property-set	specific_heat_capacity	840	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	temperature	300	300	K
+scalar	thermal-conductivity	tn6448-property-set	thermal_conductivity	126	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	temperature	300	300	K
+scalar	loss-factor-thermoelastic-peak	tn6448-property-set	loss_factor_thermoelastic_peak	0.0026	1	constant
+uncertainty	loss-factor-thermoelastic-peak	unstated	-	-	-	-
+validity	loss-factor-thermoelastic-peak	frequency	83	83	Hz

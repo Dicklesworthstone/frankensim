@@ -1,0 +1,72 @@
+name: Cooling resistance design
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-airflow/**'
+      - 'crates/fs-cli/src/network_command*'
+      - 'crates/fs-cli/src/network_command/**'
+      - 'crates/fs-cli/Cargo.toml'
+      - 'crates/fs-ascent/src/projected_al.rs'
+      - '.github/workflows/cooling-design.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  resistance-design:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize pinned dependencies
+        run: |
+          if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
+            python3 - <<'PYCODE'
+          import json, pathlib, subprocess
+          root = pathlib.Path('../franken_numpy')
+          pin = next(r for r in json.loads(pathlib.Path('constellation.lock').read_text())['libraries'] if r['lib'] == 'franken_numpy')['git_head']
+          def git(*args):
+              return subprocess.check_output(['git', '-C', str(root), *args])
+          if git('rev-parse', 'HEAD').decode().strip() != pin or git('config', '--local', '--get', 'frankensim.bootstrapIncomplete').strip() != b'true':
+              raise SystemExit('not the incomplete pinned clone; refusing repair')
+          name = 'legacy_numpy_code/numpy/doc/make.bat'
+          path = root / name
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit('expected an ordinary tracked batch file')
+          raw = git('cat-file', 'blob', pin + ':' + name)
+          actual = path.read_bytes()
+          if actual == raw or actual.replace(b'\r\n', b'\n') != raw.replace(b'\r\n', b'\n'):
+              raise SystemExit('not a line-ending-only checkout discrepancy')
+          attributes = pathlib.Path(git('rev-parse', '--absolute-git-dir').decode().strip()) / 'info/attributes'
+          attributes.parent.mkdir(parents=True, exist_ok=True)
+          with attributes.open('a') as stream:
+              stream.write('\n' + name + ' -text\n')
+          path.write_bytes(raw)
+          git('add', '--', name)
+          if git('rev-parse', ':' + name).strip() != git('rev-parse', pin + ':' + name).strip() or path.read_bytes() != raw:
+              raise SystemExit('restoration changed the locked source or index')
+          PYCODE
+            cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
+          fi
+      - name: Test material stored cooling and radiative heat partition
+        shell: bash
+        run: |
+          set -o pipefail
+          git rev-parse HEAD > material-cooling-test.log
+          cargo test -p fs-airflow --test stored_cooling --test stored_radiation 2>&1 | tee -a material-cooling-test.log
+          cargo test -p fs-airflow --example recirculating_cooling 2>&1 | tee -a material-cooling-test.log
+      - name: Retain native material-cooling diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: material-cooling-native-diagnostics
+          path: material-cooling-test.log
+          retention-days: 1
+      - name: Test actual hydraulic derivatives and coupled resistance design
+        run: |
+          cargo test -p fs-airflow --lib graph::sensitivity::
+          cargo test -p fs-cli --features cooling-design --bin frankensim network_command::design::resistance::

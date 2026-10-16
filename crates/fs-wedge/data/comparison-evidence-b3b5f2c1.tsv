@@ -1,0 +1,46 @@
+FS-WEDGE-COMPARISON-EVIDENCE-SNAPSHOT	1
+REVISION	b3b5f2c1c809eec06cde1e40cbc916d6995469b5
+SOURCE	COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md	104003	dc58fca3e4f32ccda01483a5b56f6ce3dabde1f98a3e7b86a4f2b61586127d57	d5efbdff5b1595fffcde0da72f8d82b43363ad60	f645fefcfa3c820cd9ed6127fe5ffe6150f41d0af419c4d11217b9a99aab475e
+SOURCE	crates/fs-adjoint/CONTRACT.md	35208	3cfba6b8debdb7de2db679a5ebd8d8cd5f487131991e9fa62785c9fc9c230499	3972c25a098aff02850a5df6e2e8510355a8e0f2	2a05121e9ed89c9b0f619c1645a51372084e7c8e5bc08a6b776d1cdd7572e12d
+SOURCE	crates/fs-airflow/src/lib.rs	43829	31156b5fadc4573c5e3c7851371b2b1fa28aeebb752b9faa410e1e14a66a8798	c407b3e353f617cfc0b33e82a385fe4c06e5c010	5d67be974cb14f37b32f9635259d23cf88ab463d2edc8259bbe497a159f6bec2
+SOURCE	crates/fs-conduction/CONTRACT.md	23816	7fcba8fef7d13f0dadb9f4a12e51518b10d854398e8bc7cbde75c741363a6296	9dbc2bfb45b35f8e097c57be3cc8cd1b5bfd6f31	8385f1bba1eb4eb713e63cc2dbcc299936f82aa95e46673a2112c8715654050a
+SOURCE	crates/fs-conduction/src/interface.rs	34925	f5868c383ade170348c3d050123a9947a7ec48271479812267205c4a2a845f91	8fac7f8dd594dc0f9dfd4441c1606f80f7e01587	ea2fd936b626479bbc326bbe67abc69dc186618750ec58e1fe92ec545b077ffc
+SOURCE	crates/fs-conduction/src/solve.rs	40063	612063ea13b6c44bfefabafefebb2633ac3b9c1b608cc9970b395f1b21ba67c4	296b864c3aee30995dc5c9b7d9a26e1c5f785e4b	65db458dd73087b1c6b4ec19967d4088721a1419402d4eb22c1a782871474df1
+SOURCE	crates/fs-convection/src/lib.rs	34556	f1a427708ad2db56c91d47b3efb6c4ac25f733f1dabf923d87922274e55e4cf0	019dc56d15dff4c944396db524bf9d5063676d1a	1184a056efe62b494eef3992b50e5a83ba6e788cbabe176a882681080a50cb26
+SOURCE	crates/fs-cutfem/CONTRACT.md	22386	744d04bfb4cfc918b09769d45a77d705cf0ab409852e13d9c6e2a1ce0a5f6177	4faaf4179ec4935507f862ad66a94bbfc17393d9	057e66ae5b4e59bc6c3468c80adaffce20a05411b239477b967465e5b2006e6e
+SOURCE	crates/fs-io/CONTRACT.md	34645	120a4fb93a8982bc88a582747425ef5ea06684fd2f4dc08aef7207ee1055e32f	4490d9d912724c1888636e41492a103bce9e17f5	fd26176717e3123cfd7768f2fef151fe43303e0b278e8b73589c4536944d4a82
+SOURCE	crates/fs-ladder/CONTRACT.md	3852	a52f821312faf3f601be96e746a5f5156ca0c24412eb7b53f5f4dd3f9967e7bb	a517462b1c14309caa2432925b4475071c93892c	d7c86b79f5c08221ceb183a66b213243a021361b90ec38b92737d72bd427182c
+SOURCE	crates/fs-ladder/src/lib.rs	13290	fbb3148ec2c5ca1712d33c920f253a76dc0bf7b1aa917fa82610dbf18c58e708	752e6059bfdf0461b2c27154b404f2f6427ea143	4d72cb9e9f150a6d661dcb31d212098d488316aa5fe1a6d5ab65b5eb287a0109
+SOURCE	crates/fs-rep-sdf/CONTRACT.md	13038	ab1f1f58a61bc2a80907323cc45fc90e31bb19d2250abbcaa0a1a006a3977b68	bee96ad4b7d52e9bde9aed54bbe6461bb0117cdb	9d5c0a0baf9a057663361e4a7fbd9cfe32e8435d6f389849304ef72cfc18bd69
+SOURCE	crates/fs-topopt/CONTRACT.md	15943	513689ea80ea10b39ffbdcef8e66051bead1344f113c51999721290ff8e4d09f	3d56b1cef9d9e40c7444255e5cbda934bc7f591b	118edefc8dae81bfcdcb99ca77f5a00bf3d0666b9bdfba916a658c0cf31b15b2
+POINTER	full-electronics-cooling-cht	customer-pain	COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md	iteration loop between thermal and mechanical/layout teams is the acknowledged pain
+POINTER	full-electronics-cooling-cht	kernel-readiness	crates/fs-conduction/src/solve.rs	pub struct ConductionSolver
+POINTER	full-electronics-cooling-cht	kernel-readiness	crates/fs-airflow/src/lib.rs	pub struct FanCurve
+POINTER	full-electronics-cooling-cht	kernel-readiness	crates/fs-conduction/src/interface.rs	pub struct InterfaceResistance
+POINTER	full-electronics-cooling-cht	low-cad-burden	crates/fs-io/CONTRACT.md	broader CAD/EXPRESS
+POINTER	full-electronics-cooling-cht	differentiation	COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md	The differentiation is composition, not physics
+POINTER	full-electronics-cooling-cht	low-compute-cost	crates/fs-ladder/CONTRACT.md	The ladder does not run solves
+POINTER	full-electronics-cooling-cht	low-regulatory-risk	COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md	regulatory friction is low
+POINTER	sdf-structural-topology-assurance	kernel-readiness	crates/fs-rep-sdf/CONTRACT.md	Signed-distance-field charts
+POINTER	sdf-structural-topology-assurance	kernel-readiness	crates/fs-cutfem/CONTRACT.md	vector Q1, plane-strain elasticity frontend
+POINTER	sdf-structural-topology-assurance	kernel-readiness	crates/fs-topopt/CONTRACT.md	SIMP with the modern hygiene stack
+POINTER	sdf-structural-topology-assurance	validation-tractability	crates/fs-cutfem/CONTRACT.md	fixed three-level log-log Q1 convergence
+POINTER	sdf-structural-topology-assurance	validation-tractability	crates/fs-topopt/CONTRACT.md	FULL-CHAIN sensitivity vs FD
+POINTER	sdf-structural-topology-assurance	low-cad-burden	crates/fs-rep-sdf/CONTRACT.md	narrow-band level sets
+POINTER	sdf-structural-topology-assurance	low-cad-burden	crates/fs-io/CONTRACT.md	strict native triangular faceted-resource
+POINTER	sdf-structural-topology-assurance	short-time-to-decision	crates/fs-topopt/CONTRACT.md	whole runs replay bitwise
+POINTER	sdf-structural-topology-assurance	short-time-to-decision	crates/fs-cutfem/CONTRACT.md	3D octree instantiation
+POINTER	sdf-structural-topology-assurance	differentiation	COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md	differentiability a routing requirement
+POINTER	sdf-structural-topology-assurance	differentiation	crates/fs-adjoint/CONTRACT.md	density_pullback
+POINTER	sdf-structural-topology-assurance	low-compute-cost	crates/fs-topopt/CONTRACT.md	Per-iteration wall times are DEBUG-build measurements
+POINTER	thermal-design-assurance	customer-pain	COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md	iteration loop between thermal and mechanical/layout teams is the acknowledged pain
+POINTER	thermal-design-assurance	kernel-readiness	crates/fs-conduction/src/solve.rs	pub struct ConductionSolver
+POINTER	thermal-design-assurance	kernel-readiness	crates/fs-conduction/src/interface.rs	pub struct InterfaceResistance
+POINTER	thermal-design-assurance	kernel-readiness	crates/fs-convection/src/lib.rs	pub struct CorrelationInputs
+POINTER	thermal-design-assurance	kernel-readiness	crates/fs-airflow/src/lib.rs	pub struct FanCurve
+POINTER	thermal-design-assurance	validation-tractability	crates/fs-conduction/CONTRACT.md	every analytic comparison and MMS gate
+POINTER	thermal-design-assurance	low-cad-burden	crates/fs-io/CONTRACT.md	broader CAD/EXPRESS
+POINTER	thermal-design-assurance	differentiation	COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md	The differentiation is composition, not physics
+POINTER	thermal-design-assurance	low-compute-cost	crates/fs-conduction/CONTRACT.md	continuous P₁ Lagrange
+POINTER	thermal-design-assurance	low-compute-cost	crates/fs-ladder/src/lib.rs	real costs from telemetry
+POINTER	thermal-design-assurance	low-regulatory-risk	COMPREHENSIVE_ADDENDUM_TO_FRANKENSIM_PLAN.md	regulatory friction is low

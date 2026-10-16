@@ -1,0 +1,22 @@
+[package]
+name = "fs-vvreg"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Gauntlet G1/G2 benchmark and V&V registry: pinned editions, licenses, deck hashes, QoIs, and acceptance envelopes with fail-closed citation."
+
+[package.metadata.frankensim]
+layer = "UTIL"
+
+[dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-evidence = { path = "../fs-evidence" }
+fs-qty = { path = "../fs-qty" }
+
+[dev-dependencies]
+fs-ledger = { path = "../fs-ledger" }
+
+[lints]
+workspace = true

@@ -1,0 +1,40 @@
+frankensim.matdb-source.v1
+observation	section-3-y30-optimal-afcp-overload-demagnetization	source-grade-Y30-ferrite-in-optimized-60.16cm3-dual-rotor-single-stator-axial-flux-consequent-pole-FEA-model-supplier-process-unknown	Kim and Baek 2026 Section 3 Equation 5 and Figures 13-14; three-dimensional finite-element demagnetization analysis at five times rated current and unchanged 6000 rpm speed	The source defines demagnetization coefficient as one minus post-field recoil flux density divided by initial residual flux density and reports the spatial maximum in the optimized motor as 1.654 percent at 20 degC and 22.396 percent at -40 degC. These are application-model outputs under a maximum modeled stator field of 256.49 kA/m, not intrinsic Y30 material allowables. Figure 13 plots the input B-H curves but supplies no tabulated points. Magnet manufacturer grade specification chemistry process lot magnetization state and curve provenance are absent. FEA software mesh convergence boundary-condition detail numerical uncertainty repeats dispersion and prototype validation are absent. No recoil permeability reversible recoil line or standalone irreversible-loss boundary is admitted
+scalar	maximum-demagnetization-20degC	section-3-y30-optimal-afcp-overload-demagnetization	application_model_maximum_demagnetization_fraction	1.654	%	constant
+uncertainty	maximum-demagnetization-20degC	unstated	-	-	-	-
+validity	maximum-demagnetization-20degC	temperature	20	20	degC
+validity	maximum-demagnetization-20degC	rotational_frequency	100	100	Hz
+validity	maximum-demagnetization-20degC	source_motor_output_power	750	750	W
+validity	maximum-demagnetization-20degC	source_optimal_model_magnet_volume	0.00006016	0.00006016	m^3
+validity	maximum-demagnetization-20degC	source_current_multiplier_relative_to_rated	5	5	1
+validity	maximum-demagnetization-20degC	source_maximum_stator_magnetic_field_strength	256490	256490	A/m
+validity	maximum-demagnetization-20degC	source_grade_label_y30	1	1	1
+validity	maximum-demagnetization-20degC	source_result_is_3d_fea	1	1	1
+validity	maximum-demagnetization-20degC	source_coefficient_is_spatial_maximum	1	1	1
+validity	maximum-demagnetization-20degC	source_equation_uses_post_field_recoil_flux_density	1	1	1
+validity	maximum-demagnetization-20degC	source_magnet_supplier_process_composition_lot_known	0	0	1
+validity	maximum-demagnetization-20degC	source_fea_software_mesh_convergence_known	0	0	1
+validity	maximum-demagnetization-20degC	source_bh_curve_points_tabulated	0	0	1
+validity	maximum-demagnetization-20degC	source_recoil_relative_permeability_known	0	0	1
+validity	maximum-demagnetization-20degC	source_experimental_prototype_validation_performed	0	0	1
+validity	maximum-demagnetization-20degC	source_intrinsic_material_limit_claimed	0	0	1
+validity	maximum-demagnetization-20degC	source_uncertainty_dispersion_known	0	0	1
+scalar	maximum-demagnetization-minus40degC	section-3-y30-optimal-afcp-overload-demagnetization	application_model_maximum_demagnetization_fraction	22.396	%	constant
+uncertainty	maximum-demagnetization-minus40degC	unstated	-	-	-	-
+validity	maximum-demagnetization-minus40degC	temperature	-40	-40	degC
+validity	maximum-demagnetization-minus40degC	rotational_frequency	100	100	Hz
+validity	maximum-demagnetization-minus40degC	source_motor_output_power	750	750	W
+validity	maximum-demagnetization-minus40degC	source_optimal_model_magnet_volume	0.00006016	0.00006016	m^3
+validity	maximum-demagnetization-minus40degC	source_current_multiplier_relative_to_rated	5	5	1
+validity	maximum-demagnetization-minus40degC	source_maximum_stator_magnetic_field_strength	256490	256490	A/m
+validity	maximum-demagnetization-minus40degC	source_grade_label_y30	1	1	1
+validity	maximum-demagnetization-minus40degC	source_result_is_3d_fea	1	1	1
+validity	maximum-demagnetization-minus40degC	source_coefficient_is_spatial_maximum	1	1	1
+validity	maximum-demagnetization-minus40degC	source_equation_uses_post_field_recoil_flux_density	1	1	1
+validity	maximum-demagnetization-minus40degC	source_magnet_supplier_process_composition_lot_known	0	0	1
+validity	maximum-demagnetization-minus40degC	source_fea_software_mesh_convergence_known	0	0	1
+validity	maximum-demagnetization-minus40degC	source_bh_curve_points_tabulated	0	0	1
+validity	maximum-demagnetization-minus40degC	source_recoil_relative_permeability_known	0	0	1
+validity	maximum-demagnetization-minus40degC	source_experimental_prototype_validation_performed	0	0	1
+validity	maximum-demagnetization-minus40degC	source_intrinsic_material_limit_claimed	0	0	1
+validity	maximum-demagnetization-minus40degC	source_uncertainty_dispersion_known	0	0	1

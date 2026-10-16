@@ -1,0 +1,616 @@
+//! Convex support machinery with certified separation enclosures
+//! (bead rjnd, E1 query upgrades, part 2).
+//!
+//! [`ConvexSupportMap`] presents a compact convex set through its
+//! support function; [`convex_separation`] runs a deterministic
+//! Frank-Wolfe descent on the Minkowski difference and returns a
+//! rigorous `[lo, hi]` enclosure of the Euclidean distance between the
+//! two sets. Both bounds are certificates:
+//!
+//! - the UPPER bound is the outward-rounded norm of an actual
+//!   difference of support points (a realized point of `A ⊖ B`),
+//!   inflated by both shapes' declared support slack;
+//! - the LOWER bound is the outward-rounded support-plane separation
+//!   `-h_{A⊖B}(-d) = min_A d·x - max_B d·y` for the best certified
+//!   direction found, deflated by the slacks and clamped at zero.
+//!
+//! Every iterate keeps both bounds valid, so an early stop (iteration
+//! cap, slow nonsmooth convergence) yields a WIDE enclosure, never a
+//! wrong one. A separation bracket containing zero still proves no
+//! overlap; [`crate::convex_penetration_depth`] is a separate route that
+//! requires a strictly positive common-ball witness.
+
+use crate::{ContactInflation, QueryError};
+use fs_exec::Cx;
+use fs_geom::{Aabb, Point3, Vec3};
+
+/// Default Frank-Wolfe iteration budget: enough for smooth shapes to
+/// close the gap to rounding scale, while nonsmooth (polytope) pairs
+/// honestly report the `1/k`-rate residual width instead of spinning.
+pub const CONVEX_SEPARATION_DEFAULT_ITERATIONS: u32 = 256;
+
+/// Hard iteration ceiling (work bound, not an accuracy promise).
+pub const CONVEX_SEPARATION_MAX_ITERATIONS: u32 = 65_536;
+
+/// Cancellation-poll stride in iterations.
+const CHECKPOINT_STRIDE: u32 = 64;
+
+/// A compact convex set presented by its support function.
+///
+/// Contract: `support_point(d)` returns a point of the set within
+/// Euclidean distance `support_slack()` of a true supporting point in
+/// direction `d` (the slack certifies the shape's own evaluation
+/// rounding; zero means exact, e.g. corner selection). Returned points
+/// and the slack must be finite; `interior_point()` must lie in the
+/// set (it seeds the deterministic start direction).
+pub trait ConvexSupportMap: Send + Sync {
+    /// A point of the set (near-)maximizing `d · x`.
+    fn support_point(&self, direction: Vec3) -> Point3;
+
+    /// Any fixed point of the set (deterministic).
+    fn interior_point(&self) -> Point3;
+
+    /// Certified upper bound on the Euclidean error of
+    /// [`Self::support_point`] results.
+    fn support_slack(&self) -> f64;
+
+    /// Certified radius of a Euclidean ball around `center` contained in
+    /// this set.
+    ///
+    /// `None` means that this support-map implementation cannot prove the
+    /// containment (not that the point is necessarily outside). A positive
+    /// return is an overlap-proof capability used by the penetration route;
+    /// zero is never enough because touching does not prove penetration.
+    fn contained_ball_radius(&self, center: Point3) -> Option<f64> {
+        let _ = center;
+        None
+    }
+
+    /// Stable name for refusal messages.
+    fn name(&self) -> &'static str;
+}
+
+/// Exact Euclidean ball as a support map.
+#[derive(Debug, Clone, Copy)]
+pub struct ConvexSphere {
+    center: Point3,
+    radius: f64,
+    slack: f64,
+}
+
+impl ConvexSphere {
+    /// Validated construction.
+    ///
+    /// # Errors
+    /// [`QueryError::ConvexInvalidShape`] for non-finite centers or a
+    /// non-finite/non-positive radius.
+    pub fn new(center: Point3, radius: f64) -> Result<ConvexSphere, QueryError> {
+        let finite = center.x.is_finite() && center.y.is_finite() && center.z.is_finite();
+        if !finite || !radius.is_finite() || radius <= 0.0 {
+            return Err(QueryError::ConvexInvalidShape {
+                reason: "sphere needs a finite center and a positive finite radius",
+            });
+        }
+        // support = c + r·d/|d|: normalization, scaling, and the three
+        // additions cost a handful of ulps at the |c| + r scale. 2^-44
+        // of that scale (~1e4 ulps) is a generous certified ceiling.
+        let scale = center.x.abs().max(center.y.abs()).max(center.z.abs()) + radius;
+        // det-ok: fixed in-range 2^-44 is exact binary64 (4xnt)
+        let slack = (scale * 2f64.powi(-44)).next_up();
+        Ok(ConvexSphere {
+            center,
+            radius,
+            slack,
+        })
+    }
+}
+
+impl ConvexSupportMap for ConvexSphere {
+    fn support_point(&self, direction: Vec3) -> Point3 {
+        let n = direction.norm();
+        if n > 0.0 && n.is_finite() {
+            self.center.offset(direction.scale(self.radius / n))
+        } else {
+            // Degenerate direction: any boundary point supports SOME
+            // direction; the fixed choice keeps runs deterministic.
+            self.center.offset(Vec3::new(self.radius, 0.0, 0.0))
+        }
+    }
+
+    fn interior_point(&self) -> Point3 {
+        self.center
+    }
+
+    fn support_slack(&self) -> f64 {
+        self.slack
+    }
+
+    fn contained_ball_radius(&self, center: Point3) -> Option<f64> {
+        if !(center.x.is_finite() && center.y.is_finite() && center.z.is_finite()) {
+            return None;
+        }
+        let distance_hi = norm_upper(center.delta_from(self.center));
+        if !distance_hi.is_finite() {
+            return None;
+        }
+        let radius = (self.radius - distance_hi).next_down();
+        (radius > 0.0 && radius.is_finite()).then_some(radius)
+    }
+
+    fn name(&self) -> &'static str {
+        "convex/sphere"
+    }
+}
+
+/// Axis-aligned box as a support map (corner selection is exact).
+#[derive(Debug, Clone, Copy)]
+pub struct ConvexBox {
+    aabb: Aabb,
+}
+
+impl ConvexBox {
+    /// Validated construction.
+    ///
+    /// # Errors
+    /// [`QueryError::ConvexInvalidShape`] for a non-finite or
+    /// degenerate (min not strictly below max on every axis) box.
+    pub fn new(aabb: Aabb) -> Result<ConvexBox, QueryError> {
+        let solid = aabb.min.x.is_finite()
+            && aabb.min.y.is_finite()
+            && aabb.min.z.is_finite()
+            && aabb.max.x.is_finite()
+            && aabb.max.y.is_finite()
+            && aabb.max.z.is_finite()
+            && aabb.min.x < aabb.max.x
+            && aabb.min.y < aabb.max.y
+            && aabb.min.z < aabb.max.z;
+        if solid {
+            Ok(ConvexBox { aabb })
+        } else {
+            Err(QueryError::ConvexInvalidShape {
+                reason: "box needs finite corners with min strictly below max per axis",
+            })
+        }
+    }
+}
+
+impl ConvexSupportMap for ConvexBox {
+    fn support_point(&self, direction: Vec3) -> Point3 {
+        // Ties (zero components) break toward max: deterministic and a
+        // valid supporting corner either way.
+        let pick = |d: f64, lo: f64, hi: f64| if d < 0.0 { lo } else { hi };
+        Point3::new(
+            pick(direction.x, self.aabb.min.x, self.aabb.max.x),
+            pick(direction.y, self.aabb.min.y, self.aabb.max.y),
+            pick(direction.z, self.aabb.min.z, self.aabb.max.z),
+        )
+    }
+
+    fn interior_point(&self) -> Point3 {
+        Point3::new(
+            f64::midpoint(self.aabb.min.x, self.aabb.max.x),
+            f64::midpoint(self.aabb.min.y, self.aabb.max.y),
+            f64::midpoint(self.aabb.min.z, self.aabb.max.z),
+        )
+    }
+
+    fn support_slack(&self) -> f64 {
+        0.0
+    }
+
+    fn contained_ball_radius(&self, center: Point3) -> Option<f64> {
+        if !(center.x.is_finite() && center.y.is_finite() && center.z.is_finite()) {
+            return None;
+        }
+        let radius = [
+            (center.x - self.aabb.min.x).next_down(),
+            (self.aabb.max.x - center.x).next_down(),
+            (center.y - self.aabb.min.y).next_down(),
+            (self.aabb.max.y - center.y).next_down(),
+            (center.z - self.aabb.min.z).next_down(),
+            (self.aabb.max.z - center.z).next_down(),
+        ]
+        .into_iter()
+        .fold(f64::INFINITY, f64::min);
+        (radius > 0.0 && radius.is_finite()).then_some(radius)
+    }
+
+    fn name(&self) -> &'static str {
+        "convex/box"
+    }
+}
+
+/// Oriented solid box as a support map.
+///
+/// The three axes are world-space unit vectors in local x/y/z order. The
+/// constructor validates the frame instead of silently normalizing it so a
+/// caller cannot smuggle scale or shear into a collision envelope.
+#[derive(Debug, Clone, Copy)]
+pub struct ConvexOrientedBox {
+    center: Point3,
+    axes: [Vec3; 3],
+    half_extents: Vec3,
+    slack: f64,
+}
+
+impl ConvexOrientedBox {
+    /// Construct a finite, non-degenerate oriented box.
+    ///
+    /// # Errors
+    /// [`QueryError::ConvexInvalidShape`] when the center, extents, or frame
+    /// are non-finite, an extent is not positive, or the frame is not a
+    /// right-handed orthonormal basis within the public tolerance.
+    pub fn new(center: Point3, axes: [Vec3; 3], half_extents: Vec3) -> Result<Self, QueryError> {
+        const FRAME_TOLERANCE: f64 = 1.0e-10;
+        let finite_center = center.x.is_finite() && center.y.is_finite() && center.z.is_finite();
+        let finite_extents = half_extents.x.is_finite()
+            && half_extents.y.is_finite()
+            && half_extents.z.is_finite()
+            && half_extents.x > 0.0
+            && half_extents.y > 0.0
+            && half_extents.z > 0.0;
+        let finite_axes = axes
+            .iter()
+            .all(|axis| axis.x.is_finite() && axis.y.is_finite() && axis.z.is_finite());
+        let unit_axes = finite_axes
+            && axes
+                .iter()
+                .all(|axis| (axis.dot(*axis) - 1.0).abs() <= FRAME_TOLERANCE);
+        let orthogonal = unit_axes
+            && axes[0].dot(axes[1]).abs() <= FRAME_TOLERANCE
+            && axes[0].dot(axes[2]).abs() <= FRAME_TOLERANCE
+            && axes[1].dot(axes[2]).abs() <= FRAME_TOLERANCE;
+        let handedness = cross(axes[0], axes[1]).dot(axes[2]);
+        let right_handed = orthogonal && (handedness - 1.0).abs() <= 4.0 * FRAME_TOLERANCE;
+        if !(finite_center && finite_extents && right_handed) {
+            return Err(QueryError::ConvexInvalidShape {
+                reason: "oriented box needs a finite center, positive finite half extents, and a right-handed orthonormal frame",
+            });
+        }
+
+        let center_scale = center.x.abs().max(center.y.abs()).max(center.z.abs());
+        let extent_scale = half_extents.x + half_extents.y + half_extents.z;
+        // Three scaled-axis additions plus the support-direction dots. This is
+        // deliberately conservative; the slack is composed by the query.
+        let slack = ((center_scale + extent_scale) * 2f64.powi(-42)).next_up();
+        Ok(Self {
+            center,
+            axes,
+            half_extents,
+            slack,
+        })
+    }
+}
+
+impl ConvexSupportMap for ConvexOrientedBox {
+    fn support_point(&self, direction: Vec3) -> Point3 {
+        let extents = [
+            self.half_extents.x,
+            self.half_extents.y,
+            self.half_extents.z,
+        ];
+        self.axes
+            .iter()
+            .zip(extents)
+            .fold(self.center, |point, (axis, extent)| {
+                let signed_extent = if direction.dot(*axis) < 0.0 {
+                    -extent
+                } else {
+                    extent
+                };
+                point.offset(axis.scale(signed_extent))
+            })
+    }
+
+    fn interior_point(&self) -> Point3 {
+        self.center
+    }
+
+    fn support_slack(&self) -> f64 {
+        self.slack
+    }
+
+    fn name(&self) -> &'static str {
+        "convex/oriented-box"
+    }
+}
+
+fn cross(a: Vec3, b: Vec3) -> Vec3 {
+    Vec3::new(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x,
+    )
+}
+
+/// A certified separation verdict between two convex sets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConvexSeparation {
+    /// Certified lower bound on the Euclidean distance (≥ 0).
+    pub lo: f64,
+    /// Certified upper bound on the Euclidean distance.
+    pub hi: f64,
+    /// `lo > 0`: the sets are PROVEN disjoint with at least this gap.
+    /// When false, nothing is claimed either way (see module docs).
+    pub separation_proven: bool,
+    /// Iterations actually spent.
+    pub iterations: u32,
+    /// Witness point realized in `A` for the upper bound.
+    pub witness_a: [f64; 3],
+    /// Witness point realized in `B` for the upper bound.
+    pub witness_b: [f64; 3],
+}
+
+/// Certified distance enclosure between two convex support maps via
+/// deterministic Frank-Wolfe on the Minkowski difference.
+///
+/// `max_iterations` is clamped to
+/// [`CONVEX_SEPARATION_MAX_ITERATIONS`]; zero refuses. The returned
+/// `[lo, hi]` always contains the true set distance; the width is an
+/// honest convergence report, not a promise (nonsmooth pairs tighten
+/// at `1/k`).
+///
+/// # Errors
+/// [`QueryError::ConvexInvalidShape`] for a zero iteration budget;
+/// [`QueryError::ConvexInvalidSupport`] when a support map returns a
+/// non-finite point or non-finite bound arithmetic appears;
+/// [`QueryError::Cancelled`] on cancellation.
+pub fn convex_separation(
+    a: &dyn ConvexSupportMap,
+    b: &dyn ConvexSupportMap,
+    max_iterations: u32,
+    cx: &Cx<'_>,
+) -> Result<ConvexSeparation, QueryError> {
+    if max_iterations == 0 {
+        return Err(QueryError::ConvexInvalidShape {
+            reason: "iteration budget must be positive",
+        });
+    }
+    let budget = max_iterations.min(CONVEX_SEPARATION_MAX_ITERATIONS);
+    let slack = {
+        let s = (a.support_slack() + b.support_slack()).next_up();
+        if !s.is_finite() || s < 0.0 {
+            return Err(QueryError::ConvexInvalidSupport { at: [s, 0.0, 0.0] });
+        }
+        s
+    };
+    // Deterministic seed direction: interior difference, or +x when
+    // the interiors coincide.
+    let seed = a.interior_point().delta_from(b.interior_point());
+    let d0 = if seed.norm() > 0.0 && seed.norm().is_finite() {
+        seed
+    } else {
+        Vec3::new(1.0, 0.0, 0.0)
+    };
+    let (mut pa, mut pb) = support_pair(a, b, d0.scale(-1.0))?;
+    let mut v = pa.delta_from(pb);
+    let mut best_lo = 0.0f64;
+    let mut best = summarize(v, best_lo, slack, 0, pa, pb)?;
+    for iteration in 0..budget {
+        if iteration % CHECKPOINT_STRIDE == 0 && cx.checkpoint().is_err() {
+            return Err(QueryError::Cancelled);
+        }
+        let vnorm = v.norm();
+        if !vnorm.is_finite() {
+            return Err(QueryError::ConvexInvalidSupport {
+                at: [v.x, v.y, v.z],
+            });
+        }
+        if vnorm == 0.0 {
+            // A realized common point: distance is exactly bracketed
+            // by the slack alone.
+            best = summarize(v, 0.0, slack, iteration + 1, pa, pb)?;
+            break;
+        }
+        // Support of A ⊖ B in direction -v (the minimizer of v·x),
+        // realized in each set.
+        let (sa, sb) = support_pair(a, b, v.scale(-1.0))?;
+        let s = sa.delta_from(sb);
+        // Certified support-plane bound: for the unit u = v/|v| and
+        // every x in A⊖B, |x| ≥ u·x, so distance ≥ (min_x v·x)/|v|
+        // = v·s/|v|. Rounded against the claim (dot down, norm up);
+        // a non-positive numerator proves nothing beyond the trivial
+        // distance ≥ 0.
+        let dot_vs = dot_lower(v, s);
+        if !dot_vs.is_finite() {
+            return Err(QueryError::ConvexInvalidSupport {
+                at: [s.x, s.y, s.z],
+            });
+        }
+        if dot_vs > 0.0 {
+            let plane_lo = (dot_vs / norm_upper(v)).next_down();
+            if !plane_lo.is_finite() {
+                return Err(QueryError::ConvexInvalidSupport {
+                    at: [s.x, s.y, s.z],
+                });
+            }
+            best_lo = best_lo.max(plane_lo);
+        }
+        // Exact line search on [v, s]: minimizes |v + t(s - v)|.
+        let w = Vec3::new(s.x - v.x, s.y - v.y, s.z - v.z);
+        let ww = w.dot(w);
+        if ww > 0.0 && ww.is_finite() {
+            let t = (-v.dot(w) / ww).clamp(0.0, 1.0);
+            if t >= 1.0 {
+                pa = sa;
+                pb = sb;
+                v = pa.delta_from(pb);
+            } else if t > 0.0 {
+                // The blended iterate stays a certified point of A ⊖ B
+                // only up to convexity of both sets; realize it through
+                // the same blend of the witnesses.
+                pa = lerp(pa, sa, t);
+                pb = lerp(pb, sb, t);
+                v = pa.delta_from(pb);
+            }
+        }
+        let candidate = summarize(v, best_lo, slack, iteration + 1, pa, pb)?;
+        if candidate.hi < best.hi || candidate.lo > best.lo {
+            best = ConvexSeparation {
+                lo: best.lo.max(candidate.lo),
+                hi: best.hi.min(candidate.hi),
+                separation_proven: best.lo.max(candidate.lo) > 0.0,
+                iterations: candidate.iterations,
+                witness_a: candidate.witness_a,
+                witness_b: candidate.witness_b,
+            };
+        }
+        if best.hi - best.lo <= f64::EPSILON * best.hi.max(1.0) {
+            break;
+        }
+    }
+    Ok(best)
+}
+
+/// Certified convex separation with representation/motion uncertainty
+/// composed into both sides of the distance bracket.
+///
+/// The ordinary support-map result is retained as the nominal geometric
+/// enclosure. The two proof-bearing inflations are then added on the
+/// uncertainty side: the lower endpoint moves down, the upper endpoint moves
+/// up, and the separation verdict is re-derived. Exact-zero inflations are a
+/// bitwise identity.
+///
+/// # Errors
+/// The refusals from [`convex_separation`], plus
+/// [`QueryError::InvalidContactInflation`] if the two finite radii cannot be
+/// composed or applied without overflow.
+pub fn convex_separation_with_inflation(
+    a: &dyn ConvexSupportMap,
+    b: &dyn ConvexSupportMap,
+    max_iterations: u32,
+    cx: &Cx<'_>,
+    inflation_a: ContactInflation,
+    inflation_b: ContactInflation,
+) -> Result<ConvexSeparation, QueryError> {
+    let nominal = convex_separation(a, b, max_iterations, cx)?;
+    let inflation = inflation_a.compose(inflation_b)?;
+    if inflation.radius() == 0.0 {
+        return Ok(nominal);
+    }
+    let lo = inflation.deflate_nonnegative(nominal.lo)?;
+    let hi = inflation.inflate_upper(nominal.hi)?;
+    Ok(ConvexSeparation {
+        lo,
+        hi,
+        separation_proven: lo > 0.0,
+        ..nominal
+    })
+}
+
+fn support_pair(
+    a: &dyn ConvexSupportMap,
+    b: &dyn ConvexSupportMap,
+    direction: Vec3,
+) -> Result<(Point3, Point3), QueryError> {
+    let pa = a.support_point(direction);
+    let pb = b.support_point(direction.scale(-1.0));
+    for p in [pa, pb] {
+        if !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite()) {
+            return Err(QueryError::ConvexInvalidSupport {
+                at: [p.x, p.y, p.z],
+            });
+        }
+    }
+    Ok((pa, pb))
+}
+
+fn summarize(
+    v: Vec3,
+    lo: f64,
+    slack: f64,
+    iterations: u32,
+    pa: Point3,
+    pb: Point3,
+) -> Result<ConvexSeparation, QueryError> {
+    let hi = (norm_upper(v) + slack).next_up();
+    let lo = ((lo - slack).next_down()).max(0.0);
+    if !(hi.is_finite() && lo.is_finite()) {
+        return Err(QueryError::ConvexInvalidSupport {
+            at: [v.x, v.y, v.z],
+        });
+    }
+    Ok(ConvexSeparation {
+        lo,
+        hi,
+        separation_proven: lo > 0.0,
+        iterations,
+        witness_a: [pa.x, pa.y, pa.z],
+        witness_b: [pb.x, pb.y, pb.z],
+    })
+}
+
+fn lerp(p: Point3, q: Point3, t: f64) -> Point3 {
+    Point3::new(
+        p.x + t * (q.x - p.x),
+        p.y + t * (q.y - p.y),
+        p.z + t * (q.z - p.z),
+    )
+}
+
+/// Upper bound on `|v|`: every squaring, sum, and root rounded up.
+fn norm_upper(v: Vec3) -> f64 {
+    let square_upper = |value: f64| {
+        let square = value * value;
+        if square == 0.0 { 0.0 } else { square.next_up() }
+    };
+    let sum = (square_upper(v.x) + square_upper(v.y)).next_up();
+    let sum = (sum + square_upper(v.z)).next_up();
+    if sum == 0.0 {
+        0.0
+    } else {
+        sum.sqrt().next_up()
+    }
+}
+
+/// Lower bound on `v·s`: the numerator of the support-plane bound,
+/// rounded down termwise.
+fn dot_lower(v: Vec3, s: Vec3) -> f64 {
+    let sum = ((v.x * s.x).next_down() + (v.y * s.y).next_down()).next_down();
+    (sum + (v.z * s.z).next_down()).next_down()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConvexOrientedBox, ConvexSupportMap};
+    use fs_geom::{Point3, Vec3};
+
+    const AXES: [Vec3; 3] = [
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(-1.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+    ];
+
+    #[test]
+    fn oriented_box_support_uses_the_declared_world_frame() {
+        let shape = ConvexOrientedBox::new(
+            Point3::new(1.0, 2.0, 3.0),
+            AXES,
+            Vec3::new(0.5, 0.25, 0.125),
+        )
+        .expect("valid quarter-turn box");
+        let support = shape.support_point(Vec3::new(1.0, 1.0, -1.0));
+        assert_eq!(support, Point3::new(1.25, 2.5, 2.875));
+        assert!(shape.support_slack().is_finite());
+        assert!(shape.support_slack() > 0.0);
+    }
+
+    #[test]
+    fn oriented_box_refuses_scaled_left_handed_or_degenerate_frames() {
+        let center = Point3::new(0.0, 0.0, 0.0);
+        let extents = Vec3::new(1.0, 2.0, 3.0);
+        let scaled = [
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ];
+        let left_handed = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, -1.0),
+        ];
+        assert!(ConvexOrientedBox::new(center, scaled, extents).is_err());
+        assert!(ConvexOrientedBox::new(center, left_handed, extents).is_err());
+        assert!(ConvexOrientedBox::new(center, AXES, Vec3::new(1.0, 0.0, 1.0)).is_err());
+    }
+}

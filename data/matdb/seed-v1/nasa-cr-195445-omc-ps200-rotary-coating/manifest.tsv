@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	nasa-cr-195445-omc-ps200-rotary-coating-system
+redistribution	permitted	NASA NTRS record 19950016805 marks NASA-CR-195445 public and US Government public use permitted; US4728448A is a published US patent record; retain both citations and do not infer patent-practice, trademark, or application-qualification rights
+citation	Moller, P. S. (1995), Evaluation of Thermal Barrier and PS-200 Self-Lubricating Coatings in an Air-Cooled Rotary Engine, NASA-CR-195445, NTRS 19950016805; Sliney, H. E. (1988), Carbide/Fluoride/Silver Self-Lubricating Composite, US Patent 4,728,448, Table II
+license	Public-Use-Permitted-and-US-Patent-Publication
+source	primary	properties.tsv	material-tsv-v1

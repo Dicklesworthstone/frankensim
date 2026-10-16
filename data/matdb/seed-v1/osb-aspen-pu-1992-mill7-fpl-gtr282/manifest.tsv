@@ -1,0 +1,16 @@
+frankensim.matdb-manifest.v3
+pack_id	osb-aspen-pu-1992-mill7-fpl-gtr282
+redistribution	permitted	USDA Forest Products Laboratory government report; public use permitted; retain citation and URL
+citation	USDA Forest Products Laboratory (2021), Wood Handbook: Wood as an Engineering Material, General Technical Report FPL-GTR-282, Table 12-3 (Pu and others 1992), https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr282/fpl_gtr282.pdf
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1
+property	specific_gravity	specific-gravity	dimensional
+property	bending_moe_parallel	bending-moe-parallel	dimensional
+property	bending_moe_perpendicular	bending-moe-perpendicular	dimensional
+property	bending_mor_parallel	bending-mor-parallel	dimensional
+property	bending_mor_perpendicular	bending-mor-perpendicular	dimensional
+property	internal_bond_strength	internal-bond-strength	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_panel_layup_known	source-panel-layup-known	dimensional
+axis	source_grade_known	source-grade-known	dimensional

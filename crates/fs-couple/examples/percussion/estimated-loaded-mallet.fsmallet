@@ -1,0 +1,10 @@
+# Synthetic research inputs; neither a measured brand nor fitted felt data.
+# Shaft profile must exclude this physical head. Its COM is on the tip station.
+frankensim-felt-mallet-v2
+# actual head mass [kg], face radius [m], felt thickness [m], initial gap [m]
+geometry,0.02,0.012,0.006,0.00002
+# central transverse rotary inertia [kg m^2], shaft axis azimuth [radians]
+attachment,0.0000012,0
+felt,100000,0.2,2.2,3,0.15,0.7
+conditioning,0
+creep,3000,6

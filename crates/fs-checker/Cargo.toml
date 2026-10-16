@@ -1,0 +1,27 @@
+[package]
+name = "fs-checker"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The standalone evidence-package checker (addendum Proposal 12): an independently distributable verifier that re-verifies a package's completeness, content address, and signature and renders the budget pie WITHOUT the solver stack or any license in its build graph."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+# HARD CONSTRAINT (Proposal 12): the checker's dependency graph must contain NO
+# solver stack and NO license gate. Its only direct dependency is the package
+# format; that cone is fs-blake3 + fs-crosswalk + fs-evidence -> fs-obs.
+# "Don't trust us; here is the checker."
+[dependencies]
+fs-package = { path = "../fs-package" }
+
+[dev-dependencies]
+fs-evidence = { path = "../fs-evidence" }
+fs-ledger = { path = "../fs-ledger" }
+fs-opt = { path = "../fs-opt" }
+fs-robust = { path = "../fs-robust" }
+
+[lints]
+workspace = true

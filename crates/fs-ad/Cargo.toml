@@ -1,0 +1,29 @@
+[package]
+name = "fs-ad"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Forward-mode duals (generic, nestable), the Real scalar contract; adjoint infra later."
+
+[package.metadata.frankensim]
+layer = "L1"
+
+[dependencies]
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+# Constellation (FrankenTorch), OPT-IN: reverse-mode tape bridge only.
+ft-autograd = { path = "../../../frankentorch/crates/ft-autograd", package = "frankentorch-autograd", optional = true }
+ft-core = { path = "../../../frankentorch/crates/ft-core", package = "frankentorch-core", optional = true }
+
+[features]
+# [F]-gated: reverse mode via the FrankenTorch scalar tape (large-N
+# gradients). Default build stays forward-dual only.
+torch-bridge = ["dep:ft-autograd", "dep:ft-core"]
+
+[dev-dependencies]
+fs-casebook = { path = "../fs-casebook" }
+
+[lints]
+workspace = true

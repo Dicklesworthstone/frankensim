@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	torrent-2018-m19-steinmetz-inputs
+redistribution	permitted	Energies 2018 article 11 1549 is distributed under Creative Commons Attribution 4.0; retain authors title DOI journal year and license; these attributed factual rows reproduce no article figure
+citation	Torrent, M., Perat, J. I., and Jiménez, J. A. (2018), Permanent Magnet Synchronous Motor with Different Rotor Structures for Traction Motor in High Speed Trains, Energies 11(6) 1549, Section 3.2 and Reference 13, https://doi.org/10.3390/en11061549
+license	CC-BY-4.0
+source	primary	properties.tsv	material-tsv-v1

@@ -1,0 +1,21 @@
+[package]
+name = "fs-img"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "In-house PNG/OpenEXR writers and readers, bias-labeled a-trous denoiser, deterministic film transforms."
+
+[package.metadata.frankensim]
+layer = "L5"
+
+[dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+fs-obs = { path = "../fs-obs" }
+
+[lints]
+workspace = true

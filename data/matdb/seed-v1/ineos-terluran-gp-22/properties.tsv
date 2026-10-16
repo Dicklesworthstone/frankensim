@@ -1,0 +1,40 @@
+frankensim.matdb-source.v1
+observation	ineos-terluran-gp22-properties	INEOS-Terluran-GP-22-uncolored-product	INEOS Styrolution TERLURAN GP-22 product page, Properties table	Named Terluran GP-22 easy-flow general-purpose injection-molding ABS grade, intended in particular for housings including appliance housings; this is not a pipe-grade substitution or a measured housing part. The source table heading states “Typical values for uncolored products at 23 °C”; that common heading is retained as 296.15 K for all three selected claims, although no row-specific test-condition cell states temperature. The source identifies ISO 1183 for density, ISO 527 for tensile modulus, and ISO 22007-4 for thermal conductivity. Its listed processing data are expressly indicative and may vary with processing complexity, and do not establish the realized process or specimen conditions of these three claims. Source pressure, specimen conditioning, specimen orientation, and tensile test rate are unstated. These selected typical values do not establish a full thermal profile, a temperature-dependent law, isotropy, a Poisson ratio, creep, or design allowables.
+observation	density	INEOS-Terluran-GP-22-uncolored-product	INEOS Styrolution TERLURAN GP-22 product page, Other Properties, Density, ISO 1183	The source prints density 1040 kg/m3 under the table-wide “Typical values for uncolored products at 23 °C” heading. The source gives no row-specific pressure, specimen conditioning, specimen orientation, realized processing condition, or uncertainty.
+observation	tensile-modulus	INEOS-Terluran-GP-22-uncolored-product	INEOS Styrolution TERLURAN GP-22 product page, Mechanical properties, Tensile Modulus, ISO 527	The source prints tensile modulus 2300 MPa under the table-wide “Typical values for uncolored products at 23 °C” heading, converted to 2.3e9 Pa. The source gives no row-specific pressure, specimen conditioning, specimen orientation, realized processing condition, test rate, or uncertainty. This is retained as the producer-labelled tensile modulus, not promoted to an isotropic Young modulus.
+observation	thermal-conductivity	INEOS-Terluran-GP-22-uncolored-product	INEOS Styrolution TERLURAN GP-22 product page, Thermal properties, Thermal Conductivity, ISO 22007-4	The source prints thermal conductivity 0.17 W/(m K) under the table-wide “Typical values for uncolored products at 23 °C” heading. The source gives no row-specific pressure, specimen conditioning, specimen orientation, realized processing condition, or uncertainty; no direction is claimed.
+observation	coefficient-linear-thermal-expansion	INEOS-Terluran-GP-22-uncolored-product	INEOS Styrolution TERLURAN GP-22 product page, Thermal properties, Coefficient of Linear Thermal Expansion, ISO 11359	The source prints a coefficient-of-linear-thermal-expansion range 80–110 ×10^-6/°C under the table-wide 23 °C heading. It gives no temperature interval, direction, mean-versus-instantaneous convention, specimen condition, or uncertainty. This range remains an observation only; it is not admitted as a scalar expansion property or thermal-expansion law.
+observation	specific-heat-capacity	INEOS-Terluran-GP-22-uncolored-product	INEOS Styrolution TERLURAN GP-22 product page, Properties table	No specific heat capacity is listed for exact Terluran GP-22 on this source page. No generic ABS value is substituted; a transient-heat consumer must refuse this pack without an independently sourced Cp claim.
+scalar	density	ineos-terluran-gp22-properties	density	1040	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_terluran_gp22	1	1	1
+validity	density	source_typical_uncolored	1	1	1
+validity	density	source_temperature_known	1	1	1
+validity	density	source_processing_condition_known	0	0	1
+validity	density	source_specimen_condition_known	0	0	1
+validity	density	source_specimen_orientation_known	0	0	1
+validity	density	source_test_rate_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+validity	density	temperature	296.15	296.15	K
+scalar	tensile-modulus	ineos-terluran-gp22-properties	tensile_modulus	2.3e9	Pa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_terluran_gp22	1	1	1
+validity	tensile-modulus	source_typical_uncolored	1	1	1
+validity	tensile-modulus	source_temperature_known	1	1	1
+validity	tensile-modulus	source_processing_condition_known	0	0	1
+validity	tensile-modulus	source_specimen_condition_known	0	0	1
+validity	tensile-modulus	source_specimen_orientation_known	0	0	1
+validity	tensile-modulus	source_test_rate_known	0	0	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	temperature	296.15	296.15	K
+scalar	thermal-conductivity	ineos-terluran-gp22-properties	thermal_conductivity	0.17	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_terluran_gp22	1	1	1
+validity	thermal-conductivity	source_typical_uncolored	1	1	1
+validity	thermal-conductivity	source_temperature_known	1	1	1
+validity	thermal-conductivity	source_processing_condition_known	0	0	1
+validity	thermal-conductivity	source_specimen_condition_known	0	0	1
+validity	thermal-conductivity	source_specimen_orientation_known	0	0	1
+validity	thermal-conductivity	source_test_rate_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+validity	thermal-conductivity	temperature	296.15	296.15	K

@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+observation	km2024-first-heating	EN AW 2024-T3 sheet, as delivered, first heating	Manasijevic et al. 2024 Table 2, selected 25/50/100 C rows	T3 sheet; solution treatment at 495 C, cold work and natural aging. This bounded reference retains first-heating values only. Cp is CALPHAD-calculated, warm density is expansion-derived, and conductivity is computed from measured diffusivity, density and Cp. Linear interpolation is an explicit engineering approximation, not source measurement or certified error. No 20-25 C coverage, elastic constants, expansion derivative, aging kinetics or compatibility with a different coupon is claimed. Pressure is unspecified. Reheated stock must not use this profile.
+observation	rho-method	EN AW 2024-T3 sheet	Sections 2.5 and 3.3	Room-temperature density was measured by an Archimedean method; warm densities use a literature expansion model. The reported room-temperature density uncertainty of about one percent does not bound this entire derived curve, whose uncertainty remains unstated.
+observation	cp-method	EN AW 2024-T3 composition	Section 2.7	Heat capacity was calculated with CALPHAD/Pandat; these are tabulated model outputs, not measured DSC heat-capacity values. No phase transformation or source uncertainty model is supplied by this pack.
+observation	k-method	EN AW 2024-T3 sheet, first heating	Sections 2.4 and 3.3	Conductivity is derived from first-heating light-flash diffusivity and the tabulated density and calculated Cp. The approximate three percent diffusivity uncertainty is not a conductivity confidence interval. Published rounded conductivity values are retained rather than recomputed from rounded factors.
+curve	rho	km2024-first-heating,rho-method	density	temperature	K	kg/m3	298.15:2770,323.15:2760,373.15:2750	linear
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	temperature	298.15	373.15	K
+validity	rho	first_heating	1	1	1
+validity	rho	source_pressure_known	0	0	1
+curve	cp	km2024-first-heating,cp-method	specific_heat_capacity	temperature	K	J/kg/K	298.15:877,323.15:892,373.15:918	linear
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	temperature	298.15	373.15	K
+validity	cp	first_heating	1	1	1
+validity	cp	source_pressure_known	0	0	1
+curve	k	km2024-first-heating,k-method	thermal_conductivity	temperature	K	W/m/K	298.15:121.1,323.15:125.2,373.15:133.0	linear
+uncertainty	k	unstated	-	-	-	-
+validity	k	temperature	298.15	373.15	K
+validity	k	first_heating	1	1	1
+validity	k	source_pressure_known	0	0	1

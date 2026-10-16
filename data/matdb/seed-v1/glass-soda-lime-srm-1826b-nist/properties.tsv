@@ -1,0 +1,9 @@
+frankensim.matdb-source.v1
+observation	nist-srm1826b-density	Soda-lime silica glass SRM 1826b	NIST SRM 1826b certificate dated December 1, 2006, page 1	Density at 20 deg C is certified for the specimen as a whole: 2548.668 kg/m3 with expanded uncertainty +/-0.032 kg/m3 at approximately 95 percent confidence. The certificate says microhomogeneity has not been evaluated. The expanded interval includes weighing-procedure and air/water-density contributions; runtime HalfWidth retains the stated 0.032 kg/m3 and approximately 0.95 confidence without inferring a distribution, coverage factor or degrees of freedom. The final 1 in the uncertainty row is the dimensionless confidence unit. The certificate also gives alpha=9.6e-6/K for its temperature-correction formula, without a stated range or separate uncertainty certification; that coefficient is retained with its range-unknown flag. This pack does not assert current SRM availability or current physical traceability beyond the historical certificate. No other mechanical or thermal property is inferred.
+scalar	density	nist-srm1826b-density	density	2548.668	kg/m3	constant
+uncertainty	density	absolute	0.032	kg/m3	0.95	1
+validity	density	temperature	293.15	293.15	K
+validity	density	source_microhomogeneity_evaluated	0	0	1
+scalar	linear-thermal-expansion-coefficient	nist-srm1826b-density	linear_thermal_expansion_coefficient	9.6e-6	K^-1	constant
+uncertainty	linear-thermal-expansion-coefficient	unstated	-	-	-	-
+validity	linear-thermal-expansion-coefficient	source_temperature_range_known	0	0	1

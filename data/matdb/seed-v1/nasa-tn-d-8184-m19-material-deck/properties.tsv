@@ -1,0 +1,81 @@
+frankensim.matdb-source.v1
+observation	figure-10-m19-magnetization-points	m19-silicon-steel-source-manufacturer-process-lamination-and-test-state-unspecified	NASA-TN-D-8184 Figure 10 exact table insert and material-deck instructions; source magnetic flux density in kilolines per square inch is normalized with 1 kiloline=1e-5 Wb and 1 in=0.0254 m, while magnetizing force in ampere-turns per inch is normalized with 1 in=0.0254 m	The 14 printed table points are retained without graph digitization. The program instructions reconstruct between points as straight lines on semilog paper, but material-tsv-v1 has no semilog interpolation policy, so the runtime curve is tabulated-only. The source identifies only M-19 silicon steel; manufacturer, chemistry, fully/semi-processed state, anneal, lamination thickness for this curve, magnetic test method, test frequency, waveform, direction, specimen preparation, temperature, repeats, dispersion, and uncertainty are absent
+curve	m19-magnetization-curve	figure-10-m19-magnetization-points	magnetic_flux_density	magnetic_field_strength	A/m	T	51.1811023622047:0.403000806001612,57.0866141732283:0.46500093000186,76.7716535433071:0.62000124000248,100.393700787402:0.7750015500031,137.795275590551:0.93000186000372,200.787401574803:1.08500217000434,255.905511811024:1.16250232500465,346.456692913386:1.24000248000496,511.811023622047:1.31750263500527,826.771653543307:1.39500279000558,1456.69291338583:1.47250294500589,2362.20472440945:1.5500031000062,5118.11023622047:1.70500341000682,7283.46456692913:1.79800359600719	tabulated
+uncertainty	m19-magnetization-curve	unstated	-	-	-	-
+validity	m19-magnetization-curve	magnetic_field_strength	51.1811023622047	7283.46456692913	A/m
+validity	m19-magnetization-curve	source_material_grade_m19	1	1	1
+validity	m19-magnetization-curve	source_curve_points_printed_not_digitized	1	1	1
+validity	m19-magnetization-curve	source_manufacturer_known	0	0	1
+validity	m19-magnetization-curve	source_processing_anneal_state_known	0	0	1
+validity	m19-magnetization-curve	source_lamination_thickness_known	0	0	1
+validity	m19-magnetization-curve	source_magnetic_test_method_known	0	0	1
+validity	m19-magnetization-curve	source_test_frequency_known	0	0	1
+validity	m19-magnetization-curve	source_test_temperature_known	0	0	1
+validity	m19-magnetization-curve	source_chemistry_known	0	0	1
+validity	m19-magnetization-curve	source_waveform_known	0	0	1
+validity	m19-magnetization-curve	source_direction_known	0	0	1
+observation	figure-11-m19-frequency-loss-deck	m19-silicon-steel-0.014in-lamination-source-manufacturer-process-and-test-state-unspecified	NASA-TN-D-8184 Figure 11 and printed FELOSS material-deck card; source values WCORE=9.4 W/lb, FCORE=400 Hz, BK=64.5 kilolines/in2, LT=0.014 in, and SLOPE=1.47 are normalized using 1 lb=0.45359237 kg, 1 kiloline=1e-5 Wb, and 1 in=0.0254 m	The source defines WFE=WCORE*(frequency/FCORE)^SLOPE only at the fixed printed flux density and lamination thickness. This is a one-dimensional frequency power-law approximation, not a complete Steinmetz law: it supplies no flux-density exponent or coefficient separable from the reference point. Manufacturer, chemistry, fully/semi-processed state, anneal, magnetic test method, waveform, direction, specimen preparation, temperature, fitted frequency interval, repeats, dispersion, and uncertainty are absent; the report warns that FCORE should be near the design frequency
+scalar	m19-specific-core-loss-reference	figure-11-m19-frequency-loss-deck	specific_core_loss	20.723452645378494	W/kg	constant
+uncertainty	m19-specific-core-loss-reference	unstated	-	-	-	-
+validity	m19-specific-core-loss-reference	frequency	400	400	Hz
+validity	m19-specific-core-loss-reference	magnetic_flux_density	0.9997519995039992	0.9997519995039992	T
+validity	m19-specific-core-loss-reference	lamination_thickness	0.0003556	0.0003556	m
+validity	m19-specific-core-loss-reference	source_material_grade_m19	1	1	1
+validity	m19-specific-core-loss-reference	source_manufacturer_known	0	0	1
+validity	m19-specific-core-loss-reference	source_chemistry_known	0	0	1
+validity	m19-specific-core-loss-reference	source_processing_anneal_state_known	0	0	1
+validity	m19-specific-core-loss-reference	source_magnetic_test_method_known	0	0	1
+validity	m19-specific-core-loss-reference	source_test_temperature_known	0	0	1
+validity	m19-specific-core-loss-reference	source_waveform_known	0	0	1
+validity	m19-specific-core-loss-reference	source_direction_known	0	0	1
+scalar	m19-core-loss-frequency-exponent	figure-11-m19-frequency-loss-deck	core_loss_frequency_power_law_exponent	1.47	1	constant
+uncertainty	m19-core-loss-frequency-exponent	unstated	-	-	-	-
+validity	m19-core-loss-frequency-exponent	source_reference_frequency	400	400	Hz
+validity	m19-core-loss-frequency-exponent	magnetic_flux_density	0.9997519995039992	0.9997519995039992	T
+validity	m19-core-loss-frequency-exponent	lamination_thickness	0.0003556	0.0003556	m
+validity	m19-core-loss-frequency-exponent	source_material_grade_m19	1	1	1
+validity	m19-core-loss-frequency-exponent	source_manufacturer_known	0	0	1
+validity	m19-core-loss-frequency-exponent	source_chemistry_known	0	0	1
+validity	m19-core-loss-frequency-exponent	source_flux_density_power_exponent_known	0	0	1
+validity	m19-core-loss-frequency-exponent	source_separable_steinmetz_coefficient_known	0	0	1
+validity	m19-core-loss-frequency-exponent	source_fitted_frequency_interval_known	0	0	1
+validity	m19-core-loss-frequency-exponent	source_processing_anneal_state_known	0	0	1
+validity	m19-core-loss-frequency-exponent	source_magnetic_test_method_known	0	0	1
+validity	m19-core-loss-frequency-exponent	source_test_temperature_known	0	0	1
+validity	m19-core-loss-frequency-exponent	source_waveform_known	0	0	1
+validity	m19-core-loss-frequency-exponent	source_direction_known	0	0	1
+scalar	m19-lamination-thickness	figure-11-m19-frequency-loss-deck	lamination_thickness	0.0003556	m	constant
+uncertainty	m19-lamination-thickness	unstated	-	-	-	-
+validity	m19-lamination-thickness	source_core_loss_reference	1	1	1
+validity	m19-lamination-thickness	source_material_grade_m19	1	1	1
+validity	m19-lamination-thickness	source_manufacturer_known	0	0	1
+validity	m19-lamination-thickness	source_chemistry_known	0	0	1
+validity	m19-lamination-thickness	source_processing_anneal_state_known	0	0	1
+validity	m19-lamination-thickness	source_magnetic_test_method_known	0	0	1
+validity	m19-lamination-thickness	source_test_temperature_known	0	0	1
+validity	m19-lamination-thickness	source_waveform_known	0	0	1
+validity	m19-lamination-thickness	source_direction_known	0	0	1
+scalar	m19-core-loss-reference-frequency	figure-11-m19-frequency-loss-deck	core_loss_reference_frequency	400	Hz	constant
+uncertainty	m19-core-loss-reference-frequency	unstated	-	-	-	-
+validity	m19-core-loss-reference-frequency	magnetic_flux_density	0.9997519995039992	0.9997519995039992	T
+validity	m19-core-loss-reference-frequency	lamination_thickness	0.0003556	0.0003556	m
+validity	m19-core-loss-reference-frequency	source_material_grade_m19	1	1	1
+validity	m19-core-loss-reference-frequency	source_manufacturer_known	0	0	1
+validity	m19-core-loss-reference-frequency	source_chemistry_known	0	0	1
+validity	m19-core-loss-reference-frequency	source_processing_anneal_state_known	0	0	1
+validity	m19-core-loss-reference-frequency	source_magnetic_test_method_known	0	0	1
+validity	m19-core-loss-reference-frequency	source_test_temperature_known	0	0	1
+validity	m19-core-loss-reference-frequency	source_waveform_known	0	0	1
+validity	m19-core-loss-reference-frequency	source_direction_known	0	0	1
+scalar	m19-core-loss-reference-flux-density	figure-11-m19-frequency-loss-deck	core_loss_reference_flux_density	0.9997519995039992	T	constant
+uncertainty	m19-core-loss-reference-flux-density	unstated	-	-	-	-
+validity	m19-core-loss-reference-flux-density	frequency	400	400	Hz
+validity	m19-core-loss-reference-flux-density	lamination_thickness	0.0003556	0.0003556	m
+validity	m19-core-loss-reference-flux-density	source_material_grade_m19	1	1	1
+validity	m19-core-loss-reference-flux-density	source_manufacturer_known	0	0	1
+validity	m19-core-loss-reference-flux-density	source_chemistry_known	0	0	1
+validity	m19-core-loss-reference-flux-density	source_processing_anneal_state_known	0	0	1
+validity	m19-core-loss-reference-flux-density	source_magnetic_test_method_known	0	0	1
+validity	m19-core-loss-reference-flux-density	source_test_temperature_known	0	0	1
+validity	m19-core-loss-reference-flux-density	source_waveform_known	0	0	1
+validity	m19-core-loss-reference-flux-density	source_direction_known	0	0	1

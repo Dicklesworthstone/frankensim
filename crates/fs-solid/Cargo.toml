@@ -1,0 +1,52 @@
+[package]
+name = "fs-solid"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Elasticity core: small-strain and finite-strain hyperelasticity (via fs-material), locking-free B-bar, body-fitted and CutFEM frontends, Newton with globalization."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[features]
+# Koiter post-buckling asymptotics: plan-flagged [F]; off by default
+# per the Ambition-Tag gating rule.
+koiter-asymptotics = []
+# SDF-native IPC barrier contact: plan-flagged [F]; off by default per
+# the Ambition-Tag gating rule.
+contact = []
+
+[dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-cutfem = { path = "../fs-cutfem" }
+fs-exec = { path = "../fs-exec" }
+fs-ga = { path = "../fs-ga" }
+fs-la = { path = "../fs-la" }
+fs-modal = { path = "../fs-modal" }
+fs-material = { path = "../fs-material" }
+fs-matdb = { path = "../fs-matdb" }
+fs-math = { path = "../fs-math" }
+fs-qty = { path = "../fs-qty" }
+fs-scenario = { path = "../fs-scenario" }
+fs-solver = { path = "../fs-solver" }
+fs-sparse = { path = "../fs-sparse" }
+
+[dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-evidence = { path = "../fs-evidence" }
+fs-phs = { path = "../fs-phs" }
+fs-ivl = { path = "../fs-ivl" }
+fs-mesh = { path = "../fs-mesh" }
+
+[[test]]
+name = "koiter"
+required-features = ["koiter-asymptotics"]
+
+[[test]]
+name = "contact"
+required-features = ["contact"]
+
+[lints]
+workspace = true

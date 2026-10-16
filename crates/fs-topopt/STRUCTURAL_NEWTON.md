@@ -1,0 +1,94 @@
+# Native structural constrained Newton
+
+`elasticity::second_order::ComplianceGoal` evaluates compliance, its modulus
+adjoint and its Hessian action on the existing 3-D tetrahedral elasticity
+operator. Each dead-load case is solved independently. A compliance Hessian
+requires one tangent solve per positive-weight load, not a dense Jacobian or
+parameter Hessian. Every accepted solve is checked using its recomputed true
+residual. Moduli, supports and element blocks remain bound to that point.
+
+The optional `newton-design` feature exposes
+`compliance_newton::ComplianceNewtonModel`, implementing the existing live-IR
+`PhysicsModel` and `PhysicsHessian` contracts. Its coordinates are log stiffness
+multipliers: each `exp(x_e)` multiplies the original element stiffness block.
+For SI geometry, reference material and forces, the output is compliance in
+joules. Normalize that output explicitly before combining it with a
+dimensionless objective or passing constraints to `AugmentedNewtonStudy`.
+
+The coordinate Hessian includes both terms:
+
+```text
+g_x = m * g_m
+H_x v = m * (H_m(m * v) + g_m * v)
+```
+
+The provider retains an exact-point cache. An evicted accepted point is rebuilt
+from its own coordinates; failed preparation leaves the earlier cache usable.
+`ComplianceNewtonBudget` sets absolute solve-reservation and Krylov-iteration
+ceilings. `work()` separates reserved slots, actually started solves and actual
+iterations. Failed or cancelled admitted work is not refunded. Raising a ceiling
+via `set_budget` permits continuation without clearing counters. A supplied
+`Cx` is polled through the existing native solve controller; `None` explicitly
+disables cooperative cancellation, not work admission.
+
+## End-to-end example and tests
+
+```bash
+cargo test --release -p fs-topopt --test compliance_hessian --test simp_hessian
+cargo test --release -p fs-topopt --features newton-design --test compliance_newton
+cargo run --release -p fs-topopt --features newton-design --example constrained_elasticity
+```
+
+The example sizes 48 element multipliers under two independently applied load
+cases, minimizing normalized compliance plus a declared mild regularizer subject
+to mean multiplier <= 1.5. It reports the original objective and constraint,
+candidate multipliers, KKT residuals, stop reason and work counters. An iteration
+or work stop is not labelled convergence.
+
+The integration regressions additionally use a uniform material reduction with
+independently known inverse-scaling optima. They exercise the physical Hessian
+in both objective and constraint roles, independently re-solve the returned
+physical designs, and check budget recovery and split continuation. Dense
+assembly and finite differences are confined to verification tests.
+
+## Raw-density compliance and physical-volume curvature
+
+`simp_second_order::SimpComplianceGoal` separately composes the native physical
+Hessian with the existing Helmholtz filter, Heaviside projection and SIMP map.
+It retains both the first and second pointwise chain coefficients. For the
+native filter F and combined projection/SIMP map m, its action is
+
+```text
+H_raw v = F^T (m' * H_modulus(m' * Fv) + m'' * Fv * g_modulus)
+```
+
+`volume_value_gradient` and `volume_hessian_vector_product` use actual cell-volume
+weights and projection derivatives only; stiffness penalization is not physical
+volume. The raw compliance product costs one filter, one tangent per active load,
+and one transpose filter. Volume curvature costs two filter solves and no
+elastic solve. All consume the same `SolveControl`, including cancelled or
+rejected work. Zero products and the beta-zero linear-volume Hessian avoid solves.
+
+This API requires projected densities strictly inside `(1e-12, 1)` and refuses
+SIMP clamp/floor points rather than asserting a smooth Hessian there. The existing
+first-order pipeline's endpoint behavior is unchanged. It supplies raw-density
+operator products, not a box-constrained topology optimizer or a new IR adapter.
+The `simp_hessian` test target compares against the existing first-order pipeline
+at three continuation settings on unequal-volume tetrahedra, independently checks
+physical-volume derivatives, and exercises cancellation and exhausted budgets.
+
+## Scope
+
+These paths use fixed-mesh linear elasticity with homogeneous supports and fixed
+dead loads. The log-stiffness IR adapter remains distinct from the raw-density
+operator API. Neither implements shape optimization, follower loads, stress
+certification, nonlinear material optimization or a global/continuum optimum
+certificate. A numerical
+KKT residual does not close those obligations. Global memory admission and
+serialized process checkpoints are not implemented here.
+
+The feature adds only optional links to existing workspace crates (`fs-exec`,
+`fs-opt`, `fs-qty`); there are no new external packages. The repository's existing
+dependency-bootstrap/locked-resolution issue remains a separate build limitation.
+The lockfile is not regenerated by this change; Cargo must resolve these added
+workspace dependency edges before a locked build can be claimed.

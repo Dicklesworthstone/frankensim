@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	air-dry-ussa1976-ambient-model
+redistribution	permitted	U.S. Government NASA/NOAA/USAF report; NTRS 19770009539 copyright determination GOV_PUBLIC_USE_PERMITTED; retain source and errata attribution
+citation	NOAA, NASA and USAF (1976), U.S. Standard Atmosphere, 1976, NOAA-S/T 76-1562 / NASA-TM-X-74335, pp. 2-3 Tables 2-3, p. 19 equations (50)-(53), and appended errata; https://ntrs.nasa.gov/citations/19770009539 ; https://ntrs.nasa.gov/api/citations/19770009539/downloads/19770009539.pdf
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	ussa1976-ambient-model	properties.tsv	material-tsv-v1
+property	molar_mass	molar_mass	dimensional
+property	heat_capacity_ratio	heat_capacity_ratio	dimensional
+property	sutherland_reference_viscosity	sutherland_reference_viscosity	dimensional
+property	sutherland_reference_temperature	sutherland_reference_temperature	absolute-temperature
+property	sutherland_temperature	sutherland_temperature	temperature-difference
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure
+axis	relative_humidity	relative-humidity	dimensional
+axis	source_composition_ussa1976	source-composition-ussa1976	dimensional

@@ -1,0 +1,59 @@
+frankensim.matdb-source.v1
+observation	table-2-cdtrf-g-composition	face-g-targeted-cdtrf-g-2023-v1-source-component-lots-and-purities-unspecified	Rao, Zheng, and Yang 2023 Table 2 CDTRF-G formulation transcribed on the table's stated volume-fraction basis	The five printed component fractions sum to exactly 100 percent. The source presents CDTRF-G as a FACE G-targeted surrogate formulation, not a compositional assay of FACE G. Component suppliers, lots, purities, preparation order, mixing temperature, mixing pressure, and treatment of volume contraction are absent. The DIB label is retained verbatim and is not generalized to an arbitrary commercial diisobutylene mixture. The FACE G hydrocarbon-class targets discussed in the text use a molar basis and are not laundered into the table's volume-fraction composition
+scalar	isooctane-volume-fraction	table-2-cdtrf-g-composition	isooctane_component_volume_fraction	23.75	%	constant
+uncertainty	isooctane-volume-fraction	unstated	-	-	-	-
+validity	isooctane-volume-fraction	source_composition_basis_is_volume_fraction	1	1	1
+validity	isooctane-volume-fraction	source_component_supplier_known	0	0	1
+validity	isooctane-volume-fraction	source_component_lot_known	0	0	1
+validity	isooctane-volume-fraction	source_component_purity_known	0	0	1
+validity	isooctane-volume-fraction	source_mixing_temperature_known	0	0	1
+validity	isooctane-volume-fraction	source_mixing_pressure_known	0	0	1
+validity	isooctane-volume-fraction	source_volume_contraction_treatment_known	0	0	1
+scalar	n-heptane-volume-fraction	table-2-cdtrf-g-composition	n_heptane_component_volume_fraction	19	%	constant
+uncertainty	n-heptane-volume-fraction	unstated	-	-	-	-
+validity	n-heptane-volume-fraction	source_composition_basis_is_volume_fraction	1	1	1
+validity	n-heptane-volume-fraction	source_component_supplier_known	0	0	1
+validity	n-heptane-volume-fraction	source_component_lot_known	0	0	1
+validity	n-heptane-volume-fraction	source_component_purity_known	0	0	1
+validity	n-heptane-volume-fraction	source_mixing_temperature_known	0	0	1
+validity	n-heptane-volume-fraction	source_mixing_pressure_known	0	0	1
+validity	n-heptane-volume-fraction	source_volume_contraction_treatment_known	0	0	1
+scalar	toluene-volume-fraction	table-2-cdtrf-g-composition	toluene_component_volume_fraction	42.75	%	constant
+uncertainty	toluene-volume-fraction	unstated	-	-	-	-
+validity	toluene-volume-fraction	source_composition_basis_is_volume_fraction	1	1	1
+validity	toluene-volume-fraction	source_component_supplier_known	0	0	1
+validity	toluene-volume-fraction	source_component_lot_known	0	0	1
+validity	toluene-volume-fraction	source_component_purity_known	0	0	1
+validity	toluene-volume-fraction	source_mixing_temperature_known	0	0	1
+validity	toluene-volume-fraction	source_mixing_pressure_known	0	0	1
+validity	toluene-volume-fraction	source_volume_contraction_treatment_known	0	0	1
+scalar	dib-volume-fraction	table-2-cdtrf-g-composition	diisobutylene_component_volume_fraction	9.5	%	constant
+uncertainty	dib-volume-fraction	unstated	-	-	-	-
+validity	dib-volume-fraction	source_composition_basis_is_volume_fraction	1	1	1
+validity	dib-volume-fraction	source_component_supplier_known	0	0	1
+validity	dib-volume-fraction	source_component_lot_known	0	0	1
+validity	dib-volume-fraction	source_component_purity_known	0	0	1
+validity	dib-volume-fraction	source_mixing_temperature_known	0	0	1
+validity	dib-volume-fraction	source_mixing_pressure_known	0	0	1
+validity	dib-volume-fraction	source_volume_contraction_treatment_known	0	0	1
+scalar	cyclohexane-volume-fraction	table-2-cdtrf-g-composition	cyclohexane_component_volume_fraction	5	%	constant
+uncertainty	cyclohexane-volume-fraction	unstated	-	-	-	-
+validity	cyclohexane-volume-fraction	source_composition_basis_is_volume_fraction	1	1	1
+validity	cyclohexane-volume-fraction	source_component_supplier_known	0	0	1
+validity	cyclohexane-volume-fraction	source_component_lot_known	0	0	1
+validity	cyclohexane-volume-fraction	source_component_purity_known	0	0	1
+validity	cyclohexane-volume-fraction	source_mixing_temperature_known	0	0	1
+validity	cyclohexane-volume-fraction	source_mixing_pressure_known	0	0	1
+validity	cyclohexane-volume-fraction	source_volume_contraction_treatment_known	0	0	1
+observation	table-2-cdtrf-g-ron	face-g-targeted-cdtrf-g-2023-v1-source-component-lots-and-purities-unspecified	Rao, Zheng, and Yang 2023 Table 2 reported calculated research octane number for CDTRF-G	The paper says surrogate properties were calculated using linear mixing, but its surrounding derivation discusses component molar fractions while Table 2 labels the formulation by volume fraction. No CFR-engine measurement, test standard, repeat count, dispersion, or confidence metadata is reported for this value. Table 2 prints RON 94 while Table 7 prints RON 93.9 for the identical five component fractions; the two values remain separate claims and are neither averaged nor reinterpreted as uncertainty
+scalar	table-2-reported-ron	table-2-cdtrf-g-ron	reported_calculated_research_octane_number	94	1	constant
+uncertainty	table-2-reported-ron	unstated	-	-	-	-
+validity	table-2-reported-ron	source_octane_measurement_performed	0	0	1
+validity	table-2-reported-ron	source_octane_calculation_basis_unambiguous	0	0	1
+validity	table-2-reported-ron	source_component_purity_known	0	0	1
+observation	table-7-fuel-2-ron	face-g-targeted-cdtrf-g-2023-v1-source-component-lots-and-purities-unspecified	Rao, Zheng, and Yang 2023 Table 7 Fuel 2 reported calculated research octane number at the same composition as Table 2 CDTRF-G	Table 7 prints RON 93.9 for 23.75 percent isooctane, 19 percent n-heptane, 42.75 percent toluene, 9.5 percent DIB, and 5 percent cyclohexane by volume. This conflicts at the displayed precision with Table 2's RON 94 for the same composition. No CFR-engine measurement, test standard, repeat count, dispersion, or confidence metadata is reported; both printed values remain separate and no preferred value is inferred
+scalar	table-7-reported-ron	table-7-fuel-2-ron	reported_calculated_research_octane_number	93.9	1	constant
+uncertainty	table-7-reported-ron	unstated	-	-	-	-
+validity	table-7-reported-ron	source_octane_measurement_performed	0	0	1
+validity	table-7-reported-ron	source_octane_calculation_basis_unambiguous	0	0	1
+validity	table-7-reported-ron	source_component_purity_known	0	0	1

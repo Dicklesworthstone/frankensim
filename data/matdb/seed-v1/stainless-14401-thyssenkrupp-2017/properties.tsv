@@ -1,0 +1,39 @@
+frankensim.matdb-source.v1
+observation	tk14401-physical-reference	stainless steel 1.4401 producer reference	thyssenkrupp Materials UK, November 2017, page 2 physical properties	Grade-level reference inputs, not coupon measurements. The physical table does not identify pressure, uncertainty or a specific heat treatment. The separate page-1 strength table specifies solution annealing; that condition is not silently assigned here. No equivalence to the generic NASA 316 specimen, 316L or a common measured property distribution is asserted.
+observation	modulus	stainless steel 1.4401	page 2 modulus column	Source units kN/mm2 convert to GPa. Piecewise-linear interpolation between the four listed temperatures is an explicit engineering approximation, not measured interior values or an error certificate. No Poisson ratio or complete elastic tensor is supplied.
+observation	mean-expansion	stainless steel 1.4401	page 2 expansion intervals	Each coefficient is a mean between 20 C and its named endpoint. Endpoint engineering strain relative to the 20 C length is mean coefficient times the temperature interval. These distinct interval observations must not be integrated as instantaneous alpha(T). No continuous strain law or density law is inferred.
+curve	E	tk14401-physical-reference,modulus	young_modulus	temperature	K	GPa	293.15:200,473.15:186,673.15:172,773.15:165	linear
+uncertainty	E	unstated	-	-	-	-
+validity	E	temperature	293.15	773.15	K
+validity	E	source_heat_treatment_known	0	0	1
+validity	E	source_pressure_known	0	0	1
+scalar	mean-100c	tk14401-physical-reference,mean-expansion	mean_linear_expansion_coefficient_from_20c	16e-6	K^-1	constant
+uncertainty	mean-100c	unstated	-	-	-	-
+validity	mean-100c	source_reference_temperature	293.15	293.15	K
+validity	mean-100c	source_range_end_temperature	373.15	373.15	K
+validity	mean-100c	source_heat_treatment_known	0	0	1
+validity	mean-100c	source_pressure_known	0	0	1
+scalar	mean-200c	tk14401-physical-reference,mean-expansion	mean_linear_expansion_coefficient_from_20c	16.5e-6	K^-1	constant
+uncertainty	mean-200c	unstated	-	-	-	-
+validity	mean-200c	source_reference_temperature	293.15	293.15	K
+validity	mean-200c	source_range_end_temperature	473.15	473.15	K
+validity	mean-200c	source_heat_treatment_known	0	0	1
+validity	mean-200c	source_pressure_known	0	0	1
+scalar	mean-300c	tk14401-physical-reference,mean-expansion	mean_linear_expansion_coefficient_from_20c	17e-6	K^-1	constant
+uncertainty	mean-300c	unstated	-	-	-	-
+validity	mean-300c	source_reference_temperature	293.15	293.15	K
+validity	mean-300c	source_range_end_temperature	573.15	573.15	K
+validity	mean-300c	source_heat_treatment_known	0	0	1
+validity	mean-300c	source_pressure_known	0	0	1
+scalar	mean-400c	tk14401-physical-reference,mean-expansion	mean_linear_expansion_coefficient_from_20c	17.5e-6	K^-1	constant
+uncertainty	mean-400c	unstated	-	-	-	-
+validity	mean-400c	source_reference_temperature	293.15	293.15	K
+validity	mean-400c	source_range_end_temperature	673.15	673.15	K
+validity	mean-400c	source_heat_treatment_known	0	0	1
+validity	mean-400c	source_pressure_known	0	0	1
+scalar	mean-500c	tk14401-physical-reference,mean-expansion	mean_linear_expansion_coefficient_from_20c	18e-6	K^-1	constant
+uncertainty	mean-500c	unstated	-	-	-	-
+validity	mean-500c	source_reference_temperature	293.15	293.15	K
+validity	mean-500c	source_range_end_temperature	773.15	773.15	K
+validity	mean-500c	source_heat_treatment_known	0	0	1
+validity	mean-500c	source_pressure_known	0	0	1

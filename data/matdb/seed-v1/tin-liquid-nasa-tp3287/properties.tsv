@@ -1,0 +1,12 @@
+frankensim.matdb-source.v1
+observation	nasa-tp3287-sn-liquid	pure liquid Sn in the thermodynamic standard state at 1 bar; evaluated element, no manufactured specimen or purity assay identified	NASA/TP-3287/REV1 Table III.42 selected thermodynamic functions; Sn attribution is TPIS 1991 in Table I	Engineering piecewise-linear interpolation of printed liquid rows, not the separate NASA polynomial fit or new measurements. Source molar mass is 118.710 g/mol: cp in J/mol/K divided by 0.118710 kg/mol; assigned h in kJ/mol multiplied by 1000/0.118710. Reference h=0 for crystalline Sn at 298.15 K, so liquid h includes fusion energy. Printed source pairs T:cp:h are 505.12:29.415:13.199,600:28.663:15.951,700:28.249:18.794,800:28.054:21.608,900:27.957:24.407,1000:27.945:27.201. This tranche stops at 1000 K and does not import the table's high-temperature continuation as stable liquid evidence. Source uncertainty/covariance and interpolation error bounds are unstated. Interpolated cp and h are independent approximations, not an exactly thermodynamically consistent constitutive law. The source_phase_liquid flag identifies this table phase (0=crystal,1=liquid); it is not a phase-fraction mixture law and cannot select a stable solid tin allotrope automatically. No density, conductivity, viscosity, surface tension, wetting or optical input is inferred.
+curve	cp-liquid	nasa-tp3287-sn-liquid	cp	temperature	K	J/kg/K	505.12:247.78872883498,600:241.45396344032,700:237.96647291719,800:236.32381433746,900:235.50669699267,1000:235.40561031084	linear
+uncertainty	cp-liquid	unstated	-	-	-	-
+validity	cp-liquid	temperature	505.12	1000	K
+validity	cp-liquid	pressure	100000	100000	Pa
+validity	cp-liquid	source_phase_liquid	1	1	1
+curve	h-liquid	nasa-tp3287-sn-liquid	h	temperature	K	J/kg	505.12:111186.92612248336,600:134369.47182208745,700:158318.5915255665,800:182023.41841462388,900:205601.88695139415,1000:229138.23603740209	linear
+uncertainty	h-liquid	unstated	-	-	-	-
+validity	h-liquid	temperature	505.12	1000	K
+validity	h-liquid	pressure	100000	100000	Pa
+validity	h-liquid	source_phase_liquid	1	1	1

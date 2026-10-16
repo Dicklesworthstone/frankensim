@@ -1,0 +1,24 @@
+frankensim-bakeoff-receipt-v1
+filling	string
+fixture	crates/fs-couple/tests/bakeoff_dispersion.rs music-wire card (E=200GPa d=1mm L=0.65m T=120N rho=7850), pluck loop 1.5s at 48k, partials 1..8 vs the analytic stiff law; dispersionless control in rationale
+shared-cards	292e1c61c1f2abcfa3189467e57847a8bffff77b8726eb3702073bccf33bd59a
+reference	b_over_b_card	1e0
+reference	partial8_cents_vs_harmonic	1.7962501384117687e1
+reference	worst_partial_cents	0e0
+contender	modal-zoh
+owners	fs-couple
+measured	b_over_b_card	1.0007674273856155e0
+measured	partial8_cents_vs_harmonic	1.7962923072623965e1
+measured	worst_partial_cents	5.2561326414776e-3
+budget	states=108	steps=72000	solver-iterations=0
+failure-mode	cost scales with partial count (2 states/mode to fill the audio band)
+contender	waveguide-dispersive
+owners	fs-vfit,fs-couple
+measured	b_over_b_card	1.0137364678498788e0
+measured	partial8_cents_vs_harmonic	8.17371066527133e0
+measured	worst_partial_cents	9.788790718846382e0
+budget	states=173	steps=72000	solver-iterations=0
+failure-mode	shared-coefficient cascade tunes the ladder collectively; individual partials carry cents-class residuals the modal image does not
+failure-mode	loop delay quantized by the line's linear fractional interpolation
+outcome	keep-both	modal-zoh keeps every certified claim: exact partial placement on the retained basis, truncation-audited, the polyphony image	waveguide-dispersive earns the budget-constrained hero-string scope: one line + M allpass states regardless of partial count, stiff ladder within its measured cents band; NOT a certified-partial image
+rationale	Waveguide B_hat/B = 1.014 with worst partial 9.8 cents (predicted 0.2); the DISPERSIONLESS control on the same loop measured B_hat/B = 0.000 and 27.0 cents worst — the allpass stage, not the loop, carries the stiffness. Modal worst 0.01 cents (realizes the law by construction). Budgets, honestly: modal holds FEWER states here (173 waveguide vs 108 modal) — the differing shape is OPS and scaling: the waveguide spends ~1 tap + M allpass sections per sample regardless of partial count while modal pays one rotor per audio-band mode (~10x flops here), and the waveguide's state cost is flat in bandwidth. D21 keeps both.

@@ -1,0 +1,31 @@
+frankensim-hihat-v1
+# Two independently simulated instances of an ESTIMATED 8-inch splash geometry.
+# Not measured hi-hat shells or a fitted contact/pedal/stand model.
+shell,upper,profile,estimated-splash.profile
+shell,lower,profile,estimated-splash.profile
+separation_m,0.0008
+carriage,0.05,200,0.5
+damping_ratio,0.001,0.001
+strike_m,0.06,0.01
+# Effective summed axial perimeter contact: K [N/m^alpha], alpha, chi [s/m].
+contact,10000000,1.5,0.1
+site,0.098,0,0.125
+site,0.0692964645563,0.0692964645563,0.125
+site,0,0.098,0.125
+site,-0.0692964645563,0.0692964645563,0.125
+site,-0.098,0,0.125
+site,-0.0692964645563,-0.0692964645563,0.125
+site,0,-0.098,0.125
+site,0.0692964645563,-0.0692964645563,0.125
+# side,radius,face_area,thickness,precompression,f_ref,eps_ref,p,q,crush,eps_dense,prior,K,eta
+mount,upper,0.012,0.00055,0.006,0.0003,30000,0.2,2.2,3,0.15,0.7,0.05,4500,24
+mount,lower,0.012,0.00055,0.006,0.0003,30000,0.2,2.2,3,0.15,0.7,0.05,4500,24
+# Signed force on the carriage, not prescribed cymbal/contact motion.
+pedal,0,0
+pedal,0.001,20
+pedal,0.006,20
+pedal,0.008,0
+pedal,0.010,-10
+pedal,0.012,-10
+pedal,0.016,0
+pedal,0.020,0

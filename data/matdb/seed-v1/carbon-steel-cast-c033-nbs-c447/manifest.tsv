@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	carbon-steel-cast-c033-nbs-c447
+redistribution	permitted	Work of the US Government (Circular of the National Bureau of Standards, US Government Printing Office 1943); public domain; retain circular number, authors, and table numbers
+citation	Everhart, J. L., Lindlief, W. E., Kanegis, J., Weissler, P. G., and Siegel, F. (1943), Mechanical Properties of Metals and Alloys, Circular of the National Bureau of Standards C447, US Government Printing Office, Table 20 (Iron and steel, normal-temperature properties), serials 1473-1474
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

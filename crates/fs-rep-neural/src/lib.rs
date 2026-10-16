@@ -1,0 +1,839 @@
+//! fs-rep-neural — neural implicit charts. Layer: L2.
+//!
+//! Small coordinate MLPs as shapes (DeepSDF-style). The load-bearing property
+//! is NOT the fit — it is the CERTIFICATE: with SPECTRAL-NORM-constrained
+//! layers and 1-Lipschitz activations, the network carries a certified global
+//! LIPSCHITZ CONSTANT `L = Π Uᵢ`, where every `Uᵢ` is an outward-rounded upper
+//! bound on a layer's largest singular value. That bound holds for every input
+//! regardless of training. That is what keeps a neural shape inside the
+//! certificate regime:
+//!
+//! - sphere tracing with PROVABLE step safety — an interval-certified lower
+//!   sign margin divided downward by `L` cannot tunnel through the surface
+//!   ([`derive_safe_step`]);
+//! - INTERVAL evaluation via layer-wise bound propagation (IBP) — a guaranteed
+//!   output enclosure over an input box ([`MlpSdf::eval_interval`]);
+//! - the gradient is bounded by `L` (`‖∇f‖ ≤ L`).
+//!
+//! Neural charts PROPOSE geometry; certification (watertightness, Hausdorff
+//! agreement, topology) comes from the certificate machinery, NEVER the loss
+//! curve — so [`TopologyHint`] is honestly `Unknown` here. Deterministic;
+//! outward-rounded arithmetic and elementary-function budgets come from
+//! [`fs_ivl`], while spectral diagnostics and upper bounds remain in-house.
+
+pub use fs_blake3::ContentHash as NeuralFieldIdentity;
+use fs_blake3::DomainHasher;
+use fs_ivl::Interval;
+use fs_math::det;
+use std::fmt;
+
+/// Version of the hidden-activation arithmetic shared by point evaluation and
+/// interval certification.
+pub const MLP_ACTIVATION_SEMANTICS_VERSION: u32 = 1;
+/// Stable name of the governed hidden-activation arithmetic.
+pub const MLP_ACTIVATION_SEMANTICS: &str = "fs-rep-neural-det-tanh-v1";
+/// ULP budget used to enclose the governed hidden activation.
+pub const MLP_ACTIVATION_ULP_BUDGET: u64 = det::TANH_ULP_BUDGET;
+/// Semantic version of the canonical normalized-MLP content identity.
+pub const MLP_FIELD_IDENTITY_SCHEMA_VERSION: u32 = 1;
+const MLP_FIELD_IDENTITY_DOMAIN: &str = "frankensim.mlp-sdf.identity.v1";
+
+/// Semantic version of the interval-sign-margin safe-step derivation.
+pub const SAFE_STEP_POLICY_VERSION: u32 = 1;
+/// Stable name of the safe-step derivation policy.
+pub const SAFE_STEP_POLICY: &str = "fs-rep-neural-interval-sign-margin-v1";
+
+/// Outcome of deriving a no-tunnel radius from a certified point enclosure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafeStepStatus {
+    /// The enclosure excludes zero and supplies a finite positive sign margin.
+    SignSeparated,
+    /// Zero is not excluded, or neither inward endpoint supplies a finite
+    /// positive margin.
+    NoFiniteSignMargin,
+    /// The enclosure is NaN-bearing or inverted.
+    InvalidEnclosure,
+    /// The purported Lipschitz upper bound is negative or non-finite.
+    InvalidLipschitz,
+}
+
+/// Replayable arithmetic derivation of a no-tunnel radius.
+///
+/// This record proves the division/sign-margin arithmetic conditional on the
+/// supplied enclosure and Lipschitz value. Portable authority must additionally
+/// bind those inputs to a field identity, interval implementation, budget, and
+/// issuer receipt.
+#[derive(Debug, Clone, Copy)]
+pub struct SafeStepDerivation {
+    enclosure: (f64, f64),
+    magnitude_lower_bound: f64,
+    lipschitz_upper_bound: f64,
+    radius: f64,
+    status: SafeStepStatus,
+}
+
+impl SafeStepDerivation {
+    /// Point enclosure from which the sign margin was derived.
+    #[must_use]
+    pub const fn enclosure(&self) -> (f64, f64) {
+        self.enclosure
+    }
+
+    /// Certified lower bound on `|f(x)|`; zero means no positive margin was
+    /// established.
+    #[must_use]
+    pub const fn magnitude_lower_bound(&self) -> f64 {
+        self.magnitude_lower_bound
+    }
+
+    /// Lipschitz upper bound supplied to the derivation.
+    #[must_use]
+    pub const fn lipschitz_upper_bound(&self) -> f64 {
+        self.lipschitz_upper_bound
+    }
+
+    /// Downward-rounded no-tunnel radius.
+    #[must_use]
+    pub const fn radius(&self) -> f64 {
+        self.radius
+    }
+
+    /// Admission/refusal state for this derivation.
+    #[must_use]
+    pub const fn status(&self) -> SafeStepStatus {
+        self.status
+    }
+
+    /// Safe-step policy version needed to replay this derivation.
+    #[must_use]
+    pub const fn policy_version(&self) -> u32 {
+        SAFE_STEP_POLICY_VERSION
+    }
+
+    /// Stable name of the derivation policy.
+    #[must_use]
+    pub const fn policy(&self) -> &'static str {
+        SAFE_STEP_POLICY
+    }
+}
+
+/// Public evaluation surface on which an input-dimension mismatch occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvaluationInput {
+    /// Point-value evaluation.
+    Point,
+    /// Finite-difference gradient evaluation.
+    Gradient,
+    /// Lower endpoint of an interval box.
+    IntervalLower,
+    /// Upper endpoint of an interval box.
+    IntervalUpper,
+}
+
+impl fmt::Display for EvaluationInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Point => "point",
+            Self::Gradient => "gradient",
+            Self::IntervalLower => "interval lower endpoint",
+            Self::IntervalUpper => "interval upper endpoint",
+        })
+    }
+}
+
+/// Structured refusal for a neural input whose coordinate count does not
+/// exactly match the chart's declared input dimension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputDimensionError {
+    /// Evaluation surface that rejected the input.
+    pub input: EvaluationInput,
+    /// Coordinate count declared by the first network layer.
+    pub expected: usize,
+    /// Coordinate count supplied by the caller.
+    pub actual: usize,
+}
+
+impl fmt::Display for InputDimensionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} input dimension mismatch: expected {}, got {}",
+            self.input, self.expected, self.actual
+        )
+    }
+}
+
+impl std::error::Error for InputDimensionError {}
+
+/// A dense affine layer (`out × in` weights + bias).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layer {
+    /// The weight matrix (`out` rows, each of length `in`).
+    pub weights: Vec<Vec<f64>>,
+    /// The bias (`out`).
+    pub bias: Vec<f64>,
+}
+
+impl Layer {
+    /// A layer.
+    ///
+    /// # Panics
+    /// If the weight rows disagree with the bias length, are ragged, or contain
+    /// non-finite values. Biases must also be finite.
+    #[must_use]
+    pub fn new(weights: Vec<Vec<f64>>, bias: Vec<f64>) -> Layer {
+        assert!(weights.len() == bias.len(), "weights/bias length mismatch");
+        if let Some(first) = weights.first() {
+            assert!(
+                weights.iter().all(|r| r.len() == first.len()),
+                "ragged weights"
+            );
+        }
+        assert!(
+            weights.iter().flatten().all(|w| w.is_finite()),
+            "weights must be finite"
+        );
+        assert!(bias.iter().all(|b| b.is_finite()), "bias must be finite");
+        Layer { weights, bias }
+    }
+
+    fn in_dim(&self) -> usize {
+        self.weights.first().map_or(0, Vec::len)
+    }
+}
+
+/// A deterministic power-iteration estimate of the spectral norm (largest
+/// singular value) of a matrix.
+///
+/// This estimate is retained for diagnostics and backwards compatibility. It
+/// can converge from below or miss a singular direction orthogonal to its
+/// fixed starting vector, so it MUST NOT be used as a safety certificate. Use
+/// [`spectral_norm_upper_bound`] for admission, normalization, and Lipschitz
+/// claims.
+#[must_use]
+pub fn spectral_norm(weights: &[Vec<f64>]) -> f64 {
+    if weights.is_empty() || weights[0].is_empty() {
+        return 0.0;
+    }
+    let n_in = weights[0].len();
+    // deterministic, non-degenerate initial vector.
+    let mut v: Vec<f64> = (0..n_in).map(|i| 1.0 + 0.1 * i as f64).collect();
+    normalize(&mut v);
+    for _ in 0..200 {
+        let u = matvec(weights, &v); // W v
+        let mut z = matvec_t(weights, &u); // Wᵀ (W v)
+        let nz = norm(&z);
+        if nz < 1e-30 {
+            return 0.0;
+        }
+        for zi in &mut z {
+            *zi /= nz;
+        }
+        v = z;
+    }
+    norm(&matvec(weights, &v)) // ‖W v‖ estimates σ_max from below.
+}
+
+/// A guaranteed finite upper bound on a matrix's spectral norm.
+///
+/// The result is the tighter of the scaled Frobenius bound and
+/// `sqrt(||W||_1 ||W||_∞)`, each evaluated with outward rounding at every
+/// positive arithmetic operation. The result can conservatively exceed the
+/// true spectral norm by as much as `sqrt(rank)`, but unlike power iteration it
+/// cannot miss a singular direction. Scaling by the largest entry avoids
+/// intermediate square/sum overflow.
+///
+/// # Panics
+///
+/// Panics for ragged or non-finite matrices, or when no finite `f64` can
+/// represent the certified upper bound. The latter is a fail-closed admission
+/// outcome: returning `f64::MAX` would be unsound when the mathematical norm is
+/// larger than `f64::MAX`.
+#[must_use]
+pub fn spectral_norm_upper_bound(weights: &[Vec<f64>]) -> f64 {
+    let (max_abs, unit_bound) = scaled_spectral_upper_parts(weights);
+    finite_scaled_upper(max_abs, unit_bound)
+        .unwrap_or_else(|| panic!("spectral-norm upper bound is not representable as a finite f64"))
+}
+
+/// Normalize a layer so its weight matrix has spectral norm at most `bound`.
+///
+/// This uses [`spectral_norm_upper_bound`], not the power-iteration estimate.
+/// The stored matrix is re-certified after floating-point scaling; if an
+/// extreme rounding case cannot be corrected in a few deterministic passes,
+/// the weights are collapsed to zero as a fail-closed fallback.
+///
+/// # Panics
+///
+/// Panics if `bound` is negative or non-finite, or if the layer was mutated
+/// after construction into a ragged or non-finite state.
+#[must_use]
+pub fn spectral_normalize(mut layer: Layer, bound: f64) -> Layer {
+    assert!(
+        bound.is_finite() && bound >= 0.0,
+        "spectral bound must be finite and non-negative"
+    );
+    assert!(
+        layer.bias.iter().all(|b| b.is_finite()),
+        "bias must be finite"
+    );
+    assert!(
+        layer.weights.len() == layer.bias.len(),
+        "weights/bias length mismatch"
+    );
+
+    let (max_abs, unit_bound) = scaled_spectral_upper_parts(&layer.weights);
+    if max_abs == 0.0 {
+        return layer;
+    }
+    if bound == 0.0 {
+        zero_weights(&mut layer.weights);
+        return layer;
+    }
+
+    // Form each normalized value relative to max_abs instead of first forming
+    // bound / (max_abs * unit_bound). This remains useful when the original
+    // matrix's norm exceeds f64::MAX or max_abs is subnormal.
+    let target = next_down_nonnegative(bound / unit_bound);
+    for row in &mut layer.weights {
+        for w in row {
+            *w = (*w / max_abs) * target;
+        }
+    }
+
+    // Re-certify the values actually stored after rounded division and
+    // multiplication. Ordinarily one pass suffices; the fixed limit keeps the
+    // operation deterministic even at subnormal boundaries.
+    for _ in 0..4 {
+        match try_spectral_norm_upper_bound(&layer.weights) {
+            Some(certified) if certified <= bound => return layer,
+            Some(certified) => {
+                let correction = next_down_nonnegative(bound / certified);
+                for row in &mut layer.weights {
+                    for w in row {
+                        *w *= correction;
+                    }
+                }
+            }
+            None => {
+                // The current certificate is not finitely representable yet.
+                for row in &mut layer.weights {
+                    for w in row {
+                        *w *= 0.5;
+                    }
+                }
+            }
+        }
+    }
+
+    // A zero matrix is always within the requested bound. Reaching this path
+    // requires an extreme rounding plateau; safety takes precedence over
+    // preserving a non-certifiable parameterization.
+    zero_weights(&mut layer.weights);
+    layer
+}
+
+/// An honest topology hint: never claimed without a verifying check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopologyHint {
+    /// Topology is unknown until certified (persistent-homology check).
+    Unknown,
+}
+
+/// A neural implicit chart: a coordinate MLP with a certified Lipschitz constant.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MlpSdf {
+    layers: Vec<Layer>,
+    lipschitz: f64,
+}
+
+impl MlpSdf {
+    /// Build a chart from raw layers, spectrally normalizing each to at most
+    /// `bound` (so `L ≤ boundᵏ` with 1-Lipschitz `tanh` activations). The last
+    /// layer must map to a scalar.
+    ///
+    /// # Panics
+    /// If `layers` is empty, dimensions do not chain, the output is not scalar,
+    /// `bound` is invalid, or the global certificate is not finitely
+    /// representable.
+    #[must_use]
+    pub fn new(layers: Vec<Layer>, bound: f64) -> MlpSdf {
+        assert!(!layers.is_empty(), "need at least one layer");
+        assert!(
+            bound.is_finite() && bound >= 0.0,
+            "spectral bound must be finite and non-negative"
+        );
+        assert!(
+            layers.last().unwrap().weights.len() == 1,
+            "output must be scalar"
+        );
+        for pair in layers.windows(2) {
+            assert!(
+                pair[0].weights.len() == pair[1].in_dim(),
+                "layer dims do not chain"
+            );
+        }
+        let normalized: Vec<Layer> = layers
+            .into_iter()
+            .map(|l| spectral_normalize(l, bound))
+            .collect();
+        // Certified global Lipschitz constant = Π Uᵢ, where each Uᵢ is a
+        // guaranteed spectral-norm upper bound (tanh is 1-Lipschitz).
+        let lipschitz = normalized.iter().fold(1.0, |product, layer| {
+            product_up(product, spectral_norm_upper_bound(&layer.weights))
+        });
+        assert!(
+            lipschitz.is_finite(),
+            "global Lipschitz certificate is not representable as a finite f64"
+        );
+        MlpSdf {
+            layers: normalized,
+            lipschitz,
+        }
+    }
+
+    /// The certified global Lipschitz constant.
+    #[must_use]
+    pub fn lipschitz(&self) -> f64 {
+        self.lipschitz
+    }
+
+    /// Number of coordinates required by every point and interval query.
+    #[must_use]
+    pub fn input_dim(&self) -> usize {
+        self.layers[0].in_dim()
+    }
+
+    /// Content identity of the normalized field and the arithmetic semantics
+    /// needed to evaluate and enclose it.
+    ///
+    /// The canonical preimage binds ordered layer dimensions, every normalized
+    /// weight/bias bit pattern, the Lipschitz bound, activation policy and ULP
+    /// budget, fs-ivl's enclosure policy version, and fs-math's strict-core
+    /// semantic version plus retained golden fingerprint.
+    #[must_use]
+    pub fn identity(&self) -> NeuralFieldIdentity {
+        fn update_u32(hasher: &mut DomainHasher, value: u32) {
+            hasher.update(&value.to_le_bytes());
+        }
+        fn update_u64(hasher: &mut DomainHasher, value: u64) {
+            hasher.update(&value.to_le_bytes());
+        }
+        fn update_len(hasher: &mut DomainHasher, value: usize) {
+            let canonical = u64::try_from(value)
+                .unwrap_or_else(|_| panic!("MLP identity length exceeds canonical u64 range"));
+            update_u64(hasher, canonical);
+        }
+
+        let mut hasher = DomainHasher::new(MLP_FIELD_IDENTITY_DOMAIN);
+        update_u32(&mut hasher, MLP_FIELD_IDENTITY_SCHEMA_VERSION);
+        update_u32(&mut hasher, MLP_ACTIVATION_SEMANTICS_VERSION);
+        update_u64(&mut hasher, MLP_ACTIVATION_ULP_BUDGET);
+        update_u32(&mut hasher, fs_ivl::INTERVAL_SEMANTICS_VERSION);
+        update_u32(&mut hasher, fs_math::STRICT_CORE_SEMANTICS_VERSION);
+        update_u64(&mut hasher, fs_math::STRICT_CORE_GOLDEN_HASH);
+        update_len(&mut hasher, MLP_ACTIVATION_SEMANTICS.len());
+        hasher.update(MLP_ACTIVATION_SEMANTICS.as_bytes());
+        update_len(&mut hasher, self.input_dim());
+        update_len(&mut hasher, self.layers.len());
+        for layer in &self.layers {
+            update_len(&mut hasher, layer.weights.len());
+            update_len(&mut hasher, layer.in_dim());
+            for row in &layer.weights {
+                for weight in row {
+                    update_u64(&mut hasher, weight.to_bits());
+                }
+            }
+            update_len(&mut hasher, layer.bias.len());
+            for bias in &layer.bias {
+                update_u64(&mut hasher, bias.to_bits());
+            }
+        }
+        update_u64(&mut hasher, self.lipschitz.to_bits());
+        hasher.finalize()
+    }
+
+    /// The topology hint — honestly `Unknown` (never inferred from the fit).
+    #[must_use]
+    pub fn topology_hint(&self) -> TopologyHint {
+        TopologyHint::Unknown
+    }
+
+    /// Evaluate the implicit value `f(x)` (tanh between layers, linear output).
+    ///
+    /// # Panics
+    ///
+    /// Panics when `x.len() != self.input_dim()`. Use [`Self::try_eval`] at an
+    /// untrusted boundary that needs a structured refusal.
+    #[must_use]
+    pub fn eval(&self, x: &[f64]) -> f64 {
+        self.try_eval(x).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Fallible point evaluation with exact input-dimension admission.
+    pub fn try_eval(&self, x: &[f64]) -> Result<f64, InputDimensionError> {
+        self.validate_input_dim(EvaluationInput::Point, x.len())?;
+        Ok(self.eval_admitted(x))
+    }
+
+    fn eval_admitted(&self, x: &[f64]) -> f64 {
+        let mut a = x.to_vec();
+        let last = self.layers.len() - 1;
+        for (li, layer) in self.layers.iter().enumerate() {
+            let mut z = layer.bias.clone();
+            for (j, row) in layer.weights.iter().enumerate() {
+                z[j] += dot(row, &a);
+            }
+            if li < last {
+                for zi in &mut z {
+                    *zi = det::tanh(*zi);
+                }
+            }
+            a = z;
+        }
+        a[0]
+    }
+
+    /// A deterministic central-finite-difference gradient diagnostic.
+    ///
+    /// The analytic gradient of the continuous real MLP has norm at most the
+    /// certified Lipschitz constant `L`. This rounded diagnostic is not that
+    /// analytic gradient: its coordinates use distinct line segments, and its
+    /// evaluations carry floating-point error. It therefore conveys no
+    /// certificate authority. Use AD or interval-derivative evidence when a
+    /// gradient bound is load-bearing.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `x.len() != self.input_dim()`. Use [`Self::try_eval_grad`]
+    /// at an untrusted boundary that needs a structured refusal.
+    #[must_use]
+    pub fn eval_grad(&self, x: &[f64]) -> Vec<f64> {
+        self.try_eval_grad(x)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Fallible finite-difference diagnostic with exact input-dimension
+    /// admission and the same no-certificate boundary as [`Self::eval_grad`].
+    pub fn try_eval_grad(&self, x: &[f64]) -> Result<Vec<f64>, InputDimensionError> {
+        self.validate_input_dim(EvaluationInput::Gradient, x.len())?;
+        let h = 1e-6;
+        Ok((0..x.len())
+            .map(|i| {
+                let mut xp = x.to_vec();
+                let mut xm = x.to_vec();
+                xp[i] += h;
+                xm[i] -= h;
+                (self.eval_admitted(&xp) - self.eval_admitted(&xm)) / (2.0 * h)
+            })
+            .collect())
+    }
+
+    /// A GUARANTEED output enclosure of `f` over the input box `[lo, hi]`, by
+    /// outward-rounded interval bound propagation (IBP). Structural dimension
+    /// mismatches panic; a non-finite or inverted input box fails closed to the
+    /// whole extended real line.
+    #[must_use]
+    pub fn eval_interval(&self, lo: &[f64], hi: &[f64]) -> (f64, f64) {
+        self.try_eval_interval(lo, hi)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Fallible interval evaluation with independent exact-dimension admission
+    /// for both endpoint vectors.
+    pub fn try_eval_interval(
+        &self,
+        lo: &[f64],
+        hi: &[f64],
+    ) -> Result<(f64, f64), InputDimensionError> {
+        self.validate_input_dim(EvaluationInput::IntervalLower, lo.len())?;
+        self.validate_input_dim(EvaluationInput::IntervalUpper, hi.len())?;
+        if lo
+            .iter()
+            .zip(hi)
+            .any(|(&lo, &hi)| !lo.is_finite() || !hi.is_finite() || lo > hi)
+        {
+            return Ok((f64::NEG_INFINITY, f64::INFINITY));
+        }
+
+        let mut activations = lo
+            .iter()
+            .zip(hi)
+            .map(|(&lo, &hi)| Interval::new(lo, hi))
+            .collect::<Vec<_>>();
+        let last = self.layers.len() - 1;
+        for (li, layer) in self.layers.iter().enumerate() {
+            let mut next = layer
+                .bias
+                .iter()
+                .map(|&bias| Interval::point(bias))
+                .collect::<Vec<_>>();
+            for (j, row) in layer.weights.iter().enumerate() {
+                for (i, &w) in row.iter().enumerate() {
+                    next[j] = next[j] + Interval::point(w) * activations[i];
+                }
+            }
+            if li < last {
+                for value in &mut next {
+                    *value = value.tanh();
+                }
+            }
+            activations = next;
+        }
+        Ok((activations[0].lo(), activations[0].hi()))
+    }
+
+    fn validate_input_dim(
+        &self,
+        input: EvaluationInput,
+        actual: usize,
+    ) -> Result<(), InputDimensionError> {
+        let expected = self.input_dim();
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(InputDimensionError {
+                input,
+                expected,
+                actual,
+            })
+        }
+    }
+}
+
+/// Derive a provably safe sphere-tracing radius from a sound point enclosure
+/// and a certified Lipschitz upper bound.
+///
+/// For `[lo, hi]`, the magnitude lower bound is `lo` when `lo > 0`, `-hi` when
+/// `hi < 0`, and zero otherwise. A semi-infinite enclosure is useful when its
+/// inward sign-separating endpoint is finite. The quotient is rounded down;
+/// malformed enclosures and invalid Lipschitz bounds fail closed to zero. When
+/// `L = 0`, a sign-separated constant field has infinite clearance, while an
+/// enclosure that does not exclude zero has zero clearance.
+#[must_use]
+pub fn derive_safe_step(enclosure: (f64, f64), lipschitz: f64) -> SafeStepDerivation {
+    let (lo, hi) = enclosure;
+    if lo.is_nan() || hi.is_nan() || lo > hi {
+        return SafeStepDerivation {
+            enclosure,
+            magnitude_lower_bound: 0.0,
+            lipschitz_upper_bound: lipschitz,
+            radius: 0.0,
+            status: SafeStepStatus::InvalidEnclosure,
+        };
+    }
+
+    if !lipschitz.is_finite() || lipschitz < 0.0 {
+        return SafeStepDerivation {
+            enclosure,
+            magnitude_lower_bound: 0.0,
+            lipschitz_upper_bound: lipschitz,
+            radius: 0.0,
+            status: SafeStepStatus::InvalidLipschitz,
+        };
+    }
+
+    let magnitude_lower_bound = if lo.is_finite() && lo > 0.0 {
+        lo
+    } else if hi.is_finite() && hi < 0.0 {
+        -hi
+    } else {
+        0.0
+    };
+    if magnitude_lower_bound == 0.0 {
+        return SafeStepDerivation {
+            enclosure,
+            magnitude_lower_bound,
+            lipschitz_upper_bound: lipschitz,
+            radius: 0.0,
+            status: SafeStepStatus::NoFiniteSignMargin,
+        };
+    }
+
+    let radius = if lipschitz == 0.0 {
+        f64::INFINITY
+    } else {
+        next_down_nonnegative(magnitude_lower_bound / lipschitz)
+    };
+    SafeStepDerivation {
+        enclosure,
+        magnitude_lower_bound,
+        lipschitz_upper_bound: lipschitz,
+        radius,
+        status: SafeStepStatus::SignSeparated,
+    }
+}
+
+// -- linear-algebra helpers -------------------------------------------------
+
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+fn matvec(w: &[Vec<f64>], v: &[f64]) -> Vec<f64> {
+    w.iter().map(|row| dot(row, v)).collect()
+}
+
+fn matvec_t(w: &[Vec<f64>], u: &[f64]) -> Vec<f64> {
+    let n_in = w[0].len();
+    let mut z = vec![0.0; n_in];
+    for (row, &ui) in w.iter().zip(u) {
+        for (zi, &wij) in z.iter_mut().zip(row) {
+            *zi += wij * ui;
+        }
+    }
+    z
+}
+
+fn norm(v: &[f64]) -> f64 {
+    dot(v, v).sqrt()
+}
+
+fn normalize(v: &mut [f64]) {
+    let n = norm(v);
+    if n > 1e-30 {
+        for vi in v {
+            *vi /= n;
+        }
+    }
+}
+
+/// Return `(max_abs, unit_bound)` such that the spectral norm is at most
+/// `max_abs * unit_bound`, without forming that potentially overflowing
+/// product. All inputs are validated here so every certificate-bearing caller
+/// shares the same fail-closed boundary.
+fn scaled_spectral_upper_parts(weights: &[Vec<f64>]) -> (f64, f64) {
+    let Some(first) = weights.first() else {
+        return (0.0, 0.0);
+    };
+    let n_in = first.len();
+    assert!(
+        weights.iter().all(|row| row.len() == n_in),
+        "ragged weights"
+    );
+    assert!(
+        weights.iter().flatten().all(|w| w.is_finite()),
+        "weights must be finite"
+    );
+
+    let max_abs = weights
+        .iter()
+        .flatten()
+        .map(|w| w.abs())
+        .fold(0.0_f64, f64::max);
+    if max_abs == 0.0 {
+        return (0.0, 0.0);
+    }
+
+    let mut frobenius_sum = 0.0f64;
+    let mut max_row_sum = 0.0f64;
+    let mut column_sums = vec![0.0f64; n_in];
+    for row in weights {
+        let mut row_sum = 0.0;
+        for (column_sum, magnitude) in column_sums.iter_mut().zip(row.iter().map(|w| w.abs())) {
+            if magnitude == 0.0 {
+                continue;
+            }
+            // det-ok: max_abs is bit-identical to one of the magnitudes;
+            // an epsilon rewrite would corrupt this directed-rounding branch.
+            let ratio = if magnitude.to_bits() == max_abs.to_bits() {
+                1.0
+            } else {
+                next_up_nonnegative(magnitude / max_abs)
+            };
+            frobenius_sum = add_up_nonnegative(frobenius_sum, mul_up_nonnegative(ratio, ratio));
+            row_sum = add_up_nonnegative(row_sum, ratio);
+            *column_sum = add_up_nonnegative(*column_sum, ratio);
+        }
+        max_row_sum = max_row_sum.max(row_sum);
+    }
+
+    let frobenius_bound = if frobenius_sum.to_bits() == 1.0f64.to_bits() {
+        1.0
+    } else {
+        next_up_nonnegative(frobenius_sum.sqrt())
+    };
+    let max_column_sum = column_sums.into_iter().fold(0.0_f64, f64::max);
+    let induced_product = mul_up_nonnegative(max_column_sum, max_row_sum);
+    let induced_bound = if induced_product.to_bits() == 1.0f64.to_bits() {
+        1.0
+    } else {
+        next_up_nonnegative(induced_product.sqrt())
+    };
+    let unit_bound = frobenius_bound.min(induced_bound);
+    (max_abs, unit_bound)
+}
+
+fn try_spectral_norm_upper_bound(weights: &[Vec<f64>]) -> Option<f64> {
+    let (max_abs, unit_bound) = scaled_spectral_upper_parts(weights);
+    finite_scaled_upper(max_abs, unit_bound)
+}
+
+fn finite_scaled_upper(max_abs: f64, unit_bound: f64) -> Option<f64> {
+    if max_abs == 0.0 || unit_bound == 0.0 {
+        return Some(0.0);
+    }
+    if unit_bound.to_bits() == 1.0f64.to_bits() {
+        // The induced certificate is exactly max_abs (for example, a single
+        // nonzero or a scaled permutation matrix). Keeping this exact also
+        // admits a 1×1 matrix containing f64::MAX.
+        return Some(max_abs);
+    }
+    let product = mul_up_nonnegative(max_abs, unit_bound);
+    product.is_finite().then_some(product)
+}
+
+fn add_up_nonnegative(a: f64, b: f64) -> f64 {
+    if a == 0.0 {
+        return b;
+    }
+    if b == 0.0 {
+        return a;
+    }
+    next_up_nonnegative(a + b)
+}
+
+fn mul_up_nonnegative(a: f64, b: f64) -> f64 {
+    if a == 0.0 || b == 0.0 {
+        return 0.0;
+    }
+    // det-ok: exact multiplicative-identity tests; epsilon rewrites would
+    // break the upward-rounding contract these helpers implement.
+    if a.to_bits() == 1.0f64.to_bits() {
+        return b;
+    }
+    if b.to_bits() == 1.0f64.to_bits() {
+        return a;
+    }
+    next_up_nonnegative(a * b)
+}
+
+fn product_up(a: f64, b: f64) -> f64 {
+    mul_up_nonnegative(a, b)
+}
+
+fn next_up_nonnegative(value: f64) -> f64 {
+    if value == f64::INFINITY {
+        return value;
+    }
+    if value == 0.0 {
+        return f64::from_bits(1);
+    }
+    f64::from_bits(value.to_bits() + 1)
+}
+
+fn next_down_nonnegative(value: f64) -> f64 {
+    if value <= 0.0 {
+        return 0.0;
+    }
+    if value == f64::INFINITY {
+        return f64::MAX;
+    }
+    f64::from_bits(value.to_bits() - 1)
+}
+
+fn zero_weights(weights: &mut [Vec<f64>]) {
+    for row in weights {
+        row.fill(0.0);
+    }
+}

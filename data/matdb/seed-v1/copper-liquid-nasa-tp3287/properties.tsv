@@ -1,0 +1,12 @@
+frankensim.matdb-source.v1
+observation	nasa-tp3287-cu-liquid	pure liquid Cu in the thermodynamic standard state at 1 bar; evaluated element, no manufactured specimen or purity assay identified	NASA/TP-3287/REV1 Table III.15 selected thermodynamic functions; Cu attribution is CODATA 1989 in Table I	Engineering piecewise-linear interpolation of printed liquid rows, not the separate NASA polynomial fit or new measurements. Source molar mass is 63.546 g/mol: cp in J/mol/K divided by 0.063546 kg/mol; assigned h in kJ/mol multiplied by 1000/0.063546. Reference h=0 for crystalline Cu at 298.15 K, so liquid h includes fusion energy. Printed source pairs T:cp:h are 1358:32.800:42.787,1400:32.800:44.165,1500:32.800:47.645. This tranche stops at 1500 K and does not import the table's high-temperature continuation as stable liquid evidence. Source uncertainty/covariance and interpolation error bounds are unstated. Interpolated cp and h are independent approximations, not an exactly thermodynamically consistent constitutive law. The source_phase_liquid flag identifies this table phase (0=crystal,1=liquid); it is not a phase-fraction mixture law. No density, conductivity, viscosity, surface tension, wetting or optical input is inferred.
+curve	cp-liquid	nasa-tp3287-cu-liquid	cp	temperature	K	J/kg/K	1358:516.16152078809,1400:516.16152078809,1500:516.16152078809	linear
+uncertainty	cp-liquid	unstated	-	-	-	-
+validity	cp-liquid	temperature	1358	1500	K
+validity	cp-liquid	pressure	100000	100000	Pa
+validity	cp-liquid	source_phase_liquid	1	1	1
+curve	h-liquid	nasa-tp3287-cu-liquid	h	temperature	K	J/kg	1358:673323.26188902522,1400:695008.34041481756,1500:749771.81883989542	linear
+uncertainty	h-liquid	unstated	-	-	-	-
+validity	h-liquid	temperature	1358	1500	K
+validity	h-liquid	pressure	100000	100000	Pa
+validity	h-liquid	source_phase_liquid	1	1	1

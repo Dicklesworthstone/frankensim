@@ -1,0 +1,22 @@
+frankensim-modal-performance-v3
+sample_rate_hz 48000
+samples 1201
+full_scale_pa 1
+limits 0.9 1 1000 100 1000000
+compile_limits 16 64
+voices 2
+voice retain-state 1 1
+mode 800 0 0 0 0 1
+port 0 1
+voice retain-state 1 1
+mode 1100 0 1 0 0 0
+port 0 1
+coupling_limits 4 1024 0.9 100 1000000 1000000 1e-11 1e-10 1e-8
+connections 0
+contact_limits 80 100000 0.002 1e-10 1e-10
+contact 300000000 1.5 0.2 0.0005 1 authored:two-flexible-bodies
+contact_left 0 1
+contact_right 1 1
+events 2
+force 71 0 0 3
+force 120 0 0 0

@@ -1,0 +1,29 @@
+{
+  "schema": "org.frankensim.wright-flyer.mann-target.v1",
+  "bead": "frankensim-wf-root-guzez.4.6.2.1",
+  "spec": "COMPREHENSIVE_PLAN_FOR_REAL_TIME_WRIGHT_FLYER_SIM_WITH_FRANKENSIM.md (ROUND 6 steady state), E3.3b / V-04b1",
+  "status": "pinned-target",
+  "claim_level": "Estimated (neutral-surface-layer similarity reconstruction; no Kill Devil Hills turbulence measurements exist)",
+  "model_class": "Mann (1994, JFM 273) sheared von Karman spectral tensor",
+  "parameters": {
+    "alpha_eps23_m43_s2": 0.32,
+    "length_scale_m": 1.77,
+    "gamma": 3.9,
+    "reference_height_m": 3.0
+  },
+  "provenance": {
+    "length_scale": "neutral surface-layer similarity L ~ 0.59 z at the Flyer flight-height class (Mann's neutral fit)",
+    "gamma": "Mann's neutral-shear calibration (Gamma ~ 3.9, the widely reproduced value)",
+    "alpha_eps23": "set so sigma_u at z_ref lands in the 2.0-2.5 m/s class for the Dec-17 20-27 mph gusty wind (WindReference: wrights-hand-richard + Kitty Hawk weather station lineage)"
+  },
+  "permitted_claims": [
+    "full Hermitian second-order structure target (auto + cross spectra, uw < 0 surface stress, anisotropy ratios) for V-04b1 fitting",
+    "surface-layer anisotropy class u2 > v2 > w2 with |uw|/sigma_u2 in the 0.1-0.45 band"
+  ],
+  "forbidden_claims": [
+    "site-measured turbulence levels (none exist for 1903 Kitty Hawk)",
+    "stability classes other than neutral",
+    "any validated-tier claim without independent spectral evidence"
+  ],
+  "notes": "The shear distortion (Gamma > 0) is load-bearing: it produces the u-w cross-spectrum a diagonal-only model cannot represent (Round-3 Q2: diagonal-only may initialize, never accept). Per-truncation realizable-tensor artifacts are E3.3b-ii-b scope."
+}

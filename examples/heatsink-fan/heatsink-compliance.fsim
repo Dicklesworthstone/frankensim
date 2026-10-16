@@ -1,0 +1,21 @@
+(fsim-uncertainty-study
+  :version 2
+  :project "heatsink-fan.fsim"
+  :samples 32
+  :seed 31
+  :wall-time 600s
+  :method monte-carlo
+  :correlation independent
+  :qoi "temperature-max"
+  :compliance (bernoulli-mixture
+    :required-probability 0.8 :alpha 0.05 :min-samples 8)
+  :geometry (
+    (mesh :role "heatsink"
+      :path "heatsink.stl"
+      :unit "m" :max-hole-edges 0))
+  :materials ("../../data/reference-project/aa6061.fsmcdpk")
+  :interfaces ()
+  :parameters (
+    (uniform :name "power" :target power :entity "metal" :low 2.5W :high 3.5W)
+    (uniform :name "inlet" :target air-inlet-temperature :entity "metal"
+      :low 293.15K :high 313.15K)))

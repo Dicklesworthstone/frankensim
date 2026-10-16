@@ -1,0 +1,26 @@
+; Native probability propagation through the existing gray-surface example.
+; Run from the repository root with a new ledger path:
+; frankensim --json study data/reference-project/cooling-radiation-uncertainty.fsim radiation-uq.db
+;
+; The ambient fluid remains the base project's declared 293.15 K. The separate
+; radiative reservoir varies both below and above it. Its entity is the named
+; radiation surface, not the geometric region "air". Material and emissivity
+; card values and query temperatures remain unchanged.
+; These uniform laws are declared numerical examples, not inferred card
+; uncertainties, experimental distributions, or a physical-validation claim.
+(fsim-uncertainty-study
+  :version 1
+  :project "cooling-radiation.fsim"
+  :samples 8
+  :seed 29
+  :wall-time 120s
+  :method monte-carlo
+  :correlation independent
+  :qoi "temperature-max"
+  :geometry ((mesh :role "enclosure" :path "plate.stl" :unit "m" :max-hole-edges 0))
+  :materials ("aa6061.fsmcdpk" "gray-surface.fsmcdpk")
+  :interfaces ()
+  :parameters (
+    (uniform :name "power" :target power :entity "air" :low 4W :high 6W)
+    (uniform :name "reservoir" :target radiation-reservoir-temperature
+      :entity "gray-exterior" :low 285K :high 315K)))

@@ -1,0 +1,8 @@
+# fs-wasm vendors upper-stack FrankenSim crates for the browser, reached through
+# asupersync's `wasm-browser-prod` build. Those crates' native-only code paths
+# are cfg'd out on wasm32, which the workspace-wide `deny(dead_code)` /
+# `deny(warnings)` would otherwise promote to hard errors during the wasm build.
+# Cap lints to warnings for the wasm target so the vendored dependency code
+# compiles cleanly. This affects ONLY the wasm32 build of this binding crate.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cap-lints=warn"]

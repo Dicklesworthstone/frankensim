@@ -1,0 +1,5661 @@
+//! G0/G3/G4/G5 evidence for the solve orchestration driver
+//! (bead frankensim-extreal-program-f85xj.6.5, slice 1).
+//!
+//! The battery drives the library seam directly: fixture project, real
+//! import into an in-memory ledger, then the staged solve engine with a
+//! scripted clock and caller-owned cancellation gate.
+
+use fs_cli::{
+    CardPackKind, CardPackSet, CompletedStage, GeometryImportLimits, GeometryImportRun,
+    MAX_SOLVE_VISIBLE_OP_IDS, RawCardPack, RawGeometryLibrary, SOLVE_DRIVER_VERSION,
+    SolveCancellationPlan, SolveDriverState, SolveEvidencePhase, SolveRefusal, SolveRunId,
+    SolveRunStatus, SolveStage, import_project_geometry, resume_solve,
+    resume_solve_with_cancellation_plan, run_solve, run_solve_with_cancellation_plan,
+};
+use fs_evidence::uncertainty::EngineeringUncertaintyKind;
+use fs_exec::solver::LegacySnapshotV1Adapter;
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_io::{NamedFaceGroup, quarantine::import_mesh};
+use fs_ledger::{
+    CONTROLLED_ARTIFACT_TILE_LEN, CONTROLLED_OP_FIELD_TILE_LEN, EdgeRole, ExtensionTable,
+    FiveExplicits, Ledger, MAX_OP_FIELD_BYTES, OpOutcome, STORAGE_CHUNK_LEN, hash_bytes,
+};
+use fs_project::spec::{
+    ConductionRegion, ConductionSetup, ThermalBoundary, ThermalBoundaryCondition,
+};
+use fs_project::{
+    AirflowLeakage, Budgets, ConsequenceClass, Cooling, DecisionGate, DecodedProject, EntityDecl,
+    Envelope, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment,
+    HalfSpaceSide, InterfaceCardBinding, InterfaceState, MaterialBinding, MeshSelector, Metadata,
+    OutputRequest, PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity,
+    RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings,
+    ThermalLimit, UnitsDoctrine, Vent, Versions, print_sexpr,
+};
+use fs_qty::QtyAny;
+
+#[path = "solve/radiation_product.rs"]
+mod radiation_product;
+#[path = "solve/mixed_convection.rs"]
+mod mixed_convection;
+
+#[path = "solve/transient_product.rs"]
+mod transient_product;
+
+#[path = "solve/transient_enthalpy.rs"]
+mod transient_enthalpy;
+#[path = "solve/transient_enthalpy_radiation.rs"]
+mod transient_enthalpy_radiation;
+#[path = "solve/transient_enthalpy_natural.rs"]
+mod transient_enthalpy_natural;
+#[path = "solve/transient_enthalpy_conductivity.rs"]
+mod transient_enthalpy_conductivity;
+#[path = "solve/transient_enthalpy_initial.rs"]
+mod transient_enthalpy_initial;
+#[path = "solve/transient_enthalpy_conjugate.rs"]
+mod transient_enthalpy_conjugate;
+#[path = "solve/transient_enthalpy_adjoint.rs"]
+mod transient_enthalpy_adjoint;
+#[path = "solve/transient_enthalpy_radiation_adjoint.rs"]
+mod transient_enthalpy_radiation_adjoint;
+#[path = "solve/transient_enthalpy_convection_adjoint.rs"]
+mod transient_enthalpy_convection_adjoint;
+#[path = "solve/transient_enthalpy_material_adjoint.rs"]
+mod transient_enthalpy_material_adjoint;
+
+#[path = "solve/transient_workload.rs"]
+mod transient_workload;
+#[path = "solve/transient_radiation.rs"]
+mod transient_radiation;
+#[path = "solve/transient_conjugate.rs"]
+mod transient_conjugate;
+#[path = "solve/transient_natural.rs"]
+mod transient_natural;
+#[path = "solve/transient_mixed.rs"]
+mod transient_mixed;
+
+const REFERENCE_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project");
+
+fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            gate,
+            arena,
+            StreamKey {
+                seed: 0x6a_03_01,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
+}
+
+fn facet(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> String {
+    format!(
+        "facet normal 0 0 0\nouter loop\nvertex {} {} {}\nvertex {} {} {}\nvertex {} {} {}\nendloop\nendfacet\n",
+        a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2],
+    )
+}
+
+fn tetra_stl() -> Vec<u8> {
+    let p0 = [0.0, 0.0, 0.0];
+    let p1 = [1.0, 0.0, 0.0];
+    let p2 = [0.0, 1.0, 0.0];
+    let p3 = [0.0, 0.0, 1.0];
+    let mut stl = String::from("solid enclosure\n");
+    stl.push_str(&facet(p0, p2, p1));
+    stl.push_str(&facet(p0, p1, p3));
+    stl.push_str(&facet(p0, p3, p2));
+    stl.push_str(&facet(p1, p2, p3));
+    stl.push_str("endsolid enclosure\n");
+    stl.into_bytes()
+}
+
+fn storage_row_spanning_tetra_stl() -> Vec<u8> {
+    let base = tetra_stl();
+    let split = base
+        .windows(b"facet normal".len())
+        .position(|window| window == b"facet normal")
+        .expect("fixture contains a facet");
+    let mut padded = Vec::with_capacity(base.len() + STORAGE_CHUNK_LEN + 17);
+    padded.extend_from_slice(&base[..split]);
+    padded.resize(padded.len() + STORAGE_CHUNK_LEN + 17, b'\n');
+    padded.extend_from_slice(&base[split..]);
+    padded
+}
+
+const CARD_FIXTURE_DOMAIN: &str = "org.frankensim.fs-cli.tests.solve-card-fixture.v1";
+const CONDUCTIVITY_DIMS: fs_qty::Dims = fs_qty::Dims([1, 1, -3, -1, 0, 0]);
+
+/// Build one canonical `FSMCDPK\0` payload for the fixture project's region.
+///
+/// The claim's validity domain deliberately covers the fixture's admitted
+/// binding range at both endpoints; a narrower domain is what
+/// `project-binding-domain-uncovered` exists to catch.
+fn material_pack_bytes(chemistry: &str, pack_id: &str) -> Vec<u8> {
+    material_pack_bytes_with_domain(chemistry, pack_id, 200.0, 450.0)
+}
+
+/// Pack fixture with a caller-chosen conductivity validity domain (bead
+/// frankensim-ejo12: the domain-uncovered refusal needs a card whose claim
+/// validity is NARROWER than the binding's admitted range).
+fn material_pack_bytes_with_domain(
+    chemistry: &str,
+    pack_id: &str,
+    t_lo: f64,
+    t_hi: f64,
+) -> Vec<u8> {
+    material_pack_bytes_with_domain_and_conductivity(chemistry, pack_id, t_lo, t_hi, 167.0)
+}
+
+/// Pack fixture with a caller-chosen conductivity value: the hostile
+/// material twin (Journey A falsifier) swaps the aluminium card for a
+/// low-conductivity foam under the same chemistry key.
+fn material_pack_bytes_with_domain_and_conductivity(
+    chemistry: &str,
+    pack_id: &str,
+    t_lo: f64,
+    t_hi: f64,
+    conductivity_w_mk: f64,
+) -> Vec<u8> {
+    material_pack_bytes_with_property(
+        chemistry,
+        pack_id,
+        t_lo,
+        t_hi,
+        fs_matdb::PropertyValue::Scalar {
+            value: conductivity_w_mk,
+            dims: CONDUCTIVITY_DIMS,
+        },
+        fs_matdb::InterpolationPolicy::ConstantWithinValidity,
+    )
+}
+
+fn material_pack_bytes_with_property(
+    chemistry: &str,
+    pack_id: &str,
+    t_lo: f64,
+    t_hi: f64,
+    conductivity: fs_matdb::PropertyValue,
+    interpolation: fs_matdb::InterpolationPolicy,
+) -> Vec<u8> {
+    use fs_matdb::{
+        ClaimSet, MaterialStateId, NormalizedMaterialCardPack, NormalizedPack, ObservationDataset,
+        PropertyClaim, PropertyKey, Provenance, UncertaintyModel,
+    };
+    let provenance = || Provenance {
+        source: "solve fixture conductivity table".to_string(),
+        license: "CC-BY-4.0; redistribution permitted with attribution".to_string(),
+        artifact: Some(fs_blake3::hash_domain(
+            CARD_FIXTURE_DOMAIN,
+            b"fixture-table",
+        )),
+    };
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "solve fixture coupon".to_string(),
+            method: "solve fixture campaign".to_string(),
+            artifact: fs_blake3::hash_domain(CARD_FIXTURE_DOMAIN, b"raw-observation"),
+            caveats: "fixture value; not a seed-dataset authority".to_string(),
+            provenance: provenance(),
+        })
+        .expect("licensed observation inserts");
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new("thermal-conductivity", CONDUCTIVITY_DIMS),
+            value: conductivity,
+            validity: fs_evidence::ValidityDomain::unconstrained().with("T", t_lo, t_hi),
+            uncertainty: UncertaintyModel::HalfWidth {
+                half_width: 3.0,
+                confidence: 0.95,
+            },
+            interpolation,
+            observations: vec![observation],
+            provenance: provenance(),
+        })
+        .expect("conductivity claim inserts");
+    let claims_pack = NormalizedPack::new(
+        pack_id,
+        "frankensim-material-card-pack-compiler-v1",
+        fs_blake3::hash_domain(CARD_FIXTURE_DOMAIN, b"source-envelope"),
+        "CC-BY-4.0: redistribution permitted with attribution",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("claim pack admits");
+    NormalizedMaterialCardPack::new(
+        MaterialStateId {
+            chemistry: chemistry.to_string(),
+            phase: "wrought".to_string(),
+            process: "T6".to_string(),
+            revision: 0,
+        },
+        claims_pack,
+    )
+    .expect("material-card pack admits")
+    .to_bytes()
+}
+
+fn fixture_pack_bytes() -> Vec<u8> {
+    material_pack_bytes("AA6061", "solve-fixture-pack")
+}
+
+fn raw_pack(kind: CardPackKind, source: &str, bytes: Vec<u8>) -> RawCardPack {
+    RawCardPack {
+        kind,
+        source: source.to_string(),
+        bytes,
+        expect: None,
+    }
+}
+
+/// The fixture project's admitted card-pack set.
+fn fixture_cards() -> CardPackSet {
+    CardPackSet::admit(vec![raw_pack(
+        CardPackKind::Material,
+        "fixtures/aa6061.fsmcdpk",
+        fixture_pack_bytes(),
+    )])
+    .expect("the fixture pack admits")
+}
+
+fn interface_pack_bytes() -> Vec<u8> {
+    interface_pack_bytes_with_peak(None)
+}
+
+fn interface_pack_bytes_with_peak(peak: Option<f64>) -> Vec<u8> {
+    interface_pack_bytes_with_resistance_and_peak(0.1, peak)
+}
+
+fn interface_pack_bytes_with_resistance_and_peak(resistance: f64, peak: Option<f64>) -> Vec<u8> {
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedInterfacePack, NormalizedPack,
+        ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance, SurfaceSpec,
+        SystemContext, UncertaintyModel,
+    };
+    let provenance = Provenance {
+        source: "solve fixture contact table".to_string(),
+        license: "CC-BY-4.0; redistribution permitted with attribution".to_string(),
+        artifact: Some(fs_blake3::hash_domain(
+            CARD_FIXTURE_DOMAIN,
+            b"fixture-contact-table",
+        )),
+    };
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "solve fixture contact coupon".to_string(),
+            method: "solve fixture contact campaign".to_string(),
+            artifact: fs_blake3::hash_domain(CARD_FIXTURE_DOMAIN, b"raw-contact-observation"),
+            caveats: "fixture value; not a seed-dataset authority".to_string(),
+            provenance: provenance.clone(),
+        })
+        .expect("licensed contact observation inserts");
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(
+                fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+                fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            ),
+            value: peak.map_or(
+                PropertyValue::Scalar {
+                    value: resistance,
+                    dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+                },
+                |peak| PropertyValue::Curve {
+                    abscissa: "T".to_owned(),
+                    abscissa_dims: fs_conduction::TEMPERATURE_DIMS,
+                    knots: vec![
+                        (200.0, resistance),
+                        (295.0, resistance),
+                        (300.0, peak),
+                        (305.0, resistance),
+                        (450.0, resistance),
+                    ],
+                    dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+                },
+            ),
+            validity: ValidityDomain::unconstrained().with("T", 200.0, 450.0),
+            uncertainty: UncertaintyModel::HalfWidth {
+                half_width: 0.005,
+                confidence: 0.95,
+            },
+            interpolation: if peak.is_some() {
+                InterpolationPolicy::LinearInside
+            } else {
+                InterpolationPolicy::ConstantWithinValidity
+            },
+            observations: vec![observation],
+            provenance: provenance.clone(),
+        })
+        .expect("contact claim inserts");
+    let pack = NormalizedPack::new(
+        "solve-fixture-interface-pack",
+        "frankensim-interface-pack-compiler-v1",
+        fs_blake3::hash_domain(CARD_FIXTURE_DOMAIN, b"contact-source-envelope"),
+        "CC-BY-4.0: redistribution permitted with attribution",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("contact claim pack admits");
+    let state = |chemistry: &str| MaterialStateId {
+        chemistry: chemistry.to_string(),
+        phase: "solid".to_string(),
+        process: "fixture".to_string(),
+        revision: 0,
+    };
+    NormalizedInterfacePack::new(
+        SurfaceSpec {
+            material: state("cold-body"),
+            texture_frame: "normal-plus-x".to_string(),
+        },
+        SurfaceSpec {
+            material: state("hot-body"),
+            texture_frame: "normal-minus-x".to_string(),
+        },
+        SystemContext {
+            medium: "dry-contact".to_string(),
+            third_body: None,
+            environment: "fixture-air".to_string(),
+            history: "unaged".to_string(),
+        },
+        pack,
+    )
+    .expect("interface pack admits")
+    .to_bytes()
+}
+
+fn contact_cards() -> CardPackSet {
+    contact_cards_with_interface(interface_pack_bytes())
+}
+
+fn contact_cards_with_interface(interface_bytes: Vec<u8>) -> CardPackSet {
+    CardPackSet::admit(vec![
+        raw_pack(
+            CardPackKind::Material,
+            "fixtures/aa6061.fsmcdpk",
+            fixture_pack_bytes(),
+        ),
+        raw_pack(
+            CardPackKind::Interface,
+            "fixtures/cold-hot.fsintpk",
+            interface_bytes,
+        ),
+    ])
+    .expect("contact card set admits")
+}
+
+/// The card hash the fixture project's material binding must name, and the
+/// exact material-state rendering its `:state` field must match.
+fn fixture_card_identity() -> (String, String) {
+    let cards = fixture_cards();
+    let pack = &cards.materials()[0];
+    (pack.card().to_hex(), pack.identity().to_string())
+}
+
+fn project_for_receipt(seed_root: u64, source_hash: u64, parser_version: &str) -> ProjectSpec {
+    let kelvin = |value| QtyAny::new(value, fs_project::spec::dims::TEMPERATURE);
+    let watts = |value| QtyAny::new(value, fs_project::spec::dims::POWER);
+    ProjectSpec {
+        metadata: Some(Metadata {
+            name: "solve-reference".to_string(),
+            created: "2026-07-26".to_string(),
+            context_of_use: "solve orchestration conformance".to_string(),
+            intended_decision: "exercise the staged solve driver".to_string(),
+            decision_gate: DecisionGate::ScopingEstimate,
+            consequence: ConsequenceClass::Advisory,
+        }),
+        versions: Some(Versions {
+            schema: fs_project::FSIM_VERSION,
+            constellation: "00".repeat(32),
+            workspace: "11".repeat(20),
+        }),
+        seeds: Some(Seeds { root: seed_root }),
+        budgets: Some(Budgets {
+            solve_time: QtyAny::new(60.0, fs_project::spec::dims::TIME),
+            memory_bytes: 64 * 1024 * 1024,
+            accuracy_rel: 0.01,
+        }),
+        capabilities: Some(vec!["thermal.conduction-solve".to_string()]),
+        units: Some(UnitsDoctrine {
+            storage: "si-base".to_string(),
+            display: "engineering".to_string(),
+        }),
+        geometry: Some(vec![GeometryArtifact {
+            role: "enclosure".to_string(),
+            format: "stl".to_string(),
+            source_hash,
+            parser_version: parser_version.to_string(),
+            surface_offset: None,
+        }]),
+        assignments: Some(vec![GeometryAssignment {
+            artifact: "enclosure".to_string(),
+            target: "air".to_string(),
+            length_unit: "m".to_string(),
+            selector: MeshSelector::HalfSpace {
+                normal: [1.0, 0.0, 0.0],
+                offset: 1.0,
+                side: HalfSpaceSide::AtMost,
+                tolerance: 0.0,
+            },
+            allow_overlap: false,
+        }]),
+        assembly: Some(vec![
+            EntityDecl::Assembly {
+                name: "assembly".to_string(),
+                display: "Assembly".to_string(),
+                expect_id: None,
+            },
+            EntityDecl::Part {
+                parent: "assembly".to_string(),
+                name: "enclosure".to_string(),
+                display: "Enclosure".to_string(),
+                expect_id: None,
+            },
+            EntityDecl::Region {
+                parent: "enclosure".to_string(),
+                name: "air".to_string(),
+                display: "Internal air".to_string(),
+                expect_id: None,
+            },
+        ]),
+        materials: Some(vec![MaterialBinding {
+            region: "air".to_string(),
+            card: fixture_card_identity().0,
+            claim: None,
+            state: fixture_card_identity().1,
+            // Covers the declared envelope and every thermal limit, which is
+            // what `project-material-envelope-uncovered` requires.
+            temp_lo: kelvin(233.15),
+            temp_hi: kelvin(398.15),
+            source: "solve-fixture".to_string(),
+            conductivity_tolerance: None,
+        }]),
+        interface_cards: Some(Vec::new()),
+        perfect_contacts: None,
+        power: Some(vec![PowerDissipation {
+            region: "air".to_string(),
+            watts: watts(5.0),
+            duty: 1.0,
+        }]),
+        cooling: Some(Cooling {
+            fans: Vec::new(),
+            vents: vec![Vent {
+                region: "air".to_string(),
+                area: QtyAny::new(0.004, fs_project::spec::dims::AREA),
+            }],
+            leakage: watts(0.0),
+            airflow_leakage: Some(AirflowLeakage {
+                area: QtyAny::new(0.0015, fs_project::spec::dims::AREA),
+            }),
+            fan_system: Some(fs_project::fansystem::FanSystemDecl {
+                version: fs_project::fansystem::FAN_SYSTEM_DECL_VERSION,
+                banks: vec![fs_project::fansystem::FanBankDecl {
+                    bank_id: "fixture-bank".to_string(),
+                    curve: FanCurveDecl {
+                        points: vec![
+                            FanCurvePoint {
+                                flow: QtyAny::new(0.0, fs_project::spec::dims::VOLUMETRIC_FLOW),
+                                static_pressure: QtyAny::new(
+                                    160.0,
+                                    fs_project::spec::dims::PRESSURE,
+                                ),
+                            },
+                            FanCurvePoint {
+                                flow: QtyAny::new(0.08, fs_project::spec::dims::VOLUMETRIC_FLOW),
+                                static_pressure: QtyAny::new(0.0, fs_project::spec::dims::PRESSURE),
+                            },
+                        ],
+                        pressure_tolerance_rel: 0.05,
+                        tolerance_basis: FanToleranceBasis::Manufacturer,
+                        source: "solve fixture curve; not manufacturer data".to_string(),
+                        source_id: "solve-fixture-curve-v1".to_string(),
+                        min_flow: QtyAny::new(0.001, fs_project::spec::dims::VOLUMETRIC_FLOW),
+                    },
+                    count: 1,
+                    arrangement: fs_airflow::FanArrangement::Series,
+                    speed_ratio: 1.0,
+                    speed_ratio_domain: (0.5, 2.0),
+                    rated_point: None,
+                }],
+                topology: fs_project::fansystem::FanSystemTopology::Single,
+            }),
+            conduction: None,
+            fan_efficiency: None,
+        }),
+        envelope: Some(Envelope {
+            ambient_lo: kelvin(293.15),
+            ambient_hi: kelvin(313.15),
+            pressure: QtyAny::new(101_325.0, fs_project::spec::dims::PRESSURE),
+        }),
+        requirements: Some(vec![ThermalLimit {
+            qoi: "temperature-max".to_string(),
+            class: "surface".to_string(),
+            region: "air".to_string(),
+            direction: RequirementDirection::AtMost,
+            limit: kelvin(353.15),
+            margin: kelvin(5.0),
+            source: RequirementSource {
+                kind: RequirementSourceKind::UserDeclaration,
+                document: "solve-fixture".to_string(),
+                version: "1".to_string(),
+                locator: "temperature-max".to_string(),
+            },
+            safety_factor: SafetyFactorPolicy {
+                factor: 1.0,
+                source: RequirementSource {
+                    kind: RequirementSourceKind::UserDeclaration,
+                    document: "solve-fixture-margin-policy".to_string(),
+                    version: "1".to_string(),
+                    locator: "factor".to_string(),
+                },
+            },
+            severity: RequirementSeverity::ReliabilityDerating,
+        }]),
+        solver: Some(SolverSettings {
+            fidelity: "auto".to_string(),
+            tolerance_rel: 1e-6,
+        }),
+        outputs: Some(vec![OutputRequest {
+            name: "temperature-max".to_string(),
+            kind: "scalar".to_string(),
+            region: None,
+        }]),
+    }
+}
+
+fn fixture_project(seed_root: u64, bytes: &[u8]) -> ProjectSpec {
+    let receipt = import_mesh(bytes, "stl")
+        .expect("fixture parses")
+        .source_receipt;
+    project_for_receipt(seed_root, receipt.source_hash, receipt.parser_version)
+}
+
+fn conduction_fixture_project(seed_root: u64, bytes: &[u8]) -> ProjectSpec {
+    let mut spec = fixture_project(seed_root, bytes);
+    spec.cooling.as_mut().expect("fixture cooling").conduction = Some(ConductionSetup {
+        regions: vec![ConductionRegion {
+            region: "air".to_string(),
+            seed: [
+                QtyAny::new(0.1, fs_project::spec::dims::LENGTH),
+                QtyAny::new(0.1, fs_project::spec::dims::LENGTH),
+                QtyAny::new(0.1, fs_project::spec::dims::LENGTH),
+            ],
+        }],
+        boundaries: vec![ThermalBoundary {
+            target: "air".to_string(),
+            condition: ThermalBoundaryCondition::Convection {
+                coefficient: QtyAny::new(10.0, fs_project::spec::dims::HEAT_TRANSFER_COEFFICIENT),
+                reference_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+            },
+        }],
+        adiabatic_remainder: false,
+        radiation: None,
+        transient: None,
+    });
+    spec
+}
+
+fn multi_region_contact_project() -> ProjectSpec {
+    let source = std::fs::read_to_string(format!("{REFERENCE_DATA}/multi-region-interface.fsim"))
+        .expect("committed multi-region project");
+    let mut spec = fs_project::parse_sexpr_migrating(&source)
+        .expect("historical multi-region project migrates")
+        .decoded
+        .spec;
+    let (material_card, material_state) = fixture_card_identity();
+    spec.materials = Some(
+        ["cold", "hot"]
+            .into_iter()
+            .map(|region| MaterialBinding {
+                region: region.to_string(),
+                card: material_card.clone(),
+                claim: None,
+                state: material_state.clone(),
+                temp_lo: QtyAny::new(233.15, fs_project::spec::dims::TEMPERATURE),
+                temp_hi: QtyAny::new(398.15, fs_project::spec::dims::TEMPERATURE),
+                source: "solve-contact-fixture".to_string(),
+                conductivity_tolerance: None,
+            })
+            .collect(),
+    );
+    let cards = contact_cards();
+    spec.interface_cards = Some(vec![InterfaceCardBinding {
+        interface: "cold-hot-joint".to_string(),
+        card: cards.interfaces()[0].card().to_hex(),
+        claim: None,
+        source: "solve-contact-fixture".to_string(),
+        state: InterfaceState::DryContact {
+            pressure: QtyAny::new(1.0e6, fs_project::spec::dims::PRESSURE),
+            pressure_half_width: QtyAny::new(1.0e5, fs_project::spec::dims::PRESSURE),
+            finish: "fixture-machined".to_string(),
+        },
+    }]);
+    spec.power = Some(vec![PowerDissipation {
+        region: "hot".to_string(),
+        watts: QtyAny::new(5.0, fs_project::spec::dims::POWER),
+        duty: 1.0,
+    }]);
+    spec.cooling.as_mut().expect("fixture cooling").conduction = Some(ConductionSetup {
+        regions: vec![
+            ConductionRegion {
+                region: "cold".to_string(),
+                seed: [0.5, 0.5, 0.5]
+                    .map(|value| QtyAny::new(value, fs_project::spec::dims::LENGTH)),
+            },
+            ConductionRegion {
+                region: "hot".to_string(),
+                seed: [1.5, 0.5, 0.5]
+                    .map(|value| QtyAny::new(value, fs_project::spec::dims::LENGTH)),
+            },
+        ],
+        boundaries: vec![
+            ThermalBoundary {
+                target: "cold".to_string(),
+                condition: ThermalBoundaryCondition::FixedTemperature {
+                    temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+                },
+            },
+            ThermalBoundary {
+                target: "hot".to_string(),
+                condition: ThermalBoundaryCondition::Convection {
+                    coefficient: QtyAny::new(
+                        10.0,
+                        fs_project::spec::dims::HEAT_TRANSFER_COEFFICIENT,
+                    ),
+                    reference_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+                },
+            },
+        ],
+        // The contact operator, not an exterior boundary row, owns the two
+        // duplicated joint traces. They must therefore remain in the explicit
+        // adiabatic remainder until ThermalInterfaces binds them.
+        adiabatic_remainder: true,
+        radiation: None,
+        transient: None,
+    });
+    spec
+}
+
+/// Five watts generated in the hot body have one exit: the declared unit-area
+/// joint into the fixed-temperature cold body. Thus conservation independently
+/// fixes the signed contact heat to -5 W and its mean temperature jump to
+/// -0.5 K for R'' = 0.1 m² K/W, regardless of the mesh or bulk conductivity.
+fn contact_refinement_project(fidelity: &str) -> ProjectSpec {
+    let mut spec = multi_region_contact_project();
+    spec.solver.as_mut().unwrap().fidelity = fidelity.to_string();
+    // Keep algebraic error below the independently checked 5 W / 0.5 K
+    // conservation oracles even on the finest uniform rung.
+    spec.solver.as_mut().unwrap().tolerance_rel = 1e-8;
+    spec.requirements.as_mut().unwrap()[0].region = "hot".to_string();
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.boundaries[1].condition = ThermalBoundaryCondition::HeatFlux {
+        outward_flux: QtyAny::new(0.0, fs_project::spec::dims::HEAT_FLUX),
+    };
+    spec
+}
+
+fn contact_refinement_receipt(spec: &ProjectSpec, cards: &CardPackSet) -> String {
+    let decoded = decode(spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_multi_region_contact(&ledger, spec);
+    let outcome = run_solve(
+        &ledger,
+        &CancelGate::new_clock_free(),
+        &mut benign_clock(),
+        &decoded,
+        cards,
+        &mut Vec::new(),
+    )
+    .expect("the contact refinement study completes through the ordinary staged solver");
+    assert_eq!(outcome.status, SolveRunStatus::Completed);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let receipt = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    assert_balanced_json(&receipt);
+    let number = |name| receipt_number_field(&receipt, name);
+    assert!((number("area_m2") - 1.0).abs() < 1e-12, "{receipt}");
+    assert!(
+        (number("conductance_w_per_k") - 10.0).abs() < 1e-10,
+        "{receipt}"
+    );
+    assert!((number("source_w") - 5.0).abs() < 1e-11, "{receipt}");
+    assert!(
+        (number("heat_rate_a_to_b_w") + 5.0).abs() < 2e-5,
+        "{receipt}"
+    );
+    assert!((number("mean_jump_k") + 0.5).abs() < 2e-6, "{receipt}");
+    assert!((number("dirichlet_in_w") + 5.0).abs() < 2e-5, "{receipt}");
+    assert!(number("relative_closure") < 1e-6, "{receipt}");
+    let evidence = String::from_utf8(artifact_bytes(
+        &ledger,
+        &receipt_str_field(&receipt, "evidence_artifact"),
+    ))
+    .unwrap();
+    assert_eq!(
+        receipt_number_field(&evidence, "pair_count"),
+        number("pair_count"),
+        "retained contact evidence describes the published refined field"
+    );
+    receipt
+}
+
+/// Leave the two real solids and their imported traces intact, but remove the
+/// complete declared-interface bundle so conduction must refuse the retained
+/// coincident boundary faces rather than infer a zero-resistance joint.
+fn multi_region_project_without_declared_interface(reverse_region_order: bool) -> ProjectSpec {
+    let mut spec = multi_region_contact_project();
+    spec.assembly.as_mut().expect("fixture assembly").retain(
+        |entity| !matches!(entity, EntityDecl::Interface { name, .. } if name == "cold-hot-joint"),
+    );
+    spec.assignments
+        .as_mut()
+        .expect("fixture assignments")
+        .retain(|assignment| assignment.target != "cold-hot-joint");
+    spec.interface_cards
+        .as_mut()
+        .expect("fixture interface cards")
+        .retain(|binding| binding.interface != "cold-hot-joint");
+
+    if reverse_region_order {
+        let assembly = spec.assembly.as_mut().expect("fixture assembly");
+        let cold = assembly
+            .iter()
+            .position(|entity| matches!(entity, EntityDecl::Region { name, .. } if name == "cold"))
+            .expect("cold region remains declared");
+        let hot = assembly
+            .iter()
+            .position(|entity| matches!(entity, EntityDecl::Region { name, .. } if name == "hot"))
+            .expect("hot region remains declared");
+        assembly.swap(cold, hot);
+    }
+    spec
+}
+
+fn import_multi_region_contact(ledger: &Ledger, spec: &ProjectSpec) {
+    let mut raw = RawGeometryLibrary::new();
+    for artifact in spec.geometry.as_deref().expect("geometry") {
+        let path = format!(
+            "{REFERENCE_DATA}/multi-region-{role}.stl",
+            role = artifact.role
+        );
+        let bytes = std::fs::read(&path).expect("committed multi-region mesh");
+        assert!(!raw.insert_mesh(artifact, path, bytes, "m", 0, Vec::new(),));
+    }
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        import_project_geometry(spec, &raw, ledger, GeometryImportLimits::DEFAULT, cx)
+            .expect("multi-region fixture imports");
+    });
+}
+
+fn decode(spec: &ProjectSpec) -> DecodedProject {
+    let source = print_sexpr(spec).expect("fixture renders canonically");
+    let decoded = fs_project::parse_sexpr(&source).expect("fixture re-parses strictly");
+    assert!(decoded.findings().is_empty(), "fixture validates cleanly");
+    decoded
+}
+
+/// Import the fixture geometry into the ledger so the solve prefix has
+/// retained evidence to verify.
+fn import_fixture(ledger: &Ledger, spec: &ProjectSpec, bytes: Vec<u8>) -> GeometryImportRun {
+    let artifact = &spec.geometry.as_ref().expect("geometry")[0];
+    let mut raw = RawGeometryLibrary::new();
+    assert!(!raw.insert_mesh(
+        artifact,
+        "fixtures/enclosure.stl",
+        bytes,
+        "m",
+        0,
+        vec![NamedFaceGroup {
+            name: "fixture-all-faces".to_string(),
+            // Deliberately non-sorted: solve must preserve writer order while
+            // checking duplicates without a post-parse sort.
+            faces: vec![3, 1, 2, 0],
+        }],
+    ));
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        import_project_geometry(spec, &raw, ledger, GeometryImportLimits::DEFAULT, cx)
+            .expect("fixture imports")
+    })
+}
+
+/// Reproduce a successful import candidate in an isolated ledger while
+/// allowing one exact IR or summary-byte mutation.
+fn reproduce_import_candidate(
+    source: &Ledger,
+    imported: &GeometryImportRun,
+    target: &Ledger,
+    ir: &str,
+    summary: &str,
+) -> i64 {
+    reproduce_import_candidate_with_overrides(source, imported, target, ir, summary, None, None)
+}
+
+fn reproduce_import_candidate_with_mesh(
+    source: &Ledger,
+    imported: &GeometryImportRun,
+    target: &Ledger,
+    ir: &str,
+    summary: &str,
+    promoted_mesh_override: Option<&[u8]>,
+) -> i64 {
+    reproduce_import_candidate_with_overrides(
+        source,
+        imported,
+        target,
+        ir,
+        summary,
+        promoted_mesh_override,
+        None,
+    )
+}
+
+fn reproduce_import_candidate_with_overrides(
+    source: &Ledger,
+    imported: &GeometryImportRun,
+    target: &Ledger,
+    ir: &str,
+    summary: &str,
+    promoted_mesh_override: Option<&[u8]>,
+    promotion_receipt_override: Option<&[u8]>,
+) -> i64 {
+    let source_row = source
+        .op(imported.op_id)
+        .expect("source import op query")
+        .expect("source import op");
+    let op = target
+        .begin_op(
+            None,
+            ir,
+            &FiveExplicits {
+                seed: &source_row.seed,
+                versions: &source_row.versions,
+                budget: &source_row.budget,
+                capability: &source_row.capability,
+            },
+            source_row.t_start,
+        )
+        .expect("reproduced import op");
+    for entry in &imported.artifacts {
+        for (hash, kind, role) in [
+            (entry.raw_source, "geometry-source", EdgeRole::In),
+            (
+                entry.promotion_receipt,
+                "geometry-import-receipt",
+                EdgeRole::Out,
+            ),
+            (entry.promoted_mesh, "geometry-mesh-ply", EdgeRole::Out),
+            (
+                entry.assignment_report,
+                "geometry-assignment-report",
+                EdgeRole::Out,
+            ),
+        ] {
+            let override_bytes = match kind {
+                "geometry-mesh-ply" => promoted_mesh_override,
+                "geometry-import-receipt" => promotion_receipt_override,
+                _ => None,
+            };
+            let bytes = override_bytes.map_or_else(
+                || {
+                    source
+                        .get_artifact(&hash)
+                        .expect("read source artifact")
+                        .expect("source artifact exists")
+                },
+                <[u8]>::to_vec,
+            );
+            let copied = target
+                .put_artifact(kind, &bytes, None)
+                .expect("copy typed import artifact");
+            if override_bytes.is_some() {
+                assert_eq!(copied.hash, hash_bytes(&bytes));
+            } else {
+                assert_eq!(copied.hash, hash);
+            }
+            target.link(op, &copied.hash, role).expect("typed edge");
+        }
+        let promotion_receipt = String::from_utf8(
+            source
+                .get_artifact(&entry.promotion_receipt)
+                .expect("read source promotion receipt")
+                .expect("source promotion receipt exists"),
+        )
+        .expect("source promotion receipt UTF-8");
+        target
+            .put_extension(
+                ExtensionTable::Imports,
+                &entry.import_record,
+                &promotion_receipt,
+            )
+            .expect("copy exact import extension row");
+    }
+    let summary = target
+        .put_artifact("geometry-import-run-receipt", summary.as_bytes(), None)
+        .expect("reproduced summary");
+    target
+        .link(op, &summary.hash, EdgeRole::Out)
+        .expect("summary edge");
+    target
+        .finish_op(
+            op,
+            OpOutcome::Ok,
+            None,
+            source_row.t_end.expect("source import finish clock"),
+        )
+        .expect("finish reproduced import");
+    op
+}
+
+fn replace_json_object_with_empty(input: &str, marker: &str) -> String {
+    let start = input.find(marker).expect("JSON marker") + marker.len();
+    assert_eq!(input.as_bytes().get(start), Some(&b'{'));
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut end = None;
+    for (offset, byte) in input.as_bytes()[start..].iter().copied().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1).expect("balanced JSON object");
+                if depth == 0 {
+                    end = Some(start + offset + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end.expect("complete JSON object");
+    format!("{}{{}}{}", &input[..start], &input[end..])
+}
+
+fn replace_json_unsigned(input: &str, marker: &str, replacement: usize) -> String {
+    let start = input.find(marker).expect("JSON unsigned marker") + marker.len();
+    let digits = input.as_bytes()[start..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    assert!(digits > 0, "marker must precede an unsigned JSON integer");
+    format!(
+        "{}{replacement}{}",
+        &input[..start],
+        &input[start + digits..]
+    )
+}
+
+/// A benign clock: strictly increasing, one millisecond per call.
+fn benign_clock() -> impl FnMut() -> f64 {
+    let mut calls = 0u64;
+    move || {
+        calls += 1;
+        #[allow(clippy::cast_precision_loss)]
+        {
+            calls as f64 * 0.001
+        }
+    }
+}
+
+/// Run a fresh solve that must complete every stage, including the ledgered
+/// report stage.
+fn run_to_completion(
+    ledger: &Ledger,
+    decoded: &DecodedProject,
+) -> (fs_cli::SolveOutcome, Vec<String>) {
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let outcome = run_solve(
+        ledger,
+        &gate,
+        &mut clock,
+        decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect("a conduction-declaring project completes all seven stages");
+    (outcome, progress)
+}
+
+fn run_to_gap(ledger: &Ledger, decoded: &DecodedProject) -> (SolveRefusal, Vec<String>) {
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve(
+        ledger,
+        &gate,
+        &mut clock,
+        decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect_err("slice 1 refuses at the first stage gap");
+    (refusal, progress)
+}
+
+fn run_to_one_stage_prefix(
+    ledger: &Ledger,
+    decoded: &DecodedProject,
+) -> (SolveRefusal, Vec<String>) {
+    run_to_stage_prefix(ledger, decoded, 1)
+}
+
+/// Stop a fresh run after exactly `stages` durable stages.
+///
+/// The driver calls the clock twice per stage (start and finish), so
+/// requesting the gate on call `2 * stages` lands after that stage published
+/// and before the next stage's gate poll.
+fn run_to_stage_prefix(
+    ledger: &Ledger,
+    decoded: &DecodedProject,
+    stages: u64,
+) -> (SolveRefusal, Vec<String>) {
+    let gate = CancelGate::new_clock_free();
+    let gate_ref = &gate;
+    let mut calls = 0u64;
+    let mut clock = move || {
+        calls += 1;
+        if calls == 2 * stages {
+            gate_ref.request();
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            calls as f64 * 0.001
+        }
+    };
+    let mut progress = Vec::new();
+    let refusal = run_solve(
+        ledger,
+        &gate,
+        &mut clock,
+        decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect_err("caller gate stops after the first durable stage");
+    assert_eq!(refusal.code, "cli-solve-cancelled");
+    (refusal, progress)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SolvePublicationCounts {
+    ops: u64,
+    artifacts: u64,
+    artifact_chunks: u64,
+    edges: u64,
+    artifact_output_seals: u64,
+    op_artifact_edge_seals: u64,
+    op_content_identities: u64,
+    imports: u64,
+}
+
+fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
+    SolvePublicationCounts {
+        ops: ledger.table_count("ops").expect("op count"),
+        artifacts: ledger.table_count("artifacts").expect("artifact count"),
+        artifact_chunks: ledger
+            .table_count("artifact_chunks")
+            .expect("artifact chunk count"),
+        edges: ledger.table_count("edges").expect("edge count"),
+        artifact_output_seals: ledger
+            .table_count("artifact_output_seals")
+            .expect("artifact-output-seal count"),
+        op_artifact_edge_seals: ledger
+            .table_count("op_artifact_edge_seals")
+            .expect("op-edge-seal count"),
+        op_content_identities: ledger
+            .table_count("op_content_identities")
+            .expect("op-content-identity count"),
+        imports: ledger.table_count("imports").expect("import count"),
+    }
+}
+
+#[test]
+fn g0_run_identity_is_deterministic_and_input_sensitive() {
+    assert_eq!(
+        SOLVE_DRIVER_VERSION, 37,
+        "authority-semantic changes must deliberately advance this identity-bearing version"
+    );
+
+    let bytes = tetra_stl();
+    let base = decode(&fixture_project(7, &bytes));
+    let again = decode(&fixture_project(7, &bytes));
+    assert_eq!(
+        SolveRunId::derive(&base, &fixture_cards()).to_hex(),
+        SolveRunId::derive(&again, &fixture_cards()).to_hex(),
+        "identical projects derive identical run ids"
+    );
+
+    let seed_moved = decode(&fixture_project(8, &bytes));
+    assert_ne!(
+        SolveRunId::derive(&base, &fixture_cards()).to_hex(),
+        SolveRunId::derive(&seed_moved, &fixture_cards()).to_hex(),
+        "the RNG root seed is identity-bearing"
+    );
+
+    let mut workspace_moved_spec = fixture_project(7, &bytes);
+    workspace_moved_spec
+        .versions
+        .as_mut()
+        .expect("versions")
+        .workspace = "22".repeat(20);
+    let workspace_moved = decode(&workspace_moved_spec);
+    assert_ne!(
+        SolveRunId::derive(&base, &fixture_cards()).to_hex(),
+        SolveRunId::derive(&workspace_moved, &fixture_cards()).to_hex(),
+        "the declared workspace version is identity-bearing"
+    );
+
+    // The admitted card packs are identity-bearing, but only by content:
+    // supplying the same pack from a different path, or in a different flag
+    // order, must not move the run.
+    let reordered = CardPackSet::admit(vec![
+        raw_pack(
+            CardPackKind::Material,
+            "some/other/path/aa6061.fsmcdpk",
+            fixture_pack_bytes(),
+        ),
+        raw_pack(
+            CardPackKind::Material,
+            "fixtures/aa6061.fsmcdpk",
+            fixture_pack_bytes(),
+        ),
+    ])
+    .expect("the repeated pack is idempotent");
+    assert_eq!(
+        SolveRunId::derive(&base, &fixture_cards()).to_hex(),
+        SolveRunId::derive(&base, &reordered).to_hex(),
+        "caller paths and flag order are not identity-bearing"
+    );
+}
+
+#[test]
+fn g0_solve_executes_the_real_prefix_then_refuses_at_the_first_gap() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let ops_after_import = ledger.table_count("ops").expect("count");
+
+    let (refusal, progress) = run_to_gap(&ledger, &decoded);
+    assert_eq!(refusal.code, "cli-solve-conduction-undeclared");
+    assert_eq!(refusal.stage, Some("conduction"));
+    assert_eq!(refusal.dependency, None);
+    assert!(refusal.recorded_op.is_some(), "the gap refusal is ledgered");
+    let run = refusal.run.clone().expect("run id derived");
+    assert_eq!(run, SolveRunId::derive(&decoded, &fixture_cards()).to_hex());
+
+    // Four completed stage ops plus one recorded refusal op landed.
+    let ops_after_solve = ledger.table_count("ops").expect("count");
+    assert_eq!(ops_after_solve, ops_after_import + 5);
+
+    // Every executing stage reported progress.
+    assert!(progress.iter().any(|line| line.contains("import-verify")));
+    assert!(progress.iter().any(|line| line.contains("\"assign\"")));
+    assert!(
+        progress
+            .iter()
+            .any(|line| line.contains("material-resolve")),
+        "material-resolve now executes rather than refusing"
+    );
+    assert!(
+        progress.iter().any(|line| line.contains("flow-network")),
+        "flow-network now executes rather than refusing"
+    );
+
+    // Every solve op carries the run identity as its session.
+    let run_id = SolveRunId::parse_hex(&run).expect("hex");
+    let ids = ledger
+        .visible_op_ids(fs_ledger::MAIN_BRANCH, None)
+        .expect("ops");
+    let solve_ops: Vec<i64> = ids
+        .into_iter()
+        .filter(|id| {
+            ledger
+                .op(*id)
+                .expect("op row")
+                .is_some_and(|row| row.session.as_deref() == Some(run_id.as_bytes().as_slice()))
+        })
+        .collect();
+    assert_eq!(solve_ops.len(), 5, "four stages plus the recorded refusal");
+}
+
+/// The `material-resolve` stage's own evidence: the reference project's
+/// declared binding resolves against a real pack file, the receipt names the
+/// selected claim and its replayable usage receipts, and those receipts are
+/// retained as ledger artifacts.
+#[test]
+fn g0_material_resolve_binds_the_reference_project_from_a_real_pack() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+
+    let (refusal, _) = run_to_gap(&ledger, &decoded);
+    assert_eq!(refusal.stage, Some("conduction"), "material-resolve passed");
+    let run = refusal.run.clone().expect("run");
+
+    let receipts = stage_receipt_hashes(&ledger, &run);
+    assert_eq!(receipts.len(), 4, "four stages retained a receipt");
+    let receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[2])).expect("receipt is utf-8");
+
+    assert!(receipt.contains("\"schema\":\"frankensim.cli.solve-material-resolve-receipt.v1\""));
+    assert_balanced_json(&receipt);
+    let (card_hex, state) = fixture_card_identity();
+    assert!(
+        receipt.contains(&card_hex),
+        "the receipt names the bound card"
+    );
+    assert!(
+        receipt.contains(&state),
+        "the receipt names the card's material-state identity"
+    );
+    assert!(receipt.contains("\"target_kind\":\"region\""));
+    assert!(receipt.contains("\"target\":\"air\""));
+    assert!(receipt.contains("\"property\":\"thermal-conductivity\""));
+    assert!(
+        receipt.contains("\"value_lo\":167"),
+        "resolved conductivity"
+    );
+    assert!(
+        receipt.contains("\"unstated_uncertainty\":false"),
+        "the fixture claim states its uncertainty"
+    );
+    assert!(
+        receipt.contains("\"kind\":\"half-width\""),
+        "the claim's stated uncertainty travels verbatim"
+    );
+    assert!(
+        !receipt.contains("fixtures/aa6061.fsmcdpk"),
+        "caller paths must never reach a receipt"
+    );
+    assert!(
+        receipt.contains(&fixture_cards().root().to_hex()),
+        "the receipt pins the canonical pack-set root"
+    );
+
+    // The claim-usage receipts are retained, not merely hashed: two endpoints
+    // of one property on one binding.
+    let usages = artifacts_of_kind(&ledger, "solve-material-usage-receipt");
+    assert_eq!(usages, 2, "lo and hi endpoint usage receipts are retained");
+
+    // The packs themselves are retained against the run's first operation.
+    assert_eq!(artifacts_of_kind(&ledger, "solve-material-card-pack"), 1);
+}
+
+/// A different pack set is a different run, and a project whose binding names
+/// a card no pack supplies refuses with the binding layer's own code.
+#[test]
+fn g3_pack_set_identity_and_unknown_cards_fail_closed() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+
+    let other = CardPackSet::admit(vec![raw_pack(
+        CardPackKind::Material,
+        "fixtures/other.fsmcdpk",
+        material_pack_bytes("Cu-OFE", "solve-fixture-other"),
+    )])
+    .expect("admits");
+    assert_ne!(
+        SolveRunId::derive(&decoded, &fixture_cards()).to_hex(),
+        SolveRunId::derive(&decoded, &other).to_hex(),
+        "the admitted pack set is part of run identity"
+    );
+    assert_ne!(
+        SolveRunId::derive(&decoded, &CardPackSet::empty()).to_hex(),
+        SolveRunId::derive(&decoded, &fixture_cards()).to_hex(),
+    );
+
+    // Solving with a pack set that does not supply the declared card refuses
+    // with the binding layer's own diagnostic, at the material-resolve stage.
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, tetra_stl());
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve(&ledger, &gate, &mut clock, &decoded, &other, &mut progress)
+        .expect_err("an unsupplied card cannot resolve");
+    assert_eq!(refusal.stage, Some("material-resolve"));
+    assert_eq!(refusal.code, "project-material-card-unknown");
+    assert!(
+        refusal.recorded_op.is_some(),
+        "the binding refusal is ledgered like any other stage refusal"
+    );
+}
+
+/// Cancelling before `material-resolve` and resuming must recover the packs
+/// from the ledger — the resume grammar has no pack flags at all — and land
+/// on the identical stage evidence.
+#[test]
+fn g4_resume_recovers_card_packs_and_reproduces_material_evidence() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+
+    let (cancelled, _) = run_to_one_stage_prefix(&ledger, &decoded);
+    let run = cancelled.run.clone().expect("run id");
+
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let resumed = resume_solve(&ledger, &gate, &mut clock, &run, &mut progress)
+        .expect_err("resume runs the remaining prefix and stops at the first gap");
+    assert_eq!(resumed.code, "cli-solve-conduction-undeclared");
+    assert_eq!(
+        resumed.stage,
+        Some("conduction"),
+        "resume executed material-resolve from ledger-recovered packs"
+    );
+
+    let receipts = stage_receipt_hashes(&ledger, &run);
+    assert_eq!(receipts.len(), 4);
+    let resumed_receipt = artifact_bytes(&ledger, &receipts[2]);
+
+    // An uninterrupted run of the same project and packs must produce the
+    // byte-identical material-resolve receipt.
+    let fresh_ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&fresh_ledger, &spec, tetra_stl());
+    let (fresh_refusal, _) = run_to_gap(&fresh_ledger, &decoded);
+    let fresh_run = fresh_refusal.run.clone().expect("run");
+    let fresh_receipts = stage_receipt_hashes(&fresh_ledger, &fresh_run);
+    let fresh_receipt = artifact_bytes(&fresh_ledger, &fresh_receipts[2]);
+    assert_eq!(
+        resumed_receipt, fresh_receipt,
+        "cancel/resume and uninterrupted runs share one semantic stage root"
+    );
+}
+
+fn artifacts_of_kind(ledger: &Ledger, kind: &str) -> usize {
+    let ids = ledger
+        .visible_op_ids(fs_ledger::MAIN_BRANCH, None)
+        .expect("ops");
+    let mut seen = std::collections::BTreeSet::new();
+    for id in ids {
+        let edges = ledger.op_artifact_edges_bounded(id, 1024).expect("edges");
+        for edge in &edges.edges {
+            if ledger
+                .artifact_info(&edge.artifact)
+                .expect("info")
+                .is_some_and(|info| info.kind == kind)
+            {
+                seen.insert(edge.artifact.to_hex());
+            }
+        }
+    }
+    seen.len()
+}
+
+/// Structural guard on a hand-built receipt: exactly one top-level object,
+/// balanced brackets outside strings, and no unterminated string. A receipt is
+/// assembled by `format!`, so a mis-escaped brace is a live defect class that
+/// substring assertions alone would not catch.
+fn assert_balanced_json(text: &str) {
+    let bytes = text.as_bytes();
+    let (mut depth, mut in_string, mut escaped, mut closed_top) = (0i32, false, false, false);
+    for (index, byte) in bytes.iter().enumerate() {
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                assert!(!closed_top, "content after the top-level object at {index}");
+                depth += 1;
+            }
+            b'}' | b']' => {
+                depth -= 1;
+                assert!(depth >= 0, "unbalanced close at byte {index}");
+                if depth == 0 {
+                    closed_top = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(!in_string, "receipt ends inside a string literal");
+    assert_eq!(depth, 0, "receipt brackets are unbalanced");
+    assert!(closed_top, "receipt has no closed top-level object");
+}
+
+/// Materialize one retained artifact by its hex content address.
+fn artifact_bytes(ledger: &Ledger, hex: &str) -> Vec<u8> {
+    let hash = fs_ledger::ContentHash::from_hex(hex).expect("hex content address");
+    let mut bytes = Vec::new();
+    ledger
+        .read_artifact_chunks_bounded(&hash, 4 * 1024 * 1024, &mut |tile| {
+            bytes.extend_from_slice(tile);
+        })
+        .expect("read")
+        .expect("artifact present");
+    bytes
+}
+
+#[test]
+fn g3_solve_without_retained_import_refuses_with_evidence_diagnosis() {
+    let bytes = tetra_stl();
+    let decoded = decode(&fixture_project(7, &bytes));
+    let ledger = Ledger::open(":memory:").expect("ledger");
+
+    let (refusal, _) = run_to_gap_expect_code(&ledger, &decoded, "cli-solve-import-evidence");
+    assert_eq!(refusal.stage, Some("import-verify"));
+    assert!(refusal.what.contains("no completed geometry import"));
+    assert!(refusal.fix.contains("frankensim import"));
+    assert!(
+        refusal.recorded_op.is_some(),
+        "evidence refusal is ledgered"
+    );
+}
+
+fn run_to_gap_expect_code(
+    ledger: &Ledger,
+    decoded: &DecodedProject,
+    code: &str,
+) -> (SolveRefusal, Vec<String>) {
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve(
+        ledger,
+        &gate,
+        &mut clock,
+        decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect_err("refusal expected");
+    assert_eq!(refusal.code, code, "{refusal:?}");
+    (refusal, progress)
+}
+
+#[test]
+fn g3_an_import_for_a_different_project_does_not_satisfy_verification() {
+    let bytes = tetra_stl();
+    let imported_spec = fixture_project(7, &bytes);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &imported_spec, bytes.clone());
+
+    // Same geometry, different seed: a different project hash, so the
+    // retained import must not satisfy this run.
+    let other = decode(&fixture_project(8, &bytes));
+    let (refusal, _) = run_to_gap_expect_code(&ledger, &other, "cli-solve-import-evidence");
+    assert!(refusal.what.contains("no completed geometry import"));
+}
+
+#[test]
+fn g4_a_precancelled_solve_publishes_nothing() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let ops_before = ledger.table_count("ops").expect("count");
+    let artifacts_before = ledger.table_count("artifacts").expect("count");
+
+    let gate = CancelGate::new_clock_free();
+    gate.request();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve(
+        &ledger,
+        &gate,
+        &mut clock,
+        &decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect_err("pre-cancelled run refuses");
+    assert_eq!(refusal.code, "cli-solve-cancelled");
+    assert!(refusal.recorded_op.is_none());
+
+    assert_eq!(ledger.table_count("ops").expect("count"), ops_before);
+    assert_eq!(
+        ledger.table_count("artifacts").expect("count"),
+        artifacts_before
+    );
+}
+
+#[test]
+fn g4_in_stage_evidence_cancellation_preserves_atomic_prefixes_at_every_owned_phase() {
+    let phases = [
+        (SolveEvidencePhase::ProjectValidation, None, 0),
+        (SolveEvidencePhase::ProjectValidation, None, 1),
+        (SolveEvidencePhase::ProjectIdentityDerive, None, 0),
+        (SolveEvidencePhase::ProjectIdentityDerive, None, 1),
+        (SolveEvidencePhase::FiveExplicitsRender, None, 0),
+        (SolveEvidencePhase::FiveExplicitsRender, None, 1),
+        (SolveEvidencePhase::CanonicalProjectRender, None, 0),
+        (SolveEvidencePhase::CanonicalProjectRender, None, 1),
+        (SolveEvidencePhase::ProjectIdentityDerive, Some(0), 0),
+        (SolveEvidencePhase::ProjectIdentityDerive, Some(0), 1),
+        (SolveEvidencePhase::VisibleOpPage, Some(0), 0),
+        (SolveEvidencePhase::VisibleOpPage, Some(0), 1),
+        (SolveEvidencePhase::VisibleOpPage, Some(0), u64::MAX),
+        (SolveEvidencePhase::CandidateOpRowRead, Some(0), 0),
+        (SolveEvidencePhase::CandidateOpRowRead, Some(0), u64::MAX),
+        (SolveEvidencePhase::CandidateOpTextConversion, Some(0), 0),
+        (SolveEvidencePhase::CandidateOpTextConversion, Some(0), 1),
+        (SolveEvidencePhase::ImportIrParse, None, 1),
+        (SolveEvidencePhase::ImportIrCanonicalCompare, None, 0),
+        (SolveEvidencePhase::ImportIrCanonicalCompare, None, 1),
+        (SolveEvidencePhase::ImportIrCanonicalCompare, None, 2),
+        (SolveEvidencePhase::ImportIrDuplicateCheck, Some(0), 0),
+        (SolveEvidencePhase::ImportIrDuplicateCheck, Some(0), 1),
+        (SolveEvidencePhase::ImportIrDuplicateCheck, Some(0), 17),
+        (SolveEvidencePhase::FiveExplicitsCompare, Some(0), 0),
+        (SolveEvidencePhase::FiveExplicitsCompare, Some(0), 1),
+        (SolveEvidencePhase::FiveExplicitsCompare, Some(0), u64::MAX),
+        (SolveEvidencePhase::OperationContentIdentity, Some(0), 0),
+        (
+            SolveEvidencePhase::OperationContentIdentity,
+            Some(0),
+            u64::MAX,
+        ),
+        (SolveEvidencePhase::EdgePageRead, Some(0), 0),
+        (SolveEvidencePhase::EdgePageRead, Some(0), 1),
+        (SolveEvidencePhase::ArtifactDescriptorRead, Some(0), 0),
+        (SolveEvidencePhase::ArtifactDescriptorRead, Some(0), 1),
+        (SolveEvidencePhase::ImportSummaryRead, None, 1),
+        (SolveEvidencePhase::ImportSummaryUtf8, None, 1),
+        (SolveEvidencePhase::ImportSummaryParse, None, 1),
+        (SolveEvidencePhase::RawSourceRead, Some(0), 1),
+        (SolveEvidencePhase::PromotionReceiptRead, Some(0), 1),
+        (SolveEvidencePhase::PromotedMeshRead, Some(0), 1),
+        (SolveEvidencePhase::PromotedMeshPreflight, Some(0), 1),
+        (SolveEvidencePhase::PromotedMeshDecode, Some(0), 1),
+        (SolveEvidencePhase::PromotedMeshEncodeCompare, Some(0), 2),
+        (SolveEvidencePhase::NamedGroupFaceRange, Some(0), 1),
+        (SolveEvidencePhase::AssignmentReportRead, Some(0), 1),
+        (SolveEvidencePhase::AssignmentReportUtf8, Some(0), 1),
+        (SolveEvidencePhase::AssignmentReportParse, Some(0), 1),
+        (SolveEvidencePhase::EdgeSetCompare, Some(0), 0),
+        (SolveEvidencePhase::EdgeSetCompare, Some(0), 1),
+        (SolveEvidencePhase::EdgeSetCompare, Some(0), u64::MAX),
+        (SolveEvidencePhase::EntityResolution, None, 0),
+        (SolveEvidencePhase::EntityResolution, None, 1),
+        (SolveEvidencePhase::AssignmentDerivation, None, 0),
+        (SolveEvidencePhase::AssignmentDerivation, None, 1),
+        (SolveEvidencePhase::AssignmentDerivation, None, 2),
+        (SolveEvidencePhase::AssignmentDerivation, Some(0), 0),
+        (SolveEvidencePhase::AssignmentDerivation, Some(0), 1),
+        (SolveEvidencePhase::AssignmentDerivation, Some(0), 2),
+        (SolveEvidencePhase::ReceiptDerivation, None, 0),
+        (SolveEvidencePhase::ReceiptDerivation, None, 1),
+        (SolveEvidencePhase::ReceiptDerivation, None, u64::MAX),
+        (SolveEvidencePhase::MaterialBindingResolution, None, 0),
+        (SolveEvidencePhase::MaterialBindingResolution, None, 1),
+        (SolveEvidencePhase::MaterialBindingResolution, None, 2),
+        (
+            SolveEvidencePhase::MaterialBindingResolution,
+            None,
+            u64::MAX,
+        ),
+        (SolveEvidencePhase::FlowNetworkSolve, None, 0),
+        (SolveEvidencePhase::FlowNetworkSolve, None, 1),
+        (SolveEvidencePhase::FlowNetworkSolve, None, 2),
+        (SolveEvidencePhase::FlowNetworkSolve, None, 3),
+        (SolveEvidencePhase::FlowNetworkSolve, None, 4),
+        (SolveEvidencePhase::FlowNetworkSolve, None, 5),
+        (SolveEvidencePhase::FlowNetworkSolve, None, u64::MAX),
+        (SolveEvidencePhase::PrePublication, None, 0),
+    ];
+    assert_eq!(
+        phases.len(),
+        72,
+        "every fresh-run solve-owned evidence phase, canonical-render entry/completion/tile boundary, duplicate-set entry/face/name traversal, per-vent flow-network lowering/solve boundaries, and final pre-publication boundary is listed"
+    );
+
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let prefix_ledger = Ledger::open(":memory:").expect("prefix ledger");
+    import_fixture(&prefix_ledger, &spec, bytes.clone());
+    let _ = run_to_stage_prefix(&prefix_ledger, &decoded, 1);
+    let one_stage_prefix = solve_publication_counts(&prefix_ledger);
+    let two_prefix_ledger = Ledger::open(":memory:").expect("prefix ledger");
+    import_fixture(&two_prefix_ledger, &spec, bytes.clone());
+    let _ = run_to_stage_prefix(&two_prefix_ledger, &decoded, 2);
+    let two_stage_prefix = solve_publication_counts(&two_prefix_ledger);
+    let three_prefix_ledger = Ledger::open(":memory:").expect("prefix ledger");
+    import_fixture(&three_prefix_ledger, &spec, bytes.clone());
+    let _ = run_to_stage_prefix(&three_prefix_ledger, &decoded, 3);
+    let three_stage_prefix = solve_publication_counts(&three_prefix_ledger);
+    for (phase, source_index, after_units) in phases {
+        let ledger = Ledger::open(":memory:").expect("ledger");
+        import_fixture(&ledger, &spec, bytes.clone());
+        let before = solve_publication_counts(&ledger);
+        let gate = CancelGate::new_clock_free();
+        let plan = SolveCancellationPlan::new(phase, source_index, after_units);
+        let mut clock = benign_clock();
+        let mut progress = Vec::new();
+
+        let refusal = run_solve_with_cancellation_plan(
+            &ledger,
+            &gate,
+            &mut clock,
+            &decoded,
+            &fixture_cards(),
+            &mut progress,
+            &plan,
+        )
+        .expect_err("planned in-stage cancellation refuses");
+        assert!(
+            plan.fired(),
+            "phase {phase:?} reached its planned checkpoint"
+        );
+        assert_eq!(refusal.code, "cli-solve-cancelled", "phase {phase:?}");
+        // How many stages already published when this phase runs. The
+        // assignment phase also re-attests retained reports during
+        // import-verify, which is why only its source-index-free spelling
+        // sits inside the assign stage.
+        let durable_stages = match phase {
+            SolveEvidencePhase::FlowNetworkSolve => 3,
+            SolveEvidencePhase::MaterialBindingResolution => 2,
+            SolveEvidencePhase::AssignmentDerivation if source_index.is_none() => 1,
+            _ => 0,
+        };
+        let has_durable_prefix = durable_stages > 0;
+        if has_durable_prefix {
+            assert!(
+                refusal.fix.contains("--resume"),
+                "post-import phase {phase:?} recommends its durable prefix"
+            );
+        } else {
+            assert!(
+                refusal.fix.contains("retry the fresh solve"),
+                "zero-prefix phase {phase:?} gives actionable fresh-retry guidance"
+            );
+            assert!(
+                !refusal.fix.contains("--resume"),
+                "zero-prefix phase {phase:?} does not recommend an unavailable checkpoint"
+            );
+            assert!(
+                !refusal.what.contains("durable"),
+                "zero-prefix phase {phase:?} does not claim a durable checkpoint"
+            );
+        }
+        assert!(refusal.recorded_op.is_none(), "phase {phase:?}");
+        assert_eq!(
+            progress.len(),
+            durable_stages,
+            "phase {phase:?} reports exactly its durable prefix"
+        );
+        assert_eq!(
+            solve_publication_counts(&ledger),
+            match durable_stages {
+                0 => before,
+                1 => one_stage_prefix,
+                2 => two_stage_prefix,
+                _ => three_stage_prefix,
+            },
+            "phase {phase:?} changes no publication beyond its durable prefix"
+        );
+    }
+}
+
+#[test]
+fn g4_chunked_raw_evidence_stops_before_a_later_storage_row_and_publishes_nothing() {
+    let bytes = storage_row_spanning_tetra_stl();
+    assert!(bytes.len() > STORAGE_CHUNK_LEN);
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    let imported = import_fixture(&ledger, &spec, bytes);
+    let raw = imported.artifacts[0].raw_source;
+    let raw_info = ledger
+        .artifact_info(&raw)
+        .expect("raw info query")
+        .expect("raw artifact");
+    assert!(raw_info.chunk_count > 0, "fixture must span storage rows");
+    let before = solve_publication_counts(&ledger);
+
+    let gate = CancelGate::new_clock_free();
+    let plan = SolveCancellationPlan::new(SolveEvidencePhase::RawSourceRead, Some(0), 65_536);
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve_with_cancellation_plan(
+        &ledger,
+        &gate,
+        &mut clock,
+        &decoded,
+        &fixture_cards(),
+        &mut progress,
+        &plan,
+    )
+    .expect_err("planned chunked raw-evidence cancellation refuses");
+    assert!(plan.fired());
+    assert_eq!(refusal.code, "cli-solve-cancelled");
+    assert!(refusal.recorded_op.is_none());
+    assert!(progress.is_empty());
+    assert_eq!(solve_publication_counts(&ledger), before);
+}
+
+#[test]
+fn g4_exact_cap_promotion_receipt_stops_at_the_first_controlled_tile() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let source = Ledger::open(":memory:").expect("source ledger");
+    let imported = import_fixture(&source, &spec, bytes);
+    let entry = &imported.artifacts[0];
+    let source_row = source
+        .op(imported.op_id)
+        .expect("source import op query")
+        .expect("source import op");
+    let valid_summary = String::from_utf8(
+        source
+            .get_artifact(&imported.summary_artifact)
+            .expect("read valid summary")
+            .expect("valid summary exists"),
+    )
+    .expect("valid summary UTF-8");
+
+    let exact_cap_receipt = vec![b'r'; STORAGE_CHUNK_LEN];
+    let exact_cap_hash = hash_bytes(&exact_cap_receipt);
+    let exact_cap_summary = valid_summary.replacen(
+        &entry.promotion_receipt.to_hex(),
+        &exact_cap_hash.to_hex(),
+        1,
+    );
+    assert_ne!(
+        exact_cap_summary, valid_summary,
+        "summary must bind the exact-cap receipt"
+    );
+
+    let ledger = Ledger::open(":memory:").expect("target ledger");
+    reproduce_import_candidate_with_overrides(
+        &source,
+        &imported,
+        &ledger,
+        &source_row.ir,
+        &exact_cap_summary,
+        None,
+        Some(&exact_cap_receipt),
+    );
+    let receipt_info = ledger
+        .artifact_info(&exact_cap_hash)
+        .expect("receipt descriptor query")
+        .expect("exact-cap receipt");
+    assert_eq!(receipt_info.len, STORAGE_CHUNK_LEN as u64);
+    assert_eq!(
+        receipt_info.chunk_count, 0,
+        "an artifact at the storage bound remains one inline SQL row"
+    );
+    let before = solve_publication_counts(&ledger);
+
+    let gate = CancelGate::new_clock_free();
+    let plan = SolveCancellationPlan::new(
+        SolveEvidencePhase::PromotionReceiptRead,
+        Some(0),
+        CONTROLLED_ARTIFACT_TILE_LEN as u64,
+    );
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve_with_cancellation_plan(
+        &ledger,
+        &gate,
+        &mut clock,
+        &decoded,
+        &fixture_cards(),
+        &mut progress,
+        &plan,
+    )
+    .expect_err("planned exact-cap receipt cancellation refuses");
+    assert!(plan.fired());
+    assert_eq!(refusal.code, "cli-solve-cancelled");
+    assert!(refusal.recorded_op.is_none());
+    assert!(progress.is_empty());
+    assert_eq!(solve_publication_counts(&ledger), before);
+}
+
+#[test]
+fn g4_cancel_between_stages_leaves_a_durable_prefix_that_resumes_identically() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+
+    // Reference: an uninterrupted run in its own ledger.
+    let reference = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&reference, &spec, bytes.clone());
+    let (reference_refusal, _) = run_to_gap(&reference, &decoded);
+    let reference_run = reference_refusal.run.clone().expect("run id");
+
+    // Interrupted: the clock's second tick (end of stage 0) requests the
+    // caller-owned gate, so stage 1 observes cancellation at its boundary.
+    let interrupted = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&interrupted, &spec, bytes);
+    let gate = CancelGate::new_clock_free();
+    let mut calls = 0u64;
+    let gate_ref = &gate;
+    let mut cancelling_clock = move || {
+        calls += 1;
+        if calls == 2 {
+            gate_ref.request();
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            calls as f64 * 0.001
+        }
+    };
+    let mut progress = Vec::new();
+    let cancelled = run_solve(
+        &interrupted,
+        &gate,
+        &mut cancelling_clock,
+        &decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect_err("cancellation refuses");
+    assert_eq!(cancelled.code, "cli-solve-cancelled");
+    assert!(cancelled.what.contains("1 completed stage"));
+    let run = cancelled.run.clone().expect("run id");
+    assert_eq!(run, reference_run, "same project, same run identity");
+
+    // Resume with a fresh gate: the remaining real stage executes, then the
+    // same gap refuses with the same owner.
+    let fresh_gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut resume_progress = Vec::new();
+    let resumed = resume_solve(
+        &interrupted,
+        &fresh_gate,
+        &mut clock,
+        &run,
+        &mut resume_progress,
+    )
+    .expect_err("resume still refuses at the gap");
+    assert_eq!(resumed.code, "cli-solve-conduction-undeclared");
+    assert_eq!(resumed.stage, Some("conduction"));
+    assert_eq!(resumed.dependency, None);
+
+    // The interrupted-then-resumed evidence equals the uninterrupted run's:
+    // identical stage receipt artifact hashes, in order.
+    let reference_receipts = stage_receipt_hashes(&reference, &reference_run);
+    let resumed_receipts = stage_receipt_hashes(&interrupted, &run);
+    assert_eq!(reference_receipts.len(), 4);
+    assert_eq!(
+        reference_receipts, resumed_receipts,
+        "stage evidence is bit-identical across interruption"
+    );
+}
+
+#[test]
+fn g4_resume_reattestation_cancellation_is_zero_publication_and_retryable() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (gap, _) = run_to_gap(&ledger, &decoded);
+    let run = gap.run.expect("run id");
+    let before = solve_publication_counts(&ledger);
+
+    let phases = [
+        (SolveEvidencePhase::VisibleOpPage, Some(0), 0),
+        (SolveEvidencePhase::VisibleOpPage, Some(0), 1),
+        (SolveEvidencePhase::VisibleOpPage, Some(0), u64::MAX),
+        (SolveEvidencePhase::CandidateOpRowRead, Some(0), 0),
+        (SolveEvidencePhase::CandidateOpRowRead, Some(0), u64::MAX),
+        (SolveEvidencePhase::CandidateOpTextConversion, Some(0), 0),
+        (SolveEvidencePhase::CandidateOpTextConversion, Some(0), 1),
+        (SolveEvidencePhase::EdgePageRead, Some(0), 0),
+        (SolveEvidencePhase::EdgePageRead, Some(0), 1),
+        (SolveEvidencePhase::ArtifactDescriptorRead, Some(0), 0),
+        (SolveEvidencePhase::ArtifactDescriptorRead, Some(0), 1),
+        (SolveEvidencePhase::EdgeSealRead, Some(0), 0),
+        (SolveEvidencePhase::EdgeSealRead, Some(0), 1),
+        (SolveEvidencePhase::ResumeStateRead, None, 1),
+        (SolveEvidencePhase::ResumeStateDecode, None, 0),
+        (SolveEvidencePhase::ResumeStateDecode, None, 1),
+        (SolveEvidencePhase::ResumeProjectRead, None, 1),
+        (SolveEvidencePhase::ResumeProjectUtf8, None, 1),
+        (SolveEvidencePhase::ResumeProjectParse, None, 0),
+        (SolveEvidencePhase::ResumeProjectParse, None, 1),
+        (SolveEvidencePhase::ProjectValidation, None, 0),
+        (SolveEvidencePhase::ProjectValidation, None, 1),
+        (SolveEvidencePhase::ResumeProjectCanonicalCompare, None, 1),
+        (SolveEvidencePhase::ProjectIdentityDerive, None, 0),
+        (SolveEvidencePhase::ProjectIdentityDerive, None, 1),
+        (SolveEvidencePhase::ProjectIdentityDerive, Some(0), 0),
+        (SolveEvidencePhase::ProjectIdentityDerive, Some(0), 1),
+        (SolveEvidencePhase::FiveExplicitsRender, None, 0),
+        (SolveEvidencePhase::FiveExplicitsRender, None, 1),
+        (SolveEvidencePhase::CanonicalProjectRender, None, 0),
+        (SolveEvidencePhase::CanonicalProjectRender, None, 1),
+        (SolveEvidencePhase::FiveExplicitsCompare, Some(0), 0),
+        (SolveEvidencePhase::FiveExplicitsCompare, Some(0), 1),
+        (SolveEvidencePhase::FiveExplicitsCompare, Some(0), u64::MAX),
+        (SolveEvidencePhase::OperationContentIdentity, Some(0), 0),
+        (
+            SolveEvidencePhase::OperationContentIdentity,
+            Some(0),
+            u64::MAX,
+        ),
+        (SolveEvidencePhase::ResumeStageReceiptRead, None, 1),
+        (SolveEvidencePhase::ResumeStageReceiptUtf8, None, 1),
+        (SolveEvidencePhase::ResumeStageReceiptParse, None, 1),
+        (
+            SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+            Some(0),
+            0,
+        ),
+        (
+            SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+            Some(0),
+            1,
+        ),
+        (
+            SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+            Some(0),
+            2,
+        ),
+        (
+            SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+            Some(1),
+            0,
+        ),
+        (
+            SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+            Some(1),
+            1,
+        ),
+        (
+            SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+            Some(1),
+            2,
+        ),
+        (SolveEvidencePhase::ImportIrParse, None, 1),
+        (SolveEvidencePhase::ImportIrCanonicalCompare, None, 0),
+        (SolveEvidencePhase::ImportIrCanonicalCompare, None, 1),
+        (SolveEvidencePhase::ImportIrCanonicalCompare, None, 2),
+        (SolveEvidencePhase::ImportIrDuplicateCheck, Some(0), 0),
+        (SolveEvidencePhase::ImportIrDuplicateCheck, Some(0), 1),
+        (SolveEvidencePhase::ImportIrDuplicateCheck, Some(0), 17),
+        (SolveEvidencePhase::ImportSummaryRead, None, 1),
+        (SolveEvidencePhase::ImportSummaryUtf8, None, 1),
+        (SolveEvidencePhase::ImportSummaryParse, None, 1),
+        (SolveEvidencePhase::RawSourceRead, Some(0), 1),
+        (SolveEvidencePhase::PromotionReceiptRead, Some(0), 1),
+        (SolveEvidencePhase::PromotedMeshRead, Some(0), 1),
+        (SolveEvidencePhase::PromotedMeshPreflight, Some(0), 1),
+        (SolveEvidencePhase::PromotedMeshDecode, Some(0), 2),
+        (SolveEvidencePhase::PromotedMeshEncodeCompare, Some(0), 2),
+        (SolveEvidencePhase::NamedGroupFaceRange, Some(0), 1),
+        (SolveEvidencePhase::AssignmentReportRead, Some(0), 1),
+        (SolveEvidencePhase::AssignmentReportUtf8, Some(0), 1),
+        (SolveEvidencePhase::AssignmentReportParse, Some(0), 1),
+        (SolveEvidencePhase::EdgeSetCompare, Some(0), 0),
+        (SolveEvidencePhase::EdgeSetCompare, Some(0), 1),
+        (SolveEvidencePhase::EdgeSetCompare, Some(0), u64::MAX),
+        (SolveEvidencePhase::EntityResolution, None, 0),
+        (SolveEvidencePhase::EntityResolution, None, 1),
+        (SolveEvidencePhase::AssignmentDerivation, None, 0),
+        (SolveEvidencePhase::AssignmentDerivation, None, 1),
+        (SolveEvidencePhase::AssignmentDerivation, None, 2),
+        (SolveEvidencePhase::AssignmentDerivation, Some(0), 0),
+        (SolveEvidencePhase::AssignmentDerivation, Some(0), 1),
+        (SolveEvidencePhase::AssignmentDerivation, Some(0), 2),
+        (SolveEvidencePhase::ReceiptDerivation, None, 0),
+        (SolveEvidencePhase::ReceiptDerivation, None, 1),
+        (SolveEvidencePhase::ReceiptDerivation, None, u64::MAX),
+        (SolveEvidencePhase::ResumeCardPackRead, Some(0), 0),
+        (SolveEvidencePhase::ResumeCardPackRead, Some(0), 1),
+        (SolveEvidencePhase::ResumeCardPackDecode, Some(0), 0),
+        (SolveEvidencePhase::ResumeCardPackDecode, Some(0), 1),
+    ];
+    assert_eq!(
+        phases.len(),
+        83,
+        "resume re-attestation lists every reachable read, UTF-8, opaque parse entry/completion, canonical-render entry/completion/tile, duplicate-set traversal, receipt entry/completion/tile, and canonical PLY phase"
+    );
+    for (phase, source_index, after_units) in phases {
+        let gate = CancelGate::new_clock_free();
+        let plan = SolveCancellationPlan::new(phase, source_index, after_units);
+        let mut clock = benign_clock();
+        let mut progress = Vec::new();
+        let refusal = resume_solve_with_cancellation_plan(
+            &ledger,
+            &gate,
+            &mut clock,
+            &run,
+            &mut progress,
+            &plan,
+        )
+        .expect_err("planned resume re-attestation cancellation refuses");
+        assert!(
+            plan.fired(),
+            "phase {phase:?} reached its planned checkpoint"
+        );
+        assert_eq!(refusal.code, "cli-solve-cancelled", "phase {phase:?}");
+        assert!(refusal.recorded_op.is_none(), "phase {phase:?}");
+        assert!(
+            progress.is_empty(),
+            "phase {phase:?} emitted no success line"
+        );
+        assert_eq!(
+            solve_publication_counts(&ledger),
+            before,
+            "phase {phase:?} changed no solve publication table"
+        );
+    }
+
+    let fresh_gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let retry = resume_solve(&ledger, &fresh_gate, &mut clock, &run, &mut progress)
+        .expect_err("unchanged durable prefix still reaches the known gap");
+    assert_eq!(retry.code, "cli-solve-conduction-undeclared");
+    assert_eq!(retry.stage, Some("conduction"));
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run).len(),
+        4,
+        "the normal retry preserves the complete durable stage prefix"
+    );
+}
+
+#[test]
+fn g4_resume_prepublication_cancellation_preserves_prefix_and_replay_identity() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+
+    let reference = Ledger::open(":memory:").expect("reference ledger");
+    import_fixture(&reference, &spec, bytes.clone());
+    let (reference_gap, _) = run_to_gap(&reference, &decoded);
+    let reference_run = reference_gap.run.expect("reference run id");
+    let reference_receipts = stage_receipt_hashes(&reference, &reference_run);
+
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (prefix_refusal, _) = run_to_one_stage_prefix(&ledger, &decoded);
+    let run = prefix_refusal.run.expect("run id");
+    assert_eq!(run, reference_run);
+    assert_eq!(stage_receipt_hashes(&ledger, &run).len(), 1);
+    let before = solve_publication_counts(&ledger);
+
+    let gate = CancelGate::new_clock_free();
+    let plan = SolveCancellationPlan::new(SolveEvidencePhase::PrePublication, None, 1);
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal =
+        resume_solve_with_cancellation_plan(&ledger, &gate, &mut clock, &run, &mut progress, &plan)
+            .expect_err("assign-stage pre-publication cancellation refuses");
+    assert!(plan.fired());
+    assert_eq!(refusal.code, "cli-solve-cancelled");
+    assert!(refusal.recorded_op.is_none());
+    assert!(progress.is_empty());
+    assert_eq!(solve_publication_counts(&ledger), before);
+    assert_eq!(stage_receipt_hashes(&ledger, &run).len(), 1);
+
+    let fresh_gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut retry_progress = Vec::new();
+    let retry = resume_solve(&ledger, &fresh_gate, &mut clock, &run, &mut retry_progress)
+        .expect_err("retry completes assign then reaches the known gap");
+    assert_eq!(retry.code, "cli-solve-conduction-undeclared");
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run),
+        reference_receipts,
+        "retry after pre-publication cancellation reproduces exact stage receipts"
+    );
+}
+
+/// Collect stage receipt artifact hashes for a run, in stage order.
+fn stage_receipt_hashes(ledger: &Ledger, run_hex: &str) -> Vec<String> {
+    let run = SolveRunId::parse_hex(run_hex).expect("hex");
+    let mut ids = ledger
+        .visible_op_ids(fs_ledger::MAIN_BRANCH, None)
+        .expect("ops");
+    ids.sort_unstable();
+    let mut receipts = Vec::new();
+    for id in ids {
+        let Some(row) = ledger.op(id).expect("op row") else {
+            continue;
+        };
+        if row.session.as_deref() != Some(run.as_bytes().as_slice()) {
+            continue;
+        }
+        if row.outcome.as_deref() != Some("ok") {
+            continue;
+        }
+        let edges = ledger.op_artifact_edges_bounded(id, 64).expect("edges");
+        for edge in &edges.edges {
+            if edge.role != fs_ledger::EdgeRole::Out {
+                continue;
+            }
+            let info = ledger
+                .artifact_info(&edge.artifact)
+                .expect("info")
+                .expect("artifact");
+            if info.kind == "solve-stage-receipt" {
+                receipts.push(edge.artifact.to_hex());
+            }
+        }
+    }
+    receipts
+}
+
+#[test]
+fn g5_independent_fresh_runs_retain_identical_stage_evidence() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+
+    let mut all_receipts = Vec::new();
+    for _ in 0..2 {
+        let ledger = Ledger::open(":memory:").expect("ledger");
+        import_fixture(&ledger, &spec, bytes.clone());
+        let (refusal, _) = run_to_gap(&ledger, &decoded);
+        let run = refusal.run.clone().expect("run id");
+        all_receipts.push(stage_receipt_hashes(&ledger, &run));
+    }
+    assert_eq!(all_receipts[0].len(), 4);
+    assert_eq!(
+        all_receipts[0], all_receipts[1],
+        "replay reproduces identical content identities"
+    );
+}
+
+#[test]
+fn g0_budget_enforcement_stops_the_run_with_an_honest_resumable_partial() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+
+    // 50 wall seconds per clock call: stage 0 costs 50 s of the 60 s grant
+    // (Ok, but crosses the 0.5 warning fraction); stage 1 pushes the total
+    // to 100 s, which exceeds the 1.2x hard factor and pauses.
+    let mut ticks = 0u64;
+    let mut expensive_clock = move || {
+        ticks += 1;
+        #[allow(clippy::cast_precision_loss)]
+        {
+            ticks as f64 * 50.0
+        }
+    };
+    let mut progress = Vec::new();
+    let gate = CancelGate::new_clock_free();
+    let outcome = run_solve(
+        &ledger,
+        &gate,
+        &mut expensive_clock,
+        &decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect("budget exhaustion is an honest outcome, not a refusal");
+    let SolveRunStatus::BudgetExceeded {
+        resource,
+        used,
+        granted,
+    } = outcome.status
+    else {
+        panic!("expected budget-exceeded, got {:?}", outcome.status);
+    };
+    assert_eq!(resource, "core-seconds");
+    assert!(used > granted);
+    assert_eq!(
+        outcome.stages.len(),
+        2,
+        "both completed stages are reported"
+    );
+    assert!(
+        outcome.run_receipt.is_some(),
+        "the partial has a run receipt"
+    );
+    assert!(
+        progress
+            .iter()
+            .any(|line| line.contains("\"status\":\"warning\"")),
+        "the declared warning fraction fired before enforcement: {progress:?}"
+    );
+
+    // Resuming without more budget refuses: the recorded consumption
+    // already exhausts the grant, and raising budgets changes the project
+    // identity (a fresh run).
+    let mut clock = benign_clock();
+    let mut resume_progress = Vec::new();
+    let refusal = resume_solve(
+        &ledger,
+        &gate,
+        &mut clock,
+        &outcome.run,
+        &mut resume_progress,
+    )
+    .expect_err("resume without budget refuses");
+    assert_eq!(refusal.code, "cli-solve-resume-budget");
+}
+
+#[test]
+fn g3_resume_of_an_unknown_run_refuses() {
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = resume_solve(&ledger, &gate, &mut clock, &"ab".repeat(32), &mut progress)
+        .expect_err("unknown run refuses");
+    assert_eq!(refusal.code, "cli-solve-unknown-run");
+}
+
+#[test]
+fn g3_publicly_sealed_state_without_authoritative_lineage_refuses_before_publication() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    let imported = import_fixture(&ledger, &spec, bytes);
+    let run = SolveRunId::derive(&decoded, &fixture_cards());
+
+    let project_source = ledger
+        .put_artifact("solve-project-source", decoded.canonical.as_bytes(), None)
+        .expect("project source");
+    let forged_ir = format!(
+        "{{\"schema\":\"frankensim.cli.solve-stage.v1\",\"stage\":\"assign\",\"ordinal\":1,\"run\":\"{}\",\"project\":\"{}\",\"driver_version\":{SOLVE_DRIVER_VERSION}}}",
+        run.to_hex(),
+        decoded.hash().to_hex(),
+    );
+    let forged_op = ledger
+        .begin_op(
+            Some(run.as_bytes()),
+            &forged_ir,
+            &FiveExplicits {
+                seed: b"forged",
+                versions: r#"{"forged":true}"#,
+                budget: r#"{"forged":true}"#,
+                capability: r#"{"forged":true}"#,
+            },
+            2,
+        )
+        .expect("forged op");
+    ledger
+        .link(forged_op, &project_source.hash, EdgeRole::In)
+        .expect("forged project edge");
+
+    // Every construction below is intentionally available through the public
+    // API. Codec validity and a caller-selected session/kind must not mint
+    // authority to skip both implemented stages.
+    let forged_state = SolveDriverState {
+        run: *run.as_bytes(),
+        project: *decoded.hash().as_bytes(),
+        consumed_core_s: 0.0,
+        consumed_wall_s: 0.0,
+        completed: vec![
+            CompletedStage {
+                ordinal: 0,
+                op_id: forged_op,
+                receipt: imported.summary_artifact,
+            },
+            CompletedStage {
+                ordinal: 1,
+                op_id: forged_op,
+                receipt: imported.summary_artifact,
+            },
+        ],
+    };
+    let run_prefix: [u8; 8] = run.as_bytes()[..8].try_into().expect("run prefix");
+    let envelope = LegacySnapshotV1Adapter::<SolveDriverState>::seal(
+        &forged_state,
+        u64::from_le_bytes(run_prefix),
+    );
+    let forged_checkpoint = ledger
+        .put_artifact("solve-stage-state", &envelope, None)
+        .expect("forged state artifact");
+    ledger
+        .link(forged_op, &forged_checkpoint.hash, EdgeRole::Out)
+        .expect("forged state edge");
+    ledger
+        .finish_op(forged_op, OpOutcome::Ok, None, 3)
+        .expect("finish forged op");
+
+    let ops_before_resume = ledger.table_count("ops").expect("op count");
+    let artifacts_before_resume = ledger.table_count("artifacts").expect("artifact count");
+    let seals_before_resume = ledger
+        .table_count("op_artifact_edge_seals")
+        .expect("edge-seal count");
+    let imports_before_resume = ledger.table_count("imports").expect("imports count");
+    let identities_before_resume = ledger
+        .table_count("op_content_identities")
+        .expect("op-content-identity count");
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = resume_solve(&ledger, &gate, &mut clock, &run.to_hex(), &mut progress)
+        .expect_err("caller-mintable state has no resume authority");
+    assert_eq!(refusal.code, "cli-solve-resume-identity");
+    assert!(progress.is_empty(), "no forged stage may execute");
+    assert_eq!(
+        ledger.table_count("ops").expect("op count"),
+        ops_before_resume,
+        "identity refusal occurs before any stage/refusal publication"
+    );
+    assert_eq!(
+        ledger.table_count("artifacts").expect("artifact count"),
+        artifacts_before_resume,
+        "identity refusal publishes no artifacts"
+    );
+    assert_eq!(
+        ledger
+            .table_count("op_artifact_edge_seals")
+            .expect("edge-seal count"),
+        seals_before_resume,
+        "identity refusal publishes no lineage seal"
+    );
+    assert_eq!(
+        ledger.table_count("imports").expect("imports count"),
+        imports_before_resume,
+        "identity refusal mutates no import extension row"
+    );
+    assert_eq!(
+        ledger
+            .table_count("op_content_identities")
+            .expect("op-content-identity count"),
+        identities_before_resume,
+        "identity refusal publishes no operation identity"
+    );
+}
+
+#[test]
+fn g3_forged_higher_checkpoint_with_substituted_predecessor_refuses_before_publication() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let run = SolveRunId::derive(&decoded, &fixture_cards());
+
+    // Produce the canonical assign row, receipt, and checkpoint in an
+    // independent reference ledger.
+    let reference = Ledger::open(":memory:").expect("reference ledger");
+    import_fixture(&reference, &spec, bytes.clone());
+    let _ = run_to_gap(&reference, &decoded);
+    let reference_stage = reference
+        .visible_op_ids(fs_ledger::MAIN_BRANCH, None)
+        .expect("reference ops")
+        .into_iter()
+        .filter_map(|id| reference.op(id).expect("reference op row"))
+        .find(|row| {
+            row.session.as_deref() == Some(run.as_bytes().as_slice())
+                && row.outcome.as_deref() == Some("ok")
+                && row.ir.contains("\"stage\":\"assign\"")
+        })
+        .expect("reference assign stage");
+    let reference_edges = reference
+        .op_artifact_edges_bounded(reference_stage.id, 64)
+        .expect("reference assign edges")
+        .edges;
+    let output_with_kind = |kind: &str| {
+        reference_edges
+            .iter()
+            .find(|edge| {
+                edge.role == EdgeRole::Out
+                    && reference
+                        .artifact_info(&edge.artifact)
+                        .expect("reference artifact info")
+                        .is_some_and(|info| info.kind == kind)
+            })
+            .map(|edge| edge.artifact)
+            .unwrap_or_else(|| panic!("reference assign output kind `{kind}`"))
+    };
+    let reference_receipt = output_with_kind("solve-stage-receipt");
+    let reference_checkpoint = output_with_kind("solve-stage-state");
+
+    // Build the same run only through its valid first stage.
+    let ledger = Ledger::open(":memory:").expect("target ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let gate = CancelGate::new_clock_free();
+    let mut calls = 0u64;
+    let gate_ref = &gate;
+    let mut cancelling_clock = move || {
+        calls += 1;
+        if calls == 2 {
+            gate_ref.request();
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            calls as f64 * 0.001
+        }
+    };
+    let mut progress = Vec::new();
+    let cancelled = run_solve(
+        &ledger,
+        &gate,
+        &mut cancelling_clock,
+        &decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect_err("target stops after import verification");
+    assert_eq!(cancelled.code, "cli-solve-cancelled");
+
+    // Copy the canonical higher receipt/checkpoint bytes and canonical row.
+    // The one deliberate delta is the In edge: the forged operation consumes
+    // its own higher checkpoint instead of the direct stage-0 predecessor.
+    let copy_output = |hash, kind| {
+        let bytes = reference
+            .get_artifact(&hash)
+            .expect("read reference output")
+            .expect("reference output exists");
+        ledger
+            .put_artifact(kind, &bytes, None)
+            .expect("copy canonical output")
+    };
+    let receipt = copy_output(reference_receipt, "solve-stage-receipt");
+    let checkpoint = copy_output(reference_checkpoint, "solve-stage-state");
+    let forged_op = ledger
+        .begin_op(
+            reference_stage.session.as_deref(),
+            &reference_stage.ir,
+            &FiveExplicits {
+                seed: &reference_stage.seed,
+                versions: &reference_stage.versions,
+                budget: &reference_stage.budget,
+                capability: &reference_stage.capability,
+            },
+            reference_stage.t_start,
+        )
+        .expect("otherwise-canonical forged stage");
+    assert_eq!(
+        forged_op, reference_stage.id,
+        "matching histories give the forged row its canonical operation id"
+    );
+    ledger
+        .link(forged_op, &checkpoint.hash, EdgeRole::In)
+        .expect("substituted predecessor");
+    ledger
+        .link(forged_op, &receipt.hash, EdgeRole::Out)
+        .expect("canonical receipt edge");
+    ledger
+        .link(forged_op, &checkpoint.hash, EdgeRole::Out)
+        .expect("canonical checkpoint edge");
+    ledger
+        .seal_op_artifact_edges(forged_op, 3)
+        .expect("exact edge-count seal");
+    ledger
+        .finish_op(
+            forged_op,
+            OpOutcome::Ok,
+            None,
+            reference_stage.t_end.expect("reference finish clock"),
+        )
+        .expect("finish otherwise-canonical forged stage");
+
+    let counts_before = [
+        ledger.table_count("ops").expect("op count"),
+        ledger.table_count("artifacts").expect("artifact count"),
+        ledger
+            .table_count("op_artifact_edge_seals")
+            .expect("edge-seal count"),
+        ledger.table_count("imports").expect("imports count"),
+        ledger
+            .table_count("op_content_identities")
+            .expect("identity count"),
+    ];
+    let fresh_gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut resume_progress = Vec::new();
+    let refusal = resume_solve(
+        &ledger,
+        &fresh_gate,
+        &mut clock,
+        &run.to_hex(),
+        &mut resume_progress,
+    )
+    .expect_err("substituted predecessor has no resume authority");
+    assert_eq!(refusal.code, "cli-solve-resume-identity");
+    assert!(
+        resume_progress.is_empty(),
+        "resume executes no forged stage"
+    );
+    assert_eq!(
+        [
+            ledger.table_count("ops").expect("op count"),
+            ledger.table_count("artifacts").expect("artifact count"),
+            ledger
+                .table_count("op_artifact_edge_seals")
+                .expect("edge-seal count"),
+            ledger.table_count("imports").expect("imports count"),
+            ledger
+                .table_count("op_content_identities")
+                .expect("identity count"),
+        ],
+        counts_before,
+        "identity refusal is zero-publication across rows, artifacts, seals, and extensions"
+    );
+}
+
+#[test]
+fn g3_competing_valid_longest_checkpoints_refuse_as_ambiguous() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+
+    let (first, _) = run_to_gap(&ledger, &decoded);
+    let (second, _) = run_to_gap(&ledger, &decoded);
+    let run = first.run.expect("first run id");
+    assert_eq!(second.run.as_deref(), Some(run.as_str()));
+
+    let counts_before = [
+        ledger.table_count("ops").expect("op count"),
+        ledger.table_count("artifacts").expect("artifact count"),
+        ledger
+            .table_count("op_artifact_edge_seals")
+            .expect("edge-seal count"),
+        ledger
+            .table_count("op_content_identities")
+            .expect("identity count"),
+    ];
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = resume_solve(&ledger, &gate, &mut clock, &run, &mut progress)
+        .expect_err("equally long valid histories are ambiguous");
+    assert_eq!(refusal.code, "cli-solve-resume-identity");
+    assert!(refusal.what.contains("competing independently valid"));
+    assert!(progress.is_empty());
+    assert_eq!(
+        [
+            ledger.table_count("ops").expect("op count"),
+            ledger.table_count("artifacts").expect("artifact count"),
+            ledger
+                .table_count("op_artifact_edge_seals")
+                .expect("edge-seal count"),
+            ledger
+                .table_count("op_content_identities")
+                .expect("identity count"),
+        ],
+        counts_before,
+        "ambiguity refusal publishes nothing"
+    );
+}
+
+#[test]
+fn g3_import_summary_requires_the_exact_versioned_schema_not_a_hash_substring() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let source_ledger = Ledger::open(":memory:").expect("source ledger");
+    let imported = import_fixture(&source_ledger, &spec, bytes);
+    let source_row = source_ledger
+        .op(imported.op_id)
+        .expect("source import op query")
+        .expect("source import op");
+
+    // Reproduce the accepted import writer's exact row, Five Explicits,
+    // execution context, typed artifacts, and edge roles in an isolated
+    // ledger. The summary schema string below is the sole admission delta.
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    let valid_summary = String::from_utf8(
+        source_ledger
+            .get_artifact(&imported.summary_artifact)
+            .expect("read valid summary")
+            .expect("valid summary exists"),
+    )
+    .expect("valid summary UTF-8");
+    let fake_summary = valid_summary.replacen(
+        "frankensim.cli.geometry-import-receipt.v1",
+        "alternate.geometry-import-receipt.v1",
+        1,
+    );
+    reproduce_import_candidate(
+        &source_ledger,
+        &imported,
+        &ledger,
+        &source_row.ir,
+        &fake_summary,
+    );
+
+    let (refusal, progress) =
+        run_to_gap_expect_code(&ledger, &decoded, "cli-solve-import-evidence");
+    assert_eq!(refusal.stage, Some("import-verify"));
+    assert!(
+        refusal.what.contains("no completed geometry import"),
+        "{refusal:?}"
+    );
+    assert!(
+        progress.is_empty(),
+        "the decoy summary must execute no stage"
+    );
+}
+
+#[test]
+fn g3_import_ir_requires_exact_writer_limits_and_policy_shapes() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let source = Ledger::open(":memory:").expect("source ledger");
+    let imported = import_fixture(&source, &spec, bytes);
+    let source_row = source
+        .op(imported.op_id)
+        .expect("source import op query")
+        .expect("source import op");
+    let valid_summary = String::from_utf8(
+        source
+            .get_artifact(&imported.summary_artifact)
+            .expect("read valid summary")
+            .expect("valid summary exists"),
+    )
+    .expect("valid summary UTF-8");
+
+    for (label, ir) in [
+        (
+            "limits",
+            replace_json_object_with_empty(&source_row.ir, ",\"limits\":"),
+        ),
+        (
+            "policy",
+            replace_json_object_with_empty(&source_row.ir, ",\"policy\":"),
+        ),
+    ] {
+        let ledger = Ledger::open(":memory:").expect("isolated decoy ledger");
+        reproduce_import_candidate(&source, &imported, &ledger, &ir, &valid_summary);
+        let (refusal, progress) =
+            run_to_gap_expect_code(&ledger, &decoded, "cli-solve-import-evidence");
+        assert!(
+            refusal.what.contains("no completed geometry import"),
+            "{label} decoy: {refusal:?}"
+        );
+        assert!(
+            progress.is_empty(),
+            "{label} decoy must execute no solve stage"
+        );
+    }
+}
+
+#[test]
+fn g3_import_ir_duplicate_checks_preserve_order_and_bound_labels() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let source = Ledger::open(":memory:").expect("source ledger");
+    let imported = import_fixture(&source, &spec, bytes);
+    let (valid_gap, _) = run_to_gap(&source, &decoded);
+    assert_eq!(valid_gap.stage, Some("conduction"));
+
+    let source_row = source
+        .op(imported.op_id)
+        .expect("source import op query")
+        .expect("source import op");
+    let valid_summary = String::from_utf8(
+        source
+            .get_artifact(&imported.summary_artifact)
+            .expect("read valid summary")
+            .expect("valid summary exists"),
+    )
+    .expect("valid summary UTF-8");
+    let canonical_group = "\"named_groups\":[{\"name\":\"fixture-all-faces\",\"faces\":[3,1,2,0]}]";
+    assert!(
+        source_row.ir.contains(canonical_group),
+        "the accepted writer fixture preserves deliberately non-sorted face order"
+    );
+
+    let duplicate_face = source_row.ir.replacen(
+        canonical_group,
+        "\"named_groups\":[{\"name\":\"fixture-all-faces\",\"faces\":[3,1,1,0]}]",
+        1,
+    );
+    let duplicate_name = source_row.ir.replacen(
+        canonical_group,
+        "\"named_groups\":[{\"name\":\"fixture-all-faces\",\"faces\":[3,1,2,0]},{\"name\":\"fixture-all-faces\",\"faces\":[0]}]",
+        1,
+    );
+    let oversized_name = source_row.ir.replacen(
+        "\"name\":\"fixture-all-faces\"",
+        &format!("\"name\":\"{}\"", "n".repeat(4097)),
+        1,
+    );
+    for (label, ir) in [
+        ("duplicate face", duplicate_face),
+        ("duplicate name", duplicate_name),
+        ("oversized name", oversized_name),
+    ] {
+        assert_ne!(ir, source_row.ir, "{label} mutation must change the IR");
+        let ledger = Ledger::open(":memory:").expect("isolated decoy ledger");
+        reproduce_import_candidate(&source, &imported, &ledger, &ir, &valid_summary);
+        let (refusal, progress) =
+            run_to_gap_expect_code(&ledger, &decoded, "cli-solve-import-evidence");
+        assert!(
+            refusal.what.contains("no completed geometry import"),
+            "{label}: {refusal:?}"
+        );
+        assert!(progress.is_empty(), "{label} must execute no solve stage");
+    }
+}
+
+#[test]
+fn g3_import_ir_byte_caps_must_admit_the_exact_retained_raw_bytes() {
+    let bytes = tetra_stl();
+    assert!(bytes.len() > 1, "fixture must exceed the forged caps");
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let source = Ledger::open(":memory:").expect("source ledger");
+    let imported = import_fixture(&source, &spec, bytes);
+    let source_row = source
+        .op(imported.op_id)
+        .expect("source import op query")
+        .expect("source import op");
+    let valid_summary = String::from_utf8(
+        source
+            .get_artifact(&imported.summary_artifact)
+            .expect("read valid summary")
+            .expect("valid summary exists"),
+    )
+    .expect("valid summary UTF-8");
+
+    for (label, ir) in [
+        (
+            "per-source",
+            replace_json_unsigned(&source_row.ir, ",\"max_source_bytes\":", 1),
+        ),
+        (
+            "aggregate",
+            replace_json_unsigned(&source_row.ir, ",\"max_total_source_bytes\":", 1),
+        ),
+    ] {
+        let ledger = Ledger::open(":memory:").expect("isolated cap ledger");
+        reproduce_import_candidate(&source, &imported, &ledger, &ir, &valid_summary);
+        let (refusal, progress) =
+            run_to_gap_expect_code(&ledger, &decoded, "cli-solve-import-evidence");
+        assert!(
+            refusal.what.contains("no completed geometry import"),
+            "{label} cap decoy: {refusal:?}"
+        );
+        assert!(
+            progress.is_empty(),
+            "{label} cap decoy must execute no solve stage"
+        );
+    }
+}
+
+#[test]
+fn g3_promoted_ply_with_unknown_huge_element_refuses_before_stage_publication() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let source = Ledger::open(":memory:").expect("source ledger");
+    let imported = import_fixture(&source, &spec, bytes);
+    assert_eq!(imported.artifacts.len(), 1, "fixture has one geometry row");
+    let source_row = source
+        .op(imported.op_id)
+        .expect("source import op query")
+        .expect("source import op");
+    let entry = &imported.artifacts[0];
+    let canonical_mesh = source
+        .get_artifact(&entry.promoted_mesh)
+        .expect("read canonical mesh")
+        .expect("canonical mesh exists");
+    let vertex_line = canonical_mesh
+        .windows(b"element vertex ".len())
+        .position(|window| window == b"element vertex ")
+        .expect("writer vertex line");
+    let mut hostile_mesh = Vec::with_capacity(canonical_mesh.len() + 32);
+    hostile_mesh.extend_from_slice(&canonical_mesh[..vertex_line]);
+    hostile_mesh.extend_from_slice(b"element junk 100000000\n");
+    hostile_mesh.extend_from_slice(&canonical_mesh[vertex_line..]);
+    assert!(
+        hostile_mesh.len() < 1024,
+        "the malformed header remains a tiny retained artifact"
+    );
+
+    let valid_summary = String::from_utf8(
+        source
+            .get_artifact(&imported.summary_artifact)
+            .expect("read valid summary")
+            .expect("valid summary exists"),
+    )
+    .expect("valid summary UTF-8");
+    let hostile_hash = hash_bytes(&hostile_mesh);
+    let hostile_summary =
+        valid_summary.replacen(&entry.promoted_mesh.to_hex(), &hostile_hash.to_hex(), 1);
+    assert_ne!(
+        hostile_summary, valid_summary,
+        "summary binds the decoy mesh"
+    );
+
+    let ledger = Ledger::open(":memory:").expect("decoy ledger");
+    reproduce_import_candidate_with_mesh(
+        &source,
+        &imported,
+        &ledger,
+        &source_row.ir,
+        &hostile_summary,
+        Some(&hostile_mesh),
+    );
+    let seals_before = ledger
+        .table_count("op_artifact_edge_seals")
+        .expect("edge seals");
+    let (refusal, progress) =
+        run_to_gap_expect_code(&ledger, &decoded, "cli-solve-import-evidence");
+    assert!(
+        refusal.what.contains("no completed geometry import"),
+        "{refusal:?}"
+    );
+    assert!(
+        progress.is_empty(),
+        "malformed retained PLY must publish no completed-stage progress"
+    );
+    assert_eq!(
+        ledger
+            .table_count("op_artifact_edge_seals")
+            .expect("edge seals"),
+        seals_before,
+        "malformed retained PLY must not seal a completed stage"
+    );
+}
+
+#[test]
+fn g3_genuine_import_above_project_solve_envelope_refuses_without_stage_publication() {
+    let bytes = tetra_stl();
+    let mut spec = fixture_project(7, &bytes);
+    spec.budgets.as_mut().expect("budgets").memory_bytes = 1;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let seals_before = ledger
+        .table_count("op_artifact_edge_seals")
+        .expect("edge seals");
+
+    let (refusal, progress) =
+        run_to_gap_expect_code(&ledger, &decoded, "cli-solve-import-envelope");
+    assert_eq!(refusal.stage, Some("import-verify"));
+    assert!(
+        refusal.what.contains("effective solve envelope"),
+        "{refusal:?}"
+    );
+    assert!(
+        progress.is_empty(),
+        "no completed stage may publish progress"
+    );
+    assert_eq!(
+        ledger
+            .table_count("op_artifact_edge_seals")
+            .expect("edge seals"),
+        seals_before,
+        "envelope refusal must not seal a completed stage"
+    );
+}
+
+#[test]
+fn g3_unrelated_wide_success_does_not_mask_an_older_valid_import() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+
+    ledger.begin().expect("begin wide fixture transaction");
+    let unrelated = ledger
+        .begin_op(
+            None,
+            "{\"schema\":\"unrelated.wide-success.v1\"}",
+            &FiveExplicits {
+                seed: b"unrelated",
+                versions: "{}",
+                budget: "{}",
+                capability: "{}",
+            },
+            0,
+        )
+        .expect("wide unrelated op");
+    for index in 0..1025u32 {
+        let artifact = ledger
+            .put_artifact("unrelated-tiny-evidence", &index.to_le_bytes(), None)
+            .expect("unrelated artifact");
+        ledger
+            .link(unrelated, &artifact.hash, EdgeRole::Out)
+            .expect("unrelated edge");
+    }
+    ledger
+        .finish_op(unrelated, OpOutcome::Ok, None, 1)
+        .expect("finish unrelated op");
+    ledger.commit().expect("commit wide fixture transaction");
+
+    let (refusal, progress) = run_to_gap(&ledger, &decoded);
+    assert_eq!(
+        refusal.code, "cli-solve-conduction-undeclared",
+        "{refusal:?}"
+    );
+    assert_eq!(refusal.stage, Some("conduction"));
+    assert!(
+        progress.iter().any(|line| line.contains("import-verify")),
+        "the older valid import must still execute the solve prefix"
+    );
+}
+
+fn append_unrelated_completed_ops(ledger: &Ledger, count: usize) {
+    ledger.begin().expect("begin unrelated history transaction");
+    for index in 0..count {
+        let started = i64::try_from(index)
+            .expect("bounded fixture index fits i64")
+            .saturating_mul(2)
+            .saturating_add(10_000);
+        let op = ledger
+            .begin_op(
+                None,
+                "{\"schema\":\"unrelated.history.v1\"}",
+                &FiveExplicits {
+                    seed: b"unrelated-history",
+                    versions: "{}",
+                    budget: "{}",
+                    capability: "{}",
+                },
+                started,
+            )
+            .expect("append unrelated history op");
+        ledger
+            .finish_op(op, OpOutcome::Ok, None, started.saturating_add(1))
+            .expect("finish unrelated history op");
+    }
+    ledger.commit().expect("commit unrelated history");
+}
+
+fn exact_json_bytes(len: usize) -> String {
+    assert!(len >= 2);
+    format!("\"{}\"", "x".repeat(len - 2))
+}
+
+#[test]
+fn g3_multi_page_unrelated_history_still_finds_the_older_valid_import() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    append_unrelated_completed_ops(&ledger, 193);
+
+    let (refusal, progress) = run_to_gap(&ledger, &decoded);
+    assert_eq!(
+        refusal.code, "cli-solve-conduction-undeclared",
+        "{refusal:?}"
+    );
+    assert_eq!(refusal.stage, Some("conduction"));
+    assert!(
+        progress.iter().any(|line| line.contains("import-verify")),
+        "descending discovery must continue across multiple pages"
+    );
+}
+
+#[test]
+fn g4_cap_plus_one_history_refuses_explicitly_without_publication() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    append_unrelated_completed_ops(&ledger, MAX_SOLVE_VISIBLE_OP_IDS);
+    let before = solve_publication_counts(&ledger);
+
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve(
+        &ledger,
+        &gate,
+        &mut clock,
+        &decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect_err("history beyond the frozen invocation cap refuses");
+    assert_eq!(refusal.code, "cli-solve-work-envelope", "{refusal:?}");
+    assert!(
+        refusal.what.contains("visible operation ids"),
+        "{refusal:?}"
+    );
+    assert!(refusal.recorded_op.is_none());
+    assert!(progress.is_empty());
+    assert_eq!(solve_publication_counts(&ledger), before);
+}
+
+#[test]
+fn g4_maximum_operation_fields_are_tiled_cancelled_and_retryable() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let session = vec![b's'; MAX_OP_FIELD_BYTES];
+    let seed = vec![b'r'; MAX_OP_FIELD_BYTES];
+    let ir = exact_json_bytes(MAX_OP_FIELD_BYTES);
+    let versions = exact_json_bytes(MAX_OP_FIELD_BYTES);
+    let budget = exact_json_bytes(MAX_OP_FIELD_BYTES);
+    let capability = exact_json_bytes(MAX_OP_FIELD_BYTES);
+    let unrelated = ledger
+        .begin_op(
+            Some(&session),
+            &ir,
+            &FiveExplicits {
+                seed: &seed,
+                versions: &versions,
+                budget: &budget,
+                capability: &capability,
+            },
+            100,
+        )
+        .expect("maximum-field unrelated operation");
+    ledger
+        .finish_op(unrelated, OpOutcome::Ok, None, 101)
+        .expect("finish maximum-field unrelated operation");
+    let before = solve_publication_counts(&ledger);
+
+    let gate = CancelGate::new_clock_free();
+    let plan = SolveCancellationPlan::new(
+        SolveEvidencePhase::CandidateOpRowRead,
+        Some(0),
+        u64::try_from(CONTROLLED_OP_FIELD_TILE_LEN).expect("tile size fits u64"),
+    );
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve_with_cancellation_plan(
+        &ledger,
+        &gate,
+        &mut clock,
+        &decoded,
+        &fixture_cards(),
+        &mut progress,
+        &plan,
+    )
+    .expect_err("maximum-field controlled row read stops at a tile boundary");
+    assert!(plan.fired());
+    assert_eq!(refusal.code, "cli-solve-cancelled");
+    assert!(refusal.recorded_op.is_none());
+    assert!(progress.is_empty());
+    assert_eq!(solve_publication_counts(&ledger), before);
+
+    let (retry, retry_progress) = run_to_gap(&ledger, &decoded);
+    assert_eq!(retry.code, "cli-solve-conduction-undeclared", "{retry:?}");
+    assert!(
+        retry_progress
+            .iter()
+            .any(|line| line.contains("import-verify")),
+        "retry must skip the unrelated maximum-field row and find the valid import"
+    );
+}
+
+#[test]
+fn g3_unrelated_same_run_wide_success_does_not_mask_a_valid_checkpoint() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (initial, _) = run_to_gap(&ledger, &decoded);
+    let run_hex = initial.run.expect("run id");
+    let run = SolveRunId::parse_hex(&run_hex).expect("run id parses");
+    let receipts_before = stage_receipt_hashes(&ledger, &run_hex);
+    assert_eq!(receipts_before.len(), 4, "fixture has a valid checkpoint");
+
+    ledger.begin().expect("begin wide fixture transaction");
+    let unrelated = ledger
+        .begin_op(
+            Some(run.as_bytes()),
+            "{\"schema\":\"unrelated.same-run-wide-success.v1\"}",
+            &FiveExplicits {
+                seed: b"unrelated",
+                versions: "{}",
+                budget: "{}",
+                capability: "{}",
+            },
+            100,
+        )
+        .expect("same-run unrelated op");
+    for index in 0..1025u32 {
+        let artifact = ledger
+            .put_artifact("unrelated-same-run-evidence", &index.to_le_bytes(), None)
+            .expect("unrelated artifact");
+        ledger
+            .link(unrelated, &artifact.hash, EdgeRole::Out)
+            .expect("unrelated edge");
+    }
+    ledger
+        .finish_op(unrelated, OpOutcome::Ok, None, 101)
+        .expect("finish unrelated op");
+    ledger.commit().expect("commit wide fixture transaction");
+
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = resume_solve(&ledger, &gate, &mut clock, &run_hex, &mut progress)
+        .expect_err("valid checkpoint resumes to the known stage gap");
+    assert_eq!(
+        refusal.code, "cli-solve-conduction-undeclared",
+        "{refusal:?}"
+    );
+    assert_eq!(refusal.stage, Some("conduction"));
+    assert!(progress.is_empty(), "no new stage executes before the gap");
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run_hex),
+        receipts_before,
+        "the unrelated operation neither obscures nor extends the valid checkpoint"
+    );
+}
+
+#[test]
+fn g3_resume_with_a_corrupted_retained_project_refuses_identity() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (refusal, _) = run_to_gap(&ledger, &decoded);
+    let run = refusal.run.expect("run id");
+
+    // Corrupt the retained project source; resume must refuse rather than
+    // trust the damaged pin.
+    let run_id = SolveRunId::parse_hex(&run).expect("hex");
+    let source_hash = retained_project_source_hash(&ledger, &run_id);
+    ledger
+        .corrupt_artifact_for_test(&source_hash)
+        .expect("test corruption");
+
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let resumed = resume_solve(&ledger, &gate, &mut clock, &run, &mut progress)
+        .expect_err("corrupted pin refuses");
+    // The ledger's own read-integrity gate fires before the driver's
+    // identity re-derivation gets a chance to: an earlier, equally
+    // fail-closed refusal. The driver's `cli-solve-resume-identity` arm
+    // remains defense-in-depth behind it.
+    assert_eq!(resumed.code, "cli-solve-ledger");
+    assert!(
+        resumed.what.contains("reading the retained project failed"),
+        "{resumed:?}"
+    );
+}
+
+fn retained_project_source_hash(ledger: &Ledger, run: &SolveRunId) -> fs_ledger::ContentHash {
+    let ids = ledger
+        .visible_op_ids(fs_ledger::MAIN_BRANCH, None)
+        .expect("ops");
+    for id in ids {
+        let Some(row) = ledger.op(id).expect("op row") else {
+            continue;
+        };
+        if row.session.as_deref() != Some(run.as_bytes().as_slice()) {
+            continue;
+        }
+        let edges = ledger.op_artifact_edges_bounded(id, 64).expect("edges");
+        for edge in &edges.edges {
+            let info = ledger
+                .artifact_info(&edge.artifact)
+                .expect("info")
+                .expect("artifact");
+            if info.kind == "solve-project-source" {
+                return edge.artifact;
+            }
+        }
+    }
+    panic!("no retained project source for the run");
+}
+
+#[test]
+fn g0_stage_order_and_gap_owners_are_pinned() {
+    let names: Vec<&str> = SolveStage::ALL.iter().map(|stage| stage.name()).collect();
+    assert_eq!(
+        names,
+        [
+            "import-verify",
+            "assign",
+            "material-resolve",
+            "flow-network",
+            "conduction",
+            "qoi",
+            "report",
+        ],
+    );
+    assert_eq!(SolveStage::ImportVerify.gap_dependency(), None);
+    assert_eq!(SolveStage::Assign.gap_dependency(), None);
+    assert_eq!(SolveStage::MaterialResolve.gap_dependency(), None);
+    assert_eq!(SolveStage::FlowNetwork.gap_dependency(), None);
+    assert_eq!(
+        SolveStage::Conduction.gap_dependency(),
+        None,
+        "conduction executes; an undeclared section refuses with cli-solve-conduction-undeclared"
+    );
+    assert_eq!(
+        SolveStage::Qoi.gap_dependency(),
+        None,
+        "qoi executes; an undeclared requirement refuses with cli-solve-qoi-undeclared"
+    );
+    assert_eq!(
+        SolveStage::Report.gap_dependency(),
+        None,
+        "report executes: it projects retained receipts (bead frankensim-rc-root-q61wp.12)"
+    );
+}
+
+/// One-shot generator for the tracked reference project fixture
+/// (bead frankensim-58fbi). Run explicitly:
+///
+/// ```text
+/// cargo test -p fs-cli --test solve -- --ignored dump_reference_project_fixture
+/// ```
+///
+/// It writes the canonical `.fsim` source and the material-card pack that
+/// its binding references, so the two cannot be generated from divergent
+/// inputs. The permanent drift guard is a separate, non-ignored test.
+#[test]
+#[ignore = "generator: writes the tracked reference fixture under data/reference-project"]
+fn dump_reference_project_fixture() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/reference-project")
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../data/reference-project");
+            std::fs::create_dir_all(&path).expect("fixture directory");
+            path
+        });
+    let source =
+        print_sexpr(&conduction_fixture_project(7, &tetra_stl())).expect("fixture renders");
+    std::fs::write(dir.join("cooling-reference.fsim"), &source).expect("project writes");
+    std::fs::write(dir.join("aa6061.fsmcdpk"), fixture_pack_bytes()).expect("pack writes");
+    std::fs::write(dir.join("plate.stl"), tetra_stl()).expect("geometry writes");
+    println!("wrote reference fixture to {}", dir.display());
+}
+
+/// Generator for `examples/contact-pair` (bead q61wp.49/.53): the two-body
+/// contact project the refinement oracles below exercise, as a tracked
+/// product example (`import` binds one source per geometry row).
+///
+/// ```text
+/// cargo test -p fs-cli --test solve -- --ignored dump_contact_pair_example
+/// ```
+#[test]
+#[ignore = "generator: writes the tracked example under examples/contact-pair"]
+fn dump_contact_pair_example() {
+    let dir = contact_pair_dir();
+    std::fs::create_dir_all(&dir).expect("example directory");
+    let source = print_sexpr(&contact_refinement_project("auto")).expect("example renders");
+    std::fs::write(dir.join("contact-pair.fsim"), &source).expect("project writes");
+    std::fs::write(dir.join("cold-hot.fsintpk"), interface_pack_bytes()).expect("pack writes");
+    for role in ["cold-body", "hot-body"] {
+        std::fs::copy(
+            format!("{REFERENCE_DATA}/multi-region-{role}.stl"),
+            dir.join(format!("{role}.stl")),
+        )
+        .expect("geometry copies");
+    }
+    println!("wrote contact-pair example to {}", dir.display());
+}
+
+fn contact_pair_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/contact-pair")
+}
+
+#[test]
+fn g0_the_contact_pair_example_is_exactly_what_its_generator_produces() {
+    let dir = contact_pair_dir();
+    let project = std::fs::read_to_string(dir.join("contact-pair.fsim")).expect("tracked project");
+    assert_eq!(
+        project,
+        print_sexpr(&contact_refinement_project("auto")).unwrap(),
+        "regenerate with --ignored dump_contact_pair_example"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("cold-hot.fsintpk")).expect("tracked pack"),
+        interface_pack_bytes()
+    );
+    for role in ["cold-body", "hot-body"] {
+        assert_eq!(
+            std::fs::read(dir.join(format!("{role}.stl"))).unwrap(),
+            std::fs::read(format!("{REFERENCE_DATA}/multi-region-{role}.stl")).unwrap()
+        );
+    }
+}
+
+/// Repo-relative path of the tracked reference project (bead
+/// frankensim-58fbi).
+fn reference_project_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/reference-project")
+}
+
+#[test]
+fn g0_the_tracked_reference_project_is_exactly_what_its_generator_produces() {
+    // The file and the programmatic fixture are two spellings of one
+    // project. If they can drift, the tracked file stops describing what
+    // the solve battery actually exercises, which is the whole reason the
+    // fixture is tracked rather than rebuilt per test.
+    let dir = reference_project_dir();
+    let tracked = std::fs::read_to_string(dir.join("cooling-reference.fsim"))
+        .expect("the tracked reference project exists");
+    let tracked = fs_project::parse_sexpr_migrating(&tracked)
+        .expect("historical tracked project migrates without changing physics")
+        .decoded
+        .canonical;
+    let generated =
+        print_sexpr(&conduction_fixture_project(7, &tetra_stl())).expect("fixture renders");
+    assert_eq!(
+        tracked, generated,
+        "tracked .fsim drifted from its generator; re-run the ignored \
+         dump_reference_project_fixture test"
+    );
+
+    let tracked_pack =
+        std::fs::read(dir.join("aa6061.fsmcdpk")).expect("the tracked card pack exists");
+    assert_eq!(
+        tracked_pack,
+        fixture_pack_bytes(),
+        "the tracked pack must reconstruct the exact card the project binds"
+    );
+}
+
+#[test]
+fn g0_the_tracked_reference_project_is_canonical_and_admits_with_zero_findings() {
+    let source = std::fs::read_to_string(reference_project_dir().join("cooling-reference.fsim"))
+        .expect("the tracked reference project exists");
+
+    // The migrating reader checks canonical form after its receipted version
+    // rewrite; noncanonical historical bytes still refuse.
+    let decoded = fs_project::parse_sexpr_migrating(&source)
+        .expect("the tracked historical project migrates canonically")
+        .decoded;
+    assert!(
+        decoded.findings().is_empty(),
+        "the reference project must admit clean: {:?}",
+        decoded.findings()
+    );
+
+    // Negative control 1: canonicality is enforced on THIS file, not just
+    // in principle. One extra space must refuse.
+    let mut slack = source.clone();
+    slack.insert(slack.len() - 1, ' ');
+    assert!(
+        fs_project::parse_sexpr_migrating(&slack).is_err(),
+        "a non-canonical spelling of the reference project must refuse"
+    );
+
+    // Negative control 2: validation is live on this fixture, not vacuous.
+    // Dropping the requirements section must produce findings, proving the
+    // zero-findings result above is a real result.
+    let mut stripped = fixture_project(7, &tetra_stl());
+    stripped.requirements = Some(Vec::new());
+    let stripped_source = print_sexpr(&stripped).expect("renders");
+    let stripped_decoded =
+        fs_project::parse_sexpr(&stripped_source).expect("still structurally parseable");
+    assert!(
+        !stripped_decoded.findings().is_empty(),
+        "a project with no thermal requirement must not admit silently"
+    );
+}
+
+/// Extract the string payload of a `"name":"value"` field from a receipt.
+fn receipt_str_field(receipt: &str, name: &str) -> String {
+    let key = format!("\"{name}\":\"");
+    let start = receipt
+        .find(&key)
+        .unwrap_or_else(|| panic!("receipt field `{name}` present"))
+        + key.len();
+    let rest = &receipt[start..];
+    let end = rest.find('"').expect("field is terminated");
+    rest[..end].to_string()
+}
+
+fn receipt_number_field(receipt: &str, name: &str) -> f64 {
+    let key = format!("\"{name}\":");
+    let start = receipt
+        .find(&key)
+        .unwrap_or_else(|| panic!("receipt field `{name}` present"))
+        + key.len();
+    let rest = &receipt[start..];
+    let end = rest
+        .find(|character: char| character == ',' || character == '}')
+        .unwrap_or_else(|| panic!("receipt number `{name}` is terminated"));
+    rest[..end]
+        .parse()
+        .unwrap_or_else(|_| panic!("receipt field `{name}` is numeric"))
+}
+
+/// The flow-network stage (bead frankensim-frn2i.2) executes on the reference
+/// fixture and retains an interval-certified operating-point receipt.
+///
+/// The density check is an independent oracle: the ideal-gas value is
+/// recomputed here from the declared envelope, with the stage's own operation
+/// order, and must appear verbatim. The flow bracket must sit strictly inside
+/// the declared curve's admitted domain — the stage may not certify a root the
+/// declaration does not admit.
+#[test]
+fn g0_flow_network_stage_retains_an_interval_certified_operating_point_receipt() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+
+    let (refusal, _) = run_to_gap(&ledger, &decoded);
+    assert_eq!(refusal.stage, Some("conduction"), "flow-network passed");
+    let run = refusal.run.clone().expect("run");
+
+    let receipts = stage_receipt_hashes(&ledger, &run);
+    assert_eq!(
+        receipts.len(),
+        4,
+        "flow-network retained the fourth receipt"
+    );
+    let receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[3])).expect("receipt is utf-8");
+
+    assert!(receipt.contains("\"schema\":\"frankensim.cli.solve-flow-network-receipt.v1\""));
+    assert_balanced_json(&receipt);
+    assert!(
+        receipt.contains(
+            "\"authority\":\"lossless-project-lowering-plus-interval-certified-operating-point\""
+        ),
+        "the receipt states its authority boundary"
+    );
+    assert!(
+        receipt.contains("does not authenticate manufacturer curve data"),
+        "the no-claim travels with the receipt"
+    );
+    assert!(
+        receipt.contains("\"composite\":\"solve-fixture-curve-v1\""),
+        "the composite curve carries the declared source identity"
+    );
+    assert!(receipt.contains("\"vent_count\":1"));
+
+    // Independent density oracle, replicating the stage's exact operation
+    // order on the declared envelope values.
+    let ambient_mid = (293.15_f64 + 313.15_f64) / 2.0;
+    let expected_density = 101_325.0_f64 / (287.05_f64 * ambient_mid);
+    assert!(
+        receipt.contains(&format!(
+            "\"density_estimate\":\"ideal-gas:{expected_density}\""
+        )),
+        "the density is exactly the declared envelope's ideal-gas value: {receipt}"
+    );
+
+    // The certified bracket is ordered and sits inside the declared curve's
+    // admitted domain (min flow 0.001, terminal point 0.08 m^3/s).
+    let flow_lo: f64 = receipt_str_field(&receipt, "flow_lo").parse().expect("lo");
+    let flow_mid: f64 = receipt_str_field(&receipt, "flow_mid")
+        .parse()
+        .expect("mid");
+    let flow_hi: f64 = receipt_str_field(&receipt, "flow_hi").parse().expect("hi");
+    assert!(
+        flow_lo <= flow_mid && flow_mid <= flow_hi,
+        "ordered bracket"
+    );
+    assert!(
+        flow_lo > 0.001 && flow_hi < 0.08,
+        "the certified root stays inside the declared admitted domain: [{flow_lo}, {flow_hi}]"
+    );
+    let pressure_lo: f64 = receipt_str_field(&receipt, "pressure_lo")
+        .parse()
+        .expect("p lo");
+    let pressure_hi: f64 = receipt_str_field(&receipt, "pressure_hi")
+        .parse()
+        .expect("p hi");
+    assert!(pressure_lo <= pressure_hi && pressure_lo > 0.0);
+    let leakage_fraction: f64 = receipt_str_field(&receipt, "leakage_fraction")
+        .parse()
+        .expect("leakage fraction");
+    assert!(
+        leakage_fraction > 0.0 && leakage_fraction < 1.0,
+        "a declared leakage branch carries a nonzero, non-total share: {leakage_fraction}"
+    );
+}
+
+/// G1 manufactured single-tet path: retained import evidence is replayed into
+/// a labeled volume, the card-backed conductivity operator receives 5 W, and
+/// the declared full-surface Robin law removes that heat. The declared region
+/// maximum then executes as the sixth producer with eight explicit NO-DATA
+/// terms; report projects the retained producer prefix as the seventh stage.
+#[test]
+fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    spec.requirements.as_mut().unwrap()[0].safety_factor.factor = 2.0;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+
+    let (outcome, progress) = run_to_completion(&ledger, &decoded);
+    assert!(
+        matches!(outcome.status, fs_cli::SolveRunStatus::Completed),
+        "QoI and the ledgered report stage both execute"
+    );
+    assert_eq!(outcome.stages.len(), 7, "seven producer stages sealed");
+    assert!(
+        progress.iter().any(|line| line.contains("conduction")),
+        "the executing conduction stage reports progress"
+    );
+    assert!(
+        progress
+            .iter()
+            .any(|line| line.contains("\"stage\":\"report\",\"ordinal\":6,\"status\":\"ok\"")),
+        "the report stage reports progress like every other stage"
+    );
+    let qoi_progress = progress
+        .iter()
+        .find(|line| line.contains("\"stage\":\"qoi\""))
+        .expect("the persisted QoI stage reports its assessment summary");
+    for expected in [
+        "\"ordinal\":5",
+        "\"status\":\"ok\"",
+        "\"elapsed_ms\":",
+        "\"qoi_count\":1",
+        "\"verdict\":\"indeterminate\"",
+        // Declared-input propagation measures boundary conditions and the
+        // solver term; the published solve bounds roundoff; measurement is
+        // negligible; four terms stay NO-DATA.
+        "\"weakest_term\":\"some-no-data\"",
+        "\"budget_terms_measured\":4",
+        "\"budget_terms_total\":8",
+    ] {
+        assert!(
+            qoi_progress.contains(expected),
+            "{expected}: {qoi_progress}"
+        );
+    }
+    let elapsed_ms = receipt_number_field(qoi_progress, "elapsed_ms");
+    assert!(elapsed_ms.is_finite() && elapsed_ms >= 0.0);
+
+    let run = outcome.run.clone();
+    let receipts = stage_receipt_hashes(&ledger, &run);
+    assert_eq!(
+        receipts.len(),
+        7,
+        "QoI and report retained the sixth and seventh receipts"
+    );
+    let receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
+    assert_balanced_json(&receipt);
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v7"));
+    assert!(receipt.contains("\"method\":\"outward-linear-maximum-enclosure\""), "{receipt}");
+    assert!(!receipt.contains("tolerance-tightening-resolve"),
+        "a linear solve uses the published operator, without a second primal tolerance comparison");
+    assert!(receipt.contains("change of hottest node"), "{receipt}");
+    assert!(receipt.contains("verified inverse infinity upper"), "{receipt}");
+    let control = receipt.split("\"solver_control\":").nth(1).unwrap();
+    assert!(control.starts_with("{\"status\":\"goal-tolerance\""), "{receipt}");
+    assert!(control.contains("\"goal_met\":true"), "{receipt}");
+    assert_eq!(receipt_number_field(control, "allocation_fraction"), 0.1);
+    assert_eq!(receipt_number_field(control, "primal_iterations"), 0.0,
+        "an already accurate physical solution performs no correction iterations");
+    let algebraic = receipt.split("\"solver_algebraic\":").nth(1).unwrap();
+    let algebraic_width = receipt_number_field(algebraic, "half_width_k");
+    assert!(algebraic_width > 0.0 && algebraic_width < 1e-6, "{receipt}");
+    assert!(
+        receipt.contains("\"ladder\":{\"rungs\":[{\"rung\":0,")
+            && receipt.contains("\"stop\":\"fidelity-single-rung\"")
+            && receipt.contains("\"status\":\"single-rung\""),
+        "the default fidelity solves one rung and says so: {receipt}"
+    );
+    // v4 discloses mesh quality and the recovery budgets that produced the
+    // mesh (bridge plan B3): disclosure, not enforcement.
+    assert!(
+        receipt.contains("\"quality\":{\"tets\":"),
+        "conduction receipt discloses the quality census: {receipt}"
+    );
+    assert!(
+        receipt.contains("\"recovery\":{\"memory_bytes\":"),
+        "conduction receipt names the recovery budget: {receipt}"
+    );
+    // The fixture declares 64 MiB; at 2 KiB per facet Steiner point the
+    // derived cap is 32 768, above the 4 000 default floor.
+    assert!(
+        receipt.contains("\"max_steiner\":32768"),
+        "the recovery cap derives from the declared 64 MiB budget: {receipt}"
+    );
+    assert!(
+        receipt.contains("\"memory_bytes\":67108864"),
+        "the receipt names the declared memory budget: {receipt}"
+    );
+    assert!(
+        receipt.contains("\"flat_tets\":{\"found\":"),
+        "the receipt discloses the flat-tet repair: {receipt}"
+    );
+    assert!(receipt.contains("\"interfaces\":{\"pair_count\":0"));
+    assert!(receipt.contains("\"elements\":1"));
+    assert_eq!(receipt_number_field(&receipt, "source_w"), 5.0);
+    assert!(
+        receipt_number_field(&receipt, "relative_closure") < 1e-6,
+        "the independent energy balance closes at the declared tolerance: {receipt}"
+    );
+    let min = receipt_number_field(&receipt, "min");
+    let max = receipt_number_field(&receipt, "max");
+    assert!(min.is_finite() && max.is_finite() && min <= max);
+    assert!(
+        max > 293.15,
+        "positive power under convection raises the solid above its declared reference"
+    );
+
+    let solution_hash = receipt_str_field(&receipt, "solution_artifact");
+    let _solution = fs_ledger::ContentHash::from_hex(&solution_hash).expect("solution hash");
+    let solution_bytes = artifact_bytes(&ledger, &solution_hash);
+    let solution_text = String::from_utf8(solution_bytes).expect("solution is utf-8");
+    assert_balanced_json(&solution_text);
+    assert!(solution_text.contains("frankensim.cli.solve-conduction-solution.v1"));
+    assert!(solution_text.contains("\"temperature_unit\":\"K\""));
+
+    let qoi_receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[5])).expect("QoI receipt is utf-8");
+    assert_balanced_json(&qoi_receipt);
+    assert!(qoi_receipt.contains("frankensim.cli.solve-qoi-candidate.v2"));
+    assert!(qoi_receipt.contains("\"stage\":\"qoi\""));
+    assert!(qoi_receipt.contains("\"name\":\"temperature-max\""));
+    assert!(qoi_receipt.contains("\"outcome\":\"indeterminate\""));
+    let algebraic_term = qoi_receipt.split("\"kind\":\"solver-algebraic\"").nth(1).unwrap();
+    assert_eq!(receipt_number_field(algebraic_term, "upper_kelvin").to_bits(), algebraic_width.to_bits(),
+        "the actual bound is retained unchanged through the QoI/report handoff");
+    assert!(algebraic_term.contains("outward-linear-maximum-enclosure"));
+    assert_eq!(
+        receipt_number_field(&qoi_receipt, "effective_limit_kelvin"),
+        353.15,
+        "the project limit is already effective and must not be safety-factored twice"
+    );
+    assert!(qoi_receipt.contains(&format!("\"conduction_solution\":\"{solution_hash}\"")));
+    // Propagation measures boundary conditions and the solver term, the
+    // published solve bounds roundoff, and measurement is negligible; the
+    // other four sources stay explicit NO-DATA.
+    assert_eq!(qoi_receipt.matches("\"state\":\"no-data\"").count(), 4);
+    for kind in EngineeringUncertaintyKind::ALL {
+        let measured = matches!(
+            kind,
+            EngineeringUncertaintyKind::BoundaryConditions
+                | EngineeringUncertaintyKind::SolverAlgebraic
+                | EngineeringUncertaintyKind::Roundoff
+                | EngineeringUncertaintyKind::Measurement
+        );
+        let needle = format!("\"kind\":\"{}\",\"state\":\"no-data\"", kind.name());
+        assert_eq!(
+            qoi_receipt.matches(&needle).count(),
+            usize::from(!measured),
+            "NO-DATA state of {} in the QoI receipt",
+            kind.name()
+        );
+    }
+
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut resume_progress = Vec::new();
+    let resumed = resume_solve(&ledger, &gate, &mut clock, &run, &mut resume_progress)
+        .expect_err("a completed run has nothing left to resume");
+    assert_eq!(resumed.code, "cli-solve-resume-complete");
+    assert!(
+        resume_progress.is_empty(),
+        "a resume of a completed run emits no duplicate stage progress"
+    );
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run),
+        receipts,
+        "resume preserves the exact seven-stage run"
+    );
+
+    // The report stage is a pure projection of the retained receipts.
+    let report_receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[6])).expect("report receipt is utf-8");
+    assert_balanced_json(&report_receipt);
+    assert!(report_receipt.contains("frankensim.cli.solve-report.v1"));
+    assert!(report_receipt.contains("\"stage\":\"report\""));
+    assert!(report_receipt.contains("\"verdict\":\"indeterminate\""));
+    assert!(report_receipt.contains("\"budget_terms_measured\":4"));
+    assert!(report_receipt.contains(&format!("\"qoi_receipt\":\"{}\"", receipts[5])));
+    assert!(report_receipt.contains(&format!("\"conduction_receipt\":\"{}\"", receipts[4])));
+    let html = String::from_utf8(artifact_bytes(
+        &ledger,
+        &receipt_str_field(&report_receipt, "report_html"),
+    ))
+    .expect("retained html is utf-8");
+    assert!(html.contains(&run), "the report names its run");
+    assert!(html.contains("temperature-max"));
+    assert!(
+        html.contains("NO-DATA"),
+        "unmeasured terms print as NO-DATA: {html}"
+    );
+    assert!(
+        html.contains("no-data"),
+        "the budget term states are copied verbatim"
+    );
+    assert!(
+        html.contains(&receipts[4]),
+        "the report cites the conduction receipt hash"
+    );
+    assert!(!html.contains("342.15"), "no fabricated literal survives");
+    let twin = String::from_utf8(artifact_bytes(
+        &ledger,
+        &receipt_str_field(&report_receipt, "report_json"),
+    ))
+    .expect("retained twin is utf-8");
+    assert!(twin.contains("\"schema\": \"frankensim.report.engineering.v1\""));
+    assert!(!twin.contains("NaN"), "the JSON twin never emits NaN");
+    assert_eq!(
+        twin.matches("\"state\": \"no-data\"").count(),
+        4,
+        "the four NO-DATA terms are carried into the twin"
+    );
+    let package_text = String::from_utf8(artifact_bytes(
+        &ledger,
+        &receipt_str_field(&report_receipt, "package"),
+    ))
+    .expect("retained package is utf-8");
+    let package = fs_package::EvidencePackage::from_json(&package_text)
+        .expect("the retained package is a format-9 package");
+    let check = fs_checker::check(&package);
+    assert!(
+        check.passed(),
+        "the solver-free checker accepts the retained package"
+    );
+    assert_eq!(
+        check.merkle_root().to_hex(),
+        receipt_str_field(&report_receipt, "package_root"),
+        "the receipt records the exact package root the checker recomputes"
+    );
+    assert!(
+        !package_text.contains("\"verified\""),
+        "an estimate-only run mints no Verified claim: {package_text}"
+    );
+
+    let interrupted = Ledger::open(":memory:").expect("interrupted ledger");
+    import_fixture(&interrupted, &spec, tetra_stl());
+    let (cancelled, _) = run_to_stage_prefix(&interrupted, &decoded, 5);
+    let interrupted_run = cancelled.run.expect("interrupted run");
+    assert_eq!(
+        stage_receipt_hashes(&interrupted, &interrupted_run).len(),
+        5,
+        "the cancellation checkpoint is immediately before QoI"
+    );
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let after_resume = resume_solve(
+        &interrupted,
+        &gate,
+        &mut clock,
+        &interrupted_run,
+        &mut progress,
+    )
+    .expect("resume executes QoI and then the report stage to completion");
+    assert!(matches!(
+        after_resume.status,
+        fs_cli::SolveRunStatus::Completed
+    ));
+    let resumed_receipts = stage_receipt_hashes(&interrupted, &interrupted_run);
+    assert_eq!(resumed_receipts.len(), 7);
+    assert_eq!(
+        artifact_bytes(&interrupted, &resumed_receipts[6]),
+        artifact_bytes(&ledger, &receipts[6]),
+        "the report is a pure function of the retained receipts, not of ledger coordinates"
+    );
+    assert_eq!(
+        progress
+            .iter()
+            .filter(|line| line.contains("\"stage\":\"qoi\""))
+            .count(),
+        1,
+        "resume from the pre-QoI checkpoint emits exactly one committed QoI summary"
+    );
+    assert_eq!(
+        artifact_bytes(&interrupted, &resumed_receipts[5]),
+        artifact_bytes(&ledger, &receipts[5]),
+        "resume before QoI reproduces the uninterrupted candidate receipt byte-for-byte"
+    );
+
+    // G3: a completed run is not resumable merely because its report edge and
+    // descriptor still name the expected content identity. Corrupt retained
+    // storage through the ledger's public test hook; completed-run admission
+    // must exercise the controlled integrity read and fail closed. The
+    // ledger's own controlled-read tests separately cover same-length byte
+    // substitution reaching the final content-hash check.
+    let html_hash =
+        fs_ledger::ContentHash::from_hex(&receipt_str_field(&report_receipt, "report_html"))
+            .expect("report HTML hash");
+    ledger
+        .corrupt_artifact_for_test(&html_hash)
+        .expect("test report corruption");
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = resume_solve(&ledger, &gate, &mut clock, &run, &mut progress)
+        .expect_err("corrupted retained report bytes refuse completed-run admission");
+    assert_eq!(refusal.code, "cli-solve-ledger", "{refusal:?}");
+    assert!(
+        refusal
+            .what
+            .contains("verifying a retained report artifact failed"),
+        "{refusal:?}"
+    );
+    assert!(
+        progress.is_empty(),
+        "failed re-attestation emits no progress"
+    );
+}
+
+/// G0 product contact path: two retained solids are volumetricized together,
+/// split back into region-owned matching-P1 traces, mapped to the declared
+/// scenario interface and finite-resistance card, and solved without treating
+/// the joint as either perfect contact or an adiabatic gap.
+/// The conduction fixture with its declared convection law replaced by an
+/// airflow-convection law on the fixture's one vent branch: the coefficient
+/// and reference temperature are DERIVED from the flow-network operating
+/// point through the named card, never declared.
+fn conjugate_fixture_project(seed_root: u64, bytes: &[u8], correlation: &str) -> ProjectSpec {
+    let mut spec = conduction_fixture_project(seed_root, bytes);
+    let conduction = spec
+        .cooling
+        .as_mut()
+        .and_then(|cooling| cooling.conduction.as_mut())
+        .expect("fixture conduction");
+    conduction.boundaries = vec![ThermalBoundary {
+        target: "air".to_string(),
+        condition: ThermalBoundaryCondition::AirflowConvection {
+            branch: "air".to_string(),
+            order: 0,
+            inlet_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+            hydraulic_diameter: QtyAny::new(0.02, fs_project::spec::dims::LENGTH),
+            flow_area: QtyAny::new(0.004, fs_project::spec::dims::AREA),
+            // L/Dh = 15: inside Gnielinski's developed-flow floor of 10.
+            channel_length: QtyAny::new(0.3, fs_project::spec::dims::LENGTH),
+            correlation: correlation.to_string(),
+        },
+    }];
+    spec
+}
+
+#[test]
+fn g0_conduction_stage_closes_the_conjugate_airflow_exchange_from_the_flow_network() {
+    let bytes = tetra_stl();
+    let spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes.clone());
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let outcome = run_solve(
+        &ledger,
+        &gate,
+        &mut clock,
+        &decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect("the conjugate conduction solve completes QoI and the report stage");
+    assert!(matches!(outcome.status, fs_cli::SolveRunStatus::Completed));
+
+    let run = outcome.run.clone();
+    let receipts = stage_receipt_hashes(&ledger, &run);
+    assert_eq!(receipts.len(), 7);
+    let receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
+    assert_balanced_json(&receipt);
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v7"));
+    // The exchange is in the receipt: the branch, the card, the derived
+    // coefficient, the marched air, and the two independent watt gates.
+    assert!(receipt.contains("\"conjugate\":{\"branch\":\"air\",\"path\":\"vent:air\""));
+    assert!(receipt.contains("\"card\":\"convection.gnielinski\",\"in_domain\":true"));
+    assert!(receipt_number_field(&receipt, "htc_w_m2_k") > 0.0);
+    assert!(
+        receipt_number_field(&receipt, "reynolds") > 3000.0,
+        "{receipt}"
+    );
+    let inlet = receipt_number_field(&receipt, "inlet_k");
+    let outlet = receipt_number_field(&receipt, "outlet_k");
+    assert!(
+        outlet > inlet,
+        "positive power warms the air along the branch: inlet {inlet} outlet {outlet}"
+    );
+    let reference = receipt_number_field(&receipt, "reference_k");
+    assert!(
+        reference > inlet && reference < receipt_number_field(&receipt, "max"),
+        "the effective Robin reference lies between inlet air and the hottest solid: {receipt}"
+    );
+    assert!(receipt_number_field(&receipt, "iterations") >= 1.0);
+    let tolerance = receipt_number_field(&receipt, "balance_tolerance_w");
+    assert!(receipt_number_field(&receipt, "max_region_imbalance_w").abs() <= tolerance);
+    assert!(receipt_number_field(&receipt, "decomposition_residual_w").abs() <= tolerance);
+    assert!(
+        receipt_number_field(&receipt, "relative_closure") < 1e-6,
+        "{receipt}"
+    );
+    // The solid's Robin heat rate is the air's heat rate: the derived
+    // reference reproduces what the air absorbed by construction.
+    let solid_w = receipt_number_field(&receipt, "solid_total_w");
+    let air_w = receipt_number_field(&receipt, "air_total_w");
+    assert!((solid_w - air_w).abs() <= tolerance, "{solid_w} vs {air_w}");
+    assert!(solid_w > 0.0);
+
+    // Solver error now covers the full air-reference feedback on this same
+    // field. Preparing response columns must not masquerade as correcting it.
+    assert!(receipt.contains("outward-coupled-linear-maximum-enclosure"), "{receipt}");
+    assert!(!receipt.contains("tolerance-tightening-resolve"), "{receipt}");
+    let control = receipt.split("\"solver_control\":").nth(1).unwrap();
+    assert!(control.starts_with("{\"schema\":\"frankensim.cli.coupled-maximum-publication.v1\""), "{receipt}");
+    assert!(control.contains("\"correction_supported\":true"), "{receipt}");
+    assert!(control.contains("\"mode\":\"physical-goal-correction\""), "{receipt}");
+    assert!(receipt_number_field(control, "primal_iterations") <= receipt_number_field(control, "max_primal_iterations"));
+    assert!(receipt_number_field(control, "response_iterations")
+        <= receipt_number_field(control, "max_response_iterations"));
+    let gain = receipt_number_field(control, "feedback_gain_infinity_upper");
+    assert!(gain > 0.0 && gain < 1.0, "{receipt}");
+    assert!(receipt_number_field(control, "coupled_inverse_infinity_upper")
+        >= receipt_number_field(control, "solid_inverse_infinity_upper"));
+    let algebraic = receipt.split("\"solver_algebraic\":").nth(1).unwrap();
+    let bound = receipt_number_field(algebraic, "half_width_k");
+    assert!(bound.is_finite() && bound > 0.0, "{receipt}");
+    let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
+    let term = qoi.split("\"kind\":\"solver-algebraic\"").nth(1).unwrap();
+    assert_eq!(receipt_number_field(term, "upper_kelvin").to_bits(), bound.to_bits(),
+        "the full coupled bound must reach the published QoI budget unchanged");
+
+    // A channel too short for the card's developed-flow floor (L/Dh = 5
+    // against Gnielinski's [10, 1e6]) refuses by name; executed on the rch
+    // fleet 2026-09-02 before the fixture was lengthened.
+    let mut short = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    for boundary in &mut short
+        .cooling
+        .as_mut()
+        .and_then(|cooling| cooling.conduction.as_mut())
+        .expect("fixture conduction")
+        .boundaries
+    {
+        if let ThermalBoundaryCondition::AirflowConvection { channel_length, .. } =
+            &mut boundary.condition
+        {
+            *channel_length = QtyAny::new(0.1, fs_project::spec::dims::LENGTH);
+        }
+    }
+    let decoded_short = decode(&short);
+    let short_ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&short_ledger, &short, bytes.clone());
+    let refusal = run_solve(
+        &short_ledger,
+        &gate,
+        &mut benign_clock(),
+        &decoded_short,
+        &fixture_cards(),
+        &mut Vec::new(),
+    )
+    .expect_err("a developing-length channel outside the card domain refuses");
+    assert_eq!(refusal.code, "cli-solve-conduction-airflow-card-domain");
+    assert!(refusal.what.contains("L_over_Dh"), "{}", refusal.what);
+
+    // A declared card whose domain does not cover the solved regime refuses
+    // by name instead of extrapolating (the fixture's branch is turbulent).
+    let laminar = conjugate_fixture_project(7, &bytes, "convection.circular-duct-laminar-cwt");
+    let decoded_laminar = decode(&laminar);
+    let laminar_ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&laminar_ledger, &laminar, bytes);
+    let mut laminar_progress = Vec::new();
+    let refusal = run_solve(
+        &laminar_ledger,
+        &gate,
+        &mut benign_clock(),
+        &decoded_laminar,
+        &fixture_cards(),
+        &mut laminar_progress,
+    )
+    .expect_err("an out-of-domain card refuses the exchange");
+    assert_eq!(refusal.code, "cli-solve-conduction-airflow-card-domain");
+
+    // Exact replay: a completed conjugate run has nothing left to resume
+    // and its retained receipts are unchanged.
+    let mut resume_clock = benign_clock();
+    let mut resume_progress = Vec::new();
+    let resumed = resume_solve(
+        &ledger,
+        &gate,
+        &mut resume_clock,
+        &run,
+        &mut resume_progress,
+    )
+    .expect_err("a completed run has nothing left to resume");
+    assert_eq!(resumed.code, "cli-solve-resume-complete");
+    assert_eq!(stage_receipt_hashes(&ledger, &run), receipts);
+}
+
+#[test]
+fn g0_conduction_stage_executes_declared_card_backed_contact() {
+    let spec = multi_region_contact_project();
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_multi_region_contact(&ledger, &spec);
+    let cards = contact_cards();
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let outcome = run_solve(&ledger, &gate, &mut clock, &decoded, &cards, &mut progress)
+        .expect("contact solve completes QoI and the report stage");
+    assert!(matches!(outcome.status, fs_cli::SolveRunStatus::Completed));
+
+    let run = outcome.run.clone();
+    let receipts = stage_receipt_hashes(&ledger, &run);
+    assert_eq!(
+        receipts.len(),
+        7,
+        "contact conduction, QoI, and report retained seven producer receipts"
+    );
+    let receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
+    assert_balanced_json(&receipt);
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v7"));
+    // The production volumetricizer's facet recovery inserts a Steiner
+    // point at the joint centroid and re-triangulates the shared unit
+    // face into a deterministic four-triangle fan, so the declared
+    // interface lowers to FOUR coincident matching-P1 pairs (one per
+    // retained sub-triangle), each bound by containment to the covering
+    // imported face. Two was the pre-execution guess written against the
+    // unrefined soup triangulation.
+    assert!(receipt.contains("\"interfaces\":{\"pair_count\":4"));
+    assert!(receipt.contains("\"interface\":\"cold-hot-joint\""));
+    assert!(
+        receipt_number_field(&receipt, "heat_rate_a_to_b_w").abs() > 1e-12,
+        "finite resistance carries a nonzero solved heat rate: {receipt}"
+    );
+    assert!(
+        receipt_number_field(&receipt, "relative_closure") < 1e-6,
+        "the contact solve closes its global energy balance: {receipt}"
+    );
+
+    let evidence_hash = receipt_str_field(&receipt, "evidence_artifact");
+    let evidence = String::from_utf8(artifact_bytes(&ledger, &evidence_hash))
+        .expect("interface evidence is utf-8");
+    assert_balanced_json(&evidence);
+    assert!(evidence.contains("frankensim.cli.solve-conduction-interface-evidence.v2"));
+    assert!(evidence.contains("\"pair_count\":4"));
+    assert!(evidence.contains("\"name\":\"cold-hot-joint\""));
+    assert!(receipt_number_field(&evidence, "source_faces_indexed") > 0.0);
+
+    let qoi_receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[5])).expect("QoI receipt is utf-8");
+    assert_balanced_json(&qoi_receipt);
+    assert!(qoi_receipt.contains("frankensim.cli.solve-qoi-candidate.v2"));
+    assert!(qoi_receipt.contains("\"stage\":\"qoi\""));
+
+    let mut resume_clock = benign_clock();
+    let mut resume_progress = Vec::new();
+    let resumed = resume_solve(
+        &ledger,
+        &gate,
+        &mut resume_clock,
+        &run,
+        &mut resume_progress,
+    )
+    .expect_err("a completed contact run has nothing left to resume");
+    assert_eq!(resumed.code, "cli-solve-resume-complete");
+    assert_eq!(stage_receipt_hashes(&ledger, &run), receipts);
+    assert!(
+        resume_progress.is_empty(),
+        "completed QoI is not re-emitted"
+    );
+}
+
+#[test]
+fn g1_contact_ladder_refines_both_traces_and_preserves_heat_and_jump() {
+    let spec = contact_refinement_project("ladder");
+    let receipt = contact_refinement_receipt(&spec, &contact_cards());
+    let rungs = receipt
+        .split("\"ladder\":{\"rungs\":[")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    let rows: Vec<_> = rungs.split("{\"rung\":").skip(1).collect();
+    assert_eq!(
+        rows.len(),
+        3,
+        "contact must no longer stop the h-ladder: {receipt}"
+    );
+    let pairs: Vec<_> = rows
+        .iter()
+        .map(|row| receipt_number_field(row, "interface_pairs"))
+        .collect();
+    assert!(pairs[0] > 0.0);
+    assert_eq!(
+        pairs[1],
+        4.0 * pairs[0],
+        "both matching traces split into four faces"
+    );
+    assert_eq!(pairs[2], 4.0 * pairs[1]);
+    assert_eq!(pairs[2], receipt_number_field(&receipt, "pair_count"));
+    for row in rows {
+        assert!(receipt_number_field(row, "min_dihedral_deg") >= 5.0);
+    }
+    assert!(!receipt.contains("interface-pairs-bind-base-faces"));
+}
+
+#[test]
+fn g1_contact_adaptive_probes_the_actual_hot_maximum_with_the_contact_operator() {
+    let spec = contact_refinement_project("adaptive");
+    let receipt = contact_refinement_receipt(&spec, &contact_cards());
+    assert!(
+        receipt.contains("\"status\":\"observed-tolerance-met\""),
+        "{receipt}"
+    );
+    assert_eq!(receipt_number_field(&receipt, "solved_meshes"), 2.0);
+    let history = receipt
+        .split("\"history\":[")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    let number = |name| receipt_number_field(history, name);
+    assert_eq!(
+        number("probe_interface_pairs"),
+        4.0 * number("interface_pairs")
+    );
+    assert!(number("interface_pairs") > 0.0);
+    assert!(
+        (number("signed_linear_change_k")
+            + number("linearization_remainder_k")
+            + number("maximum_remainder_k")
+            - number("measured_change_k"))
+        .abs()
+            < 1e-10
+    );
+    assert!(receipt.contains("\"continuum_error_bound\":false"));
+    assert!(!receipt.contains("unsupported-interface-transfer"));
+}
+
+#[test]
+fn g1_contact_adaptive_refines_and_retains_the_last_probed_contact_field() {
+    let mut spec = contact_refinement_project("adaptive");
+    spec.budgets.as_mut().unwrap().accuracy_rel = 1e-10;
+    spec.budgets.as_mut().unwrap().memory_bytes = 64 * 1024 * 1024;
+    // Admit the enriched operator's verified inverse as well as its mesh;
+    // the separate low-memory test covers refusal and retained-field behavior.
+    let receipt = contact_refinement_receipt(&spec, &contact_cards());
+    assert!(
+        receipt_number_field(&receipt, "solved_meshes") > 2.0,
+        "{receipt}"
+    );
+    let history = receipt
+        .split("\"history\":[")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    let rows: Vec<_> = history.split("{\"mesh\":").skip(1).collect();
+    assert!(
+        rows.len() > 1,
+        "a real contact mesh must be refined and independently probed: {receipt}"
+    );
+    let last = rows[rows.len() - 1];
+    for row in &rows {
+        assert!(receipt_number_field(row, "interface_pairs") > 0.0);
+        assert_eq!(
+            receipt_number_field(row, "probe_interface_pairs"),
+            4.0 * receipt_number_field(row, "interface_pairs"),
+            "each independent probe refines both joint traces, even when local marks stay inside a solid"
+        );
+    }
+    assert_eq!(
+        receipt_number_field(&receipt, "pair_count"),
+        receipt_number_field(last, "interface_pairs")
+    );
+    assert_eq!(
+        receipt_number_field(&receipt, "elements"),
+        receipt_number_field(last, "tets")
+    );
+    assert_eq!(
+        receipt_number_field(&receipt, "max"),
+        receipt_number_field(last, "t_max_k")
+    );
+    assert_eq!(
+        receipt_number_field(&receipt, "last_estimated_change_k"),
+        receipt_number_field(last, "estimated_change_k")
+    );
+}
+
+#[test]
+fn g1_contact_adaptive_uses_the_nonlinear_material_tangent_and_retains_its_remainder() {
+    let material = material_pack_bytes_with_property(
+        "AA6061",
+        "solve-nonlinear-contact-pack",
+        200.0,
+        450.0,
+        fs_matdb::PropertyValue::Curve {
+            abscissa: "T".to_string(),
+            abscissa_dims: fs_project::spec::dims::TEMPERATURE,
+            knots: vec![(200.0, 0.25), (450.0, 20.25)],
+            dims: CONDUCTIVITY_DIMS,
+        },
+        fs_matdb::InterpolationPolicy::LinearInside,
+    );
+    let cards = CardPackSet::admit(vec![
+        raw_pack(
+            CardPackKind::Material,
+            "fixtures/nonlinear.fsmcdpk",
+            material,
+        ),
+        raw_pack(
+            CardPackKind::Interface,
+            "fixtures/contact.fsicdpk",
+            interface_pack_bytes(),
+        ),
+    ])
+    .unwrap();
+    let mut spec = contact_refinement_project("adaptive");
+    for binding in spec.materials.as_mut().unwrap() {
+        binding.card = cards.materials()[0].card().to_hex();
+    }
+    let receipt = contact_refinement_receipt(&spec, &cards);
+    assert!(!receipt.contains("outward-linear-maximum-enclosure"),
+        "a frozen k(T) operator must not be reported as the full nonlinear maximum bound");
+    assert!(receipt.contains("tolerance-tightening-resolve"),
+        "the explicitly Estimated nonlinear tolerance comparison remains available: {receipt}");
+    assert!(receipt.contains("\"solver_control\":{\"status\":\"unsupported-model\""),
+        "the requested algebraic allocation has an explicit nonlinear limit: {receipt}");
+    assert!(
+        receipt.contains("\"status\":\"observed-tolerance-met\""),
+        "{receipt}"
+    );
+    let history = receipt
+        .split("\"history\":[")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    assert!(
+        history.contains("\"uses_nonlinear_jacobian\":true"),
+        "{receipt}"
+    );
+    let number = |name| receipt_number_field(history, name);
+    assert!(
+        number("linearization_remainder_k").abs() > 1e-10,
+        "the finite nonlinear remainder is measured and not silently dropped: {receipt}"
+    );
+    assert!(
+        (number("signed_linear_change_k")
+            + number("linearization_remainder_k")
+            + number("maximum_remainder_k")
+            - number("measured_change_k"))
+        .abs()
+            < 1e-10
+    );
+    assert!(receipt.contains("\"continuum_error_bound\":false"));
+}
+
+#[test]
+fn g0_conduction_stage_checks_interior_contact_resistance() {
+    for peak in [0.1, 0.2] {
+        let cards = contact_cards_with_interface(interface_pack_bytes_with_peak(Some(peak)));
+        let mut spec = multi_region_contact_project();
+        spec.interface_cards.as_mut().unwrap()[0].card = cards.interfaces()[0].card().to_hex();
+        let bindings = fs_project::resolve_bindings(
+            &spec,
+            &cards.library(),
+            &fs_project::BindingRequirements::thermal_steady_v1(),
+        );
+        assert!(bindings.admissible(), "{:?}", bindings.violations);
+        let contact = bindings
+            .bindings
+            .iter()
+            .find(|binding| matches!(binding.target, fs_project::BindingTarget::Interface(_)))
+            .unwrap();
+        assert_eq!(contact.properties[0].value_lo, 0.1);
+        assert_eq!(
+            contact.properties[0].value_hi, 0.1,
+            "regression must pass the old endpoint-only constant check"
+        );
+        let decoded = decode(&spec);
+        assert!(decoded.findings().is_empty(), "{:?}", decoded.findings());
+        let ledger = Ledger::open(":memory:").unwrap();
+        import_multi_region_contact(&ledger, &spec);
+        let gate = CancelGate::new_clock_free();
+        let mut clock = benign_clock();
+        let mut progress = Vec::new();
+        let result = run_solve(&ledger, &gate, &mut clock, &decoded, &cards, &mut progress);
+        if peak == 0.1 {
+            assert!(
+                matches!(result.unwrap().status, fs_cli::SolveRunStatus::Completed),
+                "a continuously supported flat curve remains usable"
+            );
+        } else {
+            let refusal =
+                result.expect_err("equal endpoints cannot hide varying contact resistance");
+            assert_eq!(
+                refusal.code,
+                "cli-solve-conduction-interface-temperature-variation"
+            );
+        }
+    }
+}
+
+fn assert_undeclared_conduction_interface_refusal(
+    reverse_region_order: bool,
+) -> ((usize, usize), (String, String)) {
+    let spec = multi_region_project_without_declared_interface(reverse_region_order);
+    let decoded = decode(&spec);
+    assert!(
+        decoded.findings().is_empty(),
+        "removing the complete interface bundle remains project-validation clean: {:?}",
+        decoded.findings()
+    );
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_multi_region_contact(&ledger, &spec);
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve(
+        &ledger,
+        &gate,
+        &mut clock,
+        &decoded,
+        &contact_cards(),
+        &mut progress,
+    )
+    .expect_err("undeclared coincident traces must refuse before conduction publishes");
+    assert_eq!(
+        refusal.code, "project-conduction-interface-undeclared",
+        "{refusal:?}"
+    );
+    assert_eq!(refusal.stage, Some("conduction"));
+    assert!(
+        refusal
+            .what
+            .contains("coincident conduction boundary slots"),
+        "{refusal:?}"
+    );
+    let slots = refusal
+        .what
+        .split_once("coincident conduction boundary slots ")
+        .expect("typed refusal names candidate slots")
+        .1;
+    let (first_slot, second_slot) = slots
+        .split_once(" and ")
+        .expect("candidate slots use the typed `and` separator");
+    // Each slot is `<index> (region <id>)`; the index leads, the region
+    // identity follows and is what a declaration-order permutation must
+    // preserve.
+    let region_of = |slot: &str| -> String {
+        slot.split_once("(region ")
+            .expect("slot names its region")
+            .1
+            .split(')')
+            .next()
+            .expect("region id closes")
+            .to_string()
+    };
+    let first_region = region_of(first_slot);
+    let second_region = region_of(second_slot);
+    let first_slot = first_slot
+        .split_whitespace()
+        .next()
+        .expect("first slot names an index")
+        .parse::<usize>()
+        .expect("first slot is an integer");
+    let second_slot = second_slot
+        .split_whitespace()
+        .next()
+        .expect("second slot precedes the diagnostic detail")
+        .parse::<usize>()
+        .expect("second slot is an integer");
+    assert!(
+        refusal.recorded_op.is_some(),
+        "the typed refusal is durable"
+    );
+
+    let run = refusal.run.expect("refusal identifies the run");
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run).len(),
+        4,
+        "the refusal publishes no conduction, QoI, or report receipt"
+    );
+    for stage in [
+        "import-verify",
+        "assign",
+        "material-resolve",
+        "flow-network",
+    ] {
+        assert!(
+            progress
+                .iter()
+                .any(|line| line.contains(&format!("\"stage\":\"{stage}\""))),
+            "{stage} completed before the conduction refusal: {progress:?}"
+        );
+    }
+    for stage in ["conduction", "qoi", "report"] {
+        assert!(
+            !progress
+                .iter()
+                .any(|line| line.contains(&format!("\"stage\":\"{stage}\""))),
+            "{stage} must not publish progress after the refusal: {progress:?}"
+        );
+    }
+    ((first_slot, second_slot), (first_region, second_region))
+}
+
+#[test]
+fn g3_conduction_undeclared_interface_refuses_in_direct_slot_order() {
+    let ((first_slot, second_slot), (first_region, second_region)) =
+        assert_undeclared_conduction_interface_refusal(false);
+    assert_ne!(
+        first_slot, second_slot,
+        "a coincident interface candidate joins two distinct boundary slots"
+    );
+    assert_ne!(
+        first_region, second_region,
+        "the coincident slots belong to the two distinct regions"
+    );
+}
+
+#[test]
+fn g3_conduction_undeclared_interface_refuses_in_reverse_slot_order() {
+    // Slot INDICES follow the tet complex, and fs-mesh keeps whichever
+    // coplanar tiling the kernel's index-ordered tie-break produced, so a
+    // declaration-order permutation is not a pure relabelling of slots any
+    // more. The invariant a permutation must preserve is semantic: the same
+    // two regions are named, in swapped roles, and both slots are distinct.
+    let (direct_slots, direct_regions) = assert_undeclared_conduction_interface_refusal(false);
+    let (reverse_slots, reverse_regions) = assert_undeclared_conduction_interface_refusal(true);
+    assert_ne!(reverse_slots.0, reverse_slots.1);
+    assert_eq!(
+        reverse_regions,
+        (direct_regions.1.clone(), direct_regions.0.clone()),
+        "reversing the region declaration order swaps which region owns the first candidate slot; direct slots {direct_slots:?}, reverse slots {reverse_slots:?}"
+    );
+}
+
+/// Declarations the flow-network stage requires but validation deliberately
+/// leaves optional refuse at the stage with typed codes, and never publish a
+/// flow checkpoint.
+#[test]
+fn g3_flow_network_missing_optional_declarations_refuse_with_typed_codes() {
+    let bytes = tetra_stl();
+    let cases: [(&str, fn(&mut ProjectSpec)); 3] = [
+        ("cli-solve-flow-network-no-fan-system", |spec| {
+            spec.cooling.as_mut().expect("cooling").fan_system = None;
+        }),
+        ("cli-solve-flow-network-no-leakage", |spec| {
+            spec.cooling.as_mut().expect("cooling").airflow_leakage = None;
+        }),
+        ("cli-solve-flow-network-no-vents", |spec| {
+            spec.cooling.as_mut().expect("cooling").vents = Vec::new();
+        }),
+    ];
+    for (code, mutate) in cases {
+        let mut spec = fixture_project(7, &bytes);
+        mutate(&mut spec);
+        let decoded = decode(&spec);
+        assert!(
+            decoded.findings().is_empty(),
+            "{code}: the mutated project still admits, so the refusal below is \
+             attributable to the flow-network stage, not validation"
+        );
+        let ledger = Ledger::open(":memory:").expect("ledger");
+        import_fixture(&ledger, &spec, bytes.clone());
+        let (refusal, _) = run_to_gap_expect_code(&ledger, &decoded, code);
+        assert_eq!(refusal.stage, Some("flow-network"), "{code}");
+        let run = refusal.run.clone().expect("run");
+        assert_eq!(
+            stage_receipt_hashes(&ledger, &run).len(),
+            3,
+            "{code}: the refused flow stage publishes no receipt"
+        );
+    }
+}
+
+/// A solid cooled only by declared coefficients declares no air network at
+/// all. The flow-network stage retains that absence as its receipt (no
+/// operating point, none claimed) instead of refusing, and the run completes;
+/// a partial air declaration still refuses, as the test above pins.
+#[test]
+fn g3_a_project_without_any_air_network_completes_with_a_not_declared_flow_receipt() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    let cooling = spec.cooling.as_mut().expect("cooling");
+    cooling.fan_system = None;
+    cooling.airflow_leakage = None;
+    cooling.vents = Vec::new();
+    cooling.fans = Vec::new();
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let outcome = run_solve(
+        &ledger,
+        &CancelGate::new_clock_free(),
+        &mut benign_clock(),
+        &decoded,
+        &fixture_cards(),
+        &mut Vec::new(),
+    )
+    .expect("a project without an air network solves");
+    assert_eq!(outcome.status, SolveRunStatus::Completed);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    assert_eq!(receipts.len(), 7);
+    let flow = String::from_utf8(artifact_bytes(&ledger, &receipts[3])).unwrap();
+    assert_balanced_json(&flow);
+    assert!(flow.contains("\"status\":\"not-declared\""), "{flow}");
+    assert!(!flow.contains("operating_point"), "{flow}");
+}
+
+/// Missing `cooling` or `envelope` sections are project-validation findings,
+/// so the flow-network stage's own codes for them are shadowed by earlier
+/// guards. This pins the shadowing at its actual reachable boundary: the
+/// product refuses such a project at geometry import, before any solve stage
+/// (or even solve validation) can run.
+#[test]
+fn g3_flow_network_mandatory_sections_refuse_before_any_stage() {
+    let bytes = tetra_stl();
+    for (code, strip) in [
+        (
+            "project-cooling-missing",
+            (|spec: &mut ProjectSpec| spec.cooling = None) as fn(&mut ProjectSpec),
+        ),
+        ("project-envelope-missing", |spec| spec.envelope = None),
+    ] {
+        let mut spec = fixture_project(7, &bytes);
+        strip(&mut spec);
+        // Not `decode()`: that helper asserts a clean fixture, and this test
+        // exists precisely because these projects carry findings.
+        let source = print_sexpr(&spec).expect("stripped fixture still renders");
+        let decoded =
+            fs_project::parse_sexpr(&source).expect("stripped fixture still parses strictly");
+        assert!(!decoded.findings().is_empty());
+
+        let artifact = &spec.geometry.as_ref().expect("geometry")[0];
+        let mut raw = RawGeometryLibrary::new();
+        assert!(!raw.insert_mesh(
+            artifact,
+            "fixtures/enclosure.stl",
+            bytes.clone(),
+            "m",
+            0,
+            Vec::new(),
+        ));
+        let ledger = Ledger::open(":memory:").expect("ledger");
+        let gate = CancelGate::new_clock_free();
+        let refusal = with_cx(&gate, |cx| {
+            import_project_geometry(&spec, &raw, &ledger, GeometryImportLimits::DEFAULT, cx)
+                .expect_err("a project missing a mandatory section cannot import")
+        });
+        assert_eq!(
+            refusal.code, code,
+            "the outer guard names the missing section: {refusal:?}"
+        );
+    }
+}
+
+/// A declared network whose resistance admits no root inside the declared
+/// curve domain refuses with the solver's own code and publishes nothing for
+/// the stage.
+#[test]
+fn g3_flow_network_without_an_admitted_root_refuses_with_the_solver_code() {
+    let bytes = tetra_stl();
+    let mut spec = fixture_project(7, &bytes);
+    {
+        let cooling = spec.cooling.as_mut().expect("cooling");
+        // A near-sealed enclosure: micro-orifice vent and leakage push the
+        // operating flow far below the declared minimum admissible flow.
+        cooling.vents = vec![Vent {
+            region: "air".to_string(),
+            area: QtyAny::new(1e-9, fs_project::spec::dims::AREA),
+        }];
+        cooling.airflow_leakage = Some(AirflowLeakage {
+            area: QtyAny::new(1e-9, fs_project::spec::dims::AREA),
+        });
+    }
+    let decoded = decode(&spec);
+    assert!(decoded.findings().is_empty(), "the sealed project admits");
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (refusal, _) = run_to_gap_expect_code(&ledger, &decoded, "cli-solve-flow-network-solve");
+    assert_eq!(refusal.stage, Some("flow-network"));
+    let run = refusal.run.clone().expect("run");
+    assert_eq!(stage_receipt_hashes(&ledger, &run).len(), 3);
+}
+
+/// Cancelling after the flow-network stage published and resuming re-attests
+/// the retained flow receipt: the resumed run lands on the conduction gap and
+/// the four-stage evidence equals an uninterrupted run's, byte for byte.
+#[test]
+fn g4_resume_reattests_the_flow_network_receipt() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+
+    let reference = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&reference, &spec, bytes.clone());
+    let (reference_gap, _) = run_to_gap(&reference, &decoded);
+    let reference_run = reference_gap.run.expect("run");
+    let reference_receipts = stage_receipt_hashes(&reference, &reference_run);
+    assert_eq!(reference_receipts.len(), 4);
+
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (cancelled, _) = run_to_stage_prefix(&ledger, &decoded, 4);
+    let run = cancelled.run.clone().expect("run");
+    assert_eq!(run, reference_run);
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run).len(),
+        4,
+        "the flow receipt is durable before the cancellation fired"
+    );
+
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let resumed = resume_solve(&ledger, &gate, &mut clock, &run, &mut progress)
+        .expect_err("resume re-attests the prefix and stops at the conduction gap");
+    assert_eq!(resumed.code, "cli-solve-conduction-undeclared");
+    assert_eq!(resumed.stage, Some("conduction"));
+    assert_eq!(resumed.dependency, None);
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run),
+        reference_receipts,
+        "re-attested flow evidence is bit-identical to the uninterrupted run"
+    );
+}
+
+/// hp7tb residue (bead frankensim-ejo12). Precondition diversity over code
+/// coverage: the CLI forwards every binding diagnostic through one
+/// statement, so a second test with merely a different CODE proves almost
+/// nothing. These two are chosen because their refusal PRECONDITIONS
+/// differ from `project-material-card-unknown`'s: the first fails with a
+/// correct card hash (lookup succeeds), the second with a correct hash AND
+/// matching state (only the validity geometry is wrong).
+#[test]
+fn g3_binding_state_spelling_mismatch_refuses_at_material_resolve() {
+    // Card hash is the admitted fixture card's, so card-unknown cannot
+    // fire; only the human-readable state string names a different
+    // revision than the pack's state identity.
+    let bytes = tetra_stl();
+    let mut spec = fixture_project(7, &bytes);
+    spec.materials.as_mut().expect("materials")[0].state = "AA6061/wrought/T6 rev 1".to_string();
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (refusal, _) = run_to_gap_expect_code(&ledger, &decoded, "project-material-state-mismatch");
+    assert_eq!(refusal.stage, Some("material-resolve"));
+    assert!(
+        refusal.recorded_op.is_some(),
+        "the binding refusal is ledgered like any other stage refusal"
+    );
+    let run = refusal.run.clone().expect("run");
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run).len(),
+        2,
+        "the refused material stage publishes no receipt"
+    );
+}
+
+#[test]
+fn g3_binding_admitted_range_wider_than_card_validity_refuses_domain_uncovered() {
+    // Lookup succeeds and the state matches; the card's claim validity
+    // (T in [250, 300] K) is strictly narrower than the binding's admitted
+    // range [233.15, 398.15] K, so the binding admits temperatures the
+    // card cannot cover and must refuse rather than extrapolate.
+    let narrow = CardPackSet::admit(vec![raw_pack(
+        CardPackKind::Material,
+        "fixtures/narrow.fsmcdpk",
+        material_pack_bytes_with_domain("AA6061", "solve-fixture-narrow", 250.0, 300.0),
+    )])
+    .expect("the narrow pack admits");
+    let (card_hex, state) = {
+        let pack = &narrow.materials()[0];
+        (pack.card().to_hex(), pack.identity().to_string())
+    };
+    let bytes = tetra_stl();
+    let mut spec = fixture_project(7, &bytes);
+    {
+        let binding = &mut spec.materials.as_mut().expect("materials")[0];
+        binding.card = card_hex;
+        binding.state = state;
+    }
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve(&ledger, &gate, &mut clock, &decoded, &narrow, &mut progress)
+        .expect_err("an uncovered admitted range cannot resolve");
+    assert_eq!(
+        refusal.code, "project-binding-domain-uncovered",
+        "{refusal:?}"
+    );
+    assert_eq!(refusal.stage, Some("material-resolve"));
+}
+
+// ---------------------------------------------------------------------------
+// Journey A falsifier battery (bead frankensim-rc-root-q61wp.14).
+//
+// The L3 claim on `thermal.conduction-solve` says the pipeline EXECUTES
+// conduction end to end with retained receipts. These tests are what make
+// "the product works" distinguishable from "the scripts exit 0": each one
+// changes the world in a way the pipeline must notice, and asserts the
+// exact, typed way it noticed. Every falsifier below was executed against a
+// deliberately broken build once (recorded in the landing commit), because
+// a falsifier that has never fired is a demo.
+// ---------------------------------------------------------------------------
+
+/// The admitted card-pack set with the fixture's aluminium card replaced by
+/// a declared low-conductivity foam under the SAME chemistry key, so the
+/// project binds unchanged and only the physics moves.
+fn foam_cards() -> CardPackSet {
+    CardPackSet::admit(vec![raw_pack(
+        CardPackKind::Material,
+        "fixtures/foam.fsmcdpk",
+        material_pack_bytes_with_domain_and_conductivity(
+            "AA6061",
+            "solve-fixture-foam",
+            200.0,
+            450.0,
+            0.04,
+        ),
+    )])
+    .expect("the foam pack admits")
+}
+
+/// Rebind the project's one material binding to the card a pack set carries:
+/// bindings name cards by content hash, so a swapped card is otherwise
+/// "unknown", not "different".
+fn rebind_to(spec: &mut ProjectSpec, cards: &CardPackSet) {
+    let pack = &cards.materials()[0];
+    let binding = &mut spec.materials.as_mut().expect("materials")[0];
+    binding.card = pack.card().to_hex();
+    binding.state = pack.identity().to_string();
+}
+
+/// Run the conjugate fixture to completion with the given cards and return
+/// (run id, QoI receipt text, conduction receipt text, solution artifact text).
+fn run_conjugate_to_completion(
+    ledger: &Ledger,
+    decoded: &DecodedProject,
+    cards: &CardPackSet,
+) -> (String, String, String, String) {
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let outcome = run_solve(ledger, &gate, &mut clock, decoded, cards, &mut progress)
+        .expect("the conjugate fixture completes every stage");
+    assert!(matches!(outcome.status, fs_cli::SolveRunStatus::Completed));
+    let receipts = stage_receipt_hashes(ledger, &outcome.run);
+    assert_eq!(receipts.len(), 7);
+    let conduction =
+        String::from_utf8(artifact_bytes(ledger, &receipts[4])).expect("receipt is utf-8");
+    let qoi = String::from_utf8(artifact_bytes(ledger, &receipts[5])).expect("receipt is utf-8");
+    let solution_hex = receipt_str_field(&conduction, "solution_artifact");
+    let solution =
+        String::from_utf8(artifact_bytes(ledger, &solution_hex)).expect("solution is utf-8");
+    (outcome.run.clone(), qoi, conduction, solution)
+}
+
+/// Falsifier: INDEPENDENT EXTRACTION ORACLE. The QoI stage reports one
+/// temperature maximum. Re-derive it from the retained conduction-solution
+/// artifact alone — the bytes a reviewer would hold — with no shared code
+/// path (a plain fold over the decoded temperature array), and require the
+/// two to agree bit for bit. A stage that reported a stale, permuted, or
+/// wrong-region maximum cannot pass this.
+#[test]
+fn ja_001_qoi_maximum_rederives_bitwise_from_the_retained_solution_artifact() {
+    let bytes = tetra_stl();
+    let spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (_, qoi, _, solution) = run_conjugate_to_completion(&ledger, &decoded, &fixture_cards());
+
+    let reported = receipt_number_field(&qoi, "value");
+    let key = "\"temperature\":[";
+    let start = solution
+        .find(key)
+        .expect("solution carries a temperature array")
+        + key.len();
+    let end = start + solution[start..].find(']').expect("array is terminated");
+    let temperatures: Vec<f64> = solution[start..end]
+        .split(',')
+        .map(|token| token.parse::<f64>().expect("canonical f64"))
+        .collect();
+    assert!(
+        temperatures.len() >= 4,
+        "the tetra fixture has at least four vertices"
+    );
+    let independent = temperatures
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert_eq!(
+        reported.to_bits(),
+        independent.to_bits(),
+        "QoI value {reported} vs retained-field maximum {independent}: {qoi}"
+    );
+    // The witness vertex named by the stage must hold that value.
+    let witness = receipt_number_field(&qoi, "witness_vertex") as usize;
+    assert_eq!(temperatures[witness].to_bits(), independent.to_bits());
+    println!(
+        "{{\"falsifier\":\"extraction-oracle\",\"mutation\":\"none\",\"reported_k\":{reported},\"rederived_k\":{independent},\"witness\":{witness}}}"
+    );
+}
+
+/// Falsifier: HOSTILE MATERIAL TWIN. The same project with the aluminium
+/// card swapped for a declared foam (k = 0.04 W/mK) must run to completion
+/// and move the junction maximum UP and the nominal margin DOWN; the two
+/// runs must have different run identities (the card-pack-set root is in
+/// the preimage) and different conduction receipts.
+#[test]
+fn ja_002_hostile_foam_card_moves_the_junction_maximum_and_margin() {
+    let bytes = tetra_stl();
+    let spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    let decoded = decode(&spec);
+
+    let ledger_al = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger_al, &spec, bytes.clone());
+    let (run_al, qoi_al, cond_al, _) =
+        run_conjugate_to_completion(&ledger_al, &decoded, &fixture_cards());
+
+    let foam = foam_cards();
+    let mut spec_foam = spec.clone();
+    rebind_to(&mut spec_foam, &foam);
+    let decoded_foam = decode(&spec_foam);
+    let ledger_foam = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger_foam, &spec_foam, bytes);
+    let (run_foam, qoi_foam, cond_foam, _) =
+        run_conjugate_to_completion(&ledger_foam, &decoded_foam, &foam);
+
+    assert_ne!(
+        run_al, run_foam,
+        "the card-pack-set root is bound into run identity"
+    );
+    assert_ne!(
+        cond_al, cond_foam,
+        "the conduction receipt carries the material identity"
+    );
+    let max_al = receipt_number_field(&qoi_al, "value");
+    let max_foam = receipt_number_field(&qoi_foam, "value");
+    let margin_al = receipt_number_field(&qoi_al, "nominal_margin_kelvin");
+    let margin_foam = receipt_number_field(&qoi_foam, "nominal_margin_kelvin");
+    // The fixture is a unit tetrahedron carrying 5 W: aluminium holds it
+    // essentially isothermal at the conjugate wall level, so the foam's
+    // signature is a strictly higher maximum and a much larger internal
+    // spread, not a large shift of the maximum itself. Executed on yto
+    // 2026-09-02: 293.3125 K vs 293.3396 K; the range grows by orders of
+    // magnitude.
+    assert!(
+        max_foam > max_al,
+        "foam must run hotter than aluminium: {max_al} vs {max_foam}"
+    );
+    let spread = |conduction: &str| {
+        receipt_number_field(conduction, "max") - receipt_number_field(conduction, "min")
+    };
+    let (spread_al, spread_foam) = (spread(&cond_al), spread(&cond_foam));
+    assert!(
+        spread_foam > 10.0 * spread_al && spread_foam > 1e-3,
+        "the foam's internal temperature spread must dwarf aluminium's: {spread_al} vs {spread_foam}"
+    );
+    assert!(
+        margin_foam < margin_al,
+        "the nominal margin must shrink with the foam: {margin_al} vs {margin_foam}"
+    );
+    // The conjugate exchange saw it too: the air absorbed the same power
+    // in both runs (steady state), so the reference temperature is the
+    // same to solver precision while the wall got hotter.
+    let ref_al = receipt_number_field(&cond_al, "reference_k");
+    let ref_foam = receipt_number_field(&cond_foam, "reference_k");
+    assert!((ref_al - ref_foam).abs() < 1e-6, "{ref_al} vs {ref_foam}");
+    println!(
+        "{{\"falsifier\":\"hostile-material-twin\",\"mutation\":\"k 167 -> 0.04 W/mK\",\"max_al_k\":{max_al},\"max_foam_k\":{max_foam},\"spread_al_k\":{spread_al},\"spread_foam_k\":{spread_foam},\"margin_al_k\":{margin_al},\"margin_foam_k\":{margin_foam}}}"
+    );
+}
+
+/// Falsifier: HOSTILE REFUSAL TWINS. The same project (a) without any
+/// card pack refuses at material-resolve with the binding layer's own code,
+/// (b) with the geometry's source hash tampered refuses at import-verify,
+/// (c) with a card whose validity domain does not cover the envelope refuses
+/// at material-resolve. Each drill asserts the CODE and the STAGE, because
+/// an exit status alone cannot tell "refused at the right stage" from
+/// "refused before the drill's target".
+#[test]
+fn ja_003_hostile_refusal_twins_refuse_at_the_named_stage_with_the_named_code() {
+    let bytes = tetra_stl();
+    let spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    let decoded = decode(&spec);
+
+    // (a) no card pack at all.
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes.clone());
+    let empty = CardPackSet::admit(Vec::new()).expect("an empty set admits");
+    let gate = CancelGate::new_clock_free();
+    let refusal = run_solve(
+        &ledger,
+        &gate,
+        &mut benign_clock(),
+        &decoded,
+        &empty,
+        &mut Vec::new(),
+    )
+    .expect_err("no cards refuses");
+    assert_eq!(refusal.code, "project-material-card-unknown");
+    assert_eq!(refusal.stage.as_deref(), Some("material-resolve"));
+
+    // (b) tampered source hash: the project names a geometry the ledger
+    // never imported.
+    let mut tampered = spec.clone();
+    tampered.geometry.as_mut().expect("geometry")[0].source_hash ^= 0x1;
+    let decoded_tampered = decode(&tampered);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes.clone());
+    let refusal = run_solve(
+        &ledger,
+        &gate,
+        &mut benign_clock(),
+        &decoded_tampered,
+        &fixture_cards(),
+        &mut Vec::new(),
+    )
+    .expect_err("a tampered geometry hash refuses");
+    assert_eq!(
+        refusal.stage.as_deref(),
+        Some("import-verify"),
+        "{}",
+        refusal.code
+    );
+    assert!(
+        refusal.code.starts_with("cli-solve-import"),
+        "{}",
+        refusal.code
+    );
+
+    // (c) a card whose domain stops short of the envelope, bound by name so
+    // the refusal is the DOMAIN gate and not the unknown-card gate.
+    let narrow = CardPackSet::admit(vec![raw_pack(
+        CardPackKind::Material,
+        "fixtures/narrow.fsmcdpk",
+        material_pack_bytes_with_domain("AA6061", "solve-fixture-narrow", 250.0, 300.0),
+    )])
+    .expect("the narrow pack admits");
+    let mut spec_narrow = spec.clone();
+    rebind_to(&mut spec_narrow, &narrow);
+    let decoded_narrow = decode(&spec_narrow);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec_narrow, bytes);
+    let refusal = run_solve(
+        &ledger,
+        &gate,
+        &mut benign_clock(),
+        &decoded_narrow,
+        &narrow,
+        &mut Vec::new(),
+    )
+    .expect_err("an uncovered domain refuses");
+    assert_eq!(refusal.code, "project-binding-domain-uncovered");
+    assert_eq!(refusal.stage.as_deref(), Some("material-resolve"));
+    println!(
+        "{{\"falsifier\":\"hostile-refusal-twins\",\"drills\":[\"no-pack:material-resolve\",\"tampered-hash:import-verify\",\"narrow-domain:material-resolve\"]}}"
+    );
+}
+
+/// Falsifier: REPLAY. The same inputs on a fresh ledger reproduce the run
+/// identity, every stage receipt, and the retained temperature field byte
+/// for byte; a completed run has nothing to resume and re-attests unchanged.
+#[test]
+fn ja_004_replay_reproduces_every_receipt_and_the_field_bitwise() {
+    let bytes = tetra_stl();
+    let spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    let decoded = decode(&spec);
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let ledger = Ledger::open(":memory:").expect("ledger");
+        import_fixture(&ledger, &spec, bytes.clone());
+        let (run, qoi, conduction, solution) =
+            run_conjugate_to_completion(&ledger, &decoded, &fixture_cards());
+        let receipts = stage_receipt_hashes(&ledger, &run);
+        // Resume of a complete run: refuses by name, receipts unchanged.
+        let gate = CancelGate::new_clock_free();
+        let resumed = resume_solve(&ledger, &gate, &mut benign_clock(), &run, &mut Vec::new())
+            .expect_err("nothing to resume");
+        assert_eq!(resumed.code, "cli-solve-resume-complete");
+        assert_eq!(stage_receipt_hashes(&ledger, &run), receipts);
+        runs.push((run, receipts, qoi, conduction, solution));
+    }
+    let (a, b) = (&runs[0], &runs[1]);
+    assert_eq!(a.0, b.0, "run identity replays");
+    assert_eq!(a.1, b.1, "every stage receipt hash replays");
+    assert_eq!(a.2, b.2, "the QoI receipt replays byte for byte");
+    assert_eq!(a.3, b.3, "the conduction receipt replays byte for byte");
+    assert_eq!(
+        a.4, b.4,
+        "the retained temperature field replays byte for byte"
+    );
+    println!(
+        "{{\"falsifier\":\"replay\",\"run\":\"{}\",\"receipts\":{}}}",
+        a.0,
+        a.1.len()
+    );
+}
+
+/// B2 ladder slice: `solver.fidelity = "ladder"` runs the uniform h-ladder
+/// (three 1->8 rungs within the memory budget), the conduction receipt (v6)
+/// carries every rung and the grid-refinement estimate, and the QoI stage
+/// turns that estimate into the FIRST measured budget term through
+/// fs-airflow's discretization-receipt seam (QoI receipt v2). The default
+/// fidelity solves one rung and says so; that path is pinned by the g1
+/// conduction test above.
+#[test]
+fn g1_adaptive_fidelity_evaluates_the_actual_maximum_and_keeps_discretization_unbounded() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string();
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let (outcome, _) = run_to_completion(&ledger, &decoded);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let conduction = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    assert_balanced_json(&conduction);
+    assert!(
+        conduction.contains("\"status\":\"observed-tolerance-met\""),
+        "{conduction}"
+    );
+    // The tolerance is 1% of the temperature RISE above the declared inlet/reference,
+    // so the loop genuinely refines (6 solved meshes) before it is met.
+    assert!(conduction.contains("\"solved_meshes\":6,"), "{conduction}");
+    assert!(
+        conduction.contains("\"maximum_remainder_k\":"),
+        "{conduction}"
+    );
+    assert!(
+        conduction.contains("\"continuum_error_bound\":false"),
+        "{conduction}"
+    );
+    assert!(!conduction.contains("fidelity-adaptive-goal-not-evaluated"));
+    let number = |key: &str| {
+        conduction
+            .split(key)
+            .nth(1)
+            .unwrap()
+            .split([',', '}'])
+            .next()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+    };
+    let linear = number("\"signed_linear_change_k\":");
+    let linearization = number("\"linearization_remainder_k\":");
+    let remainder = number("\"maximum_remainder_k\":");
+    let measured = number("\"measured_change_k\":");
+    assert!(
+        (linear + linearization + remainder - measured).abs() < 1e-7,
+        "the checked dual and both explicit remainders reproduce the independently solved maximum change"
+    );
+    assert!(conduction.contains("\"uses_nonlinear_jacobian\":false"));
+    // The term belongs to the PUBLISHED mesh: the last history row.
+    let last = |key: &str| -> f64 {
+        conduction
+            .rsplit(key)
+            .next()
+            .and_then(|rest| rest.split(|c| c == ',' || c == '}').next())
+            .and_then(|text| text.parse::<f64>().ok())
+            .expect("last history row value")
+    };
+    let estimated = last("\"estimated_change_k\":");
+    let last_measured = last("\"measured_change_k\":");
+    let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
+    // A tolerance-met adaptive study now supplies the Discretization term:
+    // 2 x the larger enrichment change (Richardson at an assumed order >= 1),
+    // and the published solve bounds roundoff, so three sources stay NO-DATA.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 3, "{qoi}");
+    let upper = qoi
+        .split("\"kind\":\"discretization\",\"state\":\"interval\",\"lower_kelvin\":0,\"upper_kelvin\":")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|text| text.parse::<f64>().ok())
+        .expect("measured adaptive discretization term");
+    assert_eq!(upper.to_bits(), (2.0 * estimated.abs().max(last_measured.abs())).to_bits(), "{qoi}");
+    assert!(qoi.contains("\"method\":\"adaptive-enrichment-order-one\""), "{qoi}");
+    let report = String::from_utf8(artifact_bytes(&ledger, &receipts[6])).unwrap();
+    let html = String::from_utf8(artifact_bytes(
+        &ledger,
+        &receipt_str_field(&report, "report_html"),
+    ))
+    .unwrap();
+    assert!(
+        html.contains("adaptive_status"),
+        "the normal report exposes adaptive results"
+    );
+    assert!(html.contains("observed-tolerance-met"));
+    assert!(
+        html.contains("no continuum error"),
+        "the report retains the adaptive scope"
+    );
+}
+
+#[test]
+fn g1_adaptive_fidelity_tight_accuracy_refines_and_resolves_the_marked_mesh() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string();
+    spec.budgets.as_mut().unwrap().accuracy_rel = 1e-12;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let (outcome, _) = run_to_completion(&ledger, &decoded);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let conduction = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    assert_balanced_json(&conduction);
+    let solves: usize = conduction
+        .split("\"solved_meshes\":")
+        .nth(1)
+        .unwrap()
+        .split(',')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        solves > 2,
+        "tight accuracy must cause a real local re-solve: {conduction}"
+    );
+    assert!(
+        conduction.matches("\"probe_tets\":").count() > 1,
+        "{conduction}"
+    );
+    assert!(conduction.contains("\"marked_cells\":"), "{conduction}");
+    assert!(conduction.contains("\"continuum_error_bound\":false"));
+    let first_number = |text: &str, key: &str| {
+        text.split(key)
+            .nth(1)
+            .unwrap()
+            .split([',', '}'])
+            .next()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+    };
+    assert!(
+        first_number(&conduction, "\"uniform_quality_fallbacks\":") > 0.0,
+        "this tight study exercises an admissible uniform fallback when local bisection loses quality"
+    );
+    let history = conduction
+        .split("\"history\":[")
+        .nth(1)
+        .unwrap()
+        .split("]")
+        .next()
+        .unwrap();
+    let last_row = history.rsplit("{\"mesh\":").next().unwrap();
+    assert_eq!(
+        first_number(&conduction, "\"elements\":"),
+        first_number(last_row, "\"tets\":"),
+        "budget stopping must retain the last probed mesh, not an unprobed refinement"
+    );
+    assert_eq!(
+        first_number(&conduction, "\"max\":"),
+        first_number(last_row, "\"t_max_k\":"),
+        "the retained temperature field and final discrepancy describe the same mesh"
+    );
+    assert_eq!(
+        first_number(&conduction, "\"last_estimated_change_k\":"),
+        first_number(last_row, "\"estimated_change_k\":")
+    );
+}
+
+#[test]
+fn g1_adaptive_conjugate_fidelity_closes_the_air_feedback_in_the_actual_goal() {
+    let bytes = tetra_stl();
+    let mut spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string();
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let (_, qoi, conduction, _) = run_conjugate_to_completion(&ledger, &decoded, &fixture_cards());
+    assert_balanced_json(&conduction);
+    assert!(
+        conduction.contains("\"status\":\"observed-tolerance-met\""),
+        "{conduction}"
+    );
+    // The tolerance is 1% of the temperature RISE above the declared inlet/reference,
+    // so the loop genuinely refines (10 solved meshes) before it is met.
+    assert!(conduction.contains("\"solved_meshes\":10,"), "{conduction}");
+    assert!(!conduction.contains("unsupported-coupled-adjoint"));
+    assert!(conduction.contains("analytic-air-solid-transpose-iqn-ils"));
+    let history = conduction.split("\"history\":[").nth(1).unwrap();
+    let number = |name| receipt_number_field(history, name);
+    assert_eq!(number("branch_count"), 1.0);
+    assert!(number("interface_iterations") >= 1.0);
+    assert!(number("interface_residual") <= number("interface_tolerance"));
+    let residual_gate = (spec.solver.as_ref().unwrap().tolerance_rel * 1e-2).max(1e-13);
+    assert!(number("primal_residual") <= residual_gate);
+    assert!(number("dual_residual") <= residual_gate);
+    assert!(
+        (number("signed_linear_change_k") + number("linearization_remainder_k")
+            + number("maximum_remainder_k") - number("measured_change_k")).abs() < 1e-10,
+        "the coupled dual and explicit remainders must recover the independent maximum change"
+    );
+    assert!(number("linearization_remainder_k").abs() < 1e-8,
+        "the linear solid and affine air law leave only numerical error in the remainder: {history}");
+    assert!(conduction.contains("\"continuum_error_bound\":false"));
+    // The adaptive comparison supplies Discretization. Since the verified
+    // solid inverses (4852d019d, 1f5d7c13b) the coupled solver bound encloses
+    // this mesh too (state contraction; 7.7e-10 K measured 2026-09-26), so
+    // only geometry and parameters stay NO-DATA through the QoI publication.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 2, "{qoi}");
+    assert!(qoi.contains("\"kind\":\"solver-algebraic\",\"state\":\"interval\""), "{qoi}");
+    assert!(qoi.contains("outward-coupled-linear-maximum-enclosure"), "{qoi}");
+    // Since the physical-publication driver (v31) the derivation states the
+    // enclosed maximum interval rather than a disposition word.
+    assert!(qoi.contains("maximum interval Some(["), "{qoi}");
+    assert!(!conduction.contains("tolerance-tightening-resolve"), "{conduction}");
+}
+
+#[test]
+fn g1_adaptive_conjugate_contact_preserves_the_heat_path_and_both_traces() {
+    let mut spec = contact_refinement_project("adaptive");
+    spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition =
+        ThermalBoundaryCondition::AirflowConvection {
+            branch: "cold".to_string(),
+            order: 0,
+            inlet_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+            hydraulic_diameter: QtyAny::new(0.02, fs_project::spec::dims::LENGTH),
+            flow_area: QtyAny::new(0.004, fs_project::spec::dims::AREA),
+            channel_length: QtyAny::new(0.3, fs_project::spec::dims::LENGTH),
+            correlation: "convection.gnielinski".to_string(),
+        };
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_multi_region_contact(&ledger, &spec);
+    let outcome = run_solve(&ledger, &CancelGate::new_clock_free(), &mut benign_clock(),
+        &decoded, &contact_cards(), &mut Vec::new()).unwrap();
+    assert_eq!(outcome.status, SolveRunStatus::Completed);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let conduction = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    assert_balanced_json(&conduction);
+    assert!(conduction.contains("\"status\":\"observed-tolerance-met\""), "{conduction}");
+    // Five watts leave the hot body through its only exit, the finite joint,
+    // then leave the cold body's exterior through the declared air branch.
+    let number = |name| receipt_number_field(&conduction, name);
+    assert!((number("heat_rate_a_to_b_w") + 5.0).abs() < 2e-5);
+    assert!((number("mean_jump_k") + 0.5).abs() < 2e-6);
+    assert!((number("air_total_w") - 5.0).abs() < 2e-5);
+    assert!(number("relative_closure") < 1e-6);
+    let history = conduction.split("\"history\":[").nth(1).unwrap();
+    let number = |name| receipt_number_field(history, name);
+    assert!(number("interface_pairs") > 0.0);
+    assert_eq!(number("probe_interface_pairs"), 4.0 * number("interface_pairs"));
+    assert_eq!(number("branch_count"), 1.0);
+    assert!(number("interface_residual") <= number("interface_tolerance"));
+    assert!((number("signed_linear_change_k") + number("linearization_remainder_k")
+        + number("maximum_remainder_k") - number("measured_change_k")).abs() < 1e-10);
+}
+
+#[test]
+fn g1_adaptive_conjugate_fidelity_refines_and_retains_the_last_probed_field() {
+    let bytes = tetra_stl();
+    let mut spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string();
+    let budgets = spec.budgets.as_mut().unwrap();
+    budgets.accuracy_rel = 1e-12;
+    budgets.memory_bytes = 64 * 1024;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let (_, _, conduction, _) = run_conjugate_to_completion(&ledger, &decoded, &fixture_cards());
+    assert_balanced_json(&conduction);
+    assert!(receipt_number_field(&conduction, "solved_meshes") > 2.0, "{conduction}");
+    let history = conduction.split("\"history\":[").nth(1).unwrap().split(']').next().unwrap();
+    let rows: Vec<_> = history.split("{\"mesh\":").skip(1).collect();
+    assert!(rows.len() > 1, "{conduction}");
+    for row in &rows {
+        assert_eq!(receipt_number_field(row, "branch_count"), 1.0);
+        assert!(receipt_number_field(row, "interface_residual")
+            <= receipt_number_field(row, "interface_tolerance"));
+        assert!((receipt_number_field(row, "signed_linear_change_k")
+            + receipt_number_field(row, "linearization_remainder_k")
+            + receipt_number_field(row, "maximum_remainder_k")
+            - receipt_number_field(row, "measured_change_k")).abs() < 1e-10);
+    }
+    let last = rows.last().unwrap();
+    assert_eq!(receipt_number_field(&conduction, "elements"), receipt_number_field(last, "tets"));
+    assert_eq!(receipt_number_field(&conduction, "max"), receipt_number_field(last, "t_max_k"));
+    assert_eq!(receipt_number_field(&conduction, "last_estimated_change_k"),
+        receipt_number_field(last, "estimated_change_k"));
+    assert!(
+        conduction.contains("\"status\":\"unresolved\""),
+        "{conduction}"
+    );
+    assert!(conduction.contains("\"continuum_error_bound\":false"));
+}
+
+#[test]
+fn g1_adaptive_fidelity_memory_limit_keeps_the_last_probed_mesh_unresolved() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string();
+    let budgets = spec.budgets.as_mut().unwrap();
+    budgets.accuracy_rel = 1e-12;
+    budgets.memory_bytes = 32 * 1024;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let (outcome, _) = run_to_completion(&ledger, &decoded);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let conduction = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    assert!(
+        conduction.contains("\"status\":\"unresolved\""),
+        "{conduction}"
+    );
+    // Interval LDL proves the small refined solids' inverses inside the 32 KiB
+    // declaration (driver 30), so the algebraic side no longer binds first:
+    // the tet memory cap stops the study, as this test's name says.
+    assert!(
+        conduction.contains("\"stop\":\"memory-budget\""),
+        "{conduction}"
+    );
+    let first_number = |text: &str, key: &str| {
+        text.split(key)
+            .nth(1)
+            .unwrap()
+            .split([',', '}'])
+            .next()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+    };
+    let history = conduction
+        .split("\"history\":[")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    let last_row = history.rsplit("{\"mesh\":").next().unwrap();
+    assert_eq!(
+        first_number(&conduction, "\"elements\":"),
+        first_number(last_row, "\"tets\":")
+    );
+    assert_eq!(
+        first_number(&conduction, "\"max\":"),
+        first_number(last_row, "\"t_max_k\":")
+    );
+    assert!(first_number(&conduction, "\"peak_solved_tets\":") <= 128.0);
+}
+
+#[test]
+fn g1_ladder_fidelity_refines_three_rungs_and_measures_the_discretization_term() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    spec.solver.as_mut().expect("fixture solver").fidelity = "ladder".to_string();
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (outcome, progress) = run_to_completion(&ledger, &decoded);
+    assert!(
+        matches!(outcome.status, fs_cli::SolveRunStatus::Completed),
+        "all seven stages execute under the ladder fidelity"
+    );
+    let run = outcome.run.clone();
+    let receipts = stage_receipt_hashes(&ledger, &run);
+    let conduction =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
+    assert_balanced_json(&conduction);
+    assert!(conduction.contains("frankensim.cli.solve-conduction-receipt.v7"));
+    assert!(
+        conduction.contains("\"ladder\":{\"rungs\":[{\"rung\":0,"),
+        "{conduction}"
+    );
+    assert_eq!(
+        conduction.matches("\"rung\":").count(),
+        3,
+        "three rungs: {conduction}"
+    );
+    assert!(conduction.contains("\"stop\":\"complete\""), "{conduction}");
+    // Every rung halves h; tets multiply by eight (read inside the ladder
+    // block: the quality census carries a `tets` key of its own).
+    let ladder_block = &conduction[conduction.find("\"ladder\":").expect("ladder block")..];
+    let numbers = |key: &str| -> Vec<f64> {
+        ladder_block
+            .split(key)
+            .skip(1)
+            .map(|rest| {
+                rest.split([',', '}'])
+                    .next()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .expect("numeric ladder field")
+            })
+            .collect()
+    };
+    let h = numbers("\"h_m\":");
+    let tets = numbers("\"tets\":");
+    assert_eq!(h.len(), 3);
+    for k in 1..3 {
+        assert!(
+            ((h[k - 1] / h[k]) - 2.0).abs() < 1e-9,
+            "h halves per rung: {h:?}"
+        );
+        assert!(
+            (tets[k] / tets[k - 1] - 8.0).abs() < 1e-12,
+            "tets x8 per rung: {tets:?}"
+        );
+    }
+    let status = conduction
+        .split("\"richardson\":{\"status\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("richardson status");
+    assert!(
+        matches!(
+            status,
+            "observed-order" | "data-range" | "converged-exactly"
+        ),
+        "three rungs always yield a grid-refinement estimate, found {status}: {conduction}"
+    );
+    assert!(
+        !conduction.contains("\"half_width_k\":null"),
+        "{conduction}"
+    );
+
+    // The QoI stage carries the estimate as the Discretization term, bound
+    // to the conduction receipt, and every other term stays NO-DATA.
+    let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).expect("receipt is utf-8");
+    assert_balanced_json(&qoi);
+    assert!(qoi.contains("frankensim.cli.solve-qoi-candidate.v2"));
+    assert!(
+        qoi.contains("\"kind\":\"discretization\",\"state\":\"interval\",\"lower_kelvin\":0"),
+        "{qoi}"
+    );
+    assert!(
+        qoi.contains("\"owner\":\"thermal-qoi-discretization-receipt\""),
+        "{qoi}"
+    );
+    assert!(
+        qoi.contains(&format!("\"ladder_status\":\"{status}\"")),
+        "{qoi}"
+    );
+    assert!(
+        qoi.contains(&format!("\"conduction_receipt\":\"{}\"", receipts[4])),
+        "{qoi}"
+    );
+    // Ladder discretization + propagated boundary/solver + the roundoff bound
+    // + negligible measurement are measured; the other three stay NO-DATA.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 3, "{qoi}");
+    assert!(
+        qoi.contains("3 of eight engineering uncertainty terms are explicit NO-DATA"),
+        "{qoi}"
+    );
+    let qoi_progress = progress
+        .iter()
+        .find(|line| line.contains("\"stage\":\"qoi\""))
+        .expect("QoI progress row");
+    for expected in [
+        "\"weakest_term\":\"some-no-data\"",
+        "\"budget_terms_measured\":5",
+        "\"budget_terms_total\":8",
+        "\"verdict\":\"indeterminate\"",
+    ] {
+        assert!(
+            qoi_progress.contains(expected),
+            "{expected}: {qoi_progress}"
+        );
+    }
+}
+
+#[test]
+fn g1_maximum_goal_corrects_a_loose_physical_solve_before_publication() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    // The uniform initial field can satisfy this loose residual rule while
+    // its regional maximum is still too inaccurate for the requested QoI.
+    spec.solver.as_mut().unwrap().tolerance_rel = 0.1;
+    spec.budgets.as_mut().unwrap().accuracy_rel = 1e-5;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let (outcome, _) = run_to_completion(&ledger, &decoded);
+    assert!(matches!(outcome.status, fs_cli::SolveRunStatus::Completed));
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let receipt = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    let control = receipt.split("\"solver_control\":").nth(1).unwrap();
+    assert!(control.starts_with("{\"status\":\"goal-tolerance\""), "{receipt}");
+    assert!(control.contains("\"candidate_accepted\":true"), "{receipt}");
+    let target = receipt_number_field(control, "requested_tolerance_k");
+    let initial = receipt_number_field(control, "initial_bound_k");
+    let final_bound = receipt_number_field(control, "final_bound_k");
+    assert!(initial > target && final_bound <= target, "{receipt}");
+    let iterations = receipt_number_field(control, "primal_iterations");
+    assert!(iterations > 0.0, "the declared goal must drive real solver work: {receipt}");
+    assert!(iterations <= receipt_number_field(control, "max_primal_iterations"));
+    assert_eq!(target.to_bits(), (0.1 * 1e-5 * receipt_number_field(control, "scale_k")).to_bits());
+    assert!(receipt_number_field(&receipt, "final_residual")
+        <= receipt_number_field(&receipt, "residual_threshold"));
+    assert!(receipt_number_field(&receipt, "relative_closure") < 1e-6, "{receipt}");
+    let algebraic = receipt.split("\"solver_algebraic\":").nth(1).unwrap();
+    assert_eq!(receipt_number_field(algebraic, "half_width_k").to_bits(), final_bound.to_bits());
+    let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
+    let term = qoi.split("\"kind\":\"solver-algebraic\"").nth(1).unwrap();
+    assert_eq!(receipt_number_field(term, "upper_kelvin").to_bits(), final_bound.to_bits(),
+        "the reported uncertainty belongs to the corrected, published field");
+}
+
+#[test]
+fn g1_adaptive_balances_both_solver_errors_against_the_current_discretization_term() {
+    let mut spec = contact_refinement_project("adaptive");
+    // The starting physical tolerance leaves room for the measured comparison
+    // to demand extra algebraic work on this nontrivial contact system.
+    spec.solver.as_mut().unwrap().tolerance_rel = 0.1;
+    spec.budgets.as_mut().unwrap().accuracy_rel = 0.75;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_multi_region_contact(&ledger, &spec);
+    let outcome = run_solve(&ledger, &CancelGate::new_clock_free(), &mut benign_clock(),
+        &decoded, &contact_cards(), &mut Vec::new()).unwrap();
+    assert_eq!(outcome.status, SolveRunStatus::Completed);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let conduction = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
+    let history = conduction.split("\"history\":[").nth(1).unwrap().split(']').next().unwrap();
+    let balances: Vec<&str> = history.split("\"algebraic_balance\":").skip(1).collect();
+    assert!(!balances.is_empty(), "{conduction}");
+    assert!(balances.iter().any(|row| receipt_number_field(row, "correction_rounds") > 0.0),
+        "the observed discretization allowance must drive additional work: {conduction}");
+    assert!(balances.iter().any(|row| receipt_number_field(row, "additional_correction_iterations") > 0.0),
+        "balancing must perform additional primal iterations: {conduction}");
+    assert!(balances.iter().any(|row| receipt_number_field(row, "field_updates") > 0.0),
+        "balancing must physically accept and re-probe a changed field: {conduction}");
+    let last = balances.last().unwrap();
+    assert!(last.starts_with("{\"status\":\"balanced\""), "{conduction}");
+    let pair = receipt_number_field(last, "pair_bound_k");
+    let allowance = receipt_number_field(last, "pair_allowance_k");
+    let discretization = receipt_number_field(last, "discretization_half_width_k");
+    assert!(pair <= allowance && allowance <= discretization / 10.0, "{conduction}");
+    let last_number = |key: &str| -> f64 {
+        history.rsplit(&format!("\"{key}\":")).next().unwrap()
+            .split([',', '}']).next().unwrap().parse().unwrap()
+    };
+    assert_eq!(discretization.to_bits(),
+        (2.0 * last_number("estimated_change_k").abs().max(last_number("measured_change_k").abs())).to_bits());
+    let control = conduction.split("\"solver_control\":").nth(1).unwrap();
+    assert!(control.contains("\"tolerance_basis\":\"measured-adaptive-discretization\""));
+    assert!(receipt_number_field(control, "primal_iterations")
+        <= receipt_number_field(control, "max_primal_iterations"));
+    assert!(receipt_number_field(control, "stability_iterations")
+        <= receipt_number_field(control, "max_stability_iterations"));
+    assert!(receipt_number_field(control, "retarget_calls") <= 4.0);
+    assert_eq!(receipt_number_field(control, "requested_tolerance_k").to_bits(), allowance.to_bits());
+    let bound = receipt_number_field(control, "final_bound_k");
+    assert_eq!(bound.to_bits(), receipt_number_field(last, "coarse_bound_k").to_bits());
+    let solver_term = qoi.split("\"kind\":\"solver-algebraic\"").nth(1).unwrap();
+    assert_eq!(bound.to_bits(), receipt_number_field(solver_term, "upper_kelvin").to_bits());
+    assert_eq!(receipt_number_field(&qoi, "value").to_bits(), last_number("t_max_k").to_bits());
+    assert!(receipt_number_field(&conduction, "final_residual")
+        <= receipt_number_field(&conduction, "residual_threshold"));
+}
+
+/// Replay falsifier for the ladder path (bead q61wp.14 item 5, extended to
+/// B2): two fresh runs of the ladder fidelity must retain byte-identical
+/// conduction and QoI receipts — the Richardson step's logarithm and power
+/// go through `fs_math::det`, so a platform libm cannot leak into a receipt.
+#[test]
+fn g1_ladder_replay_reproduces_the_conduction_and_qoi_receipts_bitwise() {
+    let run_once = || {
+        let bytes = tetra_stl();
+        let mut spec = conduction_fixture_project(7, &bytes);
+        spec.solver.as_mut().expect("fixture solver").fidelity = "ladder".to_string();
+        let decoded = decode(&spec);
+        let ledger = Ledger::open(":memory:").expect("ledger");
+        import_fixture(&ledger, &spec, bytes);
+        let (outcome, _) = run_to_completion(&ledger, &decoded);
+        assert!(matches!(outcome.status, fs_cli::SolveRunStatus::Completed));
+        let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+        (
+            outcome.run.clone(),
+            receipts.clone(),
+            artifact_bytes(&ledger, &receipts[4]),
+            artifact_bytes(&ledger, &receipts[5]),
+        )
+    };
+    let first = run_once();
+    let second = run_once();
+    assert_eq!(first.0, second.0, "same project, same run id");
+    assert_eq!(first.1, second.1, "every stage receipt hash reproduces");
+    assert_eq!(
+        first.2, second.2,
+        "conduction receipt bytes (ladder rows, Richardson) reproduce"
+    );
+    assert_eq!(
+        first.3, second.3,
+        "QoI receipt bytes (interval term) reproduce"
+    );
+    let conduction = String::from_utf8(first.2).expect("utf-8");
+    // The bounded inverse proposal now covers this all-free Robin ladder;
+    // its verified error evidence must replay with the published endpoint.
+    assert!(conduction.contains("outward-linear-maximum-enclosure"), "{conduction}");
+    let control = conduction.split("\"solver_control\":").nth(1).unwrap();
+    assert!(receipt_number_field(control, "final_bound_k").is_finite(), "{conduction}");
+    assert!(!conduction.contains("tolerance-tightening-resolve"),
+        "the ladder endpoint's solver bound is not replaced by a base-mesh comparison");
+    assert!(
+        conduction.contains("\"ladder\":{\"rungs\":[{\"rung\":0,"),
+        "{conduction}"
+    );
+}

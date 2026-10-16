@@ -1,0 +1,69 @@
+[package]
+name = "fs-geom"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Region/Chart abstraction: charts present abstract regions, agreement is checkable, conversions carry Certified receipts."
+
+[package.metadata.frankensim]
+layer = "L2"
+
+[dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-blake3 = { path = "../fs-blake3", optional = true }
+fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec" }
+fs-ivl = { path = "../fs-ivl" }
+fs-obs = { path = "../fs-obs" }
+fs-sparse = { path = "../fs-sparse" }
+
+[dev-dependencies]
+asupersync = { path = "../../../asupersync" }
+fs-propcheck = { path = "../fs-propcheck" }
+
+[features]
+# [M]-gated: admitted finite derived/stratified machine geometry is an
+# object/schema foundation only until the RD theorem and independent-checker
+# lanes promote particular claims.
+derived-geometry = ["dep:fs-blake3"]
+# [F]-gated per the Ambition-Tag rule: semantic diff ships disabled until
+# its Gauntlet tier + kill metric (R3 fallback fraction) are green.
+semantic-diff = []
+# [M]-gated per the Ambition-Tag rule: sheaf repair ships disabled until
+# certifier trials pass (milestone P6).
+sheaf-repair = []
+# [M]-gated: the sheaf-adjudicated merge (crown jewel) ships disabled
+# until its Gauntlet tier + kill metric are green. Reuses the repair
+# Hodge machinery.
+sheaf-merge = ["sheaf-repair"]
+
+[lints]
+workspace = true
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "diff"
+required-features = ["semantic-diff"]
+
+[[test]]
+name = "derived"
+required-features = ["derived-geometry"]
+
+[[test]]
+name = "exit_path"
+required-features = ["derived-geometry"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "sheaf_merge"
+required-features = ["sheaf-merge"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "sheaf_repair"
+required-features = ["sheaf-repair"]

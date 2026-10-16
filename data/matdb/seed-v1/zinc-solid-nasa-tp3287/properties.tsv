@@ -1,0 +1,12 @@
+frankensim.matdb-source.v1
+observation	nasa-tp3287-zn-crystal	pure hexagonal crystalline Zn in the thermodynamic standard state at 1 bar; evaluated element, no manufactured specimen or purity assay identified	NASA/TP-3287/REV1 Table III.51 selected thermodynamic functions; Zn attribution is CODATA 1989 in Table I	Engineering piecewise-linear interpolation of the printed crystal rows, not the separate NASA polynomial fit or new measurements. Source molar mass is 65.39 g/mol: cp in J/mol/K divided by 0.06539 kg/mol; assigned h in kJ/mol multiplied by 1000/0.06539. Reference h=0 for crystalline Zn at 298.15 K. Printed source pairs T:cp:h are 200:24.050:-2.427,298.15:25.390:0,300:25.410:0.047,400:26.226:2.631,500:27.220:5.299,600:28.820:8.095,692.73:30.975:10.862. Source uncertainty/covariance and interpolation error bounds are unstated. Interpolated cp and h are independent approximations, not an exactly thermodynamically consistent constitutive law. The source_phase_liquid flag identifies this table phase (0=crystal,1=liquid); it is not a phase-fraction mixture law. No density, conductivity, strength, creep, wetting or optical input is inferred.
+curve	cp-crystal	nasa-tp3287-zn-crystal	cp	temperature	K	J/kg/K	200:367.79324055666,298.15:388.28567059183,300:388.59152775654,400:401.07050007646,500:416.27160116226,600:440.74017433858,692.73:473.69628383545	linear
+uncertainty	cp-crystal	unstated	-	-	-	-
+validity	cp-crystal	temperature	200	692.73	K
+validity	cp-crystal	pressure	100000	100000	Pa
+validity	cp-crystal	source_phase_liquid	0	0	1
+curve	h-crystal	nasa-tp3287-zn-crystal	h	temperature	K	J/kg	200:-37115.7669368405,298.15:0,300:718.7643370546,400:40235.51001682214,500:81036.85578834683,600:123795.68741397768,692.73:166111.02615078757	linear
+uncertainty	h-crystal	unstated	-	-	-	-
+validity	h-crystal	temperature	200	692.73	K
+validity	h-crystal	pressure	100000	100000	Pa
+validity	h-crystal	source_phase_liquid	0	0	1

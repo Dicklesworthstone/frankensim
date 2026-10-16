@@ -1,0 +1,31 @@
+frankensim.matdb-source.v1
+observation	shell-s2-2011	Shell-Heat-Transfer-Oil-S2-May2011-mineral-oil	Shell May 2011 product TDS; ISO 3104 kinematic viscosity and typical design density, heat capacity and conductivity	Named refined mineral heat-transfer oil, not a hydraulic viscosity grade or synthetic ester. Four common source temperatures retained: 0, 40, 100 and 200 C. Kinematic viscosity is reported in mm2/s and converted here to m2/s by 1e-6; Cp is converted from kJ/(kg K) to J/(kg K). Dynamic viscosity must be derived at the same resolved temperature as rho times nu, not by using the separate 15 C density. Values are typical product/design inputs, not individual batch measurements or specification bounds. Pressure, exact additives, test uncertainty and aging history are unstated; aged oil is excluded and the pressure-known flag zero does not denote a zero-pressure measurement. Linear interpolation of each retained property is a declared engineering approximation without an accuracy bound, especially across sparse viscosity knots; interior values are not measured. No extrapolation, oxidation kinetics, hydraulic grade substitution, friction, wear, vapor-pressure law or phase-transition model is supplied. The source lists a higher bulk operating limit, but this pack stops at the last retained common viscosity knot. The rounded source Prandtl row is not imported as an independent claim or used to overwrite rho*nu*Cp/k. Other TDS versions must not silently replace this version's values.
+observation	prandtl-disagreement	Shell-Heat-Transfer-Oil-S2-May2011-mineral-oil	Same-page source inconsistency retained explicitly	At the four retained temperatures the source prints Prandtl numbers 3375,375,69,20. Computing rho*nu*Cp/k from its separate tables instead gives approximately 2598.42,312.20,64.71,17.21. The discrepancy exceeds simple rounding and is unresolved. The separate four-property tables are retained as typical engineering inputs; derived dynamic viscosity and Prandtl number are not separately source-measured or a claim of source-wide thermophysical consistency. No choice among conflicting source rows is calibrated to a solver output.
+curve	rho-0-200c	shell-s2-2011	density	temperature	K	kg/m3	273.15:876,313.15:850,373.15:811,473.15:746	linear
+uncertainty	rho-0-200c	unstated	-	-	-	-
+validity	rho-0-200c	temperature	273.15	473.15	K
+validity	rho-0-200c	source_formulation_shell_s2_2011	1	1	1
+validity	rho-0-200c	phase_liquid	1	1	1
+validity	rho-0-200c	source_pressure_known	0	0	1
+validity	rho-0-200c	aged_oil	0	0	1
+curve	cp-0-200c	shell-s2-2011	specific_heat_capacity	temperature	K	J/kg/K	273.15:1809,313.15:1954,373.15:2173,473.15:2538	linear
+uncertainty	cp-0-200c	unstated	-	-	-	-
+validity	cp-0-200c	temperature	273.15	473.15	K
+validity	cp-0-200c	source_formulation_shell_s2_2011	1	1	1
+validity	cp-0-200c	phase_liquid	1	1	1
+validity	cp-0-200c	source_pressure_known	0	0	1
+validity	cp-0-200c	aged_oil	0	0	1
+curve	k-0-200c	shell-s2-2011	thermal_conductivity	temperature	K	W/m/K	273.15:0.136,313.15:0.133,373.15:0.128,473.15:0.121	linear
+uncertainty	k-0-200c	unstated	-	-	-	-
+validity	k-0-200c	temperature	273.15	473.15	K
+validity	k-0-200c	source_formulation_shell_s2_2011	1	1	1
+validity	k-0-200c	phase_liquid	1	1	1
+validity	k-0-200c	source_pressure_known	0	0	1
+validity	k-0-200c	aged_oil	0	0	1
+curve	nu-0-200c	shell-s2-2011	kinematic_viscosity	temperature	K	m2/s	273.15:0.000223,313.15:0.000025,373.15:0.0000047,473.15:0.0000011	linear
+uncertainty	nu-0-200c	unstated	-	-	-	-
+validity	nu-0-200c	temperature	273.15	473.15	K
+validity	nu-0-200c	source_formulation_shell_s2_2011	1	1	1
+validity	nu-0-200c	phase_liquid	1	1	1
+validity	nu-0-200c	source_pressure_known	0	0	1
+validity	nu-0-200c	aged_oil	0	0	1

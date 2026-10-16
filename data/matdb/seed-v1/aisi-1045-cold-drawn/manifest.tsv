@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	aisi-1045-cold-drawn-tensile
+redistribution	permitted	Creative Commons Attribution 4.0 International permits redistribution with attribution; retain the authors, title, journal, DOI, and license
+citation	Kang, H. and Lee, S. (2024), Influence of the Material Mechanical Properties on Cutting Surface Quality during Turning, Processes 12(6):1171, doi:10.3390/pr12061171
+license	CC-BY-4.0
+source	primary	properties.tsv	material-tsv-v1

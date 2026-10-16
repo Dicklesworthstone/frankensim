@@ -1,0 +1,20 @@
+[package]
+name = "fs-plate-transient"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Spatial DKT plate trajectories and physical-parameter adjoints through the shared generalized-alpha integrator (split from fs-plate so fs-couple's plate dependency stays acyclic)."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-plate = { path = "../fs-plate" }
+fs-sparse = { path = "../fs-sparse" }
+fs-time = { path = "../fs-time" }
+fs-solver = { path = "../fs-solver" }
+
+[lints]
+workspace = true

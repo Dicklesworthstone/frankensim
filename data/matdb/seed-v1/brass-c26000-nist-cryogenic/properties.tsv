@@ -1,0 +1,7 @@
+frankensim.matdb-source.v1
+observation	source-pressure-unstated	source pressure is unstated	NIST Material Properties: Brass (UNS C26000)	The published material-property page does not state pressure; no atmospheric or standard-pressure inference is made.
+observation	nist-c26000-k-fit	brass UNS C26000; source does not state temper, product form, composition limits, or processing history	NIST Brass (UNS C26000) thermal-conductivity coefficient table	log10(k)=sum(a_i log10(T)^i), a..i=0.021035,-1.01835,4.54083,-5.03374,3.20536,-1.12933,0.174057,-0.0038151,0; data 5..116 K, equation 5..110 K, stated fit error 1.5 percent relative to data without confidence semantics. The exact-temperature scalar below evaluates the published polynomial; it does not expose it as a sparse curve.
+scalar	thermal-conductivity-77k	nist-c26000-k-fit	thermal_conductivity	39.7957752285347	W/m/K	constant
+uncertainty	thermal-conductivity-77k	unstated	-	-	-	-
+validity	thermal-conductivity-77k	temperature	77	77	K
+validity	thermal-conductivity-77k	source_pressure_known	0	0	1

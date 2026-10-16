@@ -1,0 +1,11 @@
+frankensim.matdb-manifest.v3
+pack_id	lead-solid-conductivity-nbs-rp668
+redistribution	permitted	Unmarked Bureau of Standards Journal of Research paper hosted by NIST; https://www.nist.gov/copyrights-disclaimers permits distribution or copying of unmarked NIST-site information with appropriate attribution requested
+citation	Van Dusen, M. S. and Shelton, S. M. (1934), Apparatus for Measuring Thermal Conductivity of Metals up to 600 C, Bureau of Standards Journal of Research 12, RP668, pp.429-440, Table 3 p.435, Table 5 p.438 and calibration discussion pp.433-434,439; https://nvlpubs.nist.gov/nistpubs/jres/12/jresv12n4p429_A2b.pdf
+license	NIST-Public-Information-Attribution-Requested
+source	nbs-rp668-lead-standard	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	temperature	temperature	absolute-temperature
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_calibration_assumed	source-calibration-assumed	dimensional
+axis	source_phase_liquid	source_phase_liquid	dimensional

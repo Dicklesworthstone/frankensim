@@ -1,0 +1,13 @@
+frankensim.matdb-manifest.v3
+pack_id	pvc-cryogenic-nist
+redistribution	permitted	Unmarked NIST public information; attribution requested; retain source URL and access date; reuse policy https://www.nist.gov/copyrights-disclaimers
+citation	NIST Cryogenics Material Properties: PVC, https://trc.nist.gov/cryogenics/materials/PVC/PVCrev.htm (accessed 2026-09-07)
+license	NIST-Public-Information-Attribution-Requested
+source	primary	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_measurement_method_known	source-measurement-method-known	dimensional
+axis	source_material_form_known	source-material-form-known	dimensional
+axis	source_density	source-density	dimensional
+axis	source_fill_gas_code	source-fill-gas-code	dimensional

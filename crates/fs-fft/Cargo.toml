@@ -1,0 +1,50 @@
+[package]
+name = "fs-fft"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Stockham FFTs, real transforms and DCT, cache-blocked 3D pencils."
+
+[package.metadata.frankensim]
+layer = "L1"
+
+[features]
+# [F]-gated per the Ambition-Tag rule (bead 27d3): the cache-blocked
+# fused two-pass six-step path for large even-log2 powers of two. Correct
+# and golden-frozen, but still MEASURED SLOWER than the radix-8/4/2 stage
+# walk on M4 after vectorized gather/scatter; it remains default-OFF on
+# that ISA, with the current x86 verdict still pending.
+frontier-sixstep = []
+
+[dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-exec = { path = "../fs-exec" }
+fs-math = { path = "../fs-math" }
+fs-simd = { path = "../fs-simd" }
+
+[dev-dependencies]
+fs-casebook = { path = "../fs-casebook" }
+fs-math = { path = "../fs-math" }
+fs-propcheck = { path = "../fs-propcheck" }
+fs-roofline = { path = "../fs-roofline" }
+fs-substrate = { path = "../fs-substrate" }
+# Constellation reference oracle (test-only): SciPy-compatible complex FFT
+# semantics and backward normalization for the BEDROCK transform battery.
+fsci-fft = { path = "../../../frankenscipy/crates/fsci-fft", version = "=0.4.0" }
+
+[lints]
+workspace = true
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "sixstep"
+required-features = ["frontier-sixstep"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+asupersync = { path = "../../../asupersync" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+asupersync = { path = "../../../asupersync", default-features = false, features = ["wasm-browser-prod", "runtime-core", "proc-macros", "nightly-outcome-try"] }

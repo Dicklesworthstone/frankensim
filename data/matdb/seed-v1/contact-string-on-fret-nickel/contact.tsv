@@ -1,0 +1,8 @@
+frankensim.matdb-contact.v1
+pair	material_a	steel-string	material_b	nickel-silver-fret	geometry	crowned-fret-line-contact
+law	penalty-power	k_n_per_m_alpha	5.0e7	alpha	1.5	chi_s_per_m	0.0
+identification	authored-typical	Estimate-class Hertzian line-contact values for a plain steel string on a crowned nickel-silver fret over a wooden fingerboard: alpha 1.5 is the Hertz exponent for the crowned geometry; K from the elastic moduli scale of the pair; no measured identification exists yet
+validity	force_n	0.0	20.0
+validity	velocity_m_s	0.0	3.0
+graze-advisory	ADVISORY: alpha = 1.5 (Hertz) carries an unbounded contact Hessian at the boundary; fret-RATTLE fixtures (tight graze) should use an alpha >= 2 variant card, keeping this card for firmly-fretted (pressed) contact where the boundary is never grazed
+citation	FrankenSim original work (authored-typical Estimate, bead 3ez8g.13.1); no external source

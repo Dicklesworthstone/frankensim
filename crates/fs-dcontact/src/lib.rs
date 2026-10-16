@@ -1,0 +1,564 @@
+//! # fs-dcontact — distributed unilateral contact
+//!
+//! Distributed collisions along lines and profiles — string-fretboard
+//! rattle, sitar/tanpura bridge (jawari), snare wires, reed lays — as
+//! ONE-SIDED power-law penalty potentials over collocation points:
+//!
+//! `Phi_contact = sum_i w_i * K/(alpha+1) * [p_i]_+^(alpha+1)`,
+//! `p_i = (Phi q)_i - c_i`  (penetration of the displacement field
+//! past the obstacle profile),
+//!
+//! added to any fs-phs `Storage` ([`ContactStorage`]). Because the
+//! contact enters as a POTENTIAL with its exact analytic gradient, the
+//! Gonzalez discrete-gradient stepper makes collisions energy-exact by
+//! construction (the Bilbao-Chatziioannou energy-consistent collision
+//! doctrine, realized through the pHS machinery instead of a bespoke
+//! scheme) — no LCP, provably stable at rattle stiffnesses. The
+//! implicit contact Newton, its iteration budget, and the achieved
+//! residual are fs-phs's disclosed caps (`StepRecord::newton_iters`,
+//! `solver_residual`) — one frozen solver law, not a second one.
+//!
+//! Honest scope (stated): NORMAL contact only — tangential friction
+//! (bowing) is its own bead (`fs-tribo`). Contact-internal viscous
+//! loss is the Hunt–Crossley increment `χ K [p]_+^α ṗ`, a
+//! **dissipative port force** ([`ContactStorage::dissipative_modal_forces`]),
+//! not a gradient of `H`. `χ = 0` recovers the elastic potential
+//! (restitution 1). Contact-law parameters `(K, alpha, χ)` are
+//! caller-supplied with a PROVENANCE string — a matdb lookup is
+//! deferred until packs carrying contact-law parameters exist.
+
+mod tangent;
+mod loss;
+use fs_math::det;
+use fs_phs::Storage;
+
+/// A distributed obstacle: collocation points with per-point gap,
+/// quadrature weight, and the shared power-law contact law. Fields
+/// are PRIVATE so admission is mandatory (review finding: pub fields
+/// made every check advisory); mutation batteries use the documented
+/// [`Obstacle::from_raw_parts`] trust escape.
+#[derive(Debug, Clone)]
+pub struct Obstacle {
+    collocation: Vec<f64>,
+    n_points: usize,
+    gaps: Vec<f64>,
+    weights: Vec<f64>,
+    stiffness: f64,
+    alpha: f64,
+    /// Hunt–Crossley internal-loss coefficient `χ` [s/m]. Zero is elastic.
+    internal_loss: f64,
+    provenance: String,
+}
+
+/// Typed refusal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DContactError {
+    /// Shape/length mismatch.
+    Shape {
+        /// What disagreed.
+        what: &'static str,
+    },
+    /// Non-physical contact-law parameter.
+    Parameter {
+        /// Which one.
+        what: &'static str,
+    },
+}
+
+impl core::fmt::Display for DContactError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DContactError::Shape { what } => write!(f, "shape mismatch: {what}"),
+            DContactError::Parameter { what } => write!(f, "bad parameter: {what}"),
+        }
+    }
+}
+
+impl std::error::Error for DContactError {}
+
+impl Obstacle {
+    /// Admit an obstacle: consistent lengths, finite entries,
+    /// `K >= 0`, `alpha >= 1`. The load-bearing property is that the
+    /// contact POTENTIAL stays C^1 for alpha >= 1 (what the Gonzalez
+    /// scheme needs); the force itself is C^1 only for alpha > 1, and
+    /// its Hessian is unbounded for 1 < alpha < 2 (stiff-graze
+    /// guidance: alpha >= 2).
+    ///
+    /// # Errors
+    /// Typed [`DContactError`].
+    #[allow(clippy::too_many_arguments)] // one admission door for one flat data record
+    pub fn new(
+        collocation: Vec<f64>,
+        n_points: usize,
+        n_modes: usize,
+        gaps: Vec<f64>,
+        weights: Vec<f64>,
+        stiffness: f64,
+        alpha: f64,
+        provenance: String,
+    ) -> Result<Self, DContactError> {
+        if collocation.len() != n_points * n_modes
+            || gaps.len() != n_points
+            || weights.len() != n_points
+        {
+            return Err(DContactError::Shape {
+                what: "collocation/gaps/weights vs (n_points, n_modes)",
+            });
+        }
+        if collocation
+            .iter()
+            .chain(&gaps)
+            .chain(&weights)
+            .any(|v| !v.is_finite())
+        {
+            return Err(DContactError::Parameter {
+                what: "non-finite obstacle entry",
+            });
+        }
+        if weights.iter().any(|&w| w < 0.0) {
+            return Err(DContactError::Parameter {
+                what: "negative quadrature weight",
+            });
+        }
+        if !stiffness.is_finite() || stiffness < 0.0 {
+            return Err(DContactError::Parameter {
+                what: "contact stiffness must be non-negative and finite",
+            });
+        }
+        if !alpha.is_finite() || alpha < 1.0 {
+            return Err(DContactError::Parameter {
+                what: "contact exponent must be at least 1",
+            });
+        }
+        Ok(Obstacle {
+            collocation,
+            n_points,
+            gaps,
+            weights,
+            stiffness,
+            alpha,
+            internal_loss: 0.0,
+            provenance,
+        })
+    }
+
+    /// Hunt–Crossley internal loss `χ ≥ 0` [s/m]. Zero is the elastic
+    /// potential (restitution 1). Nonzero adds `χ K [p]_+^α ṗ` as a
+    /// dissipative force, not a term in `H`.
+    ///
+    /// # Errors
+    /// [`DContactError::Parameter`] if `chi` is negative or non-finite.
+    pub fn with_internal_loss(mut self, chi: f64) -> Result<Self, DContactError> {
+        if !chi.is_finite() || chi < 0.0 {
+            return Err(DContactError::Parameter {
+                what: "Hunt-Crossley chi must be finite and non-negative",
+            });
+        }
+        self.internal_loss = chi;
+        Ok(self)
+    }
+
+    /// Bypass admission — for mutation batteries and trusted callers
+    /// ONLY (the fs-phs `from_raw_parts` pattern); nothing downstream
+    /// re-checks.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_raw_parts(
+        collocation: Vec<f64>,
+        n_points: usize,
+        gaps: Vec<f64>,
+        weights: Vec<f64>,
+        stiffness: f64,
+        alpha: f64,
+        provenance: String,
+    ) -> Self {
+        Obstacle {
+            collocation,
+            n_points,
+            gaps,
+            weights,
+            stiffness,
+            alpha,
+            internal_loss: 0.0,
+            provenance,
+        }
+    }
+
+    /// Row-major collocation matrix `Phi[i][k]` (n_points x n_modes).
+    #[must_use]
+    pub fn collocation(&self) -> &[f64] {
+        &self.collocation
+    }
+
+    /// Collocation point count.
+    #[must_use]
+    pub fn n_points(&self) -> usize {
+        self.n_points
+    }
+
+    /// Per-point gaps.
+    #[must_use]
+    pub fn gaps(&self) -> &[f64] {
+        &self.gaps
+    }
+
+    /// Per-point quadrature weights.
+    #[must_use]
+    pub fn weights(&self) -> &[f64] {
+        &self.weights
+    }
+
+    /// Contact stiffness `K`.
+    #[must_use]
+    pub fn stiffness(&self) -> f64 {
+        self.stiffness
+    }
+
+    /// Contact exponent `alpha`.
+    #[must_use]
+    pub fn alpha(&self) -> f64 {
+        self.alpha
+    }
+
+    /// Hunt–Crossley internal-loss coefficient `χ` [s/m].
+    #[must_use]
+    pub fn internal_loss(&self) -> f64 {
+        self.internal_loss
+    }
+
+    /// Build an obstacle from a matdb CONTACT RECEIPT (music bead
+    /// 3ez8g.13.1): the typed wiring this crate's CONTRACT reserved
+    /// for the provenance field. `(K, alpha, chi)` come from the
+    /// receipt VERBATIM and the provenance string is formatted from
+    /// the pack identity — so migrating a fixture from authored
+    /// parameters to a receipted card is provenance-only (the
+    /// equivalence test in `tests/` proves bitwise-unchanged
+    /// physics). Absent packs refuse upstream in fs-matdb by name;
+    /// there is no default K anywhere on this path.
+    ///
+    /// # Errors
+    /// Typed [`DContactError`] (same admission door as [`Obstacle::new`]).
+    pub fn from_receipt(
+        collocation: Vec<f64>,
+        n_points: usize,
+        n_modes: usize,
+        gaps: Vec<f64>,
+        weights: Vec<f64>,
+        receipt: &fs_matdb::ContactReceipt,
+    ) -> Result<Self, DContactError> {
+        let obstacle = Obstacle::new(
+            collocation,
+            n_points,
+            n_modes,
+            gaps,
+            weights,
+            receipt.k_n_per_m_alpha,
+            receipt.alpha,
+            format!(
+                "matdb:{} {} — {}",
+                receipt.pack_id, receipt.pair_label, receipt.identification
+            ),
+        )?;
+        if receipt.chi_s_per_m > 0.0 {
+            obstacle.with_internal_loss(receipt.chi_s_per_m)
+        } else {
+            Ok(obstacle)
+        }
+    }
+
+    /// Contact-law provenance (logged, never invented).
+    #[must_use]
+    pub fn provenance(&self) -> &str {
+        &self.provenance
+    }
+
+    /// Penetration `p_i = (Phi q)_i - c_i`, clamped one-sided, for the
+    /// interleaved `[q, p]` state.
+    fn penetrations(&self, n_modes: usize, x: &[f64]) -> Vec<f64> {
+        (0..self.n_points).map(|i| self.penetration_at(n_modes, x, i)).collect()
+    }
+
+    // Shared scalar kernel: storage evaluation must not allocate a point vector
+    // on every Hamiltonian/gradient call in the implicit Newton solve.
+    fn penetration_at(&self, n_modes: usize, x: &[f64], i: usize) -> f64 {
+        let mut disp = 0.0;
+        for k in 0..n_modes {
+            disp += self.collocation[i * n_modes + k] * x[2 * k];
+        }
+        let penetration = disp - self.gaps[i];
+        if penetration.is_nan() { penetration } else { penetration.max(0.0) }
+    }
+
+    /// Hunt–Crossley modal forces `f_k = −Σ_i w_i χ K [p_i]_+^α ṗ_i Φ_ik`.
+    ///
+    /// During sufficiently fast unloading, the local loss increment
+    /// saturates at the magnitude of the stored penalty reaction. This
+    /// non-fallible port therefore leaves the combined reaction at zero,
+    /// rather than allowing a unilateral contact to become attractive.
+    ///
+    /// `velocities[k]` is the physical modal velocity (the inner
+    /// storage's `∂H/∂p_k`). `χ = 0` returns zeros. This is **not** a
+    /// gradient of `H`.
+    #[must_use]
+    pub fn dissipative_modal_forces(
+        &self,
+        n_modes: usize,
+        x: &[f64],
+        velocities: &[f64],
+    ) -> Vec<f64> {
+        let mut forces = vec![0.0; n_modes];
+        if !(self.internal_loss > 0.0) || velocities.len() != n_modes {
+            return forces;
+        }
+        let pens = self.penetrations(n_modes, x);
+        for (i, &p) in pens.iter().enumerate() {
+            if p <= 0.0 {
+                continue;
+            }
+            let mut pdot = 0.0;
+            for (k, v) in velocities.iter().enumerate().take(n_modes) {
+                pdot += self.collocation[i * n_modes + k] * v;
+            }
+            let f = self.loss_force_at(i, p, pdot);
+            for (k, slot) in forces.iter_mut().enumerate().take(n_modes) {
+                *slot -= f * self.collocation[i * n_modes + k];
+            }
+        }
+        forces
+    }
+}
+
+/// Contact diagnostics over one inspection call.
+#[derive(Debug, Clone)]
+pub struct ContactProbe {
+    /// Points currently in contact.
+    pub active_points: usize,
+    /// Maximum penetration depth over the obstacle.
+    pub max_penetration: f64,
+    /// Stored contact energy.
+    pub contact_energy: f64,
+}
+
+/// An fs-phs `Storage` wrapping an inner storage with distributed
+/// contact potentials. State layout is the inner storage's
+/// (`[q_0, p_0, ...]` interleaved, `n_modes` pairs).
+pub struct ContactStorage {
+    inner: Box<dyn Storage>,
+    n_modes: usize,
+    obstacles: Vec<Obstacle>,
+}
+
+impl ContactStorage {
+    /// Wrap an inner storage; obstacles must match `n_modes`.
+    ///
+    /// # Errors
+    /// [`DContactError::Shape`] on collocation-width mismatch.
+    pub fn new(
+        inner: Box<dyn Storage>,
+        n_modes: usize,
+        obstacles: Vec<Obstacle>,
+    ) -> Result<Self, DContactError> {
+        for ob in &obstacles {
+            if ob.collocation.len() != ob.n_points * n_modes {
+                return Err(DContactError::Shape {
+                    what: "obstacle collocation width vs n_modes",
+                });
+            }
+        }
+        Ok(ContactStorage {
+            inner,
+            n_modes,
+            obstacles,
+        })
+    }
+
+    /// The wrapped inner storage.
+    #[must_use]
+    pub fn inner_storage(&self) -> &dyn Storage {
+        self.inner.as_ref()
+    }
+
+    /// The obstacles.
+    #[must_use]
+    pub fn obstacles(&self) -> &[Obstacle] {
+        &self.obstacles
+    }
+
+    /// Modal count.
+    #[must_use]
+    pub fn n_modes(&self) -> usize {
+        self.n_modes
+    }
+
+    /// Contact diagnostics at a state (max penetration feeds the
+    /// authored penetration ceiling — a FLAG for stiffness
+    /// inadequacy, deliberately not a refusal).
+    #[must_use]
+    pub fn probe(&self, x: &[f64]) -> ContactProbe {
+        let mut active = 0usize;
+        let mut max_p = 0.0f64;
+        let mut energy = 0.0f64;
+        for ob in &self.obstacles {
+            for i in 0..ob.n_points {
+                let p = ob.penetration_at(self.n_modes, x, i);
+                if p <= 0.0 {
+                    continue;
+                }
+                active += 1;
+                max_p = if p.is_nan() { p } else { max_p.max(p) };
+                energy +=
+                    ob.weights[i] * ob.stiffness / (ob.alpha + 1.0) * det::pow(p, ob.alpha + 1.0);
+            }
+        }
+        ContactProbe {
+            active_points: active,
+            max_penetration: max_p,
+            contact_energy: energy,
+        }
+    }
+
+    /// Hunt–Crossley modal forces at state `x`.
+    ///
+    /// Velocities come from the inner storage gradient (`∂H/∂p_k`),
+    /// so a free mass (`p = m v`) and a mass-normalized modal bank
+    /// (`p = v`) are both correct. `χ = 0` on every obstacle returns
+    /// zeros. Add the result to the mechanical port input; do not
+    /// fold it into `H`.
+    #[must_use]
+    pub fn dissipative_modal_forces(&self, x: &[f64]) -> Vec<f64> {
+        let mut g = vec![0.0; 2 * self.n_modes];
+        self.inner.gradient(x, &mut g);
+        let velocities: Vec<f64> = (0..self.n_modes).map(|k| g[2 * k + 1]).collect();
+        let mut forces = vec![0.0; self.n_modes];
+        for ob in &self.obstacles {
+            let extra = ob.dissipative_modal_forces(self.n_modes, x, &velocities);
+            for (f, e) in forces.iter_mut().zip(extra) {
+                *f += e;
+            }
+        }
+        forces
+    }
+}
+
+impl Storage for ContactStorage {
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        let mut h = self.inner.hamiltonian(x);
+        for ob in &self.obstacles {
+            for i in 0..ob.n_points {
+                let p = ob.penetration_at(self.n_modes, x, i);
+                if p <= 0.0 {
+                    continue;
+                }
+                h += ob.weights[i] * ob.stiffness / (ob.alpha + 1.0) * det::pow(p, ob.alpha + 1.0);
+            }
+        }
+        h
+    }
+
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        self.inner.gradient(x, out);
+        for ob in &self.obstacles {
+            for i in 0..ob.n_points {
+                let p = ob.penetration_at(self.n_modes, x, i);
+                if p <= 0.0 {
+                    continue;
+                }
+                let f = ob.weights[i] * ob.stiffness * det::pow(p, ob.alpha);
+                for k in 0..self.n_modes {
+                    out[2 * k] += f * ob.collocation[i * self.n_modes + k];
+                }
+            }
+        }
+    }
+}
+
+/// Gap profile of a polyline obstacle sampled under given abscissas:
+/// linear interpolation of `(x, height)` vertices, refusing samples
+/// outside the polyline span. The GAP convention is the caller's
+/// (heights are returned as sampled; subtract from the rest position
+/// to make gaps).
+///
+/// # Errors
+/// [`DContactError`] on unsorted/short polylines or out-of-span
+/// samples.
+pub fn polyline_heights(
+    vertices: &[(f64, f64)],
+    samples: &[f64],
+) -> Result<Vec<f64>, DContactError> {
+    if vertices.len() < 2 {
+        return Err(DContactError::Shape {
+            what: "polyline needs at least 2 vertices",
+        });
+    }
+    // NaN slips through ordering comparisons (review finding:
+    // executed Ok(NaN)); refuse non-finite coordinates up front.
+    if vertices
+        .iter()
+        .any(|&(x, y)| !x.is_finite() || !y.is_finite())
+    {
+        return Err(DContactError::Parameter {
+            what: "non-finite polyline vertex",
+        });
+    }
+    for pair in vertices.windows(2) {
+        if pair[1].0 <= pair[0].0 {
+            return Err(DContactError::Parameter {
+                what: "polyline x must strictly ascend",
+            });
+        }
+    }
+    let (x0, xn) = (vertices[0].0, vertices[vertices.len() - 1].0);
+    let mut out = Vec::with_capacity(samples.len());
+    for &s in samples {
+        if s.is_nan() || s < x0 || s > xn {
+            return Err(DContactError::Parameter {
+                what: "sample outside polyline span",
+            });
+        }
+        // Find the segment (linear scan: obstacle profiles are small).
+        let mut h = vertices[vertices.len() - 1].1;
+        for pair in vertices.windows(2) {
+            if s <= pair[1].0 {
+                let t = (s - pair[0].0) / (pair[1].0 - pair[0].0);
+                h = pair[0].1 + t * (pair[1].1 - pair[0].1);
+                break;
+            }
+        }
+        out.push(h);
+    }
+    Ok(out)
+}
+
+/// Mass-normalized sine-mode collocation matrix for a fixed-fixed
+/// string: `Phi[i][k] = sqrt(2/(mu L)) sin((k+1) pi x_i / L)` — the
+/// standard bridge from modal string states to physical displacement
+/// at the obstacle points.
+/// # Errors
+/// [`DContactError::Parameter`] on non-positive length/density (the
+/// silent-NaN alternative violates the refusal doctrine — review
+/// finding).
+pub fn string_collocation(
+    length: f64,
+    lin_density: f64,
+    points: &[f64],
+    n_modes: usize,
+) -> Result<Vec<f64>, DContactError> {
+    if length.is_nan() || length <= 0.0 || lin_density.is_nan() || lin_density <= 0.0 {
+        return Err(DContactError::Parameter {
+            what: "string length and density must be positive",
+        });
+    }
+    let norm = det::sqrt(2.0 / (lin_density * length));
+    let pi = core::f64::consts::PI;
+    let mut m = vec![0.0; points.len() * n_modes];
+    for (i, &x) in points.iter().enumerate() {
+        for k in 0..n_modes {
+            m[i * n_modes + k] = norm * det::sin((k + 1) as f64 * pi * x / length);
+        }
+    }
+    Ok(m)
+}
+
+mod opening;
+/// Stable scalar discrete gradient of the admitted contact potential.
+pub use opening::{AffineContactResponse, AffineContactStep, OpeningContactStep};

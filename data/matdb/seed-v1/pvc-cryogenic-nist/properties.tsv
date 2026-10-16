@@ -1,0 +1,23 @@
+frankensim.matdb-source.v1
+observation	nist-pvc-cryogenic-curves	PVC low-density cryogenic material curves	NIST Cryogenics Material Properties: PVC, retrieved 2026-09-07, https://trc.nist.gov/cryogenics/materials/PVC/PVCrev.htm	NIST gives log10(y)=a+b log10(T)+c log10(T)^2+d log10(T)^3+e log10(T)^4+f log10(T)^5+g log10(T)^6+h log10(T)^7+i log10(T)^8, with T in K. Thermal-conductivity coefficients a..i are (11314.56,-30824.32,34964.24,-21141.43,7187.43,-1302.708,98.35252,0,0) for density 20.02 kg/m3 air-fill gas (data/equation 100-300/90-300 K; fit error 1.5 percent), and (-4123.51,9690.59,-7920.09,1572.897,1459.993,-1028.329,255.773,-23.31925,0) for density 56.06 kg/m3 CO2-blown material (125-300/100-300 K; fit error 2 percent). Specific-heat coefficients are (190.776,-991.521,2200.811,-2726.414,2069.971,-988.4221,290.405,-48.0737,3.437928) for density 48.05 kg/m3 material (10-300 K; fit error 2 percent). Source-fill-gas code is 1 for air, 2 for CO2, and 0 when NIST does not report a gas for the specific-heat curve; density and code are retained as per-claim validity axes to prevent ambiguous same-key lookup. The 300 K point evaluations below use those published coefficients and have validity restricted to exactly 300 K; fit-error notes are retained but are not promoted to statistical uncertainty or an interpolation guarantee. This is low-density foam data, not a generic bulk PVC solid.
+scalar	thermal-conductivity-air-fill-300K	nist-pvc-cryogenic-curves	thermal_conductivity	0.0409287645535	W/m/K	constant
+uncertainty	thermal-conductivity-air-fill-300K	unstated	-	-	-	-
+validity	thermal-conductivity-air-fill-300K	temperature	300	300	K
+validity	thermal-conductivity-air-fill-300K	source_measurement_method_known	0	0	1
+validity	thermal-conductivity-air-fill-300K	source_material_form_known	1	1	1
+validity	thermal-conductivity-air-fill-300K	source_density	20.02	20.02	kg/m3
+validity	thermal-conductivity-air-fill-300K	source_fill_gas_code	1	1	1
+scalar	thermal-conductivity-co2-blown-300K	nist-pvc-cryogenic-curves	thermal_conductivity	0.0575565845878	W/m/K	constant
+uncertainty	thermal-conductivity-co2-blown-300K	unstated	-	-	-	-
+validity	thermal-conductivity-co2-blown-300K	temperature	300	300	K
+validity	thermal-conductivity-co2-blown-300K	source_measurement_method_known	0	0	1
+validity	thermal-conductivity-co2-blown-300K	source_material_form_known	1	1	1
+validity	thermal-conductivity-co2-blown-300K	source_density	56.06	56.06	kg/m3
+validity	thermal-conductivity-co2-blown-300K	source_fill_gas_code	2	2	1
+scalar	specific-heat-capacity-300K	nist-pvc-cryogenic-curves	specific_heat_capacity	1167.15580012	J/kg/K	constant
+uncertainty	specific-heat-capacity-300K	unstated	-	-	-	-
+validity	specific-heat-capacity-300K	temperature	300	300	K
+validity	specific-heat-capacity-300K	source_measurement_method_known	0	0	1
+validity	specific-heat-capacity-300K	source_material_form_known	1	1	1
+validity	specific-heat-capacity-300K	source_density	48.05	48.05	kg/m3
+validity	specific-heat-capacity-300K	source_fill_gas_code	0	0	1

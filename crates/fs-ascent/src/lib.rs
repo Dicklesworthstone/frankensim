@@ -1,0 +1,102 @@
+//! fs-ascent — the gradient-based optimizer stack (plan §9.2). Layer:
+//! L4 ASCENT.
+//!
+//! The pipeline made explicit: raw adjoint gradient (fs-adjoint) →
+//! Sobolev/Riesz smoothing → optional Riemannian projection
+//! (fs-opt's manifold metadata) → optimizer step. Optimizers here are
+//! ENGINES; problem structure (typed objective/constraint graphs,
+//! manifold metadata) lives in fs-opt — this crate consumes it.
+//!
+//! House obligations, inherited from the FLUX stack and tested the
+//! same way: RESUMABLE states (clone = checkpoint, split runs bitwise
+//! equal), deterministic trajectories from seeds (G5), budget-aware
+//! stopping through the condition algebra, and a certificate attached
+//! to every returned optimum (KKT residuals for constrained solves;
+//! gradient norms + stall diagnoses for unconstrained) so converged
+//! and stalled are DISTINGUISHABLE outcomes.
+
+pub mod auglag;
+#[cfg(feature = "conduction-assimilation")]
+pub mod conduction_assimilation;
+#[cfg(feature = "conduction-design")]
+pub mod conduction_design;
+#[cfg(feature = "equilibrium-design")]
+pub mod equilibrium;
+pub mod interior;
+pub mod lbfgs;
+pub mod newton_continuation;
+pub mod nsga;
+pub mod pareto;
+pub mod projected_al;
+pub mod reverse_manifold;
+pub mod reverse_newton;
+pub mod reverse_sqp;
+pub mod reverse_study;
+pub mod riemann;
+pub mod runner;
+pub mod sqp;
+pub mod stop;
+#[cfg(feature = "transient-design")]
+pub mod transient;
+pub mod trust;
+#[cfg(feature = "transient-design")]
+pub mod variational;
+pub mod wolfe;
+pub use nsga::{
+    NSGA_REFERENCE_GEOMETRY_SCHEMA_VERSION, NonFiniteKind, NsgaConfig,
+    NsgaDisconnectedFrontSentinel, NsgaError, NsgaIndividual, NsgaReferenceGeometry,
+    NsgaReferenceGeometryAdaptation, NsgaReferenceGeometryAdmission, NsgaReferenceGeometryDecision,
+    NsgaReferenceGeometryEvidence, NsgaReferenceGeometryIdentity, NsgaReferenceGeometryMetrics,
+    NsgaReferenceGeometryPolicy, NsgaReferenceGeometryPolicyIdentity,
+    NsgaReferenceGeometrySnapshotIdentity, NsgaReport, NsgaStop, build_references,
+    das_dennis_cardinality, fast_nondominated_sort, nsga3_run, nsga3_run_with_reference_geometry,
+    nsga3_run_with_reference_geometry_cancellable, partition_tuples,
+};
+pub use pareto::{ParetoPoint, epsilon_constraint_sweep, nondominated_front, weighted_sum_sweep};
+
+pub use auglag::{AugLagReport, KktResidual, augmented_lagrangian};
+#[cfg(feature = "equilibrium-design")]
+pub use equilibrium::{EquilibriumStudy, EquilibriumStudyError};
+pub use interior::{InteriorReport, interior_point};
+pub use lbfgs::{LbfgsError, LbfgsReport, LbfgsState};
+pub use reverse_manifold::{ReverseManifoldError, ReverseManifoldReport, ReverseManifoldStudy};
+pub use reverse_newton::{ReverseNewtonError, ReverseNewtonReport, ReverseNewtonStop, ReverseNewtonStudy};
+pub use reverse_sqp::{ReverseSqpError, ReverseSqpReport, ReverseSqpStudy};
+pub use reverse_study::{ReverseStudy, ReverseStudyError};
+pub use riemann::{RiemannianLbfgs, RiemannianReport, retract, tangent_project};
+pub use runner::{
+    Packing, STUDY_CANCELLATION_BOUNDARY_VERSION, Study, StudyError, StudyForkReceipt,
+    StudyPauseReceipt, StudyReport, StudyRunProgress,
+};
+pub use sqp::{SqpError, SqpReport, SqpRunReport, SqpSample, SqpState, SqpStop, sqp};
+pub use stop::{StopReason, StopRule};
+pub use trust::{
+    TrustRegionProgress, TrustRegionReport, TrustRegionRunReport, TrustRegionState,
+    trust_region_newton,
+};
+pub use wolfe::{WolfeOutcome, strong_wolfe};
+
+/// The objective callback shape every engine consumes:
+/// x ↦ (f(x), ∇f(x)).
+pub type FnGrad<'a> = &'a mut dyn FnMut(&[f64]) -> (f64, Vec<f64>);
+
+/// Hessian-vector product callback: (x, v) ↦ H(x)·v.
+pub type FnHv<'a> = &'a mut dyn FnMut(&[f64], &[f64]) -> Vec<f64>;
+
+/// Constraint callback: x ↦ c(x).
+pub type FnConstraints<'a> = &'a dyn Fn(&[f64]) -> Vec<f64>;
+
+/// Jacobian-transpose action: (x, w) ↦ (∂c/∂x)ᵀ·w.
+pub type FnJacobianTranspose<'a> = &'a dyn Fn(&[f64], &[f64]) -> Vec<f64>;
+
+/// Version of the deterministic trajectory-bit surface exercised by
+/// `tests/ascent_battery.rs::ascent_golden_hash`.
+///
+/// This surface includes the L-BFGS, trust-region, and Riemannian engine
+/// trajectories plus the authoritative `fs-opt` manifold operations consumed
+/// by the Riemannian stage. Any semantic change that can move those exact bits
+/// must bump this version and deliberately re-freeze the coupled golden.
+pub const TRAJECTORY_BIT_SEMANTICS_VERSION: u32 = 1;
+
+/// Crate version, re-exported for provenance stamping.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

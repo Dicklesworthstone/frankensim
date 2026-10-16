@@ -1,0 +1,314 @@
+//! A bounded, adjoint-guided target search over the SAME file-driven solid.
+//! Only one effective h varies; hydraulics and geometry remain immutable.
+//! A returned crossing is local: no global monotonicity/minimality or
+//! infeasibility theorem is inferred for an arbitrary thermal network.
+
+use super::*;
+use fs_math::det;
+
+#[cfg(feature = "cooling-design")]
+pub(super) mod resistance;
+
+#[derive(Debug)]
+pub(super) struct DesignRequest {
+    surface: String,
+    limit: f64,
+    minimum: f64,
+    maximum: f64,
+    temperature_tolerance: f64,
+    log_tolerance: f64,
+    evaluations: usize,
+}
+
+impl DesignRequest {
+    pub(super) fn parse(value: &J, surfaces: &BTreeSet<String>, mean_objective: bool) -> Result<Self> {
+        object(value, &["surface", "mean_temperature_limit_k", "temperature_limit_k", "min_htc_w_m2_k", "max_htc_w_m2_k",
+            "temperature_tolerance_k", "log_htc_tolerance", "max_evaluations"], "design")?;
+        let limit = match (value.get("temperature_limit_k"), value.get("mean_temperature_limit_k")) {
+            (Some(limit), None) => positive(limit, "temperature_limit_k")?,
+            (None, Some(limit)) if mean_objective => positive(limit, "mean_temperature_limit_k")?,
+            _ => return Err(bad("design requires temperature_limit_k; the legacy mean_temperature_limit_k is only valid for a mean objective, and both cannot be supplied")),
+        };
+        let result = Self {
+            surface: string(get(value, "surface")?, "design.surface")?,
+            limit,
+            minimum: positive(get(value, "min_htc_w_m2_k")?, "min_htc_w_m2_k")?,
+            maximum: positive(get(value, "max_htc_w_m2_k")?, "max_htc_w_m2_k")?,
+            temperature_tolerance: positive(get(value, "temperature_tolerance_k")?, "design.temperature_tolerance_k")?,
+            log_tolerance: positive(get(value, "log_htc_tolerance")?, "log_htc_tolerance")?,
+            evaluations: count(get(value, "max_evaluations")?, "max_evaluations", 4096)?,
+        };
+        if !surfaces.contains(&result.surface) || result.minimum >= result.maximum {
+            return Err(bad("design requires an existing surface and strictly ordered positive h bounds"));
+        }
+        Ok(result)
+    }
+}
+
+/// Keep the entire selected physical evaluation, including model-specific
+/// reports, rather than reconstructing a result from a temperature alone.
+pub(super) struct Designed<T = Evaluation> {
+    pub passing: T,
+    surface: String,
+    limit: f64,
+    passing_h: f64,
+    failed_lower: Option<(f64, f64)>,
+    log_width: f64,
+    history: Vec<(f64, f64)>,
+    solid_solves: usize,
+    mean_objective: bool,
+}
+
+pub(super) trait Candidate {
+    fn evaluation(&self) -> &Evaluation;
+    fn solid_solves(&self) -> usize;
+}
+
+impl Candidate for Evaluation {
+    fn evaluation(&self) -> &Evaluation { self }
+    fn solid_solves(&self) -> usize { self.coupled.iterations }
+}
+
+impl Candidate for fan_speed::ThermalEvaluation {
+    fn evaluation(&self) -> &Evaluation { &self.value }
+    fn solid_solves(&self) -> usize { self.solid_solves }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate<T, F>(request: &Request, cx: &Cx<'_>, flow: &GraphSolution, design: &DesignRequest,
+    h: f64, history: &mut Vec<(f64, f64)>, solid_solves: &mut usize, produce: &mut F) -> Result<T>
+where
+    T: Candidate,
+    F: FnMut(&Cx<'_>, &GraphSolution, &BTreeMap<String, f64>, bool) -> Result<T>,
+{
+    poll(cx)?;
+    if history.len() >= design.evaluations {
+        return Err(Failure { code: "cooling-network-design-budget",
+            message: format!("{} coupled design evaluations exhausted; no design published", history.len()) });
+    }
+    let mut coefficients: BTreeMap<_, _> = request.surfaces.iter().map(|s| (s.name.clone(), s.h)).collect();
+    coefficients.insert(design.surface.clone(), h);
+    let result = produce(cx, flow, &coefficients, true)?;
+    if !result.evaluation().objective.is_finite() { return Err(producer("nonfinite design objective")); }
+    *solid_solves = solid_solves.checked_add(result.solid_solves()).ok_or_else(|| bad("design work count overflow"))?;
+    history.push((h, result.evaluation().objective));
+    poll(cx)?;
+    Ok(result)
+}
+
+pub(super) fn solve(request: &Request, cx: &Cx<'_>, flow: &GraphSolution, design: &DesignRequest) -> Result<Designed> {
+    solve_with(request, cx, flow, design, |cx, flow, coefficients, gradient|
+        request.evaluate(cx, flow, coefficients, gradient))
+}
+
+/// Every candidate re-solves the complete selected model. Derivatives only
+/// propose trials; evaluated temperatures decide feasibility. Producer errors
+/// remain errors, never a cooling-only fallback or an infeasibility verdict.
+pub(super) fn solve_with<T, F>(request: &Request, cx: &Cx<'_>, flow: &GraphSolution,
+    design: &DesignRequest, mut produce: F) -> Result<Designed<T>>
+where
+    T: Candidate,
+    F: FnMut(&Cx<'_>, &GraphSolution, &BTreeMap<String, f64>, bool) -> Result<T>,
+{
+    let mut history = Vec::new();
+    let mut solid_solves = 0;
+    let lower = evaluate(request, cx, flow, design, design.minimum, &mut history, &mut solid_solves, &mut produce)?;
+    if lower.evaluation().objective <= design.limit {
+        return Ok(Designed { passing: lower, surface: design.surface.clone(), limit: design.limit,
+            passing_h: design.minimum, failed_lower: None, log_width: 0.0, history, solid_solves,
+            mean_objective: request.objective.is_mean() });
+    }
+    let mut passing = evaluate(request, cx, flow, design, design.maximum, &mut history, &mut solid_solves, &mut produce)?;
+    if passing.evaluation().objective > design.limit {
+        return Err(Failure { code: "cooling-network-design-bracket", message: format!(
+            "neither endpoint meets the {} K temperature limit: lower {} K, upper {} K; this is not a proof of infeasibility between the bounds",
+            design.limit, lower.evaluation().objective, passing.evaluation().objective) });
+    }
+    let mut low_h = design.minimum;
+    let mut low_value = lower.evaluation().objective;
+    let mut high_h = design.maximum;
+    let mut low = det::ln(low_h);
+    let mut high = det::ln(high_h);
+    loop {
+        poll(cx)?;
+        let width = high - low;
+        let slack = design.limit - passing.evaluation().objective;
+        if width <= design.log_tolerance && slack <= design.temperature_tolerance {
+            return Ok(Designed { passing, surface: design.surface.clone(), limit: design.limit,
+                passing_h: high_h, failed_lower: Some((low_h, low_value)), log_width: width, history, solid_solves,
+                mean_objective: request.objective.is_mean() });
+        }
+        let state = passing.evaluation();
+        let index = state.coupled.solid.iter().position(|s| s.region == design.surface)
+            .ok_or_else(|| bad("design surface missing from evaluated output"))?;
+        let derivative = *state.gradient.as_ref().ok_or_else(|| bad("design adjoint was not computed"))?
+            .log_htc.get(index).ok_or_else(|| bad("design adjoint surface arity mismatch"))?;
+        // At a maximum kink this is one active-vertex derivative. It only
+        // proposes a trial; the exact maximum is reselected and evaluated for
+        // every trial, so a branch switch cannot relax the temperature limit.
+        let newton = high - (state.objective - design.limit) / derivative;
+        let candidate = if derivative != 0.0 && newton.is_finite()
+            && newton > low + 0.1 * width && newton < high - 0.1 * width { newton }
+            else { 0.5 * low + 0.5 * high };
+        let h = det::exp(candidate);
+        if !(candidate > low && candidate < high && h.is_finite() && h > low_h && h < high_h) {
+            return Err(Failure { code: "cooling-network-design-resolution",
+                message: "floating-point h resolution cannot meet both requested design tolerances".into() });
+        }
+        let evaluated = evaluate(request, cx, flow, design, h, &mut history, &mut solid_solves, &mut produce)?;
+        if evaluated.evaluation().objective <= design.limit {
+            high = candidate;
+            high_h = h;
+            passing = evaluated;
+        } else {
+            low = candidate;
+            low_h = h;
+            low_value = evaluated.evaluation().objective;
+        }
+    }
+}
+
+pub(super) fn attach<T>(result: String, designed: &Designed<T>) -> Result<String> {
+    let prefix = result.strip_suffix("}\n").ok_or_else(|| bad("internal result framing mismatch"))?;
+    let trial = |h: f64, temperature: f64| -> Result<String> {
+        Ok(format!("{{\"htc_w_m2_k\":{},\"temperature_k\":{},\"mean_temperature_k\":{}}}",
+            num(h)?, num(temperature)?, optional(designed.mean_objective.then_some(temperature))?))
+    };
+    let failed = match designed.failed_lower {
+        None => "null".to_string(), Some((h, temperature)) => trial(h, temperature)?,
+    };
+    let trials = designed.history.iter().map(|&(h, temperature)| trial(h, temperature))
+        .collect::<Result<Vec<_>>>()?.join(",");
+    Ok(format!("{prefix},\"design\":{{\"surface\":{},\"limit_k\":{},\"selected_htc_w_m2_k\":{},\"status\":{},\"failed_lower\":{},\"log_bracket_width\":{},\"evaluations\":{},\"total_solid_solves\":{},\"history\":[{}],\"search_claim\":\"evaluated passing endpoint of a local target bracket, or feasible declared minimum; no global optimality or infeasibility proof\"}}}}\n",
+        quote(&designed.surface), num(designed.limit)?, num(designed.passing_h)?,
+        quote(if designed.failed_lower.is_none() { "minimum-feasible" } else { "target-bracketed" }),
+        failed, num(designed.log_width)?, designed.history.len(), designed.solid_solves, trials))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::tests::{request, with_cx, close};
+
+    fn design() -> DesignRequest {
+        DesignRequest { surface: "last-face".into(), limit: 323.0, minimum: 10.0, maximum: 1000.0,
+            temperature_tolerance: 1e-5, log_tolerance: 1e-4, evaluations: 80 }
+    }
+
+    #[test]
+    fn file_driven_sizing_returns_a_passing_evaluated_solid() {
+        let r = request();
+        with_cx(|cx| {
+            let flow = r.flow(cx).unwrap();
+            let d = design();
+            let result = solve(&r, cx, &flow, &d).unwrap();
+            assert!(result.passing.objective <= d.limit);
+            assert!(d.limit - result.passing.objective <= d.temperature_tolerance);
+            assert!(result.log_width <= d.log_tolerance);
+            assert!(result.failed_lower.unwrap().1 > d.limit);
+            close(result.passing_h, 194.501441754, 0.03);
+            assert!(result.history.len() <= d.evaluations);
+            let rendered = attach(render(&r, &flow, &result.passing).unwrap(), &result).unwrap();
+            let doc = J::parse(&rendered).unwrap();
+            let summary = doc.get("design").unwrap();
+            close(summary.f64_field("selected_htc_w_m2_k").unwrap(), result.passing_h, 1e-10);
+            let wall = &doc.get("walls").unwrap().as_array().unwrap()[1];
+            close(wall.f64_field("htc_w_m2_k").unwrap(), result.passing_h, 1e-10);
+        });
+    }
+
+    #[test]
+    fn design_minimum_bracket_and_budget_have_distinct_outcomes() {
+        let r = request();
+        with_cx(|cx| {
+            let flow = r.flow(cx).unwrap();
+            let mut d = design();
+            d.limit = 400.0;
+            d.evaluations = 1;
+            let result = solve(&r, cx, &flow, &d).unwrap();
+            assert!(result.failed_lower.is_none());
+            assert_eq!(result.history.len(), 1);
+            d = design(); d.limit = 290.0;
+            assert_eq!(solve(&r, cx, &flow, &d).err().unwrap().code, "cooling-network-design-bracket");
+            d = design(); d.evaluations = 1;
+            assert_eq!(solve(&r, cx, &flow, &d).err().unwrap().code, "cooling-network-design-budget");
+        });
+    }
+
+    #[test]
+    fn optional_design_request_is_admitted_and_not_silently_ignored() {
+        let text = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/cooling-network/size-mixed-slab.json"));
+        let r = Request::parse(text).unwrap();
+        assert_eq!(r.design.as_ref().unwrap().surface, "last-face");
+        assert!(Request::parse(&text.replace("\"gradient\": true", "\"gradient\": false")).is_err());
+        assert!(Request::parse(&text.replace("\"max_evaluations\": 80", "\"max_evaluations\": 0")).is_err());
+    }
+
+    #[test]
+    fn complete_candidates_preserve_the_selected_report_and_model_work() {
+        let r = request();
+        with_cx(|cx| {
+            let flow = r.flow(cx).unwrap();
+            let d = design();
+            let mut calls = 0;
+            let mut total_work = 0;
+            let result = solve_with(&r, cx, &flow, &d, |cx, flow, htc, gradient| {
+                assert!(gradient);
+                let value = r.evaluate(cx, flow, htc, gradient)?;
+                // A tagged test producer models extra inner work. This is a
+                // metadata-retention test, not simulated radiation evidence.
+                let solid_solves = 3 * value.coupled.iterations + 2;
+                total_work += solid_solves;
+                calls += 1;
+                let radiation = Some(format!("{{\"test_candidate_htc\":{}}}", htc["last-face"]));
+                Ok(fan_speed::ThermalEvaluation { value, radiation, solid_solves })
+            }).unwrap();
+            assert_eq!(result.history.len(), calls);
+            assert_eq!(result.solid_solves, total_work);
+            assert!(result.passing.value.objective <= d.limit);
+            let output = attach(result.passing.render(&r, &flow).unwrap(), &result).unwrap();
+            let doc = J::parse(&output).unwrap();
+            close(doc.path(&["radiation", "test_candidate_htc"]).unwrap().as_f64().unwrap(),
+                result.passing_h, 1e-12);
+            close(doc.path(&["design", "total_solid_solves"]).unwrap().as_f64().unwrap(),
+                total_work as f64, 0.0);
+        });
+    }
+
+    #[test]
+    fn complete_model_failure_is_not_replaced_by_a_cooling_only_candidate() {
+        let r = request();
+        with_cx(|cx| {
+            let flow = r.flow(cx).unwrap();
+            let mut calls = 0;
+            let error = solve_with::<fan_speed::ThermalEvaluation, _>(&r, cx, &flow, &design(),
+                |_, _, _, _| {
+                    calls += 1;
+                    Err(Failure { code: "cooling-network-radiation-budget",
+                        message: "test producer exhausted its nonlinear work".into() })
+                }).err().unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(error.code, "cooling-network-radiation-budget");
+            assert_eq!(error.message, "test producer exhausted its nonlinear work");
+        });
+    }
+
+    #[test]
+    fn complete_model_trial_limit_is_checked_before_starting_more_physics() {
+        let r = request();
+        with_cx(|cx| {
+            let flow = r.flow(cx).unwrap();
+            let mut d = design();
+            d.evaluations = 1;
+            let mut calls = 0;
+            let error = solve_with(&r, cx, &flow, &d, |cx, flow, htc, gradient| {
+                calls += 1;
+                let value = r.evaluate(cx, flow, htc, gradient)?;
+                let solid_solves = value.coupled.iterations;
+                Ok(fan_speed::ThermalEvaluation { value, radiation: None, solid_solves })
+            }).err().unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(error.code, "cooling-network-design-budget");
+        });
+    }
+}

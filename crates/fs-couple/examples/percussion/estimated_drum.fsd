@@ -1,0 +1,9 @@
+frankensim-drum-spec-v1
+# EDITABLE ESTIMATES of the existing 14 x 6.5 inch reference, not specimen measurements.
+# geometry: clear head radius [m], cavity depth [m], rigid outer shell radius [m]
+geometry,0.1703,0.1651,0.1778
+# head: name, thickness [m], E [Pa], nu, density [kg/m^3], tension [N/m], damping ratio
+head,batter,0.000254,4000000000,0.38,1390,3000,0.001
+head,resonant,0.0000762,4000000000,0.38,1390,1500,0.001
+mesh,5,32
+band_hz,80,500

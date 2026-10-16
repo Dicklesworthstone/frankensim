@@ -1,0 +1,110 @@
+//! Source-backed contact-area exchange between two canonical thermal inputs.
+//! The original finite-body solver owns the single signed transfer Q. No heat
+//! capacity, conduction law, latent-heat rule or nonlinear solver is duplicated.
+use super::{InterfaceResistance,SeriesThermalResistance};
+use crate::ConductionError;
+use crate::lumped::{LumpedContactStep,LumpedContactStepConfig,LumpedEnthalpyBody,
+    LumpedThermalTransport,solve_lumped_contact_step};
+use fs_exec::Cx;
+use fs_material::phase::{UniformEnthalpyStep,UniformEnthalpyStepInput};
+
+/// Exact interface source and finite-body solve retained by both proposals.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContactPairReport {
+    pub interface: InterfaceResistance,
+    /// Physical area held for this thermal step [m2]; zero is separation.
+    pub area_m2: f64,
+    /// Original source-bearing R''/area series network, absent when separated.
+    pub resistance: Option<SeriesThermalResistance>,
+    /// Original implicit finite-body result, absent for exactly zero exchange area.
+    pub contact: Option<LumpedContactStep>,
+}
+
+/// Propose both finite reservoirs through their original material charts.
+///
+/// `inputs` supply both old states, invariant masses/geometries, internal heat
+/// and one common positive duration. Both source terms enter the SAME implicit
+/// finite-body solve; no intermediate heat-only state must lie in a chart.
+/// The interface is an already resolved, source-backed area-specific resistance.
+/// Its exact receipt is retained; R''/area is built by the original interface
+/// owner and held for this step. Callers own selection at the appropriate source
+/// coordinates; no temperature/pressure dependence or perfect contact is inferred.
+///
+/// At zero physical area the link is exactly open, not a very large finite R.
+/// Each reservoir still receives its internal heat, with source/energy checks.
+/// A returning contact resumes from these actual thermal endpoints. One signed
+/// Q is -Q in side A's boundary heat and +Q in B's, including latent storage.
+/// Publish BOTH proposals together; this routine mutates neither input.
+///
+/// Reference volume/whole-surface area supplies the original reduced Biot gate
+/// with the total contact conductance spread over that surface. This is NOT a
+/// qualification of local spreading or flash temperature beneath a small patch.
+/// Fixed thermal geometry and negligible body pV work remain assumptions.
+/// No ambient/radiation exchange or thermal feedback to mechanics is included.
+pub fn advance_contact_pair(
+    cx:&Cx<'_>, inputs:[UniformEnthalpyStepInput<'_>;2],
+    transports:[&LumpedThermalTransport;2], interface:&InterfaceResistance,
+    area_m2:f64, energy_tolerance_j:f64,
+) -> Result<[UniformEnthalpyStep<ContactPairReport>;2],ConductionError> {
+    poll(cx)?;
+    if !area_m2.is_finite() || area_m2<0.0 || !positive(energy_tolerance_j)
+        || !positive(inputs[0].duration_s) || inputs[0].duration_s!=inputs[1].duration_s {
+        return Err(invalid("contact area, thermal allowance or common clock is invalid"));
+    }
+    for i in &inputs {
+        if ![i.mass_kg,i.volume_m3,i.surface_area_m2].into_iter().all(positive)
+            || !i.internal_heat_j.is_finite() || area_m2>i.surface_area_m2
+            || i.curve.state_at_specific_enthalpy(i.initial.specific_enthalpy_j_kg())
+                .map_err(|e|invalid(&e.to_string()))?!=i.initial {
+            return Err(invalid("thermal pair needs valid geometry/heat and each original chart state"));
+        }
+    }
+    // Source identity and continuous transport support remain load-bearing even
+    // at separation. Do not skip admission merely because Q or supplied heat is zero.
+    let a=body("contact side A",inputs[0],transports[0])?;
+    let b=body("contact side B",inputs[1],transports[1])?;
+    let (states,q,resistance,contact)=if area_m2==0.0 {
+        let state=|i:UniformEnthalpyStepInput<'_>|i.curve.state_at_specific_enthalpy(
+            i.initial.specific_enthalpy_j_kg()+i.internal_heat_j/i.mass_kg)
+                .map_err(|e|invalid(&e.to_string()));
+        ([state(inputs[0])?,state(inputs[1])?],0.0,None,None)
+    } else {
+        let resistance=SeriesThermalResistance::new(vec![interface.term_for_area("physical contact",area_m2)?])?;
+        let contact=solve_lumped_contact_step(cx,&a,&b,&resistance,LumpedContactStepConfig {
+            specific_enthalpy_a_j_kg:inputs[0].initial.specific_enthalpy_j_kg(),
+            specific_enthalpy_b_j_kg:inputs[1].initial.specific_enthalpy_j_kg(),
+            supplied_heat_a_j:inputs[0].internal_heat_j,supplied_heat_b_j:inputs[1].internal_heat_j,
+            duration_s:inputs[0].duration_s,energy_tolerance_j,
+        })?;
+        ([contact.state_a,contact.state_b],contact.heat_a_to_b_j,Some(resistance),Some(contact))
+    };
+    let boundary=[-q,q];let mut total_residual=0.0;
+    for side in 0..2 {
+        let residual=inputs[side].mass_kg*(states[side].specific_enthalpy_j_kg()
+            -inputs[side].initial.specific_enthalpy_j_kg())-inputs[side].internal_heat_j-boundary[side];
+        if !residual.is_finite() || residual.abs()>energy_tolerance_j {
+            return Err(invalid("contact pair exceeds a reservoir's energy allowance"));
+        }
+        total_residual+=residual;
+    }
+    if !total_residual.is_finite() || total_residual.abs()>energy_tolerance_j {
+        return Err(invalid("contact pair exceeds its combined energy allowance"));
+    }
+    poll(cx)?;
+    let report=ContactPairReport {interface:interface.clone(),area_m2,resistance,contact};
+    Ok([0,1].map(|side|UniformEnthalpyStep {state:states[side],external_heat_j:boundary[side],
+        energy_residual_tolerance_j:energy_tolerance_j,report:report.clone()}))
+}
+fn body<'a>(name:&str,input:UniformEnthalpyStepInput<'a>,transport:&LumpedThermalTransport)
+    ->Result<LumpedEnthalpyBody<'a>,ConductionError> {
+    LumpedEnthalpyBody::try_new_with_transport(name,input.mass_kg,input.surface_area_m2,0.0,
+        input.volume_m3/input.surface_area_m2,transport.clone(),input.curve)
+}
+fn positive(v:f64)->bool {v.is_finite() && v>0.0}
+fn poll(cx:&Cx<'_>)->Result<(),ConductionError> {
+    cx.checkpoint().map_err(|_|ConductionError::Cancelled {stage:"lumped-contact-pair",at:0})
+}
+fn invalid(what:&str)->ConductionError {
+    ConductionError::Interface {interface:"lumped-contact-pair".into(),what:what.into(),
+        fix:"supply both original finite thermal states and one admitted source-backed contact area".into()}
+}

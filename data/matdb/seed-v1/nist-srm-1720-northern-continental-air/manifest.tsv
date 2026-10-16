@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	nist-srm-1720-northern-continental-air
+redistribution	permitted	NIST archived certificate information is unmarked as copyrighted; NIST Copyrights and Disclaimers treats unmarked site information as public information that may be distributed or copied; retain NIST attribution, SRM 1720 lot identity, issue date, and expired-certification boundary
+citation	National Institute of Standards and Technology, Certificate of Analysis, Standard Reference Material 1720 Northern Continental Air, Lot 1720-A-XX, certificate issue date 2015-09-08, certification expired 2020-09-01, archived generic certificate template, accessed 2026-07-17
+license	NIST-Public-Information-Attribution-Requested
+source	nist-srm-1720-archived-certificate	properties.tsv	material-tsv-v1

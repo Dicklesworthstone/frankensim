@@ -1,0 +1,4 @@
+fixture=fs-benchmark-cht-query-v1
+geometry=declared cooling-query control volume
+frame=fixture-origin
+no_claim=not an as-built physical geometry

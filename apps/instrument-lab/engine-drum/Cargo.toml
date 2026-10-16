@@ -1,0 +1,52 @@
+[package]
+name = "fs-live-drum"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Live in-browser (WASM) two-head drum: FrankenSim's own FE heads (fs-plate), eigenmodes (fs-modal), prepared exact-ZOH linear impact engine (fs-couple), Hertz stick contact (fs-dcontact) and time-domain Rayleigh radiation. The reduced real-time model; NOT the offline reference."
+
+# Its own workspace (the fs-wasm / fs-flyer-wasm pattern): the browser binding
+# is decoupled from the native workspace so a wasm build never depends on the
+# state of unrelated in-progress crates.
+[workspace]
+
+[lib]
+name = "fs_live_drum"
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-couple = { path = "../../../crates/fs-couple" }
+fs-plate = { path = "../../../crates/fs-plate" }
+fs-modal = { path = "../../../crates/fs-modal" }
+fs-dcontact = { path = "../../../crates/fs-dcontact" }
+fs-exec = { path = "../../../crates/fs-exec" }
+fs-la = { path = "../../../crates/fs-la" }
+
+# wasm-bindgen only enters the wasm32 build - native builds stay dependency-clean.
+# The version is pinned to the installed wasm-bindgen CLI (0.2.128).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.128"
+# Optional: route the scalar FMA libcall to the CPU through relaxed-simd.
+fs-live-fma = { path = "fma-shim", optional = true }
+js-sys = "0.3"
+# asupersync in browser mode + JS-backed entropy for wasm32 (the fs-exec cone).
+asupersync = { path = "../../../../asupersync", default-features = false, features = ["wasm-browser-prod"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[features]
+# Second browser build (engine_fma.*): bit-identical results, hardware FMA when
+# the host proves it fuses. Needs a browser with WebAssembly relaxed-simd.
+hardware-fma = ["dep:fs-live-fma"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+
+[lints.rust]
+unsafe_code = "forbid"

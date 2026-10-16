@@ -1,0 +1,82 @@
+//! fs-solver — the solver stack (plan §8.9). Layer: L3 FLUX.
+//!
+//! Matrix-free Krylov methods (CG, MINRES, GMRES(m)) bound by the four
+//! workspace contract obligations from day one:
+//!
+//! - RESUMABLE: solver state is plain data — `clone()` is a
+//!   checkpoint, and split runs are bitwise-equal to straight runs
+//!   (the fs-time `AdaptiveState` pattern, tested the same way).
+//! - CANCELLABLE: iteration granularity — every state is complete
+//!   between iterations. FGMRES and Newton additionally accept a Cx,
+//!   poll numerical callbacks, and discard interrupted staged work.
+//! - DETERMINISTIC: all inner products go through the fixed-shape
+//!   chunked reduction (fs-tilelang's combiner — shape depends on
+//!   length only, never on threads or tiers).
+//! - ADJOINT-EQUIPPED: the operator trait carries `apply_transpose`,
+//!   and transposed solves run through the same machinery (tested to
+//!   converge comparably to primal — the IFT contract's enabler).
+//!
+//! Error transparency: every solve returns a residual HISTORY and a
+//! structured stall diagnosis instead of a timeout mystery.
+
+pub mod block;
+pub mod checked_cg;
+/// Source-refusing numerical Jacobian actions for the existing nonlinear owner.
+pub mod finite_difference;
+/// Outward residual evaluation and checked discrete algebraic goal bounds.
+pub mod goal;
+pub mod krylov;
+pub mod least_squares;
+pub mod lsqr;
+pub mod mixed;
+pub mod nonlinear;
+pub mod op;
+/// Bounded PSD nonnegative quadratic baseline; no adjoint/uniqueness claim.
+pub mod orthant;
+pub mod pmg;
+pub mod stokes;
+
+pub use block::{
+    BlockError, BlockOperator, BlockOperator2, BlockOperator3, BlockSchur2,
+    RealEquivalentComplexOp, RectLinearOp, SchurSolveSign, SquareBlock, ZeroBlock,
+};
+pub use checked_cg::{CheckedCgConfig, CheckedCgError, CheckedCgSolution, checked_cg};
+pub use krylov::{
+    CgState, GmresState, MinresState, PminresState, ResidualClaim, SolveReport, StallDiagnosis,
+};
+pub use mixed::{CsrF32, MixedReport, mixed_cg_refine};
+pub use nonlinear::{
+    AdmittedLinearSolver, CancellableSolveReport, DefinitenessEvidence, FgmresState,
+    FlexiblePreconditioner, Globalization, GlobalizationDecision, LineSearchConfig,
+    LinearSolverKind, LinearSystemFinding, LinearSystemVerifier, LinearVerificationError,
+    NewtonError, NewtonIteration, NewtonKrylovConfig, NewtonKrylovState, NewtonReport,
+    NewtonStallDiagnosis, NonlinearProblem, NullspaceEvidence, PreconditionerClass,
+    SolverAdmissionError, SolverCallback, SolverCallbackCounts, SolverRunProgress,
+    SourceCompatibility, SymmetryEvidence, TrustRegionConfig, VerifiedLinearSystem,
+    admit_linear_solver, verify_linear_system,
+};
+pub use op::{CsrOp, LinearOp};
+pub use pmg::{MaskedTensorOp, PMultigrid};
+pub use stokes::{StokesBlockDiag, StokesOp, StokesSystem};
+
+/// The single L1 spectral service consumed by solver clients. This re-export
+/// prevents a second eigensolver/health namespace from growing in fs-solver.
+pub use fs_spectral as spectral_service;
+
+/// Deterministic inner product: elementwise products folded through
+/// the fixed-shape chunked combiner (shape = f(length) only, never on threads).
+#[must_use]
+pub fn dot(a: &[f64], b: &[f64]) -> f64 {
+    assert_eq!(a.len(), b.len(), "dot length mismatch");
+    let prods: Vec<f64> = a.iter().zip(b).map(|(x, y)| x * y).collect();
+    fs_tilelang::deterministic_sum(&prods)
+}
+
+/// Deterministic 2-norm.
+#[must_use]
+pub fn norm2(a: &[f64]) -> f64 {
+    fs_math::det::sqrt(dot(a, a))
+}
+
+/// Crate version, re-exported for provenance stamping.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

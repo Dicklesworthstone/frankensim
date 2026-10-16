@@ -1,0 +1,20 @@
+[package]
+name = "material-gas-spring-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Keep cross-owner integration out of the constitutive kernel's dependency graph.
+[workspace]
+
+[[bin]]
+name = "material_gas_spring"
+path = "driver.rs"
+
+[dependencies]
+fs-material = { path = "../.." }
+fs-mbd = { path = "../../../fs-mbd" }
+fs-evidence = { path = "../../../fs-evidence" }
+fs-matdb = { path = "../../../fs-matdb" }
+fs-qty = { path = "../../../fs-qty" }
+fs-thermochem = { path = "../../../fs-thermochem" }

@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+observation	mw16c-polyimide-thermal-endurance-basis	nasa-20240007451-16awg-heavy-build-mw16c-polyimide-wire-vendor-and-spool-unspecified	Tallerico et al. Sections III and III-D; 16 AWG heavy-build MW-16C polyimide-insulated magnet wire per NEMA MW 1000-2003; twisted pairs prepared per ASTM D2307-2013	The paper describes the thermal class as an estimate of the temperature at which insulation is expected to have 20000 h life in air and later states that this wire insulation is rated for 20000 h operational life at 240 degC per ASTM D2307. The two numbers are retained as one cross-bound classification basis, not an Arrhenius law or direct lifetime guarantee. Vendor, lot, spool for most groups, qualification report, raw classification data, humidity, pressure, measurement uncertainty, and confidence metadata are absent. The 250 degC group used the same wire type and vendor but a different unspecified spool
+scalar	thermal-endurance-reference-temperature	mw16c-polyimide-thermal-endurance-basis	thermal_endurance_reference_temperature	240	degC	constant
+uncertainty	thermal-endurance-reference-temperature	unstated	-	-	-	-
+validity	thermal-endurance-reference-temperature	reference_duration	20000	20000	h
+validity	thermal-endurance-reference-temperature	source_wire_spec_nema_mw16c	1	1	1
+validity	thermal-endurance-reference-temperature	source_nema_mw1000_2003	1	1	1
+validity	thermal-endurance-reference-temperature	source_test_standard_astm_d2307_2013	1	1	1
+validity	thermal-endurance-reference-temperature	source_wire_vendor_known	0	0	1
+validity	thermal-endurance-reference-temperature	source_wire_lot_known	0	0	1
+validity	thermal-endurance-reference-temperature	source_thermal_endurance_raw_data_available	0	0	1
+scalar	thermal-endurance-reference-duration	mw16c-polyimide-thermal-endurance-basis	thermal_endurance_reference_duration	20000	h	constant
+uncertainty	thermal-endurance-reference-duration	unstated	-	-	-	-
+validity	thermal-endurance-reference-duration	reference_temperature	240	240	degC
+validity	thermal-endurance-reference-duration	source_wire_spec_nema_mw16c	1	1	1
+validity	thermal-endurance-reference-duration	source_nema_mw1000_2003	1	1	1
+validity	thermal-endurance-reference-duration	source_test_standard_astm_d2307_2013	1	1	1
+validity	thermal-endurance-reference-duration	source_wire_vendor_known	0	0	1
+validity	thermal-endurance-reference-duration	source_wire_lot_known	0	0	1
+validity	thermal-endurance-reference-duration	source_thermal_endurance_raw_data_available	0	0	1

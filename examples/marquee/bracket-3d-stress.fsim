@@ -1,0 +1,51 @@
+(fsim-sdf3-study :version 1
+  (metadata
+    :name "3d-minimum-volume-stress"
+    :created "2026-10-10"
+    :context-of-use "Numerical minimum-volume design with a qp stress aggregate constraint"
+    :intended-decision "Explore material reduction while preserving the declared aggregate stress limit"
+    :decision-gate scoping-estimate
+    :consequence advisory)
+  (seeds :root 1337)
+  (budgets
+    :wall-seconds 300.0
+    :memory-bytes 536870912
+    :linear-iterations 250000
+    :per-solve-iterations 50000
+    :quadrature-boxes 1000000
+    :quadrature-points 1000000)
+  (capabilities "optimization.marquee-topopt" "geometry.sdf" "physics.cutfem")
+  (units :storage "SI")
+  (domain
+    :type curved-height-sdf
+    :bounds ((0.0 0.0 0.0) (1.0 1.0 1.0))
+    :height-m 0.7
+    :curvature-per-m 0.1)
+  (physics
+    :type elasticity-3d
+    :initial-level 1
+    :maximum-level 1
+    :maximum-leaves 8
+    :youngs-modulus-pa 1.0
+    :poissons-ratio 0.3)
+  (scenario
+    :fixed-boundary left
+    :body-loads (
+      (load :density-n-m3 (0.0 -1.0 0.0) :weight 0.3)
+      (load :density-n-m3 (0.0 0.0 -1.0) :weight 0.7)))
+  (objective :type volume-fraction :sense minimize :unit "1")
+  (optimizer
+    :type stress-limited-simp
+    :initial-density 0.75
+    :filter-radius-m 0.15
+    :max-updates 80
+    :density-floor 0.05
+    :stress-limit-pa 8.0
+    :relaxation-power 1.0
+    :aggregation-power 8.0
+    :max-stress-points 50000
+    :max-evaluations 2000
+    :max-backtracks 40
+    :tolerance 0.000002
+    :penal 3.0
+    :beta 0.0))

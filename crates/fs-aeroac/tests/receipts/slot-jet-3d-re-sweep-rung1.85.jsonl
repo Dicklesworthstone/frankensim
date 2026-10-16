@@ -1,0 +1,2 @@
+{"schema":"fs-aeroac.slot-jet-3d.re-sweep/v1","scope":"campaign header; per-rung rows follow"}
+{"schema":"fs-aeroac.slot-jet-3d.rung/v1","reynolds":14.800000000000031,"second_order_rate":1.85,"higher_order_rate":1.9500000000000002,"flatness":0.00000000000005759022002677416,"tonal":true,"strouhal":62.4847412109375,"peak_bin":4095,"prominence":325591374900553540,"force_rms":0.000010803534260866861,"amplitude_qualified":true,"strouhal_bin_width":0.0152587890625,"mach_max_lattice":0.031211233240893282,"flux_imbalance":0.00016009832672172908}

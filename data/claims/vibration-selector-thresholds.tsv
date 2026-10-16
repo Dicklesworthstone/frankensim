@@ -1,0 +1,15 @@
+# frankensim-vibration-selector-thresholds-v1
+# The linear<->nonlinear switch point AS DATA (3ez8g.7.1 scope 2): soft notes stay
+# linear IN THE SAME VOICE; the KC image engages when the predicted pitch glide
+# exceeds the threshold. Formula: glide_cents = (1200/ln 2)*(3/32)(EA/T0)(k pi A/L)^2
+# (fs-nlmodal's 1e-12-pinned law). Fixture provenance: nylon-like reference string
+# EA=500 N, T0=80 N, L=0.65 m, k=1 (the acoustic_assembly nylon_like family).
+# The gate test RE-DERIVES A* from the formula (self-verified pin; a hand-edited
+# threshold fails).
+quantity	value
+target_glide_cents	1.0
+amplitude_threshold_m	6.496208338e-03
+ea_n	500.0
+t0_n	80.0
+length_m	0.65
+mode_k	1

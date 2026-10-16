@@ -1,0 +1,13 @@
+frankensim-listening-receipt-v1
+listener	pending
+session	2026-08-18
+artifact	b64e0fca66a0adea23dcf8384c408f5a23416e71b2fa832de00773581c9a5afc
+artifact-ref	data/listening/guitar-strum.provenance.json
+question	does the strummed chord read as an acoustic guitar body — woody, boxy low-end resonance — rather than a plain string buzz?
+verdict	unadjudicated
+observations	3.2 s staggered strum through the composed Carcagno-gated body (triad peaks as the modal bank); awaiting the owner's ear
+loudness-sone	absent
+sharpness-acum	absent
+log-attack-time	-7.242089210286488e-1
+spl-db	absent
+law	psychoacoustic metrics are never a substitute for human listening

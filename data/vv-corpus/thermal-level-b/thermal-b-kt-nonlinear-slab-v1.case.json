@@ -1,0 +1,18 @@
+{
+  "id": "thermal-b-kt-nonlinear-slab-v1",
+  "title": "Temperature-dependent k(T) slab: Dirichlet base, Robin tip, element-mean evaluation",
+  "notes": "k(T) is the piecewise-linear interpolation of the declared knots (a single linear segment here). Both codes evaluate k once per element at the element-mean temperature (the declared discretization) and drive the nonlinearity by undamped Picard iteration to the declared tolerance, so agreement checks independent nonlinear-iteration/assembly/solver implementations.",
+  "mesh": { "counts": [10, 4, 4], "extent": [0.05, 0.02, 0.02] },
+  "material": {
+    "kind": "linear_kt",
+    "evaluation": "element-mean-temperature",
+    "knots": [[250.0, 8.0], [500.0, 18.0]]
+  },
+  "source": { "kind": "none" },
+  "bcs": [
+    { "name": "hot", "face": ["x", 0.0], "kind": "dirichlet", "t_k": 450.0 },
+    { "name": "cooled", "face": ["x", "max"], "kind": "robin", "h": 40.0, "t_inf_k": 300.0 }
+  ],
+  "picard": { "tol": 1e-13, "max_iterations": 60 },
+  "probes": [[5, 2, 2], [10, 2, 2], [2, 1, 1], [8, 3, 0], [10, 0, 0]]
+}

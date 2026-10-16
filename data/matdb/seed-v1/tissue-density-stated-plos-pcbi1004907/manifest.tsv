@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	tissue-density-stated-plos-pcbi1004907
+redistribution	permitted	Creative Commons Attribution License per the article; retain authors, journal, DOI
+citation	Titze I.R., Riede T., Mau T. (2016), Predicting Achievable Fundamental Frequency Ranges in Vocalization Across Species, PLoS Comput Biol 12(6):e1004907; https://doi.org/10.1371/journal.pcbi.1004907
+license	CC-BY-4.0
+source	primary	properties.tsv	material-tsv-v1

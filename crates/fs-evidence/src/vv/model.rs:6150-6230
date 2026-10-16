@@ -1,0 +1,8 @@
+{
+  "project_key": "/Users/jemanuel/projects/frankensim",
+  "agent_name": "RusticSpire",
+  "paths": ["crates/fs-evidence/**"],
+  "exclusive": true,
+  "reason": "clear nightly clippy drift unblocking neural-cone strict lane (frankensim-cf4fv/rsxgz)",
+  "ttl_seconds": 10800
+}

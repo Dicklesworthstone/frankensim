@@ -1,0 +1,32 @@
+[package]
+name = "fs-constraint"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Constraint calculus: typed kinds with optimizer treatments, evidence-typed evaluations, minimal unsat cores, and ranked calibrated repairs."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[features]
+# [F]-gated per the Ambition-Tag rule: the anytime-valid chance
+# estimator (e-process stopping) stays out of default builds until its
+# statistical claims carry independent review evidence.
+frontier-eproc = []
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec" }
+fs-ivl = { path = "../fs-ivl" }
+fs-obs = { path = "../fs-obs" }
+fs-opt = { path = "../fs-opt" }
+fs-qty = { path = "../fs-qty" }
+
+[dev-dependencies]
+asupersync = { path = "../../../asupersync" }
+fs-alloc = { path = "../fs-alloc" }
+
+[lints]
+workspace = true

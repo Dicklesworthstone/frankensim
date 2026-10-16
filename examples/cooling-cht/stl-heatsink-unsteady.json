@@ -1,0 +1,73 @@
+{
+ "schema": "frankensim.cooling-cht.v1",
+ "size_m": [
+  0.08,
+  0.1,
+  0.04
+ ],
+ "voxel_m": 0.004,
+ "fluid": "dry-air-300k",
+ "materials": [
+  {
+   "name": "aluminium",
+   "conductivity_w_m_k": 167.0
+  }
+ ],
+ "solids": [
+  {
+   "material": "aluminium",
+   "stl": "../heatsink-fan/heatsink.stl",
+   "scale": 1.0,
+   "offset_m": [
+    0.0,
+    0.02,
+    0.0
+   ]
+  }
+ ],
+ "sources": [
+  {
+   "name": "die",
+   "power_w": 3.0,
+   "min_m": [
+    0.03,
+    0.04,
+    0.0
+   ],
+   "max_m": [
+    0.05,
+    0.06,
+    0.004
+   ]
+  }
+ ],
+ "faces": {
+  "y-": {
+   "type": "inlet",
+   "velocity_m_s": [
+    0.0,
+    0.5,
+    0.0
+   ],
+   "temperature_k": 293.15
+  },
+  "y+": {
+   "type": "opening",
+   "ambient_k": 293.15
+  }
+ },
+ "solver": {
+  "tolerance": 1e-06
+ },
+ "limits": {
+  "wall_seconds": 5400
+ },
+ "transient": {
+  "time_step_s": 0.02,
+  "steps": 100,
+  "flow": "unsteady",
+  "energy": "steady-on-mean-flow",
+  "inner_tolerance": 1e-06,
+  "inner_iterations": 300
+ }
+}

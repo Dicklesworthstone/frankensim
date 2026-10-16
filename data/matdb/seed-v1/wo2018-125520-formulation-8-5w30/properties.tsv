@@ -1,0 +1,102 @@
+frankensim.matdb-source.v1
+observation	table-ix-formulation-8-composition	wo2018-125520-table-ix-formulation-8-source-products-lots-unspecified	Lewis, Fitch, and Han Table IX Formulation 8 direct mass-fraction transcription	The four printed as-added fractions sum to exactly 100.00 wt%. SpectraSyn 4, Synesstic 5, SpectraSyn Elite 150, and Infineum P6003 are retained as source-era commercial identifiers, not present-day fungible product specifications. The patent gives parenthetical viscosity descriptors but no component lots, manufacturing dates, detailed chemical compositions, final blend order, mixing temperature or duration, sample storage history, or batch assay. Trademark names identify the source blend without implying endorsement
+scalar	spectrasyn-4-mass-fraction	table-ix-formulation-8-composition	spectrasyn_4_component_mass_fraction	60.00	%	constant
+uncertainty	spectrasyn-4-mass-fraction	unstated	-	-	-	-
+validity	spectrasyn-4-mass-fraction	source_composition_basis_is_mass_fraction	1	1	1
+validity	spectrasyn-4-mass-fraction	source_formulation_number	8	8	1
+validity	spectrasyn-4-mass-fraction	source_patent_practice_license_granted	0	0	1
+validity	spectrasyn-4-mass-fraction	source_component_commercial_identifier_known	1	1	1
+validity	spectrasyn-4-mass-fraction	source_component_lot_known	0	0	1
+validity	spectrasyn-4-mass-fraction	source_component_detailed_chemistry_known	0	0	1
+validity	spectrasyn-4-mass-fraction	source_final_blend_protocol_known	0	0	1
+scalar	synesstic-5-mass-fraction	table-ix-formulation-8-composition	synesstic_5_component_mass_fraction	10.00	%	constant
+uncertainty	synesstic-5-mass-fraction	unstated	-	-	-	-
+validity	synesstic-5-mass-fraction	source_composition_basis_is_mass_fraction	1	1	1
+validity	synesstic-5-mass-fraction	source_formulation_number	8	8	1
+validity	synesstic-5-mass-fraction	source_patent_practice_license_granted	0	0	1
+validity	synesstic-5-mass-fraction	source_component_commercial_identifier_known	1	1	1
+validity	synesstic-5-mass-fraction	source_component_lot_known	0	0	1
+validity	synesstic-5-mass-fraction	source_component_detailed_chemistry_known	0	0	1
+validity	synesstic-5-mass-fraction	source_final_blend_protocol_known	0	0	1
+scalar	spectrasyn-elite-150-mass-fraction	table-ix-formulation-8-composition	spectrasyn_elite_150_component_mass_fraction	18.00	%	constant
+uncertainty	spectrasyn-elite-150-mass-fraction	unstated	-	-	-	-
+validity	spectrasyn-elite-150-mass-fraction	source_composition_basis_is_mass_fraction	1	1	1
+validity	spectrasyn-elite-150-mass-fraction	source_formulation_number	8	8	1
+validity	spectrasyn-elite-150-mass-fraction	source_patent_practice_license_granted	0	0	1
+validity	spectrasyn-elite-150-mass-fraction	source_component_commercial_identifier_known	1	1	1
+validity	spectrasyn-elite-150-mass-fraction	source_component_lot_known	0	0	1
+validity	spectrasyn-elite-150-mass-fraction	source_component_detailed_chemistry_known	0	0	1
+validity	spectrasyn-elite-150-mass-fraction	source_final_blend_protocol_known	0	0	1
+scalar	infineum-p6003-mass-fraction	table-ix-formulation-8-composition	infineum_p6003_component_mass_fraction	12.00	%	constant
+uncertainty	infineum-p6003-mass-fraction	unstated	-	-	-	-
+validity	infineum-p6003-mass-fraction	source_composition_basis_is_mass_fraction	1	1	1
+validity	infineum-p6003-mass-fraction	source_formulation_number	8	8	1
+validity	infineum-p6003-mass-fraction	source_patent_practice_license_granted	0	0	1
+validity	infineum-p6003-mass-fraction	source_component_commercial_identifier_known	1	1	1
+validity	infineum-p6003-mass-fraction	source_component_lot_known	0	0	1
+validity	infineum-p6003-mass-fraction	source_component_detailed_chemistry_known	0	0	1
+validity	infineum-p6003-mass-fraction	source_final_blend_protocol_known	0	0	1
+observation	table-ix-formulation-8-performance	wo2018-125520-table-ix-formulation-8-source-products-lots-unspecified	Lewis, Fitch, and Han Table IX Formulation 8 direct 5W30 property-row transcription	Table IX labels Formulation 8 as 5W30 and reports the retained values at the printed conditions. Dashes for CCS at -25 degC and MRV at -30 degC are absences, not zero-valued measurements. The source reports no component or final-blend lot, repetitions, dispersion, confidence interval, instrument, method edition, or aging state for this row. These values do not generalize across the SAE grade or across current products carrying the same trademarks
+scalar	kinematic-viscosity-40degC	table-ix-formulation-8-performance	kinematic_viscosity	61.49	mm^2/s	constant
+uncertainty	kinematic-viscosity-40degC	unstated	-	-	-	-
+validity	kinematic-viscosity-40degC	temperature	40	40	degC
+validity	kinematic-viscosity-40degC	source_formulation_number	8	8	1
+validity	kinematic-viscosity-40degC	source_patent_practice_license_granted	0	0	1
+validity	kinematic-viscosity-40degC	source_viscosity_grade_is_5w30	1	1	1
+validity	kinematic-viscosity-40degC	source_test_method_edition_known	0	0	1
+validity	kinematic-viscosity-40degC	source_repeat_count_known	0	0	1
+scalar	kinematic-viscosity-100degC	table-ix-formulation-8-performance	kinematic_viscosity	10.62	mm^2/s	constant
+uncertainty	kinematic-viscosity-100degC	unstated	-	-	-	-
+validity	kinematic-viscosity-100degC	temperature	100	100	degC
+validity	kinematic-viscosity-100degC	source_formulation_number	8	8	1
+validity	kinematic-viscosity-100degC	source_patent_practice_license_granted	0	0	1
+validity	kinematic-viscosity-100degC	source_viscosity_grade_is_5w30	1	1	1
+validity	kinematic-viscosity-100degC	source_test_method_edition_known	0	0	1
+validity	kinematic-viscosity-100degC	source_repeat_count_known	0	0	1
+scalar	viscosity-index	table-ix-formulation-8-performance	viscosity_index_scale_reading	164	1	constant
+uncertainty	viscosity-index	unstated	-	-	-	-
+validity	viscosity-index	source_formulation_number	8	8	1
+validity	viscosity-index	source_patent_practice_license_granted	0	0	1
+validity	viscosity-index	source_viscosity_grade_is_5w30	1	1	1
+validity	viscosity-index	source_test_method_edition_known	0	0	1
+validity	viscosity-index	source_repeat_count_known	0	0	1
+scalar	pour-point	table-ix-formulation-8-performance	pour_point_temperature	-66	degC	constant
+uncertainty	pour-point	unstated	-	-	-	-
+validity	pour-point	source_formulation_number	8	8	1
+validity	pour-point	source_patent_practice_license_granted	0	0	1
+validity	pour-point	source_viscosity_grade_is_5w30	1	1	1
+validity	pour-point	source_test_method_edition_known	0	0	1
+validity	pour-point	source_repeat_count_known	0	0	1
+scalar	ccs-minus30degC	table-ix-formulation-8-performance	cold_cranking_simulator_dynamic_viscosity	4886	mPa*s	constant
+uncertainty	ccs-minus30degC	unstated	-	-	-	-
+validity	ccs-minus30degC	temperature	-30	-30	degC
+validity	ccs-minus30degC	source_formulation_number	8	8	1
+validity	ccs-minus30degC	source_patent_practice_license_granted	0	0	1
+validity	ccs-minus30degC	source_viscosity_grade_is_5w30	1	1	1
+validity	ccs-minus30degC	source_test_method_edition_known	0	0	1
+validity	ccs-minus30degC	source_repeat_count_known	0	0	1
+scalar	mrv-minus35degC	table-ix-formulation-8-performance	mini_rotary_viscometer_dynamic_viscosity	10782	mPa*s	constant
+uncertainty	mrv-minus35degC	unstated	-	-	-	-
+validity	mrv-minus35degC	temperature	-35	-35	degC
+validity	mrv-minus35degC	source_formulation_number	8	8	1
+validity	mrv-minus35degC	source_patent_practice_license_granted	0	0	1
+validity	mrv-minus35degC	source_viscosity_grade_is_5w30	1	1	1
+validity	mrv-minus35degC	source_test_method_edition_known	0	0	1
+validity	mrv-minus35degC	source_repeat_count_known	0	0	1
+scalar	hths-150degC	table-ix-formulation-8-performance	high_temperature_high_shear_dynamic_viscosity	3.395	mPa*s	constant
+uncertainty	hths-150degC	unstated	-	-	-	-
+validity	hths-150degC	temperature	150	150	degC
+validity	hths-150degC	source_formulation_number	8	8	1
+validity	hths-150degC	source_patent_practice_license_granted	0	0	1
+validity	hths-150degC	source_viscosity_grade_is_5w30	1	1	1
+validity	hths-150degC	source_test_method_edition_known	0	0	1
+validity	hths-150degC	source_repeat_count_known	0	0	1
+scalar	noack-250degC	table-ix-formulation-8-performance	noack_mass_loss_fraction	9.2	%	constant
+uncertainty	noack-250degC	unstated	-	-	-	-
+validity	noack-250degC	temperature	250	250	degC
+validity	noack-250degC	source_formulation_number	8	8	1
+validity	noack-250degC	source_patent_practice_license_granted	0	0	1
+validity	noack-250degC	source_viscosity_grade_is_5w30	1	1	1
+validity	noack-250degC	source_test_method_edition_known	0	0	1
+validity	noack-250degC	source_repeat_count_known	0	0	1
+validity	noack-250degC	source_test_duration_known	0	0	1

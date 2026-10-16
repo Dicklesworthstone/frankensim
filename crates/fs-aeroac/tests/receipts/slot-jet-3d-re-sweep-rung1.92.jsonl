@@ -1,0 +1,2 @@
+{"schema":"fs-aeroac.slot-jet-3d.re-sweep/v1","scope":"campaign header; per-rung rows follow"}
+{"schema":"fs-aeroac.slot-jet-3d.rung-refusal/v1","second_order_rate":1.92,"higher_order_rate":1.99,"refusal":"non-finite input: 3-D lattice destabilized during chunked settle"}

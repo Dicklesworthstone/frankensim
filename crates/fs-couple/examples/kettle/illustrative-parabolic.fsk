@@ -1,0 +1,41 @@
+frankensim-kettle-v1
+# ILLUSTRATIVE, NOT a measured production timpani or identified material card.
+# 26-inch clear diameter is a chosen design size. The wall is piecewise-linear
+# through samples z=0.28*(r/0.3302)^2; the solver uses these actual segments.
+station,0,0
+station,0.004375,0.041275
+station,0.0175,0.08255
+station,0.039375,0.123825
+station,0.07,0.1651
+station,0.109375,0.206375
+station,0.1575,0.24765
+station,0.214375,0.288925
+station,0.28,0.3302
+# thickness_m, E_Pa, nu, density_kg_m3, installed_tension_N_m, viscous_ratio
+head,0.000254,4000000000,0.38,1390,4000,0.001
+head_mesh,4,32
+head_band_hz,0,400
+maximum_slope,0.1
+# rho_kg_m3, sound_speed_m_s, nonuniform_momentum_drag_per_s
+# Losses are explicitly illustrative; neither a fitted Q nor a hidden EQ.
+air,1.2,343,0
+air_mesh,4,3
+air_maximum_hz,500
+rate_hz,768000
+# effective_mass_kg, face_radius_m, thickness_m, gap_m, speed_m_s, x_m, y_m
+mallet,0.02,0.012,0.006,0.00002,0.5,0.12,0
+# stress_Pa, reference_strain, load_power, unload_power, crush, densification, history
+felt,100000,0.2,2.2,3,0.15,0.7,0
+# Optional whole-face Kelvin stiffness [N/m] and viscosity [Ns/m].
+creep,3000,6
+# Optional explicit OUTER wall for exterior pressure/reaction. These are
+# illustrative stations, NOT a measured normal-thickness copper survey.
+outer_station,-0.002,0
+outer_station,0.004375,0.043275
+outer_station,0.0175,0.08455
+outer_station,0.039375,0.125825
+outer_station,0.07,0.1671
+outer_station,0.109375,0.208375
+outer_station,0.1575,0.24965
+outer_station,0.214375,0.290925
+outer_station,0.28,0.3322

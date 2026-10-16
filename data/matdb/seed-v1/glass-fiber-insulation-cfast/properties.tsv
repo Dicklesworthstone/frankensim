@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	cfast-tsv-conversion-2026-09-07	FrankenSim CFAST thermal.csv SI typed-TSV conversion	FrankenSim conversion notice, 2026-09-07	On 2026-09-07, FrankenSim converted the CFAST thermal.csv record to SI typed TSV. The change is representation and units only; it does not change the source model-input status or assert a measured specimen property.
+observation	cfast-glass-fiber-insulation	Glass Fiber, Insulation (3.5 in), CFAST record GLASFIBR	NIST CFAST model-input record	Source row is a CFAST textbook/model input, not a measured insulation specimen or design allowable. Fiber chemistry, binder, facing, installed density, moisture state, temperature, pressure, measurement method, replicates, and uncertainty are absent. Raw record values are 0.04 W/(m K), 720 J/(kg K), 105 kg/m3, 0.088 m, and emissivity 0.9.
+scalar	thermal-conductivity	cfast-glass-fiber-insulation	thermal_conductivity	0.04	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_test_temperature_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_product_and_install_density_known	0	0	1
+validity	thermal-conductivity	source_measurement_method_known	0	0	1
+scalar	specific-heat-capacity	cfast-glass-fiber-insulation	specific_heat_capacity	720	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_test_temperature_known	0	0	1
+validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
+validity	specific-heat-capacity	source_product_and_install_density_known	0	0	1
+validity	specific-heat-capacity	source_measurement_method_known	0	0	1
+scalar	density	cfast-glass-fiber-insulation	density	105	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_product_and_install_density_known	0	0	1
+validity	density	source_measurement_method_known	0	0	1
+scalar	nominal-thickness	cfast-glass-fiber-insulation	nominal_thickness	0.088	m	constant
+uncertainty	nominal-thickness	unstated	-	-	-	-
+validity	nominal-thickness	source_is_cfast_layer_input	1	1	1
+scalar	emissivity	cfast-glass-fiber-insulation	emissivity	0.9	1	constant
+uncertainty	emissivity	unstated	-	-	-	-
+validity	emissivity	source_is_cfast_layer_input	1	1	1

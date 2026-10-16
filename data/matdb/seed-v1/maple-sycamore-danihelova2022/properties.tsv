@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	danihelova-resonant-rod	Sycamore maple (Acer pseudoplatanus) unmodified reference bars	Longitudinal resonant dynamic method on 10 x 10 x 400 mm radially sawn bars, log decrement from the half-width equation theta = pi (f2 - f1) / fr, loss coefficient eta = theta / pi	Table 1 unmodified-reference mean values over the specimen set (including curly maple), conditioned to 8.0 +/- 0.2 percent moisture content at 20 +/- 2 C and 45 +/- 5 percent relative humidity; mean resonant frequency 5240 Hz (SD 535); the source prints standard deviations (density SD 38.6 kg/m3, log decrement SD 0.00427, loss coefficient SD 0.0021) without confidence semantics, so runtime uncertainty stays Unstated; the modulus is the DYNAMIC modulus of elasticity along the grain computed from rod resonance, not the static bending modulus the FPL-GTR-282 packs carry; axis convention: L longitudinal (grain) per instrument-axis-convention.tsv
+scalar	density-8pct	danihelova-resonant-rod	density	609	kg/m3	constant
+uncertainty	density-8pct	unstated	-	-	-	-
+validity	density-8pct	moisture_content	8	8	%
+scalar	dynamic-young-modulus-longitudinal	danihelova-resonant-rod	dynamic_young_modulus_longitudinal	10700	MPa	constant
+uncertainty	dynamic-young-modulus-longitudinal	unstated	-	-	-	-
+validity	dynamic-young-modulus-longitudinal	moisture_content	8	8	%
+scalar	log-decrement-longitudinal	danihelova-resonant-rod	log_decrement_longitudinal	0.055	1	constant
+uncertainty	log-decrement-longitudinal	unstated	-	-	-	-
+validity	log-decrement-longitudinal	frequency	5240	5240	Hz
+scalar	loss-factor-longitudinal	danihelova-resonant-rod	loss_factor_longitudinal	0.0175	1	constant
+uncertainty	loss-factor-longitudinal	unstated	-	-	-	-
+validity	loss-factor-longitudinal	frequency	5240	5240	Hz

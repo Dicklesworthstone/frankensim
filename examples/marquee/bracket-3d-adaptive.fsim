@@ -1,0 +1,49 @@
+(fsim-sdf3-study :version 1
+  (metadata
+    :name "adaptive-3d-cantilever"
+    :created "2026-09-24"
+    :context-of-use "3-D CutFEM SIMP numerical design study with goal-guided background refinement"
+    :intended-decision "Explore an independently loaded, volume-limited cantilever design"
+    :decision-gate scoping-estimate
+    :consequence advisory)
+  (seeds :root 1337)
+  (budgets
+    :wall-seconds 300.0
+    :memory-bytes 536870912
+    :linear-iterations 250000
+    :per-solve-iterations 50000
+    :quadrature-boxes 1000000
+    :quadrature-points 1000000)
+  (capabilities
+    "optimization.marquee-topopt"
+    "geometry.sdf"
+    "physics.cutfem")
+  (units :storage "SI")
+  (domain
+    :type curved-height-sdf
+    :bounds ((0.0 0.0 0.0) (1.0 1.0 1.0))
+    :height-m 0.7
+    :curvature-per-m 0.1)
+  (physics
+    :type elasticity-3d
+    :initial-level 1
+    :maximum-level 5
+    :maximum-leaves 2048
+    :youngs-modulus-pa 1.0
+    :poissons-ratio 0.3)
+  (scenario
+    :fixed-boundary left
+    :body-loads (
+      (load :density-n-m3 (0.0 -1.0 0.0) :weight 0.3)
+      (load :density-n-m3 (0.0 0.0 -1.0) :weight 0.7)))
+  (objective :type compliance :sense minimize :unit "J")
+  (optimizer
+    :type adaptive-simp
+    :initial-density 0.5
+    :volume-fraction 0.5
+    :filter-radius-m 0.15
+    :updates-per-stage 3
+    :move-limit 0.15
+    :marking-fraction 0.5
+    :max-marks 2
+    :schedule ((1.0 1.0) (2.0 2.0) (3.0 8.0))))

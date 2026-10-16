@@ -1,0 +1,8 @@
+frankensim.matdb-source.v1
+observation	tn1467-figure5-reeds	Free-cutting half-hard yellow brass reeds	Specimen damping coefficients at constant stress amplitude, Figure 5, 1/16 inch thick cantilever reeds, 50-500 cps, room temperature, in air	GRAPH-READ estimated tier: the source publishes Figure 5 as curves, not a table, so the endpoint values below were read off the log-linear figure and carry graph-reading error on top of the unstated experimental scatter; the quantity is the SPECIMEN damping coefficient g (loss-factor type, E(1 + i g)) measured in air, and the companion NASA TN D-2893 aluminum work measured air damping up to 10x the material damping, so these rows are an UPPER BOUND on the material loss factor, not a separated material property; the stress-amplitude exponent for brass is n = 1.69 (g proportional to stress^1.69, source page 15), and the 30000 psi curve spans roughly 0.02 down to 0.0099 over the same band; no confidence semantics are printed, so runtime uncertainty stays Unstated
+scalar	specimen-loss-factor-10ksi-50hz	tn1467-figure5-reeds	specimen_loss_factor_10ksi_50hz	0.0047	1	constant
+uncertainty	specimen-loss-factor-10ksi-50hz	unstated	-	-	-	-
+validity	specimen-loss-factor-10ksi-50hz	frequency	50	50	Hz
+scalar	specimen-loss-factor-10ksi-500hz	tn1467-figure5-reeds	specimen_loss_factor_10ksi_500hz	0.0015	1	constant
+uncertainty	specimen-loss-factor-10ksi-500hz	unstated	-	-	-	-
+validity	specimen-loss-factor-10ksi-500hz	frequency	500	500	Hz

@@ -1,0 +1,14 @@
+frankensim.matdb-manifest.v3
+pack_id	water-vapor-sutherland-ambient
+redistribution	permitted	Only attributed numerical facts, a derived heat-capacity ratio and original model descriptions are distributed, not source tables, documents or prose. NIST-JANAF and supplier source copyrights are retained; no source-document redistribution license is asserted.
+citation	NIST-JANAF Thermochemical Tables, H-064, H2O(g), Cp at 298.15 K, https://janaf.nist.gov/tables/H-064.html ; NASA TP-2002-211556, Appendix B Table B1 printed p21, H2O molecular weight only, https://ntrs.nasa.gov/citations/20020085330 ; COMSOL 6.4 CFD Module, Sutherland's Law, Table 5-2 steam row (citing White), https://doc.comsol.com/6.4/doc/com.comsol.help.cfd/cfd_ug_fluidflow_high_mach.08.46.html ; accessed 2026-09-09
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	vapor-model	properties.tsv	material-tsv-v1
+property	molar_mass	molar_mass	dimensional
+property	heat_capacity_ratio	heat_capacity_ratio	dimensional
+property	sutherland_reference_viscosity	sutherland_reference_viscosity	dimensional
+property	sutherland_reference_temperature	sutherland_reference_temperature	absolute-temperature
+property	sutherland_temperature	sutherland_temperature	temperature-difference
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure
+axis	source_component_water_vapor	source-component-water-vapor	dimensional

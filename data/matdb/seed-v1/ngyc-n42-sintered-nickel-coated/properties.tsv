@@ -1,0 +1,19 @@
+frankensim.matdb-source.v1
+observation	published-si-magnetic-properties	ngyc-yinxian-ningbo-n42-sintered-ndfeb-nickel-coated-cubes-paper-lot-unspecified	Telfah et al. 2023 Fabrication and characterization section; supplier-identified N42 sintered NdFeB, nickel-coated cubes used in the multilayer Halbach magnet	The paper reports 1350 mT remanence, 923 kA/m coercivity, and 318.3 kJ/m3 maximum energy product but does not state whether these are measured values or supplier nominal values. Magnetic test method, property test temperature, intrinsic coercivity, recoil permeability, demagnetization curves, temperature coefficients, cube-to-value allocation, lot, chemistry, sinter schedule, coating stack/thickness, and dispersion are absent. The same sentence also prints 42 MGOe for maximum energy product, which is not SI-equivalent to 318.3 kJ/m3; the conflicting representations remain separate claims
+scalar	remanence-si	published-si-magnetic-properties	remanent_flux_density	1350	mT	constant
+uncertainty	remanence-si	unstated	-	-	-	-
+validity	remanence-si	source_magnetic_test_temperature_known	0	0	1
+validity	remanence-si	source_magnetic_test_method_known	0	0	1
+scalar	coercivity-si	published-si-magnetic-properties	coercive_field_strength	923	kA/m	constant
+uncertainty	coercivity-si	unstated	-	-	-	-
+validity	coercivity-si	source_magnetic_test_temperature_known	0	0	1
+validity	coercivity-si	source_magnetic_test_method_known	0	0	1
+scalar	energy-product-si-print	published-si-magnetic-properties	maximum_magnetic_energy_product	318.3	kJ/m3	constant
+uncertainty	energy-product-si-print	unstated	-	-	-	-
+validity	energy-product-si-print	source_magnetic_test_temperature_known	0	0	1
+validity	energy-product-si-print	source_magnetic_test_method_known	0	0	1
+observation	published-cgs-energy-product	ngyc-yinxian-ningbo-n42-sintered-ndfeb-nickel-coated-cubes-paper-lot-unspecified	Exact unit normalization of the separately printed 42 MGOe maximum-energy-product representation using 1 G=1e-4 T and 1 Oe=1000/(4*pi) A/m	42 MGOe converts to 334.2253804929802 kJ/m3, not the 318.3 kJ/m3 printed in the same source sentence. This derived SI transcription exists only to preserve and expose the source conflict; it is not a refit, correction, preference, uncertainty interval, or independent observation. Source magnetic test temperature and method remain absent
+scalar	energy-product-cgs-print-normalized	published-cgs-energy-product	maximum_magnetic_energy_product	334.2253804929802	kJ/m3	constant
+uncertainty	energy-product-cgs-print-normalized	unstated	-	-	-	-
+validity	energy-product-cgs-print-normalized	source_magnetic_test_temperature_known	0	0	1
+validity	energy-product-cgs-print-normalized	source_magnetic_test_method_known	0	0	1

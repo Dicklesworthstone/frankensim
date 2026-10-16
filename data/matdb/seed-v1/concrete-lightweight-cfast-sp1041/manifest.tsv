@@ -1,0 +1,16 @@
+frankensim.matdb-manifest.v3
+pack_id	concrete-lightweight-cfast-sp1041
+redistribution	permitted	NIST-developed CFAST software is public-domain in the United States; CFAST LICENSE.md permits use, copying, distribution, modification, and derivatives with the notice and NIST acknowledgement retained
+citation	Peacock, R. D., et al. (2005), CFAST Version 6 User's Guide, NIST SP 1041, Chapter 3 p. 9 thermal-properties screenshot, https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication1041.pdf; CFAST thermal.csv record CONCLITE pinned at https://raw.githubusercontent.com/firemodels/cfast/d4a6e17c292851b80329581d0fb6018317ca3269/Utilities/for_bundle/Bin/thermal.csv
+license	NIST-developed software is provided by NIST as a public service. You may use, copy and distribute copies of the software in any medium, provided that you keep intact this entire notice. You may improve, modify and create derivative works of the software or any portion of the software, and you may copy and distribute such modifications or works. Modified works should carry a notice stating that you changed the software and should note the date and nature of any such change. Please explicitly acknowledge the National Institute of Standards and Technology as the source of the software. NIST-developed software is expressly provided “AS IS.” NIST MAKES NO WARRANTY OF ANY KIND, EXPRESS, IMPLIED, IN FACT OR ARISING BY OPERATION OF LAW, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT AND DATA ACCURACY. NIST NEITHER REPRESENTS NOR WARRANTS THAT THE OPERATION OF THE SOFTWARE WILL BE UNINTERRUPTED OR ERROR-FREE, OR THAT ANY DEFECTS WILL BE CORRECTED. NIST DOES NOT WARRANT OR MAKE ANY REPRESENTATIONS REGARDING THE USE OF THE SOFTWARE OR THE RESULTS THEREOF, INCLUDING BUT NOT LIMITED TO THE CORRECTNESS, ACCURACY, RELIABILITY, OR USEFULNESS OF THE SOFTWARE. You are solely responsible for determining the appropriateness of using and distributing the software and you assume all risks associated with its use, including but not limited to the risks and costs of program errors, compliance with applicable laws, damage to or loss of data, programs or equipment, and the unavailability or interruption of operation. This software is not intended to be used in any situation where a failure could cause risk of injury or damage to property. The software developed by NIST employees is not subject to copyright protection within the United States.
+source	primary	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	density	density	dimensional
+property	nominal_thickness	nominal-thickness	dimensional
+property	emissivity	emissivity	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_mix_and_cure_known	source-mix-and-cure-known	dimensional
+axis	source_measurement_method_known	source-measurement-method-known	dimensional
+axis	source_is_cfast_layer_input	source-is-cfast-layer-input	dimensional

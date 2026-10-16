@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	cfast-tsv-conversion-2026-09-07	FrankenSim CFAST thermal.csv SI typed-TSV conversion	FrankenSim conversion notice, 2026-09-07	On 2026-09-07, FrankenSim converted the CFAST thermal.csv record to SI typed TSV. The change is representation and units only; it does not change the source model-input status or assert a measured specimen property.
+observation	cfast-cellulose-insulation	Cellulose Insulation, Wood or Paper Pulp (3.5 in), CFAST record CELLULOS	NIST CFAST model-input record; visual transcription check against NIST SP 1041 Chapter 3 page 9 thermal-properties screenshot	Source row is a CFAST textbook/model input, not a measured insulation specimen or design allowable. Fiber source, treatment/fire retardant, installed density, moisture state, temperature, pressure, measurement method, replicates, and uncertainty are absent. CFAST raw values are 0.039 W/(m K), 1380 J/(kg K), 45 kg/m3, 0.088 m, and emissivity 0.9; SP 1041 displays 3.9e-05 kW/(m K), so the checked conversion is 3.9e-05*1000 = 0.039 W/(m K).
+scalar	thermal-conductivity	cfast-cellulose-insulation	thermal_conductivity	0.039	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_test_temperature_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_product_and_install_density_known	0	0	1
+validity	thermal-conductivity	source_measurement_method_known	0	0	1
+scalar	specific-heat-capacity	cfast-cellulose-insulation	specific_heat_capacity	1380	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_test_temperature_known	0	0	1
+validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
+validity	specific-heat-capacity	source_product_and_install_density_known	0	0	1
+validity	specific-heat-capacity	source_measurement_method_known	0	0	1
+scalar	density	cfast-cellulose-insulation	density	45	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_product_and_install_density_known	0	0	1
+validity	density	source_measurement_method_known	0	0	1
+scalar	nominal-thickness	cfast-cellulose-insulation	nominal_thickness	0.088	m	constant
+uncertainty	nominal-thickness	unstated	-	-	-	-
+validity	nominal-thickness	source_is_cfast_layer_input	1	1	1
+scalar	emissivity	cfast-cellulose-insulation	emissivity	0.9	1	constant
+uncertainty	emissivity	unstated	-	-	-	-
+validity	emissivity	source_is_cfast_layer_input	1	1	1

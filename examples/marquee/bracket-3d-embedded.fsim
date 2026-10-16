@@ -1,0 +1,53 @@
+(fsim-sdf3-study :version 1
+  (metadata
+    :name "embedded-supported-3d-slab"
+    :created "2026-10-10"
+    :context-of-use "Numerical CutFEM density design supported on an implicit interior face"
+    :intended-decision "Explore material redistribution without moving support to a background box face"
+    :decision-gate scoping-estimate
+    :consequence advisory)
+  (seeds :root 1337)
+  (budgets
+    :wall-seconds 600.0
+    :memory-bytes 536870912
+    :linear-iterations 250000
+    :per-solve-iterations 50000
+    :quadrature-boxes 1000000
+    :quadrature-points 1000000)
+  (capabilities
+    "optimization.marquee-topopt"
+    "geometry.sdf"
+    "physics.cutfem")
+  (units :storage "SI")
+  (domain
+    :type constructive-implicit
+    :bounds ((0.0 0.0 0.0) (1.0 1.0 1.0))
+    :shape (intersection
+      :blend-m 0.0
+      :left (half-space :normal (-1.0 0.0 0.0) :offset-m -0.17)
+      :right (half-space :normal (1.0 0.0 0.0) :offset-m 0.83)))
+  (physics
+    :type elasticity-3d
+    :initial-level 1
+    :maximum-level 5
+    :maximum-leaves 2048
+    :youngs-modulus-pa 1.0
+    :poissons-ratio 0.3)
+  (scenario
+    :fixed-boundary (embedded :axis x :fraction (0.0 0.5) :penalty 32.0)
+    :loads (
+      (load :body-n-m3 (0.0 0.0 0.0)
+        :surface (traction :pa (1.0 0.0 0.0) :x-fraction (0.5 1.0)) :weight 0.5)
+      (load :body-n-m3 (0.0 0.0 0.0)
+        :surface (traction :pa (0.0 0.0 -1.0) :x-fraction (0.5 1.0)) :weight 0.5)))
+  (objective :type compliance :sense minimize :unit "J")
+  (optimizer
+    :type adaptive-simp
+    :initial-density 0.5
+    :volume-fraction 0.5
+    :filter-radius-m 0.15
+    :updates-per-stage 1
+    :move-limit 0.15
+    :marking-fraction 0.5
+    :max-marks 2
+    :schedule ((1.0 1.0) (2.0 2.0))))

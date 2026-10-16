@@ -1,0 +1,27 @@
+[package]
+name = "fs-heatmap-wasm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Browser (WASM) surface for the CMA-ES explainer site's objective-landscape heatmaps — a registry of the site's 2D benchmark fields rasterized through shared normalization modes and linear color ramps into an in-memory RGBA buffer, replacing per-pixel JS loops that stall the main thread on mount and on every landscape switch."
+
+# Own decoupled mini-workspace (the fs-cmaes-viz-wasm pattern): the wasm
+# binding crate never depends on the state of unrelated in-progress crates.
+[workspace]
+
+[lib]
+name = "fs_heatmap_wasm"
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.frankensim]
+layer = "L6"
+
+# wasm-bindgen only enters the wasm32 build — native builds stay dependency-clean.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = 3
+
+[lints.rust]
+unsafe_code = "forbid"

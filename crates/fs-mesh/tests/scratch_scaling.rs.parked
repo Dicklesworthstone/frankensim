@@ -1,0 +1,361 @@
+//! PROBE (untracked): the B4 complexity gate and the enclosure-with-vents
+//! body. Tessellated cylinders at growing facet counts measure how
+//! volumetricize scales (each level's rim is n co-circular points — the
+//! degeneracy real CAD tessellation produces everywhere); the vented
+//! enclosure is a shell whose interior void reaches the outside.
+use asupersync::types::Budget;
+use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
+use fs_mesh::{
+    RecoveryOptions, RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy,
+    volumetricize,
+};
+use std::collections::BTreeMap;
+use std::time::Instant;
+
+fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0xB0_D1,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
+}
+
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+struct Builder {
+    verts: Vec<[f64; 3]>,
+    index: BTreeMap<[u64; 3], u32>,
+    tris: Vec<[u32; 3]>,
+}
+
+impl Builder {
+    fn new() -> Self {
+        Builder {
+            verts: Vec::new(),
+            index: BTreeMap::new(),
+            tris: Vec::new(),
+        }
+    }
+    fn vid(&mut self, p: [f64; 3]) -> u32 {
+        let key = [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
+        if let Some(&id) = self.index.get(&key) {
+            return id;
+        }
+        let id = u32::try_from(self.verts.len()).expect("vertex count");
+        self.verts.push(p);
+        self.index.insert(key, id);
+        id
+    }
+    fn tri(&mut self, corners: [[f64; 3]; 3], outward: [f64; 3]) {
+        let [a, b, c] = corners;
+        let n = cross(sub(b, a), sub(c, a));
+        let (a, b, c) = if dot(n, outward) > 0.0 {
+            (a, b, c)
+        } else {
+            (a, c, b)
+        };
+        let ids = [self.vid(a), self.vid(b), self.vid(c)];
+        self.tris.push(ids);
+    }
+    fn quad(&mut self, corners: [[f64; 3]; 4], outward: [f64; 3]) {
+        let [a, b, c, d] = corners;
+        self.tri([a, b, c], outward);
+        self.tri([a, c, d], outward);
+    }
+}
+
+/// A tessellated right prism on a regular `n`-gon, `m` axial rings.
+/// Returns points, triangles, the exact analytic volume and an interior seed.
+fn cylinder(n: usize, m: usize) -> (Vec<[f64; 3]>, Vec<[u32; 3]>, f64, [f64; 3]) {
+    let (r, h) = (0.020f64, 0.050f64);
+    let mut b = Builder::new();
+    let rim = |i: usize, k: usize| -> [f64; 3] {
+        let t = 2.0 * std::f64::consts::PI * (i % n) as f64 / n as f64;
+        [r * t.cos(), r * t.sin(), h * k as f64 / m as f64]
+    };
+    for i in 0..n {
+        b.tri([[0.0, 0.0, 0.0], rim(i, 0), rim(i + 1, 0)], [0.0, 0.0, -1.0]);
+        b.tri([[0.0, 0.0, h], rim(i, m), rim(i + 1, m)], [0.0, 0.0, 1.0]);
+    }
+    for k in 0..m {
+        for i in 0..n {
+            let outward = {
+                let a = rim(i, k);
+                let c = rim(i + 1, k);
+                [a[0] + c[0], a[1] + c[1], 0.0]
+            };
+            b.quad(
+                [rim(i, k), rim(i + 1, k), rim(i + 1, k + 1), rim(i, k + 1)],
+                outward,
+            );
+        }
+    }
+    let area = 0.5 * n as f64 * r * r * (2.0 * std::f64::consts::PI / n as f64).sin();
+    (b.verts, b.tris, area * h, [0.0, 0.0, h / 3.0])
+}
+
+/// A closed box shell (wall thickness `t`) with two rectangular vents through
+/// the `x = X` wall: the solid is the shell, and its interior void reaches
+/// the outside through the vents, so nothing is an enclosed cavity.
+fn vented_enclosure() -> (Vec<[f64; 3]>, Vec<[u32; 3]>, f64, [f64; 3]) {
+    let (bx, by, bz, t) = (0.060f64, 0.040f64, 0.030f64, 0.005f64);
+    // Vents through the x = bx wall, cut in the (y, z) plane. PROBE_COARSE
+    // uses one full-inner-height slot: the same topology (the void reaches
+    // the outside) with half the breakpoint grid.
+    let coarse = [(0.014f64, 0.026f64, t, bz - t)];
+    let fine = [
+        (0.008f64, 0.018f64, 0.008f64, 0.022f64),
+        (0.024f64, 0.034f64, 0.008f64, 0.022f64),
+    ];
+    let vents: &[(f64, f64, f64, f64)] = if std::env::var_os("PROBE_COARSE").is_some() {
+        &coarse
+    } else {
+        &fine
+    };
+    // Breakpoints shared by EVERY face of both boxes: a face that carries a
+    // vent edge subdivides its neighbours' shared edges too, or the shell has
+    // T-junctions and is not a closed manifold (measured: the first draft).
+    let sorted = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v.dedup();
+        v
+    };
+    let xs = sorted(vec![0.0, t, bx - t, bx]);
+    let ys = sorted({
+        let mut v = vec![0.0, t, by - t, by];
+        v.extend(vents.iter().flat_map(|&(y0, y1, _, _)| [y0, y1]));
+        v
+    });
+    let zs = sorted({
+        let mut v = vec![0.0, t, bz - t, bz];
+        v.extend(vents.iter().flat_map(|&(_, _, z0, z1)| [z0, z1]));
+        v
+    });
+    let clip = |v: &[f64], lo: f64, hi: f64| -> Vec<f64> {
+        v.iter()
+            .copied()
+            .filter(|x| *x >= lo - 1e-12 && *x <= hi + 1e-12)
+            .collect()
+    };
+    let mut b = Builder::new();
+    // One axis-aligned rectangle emitted as the full grid of its breakpoints,
+    // skipping the cells a vent removes. `axis` is the constant coordinate.
+    let mut grid_face = |b: &mut Builder,
+                         axis: usize,
+                         fixed: f64,
+                         outward: [f64; 3],
+                         us: &[f64],
+                         vs: &[f64],
+                         skip_vents: bool| {
+        for wu in us.windows(2) {
+            for wv in vs.windows(2) {
+                if skip_vents
+                    && vents.iter().any(|&(y0, y1, z0, z1)| {
+                        wu[0] >= y0 - 1e-12
+                            && wu[1] <= y1 + 1e-12
+                            && wv[0] >= z0 - 1e-12
+                            && wv[1] <= z1 + 1e-12
+                    })
+                {
+                    continue;
+                }
+                let at = |u: f64, v: f64| match axis {
+                    0 => [fixed, u, v],
+                    1 => [u, fixed, v],
+                    _ => [u, v, fixed],
+                };
+                b.quad(
+                    [
+                        at(wu[0], wv[0]),
+                        at(wu[1], wv[0]),
+                        at(wu[1], wv[1]),
+                        at(wu[0], wv[1]),
+                    ],
+                    outward,
+                );
+            }
+        }
+    };
+    // Outer box: x-normal faces on (y, z), y-normal on (x, z), z-normal on
+    // (x, y); the x = bx face carries the vents.
+    grid_face(&mut b, 0, 0.0, [-1.0, 0.0, 0.0], &ys, &zs, false);
+    grid_face(&mut b, 0, bx, [1.0, 0.0, 0.0], &ys, &zs, true);
+    grid_face(&mut b, 1, 0.0, [0.0, -1.0, 0.0], &xs, &zs, false);
+    grid_face(&mut b, 1, by, [0.0, 1.0, 0.0], &xs, &zs, false);
+    grid_face(&mut b, 2, 0.0, [0.0, 0.0, -1.0], &xs, &ys, false);
+    grid_face(&mut b, 2, bz, [0.0, 0.0, 1.0], &xs, &ys, false);
+    // Inner void: the same grids clipped to it, outward from the SOLID points
+    // into the void; the x = bx - t face carries the vents.
+    let (xi, yi, zi) = (
+        clip(&xs, t, bx - t),
+        clip(&ys, t, by - t),
+        clip(&zs, t, bz - t),
+    );
+    grid_face(&mut b, 0, t, [1.0, 0.0, 0.0], &yi, &zi, false);
+    grid_face(&mut b, 0, bx - t, [-1.0, 0.0, 0.0], &yi, &zi, true);
+    grid_face(&mut b, 1, t, [0.0, 1.0, 0.0], &xi, &zi, false);
+    grid_face(&mut b, 1, by - t, [0.0, -1.0, 0.0], &xi, &zi, false);
+    grid_face(&mut b, 2, t, [0.0, 0.0, 1.0], &xi, &yi, false);
+    grid_face(&mut b, 2, bz - t, [0.0, 0.0, -1.0], &xi, &yi, false);
+    // Vent tubes: four walls each, from x = bx - t to x = bx.
+    for &(y0, y1, z0, z1) in vents {
+        b.quad(
+            [
+                [bx - t, y0, z0],
+                [bx, y0, z0],
+                [bx, y0, z1],
+                [bx - t, y0, z1],
+            ],
+            [0.0, 1.0, 0.0],
+        );
+        b.quad(
+            [
+                [bx - t, y1, z0],
+                [bx, y1, z0],
+                [bx, y1, z1],
+                [bx - t, y1, z1],
+            ],
+            [0.0, -1.0, 0.0],
+        );
+        b.quad(
+            [
+                [bx - t, y0, z0],
+                [bx, y0, z0],
+                [bx, y1, z0],
+                [bx - t, y1, z0],
+            ],
+            [0.0, 0.0, 1.0],
+        );
+        b.quad(
+            [
+                [bx - t, y0, z1],
+                [bx, y0, z1],
+                [bx, y1, z1],
+                [bx - t, y1, z1],
+            ],
+            [0.0, 0.0, -1.0],
+        );
+    }
+    let void = (bx - 2.0 * t) * (by - 2.0 * t) * (bz - 2.0 * t);
+    let tubes: f64 = vents
+        .iter()
+        .map(|&(y0, y1, z0, z1)| (y1 - y0) * (z1 - z0) * t)
+        .sum();
+    let volume = bx * by * bz - void - tubes;
+    (b.verts, b.tris, volume, [t / 2.0, by / 2.0, bz / 2.0])
+}
+
+fn solve_body(
+    verts: Vec<[f64; 3]>,
+    tris: Vec<[u32; 3]>,
+    seed: [f64; 3],
+) -> Result<fs_mesh::AuditedLabeledTetComplex, fs_mesh::VolumetricError> {
+    let spec = RegionSpec {
+        id: RegionId(1),
+        kind: RegionKind::Solid,
+        seed,
+        triangles: tris,
+    };
+    let policy = VolumetricPolicy {
+        length_unit: "m".to_string(),
+        recovery: RecoveryOptions {
+            max_steiner: std::env::var("PROBE_STEINER")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(200_000),
+            ..RecoveryOptions::default()
+        },
+        max_vertices: verts.len(),
+        max_tets: 4_000_000,
+        refinement: None,
+    };
+    with_cx(|cx| volumetricize(UnverifiedPlc::new(verts, vec![spec]), policy, cx))
+}
+
+fn region_volume(audited: &fs_mesh::AuditedLabeledTetComplex) -> f64 {
+    audited
+        .witness()
+        .per_region_auditor
+        .iter()
+        .map(|(_, v)| *v)
+        .sum()
+}
+
+#[test]
+fn probe_cylinder_scaling() {
+    let spec = std::env::var("PROBE_SIZES").unwrap_or_else(|_| "16x1,32x1,64x2,128x4".to_string());
+    for size in spec.split(',') {
+        let (n, m) = size.split_once('x').expect("NxM");
+        let (n, m): (usize, usize) = (n.parse().unwrap(), m.parse().unwrap());
+        let (verts, tris, expected, seed) = cylinder(n, m);
+        let facets = tris.len();
+        let started = Instant::now();
+        match solve_body(verts, tris, seed) {
+            Ok(audited) => {
+                let census = audited.labeled().quality();
+                let volume = region_volume(&audited);
+                eprintln!(
+                    "PROBE cylinder {n}x{m}: {facets} facets -> {:.2} s, {}, volume rel err {:.2e}, recovery {}, repair {}",
+                    started.elapsed().as_secs_f64(),
+                    census.to_json(),
+                    ((volume - expected) / expected).abs(),
+                    audited.labeled().recovery().facets.to_json(),
+                    audited.labeled().flat_repair().to_json()
+                );
+            }
+            Err(error) => eprintln!(
+                "PROBE cylinder {n}x{m}: {facets} facets -> REFUSED after {:.2} s: {error}",
+                started.elapsed().as_secs_f64()
+            ),
+        }
+    }
+}
+
+#[test]
+fn probe_vented_enclosure() {
+    let (verts, tris, expected, seed) = vented_enclosure();
+    let facets = tris.len();
+    let started = Instant::now();
+    match solve_body(verts, tris, seed) {
+        Ok(audited) => {
+            let census = audited.labeled().quality();
+            let volume = region_volume(&audited);
+            eprintln!(
+                "PROBE vented enclosure: {facets} facets -> {:.2} s, {}, volume {volume:.6e} vs {expected:.6e} (rel {:.2e}), recovery {}, repair {}",
+                started.elapsed().as_secs_f64(),
+                census.to_json(),
+                ((volume - expected) / expected).abs(),
+                audited.labeled().recovery().facets.to_json(),
+                audited.labeled().flat_repair().to_json()
+            );
+        }
+        Err(error) => eprintln!(
+            "PROBE vented enclosure: {facets} facets -> REFUSED after {:.2} s: {error}",
+            started.elapsed().as_secs_f64()
+        ),
+    }
+}

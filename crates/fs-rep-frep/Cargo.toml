@@ -1,0 +1,26 @@
+[package]
+name = "fs-rep-frep"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "F-rep charts: CSG DAGs with R-function differentiable Booleans and auto-derived interval/Lipschitz/gradient evaluators."
+
+[package.metadata.frankensim]
+layer = "L2"
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec" }
+fs-geom = { path = "../fs-geom" }
+fs-ivl = { path = "../fs-ivl" }
+fs-math = { path = "../fs-math" }
+fs-obs = { path = "../fs-obs" }
+
+[dev-dependencies]
+asupersync = { path = "../../../asupersync" }
+fs-alloc = { path = "../fs-alloc" }
+
+[lints]
+workspace = true

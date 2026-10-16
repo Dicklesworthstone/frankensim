@@ -1,0 +1,791 @@
+# CI Gates — the Decalogue as machine-checkable policy
+
+Owned by the foundations CI/CD bead. This is the mapping from principle to
+mechanical gate, with the honest wiring status of each. Phase gates are
+Gauntlet states, not dates (plan §16.1); a gate listed as **deferred** below
+is wired the moment its owning crate lands, and this file is updated in the
+same change.
+
+## DSR is the CI source of truth
+
+GitHub Actions is unavailable/throttled for this account, so FrankenSim uses
+DSR as the primary CI and release runner. Agents should use DSR instead of
+waiting on or citing GitHub Actions:
+
+```bash
+dsr repos info frankensim
+dsr quality --tool frankensim
+dsr build frankensim --target darwin/arm64
+```
+
+The GitHub workflow files remain in the repo as manual executable specs for the
+gate shape and as historical documentation. They are not automatic push/PR
+criteria.
+
+## Workflows
+
+| Workflow | Trigger | What it proves |
+| --- | --- | --- |
+| `dsr quality --tool frankensim` | manual DSR command | configured fmt, clippy `-D warnings`, workspace unit + conformance tests, xtask policy gates, constellation drift, required quality lanes, x86 cross-check; see the external-wrapper limitations below |
+| `dsr build frankensim --target darwin/arm64` | manual DSR command | native release artifact build for the configured Apple Silicon lane |
+| `ci.yml` | manual GitHub dispatch only | archived/manual version of the fmt, clippy, test, policy, and constellation gate shape |
+| `nightly.yml` | manual GitHub dispatch only | archived/manual version of the full dev/release suites and retained fs-ledger run record |
+| `ci-self-test.yml` | manual | meta-tests: injected failures demonstrably turn the gates red |
+
+### ASCENT conformance profiles
+
+The ASCENT conformance umbrella has a standalone DSR-compatible profile runner
+at `scripts/ci/ascent_conformance_profile.sh`:
+
+```bash
+scripts/ci/ascent_conformance_profile.sh --list pr
+scripts/ci/ascent_conformance_profile.sh --self-test
+scripts/ci/ascent_conformance_profile.sh pr
+scripts/ci/ascent_conformance_profile.sh --list nightly
+scripts/ci/ascent_conformance_profile.sh nightly
+```
+
+The `pr` profile is an explicit cheap selector spanning the base gradient,
+constrained, Pareto, Problem-IR runner, and machine-independent budget-ledger
+surfaces. It runs each named integration target separately so one failure does
+not hide the remaining rows. The `nightly` profile runs the complete
+`fs-ascent` package with Cargo fail-fast disabled, so newly added integration
+targets join nightly coverage without hand-maintained selector drift. Both use
+`--locked`. Python 3 is required for the process supervisor; `--list` remains a
+non-executing selector description and labels its output unsealed.
+
+The default aggregate monotonic budgets are 900 seconds for `pr` and 7200
+seconds for `nightly`; `FS_ASCENT_PR_BUDGET_SECONDS` and
+`FS_ASCENT_NIGHTLY_BUDGET_SECONDS` may override them for an explicitly declared
+host policy. Elapsed time intentionally includes compilation and test execution.
+Each Cargo target starts in a new session and process group. The supervisor pins
+the unreaped leader identity while inspecting that group, forwards HUP, INT, or
+TERM, and uses bounded grace and KILL-drain intervals. A deadline failure stops
+later PR targets from launching. A completely drained deadline exits 124; an
+incomplete drain fails closed with 125 or 127. Launch failure exits 126, ordinary
+test failure exits 1, and handled HUP, INT, and TERM exit 129, 130, and 143.
+
+Every execution gets a unique retained directory below
+`FS_ASCENT_PROFILE_LOG_DIR` (default
+`target/ascent-conformance-profile`). Child stdout and stderr go only to a
+per-target log; canonical run-start, target-result, run-summary, and proof-seal
+rows go to the authoritative `verdicts.jsonl` and are mirrored to stdout. Target
+rows retain the exact argument vector, log hash and size, and the leader's exact
+exit code or signal. The terminal, exactly-once proof seal hashes every preceding
+JSONL byte and records source identities observed before and after execution:
+HEAD, HEAD tree, index, materialized tracked/untracked tree, Git status,
+`Cargo.lock`, and `constellation.lock`. A proof is `sealed` only when those
+identities match; source drift fails closed with exit 127.
+
+`FS_ASCENT_TERMINATION_GRACE_SECONDS` and
+`FS_ASCENT_KILL_DRAIN_SECONDS` bound shutdown. Containment claims cover only the
+new session/process group: a descendant that deliberately escapes into another
+session is outside the claim. SIGKILL of the supervisor, host failure, or power
+loss can also prevent a terminal seal; an absent seal is not proof. `--self-test`
+uses fake executables only—never real Cargo—and covers clean passage, paths with
+spaces, stdout isolation, exact nonzero-exit mapping, launch failure, a stubborn
+child/grandchild deadline, HUP/INT/TERM forwarding, and the incomplete-exit seal
+guard. Its artifacts are retained and reported rather than deleted. This lane is
+a scheduling and evidence guard, not a benchmark or cross-ISA performance
+claim. It remains callable instead of duplicating package execution inside the
+workspace-wide DSR quality gate.
+
+### Casebook conformance profiles
+
+The structured Casebook surface has a separate repo-local profile runner. It
+is intentionally callable rather than activated in DSR or the archived GitHub
+workflow specs by this tranche:
+
+```bash
+bash scripts/ci/casebook_conformance_profile.sh --check
+bash scripts/ci/casebook_conformance_profile.sh --self-test
+bash scripts/ci/casebook_conformance_profile.sh --list pr
+bash scripts/ci/casebook_conformance_profile.sh pr
+bash scripts/ci/casebook_conformance_profile.sh --list nightly-full
+bash scripts/ci/casebook_conformance_profile.sh nightly-full
+```
+
+The `pr` profile is an explicit reviewed set of cheap, family-representative
+Casebook targets. `nightly-full` is complete under its declared discovery
+policy: every ordinary Cargo integration-target entrypoint whose Rust tokens
+contain an `fs_casebook` import, `extern crate`, or qualified path. Discovery
+starts from `cargo metadata --locked --no-deps` and then inspects each reported
+test target's canonical source path; target filenames are not a classification
+mechanism, so `conformance.rs` and replay targets are not silently missed. The
+lexical scanner strips nested comments, cooked/raw/byte strings, and character
+literals before classification, so examples or documentation do not create
+false coverage. Its balanced attribute scanner distinguishes `ignore` in a
+`cfg_attr` predicate from an `ignore` attribute that the `cfg_attr` can emit,
+including nested conditional attributes. Full coverage auto-adopts every
+additional discovered target,
+while a reviewed minimum inventory prevents accidental target removal or
+scanner regression from silently shrinking the lane. The PR set must remain
+inside that reviewed baseline and live discovery; duplicate, missing, stale,
+malformed, empty, noncanonical-feature, or source-escaping entries fail closed.
+Direct and `cfg_attr`-conditional `#[ignore]` markers also refuse discovery:
+hardware/performance, weekly, diagnostic, and deep-cap ignored lanes retain
+their separately declared cadence and are never swept into `nightly-full` by a
+blanket `--ignored`.
+
+That completeness boundary is intentionally exact. The scanner classifies the
+Cargo-reported entrypoint, not arbitrary transitive `mod` files, generated macro
+output, or a dependency renamed so that no `fs_casebook` token remains. Such a
+layout must keep a token in the entrypoint or extend this discovery contract and
+its scanner fixtures. This makes an unsupported construction visible rather
+than silently claiming semantic whole-program dependency analysis.
+
+`--check` and `--list` invoke only locked Cargo metadata plus source inspection;
+they do not build or execute tests. `--self-test` invokes no Cargo command and
+creates no temporary files. It exercises the production lexical scanner,
+passing and malformed inventories, missing/stale/duplicate classifications,
+required-feature selector preservation, pre-launch deadline refusal, spawn and
+ordinary failures, stdout/receipt isolation, a leader that leaves a live
+descendant, a TERM-resistant timeout that proves both TERM and KILL were sent,
+wrapper interruption cleanup, and a separate causal shell-trap forwarding path.
+The default aggregate wall budgets are 900 seconds for `pr` and 7200 seconds
+for `nightly-full`; bounded overrides are retained through
+`FS_CASEBOOK_PR_BUDGET_SECONDS` and `FS_CASEBOOK_FULL_BUDGET_SECONDS`.
+
+Profile execution runs each selector separately with `--locked`, continues
+after ordinary target failures, and stops before launching more work once the
+shared monotonic deadline is exhausted. The shell forwards HUP/INT/TERM through
+the active Bash job rather than a reusable numeric PID. Each target starts in a
+new session; its leader remains
+unreaped while the wrapper verifies live members by PGID and SID, so PID reuse
+cannot redirect cleanup. TERM, a bounded grace period, KILL if needed, and a
+bounded drain apply only to that owned group. Child stdout/stderr go to stderr;
+stdout is JSONL receipts only. Per-target receipts distinguish ordinary,
+spawn, timeout, lingering-descendant, and interrupt outcomes. The terminal row
+reports attempted targets, expected target receipts, and unattempted targets;
+the retained-proof consumer must count the actual intervening target rows and
+fail if that count differs rather than trusting an impossible shell-side claim.
+
+Containment does not claim control over adversarial code that deliberately
+creates a different session/process group. Receipts state that boundary and
+also report provenance as `unsealed`: this helper does not itself bind the
+exact HEAD, dirty worktree bytes, lockfile digest, constellation, toolchain,
+environment, or ISA. A retained proof must wrap it in the DSR provenance lane.
+Uncatchable supervisor loss (`SIGKILL`), shell/host loss, and storage/output
+failure are likewise outside the bounded-drain claim; a missing target or
+terminal JSONL row is a failed proof, never evidence that cleanup completed.
+The same rule covers the narrow process-exec-to-Python-handler startup aperture:
+normal HUP/INT/TERM forwarding is tested after the wrapper is active, while a
+wrapper lost before it can emit a receipt makes the run malformed and failed.
+This remains a scheduling and discovery contract, not benchmark, cross-ISA,
+retained-proof, or CI-wiring evidence. Until external DSR configuration
+explicitly selects these commands, their existence does not claim that DSR is
+already using the PR/full split.
+
+## Runner honesty
+
+- `macos-14` = Apple Silicon (aarch64, NEON): a true reference-family runner.
+- The `scripts/ci/x86_cross_check.sh` lane (bead ebro) is the ARM-INVISIBLE
+  BREAKAGE firewall: `cargo check --locked --workspace --all-targets --target
+  x86_64-unknown-linux-gnu` from the aarch64 dev machines, followed by one
+  derived `cargo check --locked` for every test/bench/bin/example target whose
+  manifest declares `required-features`. This covers the default target surface and the
+  gated targets that `--all-targets` alone skips. No cross-linker is needed
+  (`check` does not link). Each invocation owns a collision-proof log directory
+  and a separate Cargo target directory; concurrent proofs never share mutable
+  build output.
+  Because this is part of the required DSR gate, a missing Rust target is a
+  named failure with the installation command, not a zero-exit skip.
+  Every Cargo command is lockfile-closed. Its retained JSONL verdict binds the
+  exact before/after root content, `constellation.lock`, and every clean pinned
+  sibling tree; root or sibling movement fails the lane. The sole terminal row
+  says whether that provenance is `sealed` or `incomplete`. It cannot prove
+  runtime behavior or generated machine-code quality - real x86 execution still
+  lives on the Threadripper lanes.
+- The `scripts/ci/x86_runtime_sweep.sh` lane (bead yuyy) closes that runtime
+  gap for the pre-release flow: on the first quiet, reachable Threadripper
+  (ts1/ts2), fast-forwarded to origin/main, it first runs `cargo run --locked
+  -p xtask -- check-identities`, which recomputes and byte-compares the
+  committed `identity-schemas.json`, then runs the full workspace tests
+  (`--no-fail-fast`). Both commands use the same hermetic target directory,
+  their exact statuses are retained, and either failure fails the lane. The
+  lane is load-gated with bounded retries (the workers double as rch lanes
+  whose background traffic can kill long runs), and dirty/diverged clones are
+  refused with a named host diagnostic. Local and remote pre/post dirt
+  probes disable global excludes, independently enumerate untracked paths using
+  only repository `.gitignore` rules, and reject hidden index flags. Exactly one terminal JSONL
+  verdict represents the overall run. The lane never stashes, drops, or
+  rewrites remote worktree changes; even `Cargo.lock` churn is a refusal.
+  Before Cargo, the remote lane retains a
+  `scripts/ci/checkout_constellation.sh --snapshot` identity; after Cargo it
+  captures the identity again and requires equality. That binds exact root
+  content, `constellation.lock`, and every pinned/clean path-dependency sibling.
+  Both Cargo commands run with `--locked`, and a pass requires each exact exit
+  status, an
+  unchanged before/after HEAD and snapshot, clean post-test remote and local
+  worktrees, at least one
+  completed suite, no failed suite, and a successfully retained full log. The
+  retained marker block includes the final porcelain diagnostic when a test or
+  build script dirties the clone. The local caller must itself be clean,
+  and the fast-forwarded remote HEAD must equal that admitted local HEAD; a
+  remote `origin/main` run can never stand in for uncommitted local changes.
+  ~20 min;
+  named-skip when no quiet host answers - staleness of the last pass row is
+  the alarm to watch. First catch of this class: the obq0 fs-cheb per-ISA
+  schedule divergence.
+- `ubuntu-24.04` = x86-64, but GitHub-hosted runners do **not** guarantee
+  AVX-512. fs-substrate resolves the SIMD tier at startup and the tier is in
+  the logs; the x86 lane therefore proves *portable correctness plus whatever
+  tier the runner exposes* (typically AVX2). An AVX-512-guaranteed lane needs
+  a self-hosted runner and stays **deferred** until one exists. Roofline
+  *performance* bands (§14) are meaningless on shared virtual runners and are
+  explicitly NOT claimed by CI; they belong to the reference machines with
+  ledgered fingerprints.
+
+## xtask policy gates (the `check-all` set)
+
+`cargo run -p xtask -- check-all` runs, and CI treats as one gate:
+
+| Check | What it refuses |
+| --- | --- |
+| `check-layers` | a crate depending upward/sideways against the L0–L6 map |
+| `check-deps` | non-Franken runtime dependencies |
+| `check-contracts` | crates missing CONTRACT.md canonical sections |
+| `check-unsafe` | unsafe outside registered <300-line capsules with SAFETY.md |
+| `check-powi` | optimization-level-dependent `f64::powi` on determinism paths |
+| `check-goldens` | golden hashes whose upstream semantic surfaces drifted without a deliberate re-freeze (`golden-couplings.json`, docs/GOLDEN_POLICY.md) |
+| `check-identities` | persisted/replayed identity schemas with unclassified source fields, missing exact-field mutations or replay-version refusal guard targets, stale generated coverage, or schema/domain drift without a golden-coupling bump (`identity-schemas.json`) |
+| `check-manifest-fixture` | a new-domain package/edge omitted from `proposed-manifest-fixture.json`, an observed undeclared or forbidden edge, a missing declared-present edge, same-layer cycle/order drift, a root/standalone-`fs-wasm` metadata mismatch, or duplicate ownership of a registered domain type |
+| `check-vv-scorecard` | tracked `vv-scorecard.md`/`vv-scorecard.json` drifting from the deterministic projection of the seeded validation corpus and adversarial registry (regenerate with `generate-vv-scorecard`) |
+| `check-constellation-drift` | a constellation sibling checkout that WANDERED: dirty worktree, HEAD retreated behind the `constellation.lock` pin, or history diverged from the pin — each verdict names the sibling and prints expected and actual heads (bead `frankensim-es6pt`). A strict fast-forward is reported as `stale-lock` (visible, NOT red: the lock, not the checkout, must move, through the release train); a missing, shallow, or pin-object-absent checkout is NO-DATA, never silently counted as pass or drift. The strict `check-constellation` equality check remains the separate reproducibility authority |
+| `check-spine-metrics` | a missing, corrupt, or internally inconsistent `spine-metrics.json` beads snapshot (a gate that reports zero findings on a rotted input is how gates die), or an e2e state outside the admitted v2 states (`no-retained-receipt`, `measured`), or — when measured — a retained `spine-e2e-summary.json` receipt that is absent, doctored (fnv mismatch, nonzero failures), or STALE against the live SolveStage table: the gate refuses a receipt claiming a stage boundary the product no longer admits (beads `frankensim-o5et9`, `frankensim-iakds`). A tracker that moved since the snapshot renders a visible `stale-snapshot` policy note — never a silent pass, never a wedge; regenerate deliberately with `generate-spine-metrics`. The snapshot feeds the dashboard's blocked-ratio/actionable/e2e rows so the live beads store never byte-destabilizes `check-program-metrics` |
+| `check-tropical-path` | a missing, corrupt, or internally inconsistent `tropical-critical-path.json` artifact (slack/map/makespan coherence is verified), or a CYCLE in the live open-bead dependency graph — the certified path is undefined until the cycle breaks, and the gate refuses to silently linearise it (bead `frankensim-kx95s`). Tracker movement renders a `stale-snapshot` note, not a wedge; regenerate deliberately with `generate-tropical-path`. The artifact records per-bead slack, the spine beads' positions, defaulted-estimate counts, and bv's topological top-10 beside slack where bv was runnable — the centrality/schedule disagreement is the finding |
+| `check-suite-receipt` | a missing/corrupt `suite-receipt.json`, totals that disagree with per-crate sums, any `green`/`green-with-known-red` claim while unexpected red or build failures exist (the receipt's negative control), a registered known-red test whose owner bead is CLOSED while the test still fails, or a registry/receipt row-set mismatch (bead `frankensim-fluz9`). The receipt is produced by `generate-suite-receipt`: cargo metadata enumeration, `--no-run --keep-going` build, direct per-executable `--format json` runs (certain package attribution, build-failure isolation), per-package doc tests, then the known-red partition from `suite-known-red.json`. HEAD movement renders a `stale-receipt` note; a repaired known-red renders a `known-red-repaired` note until its registry row is deliberately removed |
+| `check-program-metrics` | tracked `program-metrics.md`/`program-metrics.json` drifting from the deterministic projection of the seeded validation corpus, adversarial registry, and capability maturity registry (regenerate with `generate-program-metrics`) |
+| `check-schemas` | a frozen public schema whose version constant drifted from its policy record, a migration obligation whose evidence test is missing, a `no-predecessor` schema bumped without declaring a migration path, or a new public version constant in a product-boundary crate that is neither promised nor explicitly disclaimed (`schema-policy.json`, docs/SCHEMA_POLICY.md) |
+| `check-consolidation` | a crate that no supported workflow exercises and no review has dispositioned, a `FREEZE`/`CONSOLIDATE`/`REPAIR-OR-QUARANTINE` disposition on a crate that has since gained a workflow consumer, a disposition without a rationale, or a usage sweep whose known-exercised control crate is itself unreached (`consolidation-review.json`, docs/CONSOLIDATION_REVIEW.md) |
+| `check-claims` | claim-state drift in the tracker mirror |
+
+### Pre-commit guard (fires in milliseconds, not at check-all time)
+
+Two failures are cheap to see at commit time and expensive to discover a week
+later. `scripts/hooks/pre-commit` catches both:
+
+- **A sibling off its `constellation.lock` pin.** On 2026-07-24 asupersync moved
+  five times while the lock pinned 0.3.8; it surfaced hours later as
+  inscrutable `E0277`s three layers down in FrankenSQLite and cost the whole
+  fleet its build.
+- **A `*_VERSION` / `*_IDENTITY_VERSION` constant bumped without
+  `golden-couplings.json` in the same commit**, which is how fifteen surfaces
+  quietly accumulated into 33 violations.
+
+```bash
+scripts/hooks/install.sh           # install (never clobbers an existing hook)
+scripts/hooks/install.sh --status  # report what is installed
+```
+
+It is **pure shell** — no `cargo`, no build — because a hook that builds the
+workspace is a hook that gets bypassed with `--no-verify` on its second use, and
+a bypassed guard is worse than none. It **warns** by default and lets the commit
+through; `FRANKENSIM_HOOK_STRICT=1` turns warnings into refusals. Warn-by-default
+is deliberate: in a shared tree a blocking heuristic can wedge every agent at
+once, including whoever is trying to commit the fix.
+
+An existing hook is preserved as `pre-commit.local` and chained first, so Agent
+Mail's reservation guard keeps working. The authoritative checks remain
+`check-constellation` and `check-goldens`; the hook only front-runs them.
+
+### Asking whether YOUR lane is clean
+
+`check-all` reports one verdict over thirty checks, so in a shared repository
+another lane's accumulated debt drowns your signal. Restrict the verdict:
+
+```bash
+cargo run -p xtask -- check-all --only schema-policy,consolidation-review
+```
+
+The exit code then reflects **only** the named checks: `0` if your lane is
+clean, `1` if it is not, and `2` if you named a check that did not run (a typo
+is refused rather than quietly reporting success). Every check still executes —
+this filters the verdict, not the work, so a violation outside your selection is
+still found, just not charged to you.
+
+A full run also emits a per-check tally before the summary, so ownership is
+readable at a glance:
+
+```json
+{"check":"golden-couplings","verdict":"tally","violations":33}
+```
+
+Each is also runnable alone (same names). Golden re-pins follow
+docs/GOLDEN_POLICY.md: committed tree, BOTH build modes, plausible root
+cause, coupling row updated in the same commit.
+
+The proposed-manifest gate is deliberately ahead of crate implementation.
+Edges marked `present` must resolve now; edges marked `proposed` are reserved
+and may be absent until their owner lands, but no other edge may appear. Its
+same-layer order and minimal compile-root inventory cover the exact 15-crate
+new-domain set, while `cargo metadata --locked --no-deps` observes both the
+root workspace and the standalone `crates/fs-wasm` workspace. Every admitted
+or rejected edge decision is emitted as a structured JSONL row. The xtask unit
+target retains seeded cycle, undeclared-edge, shorthand, and duplicate-type
+falsifiers; the real gate remains part of `check-all`, so the configured DSR
+quality lane executes it without a separate GitHub workflow.
+
+## Required quality lanes
+
+`scripts/ci/quality_lanes.sh` is a REQUIRED DSR check. It derives every
+test, bench, binary, and example target with `required-features` from locked
+Cargo metadata and checks/runs each target with its declared features and
+`--locked`.
+
+The same sealed run includes the development-only high-precision oracle at
+`tools/oracle`. That nested workspace is outside the production Cargo graph
+and pins Rug/MPFR in its own reviewed lockfile. Four fail-closed rows check its
+formatting, strict Clippy surface, comparison-plumbing tests, and deterministic
+audit. The audit evaluates 4,096 generated samples per family at 256-bit
+precision, reports per-function ULP histograms and argmax inputs, and exits
+nonzero if an `fs-math` declared budget is exceeded or an `fs-ivl` enclosure
+misses an MPFR point value. A passing finite sample is external agreement
+evidence for that exact source snapshot and sample family; it is not an
+exhaustive binary64 proof, run authentication, or fresh cross-ISA evidence.
+Missing oracle manifest or lockfile is a named failure.
+
+The standalone
+`crates/fs-wasm` workspace has three required obligations:
+
+1. Native tests against its tracked lock.
+2. A locked `wasm32-unknown-unknown` Cargo check.
+3. A `wasm-pack build --dev --target web -- --locked` browser build whose
+   invocation must not modify the nested lock.
+
+The manifest, `wasm-pack`, and the Rust wasm target are DSR host prerequisites.
+Absence is a named FAILURE, not an advisory skip. Every admitted invocation gets
+a collision-proof run directory under `target/quality-lanes/` containing full
+per-lane logs, an isolated wasm-pack output, `verdicts.jsonl`, and
+`inventory.json`; it also owns a separate Cargo target directory. Override paths
+are normalized to absolute paths before any nested-workspace command runs. The
+inventory SHA-256 hashes canonical input file CONTENTS (manifests, locks,
+contracts, Rust sources/tests, the isolated oracle source and lock, CI scripts,
+and the derived gated-target list), not merely
+filenames. The same composite
+root + clean-constellation snapshot used by the x86 lane must match before and
+after the run.
+Per-lane rows and the summary are explicitly `provisional` and carry JSON `null`
+for the not-yet-known closing snapshot. The literal final JSONL row is
+`quality-proof-seal`; it binds the SHA-256 of every preceding row to the final
+snapshot and reports `sealed` or `incomplete`. Consumers MUST verify that seal
+rather than treating an earlier row as an independent receipt. Once the run
+directory exists, an EXIT finalizer also writes an `incomplete`/`fail` seal for
+initial-admission errors and later implicit shell failures; a provisional row
+cannot become the terminal record merely because `set -e` fired. SIGKILL,
+host/process loss, or a storage failure can still prevent the finalizer from
+writing, so a missing or malformed seal is always a failed proof, never a skip.
+
+### Native-binary example lanes (human-runnable; not in `check-all`)
+
+Three shell lanes drive the REAL `frankensim` binary against the tracked
+worked examples. None is run by an xtask gate (the rch offload regime means no
+native binary is guaranteed at gate time); the always-on gate for the same
+facts is the fs-cli G0/G1 battery (`crates/fs-cli/tests/cli.rs`, in
+particular `g1_the_heatsink_fan_example_runs_every_stage_through_the_real_cli_verb`
+and `g1_run_completes_seven_stages_and_exports_report_and_package_for_the_reference_project`),
+which runs wherever `cargo test -p fs-cli --test cli` runs. Expected counts
+are measured values with the commit they were measured at; a lane that
+returns a different count is a regression owned by the bead named here.
+
+| Lane | What it proves | Expected (commit) | Owner |
+|---|---|---|---|
+| `scripts/ci/examples_freshness_e2e.sh --binary PATH` | heated-plate, cooling-reference and refusal-loop validate as documented; the finned heatsink imports, solves all seven stages, `report`/`package` export the retained bytes, an unknown run refuses with `cli-solve-unknown-run`; the ladder variant (`heatsink-fan-ladder.fsim`, solver fidelity `ladder`) solves three uniform rungs, measures the QoI budget's discretization term and renders the report's convergence section (adds ~2.5 min in a debug build); the rotated twin (`heatsink-fan-rotated.fsim` on `heatsink-rotated.stl`, every facet oblique, f32 import precision) imports, solves all seven stages and reproduces the axis-aligned T_max within 1 mK (measured 0.16 mK on different meshes) | 39 checks, 0 failures, 280 s debug (2026-09-03, B4 rotated twin) | q61wp.61 (registration), q61wp.8 lineage, q61wp.44 (ladder), q61wp.46 (rotated twin) |
+| `scripts/ci/solve_stage_producers_e2e.sh --profile full --binary PATH` | every solve stage executes on the cooling reference; refusal drills; determinism of the run identity; resume of a completed run refuses; cross-ledger byte-identical report twins; `--retain-receipt` mints the spine e2e receipt with the `stages` rows check-maturity reads | 65 checks, 0 failures, 7/7 stages (974b1cc6) | q61wp.13 (receipt), NobleLion lane |
+| `scripts/ci/e2e_extreal_vertical_profile.sh --run` | per-stage wall-clock of validate/import/solve/report/package | stage rows only; the synthesized kernel-attribution rows are literal fractions of the solve time and are NOT measurements until q61wp.60 lands | q61wp.60 |
+
+Under the RCH offload regime set `FRANKENSIM_BIN` (or `--binary`) to a native
+build; the lanes refuse without one rather than pretending.
+
+### Local build hygiene for concurrent agents (measured 2026-09-01/02)
+
+Facts an agent needs before its first local build on the shared Mac; each
+number is from a real run on that box (41 sessions, load average 160–860):
+
+- **The shell exports a global `CARGO_TARGET_DIR`** (`/Volumes/USB_NVME/cargo-target`)
+  shared by every repository and agent. One lock serialises everyone; waits of
+  10+ minutes behind another agent's build were observed twice in one evening.
+  For local verification use a private target: `CARGO_TARGET_DIR=/Volumes/USB_NVME/rch-targets/<agent>-<crate> cargo ltest -p <crate> ...`.
+  Cost: a cold private target rebuilt fs-cli's cone in ~20 minutes (asupersync
+  alone 19 minutes under load); afterwards fs-cli rebuilt in 4 m 29 s after a
+  fs-mesh edit and 1 m 08 s after a solve.rs edit; a native `xtask` built in
+  7.5 s.
+- **`cargo build|check|test|clippy` are hooked to the rch offload** (the hook
+  fires even through an absolute cargo path or `sh -c`). The local aliases
+  `cargo lcheck`, `cargo ltest`, `cargo lbuild`, `cargo lclippy` run the real
+  cargo locally. Root-workspace offload is refused on this host (`hz3` alias);
+  crate-scoped offload works. An rch client that dies with exit 144 was killed
+  by the local supervisor; the remote job survives — check the worker before
+  rerunning.
+- **`cargo test` rebuilds the package's binaries too.** A `frankensim` binary in
+  a private target changes under you when an integration test run finishes;
+  record the binary's mtime next to any lane receipt (the freshness and
+  vertical-profile lanes print it).
+- **The tracked `target/debug/xtask` on the Mac may be a Linux ELF** (built by
+  a yto/rch job; `exec format error`). Build a native one:
+  `CARGO_TARGET_DIR=<private> cargo lbuild -p xtask`, then run
+  `<private>/debug/xtask <subcommand>` from the repository root.
+- **macOS first-exec wedge:** a freshly linked binary can hang at `_dyld_start`
+  under `syspolicyd` on first execution; a second invocation runs. Diagnose
+  with `sample <pid>`; do not "fix" it by rebuilding.
+- **Generators read the git INDEX.** Stage new tracked files before
+  `generate-source-manifest` / `generate-program-metrics`, and add every new
+  tracked file to `doc-facts-inventory.json` (hand-maintained; `check-docs`
+  refuses an uninventoried file and prints the exact facts block to paste).
+- **Never commit `Cargo.lock` from a local build**: the sibling constellation
+  is off-pin on this host and a local resolve records drifted sibling versions
+  (memory of the 2026-09-01 audit: committed lock at asupersync 0.4.10 vs pin
+  0.4.9). Commit by pathspec (`git commit -m ... -- <paths>`); a sweeper agent
+  commits the whole tree every few minutes, so verify before you edit shared
+  files, not after.
+
+## Constellation
+
+The workspace path-depends on sibling repos. The canonical fresh-checkout
+path is `cargo run --manifest-path tools/bootstrap/Cargo.toml` (beads
+huq.17 and 1t8i; docs/BOOTSTRAP.md). This standalone, zero-dependency package
+builds before the root workspace resolves, fetches every repo from
+`constellation.lock`'s recorded remotes at the pinned revisions, applies the
+same pinned-head and clean-tree verification to existing and newly cloned
+siblings, and refuses a noncanonical/oversized lock, duplicate or unknown
+library, mismatched lock hash, path-unsafe library identity, or missing, wrong,
+duplicate, unknown, or type-invalid top-level identity metadata before deriving
+or accessing any destination. The canonical v2 lock identity is
+`org.frankensim.xtask.constellation-lock.v1` at integer version `1`; its existing
+row-only hash still covers `(lib, version, git_head)`. The Rust writer's
+retained implementation coupling advances independently under
+`org.frankensim.xtask.constellation-lock-writer.v2` at authority version `2`;
+that writer epoch is not serialized into the lock and does not expand its
+portable identity. The writer fsyncs a uniquely staged same-directory document
+before atomic replacement, so a failed write or rename retains the prior valid
+lock. Clean verification
+disables global ignores, catches files hidden by repository-local excludes,
+rejects untracked `.gitignore` authorities plus `assume-unchanged`,
+`skip-worktree`, and persisted FSMonitor index authority. Ordinary observations
+disable fsmonitor and the untracked cache. The verifier instead reads the raw
+primary index: versions 2 and 3 are structurally parsed, any `FSMN` extension is
+refused without a per-entry decoding claim, the trailing SHA-1 or SHA-256
+checksum is authenticated, and raw Git path grammar is conservatively validated
+before any worktree join. Case-insensitive `.git` components, symlink
+`.gitmodules`, and every UTF-8 sequence Git documents as HFS-ignored refuse on
+all platforms; Windows also refuses native separators, rooted or
+drive/stream-qualified paths, and short-name `.git` or symlink `.gitmodules`
+aliases. Malformed, truncated, or
+checksum-invalid indexes, version 4, split-index `link`, sparse-index `sdir`,
+every other unsupported required extension, or ambiguous object-hash/checksum
+boundaries fail closed.
+A missing primary index is valid only with an empty Git
+inventory. This avoids a false clean result when Git refreshes an unavailable
+monitor and clears its in-memory fsmonitor-valid bits before `ls-files -f` can
+report them. Normalize FSMonitor or split-index state deliberately before
+running the gate. Raw tracked file/symlink object IDs are independently
+checked with `hash-object --no-filters`, so local filters, EOL transforms, and
+working-tree-encoding cannot normalize changed source into a false clean result.
+Before raw hashing, every materialized logical index prefix is inspected:
+intermediate components must be ordinary directories, and distinct logical
+prefixes may not resolve to one filesystem identity on Unix; Windows requires
+exact preserved directory-entry spelling and rejects non-symbolic reparse points.
+Case/normalization collisions, Unix tracked hard-link aliases, and ancestor-link
+redirection therefore refuse before external or collapsed bytes can be admitted.
+Every clean-tree
+decision also recursively forces initialized nested submodules visible despite
+repository or `.gitmodules` ignore policy: at every depth their HEAD must match
+the containing index gitlink, their tracked and untracked worktrees must be
+clean, and local exclude/index flags cannot conceal changes. This does not
+initialize absent submodules or expand `constellation.lock` identity. It supports
+only exact ordinary-directory repository roots, strips inherited Git
+repository/worktree/index/object redirection, pathspec-mode controls, and
+standard-handle and attribute-source overrides; it disables trace destinations
+and replacement objects, and isolates global/system configuration, templates,
+hooks, attributes, and
+credential helpers. Transport admission is default-deny and enables only
+`file`, `https`, and `ssh`; `http`, `git`, custom remote helpers, and other
+protocols refuse before helper execution. Embedded shell Python runs isolated
+from `PYTHONPATH`. Local executable or transport Git authorities, including
+remote-VCS helper and bundle/packfile-URI selection, replace
+refs, grafts, and `extensions.refStorage` refuse before filter-aware observation
+or mutation. `GIT_REFERENCE_BACKEND` is removed alongside inherited object/ref
+format defaults. Resume
+checkout uses `--no-overwrite-ignore`, preserving owner-controlled ignored
+collisions. Fetch disables automatic maintenance and submodule recursion;
+checkout also disables submodule recursion, so initialized nested repositories
+are verified without outer-bootstrap network or worktree mutation. Recursive
+admission reaches every initialized descendant before each parent status forces
+gitlink visibility with `--ignore-submodules=none`; a non-content cached diff
+independently retains staged-gitlink detection. Provenance
+publication stages and fsyncs the candidate first, then
+runs two complete whole-constellation revalidation passes plus an exact final
+lock-byte check immediately before atomic rename. Every Git subprocess sets
+`GIT_NO_LAZY_FETCH=1`, so offline or verification paths cannot implicitly fill
+missing promisor objects. It supports `--offline` cache verification and `--from`
+mirrors, and writes fetch
+provenance with identity domain
+`org.frankensim.xtask.constellation-bootstrap-provenance.v3` at version `3`
+(the top-level schema string remains `frankensim-constellation-bootstrap-v2`);
+the standalone and in-workspace producers share one canonical encoder and the
+same top-level and row shape,
+distinguish the canonical upstream remote from the selected mirror/transport,
+record whether that transport was actually used, and stage the complete receipt
+beside its destination before atomic replacement. The written and fsynced
+staging handle remains live across the final validation barrier. Immediately
+before rename, Unix verifies its sealed device/inode, single-link state, and
+mutation-sensitive metadata against the visible non-symlink entry; Windows
+verifies the corresponding volume serial, file index, link count, attributes,
+size, and timestamps without following reparse points. This closes the long
+validation-window substitution risk on both platform families. Safe `std`
+still exposes only a pathname rename, so the gate makes no claim against the
+narrow final identity-check-to-rename race when an untrusted concurrent writer
+controls the destination directory. Cooperating concurrent invocations remain
+complete and use last-successful-rename-wins ordering. Other targets fail a
+support preflight before sibling repository mutation because no safe portable
+file-object identity is available. A failed validation or staging write leaves
+earlier verified provenance intact; failed temp/rename paths remain
+non-authoritative diagnostic artifacts, and parent-directory fsync is
+best-effort. `cargo run -p xtask --
+bootstrap-constellation` remains the in-workspace command after the sibling
+paths already resolve.
+`scripts/ci/checkout_constellation.sh` remains the shell-only
+equivalent used by the manual workflow specs. It admits the same exact lock
+schema/domain/version and refuses malformed identity metadata before any sibling
+operation; retained synthetic coverage runs checkout, verify-only, and snapshot
+through that parser. Both it and `xtask
+check-constellation` now require every sibling to be at the pinned head with a
+clean tracked/untracked working tree. The script's `--snapshot` mode is the
+canonical repo-local CI content identity. Snapshot v3 length-frames HEAD, index
+state, sorted paths, Git-semantic modes, regular-file SHA-256s, symlink target
+bytes, explicit missing entries, the exact lock bytes, and every clean pinned
+sibling head/tree. Initialized root gitlinks are recursively framed with their
+parent index records, actual HEAD, complete nested index/index flags, and exact
+worktree bytes; uninitialized gitlinks receive an explicit state marker and are
+not initialized. Snapshot traversal applies the same ordinary-prefix and
+filesystem-alias barrier before hashing. Thus equal-shape porcelain states with different dirty bytes
+or nested indexes cannot collide. Sibling cleanliness probes use the same
+recursive boundary semantics and override `ignore=dirty` and `ignore=all`. The
+snapshot never hashes rendered `git diff` text and
+fails closed on unsupported special files. Cleanliness forces executable-bit and full untracked
+reporting, disables global excludes, then independently enumerates untracked
+paths using only the repository's `.gitignore` rules; ignored build artifacts
+are intentionally outside source identity, but untracked `.gitignore` files are
+refused as unpinned policy at the root and every initialized nested repository.
+Two complete root-plus-all-siblings captures must match before the digest is
+emitted, so adjacent per-repository checks cannot masquerade as one coherent
+constellation observation. Raw stage-zero tracked bytes are checked independently
+of Git filters, fsmonitor, and the untracked cache. Stable dirty FrankenSim roots are
+therefore hashed exactly, while any dirty sibling is refused.
+
+The standalone Rust, shell, and in-workspace xtask bootstrap paths initialize
+new siblings in place with a local incomplete-state marker before fetching. A retry may resume
+a clean marked checkout, or a clean unborn checkout with the exact expected
+origin, without deleting anything. Ordinary dirty repositories and ordinary
+repositories at a mismatched HEAD are never repaired automatically. Bumping a
+sibling remains deliberate: re-run `cargo run -p xtask -- lock-constellation`
+locally and commit the new lock (schema v2 records remotes).
+
+## Constellation governance
+
+[Constellation Governance](CONSTELLATION_GOVERNANCE.md) defines the
+single-maintainer planning assumption, review cadence, reachability-based
+incident classification, fail-closed emergency-update policy, archival
+requirements, and support horizon for all seven pinned siblings. The generated
+[trust-cone assessment](CONSTELLATION_TRUST_CONE.md) links that policy to
+measured consumers and risk classes. The retained
+[July 2026 FrankenSQLite corruption tabletop](CONSTELLATION_INCIDENT_TABLETOP_2026-07.md)
+exercises report, triage, candidate pin, emergency train, and archival decisions.
+
+`cargo run -p xtask -- check-constellation-assessment` requires these documents,
+their normative sections, and their cross-references. This is a documentation
+and consistency gate. It does not prove maintainer availability or incident
+resolution.
+
+E13.4 still owns the executable cross-repository compatibility train, and E13.3
+still owns the deterministic vendored source bundle. Both are open. Therefore a
+focused sibling test is not a complete pin-admission result, and the configured
+DSR release artifact, Git remotes, sibling checkouts, lock, and bootstrap
+provenance are not yet an independently escrowed, self-contained release bundle.
+
+## Structural source manifest
+
+[`frankensim-source-manifest.json`](../frankensim-source-manifest.json) is the
+canonical in-house source/SBOM content schema for E13.2.
+[`frankensim-source-manifest.spdx.json`](../frankensim-source-manifest.spdx.json)
+is its deterministic SPDX 2.3 JSON projection. Both are generated and checked
+with:
+
+```bash
+cargo run --locked -p xtask -- generate-source-manifest
+cargo run --locked -p xtask -- check-source-manifest
+```
+
+`check-source-manifest` is composed into `xtask check-all`, so the configured
+DSR quality gate checks it before the later repo-local quality lanes run. With
+Git metadata present, the manifest double-captures and length-frames every
+indexed non-Beads blob except the two generated manifest artifacts, binding
+path, Git mode, byte count, and BLAKE3 content digest into
+`org.frankensim.xtask.source-root.v1`. Reading the index blobs rather than the
+ambient worktree makes the artifact describe the exact commit candidate and
+prevents unrelated unstaged shared-tree edits from being absorbed. Its outer
+canonical JSON identity uses `org.frankensim.xtask.source-manifest.v1`. The
+artifact also retains:
+
+- all seven `constellation.lock` rows, remotes, measured
+  production/development/pinned-unused boundaries, and stable references to
+  the lock, bootstrap-provenance, and trust-assessment rows;
+- the 140 native and one standalone `fs-*` crate manifests with layer and
+  unsafe-capsule counts;
+- the pinned toolchain channel/components and exact configuration digest;
+- the complete unsafe-capsule registry summary; and
+- explicit isolation rows for the zero-dependency bootstrap, the independent
+  certified-arithmetic N-version kernel, the Rug/MPFR development oracle, and
+  the standalone browser/WASM distribution cone.
+
+The SPDX projection maps that same source set to one file-analyzed structural
+root package, every tracked source row to an SPDX file with a BLAKE3 checksum,
+all native and standalone crates to component packages, all seven sibling pins
+to exact VCS download locations, and the bootstrap/oracle/checker boundaries to
+explicit build/dev-tool relationships. Its document namespace is derived from
+the canonical manifest identity. SPDX 2.3 requires a SHA-1 package verification
+code when `filesAnalyzed` is true; xtask computes that compatibility field with
+its independently vector-tested internal SHA-1 implementation. SHA-1 is not
+used as FrankenSim source authority, and the rendering makes no vulnerability,
+license, authenticity, correctness, or release-attestation claim.
+
+`.beads/**` is intentionally excluded: issue-tracker churn is operational
+coordination, not build source. Untracked and unstaged work are excluded by the
+Git-index inventory and blob capture, so a committed manifest cannot silently
+absorb another agent's scratch or mid-edit file. In a transferred or extracted
+source snapshot without `.git`, the checker uses the retained manifest only to
+recover the bounded, sorted path/mode inventory, then independently re-reads
+and re-hashes every listed file twice. This archive fallback cannot discover an
+extra file that was not in the retained inventory and refuses Git-link rows
+that cannot be rehydrated without Git metadata.
+
+This structural artifact cannot truthfully bind the Git commit that will
+contain itself. Its release fields therefore fail closed: final FrankenSim
+commit, complete root-plus-constellation snapshot, `rustc` host, and retained
+canonical bootstrap-provenance identity are explicitly required but unbound.
+E13.3 must attach those fields in a release envelope and embed the manifest in
+the verified vendored bundle. `fs-package` v9 now adds the optional
+`Provenance::source_manifest_identity` citation: when supplied, citation
+presence/value is bound into the package root and waiver authorization context,
+and strict JSON decode/encode preserves it exactly. An uncited package remains
+valid but claims no exact source closure. The citation is an artifact address;
+it does not authenticate the manifest, prove that the cited source produced the
+package, or supply the still-missing E13.3 release binding. None of those
+stronger integrations may be inferred from a green structural drift check or a
+matching package field.
+
+## Public V&V scorecard
+
+[`vv-scorecard.md`](../vv-scorecard.md) and
+[`vv-scorecard.json`](../vv-scorecard.json) are the public V&V scorecard: a
+deterministic projection of the seeded `fs-vvreg` validation corpus and the
+built-in adversarial registry into per-(QoI, regime) outcome cells with a
+loud KNOWN GAPS list (bead `frankensim-extreal-program-f85xj.4.8`). Both are
+generated and checked with:
+
+```bash
+cargo run --locked -p xtask -- generate-vv-scorecard
+cargo run --locked -p xtask -- check-vv-scorecard
+```
+
+`check-vv-scorecard` regenerates both artifacts in memory and requires byte
+identity with the tracked files; it is composed into `xtask check-all`, so
+the configured DSR quality gate checks it. No retained ledgered run-result or
+executed adversarial-assessment store exists yet, so the committed artifact
+honestly renders every prediction-error, interval-coverage, and
+false-acceptance cell as `NO-DATA`; a populated cell requires a future
+persisting lane (e05/e07 scope), never a hand edit. The scorecard is a
+diagnostic projection: nothing it shows upgrades any corpus claim cap.
+
+## Program metrics dashboard
+
+[`program-metrics.md`](../program-metrics.md) and
+[`program-metrics.json`](../program-metrics.json) are the program's OUTCOME
+metrics as one deterministic artifact (bead
+`frankensim-extreal-program-f85xj.16.4`). Rows are projected from the seeded
+`fs-vvreg` corpus, the adversarial registry, the V&V scorecard, and
+`capability-maturity.json`:
+
+```bash
+cargo run --locked -p xtask -- generate-program-metrics
+cargo run --locked -p xtask -- check-program-metrics
+cargo run --locked -p xtask -- record-program-metrics "<label>"
+```
+
+`check-program-metrics` regenerates both artifacts in memory and requires byte
+identity with the tracked files; it is composed into `xtask check-all`, so the
+configured DSR quality gate checks it. **Editing `capability-maturity.json` or
+the `fs-vvreg` corpus therefore requires regenerating this dashboard**, exactly
+as it already requires regenerating the V&V scorecard.
+
+Two properties are worth knowing before reading the artifact:
+
+- **`NO-DATA` and a measured zero are different, and neither is laundered into
+  the other.** `NO-DATA` means no measurement machinery exists, so any number
+  would be invented; each such row names the tracked bead that would make it
+  live. A measured `0` means the population is enumerable and the answer is
+  genuinely none — several rows are real zeros today, and hiding those behind
+  `NO-DATA` would conceal a known-bad result. Ratio denominators are
+  `NonZeroU64`, so an empty population cannot render as `0%`.
+- **Trend is computed against the retained history, not against the artifact
+  itself.** `record-program-metrics` appends one generation to
+  `program-metrics-history.jsonl`; `generate` never writes it. That separation
+  is what keeps `check` idempotent — a dashboard that read its own output as
+  its trend basis could not be byte-checked. Because each recorded generation
+  carries the `source_identity` of its values, an `unchanged` trend over an
+  identical identity is provable rather than coincidental.
+
+Kernel throughput, crate counts, test-file counts, and open-issue counts are
+deliberately EXCLUDED and the artifact says so with reasons: they are
+diagnostics rather than outcomes, and the issue store in particular churns on
+every unrelated edit, which would make this checked artifact stale for every
+agent in the repository.
+
+## External DSR wrapper limitations
+
+The repo-local scripts above fail closed and retain their own complete evidence,
+but the current DSR wrapper/configuration lives outside this repository and is
+not yet an evidence-complete aggregate. As of this revision, external DSR:
+
+- can return success when its repository configuration is missing, malformed,
+  unreadable, or resolves to zero checks;
+- captures command output in memory and retains only the first 1,000 bytes in
+  its result instead of storing a full per-command log;
+- does not bind all configured checks to one before/after root + constellation
+  snapshot; and
+- reports dry-run commands as passed even though they were not executed.
+
+Its separately configured top-level Cargo checks/build also need `--locked`.
+Until those external issues are fixed, a bare "DSR 8/8" line is not sufficient
+evidence by itself. Cite the exact repo-local `verdicts.jsonl`, full-log paths,
+before/after snapshot, HEAD, and lock identities emitted by these scripts. DSR
+remains the required orchestrator; this is an explicit no-claim boundary on its
+current aggregate receipt, not permission to substitute GitHub Actions.
+
+## Decalogue mapping (plan patch Rev 25)
+
+| Principle | Gate | Status |
+| --- | --- | --- |
+| P1 pure Rust, Franken-only | `xtask check-deps` + `check-unsafe` capsule registry lint | **live** (`ci.yml`) |
+| P2 determinism | G5 audit: bit-identical re-run of seeded suites across thread counts | **deferred** — owning bead: determinism audit harness; unit-level determinism asserted in crate suites today |
+| P3 differentiable-or-certifiable | gradient-check merge gate (adjoint vs dual/FD; a solver without a passing check cannot merge, §8.7) | **deferred** — wired when fs-ad adjoint infra + first solver land; fs-vskeleton already self-gates its adjoint in-run |
+| P4 budgets first | Five-Explicits lint on ledger ops | **live in fs-ledger API** (structured rejection); IR-level admission lint deferred to fs-ir |
+| P5 structure preservation | exact-sequence / conservation G0 law suites | **partial** — review-checklist status; suites land with fs-feec |
+| P6 roofline-honest | perf-regression bands vs ledgered baselines (§14.4) | **partial** — fs-roofline harness + regress statistics live (fz2.4/fz2.4.1); per-crate `#[ignore]`d perf lanes ledger attainment with anti-collapse floors; TARGET certification requires a quiet reference machine (shared-workbench noise swings axes ±15%+, measured), so gates report targets and assert floors until then |
+| P7 cancellation-correct | G4 storm gate (kill/cancel batteries, leak accounting) | **partial** — fs-ledger kill -9 battery runs in `ci.yml` today; executor-wide storms land with fs-exec |
+| P8 one data model | conformance suites over shared complex/cochain types | **deferred** — with fs-geom/fs-feec |
+| P9 provenance-complete | golden-ledger replay + integrity re-hash; constellation drift + golden-coupling gates | **partial** — integrity, drift, `check-goldens` coupling discipline, and bootstrap fetch-provenance live; replay gate lands with fs-ledger time travel |
+| P10 agent-first | JSONL verdicts from every suite retained as artifacts; structured-error schema validation | **partial** — repo-local quality/x86 verdict and full-log retention live; external DSR aggregation limitations are named above; catalog no-drift gate lands with fs-ir |
+
+## Gate meta-tests (are the gates real?)
+
+`ci-self-test.yml` proves the wiring by injection:
+
+1. `FS_CI_INJECT_FAILURE=1` arms a deliberately failing xtask test → the test
+   gate must go red (asserted by inverting the step's exit code).
+2. A seeded formatting violation → `cargo fmt --check` must go red.
+3. The xtask unit battery seeds layer/dependency/contract/unsafe violations
+   and asserts each is caught (`cargo test -p xtask -- seeded`).
+
+A green `ci-self-test` run is the evidence that a red gate blocks; run it
+after any change to the workflows or to xtask's checks.

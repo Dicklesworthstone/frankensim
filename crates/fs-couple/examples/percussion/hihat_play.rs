@@ -1,0 +1,157 @@
+//! CLI composition; both cymbals use one time owner and one pressure scene.
+use super::*;
+use std::path::Path;
+use acoustics::stereo::radiation_spec;
+
+pub fn is_command(command:Option<&str>)->bool {matches!(command,Some("hihat"|"hihat-wav"|"hihat-mic"))}
+
+pub fn run(mut args:Vec<String>)->Result<(),Error> {
+    let analytic=mechanics::analytic_option(&mut args)?;
+    let substeps=mechanics::substeps_option(&mut args)?;
+    let prepared=mechanics::prepared_option(&mut args)?||analytic||substeps.is_some();
+    let right=acoustics::stereo::option(&mut args)?;
+    let microphone_spec=acoustics::receivers::input::option(&mut args)?;
+    let radiation=radiation_spec::option(&mut args)?;
+    let feedback=acoustics::stereo::feedback::option(&mut args)?;
+    let second=sticks::option(&mut args)?;
+    let targets=targets::Selection::options(&mut args,second)?;
+    let rocking=rocking::option(&mut args)?;
+    let first_force=mechanics::drive::option(&mut args)?;
+    let second_force=mechanics::drive::second_option(&mut args)?;
+    let squeeze=squeeze::option(&mut args)?;
+    let mallet_paths=mallets::options(&mut args)?;
+    let material_path=shell_relaxation::option(&mut args)?;
+    let mute=compliant_mute::option(&mut args)?;
+    let shafts=shaft_playing::Selection::options(&mut args)?;
+    let (args,stroke)=playing::parse(args)?;
+    let command=args.first().map(String::as_str);
+    if !is_command(command)||args.len()<2 {return Err("usage: hihat INPUT.fshh [steps]; hihat-wav INPUT [frames] [full_scale_pa]; hihat-mic INPUT [frames] [full_scale_pa] [x y z]; see HIHAT.md".into());}
+    rocking::admit_command(rocking,command.unwrap())?;
+    if let Some(spec)=&microphone_spec {spec.admit_command(command.unwrap(),args.len()>4,right.is_some())?;}
+    acoustics::stereo::feedback::admit_command(feedback,command.unwrap(),false)?;
+    let mic=command==Some("hihat-mic");let audio=command!=Some("hihat");
+    if (!audio&&args.len()>3)||(audio&&args.len()>4&&!(mic&&args.len()==7))
+        ||(!mic&&right.is_some())||(!audio&&radiation.is_some())||(second_force.is_some()||shafts.second.is_some())&&second.is_none() {
+        return Err("hi-hat received incompatible output, receiver or second-stick controls".into());
+    }
+    let count=if args.len()>=3 {args[2].parse::<u64>()?}else{if audio{48000}else{4096}};
+    if count==0||count>if audio{480000}else{1_000_000}{return Err("hi-hat duration exceeds the existing output budget".into());}
+    let scale=if args.len()>=4 {args[3].parse::<f64>()?}else{20.};
+    if !scale.is_finite()||scale<=0.{return Err("hi-hat PCM scale must be positive finite Pa".into());}
+    let dt=if audio{acoustics::MECHANICAL_DT}else{2e-6};
+    let steps=if audio{count.checked_mul(acoustics::SUBSTEPS as u64).ok_or("hi-hat clock overflow")?}else{count};
+    let receiver=if mic {acoustics::Receiver::FinitePoint(if args.len()==7{
+        [args[4].parse()?,args[5].parse()?,args[6].parse()?]
+    }else{[0.08,0.05,0.35]})}else{acoustics::Receiver::FarField([1.5,0.7,1.5])};
+    let mallets=mallets::Selection::load(mallet_paths)?;
+    mallets.admit(command.unwrap(),stroke,second)?;
+    if let Some(mute)=&mute {mute.admit_command(command.unwrap())?;}
+    let material=material_path.as_deref().map(|path|shell_relaxation::Spec::load(path,true)).transpose()?;
+    let spec=Spec::load(Path::new(&args[1]))?;let [upper,lower]=spec.shells()?;
+    let pair=build_with_rocking(&spec,&upper,&lower,stroke,second,steps,dt,audio,squeeze.as_ref(),
+        &shafts,&mallets,material.as_ref(),mute.as_ref(),targets,rocking)?;
+    let receivers=match microphone_spec {
+        Some(spec)=>spec.into_receivers(),
+        None=>{let mut receivers=vec![receiver];if let Some(p)=right{receivers.push(acoustics::Receiver::FinitePoint(p));}receivers},
+    };
+    let (mut e,loaded)=if feedback {
+        let (e,bake)=acoustics::stereo::feedback::prepare(pair.experiment,usize::try_from(count)?,scale,
+            &receivers,radiation.unwrap_or_default(),&CancelGate::new_clock_free())?;(e,Some(bake))
+    }else{(pair.experiment,None)};
+    if prepared {e.system=if analytic{e.system.into_analytic_nonlinear()?}else{e.system.into_prepared_nonlinear()?};}
+    if let Some(b)=substeps{e.system=e.system.with_impact_substeps(b)?;}
+    let mut inputs=vec![mechanics::drive::Input{program:mechanics::drive::Program::parse(&spec.pedal)?,
+        coordinate:pair.pedal.coordinate,tip_weight:pair.pedal.weight}];
+    let mut hands=Vec::new();
+    for (hand,program) in [first_force,second_force].into_iter().enumerate() {
+        if let Some(program)=program {
+            match &pair.flexible_sticks[hand] {
+                Some(p)=>hands.push(mechanics::drive::SpatialInput{program,weights:p.hand_row(e.force.len())?}),
+                None=>{let p=if hand==0{sticks::Port{coordinate:0,weight:e.stick_weight}}
+                    else{e.second_stick.ok_or("missing hi-hat second stick")?};
+                    inputs.push(mechanics::drive::Input{program,coordinate:p.coordinate,tip_weight:p.weight});}
+            }
+        }
+    }
+    if let Some(mute)=mute {
+        inputs.extend(mute.into_inputs(e.mute.as_ref().ok_or("missing paired mute attachment")?)?);
+    }
+    e.system=e.system.with_stick_drives(inputs,dt,steps,e.force.len())?;
+    if let Mechanics::Driven{drive,..}=&mut e.system {
+        for hand in hands {drive.add_spatial_input(hand)?;}
+    }else{return Err("missing shared player clock for flexible shafts".into());}
+    for (hand,ports) in pair.flexible_sticks.iter().enumerate() {
+        if let Some(p)=ports {eprintln!("physical shaft {}: {} elastic modes; contact at tip, external force at supplied hand station; no added acoustic source",hand+1,p.elastic_modes());}
+    }
+    eprintln!("hi-hat exterior strike targets: first={}, second={}; positive hand travel, launch speed and force act inward toward that hand's selected shell",
+        pair.targets.first.label(),if e.second_stick.is_some(){pair.targets.second.label()}else{"none"});
+    eprintln!("paired cymbals: upper_modes={}, lower_modes={}, contact_sites={}, one joint mechanics; supplied masses/geometry and authored contact, not a calibrated hi-hat; axial carriage; maximum_rigid_shell_angle_rad={rocking:?}; squeeze_film={}",
+        pair.upper_modes.len(),pair.lower_modes.len(),pair.collision.n_points(),
+        squeeze.as_ref().map_or("none",squeeze::Config::label));
+    let gate=CancelGate::new_clock_free();let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());
+    if audio {
+        let wav=match loaded {
+            Some(bake)=>bake.render(&mut e,usize::try_from(count)?,scale,&gate)?,
+            None=>acoustics::stereo::render_receivers_with_spec(&mut e,usize::try_from(count)?,scale,&receivers,
+                radiation.unwrap_or_default(),&gate)?,
+        };
+        out.write_all(&wav)?;out.flush()?;return Ok(());
+    }
+    write!(out,"time_s,upper_down_m,lower_down_m,pedal_down_m,pedal_speed_m_s,min_contact_gap_m,active_sites,total_energy_j,loss_j,player_work_j,balance_j")?;
+    for (hand,ports) in pair.flexible_sticks.iter().enumerate() {
+        if ports.is_some(){
+            let direction=if [pair.targets.first,pair.targets.second][hand]==targets::Target::Upper {"down"}else{"inward"};
+            write!(out,",stick{}_tip_{}_m,stick{}_tip_speed_m_s,stick{}_hand_{}_m,stick{}_hand_speed_m_s,stick{}_bending_j",
+                hand+1,direction,hand+1,hand+1,direction,hand+1,hand+1)?;
+        }
+    }
+    let gas=squeeze.as_ref().is_some_and(|f|f.gas().is_some());
+    if gas {write!(out,",gas_min_absolute_pa,gas_max_absolute_pa,gas_mass_kg,gas_free_energy_j")?;}
+    if material.is_some() {write!(out,",shell_memory_energy_j,shell_relaxation_power_w")?;}
+    if rocking.is_some() {rocking::header(&mut out,"upper")?;rocking::header(&mut out,"lower")?;}
+    if let Some(mute)=&e.mute {mute.header(&mut out)?;}
+    writeln!(out)?;
+    for _ in 0..steps {
+        let f=e.system.step(&e.force,&gate)?;let x=e.system.state();
+        let displacement=|row:&[f64]|row.iter().enumerate().map(|(i,b)|b*x[2*i]).sum::<f64>();
+        let mut gap=f64::INFINITY;let mut active=0;
+        for (row,&clearance) in pair.collision.collocation().chunks(e.force.len()).zip(pair.collision.gaps()) {
+            let g=clearance-displacement(row);gap=gap.min(g);active+=usize::from(g<0.);
+        }
+        write!(out,"{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{},{:.17e},{:.17e},{:.17e},{:.17e}",
+            f.time_s,displacement(&e.observer_a),displacement(&e.observer_b),x[2*pair.pedal.coordinate]*pair.pedal.weight,
+            x[2*pair.pedal.coordinate+1]*pair.pedal.weight,gap,active,f.stored_energy_j,f.dissipated_energy_j,
+            f.supplied_work_j,f.balance_residual_j)?;
+        for ports in pair.flexible_sticks.iter().flatten() {
+            let o=ports.observe(x)?;
+            write!(out,",{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",o.tip_displacement_m,o.tip_velocity_m_s,
+                o.hand_displacement_m,o.hand_velocity_m_s,o.flexural_energy_j)?;
+        }
+        if gas {
+            let o=gas_observation(&e.system)?.ok_or("missing selected gas state")?;
+            write!(out,",{:.17e},{:.17e},{:.17e},{:.17e}",o.minimum_pressure_pa,o.maximum_pressure_pa,
+                o.mass_kg,o.free_energy_j)?;
+        }
+        if material.is_some() {
+            let o=head_relaxation::observation(&e.system);
+            write!(out,",{:.17e},{:.17e}",o.stored_energy_j,o.dissipated_power_w)?;
+        }
+        if rocking.is_some() {rocking::row(&e.system,1,false,&mut out)?;rocking::row(&e.system,2,true,&mut out)?;}
+        if let Some(mute)=&e.mute {mute.row(&e.system,&mut out)?;}
+        writeln!(out)?;
+    }
+    out.flush()?;Ok(())
+}
+
+// Observation follows wrappers but never advances an independent gas clock.
+pub(super) fn gas_observation(system:&Mechanics)
+    ->Result<Option<fs_couple::render::plate::impact::gas_film::GasObservation>,Error>
+{
+    Ok(match system {
+        Mechanics::Reference(s)=>s.gas_film_observation()?,
+        Mechanics::Nonlinear(s)=>s.gas_film_observation()?,
+        Mechanics::Substepped(s)=>s.gas_film_observation()?,
+        Mechanics::Driven{inner,..}=>gas_observation(inner)?,
+        Mechanics::Prepared(_)=>None,
+    })
+}

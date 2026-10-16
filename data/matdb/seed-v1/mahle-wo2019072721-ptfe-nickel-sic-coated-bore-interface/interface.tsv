@@ -1,0 +1,137 @@
+frankensim.matdb-source.v1
+surface_a	polytetrafluoroethylene PTFE piston ring	patent-disclosed oil-free compressor piston ring; grade filler dimensions manufacture and sliding finish unstated	WO 2019/072721 A1 claim 1 identifies PTFE but no tested specimen or commercial ring identity	1	ptfe-piston-ring-grade-filler-dimensions-and-finish-unstated
+surface_b	cylinder running surface with nickel-main-component liner layer containing silicon carbide	patent claims a honed coated bore; cylinder substrate nickel alloy coating application process and manufactured specimen state unstated	claims 4-10 define design windows and an approximate roughness rather than measured as-built metrology	1	honed-nickel-sic-liner-patent-claimed-ra-approx-0.1um-not-measured
+context	oil-free-compressor-working-gas-composition-pressure-humidity-and-temperature-unstated	-	patent-design-environment-with-no-tested-specimen-or-operating-point	patent-disclosed-ptfe-piston-ring-against-nickel-sic-coated-cylinder-running-surface
+observation	claims-1-and-4-through-10-design-window	patent-disclosed PTFE piston ring against nickel-main-component silicon-carbide-containing cylinder liner layer	Kara WO 2019/072721 A1 claims 1 and 4 through 10 direct design-window transcription	This observation records patent claim language rather than measurements from a manufactured specimen. Claim 5 says approximately 2 to 6 wt percent SiC; claim 6 gives strict 1 to 4 micrometer particle-diameter bounds and a preferred 2.5 micrometer value; claim 7 gives strict 40 to 100 micrometer liner-thickness bounds and a preferred 50 micrometer value; claims 9 and 10 state approximately 0.1 micrometer arithmetic mean roughness and honing. No lubricant is present. PTFE grade filler process finish dimensions cylinder substrate nickel alloy coating process gas operating point repeats uncertainty quantitative friction wear leakage or life data are given
+observation	disclosed-embodiment-sic-window	patent-disclosed PTFE piston ring against embodiment nickel-matrix silicon-carbide-containing cylinder liner layer	Kara WO 2019/072721 A1 disclosed embodiment direct composition-window transcription	The embodiment text says 2 to 4 wt percent SiC while patent claim 5 says approximately 2 to 6 wt percent. Both statements remain separate source-linked claims; they are not silently fused. This is still a design disclosure rather than a post-deposition assay. No specimen lot porosity adhesion chemistry uncertainty or tribology measurement is reported
+scalar	claim-sic-mass-fraction-lower	claims-1-and-4-through-10-design-window	patent_claim_liner_silicon_carbide_mass_fraction_approximate_lower_bound	2	%	constant
+uncertainty	claim-sic-mass-fraction-lower	unstated	-	-	-	-
+validity	claim-sic-mass-fraction-lower	source_is_patent_design_statement_not_measured_specimen	1	1	1
+validity	claim-sic-mass-fraction-lower	source_lubricant_present	0	0	1
+validity	claim-sic-mass-fraction-lower	source_ptfe_grade_filler_manufacturing_finish_known	0	0	1
+validity	claim-sic-mass-fraction-lower	source_cylinder_substrate_liner_alloy_application_process_known	0	0	1
+validity	claim-sic-mass-fraction-lower	source_operating_pressure_speed_temperature_gas_known	0	0	1
+validity	claim-sic-mass-fraction-lower	source_quantitative_friction_wear_leakage_lifetime_measured	0	0	1
+validity	claim-sic-mass-fraction-lower	source_patent_practice_license_granted	0	0	1
+validity	claim-sic-mass-fraction-lower	source_statement_scope_patent_claims	1	1	1
+validity	claim-sic-mass-fraction-lower	source_statement_scope_embodiment_description	0	0	1
+validity	claim-sic-mass-fraction-lower	source_value_is_approximate	1	1	1
+scalar	claim-sic-mass-fraction-upper	claims-1-and-4-through-10-design-window	patent_claim_liner_silicon_carbide_mass_fraction_approximate_upper_bound	6	%	constant
+uncertainty	claim-sic-mass-fraction-upper	unstated	-	-	-	-
+validity	claim-sic-mass-fraction-upper	source_is_patent_design_statement_not_measured_specimen	1	1	1
+validity	claim-sic-mass-fraction-upper	source_lubricant_present	0	0	1
+validity	claim-sic-mass-fraction-upper	source_ptfe_grade_filler_manufacturing_finish_known	0	0	1
+validity	claim-sic-mass-fraction-upper	source_cylinder_substrate_liner_alloy_application_process_known	0	0	1
+validity	claim-sic-mass-fraction-upper	source_operating_pressure_speed_temperature_gas_known	0	0	1
+validity	claim-sic-mass-fraction-upper	source_quantitative_friction_wear_leakage_lifetime_measured	0	0	1
+validity	claim-sic-mass-fraction-upper	source_patent_practice_license_granted	0	0	1
+validity	claim-sic-mass-fraction-upper	source_statement_scope_patent_claims	1	1	1
+validity	claim-sic-mass-fraction-upper	source_statement_scope_embodiment_description	0	0	1
+validity	claim-sic-mass-fraction-upper	source_value_is_approximate	1	1	1
+scalar	claim-particle-diameter-lower	claims-1-and-4-through-10-design-window	patent_claim_silicon_carbide_particle_diameter_lower_exclusive_bound	0.000001	m	constant
+uncertainty	claim-particle-diameter-lower	unstated	-	-	-	-
+validity	claim-particle-diameter-lower	source_is_patent_design_statement_not_measured_specimen	1	1	1
+validity	claim-particle-diameter-lower	source_lubricant_present	0	0	1
+validity	claim-particle-diameter-lower	source_ptfe_grade_filler_manufacturing_finish_known	0	0	1
+validity	claim-particle-diameter-lower	source_cylinder_substrate_liner_alloy_application_process_known	0	0	1
+validity	claim-particle-diameter-lower	source_operating_pressure_speed_temperature_gas_known	0	0	1
+validity	claim-particle-diameter-lower	source_quantitative_friction_wear_leakage_lifetime_measured	0	0	1
+validity	claim-particle-diameter-lower	source_patent_practice_license_granted	0	0	1
+validity	claim-particle-diameter-lower	source_statement_scope_patent_claims	1	1	1
+validity	claim-particle-diameter-lower	source_statement_scope_embodiment_description	0	0	1
+validity	claim-particle-diameter-lower	source_bound_is_strict_exclusive	1	1	1
+scalar	claim-particle-diameter-preferred	claims-1-and-4-through-10-design-window	patent_claim_silicon_carbide_particle_diameter_preferred	0.0000025	m	constant
+uncertainty	claim-particle-diameter-preferred	unstated	-	-	-	-
+validity	claim-particle-diameter-preferred	source_is_patent_design_statement_not_measured_specimen	1	1	1
+validity	claim-particle-diameter-preferred	source_lubricant_present	0	0	1
+validity	claim-particle-diameter-preferred	source_ptfe_grade_filler_manufacturing_finish_known	0	0	1
+validity	claim-particle-diameter-preferred	source_cylinder_substrate_liner_alloy_application_process_known	0	0	1
+validity	claim-particle-diameter-preferred	source_operating_pressure_speed_temperature_gas_known	0	0	1
+validity	claim-particle-diameter-preferred	source_quantitative_friction_wear_leakage_lifetime_measured	0	0	1
+validity	claim-particle-diameter-preferred	source_patent_practice_license_granted	0	0	1
+validity	claim-particle-diameter-preferred	source_statement_scope_patent_claims	1	1	1
+validity	claim-particle-diameter-preferred	source_statement_scope_embodiment_description	0	0	1
+validity	claim-particle-diameter-preferred	source_value_is_preferred	1	1	1
+scalar	claim-particle-diameter-upper	claims-1-and-4-through-10-design-window	patent_claim_silicon_carbide_particle_diameter_upper_exclusive_bound	0.000004	m	constant
+uncertainty	claim-particle-diameter-upper	unstated	-	-	-	-
+validity	claim-particle-diameter-upper	source_is_patent_design_statement_not_measured_specimen	1	1	1
+validity	claim-particle-diameter-upper	source_lubricant_present	0	0	1
+validity	claim-particle-diameter-upper	source_ptfe_grade_filler_manufacturing_finish_known	0	0	1
+validity	claim-particle-diameter-upper	source_cylinder_substrate_liner_alloy_application_process_known	0	0	1
+validity	claim-particle-diameter-upper	source_operating_pressure_speed_temperature_gas_known	0	0	1
+validity	claim-particle-diameter-upper	source_quantitative_friction_wear_leakage_lifetime_measured	0	0	1
+validity	claim-particle-diameter-upper	source_patent_practice_license_granted	0	0	1
+validity	claim-particle-diameter-upper	source_statement_scope_patent_claims	1	1	1
+validity	claim-particle-diameter-upper	source_statement_scope_embodiment_description	0	0	1
+validity	claim-particle-diameter-upper	source_bound_is_strict_exclusive	1	1	1
+scalar	claim-liner-thickness-lower	claims-1-and-4-through-10-design-window	patent_claim_liner_layer_thickness_lower_exclusive_bound	0.00004	m	constant
+uncertainty	claim-liner-thickness-lower	unstated	-	-	-	-
+validity	claim-liner-thickness-lower	source_is_patent_design_statement_not_measured_specimen	1	1	1
+validity	claim-liner-thickness-lower	source_lubricant_present	0	0	1
+validity	claim-liner-thickness-lower	source_ptfe_grade_filler_manufacturing_finish_known	0	0	1
+validity	claim-liner-thickness-lower	source_cylinder_substrate_liner_alloy_application_process_known	0	0	1
+validity	claim-liner-thickness-lower	source_operating_pressure_speed_temperature_gas_known	0	0	1
+validity	claim-liner-thickness-lower	source_quantitative_friction_wear_leakage_lifetime_measured	0	0	1
+validity	claim-liner-thickness-lower	source_patent_practice_license_granted	0	0	1
+validity	claim-liner-thickness-lower	source_statement_scope_patent_claims	1	1	1
+validity	claim-liner-thickness-lower	source_statement_scope_embodiment_description	0	0	1
+validity	claim-liner-thickness-lower	source_bound_is_strict_exclusive	1	1	1
+scalar	claim-liner-thickness-preferred	claims-1-and-4-through-10-design-window	patent_claim_liner_layer_thickness_preferred	0.00005	m	constant
+uncertainty	claim-liner-thickness-preferred	unstated	-	-	-	-
+validity	claim-liner-thickness-preferred	source_is_patent_design_statement_not_measured_specimen	1	1	1
+validity	claim-liner-thickness-preferred	source_lubricant_present	0	0	1
+validity	claim-liner-thickness-preferred	source_ptfe_grade_filler_manufacturing_finish_known	0	0	1
+validity	claim-liner-thickness-preferred	source_cylinder_substrate_liner_alloy_application_process_known	0	0	1
+validity	claim-liner-thickness-preferred	source_operating_pressure_speed_temperature_gas_known	0	0	1
+validity	claim-liner-thickness-preferred	source_quantitative_friction_wear_leakage_lifetime_measured	0	0	1
+validity	claim-liner-thickness-preferred	source_patent_practice_license_granted	0	0	1
+validity	claim-liner-thickness-preferred	source_statement_scope_patent_claims	1	1	1
+validity	claim-liner-thickness-preferred	source_statement_scope_embodiment_description	0	0	1
+validity	claim-liner-thickness-preferred	source_value_is_preferred	1	1	1
+scalar	claim-liner-thickness-upper	claims-1-and-4-through-10-design-window	patent_claim_liner_layer_thickness_upper_exclusive_bound	0.0001	m	constant
+uncertainty	claim-liner-thickness-upper	unstated	-	-	-	-
+validity	claim-liner-thickness-upper	source_is_patent_design_statement_not_measured_specimen	1	1	1
+validity	claim-liner-thickness-upper	source_lubricant_present	0	0	1
+validity	claim-liner-thickness-upper	source_ptfe_grade_filler_manufacturing_finish_known	0	0	1
+validity	claim-liner-thickness-upper	source_cylinder_substrate_liner_alloy_application_process_known	0	0	1
+validity	claim-liner-thickness-upper	source_operating_pressure_speed_temperature_gas_known	0	0	1
+validity	claim-liner-thickness-upper	source_quantitative_friction_wear_leakage_lifetime_measured	0	0	1
+validity	claim-liner-thickness-upper	source_patent_practice_license_granted	0	0	1
+validity	claim-liner-thickness-upper	source_statement_scope_patent_claims	1	1	1
+validity	claim-liner-thickness-upper	source_statement_scope_embodiment_description	0	0	1
+validity	claim-liner-thickness-upper	source_bound_is_strict_exclusive	1	1	1
+scalar	claim-liner-roughness	claims-1-and-4-through-10-design-window	patent_claim_honed_liner_arithmetic_mean_roughness_approximate	0.0000001	m	constant
+uncertainty	claim-liner-roughness	unstated	-	-	-	-
+validity	claim-liner-roughness	source_is_patent_design_statement_not_measured_specimen	1	1	1
+validity	claim-liner-roughness	source_lubricant_present	0	0	1
+validity	claim-liner-roughness	source_ptfe_grade_filler_manufacturing_finish_known	0	0	1
+validity	claim-liner-roughness	source_cylinder_substrate_liner_alloy_application_process_known	0	0	1
+validity	claim-liner-roughness	source_operating_pressure_speed_temperature_gas_known	0	0	1
+validity	claim-liner-roughness	source_quantitative_friction_wear_leakage_lifetime_measured	0	0	1
+validity	claim-liner-roughness	source_patent_practice_license_granted	0	0	1
+validity	claim-liner-roughness	source_statement_scope_patent_claims	1	1	1
+validity	claim-liner-roughness	source_statement_scope_embodiment_description	0	0	1
+validity	claim-liner-roughness	source_value_is_approximate	1	1	1
+validity	claim-liner-roughness	source_surface_is_honed	1	1	1
+scalar	embodiment-sic-mass-fraction-lower	disclosed-embodiment-sic-window	patent_embodiment_liner_silicon_carbide_mass_fraction_lower_bound	2	%	constant
+uncertainty	embodiment-sic-mass-fraction-lower	unstated	-	-	-	-
+validity	embodiment-sic-mass-fraction-lower	source_is_patent_design_statement_not_measured_specimen	1	1	1
+validity	embodiment-sic-mass-fraction-lower	source_lubricant_present	0	0	1
+validity	embodiment-sic-mass-fraction-lower	source_ptfe_grade_filler_manufacturing_finish_known	0	0	1
+validity	embodiment-sic-mass-fraction-lower	source_cylinder_substrate_liner_alloy_application_process_known	0	0	1
+validity	embodiment-sic-mass-fraction-lower	source_operating_pressure_speed_temperature_gas_known	0	0	1
+validity	embodiment-sic-mass-fraction-lower	source_quantitative_friction_wear_leakage_lifetime_measured	0	0	1
+validity	embodiment-sic-mass-fraction-lower	source_patent_practice_license_granted	0	0	1
+validity	embodiment-sic-mass-fraction-lower	source_statement_scope_patent_claims	0	0	1
+validity	embodiment-sic-mass-fraction-lower	source_statement_scope_embodiment_description	1	1	1
+scalar	embodiment-sic-mass-fraction-upper	disclosed-embodiment-sic-window	patent_embodiment_liner_silicon_carbide_mass_fraction_upper_bound	4	%	constant
+uncertainty	embodiment-sic-mass-fraction-upper	unstated	-	-	-	-
+validity	embodiment-sic-mass-fraction-upper	source_is_patent_design_statement_not_measured_specimen	1	1	1
+validity	embodiment-sic-mass-fraction-upper	source_lubricant_present	0	0	1
+validity	embodiment-sic-mass-fraction-upper	source_ptfe_grade_filler_manufacturing_finish_known	0	0	1
+validity	embodiment-sic-mass-fraction-upper	source_cylinder_substrate_liner_alloy_application_process_known	0	0	1
+validity	embodiment-sic-mass-fraction-upper	source_operating_pressure_speed_temperature_gas_known	0	0	1
+validity	embodiment-sic-mass-fraction-upper	source_quantitative_friction_wear_leakage_lifetime_measured	0	0	1
+validity	embodiment-sic-mass-fraction-upper	source_patent_practice_license_granted	0	0	1
+validity	embodiment-sic-mass-fraction-upper	source_statement_scope_patent_claims	0	0	1
+validity	embodiment-sic-mass-fraction-upper	source_statement_scope_embodiment_description	1	1	1

@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	tensile-series	AISI-1045-cold-drawn-bar-37mm-OD-102mm-length-test-temperature-not-reported	ASTM E8 cylindrical tensile specimens; 50 mm gauge length; 12.5 mm test-section diameter; 21 mm grip diameter; 250 mm total length; extensometer; 10 mm/min crosshead speed	Approximately 0.45 wt% carbon; three specimens; printed yield strengths 540.73, 557.59, and 553.20 MPa; printed ultimate strengths 684.58, 707.75, and 693.60 MPa; printed 50 mm elongations 14.42, 14.20, and 13.68 percent; source reports means 550.51 MPa, 695.31 MPa, and 14.1 percent; symmetric 95 percent Student-t half-widths for the mean are derived with t(0.975, df=2)=4.302652729911275 under an iid normal assumption; source does not report test temperature; no joint covariance is inferred from the paired rows; hardness is not retained because the printed values and reported mean disagree at their displayed precision
+scalar	yield-strength	tensile-series	yield_strength	550.51	MPa	constant
+uncertainty	yield-strength	absolute	21.7281028138069	MPa	0.95	1
+validity	yield-strength	crosshead_speed	10	10	mm/min
+validity	yield-strength	source_test_temperature_known	0	0	1
+scalar	ultimate-tensile-strength	tensile-series	ultimate_tensile_strength	695.31	MPa	constant
+uncertainty	ultimate-tensile-strength	absolute	29.0129099774989	MPa	0.95	1
+validity	ultimate-tensile-strength	crosshead_speed	10	10	mm/min
+validity	ultimate-tensile-strength	source_test_temperature_known	0	0	1
+scalar	tensile-elongation-50mm	tensile-series	tensile_elongation_50mm	14.1	%	constant
+uncertainty	tensile-elongation-50mm	absolute	0.943972330500626	%	0.95	1
+validity	tensile-elongation-50mm	crosshead_speed	10	10	mm/min
+validity	tensile-elongation-50mm	source_test_temperature_known	0	0	1

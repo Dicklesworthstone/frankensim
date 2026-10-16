@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+observation	table-6-pennzane-shf-x-2000	Pennzane-SHF-X-2000-multiply-alkylated-cyclopentane-aerospace-bearing-oil	NASA-CP-3350 Bessette Table 6 typical Pennzane properties at the printed conditions	The source identifies the fluid as Tris(2-octyldodecyl) cyclopentane with approximate molecular weight 910 g/mol. Table 6 labels results typical and does not report vendor lot, additive state, measurement standards, replicates, dispersion, or confidence. The printed 8e-4 cc/cc/degC expansion coefficient remains observation-only because the current source-unit grammar has no temperature-interval degree-Celsius token. The conditioned 0.34 mm wear scar is a tribometer-system result, not a bulk claim. Table 5 vapor pressures are lot-specific and their superscript exponents are not unambiguous in the retained text extraction, so they are not admitted
+scalar	kinematic-viscosity-100degC	table-6-pennzane-shf-x-2000	kinematic_viscosity	14.3	mm^2/s	constant
+uncertainty	kinematic-viscosity-100degC	unstated	-	-	-	-
+validity	kinematic-viscosity-100degC	temperature	100	100	degC
+scalar	kinematic-viscosity-40degC	table-6-pennzane-shf-x-2000	kinematic_viscosity	107	mm^2/s	constant
+uncertainty	kinematic-viscosity-40degC	unstated	-	-	-	-
+validity	kinematic-viscosity-40degC	temperature	40	40	degC
+scalar	kinematic-viscosity-minus40degC	table-6-pennzane-shf-x-2000	kinematic_viscosity	80500	mm^2/s	constant
+uncertainty	kinematic-viscosity-minus40degC	unstated	-	-	-	-
+validity	kinematic-viscosity-minus40degC	temperature	-40	-40	degC
+scalar	viscosity-index	table-6-pennzane-shf-x-2000	viscosity_index_scale_reading	137	1	constant
+uncertainty	viscosity-index	unstated	-	-	-	-
+scalar	flash-point	table-6-pennzane-shf-x-2000	flash_point_temperature	300	degC	constant
+uncertainty	flash-point	unstated	-	-	-	-
+scalar	pour-point	table-6-pennzane-shf-x-2000	pour_point_temperature	-55	degC	constant
+uncertainty	pour-point	unstated	-	-	-	-
+scalar	density-25degC	table-6-pennzane-shf-x-2000	density	0.84	g/mL	constant
+uncertainty	density-25degC	unstated	-	-	-	-
+validity	density-25degC	temperature	25	25	degC

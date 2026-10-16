@@ -1,0 +1,677 @@
+# Finite-time cooling in the native project workflow
+
+`cooling-transient.fsim` runs the seven-stage import, solve and retained-report
+workflow with heat storage. It uses the existing `plate.stl` tetrahedron and
+`aa6061.fsmcdpk` conductivity fixture. The solid starts at 293.15 K, receives
+5 W for two seconds and exchanges heat through a fixed 10 W/(m² K) Robin
+boundary at 293.15 K. The declared volumetric heat capacity is a **synthetic
+100 J/(m³ K)** chosen to make this small example's time response visible; it
+is not an AA6061 property claim. Each capacity retains its own source text.
+
+From the repository root, with a built `frankensim` on `PATH`:
+
+```bash
+frankensim --json validate data/reference-project/cooling-transient.fsim
+frankensim --json import data/reference-project/cooling-transient.fsim \
+  data/reference-project/plate.stl transient.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-transient.fsim transient.db \
+  --materials data/reference-project/aa6061.fsmcdpk
+```
+
+Export the retained report or package using the run ID returned by `solve`:
+
+```bash
+frankensim --json report <run-id> transient.db
+frankensim --json package <run-id> transient.db
+```
+
+The conduction stage uses backward Euler on four 0.5 s steps, then starts
+again from the declared initial field on eight 0.25 s steps. Its twelve-step
+cap includes both trajectories. The fine trajectory supplies the published
+field and temperature maximum **at 2 s**. Every accepted step retains its
+time, final-region maximum, stored energy change, net heat input, recomputed
+linear residual and storage-minus-input energy residual. The energy gate is
+1 µJ per step. The common endpoint energy report shows `storage_w` separately
+from numerical `closure_w`.
+
+The report's temporal estimate is `1.25 * abs(fine_final_k - coarse_final_k)`
+for the actual selected final-region maximum, with assumed order one. This
+is Estimated temporal error. It does not establish spatial convergence,
+observed order, a maximum between time nodes, or a complete uncertainty budget.
+If both grids agree exactly in floating point, the estimate stays unavailable
+instead of claiming zero error. The temperature-limit margin is a final-time
+nominal comparison; missing engineering error terms keep the decision
+indeterminate.
+
+For another native project, add `:transient (transient ...)` inside its
+`conduction` declaration, providing an initial absolute temperature, horizon,
+maximum coarse step, combined step cap, energy tolerance and one sourced
+volumetric capacity per conduction region. All quantities use coherent SI.
+For static power, the horizon and maximum step imply
+`N = ceil(horizon / max-step)`; admission requires
+`3*N <= max-steps <= 10000`. With scheduled power, the same limit applies to
+the sum of the step counts between successive switches. Capacities and every
+other input are part of canonical project and run identity. Existing v10
+projects migrate with storage absent, so they retain their steady behavior;
+v11 transient projects migrate with their existing static power unchanged.
+
+This product slice supports fixed capacity, constant or temperature-dependent
+conductivity from the bound material card, Dirichlet/Neumann/Robin boundaries,
+matching finite contact, declared ambient radiation, natural convection and
+quasi-steady airflow from the native fan network. Natural and forced convection
+may occupy distinct boundary patches. A temperature-dependent curve is evaluated at
+each trial endpoint, including its actual conductivity derivative in the
+Newton/FGMRES tangent; the solver never substitutes conductivity at the old
+temperature. Each step starts from unchanged physical history until its
+nonlinear residual and energy balance both pass. Initial
+temperature may differ from prescribed boundary temperature; the first step
+includes the discrete boundary storage reaction. An insulated heated body is
+admitted because positive heat capacity anchors its finite-time equation.
+
+For temperature-dependent conductivity, `solver.tolerance-rel` controls the
+relative nonlinear residual against that endpoint's initial residual. The
+absolute residual floor is 1% of the declared energy tolerance divided by the
+square root of the vertex count. The existing numerical policy limits each
+solid response to 32 Newton updates and 24 backtracks per update; the same
+linear iteration budget covers all Newton corrections within that response.
+Without convection or radiation coupling there is one response per endpoint.
+Each airflow or natural-convection evaluation can repeat the solid response
+through radiation's separate outer-iteration cap. The receipt discloses the
+complete product of these
+bounded allowances for one physical endpoint. These controls, actual updates,
+backtracks and joule residuals are retained in the `transient.nonlinear`
+object and each time-step row. An exhausted numerical budget or
+material-validity boundary refuses the unfinished stage. Constant conductivity
+uses the linear solid response and records `nonlinear: null`.
+
+Spatial ladder/adaptive studies and steady adjoint requests are not admitted
+with this declaration. Every natural update closes the complete air solve,
+then checks the full physical endpoint and actual air-enthalpy balance.
+Airflow is quasi-steady; its own heat storage and time-varying fan
+dynamics are not modeled. Heat capacity remains temperature independent;
+latent heat and phase changes use the explicit total-enthalpy storage below. Stage
+cancellation retains the preceding
+completed pipeline stages; an unfinished conduction stage restarts from its
+declared initial state.
+
+## Total enthalpy and latent heat
+
+`cooling-enthalpy.fsim` exercises the spatial enthalpy solver on the same
+tetrahedron, with an insulated boundary and 5 W of internal heating for two
+seconds. It supplies a **synthetic** 1 kg/m³ reference density and a declared
+enthalpy chart with a 293.35 K latent plateau from 20 to 80 J/kg. These are
+educational model inputs, not properties of the AA6061 conductivity fixture.
+The source text records that distinction in the project itself.
+
+```bash
+frankensim --json validate data/reference-project/cooling-enthalpy.fsim
+frankensim --json import data/reference-project/cooling-enthalpy.fsim \
+  data/reference-project/plate.stl enthalpy.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-enthalpy.fsim enthalpy.db \
+  --materials data/reference-project/aa6061.fsmcdpk
+```
+
+The uniform initial enthalpy is zero at 293.15 K. The tetrahedron's volume is
+1/6 m³, so the declared density gives a reference mass of 1/6 kg. The
+independent energy balance predicts a 10 J increase after two seconds,
+specific enthalpy 60 J/kg, temperature 293.35 K and liquid mass fraction
+2/3. The spatial solver computes that uniform limit and retains the nodal
+enthalpy and phase fields plus accepted-step energy checks. Temperature
+agreement between the two grids on a plateau is not proof of phase or
+enthalpy convergence.
+
+Schema v13 adds `:enthalpy` inside `transient`, alongside an explicitly empty
+`:capacities (capacities)`. Every region needs a source, attributed card
+identity, reference density, initial specific enthalpy and an ordered chart.
+Specific enthalpy includes latent heat once; a separate capacity cannot be
+active with this storage model. Temperature alone cannot select the initial
+phase fraction on a plateau, which is why initial enthalpy is mandatory.
+The chart supports all-solid, all-liquid or full solid-to-liquid data without
+extrapolation. Newton iterations and line-search halvings are explicit bounded
+controls. Existing v12 projects migrate with their capacities unchanged.
+
+This native mode supports fixed reference geometry, temperature-dependent
+conductivity, regional power schedules, matching finite-resistance contact,
+prescribed Neumann/Robin boundaries, sourced natural convection or quasi-steady
+airflow convection, and ambient radiation. Prescribed temperatures refuse for
+enthalpy storage. Requested trajectory adjoints support prescribed exterior
+laws, fixed contact and complete ambient-radiation state feedback;
+natural-convection and airflow feedback remain outside the native enthalpy
+adjoint scope. The declared curves and card identities create no
+material-query receipts, expansion, phase kinetics or experimental validation.
+
+### Sensitivities through a phase change
+
+`cooling-enthalpy-adjoint.fsim` heats the insulated tetrahedron through its
+latent plateau and requests the existing report output:
+
+```lisp
+(qoi :name "temperature-final-adjoint" :kind "report")
+```
+
+The alternative `temperature-sampled-peak-adjoint` selects the earliest
+largest nodal temperature among the retained fine-grid states, including the
+initial state. Select one report at a time. Both use the existing
+temperature-maximum requirement region. Their selected branch and any tied
+maxima remain explicit in the report.
+
+```bash
+frankensim --json validate data/reference-project/cooling-enthalpy-adjoint.fsim
+frankensim --json import data/reference-project/cooling-enthalpy-adjoint.fsim \
+  data/reference-project/plate.stl enthalpy-adjoint.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-enthalpy-adjoint.fsim \
+  enthalpy-adjoint.db --materials data/reference-project/aa6061.fsmcdpk
+```
+
+The example declares a synthetic 1 kg/m³ reference density, 100 J/(kg K)
+sensible heat capacity and a 60 J/kg latent interval at 293.35 K. It starts
+at zero specific enthalpy, supplies 5 W for four seconds and uses the
+tetrahedron's 1/6 m³ volume. Conservation therefore predicts a final
+specific enthalpy of 120 J/kg and temperature of 293.75 K. Its fine grid
+samples the interior of the plateau, then leaves it before the final time.
+
+For uniform input changes, the independent derivatives are
+0.01 K per J/kg of initial specific enthalpy, 0.24 K per added watt supplied
+throughout the run, and -1.2 K per kg/m³ of reference density. These are
+analytic expectations for this manufactured example, not asserted execution
+results. The uniform temperature maximum may have tied vertices; the report
+identifies the selected nodal branch and does not call a tie a unique
+maximum derivative.
+
+The `transient.adjoint` object uses schema
+`fs-cli-native-enthalpy-adjoint-v1`. It records initial nodal and regional
+enthalpy gradients, absolute regional-power gradients for every fine interval,
+source-multiplier gradients and regional reference-density gradients.
+Absolute-power controls remain available during zero-power intervals.
+Sum the interval derivatives to differentiate a workload segment or a
+power change held throughout the run.
+
+The solver revalidates each retained accepted endpoint before applying the
+shared exact transpose. The reverse state is a specific-enthalpy gradient;
+it never divides by the temperature slope on a latent plateau. A selected
+initial peak has no dependence on future power or reference mass. Requests
+at genuine chart or material derivative corners refuse. These local
+derivatives keep geometry, boundary laws, contact data, chart values and
+the time grid fixed. They supply neither a continuous-time peak derivative
+nor an uncertainty or physical-validation certificate.
+
+### Sensitivities with radiative cooling
+
+`cooling-enthalpy-radiation-adjoint.fsim` starts a synthetic sensible-storage
+body at 330 K with a 270 K gray radiation reservoir, prescribed convection
+to 293.15 K and 5 W of heating. It requests `temperature-final-adjoint` on
+the one-second fine trajectory. The material card supplies conductivity;
+the declared density and enthalpy chart are manufactured example data.
+
+Use the same validate/import/solve commands above with the radiative project
+filename and a separate ledger, such as `enthalpy-radiation-adjoint.db`.
+The existing `aa6061.fsmcdpk` fixture also supplies its gray-surface card.
+The report retains initial-enthalpy, regional and interval-power, source
+multiplier and reference-density gradients. Its optional `radiation` row
+identifies the complete nonlinear area-mean tangent and additional bounded
+workspace. It also exposes per-surface emissivity and reservoir-temperature
+controls under `transient.adjoint.radiation.surfaces`; the card query, selected
+claim/support and time grid remain fixed.
+
+Each surface row identifies the declared name and boundary target, nominal
+emissivity and reservoir kelvin, material card, property-use receipt and query
+temperature. `dtemperature_demissivity_k` is the selected temperature change
+per unit absolute emissivity. `dtemperature_dreservoir_temperature_k_per_k`
+is the change per kelvin of that reservoir. Both controls are held throughout
+the trajectory and accumulated only over the selected reverse prefix.
+Sharing a material card does not merge separate surface controls. An initial
+sampled peak has zero sensitivity to either future boundary input.
+
+Emissivity must remain in (0,1]; at a nominal value of one, only decreases are
+feasible. A reservoir must remain above absolute zero, but need not lie inside
+the wall-material support interval. These are local gray-model sensitivities
+at the sourced nominal value, not derivatives of the card's immutable source
+record or a propagation of measurement uncertainty. Fresh source-data edits
+require a newly admitted material card.
+
+The reverse solve includes the derivative of the full physical radiation
+law at each accepted endpoint; it does not freeze the coefficient used by
+the nonlinear forward iteration. The independent regular-tetrahedron tests
+cover both heating and cooling reservoirs, and a latent history that later
+leaves its plateau. Those tests also compare to fresh perturbed solves and
+explicitly distinguish the full tangent from a frozen radiation coefficient.
+These are local discrete derivatives on the reported grid, with the same
+branch, support and validation limits as the non-radiative enthalpy report.
+
+### Fan-cooled phase storage
+
+`examples/heatsink-fan/heatsink-fan-enthalpy.fsim` combines the existing fan,
+vent, channel and sourced conductivity with a synthetic phase-change chart
+and a 20 W startup pulse. Its README gives validate/import/run commands and
+the complete chart. Each time interval uses the existing branch heat-exchange
+solver, with a single unchanged old enthalpy through every airflow, radiation
+and Newton trial.
+
+The accepted solid is checked at the air march's updated Robin references.
+Both its complete nodal energy residual and the independent storage balance
+must pass. The storage balance uses actual air enthalpy gain, any off-path
+convection and nonlinear ambient radiation, each once. Per-step
+`conjugate` evidence retains applied and physical references separately,
+physical residual tolerances, actual heat transfers and the branch exchange.
+The top-level conjugate report describes the last counted solid response.
+
+Airflow stays quasi-steady: the model retains the solved fan flow and
+transport properties throughout the thermal trajectory. It adds no air
+storage or transient fan dynamics. Separate natural-convection reservoirs
+may exchange with the same stored solid, with optional ambient radiation.
+The declared work allowance includes all nested air/natural/radiation/Newton trials,
+and an exhausted tolerance, material domain or budget publishes no endpoint.
+
+### Natural reservoirs, forced air and phase change together
+
+`data/reference-project/cooling-enthalpy-airflow.fsim` is a small mixed
+example using the existing unit-tetrahedron mesh. Its synthetic 1 kg body
+starts at 330 K and 50% liquid mass fraction on a 10000 J/kg latent plateau.
+A 350 K natural-convection reservoir warms one 0.5 m² face. That face also
+radiates to a 270 K reservoir using the existing gray-surface card; the
+remaining exterior exchanges heat with fan-driven air entering at 293.15 K.
+The 20 W power pulse ends at 0.075 s, and cooling continues through 0.2 s.
+Density, phase data and the fan curve are explicitly educational inputs.
+
+```bash
+frankensim --json validate data/reference-project/cooling-enthalpy-airflow.fsim
+frankensim --json import data/reference-project/cooling-enthalpy-airflow.fsim \
+  data/reference-project/plate.stl enthalpy-airflow.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-enthalpy-airflow.fsim \
+  enthalpy-airflow.db --materials data/reference-project/aa6061.fsmcdpk \
+  --materials data/reference-project/gray-surface.fsmcdpk
+```
+
+The temperature remains on the 330 K plateau while stored enthalpy and liquid
+mass fraction decrease. Inspect `transient.endpoint.specific_enthalpy_j_kg`,
+`liquid_mass_fraction` and integrated energy alongside the temperature field.
+The stored-energy change is the delivered 1.5 J pulse minus air heat, signed
+natural-reservoir heat and radiation integrated over the full trajectory.
+Equal coarse/fine temperatures on a plateau do not prove phase convergence.
+
+Every air callback closes the natural and radiation laws using the same
+accepted old enthalpy. Publication also checks the full nodal residual under
+updated natural coefficients and air references, physical energy closure and
+actual air enthalpy gain. Natural and radiation heat enter the solid balance
+separately from forced convection. Per-step natural/radiation rows describe
+the final air trial; trajectory counters include all trials. The field stays
+attached to its last counted applied boundary, with no hidden final re-solve.
+
+### Hot and cold bodies at the start
+
+Schema v15 adds an explicit regional initialization mode:
+
+```lisp
+:initial-temperature from-regional-enthalpy
+```
+
+Use it inside `transient` with the existing per-region enthalpy declarations.
+Each body's chart and `:initial-specific-enthalpy` determine its initial
+temperature and phase fraction. A kelvin quantity such as
+`:initial-temperature 300.0K` still asserts that every regional enthalpy
+resolves to that same temperature. Regional mode is admitted only with
+total-enthalpy storage; fixed-capacity projects keep their uniform quantity.
+
+`examples/contact-pair/hot-cold-enthalpy.fsim` reuses the two existing
+one-metre cubes and sourced finite-resistance contact. The bodies start at
+300 K and 350 K with synthetic reference densities of 10 and 20 kg/m³ and
+a common synthetic heat capacity of 10 J/(kg K), expressed through their
+enthalpy charts. Both exterior boundaries are insulated and external power
+is zero.
+
+```bash
+frankensim --json validate examples/contact-pair/hot-cold-enthalpy.fsim
+frankensim --json import examples/contact-pair/hot-cold-enthalpy.fsim \
+  examples/contact-pair/cold-body.stl examples/contact-pair/hot-body.stl \
+  hot-cold.db --unit m --max-hole-edges 0
+frankensim --json solve examples/contact-pair/hot-cold-enthalpy.fsim hot-cold.db \
+  --materials data/reference-project/aa6061.fsmcdpk \
+  --interfaces examples/contact-pair/cold-hot.fsintpk
+```
+
+The total reference mass is 30 kg. With `h = 10*(T - 300)` J/kg, the
+initial total enthalpy is 10,000 J and remains constant during internal
+contact exchange. The retained cold-to-hot orientation reports negative
+contact heat while the cold body warms and the hot body cools. These are
+conservation expectations, not experimental validation or a claim that the
+bodies reach equilibrium in the two-second horizon.
+
+The trajectory receipt records `initial_state: "regional-enthalpy"`,
+`initial_temperature_k: null` at the top level, and the actual initial
+temperature on each material row. Every initial body temperature is checked
+against its sourced conductivity domain before marching. The coarse and
+fine trajectories start independently from the same declared enthalpy field.
+The native contact regression checks the mass-weighted energy independently,
+signed interface heat, nodal temperature/enthalpy consistency and replay.
+
+### Latent storage with ambient radiation
+
+`cooling-enthalpy-radiation.fsim` combines the same explicit synthetic phase
+chart with convection, the sourced 0.85 gray-emissivity fixture, and a 20 W
+startup pulse lasting 0.25 s. The pulse delivers 5 J before the power switches
+off. Both grids land on that switch and follow the remaining cooling window;
+the final stored energy accounts for the heat lost to the exterior.
+
+```bash
+frankensim --json validate data/reference-project/cooling-enthalpy-radiation.fsim
+frankensim --json import data/reference-project/cooling-enthalpy-radiation.fsim \
+  data/reference-project/plate.stl enthalpy-radiation.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-enthalpy-radiation.fsim \
+  enthalpy-radiation.db --materials data/reference-project/aa6061.fsmcdpk \
+  --materials data/reference-project/gray-surface.fsmcdpk
+```
+
+Every radiation trial solves from the same accepted old enthalpy. A step must
+pass both the complete nonlinear residual and the physical storage balance
+using actual radiation, not just a small change in a trial coefficient. The
+enthalpy trajectory's common `net_input_w`, `energy_residual_j` and cumulative
+energy fields use the physical balance, including signed nonlinear radiation.
+Each step's `radiation` object retains the applied and nonlinear heat, original
+convection, physical residual and work. The normal final radiation report keeps
+the exact emissivity card evidence and convection/radiation decomposition.
+
+`transient.radiation` counts all outer trials, Newton updates and Krylov
+iterations against their complete multiplied budgets. Detailed Newton/linear
+histories describe the final inner solve of each accepted step, which is the
+history exposed by the shared owner. The reservoir model uses patch-mean
+temperature; it does not infer enclosure exchange or pointwise T(x)^4
+integration. The independent regular-tetrahedron regressions cover both
+radiative heat loss and heating from a hotter reservoir, plus latent-plateau
+energy and phase accounting.
+
+### Phase change with natural convection
+
+`cooling-enthalpy-natural.fsim` keeps the synthetic density and phase chart
+of `cooling-enthalpy.fsim`, while replacing insulation with the existing
+Churchill–Chu vertical-plate law at 293.15 K and 0.1 m characteristic length.
+The 5 W heater runs for two seconds. Source energy is 10 J; retained energy
+subtracts the computed passive heat loss at every endpoint. The numerical
+tetrahedron and vertical-plate idealization are educational inputs.
+
+```bash
+frankensim --json validate data/reference-project/cooling-enthalpy-natural.fsim
+frankensim --json import data/reference-project/cooling-enthalpy-natural.fsim \
+  data/reference-project/plate.stl enthalpy-natural.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-enthalpy-natural.fsim \
+  enthalpy-natural.db --materials data/reference-project/aa6061.fsmcdpk
+```
+
+The same boundary declaration can be used with the radiation example:
+
+```lisp
+(natural-convection :target "solid"
+  :characteristic-length 0.1m
+  :ambient-temperature 293.15K
+  :correlation "convection.churchill-chu-vertical-plate")
+```
+
+Each candidate re-evaluates its natural-convection coefficient and its complete
+physical heat equation. A small coefficient change or a closed total energy
+balance alone cannot accept a step. Every internal convection, radiation and
+Newton trial uses unchanged old enthalpy; only a completed physical endpoint
+advances time. This preserves latent storage even when temperature stays fixed.
+
+The existing correlation supports heated and cooled walls in its declared
+Rayleigh domain. A powered body may start at ambient using the existing initial
+coefficient guess, but exact unpowered equilibrium and out-of-domain actual
+states still refuse. `transient.natural` reports both grids' complete work;
+each step retains the physical residual and energy balance. The ordinary
+`natural_convection` receipt retains the final physical card evaluation.
+
+### Conductivity that follows the phase state
+
+Schema v14 adds an optional `:phase-conductivity` declaration after a regional
+enthalpy material's knots:
+
+```lisp
+:phase-conductivity
+(phase-conductivity
+  :law "linear-liquid-mass-fraction"
+  :solid-multiplier 1.0
+  :liquid-multiplier 0.2
+  :source "synthetic phase multipliers for an educational model")
+```
+
+At each nonlinear trial, the solver evaluates the liquid mass fraction at
+every node and uses each tetrahedron's mean fraction to scale its existing
+conductivity tensor. A 0.2 liquid multiplier means that the declared liquid
+limit conducts at one fifth of the base tensor's value at the same temperature.
+The exact enthalpy tangent includes this feedback, even on a latent plateau
+where temperature is fixed but liquid fraction changes. A region without a
+declaration retains its original conductivity.
+
+The base tensor still comes from its original material card and temperature
+domain. These optional factors are separately declared model inputs, recorded
+with their source; they do not establish a solid/liquid volume-mixture law or
+supply experimentally validated phase properties. Historical v13 projects
+migrate without adding a multiplier.
+
+`cooling-enthalpy-phase-conductivity.fsim` combines the synthetic declaration
+above with the existing 20 W startup pulse, Robin boundary and gray radiation:
+
+```bash
+frankensim --json validate data/reference-project/cooling-enthalpy-phase-conductivity.fsim
+frankensim --json import data/reference-project/cooling-enthalpy-phase-conductivity.fsim \
+  data/reference-project/plate.stl enthalpy-phase.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-enthalpy-phase-conductivity.fsim \
+  enthalpy-phase.db --materials data/reference-project/aa6061.fsmcdpk \
+  --materials data/reference-project/gray-surface.fsmcdpk
+```
+
+## Pulse and duty-cycle heating
+
+Schema v12 admits optional `:power-schedules` inside the transient declaration.
+For example, this schedule deposits 5 J through a 20 W pulse, then switches
+the solid off for the rest of the two-second window:
+
+```lisp
+:power-schedules
+(power-schedules
+  (schedule :region "solid" :source "declared 20 W startup pulse"
+    :steps (steps
+      (step :until 0.25s :watts 20.0kg·m^2·s^-3)
+      (step :until 2.0s :watts 0.0kg·m^2·s^-3))))
+```
+
+Each `watts` value is the absolute delivered power from the preceding switch
+(or time zero) until `until`. It replaces all static delivered power for that
+volume region; the static row's duty factor is not applied a second time.
+Unscheduled volume regions and surface heat inputs retain their static values.
+Every schedule needs a source, strictly increasing positive times and an exact
+final time equal to the transient horizon. Negative power and surface schedules
+are refused.
+
+Both time grids land on every switch, including short pulses between their
+old uniform sampling points. For the example above with `max-step = 0.5 s`,
+the two segments need `ceil(0.25/0.5) + ceil(1.75/0.5) = 5` coarse steps and
+10 fine steps, so declare at least `max-steps = 15`. Actual step lengths and
+source watts are retained. For schedules the uniform `coarse_step_s` and
+`fine_step_s` fields are null; the `*_max_step_s` fields and each row's `dt_s`
+describe the grid. The `workload` object includes the full sourced schedule
+and integrated scheduled input in joules.
+
+`cooling-pulsed.fsim` is the complete runnable project for this pulse. Use it
+in the same validate/import/solve commands above with a fresh `pulsed.db`.
+The reported temperature limit still applies at the final time, which can be
+lower than the temperature reached during the pulse.
+
+## Ambient radiation during a pulse
+
+`cooling-radiative-pulse.fsim` adds the existing sourced 0.85 gray-emissivity
+surface card to the complete pulse example. The surface exchanges radiation
+with a 293.15 K reservoir alongside its prescribed convection. Supply both
+immutable material packs:
+
+```bash
+frankensim --json validate data/reference-project/cooling-radiative-pulse.fsim
+frankensim --json import data/reference-project/cooling-radiative-pulse.fsim \
+  data/reference-project/plate.stl radiative-pulse.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-radiative-pulse.fsim \
+  radiative-pulse.db --materials data/reference-project/aa6061.fsmcdpk \
+  --materials data/reference-project/gray-surface.fsmcdpk
+```
+
+The declaration uses the existing `:radiation (radiation ...)` block inside
+`conduction`; no new emissivity or radiation schema is needed. The shared
+gray-patch law uses the actual area-mean endpoint temperature and a fixed
+reservoir. The same accepted old temperature is held fixed through every
+radiative trial and every inner conductivity correction. Only a complete
+endpoint can advance physical time.
+
+A small radiation temperature change alone cannot accept a step. The patch
+heat mismatch, actual implicit residual and physical energy balance must all
+pass their declared gates. The inner solid residual tolerance is tightened
+to reserve room for the radiative coupling error. Actual surface temperatures
+must remain within the emissivity card's validity domain, including when
+the reservoir supplies heat to the solid.
+
+The `radiation` object in each time-step row retains applied radiation watts,
+nonlinear radiation watts, convection watts, physical joule residual and its
+threshold, physical energy residual, and the prescribed-temperature reaction
+with boundary storage. Existing step `net_input_w` and `energy_residual_j`
+retain the frozen-secant operator's balance; the explicitly named physical
+fields check the full nonlinear endpoint. Their distinction prevents a
+frozen radiative coefficient from being reported as an exact nonlinear law.
+
+`transient.radiation` reports coarse, fine and total radiative trial counts,
+the maximum physical energy residual and the complete per-endpoint Krylov
+allowance. A solid response shares one linear budget across all of its Newton
+corrections; at most `radiation.max-iterations` responses occur per outer
+airflow or natural-convection evaluation (or per endpoint without either).
+The original complete `conduction.radiation` receipt describes the final fine
+endpoint and retains the immutable surface-card evidence. Numerical
+cancellation remains cooperative; wall-time checks occur between numerical
+operations and do not promise an intra-kernel deadline.
+
+This example and its capacity are synthetic. The result is an Estimated
+final-time temperature with a coarse/fine temporal comparison, without a
+continuous-time peak, enclosure-radiation, phase-change or transient-adjoint
+claim.
+
+## Fan-cooled startup pulses
+
+`examples/heatsink-fan/heatsink-fan-pulse.fsim` adds a native transient
+declaration to the existing finned-heatsink and fan-network project. The
+20 W pulse lasts 0.25 s and is followed by 1.75 s with regional power off.
+Both grids land on the switch: five coarse steps and ten fine steps share
+the declared fifteen-step cap. The project declares a **synthetic
+100000 J/(m³ K)** solid capacity, with an explicit source saying that this is
+not an AA6061 property claim. The existing fan curve is illustrative as well.
+
+From the repository root:
+
+```bash
+frankensim --json validate examples/heatsink-fan/heatsink-fan-pulse.fsim
+frankensim --json import examples/heatsink-fan/heatsink-fan-pulse.fsim \
+  examples/heatsink-fan/heatsink.stl fan-pulse.db --unit m --max-hole-edges 0
+frankensim --json solve examples/heatsink-fan/heatsink-fan-pulse.fsim \
+  fan-pulse.db --materials data/reference-project/aa6061.fsmcdpk
+```
+
+The existing `airflow-convection` laws supply each branch, ordered segment,
+inlet temperature and convection correlation. The flow-network stage supplies
+the operating point; retained exterior areas and the correlation card supply
+the conductance. Air warms along each declared path at every thermal endpoint.
+Independent branches retain their own inlet and mass flow while sharing one
+solid field. The operating point stays fixed through the trajectory: only the
+solid stores heat, and neither air storage nor fan acceleration is inferred.
+
+Every air evaluation and inner radiation/Newton solve sees the same accepted
+old solid temperature. The shared IQN-ILS solver has at most 100 airflow
+evaluations per natural trial, or per endpoint without natural convection;
+the natural loop allows at most 80 trials. It uses the existing branch-local heat gates and
+tightens its raw reference-temperature criterion to at most
+`0.01 * energy_tolerance_j / (dt_s * sum(hA))`. A final independent joule gate
+uses actual heat carried away by every air branch, off-path convection,
+nonlinear ambient radiation, prescribed boundary reaction and solid storage.
+Radiation exchanges heat with its own reservoir; it is excluded from the
+air's heat gain.
+
+Each step's `conjugate` object retains the standard exchange receipt,
+`applied_references_k`, all inner work counts and the full coupled energy
+residual. The published solid is exactly the last counted response at those
+applied references. The air marcher also reports its updated references;
+their difference is bounded by the retained `reference_tolerance_k`.
+No additional solve is performed after convergence.
+
+`transient.conjugate` aggregates both grids' airflow evaluations and solid
+responses, discloses the full endpoint Krylov allowance, and records the fine
+trajectory's integrated coupled heat balance. `conduction.conjugate` describes
+the final fine endpoint. Existing applied-operator energy and radiation
+physical-energy fields keep their meanings; `coupled_energy_residual_j`
+separately checks actual air transport. Final-time temperature limits and
+the coarse/fine temporal estimate retain the same scope as the other native
+transient examples.
+
+## Passive cooling after a startup pulse
+
+`cooling-passive-pulse.fsim` replaces the radiative pulse example's fixed
+convection coefficient with the existing Churchill–Chu vertical-plate law.
+It declares a 0.1 m characteristic length and 293.15 K ambient, retaining
+the gray-emissivity surface and its separate 293.15 K radiation reservoir.
+The geometry, heat capacity and vertical-plate idealization are synthetic;
+this example is not experimental validation of passive cooling.
+
+```bash
+frankensim --json validate data/reference-project/cooling-passive-pulse.fsim
+frankensim --json import data/reference-project/cooling-passive-pulse.fsim \
+  data/reference-project/plate.stl passive-pulse.db --unit m --max-hole-edges 0
+frankensim --json solve data/reference-project/cooling-passive-pulse.fsim \
+  passive-pulse.db --materials data/reference-project/aa6061.fsmcdpk \
+  --materials data/reference-project/gray-surface.fsmcdpk
+```
+
+Use the existing boundary declaration:
+
+```lisp
+(natural-convection :target "solid"
+  :characteristic-length 0.1m
+  :ambient-temperature 293.15K
+  :correlation "convection.churchill-chu-vertical-plate")
+```
+
+At every backward-Euler endpoint, the area-mean wall temperature determines
+the actual Rayleigh number and convection coefficient. Heated and cooled
+walls retain their signed heat exchange. Natural convection composes with
+scheduled power, prescribed-temperature storage reactions, matching contact,
+endpoint `k(T)` and ambient radiation. All coefficient, radiation and Newton
+trials hold the same accepted old field fixed.
+
+The existing initial coefficient uses a wall guess 10 K above ambient.
+That is only a starting coefficient, so a powered solid may start exactly at
+ambient. The solved candidate must satisfy the actual law. Exact equilibrium
+and actual Rayleigh numbers outside the card's `[0.1, 1e12]` domain retain
+their named refusals; no near-equilibrium extension or clipped coefficient is
+introduced. An unpowered equilibrium or a cooling tail that leaves the
+card's domain therefore refuses the unfinished conduction stage.
+
+A small coefficient update cannot accept an endpoint by itself. Publication
+requires all three gates: relative coefficient change at most `1e-10`, a
+full physical free-residual norm below its fixed target, and the original
+declared joule energy tolerance. The residual target is fixed from the first
+fully evaluated candidate, using the requested relative tolerance plus a
+one-percent energy allowance divided by the square root of the free-degree
+count. Subsequent inner solves tighten their allowances to reserve room
+for the outer law discrepancy. Total energy balance alone cannot conceal
+opposing local heat-equation errors.
+
+The natural loop permits at most 80 coefficient evaluations per endpoint.
+The admitted work product includes every inner radiation response and every
+Newton/Krylov iteration; direct physical endpoint audits have a separate
+160-evaluation cap. A successful endpoint uses `2 * iterations - 1` direct
+audits. An exhausted limit or invalid candidate publishes no partial field.
+
+Each step's `natural` object retains applied and physical coefficients,
+the physical free-residual norm and target, physical convection/radiation,
+the prescribed-temperature reaction, the physical energy residual, the
+existing natural-convection card receipt and all nested work counts.
+The published field and common energy report belong to the last counted
+solid response at the retained applied coefficients. The physical-law
+audit is reported separately; convergence does not trigger an extra solve.
+
+`transient.natural` aggregates both grids' coefficient iterations, solid
+responses and direct endpoint audits, together with the maximum accepted
+physical energy residual and the fine trajectory's integrated heat balance.
+`conduction.natural_convection` retains the final fine endpoint's physical card receipt.
+The fifteen-step pulse grid and final-time temperature/QoI scope are the
+same as in the other pulse examples.

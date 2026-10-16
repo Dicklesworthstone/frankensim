@@ -1,0 +1,952 @@
+//! Analytic conduction solutions with DECLARED envelopes.
+//!
+//! Four families, and each states what kind of agreement it is claiming,
+//! because they are not the same kind:
+//!
+//! | case | exact solution | why the envelope is what it is |
+//! | --- | --- | --- |
+//! | slab, Dirichlet–Dirichlet | linear in `x` | in the P₁ space, so agreement is ROUND-OFF-level and the envelope is `1e-9 K` |
+//! | slab with a uniform source | quadratic | nodally reproduced by P₁ on this mesh, so again round-off at the nodes; the `L2` envelope is the interpolation error |
+//! | slab, Dirichlet–Robin | linear in `x` | in the P₁ space; the envelope also pins the Robin heat rate against `k h ΔT/(k+h)` |
+//! | annulus, radial log profile | `ln r` | NOT in the P₁ space: a DISCRETIZATION envelope, checked to shrink like `h²` under refinement. Its CONDUCTANCE envelope is looser and geometry-dominated: the annulus is meshed as a polygon, so the solved surface sits a chord sagitta inside the true cylinder |
+//! | spherical shell, radial reciprocal profile | `1/r` | NOT in the P₁ space: a DISCRETIZATION envelope, checked to shrink like `h²` on a pole-free spherical patch. Its CONDUCTANCE envelope also carries the faceted-surface geometry error |
+//! | straight fin | 1-D fin equation | a MODEL comparison, not a discretization one: the envelope carries the fin model's own error, and the Biot number that bounds it is computed and printed |
+//!
+//! The fin row is the only one where "within envelope" includes a model
+//! discrepancy the solver is not responsible for. That is stated here so
+//! its number is never read as a discretization claim.
+
+mod support;
+
+use fs_conduction::assemble::{assemble_operator, full_residual};
+use fs_conduction::bc::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
+use fs_conduction::field::ScalarField;
+use fs_conduction::fixtures::{
+    annulus_sector, box_grid, cylindrical_radius, on_box_face, spherical_radius,
+    spherical_shell_patch,
+};
+use fs_conduction::material::ConductivityModel;
+use fs_conduction::mesh::ConductionMesh;
+use fs_conduction::solve::{
+    ConductionProblem, ConductionSolution, InitialGuess, LinearConfig, Nonlinearity, SolveConfig,
+    StopRule, element_heat_flux, solve,
+};
+use fs_vvreg::thermal_level_a::{ThermalLevelAKind, thermal_level_a_cases};
+use support::{l2_error, max_nodal_error, with_cx};
+
+const LEVEL_A_ANALYTIC_BINDINGS: [(&str, Option<&str>, &str); 13] = [
+    (
+        "thermal-a-slab-dirichlet",
+        Some("tests/analytic.rs::slab_dirichlet_dirichlet"),
+        "the solver fixture uses the catalog parameters and compares outward heat flux",
+    ),
+    (
+        "thermal-a-slab-robin",
+        Some("tests/analytic.rs::slab_dirichlet_robin"),
+        "the solver fixture uses the catalog parameters and compares Robin heat flux",
+    ),
+    (
+        "thermal-a-slab-uniform-source",
+        Some("tests/analytic.rs::slab_with_uniform_source"),
+        "the solver fixture uses the catalog parameters and compares center rise",
+    ),
+    (
+        "thermal-a-rectangle-linear",
+        Some("tests/analytic.rs::rectangular_affine_temperature_patch"),
+        "the solver fixture uses the catalog affine field and probe location",
+    ),
+    (
+        "thermal-a-cylinder-shell",
+        Some("tests/analytic.rs::cylindrical_shell_radial_profile"),
+        "the sector solve is normalized to the catalog full-cylinder conductance",
+    ),
+    (
+        "thermal-a-sphere-shell",
+        Some("tests/analytic.rs::spherical_shell_radial_profile"),
+        "a pole-free patch solve is normalized by its exact solid angle to the catalog full-shell conductance",
+    ),
+    (
+        "thermal-a-fin-efficiency",
+        Some("tests/analytic.rs::straight_fin_against_the_one_dimensional_model"),
+        "the 3-D adiabatic-tip fixture uses mL=1 and compares efficiency",
+    ),
+    (
+        "thermal-a-lumped-transient",
+        None,
+        "fs-conduction is steady-only",
+    ),
+    (
+        "thermal-a-duct-nu-cwt",
+        None,
+        "the Nusselt limit belongs to fs-convection, not the conduction kernel",
+    ),
+    (
+        "thermal-a-duct-nu-chf",
+        None,
+        "the Nusselt limit belongs to fs-convection, not the conduction kernel",
+    ),
+    (
+        "thermal-a-parallel-plate-view-factor",
+        None,
+        "reference-only here: the infinite-parallel-plate constructor stores F12=F21=1 literally; radiation tests exercise admission and radiosity algebra but no geometry kernel computes this Level-A value",
+    ),
+    (
+        "thermal-a-contact-series",
+        Some("tests/contact.rs::two_slab_contact_matches_level_a_series_and_retains_receipt"),
+        "the matching-P1 two-slab fixture binds an ordered interface card and retains its property receipt",
+    ),
+    (
+        "thermal-a-heatsink-fin-array-ntu",
+        None,
+        "the lumped NTU junction chain is the air-side exchange owned by fs-airflow::conjugate and the fs-cli conduction stage's conjugate exchange, not the conduction kernel; fs-vvreg's thermal_level_a test reproduces the formula and fs-cli's conjugate G0 test executes the chain at the retained operating point",
+    ),
+];
+
+fn level_a_reference(case_id: &str, metric: &str) -> f64 {
+    let case = thermal_level_a_cases()
+        .iter()
+        .find(|case| case.id == case_id)
+        .unwrap_or_else(|| panic!("missing Level-A case {case_id}"));
+    assert_eq!(case.kind, ThermalLevelAKind::AnalyticReference);
+    assert_eq!(case.metric, metric);
+    assert!(
+        LEVEL_A_ANALYTIC_BINDINGS
+            .iter()
+            .any(|(id, test, _)| *id == case_id && test.is_some()),
+        "{case_id} is not declared as an executing fs-conduction binding"
+    );
+    case.reference_value_si
+}
+
+fn verdict(case: &str, level_a_case_id: &str, detail: &str) {
+    println!(
+        "{{\"suite\":\"fs-conduction/analytic\",\"case\":\"{case}\",\
+         \"level_a_case_id\":\"{level_a_case_id}\",\"verdict\":\"pass\",\
+         \"authority\":\"executed-solver-envelope-not-registry-receipt\",\
+         \"detail\":\"{}\"}}",
+        support::json_escape(detail)
+    );
+}
+
+fn config() -> SolveConfig {
+    SolveConfig {
+        nonlinearity: Nonlinearity::FixedPoint {
+            relaxation: 1.0,
+            max_backtracks: 8,
+        },
+        stop: StopRule {
+            residual_rtol: 1e-11,
+            residual_atol: 1e-24,
+            step_atol: 0.0,
+            max_iterations: 12,
+        },
+        linear: LinearConfig {
+            tolerance: 1e-13,
+            max_iterations: 60_000,
+            restart: 60,
+        },
+        initial: InitialGuess::DirichletMean,
+    }
+}
+
+/// Nodal heat inflow at every vertex: the full-residual rows. On a
+/// Dirichlet vertex this is the reaction — the heat entering the domain
+/// through the prescribed row.
+fn nodal_inflow(
+    mesh: &ConductionMesh,
+    boundary: &ThermalBoundary,
+    material: &ConductivityModel,
+    source: &ScalarField,
+    solution: &ConductionSolution,
+) -> Vec<f64> {
+    with_cx(|cx| {
+        let system = assemble_operator(cx, mesh, boundary, material, source, &solution.temperature)
+            .expect("assemble");
+        full_residual(&system, &solution.temperature)
+    })
+}
+
+// ------------------------------------------------------------ slab, D–D
+
+#[test]
+fn slab_dirichlet_dirichlet() {
+    const K: f64 = 20.0;
+    const LENGTH: f64 = 0.2;
+    const T_HOT: f64 = 340.0;
+    const T_COLD: f64 = 300.0;
+    let reference_flux = level_a_reference("thermal-a-slab-dirichlet", "outward-heat-flux");
+    let (complex, positions) = box_grid([6, 3, 3], [LENGTH, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let material = ConductivityModel::isotropic_declared(K).expect("material");
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(T_HOT).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], LENGTH),
+            ThermalBc::dirichlet(T_COLD).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let solution = with_cx(|cx| {
+        solve(
+            cx,
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
+            config(),
+        )
+        .expect("solve")
+    });
+
+    let exact = |p: [f64; 3]| T_HOT + (T_COLD - T_HOT) * p[0] / LENGTH;
+    let err = max_nodal_error(&mesh, &solution.temperature, &exact);
+    assert!(
+        err < 1e-9,
+        "a linear profile lives in the P1 space; nodal error {err:e} must be round-off"
+    );
+
+    // Fourier's law through the slab: q_x = k ΔT / L, uniformly.
+    let want_flux = K * (T_HOT - T_COLD) / LENGTH;
+    assert_eq!(want_flux.to_bits(), reference_flux.to_bits());
+    let flux = element_heat_flux(&mesh, &material, &solution.temperature).expect("flux");
+    let worst_flux = flux
+        .iter()
+        .map(|q| (q[0] - want_flux).abs().max(q[1].abs()).max(q[2].abs()))
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst_flux < 1e-8 * want_flux,
+        "recovered flux deviates by {worst_flux:e} from k ΔT/L = {want_flux:e}"
+    );
+
+    // The heat INTO the hot face must equal k A ΔT / L, and the heat out
+    // of the cold face must match it: an independent check of the
+    // Dirichlet reaction against the closed-form conductance.
+    let inflow = nodal_inflow(&mesh, &boundary, &material, &source, &solution);
+    let mut hot = 0.0f64;
+    let mut cold = 0.0f64;
+    for (v, &p) in mesh.positions().iter().enumerate() {
+        if on_box_face(p[0], 0.0) {
+            hot += inflow[v];
+        } else if on_box_face(p[0], LENGTH) {
+            cold += inflow[v];
+        }
+    }
+    let want_q = reference_flux;
+    assert!(
+        (hot - want_q).abs() < 1e-8 * want_q,
+        "hot-face reaction {hot} != k A ΔT/L = {want_q}"
+    );
+    assert!(
+        (cold + want_q).abs() < 1e-8 * want_q,
+        "cold-face reaction {cold} != −k A ΔT/L"
+    );
+    verdict(
+        "slab-dirichlet",
+        "thermal-a-slab-dirichlet",
+        &format!(
+            "nodal_err={err:e} flux_err={worst_flux:e} Q_hot={hot} Q_analytic={want_q} \
+             envelope=1e-9K/1e-8rel"
+        ),
+    );
+}
+
+// ----------------------------------------------------- slab with source
+
+#[test]
+fn slab_with_uniform_source() {
+    const K: f64 = 10.0;
+    const F: f64 = 100_000.0;
+    const LENGTH: f64 = 0.1;
+    const T_WALL: f64 = 300.0;
+    let reference_rise =
+        level_a_reference("thermal-a-slab-uniform-source", "center-temperature-rise");
+    let (complex, positions) = box_grid([8, 3, 3], [LENGTH, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let material = ConductivityModel::isotropic_declared(K).expect("material");
+    let source = ScalarField::Uniform(F);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "walls",
+            |f| on_box_face(f.centroid[0], 0.0) || on_box_face(f.centroid[0], LENGTH),
+            ThermalBc::dirichlet(T_WALL).expect("bc"),
+        )
+        .expect("walls")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let solution = with_cx(|cx| {
+        solve(
+            cx,
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
+            config(),
+        )
+        .expect("solve")
+    });
+
+    // T(x) = T_wall + f x(L−x)/(2k); peak T_wall + f L²/(8k).
+    let exact = |p: [f64; 3]| T_WALL + F * p[0] * (LENGTH - p[0]) / (2.0 * K);
+    let err = max_nodal_error(&mesh, &solution.temperature, &exact);
+    assert!(
+        err < 1e-8,
+        "P1 reproduces a quadratic profile at the nodes on this mesh; got {err:e}"
+    );
+    let peak = solution
+        .temperature
+        .iter()
+        .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let want_peak = reference_rise + T_WALL;
+    let formula_rise = F * LENGTH.powi(2) / (8.0 * K);
+    assert!(
+        (formula_rise - reference_rise).abs() <= 2.0e-14 * reference_rise,
+        "fixture formula {formula_rise:.17e} must reproduce catalog rise \
+         {reference_rise:.17e} within the catalog recomputation envelope"
+    );
+    assert!((peak - want_peak).abs() < 1e-8);
+
+    // The L2 envelope IS the interpolation error, because the nodal
+    // values are exact: ‖T − I_h T‖ for this quadratic on h = 1/8. It is
+    // stated RELATIVE to the peak temperature rise, because an absolute
+    // kelvin envelope on an interpolation error is just a restatement of
+    // the mesh size.
+    let l2 = l2_error(&mesh, &solution.temperature, &exact);
+    let rise = reference_rise;
+    assert!(
+        l2 / rise < 2.0e-2,
+        "L2 deviation {l2:e} K is {:.4} of the {rise} K rise, above the declared 2% \
+         envelope for the h = 1/8 interpolation error",
+        l2 / rise
+    );
+
+    // All the generated heat leaves through the two walls.
+    let e = solution.report.energy;
+    let want_source = F * LENGTH;
+    assert!(
+        (e.source_w - want_source).abs() < 1e-6 * want_source,
+        "the source integral {} should be f x volume = {want_source}",
+        e.source_w
+    );
+    assert!(
+        (e.dirichlet_in_w + want_source).abs() < 1e-6 * want_source,
+        "steady state requires the walls to remove every watt generated"
+    );
+    verdict(
+        "slab-with-source",
+        "thermal-a-slab-uniform-source",
+        &format!(
+            "nodal_err={err:e} peak={peak} analytic_peak={want_peak} l2={l2:e} \
+             l2_rel_rise={:.5} Q_gen={} Q_walls={} envelope=1e-8K nodal / 2% L2",
+            l2 / rise,
+            e.source_w,
+            e.dirichlet_in_w
+        ),
+    );
+}
+
+// ------------------------------------------------------ slab, D–Robin
+
+#[test]
+fn slab_dirichlet_robin() {
+    const K: f64 = 10.0;
+    const H: f64 = 100.0;
+    const LENGTH: f64 = 0.1;
+    const T_HOT: f64 = 395.0;
+    const T_INF: f64 = 295.0;
+    let reference_flux = level_a_reference("thermal-a-slab-robin", "outward-heat-flux");
+    let (complex, positions) = box_grid([6, 3, 3], [LENGTH, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let material = ConductivityModel::isotropic_declared(K).expect("material");
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(T_HOT).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "convective",
+            |f| on_box_face(f.centroid[0], LENGTH),
+            ThermalBc::robin(H, T_INF).expect("bc"),
+        )
+        .expect("convective")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let solution = with_cx(|cx| {
+        solve(
+            cx,
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
+            config(),
+        )
+        .expect("solve")
+    });
+
+    // q = ΔT/(L/k + 1/h), with dT/dx = −q/k.
+    let want_q = (T_HOT - T_INF) / (LENGTH / K + 1.0 / H);
+    assert_eq!(want_q.to_bits(), reference_flux.to_bits());
+    let slope = -want_q / K;
+    let exact = |p: [f64; 3]| T_HOT + slope * p[0];
+    let err = max_nodal_error(&mesh, &solution.temperature, &exact);
+    assert!(
+        err < 1e-9,
+        "the Dirichlet–Robin slab profile is linear, so P1 is exact; got {err:e}"
+    );
+
+    // The box has unit cross-sectional area, so heat rate equals the
+    // catalog's outward heat-flux value.
+    let e = solution.report.energy;
+    assert!(
+        (e.robin_out_w - want_q).abs() < 1e-8 * want_q,
+        "Robin heat rate {} != k h ΔT/(k+h) = {want_q}",
+        e.robin_out_w
+    );
+    assert!(
+        (e.dirichlet_in_w - want_q).abs() < 1e-8 * want_q,
+        "the Dirichlet face must supply exactly what the convective face removes"
+    );
+    verdict(
+        "slab-dirichlet-robin",
+        "thermal-a-slab-robin",
+        &format!(
+            "nodal_err={err:e} slope={slope} Q_robin={} Q_analytic={want_q} envelope=1e-9K",
+            e.robin_out_w
+        ),
+    );
+}
+
+// ----------------------------------------------- rectangular affine patch
+
+#[test]
+fn rectangular_affine_temperature_patch() {
+    const X_EXTENT: f64 = 1.0;
+    const Y_EXTENT: f64 = 0.5;
+    const PROBE_X: f64 = 0.5;
+    const PROBE_Y: f64 = 0.25;
+    let reference_temperature =
+        level_a_reference("thermal-a-rectangle-linear", "probe-temperature");
+    let exact = |p: [f64; 3]| 300.0 + 20.0 * p[0] + 40.0 * p[1];
+    assert_eq!(
+        exact([PROBE_X, PROBE_Y, 0.0]).to_bits(),
+        reference_temperature.to_bits()
+    );
+
+    let (complex, positions) = box_grid([4, 4, 2], [X_EXTENT, Y_EXTENT, 0.1]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let material = ConductivityModel::isotropic_declared(10.0).expect("material");
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "affine-temperature",
+            |_| true,
+            ThermalBc::Dirichlet {
+                temperature: ScalarField::Nodal(
+                    mesh.positions().iter().map(|&point| exact(point)).collect(),
+                ),
+            },
+        )
+        .expect("boundary")
+        .finish()
+        .expect("partition");
+    let solution = with_cx(|cx| {
+        solve(
+            cx,
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
+            config(),
+        )
+        .expect("solve")
+    });
+
+    let err = max_nodal_error(&mesh, &solution.temperature, &exact);
+    assert!(
+        err < 1.0e-9,
+        "an affine temperature lives in the P1 space; nodal error {err:e} must be round-off"
+    );
+    let probe = mesh
+        .positions()
+        .iter()
+        .zip(&solution.temperature)
+        .find(|(point, _)| {
+            on_box_face(point[0], PROBE_X)
+                && on_box_face(point[1], PROBE_Y)
+                && on_box_face(point[2], 0.0)
+        })
+        .map(|(_, &temperature)| temperature)
+        .expect("the structured grid contains the catalog probe");
+    assert!(
+        (probe - reference_temperature).abs() < 1.0e-9,
+        "probe temperature {probe} K != catalog reference {reference_temperature} K"
+    );
+    verdict(
+        "rectangular-affine-temperature",
+        "thermal-a-rectangle-linear",
+        &format!(
+            "nodal_err={err:e} probe={probe}K reference={reference_temperature}K \
+             envelope=1e-9K"
+        ),
+    );
+}
+
+// ---------------------------------------------------- cylindrical shell
+
+const R_IN: f64 = 0.05;
+const R_OUT: f64 = 0.1;
+const SWEEP: f64 = core::f64::consts::FRAC_PI_2;
+const HEIGHT: f64 = 1.0;
+const SHELL_K: f64 = 15.0;
+const T_IN: f64 = 400.0;
+const T_OUT: f64 = 300.0;
+
+fn cylinder_exact(p: [f64; 3]) -> f64 {
+    let r = cylindrical_radius(p);
+    T_IN + (T_OUT - T_IN) * fs_math::det::ln(r / R_IN) / fs_math::det::ln(R_OUT / R_IN)
+}
+
+fn run_cylinder(refine: usize) -> (f64, f64, f64) {
+    let counts = [4 * refine, 6 * refine, 2 * refine];
+    let (complex, positions) = annulus_sector(counts, R_IN, R_OUT, SWEEP, HEIGHT);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let material = ConductivityModel::isotropic_declared(SHELL_K).expect("material");
+    let source = ScalarField::Uniform(0.0);
+    // Classify by the VERTEX radii, not the face centroid: the mesh is a
+    // faceted approximation of the cylinder, so a chord's midpoint sits
+    // inside the true radius while its vertices sit exactly on it.
+    let radii: Vec<f64> = mesh
+        .positions()
+        .iter()
+        .map(|&p| cylindrical_radius(p))
+        .collect();
+    let on_radius = |verts: [u32; 3], target: f64| {
+        verts
+            .iter()
+            .all(|&v| (radii[v as usize] - target).abs() < 1e-9)
+    };
+    let radii_in = radii.clone();
+    let radii_out = radii.clone();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "inner",
+            |f| {
+                f.vertices
+                    .iter()
+                    .all(|&v| (radii_in[v as usize] - R_IN).abs() < 1e-9)
+            },
+            ThermalBc::dirichlet(T_IN).expect("bc"),
+        )
+        .expect("inner")
+        .region(
+            "outer",
+            |f| {
+                f.vertices
+                    .iter()
+                    .all(|&v| (radii_out[v as usize] - R_OUT).abs() < 1e-9)
+            },
+            ThermalBc::dirichlet(T_OUT).expect("bc"),
+        )
+        .expect("outer")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    assert!(
+        on_radius(mesh.boundary()[0].vertices, R_IN)
+            || !on_radius(mesh.boundary()[0].vertices, R_IN),
+        "radius classifier is total"
+    );
+    let solution = with_cx(|cx| {
+        solve(
+            cx,
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
+            config(),
+        )
+        .expect("solve")
+    });
+    let l2 = l2_error(&mesh, &solution.temperature, &cylinder_exact);
+    let nodal = max_nodal_error(&mesh, &solution.temperature, &cylinder_exact);
+
+    // Radial heat rate of the sector: k · height · sweep · ΔT / ln(r_o/r_i).
+    let inflow = nodal_inflow(&mesh, &boundary, &material, &source, &solution);
+    let mut q_in = 0.0f64;
+    for (v, &r) in radii.iter().enumerate() {
+        if (r - R_IN).abs() < 1e-9 {
+            q_in += inflow[v];
+        }
+    }
+    (l2, nodal, q_in)
+}
+
+#[test]
+fn cylindrical_shell_radial_profile() {
+    let reference_conductance =
+        level_a_reference("thermal-a-cylinder-shell", "thermal-conductance");
+    let drop = T_IN - T_OUT;
+    let want_q = reference_conductance * drop * SWEEP / core::f64::consts::TAU;
+    let formula_conductance =
+        core::f64::consts::TAU * SHELL_K * HEIGHT / fs_math::det::ln(R_OUT / R_IN);
+    assert!(
+        (formula_conductance - reference_conductance).abs() <= 2.0e-14 * reference_conductance,
+        "catalog conductance must reproduce from the solver fixture parameters"
+    );
+    let (l2_coarse, _nodal_coarse, q_coarse) = run_cylinder(1);
+    let (l2_fine, nodal_fine, q_fine) = run_cylinder(2);
+
+    // ln r is NOT in the P1 space, so this is a DISCRETIZATION envelope:
+    // it must shrink like h², i.e. roughly 4x per halving.
+    let ratio = l2_coarse / l2_fine;
+    assert!(
+        ratio > 3.2,
+        "L2 error ratio {ratio:.3} under a 2x refinement is not second order \
+         ({l2_coarse:e} -> {l2_fine:e})"
+    );
+    assert!(
+        l2_fine / drop < 2.0e-3,
+        "fine-grid L2 deviation {l2_fine:e} K is {:.5} of the {drop} K radial drop, \
+         above the declared 0.2% envelope",
+        l2_fine / drop
+    );
+    assert!(
+        nodal_fine / drop < 1.0e-2,
+        "fine-grid nodal deviation {nodal_fine:e} K is above the declared 1% envelope"
+    );
+
+    // The radial conductance is the classical log formula.
+    let conductance_coarse = q_coarse / drop * core::f64::consts::TAU / SWEEP;
+    let conductance_fine = q_fine / drop * core::f64::consts::TAU / SWEEP;
+    let rel_coarse = (conductance_coarse - reference_conductance).abs() / reference_conductance;
+    let rel_fine = (conductance_fine - reference_conductance).abs() / reference_conductance;
+    // The 0.5% envelope on the CONDUCTANCE is dominated by GEOMETRY, not
+    // by the PDE discretization: the annular boundary is meshed as a
+    // polygon, so the solved domain's inner surface sits a chord sagitta
+    // (≈ r Δθ²/8, here ≈ 0.2% of r) inside the true cylinder. Refinement
+    // must shrink it, which is the assertion below.
+    assert!(
+        rel_fine < 5.0e-3,
+        "fine-grid full-cylinder conductance {conductance_fine} deviates {rel_fine:.4} from \
+         the catalog reference {reference_conductance} (envelope 0.5%, dominated by the \
+         polygonal boundary); sector heat rate was {q_fine} W vs {want_q} W"
+    );
+    assert!(
+        rel_fine < rel_coarse,
+        "refinement must improve the conductance: {rel_coarse:.5} -> {rel_fine:.5}"
+    );
+    verdict(
+        "cylindrical-shell",
+        "thermal-a-cylinder-shell",
+        &format!(
+            "l2_coarse={l2_coarse:e} l2_fine={l2_fine:e} ratio={ratio:.3} \
+             nodal_fine={nodal_fine:e} G_fine={conductance_fine} \
+             G_reference={reference_conductance} Q_sector_fine={q_fine} \
+             Q_sector_analytic={want_q} \
+             rel={rel_fine:.5} envelopes=0.2%L2/1%nodal/0.5%Q(polygonal-boundary-dominated)"
+        ),
+    );
+}
+
+// ------------------------------------------------------ spherical shell
+
+const POLAR_MIN: f64 = core::f64::consts::FRAC_PI_4;
+const POLAR_MAX: f64 = 3.0 * core::f64::consts::FRAC_PI_4;
+
+fn sphere_exact(p: [f64; 3]) -> f64 {
+    let r = spherical_radius(p);
+    T_OUT + (T_IN - T_OUT) * (1.0 / r - 1.0 / R_OUT) / (1.0 / R_IN - 1.0 / R_OUT)
+}
+
+fn run_sphere(refine: usize) -> (f64, f64, f64) {
+    let counts = [4 * refine, 6 * refine, 6 * refine];
+    let (complex, positions) =
+        spherical_shell_patch(counts, R_IN, R_OUT, POLAR_MIN, POLAR_MAX, SWEEP);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let material = ConductivityModel::isotropic_declared(SHELL_K).expect("material");
+    let source = ScalarField::Uniform(0.0);
+    let radii: Vec<f64> = mesh
+        .positions()
+        .iter()
+        .map(|&p| spherical_radius(p))
+        .collect();
+    let radii_in = radii.clone();
+    let radii_out = radii.clone();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "inner",
+            |f| {
+                f.vertices
+                    .iter()
+                    .all(|&v| (radii_in[v as usize] - R_IN).abs() < 1e-9)
+            },
+            ThermalBc::dirichlet(T_IN).expect("bc"),
+        )
+        .expect("inner")
+        .region(
+            "outer",
+            |f| {
+                f.vertices
+                    .iter()
+                    .all(|&v| (radii_out[v as usize] - R_OUT).abs() < 1e-9)
+            },
+            ThermalBc::dirichlet(T_OUT).expect("bc"),
+        )
+        .expect("outer")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let solution = with_cx(|cx| {
+        solve(
+            cx,
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
+            config(),
+        )
+        .expect("solve")
+    });
+    let l2 = l2_error(&mesh, &solution.temperature, &sphere_exact);
+    let nodal = max_nodal_error(&mesh, &solution.temperature, &sphere_exact);
+    let inflow = nodal_inflow(&mesh, &boundary, &material, &source, &solution);
+    let mut q_in = 0.0f64;
+    for (v, &r) in radii.iter().enumerate() {
+        if (r - R_IN).abs() < 1e-9 {
+            q_in += inflow[v];
+        }
+    }
+    (l2, nodal, q_in)
+}
+
+#[test]
+fn spherical_shell_radial_profile() {
+    let reference_conductance = level_a_reference("thermal-a-sphere-shell", "thermal-conductance");
+    let drop = T_IN - T_OUT;
+    let full_solid_angle = 4.0 * core::f64::consts::PI;
+    let patch_solid_angle = SWEEP * (fs_math::det::cos(POLAR_MIN) - fs_math::det::cos(POLAR_MAX));
+    let want_q = reference_conductance * drop * patch_solid_angle / full_solid_angle;
+    let formula_conductance = full_solid_angle * SHELL_K / (1.0 / R_IN - 1.0 / R_OUT);
+    assert!(
+        (formula_conductance - reference_conductance).abs() <= 2.0e-14 * reference_conductance,
+        "catalog conductance must reproduce from the spherical fixture parameters"
+    );
+    let (l2_coarse, _nodal_coarse, q_coarse) = run_sphere(1);
+    let (l2_fine, nodal_fine, q_fine) = run_sphere(2);
+    let ratio = l2_coarse / l2_fine;
+    assert!(
+        ratio > 3.2,
+        "spherical L2 error ratio {ratio:.3} under a 2x refinement is not second order ({l2_coarse:e} -> {l2_fine:e})"
+    );
+    assert!(
+        l2_fine / drop < 1.0e-3,
+        "fine-grid spherical L2 deviation {l2_fine:e} K is {:.5} of the {drop} K radial drop, above the declared 0.1% envelope",
+        l2_fine / drop
+    );
+    assert!(
+        nodal_fine / drop < 1.0e-2,
+        "fine-grid spherical nodal deviation {nodal_fine:e} K is above the declared 1% envelope"
+    );
+
+    let conductance_coarse = q_coarse / drop * full_solid_angle / patch_solid_angle;
+    let conductance_fine = q_fine / drop * full_solid_angle / patch_solid_angle;
+    let rel_coarse = (conductance_coarse - reference_conductance).abs() / reference_conductance;
+    let rel_fine = (conductance_fine - reference_conductance).abs() / reference_conductance;
+    assert!(
+        rel_fine < 1.0e-2,
+        "fine-grid full-sphere conductance {conductance_fine} deviates {rel_fine:.4} from the catalog reference {reference_conductance} (envelope 1%, including faceted-surface geometry); patch heat rate was {q_fine} W vs {want_q} W"
+    );
+    assert!(
+        rel_fine < rel_coarse,
+        "refinement must improve spherical conductance: {rel_coarse:.5} -> {rel_fine:.5}"
+    );
+    verdict(
+        "spherical-shell",
+        "thermal-a-sphere-shell",
+        &format!(
+            "l2_coarse={l2_coarse:e} l2_fine={l2_fine:e} ratio={ratio:.3} nodal_fine={nodal_fine:e} G_coarse={conductance_coarse} G_fine={conductance_fine} G_reference={reference_conductance} Q_patch_fine={q_fine} Q_patch_analytic={want_q} solid_angle={patch_solid_angle} rel_coarse={rel_coarse:.5} rel_fine={rel_fine:.5} envelopes=0.1%L2/1%nodal/1%Q(faceted-surface-dominated)"
+        ),
+    );
+}
+
+// ------------------------------------------------------------------ fin
+
+#[test]
+fn straight_fin_against_the_one_dimensional_model() {
+    // Aluminium fin, forced-convection coefficient.
+    const K: f64 = 200.0;
+    const H: f64 = 25.0;
+    const W: f64 = 0.02;
+    const T: f64 = 0.002;
+    const T_BASE: f64 = 350.0;
+    const T_INF: f64 = 300.0;
+
+    let reference_efficiency = level_a_reference("thermal-a-fin-efficiency", "fin-efficiency");
+    let perimeter = 2.0 * (W + T);
+    let area = W * T;
+    let m = fs_math::det::sqrt(H * perimeter / (K * area));
+    let length = 1.0 / m;
+    let (complex, positions) = box_grid([24, 6, 3], [length, W, T]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let material = ConductivityModel::isotropic_declared(K).expect("material");
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "base",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(T_BASE).expect("bc"),
+        )
+        .expect("base")
+        .region(
+            "wetted-sides",
+            |f| !on_box_face(f.centroid[0], 0.0) && !on_box_face(f.centroid[0], length),
+            ThermalBc::robin(H, T_INF).expect("bc"),
+        )
+        .expect("wetted")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let mut fin_config = config();
+    // The catalog geometry is thinner and more ill-conditioned than the
+    // historical fin fixture. This remains well below the 2% model envelope,
+    // while avoiding a refusal on a recomputed residual measured at 1.15e-13
+    // on this fixture; ~8x headroom so a re-dimension does not read as a
+    // solver regression.
+    fin_config.linear.tolerance = 1.0e-12;
+    let solution = with_cx(|cx| {
+        solve(
+            cx,
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
+            fin_config,
+        )
+        .expect("solve")
+    });
+
+    // The catalog fixes the adiabatic-tip model at mL=1.
+    let ml = m * length;
+    let cosh_ml = f64::midpoint(fs_math::det::exp(ml), fs_math::det::exp(-ml));
+    let sinh_ml = (fs_math::det::exp(ml) - fs_math::det::exp(-ml)) / 2.0;
+    let tanh_ml = sinh_ml / cosh_ml;
+    let theta_b = T_BASE - T_INF;
+    let q_fin = fs_math::det::sqrt(H * perimeter * K * area) * theta_b * tanh_ml;
+    let model_efficiency = tanh_ml / ml;
+    assert!(
+        (model_efficiency - reference_efficiency).abs() <= 2.0e-14,
+        "mL=1 model efficiency must reproduce the catalog reference"
+    );
+    // The Biot number that bounds the 1-D model's own error.
+    let biot = H * (T / 2.0) / K;
+
+    let q_solved = solution.report.energy.dirichlet_in_w;
+    let solved_efficiency = q_solved / (H * perimeter * length * theta_b);
+    let rel = (solved_efficiency - reference_efficiency).abs() / reference_efficiency;
+    assert!(
+        biot < 1.0e-3,
+        "the 1-D fin model is only a fair comparison at small Biot; got {biot:e}"
+    );
+    assert!(
+        rel < 2.0e-2,
+        "3-D fin efficiency {solved_efficiency} deviates {rel:.4} from the catalog's \
+         adiabatic-tip reference {reference_efficiency} (model heat rate {q_fin} W; \
+         envelope 2%, which CARRIES model error, not just discretization)"
+    );
+
+    // Tip temperature from the same model.
+    let tip_theta = theta_b / cosh_ml;
+    let tip_numeric = mesh
+        .positions()
+        .iter()
+        .zip(&solution.temperature)
+        .filter(|(p, _)| on_box_face(p[0], length))
+        .map(|(_, &t)| t)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let tip_rel = ((tip_numeric - T_INF) - tip_theta).abs() / tip_theta;
+    assert!(
+        tip_rel < 2.0e-2,
+        "tip excess temperature {} K deviates {tip_rel:.4} from the 1-D model {tip_theta} K",
+        tip_numeric - T_INF
+    );
+    verdict(
+        "straight-fin",
+        "thermal-a-fin-efficiency",
+        &format!(
+            "Bi={biot:e} mL={ml:.4} eta_3d={solved_efficiency:.6} \
+             eta_reference={reference_efficiency:.6} Q_3d={q_solved:.5}W \
+             Q_1d={q_fin:.5}W rel={rel:.5} tip_3d={:.4}K tip_1d={tip_theta:.4}K \
+             envelope=2%(model+discretization)",
+            tip_numeric - T_INF
+        ),
+    );
+}
+
+#[test]
+fn level_a_analytic_binding_matrix_is_complete_and_gap_preserving() {
+    let catalog_ids = thermal_level_a_cases()
+        .iter()
+        .filter(|case| case.kind == ThermalLevelAKind::AnalyticReference)
+        .map(|case| case.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let binding_ids = LEVEL_A_ANALYTIC_BINDINGS
+        .iter()
+        .map(|(id, _, _)| *id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(binding_ids, catalog_ids);
+    assert_eq!(
+        LEVEL_A_ANALYTIC_BINDINGS
+            .iter()
+            .filter(|(_, test, _)| test.is_some())
+            .count(),
+        8
+    );
+    for (id, test, basis) in LEVEL_A_ANALYTIC_BINDINGS {
+        assert!(
+            !basis.is_empty(),
+            "{id} must state its binding or gap basis"
+        );
+        if let Some(test) = test {
+            assert!(
+                test.starts_with("tests/analytic.rs::")
+                    || test.starts_with("tests/contact.rs::")
+                    || test.starts_with("tests/radiation.rs::"),
+                "{id}: executing test path must be stable"
+            );
+        }
+    }
+}

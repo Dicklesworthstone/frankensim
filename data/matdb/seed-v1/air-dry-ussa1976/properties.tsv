@@ -1,0 +1,32 @@
+frankensim.matdb-source.v1
+observation	ussa1976-model	USSA-1976 dry ideal-gas reference mixture; not a measured ambient sample or certified reference cylinder	Calorically perfect ideal gas and empirical Sutherland/USSA transport, from corrected equations rather than uncorrected printed tables	Model parameters, not new measurements. M=28.9644 kg/kmol; gamma=1.40; R*=8.31432 J/(mol K) from p.3. Equation51: mu=1.458e-6*T^(3/2)/(T+110.4) Pa*s. Store the equivalent mu_ref at T_ref=273.15K to avoid fractional dimensions; beta is recovered by the existing gas adapter. Equation53: k=2.64638e-3*T^(3/2)/(T+245.4*10^(-12/T)) W/(m K), evaluated by existing GasState with explicit Ussa1976AirFit selection. Table2 and TableIII contain errors identified by the appended errata; use p.3 R*, Eq51 S=110.4K rather than Table2 110K, and Eq53 rather than the erroneous printed k column. Density, Cp/Cv, gamma, sound speed, viscosity, conductivity, Prandtl number and impedance derive through that existing model; this pack supplies five parameters, not nine independent measured output properties. The declared 273.15..313.15K,80000..110000Pa rectangle is a bounded ambient engineering application window chosen for this model, not a source-certified accuracy envelope or atmospheric altitude trajectory. Conductivity above the source's ordinary sea-level temperature is an explicitly admitted model extrapolation; no numerical uncertainty bound, real-gas correction, humidity transport, phase equilibrium, molecular relaxation or experimental qualification is supplied. The composition flag selects the report's dry low-altitude reference mixture and is mandatory; the model's effective molar mass is authoritative, not a renormalization of the rounded constituent list. Table3 volume/mole fractions: N2 .78084,O2 .209476,Ar .00934,CO2 .000314,Ne .00001818,He .00000524,Kr .00000114,Xe .000000087,CH4 .000002,H2 .0000005; their rounded sum is .999997147, not an exactly normalized modern atmosphere. Zero relative humidity is an explicit applicability condition, not a default for missing humidity.
+scalar	molar-mass	ussa1976-model	molar_mass	0.0289644	kg/mol	constant
+uncertainty	molar-mass	unstated	-	-	-	-
+validity	molar-mass	temperature	273.15	313.15	K
+validity	molar-mass	pressure	80000	110000	Pa
+validity	molar-mass	relative_humidity	0	0	1
+validity	molar-mass	source_composition_ussa1976	1	1	1
+scalar	gamma	ussa1976-model	heat_capacity_ratio	1.40	1	constant
+uncertainty	gamma	unstated	-	-	-	-
+validity	gamma	temperature	273.15	313.15	K
+validity	gamma	pressure	80000	110000	Pa
+validity	gamma	relative_humidity	0	0	1
+validity	gamma	source_composition_ussa1976	1	1	1
+scalar	mu-reference	ussa1976-model	sutherland_reference_viscosity	0.000017160792662455268875	Pa*s	constant
+uncertainty	mu-reference	unstated	-	-	-	-
+validity	mu-reference	temperature	273.15	313.15	K
+validity	mu-reference	pressure	80000	110000	Pa
+validity	mu-reference	relative_humidity	0	0	1
+validity	mu-reference	source_composition_ussa1976	1	1	1
+scalar	temperature-reference	ussa1976-model	sutherland_reference_temperature	273.15	K	constant
+uncertainty	temperature-reference	unstated	-	-	-	-
+validity	temperature-reference	temperature	273.15	313.15	K
+validity	temperature-reference	pressure	80000	110000	Pa
+validity	temperature-reference	relative_humidity	0	0	1
+validity	temperature-reference	source_composition_ussa1976	1	1	1
+scalar	sutherland-s	ussa1976-model	sutherland_temperature	110.4	K	constant
+uncertainty	sutherland-s	unstated	-	-	-	-
+validity	sutherland-s	temperature	273.15	313.15	K
+validity	sutherland-s	pressure	80000	110000	Pa
+validity	sutherland-s	relative_humidity	0	0	1
+validity	sutherland-s	source_composition_ussa1976	1	1	1

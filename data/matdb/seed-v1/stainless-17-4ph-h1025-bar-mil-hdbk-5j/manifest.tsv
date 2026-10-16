@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	stainless-17-4ph-h1025-bar-mil-hdbk-5j
+redistribution	permitted	Work of the US Government (Department of Defense Handbook, DISTRIBUTION STATEMENT A: approved for public release, distribution unlimited); retain handbook number, revision, and table numbers
+citation	MIL-HDBK-5J (2003), Metallic Materials and Elements for Aerospace Vehicle Structures, Department of Defense Handbook, 31 January 2003, Table 2.6.9.0(e) Design Mechanical and Physical Properties of 17-4PH Stainless Steel Bar (AMS 5643, condition H1025, S basis); https://everyspec.com/MIL-HDBK/MIL-HDBK-0001-0099/MIL_HDBK_5J_139/
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

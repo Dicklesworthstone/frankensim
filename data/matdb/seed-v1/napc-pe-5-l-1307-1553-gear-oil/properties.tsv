@@ -1,0 +1,17 @@
+frankensim.matdb-source.v1
+observation	table-iv-pe-5-l-1307	NAPC-PE-5-L-1307-NASA-identification-B-polyol-ester-gear-oil-batch	NASA-TM-104352 Table IV batch-column flash-point and pour-point temperatures; measurement standards not reported	PE-5-L-1307 and PE-5-L-1553 are reported as two batches of the same lubricant meeting MIL-L-23699; additive and chemical data are proprietary to the manufacturer; replicate count and measurement dispersion are not reported; batch-specific values remain separate. Table IV prints kinematic-viscosity values 30.27 at 311 K and 5.46 at 373 K without stating their unit, so they remain observation-only and are not normalized into claims
+scalar	flash-point-1307	table-iv-pe-5-l-1307	flash_point_temperature	539	K	constant
+uncertainty	flash-point-1307	unstated	-	-	-	-
+scalar	pour-point-1307	table-iv-pe-5-l-1307	pour_point_temperature	220	K	constant
+uncertainty	pour-point-1307	unstated	-	-	-	-
+observation	table-iv-pe-5-l-1553	NAPC-PE-5-L-1553-NASA-identification-B-polyol-ester-gear-oil-batch	NASA-TM-104352 Table IV batch-column flash-point and pour-point temperatures; measurement standards not reported	PE-5-L-1307 and PE-5-L-1553 are reported as two batches of the same lubricant meeting MIL-L-23699; additive and chemical data are proprietary to the manufacturer; replicate count and measurement dispersion are not reported; batch-specific values remain separate. Table IV prints kinematic-viscosity values 29.11 at 311 K and 5.32 at 373 K without stating their unit, so they remain observation-only and are not normalized into claims
+scalar	flash-point-1553	table-iv-pe-5-l-1553	flash_point_temperature	539	K	constant
+uncertainty	flash-point-1553	unstated	-	-	-	-
+scalar	pour-point-1553	table-iv-pe-5-l-1553	pour_point_temperature	213	K	constant
+uncertainty	pour-point-1553	unstated	-	-	-	-
+observation	table-iv-pe-5-l-1307-1553-common	NAPC-PE-5-L-1307-and-PE-5-L-1553-NASA-identification-B-common-formulation	NASA-TM-104352 Table IV common-formulation specific gravity and total acid number; measurement standards not reported	The table spans these values across the two NAPC batch columns and the text identifies both codes as batches of the same MIL-L-23699 lubricant; additive and chemical data are proprietary; replicate count, measurement dispersion, and continuous property laws are not reported or inferred
+scalar	specific-gravity-289K	table-iv-pe-5-l-1307-1553-common	reported_specific_gravity	1.000	1	constant
+uncertainty	specific-gravity-289K	unstated	-	-	-	-
+validity	specific-gravity-289K	temperature	289	289	K
+scalar	total-acid-number	table-iv-pe-5-l-1307-1553-common	total_acid_number_as_koh_mass_per_oil_mass	0.03	mg/g	constant
+uncertainty	total-acid-number	unstated	-	-	-	-

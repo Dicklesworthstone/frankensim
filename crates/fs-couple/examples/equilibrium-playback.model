@@ -1,0 +1,13 @@
+frankensim-modal-performance-v2
+sample_rate_hz 48000
+samples 1
+full_scale_pa 1
+limits 0.9 1 1000 1000 10000
+compile_limits 0 1
+voices 1
+voice retain-state 1 1
+mode 1000 0.01 1 0 0 0
+port 0 1
+coupling_limits 0 16384 0.9 1000 10000 10000 1e-10 1e-11 1e-9
+connections 0
+events 0

@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	water-liquid-iapws-sr6-08-0.1mpa
+redistribution	permitted	IAPWS SR6-08(2011) expressly permits publication in whole or in part in all countries provided that attribution is given to the International Association for the Properties of Water and Steam
+citation	International Association for the Properties of Water and Steam (2011), IAPWS SR6-08, Revised Supplementary Release on Properties of Liquid Water at 0.1 MPa, equations (1)-(8), tables 1-3 and 5-8; https://iapws.org/documents/release/LiquidWater.download
+license	IAPWS-SR6-08-2011-Attribution-Permitted
+source	iapws-sr6-08-liquid-water	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	specific_enthalpy	specific-enthalpy	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	dynamic_viscosity	dynamic-viscosity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure
+axis	phase_liquid	phase-liquid	dimensional
+axis	enthalpy_reference_iapws_sr6_08_eq1	enthalpy-reference-iapws-sr6-08-eq1	dimensional

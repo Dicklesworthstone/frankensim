@@ -1,0 +1,321 @@
+# fs-constraint — CONTRACT
+
+## Purpose and layer
+
+L4 (ASCENT). The constraint CALCULUS (plan §9.1, patch Rev F):
+constraints with SEMANTICS, not anonymous `g(x) ≤ 0` — a typed kind
+taxonomy with per-kind optimizer treatments, evidence-typed
+evaluations, and infeasibility DIAGNOSIS (minimal unsat cores, ranked
+calibrated repairs) that turns optimizer failures into design
+conversations. fs-opt hosts the expression graphs; this crate owns
+what the constraints MEAN.
+
+## Public types and semantics
+
+- `ConstraintKind`: `Hard` (never traded → feasibility restoration),
+  `Soft(PenaltyLaw::{Quadratic, Hinge})` (→ penalty term), `Chance
+  {level, ChanceEstimator::MonteCarlo{samples, delta}}` (→ estimate
+  then act on the BOUND), `Robust{half_widths}` and `Certification
+  {ProofKind::{Interval, Sos}}` (→ prove or escalate), `Fabrication
+  {process}` and `Code{standard}` (→ domain check; semantics named
+  for the ledger). `treatment()` is the routing table.
+- `evaluate(problem, spec, x, noise) -> ConstraintEvidence`: status
+  (`Satisfied`/`Active`/`Violated`/`NeedsProof`/`Proven`/
+  `BoundNotCleared`), EXACT violation certificates for algebraic
+  graphs, active-set role, penalty per law. Chance kinds REFUSE here
+  (typed BadParam naming the replacement): the retired synchronous
+  sampler could neither cancel nor bound a workload of up to
+  u32::MAX evaluations, and a silent cap would hide the resource
+  contract (bead frankensim-oxyjg).
+- `evaluate_chance_with_budget(problem, spec, x, noise, plan, cx) ->
+  Result<(ConstraintEvidence, ChanceWorkReceipt), ChanceEvalError>`:
+  the ONLY chance path. A versioned `ChanceWorkPlan` declares the
+  sample/dimension/tile shape with checked-arithmetic work totals over
+  fixed unit weights; admission against the caller's `Cx` budget
+  happens before the first sample. Sampling proceeds in deterministic
+  logical tiles (the sample index is the stream key; worker count can
+  never reorder draws), polling cancellation/deadline/poll quota at
+  every tile boundary and charging declared cost per completed tile.
+  Budget refusals drain immediately: NO partial evidence is produced,
+  and the retained `ChanceWorkReceipt` names the plan identity, final
+  `BudgetConsumption`, completed-sample prefix, and hits. Statistical
+  semantics are unchanged from the retired loop (same Hoeffding bound,
+  same exact-dimension finite-draw refusal).
+  Certification kinds refuse "satisfied" pointwise REGARDLESS of how
+  good `g(x)` looks in every entry point.
+  The v1 host gate first requires exactly one `Rn` variable and an `x`
+  whose length equals that declared point dimension. Zero/multiple-variable
+  problems and Sphere, SO(3), or Stiefel hosts return typed `InvalidDomain`
+  before graph evaluation or a chance-noise callback can observe work.
+  Chance draws are additive Euclidean point-coordinate offsets only; this
+  boundary neither projects nor retracts draws for manifold variables.
+  Public policy fields are admitted before graph evaluation: active-set
+  tolerances, robust half-widths, and soft weights must be finite and
+  non-negative; robust width count must equal point dimension; chance
+  levels/delta/sample counts must satisfy their declared domains, and
+  `1 - delta` must remain strictly inside `(0,1)` in binary64. A
+  chance noise draw must match the point dimension exactly; extra
+  components cannot be silently ignored. A
+  computed soft penalty must also remain finite and non-negative. No
+  malformed value may turn a violation into satisfaction or a negative
+  objective reward. The currently declared fixed-horizon Monte-Carlo
+  estimator emits a `HalfWidth` certificate; substituting an unbound
+  e-value or no statistical certificate downgrades the ledger row rather
+  than changing the estimator after the fact.
+- `interval_eval` (the in-house prover): dependency-aware interval
+  inclusion formulas over fs-opt graphs per node; refuses (teaching
+  reasons) on division through zero, domain violations, negative powers,
+  and PDE/stochastic nodes. Every arithmetic endpoint is computed on
+  fs-ivl's outward-rounded kernel (`frankensim-zup19`), so a rounded
+  endpoint can no longer move inward past the exact real bound;
+  enclosure rigor is conditional on fs-ivl's declared fs-math ULP
+  budgets (that crate's own no-claim section). Before
+  memo allocation it checks the sealed root depth and
+  aggregate admission-work receipt against fs-opt's default cap
+  schedule, and the walk itself is EXPLICIT-STACK (reachability
+  worklist + bottom-up arena-order sweep; bead frankensim-xf8v7), so a
+  graph built under looser caps refuses typed and no admitted graph can
+  overflow the call stack; the exact max-depth boundary is a G4 fixture.
+  The public `interval_eval` boundary admits a zero-variable constant
+  problem with an empty binding, or exactly one `Rn` host with exactly
+  one interval per component. It refuses non-finite, reversed,
+  unrepresentable-span, missing, or extra boxes before graph evaluation
+  and never aliases several host variables onto one binding vector.
+  `prove_interval`
+  accepts only `Certification { proof: Interval }`; it refuses SOS and
+  non-certification requests rather than relabeling an interval result.
+  Proof subjects accept the same zero-variable constant or one-`Rn`
+  host shapes; multi-variable/manifold or dimension-mismatched subjects
+  refuse rather than sharing bindings.
+  A cleared structural bound returns the current `Proven` schema status
+  plus a sealed `ProofArtifact` carrying both interval ends and a
+  `ProofSubject` bound to the
+  full-width admitted fs-opt problem semantic identity, exact node,
+  ordered endpoint bit patterns, AND the arithmetic-kernel identity
+  (`INTERVAL_KERNEL_IDENTITY`); a proof minted under a different kernel
+  is a different theorem and fails binding. Every `Proven` evidence
+  value also retains those exact proof-bound bits; the artifact/evidence
+  verifier requires the subject (kernel included) and both bound
+  endpoints to match. Robust kinds use the same admitted uncertainty-box
+  path and carry ENCLOSURE certificates on the same outward-rounded
+  kernel; fp-slack sampling remains measured evidence and never promotes
+  itself to theorem authority.
+- `diagnose_infeasibility(problem, specs, domain, cx) -> Diagnosis`:
+  elastic-relaxation solve (multi-start projected subgradient descent
+  on total hinge violation, deterministic LCG starts) classifies
+  feasibility and yields a witness or an unsat core seeded from the
+  elastic support and refined by the DELETION FILTER — the core is
+  MINIMAL (dropping any member restores feasibility). Repairs
+  (relax-bound at graded slacks; drop-soft for soft members) come
+  RANKED by Monte-Carlo feasible-volume estimates.
+  Domain admission precedes solver allocation and evaluation: exactly
+  one `Rn` variable, one range per point coordinate, finite ordered
+  endpoints, and a finite span. Equal endpoints are valid fixed
+  coordinates.
+- `serialize_specs`/`parse_specs`: canonical `fscon v2` line form
+  (floats as bit patterns), identical round-trips for admitted specs,
+  and line-numbered refusals. The infallible writer preserves untrusted
+  public field bits; the parser is the policy-admission boundary, so
+  writer output from an invalid in-memory spec is intentionally refused.
+  Dynamic tokens use canonical uppercase UTF-8 byte-percent
+  encoding: literal percent and space are distinct (`%25` versus
+  `%20`), unsafe bytes cannot split records, and `%` is the unambiguous
+  empty-token sentinel. The parser rejects malformed/noncanonical
+  encodings, legacy v1 ambiguity, trailing fields, and non-finite or
+  negative raw-bit policy values.
+- `ConstraintEvidence::to_ledger_row` and `Diagnosis::to_json`: the
+  Rev S ledger row and the agent-facing diagnosis payload. All string
+  fields receive complete JSON escaping. Publicly forged non-finite,
+  negative, structurally inconsistent, or unbound required evidence
+  emits a canonical `valid:false`/`status:no-claim` representation with
+  a deterministic first reason and no positive satisfied/feasible
+  headline; malformed numbers become `null` only after that downgrade.
+  Diagnosis admission also requires its finite component violations to
+  sum to the reported elastic total, and `elastic_solve` recomputes that
+  published total from the final published component vector in canonical
+  constraint order. A stale optimizer-carried aggregate therefore cannot
+  authorize a feasible or infeasible headline.
+
+## Invariants
+
+1. All seven kinds map to their declared treatments; spec sets
+   round-trip identically; ledger rows validate through fs-obs
+   (fscon-001).
+2. Statuses, roles, exact violation certificates, and both penalty
+   laws evaluate as declared (fscon-002).
+3. The chance BOUND decides: on an analytic uniform-noise fixture the
+   raw rate clearing the level while the Hoeffding bound does not
+   yields `BoundNotCleared`, never `Satisfied`; the half-width
+   travels as a `StatisticalCertificate` (fscon-003).
+4. Certification kinds refuse without artifacts; interval proofs
+   succeed exactly on provable domains and refuse honestly otherwise;
+   interval containment holds over random nonlinear boxes (G0);
+   robust kinds carry enclosures (fscon-004).
+5. Unsat cores are MINIMAL against enumeration: the core is jointly
+   infeasible, every single deletion restores feasibility, bystanders
+   are excluded, feasible systems return witnesses, and elastic
+   verdicts match grid enumeration on the seeded fixture family
+   (fscon-005).
+6. Repairs are ranked by feasibility estimate, soft members offer
+   drop actions, and estimates are CALIBRATED against exact
+   enumeration (worst gap < 0.05 on the worked mass/strength
+   example); the diagnosis payload ships through fs-obs (fscon-006).
+7. Malformed elastic domains refuse before allocation/evaluation,
+   while fixed axes remain admissible; hostile constraint/repair text
+   cannot escape its JSON string and every emitted payload remains
+   valid JSON.
+8. Policy admission is identical for direct evaluation and raw-bit
+   parsing; interval proof engines cannot satisfy a different declared
+   proof kind; proof subjects change when problem, node, endpoint order,
+   or even signed-zero endpoint bits change, and artifact/evidence
+   verification includes both proof-bound endpoint bits.
+9. Percent encoding is injective and writer/parser bytes are a fixed
+   point. Invalid public evidence always loses positive claim authority
+   with one stable reason rather than preserving a claim beside `null`.
+10. Direct evaluation admits its single-`Rn` host and exact point length
+    before graph/noise work. Unsupported product or manifold hosts cannot
+    turn ambient-coordinate chance draws into an accidental manifold claim.
+
+## Error model
+
+`ConError` teaching errors: `NotScalar`, `Eval` (fs-opt errors carried
+through), `NotProvable{why}` (an honest gap with escalation advice,
+not a failure), `BadParam`, `ProofKindMismatch`,
+`InvalidDomain(DomainError)`,
+`Parse{line, what}`. `DomainError` distinguishes host variable count and
+manifold, point-dimension representation, point/domain component-count
+mismatch, and an axis-specific `InvalidRange` reason. The interval engine's
+`IvalError` names each refusal reason, including the aggregate cap name,
+observed count, and enforced limit. The restoration entry points return
+`RestorationError`: `Invalid(ConError)` for pre-admission input faults
+and evaluator faults, `Refused { refusal, receipt }` when ADMITTED work
+is stopped by cancellation, deadline, poll quota, or cost quota — the
+retained `RestorationWorkReceipt` names the plan identity and exactly
+how far the run got.
+
+## Determinism class
+
+Fully deterministic: LCG-seeded multi-starts and Monte-Carlo streams,
+canonical constraint ordering, bitwise float serialization. Identical
+inputs give identical diagnoses, estimates, and bytes.
+
+The conformance aggregate records distinguish input generation from
+execution provenance. Randomized fscon-003, fscon-004, and fscon-005
+carry their literal base input seeds `0x1001_2026_0707_0003`,
+`0x1001_2026_0707_0004`, and `0x1001_2026_0707_0005`; fscon-003 derives
+sample stream `s` as `base ^ s.wrapping_mul(0x9E37_79B9_7F4A_7C15)`.
+Fixed-input cases use aggregate seed zero. Scoped-runtime cases
+separately use the fixed Cx execution seed `0xC0C0`; that execution
+identity is not misreported as randomized input provenance.
+
+## Cancellation behavior
+
+`elastic_solve`, `elastic_solve_with_plan`, and `diagnose_infeasibility`
+build a checked `RestorationWorkPlan` (bead
+`frankensim-constraint-restoration-budget-receipts-x5sev`), admit it once
+against the caller's `Cx` budget through fs-exec's `AdmittedBudget`,
+and then route every phase — canonical skip-mask builds, constraint
+total passes, finite-difference probes, descent steps and starts,
+deletion-filter subset solves, verification solves, and Monte-Carlo
+repair sampling — through that one accountant. Checkpoints fire at the
+deterministic 64-entry stride inside every long loop and at each phase
+boundary; completed tiles charge contract unit weights. Cancellation,
+deadline, poll-quota, and cost-quota stops return a typed
+`RestorationError::Refused` carrying the latched `BudgetRefusal` plus a
+retained `RestorationWorkReceipt` (plan identity, final
+`BudgetConsumption`, charged work units, primary-solve starts); NO
+partial report is ever produced. Input faults refuse as
+`RestorationError::Invalid` before any budget authority is consumed.
+A single synchronous fs-opt scalar evaluation is not yet internally
+cancellation-tiled: the stride bounds how much work can run between two
+checkpoints, but one evaluation itself is atomic.
+
+## Unsafe boundary
+
+None. `#![forbid(unsafe_code)]` via workspace lints; no capsules.
+
+## Feature flags
+
+None.
+
+## Conformance tests
+
+`tests/conformance.rs`, cases fscon-001..fscon-006 — completed aggregate
+cases emit `fs_obs::EventKind::ConformanceCase` with Info/Error severity,
+failure-record linting, JSONL wire validation, and printing before the
+aggregate assertion. Seeded LCG randomness follows the mapping above.
+The object-shaped Custom companions for ledger rows and the full
+diagnosis payload remain wire-validated and printed, alongside G4
+shared-DAG/work and exact/max+1 depth-boundary fixtures for interval
+evaluation. Adversarial fixed cases cover malformed domain
+bounds/dimensions, fixed axes, negative/non-finite policy values and
+their exact boundary neighbors, interval proof-kind confusion, exact
+artifact subject binding, hostile/injective wire and JSON text,
+positive-claim downgrade, deterministic round trips, and pre-cancelled
+evaluation ordering. Any reimplementation must pass the suite
+unchanged.
+
+`tests/restoration_budget.rs` — the restoration resource-contract
+battery: G0 cap/zero/overflow/skip/tamper/schema refusals and
+admission-time refusals (zero/exact cost quota, zero polls, deadline
+without clock, expired deadline), G4 mid-run cancellation via a
+deterministic cancel-on-observation clock with bounded-extra-work
+proofs and mid-run deadline expiry, G3 skip-order equivalence sharing
+one plan identity, and G5 bit-stable replay of reports AND receipts,
+plus the lease-less `NoLeaseNoClaim` boundary and the diagnosis-wide
+shared-receipt contract.
+
+## No-claim boundaries
+
+- The interval prover computes every endpoint on fs-ivl's
+  outward-rounded kernel (`frankensim-zup19` is LANDED for this crate's
+  executable authority; the kernel identity is versioned into
+  `ProofSubject`). Remaining rigor conditions: fs-ivl's declared
+  fs-math ULP budgets, and the sealed independent proof RE-CHECKER
+  (replay/validate of every endpoint without trusting the producer's
+  status bit) is still future work — until it exists a consumer trusts
+  the producer's artifact rather than independently verifying it. SOS
+  certificates are REPRESENTED (`ProofKind::Sos`), not executable —
+  fs-sos is a later bead. Evaluation retains the explicit
+  `NeedsProof { Sos }` intent, while the interval-only sealed artifact API
+  refuses to mint or accept an opaque caller-authored SOS reference; this
+  removes false authority without removing the planned SOS capability.
+- `ProofArtifact` subject binding prevents accidental cross-problem,
+  cross-node, or cross-domain reuse and its sealed fields prevent
+  caller-side struct-literal minting. It is not external authenticity,
+  independent proof checking, or a substitute for the future fs-sos
+  verifier/trust channel.
+- The elastic solver is small-fixture machinery (multi-start FD
+  subgradient); the production feasibility-restoration solver is a
+  later ASCENT bead. Nonconvex fixtures can defeat it — verdicts are
+  cross-checked against enumeration only at conformance scale.
+- Cancellation checkpoints bound how much work runs between two
+  observations, but the interior of one scalar graph evaluation is not
+  itself tiled: a single fs-opt evaluation completes atomically once
+  started.
+- The restoration resource contract is a WORST-CASE declaration:
+  `RestorationWorkPlan` bounds deletion filtering (`2N + 2` subset
+  solves) and repair estimation (`3N` estimates) structurally, so an
+  early-converging run legitimately charges less than its plan. Charged
+  work is authoritative; planned work is only the admitted ceiling.
+  Memory is NOT yet lease-admitted anywhere in this crate: contexts
+  without an operation-memory lease record `NoLeaseNoClaim`, and no
+  report may be read as memory-bounded.
+- Chance estimation is Monte-Carlo/Hoeffding v1; e-process anytime
+  validity and richer estimators join with the UQ beads. Its current
+  synchronous closure API has no `Cx`, work admission, cancellation, or
+  resource receipt and must not be used for untrusted large sample
+  counts; P0 successor `frankensim-oxyjg` owns the budgeted, replayable,
+  anytime-valid redesign rather than hiding this gap behind an arbitrary
+  cap.
+- Fabrication/Code kinds carry semantics to the ledger; process
+  models (fs-fab) and code-check rule packs bind in their beads.
+- Repair generation covers bound relaxations and soft drops; material
+  /topology switches (the patch's richer vocabulary) need fs-xform
+  and fs-fab integration.
+- Direct-evaluation and elastic-solver hosts are single-`Rn`-variable v1.
+  Their public boundaries enforce that no-claim explicitly; multi-variable
+  and manifold-variable domains generalize with the restoration solver.
+- Assertions and expectations reached before an aggregate verdict are
+  ordinary Rust test diagnostics; an early abort cannot claim that a
+  canonical aggregate conformance record was emitted.

@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	c447-table12-cu-zn-70-30	70-30 class copper-zinc alloy (cartridge-brass composition; serials 956-957: Cu 71.68 sheet 0.020 in; serials 958-959: Cu 70.5 strip)	NBS Circular C447 Table 12 hardness entries; the table note states hardness numbers are Brinell unless prefixed R_B (Rockwell B), etc.	Scale-TYPED hardness, never converted: Rockwell B 24 (soft sheet, serial 956) and 82 (cold-worked 37 percent, serial 957) for the Cu 71.68 sheet; Brinell 58 (annealed 2 hr at 1155 F, serial 958) and 89 (cold-rolled 11 percent, serial 959) for the Cu 70.5 strip; Brinell loads are not stated in Table 12 (named absence); the two serial groups are DIFFERENT lots with slightly different compositions and are typed by state in the property names; NBS Table 11 is the printed Vickers/Rockwell/Brinell conversion table for cartridge brass and is cited as reference, deliberately NOT transcribed into claims (conversion is a modeling act, not a measurement); uncertainty Unstated
+scalar	hardness-rockwell-b-soft-sheet	c447-table12-cu-zn-70-30	hardness_rockwell_b_soft_sheet	24	1	constant
+uncertainty	hardness-rockwell-b-soft-sheet	unstated	-	-	-	-
+validity	hardness-rockwell-b-soft-sheet	temperature	293	293	K
+scalar	hardness-rockwell-b-cold-worked-37pct	c447-table12-cu-zn-70-30	hardness_rockwell_b_cold_worked_37pct	82	1	constant
+uncertainty	hardness-rockwell-b-cold-worked-37pct	unstated	-	-	-	-
+validity	hardness-rockwell-b-cold-worked-37pct	temperature	293	293	K
+scalar	hardness-brinell-annealed	c447-table12-cu-zn-70-30	hardness_brinell_annealed	58	1	constant
+uncertainty	hardness-brinell-annealed	unstated	-	-	-	-
+validity	hardness-brinell-annealed	temperature	293	293	K
+scalar	hardness-brinell-cold-rolled-11pct	c447-table12-cu-zn-70-30	hardness_brinell_cold_rolled_11pct	89	1	constant
+uncertainty	hardness-brinell-cold-rolled-11pct	unstated	-	-	-	-
+validity	hardness-brinell-cold-rolled-11pct	temperature	293	293	K

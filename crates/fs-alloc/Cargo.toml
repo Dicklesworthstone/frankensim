@@ -1,0 +1,19 @@
+[package]
+name = "fs-alloc"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Scope arenas with O(1) cancel reclaim, 128-byte alignment, hugepages, pools."
+
+[package.metadata.frankensim]
+layer = "L0"
+
+[dependencies]
+fs-obs = { path = "../fs-obs" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

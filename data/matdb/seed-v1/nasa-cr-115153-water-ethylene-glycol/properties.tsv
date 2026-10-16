@@ -1,0 +1,41 @@
+frankensim.matdb-source.v1
+observation	table-5-composition-specification	nasa-cr-115153-water-ethylene-glycol-sodium-nitrite-sodium-benzoate-solution	NASA-CR-115153 Table 5 printed formulation specification for the fluid-heated sublimator test solution	The source specifies 0.10 to 0.25 percent sodium nitrite, 1.33 to 1.57 percent sodium benzoate, and 36 to 38.5 percent water, all by weight. These are formulation bounds, not statistical intervals; separate lower- and upper-bound claims preserve them without inventing a midpoint, confidence level, exact batch composition, ethylene-glycol balance, supplier, grade, preparation procedure, or production lot
+scalar	sodium-nitrite-mass-fraction-lower-bound	table-5-composition-specification	sodium_nitrite_mass_fraction_lower_bound	0.10	%	constant
+uncertainty	sodium-nitrite-mass-fraction-lower-bound	unstated	-	-	-	-
+scalar	sodium-nitrite-mass-fraction-upper-bound	table-5-composition-specification	sodium_nitrite_mass_fraction_upper_bound	0.25	%	constant
+uncertainty	sodium-nitrite-mass-fraction-upper-bound	unstated	-	-	-	-
+scalar	sodium-benzoate-mass-fraction-lower-bound	table-5-composition-specification	sodium_benzoate_mass_fraction_lower_bound	1.33	%	constant
+uncertainty	sodium-benzoate-mass-fraction-lower-bound	unstated	-	-	-	-
+scalar	sodium-benzoate-mass-fraction-upper-bound	table-5-composition-specification	sodium_benzoate_mass_fraction_upper_bound	1.57	%	constant
+uncertainty	sodium-benzoate-mass-fraction-upper-bound	unstated	-	-	-	-
+scalar	water-mass-fraction-lower-bound	table-5-composition-specification	water_mass_fraction_lower_bound	36	%	constant
+uncertainty	water-mass-fraction-lower-bound	unstated	-	-	-	-
+scalar	water-mass-fraction-upper-bound	table-5-composition-specification	water_mass_fraction_upper_bound	38.5	%	constant
+uncertainty	water-mass-fraction-upper-bound	unstated	-	-	-	-
+observation	table-5-density	nasa-cr-115153-water-ethylene-glycol-sodium-nitrite-sodium-benzoate-solution	NASA-CR-115153 Table 5 printed bulk density	The source reports 67.5 lbm/ft3 without test temperature, pressure, method, replicate count, dispersion, or confidence metadata. The retained SI scalar uses the exact international pound and foot definitions: 67.5 * 0.45359237 / 0.3048^3 = 1081.24627774231 kg/m3. The extra SI digits preserve deterministic conversion, not source precision; callers must acknowledge source_test_temperature_known=0 and source_test_pressure_known=0
+scalar	density-source-conditions-unspecified	table-5-density	density	1081.24627774231	kg/m3	constant
+uncertainty	density-source-conditions-unspecified	unstated	-	-	-	-
+validity	density-source-conditions-unspecified	source_test_temperature_known	0	0	1
+validity	density-source-conditions-unspecified	source_test_pressure_known	0	0	1
+observation	table-5-thermal-conductivity	nasa-cr-115153-water-ethylene-glycol-sodium-nitrite-sodium-benzoate-solution	NASA-CR-115153 Table 5 printed bulk thermal conductivity	The source reports 0.22 BTU/(hr ft degF) without test temperature, pressure, method, replicate count, dispersion, confidence metadata, or a choice between International Table and thermochemical BTU. Deterministic SI transcription uses Btu_IT=1055.05585262 J, h=3600 s, ft=0.3048 m, and delta-degF=5/9 K, yielding 0.380761626601706 W/(m K). The extra SI digits are normalization provenance, not source precision; callers must acknowledge all three missing-condition flags
+scalar	thermal-conductivity-source-conditions-unspecified	table-5-thermal-conductivity	thermal_conductivity	0.380761626601706	W/m/K	constant
+uncertainty	thermal-conductivity-source-conditions-unspecified	unstated	-	-	-	-
+validity	thermal-conductivity-source-conditions-unspecified	source_test_temperature_known	0	0	1
+validity	thermal-conductivity-source-conditions-unspecified	source_test_pressure_known	0	0	1
+validity	thermal-conductivity-source-conditions-unspecified	source_btu_convention_known	0	0	1
+observation	table-5-approximate-specific-heat-law	nasa-cr-115153-water-ethylene-glycol-sodium-nitrite-sodium-benzoate-solution	NASA-CR-115153 Table 5 approximate specific-heat relation evaluated at three exact temperatures	The source prints approximately cp=(0.67 + 0.008*T_degF) BTU/(lbm degF) for 0 through 100 degF, but gives no residual, uncertainty, pressure, method, replicate count, confidence metadata, or BTU convention. Exact-point SI transcriptions use Btu_IT=1055.05585262 J, lbm=0.45359237 kg, and delta-degF=5/9 K. They do not expose a continuous law or add precision; source_test_pressure_known=0 and source_btu_convention_known=0 remain mandatory
+scalar	specific-heat-capacity-0degF	table-5-approximate-specific-heat-law	specific_heat_capacity	2805.156	J/kg/K	constant
+uncertainty	specific-heat-capacity-0degF	unstated	-	-	-	-
+validity	specific-heat-capacity-0degF	temperature	255.372222222222	255.372222222222	K
+validity	specific-heat-capacity-0degF	source_test_pressure_known	0	0	1
+validity	specific-heat-capacity-0degF	source_btu_convention_known	0	0	1
+scalar	specific-heat-capacity-50degF	table-5-approximate-specific-heat-law	specific_heat_capacity	4479.876	J/kg/K	constant
+uncertainty	specific-heat-capacity-50degF	unstated	-	-	-	-
+validity	specific-heat-capacity-50degF	temperature	283.15	283.15	K
+validity	specific-heat-capacity-50degF	source_test_pressure_known	0	0	1
+validity	specific-heat-capacity-50degF	source_btu_convention_known	0	0	1
+scalar	specific-heat-capacity-100degF	table-5-approximate-specific-heat-law	specific_heat_capacity	6154.596	J/kg/K	constant
+uncertainty	specific-heat-capacity-100degF	unstated	-	-	-	-
+validity	specific-heat-capacity-100degF	temperature	310.927777777778	310.927777777778	K
+validity	specific-heat-capacity-100degF	source_test_pressure_known	0	0	1
+validity	specific-heat-capacity-100degF	source_btu_convention_known	0	0	1

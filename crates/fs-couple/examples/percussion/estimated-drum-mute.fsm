@@ -1,0 +1,14 @@
+# Authored single felt-lined moving pad outside the batter head. Not calibrated.
+frankensim-compliant-mute-v1
+surface,batter
+site,0.10,-0.005,0.0001
+site,0.10,0.005,0.0001
+jaw,above,0.025,0.15,0.00002,0.004,30000,0.2,2.2,3,0.15,0.7,0
+creep,above,4000,12
+force,above,0,0
+force,above,0.001,0
+force,above,0.002,0.5
+force,above,0.0045,0.5
+force,above,0.005,-0.8
+force,above,0.007,-0.8
+force,above,0.008,0

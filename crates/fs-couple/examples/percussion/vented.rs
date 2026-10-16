@@ -1,0 +1,176 @@
+//! Explicit one-way or coupled vent radiation, never an implicit upgrade.
+use super::{Error,cavity::{self,NeckOptions}};
+
+/// Select the mouth boundary before the existing feedback parser runs. The
+/// coupled selection requires a separate internal-only impedance declaration;
+/// it never reinterprets an ordinary effective-length neck or subtracts a guessed
+/// exterior end correction. Failed admission leaves every argument unchanged.
+pub fn radiation_option(args:&mut Vec<String>)->Result<bool,Error> {
+    let count=|name:&str|args.iter().filter(|a|a.as_str()==name).count();
+    let prescribed=count("--prescribed-vent-radiation");
+    let coupled=count("--coupled-vent-radiation");
+    let internal=count("--cavity-neck-internal");
+    let effective=count("--cavity-neck");
+    let feedback=count("--radiation-feedback");
+    if prescribed+coupled>1 || internal>1 || effective>1 || feedback>1
+        || (internal>0 && (coupled!=1 || effective!=0))
+        || (coupled>0 && internal!=1) || (prescribed>0 && feedback>0) {
+        return Err("choose --prescribed-vent-radiation with --cavity-neck, or --coupled-vent-radiation with --cavity-neck-internal; coupled radiation implies feedback and excludes exterior inertia/loss from the supplied neck".into());
+    }
+    args.retain(|a|!matches!(a.as_str(),"--prescribed-vent-radiation"|"--coupled-vent-radiation"));
+    if coupled==1 && feedback==0 {args.push("--radiation-feedback".into());}
+    Ok(prescribed+coupled==1)
+}
+
+pub fn admit(neck:Option<NeckOptions>,distributed:bool,command:&str,prescribed:bool)->Result<(),Error> {
+    if !prescribed {return cavity::admit_neck_command(neck,distributed,command);}
+    if neck.is_none() || !distributed || !matches!(command,
+        "drum-wav"|"drum-mic"|"drum-modal-wav"|"drum-modal-mic"|
+        "drum-stretch-wav"|"drum-stretch-mic"|"snare-wav"|"snare-mic"|"snare-off-wav"|"snare-off-mic") {
+        return Err("--prescribed-vent-radiation requires a drum/snare audio command, --cavity-modes and an explicit --cavity-neck; it does not add radiation feedback".into());
+    }
+    if neck.is_some_and(|n|n.exterior_load)
+        && matches!(command,"drum-modal-wav"|"drum-modal-mic") {
+        return Err("coupled vent radiation needs the joint nonlinear-capable time owner, not the linear-only modal image".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{acoustics,drum_with_radiation,drum_spec,Experiment,Stroke,snare::SnareSet};
+    use fs_exec::CancelGate;
+    use fs_couple::render::plate::impact::ImpactSubstepConfig;
+
+    fn neck()->NeckOptions {NeckOptions {exterior_load:false,radius_m:0.003,effective_length_m:0.008,
+        resistance_pa_s_m3:1000.0,azimuth_rad:std::f64::consts::PI/8.0,axial_position_m:0.08}}
+    fn build(audio:bool,nonlinear:bool,frames:u64)->Experiment {
+        let wires=SnareSet {strands:2,modes_per_strand:2,contact_cells:4,..SnareSet::reference(false)};
+        let spec=drum_spec::Spec {radial_intervals:2,azimuths:8,..drum_spec::Spec::reference()};
+        let mut e=drum_with_radiation(frames*acoustics::SUBSTEPS as u64,acoustics::MECHANICAL_DT,
+            audio,!nonlinear,Some(wires),nonlinear,
+            Stroke {speed_m_s:2.0,position_m:Some([0.06,0.01])},true,Some(neck()),Some(spec),
+            Some(Stroke {speed_m_s:1.6,position_m:Some([-0.05,0.02])}),&[],25.0,None,audio).unwrap();
+        if nonlinear {
+            e.system=e.system.into_analytic_nonlinear().unwrap().with_impact_substeps(
+                ImpactSubstepConfig {max_depth:8,max_attempts:511}).unwrap();
+        }
+        e
+    }
+
+    // G0/G3: the actual CLI parser order, with other controls left in place.
+    #[test]
+    fn coupled_selection_binds_internal_impedance_and_never_doubles_feedback() {
+        for explicit in [false,true] {
+            let mut args:Vec<String>=["drum-stretch-mic","192","--coupled-vent-radiation",
+                "--cavity-neck-internal","0.003","0.008","1000","0.39269908169872414","0.08",
+                "--cavity-modes","--analytic-newton"].map(String::from).to_vec();
+            if explicit {args.push("--radiation-feedback".into());}
+            assert!(acoustics::aperture::option(&mut args).unwrap());
+            assert!(acoustics::stereo::feedback::option(&mut args).unwrap());
+            assert!(cavity::option(&mut args).unwrap());
+            let selected=cavity::neck_option(&mut args).unwrap().unwrap();
+            assert!(selected.exterior_load);
+            assert_eq!(selected.effective_length_m,0.008);
+            assert_eq!(selected.resistance_pa_s_m3,1000.0);
+            admit(Some(selected),true,"drum-stretch-mic",true).unwrap();
+            assert!(admit(Some(selected),true,"drum-modal-mic",true).is_err());
+            assert!(admit(Some(selected),true,"drum-stretch",false).is_err());
+            assert!(admit(Some(selected),false,"drum-stretch-mic",true).is_err());
+            assert_eq!(args,["drum-stretch-mic","192","--analytic-newton"]);
+        }
+        let declarations=[
+            "--coupled-vent-radiation", "--cavity-neck-internal 0.003 0.008 1000 0.4 0.08",
+            "--coupled-vent-radiation --cavity-neck 0.003 0.008 1000 0.4 0.08",
+            "--prescribed-vent-radiation --radiation-feedback --cavity-neck 0.003 0.008 1000 0.4 0.08",
+            "--coupled-vent-radiation --prescribed-vent-radiation --cavity-neck-internal 0.003 0.008 1000 0.4 0.08",
+            "--coupled-vent-radiation --coupled-vent-radiation --cavity-neck-internal 0.003 0.008 1000 0.4 0.08",
+            "--coupled-vent-radiation --cavity-neck-internal 0.003 0.008 1000 0.4 0.08 --cavity-neck 0.003 0.008 1000 0.4 0.08",
+        ];
+        for declaration in declarations {
+            let mut args:Vec<String>=declaration.split_whitespace().map(String::from).collect();
+            let before=args.clone();assert!(acoustics::aperture::option(&mut args).is_err());
+            assert_eq!(args,before);
+        }
+        for declaration in ["--cavity-neck-internal", "--cavity-neck-internal 0.003 0.008 -1 0 0.08",
+            "--cavity-neck-internal NaN 0.008 1000 0 0.08"] {
+            let mut args:Vec<String>=declaration.split_whitespace().map(String::from).collect();
+            let before=args.clone();assert!(cavity::neck_option(&mut args).is_err());assert_eq!(args,before);
+        }
+    }
+
+    #[test]
+    fn selecting_the_approximation_never_silently_promotes_a_bare_vent_request() {
+        for command in ["drum-wav","drum-mic","drum-modal-wav","drum-modal-mic",
+            "drum-stretch-wav","drum-stretch-mic","snare-wav","snare-mic","snare-off-wav","snare-off-mic"] {
+            admit(Some(neck()),true,command,true).unwrap();
+            assert!(admit(Some(neck()),true,command,false).is_err());
+            assert!(admit(None,true,command,true).is_err());
+            assert!(admit(Some(neck()),false,command,true).is_err());
+        }
+        for command in ["drum","drum-modal","drum-stretch","snare","snare-off"] {
+            admit(Some(neck()),true,command,false).unwrap();
+            assert!(admit(Some(neck()),true,command,true).is_err());
+        }
+        for command in ["splash","splash-mic","splash-wav","unknown"] {
+            assert!(admit(Some(neck()),true,command,true).is_err());
+        }
+    }
+
+    #[test]
+    fn vent_observation_retains_actual_neck_and_two_stick_nonlinear_snare_state_work_and_clocks() {
+        let gate=CancelGate::new_clock_free();
+        for nonlinear in [false,true] {
+            let mut observed=build(true,nonlinear,16);let mut mechanics=build(false,nonlinear,16);
+            let port=observed.air.as_ref().unwrap().coupling.neck_radiation_port(0).unwrap();
+            let modes=observed.acoustics.as_ref().unwrap().state_modes();
+            assert_eq!(modes.last(),Some(&port.coordinate));
+            let second=observed.second_stick.unwrap();
+            assert!(!modes.contains(&second.coordinate));assert!(!modes.contains(&0));
+            assert_eq!(modes.len(),second.coordinate); // heads plus one neck, neither stick
+            assert_eq!(observed.force,mechanics.force);assert_eq!(observed.system.state(),mechanics.system.state());
+            let mut peak_flow=0.0_f64;let mut peak_work=0.0_f64;
+            for _ in 0..256 {
+                let f=observed.system.step(&observed.force,&gate).unwrap();
+                let g=mechanics.system.step(&mechanics.force,&gate).unwrap();
+                assert_eq!(observed.system.state(),mechanics.system.state());
+                assert_eq!(f.time_s,g.time_s);assert_eq!(f.stored_energy_j,g.stored_energy_j);
+                assert_eq!(f.dissipated_energy_j,g.dissipated_energy_j);assert_eq!(f.supplied_work_j,g.supplied_work_j);
+                let neck=observed.air.as_ref().unwrap().coupling.neck_observation(observed.system.state(),0).unwrap();
+                peak_flow=peak_flow.max(neck.volume_flow_m3_s.abs());peak_work=peak_work.max(f.stored_energy_j);
+            }
+            assert!(peak_flow>0.0 && peak_work>0.0);
+            assert_eq!(observed.system.membrane_observation(1).is_some(),nonlinear);
+        }
+    }
+
+    #[test]
+    fn prescribed_vent_runs_through_real_bem_fits_stereo_and_pcm_without_advancing_mechanics_twice() {
+        let frames=192;let mut e=build(true,false,frames);let mut reference=build(false,false,frames);
+        let receivers=[
+            acoustics::Receiver::FinitePoint([0.08,0.05,0.35]),
+            acoustics::Receiver::FinitePoint([-0.12,0.05,0.4])];
+        // This deliberately small 2-ring/8-sector mechanical fixture has only
+        // 2.79 panels/wavelength at the default 1640 Hz upper band. Refusing
+        // that request is correct; use an explicit 500 Hz observer band that
+        // retains its whole 80..500 Hz head window and resolves the boundary.
+        let before=e.system.state().to_vec();
+        let error=acoustics::stereo::render_receivers(&mut e,frames as usize,20.0,&receivers).unwrap_err();
+        assert!(matches!(error.downcast_ref::<fs_bem::helmholtz::HelmholtzError>(),
+            Some(fs_bem::helmholtz::HelmholtzError::TooCoarse {..})));
+        assert_eq!(e.system.state(),before);
+        let spec=acoustics::stereo::radiation_spec::Spec {band_hz:[40.0,500.0],
+            ..acoustics::stereo::radiation_spec::Spec::default()};
+        let wav=acoustics::stereo::render_receivers_with_spec(&mut e,frames as usize,20.0,
+            &receivers,spec,&CancelGate::new_clock_free()).unwrap();
+        assert_eq!(&wav[..4],b"RIFF");assert_eq!(&wav[8..12],b"WAVE");
+        assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()),2);
+        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()),48000);
+        assert_eq!(wav.len(),44+frames as usize*4);
+        assert!(wav[44..].iter().any(|b|*b!=0),"actual aperture/head pressure must reach PCM");
+        let gate=CancelGate::new_clock_free();
+        for _ in 0..frames*acoustics::SUBSTEPS as u64 {reference.system.step(&reference.force,&gate).unwrap();}
+        assert_eq!(e.system.state(),reference.system.state());
+    }
+}

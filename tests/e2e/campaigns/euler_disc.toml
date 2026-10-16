@@ -1,0 +1,219 @@
+# Euler Disc Emergent Flagship Campaign Manifest (bead frankensim-euler-disc-emergent-flagship-t6314.8.2)
+schema = "frankensim.new-domains.case-manifest.v1"
+phase = "euler_disc"
+
+[[case]]
+id = "ed.core.geometry_and_mass"
+version = 1
+purpose = "Verify exact geometry and mass properties of the Euler disc and matched 1mm outer fillet"
+owning_bead = "frankensim-euler-disc-emergent-flagship-t6314.8.2"
+gauntlet_tier = "G0"
+entry_command = ["cargo", "run", "-q", "-p", "fs-euler-disc-e2e", "--bin", "euler_disc_campaign", "--", "--convergence-only"]
+expected_output_pattern = "euler-disc"
+profiles = ["smoke", "standard"]
+seed = 0
+seed_overridable = false
+max_wall_seconds = 300
+expected = "authority"
+determinism_class = "repo-deterministic"
+qoi_notes = "geometry resolution and matched-fillet equal-mass properties"
+
+[[case]]
+id = "ed.core.conservative_mechanics"
+version = 1
+purpose = "Verify ideal conservative rigid-body Euler mechanics and energy conservation"
+owning_bead = "frankensim-euler-disc-emergent-flagship-t6314.8.2"
+gauntlet_tier = "G1"
+entry_command = ["cargo", "run", "-q", "-p", "fs-euler-disc-e2e", "--bin", "ideal_conservative_baseline"]
+expected_output_pattern = "conservative"
+profiles = ["smoke", "standard"]
+seed = 0
+seed_overridable = false
+max_wall_seconds = 300
+expected = "authority"
+determinism_class = "repo-deterministic"
+qoi_notes = "Hamiltonian conservation in smooth contact"
+
+[[case]]
+id = "ed.core.contact_and_loss"
+version = 1
+purpose = "Verify unilateral contact, restitution, and rolling friction loss model"
+owning_bead = "frankensim-euler-disc-emergent-flagship-t6314.8.2"
+gauntlet_tier = "G1"
+entry_command = ["cargo", "test", "-q", "-p", "fs-euler-disc-e2e", "--test", "contact_dynamics"]
+expected_output_pattern = "test result: ok"
+profiles = ["smoke", "standard"]
+seed = 0
+seed_overridable = false
+max_wall_seconds = 300
+expected = "authority"
+determinism_class = "repo-deterministic"
+qoi_notes = "normal and tangential contact dissipative bounds"
+
+[[case]]
+id = "ed.core.flexible_base_reduced"
+version = 1
+purpose = "Verify one-mode and modal reduced compliant base response coupling"
+owning_bead = "frankensim-euler-disc-emergent-flagship-t6314.8.2"
+gauntlet_tier = "G1"
+entry_command = ["cargo", "test", "-q", "-p", "fs-euler-disc-e2e", "--test", "base_response"]
+expected_output_pattern = "test result: ok"
+profiles = ["standard"]
+seed = 0
+seed_overridable = false
+max_wall_seconds = 300
+expected = "authority"
+determinism_class = "repo-deterministic"
+qoi_notes = "base compliance interaction and modal dissipation"
+
+[[case]]
+id = "ed.core.reduced_external_air"
+version = 1
+purpose = "Verify exterior air drag torque and boundary-layer dissipation model"
+owning_bead = "frankensim-euler-disc-emergent-flagship-t6314.8.2"
+gauntlet_tier = "G1"
+entry_command = ["cargo", "test", "-q", "-p", "fs-euler-disc-e2e", "--test", "external_air"]
+expected_output_pattern = "test result: ok"
+profiles = ["standard"]
+seed = 0
+seed_overridable = false
+max_wall_seconds = 300
+expected = "authority"
+determinism_class = "repo-deterministic"
+qoi_notes = "external air damping coefficient scaling"
+
+[[case]]
+id = "ed.core.compressible_gas_film"
+version = 1
+purpose = "Verify narrow-gap compressible gas film lubrication and squeeze force"
+owning_bead = "frankensim-euler-disc-emergent-flagship-t6314.8.2"
+gauntlet_tier = "G1"
+entry_command = ["cargo", "test", "-q", "-p", "fs-euler-disc-e2e", "--test", "air_film"]
+expected_output_pattern = "test result: ok"
+profiles = ["standard"]
+seed = 0
+seed_overridable = false
+max_wall_seconds = 300
+expected = "authority"
+determinism_class = "repo-deterministic"
+qoi_notes = "thin-gap gas film force and moment"
+
+[[case]]
+id = "ed.core.coupled_reduced"
+version = 1
+purpose = "Verify complete multi-physics coupled simulation of the Euler disc campaign"
+owning_bead = "frankensim-euler-disc-emergent-flagship-t6314.8.2"
+gauntlet_tier = "G2"
+entry_command = ["scripts/e2e/euler_disc_campaign.sh", "--output", "target/euler-disc-campaign/campaign.jsonl", "--stderr-log", "target/euler-disc-campaign/campaign.stderr.log"]
+expected_output_pattern = "OK"
+profiles = ["standard", "full"]
+seed = 0
+seed_overridable = false
+max_wall_seconds = 900
+expected = "authority"
+determinism_class = "repo-deterministic"
+qoi_notes = "deterministic campaign trajectory execution"
+
+[[case]]
+id = "ed.core.prediction_seal"
+version = 1
+purpose = "Verify cryptographic prediction seal generation prior to benchmark unlocking"
+owning_bead = "frankensim-euler-disc-emergent-flagship-t6314.8.2"
+gauntlet_tier = "G0"
+entry_command = ["cargo", "test", "-q", "-p", "fs-euler-disc-e2e", "--test", "protocol"]
+expected_output_pattern = "test result: ok"
+profiles = ["smoke", "standard"]
+seed = 0
+seed_overridable = false
+max_wall_seconds = 300
+expected = "authority"
+determinism_class = "repo-deterministic"
+qoi_notes = "prediction bundle digest sealing"
+
+[[case]]
+id = "ed.core.synthetic_unlock_scoring"
+version = 1
+purpose = "Verify blind unlock scoring arithmetic on synthetic benchmark fixtures"
+owning_bead = "frankensim-euler-disc-emergent-flagship-t6314.8.2"
+gauntlet_tier = "G0"
+entry_command = ["cargo", "test", "-q", "-p", "fs-euler-disc-e2e", "--test", "contract"]
+expected_output_pattern = "test result: ok"
+profiles = ["smoke", "standard"]
+seed = 0
+seed_overridable = false
+max_wall_seconds = 300
+expected = "authority"
+determinism_class = "repo-deterministic"
+qoi_notes = "scoring metric verification on synthetic data"
+
+[[case]]
+id = "ed.core.hostile_twin_guard"
+version = 1
+purpose = "Verify detection and fail-closed refusal of corrupted or tampered inputs"
+owning_bead = "frankensim-euler-disc-emergent-flagship-t6314.8.2"
+gauntlet_tier = "G0"
+entry_command = ["cargo", "test", "-q", "-p", "fs-euler-disc-e2e", "--test", "hostile_twins"]
+expected_output_pattern = "test result: ok"
+profiles = ["smoke", "standard"]
+seed = 0
+seed_overridable = false
+max_wall_seconds = 300
+expected = "authority"
+determinism_class = "repo-deterministic"
+qoi_notes = "tampered envelope rejection"
+
+[[case]]
+id = "ed.core.artifact_replay"
+version = 1
+purpose = "Verify artifact-only deterministic replay from retained campaign ledger"
+owning_bead = "frankensim-euler-disc-emergent-flagship-t6314.8.2"
+gauntlet_tier = "G5"
+entry_command = ["cargo", "test", "-q", "-p", "fs-euler-disc-e2e", "--test", "replay"]
+expected_output_pattern = "test result: ok"
+profiles = ["standard"]
+seed = 0
+seed_overridable = false
+max_wall_seconds = 300
+expected = "authority"
+determinism_class = "repo-deterministic"
+qoi_notes = "exact byte-level replay verification"
+
+[[case]]
+id = "ed.core.no_promotion_audit"
+version = 1
+purpose = "Verify that numerical simulation alone cannot mint L4 validation authority"
+owning_bead = "frankensim-euler-disc-emergent-flagship-t6314.8.2"
+gauntlet_tier = "G0"
+entry_command = ["cargo", "test", "-q", "-p", "fs-euler-disc-e2e", "--test", "no_claim"]
+expected_output_pattern = "test result: ok"
+profiles = ["smoke", "standard"]
+seed = 0
+seed_overridable = false
+max_wall_seconds = 300
+expected = "authority"
+determinism_class = "repo-deterministic"
+qoi_notes = "strict no-claim boundary audit"
+
+[[optional_case]]
+id = "ed.optional.asbuilt_physical"
+purpose = "Physical as-built non-axisymmetric scan ingestion"
+
+[[optional_case]]
+id = "ed.optional.base_resolved"
+purpose = "Resolved 3D continuum FEM base compliance solve"
+
+[[optional_case]]
+id = "ed.optional.flow_resolved_rigid"
+purpose = "Resolved 3D Navier-Stokes / LBM aerodynamics around rigid disc"
+
+[[optional_case]]
+id = "ed.optional.flexible_fsi"
+purpose = "Fully coupled flexible FSI with moving boundary"
+
+[[optional_case]]
+id = "ed.optional.physical_ingest"
+purpose = "Experimental high-speed video and acoustical telemetry ingestion"
+
+[[optional_case]]
+id = "ed.optional.l4_submission"
+purpose = "Formal L4 experimental validation submission"

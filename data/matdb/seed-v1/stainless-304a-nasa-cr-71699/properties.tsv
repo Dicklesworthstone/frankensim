@@ -1,0 +1,7 @@
+frankensim.matdb-source.v1
+observation	source-pressure-unstated	source pressure is unstated	NASA-CR-71699 Table I-19 thermal-conductivity selected values	The published source does not state pressure; no atmospheric or standard-pressure inference is made.
+observation	nasa-cr-71699-table-i19	stainless steel 304A; the source does not state a heat treatment, product form, or a basis for equating it with another 304 designation	NASA-CR-71699 Table I-19 thermal-conductivity selected values	The table remarks identify 373..923 K selected values as based on the named experimental sources. This curve retains only the corresponding 400..900 K non-starred knots. Its explicit linear between-knot values are engineering interpolation estimates, not source measurements, and no interpolation-error or measurement-confidence claim is made. It does not claim room-temperature mechanical, density, corrosion, magnetic, phase, or elastic properties.
+curve	thermal-conductivity-400-900k	nasa-cr-71699-table-i19	thermal_conductivity	temperature	K	W/m/K	400:17,450:17.7,500:18.4,600:19.8,700:21.2,800:22.5,900:23.9	linear
+uncertainty	thermal-conductivity-400-900k	unstated	-	-	-	-
+validity	thermal-conductivity-400-900k	temperature	400	900	K
+validity	thermal-conductivity-400-900k	source_pressure_known	0	0	1

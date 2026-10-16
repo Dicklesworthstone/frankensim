@@ -1,0 +1,12 @@
+frankensim.matdb-manifest.v3
+pack_id	aluminum-2024-t3-first-heating-km2024
+redistribution	permitted	Selected attributed numerical facts and original explanatory notes only; no source article, figures, table layout or source-document redistribution license is asserted
+citation	Manasijevic et al. (2024), Study of thermal properties of the aluminum EN AW 2024-T3 alloy, Kovove Mater. 62, 31-39, Table 2 page 35 and sections 2.4, 2.5, 2.7, 3.3; DOI 10.31577/km.2024.1.31; https://kovmat.sav.sk/full.php?cc=1&rr=62&ss=31
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	km2024-first-heating	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	temperature	temperature	absolute-temperature
+axis	first_heating	first-heating	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional

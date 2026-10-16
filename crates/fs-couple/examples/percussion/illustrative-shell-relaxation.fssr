@@ -1,0 +1,8 @@
+# Authored proportional flexural spectrum, NOT identified bronze or a fitted recording.
+frankensim-shell-relaxation-v1
+intrinsic_loss,replace
+initial,relaxed
+band_hz,0,5000
+shell,single
+branch,single,0.015,0.002
+branch,single,0.005,0.02

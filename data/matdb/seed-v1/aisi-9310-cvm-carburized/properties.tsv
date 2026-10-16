@@ -1,0 +1,30 @@
+frankensim.matdb-source.v1
+observation	nominal-chemistry	AISI-9310-CVM-single-lot-single-heat-28-tooth-spur-gear-NASA-TM-104352	NASA-TM-104352 Table I nominal composition by weight	Nominal grade chemistry rather than an analysis of the tested heat; balance iron; analytical method, uncertainty, and unreported trace-element values are not inferred
+scalar	carbon-mass-fraction	nominal-chemistry	carbon_mass_fraction	0.10	%	constant
+uncertainty	carbon-mass-fraction	unstated	-	-	-	-
+scalar	manganese-mass-fraction	nominal-chemistry	manganese_mass_fraction	0.63	%	constant
+uncertainty	manganese-mass-fraction	unstated	-	-	-	-
+scalar	silicon-mass-fraction	nominal-chemistry	silicon_mass_fraction	0.27	%	constant
+uncertainty	silicon-mass-fraction	unstated	-	-	-	-
+scalar	nickel-mass-fraction	nominal-chemistry	nickel_mass_fraction	3.22	%	constant
+uncertainty	nickel-mass-fraction	unstated	-	-	-	-
+scalar	chromium-mass-fraction	nominal-chemistry	chromium_mass_fraction	1.21	%	constant
+uncertainty	chromium-mass-fraction	unstated	-	-	-	-
+scalar	molybdenum-mass-fraction	nominal-chemistry	molybdenum_mass_fraction	0.12	%	constant
+uncertainty	molybdenum-mass-fraction	unstated	-	-	-	-
+scalar	copper-mass-fraction	nominal-chemistry	copper_mass_fraction	0.13	%	constant
+uncertainty	copper-mass-fraction	unstated	-	-	-	-
+scalar	phosphorus-mass-fraction	nominal-chemistry	phosphorus_mass_fraction	0.005	%	constant
+uncertainty	phosphorus-mass-fraction	unstated	-	-	-	-
+scalar	sulfur-mass-fraction	nominal-chemistry	sulfur_mass_fraction	0.005	%	constant
+uncertainty	sulfur-mass-fraction	unstated	-	-	-	-
+observation	gear-case-detailed	AISI-9310-CVM-single-lot-single-heat-28-tooth-spur-gear-NASA-TM-104352	NASA-TM-104352 Test Materials detailed case/core hardness and carburized case-depth statement	Table II schedule: air preheat; carburize 1172 K for 8 h; air cool to room temperature; copper plate all over; reheat 922 K for 2.5 h; air cool to room temperature; austenitize 1117 K for 2.5 h; oil quench; subzero treat 180 K for 3.5 h; double temper 450 K for 2 h each; finish grind; stress relieve 450 K for 2 h. One lot from one CVM heat; hardness locations, replicate count, dispersion, and case-depth method are not reported. Detailed case C58 conflicts with the same report's summary-level C60 statement and is retained separately rather than fused
+scalar	case-hardness-detailed	gear-case-detailed	case_rockwell_c_scale_reading	58	1	constant
+uncertainty	case-hardness-detailed	unstated	-	-	-	-
+scalar	core-hardness-detailed	gear-case-detailed	core_rockwell_c_scale_reading	40	1	constant
+uncertainty	core-hardness-detailed	unstated	-	-	-	-
+scalar	case-depth-detailed	gear-case-detailed	carburized_case_depth	0.97	mm	constant
+uncertainty	case-depth-detailed	unstated	-	-	-	-
+observation	gear-case-summary	AISI-9310-CVM-single-lot-single-heat-28-tooth-spur-gear-NASA-TM-104352	NASA-TM-104352 abstract and summary statement that the carburized gears were hardened to Rockwell C60	Summary-level C60 conflicts with the detailed Test Materials case-hardness value C58; measurement location, replicate count, dispersion, and reason for the discrepancy are not reported, so this statement remains a separate claim and is not averaged or selected
+scalar	case-hardness-summary	gear-case-summary	case_rockwell_c_scale_reading	60	1	constant
+uncertainty	case-hardness-summary	unstated	-	-	-	-

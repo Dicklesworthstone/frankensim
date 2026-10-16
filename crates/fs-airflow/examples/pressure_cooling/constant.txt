@@ -1,0 +1,8 @@
+# Synthetic constant-property comparison. Not a measured or named coolant.
+material=illustrative-constant-liquid
+source=Authored pressure-cooling numerical example, not measurements
+license=CC0-1.0
+pressure_pa=100000
+# T_K  rho_kg_m3  Cp_J_kg_K  k_W_m_K  mu_Pa_s
+250 1000 2000 0.5 0.002
+450 1000 2000 0.5 0.002

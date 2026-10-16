@@ -1,0 +1,23 @@
+frankensim-bakeoff-receipt-v1
+filling	electric-string
+fixture	crates/fs-couple/tests/electric_chain.rs tone-RC(1200 Hz) + Koren 12AX7 gain stage (300 V, 100k, -1.5 V); sine 220 Hz at 0.02/0.35 V + 110 Hz pluck burst
+shared-cards	f1ecbd21cf396c423e2b7962162b23e33c060da5d27eedd6eac7dd2115fa43b8
+reference	gain-small-signal-220hz	5.992280723939027e1
+reference	h2-rel-drive-0p35	1.465635476127781e-2
+reference	pluck-l2-vs-authority	0e0
+contender	split-circuit-image
+owners	fs-phs,fs-couple
+measured	gain-small-signal-220hz	5.994995351740261e1
+measured	h2-rel-drive-0p35	1.4656354827020107e-2
+measured	pluck-l2-vs-authority	4.634898444883033e-12
+budget	states=8	steps=72000	solver-iterations=216000
+failure-mode	fixed 3-sweep Gauss-Seidel budget leaves a bounded island residual (telemetry-disclosed); QoI drift vs the authority is the measured price of the per-sample cost bound
+contender	full-dae-authority
+owners	fs-phs
+measured	gain-small-signal-220hz	5.994995351740263e1
+measured	h2-rel-drive-0p35	1.465635476127781e-2
+measured	pluck-l2-vs-authority	0e0
+budget	states=1	steps=72000	solver-iterations=244257
+failure-mode	unbounded per-sample Newton count (data-dependent); no real-time budget claim
+outcome	keep-both	split-circuit-image keeps the BUDGET lane: bounded per-sample cost (fixed sweeps), disclosed residual, QoI drift within the receipt's measured envelope	full-dae-authority keeps the AUTHORITY/verification lane: per-sample 1e-14 solve of the same constitutive equations; the reference other images are measured against
+rationale	measured: split gain 59.950 vs authority 59.950 vs analytic 59.923; split H2 0.01466 vs authority 0.01466; split pluck L2 vs authority 4.635e-12; iterations 216000 (split, fixed) vs 244257 (authority, data-dependent). The authority's own pluck-L2 is 0 BY CONSTRUCTION (it is the reference trajectory). KeepBoth: the split image buys a hard per-sample budget with a measured, small QoI drift; the monolith is the authority (D14 factorization, both lanes named)

@@ -1,0 +1,7 @@
+node_modules/
+src/
+tools/
+engine-drum/
+engine-piano/
+.vercel
+!dist/

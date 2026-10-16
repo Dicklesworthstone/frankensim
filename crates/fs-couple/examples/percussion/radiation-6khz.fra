@@ -1,0 +1,8 @@
+frankensim-radiation-preparation-v1
+# Requested observer approximation, not an acoustic/structural convergence claim.
+band_hz,40,6000
+training_intervals,64
+max_order,24
+subdivisions,1
+max_panels,4096
+max_dense_work,20000000000000

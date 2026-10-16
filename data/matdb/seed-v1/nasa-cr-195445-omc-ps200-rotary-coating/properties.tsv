@@ -1,0 +1,67 @@
+frankensim.matdb-source.v1
+observation	ps200-feedstock-composition	PS200-80wtpct-nickel-bonded-Cr3C2-10wtpct-Ag-10wtpct-BaF2-CaF2-eutectic-powder-lot-unspecified	Sliney US4728448A Table II preferred PS200 composition; powdered components co-deposited by plasma spray	The three values are pre-spray feedstock component mass fractions, not measured post-spray phase fractions. The bonded-carbide component is named nickel-bonded chromium carbide, but the patent table does not resolve the binder fraction or alloy chemistry inside that component. Powder lot, particle-size distribution, spray vendor, gun, atmosphere, standoff, power, substrate preparation, porosity, and post-spray assay are absent. NASA-CR-195445 explicitly identifies its PS-200 through this patent but does not independently assay the engine coating. Publication access is not a patent-practice or trademark license
+scalar	bonded-chromium-carbide-feedstock-mass-fraction	ps200-feedstock-composition	ps200_bonded_chromium_carbide_feedstock_mass_fraction	80	%	constant
+uncertainty	bonded-chromium-carbide-feedstock-mass-fraction	unstated	-	-	-	-
+validity	bonded-chromium-carbide-feedstock-mass-fraction	source_feedstock_composition_basis_is_mass_fraction	1	1	1
+validity	bonded-chromium-carbide-feedstock-mass-fraction	source_ps200_plasma_sprayed_in_engine_report	1	1	1
+validity	bonded-chromium-carbide-feedstock-mass-fraction	source_post_spray_phase_fractions_known	0	0	1
+validity	bonded-chromium-carbide-feedstock-mass-fraction	source_powder_lot_known	0	0	1
+validity	bonded-chromium-carbide-feedstock-mass-fraction	source_patent_practice_license_granted	0	0	1
+scalar	silver-feedstock-mass-fraction	ps200-feedstock-composition	ps200_silver_feedstock_mass_fraction	10	%	constant
+uncertainty	silver-feedstock-mass-fraction	unstated	-	-	-	-
+validity	silver-feedstock-mass-fraction	source_feedstock_composition_basis_is_mass_fraction	1	1	1
+validity	silver-feedstock-mass-fraction	source_ps200_plasma_sprayed_in_engine_report	1	1	1
+validity	silver-feedstock-mass-fraction	source_post_spray_phase_fractions_known	0	0	1
+validity	silver-feedstock-mass-fraction	source_powder_lot_known	0	0	1
+validity	silver-feedstock-mass-fraction	source_patent_practice_license_granted	0	0	1
+scalar	baf2-caf2-eutectic-feedstock-mass-fraction	ps200-feedstock-composition	ps200_baf2_caf2_eutectic_feedstock_mass_fraction	10	%	constant
+uncertainty	baf2-caf2-eutectic-feedstock-mass-fraction	unstated	-	-	-	-
+validity	baf2-caf2-eutectic-feedstock-mass-fraction	source_feedstock_composition_basis_is_mass_fraction	1	1	1
+validity	baf2-caf2-eutectic-feedstock-mass-fraction	source_ps200_plasma_sprayed_in_engine_report	1	1	1
+validity	baf2-caf2-eutectic-feedstock-mass-fraction	source_post_spray_phase_fractions_known	0	0	1
+validity	baf2-caf2-eutectic-feedstock-mass-fraction	source_powder_lot_known	0	0	1
+validity	baf2-caf2-eutectic-feedstock-mass-fraction	source_patent_practice_license_granted	0	0	1
+observation	omc-test3-sidewall-finish	NASA-CR-195445-Test3-air-cooled-OMC-rotary-engine-aluminum-alloy-grade-unspecified-side-housings-PS200-over-source-labeled-zirconia-or-SX331	NASA-CR-195445 Wear Characteristics and Appendix A-3b; Test 3 used a stock iron rotor, stock tungsten-carbide OMC trochoid housing, and PS-200/TBC accessory and drive end side housings; the narrative reports a completed 2.5 h run	The report describes the engine coating as plasma-sprayed PS-200 over zirconia and elsewhere labels the underlayer SX-331 without proving that the names are chemically identical. Aluminum alloy, temper, casting route, coating thickness, spray parameters, surface-finish method, profilometer cutoff, trace direction, repeat count, dispersion, and measurement uncertainty are absent. The narrative reports 2.5 h while the Figure 7 discussion mentions before and after a 2 h test, so the retained duration is narrative context rather than a metrology timestamp. A drive-side TBC crack attributed to a probable spray defect led the team to scrap that housing. No measurable wear is reported without a detection limit, so no zero-wear or wear-rate claim is admitted
+scalar	test3-sidewall-roughness-before	omc-test3-sidewall-finish	surface_roughness_rms	0.5334	um	constant
+uncertainty	test3-sidewall-roughness-before	unstated	-	-	-	-
+validity	test3-sidewall-roughness-before	source_engine_test_number	3	3	1
+validity	test3-sidewall-roughness-before	source_surface_stage_index	0	0	1
+validity	test3-sidewall-roughness-before	source_narrative_run_duration	2.5	2.5	h
+validity	test3-sidewall-roughness-before	source_ps200_over_zirconia_or_sx331	1	1	1
+validity	test3-sidewall-roughness-before	source_substrate_is_aluminum_alloy	1	1	1
+validity	test3-sidewall-roughness-before	source_aluminum_alloy_grade_known	0	0	1
+validity	test3-sidewall-roughness-before	source_coating_thickness_known	0	0	1
+validity	test3-sidewall-roughness-before	source_surface_finish_method_known	0	0	1
+scalar	test3-sidewall-roughness-after	omc-test3-sidewall-finish	surface_roughness_rms	0.1778	um	constant
+uncertainty	test3-sidewall-roughness-after	unstated	-	-	-	-
+validity	test3-sidewall-roughness-after	source_engine_test_number	3	3	1
+validity	test3-sidewall-roughness-after	source_surface_stage_index	1	1	1
+validity	test3-sidewall-roughness-after	source_narrative_run_duration	2.5	2.5	h
+validity	test3-sidewall-roughness-after	source_ps200_over_zirconia_or_sx331	1	1	1
+validity	test3-sidewall-roughness-after	source_substrate_is_aluminum_alloy	1	1	1
+validity	test3-sidewall-roughness-after	source_aluminum_alloy_grade_known	0	0	1
+validity	test3-sidewall-roughness-after	source_coating_thickness_known	0	0	1
+validity	test3-sidewall-roughness-after	source_surface_finish_method_known	0	0	1
+observation	omc-test6-trochoid-finish	NASA-CR-195445-Test6-air-cooled-OMC-rotary-engine-aluminum-trochoid-grade-unspecified-PS200-over-source-labeled-zirconia-or-SX331-local-breakthrough	NASA-CR-195445 Wear Characteristics and Appendix A-6b; Test 6 used an OMC-style titanium rotor with alumina microspheres on its face and Cr2O3 on its sides, plus PS-200/TBC sidewalls and trochoid; the intended 2 h run was stopped at 1.5 h	The report identifies the trochoid as aluminum-alloy context by stopping when its exhaust-port temperature exceeded 500 degF near the alloy's tolerable limit, but does not report alloy, temper, casting route, or lot. Plasma Technologies used a computerized cam follower after APS Materials produced an uneven first housing; the tested housing still had uneven spray and honing, local PS-200 breakthrough to zirconia, leakage paths, hot spots, and minor apex-seal roughness. Coating thickness, as-tested profile, surface-finish method, profilometer cutoff, trace direction, repeat count, dispersion, and uncertainty are absent. The two RMS values do not establish a wear rate, friction coefficient, service life, or universal Wankel coating behavior
+scalar	test6-trochoid-roughness-before	omc-test6-trochoid-finish	surface_roughness_rms	0.6096	um	constant
+uncertainty	test6-trochoid-roughness-before	unstated	-	-	-	-
+validity	test6-trochoid-roughness-before	source_engine_test_number	6	6	1
+validity	test6-trochoid-roughness-before	source_surface_stage_index	0	0	1
+validity	test6-trochoid-roughness-before	source_actual_run_duration	1.5	1.5	h
+validity	test6-trochoid-roughness-before	source_ps200_over_zirconia_or_sx331	1	1	1
+validity	test6-trochoid-roughness-before	source_substrate_is_aluminum_alloy	1	1	1
+validity	test6-trochoid-roughness-before	source_aluminum_alloy_grade_known	0	0	1
+validity	test6-trochoid-roughness-before	source_local_ps200_breakthrough_present	1	1	1
+validity	test6-trochoid-roughness-before	source_coating_thickness_known	0	0	1
+validity	test6-trochoid-roughness-before	source_surface_finish_method_known	0	0	1
+scalar	test6-trochoid-roughness-after	omc-test6-trochoid-finish	surface_roughness_rms	0.4318	um	constant
+uncertainty	test6-trochoid-roughness-after	unstated	-	-	-	-
+validity	test6-trochoid-roughness-after	source_engine_test_number	6	6	1
+validity	test6-trochoid-roughness-after	source_surface_stage_index	1	1	1
+validity	test6-trochoid-roughness-after	source_actual_run_duration	1.5	1.5	h
+validity	test6-trochoid-roughness-after	source_ps200_over_zirconia_or_sx331	1	1	1
+validity	test6-trochoid-roughness-after	source_substrate_is_aluminum_alloy	1	1	1
+validity	test6-trochoid-roughness-after	source_aluminum_alloy_grade_known	0	0	1
+validity	test6-trochoid-roughness-after	source_local_ps200_breakthrough_present	1	1	1
+validity	test6-trochoid-roughness-after	source_coating_thickness_known	0	0	1
+validity	test6-trochoid-roughness-after	source_surface_finish_method_known	0	0	1

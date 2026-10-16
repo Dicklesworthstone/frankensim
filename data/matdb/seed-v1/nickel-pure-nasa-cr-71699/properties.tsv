@@ -1,0 +1,7 @@
+frankensim.matdb-source.v1
+observation	source-pressure-unstated	source pressure is unstated	NASA-CR-71699 Table I-8 thermal-conductivity selected values	The published source does not state pressure; no atmospheric or standard-pressure inference is made.
+observation	nasa-cr-71699-table-i8	annealed 99.99 percent pure nickel with residual electrical resistivity rho0 = 3.5e-8 ohm cm	NASA-CR-71699 Table I-8 thermal-conductivity selected values	The table remarks identify the 350..1300 K selected values as derived from the named experimental sources. This bounded curve excludes the table's explicitly extrapolated and estimated rows. Its explicit linear between-knot values are engineering interpolation estimates, not source measurements, and no interpolation-error or measurement-confidence claim is made. It does not claim density, phase, strength, or elastic properties.
+curve	thermal-conductivity-350-1300k	nasa-cr-71699-table-i8	thermal_conductivity	temperature	K	W/m/K	350:83,400:79,450:75,500:72,600:65,630:64,700:66,800:68,900:70,1000:72,1100:74,1200:76,1300:78	linear
+uncertainty	thermal-conductivity-350-1300k	unstated	-	-	-	-
+validity	thermal-conductivity-350-1300k	temperature	350	1300	K
+validity	thermal-conductivity-350-1300k	source_pressure_known	0	0	1

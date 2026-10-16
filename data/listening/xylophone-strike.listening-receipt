@@ -1,0 +1,13 @@
+frankensim-listening-receipt-v1
+listener	pending
+session	2026-08-17
+artifact	fc174bd883cca15130e267e9fe8fcb5608fbe69c763cf463e233d4a7a98fddbe
+artifact-ref	data/listening/xylophone-strike.provenance.json
+question	does it read as a BAR (inharmonic 2.76/5.40 ladder), not a string — and does the third strike lose its fundamental?
+verdict	unadjudicated
+observations	three strikes at 0.30/0.50/0.2242 of the free-free rosewood bar; awaiting the owner's ear
+loudness-sone	absent
+sharpness-acum	absent
+log-attack-time	-4.681241237375588e0
+spl-db	absent
+law	psychoacoustic metrics are never a substitute for human listening

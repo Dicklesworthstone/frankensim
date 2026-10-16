@@ -1,0 +1,11 @@
+frankensim.matdb-manifest.v3
+pack_id	copper-solid-nasa-tp3287
+redistribution	permitted	NASA NTRS 20010021116 declares PUBLIC distribution and GOV_PUBLIC_USE_PERMITTED; retain authors, report, table, standard state, and underlying evaluated-data attribution
+citation	McBride, B. J., Gordon, S., and Reno, M. A. (2001), Thermodynamic Data for Fifty Reference Elements, NASA/TP-3287/REV1, Table III.15 p.35, Table I p.8 and standard states p.2; https://ntrs.nasa.gov/citations/20010021116
+license	NASA-NTRS-GOV_PUBLIC_USE_PERMITTED
+source	copper-crystal	properties.tsv	material-tsv-v1
+property	cp	specific-heat-capacity	dimensional
+property	h	specific-enthalpy-reference-29815k	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure
+axis	source_phase_liquid	source_phase_liquid	dimensional

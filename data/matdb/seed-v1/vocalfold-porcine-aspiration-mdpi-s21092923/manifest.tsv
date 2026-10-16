@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	vocalfold-porcine-aspiration-mdpi-s21092923
+redistribution	permitted	Creative Commons Attribution 4.0 (CC BY); retain authors, journal, DOI, license URL
+citation	Scheible F., Lamprecht R., Semmler M., Sutor A. (2021), Dynamic Biomechanical Analysis of Vocal Folds Using Pipette Aspiration Technique, Sensors 21(9):2923, MDPI; https://doi.org/10.3390/s21092923; Section 3.4.1 and Figures 12/17
+license	CC-BY-4.0
+source	primary	properties.tsv	material-tsv-v1

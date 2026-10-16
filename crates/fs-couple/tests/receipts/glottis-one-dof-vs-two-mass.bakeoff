@@ -1,0 +1,30 @@
+frankensim-bakeoff-receipt-v1
+filling	voice-glottis
+fixture	crates/fs-couple/tests/vowel_gates.rs: identical licensed two-mass card + Assaneo /u/ tract; each island driven above ITS OWN corrected-load threshold (1-DOF 7.2 kPa, two-mass 1.4 kPa); spectral QoIs from glottal_qois
+shared-cards	c8e58c65f37246e706c24b66aabf43e71f8a5c0c3d75567c8d19ddcad68d31a1
+reference	f0_hz	1.8604651162790697e2
+reference	jitter	1.8958898937950302e-3
+reference	onset_pa_class	5e2
+reference	open_quotient	8.086805555555555e-1
+reference	spectral_slope_db_oct	-1.1536887546653732e1
+contender	one-dof-surface-wave
+owners	fs-couple,fs-phs
+measured	f0_hz	1.6216216216216216e2
+measured	jitter	6.704796675208842e-4
+measured	onset_pa_class	5.8e3
+measured	open_quotient	8.441666666666666e-1
+measured	spectral_slope_db_oct	-6.647044886776893e0
+budget	states=2	steps=28800	solver-iterations=0
+failure-mode	loud-pressure onset class (~5.8 kPa under the corrected tract load) and non-monotone onset-vs-stiffness (fixed mucosal delay phase tuning)
+failure-mode	rough source (jitter ~0.1) — character, not solo smoothness
+contender	two-mass
+owners	fs-couple,fs-phs,fs-dcontact
+measured	f0_hz	1.8604651162790697e2
+measured	jitter	1.8958898937950302e-3
+measured	onset_pa_class	5e2
+measured	open_quotient	8.086805555555555e-1
+measured	spectral_slope_db_oct	-1.1536887546653732e1
+budget	states=4	steps=28800	solver-iterations=0
+failure-mode	flow skew near-symmetric without glottal-duct inertance (named upgrade)
+outcome	keep-both	one-dof-surface-wave keeps the cheap-ensemble scope: 2 states, robust limit cycle, loud-pressure onset class, rough-source character	two-mass keeps the solo-realism scope: physiological onset pressures, the vertical-phase mechanism, low jitter — the voice claims build on it
+rationale	Measured on the identical fixture above each island's own threshold. one-dof: {"f0_hz": 162.16216216216216, "jitter": 0.0006704796675208842, "onset_pa_class": 5800.0, "open_quotient": 0.8441666666666666, "spectral_slope_db_oct": -6.647044886776893}. two-mass: {"f0_hz": 186.04651162790697, "jitter": 0.0018958898937950302, "onset_pa_class": 500.0, "open_quotient": 0.8086805555555555, "spectral_slope_db_oct": -11.536887546653732}. The onset classes differ 10x (5.8 vs 0.5 kPa under the corrected volume-normalized load) — the budget/realism split D21 keeps both for.

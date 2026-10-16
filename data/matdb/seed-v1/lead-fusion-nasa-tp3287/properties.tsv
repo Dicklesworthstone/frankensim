@@ -1,0 +1,8 @@
+frankensim.matdb-source.v1
+observation	nasa-tp3287-pb-fusion	pure Pb cubic crystal to liquid transition at 1 bar in the NASA evaluated thermodynamic standard state	NASA/TP-3287/REV1 Table III.38 paired crystal/liquid rows at 600.65 K	Fusion energy is derived from the same table and reference state: (13.361-8.549) kJ/mol = 4.812 kJ/mol, divided by 0.2072 kg/mol = 23223.938223938225 J/kg. This is the phase-transition enthalpy difference, not liquid enthalpy of formation at 298.15 K or latent heat of vaporization. Source uncertainty/covariance and assay are unstated; extra decimal places encode unit conversion rather than measurement precision. Pressure is the independent axis of these characteristic transition properties; no temperature-dependent phase-fraction, hysteresis, supercooling or kinetic law is asserted. This source's transition temperature does not replace the distinct historical C447 scale value.
+scalar	melting-point	nasa-tp3287-pb-fusion	tm	600.65	K	constant
+uncertainty	melting-point	unstated	-	-	-	-
+validity	melting-point	pressure	100000	100000	Pa
+scalar	latent-heat-fusion	nasa-tp3287-pb-fusion	fusion	23223.938223938225	J/kg	constant
+uncertainty	latent-heat-fusion	unstated	-	-	-	-
+validity	latent-heat-fusion	pressure	100000	100000	Pa

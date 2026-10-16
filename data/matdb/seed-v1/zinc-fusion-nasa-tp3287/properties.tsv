@@ -1,0 +1,8 @@
+frankensim.matdb-source.v1
+observation	nasa-tp3287-zn-fusion	pure Zn hexagonal crystal to liquid transition at 1 bar in the NASA evaluated thermodynamic standard state	NASA/TP-3287/REV1 Table III.51 paired crystal/liquid rows at 692.73 K	Fusion energy is derived from the same table and reference state: (18.162-10.862) kJ/mol = 7.300 kJ/mol, divided by 0.06539 kg/mol = 111637.865116990346 J/kg. This is the phase-transition enthalpy difference, not liquid enthalpy of formation at 298.15 K or latent heat of vaporization. Source uncertainty/covariance and assay are unstated; extra decimal places encode unit conversion rather than measurement precision. Pressure is the independent axis of these characteristic transition properties; no temperature-dependent phase-fraction, hysteresis, supercooling or kinetic law is asserted.
+scalar	melting-point	nasa-tp3287-zn-fusion	tm	692.73	K	constant
+uncertainty	melting-point	unstated	-	-	-	-
+validity	melting-point	pressure	100000	100000	Pa
+scalar	latent-heat-fusion	nasa-tp3287-zn-fusion	fusion	111637.865116990346	J/kg	constant
+uncertainty	latent-heat-fusion	unstated	-	-	-	-
+validity	latent-heat-fusion	pressure	100000	100000	Pa

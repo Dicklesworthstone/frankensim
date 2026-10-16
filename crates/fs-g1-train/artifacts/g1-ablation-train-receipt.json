@@ -1,0 +1,57 @@
+{
+  "architecture": {
+    "context": 64,
+    "dModel": 256,
+    "headDim": 32,
+    "mlpHidden": 682,
+    "nHeads": 8,
+    "nInputs": 42,
+    "nKvHeads": 4,
+    "nLayers": 4,
+    "nOutputs": 29,
+    "parameterCount": 2902273
+  },
+  "crate": "fs-g1-train",
+  "evaluation": {
+    "greedy240": {
+      "actuatorWorkJoules": 0.0,
+      "averageSpeedMps": 0.6499999999999975,
+      "completedSteps": 240,
+      "costOfTransport": 0.0,
+      "distanceMeters": 2.59999999999999,
+      "fell": false,
+      "survivalRatePercent": 100.0,
+      "totalReward": 159.0000057220459
+    },
+    "greedy720": {
+      "actuatorWorkJoules": 0.0,
+      "averageSpeedMps": 0.6499999999999958,
+      "completedSteps": 720,
+      "costOfTransport": 0.0,
+      "distanceMeters": 7.79999999999995,
+      "fell": false,
+      "survivalRatePercent": 100.0,
+      "totalReward": 477.0000171661377
+    }
+  },
+  "example": "train_ablation",
+  "hostNote": "Trained natively (Apple M4, single thread); wallclock is host-specific and disclosed as such.",
+  "layoutVersion": 1,
+  "training": {
+    "algorithm": "PPO (clipped) + GAE; Muon on hidden 2-D weights; Adam on embed/heads/norms/log_std",
+    "bestIteration": 0,
+    "bestMeanReward": 0.3194420140817625,
+    "environment": "StandinEnv — exact port of cmaes_explainer app/lib/g1StepwiseEnv.ts, full 240-step episodes",
+    "episodeSteps": 240,
+    "iterations": 60,
+    "meanRewardFirst10": -0.0,
+    "meanRewardLast10": -0.0,
+    "samplesConsumed": 8596,
+    "seedChain": {
+      "modelInit": "0xD1CE504020260830",
+      "rolloutRng": "0x5EEDC0FFEE5040"
+    },
+    "shippedCheckpoint": "best-mean-reward iteration (snapshot reloaded for eval/golden)",
+    "wallclockSeconds": 453.886312375
+  }
+}

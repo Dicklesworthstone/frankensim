@@ -1,0 +1,40 @@
+[package]
+name = "fs-diffreal-e2e"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Differentiation & reality end-to-end suite: shared tape/VJP fixture sensitivities, independent dual/FD falsifiers, the as-built loop, and sampled-only tolerance checks with typed logs."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-ad = { path = "../fs-ad" }
+fs-adjoint = { path = "../fs-adjoint", features = ["ledger-transpose"] }
+fs-evidence = { path = "../fs-evidence" }
+fs-asbuilt = { path = "../fs-asbuilt" }
+fs-assimilate = { path = "../fs-assimilate" }
+fs-blake3 = { path = "../fs-blake3" }
+fs-alloc = { path = "../fs-alloc" }
+fs-exec = { path = "../fs-exec" }
+fs-toleralloc = { path = "../fs-toleralloc" }
+
+[dev-dependencies]
+# Test-only: the as-built product chain (bead f85xj.12.2) needs the scenario
+# placement binding and the report projection at its two ends. They are
+# dev-dependencies because this crate's LIBRARY composes neither.
+fs-report = { path = "../fs-report" }
+fs-scenario = { path = "../fs-scenario" }
+# Test-only: the physics stage of the as-built chain (bead f85xj.12.10) drives
+# a conduction solve from an extracted thickness field. `fs-conduction` (L3)
+# and its material/mesh vocabulary are dev-only for the same reason: this
+# crate's LIBRARY composes no solver, so these edges stay out of the
+# production dependency graph.
+fs-conduction = { path = "../fs-conduction" }
+fs-matdb = { path = "../fs-matdb" }
+fs-rep-mesh = { path = "../fs-rep-mesh" }
+
+[lints]
+workspace = true

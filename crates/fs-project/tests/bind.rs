@@ -1,0 +1,1106 @@
+//! Battery for validate-time material/interface binding resolution
+//! (bead f85xj.6.4): the reference project binds fully with retained,
+//! replayable receipts; envelope-outside-domain refuses BEFORE any
+//! solve; Unstated uncertainty warns up front without refusing; and a
+//! card with coexisting conflicting claims resolves only through the
+//! explicit claim pin recorded in the project file — auto-pick is
+//! impossible by construction.
+#![allow(clippy::float_cmp)] // bit-exact propagation of stored card values is the contract under test
+
+use std::collections::BTreeMap;
+
+use fs_blake3::hash_bytes;
+use fs_conduction::{ConductionMesh, ThermalBoundaryBuilder, ThermalInterfaces};
+use fs_evidence::{Color, ValidityDomain};
+use fs_matdb::{
+    ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialCard, MaterialStateId,
+    PINNED_CLAIM_POLICY_TAG, PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint,
+    SurfaceSpec, SystemContext, UncertaintyModel,
+};
+use fs_project::bind::lower_card_backed_thermal_interfaces;
+use fs_project::{
+    BindingRequirements, CONTACT_RESISTANCE_DIMS, CONTACT_RESISTANCE_PROPERTY, CardLibrary,
+    ConductionInterfaceResolution, ConductionSourceFace, EntityDecl, Envelope,
+    InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialResolution,
+    PerfectContactBinding, ProjectSpec, RequirementDirection, RequirementSeverity,
+    RequirementSource, RequirementSourceKind, ResolvedConductionInterfacePair, SafetyFactorPolicy,
+    TEMPERATURE_AXIS, THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY, ThermalLimit,
+    resolve_bindings,
+};
+use fs_qty::QtyAny;
+use fs_regime::{
+    AxisViolationKind, EnvelopeCoverage, OperatingPoint, QoiClaim, audit_product_output_with_cards,
+};
+use fs_rep_mesh::TetComplex;
+use fs_scenario::Violation;
+
+const KELVIN: fs_qty::Dims = fs_qty::Dims([0, 0, 0, 1, 0, 0]);
+const PASCAL: fs_qty::Dims = fs_qty::Dims([-1, 1, -2, 0, 0, 0]);
+
+fn kelvin(value: f64) -> QtyAny {
+    QtyAny {
+        value,
+        dims: KELVIN,
+    }
+}
+
+fn provenance(source: &str) -> Provenance {
+    Provenance {
+        source: source.to_string(),
+        license: "internal-use".to_string(),
+        artifact: None,
+    }
+}
+
+fn conductivity_claim(
+    value: f64,
+    lo: f64,
+    hi: f64,
+    source: &str,
+    uncertainty: UncertaintyModel,
+) -> PropertyClaim {
+    PropertyClaim {
+        key: PropertyKey::new(THERMAL_CONDUCTIVITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS),
+        value: PropertyValue::Scalar {
+            value,
+            dims: THERMAL_CONDUCTIVITY_DIMS,
+        },
+        validity: ValidityDomain::unconstrained().with(TEMPERATURE_AXIS, lo, hi),
+        uncertainty,
+        interpolation: InterpolationPolicy::ConstantWithinValidity,
+        observations: Vec::new(),
+        provenance: provenance(source),
+    }
+}
+
+fn resistance_claim(value: f64, lo: f64, hi: f64, source: &str) -> PropertyClaim {
+    PropertyClaim {
+        key: PropertyKey::new(CONTACT_RESISTANCE_PROPERTY, CONTACT_RESISTANCE_DIMS),
+        value: PropertyValue::Scalar {
+            value,
+            dims: CONTACT_RESISTANCE_DIMS,
+        },
+        validity: ValidityDomain::unconstrained().with(TEMPERATURE_AXIS, lo, hi),
+        uncertainty: UncertaintyModel::RelativeHalfWidth {
+            fraction: 0.2,
+            confidence: 0.9,
+        },
+        interpolation: InterpolationPolicy::ConstantWithinValidity,
+        observations: Vec::new(),
+        provenance: provenance(source),
+    }
+}
+
+fn stated() -> UncertaintyModel {
+    UncertaintyModel::HalfWidth {
+        half_width: 0.02,
+        confidence: 0.95,
+    }
+}
+
+fn fr4_state() -> MaterialStateId {
+    MaterialStateId {
+        chemistry: "FR4".to_string(),
+        phase: "laminate".to_string(),
+        process: "cured".to_string(),
+        revision: 0,
+    }
+}
+
+fn copper_state() -> MaterialStateId {
+    MaterialStateId {
+        chemistry: "Cu-OFE".to_string(),
+        phase: "wrought".to_string(),
+        process: "annealed".to_string(),
+        revision: 0,
+    }
+}
+
+fn material_card(state: MaterialStateId, claims: Vec<PropertyClaim>) -> MaterialCard {
+    let mut set = ClaimSet::new();
+    for claim in claims {
+        set.insert_claim(claim).expect("fixture claim inserts");
+    }
+    MaterialCard::assemble(state, set, Vec::new()).expect("fixture card assembles")
+}
+
+fn interface_card(claims: Vec<PropertyClaim>) -> InterfaceSystemCard {
+    let mut set = ClaimSet::new();
+    for claim in claims {
+        set.insert_claim(claim).expect("fixture claim inserts");
+    }
+    InterfaceSystemCard::assemble(
+        SurfaceSpec {
+            material: copper_state(),
+            texture_frame: "lapped-frame-1".to_string(),
+        },
+        SurfaceSpec {
+            material: fr4_state(),
+            texture_frame: "as-cured-frame-2".to_string(),
+        },
+        SystemContext {
+            medium: "tim-paste-x".to_string(),
+            third_body: None,
+            environment: "air".to_string(),
+            history: "cured-once".to_string(),
+        },
+        set,
+        Vec::new(),
+    )
+    .expect("fixture interface card assembles")
+}
+
+/// The reference library: FR4 board, copper spreader, one TIM system,
+/// every claim valid over [200, 450] K.
+fn reference_library() -> (CardLibrary, String, String, String) {
+    let mut library = CardLibrary::new();
+    let board = library.insert_material(material_card(
+        fr4_state(),
+        vec![conductivity_claim(
+            0.3,
+            200.0,
+            450.0,
+            "laminate handbook",
+            stated(),
+        )],
+    ));
+    let spreader = library.insert_material(material_card(
+        copper_state(),
+        vec![conductivity_claim(
+            390.0,
+            200.0,
+            450.0,
+            "copper handbook",
+            stated(),
+        )],
+    ));
+    let tim = library.insert_interface(interface_card(vec![resistance_claim(
+        2.0e-5,
+        200.0,
+        450.0,
+        "tim datasheet",
+    )]));
+    (library, board, spreader, tim)
+}
+
+/// The reference project skeleton for resolution: two regions, one
+/// interface, envelope 263.15..318.15 K, one 371.15 K junction limit on
+/// the spreader region.
+fn reference_spec(board_card: &str, spreader_card: &str, tim_card: &str) -> ProjectSpec {
+    ProjectSpec {
+        assembly: Some(vec![
+            EntityDecl::Assembly {
+                name: "rig".to_string(),
+                display: "Reference rig".to_string(),
+                expect_id: None,
+            },
+            EntityDecl::Part {
+                parent: "rig".to_string(),
+                name: "stack".to_string(),
+                display: "Board stack".to_string(),
+                expect_id: None,
+            },
+            EntityDecl::Region {
+                parent: "stack".to_string(),
+                name: "board".to_string(),
+                display: "PCB".to_string(),
+                expect_id: None,
+            },
+            EntityDecl::Region {
+                parent: "stack".to_string(),
+                name: "spreader".to_string(),
+                display: "Heat spreader".to_string(),
+                expect_id: None,
+            },
+            EntityDecl::Interface {
+                parent: "rig".to_string(),
+                name: "tim".to_string(),
+                display: "Spreader TIM".to_string(),
+                from: "board".to_string(),
+                to: "spreader".to_string(),
+                expect_id: None,
+            },
+        ]),
+        envelope: Some(Envelope {
+            ambient_lo: kelvin(263.15),
+            ambient_hi: kelvin(318.15),
+            pressure: QtyAny {
+                value: 101_325.0,
+                dims: PASCAL,
+            },
+        }),
+        requirements: Some(vec![ThermalLimit {
+            qoi: "t-junction-max".to_string(),
+            class: "junction".to_string(),
+            region: "spreader".to_string(),
+            direction: RequirementDirection::AtMost,
+            limit: kelvin(371.15),
+            margin: kelvin(10.0),
+            source: RequirementSource {
+                kind: RequirementSourceKind::Datasheet,
+                document: "spreader-component-limit".to_string(),
+                version: "rev-3".to_string(),
+                locator: "table-2".to_string(),
+            },
+            safety_factor: SafetyFactorPolicy {
+                factor: 1.0,
+                source: RequirementSource {
+                    kind: RequirementSourceKind::InternalPolicy,
+                    document: "thermal-margin-policy".to_string(),
+                    version: "2026.1".to_string(),
+                    locator: "section-1".to_string(),
+                },
+            },
+            severity: RequirementSeverity::DamageLimit,
+        }]),
+        materials: Some(vec![
+            MaterialBinding {
+                region: "board".to_string(),
+                card: board_card.to_string(),
+                claim: None,
+                state: "FR4/laminate/cured rev 0".to_string(),
+                temp_lo: kelvin(233.15),
+                temp_hi: kelvin(398.15),
+                source: "seed-v1".to_string(),
+                conductivity_tolerance: None,
+            },
+            MaterialBinding {
+                region: "spreader".to_string(),
+                card: spreader_card.to_string(),
+                claim: None,
+                state: "Cu-OFE/wrought/annealed rev 0".to_string(),
+                temp_lo: kelvin(233.15),
+                temp_hi: kelvin(398.15),
+                source: "seed-v1".to_string(),
+                conductivity_tolerance: None,
+            },
+        ]),
+        interface_cards: Some(vec![InterfaceCardBinding {
+            interface: "tim".to_string(),
+            card: tim_card.to_string(),
+            claim: None,
+            source: "seed-v1".to_string(),
+            state: InterfaceState::Tim {
+                thickness: QtyAny::new(100e-6, fs_project::spec::dims::LENGTH),
+                thickness_half_width: QtyAny::new(10e-6, fs_project::spec::dims::LENGTH),
+            },
+        }]),
+        ..ProjectSpec::default()
+    }
+}
+
+fn two_trace_contact_mesh() -> (ConductionMesh, fs_conduction::InterfaceFacePair) {
+    let positions = vec![
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0],
+    ];
+    let mesh = ConductionMesh::new(
+        TetComplex::from_tets(positions.len(), vec![[0, 1, 2, 3], [4, 6, 5, 7]]),
+        positions,
+    )
+    .expect("two valid duplicated-trace tetrahedra");
+    let pair = ThermalInterfaces::coincident_face_pairs(&mesh)
+        .expect("coincident contact candidate")
+        .pop()
+        .expect("one contact candidate");
+    (mesh, pair)
+}
+
+fn resolved_contact_topology(
+    pair: fs_conduction::InterfaceFacePair,
+) -> ConductionInterfaceResolution {
+    let source = ConductionSourceFace {
+        artifact: "reference-mesh".to_string(),
+        source_identity: "fixture".to_string(),
+        face: 0,
+    };
+    ConductionInterfaceResolution {
+        violations: Vec::new(),
+        pairs: vec![ResolvedConductionInterfacePair {
+            interface: "tim".to_string(),
+            from_region: "board".to_string(),
+            to_region: "spreader".to_string(),
+            from_boundary_slot: pair.side_a,
+            to_boundary_slot: pair.side_b,
+            from_source: source.clone(),
+            to_source: source.clone(),
+            interface_sources: vec![source],
+        }],
+        source_faces_indexed: 2,
+    }
+}
+
+fn assert_code<'v>(
+    resolution: &'v MaterialResolution,
+    code: &str,
+    what_contains: &str,
+    fix_contains: &str,
+) -> &'v Violation {
+    let found = resolution
+        .violations
+        .iter()
+        .find(|violation| violation.code == code)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected violation `{code}`; got: {:?}",
+                resolution
+                    .violations
+                    .iter()
+                    .map(|violation| violation.code)
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        found.what.contains(what_contains),
+        "violation `{code}` what {:?} must name {what_contains:?}",
+        found.what
+    );
+    assert!(
+        found.fix.contains(fix_contains),
+        "violation `{code}` fix {:?} must offer {fix_contains:?}",
+        found.fix
+    );
+    found
+}
+
+#[test]
+fn the_reference_project_binds_fully_with_replayable_receipts() {
+    let (library, board, spreader, tim) = reference_library();
+    let spec = reference_spec(&board, &spreader, &tim);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+
+    assert!(
+        resolution.admissible(),
+        "reference project must bind: {:?}",
+        resolution.violations
+    );
+    assert!(resolution.advisories.is_empty());
+    assert_eq!(resolution.bindings.len(), 3);
+    let board_binding = resolution
+        .bindings
+        .iter()
+        .find(|binding| binding.target == fs_project::BindingTarget::Region("board".to_string()))
+        .expect("board binding");
+    assert_eq!(
+        board_binding.properties[0].uncertainty,
+        stated(),
+        "the project binding has no authority to narrow or replace the selected claim's uncertainty"
+    );
+    let receipts: Vec<_> = resolution.receipts().collect();
+    assert_eq!(receipts.len(), 6, "3 bindings x 1 property x 2 endpoints");
+
+    // Every retained receipt replays against the claim set that made it,
+    // and the retained bytes decode back to the retained receipt.
+    for retained in &receipts {
+        let claims = if retained.context.starts_with("interface") {
+            library.interface(&tim).expect("tim card").claims()
+        } else if retained.context.contains("`board`") {
+            library.material(&board).expect("board card").claims()
+        } else {
+            library.material(&spreader).expect("spreader card").claims()
+        };
+        claims
+            .verify_receipt(&retained.receipt)
+            .expect("retained receipt replays");
+        let hash = fs_matdb::PropertyUsageReceipt::from_bytes_verified(&retained.bytes, {
+            retained.receipt.content_hash()
+        })
+        .expect("retained bytes decode");
+        assert_eq!(&hash, &retained.receipt);
+    }
+
+    // The logged table carries the complete chain per row.
+    let table = resolution.render_table();
+    for needle in [
+        "region `board`",
+        "region `spreader`",
+        "interface `tim`",
+        "interface-state tim(thickness=0.0001±0.00001 m)",
+        THERMAL_CONDUCTIVITY_PROPERTY,
+        CONTACT_RESISTANCE_PROPERTY,
+        "FR4/laminate/cured rev 0",
+        "Cu-OFE/wrought/annealed rev 0",
+        "tim-paste-x",
+        "laminate handbook",
+        "seed-v1",
+        "±0.02 @ confidence 0.95",
+    ] {
+        assert!(
+            table.contains(needle),
+            "table must log {needle:?}:\n{table}"
+        );
+    }
+}
+
+#[test]
+fn actual_matdb_claim_demotes_after_reference_project_runtime_drift() {
+    let (library, board, spreader, tim) = reference_library();
+    let spec = reference_spec(&board, &spreader, &tim);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert!(
+        resolution.admissible(),
+        "reference project must bind: {:?}",
+        resolution.violations
+    );
+
+    let board_binding = resolution
+        .bindings
+        .iter()
+        .find(|binding| binding.target == fs_project::BindingTarget::Region("board".to_string()))
+        .expect("reference board binding");
+    let conductivity = board_binding
+        .properties
+        .iter()
+        .find(|property| property.property == THERMAL_CONDUCTIVITY_PROPERTY)
+        .expect("board conductivity");
+    let registry = resolution.regime_audit_cards();
+    assert_eq!(registry.len(), 3, "board, spreader, and TIM claims");
+    assert_eq!(
+        conductivity.regime_card.name,
+        format!(
+            "fs-matdb:claim:{}:{}",
+            board_binding.card, conductivity.selected_claim
+        )
+    );
+    assert_eq!(
+        conductivity.regime_card.version,
+        format!(
+            "property-usage-receipt-v{}",
+            conductivity.receipt_lo.receipt.schema_version
+        )
+    );
+    assert_eq!(
+        conductivity.regime_card.validity.bound(TEMPERATURE_AXIS),
+        Some((200.0, 450.0))
+    );
+
+    let audit = audit_product_output_with_cards(
+        &registry,
+        &[
+            OperatingPoint {
+                id: "reference".to_string(),
+                groups: BTreeMap::from([(TEMPERATURE_AXIS.to_string(), 371.15)]),
+            },
+            OperatingPoint {
+                id: "runtime-drift".to_string(),
+                groups: BTreeMap::from([(TEMPERATURE_AXIS.to_string(), 451.0)]),
+            },
+        ],
+        &[QoiClaim {
+            qoi: "board-temperature".to_string(),
+            color: Color::Estimated {
+                estimator: "thermal-reference-project".to_string(),
+                dispersion: 0.02,
+            },
+            model_cards: vec![conductivity.regime_card.name.clone()],
+            override_acknowledgement: None,
+        }],
+    )
+    .expect("actual matdb card audits");
+    let receipt = &audit.receipts[0];
+    assert_eq!(receipt.coverage, EnvelopeCoverage::Partial);
+    assert_eq!(receipt.in_domain_points, ["reference"]);
+    assert_eq!(receipt.out_of_domain_points, ["runtime-drift"]);
+    assert_eq!(receipt.model_cards.len(), 1);
+    assert_eq!(receipt.model_cards[0].name, conductivity.regime_card.name);
+    assert_eq!(
+        receipt.model_cards[0].version,
+        conductivity.regime_card.version
+    );
+    assert_eq!(receipt.violations.len(), 1);
+    let violation = &receipt.violations[0];
+    assert_eq!(violation.point, "runtime-drift");
+    assert_eq!(violation.card, conductivity.regime_card.name);
+    assert_eq!(violation.axis, TEMPERATURE_AXIS);
+    assert_eq!(violation.observed, Some(451.0));
+    assert_eq!(violation.lo, 200.0);
+    assert_eq!(violation.hi, 450.0);
+    assert_eq!(violation.kind, AxisViolationKind::Above);
+    assert!(violation.distance > 0.0);
+    assert!(matches!(
+        receipt.effective_color,
+        Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+    ));
+    let canonical = receipt.to_canonical_json();
+    assert!(canonical.contains(&board_binding.card));
+    assert!(canonical.contains(&conductivity.selected_claim));
+}
+
+#[test]
+fn envelope_outside_the_card_domain_refuses_at_validate() {
+    let (mut library, board, _, tim) = reference_library();
+    // A spreader card whose data ends at 350 K, below the 371.15 K limit.
+    let narrow = library.insert_material(material_card(
+        copper_state(),
+        vec![conductivity_claim(
+            390.0,
+            250.0,
+            350.0,
+            "narrow source",
+            stated(),
+        )],
+    ));
+    let spec = reference_spec(&board, &narrow, &tim);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+
+    assert!(!resolution.admissible());
+    assert_code(
+        &resolution,
+        "project-binding-domain-uncovered",
+        "region `spreader`",
+        "never extrapolates",
+    );
+}
+
+#[test]
+fn an_admitted_range_narrower_than_the_envelope_refuses() {
+    let (library, board, spreader, tim) = reference_library();
+    let mut spec = reference_spec(&board, &spreader, &tim);
+    // The user admits the board material only above the envelope floor.
+    spec.materials.as_mut().expect("materials")[0].temp_lo = kelvin(283.15);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+
+    let found = assert_code(
+        &resolution,
+        "project-material-envelope-uncovered",
+        "region `board`",
+        "qualified for this envelope",
+    );
+    // The message states both ranges so the fix is decidable from it.
+    assert!(found.what.contains("263.15") && found.what.contains("283.15"));
+}
+
+#[test]
+fn unstated_uncertainty_warns_up_front_without_refusing() {
+    let (mut library, _, spreader, tim) = reference_library();
+    let unstated = library.insert_material(material_card(
+        fr4_state(),
+        vec![conductivity_claim(
+            0.3,
+            200.0,
+            450.0,
+            "uncertainty-free datasheet",
+            UncertaintyModel::Unstated,
+        )],
+    ));
+    let spec = reference_spec(&unstated, &spreader, &tim);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+
+    assert!(
+        resolution.admissible(),
+        "Unstated uncertainty warns, never refuses: {:?}",
+        resolution.violations
+    );
+    let advisory = resolution
+        .advisories
+        .iter()
+        .find(|advisory| advisory.code == "binding-uncertainty-unstated")
+        .expect("unstated advisory");
+    assert!(advisory.what.contains("region `board`"));
+    assert!(advisory.note.contains("Estimated"));
+    let board_row = &resolution.bindings[0];
+    assert!(board_row.properties[0].unstated_uncertainty);
+    assert!(resolution.render_table().contains("UNSTATED"));
+}
+
+#[test]
+fn conflicting_claims_refuse_without_a_pin_and_resolve_only_through_one() {
+    let (mut library, _, spreader, tim) = reference_library();
+    let handbook = conductivity_claim(0.29, 200.0, 450.0, "handbook", stated());
+    let vendor = conductivity_claim(0.35, 200.0, 450.0, "vendor datasheet", stated());
+    let vendor_pin = vendor.content_hash().to_hex();
+    let conflicted = library.insert_material(material_card(fr4_state(), vec![handbook, vendor]));
+
+    // Without a pin: a typed refusal naming every candidate, and NO
+    // resolved row for the region — auto-pick is impossible.
+    let spec = reference_spec(&conflicted, &spreader, &tim);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert!(!resolution.admissible());
+    let conflict = assert_code(
+        &resolution,
+        "project-binding-claims-conflict",
+        "region `board`",
+        ":claim <hex>",
+    );
+    assert!(
+        conflict.fix.contains(&vendor_pin),
+        "fix lists the candidates"
+    );
+    assert!(
+        !resolution
+            .bindings
+            .iter()
+            .any(|binding| binding.target == fs_project::BindingTarget::Region("board".into())),
+        "no value may be produced for a conflicted, unpinned binding"
+    );
+
+    // With the pin recorded in the project file: resolves to exactly the
+    // pinned claim, through the receipted pinned-claim policy.
+    let mut pinned_spec = reference_spec(&conflicted, &spreader, &tim);
+    pinned_spec.materials.as_mut().expect("materials")[0].claim = Some(vendor_pin.clone());
+    let pinned = resolve_bindings(
+        &pinned_spec,
+        &library,
+        &BindingRequirements::thermal_steady_v1(),
+    );
+    assert!(pinned.admissible(), "{:?}", pinned.violations);
+    let board_row = &pinned.bindings[0];
+    assert_eq!(board_row.pinned_claim.as_deref(), Some(vendor_pin.as_str()));
+    let property = &board_row.properties[0];
+    assert_eq!(property.selected_claim, vendor_pin);
+    assert_eq!(property.value_lo, 0.35);
+    assert_eq!(property.receipt_lo.receipt.policy, PINNED_CLAIM_POLICY_TAG);
+    assert_eq!(property.provenance_source, "vendor datasheet");
+}
+
+#[test]
+fn pin_refusals_are_typed_and_never_bypass_the_domain() {
+    let (mut library, _, spreader, tim) = reference_library();
+    let wide = conductivity_claim(0.29, 200.0, 450.0, "handbook", stated());
+    let narrow = conductivity_claim(0.35, 250.0, 300.0, "narrow vendor", stated());
+    let narrow_pin = narrow.content_hash().to_hex();
+    let card = library.insert_material(material_card(fr4_state(), vec![wide, narrow]));
+
+    // A pin that names no claim on the card.
+    let mut spec = reference_spec(&card, &spreader, &tim);
+    spec.materials.as_mut().expect("materials")[0].claim =
+        Some(hash_bytes(b"not a claim").to_hex());
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert_code(
+        &resolution,
+        "project-binding-pin-unknown",
+        "region `board`",
+        "stale",
+    );
+
+    // A pinned claim that does not cover the admitted range: the wide
+    // claim covers it, but a pin never silently substitutes or extends.
+    let mut spec = reference_spec(&card, &spreader, &tim);
+    spec.materials.as_mut().expect("materials")[0].claim = Some(narrow_pin);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert_code(
+        &resolution,
+        "project-binding-pin-domain",
+        "region `board`",
+        "never bypasses the extrapolation refusal",
+    );
+
+    // A malformed pin.
+    let mut spec = reference_spec(&card, &spreader, &tim);
+    spec.materials.as_mut().expect("materials")[0].claim = Some("zz".repeat(32));
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert_code(
+        &resolution,
+        "project-binding-pin-malformed",
+        "region `board`",
+        "full content hash",
+    );
+}
+
+#[test]
+fn a_range_stitched_from_two_claims_is_not_a_resolution() {
+    let (mut library, _, spreader, tim) = reference_library();
+    let cold = conductivity_claim(0.29, 200.0, 300.0, "cold source", stated());
+    let hot = conductivity_claim(0.31, 300.0, 450.0, "hot source", stated());
+    let stitched = library.insert_material(material_card(fr4_state(), vec![cold, hot]));
+    let spec = reference_spec(&stitched, &spreader, &tim);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+
+    assert_code(
+        &resolution,
+        "project-binding-domain-split",
+        "region `board`",
+        "whole admitted range",
+    );
+}
+
+#[test]
+fn g0_material_envelope_requires_continuous_support_even_with_a_pin() {
+    let (mut library, _, spreader, tim) = reference_library();
+    let mut curve = conductivity_claim(0.25, 200.0, 450.0, "synthetic curve", stated());
+    curve.value = PropertyValue::Curve {
+        abscissa: TEMPERATURE_AXIS.into(),
+        abscissa_dims: KELVIN,
+        knots: vec![(233.15, 0.25), (398.15, 0.35)],
+        dims: THERMAL_CONDUCTIVITY_DIMS,
+    };
+    curve.interpolation = InterpolationPolicy::TabulatedOnly;
+    let pin = curve.content_hash().to_hex();
+    let exact_card = material_card(fr4_state(), vec![curve.clone()]);
+    // Both endpoints answer under the old check; neither establishes support
+    // between these two synthetic samples.
+    for t in [233.15, 398.15] {
+        exact_card
+            .claims()
+            .query(
+                THERMAL_CONDUCTIVITY_PROPERTY,
+                &QueryPoint::new().with(TEMPERATURE_AXIS, t).unwrap(),
+                fs_matdb::SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap();
+    }
+    let exact = library.insert_material(exact_card);
+    for requested_pin in [None, Some(pin)] {
+        let mut spec = reference_spec(&exact, &spreader, &tim);
+        spec.materials.as_mut().unwrap()[0].claim = requested_pin;
+        let resolution =
+            resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+        assert_code(
+            &resolution,
+            "project-binding-domain-uncovered",
+            "exact samples",
+            "continuous response",
+        );
+        assert!(
+            !resolution.bindings.iter().any(|binding| {
+                binding.target == fs_project::BindingTarget::Region("board".into())
+            }),
+            "unsupported data must publish no board binding or receipts"
+        );
+    }
+
+    // Explicitly admitted interpolation supplies the missing interval; the
+    // resolver retains the original evaluated values and replayable receipts.
+    curve.interpolation = InterpolationPolicy::LinearInside;
+    let continuous_card = material_card(fr4_state(), vec![curve]);
+    let claims = continuous_card.claims().clone();
+    let continuous = library.insert_material(continuous_card);
+    let spec = reference_spec(&continuous, &spreader, &tim);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert!(resolution.admissible(), "{:?}", resolution.violations);
+    let property = &resolution.bindings[0].properties[0];
+    assert_eq!((property.value_lo, property.value_hi), (0.25, 0.35));
+    claims.verify_receipt(&property.receipt_lo.receipt).unwrap();
+    claims.verify_receipt(&property.receipt_hi.receipt).unwrap();
+}
+
+#[test]
+fn g0_interface_envelope_detects_interior_conflicts_and_honors_explicit_pins() {
+    let (mut library, board, spreader, _) = reference_library();
+    let wide = resistance_claim(2.0e-5, 200.0, 450.0, "synthetic full-range source");
+    let pin = wide.content_hash().to_hex();
+    let interior = resistance_claim(3.0e-5, 300.0, 320.0, "synthetic interior source");
+    let interior_pin = interior.content_hash().to_hex();
+    let card = interface_card(vec![wide, interior]);
+    let claims = card.claims().clone();
+    for t in [263.15, 371.15] {
+        let answer = claims
+            .query(
+                CONTACT_RESISTANCE_PROPERTY,
+                &QueryPoint::new().with(TEMPERATURE_AXIS, t).unwrap(),
+                fs_matdb::SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap();
+        assert_eq!(answer.receipt.selected.0.to_hex(), pin);
+    }
+    let tim = library.insert_interface(card);
+    let mut spec = reference_spec(&board, &spreader, &tim);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    let conflict = assert_code(
+        &resolution,
+        "project-binding-claims-conflict",
+        "T = 300",
+        ":claim <hex>",
+    );
+    assert!(conflict.fix.contains(&pin) && conflict.fix.contains(&interior_pin));
+    assert!(
+        !resolution.bindings.iter().any(|binding| {
+            binding.target == fs_project::BindingTarget::Interface("tim".into())
+        }),
+        "interior ambiguity must publish no interface binding or receipts"
+    );
+
+    spec.interface_cards.as_mut().unwrap()[0].claim = Some(pin.clone());
+    let pinned = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert!(pinned.admissible(), "{:?}", pinned.violations);
+    let property = &pinned
+        .bindings
+        .iter()
+        .find(|binding| binding.target == fs_project::BindingTarget::Interface("tim".into()))
+        .unwrap()
+        .properties[0];
+    assert_eq!(property.selected_claim, pin);
+    for receipt in [&property.receipt_lo.receipt, &property.receipt_hi.receipt] {
+        assert_eq!(receipt.policy, PINNED_CLAIM_POLICY_TAG);
+        claims.verify_receipt(receipt).unwrap();
+    }
+}
+
+#[test]
+fn structural_refusals_cover_cards_states_targets_and_coverage() {
+    let (mut library, board, spreader, tim) = reference_library();
+
+    // Unknown card hash.
+    let mut spec = reference_spec(&board, &spreader, &tim);
+    spec.materials.as_mut().expect("materials")[0].card = "ab".repeat(32);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert_code(
+        &resolution,
+        "project-material-card-unknown",
+        "region `board`",
+        "correct the card hash",
+    );
+
+    // Manufactured-state mismatch.
+    let mut spec = reference_spec(&board, &spreader, &tim);
+    spec.materials.as_mut().expect("materials")[0].state = "FR4".to_string();
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert_code(
+        &resolution,
+        "project-material-state-mismatch",
+        "`FR4`",
+        "manufactured state, never a name",
+    );
+
+    // A direct resolver caller cannot bypass ordinary ProjectSpec validation
+    // to publish a binding without a visible card-source channel.
+    let mut spec = reference_spec(&board, &spreader, &tim);
+    spec.materials.as_mut().expect("materials")[0].source = " seed-v1".to_string();
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert_code(
+        &resolution,
+        "project-binding-source-invalid",
+        "region `board`",
+        "custody channel",
+    );
+    assert!(
+        !resolution
+            .bindings
+            .iter()
+            .any(|binding| binding.target == fs_project::BindingTarget::Region("board".into())),
+        "invalid source provenance must not leave a resolved row"
+    );
+
+    let mut spec = reference_spec(&board, &spreader, &tim);
+    spec.interface_cards.as_mut().expect("interface cards")[0]
+        .source
+        .clear();
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert_code(
+        &resolution,
+        "project-binding-source-invalid",
+        "interface `tim`",
+        "custody channel",
+    );
+
+    // Binding to a non-region entity.
+    let mut spec = reference_spec(&board, &spreader, &tim);
+    spec.materials.as_mut().expect("materials")[0].region = "stack".to_string();
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert_code(
+        &resolution,
+        "project-material-target-kind",
+        "`stack`",
+        "region entities",
+    );
+    // ... which also leaves `board` unbound.
+    assert_code(
+        &resolution,
+        "project-material-unbound-region",
+        "`board`",
+        "exactly one material card",
+    );
+
+    // Duplicate binding.
+    let mut spec = reference_spec(&board, &spreader, &tim);
+    let duplicate = spec.materials.as_ref().expect("materials")[0].clone();
+    spec.materials.as_mut().expect("materials").push(duplicate);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert_code(
+        &resolution,
+        "project-material-binding-duplicate",
+        "`board`",
+        "exactly once",
+    );
+
+    // Unbound interface.
+    let mut spec = reference_spec(&board, &spreader, &tim);
+    spec.interface_cards = Some(Vec::new());
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert_code(
+        &resolution,
+        "project-interface-unbound",
+        "`tim`",
+        "exactly one interface-system card",
+    );
+
+    // A card claim under the right name with the wrong dimensions.
+    let wrong_dims = library.insert_material(material_card(
+        fr4_state(),
+        vec![PropertyClaim {
+            key: PropertyKey::new(THERMAL_CONDUCTIVITY_PROPERTY, KELVIN),
+            value: PropertyValue::Scalar {
+                value: 0.3,
+                dims: KELVIN,
+            },
+            validity: ValidityDomain::unconstrained().with(TEMPERATURE_AXIS, 200.0, 450.0),
+            uncertainty: stated(),
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: Vec::new(),
+            provenance: provenance("dimensionally confused source"),
+        }],
+    ));
+    let spec = reference_spec(&wrong_dims, &spreader, &tim);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert_code(
+        &resolution,
+        "project-binding-property-dims",
+        "region `board`",
+        "fix the card data",
+    );
+
+    // A card without the required property at all.
+    let empty = library.insert_material(material_card(fr4_state(), Vec::new()));
+    let spec = reference_spec(&empty, &spreader, &tim);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert_code(
+        &resolution,
+        "project-binding-property-missing",
+        "region `board`",
+        "bind a card that states this property",
+    );
+}
+
+#[test]
+fn card_backed_interface_lowering_binds_the_selected_claim_to_the_exact_face_pair() {
+    let (library, board, spreader, tim) = reference_library();
+    let spec = reference_spec(&board, &spreader, &tim);
+    let bindings = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert!(bindings.admissible(), "{:?}", bindings.violations);
+    let (mesh, pair) = two_trace_contact_mesh();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .expect("explicit all-adiabatic boundary");
+    let point = QueryPoint::new()
+        .with(TEMPERATURE_AXIS, 300.0)
+        .expect("finite temperature query point");
+
+    let interfaces = lower_card_backed_thermal_interfaces(
+        &bindings,
+        &resolved_contact_topology(pair),
+        &library,
+        &mesh,
+        &boundary,
+        &point,
+    )
+    .expect("resolved card and exact pair lower into the contact operator");
+
+    assert_eq!(interfaces.surface_count(), 1);
+    assert_eq!(interfaces.surface_is_mapped("tim"), Some(false));
+    assert_eq!(
+        interfaces.surface_face_resistances("tim"),
+        Some(vec![2.0e-5]),
+        "the operator must retain the card claim rather than infer perfect contact"
+    );
+}
+
+#[test]
+fn card_backed_interface_lowering_refuses_a_solve_point_outside_the_pinned_claim_domain() {
+    let (library, board, spreader, tim) = reference_library();
+    let spec = reference_spec(&board, &spreader, &tim);
+    let bindings = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    let (mesh, pair) = two_trace_contact_mesh();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .expect("explicit all-adiabatic boundary");
+    let point = QueryPoint::new()
+        .with(TEMPERATURE_AXIS, 500.0)
+        .expect("finite temperature query point");
+
+    let refusal = lower_card_backed_thermal_interfaces(
+        &bindings,
+        &resolved_contact_topology(pair),
+        &library,
+        &mesh,
+        &boundary,
+        &point,
+    )
+    .expect_err("out-of-domain solve point must not reuse an endpoint receipt");
+    assert_eq!(refusal.len(), 1);
+    assert_eq!(refusal[0].code, "project-conduction-interface-card-query");
+    assert!(refusal[0].what.contains("supplied solve point"));
+}
+
+#[test]
+fn deliberate_perfect_contact_is_bound_as_intent_but_refuses_solver_authority() {
+    let (library, board, spreader, tim) = reference_library();
+    let mut spec = reference_spec(&board, &spreader, &tim);
+    spec.interface_cards = Some(Vec::new());
+    spec.perfect_contacts = Some(vec![PerfectContactBinding {
+        interface: "tim".to_string(),
+        authority: "thermal-policy:rev-7".to_string(),
+        rationale: "approved screening idealization".to_string(),
+    }]);
+
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert!(!resolution.admissible());
+    assert_code(
+        &resolution,
+        "project-perfect-contact-unsupported",
+        "thermal-policy:rev-7",
+        "explicit perfect-contact conduction operator",
+    );
+    assert!(
+        !resolution
+            .violations
+            .iter()
+            .any(|violation| violation.code == "project-interface-unbound"),
+        "the explicit declaration covers the interface law slot: {:?}",
+        resolution.violations
+    );
+    assert!(
+        !resolution
+            .bindings
+            .iter()
+            .any(|binding| binding.target == fs_project::BindingTarget::Interface("tim".into())),
+        "unsupported perfect contact must not fabricate a resolved property row"
+    );
+    assert_eq!(
+        resolution.receipts().count(),
+        4,
+        "only two material cards may produce endpoint receipts"
+    );
+}
+
+#[test]
+fn missing_sections_name_the_precondition_instead_of_panicking() {
+    let resolution = resolve_bindings(
+        &ProjectSpec::default(),
+        &CardLibrary::new(),
+        &BindingRequirements::thermal_steady_v1(),
+    );
+    assert_code(
+        &resolution,
+        "project-binding-preconditions",
+        "material resolution needs",
+        "structural validation",
+    );
+}
+
+/// The product-level constants must track `fs-conduction`'s consumption:
+/// a drift here would validate against one property spelling and solve
+/// against another.
+#[test]
+fn resolution_constants_track_fs_conduction() {
+    assert_eq!(
+        THERMAL_CONDUCTIVITY_DIMS,
+        fs_conduction::material::CONDUCTIVITY_DIMS
+    );
+    assert_eq!(TEMPERATURE_AXIS, fs_conduction::material::TEMPERATURE_AXIS);
+    assert_eq!(
+        CONTACT_RESISTANCE_PROPERTY,
+        fs_conduction::interface::AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY
+    );
+    assert_eq!(
+        CONTACT_RESISTANCE_DIMS,
+        fs_conduction::interface::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS
+    );
+}

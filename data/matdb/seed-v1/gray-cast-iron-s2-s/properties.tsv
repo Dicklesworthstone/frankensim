@@ -1,0 +1,37 @@
+frankensim.matdb-source.v1
+observation	composition	S2-S-pearlitic-gray-cast-iron-500kg-induction-70wtpct-steel-scrap-30wtpct-pig-iron-superheat-1530degC-0p4wtpct-SrFeSi-Ino2-EN1561-TypeII-mold	Wang et al. 2018 Table 1 reported S2-S composition and carbon equivalent	Ino_2 is Sr-FeSi containing 2.0 wt% Sr; 0.4 wt% Ino_2 was placed in the ladle before pouring; composition measurement method and uncertainty are not reported; no balance-iron scalar or unreported trace value is inferred
+scalar	carbon-mass-fraction	composition	carbon_mass_fraction	3.54	%	constant
+uncertainty	carbon-mass-fraction	unstated	-	-	-	-
+scalar	silicon-mass-fraction	composition	silicon_mass_fraction	1.62	%	constant
+uncertainty	silicon-mass-fraction	unstated	-	-	-	-
+scalar	manganese-mass-fraction	composition	manganese_mass_fraction	0.51	%	constant
+uncertainty	manganese-mass-fraction	unstated	-	-	-	-
+scalar	phosphorus-mass-fraction	composition	phosphorus_mass_fraction	0.025	%	constant
+uncertainty	phosphorus-mass-fraction	unstated	-	-	-	-
+scalar	sulfur-mass-fraction	composition	sulfur_mass_fraction	0.028	%	constant
+uncertainty	sulfur-mass-fraction	unstated	-	-	-	-
+scalar	molybdenum-mass-fraction	composition	molybdenum_mass_fraction	0.35	%	constant
+uncertainty	molybdenum-mass-fraction	unstated	-	-	-	-
+scalar	copper-mass-fraction	composition	copper_mass_fraction	0.58	%	constant
+uncertainty	copper-mass-fraction	unstated	-	-	-	-
+scalar	tin-mass-fraction	composition	tin_mass_fraction	0.060	%	constant
+uncertainty	tin-mass-fraction	unstated	-	-	-	-
+scalar	carbon-equivalent	composition	carbon_equivalent_ce	4.05	%	constant
+uncertainty	carbon-equivalent	unstated	-	-	-	-
+observation	microstructure	S2-S-pearlitic-gray-cast-iron-500kg-induction-70wtpct-steel-scrap-30wtpct-pig-iron-superheat-1530degC-0p4wtpct-SrFeSi-Ino2-EN1561-TypeII-mold	Wang et al. 2018 Table 2; optical metallography and Image J Pro Version 6.0 quantitative analysis; eight cross-section fields	Fully pearlitic matrix with GB/T 7216-2009 type-A graphite; Table 2 error bars are one standard deviation: graphite area 9.0 +/- 0.2 percent, maximum graphite length 273 +/- 19 um, primary-dendrite area 15.6 +/- 0.9 percent, and eutectic-colony count 371 +/- 19 per cm2; confidence metadata and field-level values are absent, so runtime uncertainty remains Unstated
+scalar	graphite-area-fraction	microstructure	graphite_area_fraction	9.0	%	constant
+uncertainty	graphite-area-fraction	unstated	-	-	-	-
+scalar	maximum-graphite-flake-length	microstructure	maximum_graphite_flake_length	273	um	constant
+uncertainty	maximum-graphite-flake-length	unstated	-	-	-	-
+scalar	primary-dendrite-area-fraction	microstructure	primary_dendrite_area_fraction	15.6	%	constant
+uncertainty	primary-dendrite-area-fraction	unstated	-	-	-	-
+scalar	eutectic-colony-areal-density	microstructure	eutectic_colony_areal_density	371	cm-2	constant
+uncertainty	eutectic-colony-areal-density	unstated	-	-	-	-
+observation	tensile	S2-S-pearlitic-gray-cast-iron-500kg-induction-70wtpct-steel-scrap-30wtpct-pig-iron-superheat-1530degC-0p4wtpct-SrFeSi-Ino2-EN1561-TypeII-mold	GB/T T228.1-2010 dog-bone tensile bars; 20 mm gauge diameter; 60 mm gauge length; 3.2 um surface finish; three tests averaged	Figure 8 center digitized from the published 2141 by 1490 pixel PNG to the nearest 1 MPa; the plotted one-standard-deviation bar is approximately 8 MPa but has no confidence metadata or printed replicates; exact test temperature is not reported; runtime uncertainty remains Unstated
+scalar	ultimate-tensile-strength	tensile	ultimate_tensile_strength	326	MPa	constant
+uncertainty	ultimate-tensile-strength	unstated	-	-	-	-
+validity	ultimate-tensile-strength	source_test_temperature_known	0	0	1
+observation	thermal-conductivity	S2-S-pearlitic-gray-cast-iron-500kg-induction-70wtpct-steel-scrap-30wtpct-pig-iron-superheat-1530degC-0p4wtpct-SrFeSi-Ino2-EN1561-TypeII-mold	Room-state 12.5 mm diameter by 2.5 mm disk cut from tensile grip; NETZSCH LFA 457 diffusivity and heat capacity; Archimedes density; conductivity derived as diffusivity times heat capacity times density	Figure 8 center digitized from the published 2141 by 1490 pixel PNG to the nearest 0.1 W/(m K); the plotted one-standard-deviation bar is approximately 0.3 W/(m K) but has no confidence metadata or printed replicate count; exact room temperature is not reported; runtime uncertainty remains Unstated
+scalar	thermal-conductivity	thermal-conductivity	thermal_conductivity	58.8	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_test_temperature_known	0	0	1

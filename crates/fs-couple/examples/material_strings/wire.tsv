@@ -1,0 +1,26 @@
+frankensim.matdb-source.v1
+observation	synthetic	Synthetic isotropic wire	Manufactured coefficients for integration tests	Not measurements or a real instrument material; no gold/silver/wood authority
+scalar	density	synthetic	density	7800	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	200000	rad/s
+scalar	young_modulus	synthetic	young_modulus	200000000000	Pa	constant
+uncertainty	young_modulus	unstated	-	-	-	-
+validity	young_modulus	T	280	320	K
+validity	young_modulus	omega	0	200000	rad/s
+scalar	poisson_ratio	synthetic	poisson_ratio	0.3	1	constant
+uncertainty	poisson_ratio	unstated	-	-	-	-
+validity	poisson_ratio	T	280	320	K
+validity	poisson_ratio	omega	0	200000	rad/s
+scalar	kelvin_voigt_bending_viscosity	synthetic	kelvin_voigt_bending_viscosity	10	Pa*s	constant
+uncertainty	kelvin_voigt_bending_viscosity	unstated	-	-	-	-
+validity	kelvin_voigt_bending_viscosity	T	280	320	K
+validity	kelvin_voigt_bending_viscosity	omega	0	200000	rad/s
+scalar	shear_modulus	synthetic	shear_modulus	80000000000	Pa	constant
+uncertainty	shear_modulus	unstated	-	-	-	-
+validity	shear_modulus	T	280	320	K
+validity	shear_modulus	omega	0	200000	rad/s
+scalar	kelvin_voigt_shear_viscosity	synthetic	kelvin_voigt_shear_viscosity	1000	Pa*s	constant
+uncertainty	kelvin_voigt_shear_viscosity	unstated	-	-	-	-
+validity	kelvin_voigt_shear_viscosity	T	280	320	K
+validity	kelvin_voigt_shear_viscosity	omega	0	200000	rad/s

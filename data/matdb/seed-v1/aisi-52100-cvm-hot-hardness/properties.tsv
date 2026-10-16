@@ -1,0 +1,59 @@
+frankensim.matdb-source.v1
+observation	ingot-chemistry	AISI-52100-consumable-vacuum-melted-single-ingot-NASA-TN-D-6632	NASA-TN-D-6632 Table I actual composition; analytical method not reported	Balance iron; no heat identifier, analytical uncertainty, or unreported trace-element value is inferred
+scalar	carbon-mass-fraction	ingot-chemistry	carbon_mass_fraction	0.96	%	constant
+uncertainty	carbon-mass-fraction	unstated	-	-	-	-
+scalar	silicon-mass-fraction	ingot-chemistry	silicon_mass_fraction	0.22	%	constant
+uncertainty	silicon-mass-fraction	unstated	-	-	-	-
+scalar	manganese-mass-fraction	ingot-chemistry	manganese_mass_fraction	0.36	%	constant
+uncertainty	manganese-mass-fraction	unstated	-	-	-	-
+scalar	sulfur-mass-fraction	ingot-chemistry	sulfur_mass_fraction	0.012	%	constant
+uncertainty	sulfur-mass-fraction	unstated	-	-	-	-
+scalar	phosphorus-mass-fraction	ingot-chemistry	phosphorus_mass_fraction	0.007	%	constant
+uncertainty	phosphorus-mass-fraction	unstated	-	-	-	-
+scalar	chromium-mass-fraction	ingot-chemistry	chromium_mass_fraction	1.36	%	constant
+uncertainty	chromium-mass-fraction	unstated	-	-	-	-
+observation	hardness-second-temper-505K	AISI-52100-CVM-single-ingot-austenitize-1116-to-1144K-30min-oil-quench-325K-first-temper-394K-60min-second-temper-505K-60min	NASA-TN-D-6632 Table II; standard Rockwell C tester; 150 kg load; diamond indenter; low-oxygen electric furnace; 294 K reading	Minimum two hardness measurements; dispersion not reported; ASTM grain size 12; X-ray retained austenite is censored as less than 2 volume percent; the report's plus-or-minus-one-Rockwell-point predictive equation is not measurement uncertainty for this table value
+scalar	rockwell-c-hardness-second-temper-505K	hardness-second-temper-505K	rockwell_c_scale_reading	59.7	1	constant
+uncertainty	rockwell-c-hardness-second-temper-505K	unstated	-	-	-	-
+validity	rockwell-c-hardness-second-temper-505K	second_temper_temperature	505	505	K
+validity	rockwell-c-hardness-second-temper-505K	temperature	294	294	K
+observation	hardness-second-temper-450K	AISI-52100-CVM-single-ingot-austenitize-1116-to-1144K-30min-oil-quench-325K-first-temper-394K-60min-second-temper-450K-60min	NASA-TN-D-6632 Table II; standard Rockwell C tester; 150 kg load; diamond indenter; low-oxygen electric furnace; 294 K reading	Minimum two hardness measurements; dispersion not reported; ASTM grain size 12; the report's plus-or-minus-one-Rockwell-point predictive equation is not measurement uncertainty for this table value
+scalar	rockwell-c-hardness-second-temper-450K	hardness-second-temper-450K	rockwell_c_scale_reading	62.3	1	constant
+uncertainty	rockwell-c-hardness-second-temper-450K	unstated	-	-	-	-
+validity	rockwell-c-hardness-second-temper-450K	second_temper_temperature	450	450	K
+validity	rockwell-c-hardness-second-temper-450K	temperature	294	294	K
+observation	retained-austenite-second-temper-450K	AISI-52100-CVM-single-ingot-austenitize-1116-to-1144K-30min-oil-quench-325K-first-temper-394K-60min-second-temper-450K-60min	NASA-TN-D-6632 Table II X-ray diffraction retained-austenite measurement at the reported room state	Displayed value 12.8 volume percent; uncertainty and replicate count not reported; no covariance with hardness is inferred
+scalar	retained-austenite-second-temper-450K	retained-austenite-second-temper-450K	retained_austenite_volume_fraction	12.8	%	constant
+uncertainty	retained-austenite-second-temper-450K	unstated	-	-	-	-
+validity	retained-austenite-second-temper-450K	second_temper_temperature	450	450	K
+validity	retained-austenite-second-temper-450K	temperature	294	294	K
+observation	hardness-second-temper-433K	AISI-52100-CVM-single-ingot-austenitize-1116-to-1144K-30min-oil-quench-325K-first-temper-394K-60min-second-temper-433K-60min	NASA-TN-D-6632 Table II; standard Rockwell C tester; 150 kg load; diamond indenter; low-oxygen electric furnace; 294 K reading	Minimum two hardness measurements; dispersion not reported; ASTM grain size 12; the report's plus-or-minus-one-Rockwell-point predictive equation is not measurement uncertainty for this table value
+scalar	rockwell-c-hardness-second-temper-433K	hardness-second-temper-433K	rockwell_c_scale_reading	63.4	1	constant
+uncertainty	rockwell-c-hardness-second-temper-433K	unstated	-	-	-	-
+validity	rockwell-c-hardness-second-temper-433K	second_temper_temperature	433	433	K
+validity	rockwell-c-hardness-second-temper-433K	temperature	294	294	K
+observation	retained-austenite-second-temper-433K	AISI-52100-CVM-single-ingot-austenitize-1116-to-1144K-30min-oil-quench-325K-first-temper-394K-60min-second-temper-433K-60min	NASA-TN-D-6632 Table II X-ray diffraction retained-austenite measurement at the reported room state	Displayed value 15.6 volume percent; uncertainty and replicate count not reported; no covariance with hardness is inferred
+scalar	retained-austenite-second-temper-433K	retained-austenite-second-temper-433K	retained_austenite_volume_fraction	15.6	%	constant
+uncertainty	retained-austenite-second-temper-433K	unstated	-	-	-	-
+validity	retained-austenite-second-temper-433K	second_temper_temperature	433	433	K
+validity	retained-austenite-second-temper-433K	temperature	294	294	K
+observation	hardness-second-temper-394K	AISI-52100-CVM-single-ingot-austenitize-1116-to-1144K-30min-oil-quench-325K-first-temper-394K-60min-second-temper-394K-60min	NASA-TN-D-6632 Table II; standard Rockwell C tester; 150 kg load; diamond indenter; low-oxygen electric furnace; 294 K reading	Minimum two hardness measurements; dispersion not reported; ASTM grain size 12; the report's plus-or-minus-one-Rockwell-point predictive equation is not measurement uncertainty for this table value
+scalar	rockwell-c-hardness-second-temper-394K	hardness-second-temper-394K	rockwell_c_scale_reading	64.6	1	constant
+uncertainty	rockwell-c-hardness-second-temper-394K	unstated	-	-	-	-
+validity	rockwell-c-hardness-second-temper-394K	second_temper_temperature	394	394	K
+validity	rockwell-c-hardness-second-temper-394K	temperature	294	294	K
+observation	retained-austenite-second-temper-394K	AISI-52100-CVM-single-ingot-austenitize-1116-to-1144K-30min-oil-quench-325K-first-temper-394K-60min-second-temper-394K-60min	NASA-TN-D-6632 Table II X-ray diffraction retained-austenite measurement at the reported room state	Displayed value 18.4 volume percent; uncertainty and replicate count not reported; no covariance with hardness is inferred
+scalar	retained-austenite-second-temper-394K	retained-austenite-second-temper-394K	retained_austenite_volume_fraction	18.4	%	constant
+uncertainty	retained-austenite-second-temper-394K	unstated	-	-	-	-
+validity	retained-austenite-second-temper-394K	second_temper_temperature	394	394	K
+validity	retained-austenite-second-temper-394K	temperature	294	294	K
+observation	hardness-no-second-temper	AISI-52100-CVM-single-ingot-austenitize-1116-to-1144K-30min-oil-quench-325K-first-temper-394K-60min-no-second-temper	NASA-TN-D-6632 Table II; standard Rockwell C tester; 150 kg load; diamond indenter; low-oxygen electric furnace; 294 K reading	Minimum two hardness measurements; dispersion not reported; ASTM grain size 12; the report's plus-or-minus-one-Rockwell-point predictive equation is not measurement uncertainty for this table value
+scalar	rockwell-c-hardness-no-second-temper	hardness-no-second-temper	rockwell_c_scale_reading	65.1	1	constant
+uncertainty	rockwell-c-hardness-no-second-temper	unstated	-	-	-	-
+validity	rockwell-c-hardness-no-second-temper	second_temper_applied	0	0	1
+validity	rockwell-c-hardness-no-second-temper	temperature	294	294	K
+observation	retained-austenite-no-second-temper	AISI-52100-CVM-single-ingot-austenitize-1116-to-1144K-30min-oil-quench-325K-first-temper-394K-60min-no-second-temper	NASA-TN-D-6632 Table II X-ray diffraction retained-austenite measurement at the reported room state	Displayed value 11.8 volume percent; uncertainty and replicate count not reported; no covariance with hardness is inferred
+scalar	retained-austenite-no-second-temper	retained-austenite-no-second-temper	retained_austenite_volume_fraction	11.8	%	constant
+uncertainty	retained-austenite-no-second-temper	unstated	-	-	-	-
+validity	retained-austenite-no-second-temper	second_temper_applied	0	0	1
+validity	retained-austenite-no-second-temper	temperature	294	294	K

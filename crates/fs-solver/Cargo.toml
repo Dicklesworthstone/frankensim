@@ -1,0 +1,29 @@
+[package]
+name = "fs-solver"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Solver stack: resumable matrix-free Krylov and Newton-Krylov methods, verified admission, typed block operators, transposed solves, and FEEC p-multigrid."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-exec = { path = "../fs-exec" }
+fs-feec = { path = "../fs-feec" }
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+fs-spectral = { path = "../fs-spectral" }
+fs-sparse = { path = "../fs-sparse" }
+fs-tilelang = { path = "../fs-tilelang" }
+
+[dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-opdsl = { path = "../fs-opdsl" }
+fs-propcheck = { path = "../fs-propcheck" }
+fs-rand = { path = "../fs-rand" }
+
+[lints]
+workspace = true

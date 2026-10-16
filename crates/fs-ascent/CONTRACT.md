@@ -1,0 +1,587 @@
+# fs-ascent CONTRACT
+
+## Purpose and layer
+
+Layer: **L4 ASCENT** (deps: fs-adjoint/fs-solver L3, fs-opt L4,
+fs-la L1, fs-exec/fs-math L0). The gradient-based optimizer stack (plan
+§9.2): the pipeline raw adjoint gradient → Sobolev smoothing →
+optional Riemannian projection → optimizer, with ENGINES here and
+problem STRUCTURE (typed graphs, manifold metadata) in fs-opt. Every
+returned optimum carries a certificate (gradient norm, KKT residuals)
+so converged and stalled are distinguishable outcomes.
+
+## Public types and semantics
+
+- `FnGrad`/`FnHv` — the callback shapes every engine consumes.
+- `LbfgsState` — resumable L-BFGS (two-loop recursion, m ≈ 17-class
+  memory, strong-Wolfe line search, curvature-pair skip guard,
+  steepest-descent fallback when stale memory yields a non-descent
+  direction after resume on nonconvex terrain). Checkpoint = clone;
+  split runs bitwise-equal to straight runs.
+- `wolfe::strong_wolfe` — bracket + bisection zoom, deterministic
+  control flow, finite-input/output admission, and evaluation counts returned;
+  the internal budgeted entry point checks a hard cap before every expansion
+  and zoom callback.
+- `trust::trust_region_newton` — Steihaug-CG on the quadratic model
+  with NEGATIVE-CURVATURE boundary steps (counted in the report),
+  classical radius laws (¼/¾ thresholds). Extreme gradient magnitudes use
+  exact power-of-two objective normalization in the quadratic model and
+  actual/predicted reduction ratio; callback results, reported objective and
+  gradient, and stopping tolerances retain the caller's units. Normalization
+  admits subnormal objective scales and avoids overflow from uniformly scaled
+  gradients, curvature products, and opposite-sign objective differences.
+  Positive curvature whose unrestricted CG step overflows truncates to the
+  finite trust boundary, and representable positive model decreases have no
+  arbitrary absolute zero floor. Ordinary-scale arithmetic retains the
+  established trajectory. Inline G1/G3 tests cover convex quadratics scaled by
+  `1e-250` through `1e250`, subnormal negative-curvature models, tiny positive
+  curvature and model decreases, plus G4/G5 cancellation/checkpoint replay.
+  Callback outputs must still be finite; no arbitrary-conditioning guarantee,
+  recovery of precision already lost inside callbacks, or invariance under
+  changing design-variable units is claimed. `hv_fd_of_gradients` is the
+  interim Hessian-vector product with its O(√ε) accuracy in the name
+  (second-order adjoints are recorded follow-up).
+- `auglag::augmented_lagrangian` — PHR augmented Lagrangian
+  (equalities + inequalities) over L-BFGS inner solves, classical
+  penalty schedule, multipliers returned, and a `KktResidual`
+  certificate (stationarity, primal feasibility, inequality dual
+  feasibility, complementarity) on every outcome.
+- `riemann::{tangent_project, retract, RiemannianLbfgs}` — checked
+  manifold operations for fs-opt metadata (Rn/Sphere and the legacy
+  embedded-S³ interpretation of So3; Stiefel is refused loudly), plus
+  Riemannian L-BFGS with scale-relative curvature admission, shortest-geodesic
+  isometric transport on Sphere/S³, and a retraction-aware deterministic
+  strong-Wolfe search. Reports carry componentwise and intrinsic L2 gradient
+  norms plus the worst manifold violation along the path. The legacy So3 and
+  Stiefel limitations are explicit no-claim boundaries below; certified
+  Lie-group/Stiefel execution requires their reconciliation with fs-opt's live
+  3-parameter quaternion-exponential and QR retractions.
+- `pareto::{weighted_sum_sweep, epsilon_constraint_sweep}` —
+  gradient-based Pareto TRACING: warm-started L-BFGS continuation
+  along a weight schedule (exact on convex fronts) and warm-started
+  augmented-Lagrangian ε-constraint continuation (covers CONCAVE
+  fronts, where weighted sums provably collapse to extremes —
+  exhibited in the battery); every ε-constraint point carries its
+  KKT certificate.
+- `pareto::nondominated_front` — exact two-objective minimization filter for
+  tracing and benchmark candidate streams. Dominance requires no worse in
+  either objective and strictly better in at least one; bit-identical objective
+  rows retain the first occurrence. The output preserves input order, so
+  disconnected front segments keep the schedule's stable presentation while
+  dominated bridge rows disappear.
+- `nsga::{NsgaReferenceGeometry, NsgaReferenceGeometryPolicy}` — immutable,
+  versioned Das--Dennis reference geometry plus a bounded deterministic
+  one-direction refinement. Geometry identities retain all canonical direction
+  bits; admitted snapshots additionally retain canonical front bits and policy
+  bits (cap plus cover trigger), with duplicates removed and `-0.0` refused.
+  The assessment reports bidirectional cover radii and association-share
+  discrepancy. A 2D empty interior association interval is a disconnected-front
+  sentinel only, not a claim about continuous Pareto-front topology. Adaptation
+  consumes only its supplied normalized front and explicit direction cap, and
+  returns a new revision so the caller's old geometry is the rollback value.
+  `nsga3_run_with_reference_geometry` applies that decision from rank-zero
+  geometry in production environmental selection and retains each route/metric,
+  policy identity, and pre/post identities.
+- `stop::{StopRule, StopReason}` — the stopping-condition algebra:
+  grad-norm / objective / budget / stall leaves under Any/All
+  combinators, with REASON attribution in every report.
+- `interior::interior_point` (bead ijil) — the LOG-BARRIER
+  interior-point option: barrier subproblems minimized by the
+  resumable L-BFGS, equalities on the AL term, softmax phase-1 for
+  infeasible starts, barrier multiplier estimates ν = μ/(−cᵢ) feeding
+  the SAME KktResidual certificate. Fixture parity with AL gated
+  (same optimum, same active multiplier on the landed KKT fixture;
+  circle fixture to the analytic ν = 0.5).
+- `sqp::sqp` (bead ijil) — active-set SQP for tightly-constrained
+  small-dimension POLISH: damped-BFGS Lagrangian Hessian, QP
+  subproblems via the dense fs-la KKT factorization, ℓ1-merit
+  backtracking; parity with AL to 5e-8 on x AND multipliers; measured
+  warm-start polish envelope 10 iterations to 5e-11 KKT
+  (identity-seeded BFGS needs curvature pairs — the gate is the
+  measurement, not a wish). Large-scale SQP (sparse KKT, TR
+  globalization) is recorded follow-up.
+- `runner::{Study, Packing, StudyReport, StudyError, StudyForkReceipt,
+  StudyPauseReceipt, StudyRunProgress}` (beads ijil, 7tv.21.15, and
+  7tv.21.21) — the
+  Problem-IR study runner: ALL variables pack across the manifold
+  product (per-block riemann ops keep the sphere spherical to 1e-12
+  along the whole path), central-difference tangent gradients through
+  `fs_opt::eval` (the live IR is evaluation-only — documented),
+  `Problem.budget.limit` threads into the stop algebra as explicit
+  `Unlimited` or `Limited(NonZeroU64)`, with
+  CORRECT attribution (`StopReason::Budget`, not a composite shrug),
+  constraints route to AL/IP/SQP through packed FD adapters, and
+  studies are RESUMABLE (clone = checkpoint; split runs bitwise equal
+  INCLUDING eval accounting — the cached current-objective is what
+  makes segment boundaries invisible). Every checkpoint is bound to the
+  full-width semantic identity of that cache's admitted `Problem`;
+  `try_run` refuses a different identity before mutation. Objective steering
+  uses `fork_for`: an exact variable schema is mandatory, the parent is
+  untouched, and the child keeps the branch point/driver configuration while
+  clearing objective history, step/evaluation counters, and problem-dependent
+  caches. An unchanged semantic problem is refused so a fork cannot reset the
+  same problem's budget accounting. The returned receipt retains both problem
+  IDs, parent accounting, branch-point float bits, and driver bits.
+  `try_run_cancellable` additionally accepts the shared `fs-exec::Cx`, polls
+  only at complete resume-safe iteration boundaries, and returns cancellation
+  as `StudyRunProgress::Paused` rather than laundering orchestration into an
+  optimizer `StopReason`. Its versioned receipt binds the problem identity,
+  complete point/history/cache bits, accounting, and driver bits; observing a
+  request is mutation-free and the same checkpoint resumes under a fresh Cx.
+- Under `transient-design`, `transient::imex::{ImexTransientFamily,
+  ImexTransientModel, ImexTransientStudy, evaluate_imex_transient}` bind the
+  existing SQP engine to stiff ARS(2,2,2) trajectories. Each usable decision
+  point records one matrix-free IMEX trajectory and evaluates all sensor losses
+  in one checkpointed reverse sweep. The total gradient includes linear and
+  nonlinear dynamics, direct sensor parameters, and the initial-condition VJP.
+  Primal and transposed preconditioners are explicit separate inputs. The
+  nondecreasing endpoint-index timetable permits initial and repeated sensor
+  readings; step size, timetable and solver policy are held fixed.
+  `ImexTransientConfig` bounds state size, samples, forward steps, records,
+  per-step scratch, replay work, checkpoints and the small dense SQP system.
+  Parameter bounds are SQP inequalities. Out-of-box trials are refused;
+  numerical/model/budget failures never become artificial objective penalties.
+  A study retains the accepted optimizer and its exactly matching physical
+  evaluation. Clone and continuation preserve accepted derivatives, BFGS state
+  and cumulative attempted-evaluation counts; failed and cancelled trials stay
+  charged, while unfinished searches/recordings restart on retry. Cancellation
+  is polled at solver/callback boundaries, without within-kernel preemption.
+  Convergence reports a local KKT result for supplied discrete derivatives,
+  without a global-optimality, interval-gradient or parameter-identifiability
+  claim. `examples/imex_calibration.rs` fits conductance, heater power, sensor
+  offset and initial temperature from dense-generated two-body thermal data;
+  `tests/imex_calibration.rs` checks the complete parameter chain against an
+  independent dense forward calculation, recovery, continuation and refusals.
+- Under `transient-design`, `transient::structural::{StructuralTransientFamily,
+  StructuralTransientModel, StructuralTransientStudy,
+  evaluate_structural_transient}` bind SQP to operator generalized-alpha
+  structural trajectories with time-dependent loads. One checkpointed sweep
+  differentiates displacement, velocity and acceleration observations, including
+  repeated/initial endpoints, direct sensor parameters and load parameters.
+  The model's initial-state VJP completes the q/v/a chain; parameter-dependent
+  consistent acceleration can use `fs_time::galpha::initialization`'s mass solve
+  and transposed pullback. Initial clock, timestep, spectral radius, timetable
+  and solve policies remain fixed. The transposed effective-operator
+  preconditioner is explicit; the primal uses the existing Newton solver.
+  Independent limits bound state dimension, samples, forward steps, records,
+  per-step workspace, replay work, parked checkpoints and the dense SQP system.
+  Bounds are SQP inequalities; numerical, model and budget failures retain
+  their errors instead of becoming penalties. Accepted physical evaluations
+  remain paired with their optimizer point; clone/resume preserve BFGS state
+  and attempted-evaluation accounting, including failed or cancelled trials.
+  `examples/structural_calibration.rs` fits coupling stiffness, damping, load
+  amplitude, initial displacement and sensor offset from dense-generated
+  two-body spring/damper q/v/a observations. Its integration tests compare the
+  entire gradient with an independent dense forward/initialization reference
+  and check recovery, exact split/clone behavior, zero-step initial objectives
+  and bounded refusal. This is a lumped structural numerical consumer, with
+  no plate/shell spatial discretization, experimental validation, global
+  optimum or parameter-identifiability claim.
+- `examples/plate_calibration.rs` supplies the spatial DKT consumer of that
+  structural trajectory/observation machinery. The existing `SqpState` fits
+  stiffness scale, moving-force amplitude and displacement sensor offset on
+  a clamped 32-triangle, 27-free-DOF plate; no modal truncation is used. Mass
+  and Rayleigh coefficients are fixed to avoid the common stiffness/mass/load
+  scale ambiguity. Every trial uses the sparse `fs-plate::transient` adapter,
+  work-conjugate mesh point loads/probes, consistent initial acceleration and
+  its pullback, and one sampled checkpoint sweep. Synthetic readings use an
+  independent dense generalized-alpha path on the same spatial pencil.
+  `tests/plate_calibration.rs` checks all fitted gradients against dense finite
+  differences, actual recovery, exact split/clone behavior, cancellation and
+  invalid observations without replacing the accepted sample or refunding
+  attempted work. This is fixed-mesh numerical recovery; spatial convergence,
+  physical damping identification and experimental validation are separate.
+- `examples/enthalpy_calibration.rs` connects the spatial enthalpy solver's
+  discrete adjoint to the existing `SqpState`. Two bounded heater-density
+  pulses act through a localized P1 source in a fixed tetrahedral slab.
+  Twelve cross-section-mean temperature observations at four accepted times
+  contribute to one reverse sweep through 24 stored endpoint linearizations.
+  Each reverse step adds observation seeds to the carried enthalpy derivative,
+  uses the actual transposed spatial tangent, and contracts the consistent
+  nodal source pullback with the heater profile. SQP owns bounds, BFGS,
+  line search, cumulative evaluation limits and the local KKT stop.
+  Geometry, reference mass, phase chart, conductivity and clock stay fixed;
+  chart/conductivity corners refuse through the owning conduction API.
+  `tests/enthalpy_calibration.rs` checks complete history gradients against
+  forward-only differences and recovers both synthetic pulse amplitudes while
+  the final field retains solid, latent and liquid regions. Explicit
+  `--ambient-radiation` mode adds a declared gray surface and convection at the
+  heated face. Observation generation, every candidate forward trajectory and
+  the reverse sweep use that same law. Radiative endpoint linearizations retain
+  the complete temperature/enthalpy feedback in the existing tape, including
+  its mean-dependent rank-one contribution; a frozen surface coefficient is
+  not used for gradients. The two heater pulses are recovered under the known
+  surface/environment declaration, and the complete history gradient is checked
+  against forward differences. Emissivity and reservoir temperature are fixed
+  inputs in this example, not fitted or experimentally inferred. The example uses
+  same-model synthetic observations and a small full-storage trajectory;
+  it makes no experimental-validation, general-identifiability, global-optimum
+  or checkpoint-scaling claim. The added conduction/material dependencies are
+  development-only consumers; the optimizer's production graph is unchanged.
+
+## Invariants
+
+- Deterministic trajectories from identical inputs (G5-tested);
+  resumable states bitwise across split points.
+- Resumption cannot reinterpret cached state under a different semantic
+  problem. Reweighting is an explicit world fork with immutable parent state
+  and fresh branch-local accounting.
+- Cancellation is observed only at a complete Study boundary, never in a
+  partially applied gradient/retract step. Repeated observation is
+  mutation-free, and pause/resume must preserve the uninterrupted trajectory.
+- L-BFGS curvature pairs are admitted only with finite, positive sᵀy above a
+  scale-relative roundoff floor (SPD memory preserved on nonconvex problems).
+- Riemannian curvature memory is transported after every accepted iterate,
+  whether or not the new pair is admissible. Transported pairs have curvature
+  and rho recomputed and are dropped if transport makes them invalid; zero
+  memory means exactly zero retained pairs.
+- Every evaluation-budget leaf is a hard resource ceiling for Riemannian line
+  search, including below `All`; budget exhaustion takes attribution priority
+  over simultaneous convergence so a `GradNorm` report proves strict
+  pre-budget convergence. Because construction has already retained one
+  objective callback, `run` rejects an absolute budget below the state's
+  existing evaluation count before performing more work.
+- Riemannian iterates remain ON the manifold to roundoff (the
+  retraction is the constraint — no renormalization hacks; violation
+  tracked and reported).
+- KKT certificates are computed from the PROBLEM's callbacks, not
+  the inner solver's internal state.
+- KKT certification is fail-closed: decision vectors, objective and
+  constraint values, gradients, multiplier vectors, and Jacobian-
+  transpose actions must have exact dimensions and finite entries.
+  Inequality dual feasibility is an explicit residual, so a negative
+  multiplier cannot cancel stationarity into a false certificate.
+
+## Error model
+
+Structured panics on invalid manifold descriptors or starting points, exact
+dimension mismatches, non-finite callback/state data, singular retractions,
+negative or non-finite norm/stagnation tolerances, non-finite objective targets,
+zero stall windows, empty stop-rule composites, evaluation budgets that
+underwrite callbacks already retained by a resumable state, non-descent
+directions handed to the line search, and unsupported manifolds used in descent (modeling errors
+surfaced loudly before they can mint a certificate). Precision no-op trials
+and underflowed/non-finite slopes produce a reported Stall without accepting a
+new decision or curvature pair; evaluation and observed-violation accounting
+still advance. Pareto sweeps reject non-finite
+decisions/objective values/gradients, invalid weights or epsilons,
+non-positive tolerances, and gradient dimension mismatches at the API
+boundary. Nondominance filtering also refuses malformed public candidates,
+including non-finite objective, gradient-residual, or KKT evidence. Optimizer
+non-convergence with a well-formed problem is a
+REPORTED outcome (reason + certificate), never a panic.
+
+## Determinism class
+
+Bit-deterministic across runs on the same execution surface and verified identical
+across architectures (x86_64 Linux and aarch64 macOS) in both debug and release
+profiles under `TRAJECTORY_BIT_SEMANTICS_VERSION = 1`:
+- Trajectory golden FNV-64 over L-BFGS, trust-region, and Riemannian trajectories: `0xe185_4f98_a25e_3663`.
+- Pareto front golden FNV-64: `0x301b_04df_db91_3965`.
+
+Requalification under bead `frankensim-ascent-golden-requalify-o6bne` provides retained
+receipts across 2 ISAs x 2 build profiles in `tests/receipts/` (`ascent_golden_x86_64_debug.json`,
+`ascent_golden_x86_64_release.json`, `ascent_golden_aarch64_debug.json`, and
+`ascent_golden_aarch64_release.json`), establishing cross-ISA bit-determinism across
+darwin/arm64 and x86_64 for these pinned sentinels.
+
+## Cancellation behavior
+
+Iteration-granular (the fs-solver pattern): `try_run_cancellable` checks its
+`fs-exec::Cx` before work, after initial-objective cache completion, before an
+iteration, and after a complete retract/evaluate step. A request arriving
+inside the finite-difference gradient drains that iteration before pausing;
+there is no torn state. Legacy `run`/`try_run` remain context-free wrappers.
+Problem evaluation budgets still flow through the optimizer stop algebra;
+orchestration cancellation is a distinct typed outcome.
+
+`TrustRegionState::run_cancellable` also polls before and after each
+Steihaug Hessian-vector product, the final model product, and the candidate
+objective/gradient evaluation. A request discards the unfinished proposal;
+accepted point/gradient, radius, history, iteration count and committed
+negative-curvature count remain unchanged. Every completed callback remains
+charged, including a discarded objective evaluation. Resume restarts only that
+proposal; with the same deterministic callbacks and sufficient remaining
+budget it reproduces the uninterrupted numerical trajectory while retaining
+the extra callback cost. Individual callbacks and vector operations
+remain non-preemptible; no wall-clock latency or serialized Krylov continuation
+is claimed. Focused G4 tests inject cancellation at every callback boundary,
+inside a later Krylov product, and through the public `Cx` adapter.
+
+## Unsafe boundary
+
+None. `unsafe_code = "deny"`.
+
+## Feature flags
+
+None.
+
+## Conformance tests
+
+`tests/ascent_battery.rs` (8 cases): L-BFGS on Rosenbrock(10) inside
+an evaluation envelope (< 600 evals) certifying by gradient norm;
+bitwise resume at 3 cut points + G5 repeat; THE FLAGSHIP full
+pipeline — PDE-constrained density misfit (fs-adjoint DensityPoisson)
+with the IFT adjoint gradient verify_gradient-GATED before the
+optimizer sees it, driven to ≤ 1e−12 misfit by L-BFGS; trust-region
+Newton–Krylov solving Rosenbrock with negative-curvature steps
+counted and gradient certification; augmented Lagrangian on an
+equality+active-inequality fixture recovering the analytic optimum
+with all four KKT residuals ≤ 1e−6 and a positive active multiplier;
+Riemannian L-BFGS minimizing a Rayleigh quotient on S¹¹ to the
+Jacobi-verified smallest eigenvalue with manifold violation ≤ 1e−14
+along the whole path; stop-rule attribution (Budget and Stall
+distinguished); TR-Newton exact-Hv vs FD-Hv head-to-head (3 iters /
+43 solves vs 5 iters / 1625 evaluations); cross-ISA golden hash.
+`tests/pareto_battery.rs` (4 cases): the convex quadratic pair's
+closed-form front matched to 2.2e−16 (machine precision — the
+weighted-sum optimum is analytic); Fonseca–Fleming CONCAVE front —
+weighted sums collapse to exactly 2 clusters while ε-constraint
+covers f₁ ∈ [0.15, 0.85] on the true Pareto set (x₁ = x₂ to 1e−4)
+with all KKT residuals ≤ 1e−7; bitwise replay; Pareto golden
+`0x301b_04df_db91_3965`; fail-fast guards for invalid weights,
+epsilons, tolerances, decision vectors, objective values, and gradient
+dimensions.
+
+`tests/riemannian_study_replay.rs` (bead 7tv.21.23) is the retained G5
+study-scale receipt and seeded-failure self-test for the Riemannian L-BFGS
+family. It reuses the known-convergent seeded sphere/Rayleigh fixture, binds
+the fixed input seed and logical RNG coordinates, complete symmetric objective
+matrix and regenerated start, engine/manifold configuration, every public
+optimizer-state field,
+complete objective history, every public report field, and an independently
+recomputed scale-normalized intrinsic Rayleigh residual into a versioned
+canonical identity. The run must stop by componentwise gradient below 1e-9
+strictly before its hard evaluation cap, with that terminal state equal to the
+final objective/gradient callback rather than any earlier visit. It reproduces
+the callback objective and tangent gradient at returned x, agrees with the
+Jacobi eigenvalue oracle, and keeps the intrinsic residual below 1e-10. Semantic
+admission rejects non-finite/off-manifold callback points before residual
+construction, negative-zero norm certificates, alternate input seeds, and
+oracle-valid post-terminal suffixes. A separately constructed same-seed run
+must reproduce the whole receipt byte for byte, and the canonical same-ISA
+reference identity is frozen so a deterministic trajectory regression cannot
+self-approve merely by changing both in-process runs. A deterministic mutation
+seed flips one finite mantissa bit in the returned decision; both repeated
+mutations must mint the same moved identity, and the test-local merge gate
+refuses that identity-consistent but non-reference receipt. This proves one
+sphere fixture on the declared same-build/same-ISA scope only, not all
+manifolds, persisted checkpoint transport, cancellation recovery, cross-ISA
+equality, or performance.
+
+`tests/trust_region_study_replay.rs` (bead 7tv.21.25) is the retained
+study-scale replay and seeded-failure self-test for trust-region Newton–Krylov.
+The production Steihaug driver solves the existing six-dimensional Rosenbrock
+fixture with an exact analytic Hessian-vector callback; the fixture itself is
+non-random, so the event seed zero is explicitly a wire-schema sentinel rather
+than a fictitious optimizer input. Its versioned identity binds the start,
+complete trust/Steihaug policy, dependency and oracle versions, one global
+objective/Hessian callback ordinal, each outer-iteration and callback role,
+every callback input/output, every public `TrustRegionReport` field, and a
+causal mutation seed. The semantic admission gate independently recomputes
+Rosenbrock values, gradients, and Hessian-vector products, reconstructs every
+Steihaug step and termination (including boundary and nonpositive-curvature
+branches), then replays model and actual decrease, agreement ratio, radius
+update, accept/reject decision, final state, termination condition, and exact
+accounting. Replay must be byte-identical, and reported negative-curvature hits
+must equal independently located Steihaug-only witnesses. Deterministic red
+families cover returned state, callback evidence, configuration/accounting,
+global ordinals, roles and segments, curvature claims, directions, and a
+self-consistent acceptance flip; stale and correctly resealed corruptions fail
+through distinct typed gates. This proves one objective/Hessian pair only, not
+approximate-Hessian parity, all objectives, cancellation, checkpointing,
+cross-ISA equality, persistence, or performance.
+
+`tests/constrained_study_replay.rs` (bead 7tv.21.26) supplies retained
+study-scale replay and seeded-failure self-tests for all three constrained
+engines: augmented Lagrangian, log-barrier interior point, and active-set SQP.
+Each production engine solves the shared equality-plus-active-inequality KKT
+fixture. Its versioned receipt binds engine tolerance and iteration cap, exact
+ordered objective/constraint/Jacobian-transpose callback inputs and outputs,
+and every public result, multiplier, accounting, convergence, and four-component
+KKT field. The fixture is non-random: event seed zero is a wire-schema sentinel,
+while disclosed mutation seeds causally choose only the within-lane coordinate
+or direction they actually mutate. The identity also
+binds the dimensionless formula/unit convention, independent-oracle versions,
+each engine's complete schedule and accounting semantics, all acceptance gates,
+and dependency versions. A separate analytic oracle recomputes objective,
+gradient, equality and inequality values/Jacobians, requires returned-point
+Jacobian-transpose callbacks at the exact reported multipliers, reconstructs
+the optimum and multipliers, and verifies finite nonnegative stationarity,
+feasibility, dual-feasibility, complementarity, raw-KKT, and scaled-KKT
+certificates. Exact callback-count reconstruction distinguishes the three
+engines' schedules and refuses impossible post-cap traces. Separate executions
+must be byte-identical. Ten deterministic red lanes corrupt the returned
+decision, returned-point callback values or Jacobian products, multipliers,
+raw/scaled KKT evidence, or schedule/configuration; stale, correctly resealed,
+and semantic-self-reference admission paths all fail closed. This is one small
+dense fixture, not all constrained problems, large-scale sparse behavior,
+cancellation, checkpointing, cross-ISA equality, persistence, or performance.
+
+`tests/pareto_study_replay.rs` (bead 7tv.21.27) is the retained study-scale
+replay and seeded-failure self-test for the two-objective Pareto tracing family.
+It runs production weighted-sum continuation across the convex quadratic front
+and production epsilon-constraint continuation across the concave
+Fonseca-Fleming front. This fixture has no stochastic input and therefore makes
+no fictitious input-seed claim. The versioned receipt binds both schedules,
+starts, dimensions, acceptance gates, oracle versions, and the causally used
+mutation seed; it also binds every objective callback point/value/gradient and
+every public decision, objective, scalar-gradient, optional KKT, and KKT
+component field. A separately constructed execution must replay byte-identically.
+The semantic oracle independently recomputes objective/gradient pairs, proves
+that every returned point was evaluated by both objectives in the exact
+phase-local order, checks schedule association and epsilon feasibility, and
+proves existence of a nonnegative one-row multiplier whose reconstructed
+stationarity, feasibility, dual-feasibility, and complementarity components
+match every finite nonnegative public KKT field. A
+deterministic mutation seed flips one finite epsilon-path decision mantissa bit;
+stale and identity-consistently resealed forms are both refused, as are resealed
+schedule, callback-order/coverage/value/gradient, objective, negative-certificate,
+and finite-positive certificate corruptions.
+This proves the
+two-objective tracing paths only, not tri-objective behavior, the full WFG
+transformation stack, cancellation, checkpointing, cross-ISA equality,
+persistence, or performance.
+
+`tests/wfg_moo_battery.rs` covers WFG-scale front geometry without claiming
+the full deceptive or multimodal transformation stack. Concave, convex, and
+WFG1-class mixed fixtures retain their measured sweep behavior as linted,
+wire-validated `fs-obs` `ConformanceCase` rows. The WFG2-class disconnected
+fixture samples the deterministic five-basin shape on a fixed 1001-point
+parameter grid, runs the public stable nondominance filter, and requires six
+separated record-low segments with both objective seams retained and every
+dominated bridge removed. Repeat and reversed-input runs must reproduce the
+same complete front identity after presentation order is restored. An exact
+duplicate of the upper seam catches a test-local comparator mutant that treats
+equality as dominance and incorrectly lets the two copies erase each other.
+The structured receipt binds crate versions, grid, objective scales, WFG2
+basin count, every retained parameter/objective bit, segment/front counts, and
+the caught mutation with fixed input seed zero.
+
+`tests/bbob_budget_ledger.rs` and `tests/gradient_budget_ledger.rs` emit the
+four-metric observation envelope for every optimizer fixture: observed nfev/ERT,
+pinned nfev ceiling, observed success rate, and minimum success rate, all as
+wire-validated `fs-obs::BenchmarkResult` events with machine id zero. Their
+gate metadata comes only from `tests/support/budget_trend.rs`, not duplicated
+tuple literals. `tests/budget_trend_manifest.rs` (bead 7tv.21.12) audits the
+closed fourteen-row `(suite, kernel)` inventory, refuses missing/duplicate or
+metadata-drifted rows, and deterministically renders schema
+`frankensim-ascent-budget-trend-v1` for central trend ingestion.
+
+`tests/cutest_scale_battery.rs` (bead 7tv.21.13) extends the small-dimensional
+CUTEst-class oracle tranche with extended Rosenbrock, extended Powell singular,
+and variably-dimensioned families at 16 and 64 variables. Before an optimizer
+result is admitted, each analytic gradient must match FrankenScipy's independent
+finite-difference gate and the same gate must reject a one-coordinate mutant.
+L-BFGS must then reach the known zero objective within a pinned evaluation
+ceiling and reproduce the complete evaluated-point trace, public state, history,
+accounting, and report bit for bit. Every case is a wire-validated `fs-obs`
+`ConformanceCase` row with fixed-input seed zero and a versioned identity over
+the fixture, engine configuration, initial point, and every evaluated point.
+
+`tests/runner_battery.rs` (4 cases): Problem-IR product-manifold packing,
+problem-owned budget attribution, clone-checkpoint replay, and packed
+constraint routing. All aggregate outcomes are linted and wire-validated
+`fs-obs` `ConformanceCase` events with fixed-input seed zero. The G5 replay
+case admits the problem and binds its full-width semantic ID, study
+parameters, initial point, exact final point, complete public objective
+history, step/evaluation accounting, and terminal report into canonical
+identities. An object-shaped companion receipt retains the exact initial,
+final, and objective-history float bits plus the reference, independent
+repeat, and three cut-bound checkpoint-resume identities. Each per-cut row
+retains the checkpoint state, stop reason, step/history counts, and study/report
+evaluation accounting. The case passes only if all three cuts are genuine
+iteration-cap splits and every canonical final state is byte-identical to the
+uninterrupted reference.
+
+`tests/runner_fork_battery.rs` (bead 7tv.21.15) covers gradient-study P9
+world-forking. A two-step equal-weight trunk holds a live cached objective;
+direct continuation under a different semantic problem must return a typed,
+mutation-free mismatch, while an unchanged-problem fork must refuse a hidden
+accounting reset. Opposite 0.95/0.05 objective reweightings then fork from the
+exact same point, start with empty branch-local history/accounting, converge
+toward opposite analytic optima, and reproduce both fork receipts and complete
+public terminal states bit for bit on independent repeats. A renamed variable
+schema is refused before a child exists. The wire-validated `fs-obs` receipt
+binds parent/child problem identities, branch-point/driver bits, parent
+accounting, terminal states, and fixed input seed zero; the aggregate
+`ConformanceCase` is emitted only after all direct assertions pass.
+
+`tests/runner_cancel_battery.rs` (bead 7tv.21.21) is the G4 in-process Study
+cancellation tranche. A real quadratic Problem-IR study first proves a
+pre-requested context performs zero work, then lands four clean prefixes and
+observes each requested cancellation twice. Every observation must leave the
+public state and complete private-cache pause receipt bit-identical. Fresh
+contexts resume through all storms to the same final point, history,
+accounting, stop report, and exact identity as both an uninterrupted run and
+an independent storm replay. A wire-validated custom receipt retains the Cx
+stream configuration, boundary version, pause roots, and final/reference
+roots before a seeded `StormAssertion` is emitted.
+
+## No-claim boundaries
+
+- Second-order adjoints (adjoint-of-adjoint Hv) are follow-up scope;
+  `hv_fd_of_gradients` is the documented O(√ε) interim, and exact
+  duals cover small parameter counts.
+- No Adam-family stochastic optimizer yet (surrogate-training-
+  adjacent; lands with its consumer). Interior-point + SQP: RESOLVED
+  (bead ijil; AL remains the constrained default). FrankenScipy
+  cross-validation: RESOLVED (bead ijil) with the API-check outcome on
+  record — fsci-opt 0.1.0's `minimize`/`slsqp` accept NO general
+  constraint callbacks (bounds/penalty only), so the oracle pairing is
+  unconstrained parity vs `minimize(Bfgs/LBfgsB)` (agree within 1e-4
+  on fsci's own Rosenbrock from a shared global-basin start) and
+  constrained parity vs `differential_evolution_constrained` (seeded;
+  AL/IP/SQP all within 1e-6 of the DE oracle). MEASURED FINDING kept:
+  Rosenbrock n ≥ 4 is BIMODAL — from the classic start our L-BFGS and
+  fsci's BFGS landed in DIFFERENT basins (both genuinely stationary;
+  basin choice is not a parity criterion), and from another start the
+  roles flipped.
+- Riemannian strong Wolfe and isometric transport are certified only for Rn and
+  the normalized embedded sphere path used by Sphere/S³. `fs-opt` now has a
+  3-parameter quaternion-exponential So3 retraction and a QR Stiefel retraction,
+  while this older fs-ascent surface still treats So3 as four-dimensional S³
+  and refuses Stiefel. No certified So3/Stiefel optimizer or product-runner
+  claim is made until those parameter dimensions, tangent maps, transports,
+  curve derivatives, and typed admission paths are unified.
+- Multi-variable manifold products + the Problem-IR driver: RESOLVED
+  (bead ijil, `runner` module). Remaining runner scope: reverse-mode
+  IR gradients (the live IR is evaluation-only), L-BFGS/TR engines
+  behind the runner (projected gradient is the v1 driver), and
+  ledgered study artifacts (fs-ledger wiring) — recorded follow-ups.
+- The runner receipts cover one fixed, sequential projected-gradient
+  Problem-IR fixture with in-process clone checkpoints, one finite in-process
+  two-objective reweight fork, and one finite in-process Cx cancellation
+  schedule. The G4 battery polls at iteration boundaries; it does not measure
+  asynchronous cancellation latency inside a finite-difference gradient or
+  prove worker-count behavior. The suite does not claim persisted checkpoint
+  serialization, generalized lineage replay, other optimizer-family studies,
+  cross-ISA equality, fs-ledger artifact replay, or performance. Fork/pause
+  receipts are ledger-ready data, not evidence that fs-ledger persistence is
+  wired. Those claims require their own retained study/host evidence.
+  Expectations that fail before an aggregate event remain ordinary Rust test
+  diagnostics.
+- Constraint Jacobian-transpose callbacks remain a mathematical trust
+  boundary: fs-ascent checks exact dimensions, finite values, and the
+  mandatory `J^T 0 = 0` linearity identity, but independent derivative
+  verification is required before stronger correctness claims.
+- The budget-trend manifest is a machine-independent regression-gate
+  declaration over objective-evaluation counts. It is not a wall-clock or
+  throughput claim, does not establish cross-ISA optimizer equivalence, and
+  does not itself persist or compare historical runs. Central CI/ledger tooling
+  owns retention, history selection, alert policy, and machine evidence.
+- The CUTEst-scale battery embeds three smooth analytic problem families; it
+  does not parse CUTEst SIF files, link a CUTEst runtime, cover the full CUTEst
+  taxonomy, or establish wall-clock or cross-ISA performance. Its 16/64-variable
+  rows prove finite gradient-gate, evaluation-budget, and same-process replay
+  behavior for the named starts only. Wider dimensions, constrained/nonsmooth
+  families, retained two-ISA execution, and historical trend persistence remain
+  separate evidence obligations. The versioned `fs-obs` trace identity is a
+  deterministic legacy-FNV drift fingerprint, not a cryptographic authenticity
+  or scientific-authority anchor.
+- The WFG2 disconnected battery certifies exact nondominance semantics and the
+  sampled five-basin front geometry only. It does not implement the complete
+  WFG2 reduction/transform pipeline, prove coverage between grid samples,
+  establish optimizer convergence across dominated gaps, cover all nine WFG
+  families, or produce cross-ISA/performance evidence. Its retained identity
+  is replay evidence, not cryptographic scientific authority.

@@ -1,0 +1,10 @@
+frankensim-drum-spec-v1
+# Illustrative spatial prestress, NOT a measured head or inferred lug setting.
+geometry,0.1703,0.1651,0.1778
+head,batter,0.000254,4000000000,0.38,1390,3000,0.001
+head,resonant,0.0000762,4000000000,0.38,1390,1500,0.001
+# Additional xx,yy,xy [N/m], then c,d,e,f [N/m^2]. See TENSION.md.
+tension_variation,batter,300,-200,80,600,-200,100,400
+tension_variation,resonant,-100,150,-40,-300,120,100,-200
+mesh,5,32
+band_hz,80,500

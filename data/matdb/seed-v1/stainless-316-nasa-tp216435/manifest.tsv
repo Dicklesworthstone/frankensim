@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	stainless-316-nasa-tp216435
+redistribution	permitted	NASA NTRS record 20100029805 declares distribution PUBLIC and copyright determination GOV_PUBLIC_USE_PERMITTED; retain NASA/TP-2010-216435 attribution, source URL, selected factual table values, and original explanatory notes only
+citation	Martin, J. J.; Reid, R. S.; Bragg-Sitton, S. M. (2010), Design of Refractory Metal Life Test Heat Pipe and Calorimeter, NASA/TP-2010-216435, NTRS 20100029805, Table 23 and Figures 41–44, printed pages 78–80; https://ntrs.nasa.gov/citations/20100029805 ; https://ntrs.nasa.gov/api/citations/20100029805/downloads/20100029805.pdf?attachment=true
+license	NASA-NTRS-GOV_PUBLIC_USE_PERMITTED
+source	nasa-tp2010-216435-table23	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	temperature	temperature	absolute-temperature
+axis	source_generic_316_identity	source-generic-316-identity	dimensional
+axis	source_uns_designation_known	source-uns-designation-known	dimensional
+axis	source_heat_treatment_known	source-heat-treatment-known	dimensional
+axis	source_product_form_known	source-product-form-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional

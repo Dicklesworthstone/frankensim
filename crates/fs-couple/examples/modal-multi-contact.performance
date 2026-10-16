@@ -1,0 +1,31 @@
+frankensim-modal-performance-v4
+sample_rate_hz 48000
+samples 1201
+full_scale_pa 2
+limits 0.9 1 1000 1000 1000
+compile_limits 16 64
+voices 3
+voice retain-state 1 1
+mode 300 0.005 0 0 0 1
+port 0 1
+voice retain-state 1 1
+mode 800 0.01 1 0 0 0
+port 0 1
+voice retain-state 1 1
+mode 450 0.008 0 0 0 -0.7
+port 0 1
+coupling_limits 4 4096 0.9 1000 1000 1000000 1e-11 1e-10 1e-8
+connections 0
+multi_contact_limits 4 64 4096
+contacts 2
+contact_limits 96 1000000 0.1 1e-8 1e-9
+contact 3000000 1.5 0.12 0.0001 1 authored-left-contact
+contact_left 0 1
+contact_right 1 1
+contact_limits 96 1000000 0.1 1e-8 1e-9
+contact 2400000 1.5 0.2 0.00012 1 authored-right-contact
+contact_left 1 1
+contact_right 2 1
+events 2
+force 300 0 0 1
+force 340 0 0 0

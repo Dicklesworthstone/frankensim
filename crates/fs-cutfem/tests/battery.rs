@@ -1,0 +1,1259 @@
+//! fs-cutfem conformance battery (bead tfz.8).
+//!
+//! - cut-001 G0: certified cut classification — zero misclassification
+//!   on adversarial tangent/near-tangent interfaces, enclosure
+//!   containment law.
+//! - cut-002 G0: cut-quadrature exactness on polynomial fixtures
+//!   (linear interface: quadratic moments exact) and depth convergence
+//!   on curved interfaces (error control documented).
+//! - cut-003 G0: ghost-penalty conditioning independence of cut
+//!   fraction (eigenvalue-verified curves; blowup without ghost).
+//! - cut-004 G1: MMS optimal orders across RANDOMIZED cut
+//!   configurations, slivers deliberately included.
+//! - cut-005 G1: embedded-BC accuracy vs a body-fitted reference on a
+//!   shared fixture.
+//! - cut-006 G1: moving-interface sequence without re-meshing (the
+//!   topology-optimization rehearsal).
+//! - cut-007: aggregated-element fallback — conditioning restored and
+//!   accuracy held with ghost penalty OFF (policy logged), including a
+//!   graded interface band that has no ghost-specific uniformity contract.
+//! - cut-008: hanging-node patch test (linear reproduction on a graded
+//!   tree) and estimate-driven h-refinement efficiency.
+
+use fs_cutfem::{
+    AggPolicy, CellClass, Circle, CutFemError, CutSdf, CutSdf3, FemParams, HalfPlane, HeightAxis,
+    HexCell, Quadtree, Space, VerticalLineRoot, condition_estimate, cut_cell_rules,
+    isolate_certified_height_root,
+};
+use fs_ivl::Interval;
+use fs_solver::krylov::CgState;
+use fs_solver::op::CsrOp;
+use fs_sparse::Coo;
+use fs_sparse::precond::IdentityPrecond;
+use std::f64::consts::PI;
+use std::fmt::Write as _;
+
+fn verdict(name: &str, pass: bool, details: &str) {
+    println!(
+        "{{\"test\":\"{name}\",\"verdict\":\"{}\",{details}}}",
+        if pass { "pass" } else { "fail" }
+    );
+    assert!(pass, "{name} failed: {details}");
+}
+
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0
+    }
+    #[allow(clippy::cast_precision_loss)]
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+// ---------------------------------------------------------------- MMS fixtures
+
+fn sin_u(x: f64, y: f64) -> f64 {
+    (PI * x).sin() * (PI * y).sin()
+}
+fn sin_f(x: f64, y: f64) -> f64 {
+    2.0 * PI * PI * sin_u(x, y)
+}
+fn sin_grad(x: f64, y: f64) -> [f64; 2] {
+    [
+        PI * (PI * x).cos() * (PI * y).sin(),
+        PI * (PI * x).sin() * (PI * y).cos(),
+    ]
+}
+
+// ------------------------------------------------------------------- cut-001
+
+#[test]
+#[allow(clippy::too_many_lines)] // six fixtures declared inline: the adversarial list IS the test
+fn cut_001_certified_classification() {
+    let h16 = 1.0 / 16.0;
+    let fixtures: Vec<(&str, Box<dyn CutSdf>)> = vec![
+        (
+            "circle-generic",
+            Box::new(Circle {
+                center: [0.5, 0.5],
+                radius: 0.25,
+            }),
+        ),
+        (
+            "halfplane-on-gridline",
+            Box::new(HalfPlane {
+                normal: [1.0, 0.0],
+                offset: 0.5,
+            }),
+        ),
+        (
+            "halfplane-through-nodes",
+            Box::new(HalfPlane {
+                normal: [
+                    std::f64::consts::FRAC_1_SQRT_2,
+                    std::f64::consts::FRAC_1_SQRT_2,
+                ],
+                offset: std::f64::consts::FRAC_1_SQRT_2,
+            }),
+        ),
+        (
+            "circle-tangent-to-gridline",
+            Box::new(Circle {
+                center: [0.5, 5.0 * h16],
+                radius: 4.0 * h16,
+            }),
+        ),
+        (
+            "circle-near-tangent-1e13",
+            Box::new(Circle {
+                center: [0.5, 5.0 * h16],
+                radius: 4.0 * h16 + 1e-13,
+            }),
+        ),
+        (
+            "tiny-circle-inside-one-cell",
+            Box::new(Circle {
+                center: [0.5 + 0.3 * h16, 0.5 + 0.4 * h16],
+                radius: 0.05 * h16,
+            }),
+        ),
+    ];
+    let grid = Quadtree::uniform(4);
+    let mut total_violations = 0usize;
+    let mut total_conservative = 0usize;
+    let mut rows = String::new();
+    for (name, sdf) in &fixtures {
+        let mut violations = 0usize;
+        let mut conservative = 0usize;
+        for c in grid.leaves() {
+            let (lo, hi) = grid.rect(c);
+            let iv = sdf.enclose(lo, hi);
+            let class = if iv.hi() < 0.0 {
+                CellClass::Inside
+            } else if iv.lo() > 0.0 {
+                CellClass::Outside
+            } else {
+                CellClass::Cut
+            };
+            let mut any_pos = false;
+            let mut any_nonpos = false;
+            for si in 0..=16 {
+                for sj in 0..=16 {
+                    let p = [
+                        lo[0] + (hi[0] - lo[0]) * f64::from(si) / 16.0,
+                        lo[1] + (hi[1] - lo[1]) * f64::from(sj) / 16.0,
+                    ];
+                    let v = sdf.value(p);
+                    if !iv.contains(v) {
+                        violations += 1; // containment law broken
+                    }
+                    if v > 0.0 {
+                        any_pos = true;
+                    } else {
+                        any_nonpos = true;
+                    }
+                }
+            }
+            match class {
+                CellClass::Inside if any_pos => violations += 1,
+                CellClass::Outside if any_nonpos => violations += 1,
+                CellClass::Cut if !(any_pos && any_nonpos) => conservative += 1,
+                _ => {}
+            }
+        }
+        let _ = write!(
+            rows,
+            "\"{name}\":{{\"violations\":{violations},\"conservative_cuts\":{conservative}}},"
+        );
+        total_violations += violations;
+        total_conservative += conservative;
+    }
+    verdict(
+        "cut-001",
+        total_violations == 0,
+        &format!(
+            "\"detail\":\"certified classification, 6 adversarial fixtures\",\
+             {rows}\"total_violations\":{total_violations},\
+             \"total_conservative_cuts\":{total_conservative}"
+        ),
+    );
+}
+
+// ------------------------------------------------------------------- cut-002
+
+/// Exact ∫ over a polygon of quadratic monomials via the degree-2
+/// midpoint triangle rule on an ANALYTICALLY constructed polygon.
+fn polygon_moments_exact(poly: &[[f64; 2]]) -> [f64; 6] {
+    let mono =
+        |p: [f64; 2]| -> [f64; 6] { [1.0, p[0], p[1], p[0] * p[0], p[0] * p[1], p[1] * p[1]] };
+    let mut acc = [0.0f64; 6];
+    for k in 1..poly.len() - 1 {
+        let (p, q, r) = (poly[0], poly[k], poly[k + 1]);
+        let area = 0.5 * ((q[0] - p[0]) * (r[1] - p[1]) - (r[0] - p[0]) * (q[1] - p[1]));
+        for m in [
+            [f64::midpoint(p[0], q[0]), f64::midpoint(p[1], q[1])],
+            [f64::midpoint(q[0], r[0]), f64::midpoint(q[1], r[1])],
+            [f64::midpoint(r[0], p[0]), f64::midpoint(r[1], p[1])],
+        ] {
+            let vals = mono(m);
+            for (a, v) in acc.iter_mut().zip(vals) {
+                *a += area / 3.0 * v;
+            }
+        }
+    }
+    acc
+}
+
+#[test]
+fn cut_002_quadrature_exactness_and_depth_control() {
+    // (a) Linear interface: quadratic moments EXACT (crossings by
+    // bisection, polygon degree-2 rule).
+    let hp = HalfPlane {
+        normal: [0.6, 0.8],
+        offset: 0.37,
+    };
+    // Analytic inside polygon on [0,1]²: walk corners + exact crossings.
+    let corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let mut poly: Vec<[f64; 2]> = Vec::new();
+    for e in 0..4 {
+        let a = corners[e];
+        let b = corners[(e + 1) % 4];
+        let (fa, fb) = (hp.value(a), hp.value(b));
+        if fa <= 0.0 {
+            poly.push(a);
+        }
+        if (fa <= 0.0) != (fb <= 0.0) {
+            let t = fa / (fa - fb); // exact for linear φ
+            poly.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]);
+        }
+    }
+    let exact = polygon_moments_exact(&poly);
+    let mut max_rel = 0.0f64;
+    for depth in [0u32, 3u32] {
+        let rules = cut_cell_rules(&hp, [0.0, 0.0], [1.0, 1.0], depth);
+        let mono =
+            |p: [f64; 2]| -> [f64; 6] { [1.0, p[0], p[1], p[0] * p[0], p[0] * p[1], p[1] * p[1]] };
+        let mut got = [0.0f64; 6];
+        for &(p, w) in &rules.bulk {
+            let vals = mono(p);
+            for (g, v) in got.iter_mut().zip(vals) {
+                *g += w * v;
+            }
+        }
+        for (g, e) in got.iter().zip(exact) {
+            max_rel = max_rel.max((g - e).abs() / e.abs().max(1e-30));
+        }
+    }
+    // (b) Curved interface: area/perimeter converge quadratically in
+    // depth (the error-control documentation).
+    let circ = Circle {
+        center: [0.5, 0.5],
+        radius: 0.3,
+    };
+    let true_area = PI * 0.3 * 0.3;
+    let true_len = 2.0 * PI * 0.3;
+    let mut area_err = Vec::new();
+    let mut len_err = Vec::new();
+    for depth in [1u32, 3, 5] {
+        let rules = cut_cell_rules(&circ, [0.0, 0.0], [1.0, 1.0], depth);
+        let area: f64 = rules.bulk.iter().map(|&(_, w)| w).sum();
+        let len: f64 = rules.iface.iter().map(|&(_, w, _)| w).sum();
+        area_err.push((area - true_area).abs() / true_area);
+        len_err.push((len - true_len).abs() / true_len);
+    }
+    let area_order = (area_err[1] / area_err[2]).log2() / 2.0;
+    let len_order = (len_err[1] / len_err[2]).log2() / 2.0;
+    // Depth-5 magnitudes match the chord-sagitta model (area ≈ h²/6r²,
+    // length ≈ (h/r)²/24 relative): the control knob is the measured
+    // second-order convergence in depth.
+    let pass = max_rel < 1e-9
+        && area_err[2] < 3e-3
+        && len_err[2] < 1e-3
+        && area_order > 1.7
+        && len_order > 1.7;
+    verdict(
+        "cut-002",
+        pass,
+        &format!(
+            "\"detail\":\"linear-interface quadratic moments exact; curved depth control\",\
+             \"linear_max_rel\":{max_rel:.3e},\
+             \"area_err\":[{:.3e},{:.3e},{:.3e}],\"area_order\":{area_order:.2},\
+             \"len_err\":[{:.3e},{:.3e},{:.3e}],\"len_order\":{len_order:.2}",
+            area_err[0], area_err[1], area_err[2], len_err[0], len_err[1], len_err[2]
+        ),
+    );
+}
+
+// ------------------------------------------------------------------- cut-003
+
+fn strip_space_cond(eps: f64, ghost_gamma: f64, agg: Option<AggPolicy>) -> (f64, usize) {
+    let grid = Quadtree::uniform(4);
+    let h = 1.0 / 16.0;
+    let sdf = HalfPlane {
+        normal: [1.0, 0.0],
+        offset: 0.5 + eps * h,
+    };
+    let params = FemParams {
+        ghost_gamma,
+        agg,
+        strong_outer: true,
+        ..FemParams::default()
+    };
+    let space = Space::build(&grid, &sdf, params).expect("strip builds");
+    let (a, _b) = space.assemble(&|_, _| 1.0, &|_, _| 0.0);
+    (condition_estimate(&a).cond, space.dof_count())
+}
+
+#[test]
+fn cut_003_ghost_penalty_conditioning_independence() {
+    let eps_sweep = [0.5, 1e-2, 1e-4, 1e-6, 1e-8];
+    let mut with_ghost = Vec::new();
+    let mut without = Vec::new();
+    for &eps in &eps_sweep {
+        with_ghost.push(strip_space_cond(eps, 0.5, None).0);
+        without.push(strip_space_cond(eps, 0.0, None).0);
+    }
+    let ghost_ratio = with_ghost.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        / with_ghost.iter().copied().fold(f64::INFINITY, f64::min);
+    let blowup = without[4] / without[0];
+    let mut curves = String::new();
+    for (i, &eps) in eps_sweep.iter().enumerate() {
+        let _ = write!(
+            curves,
+            "{{\"eps\":{eps:.1e},\"cond_ghost\":{:.3e},\"cond_no_ghost\":{:.3e}}},",
+            with_ghost[i], without[i]
+        );
+    }
+    let pass = ghost_ratio < 30.0 && blowup > 1e3;
+    verdict(
+        "cut-003",
+        pass,
+        &format!(
+            "\"detail\":\"eigenvalue-verified conditioning vs cut fraction\",\
+             \"curves\":[{}],\"ghost_max_over_min\":{ghost_ratio:.2},\
+             \"no_ghost_blowup\":{blowup:.3e}",
+            curves.trim_end_matches(',')
+        ),
+    );
+}
+
+// ------------------------------------------------------------------- cut-004
+
+fn disk_mms_l2_h1(circle: &Circle, level: u32) -> (f64, f64) {
+    let grid = Quadtree::uniform(level);
+    let space = Space::build(&grid, circle, FemParams::default()).expect("disk builds");
+    let sol = space.solve(&sin_f, &sin_u).expect("disk solves");
+    space.l2_h1_error(circle, &sin_u, &sin_grad, &sol.nodal)
+}
+
+#[test]
+fn cut_004_mms_orders_across_randomized_cuts() {
+    let mut lcg = Lcg(0x1001_2026_0707_0051);
+    let mut configs: Vec<Circle> = (0..6)
+        .map(|_| Circle {
+            center: [
+                0.5 + 0.12 * (lcg.unit() - 0.5),
+                0.5 + 0.12 * (lcg.unit() - 0.5),
+            ],
+            radius: 0.26 + 0.07 * lcg.unit(),
+        })
+        .collect();
+    // The deliberate sliver: tangency to four grid lines at every level.
+    configs.push(Circle {
+        center: [0.5, 0.5],
+        radius: 0.25 + 1e-9,
+    });
+    let mut l2_orders = Vec::new();
+    let mut h1_orders = Vec::new();
+    let mut rows = String::new();
+    let mut worst_fine_l2 = 0.0f64;
+    for (k, c) in configs.iter().enumerate() {
+        let (l2a, h1a) = disk_mms_l2_h1(c, 4);
+        let (l2b, h1b) = disk_mms_l2_h1(c, 5);
+        let (l2c, h1c) = disk_mms_l2_h1(c, 6);
+        let ol2 = (l2b / l2c).log2();
+        let oh1 = (h1b / h1c).log2();
+        l2_orders.push(ol2);
+        h1_orders.push(oh1);
+        worst_fine_l2 = worst_fine_l2.max(l2c);
+        let _ = write!(
+            rows,
+            "{{\"config\":{k},\"center\":[{:.4},{:.4}],\"r\":{:.6},\
+             \"l2\":[{l2a:.3e},{l2b:.3e},{l2c:.3e}],\"h1\":[{h1a:.3e},{h1b:.3e},{h1c:.3e}],\
+             \"l2_order\":{ol2:.2},\"h1_order\":{oh1:.2}}},",
+            c.center[0], c.center[1], c.radius
+        );
+    }
+    let median = |v: &mut Vec<f64>| -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).expect("finite orders"));
+        v[v.len() / 2]
+    };
+    let med_l2 = median(&mut l2_orders);
+    let med_h1 = median(&mut h1_orders);
+    // The median alone can mask a SINGLE non-converging config — precisely the
+    // pathological sliver this test deliberately includes. The "(sliver
+    // included)" claim is only honest if EVERY config converges, so gate the
+    // WORST order too (median() sorts the order vecs ascending in place, so
+    // index 0 is the min). Floors are set to catch genuine non-convergence
+    // (order → 0..1) without being brittle to the 2-level estimate's noise;
+    // observed worst is ~2.16 L2 / ~1.04 H1 across all 7 configs.
+    let worst_l2_order = l2_orders[0];
+    let worst_h1_order = h1_orders[0];
+    let pass = med_l2 >= 1.8
+        && med_h1 >= 0.85
+        && worst_fine_l2 < 2e-3
+        && worst_l2_order >= 1.5
+        && worst_h1_order >= 0.8;
+    verdict(
+        "cut-004",
+        pass,
+        &format!(
+            "\"detail\":\"MMS orders across 7 randomized cut configs (sliver included)\",\
+             \"configs\":[{}],\"median_l2_order\":{med_l2:.2},\
+             \"median_h1_order\":{med_h1:.2},\"worst_l2_order\":{worst_l2_order:.2},\
+             \"worst_h1_order\":{worst_h1_order:.2},\"worst_fine_l2\":{worst_fine_l2:.3e}",
+            rows.trim_end_matches(',')
+        ),
+    );
+}
+
+// ------------------------------------------------------------------- cut-005
+
+/// Body-fitted Q1 reference on (0, a) × (0, 1) with homogeneous
+/// Dirichlet data (the shared fixture's exact solution vanishes on
+/// every side): returns the L2 error at n×n cells.
+#[allow(clippy::too_many_lines)]
+fn body_fitted_l2(
+    a_len: f64,
+    n: usize,
+    u: &dyn Fn(f64, f64) -> f64,
+    f: &dyn Fn(f64, f64) -> f64,
+) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let hx = a_len / n as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let hy = 1.0 / n as f64;
+    let idx = |i: usize, j: usize| -> Option<usize> {
+        if i == 0 || i == n || j == 0 || j == n {
+            None
+        } else {
+            Some((i - 1) + (j - 1) * (n - 1))
+        }
+    };
+    let g3: [(f64, f64); 3] = [
+        (-0.774_596_669_241_483_4, 0.555_555_555_555_555_6),
+        (0.0, 0.888_888_888_888_889),
+        (0.774_596_669_241_483_4, 0.555_555_555_555_555_6),
+    ];
+    let q1 = |lo: [f64; 2], hi: [f64; 2], p: [f64; 2]| -> ([f64; 4], [[f64; 2]; 4]) {
+        let hx = hi[0] - lo[0];
+        let hy = hi[1] - lo[1];
+        let xi = (p[0] - lo[0]) / hx;
+        let et = (p[1] - lo[1]) / hy;
+        (
+            [
+                (1.0 - xi) * (1.0 - et),
+                xi * (1.0 - et),
+                xi * et,
+                (1.0 - xi) * et,
+            ],
+            [
+                [-(1.0 - et) / hx, -(1.0 - xi) / hy],
+                [(1.0 - et) / hx, -xi / hy],
+                [et / hx, xi / hy],
+                [-et / hx, (1.0 - xi) / hy],
+            ],
+        )
+    };
+    let nf = (n - 1) * (n - 1);
+    let mut coo = Coo::new(nf, nf);
+    let mut rhs = vec![0.0f64; nf];
+    for ci in 0..n {
+        for cj in 0..n {
+            #[allow(clippy::cast_precision_loss)]
+            let lo = [ci as f64 * hx, cj as f64 * hy];
+            let hi = [lo[0] + hx, lo[1] + hy];
+            let local = [(ci, cj), (ci + 1, cj), (ci + 1, cj + 1), (ci, cj + 1)];
+            let mut k = [[0.0f64; 4]; 4];
+            let mut fl = [0.0f64; 4];
+            for &(gx, wx) in &g3 {
+                for &(gy, wy) in &g3 {
+                    let p = [
+                        f64::midpoint(lo[0], hi[0]) + 0.5 * hx * gx,
+                        f64::midpoint(lo[1], hi[1]) + 0.5 * hy * gy,
+                    ];
+                    let w = wx * wy * 0.25 * hx * hy;
+                    let (nv, gr) = q1(lo, hi, p);
+                    let fv = f(p[0], p[1]);
+                    for a in 0..4 {
+                        for b in 0..4 {
+                            k[a][b] += w * (gr[a][0] * gr[b][0] + gr[a][1] * gr[b][1]);
+                        }
+                        fl[a] += w * fv * nv[a];
+                    }
+                }
+            }
+            for a in 0..4 {
+                let Some(ia) = idx(local[a].0, local[a].1) else {
+                    continue;
+                };
+                rhs[ia] += fl[a];
+                for b in 0..4 {
+                    if let Some(ib) = idx(local[b].0, local[b].1) {
+                        coo.push(ia, ib, k[a][b]);
+                    }
+                }
+            }
+        }
+    }
+    let op = CsrOp::symmetric(coo.assemble());
+    let m = IdentityPrecond;
+    let mut st = CgState::new(&op, &m, &rhs);
+    let _ = st.run(&op, &m, 1e-12, 60_000);
+    assert!(st.rel_residual() < 1e-8, "body-fitted CG converged");
+    let mut l2 = 0.0f64;
+    for ci in 0..n {
+        for cj in 0..n {
+            #[allow(clippy::cast_precision_loss)]
+            let lo = [ci as f64 * hx, cj as f64 * hy];
+            let hi = [lo[0] + hx, lo[1] + hy];
+            let local = [(ci, cj), (ci + 1, cj), (ci + 1, cj + 1), (ci, cj + 1)];
+            let vals: Vec<f64> = local
+                .iter()
+                .map(|&(i, j)| idx(i, j).map_or(0.0, |id| st.x[id]))
+                .collect();
+            for &(gx, wx) in &g3 {
+                for &(gy, wy) in &g3 {
+                    let p = [
+                        f64::midpoint(lo[0], hi[0]) + 0.5 * hx * gx,
+                        f64::midpoint(lo[1], hi[1]) + 0.5 * hy * gy,
+                    ];
+                    let w = wx * wy * 0.25 * hx * hy;
+                    let (nv, _) = q1(lo, hi, p);
+                    let uh: f64 = (0..4).map(|a| nv[a] * vals[a]).sum();
+                    let e = u(p[0], p[1]) - uh;
+                    l2 += w * e * e;
+                }
+            }
+        }
+    }
+    l2.sqrt()
+}
+
+#[test]
+fn cut_005_embedded_bc_matches_body_fitted() {
+    let a_len = 0.55;
+    let u = move |x: f64, y: f64| (PI * x / a_len).sin() * (PI * y).sin();
+    let f = move |x: f64, y: f64| (PI * PI / (a_len * a_len) + PI * PI) * u(x, y);
+    let grad = move |x: f64, y: f64| {
+        [
+            PI / a_len * (PI * x / a_len).cos() * (PI * y).sin(),
+            PI * (PI * x / a_len).sin() * (PI * y).cos(),
+        ]
+    };
+    let sdf = HalfPlane {
+        normal: [1.0, 0.0],
+        offset: a_len,
+    };
+    let mut ratios = Vec::new();
+    let mut cut_l2s = Vec::new();
+    let mut rows = String::new();
+    for (level, n) in [(4u32, 16usize), (5, 32)] {
+        let grid = Quadtree::uniform(level);
+        let params = FemParams {
+            strong_outer: true,
+            ..FemParams::default()
+        };
+        let space = Space::build(&grid, &sdf, params).expect("strip builds");
+        let sol = space.solve(&f, &u).expect("strip solves");
+        let (l2, _h1) = space.l2_h1_error(&sdf, &u, &grad, &sol.nodal);
+        let bf = body_fitted_l2(a_len, n, &u, &f);
+        ratios.push(l2 / bf);
+        cut_l2s.push(l2);
+        let _ = write!(
+            rows,
+            "{{\"level\":{level},\"cutfem_l2\":{l2:.3e},\"body_fitted_l2\":{bf:.3e},\
+             \"ratio\":{:.2}}},",
+            l2 / bf
+        );
+    }
+    let order = (cut_l2s[0] / cut_l2s[1]).log2();
+    let pass = ratios.iter().all(|&r| r < 3.0) && order > 1.7;
+    verdict(
+        "cut-005",
+        pass,
+        &format!(
+            "\"detail\":\"embedded Nitsche vs body-fitted Q1 on the shared strip fixture\",\
+             \"rows\":[{}],\"cutfem_order\":{order:.2}",
+            rows.trim_end_matches(',')
+        ),
+    );
+}
+
+// ------------------------------------------------------------------- cut-006
+
+#[test]
+fn cut_006_moving_interface_without_remeshing() {
+    let grid = Quadtree::uniform(5); // built ONCE; never touched again
+    let leaves_before = grid.leaf_count();
+    let mut errs = Vec::new();
+    let mut rows = String::new();
+    for k in 0..11 {
+        let circle = Circle {
+            center: [0.35 + 0.03 * f64::from(k), 0.5],
+            radius: 0.3,
+        };
+        let space = Space::build(&grid, &circle, FemParams::default()).expect("step builds");
+        let sol = space.solve(&sin_f, &sin_u).expect("step solves");
+        let (l2, _) = space.l2_h1_error(&circle, &sin_u, &sin_grad, &sol.nodal);
+        let _ = write!(
+            rows,
+            "{{\"step\":{k},\"cx\":{:.2},\"l2\":{l2:.3e},\"iters\":{}}},",
+            0.35 + 0.03 * f64::from(k),
+            sol.iters
+        );
+        errs.push(l2);
+    }
+    let emax = errs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let emin = errs.iter().copied().fold(f64::INFINITY, f64::min);
+    let pass = leaves_before == grid.leaf_count() && emax < 8e-3 && emax / emin < 2.5;
+    verdict(
+        "cut-006",
+        pass,
+        &format!(
+            "\"detail\":\"11-step level-set translation on one fixed background grid\",\
+             \"steps\":[{}],\"err_max\":{emax:.3e},\"err_stability_ratio\":{:.2}",
+            rows.trim_end_matches(','),
+            emax / emin
+        ),
+    );
+}
+
+// ------------------------------------------------------------------- cut-007
+
+#[test]
+fn cut_007_aggregation_fallback() {
+    // The pathological sliver from cut-003, ghost penalty OFF.
+    let (cond_bare, _) = strip_space_cond(1e-8, 0.0, None);
+    let (cond_agg, _) = strip_space_cond(1e-8, 0.0, Some(AggPolicy::default()));
+    // Accuracy: the shared strip MMS solved with aggregation-only vs
+    // ghost-only stabilization.
+    let a_len = 0.5 + 1e-8 / 16.0;
+    let u = move |x: f64, y: f64| (PI * x / a_len).sin() * (PI * y).sin();
+    let f = move |x: f64, y: f64| (PI * PI / (a_len * a_len) + PI * PI) * u(x, y);
+    let grad = move |x: f64, y: f64| {
+        [
+            PI / a_len * (PI * x / a_len).cos() * (PI * y).sin(),
+            PI * (PI * x / a_len).sin() * (PI * y).cos(),
+        ]
+    };
+    let sdf = HalfPlane {
+        normal: [1.0, 0.0],
+        offset: a_len,
+    };
+    let grid = Quadtree::uniform(4);
+    let solve_with = |ghost: f64, agg: Option<AggPolicy>| -> (f64, usize, Vec<String>) {
+        let params = FemParams {
+            ghost_gamma: ghost,
+            agg,
+            strong_outer: true,
+            ..FemParams::default()
+        };
+        let space = Space::build(&grid, &sdf, params).expect("sliver builds");
+        let sol = space.solve(&f, &u).expect("sliver solves");
+        let (l2, _) = space.l2_h1_error(&sdf, &u, &grad, &sol.nodal);
+        (l2, space.stats().aggregated, space.agg_log().to_vec())
+    };
+    let (l2_ghost, _, _) = solve_with(0.5, None);
+    let (l2_agg, aggregated, log) = solve_with(0.0, Some(AggPolicy::default()));
+    let pass = aggregated > 0 && cond_agg < cond_bare / 1e2 && l2_agg < 2.0 * l2_ghost;
+    verdict(
+        "cut-007",
+        pass,
+        &format!(
+            "\"detail\":\"aggregation restores conditioning and accuracy with ghost OFF\",\
+             \"cond_bare\":{cond_bare:.3e},\"cond_agg\":{cond_agg:.3e},\
+             \"aggregated_nodes\":{aggregated},\"l2_ghost\":{l2_ghost:.3e},\
+             \"l2_agg\":{l2_agg:.3e},\"policy_rows\":{}",
+            log.len()
+        ),
+    );
+    for row in log.iter().take(3) {
+        println!("{{\"test\":\"cut-007\",\"policy\":{row}}}");
+    }
+}
+
+#[test]
+fn cut_007b_ghost_free_aggregation_accepts_graded_interface_band() {
+    // Refine only the left half. Balance leaves a deliberately graded
+    // level-4/level-3 interface at x=0.5. The material sliver lies in the
+    // fine cell immediately to its left, while its active face-neighbor is
+    // coarser on the right: exactly the configuration ghost faces must
+    // refuse, but aggregation with ghost OFF must accept.
+    let mut grid = Quadtree::with_room(2, 4);
+    grid.refine_where(4, &|_lo: [f64; 2], hi: [f64; 2]| hi[0] <= 0.5);
+    let sdf = HalfPlane {
+        normal: [-1.0, 0.0],
+        offset: -0.499,
+    };
+    let params = FemParams {
+        ghost_gamma: 0.0,
+        agg: Some(AggPolicy::default()),
+        strong_outer: true,
+        solver_tol: 1e-13,
+        ..FemParams::default()
+    };
+    let ghost_enabled = FemParams {
+        ghost_gamma: 0.5,
+        agg: None,
+        ..params
+    };
+    assert!(matches!(
+        Space::build(&grid, &sdf, ghost_enabled),
+        Err(CutFemError::CutBandNotUniform { .. })
+    ));
+    let space = Space::build(&grid, &sdf, params)
+        .expect("ghost-free aggregation must accept a graded interface band");
+    let exact = |x: f64, y: f64| 1.0 + 2.0 * x + 3.0 * y;
+    let solution = space
+        .solve(&|_, _| 0.0, &exact)
+        .expect("graded aggregation patch solves");
+    assert!(matches!(
+        solution.residual_claim(),
+        fs_solver::ResidualClaim::TrueEuclidean(value)
+            if value.to_bits() == solution.rel_residual.to_bits()
+    ));
+    assert_eq!(
+        solution.euclidean_rel_residual().map(f64::to_bits),
+        Some(solution.rel_residual.to_bits())
+    );
+    let (matrix, rhs) = space.assemble(&|_, _| 0.0, &exact);
+    let mut applied = vec![0.0; rhs.len()];
+    matrix.spmv(&solution.free, &mut applied);
+    let residual = rhs
+        .iter()
+        .zip(applied)
+        .map(|(b, ax)| b - ax)
+        .collect::<Vec<_>>();
+    let independently_recomputed =
+        fs_solver::norm2(&residual) / fs_solver::norm2(&rhs).max(f64::MIN_POSITIVE);
+    assert_eq!(
+        solution.rel_residual.to_bits(),
+        independently_recomputed.to_bits(),
+        "the public residual claim must be the explicit b - Ax recomputation"
+    );
+    let nodal_errors: Vec<f64> = solution
+        .nodal
+        .iter()
+        .map(|(&node, &value)| {
+            let point = grid.node_pos(node);
+            (value - exact(point[0], point[1])).abs()
+        })
+        .collect();
+    let all_finite = nodal_errors.iter().all(|error| error.is_finite());
+    let max_nodal_error = nodal_errors.iter().copied().fold(0.0f64, f64::max);
+    let pass = space.stats().hanging > 0
+        && space.stats().aggregated > 0
+        && space.stats().ghost_faces == 0
+        && all_finite
+        && max_nodal_error < 1e-8;
+    verdict(
+        "cut-007b",
+        pass,
+        &format!(
+            "\"detail\":\"graded aggregation path omits ghost-only band check\",\
+             \"hanging\":{},\"aggregated\":{},\"ghost_faces\":{},\
+             \"max_nodal_error\":{max_nodal_error:.3e}",
+            space.stats().hanging,
+            space.stats().aggregated,
+            space.stats().ghost_faces
+        ),
+    );
+}
+
+#[test]
+fn scalar_space_rejects_invalid_ghost_penalty() {
+    let grid = Quadtree::uniform(2);
+    let sdf = Circle {
+        center: [0.5, 0.5],
+        radius: 0.4,
+    };
+    for ghost_gamma in [f64::NAN, f64::INFINITY, -0.25] {
+        let error = Space::build(
+            &grid,
+            &sdf,
+            FemParams {
+                ghost_gamma,
+                ..FemParams::default()
+            },
+        );
+        assert!(matches!(error, Err(CutFemError::InvalidFemInput { .. })));
+    }
+}
+
+// ------------------------------------------------------------------- cut-008
+
+#[test]
+fn cut_008_hanging_nodes_and_adaptivity() {
+    // (a) Patch test: a linear exact solution is reproduced EXACTLY on
+    // a graded tree with hanging nodes (straight interface, so chords
+    // are exact too).
+    let lin = |x: f64, y: f64| 1.0 + 2.0 * x + 3.0 * y;
+    let sdf = HalfPlane {
+        normal: [0.6, 0.8],
+        offset: 0.55,
+    };
+    let mut grid = Quadtree::with_room(3, 5);
+    grid.refine_toward_interface(&sdf, 5);
+    let params = FemParams {
+        strong_outer: true,
+        solver_tol: 1e-13,
+        ..FemParams::default()
+    };
+    let space = Space::build(&grid, &sdf, params).expect("graded builds");
+    let hanging = space.stats().hanging;
+    let sol = space.solve(&|_, _| 0.0, &lin).expect("patch solves");
+    let mut max_nodal = 0.0f64;
+    for (&n, &v) in &sol.nodal {
+        let p = space_node_pos(&grid, n);
+        max_nodal = max_nodal.max((v - lin(p[0], p[1])).abs());
+    }
+    // (b) Estimate-driven h-refinement efficiency: a bump on the
+    // interface; graded tree beats uniform-coarse on error at a
+    // fraction of uniform-fine's DOFs.
+    let circle = Circle {
+        center: [0.5, 0.5],
+        radius: 0.3,
+    };
+    let beta = 200.0;
+    let px = 0.8;
+    let py = 0.5;
+    let u = move |x: f64, y: f64| {
+        let r2 = (x - px) * (x - px) + (y - py) * (y - py);
+        sin_u(x, y) + (-beta * r2).exp()
+    };
+    let f = move |x: f64, y: f64| {
+        let r2 = (x - px) * (x - px) + (y - py) * (y - py);
+        sin_f(x, y) + (4.0 * beta - 4.0 * beta * beta * r2) * (-beta * r2).exp()
+    };
+    let grad = move |x: f64, y: f64| {
+        let r2 = (x - px) * (x - px) + (y - py) * (y - py);
+        let e = (-beta * r2).exp();
+        let s = sin_grad(x, y);
+        [
+            s[0] - 2.0 * beta * (x - px) * e,
+            s[1] - 2.0 * beta * (y - py) * e,
+        ]
+    };
+    let solve_on = |grid: &Quadtree| -> (f64, usize) {
+        let space = Space::build(grid, &circle, FemParams::default()).expect("builds");
+        let sol = space.solve(&f, &u).expect("solves");
+        let (l2, _) = space.l2_h1_error(&circle, &u, &grad, &sol.nodal);
+        (l2, space.dof_count())
+    };
+    let (err_u4, _dofs_u4) = solve_on(&Quadtree::uniform(4));
+    let (err_u6, dofs_u6) = solve_on(&Quadtree::uniform(6));
+    let mut graded = Quadtree::with_room(4, 6);
+    // The "estimate": refine where the data f is large (the bump) —
+    // the dwr-adaptivity hook drives the same refine_where surface.
+    graded.refine_where(6, &|lo: [f64; 2], hi: [f64; 2]| {
+        let cx = f64::midpoint(lo[0], hi[0]);
+        let cy = f64::midpoint(lo[1], hi[1]);
+        let d2 = (cx - px) * (cx - px) + (cy - py) * (cy - py);
+        d2 < 0.15 * 0.15
+    });
+    graded.refine_toward_interface(&circle, 6);
+    let (err_graded, dofs_graded) = solve_on(&graded);
+    // Efficiency claim, all measured: the graded tree lands within 2×
+    // of uniform-fine ERROR at ~half its DOFs, and far below
+    // uniform-coarse error.
+    #[allow(clippy::cast_precision_loss)]
+    let dof_ratio = dofs_graded as f64 / dofs_u6 as f64;
+    let pass = hanging > 0
+        && max_nodal < 1e-8
+        && err_graded < 0.5 * err_u4
+        && err_graded < 2.0 * err_u6
+        && dof_ratio < 0.55;
+    verdict(
+        "cut-008",
+        pass,
+        &format!(
+            "\"detail\":\"hanging-node patch test + estimate-driven refinement\",\
+             \"hanging\":{hanging},\"patch_max_nodal_err\":{max_nodal:.3e},\
+             \"err_uniform4\":{err_u4:.3e},\"err_uniform6\":{err_u6:.3e},\
+             \"err_graded\":{err_graded:.3e},\"dofs_uniform6\":{dofs_u6},\
+             \"dofs_graded\":{dofs_graded}"
+        ),
+    );
+}
+
+fn space_node_pos(grid: &Quadtree, n: (u32, u32)) -> [f64; 2] {
+    grid.node_pos(n)
+}
+
+/// cut-009 G0 (bead ay40): the canonical scalar sampler never
+/// fabricates a zero. Active reads are fully evidenced bilinear values,
+/// outside reads are build-time classification certificates, and every
+/// degraded input — out-of-box or non-finite points, missing corner
+/// evidence, non-finite corner evidence — refuses as
+/// `InvalidFemInput`.
+#[test]
+fn cut_009_scalar_sampler_fails_closed() {
+    use fs_cutfem::ScalarSample;
+    use std::collections::BTreeMap;
+
+    let grid = Quadtree::uniform(3);
+    // Solid x < 0.6: left columns Inside, the [0.5, 0.625) column Cut,
+    // columns right of 0.625 certified Outside.
+    let sdf = HalfPlane {
+        normal: [1.0, 0.0],
+        offset: 0.6,
+    };
+    let space = Space::build(&grid, &sdf, FemParams::default()).expect("half-plane builds");
+
+    // Evidence for every lattice node: the linear field u = x + 2y,
+    // which leaf bilinear interpolation reproduces exactly.
+    let extent = grid.node_extent();
+    let mut nodal: BTreeMap<(u32, u32), f64> = BTreeMap::new();
+    for i in 0..=extent {
+        for j in 0..=extent {
+            let p = space_node_pos(&grid, (i, j));
+            nodal.insert((i, j), p[0] + 2.0 * p[1]);
+        }
+    }
+
+    let active = space
+        .sample_scalar(&nodal, [0.3, 0.3])
+        .expect("active sample");
+    let active_err = match active {
+        ScalarSample::Active(v) => (v - (0.3 + 2.0 * 0.3)).abs(),
+        ScalarSample::CertifiedOutside => f64::INFINITY,
+    };
+
+    let outside = space
+        .sample_scalar(&nodal, [0.9, 0.5])
+        .expect("outside classifies");
+    let outside_ok = outside == ScalarSample::CertifiedOutside;
+
+    // Missing corner evidence on an active leaf refuses by name.
+    let victim_leaf = grid.find_leaf_at(0.15, 0.15).expect("interior leaf");
+    let victim_node = grid.corner_nodes(victim_leaf)[0];
+    let mut missing = nodal.clone();
+    missing.remove(&victim_node);
+    let missing_refusal = space.sample_scalar(&missing, [0.15, 0.15]);
+    let missing_ok = matches!(&missing_refusal, Err(CutFemError::InvalidFemInput { .. }))
+        && format!("{}", missing_refusal.unwrap_err()).contains("no nodal evidence");
+
+    // Non-finite corner evidence refuses by name.
+    let mut poisoned = nodal.clone();
+    poisoned.insert(victim_node, f64::NAN);
+    let poisoned_refusal = space.sample_scalar(&poisoned, [0.15, 0.15]);
+    let poisoned_ok = matches!(&poisoned_refusal, Err(CutFemError::InvalidFemInput { .. }))
+        && format!("{}", poisoned_refusal.unwrap_err()).contains("non-finite");
+
+    // Points the grid cannot classify refuse instead of clamping.
+    let out_of_box = matches!(
+        space.sample_scalar(&nodal, [1.5, 0.5]),
+        Err(CutFemError::InvalidFemInput { .. })
+    );
+    let box_rim = matches!(
+        space.sample_scalar(&nodal, [1.0, 0.5]),
+        Err(CutFemError::InvalidFemInput { .. })
+    );
+    let non_finite_point = matches!(
+        space.sample_scalar(&nodal, [f64::NAN, 0.5]),
+        Err(CutFemError::InvalidFemInput { .. })
+    );
+
+    let pass = active_err < 1e-12
+        && outside_ok
+        && missing_ok
+        && poisoned_ok
+        && out_of_box
+        && box_rim
+        && non_finite_point;
+    verdict(
+        "cut-009",
+        pass,
+        &format!(
+            "\"detail\":\"canonical scalar sampler fails closed (ay40)\",\
+             \"active_err\":{active_err:.3e},\"outside_certified\":{outside_ok},\
+             \"missing_refuses\":{missing_ok},\"non_finite_refuses\":{poisoned_ok},\
+             \"out_of_box_refuses\":{out_of_box},\"rim_refuses\":{box_rim},\
+             \"nan_point_refuses\":{non_finite_point}"
+        ),
+    );
+}
+
+struct AffinePlane3 {
+    normal: [f64; 3],
+    offset: f64,
+}
+
+impl CutSdf3 for AffinePlane3 {
+    fn value(&self, point: [f64; 3]) -> f64 {
+        self.normal[0] * point[0] + self.normal[1] * point[1] + self.normal[2] * point[2]
+            - self.offset
+    }
+
+    fn enclose(&self, lo: [f64; 3], hi: [f64; 3]) -> Interval {
+        let mut enclosure = Interval::point(-self.offset);
+        for axis in 0..3 {
+            enclosure =
+                enclosure + Interval::point(self.normal[axis]) * Interval::new(lo[axis], hi[axis]);
+        }
+        enclosure
+    }
+
+    fn derivative_enclose(&self, _lo: [f64; 3], _hi: [f64; 3], axis: HeightAxis) -> Interval {
+        Interval::point(
+            self.normal[match axis {
+                HeightAxis::X => 0,
+                HeightAxis::Y => 1,
+                HeightAxis::Z => 2,
+            }],
+        )
+    }
+}
+
+struct DoubleRoot3;
+
+impl CutSdf3 for DoubleRoot3 {
+    fn value(&self, point: [f64; 3]) -> f64 {
+        (point[2] - 0.5).powi(2)
+    }
+
+    fn enclose(&self, lo: [f64; 3], hi: [f64; 3]) -> Interval {
+        let z = Interval::new(lo[2], hi[2]) - Interval::point(0.5);
+        z * z
+    }
+
+    fn derivative_enclose(&self, lo: [f64; 3], hi: [f64; 3], axis: HeightAxis) -> Interval {
+        if axis == HeightAxis::Z {
+            (Interval::new(lo[2], hi[2]) - Interval::point(0.5)) * Interval::point(2.0)
+        } else {
+            Interval::point(0.0)
+        }
+    }
+}
+
+struct FuzzyLowerEndpoint3;
+
+impl CutSdf3 for FuzzyLowerEndpoint3 {
+    fn value(&self, point: [f64; 3]) -> f64 {
+        point[2] + 0.1
+    }
+
+    fn enclose(&self, lo: [f64; 3], hi: [f64; 3]) -> Interval {
+        if lo[2] == 0.0 && hi[2] == 0.0 {
+            Interval::new(-0.1, 0.1)
+        } else {
+            Interval::new(lo[2], hi[2]) + Interval::point(0.1)
+        }
+    }
+
+    fn derivative_enclose(&self, _lo: [f64; 3], _hi: [f64; 3], axis: HeightAxis) -> Interval {
+        if axis == HeightAxis::Z {
+            Interval::point(1.0)
+        } else {
+            Interval::point(0.0)
+        }
+    }
+}
+
+struct NonFiniteDerivative3;
+
+impl CutSdf3 for NonFiniteDerivative3 {
+    fn value(&self, point: [f64; 3]) -> f64 {
+        point[2] - 0.3
+    }
+
+    fn enclose(&self, lo: [f64; 3], hi: [f64; 3]) -> Interval {
+        Interval::new(lo[2], hi[2]) - Interval::point(0.3)
+    }
+
+    fn derivative_enclose(&self, _lo: [f64; 3], _hi: [f64; 3], _axis: HeightAxis) -> Interval {
+        Interval::new(f64::INFINITY, f64::INFINITY)
+    }
+}
+
+struct NonFiniteValue3;
+
+impl CutSdf3 for NonFiniteValue3 {
+    fn value(&self, point: [f64; 3]) -> f64 {
+        point[2] - 0.3
+    }
+
+    fn enclose(&self, _lo: [f64; 3], _hi: [f64; 3]) -> Interval {
+        Interval::WHOLE
+    }
+
+    fn derivative_enclose(&self, _lo: [f64; 3], _hi: [f64; 3], axis: HeightAxis) -> Interval {
+        if axis == HeightAxis::Z {
+            Interval::point(1.0)
+        } else {
+            Interval::point(0.0)
+        }
+    }
+}
+
+struct MixedDerivativeEvidence3;
+
+impl CutSdf3 for MixedDerivativeEvidence3 {
+    fn value(&self, point: [f64; 3]) -> f64 {
+        point[2] - 0.3
+    }
+
+    fn enclose(&self, lo: [f64; 3], hi: [f64; 3]) -> Interval {
+        Interval::new(lo[2], hi[2]) - Interval::point(0.3)
+    }
+
+    fn derivative_enclose(&self, _lo: [f64; 3], _hi: [f64; 3], axis: HeightAxis) -> Interval {
+        match axis {
+            HeightAxis::X => Interval::new(f64::INFINITY, f64::INFINITY),
+            HeightAxis::Y => Interval::point(0.0),
+            HeightAxis::Z => Interval::point(1.0),
+        }
+    }
+}
+
+/// G0: a certified monotone height line isolates its root, while a double
+/// root whose derivative enclosure contains zero remains explicitly ambiguous.
+#[test]
+fn cut_010_certified_3d_vertical_line_isolation_fails_closed() {
+    let cell = HexCell::try_new([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]).expect("unit hex cell");
+    let vertical = AffinePlane3 {
+        normal: [0.0, 0.0, 1.0],
+        offset: 0.3,
+    };
+    let resolved = isolate_certified_height_root(&vertical, cell, [0.5, 0.5], 12)
+        .expect("finite interior height line");
+    let (axis, enclosure) = match resolved {
+        VerticalLineRoot::CertifiedRoot {
+            height_axis,
+            enclosure,
+        } => (height_axis, enclosure),
+        other => panic!("monotone plane must certify one root, got {other:?}"),
+    };
+    let plane_ok =
+        axis == HeightAxis::Z && enclosure.contains(0.3) && enclosure.width() <= 1.0 / 4096.0;
+
+    let double_root = isolate_certified_height_root(&DoubleRoot3, cell, [0.5, 0.5], 12)
+        .expect("finite interior height line");
+    let double_root_refuses = matches!(double_root, VerticalLineRoot::Ambiguous);
+
+    let increasing_outside = isolate_certified_height_root(
+        &AffinePlane3 {
+            normal: [0.0, 0.0, 1.0],
+            offset: -1.0,
+        },
+        cell,
+        [0.5, 0.5],
+        12,
+    )
+    .expect("increasing exterior line");
+    let decreasing_outside = isolate_certified_height_root(
+        &AffinePlane3 {
+            normal: [0.0, 0.0, -1.0],
+            offset: 1.0,
+        },
+        cell,
+        [0.5, 0.5],
+        12,
+    )
+    .expect("decreasing interior line");
+    let no_intersection_both_directions = matches!(
+        increasing_outside,
+        VerticalLineRoot::NoIntersection {
+            height_axis: HeightAxis::Z
+        }
+    ) && matches!(
+        decreasing_outside,
+        VerticalLineRoot::NoIntersection {
+            height_axis: HeightAxis::Z
+        }
+    );
+
+    let tie_break = isolate_certified_height_root(
+        &AffinePlane3 {
+            normal: [1.0, 1.0, 1.0],
+            offset: 0.3,
+        },
+        cell,
+        [0.0, 0.0],
+        12,
+    )
+    .expect("tied derivative bounds");
+    let x_wins_equal_derivative_tie = matches!(
+        tie_break,
+        VerticalLineRoot::CertifiedRoot {
+            height_axis: HeightAxis::X,
+            ..
+        }
+    );
+
+    let non_finite_cell_refuses = matches!(
+        HexCell::try_new([f64::NAN, 0.0, 0.0], [1.0, 1.0, 1.0]),
+        Err(fs_cutfem::CutQuadrature3dError::NonFiniteCell { axis: 0 })
+    );
+    let collapsed_cell_refuses = matches!(
+        HexCell::try_new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
+        Err(fs_cutfem::CutQuadrature3dError::NonPositiveCellSpan { axis: 1 })
+    );
+    let invalid_base_refuses = matches!(
+        isolate_certified_height_root(&vertical, cell, [f64::NAN, 0.5], 12),
+        Err(fs_cutfem::CutQuadrature3dError::NonFiniteBase { coordinate: 0 })
+    ) && matches!(
+        isolate_certified_height_root(&vertical, cell, [1.5, 0.5], 12),
+        Err(fs_cutfem::CutQuadrature3dError::BaseOutsideCell { axis: 0 })
+    );
+    let endpoint_zero_is_not_a_root_proof = matches!(
+        isolate_certified_height_root(&FuzzyLowerEndpoint3, cell, [0.5, 0.5], 12),
+        Ok(VerticalLineRoot::Ambiguous)
+    );
+    let non_finite_evidence_is_ambiguous = matches!(
+        isolate_certified_height_root(&NonFiniteDerivative3, cell, [0.5, 0.5], 12),
+        Ok(VerticalLineRoot::Ambiguous)
+    ) && matches!(
+        isolate_certified_height_root(&NonFiniteValue3, cell, [0.5, 0.5], 12),
+        Ok(VerticalLineRoot::Ambiguous)
+    );
+    let usable_axis_survives_unusable_peer = matches!(
+        isolate_certified_height_root(&MixedDerivativeEvidence3, cell, [0.5, 0.5], 12),
+        Ok(VerticalLineRoot::CertifiedRoot {
+            height_axis: HeightAxis::Z,
+            ..
+        })
+    );
+
+    verdict(
+        "cut-010",
+        plane_ok
+            && double_root_refuses
+            && no_intersection_both_directions
+            && x_wins_equal_derivative_tie
+            && non_finite_cell_refuses
+            && collapsed_cell_refuses
+            && invalid_base_refuses
+            && endpoint_zero_is_not_a_root_proof
+            && non_finite_evidence_is_ambiguous
+            && usable_axis_survives_unusable_peer,
+        &format!(
+            "\"detail\":\"certified 3-D monotone height root with no-intersection, tie, and refusal checks\",\
+             \"root_width\":{:.3e},\"double_root_ambiguous\":{double_root_refuses},\
+             \"no_intersection_both_directions\":{no_intersection_both_directions},\
+             \"x_wins_equal_derivative_tie\":{x_wins_equal_derivative_tie},\
+             \"invalid_inputs_refuse\":{},\"endpoint_zero_ambiguous\":{endpoint_zero_is_not_a_root_proof},\
+             \"non_finite_evidence_ambiguous\":{non_finite_evidence_is_ambiguous}",
+            enclosure.width(),
+            non_finite_cell_refuses && collapsed_cell_refuses && invalid_base_refuses
+        ),
+    );
+}

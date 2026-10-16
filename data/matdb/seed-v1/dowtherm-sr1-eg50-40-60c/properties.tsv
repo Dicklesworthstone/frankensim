@@ -1,0 +1,34 @@
+frankensim.matdb-source.v1
+observation	dowtherm-sr1-eg50	inhibited-dowtherm-sr1-aqueous-50-volume-percent-ethylene-glycol	Dow 2001 engineering guide, named DOWTHERM SR-1 aqueous solution, 50 volume percent ethylene glycol	Five literal SI table rows from 40 to 60 C at 5 C spacing; Cp converted from kJ/(kg K) to J/(kg K) and viscosity from mPa s to Pa s. The concentration is glycol volume percent, NOT product volume percent or glycol mass percent. The volume reference temperature and numerical property-test pressure are unstated; their known flags are zero, not a zero-kelvin or zero-pressure measurement. The named inhibited product is retained, not replaced by pure ethylene glycol or DOWTHERM 4000. All selected cells are unshaded; the source legend marks shaded cells as at or above atmospheric boiling point. Only this warm liquid subset is admitted; freezing, boiling, arbitrary pressure and other concentrations are unsupported. Linear interpolation between retained rows is an explicit engineering approximation with unstated uncertainty, not measured interior data or a certified error bound. These version-specific guide values must not be combined with the differing conductivity values in later technical data sheets. No mass-to-volume conversion is asserted without the missing reference basis. Heat and flow consumers may use frozen incompressible coefficients as an explicit approximation; this does not validate pressure dependence, coupled temperature evolution, inhibitor chemistry or corrosion protection.
+curve	density-40-60c	dowtherm-sr1-eg50	density	temperature	K	kg/m3	313.15:1064.9,318.15:1062.1,323.15:1059.3,328.15:1056.3,333.15:1053.2	linear
+uncertainty	density-40-60c	unstated	-	-	-	-
+validity	density-40-60c	temperature	313.15	333.15	K
+validity	density-40-60c	ethylene_glycol_volume_fraction	0.5	0.5	1
+validity	density-40-60c	source_formulation_dowtherm_sr1	1	1	1
+validity	density-40-60c	phase_liquid	1	1	1
+validity	density-40-60c	source_pressure_known	0	0	1
+validity	density-40-60c	volume_reference_temperature_known	0	0	1
+curve	cp-40-60c	dowtherm-sr1-eg50	specific_heat_capacity	temperature	K	J/kg/K	313.15:3359,318.15:3379,323.15:3398,328.15:3417,333.15:3437	linear
+uncertainty	cp-40-60c	unstated	-	-	-	-
+validity	cp-40-60c	temperature	313.15	333.15	K
+validity	cp-40-60c	ethylene_glycol_volume_fraction	0.5	0.5	1
+validity	cp-40-60c	source_formulation_dowtherm_sr1	1	1	1
+validity	cp-40-60c	phase_liquid	1	1	1
+validity	cp-40-60c	source_pressure_known	0	0	1
+validity	cp-40-60c	volume_reference_temperature_known	0	0	1
+curve	k-40-60c	dowtherm-sr1-eg50	thermal_conductivity	temperature	K	W/m/K	313.15:0.378,318.15:0.381,323.15:0.383,328.15:0.385,333.15:0.387	linear
+uncertainty	k-40-60c	unstated	-	-	-	-
+validity	k-40-60c	temperature	313.15	333.15	K
+validity	k-40-60c	ethylene_glycol_volume_fraction	0.5	0.5	1
+validity	k-40-60c	source_formulation_dowtherm_sr1	1	1	1
+validity	k-40-60c	phase_liquid	1	1	1
+validity	k-40-60c	source_pressure_known	0	0	1
+validity	k-40-60c	volume_reference_temperature_known	0	0	1
+curve	mu-40-60c	dowtherm-sr1-eg50	dynamic_viscosity	temperature	K	Pa*s	313.15:0.00226,318.15:0.00200,323.15:0.00178,328.15:0.00159,333.15:0.00143	linear
+uncertainty	mu-40-60c	unstated	-	-	-	-
+validity	mu-40-60c	temperature	313.15	333.15	K
+validity	mu-40-60c	ethylene_glycol_volume_fraction	0.5	0.5	1
+validity	mu-40-60c	source_formulation_dowtherm_sr1	1	1	1
+validity	mu-40-60c	phase_liquid	1	1	1
+validity	mu-40-60c	source_pressure_known	0	0	1
+validity	mu-40-60c	volume_reference_temperature_known	0	0	1

@@ -1,0 +1,34 @@
+[package]
+name = "fs-live-kit"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Live in-browser (WASM) drum kit: each piece is the fs-vkplate solver (membranes, von Karman shells, enclosed air, implicit contacts, Rayleigh microphone) on a coarser grid, struck anywhere, silent pieces not stepped. The reduced real-time model; NOT the offline reference."
+
+# Its own workspace (the engine-drum pattern): fs-vkplate is std only, so this builds from the
+# working tree without the sibling repositories.
+[workspace]
+
+[lib]
+name = "fs_live_kit"
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-vkplate = { path = "../../../crates/fs-vkplate" }
+
+# wasm-bindgen only enters the wasm32 build. The version is pinned to the installed CLI (0.2.128).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.128"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+
+[lints.rust]
+unsafe_code = "forbid"
