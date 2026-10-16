@@ -128,7 +128,9 @@ impl Spec {
         if text.len()>MAX_BYTES { return Err("drum specification exceeds 64 KiB".into()); }
         let (mut header,mut geometry,mut mesh,mut band) = (false,None,None,None);
         let mut heads = [None,None];
-        let mut variations = [None,None];\n        let mut harmonic_seen = [[false; fs_plate::shell::head::tension::TENSION_HARMONIC_COUNT];2];
+        let mut variations = [None,None];
+        let mut variation_seen = [false; 2];
+        let mut harmonic_seen = [[false; fs_plate::shell::head::tension::TENSION_HARMONIC_COUNT];2];
         for (number,raw) in text.lines().enumerate() {
             let row = raw.split('#').next().unwrap_or("").trim();
             if row.is_empty() { continue; }
@@ -158,9 +160,13 @@ impl Spec {
                 }
                 "tension_variation" => {
                     let i=match fields[1] {"batter"=>0,"resonant"=>1,_=>return Err(error("unknown tension-variation head"))};
-                    if variations[i].is_some() { return Err(error("duplicate head tension variation")); }
-                    variations[i]=Some(TensionVariation {constant_n_m:[value(2)?,value(3)?,value(4)?],
-                        gradient_n_m2:[value(5)?,value(6)?,value(7)?,value(8)?]});
+                    if variation_seen[i] { return Err(error("duplicate head tension variation")); }
+                    variation_seen[i] = true;
+                    // Affine and harmonic records are independent. Preserve any
+                    // harmonics already supplied, including explicit zero rows.
+                    let variation = variations[i].get_or_insert_with(TensionVariation::default);
+                    variation.constant_n_m = [value(2)?, value(3)?, value(4)?];
+                    variation.gradient_n_m2 = [value(5)?, value(6)?, value(7)?, value(8)?];
                 }
                 "tension_harmonic" => {
                     let i=match fields[1] {"batter"=>0,"resonant"=>1,_=>return Err(error("unknown tension-harmonic head"))};

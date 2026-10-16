@@ -230,3 +230,93 @@ fn malformed_duplicate_or_overstrong_lug_harmonics_refuse_without_clipping() {
     let s=Spec::read(&format!("{valid}tension_harmonic,resonant,8,1600,0\n")).unwrap();
     assert!(s.head(1).is_err());
 }
+
+
+#[test]
+fn affine_and_harmonic_records_compose_in_either_order() {
+    let base = small();
+    let file = format!(
+        "{}tension_harmonic,batter,2,45,-12\n\
+         tension_variation,resonant,20,40,-2,-1,2,3,-4\n\
+         tension_harmonic,batter,8,120,-35\n\
+         tension_variation,batter,120,70,10,1,-2,3,4\n\
+         tension_harmonic,resonant,12,10,-4\n",
+        text(base)
+    );
+    let parsed = Spec::read(&file).unwrap();
+    let mut records: Vec<_> = file.lines().skip(1).collect();
+    records.reverse();
+    let reversed = Spec::read(&format!("{HEADER}\n{}\n", records.join("\n"))).unwrap();
+    let mut expected = base;
+    expected.tension_variation[0].constant_n_m = [120.0, 70.0, 10.0];
+    expected.tension_variation[0].gradient_n_m2 = [1.0, -2.0, 3.0, 4.0];
+    expected.tension_variation[0].harmonics_n_m[0] = [45.0, -12.0];
+    expected.tension_variation[0].harmonics_n_m[6] = [120.0, -35.0];
+    expected.tension_variation[1].constant_n_m = [20.0, 40.0, -2.0];
+    expected.tension_variation[1].gradient_n_m2 = [-1.0, 2.0, 3.0, -4.0];
+    expected.tension_variation[1].harmonics_n_m[10] = [10.0, -4.0];
+    assert_eq!(parsed, expected);
+    assert_eq!(reversed, expected);
+    // Check the actual FE pencils, not only the parser's stored coefficients.
+    for head in 0..2 {
+        let declared = parsed.head(head).unwrap();
+        let physical = expected.head(head).unwrap();
+        assert_eq!(declared.mesh.nodes, physical.mesh.nodes);
+        assert_eq!(declared.model.dof_map, physical.model.dof_map);
+        assert_eq!(declared.model.m, physical.model.m);
+        assert_eq!(declared.model.k, physical.model.k);
+    }
+}
+
+#[test]
+fn tension_duplicates_are_detected_by_record_kind_even_for_zero_values() {
+    let valid = text(small());
+    for head in ["batter", "resonant"] {
+        let affine = format!("tension_variation,{head},0,0,0,0,0,0,0\n");
+        let harmonic = format!("tension_harmonic,{head},8,0,0\n");
+        for rows in [
+            format!("{affine}{affine}"),
+            format!("{harmonic}{affine}{affine}"),
+            format!("{affine}{harmonic}{affine}"),
+        ] {
+            let error = Spec::read(&format!("{valid}{rows}")).unwrap_err();
+            assert!(error.to_string().contains("duplicate head tension variation"));
+        }
+        for rows in [
+            format!("{harmonic}{affine}{harmonic}"),
+            format!("{affine}{harmonic}{harmonic}"),
+        ] {
+            let error = Spec::read(&format!("{valid}{rows}")).unwrap_err();
+            assert!(error.to_string().contains("duplicate head tension harmonic"));
+        }
+    }
+}
+
+#[test]
+fn legacy_affine_and_explicit_zero_harmonics_preserve_the_head_pencil() {
+    let file = format!(
+        "{}tension_variation,batter,120,70,10,1,-2,3,4\n",
+        text(small())
+    );
+    let affine = Spec::read(&file).unwrap();
+    let mut expected = small();
+    expected.tension_variation[0].constant_n_m = [120.0, 70.0, 10.0];
+    expected.tension_variation[0].gradient_n_m2 = [1.0, -2.0, 3.0, 4.0];
+    assert_eq!(affine, expected);
+    let explicit_zero = Spec::read(&format!(
+        "{file}tension_harmonic,batter,2,-0,0\n\
+         tension_harmonic,resonant,12,0,-0\n"
+    )).unwrap();
+    assert_eq!(explicit_zero, expected);
+    for head in 0..2 {
+        let before = expected.head(head).unwrap();
+        let after = explicit_zero.head(head).unwrap();
+        assert_eq!(before.model.free, after.model.free);
+        for row in 0..before.model.free {
+            for col in 0..before.model.free {
+                assert_eq!(before.model.k.get(row, col).to_bits(), after.model.k.get(row, col).to_bits());
+                assert_eq!(before.model.m.get(row, col).to_bits(), after.model.m.get(row, col).to_bits());
+            }
+        }
+    }
+}
