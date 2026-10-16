@@ -11,6 +11,8 @@ use crate::state_point::{MaterialPropertySelection, MaterialStatePointError,
     resolve_material_state_point};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Dims, QuantitySpec};
+use std::sync::Arc;
+use tabulated::{TabulatedMembrane, CURVE_PROPERTIES, COUPLING_PROPERTY, STRAIN_AXIS};
 
 /// Reference mass per sheet area [kg/m2], NOT constituent bulk density.
 pub const AREAL_DENSITY: &str = "areal_density";
@@ -32,7 +34,7 @@ pub const BENDING_DIMS: Dims = Dims([2, 1, -2, 0, 0, 0]);
 /// A consumer chooses complete independent capabilities, never inferred ones.
 #[derive(Debug, Clone, Copy)]
 pub struct SheetCapabilities {
-    /// Require all four equilibrium membrane constants.
+    /// Require either the complete quadratic or complete tabulated membrane law.
     pub membrane: bool,
     /// Require all four independent directional bending constants.
     pub bending: bool,
@@ -68,6 +70,7 @@ pub struct ResolvedSheet {
     material: ResolvedMaterialStatePoint,
     areal_density: f64,
     thickness: f64,
+    tabulated: Option<Arc<TabulatedMembrane>>,
 }
 fn property(m: &ResolvedMaterialStatePoint, key: &'static str, dims: Dims)
     -> Result<f64, SheetError> {
@@ -88,7 +91,7 @@ impl ResolvedSheet {
         if areal_density <= 0.0 || thickness <= 0.0 {
             return Err(SheetError::Invalid("positive reference areal density and full thickness required"));
         }
-        Ok(Self { material, areal_density, thickness })
+        Ok(Self { material, areal_density, thickness, tabulated: None })
     }
     /// Complete original immutable material bundle.
     pub const fn material(&self) -> &ResolvedMaterialStatePoint { &self.material }
@@ -100,11 +103,40 @@ impl ResolvedSheet {
     /// are effective membrane moduli, not instantaneous tangents of a nonlinear
     /// stress curve. This does not infer compression softening or Maxwell loss.
     pub fn membrane(&self) -> Result<QuadraticMembrane, SheetError> {
+        if self.tabulated.is_some() || CURVE_PROPERTIES.iter().any(|k|self.material.property(k).is_some())
+            || self.material.property(COUPLING_PROPERTY).is_some() {
+            return Err(SheetError::Invalid("a nonlinear sheet cannot become constant stiffness; use membrane_law"));
+        }
         let mut p = [0.0; 4];
         for (i, key) in MEMBRANE_PROPERTIES.iter().enumerate() {
             p[i] = property(&self.material, key, if i == 2 { Dims::NONE } else { MEMBRANE_DIMS })?;
         }
         QuadraticMembrane::new(p[0], p[1], p[2], p[3])
+    }
+    /// Adopt an existing complete bundle and its exact card. Additional thermal
+    /// or contact selections remain in the original source object.
+    pub fn try_from_material_with_card(material: ResolvedMaterialStatePoint, card: &MaterialCard)
+        -> Result<Self, SheetError> {
+        if material.card_identity()!=card.content_hash() {
+            return Err(SheetError::Invalid("sheet material bundle and source card differ"));
+        }
+        let mut sheet=Self::try_from_material(material)?;
+        if CURVE_PROPERTIES.iter().any(|k|sheet.material.property(k).is_some())
+            || sheet.material.property(COUPLING_PROPERTY).is_some() {
+            if MEMBRANE_PROPERTIES.iter().any(|k|sheet.material.property(k).is_some()) {
+                return Err(SheetError::Invalid("ambiguous quadratic and nonlinear membrane capabilities"));
+            }
+            sheet.tabulated=Some(Arc::new(TabulatedMembrane::from_material_source(&sheet.material,card)?));
+        }
+        Ok(sheet)
+    }
+    /// Exact selected constitutive law, shared immutably across triangles. The
+    /// source, not the mechanical solver, chooses quadratic versus tabulated.
+    pub fn membrane_law(&self) -> Result<MembraneLaw, SheetError> {
+        match &self.tabulated {
+            Some(law)=>Ok(MembraneLaw::Tabulated(Arc::clone(law))),
+            None=>Ok(MembraneLaw::Quadratic(self.membrane()?)),
+        }
     }
     /// Characterized engineering-curvature stiffness, without any solid-plate
     /// conversion. Scalar seam/hinge bending and coupon N m2 cannot fill a D matrix.
@@ -127,7 +159,23 @@ pub fn resolve_sheet(card: &MaterialCard, point: &QueryPoint,
         ScalarPropertyRequirement::try_new(AREAL_DENSITY, Dims([-2, 1, 0, 0, 0, 0]), ScalarAdmissibility::StrictlyPositive)?,
         ScalarPropertyRequirement::try_new(THICKNESS, Dims([1, 0, 0, 0, 0, 0]), ScalarAdmissibility::StrictlyPositive)?,
     ];
-    if capabilities.membrane {
+    let nonlinear=capabilities.membrane && CURVE_PROPERTIES.iter().chain([&COUPLING_PROPERTY])
+        .any(|key|!card.claims_for(key).is_empty());
+    let mut point=point.clone();
+    if nonlinear {
+        if MEMBRANE_PROPERTIES.iter().any(|key|!card.claims_for(key).is_empty()) {
+            return Err(SheetError::Invalid("select an unambiguous quadratic or nonlinear source profile"));
+        }
+        if point.axes().get(STRAIN_AXIS).is_some_and(|x|*x!=0.0)
+            || point.axis_quantities().get(STRAIN_AXIS).is_some_and(|q|*q!=QuantitySpec::dimensional(Dims::NONE)) {
+            return Err(SheetError::Invalid("sheet law resolution needs a zero-strain reference query"));
+        }
+        point=point.with_quantity(STRAIN_AXIS,QuantitySpec::dimensional(Dims::NONE),0.0)
+            .map_err(|_|SheetError::Invalid("invalid Green-strain reference coordinate"))?;
+        for key in CURVE_PROPERTIES.iter().chain([&COUPLING_PROPERTY]) {
+            requirements.push(ScalarPropertyRequirement::try_new(*key,MEMBRANE_DIMS,ScalarAdmissibility::Finite)?);
+        }
+    } else if capabilities.membrane {
         for (i, key) in MEMBRANE_PROPERTIES.iter().enumerate() {
             requirements.push(ScalarPropertyRequirement::try_new(*key,
                 if i == 2 { Dims::NONE } else { MEMBRANE_DIMS }, ScalarAdmissibility::Finite)?);
@@ -138,8 +186,9 @@ pub fn resolve_sheet(card: &MaterialCard, point: &QueryPoint,
             requirements.push(ScalarPropertyRequirement::try_new(key, BENDING_DIMS, ScalarAdmissibility::Finite)?);
         }
     }
-    let sheet = ResolvedSheet::try_from_material(resolve_material_state_point(card, point, &requirements, selection)?)?;
-    if capabilities.membrane { sheet.membrane()?; }
+    let sheet = ResolvedSheet::try_from_material_with_card(
+        resolve_material_state_point(card, &point, &requirements, selection)?,card)?;
+    if capabilities.membrane { sheet.membrane_law()?; }
     if capabilities.bending { sheet.bending()?; }
     Ok(sheet)
 }
@@ -231,3 +280,30 @@ impl SheetLaw for QuadraticMembrane {
 
 /// Source-qualified sheet sensible heat on the shared material/thermal owners.
 pub mod thermal;
+
+/// Work-consistent signed nonlinear stress/strain tables.
+pub mod tabulated;
+
+/// Complete immutable equilibrium law selected by the material source.
+#[derive(Clone,Debug,PartialEq)]
+pub enum MembraneLaw {
+    /// Existing fixed-state orthotropic quadratic response.
+    Quadratic(QuadraticMembrane),
+    /// Signed source curves with integrated work and actual segment tangents.
+    Tabulated(Arc<TabulatedMembrane>),
+}
+impl MembraneLaw {
+    /// Small-vibration analysis needs a locally unique, two-sided material
+    /// tangent. This does not alter the nonlinear solver's one-sided convention.
+    pub fn admit_linearization(&self, strain:[f64;3]) -> Result<(),SheetError> {
+        match self {
+            Self::Quadratic(law)=>law.response(strain).map(|_|()),
+            Self::Tabulated(law)=>law.admit_linearization(strain),
+        }
+    }
+}
+impl SheetLaw for MembraneLaw {
+    fn response(&self, strain:[f64;3])->Result<SheetResponse,SheetError> {
+        match self {Self::Quadratic(law)=>law.response(strain),Self::Tabulated(law)=>law.response(strain)}
+    }
+}
