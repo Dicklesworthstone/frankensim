@@ -527,10 +527,10 @@ fn retain(report: &LadderReport, m: &Measurement) {
 
 #[test]
 fn resolution_and_tolerance_refusals_are_explicit() {
-    let mut v = voice(48000, 8192, 1e-9, ReedSolverMode::Strict);
+    let mut v = voice(48000, 8192, 1e-9, ReedSolverMode::Strict, 2800.0);
     assert_eq!(v.realized_resolution().n_fft, 8192);
     assert_eq!(
-        voice(48000, 8193, 1e-9, ReedSolverMode::Strict)
+        voice(48000, 8193, 1e-9, ReedSolverMode::Strict, 2800.0)
             .realized_resolution()
             .n_fft,
         8192
