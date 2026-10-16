@@ -2,6 +2,26 @@
 
 ## Purpose and layer
 
+`planar` (IRP M1.2-W6) is an additive L2 constrained-triangle owner for explicit
+outer loops and holes. Exact `orient2d`/`incircle` signs control topology;
+deterministic cavity recovery and unconstrained-edge hole flooding retain
+source segments and exclude holes. Bounded circumcentre insertion and segment
+bisection refine size/angle; acute input vertices and incident exempt triangles
+are recorded without rounding tips. Success audits Euler characteristic,
+polygon area and every nonexempt angle. Metric arithmetic remains f64; work
+exhaustion and unrepresentable exact-collinear midpoints refuse. This is not
+a universal finite-precision termination theorem or a continuum CAD certificate.
+Parametric loops require an explicit second-derivative bound and chord
+tolerance; sampling uses the interpolation bound `max|p''| dt²/8`. Its bound is
+caller-supplied, not independently certified. `PlanarMesh::refine_uniform`
+provides nested h-refinement at fixed polygonal geometry and preserves source
+chains; descendants of acute-corner exemptions require a new quality audit.
+All paths poll Cx cancellation and check vertex/triangle/work caps. The
+`planar` unit and `planar_outline` integration targets define G0 topology,
+holes/refusals/budgets, G1 circle/ellipse area order and G3 rigid transforms.
+No native pass is implied by source presence; physical shell assembly belongs
+to fs-plate and is not a runtime dependency of this crate.
+
 L2 (MORPH). Body-fitted tet meshing (plan §7.5) for when a mesh is
 WANTED — final verification, shells, export — remembering CutFEM-on-SDF
 exists precisely so meshing stays optional inside optimization loops.

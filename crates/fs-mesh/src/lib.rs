@@ -33,6 +33,8 @@ mod exude;
 pub mod hexdom;
 mod marked_tet;
 mod parallel;
+/// Exact-sign constrained planar outlines, hole carving and quality refinement.
+pub mod planar;
 mod recovery;
 mod refine;
 mod remesh;
