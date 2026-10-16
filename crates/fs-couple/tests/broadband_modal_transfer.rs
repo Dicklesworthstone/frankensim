@@ -269,7 +269,7 @@ fn fit_grid_density_converges() {
 #[test]
 fn integer_delay_is_exact_fractional_delay_converges() {
     let dt = 1.0 / f64::from(RATE);
-    let h = |w| C64::new(1.0, -w * RADIUS / SOUND_SPEED).recip();
+    let h = |w: f64| C64::new(1.0, -w * RADIUS / SOUND_SPEED).recip();
     let undelayed = samples(64, 0.0, h);
     let integer = samples(64, 137.0 * dt, |w| h(w) * phase(w * 137.0 * dt));
     let (mut a, _) =
