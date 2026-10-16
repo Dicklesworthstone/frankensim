@@ -125,8 +125,13 @@ fn smooth_coupled_motion_converges_to_independent_symmetric_oscillator_solution(
             ((a-b)*if i<2 { omega } else { 1.0 }).powi(2)).sum::<f64>().sqrt();
         errors.push(error);
     }
-    assert!(errors[0]/errors[1] > 3.8, "{errors:?}");
-    assert!(errors[1]/errors[2] > 3.8, "{errors:?}");
+    // The complete coupled pencil is now propagated exactly. All three rungs
+    // must agree with the independent continuous q/v solution; a ratio of
+    // errors at rounding noise no longer measures a convergence order.
+    assert!(
+        errors.iter().all(|error| *error < 1e-11),
+        "weighted q/v errors [m sqrt(kg)/s] at every clock: {errors:?}"
+    );
 }
 
 #[test]

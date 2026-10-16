@@ -361,11 +361,13 @@ fn effective_compliance(network: &CoupledModalSystem, column: &[f64], gate: &Can
 
 // Full displacement response of the existing bilateral network to a unit
 // attachment load. Cross-contact compliance is b_i^T response(b_j).
-fn network_response(network: &CoupledModalSystem, column: &[f64], gate: &CancelGate)
-    -> Result<Vec<f64>, ModalCouplingError>
-{
+fn network_response(
+    network: &CoupledModalSystem,
+    column: &[f64],
+    gate: &CancelGate,
+) -> Result<Vec<f64>, ModalCouplingError> {
     poll(Some(gate))?;
-    let response=network.exact.response(column,network.dt)?;
+    let response = network.linear_response(column, gate)?;
     poll(Some(gate))?;
     Ok(response)
 }

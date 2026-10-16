@@ -192,12 +192,44 @@ pub(super) fn stage(
         .checked_add(1)
         .ok_or_else(|| invalid("coupled sample clock overflow"))?;
     let before = network.total_energy_j()?;
-    let (rec, x, u) = network
-        .exact
-        .advance(&network.models, external, network.dt)?;
-    poll(gate)?;
-    let (component_loss, connection_loss) =
-        network.exact.losses(&x, &u, network.dt, rec.dissipated)?;
+    let (rec_x, x, u, component_loss, connection_loss, h_x) = if let Some(exact) = &network.exact {
+        let (rec, x, u) = exact.advance(&network.models, external, network.dt)?;
+        poll(gate)?;
+        let (comp_loss, conn_loss) = exact.losses(&x, &u, network.dt, rec.dissipated)?;
+        let h_x = exact.system.hamiltonian(&x);
+        (rec.x, x, u, comp_loss, conn_loss, h_x)
+    } else {
+        if external.len() != network.mode_count() || external.iter().any(|v| !v.is_finite()) {
+            return Err(invalid(
+                "external forces must match the complete finite linear pencil",
+            ));
+        }
+        let x = flatten(&network.models);
+        let u = external.to_vec();
+        let mut rec_x = Vec::with_capacity(x.len());
+        let mut comp_loss = 0.0_f64;
+        let mut k = 0usize;
+        for model in &network.models {
+            poll(gate)?;
+            for (mode_idx, (&mode, &state)) in model.modes().iter().zip(model.states()).enumerate()
+            {
+                let next = model.advance_exact_zoh_step(mode_idx, state, external[k]);
+                rec_x.push(next.displacement_m_sqrt_kg);
+                rec_x.push(next.velocity_m_sqrt_kg_per_s);
+                let w = mode.angular_frequency_rad_s;
+                let e_before = 0.5
+                    * (state.velocity_m_sqrt_kg_per_s.powi(2)
+                        + (w * state.displacement_m_sqrt_kg).powi(2));
+                let e_after = 0.5
+                    * (next.velocity_m_sqrt_kg_per_s.powi(2)
+                        + (w * next.displacement_m_sqrt_kg).powi(2));
+                let dq = next.displacement_m_sqrt_kg - state.displacement_m_sqrt_kg;
+                comp_loss = finite(comp_loss + (e_before + external[k] * dq - e_after))?;
+                k += 1;
+            }
+        }
+        (rec_x, x, u, comp_loss, 0.0, before)
+    };
     let mut pressure = 0.0;
     let mut modal_after = 0.0;
     let mut work = 0.0;
@@ -207,8 +239,8 @@ pub(super) fn stage(
         let states: Vec<_> = range
             .clone()
             .map(|k| ModalAcousticState {
-                displacement_m_sqrt_kg: rec.x[2 * k],
-                velocity_m_sqrt_kg_per_s: rec.x[2 * k + 1],
+                displacement_m_sqrt_kg: rec_x[2 * k],
+                velocity_m_sqrt_kg_per_s: rec_x[2 * k + 1],
             })
             .collect();
         network.candidates[i]
@@ -220,7 +252,7 @@ pub(super) fn stage(
         let mut component_pressure = 0.0;
         for ((k, mode), state) in range.zip(network.models[i].modes()).zip(&states) {
             network.old_q[k] = x[2 * k];
-            network.free_delta[k] = finite(rec.x[2 * k] - x[2 * k])?;
+            network.free_delta[k] = finite(rec_x[2 * k] - x[2 * k])?;
             work = finite(work + external[k] * network.free_delta[k])?;
             modal_after = finite(
                 modal_after
@@ -249,10 +281,8 @@ pub(super) fn stage(
     // H_quadratic(t) <= (sqrt(H0)+dt*||u||/sqrt(2))^2 for PSD loss.
     // Each individual spring obeys k*(b.q)^2 <= 2*H_quadratic.
     // This bounds reaction magnitude throughout the step, not just endpoints.
-    let root_twice_energy = finite(
-        det::sqrt(2.0 * network.exact.system.hamiltonian(&x))
-            + network.dt * det::sqrt(u.iter().map(|f| f * f).sum()),
-    )?;
+    let root_twice_energy =
+        finite(det::sqrt(2.0 * h_x) + network.dt * det::sqrt(u.iter().map(|f| f * f).sum()))?;
     for (index, (column, link)) in network.columns.iter().zip(&network.connections).enumerate() {
         poll(gate)?;
         let extension = extension(&network.candidates, column, link.rest_extension_m)?;
@@ -260,7 +290,7 @@ pub(super) fn stage(
         let velocity: f64 = column
             .iter()
             .enumerate()
-            .map(|(i, b)| b * rec.x[2 * i + 1])
+            .map(|(i, b)| b * rec_x[2 * i + 1])
             .sum();
         network.reactions[index] =
             finite(-link.stiffness_n_m * extension - link.damping_n_s_m * velocity)?;
@@ -287,7 +317,10 @@ pub(super) fn stage(
         network.config.maximum_abs_pressure_pa,
     )?;
     let residual = finite(after - before + component_loss + connection_loss - work)?;
-    let scale = before.max(after).max(work.abs()).max(rec.dissipated.abs());
+    let scale = before
+        .max(after)
+        .max(work.abs())
+        .max((component_loss + connection_loss).abs());
     let tolerance = finite(
         network.config.energy_absolute_tolerance_j
             + network.config.energy_relative_tolerance * scale,

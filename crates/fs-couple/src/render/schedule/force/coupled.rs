@@ -176,7 +176,7 @@ pub struct CoupledModalFrame {
 pub struct CoupledModalSystem {
     models: Vec<ModalAcousticTimeModel>,
     candidates: Vec<ModalAcousticTimeModel>,
-    exact: exact::ExactNetwork,
+    exact: Option<exact::ExactNetwork>,
     offsets: Vec<usize>,
     connections: Vec<ConnectionLaw>,
     columns: Vec<Vec<f64>>,
@@ -270,7 +270,20 @@ impl CoupledModalSystem {
         }
         let guard = core::f64::consts::PI / dt * config.nyquist_guard_fraction;
         if upper_squared.sqrt() > guard { return Err(invalid("coupled stiffness bound exceeds the Nyquist guard")); }
-        let exact=exact::ExactNetwork::new(&models,&columns,&connections,count,gate)?;
+        let exact = if connections
+            .iter()
+            .any(|link| link.stiffness_n_m != 0.0 || link.damping_n_s_m != 0.0)
+        {
+            Some(exact::ExactNetwork::new(
+                &models,
+                &columns,
+                &connections,
+                count,
+                gate,
+            )?)
+        } else {
+            None
+        };
         let candidates = models.clone();
         let frame = CoupledModalFrame {
             sample: 0, observer_pressure_pa: 0.0, modal_energy_j: 0.0, connection_energy_j: 0.0,
@@ -355,20 +368,70 @@ impl CoupledModalSystem {
 
     // Unrestrained full-network prediction is scratch. Contact/friction may
     // suppress it before any physical endpoint or force budget is applied.
-    fn prepare_prediction(&mut self, external: &[f64], gate: Option<&CancelGate>)
-        -> Result<(), ModalCouplingError>
-    {
+    fn prepare_prediction(
+        &mut self,
+        external: &[f64],
+        gate: Option<&CancelGate>,
+    ) -> Result<(), ModalCouplingError> {
         poll(gate)?;
         if external.len() != self.mode_count() || external.iter().any(|x| !x.is_finite()) {
             return Err(invalid("external forces must be finite and match all component modes"));
         }
-        let (record,x,_)=self.exact.advance(&self.models,external,self.dt)?;
-        for k in 0..self.mode_count() {self.old_q[k]=x[2*k];self.free_delta[k]=finite(record.x[2*k]-x[2*k])?;}
+        if let Some(exact) = &self.exact {
+            let (record, x, _) = exact.advance(&self.models, external, self.dt)?;
+            for k in 0..self.mode_count() {
+                self.old_q[k] = x[2 * k];
+                self.free_delta[k] = finite(record.x[2 * k] - x[2 * k])?;
+            }
+        } else {
+            let mut k = 0;
+            for model in &self.models {
+                poll(gate)?;
+                for (mode, state) in model.states().iter().enumerate() {
+                    self.old_q[k] = state.displacement_m_sqrt_kg;
+                    self.free_delta[k] = finite(
+                        model
+                            .advance_exact_zoh_step(mode, *state, external[k])
+                            .displacement_m_sqrt_kg
+                            - self.old_q[k],
+                    )?;
+                    k += 1;
+                }
+            }
+        }
         self.forces.copy_from_slice(external);
         poll(gate)?;
         Ok(())
     }
 
+    fn linear_response(
+        &self,
+        column: &[f64],
+        gate: &CancelGate,
+    ) -> Result<Vec<f64>, ModalCouplingError> {
+        poll(Some(gate))?;
+        if let Some(exact) = &self.exact {
+            return exact.response(column, self.dt);
+        }
+        if column.len() != self.mode_count() {
+            return Err(invalid("response column must match every original mode"));
+        }
+        let mut result = Vec::with_capacity(column.len());
+        let mut k = 0;
+        for model in &self.models {
+            poll(Some(gate))?;
+            for mode in 0..model.modes().len() {
+                result.push(finite(
+                    column[k]
+                        * model
+                            .advance_exact_zoh_step(mode, ModalAcousticState::default(), 1.0)
+                            .displacement_m_sqrt_kg,
+                )?);
+                k += 1;
+            }
+        }
+        Ok(result)
+    }
 }
 
 fn connection_layout(
