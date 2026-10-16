@@ -172,3 +172,6 @@ impl HelmholtzModalCavity {
 
 #[cfg(test)]
 mod tests;
+
+/// One shared gas volume for multiple independently retained moving surfaces.
+pub mod shared;
