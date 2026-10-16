@@ -5,7 +5,9 @@
 
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_blake3::{ContentHash, hash_domain};
-use fs_material::gas::GasState;
+use fs_material::gas_species::input::{
+    GasInputError, GasRecord, ThermochemicalSources, read_gas_record,
+};
 use fs_scenario::{RadiatingPlate, gesture::{GestureSchedule, GestureTarget, GestureValue}};
 use crate::bowed_string::{BowGesture, BowedRunConfig, BowedRunError, BowedStringCard, FrictionIsland, Termination};
 use crate::render::{RenderContext, RenderError, RenderVoice, schedule::ScheduledRenderer};
@@ -26,10 +28,20 @@ const MAX_WORK: u64 = 16_777_216;
 /// Syntax and existing physical/scheduling owner refusals remain distinguishable.
 #[derive(Debug)]
 pub enum BowedPerformanceError {
+    /// Original material refusal on the ambient record.
+    Gas {
+        /// One-based source line.
+        line: usize,
+        /// Original material owner diagnostic.
+        source: fs_material::MaterialError,
+    },
     /// First offending header line, or zero for whole-file/schedule admission.
-    Input { /// One-based header line, zero for non-header admission.
-        line: usize, /// Violated input condition.
-        what: &'static str },
+    Input {
+        /// One-based header line, zero for non-header admission.
+        line: usize,
+        /// Violated input condition.
+        what: &'static str,
+    },
     /// The existing string/bridge/friction solver rejected the supplied state.
     Model(BowedRunError),
     /// The existing gesture compiler rejected the source or its budgets.
@@ -40,6 +52,7 @@ pub enum BowedPerformanceError {
 impl core::fmt::Display for BowedPerformanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Gas { line, source } => write!(f, "bowed gas line {line}: {source}"),
             Self::Input { line, what } => write!(f, "bowed input line {line}: {what}"),
             Self::Model(e) => write!(f, "bowed model: {e:?}"),
             Self::Schedule(e) => write!(f, "bowed input: {e}"),
@@ -47,7 +60,14 @@ impl core::fmt::Display for BowedPerformanceError {
         }
     }
 }
-impl std::error::Error for BowedPerformanceError {}
+impl std::error::Error for BowedPerformanceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Gas { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 fn bad(line: usize, what: &'static str) -> BowedPerformanceError {
     BowedPerformanceError::Input { line, what }
 }
@@ -77,6 +97,7 @@ pub struct BowedPerformanceInfo {
 pub struct BowedPerformance {
     info: BowedPerformanceInfo,
     renderer: ScheduledRenderer,
+    gas_record: GasRecord,
 }
 impl BowedPerformance {
     /// Decode the complete input before constructing a physical runtime.
@@ -92,6 +113,17 @@ impl BowedPerformance {
     /// Malformed/oversized input, invalid physics, unsupported tracks, unobserved
     /// commands, exhausted compilation budgets or the original owner's refusal.
     pub fn from_bytes(bytes: &[u8], max_block: usize) -> Result<Self, BowedPerformanceError> {
+        Self::from_bytes_with_gas_sources(bytes, max_block, None)
+    }
+
+    /// Decode an explicit thermochemical ambient against caller-loaded sources.
+    /// Retains its original receipts for render provenance. The legacy reader
+    /// passes no registry and retains its exact physical coefficients.
+    pub fn from_bytes_with_gas_sources(
+        bytes: &[u8],
+        max_block: usize,
+        sources: Option<&ThermochemicalSources<'_>>,
+    ) -> Result<Self, BowedPerformanceError> {
         if bytes.len() > MAX_BOWED_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
             return Err(bad(0, "source exceeds 1 MiB or callback capacity is outside 1..=65536"));
         }
@@ -136,8 +168,15 @@ impl BowedPerformance {
             frequency_hz: row.scalar()?, damping_ratio: row.scalar()? };
         row.finish()?;
         let mut row = r.row("ambient")?;
-        let ambient = GasState::try_new_moist_air(row.scalar()?, row.scalar()?, row.scalar()?)
-            .map_err(|_| bad(r.line, "ambient state is outside the shared moist-air model"))?;
+        let gas_record =
+            read_gas_record(&mut row.words, None, sources).map_err(|error| match error {
+                GasInputError::Input(what) => bad(row.line, what),
+                GasInputError::Material(source) => BowedPerformanceError::Gas {
+                    line: row.line,
+                    source,
+                },
+            })?;
+        let ambient = *gas_record.state();
         row.finish()?;
         let mut row = r.row("listener_m")?;
         let listener_m = row.scalar()?; row.finish()?;
@@ -198,12 +237,21 @@ impl BowedPerformance {
         let renderer = ScheduledRenderer::new(context, vec![], 0).map_err(BowedPerformanceError::Render)?;
         renderer.validate_sample_rate(rate).map_err(BowedPerformanceError::Render)?;
         renderer.validate_sample_count(samples).map_err(BowedPerformanceError::Render)?;
-        Ok(Self { info, renderer })
+        Ok(Self {
+            info,
+            renderer,
+            gas_record,
+        })
     }
 
     /// Actual source clocks and counts, unchanged by output conversion.
     #[must_use]
     pub const fn info(&self) -> BowedPerformanceInfo { self.info }
+    /// Original ambient record, including thermochemical pack identities.
+    #[must_use]
+    pub const fn gas_record(&self) -> &GasRecord {
+        &self.gas_record
+    }
     /// Transfer retained physics and controls to the existing rendering owners.
     #[must_use]
     pub fn into_renderer(self) -> ScheduledRenderer { self.renderer }

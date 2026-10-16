@@ -37,9 +37,21 @@ pub(super) struct PreparedDuct {
 }
 
 impl DuctInput {
-    pub fn read(r: &mut Reader<'_>, air: &GasState, gate: &CancelGate)
-        -> Result<Self, PlateValveInputError>
-    {
+    pub fn read(
+        r: &mut Reader<'_>,
+        air: &GasState,
+        gate: &CancelGate,
+    ) -> Result<Self, PlateValveInputError> {
+        Self::read_with_gas_sources(r, air, gate, None, &mut Vec::new())
+    }
+
+    pub fn read_with_gas_sources(
+        r: &mut Reader<'_>,
+        air: &GasState,
+        gate: &CancelGate,
+        sources: Option<&ThermochemicalSources<'_>>,
+        records: &mut Vec<GasRecord>,
+    ) -> Result<Self, PlateValveInputError> {
         let mut row = r.next()?;
         match row.word()? {
             "tube" => {
@@ -124,7 +136,7 @@ impl DuctInput {
                     // uses ambient; malformed data never selects that default.
                     let local = if row.fields.clone().next() == Some("gas") {
                         row.word()?;
-                        let local = gas::read(&mut row, Some(air.pressure))?;
+                        let local = gas::read_with_sources(&mut row, Some(air.pressure), sources, records)?;
                         regional = true;
                         local
                     } else { *air };

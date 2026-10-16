@@ -8,6 +8,7 @@ use fs_couple::bernoulli_aperture::performance::{ApertureObservation, AperturePe
 use fs_couple::bernoulli_aperture::performance::file::{PlateValvePerformance, MAX_PLATE_VALVE_PERFORMANCE_BYTES, PLATE_VALVE_PERFORMANCE_SCHEMA};
 use fs_couple::bernoulli_aperture::radiation::BaffledRadiationLoad;
 use fs_exec::CancelGate;
+use fs_material::gas_species::input::ThermochemicalSources;
 use super::{RATE, create_outputs, json_string, stream_output};
 
 fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolicy), String> {
@@ -83,13 +84,21 @@ struct Loaded {
     hash:ContentHash, fixture:&'static str, source_json:String,
 }
 fn load(bytes: &[u8], block: usize, policy: ObservationPolicy) -> Result<Loaded, String> {
+    load_with_gas_sources(bytes, block, policy, None)
+}
+fn load_with_gas_sources(
+    bytes: &[u8],
+    block: usize,
+    policy: ObservationPolicy,
+    sources: Option<&ThermochemicalSources<'_>>,
+) -> Result<Loaded, String> {
     // Exact versioned source header selects the existing owner; filenames and
     // instrument labels never choose geometry or material constants.
     if bytes.starts_with(b"frankensim-plate-valve-performance-v1\n") {
         if policy == ObservationPolicy::Acceptance {
             return Err("--acceptance selects the explicit ReedPerformance flanged-development path; plate-valve files require explicit matched-load builder admission".into());
         }
-        let p=PlateValvePerformance::from_bytes(bytes,block,&CancelGate::new()).map_err(|e|e.to_string())?;
+        let p=PlateValvePerformance::from_bytes_with_gas_sources(bytes,block,&CancelGate::new(),sources).map_err(|e|e.to_string())?;
         let i=p.info();let a=p.renderer().system().aperture();
         let plate=a.plate_reduction().expect("plate file retains its specimen");
         let observation=match p.renderer().observation() {
@@ -114,15 +123,16 @@ fn load(bytes: &[u8], block: usize, policy: ObservationPolicy) -> Result<Loaded,
         };
         let propagation=if p.viscothermal_losses().is_empty() {"lossless propagating sections with explicit local loads"}
             else {"gas-derived viscothermal series/thermal memory distributed along selected sections"};
-        let source_json=format!("\"plate_valve_input\":{{\"schema\":\"{PLATE_VALVE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"nodes\":{},\"triangles\":{},\"sections\":{},\"memory_branches\":{},\"compiled_controls\":{},\"pressure_point\":\"{observation}\",\"requested_tube_length_m\":{:e},\"represented_tube_length_m\":{:e},\"effective_mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"model_scope\":\"one linear plate mode; spatial lay and supplied material history; {propagation}; {scope}\"{receiver_json}}}",
+        let gas_json=super::thermochemical::provenance(p.gas_records());
+        let source_json=format!("\"plate_valve_input\":{{\"schema\":\"{PLATE_VALVE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"nodes\":{},\"triangles\":{},\"sections\":{},\"memory_branches\":{},\"compiled_controls\":{},\"pressure_point\":\"{observation}\",\"requested_tube_length_m\":{:e},\"represented_tube_length_m\":{:e},\"effective_mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"model_scope\":\"one linear plate mode; spatial lay and supplied material history; {propagation}; {scope}\"{receiver_json}{gas_json}}}",
             i.input_hash.to_hex(),i.nodes,i.triangles,i.sections,i.memory_branches,i.compiled_controls,
             requested,i.represented_tube_length_m,plate.mass_kg(),plate.stiffness_n_m(),plate.pressure_area_m2());
         Ok(Loaded{source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"plate-valve-input",source_json})
     } else {
-        let p=ReedPerformance::from_bytes_with_policy(bytes,block,policy).map_err(|e|e.to_string())?;
+        let p=ReedPerformance::from_bytes_with_gas_sources(bytes,block,policy,sources).map_err(|e|e.to_string())?;
         let i=p.info();
-        let observer_json=super::duct_metadata::reed_provenance(&p);
+        let observer_json=format!("{}{}",super::duct_metadata::reed_provenance(&p),super::thermochemical::provenance(p.gas_records()));
         let policy_name=if policy==ObservationPolicy::Acceptance {"acceptance"} else {"diagnostic"};
         let source_json=format!("\"reed_input\":{{\"schema\":\"{REED_PERFORMANCE_SCHEMA}\",\"observation_policy\":\"{policy_name}\",\"blake3\":\"{}\",\"segments\":{},\"tone_holes\":{},\"massive_reed\":{},\"gesture_events\":{},\"compiled_controls\":{}{observer_json}}}",
             i.input_hash.to_hex(),i.segments,i.tone_holes,i.massive_reed,i.gesture_events,i.compiled_controls);
@@ -132,6 +142,12 @@ fn load(bytes: &[u8], block: usize, policy: ObservationPolicy) -> Result<Loaded,
 }
 
 pub(super) fn run(args: &[String]) -> Result<(), String> {
+    run_with_gas_sources(args, None)
+}
+pub(super) fn run_with_gas_sources(
+    args: &[String],
+    sources: Option<&ThermochemicalSources<'_>>,
+) -> Result<(), String> {
     let (input, output, block, decimate, policy) = options(args)?;
     let output = Path::new(output);
     let sidecar = output.with_extension("provenance.json");
@@ -142,7 +158,7 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     let mut bytes = Vec::new();
     file.take((MAX_PLATE_VALVE_PERFORMANCE_BYTES + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("wind input read failed: {e}"))?;
-    let loaded=load(&bytes,block,policy)?;
+    let loaded = load_with_gas_sources(&bytes, block, policy, sources)?;
     if !decimate && loaded.rate != RATE {
         return Err("non-48000-Hz mechanics require explicit --decimate; no implicit resampling".into());
     }

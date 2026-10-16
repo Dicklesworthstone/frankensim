@@ -27,6 +27,7 @@ use fs_blake3::{ContentHash, hash_domain};
 use crate::bernoulli_aperture::viscothermal::ViscothermalSection;
 use fs_exec::CancelGate;
 use fs_material::{gas::GasState, visco::GeneralizedMaxwell};
+use fs_material::gas_species::input::{GasRecord, ThermochemicalSources};
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateSection, SliceOptions};
 use fs_scenario::gesture::GestureSchedule;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
@@ -137,6 +138,7 @@ pub struct PlateValvePerformance {
     viscothermal_losses: Vec<ViscothermalSection>,
     ambient_gas: GasState,
     exterior_gas: Option<GasState>,
+    gas_records: Vec<GasRecord>,
 }
 impl PlateValvePerformance {
     /// Parse every record, derive the actual plate and selected blade symmetry,
@@ -154,11 +156,24 @@ impl PlateValvePerformance {
     /// # Errors
     /// Invalid/count-limited source, cancellation, section/mesh/reduction/contact/
     /// material/propagation admission, or incomplete/unsupported gestures.
-    pub fn from_bytes(bytes: &[u8], max_block: usize, gate: &CancelGate)
-        -> Result<Self,PlateValveInputError>
-    {
+    pub fn from_bytes(
+        bytes: &[u8],
+        max_block: usize,
+        gate: &CancelGate,
+    ) -> Result<Self, PlateValveInputError> {
+        Self::from_bytes_with_gas_sources(bytes, max_block, gate, None)
+    }
+
+    /// Decode every ambient, exterior and regional declaration against an
+    /// explicit source registry, retaining the original gas records.
+    pub fn from_bytes_with_gas_sources(
+        bytes: &[u8],
+        max_block: usize,
+        gate: &CancelGate,
+        sources: Option<&ThermochemicalSources<'_>>,
+    ) -> Result<Self, PlateValveInputError> {
         checkpoint(gate)?;
-        let parsed = Parsed::read(bytes,max_block,gate)?;
+        let parsed = Parsed::read_with_gas_sources(bytes, max_block, gate, sources)?;
         let dt=1.0/f64::from(parsed.config.sample_rate_hz);
         // One exterior declaration drives radiation; all internal media and
         // constitutive loads still come from their original regional states.
@@ -211,7 +226,15 @@ impl PlateValvePerformance {
             compiled_controls:renderer.pending_controls().len(),represented_tube_length_m:represented,radiation_load,
             duct_nodes,duct_sections,radiation_terminals:radiation_loads.len(),
         };
-        Ok(Self {info,renderer,radiation_loads,viscothermal_losses,ambient_gas:parsed.air,exterior_gas:parsed.exterior})
+        Ok(Self {
+            info,
+            renderer,
+            radiation_loads,
+            viscothermal_losses,
+            ambient_gas: parsed.air,
+            exterior_gas: parsed.exterior,
+            gas_records: parsed.gas_records,
+        })
     }
     /// Exact source facts, retained separately from the evolving physical state.
     #[must_use]
@@ -224,6 +247,11 @@ impl PlateValvePerformance {
     /// internal-pressure observations. None preserves local terminal media.
     #[must_use]
     pub const fn exterior_gas(&self) -> Option<&GasState> {self.exterior_gas.as_ref()}
+    /// Original gas declarations and source receipts, in authored read order.
+    #[must_use]
+    pub fn gas_records(&self) -> &[GasRecord] {
+        &self.gas_records
+    }
     /// Complete finite renderer with immutable access to the physical specimen.
     #[must_use]
     pub const fn renderer(&self) -> &AperturePerformance {&self.renderer}
@@ -242,15 +270,40 @@ impl PlateValvePerformance {
 }
 
 struct Parsed {
-    config:AperturePerformanceConfig,full_scale_pa:f64,air:GasState,duct:DuctInput,exterior:Option<GasState>,
-    observation:ApertureObservation,chart:PlateChart,plate:PlateApertureOptions,
-    symmetry:PlateApertureSymmetry,initial:ApertureState,
-    closure:PlateClosureSpec,relaxation:Option<(PlateRelaxationSpec,InitialApertureMemory)>,
-    forces:Option<ApertureForceProgram>,
-    max_angular_step:f64,schedule:GestureSchedule,nodes:usize,triangles:usize,sections:usize,
+    gas_records: Vec<GasRecord>,
+    config: AperturePerformanceConfig,
+    full_scale_pa: f64,
+    air: GasState,
+    duct: DuctInput,
+    exterior: Option<GasState>,
+    observation: ApertureObservation,
+    chart: PlateChart,
+    plate: PlateApertureOptions,
+    symmetry: PlateApertureSymmetry,
+    initial: ApertureState,
+    closure: PlateClosureSpec,
+    relaxation: Option<(PlateRelaxationSpec, InitialApertureMemory)>,
+    forces: Option<ApertureForceProgram>,
+    max_angular_step: f64,
+    schedule: GestureSchedule,
+    nodes: usize,
+    triangles: usize,
+    sections: usize,
 }
 impl Parsed {
-    fn read(bytes:&[u8],max_block:usize,gate:&CancelGate)->Result<Self,PlateValveInputError> {
+    fn read(
+        bytes: &[u8],
+        max_block: usize,
+        gate: &CancelGate,
+    ) -> Result<Self, PlateValveInputError> {
+        Self::read_with_gas_sources(bytes, max_block, gate, None)
+    }
+    fn read_with_gas_sources(
+        bytes: &[u8],
+        max_block: usize,
+        gate: &CancelGate,
+        sources: Option<&ThermochemicalSources<'_>>,
+    ) -> Result<Self, PlateValveInputError> {
         if bytes.len()>MAX_PLATE_VALVE_PERFORMANCE_BYTES || !(1..=65536).contains(&max_block) {
             return Err(bad(0,"input exceeds 4 MiB or callback capacity is outside 1..=65536"));
         }
@@ -259,21 +312,26 @@ impl Parsed {
         let mut r=Reader{lines:header.lines(),line:0};
         r.row(PLATE_VALVE_PERFORMANCE_SCHEMA)?.finish()?;
         let mut row=r.row("audio")?;
-        let rate:u32=row.parse()?;let samples:u64=row.parse()?;let full_scale_pa=row.scalar()?;row.finish()?;
+        let rate:u32=row.parse()?;
+        let samples:u64=row.parse()?;
+        let full_scale_pa=row.scalar()?;
+        row.finish()?;
         if rate==0 || rate>192000 || samples==0 || samples>28800000 || samples>600*u64::from(rate) || full_scale_pa<=0.0 {
             return Err(bad(r.line,"audio requires positive rate <=192000, full scale and at most 600 seconds/28800000 samples"));
         }
         let mut row=r.row("ambient")?;
-        let air=gas::read(&mut row,None)?;row.finish()?;
+        let mut gas_records = Vec::new();
+        let air = gas::read_with_sources(&mut row, None, sources, &mut gas_records)?;
+        row.finish()?;
         let exterior=if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("exterior") {
             let mut row=r.row("exterior")?;
-            let state=gas::read(&mut row,None)?;
+            let state=gas::read_with_sources(&mut row,None,sources,&mut gas_records)?;
             if state.pressure != air.pressure {
                 return Err(bad(row.line,"exterior and ambient must share static pressure; mean interface flow is not modeled"));
             }
             row.finish()?;Some(state)
         } else {None};
-        let duct=DuctInput::read(&mut r,&air,gate)?;
+        let duct = DuctInput::read_with_gas_sources(&mut r, &air, gate, sources, &mut gas_records)?;
         let mut row=r.row("observation")?;
         let observation=match row.word()? {
             "inlet"=>ApertureObservation::Inlet,"terminal"=>ApertureObservation::TubeTerminal,
@@ -283,28 +341,43 @@ impl Parsed {
                 node:row.parse()?,receiver:read_receiver(&mut row)?,
             },
             _=>return Err(bad(r.line,"observation must name a physical inlet, terminal, network node or outlet receiver")),
-        };row.finish()?;
+        };
+        row.finish()?;
         let mut row=r.row("plate")?;
         let support=match row.word()? {"clamped"=>EdgeSupport::Clamped,"simply-supported"=>EdgeSupport::SimplySupported,
             _=>return Err(bad(r.line,"unsupported plate support law"))};
-        let pretension=row.scalar()?;let damping_ratio=row.scalar()?;let low=row.scalar()?;let high=row.scalar()?;
-        let mode_index=row.count(MAX_NODES*3)?;let max_angular_step=row.scalar()?;row.finish()?;
+        let pretension=row.scalar()?;
+        let damping_ratio=row.scalar()?;
+        let low=row.scalar()?;
+        let high=row.scalar()?;
+        let mode_index=row.count(MAX_NODES*3)?;
+        let max_angular_step=row.scalar()?;
+        row.finish()?;
         if low<0.0 || high<=low || max_angular_step<=0.0 || max_angular_step>1.0 {
             return Err(bad(r.line,"plate requires an ordered nonnegative frequency window and angular step in (0,1]"));
         }
         let mut row=r.row("aperture")?;
-        let rest_opening_m=row.scalar()?;let max_slit_mode_variation=row.scalar()?;let max_slope=row.scalar()?;
+        let rest_opening_m=row.scalar()?;
+        let max_slit_mode_variation=row.scalar()?;
+        let max_slope=row.scalar()?;
         let symmetry=match row.fields.next() {
             None | Some("single-blade") => PlateApertureSymmetry::SingleBlade,
             Some("symmetric-opposed-pair") => PlateApertureSymmetry::SymmetricOpposedPair,
             Some(_) => return Err(bad(r.line,"aperture symmetry must be single-blade or symmetric-opposed-pair")),
-        };row.finish()?;
+        };
+        row.finish()?;
         let mut row=r.row("initial")?;
-        let initial=ApertureState{opening_m:row.scalar()?,opening_velocity_m_s:row.scalar()?};row.finish()?;
+        let initial=ApertureState{opening_m:row.scalar()?,opening_velocity_m_s:row.scalar()?};
+        row.finish()?;
         let mut row=r.row("contact")?;
-        let stiffness_pa_per_m_alpha=row.scalar()?;let alpha=row.scalar()?;
-        let internal_loss_s_per_m=row.scalar()?;let max_penetration_m=row.scalar()?;row.finish()?;
-        let mut row=r.row("source")?;let label=row.word()?.to_string();row.finish()?;
+        let stiffness_pa_per_m_alpha=row.scalar()?;
+        let alpha=row.scalar()?;
+        let internal_loss_s_per_m=row.scalar()?;
+        let max_penetration_m=row.scalar()?;
+        row.finish()?;
+        let mut row=r.row("source")?;
+        let label=row.word()?.to_string();
+        row.finish()?;
         if label.len()>256 {return Err(bad(r.line,"source label exceeds 256 bytes"));}
         let provenance=format!("supplied numeric plate-valve source {label}; no inferred material identification");
         let section_count=r.count("sections",MAX_SECTIONS)?;
@@ -322,7 +395,9 @@ impl Parsed {
         }
         let node_count=r.count("nodes",MAX_NODES)?;
         if node_count<3 {return Err(bad(r.line,"at least three original mesh nodes are required"));}
-        let mut nodes=Vec::with_capacity(node_count);let mut gaps=Vec::with_capacity(node_count);let mut supports=Vec::new();
+        let mut nodes=Vec::with_capacity(node_count);
+        let mut gaps=Vec::with_capacity(node_count);
+        let mut supports=Vec::new();
         for i in 0..node_count {
             checkpoint(gate)?;let mut row=r.row("node")?;
             nodes.push((row.scalar()?,row.scalar()?));gaps.push(row.scalar()?);
@@ -330,8 +405,10 @@ impl Parsed {
         }
         let triangle_count=r.count("triangles",MAX_TRIANGLES)?;
         if triangle_count==0 {return Err(bad(r.line,"at least one original mesh triangle is required"));}
-        let mut triangles=Vec::with_capacity(triangle_count);let mut assigned=Vec::with_capacity(triangle_count);
-        let mut section_triangles=vec![Vec::new();section_count];let mut lay_triangles=Vec::new();
+        let mut triangles=Vec::with_capacity(triangle_count);
+        let mut assigned=Vec::with_capacity(triangle_count);
+        let mut section_triangles=vec![Vec::new();section_count];
+        let mut lay_triangles=Vec::new();
         for i in 0..triangle_count {
             checkpoint(gate)?;let mut row=r.row("triangle")?;
             triangles.push([row.parse()?,row.parse()?,row.parse()?]);let section:usize=row.parse()?;
@@ -339,7 +416,8 @@ impl Parsed {
             section_triangles[section].push(i);if row.flag()? {lay_triangles.push(i);}row.finish()?;
         }
         if section_triangles.iter().any(Vec::is_empty) {return Err(bad(r.line,"every supplied section must be used by the plate"));}
-        let edge_count=r.count("slit_edges",node_count)?;let mut slit_edges=Vec::with_capacity(edge_count);
+        let edge_count=r.count("slit_edges",node_count)?;
+        let mut slit_edges=Vec::with_capacity(edge_count);
         for _ in 0..edge_count {let mut row=r.row("edge")?;slit_edges.push([row.parse()?,row.parse()?]);row.finish()?;}
         let mesh=PlateMesh::from_unstructured(nodes,triangles).map_err(PlateValveInputError::Geometry)?;
         let chart=PlateChart::with_boundary_and_regions(mesh,sections[0],supports,Vec::new())
@@ -388,7 +466,9 @@ impl Parsed {
             }
             _ => return Err(bad(r.line,"expected force_ports or compile_limits")),
         };
-        let max_compile_work:u64=row.parse()?;let max_controls=row.count(MAX_CONTROLS)?;row.finish()?;
+        let max_compile_work:u64=row.parse()?;
+        let max_controls=row.count(MAX_CONTROLS)?;
+        row.finish()?;
         if max_compile_work>16777216 {return Err(bad(r.line,"pressure compilation exceeds 16777216 visits"));}
         if forces.as_ref().is_some_and(|f| f.events.len() > max_controls) {
             return Err(bad(r.line,"force assignments exceed the declared control budget"));
@@ -396,7 +476,7 @@ impl Parsed {
         if r.lines.next().is_some() {return Err(bad(r.line+1,"unexpected trailing geometry record"));}
         let config=AperturePerformanceConfig{sample_rate_hz:rate,samples,max_block,max_compile_work,max_controls};
         let schedule=decode_schedule(gestures)?;
-        Ok(Self{config,full_scale_pa,air,duct,exterior,observation,chart,plate,symmetry,initial,closure,relaxation,forces,max_angular_step,
+        Ok(Self{gas_records,config,full_scale_pa,air,duct,exterior,observation,chart,plate,symmetry,initial,closure,relaxation,forces,max_angular_step,
             schedule,nodes:node_count,triangles:triangle_count,sections:section_count})
     }
 }

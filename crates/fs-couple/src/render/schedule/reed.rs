@@ -13,7 +13,9 @@ use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_duct::{Duct, HoleState, Segment, Termination};
 use fs_material::gas::GasState;
-use fs_material::gas_species::input::{GasInputError, read_gas_state};
+use fs_material::gas_species::input::{
+    GasInputError, GasRecord, ThermochemicalSources, read_gas_record,
+};
 use fs_scenario::{BeatingReed, gesture::{GestureSchedule, GestureTarget}};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::regional::outlet::{OutletError, OutletReceiverInfo};
@@ -124,6 +126,7 @@ pub struct ReedPerformance {
     segment_gases: Vec<GasState>,
     terminal: Option<outlet::TerminalObservation>,
     observation_policy: ObservationPolicy,
+    gas_records: Vec<GasRecord>,
 }
 impl ReedPerformance {
     /// Decode and admit all records before building or advancing the runtime.
@@ -148,6 +151,17 @@ impl ReedPerformance {
         max_block: usize,
         policy: ObservationPolicy,
     ) -> Result<Self, ReedPerformanceError> {
+        Self::from_bytes_with_gas_sources(bytes, max_block, policy, None)
+    }
+
+    /// Resolve ambient, segment and exterior declarations against explicit
+    /// caller-loaded sources. Original records remain available for sidecars.
+    pub fn from_bytes_with_gas_sources(
+        bytes: &[u8],
+        max_block: usize,
+        policy: ObservationPolicy,
+        sources: Option<&ThermochemicalSources<'_>>,
+    ) -> Result<Self, ReedPerformanceError> {
         if bytes.len() > MAX_REED_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
             return Err(bad(0, "source exceeds 1 MiB or callback capacity is outside 1..=65536"));
         }
@@ -165,7 +179,8 @@ impl ReedPerformance {
             || samples > u64::from(rate) * 600
         { return Err(bad(r.line, "audio requires a rate in 1..=192000 and at most 600 seconds/28800000 positive samples")); }
         let mut row = r.row("ambient")?;
-        let air = row.gas(None)?;
+        let mut gas_records = Vec::new();
+        let air = row.gas_with_sources(None, sources, &mut gas_records)?;
         row.finish()?;
         let mut row = r.row("reed")?;
         let reed = BeatingReed {
@@ -177,7 +192,8 @@ impl ReedPerformance {
         if !crate::reed_bore::reed_parameters_valid(reed) {
             return Err(bad(r.line, "reed mass, stiffness and damping must be finite and nonnegative"));
         }
-        let observation = outlet::ObservationInput::read(&mut r)?;
+        let observation =
+            outlet::ObservationInput::read_with_gas_sources(&mut r, sources, &mut gas_records)?;
         observation.validate_policy(policy)?;
         let mut row = r.row("termination")?;
         let termination = match row.word()? {
@@ -219,7 +235,7 @@ impl ReedPerformance {
             };
             let gas = match row.words.next() {
                 None => air,
-                Some("gas") => row.gas(Some(air.pressure))?,
+                Some("gas") => row.gas_with_sources(Some(air.pressure), sources, &mut gas_records)?,
                 Some(_) => return Err(bad(row.line, "expected an optional gas record after geometry")),
             };
             if gas.pressure != air.pressure {
@@ -276,6 +292,7 @@ impl ReedPerformance {
             segment_gases,
             terminal,
             observation_policy: policy,
+            gas_records,
         })
     }
 
@@ -301,6 +318,11 @@ impl ReedPerformance {
     /// separately supply radiation loading and observation. All are stationary.
     #[must_use]
     pub fn segment_gases(&self) -> &[GasState] { &self.segment_gases }
+    /// All authored gas records, including their source receipts, in read order.
+    #[must_use]
+    pub fn gas_records(&self) -> &[GasRecord] {
+        &self.gas_records
+    }
     /// Remaining samples on the mechanical clock.
     #[must_use]
     pub fn remaining_samples(&self) -> u64 { self.info.samples - self.renderer.samples_rendered() }
@@ -363,10 +385,21 @@ impl<'a> Reader<'a> {
 }
 impl<'a> Row<'a> {
     fn gas(&mut self, pressure: Option<f64>) -> Result<GasState, ReedPerformanceError> {
-        read_gas_state(&mut self.words, pressure).map_err(|error| match error {
+        self.gas_with_sources(pressure, None, &mut Vec::new())
+    }
+    fn gas_with_sources(
+        &mut self,
+        pressure: Option<f64>,
+        sources: Option<&ThermochemicalSources<'_>>,
+        records: &mut Vec<GasRecord>,
+    ) -> Result<GasState, ReedPerformanceError> {
+        let record = read_gas_record(&mut self.words, pressure, sources).map_err(|error| match error {
             GasInputError::Input(what) => bad(self.line, what),
             GasInputError::Material(source) => ReedPerformanceError::Gas { line: self.line, source },
-        })
+        })?;
+        let gas = *record.state();
+        records.push(record);
+        Ok(gas)
     }
     fn word(&mut self) -> Result<&'a str, ReedPerformanceError> {
         self.words.next().ok_or_else(|| bad(self.line, "missing field"))
