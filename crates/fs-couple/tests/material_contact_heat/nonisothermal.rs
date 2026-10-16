@@ -166,6 +166,7 @@ fn independent_temperature_binding_retains_strict_source_phase_density_and_conte
         // Separately reject inconsistent solid density and a liquid fraction.
         let h=if density==900.0 {0.0}else{0.5};
         let bad=CaloricReservoir::new("bad".into(),&curve,curve.state_at_specific_enthalpy(h).unwrap(),0.001,1e-6,0.0006).unwrap();
-        assert!(resolve([&bad,&r[1]],&point(),305.0).is_err());
+        // Called directly: the `resolve` closure fixes one borrow lifetime for its stores.
+        assert!(resolve_contact_at_temperatures(contact,&cards,&point(),[&bad,&r[1]],305.0).is_err());
     }
 }
