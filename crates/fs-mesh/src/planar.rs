@@ -346,7 +346,7 @@ pub fn mesh_outline(
     }
     let mut triangles = triangulation::initial(&vertices, &segments, &rings, cx)?;
     cap("triangles", triangles.len(), options.budget.max_triangles)?;
-    let mut insertions = 0;
+    let mut insertions = 0_usize;
     loop {
         checkpoint(cx)?;
         let adjacency = triangulation::edges(&triangles);
