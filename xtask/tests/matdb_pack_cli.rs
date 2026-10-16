@@ -155,7 +155,7 @@ mod common_material_acquisition {
                 let s_relative_term_j_mol_k = 2e-3 * s.abs();
                 let matched = cp_error <= 1e-3 && h_margin_kj_mol >= 0.0
                     && s_absolute_error_j_mol_k <= s_relative_term_j_mol_k + s_quantization_j_mol_k;
-                println!("{{\"suite\":\"matdb-pack\",\"bead\":\"M0.1-W1\",\"species\":\"{}\",\"T_K\":{t},\"reference_resolution\":{{\"cp_half_unit_J_mol_K\":{cp_quantization_j_mol_k},\"s_half_unit_J_mol_K\":{s_quantization_j_mol_k},\"h_half_unit_kJ_mol\":{h_quantization_kj_mol}}},\"observed\":{{\"h_absolute_error_kJ_mol\":{h_absolute_error_kj_mol},\"h_relative_gate_term_kJ_mol\":{h_relative_term_kj_mol},\"h_margin_kJ_mol\":{h_margin_kj_mol},\"s_absolute_error_J_mol_K\":{s_absolute_error_j_mol_k},\"s_relative_gate_term_J_mol_K\":{s_relative_term_j_mol_k}}}}", model.species());
+                println!("{{\"suite\":\"matdb-pack\",\"bead\":\"M0.1-W1\",\"species\":\"{}\",\"T_K\":{t},\"reference_resolution\":{{\"cp_half_unit_J_mol_K\":{cp_quantization_j_mol_k},\"s_half_unit_J_mol_K\":{s_quantization_j_mol_k},\"h_half_unit_kJ_mol\":{h_quantization_kj_mol}}},\"observed\":{{\"h_absolute_error_kJ_mol\":{h_absolute_error_kj_mol},\"h_relative_gate_term_kJ_mol\":{h_relative_term_kj_mol},\"h_margin_kJ_mol\":{h_margin_kj_mol},\"s_absolute_error_J_mol_K\":{s_absolute_error_j_mol_k},\"s_relative_gate_term_J_mol_K\":{s_relative_term_j_mol_k}}}}}", model.species());
                 println!(
                     "{{\"suite\":\"matdb-pack\",\"bead\":\"M0.1-W1\",\"test\":\"g2_g3_sourced_nasa9_species_match_janaf\",\"inputs\":{{\"species\":\"{}\",\"species_pack\":\"{}\",\"nasa9_pack\":\"{}\"}},\"provenance\":\"https://janaf.nist.gov/tables/{page}.html\",\"rungs\":[{t}],\"observed\":{{\"cp_relative_error\":{cp_error},\"h_delta_relative_error\":{h_error},\"s_relative_error\":{s_error}}},\"tolerance\":{{\"cp\":0.001,\"h_s\":0.002}},\"verdict\":\"{}\",\"elapsed_s\":{}}}",
                     model.species(),
@@ -348,7 +348,7 @@ mod common_material_acquisition {
                 transport.content_hash()
             );
             let bem = fs_bem::helmholtz::Medium::from(gas);
-            let rayleigh = fs_couple::baffled_pressure::RayleighMedium::from(gas);
+            let rayleigh = fs_couple::pcm_wav::baffled::RayleighMedium::from(gas);
             for (rho, c) in [
                 (bem.density, bem.sound_speed),
                 (rayleigh.density, rayleigh.sound_speed),
