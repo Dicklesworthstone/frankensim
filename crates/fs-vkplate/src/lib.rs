@@ -1750,6 +1750,162 @@ impl Instrument {
         }
         self.step_index += 1;
     }
+
+    /// Everything one time step reads, as plain data (microphone taps prepared first): for a stepper
+    /// outside this crate, the CUDA renderer in apps/instrument-lab/render-gpu. Exporting changes
+    /// nothing here, and `step` stays the reference that stepper is checked against.
+    pub fn image(&mut self) -> InstrumentImage {
+        if !self.prepared {
+            self.prepare();
+        }
+        let k = self.k();
+        let bodies = self.bodies.iter_mut().map(|b| b.image(k)).collect();
+        let mics = self
+            .mics
+            .iter()
+            .map(|m| MicImage { taps: m.taps.clone(), ptaps: m.ptaps.clone(), ring_len: m.ring.len(), unbaffled: m.unbaffled, hp: m.hp })
+            .collect();
+        InstrumentImage {
+            rate: self.rate,
+            step_index: self.step_index,
+            bodies,
+            cavities: self.cavities.clone(),
+            rads: self.rads.clone(),
+            links: self.links.clone(),
+            contacts: self.contacts.clone(),
+            frictions: self.frictions.clone(),
+            strikes: self.strikes.clone(),
+            drives: self.drives.clone(),
+            mics,
+        }
+    }
+}
+
+// --------------------------------------------------------------------- export
+/// A sparse matrix as compressed rows: row `i` holds `val[ptr[i]..ptr[i + 1]]` at columns
+/// `col[ptr[i]..ptr[i + 1]]`, summed in that order.
+#[derive(Clone, Debug)]
+pub struct CsrImage {
+    pub ptr: Vec<usize>,
+    pub col: Vec<usize>,
+    pub val: Vec<f64>,
+}
+
+/// The von Karman data of a plate: per core node its 9-point stencil in the body's node numbering
+/// (centre, E, W, N, S, NE, NW, SE, SW; None off the core), l(z0) there, the rest height per node,
+/// E t, and the stress function of the last step (the core numbering of `Body::airy_solve`).
+#[derive(Clone, Debug)]
+pub struct VonKarmanImage {
+    pub eh: f64,
+    pub nb: Vec<[Option<usize>; 9]>,
+    pub l0: Vec<f64>,
+    pub z0: Vec<f64>,
+    pub f: Vec<f64>,
+}
+
+/// One body's operators, per-node update coefficients and state. `cf[i]` is
+/// [k^2 / a, 2 m / k^2, (1 - s0 k) m / k^2, 2 s1 m / k] with a = m (1 + s0 k) / k^2, at the
+/// instrument's step k; the first is also node i's compliance (displacement per unit force in a step).
+#[derive(Clone, Debug)]
+pub struct BodyImage {
+    pub name: String,
+    pub n: usize,
+    pub h: f64,
+    pub mass: Vec<f64>,
+    pub s0: Vec<f64>,
+    pub s1: f64,
+    pub cf: Vec<[f64; 4]>,
+    pub lap: CsrImage,
+    pub stiff: CsrImage,
+    pub tension: f64,
+    pub berger: f64,
+    pub bias: Vec<f64>,
+    pub vk: Option<VonKarmanImage>,
+    pub area: f64,
+    pub air_mass: f64,
+    pub w: Vec<f64>,
+    pub wp: Vec<f64>,
+    /// L w of the previous step (`lap` times `wp`).
+    pub lwp: Vec<f64>,
+    pub psi: f64,
+    pub r_prev: f64,
+    pub budget: f64,
+}
+
+/// A microphone's prepared taps: (body, node, whole-sample delay, weight on that sample, weight on
+/// the next) on surface acceleration, and (cavity, delay, weights) on port flow acceleration.
+#[derive(Clone, Debug)]
+pub struct MicImage {
+    pub taps: Vec<(usize, usize, usize, f64, f64)>,
+    pub ptaps: Vec<(usize, usize, f64, f64)>,
+    pub ring_len: usize,
+    pub unbaffled: Option<f64>,
+    pub hp: (f64, f64),
+}
+
+#[derive(Clone)]
+pub struct InstrumentImage {
+    pub rate: f64,
+    pub step_index: u64,
+    pub bodies: Vec<BodyImage>,
+    pub cavities: Vec<Cavity>,
+    pub rads: Vec<RadDamp>,
+    pub links: Vec<Link>,
+    pub contacts: Vec<Contact>,
+    pub frictions: Vec<Friction>,
+    pub strikes: Vec<Strike>,
+    pub drives: Vec<Drive>,
+    pub mics: Vec<MicImage>,
+}
+
+impl Csr {
+    fn image(&self) -> CsrImage {
+        // a matrix with no rows has no ptr[0]
+        let ptr = if self.ptr.is_empty() { vec![0; self.n + 1] } else { self.ptr.clone() };
+        CsrImage { ptr, col: self.col.clone(), val: self.val.clone() }
+    }
+}
+
+impl Body {
+    fn image(&mut self, k: f64) -> BodyImage {
+        self.coefs(k);
+        BodyImage {
+            name: self.name.clone(),
+            n: self.n,
+            h: self.h,
+            mass: self.mass.clone(),
+            s0: self.s0.clone(),
+            s1: self.s1,
+            cf: self.cf.clone(),
+            lap: self.lap.image(),
+            stiff: self.stiff.image(),
+            tension: self.tension,
+            berger: self.berger,
+            bias: self.bias.clone(),
+            vk: self.vk.as_ref().map(|v| VonKarmanImage { eh: v.eh, nb: v.nb.clone(), l0: v.l0.clone(), z0: v.z0.clone(), f: v.f.clone() }),
+            area: self.area,
+            air_mass: self.air_mass,
+            w: self.w.clone(),
+            wp: self.wp.clone(),
+            lwp: self.lwp.clone(),
+            psi: self.psi,
+            r_prev: self.r_prev,
+            budget: self.budget,
+        }
+    }
+
+    /// Solve the plate's Airy system A F = x in place (core numbering), with the factor every step
+    /// uses. False (and `x` untouched) for a body without von Karman coupling. Column j of A^-1 is
+    /// the solve of the j-th unit vector.
+    pub fn airy_solve(&self, x: &mut [f64]) -> bool {
+        match &self.vk {
+            Some(v) if x.len() == v.nb.len() => {
+                v.airy.solve(x);
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 // --------------------------------------------------------------------- decimation

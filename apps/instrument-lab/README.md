@@ -23,6 +23,7 @@ Two tracks, always labelled:
 | `src/live/` | live section UIs and typed clients for the engine workers |
 | `public/live/` | engine wasm + module workers + the AudioWorklet sink (static, unbundled; a build serves them under `live/<hash>/`, see Rebuilding) |
 | `engine-kit/`, `engine-piano/`, `engine-drum/` | the live engines (standalone cargo workspaces) |
+| `render-gpu/` | offline kit renders on an NVIDIA GPU when one is present (one persistent CUDA kernel stepping the exported fs-vkplate instrument; batches, chunks, both GPUs), on the CPU otherwise; see its README for the measured agreement and speed |
 | `public/live/mix-worklet.js`, `lane.js` | `fs-live-mix`: sums frame-stamped lanes from several engine Workers in lock-step with the AudioContext clock |
 | `tools/strandbar.py` | builds the Strandbar studio loop and the live engines' score and levels (`data/strandbar.json`) |
 | `tools/build_data.py` | turns a render campaign into `public/{audio,img,data,viz}` |
