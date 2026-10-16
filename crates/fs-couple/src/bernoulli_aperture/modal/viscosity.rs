@@ -109,6 +109,26 @@ fn solve_scaled(factor: &Cholesky, matrix: &[f64], scale: &[f64], rhs: &mut [f64
     Ok(())
 }
 impl ModalAperture {
+    pub(super) fn admit_linear_clock(&self) -> Result<(), AcousticRealizeError> {
+        let modes = &self.spec.modes;
+        let matrix = self.viscosity_matrix_n_s_m();
+        let area_sum = modes.iter().map(|m| m.pressure_area_m2.abs()
+            / fs_math::det::sqrt(m.mass_kg)).sum::<f64>();
+        for (i,m) in modes.iter().enumerate() {
+            let root_mass = fs_math::det::sqrt(m.mass_kg);
+            let resistance = if let Some(c) = matrix {
+                modes.iter().enumerate().map(|(j,other)| c[i*modes.len()+j].abs()
+                    / root_mass / fs_math::det::sqrt(other.mass_kg)).sum::<f64>()
+            } else { m.damping_n_s_m / m.mass_kg };
+            // Full linear-generator norm, including characteristic-load Z A A^T.
+            let rate = fs_math::det::sqrt(m.stiffness_n_m / m.mass_kg) + resistance
+                + self.spec.impedance_pa_s_m3 * m.pressure_area_m2.abs() / root_mass * area_sum;
+            fs_phs::linear_exact::admit_midpoint_band(rate, self.spec.time_step_s)
+                .map_err(AcousticRealizeError::TimeResolution)?;
+        }
+        Ok(())
+    }
+
     /// Select a complete constant C [N s/m], row-major in these physical modes.
     /// Its force is -C v_mid and its loss is dt*v_mid^T C v_mid in the existing
     /// pressure/contact solve. Mass, stiffness, force/pressure/gap projections,
@@ -133,6 +153,7 @@ impl ModalAperture {
             return Err(invalid("full modal viscosity requires one unadvanced attachment"));
         }
         self.viscosity = Some(ApertureViscosity::new(&self.spec, matrix_n_s_m, gate)?);
+        self.admit_linear_clock()?;
         Ok(self)
     }
     /// Complete admitted C in the source coordinates; None means diagonal loss.

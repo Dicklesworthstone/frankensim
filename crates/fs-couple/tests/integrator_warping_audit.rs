@@ -124,13 +124,13 @@ const PATHS: &[AuditRow] = &[
     AuditRow {
         path: "bernoulli_aperture::ModalAperture",
         integrator: Integrator::GonzalezMidpoint,
-        bound: None,
+        bound: Some(fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP),
         owner: Owner::Modal,
     },
     AuditRow {
         path: "bernoulli_aperture::uniform (through ModalAperture)",
         integrator: Integrator::GonzalezMidpoint,
-        bound: None,
+        bound: Some(fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP),
         owner: Owner::Modal,
     },
     AuditRow {
@@ -690,6 +690,57 @@ fn paired_aperture_refuses_beyond_one_cent_resolved_band() {
                 fs_phs::linear_exact::ResolvedBandError::Outside { .. }
             )
         )
+    ));
+}
+
+#[test]
+fn modal_aperture_includes_full_viscosity_in_the_one_cent_band() {
+    use fs_couple::acoustic_realize::AcousticRealizeError;
+    let cap = fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP;
+    let make = |dt| {
+        ModalAperture::new(
+            ModalApertureSpec {
+                rest_opening_m: REST,
+                width_m: 0.01,
+                modes: vec![
+                    ApertureMode {
+                        mass_kg: 1.0,
+                        stiffness_n_m: 1.0,
+                        damping_n_s_m: 0.0,
+                        pressure_area_m2: 0.0,
+                        gap_projection: 1.0,
+                        force_projection: [0.0; 2]
+                    };
+                    2
+                ],
+                density_kg_m3: 1.2,
+                impedance_pa_s_m3: 1e6,
+                time_step_s: dt,
+                max_steps: 1,
+                limits: limits(),
+            },
+            vec![BladeState::default(); 2],
+            obstacle(),
+        )
+    };
+    assert!(make(cap).is_ok());
+    assert!(matches!(
+        make(cap + 1e-12),
+        Err(AcousticRealizeError::TimeResolution(_))
+    ));
+    // A full off-diagonal C changes the complete pole norm although each
+    // bare mechanical frequency is still one radian per second.
+    assert!(
+        make(cap / 2.5)
+            .unwrap()
+            .with_viscosity(vec![1.0, 0.5, 0.5, 1.0], &CancelGate::new())
+            .is_ok()
+    );
+    assert!(matches!(
+        make(cap / 2.5 + 1e-12)
+            .unwrap()
+            .with_viscosity(vec![1.0, 0.5, 0.5, 1.0], &CancelGate::new()),
+        Err(AcousticRealizeError::TimeResolution(_))
     ));
 }
 
