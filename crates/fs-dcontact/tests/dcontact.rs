@@ -175,8 +175,12 @@ fn g1_hertz_sphere_impact_contact_time_matches_johnson() {
         0.4,
     );
     let reference = 2.943 * maximum / incoming;
-    let mut times = [0.0; 3];
-    for (i, cells) in [32, 64, 128].into_iter().enumerate() {
+    // Retain the original three-rung gate while exposing finer rungs to
+    // distinguish an event error from a pre-asymptotic discretization band.
+    // Native results, not a presumed method order, must adjudicate that claim.
+    let mut times = [0.0; 7];
+    let rungs = [32, 64, 128, 256, 512, 1024, 2048];
+    for (i, cells) in rungs.into_iter().enumerate() {
         let dt = reference / f64::from(cells);
         let (time, restitution) = isolated_impact(mass, k, 0.0, incoming, dt);
         times[i] = time;
@@ -186,12 +190,22 @@ fn g1_hertz_sphere_impact_contact_time_matches_johnson() {
             (time / reference - 1.0).abs()
         );
     }
+    for (i, window) in times.windows(3).enumerate() {
+        let observed = ((window[0] - window[1]).abs() / (window[1] - window[2]).abs()).log2();
+        println!(
+            "{{\"suite\":\"normal-contact\",\"case\":\"hertz-impact-order\",\"coarse_cells\":{},\"middle_cells\":{},\"fine_cells\":{},\"observed_order\":{observed},\"order_gate\":1.8}}",
+            rungs[i],
+            rungs[i + 1],
+            rungs[i + 2]
+        );
+    }
     let order = ((times[0] - times[1]).abs() / (times[1] - times[2]).abs()).log2();
     assert!(
         order.is_finite() && order >= 1.8,
         "contact time order {order}: {times:?}"
     );
     assert!((times[2] / reference - 1.0).abs() <= 0.005);
+    assert!((times[6] / reference - 1.0).abs() <= 0.005);
 }
 
 #[test]
