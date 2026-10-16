@@ -58,9 +58,9 @@ fn exterior_load_reaches_the_inlet_without_replacing_internal_propagation() {
     for loss in [LossModel::Lossless, LossModel::Bessel] {
         // Independent assembly: external radiation -> heavy-gas tail -> air head.
         let load = fs_duct::compact_radiation_impedance(Termination::UnflangedOpen, &a, 0.001, omega).unwrap();
-        let tail = input_impedance_load(&Duct { segments: vec![geometry.segments[1]] }, &b,
+        let tail = input_impedance_load(&Duct { segments: vec![geometry.segments[1].clone()] }, &b,
             omega, loss, load, None).unwrap();
-        let head = input_impedance_load(&Duct { segments: vec![geometry.segments[0]] }, &a,
+        let head = input_impedance_load(&Duct { segments: vec![geometry.segments[0].clone()] }, &a,
             omega, loss, tail.impedance, None).unwrap();
         let r = actual.response(omega, loss, Termination::UnflangedOpen, None).unwrap();
         assert_eq!(r.impedance, head.impedance);
@@ -122,9 +122,9 @@ fn incoherent_pressure_mismatched_and_two_medium_open_chimneys_refuse() {
     assert!(baseline.clone().with_exterior_gas(bad).is_err());
     assert_eq!(*baseline.exterior_gas(), b);
     for state in [HoleState::Closed, HoleState::Open, HoleState::Vent(0.3)] {
-        let geometry = Duct { segments: vec![duct().segments[0],
+        let geometry = Duct { segments: vec![duct().segments[0].clone(),
             Segment::ToneHole { hole_radius: 0.0004, chimney_height: 0.001,
-                bore_radius: 0.001, state }, duct().segments[1]] };
+                bore_radius: 0.001, state }, duct().segments[1].clone()] };
         let region = RegionalDuct::new(&geometry, &[a, a, b]).unwrap();
         assert!(region.clone().with_exterior_gas(a).is_ok());
         assert_eq!(region.with_exterior_gas(b).is_ok(), matches!(state, HoleState::Closed));

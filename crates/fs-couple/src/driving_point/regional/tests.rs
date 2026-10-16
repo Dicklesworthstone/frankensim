@@ -86,9 +86,9 @@ fn terminal_radiation_and_viscothermal_losses_use_their_actual_media() {
     let gases = [air(), co2()];
     let regional = RegionalDuct::new(&duct, &gases).unwrap();
     let omega = core::f64::consts::TAU*731.0;
-    let tail = input_impedance_wall(&Duct { segments: vec![duct.segments[1]] }, &gases[1],
+    let tail = input_impedance_wall(&Duct { segments: vec![duct.segments[1].clone()] }, &gases[1],
         omega, LossModel::Bessel, Termination::UnflangedOpen, None).unwrap();
-    let head = input_impedance_load(&Duct { segments: vec![duct.segments[0]] }, &gases[0],
+    let head = input_impedance_load(&Duct { segments: vec![duct.segments[0].clone()] }, &gases[0],
         omega, LossModel::Bessel, tail.impedance, None).unwrap();
     let result = regional.response(omega, LossModel::Bessel, Termination::UnflangedOpen, None).unwrap();
     assert_eq!(result.mouth_ka.to_bits(), tail.mouth_ka.to_bits());

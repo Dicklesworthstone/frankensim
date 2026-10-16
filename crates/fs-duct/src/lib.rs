@@ -1771,7 +1771,7 @@ mod tests {
             length: 0.30,
         };
         let duct = Duct {
-            segments: vec![cone],
+            segments: vec![cone.clone()],
         };
         let z_local = input_impedance(&duct, &state, omega, LossModel::Bessel, Termination::Closed)
             .expect("local")

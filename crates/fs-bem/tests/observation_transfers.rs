@@ -640,7 +640,7 @@ fn fir_ladder_is_scale_invariant_and_rejects_unresolved_tails() {
     let d = declaration();
     let reference = analytic_bake(&d);
     for scale in [1e-180, 1e180] {
-        let sample = |w| {
+        let sample = |w: f64| {
             Ok(analytic_sphere(C64::new(0.0, -w), A, R, (R - A) / C)
                 .into_iter()
                 .map(|z| z.scale(scale))
