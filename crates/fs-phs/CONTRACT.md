@@ -72,6 +72,18 @@ closure of IRP M5.2-W1; native execution remains the remote verification gate.
   identification, frequency-domain validity or thermal evolution is inferred.
 - `discrete_gradient` — the PINNED Gonzalez midpoint formula (order
   2): satisfies `dg . (b - a) = H(b) - H(a)` identically.
+  `Storage::midpoint_energy_remainder` optionally supplies a cancellation-stable
+  evaluation of its original correction numerator. It must account for EVERY
+  stored-energy contribution and the supplied actual midpoint; `None` retains
+  endpoint-energy subtraction. Both the canonical residual and analytic Newton
+  use this same value. This changes numerical evaluation, never the Hamiltonian,
+  loss law, solver request, rounding-floor policy or iteration cap. fs-dcontact's
+  power-law implementation requires a current borrowed quadratic inner matrix
+  (or a complete stable inner callback) and retains the total contact storage's
+  nonlinear status.
+  Native HC regression and independent double-double remainder tests are the
+  qualification gates; this hook is not authority to replace an unknown energy
+  contribution by zero or waive algebraic admission.
 - `step` — implicit discrete-gradient step (approximate-Newton with
   central-difference Jacobian and state-relative target 1e-13). On
   stagnation the best iterate must pass the same quantitative algebraic
