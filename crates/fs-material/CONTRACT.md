@@ -163,6 +163,30 @@ homogenization, the P2 milestone.
   constants and refuses a non-positive-definite compliance. Spatial material
   orientation remains an independently identity-bound field owned by the
   geometry/solid consumer; no chemistry name implies isotropy or a grain axis.
+  `resolve_orthotropic_elastic_state_point_from_reference_ratios` derives E/G
+  as the exact binary64 products of receipted E_L and the source's ratios.
+  L/R/T map to axes1/2/3, with shears in G_LR,G_RT,G_TL order. The caller
+  declares Full3d or an ordered material plane and the MajorRatios Poisson
+  rule. Full3d returns the existing complete law; a plane result has only its
+  two Young moduli, major Poisson value and shear modulus, never fabricated
+  out-of-plane constants. Missing required ratios/density refuse by name.
+  Independently measured minor Poisson ratios for requested pairs, when
+  present, retain receipts and signed relative reciprocity residuals; they
+  are never averaged into the major set. Unrepresentable residuals refuse.
+  `ReferenceRatioDerivation` uses domain
+  `org.frankensim.fs-material.orthotropic-reference-ratio.v1` to bind source
+  bundle, set, axes, rule, strain limit and residuals. Canonical-key states
+  retain their existing bundle identity and have no ratio derivation.
+  Derived products are not inserted as fake source claims. FPL E_L remains
+  the quasi-static reference modulus with its original moisture validity and
+  Unstated uncertainty; no dynamic correction, moisture law, spatial grain
+  orientation or propagated covariance is inferred. This is bounded exact
+  algebra after ordinary source resolution, with no iterative cancellation
+  claim. G0 tests cover compliance roundtrip2e-15 (8ulp), product/receipt bits,
+  reciprocity, plane support and refusals; the source-to-consumer lane checks
+  all23 FPL packs (12 Full3d,18 Plane12) and bitwise plate section/mode controls.
+  Native qualification is recorded separately; these tests are not specimen
+  validation. No material pack schema or source row is changed.
   `resolve_elastic_tensor_state_point` resolves density and all 36 explicitly
   addressed coefficients from one card at one supported point. The requested
   keys must share a source tensor identity, basis/frame, notation, order and

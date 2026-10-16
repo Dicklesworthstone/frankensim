@@ -20,6 +20,9 @@ use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
 use crate::elastic::OrthotropicElastic;
 
+mod reference_ratios;
+pub use reference_ratios::*;
+
 pub use fs_matdb::{
     CorrelationUnknownReason, ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation,
     ElasticTensorOrder, ElasticTensorSymmetry, JointCorrelation, JointUsageReceipt,
@@ -1965,6 +1968,7 @@ pub struct OrthotropicElasticStatePoint {
     resolved: ResolvedMaterialStatePoint,
     density_kg_m3: f64,
     law: OrthotropicElastic,
+    derivation: Option<ReferenceRatioDerivation>,
 }
 
 impl OrthotropicElasticStatePoint {
@@ -1984,6 +1988,12 @@ impl OrthotropicElasticStatePoint {
     #[must_use]
     pub const fn law(&self) -> &OrthotropicElastic {
         &self.law
+    }
+
+    /// Explicit ratio-to-engineering-constant derivation, absent for canonical cards.
+    #[must_use]
+    pub const fn derivation(&self) -> Option<&ReferenceRatioDerivation> {
+        self.derivation.as_ref()
     }
 }
 
@@ -2050,6 +2060,7 @@ pub fn resolve_orthotropic_elastic_state_point(
         density_kg_m3: value(DENSITY_PROPERTY),
         resolved,
         law,
+        derivation: None,
     })
 }
 

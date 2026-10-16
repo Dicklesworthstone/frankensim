@@ -1152,7 +1152,7 @@ impl AssemblyOptions {
 ///
 /// # Errors
 /// [`PlateError`] on degenerate elements, bad sections, or bad stiffeners.
-#[allow(clippy::too_many_lines)] // one coherent assembly pipeline
+#[allow(clippy::too_many_lines)]// one coherent assembly pipeline
 pub fn assemble(
     mesh: &PlateMesh,
     section: &PlateSection,
@@ -1175,7 +1175,7 @@ pub fn assemble(
 ///
 /// # Errors
 /// Invalid mesh/section data, section counts, supports, or stiffeners refuse.
-#[allow(clippy::too_many_lines)] // one coherent assembly pipeline
+#[allow(clippy::too_many_lines)]// one coherent assembly pipeline
 pub fn assemble_with_sections(
     mesh: &PlateMesh,
     sections: PlateSectionField<'_>,
@@ -1206,7 +1206,7 @@ pub enum TransverseMass {
     EdgeCubic,
 }
 
-#[allow(clippy::too_many_lines)] // the same assembly pipeline with an explicit mass integral
+#[allow(clippy::too_many_lines)]// the same assembly pipeline with an explicit mass integral
 fn assemble_with_sections_inner(
     mesh: &PlateMesh,
     sections: PlateSectionField<'_>,
@@ -2398,7 +2398,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)] // one coherent literature-case gate
+    #[allow(clippy::too_many_lines)]// one coherent literature-case gate
     fn olson_hazell_stiffened_panel_matches_literature() {
         // LITERATURE CASE — Olson & Hazell (1977), the classical clamped
         // square integrally rib-stiffened plate: 203 mm × 203 mm × 1.37 mm,
@@ -2544,7 +2544,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp)] // the front doors must be BIT-identical
+    #[allow(clippy::float_cmp)]// the front doors must be BIT-identical
     fn dimensioned_front_matches_raw_and_pins_spruce_d_matrix() {
         // Spruce-like constants (the crate's orthotropic fixture). The
         // qty front doors must be bit-identical to the raw constructors.
@@ -2629,8 +2629,12 @@ mod tests {
         use fs_blake3::hash_domain;
         use fs_evidence::ValidityDomain;
         use fs_matdb::{
-            ClaimSet, InterpolationPolicy, ObservationDataset, PropertyClaim, PropertyKey,
-            PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
+            ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, ObservationDataset,
+            PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+        };
+        use fs_material::state_point::{
+            MaterialPropertySelection, OrthotropicRequirementSet, PoissonReciprocityRule,
+            resolve_orthotropic_elastic_state_point_from_reference_ratios,
         };
         use fs_qty::Dims;
 
@@ -2684,32 +2688,48 @@ mod tests {
         let at_12pct = QueryPoint::new()
             .with("moisture_content", 12.0)
             .expect("finite query point");
-        let fetch = |name: &str| -> f64 {
-            let answer = db
-                .query(name, &at_12pct, SelectionPolicy::SingleClaimOnly)
-                .expect("receipted query answers");
-            db.verify_receipt(&answer.receipt)
-                .expect("receipt verifies");
-            answer.evidence.value.value
-        };
-        let el = fetch("young_modulus_longitudinal");
-        let er = el * fetch("er_over_el");
-        let et = el * fetch("et_over_el");
-        let glr = el * fetch("glr_over_el");
-        let glt = el * fetch("glt_over_el");
-        let grt = el * fetch("grt_over_el");
-        let nu_lr = fetch("nu_lr");
-        let nu_lt = fetch("nu_lt");
-        let nu_rt = fetch("nu_rt");
-        let rho = fetch("density");
-
-        // Quartersawn top: material axis 1 = L (grain), axis 2 = R — the
-        // axis-convention contract. g order is (G12, G23, G31).
-        let law =
-            OrthotropicElastic::new([el, er, et], [nu_lr, nu_lt, nu_rt], [glr, grt, glt], 1.0)
-                .expect("spruce compliance is admissible");
-        let sec = PlateSection::orthotropic_qty(&law, Length::new(0.003), Density::new(rho))
+        let card = MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "test-fixture: Sitka spruce source-table demo".into(),
+                phase: "clear wood".into(),
+                process: "FPL-GTR-282 transcription, 12% MC".into(),
+                revision: 0,
+            },
+            db,
+            vec![],
+        )
+        .unwrap();
+        let material = resolve_orthotropic_elastic_state_point_from_reference_ratios(
+            &card,
+            &at_12pct,
+            MaterialPropertySelection::SingleClaimOnly,
+            1.0,
+            OrthotropicRequirementSet::Full3d,
+            PoissonReciprocityRule::MajorRatios,
+        )
+        .expect("all required sourced constants are present");
+        for p in material.resolved().properties() {
+            card.claims().verify_receipt(&p.answer().receipt).unwrap();
+        }
+        let rho = material.density_kg_m3();
+        let law = material.law().expect("requested full 3-D law");
+        let sec = PlateSection::orthotropic_qty(law, Length::new(0.003), Density::new(rho))
             .expect("section from db values");
+        // Independent pre-adapter arithmetic is a test-only control. The
+        // consuming path above obtains every value through the new adapter.
+        let legacy_law = OrthotropicElastic::new(
+            [1.188e10, 1.188e10 * 0.078, 1.188e10 * 0.043],
+            [0.372, 0.467, 0.435],
+            [1.188e10 * 0.064, 1.188e10 * 0.003, 1.188e10 * 0.061],
+            1.0,
+        )
+        .unwrap();
+        let legacy_sec =
+            PlateSection::orthotropic_qty(&legacy_law, Length::new(0.003), Density::new(448.0))
+                .unwrap();
+        assert_eq!(sec.d.map(f64::to_bits), legacy_sec.d.map(f64::to_bits));
+        assert_eq!(sec.density.to_bits(), legacy_sec.density.to_bits());
+        assert_eq!(sec.thickness.to_bits(), legacy_sec.thickness.to_bits());
 
         // Guitar-top-proportioned SS rectangle, 0.5 m x 0.4 m x 3 mm.
         let (a, b) = (0.5, 0.4);
@@ -2741,6 +2761,40 @@ mod tests {
             &SliceOptions::default(),
         )
         .expect("modes");
+        let legacy_model = assemble(
+            &mesh,
+            &legacy_sec,
+            &boundary,
+            &[],
+            &AssemblyOptions {
+                pretension: 0.0,
+                support: EdgeSupport::SimplySupported,
+            },
+        )
+        .unwrap();
+        let legacy_rep = modes(
+            &legacy_model,
+            (0.5 * w11 * w11, 1.5 * w11 * w11),
+            &SliceOptions::default(),
+        )
+        .unwrap();
+        let old_bits: Vec<_> = legacy_rep
+            .modes
+            .iter()
+            .map(|m| m.lambda.to_bits())
+            .collect();
+        assert_eq!(
+            rep.modes
+                .iter()
+                .map(|m| m.lambda.to_bits())
+                .collect::<Vec<_>>(),
+            old_bits
+        );
+        println!(
+            "{{\"suite\":\"irp-s0\",\"case\":\"FPL-adapter-bitwise-control\",\"old_section_d_bits\":{:?},\"old_mode_lambda_bits\":{:?},\"verdict\":\"pass\"}}",
+            legacy_sec.d.map(f64::to_bits),
+            old_bits
+        );
         assert_eq!(rep.expected, 1, "isolated fundamental");
         let got = rep.modes[0].lambda.sqrt();
         let rel = (got - w11).abs() / w11;

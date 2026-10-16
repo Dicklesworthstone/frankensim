@@ -5,6 +5,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 readonly REPO_ROOT
 readonly TEST_FILE="${REPO_ROOT}/xtask/tests/matdb_pack_cli.rs"
+readonly MATERIAL_SOURCE_HOST="$(uname -n)"
+readonly MATERIAL_SOURCE_GIT_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 readonly -a EXPECTED_TESTS=(
   "common_material_acquisition::g0_g3_cryogenic_aluminum_copper_curves_and_discovery"
   "common_material_acquisition::g0_g3_iapws_liquid_water_curves_and_discovery"
@@ -14,6 +16,7 @@ readonly -a EXPECTED_TESTS=(
   "common_material_acquisition::g1_g3_sourced_warm_316_reaches_conduction"
   "common_material_acquisition::g0_g3_stainless_thermomechanical_envelope"
   "common_material_acquisition::g1_g3_sourced_silicon_tensor_reaches_oriented_solid"
+  "common_material_acquisition::g1_g3_sourced_fpl_tonewood_ratios_reach_orthotropic_state"
   "common_material_acquisition::g1_g3_sourced_dry_air_reaches_acoustic_loss"
   "common_material_acquisition::g1_g3_sourced_metal_profiles_reach_thermoelastic_plate"
   "common_material_acquisition::g1_g3_sourced_conductors_reach_circuit_dissipation"
@@ -61,6 +64,7 @@ write_summary() {
   {
     printf '{\n  "schema":"frankensim.material-sources.e2e.v1",\n'
     printf '  "started_utc":"%s",\n' "$STARTED_UTC"
+    printf '  "host":"%s",\n  "git_head":"%s",\n' "$MATERIAL_SOURCE_HOST" "$MATERIAL_SOURCE_GIT_HEAD"
     printf '  "producer_exit":%s,\n' "$producer_exit"
     printf '  "verdict":"%s",\n' "$verdict"
     printf '  "command_file":"command.txt",\n  "stdout_log":"stdout.log",\n'
@@ -82,8 +86,8 @@ run() {
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   STARTED_UTC="$started"
   export STARTED_UTC
-  printf '{"utc":"%s","event":"start","expected_test_count":%s}\n' \
-    "$started" "${#EXPECTED_TESTS[@]}" >"${output_dir}/events.jsonl"
+  printf '{"utc":"%s","event":"start","host":"%s","git_head":"%s","expected_test_count":%s}\n' \
+    "$started" "$MATERIAL_SOURCE_HOST" "$MATERIAL_SOURCE_GIT_HEAD" "${#EXPECTED_TESTS[@]}" >"${output_dir}/events.jsonl"
 
   local -a command
   if [[ -n "${MATDB_PACK_TEST_BIN:-}" ]]; then
