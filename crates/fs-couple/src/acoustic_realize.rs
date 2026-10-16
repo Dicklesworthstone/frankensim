@@ -147,7 +147,7 @@ pub struct RealizedAssembly {
 pub fn realize_assembly(
     assembly: &AcousticAssembly,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
-    realize_assembly_inner(assembly, None, None)
+    realize_assembly_inner(assembly, None, None, None)
 }
 
 /// Realize the same assembly in an explicitly supplied gas state.
@@ -170,7 +170,28 @@ pub fn realize_assembly_with_gas(
     gas: &GasState,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     validate_external_gas(gas)?;
-    realize_assembly_inner(assembly, None, Some(*gas))
+    realize_assembly_inner(assembly, None, Some(*gas), None)
+}
+
+/// Realize a caller-resolved gas with an explicit observer constitutive law.
+/// NASA-9 producers use this path: ISO applicability is a caller assertion,
+/// never inferred from numerical equality with a legacy atmosphere. Invalid
+/// declared ISO conditions refuse instead of selecting a different law.
+pub fn realize_assembly_with_gas_and_absorption(
+    assembly: &AcousticAssembly,
+    gas: &GasState,
+    absorption: crate::air_path::GasAbsorptionModel,
+) -> Result<RealizedAssembly, AcousticRealizeError> {
+    validate_external_gas(gas)?;
+    // Validate the selected law before expensive physical stepping.
+    crate::air_path::absorb_pressure_history_with_model(
+        &mut [],
+        1.0 / f64::from(assembly.sample_rate_hz),
+        assembly.listener.distance_m,
+        gas,
+        absorption,
+    )?;
+    realize_assembly_inner(assembly, None, Some(*gas), Some(absorption))
 }
 
 /// Realize an assembly with a linear plate chart, including regional materials
@@ -191,7 +212,7 @@ pub fn realize_assembly_with_plate_chart(
             what: "chart assembly requires the uniform plate description to be absent",
         });
     }
-    realize_assembly_inner(assembly, Some((chart, options)), None)
+    realize_assembly_inner(assembly, Some((chart, options)), None, None)
 }
 
 /// Plate-chart variant of realize_assembly_with_gas. Geometry/material
@@ -212,7 +233,7 @@ pub fn realize_assembly_with_plate_chart_and_gas(
         });
     }
     validate_external_gas(gas)?;
-    realize_assembly_inner(assembly, Some((chart, options)), Some(*gas))
+    realize_assembly_inner(assembly, Some((chart, options)), Some(*gas), None)
 }
 
 #[allow(clippy::too_many_lines)]// one coherent realization dispatcher
@@ -220,6 +241,7 @@ fn realize_assembly_inner(
     assembly: &AcousticAssembly,
     chart: Option<(&fs_plate::PlateChart, &PlateChartRadiation)>,
     gas_override: Option<GasState>,
+    absorption: Option<crate::air_path::GasAbsorptionModel>,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     if assembly.string.is_none() && assembly.duct.is_none() {
         return Err(AcousticRealizeError::InvalidDescription {
@@ -297,7 +319,7 @@ fn realize_assembly_inner(
             n,
         )?;
         add_in_place(&mut pressure_pa, &hist);
-        return Ok(finish_observer(assembly, &gas, pressure_pa));
+        return finish_observer(assembly, &gas, pressure_pa, absorption);
     }
     if assembly.string.is_some() && assembly.duct.is_some() {
         if assembly
@@ -305,9 +327,9 @@ fn realize_assembly_inner(
             .as_ref()
             .is_some_and(|d| bore_spec(d).is_some())
         {
-            return realize_coupled_ode(assembly, &gas, &mut bodies, n);
+            return realize_coupled_ode(assembly, &gas, &mut bodies, n, absorption);
         }
-        return realize_coupled(assembly, &gas, &mut bodies, n);
+        return realize_coupled(assembly, &gas, &mut bodies, n, absorption);
     }
     if let Some(string) = &assembly.string {
         if assembly.pluck.is_none() && assembly.bow.is_none() {
@@ -334,7 +356,7 @@ fn realize_assembly_inner(
                 n,
             )?;
             add_in_place(&mut pressure_pa, &hist);
-            return Ok(finish_observer(assembly, &gas, pressure_pa));
+            return finish_observer(assembly, &gas, pressure_pa, absorption);
         }
         let hist = realize_string(
             string,
@@ -379,7 +401,7 @@ fn realize_assembly_inner(
         };
         add_in_place(&mut pressure_pa, &hist);
     }
-    Ok(finish_observer(assembly, &gas, pressure_pa))
+    finish_observer(assembly, &gas, pressure_pa, absorption)
 }
 
 /// One-way string (fixed-fixed, `φ(0)=0`) plus an
@@ -395,6 +417,7 @@ fn realize_coupled_ode(
     gas: &GasState,
     plates: &mut PlateBank,
     n: usize,
+    absorption: Option<crate::air_path::GasAbsorptionModel>,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     let string = assembly.string.as_ref().expect("checked");
     let twin = secondary_string(string, (1.0 + string.polarization_detune).powi(2));
@@ -511,7 +534,7 @@ fn realize_coupled_ode(
                 + chain_inlet_pressure(&body, &rec.x, n_plate);
             x_body = rec.x;
         }
-        return Ok(finish_observer(assembly, gas, out));
+        return finish_observer(assembly, gas, out, absorption);
     }
     let mut members = vec![linear_string_member(
         string,
@@ -572,7 +595,7 @@ fn realize_coupled_ode(
             + chain_inlet_pressure(&body, &rec.x, n_plate);
         x_body = rec.x;
     }
-    Ok(finish_observer(assembly, gas, out))
+    finish_observer(assembly, gas, out, absorption)
 }
 
 #[allow(clippy::too_many_arguments)]// one coherent chain step record
@@ -724,6 +747,7 @@ fn realize_coupled(
     gas: &GasState,
     plates: &mut PlateBank,
     n: usize,
+    absorption: Option<crate::air_path::GasAbsorptionModel>,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     use crate::driving_point::characteristic_line;
     use crate::reed_bore::solve_reed_wave;
@@ -771,7 +795,7 @@ fn realize_coupled(
     .map_err(map_drive)?;
     let mut texture = TextureDrive::try_new(assembly.contact_texture)?;
     if string.axial_stiffness_n > 0.0 || string.relaxation_bending.is_some() {
-        return realize_coupled_kc(assembly, gas, plates, n, fitted, zc, area, &mut texture);
+        return realize_coupled_kc(assembly, gas, plates, n, fitted, zc, area, &mut texture, absorption);
     }
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
     let mut members = vec![linear_string_member(
@@ -859,7 +883,7 @@ fn realize_coupled(
         p += plates.drive_and_radiate(fb + p_bore * area, dt, gas.density, listener_m)?;
         out[i] = p;
     }
-    Ok(finish_observer(assembly, gas, out))
+    finish_observer(assembly, gas, out, absorption)
 }
 
 /// Shared clock with a Kirchhoff–Carrier string (EA > 0).
@@ -873,6 +897,7 @@ fn realize_coupled_kc(
     zc: f64,
     area: f64,
     texture: &mut TextureDrive,
+    absorption: Option<crate::air_path::GasAbsorptionModel>,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     use crate::reed_bore::solve_reed_wave;
     let string = assembly.string.as_ref().expect("checked");
@@ -960,7 +985,7 @@ fn realize_coupled_kc(
         p += plates.drive_and_radiate(fb + p_bore * area, dt, gas.density, listener_m)?;
         out[i] = p;
     }
-    Ok(finish_observer(assembly, gas, out))
+    finish_observer(assembly, gas, out, absorption)
 }
 
 /// Encode the realization as PCM16 WAV.
@@ -1041,29 +1066,40 @@ fn finish_observer(
     assembly: &AcousticAssembly,
     gas: &GasState,
     mut pressure_pa: Vec<f64>,
-) -> RealizedAssembly {
+    absorption: Option<crate::air_path::GasAbsorptionModel>,
+) -> Result<RealizedAssembly, AcousticRealizeError> {
     let dt = 1.0 / f64::from(assembly.sample_rate_hz);
-    // ISO 9613-1 is only valid for atmospheric air. If this exact state did
-    // not come from the scenario AmbientGas declaration, deliberately pass an
-    // invalid humidity so absorb_pressure_history selects its documented
-    // Stokes-Kirchhoff generic-gas fallback at every frequency bin.
-    let relative_humidity = if gas_state(assembly.ambient).ok().as_ref() == Some(gas) {
-        assembly.ambient.relative_humidity
+    if let Some(model) = absorption {
+        crate::air_path::absorb_pressure_history_with_model(
+            &mut pressure_pa,
+            dt,
+            assembly.listener.distance_m,
+            gas,
+            model,
+        )?;
     } else {
-        f64::NAN
-    };
-    crate::air_path::absorb_pressure_history(
-        &mut pressure_pa,
-        dt,
-        assembly.listener.distance_m,
-        gas,
-        relative_humidity,
-    );
-    RealizedAssembly {
+        // ISO 9613-1 is only valid for atmospheric air. If this exact state did
+        // not come from the scenario AmbientGas declaration, deliberately pass an
+        // invalid humidity so absorb_pressure_history selects its documented
+        // Stokes-Kirchhoff generic-gas fallback at every frequency bin.
+        let relative_humidity = if gas_state(assembly.ambient).ok().as_ref() == Some(gas) {
+            assembly.ambient.relative_humidity
+        } else {
+            f64::NAN
+        };
+        crate::air_path::absorb_pressure_history(
+            &mut pressure_pa,
+            dt,
+            assembly.listener.distance_m,
+            gas,
+            relative_humidity,
+        );
+    }
+    Ok(RealizedAssembly {
         sample_rate_hz: assembly.sample_rate_hz,
         pressure_pa,
         gas: *gas,
-    }
+    })
 }
 
 fn sample_count(rate_hz: u32, duration_s: f64) -> Result<usize, AcousticRealizeError> {
@@ -4929,6 +4965,83 @@ mod arbitrary_gas_realization_tests {
     use super::*;
     use fs_material::gas::{ConductivityModel, GasSpec};
     use fs_scenario::{Listener, Pluck};
+
+    #[test]
+    fn observer_absorption_law_is_explicit_for_thermochemical_gas() {
+        use crate::air_path::{GasAbsorptionModel, absorb_pressure_history_with_model};
+        let description = fixture();
+        let mut gas = gas_state(description.ambient).unwrap();
+        // Perturb a coherent coefficient set to distinguish an externally
+        // resolved state from the legacy atmosphere. This unit tests routing;
+        // source-backed NASA-9 numerical values are checked in matdb_pack_cli.
+        gas.specific_heat_cp *= 1.001;
+        gas.gamma = gas.specific_heat_cp / (gas.specific_heat_cp - gas.specific_gas_constant);
+        gas.sound_speed = det::sqrt(gas.gamma * gas.specific_gas_constant * gas.temperature);
+        gas.characteristic_impedance = gas.density * gas.sound_speed;
+        gas.prandtl = gas.dynamic_viscosity * gas.specific_heat_cp / gas.thermal_conductivity;
+        gas.validate_coherence().unwrap();
+        let history: Vec<_> = (0..128).map(|i| det::sin(i as f64 * 0.29)).collect();
+        let model = GasAbsorptionModel::Iso9613Air {
+            relative_humidity: 0.5,
+        };
+        let mut expected = history.clone();
+        absorb_pressure_history_with_model(
+            &mut expected,
+            1.0 / 16000.0,
+            description.listener.distance_m,
+            &gas,
+            model,
+        )
+        .unwrap();
+        let result = finish_observer(&description, &gas, history.clone(), Some(model)).unwrap();
+        assert_eq!(result.pressure_pa, expected);
+        let classical = finish_observer(
+            &description,
+            &gas,
+            history.clone(),
+            Some(GasAbsorptionModel::StokesKirchhoff),
+        )
+        .unwrap();
+        assert_ne!(result.pressure_pa, classical.pressure_pa);
+        assert!(
+            finish_observer(
+                &description,
+                &gas,
+                history.clone(),
+                Some(GasAbsorptionModel::Iso9613Air {
+                    relative_humidity: f64::NAN
+                })
+            )
+            .is_err()
+        );
+        let legacy = gas_state(description.ambient).unwrap();
+        let mut original = history.clone();
+        crate::air_path::absorb_pressure_history(
+            &mut original,
+            1.0 / 16000.0,
+            description.listener.distance_m,
+            &legacy,
+            description.ambient.relative_humidity,
+        );
+        assert_eq!(
+            finish_observer(&description, &legacy, history, None)
+                .unwrap()
+                .pressure_pa,
+            original
+        );
+        assert_eq!(
+            realize_assembly_with_gas_and_absorption(
+                &description,
+                &legacy,
+                GasAbsorptionModel::Iso9613Air {
+                    relative_humidity: description.ambient.relative_humidity
+                }
+            )
+            .unwrap()
+            .pressure_pa,
+            realize_assembly(&description).unwrap().pressure_pa
+        );
+    }
 
     fn fixture() -> AcousticAssembly {
         AcousticAssembly {
