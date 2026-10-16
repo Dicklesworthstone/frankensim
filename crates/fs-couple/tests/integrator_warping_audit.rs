@@ -603,6 +603,24 @@ fn impact_guard_cap_and_cap_plus_one() {
 }
 
 #[test]
+fn valve_angular_step_cap_and_cap_plus_one() {
+    use fs_couple::bernoulli_aperture::modal::material::admit_modal_angular_step;
+    assert!(admit_modal_angular_step(1.0, 1.0 / 192_000.0).is_ok());
+    assert!(matches!(
+        admit_modal_angular_step(1.0 + 1e-12, 1.0 / 192_000.0),
+        Err(fs_couple::acoustic_realize::AcousticRealizeError::InvalidDescription { .. })
+    ));
+    for (cap, dt) in [
+        (0.0, 1e-6),
+        (f64::NAN, 1e-6),
+        (1.0, 0.0),
+        (1.0, f64::INFINITY),
+    ] {
+        assert!(admit_modal_angular_step(cap, dt).is_err());
+    }
+}
+
+#[test]
 fn coupled_modal_connection_warping_vs_exact_eigenproblem() {
     // Two equal unit masses: K=[[w²+k,-k],[-k,w²+k]], antisymmetric
     // eigenvalue w²+2k = 1.2w². The fixture excites exactly that eigenspace.

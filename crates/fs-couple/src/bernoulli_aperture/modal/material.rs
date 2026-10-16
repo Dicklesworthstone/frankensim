@@ -49,6 +49,17 @@ pub struct MaterialModalPlate {
 fn poll(gate: &CancelGate) -> Result<(), AcousticRealizeError> {
     if gate.is_requested() { Err(AcousticRealizeError::Cancelled) } else { Ok(()) }
 }
+/// Admit the material adapter's declared angular cap before geometry work.
+/// Actual modes also need the renderer's stricter phase-resolution admission.
+pub fn admit_modal_angular_step(maximum_angular_step: f64, dt_s: f64)
+    -> Result<(), AcousticRealizeError>
+{
+    if !maximum_angular_step.is_finite() || maximum_angular_step <= 0.0
+        || maximum_angular_step > 1.0 || !dt_s.is_finite() || dt_s <= 0.0 {
+        return Err(invalid("material modal angular cap must be in (0,1] radians with a positive finite timestep"));
+    }
+    Ok(())
+}
 impl MaterialModalPlate {
     /// Exact immutable regional material/geometry/loss source.
     pub const fn source(&self) -> &ResolvedPlateChart { &self.source }
@@ -72,6 +83,7 @@ impl MaterialModalPlate {
         tensor: Option<(PlateViscosity, PlateViscosityLimits)>) -> Result<Self, AcousticRealizeError>
     {
         poll(gate)?;
+        admit_modal_angular_step(options.maximum_angular_step, dt)?;
         let mesh = &source.chart().mesh;
         let n = mesh.nodes.len();
         if !(1..=512).contains(&options.max_nodes) || !(1..=2048).contains(&options.max_triangles)
@@ -79,9 +91,7 @@ impl MaterialModalPlate {
             || options.reduction.n_modes == 0 || options.reduction.n_modes > MAX_MODES-first
             || options.slit_edges.is_empty() || options.slit_edges.len() > n
             || !options.maximum_trace_slope.is_finite() || options.maximum_trace_slope <= 0.0
-            || !options.maximum_slit_deviation_m.is_finite() || options.maximum_slit_deviation_m < 0.0
-            || !options.maximum_angular_step.is_finite() || options.maximum_angular_step <= 0.0
-            || options.maximum_angular_step > 1.0 || !dt.is_finite() || dt <= 0.0 {
+            || !options.maximum_slit_deviation_m.is_finite() || options.maximum_slit_deviation_m < 0.0 {
             return Err(invalid("material modal plate requires bounded geometry, modes, clock and spatial limits"));
         }
         let terms = n.checked_mul(options.reduction.n_modes+1)
