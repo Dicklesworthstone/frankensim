@@ -32,7 +32,9 @@
 //! so the fundamental locks where `Im Z = 0` and the threshold is
 //! insensitive to the e^{+-i omega t} conjugation choice between
 //! fs-orbit's synthesis and fs-duct's impedance; the port uses
-//! `1/Z` directly with this disclosure.
+//! `1/Z` directly with this disclosure. The dynamic lip has `s I`
+//! derivative rows, so its bore impedance MUST be conjugated from
+//! fs-duct's exp(-i omega t) to fs-orbit's exp(+i omega t).
 
 use fs_couple::reed_bore::realize_reed_bore;
 use fs_couple::thin_plate::PlateBank;
@@ -339,7 +341,10 @@ impl OrbitProblem for LipHb {
         .expect("bore impedance")
         .impedance;
         let zero = C64::new(0.0, 0.0);
-        // Rows 0,1: plain ODE (s I); row 2: bore admittance.
+        // Rows 0,1: plain ODE (s I), with exp(+i omega t) synthesis.
+        // The acoustic row must use that SAME convention: fs-duct
+        // returns exp(-i omega t) impedance. Conjugate only the load,
+        // keeping its resistance and the ODE derivative signs intact.
         vec![
             s,
             zero,
@@ -349,11 +354,90 @@ impl OrbitProblem for LipHb {
             zero, //
             zero,
             zero,
-            z.recip().scale(self.zc()),
+            z.conj().recip().scale(self.zc()),
         ]
     }
     fn autonomous(&self) -> bool {
         true
+    }
+}
+
+/// G1/G3: an open cylinder tends to Z=+i rho*c/S tan(omega*L/c)
+/// under exp(+i omega t), independently of any TMM implementation.
+/// A viscosity ladder checks that limit through the actual LipHb port;
+/// it does not claim an oracle for finite-loss ZK amplitudes.
+#[test]
+fn lip_hb_port_matches_laplace_cylinder_and_rejects_conjugation_flip() {
+    let start = std::time::Instant::now();
+    let radius = 0.006;
+    let length = 1.4;
+    let mass = 2.0e-3;
+    let lip_omega = TAU * 270.0;
+    for hz in [20.0, 30.0, 40.0] {
+        let omega = TAU * hz;
+        let mut previous_error = None;
+        for shear in [1.0e3, 1.0e4, 1.0e5] {
+            let mut gas = air();
+            // Manufactured vanishing-viscosity limit; all acceptance
+            // fixtures below still use the original physical air state.
+            gas.dynamic_viscosity = gas.density * omega * radius * radius / (shear * shear);
+            let theta = omega * length / gas.sound_speed;
+            let expected = C64::new(0.0, -fs_math::det::cos(theta) / fs_math::det::sin(theta));
+            let problem = LipHb {
+                duct: Duct {
+                    segments: vec![Segment::Cylinder { radius, length }],
+                },
+                gas,
+                mass_kg: mass,
+                stiffness_n_m: mass * lip_omega * lip_omega,
+                damping_n_s_m: mass * lip_omega / 10.0,
+                width_m: 7.0e-3,
+                rest_gap_m: 6.0e-4,
+                face_area_m2: 3.0e-4,
+                blowing_pressure_pa: 3_000.0,
+            };
+            let s = C64::new(0.0, omega);
+            let port = problem.port(s);
+            assert_eq!(port.len(), 9);
+            for (slot, &value) in port.iter().enumerate().take(8) {
+                assert_eq!(value, if slot == 0 || slot == 4 { s } else { C64::ZERO });
+            }
+            // Wall corrections vanish as 1/rv. This limit is well away
+            // from zeros/poles (theta=0.51..1.03); 16/rv bounds the
+            // leading Zc and cotangent corrections with a >4x margin.
+            let tolerance = 16.0 / shear;
+            let relative_error = |y: C64| (y - expected).abs() / expected.abs();
+            let agrees = |y: C64| relative_error(y) < tolerance;
+            let observed = port[8];
+            assert!(observed.re > 0.0, "passive bore resistance");
+            assert!(
+                agrees(observed),
+                "hz={hz} rv={shear}: {observed:?} vs {expected:?}"
+            );
+            let error = relative_error(observed);
+            if let Some(previous) = previous_error {
+                let ratio = previous / error;
+                assert!(
+                    (8.0..12.0).contains(&ratio),
+                    "1/rv convergence ratio {ratio}"
+                );
+            }
+            previous_error = Some(error);
+            // This is the pre-fix port: one missing (or one extra)
+            // conjugation. The SAME analytic acceptance predicate must
+            // reject it on every rung, not merely compare two adapters.
+            let flipped = observed.conj();
+            assert!(!agrees(flipped), "planted conjugation flip escaped");
+            assert!(relative_error(flipped) > 1.9);
+            if shear == 1.0e5 {
+                assert!(error < 1.0e-4);
+            }
+            println!(
+                "{{\"case\":\"lip-hb-laplace-convention\",\"hz\":{hz},\"axis\":\"shear\",\"rung\":{shear},\"relative_error\":{error:e},\"flip_error\":{:e},\"oracle\":\"analytic inviscid open cylinder\",\"tolerance\":{tolerance:e},\"verdict\":\"pass\",\"elapsed_ms\":{}}}",
+                relative_error(flipped),
+                start.elapsed().as_millis()
+            );
+        }
     }
 }
 
@@ -681,6 +765,7 @@ struct LossCounterfactual<'a, P> {
     length: f64,
     zc: f64,
     admittance_slot: usize,
+    conjugate_acoustic: bool,
     historical: bool,
 }
 
@@ -698,10 +783,10 @@ impl<P: OrbitProblem> OrbitProblem for LossCounterfactual<'_, P> {
         let mut port = self.inner.port(s);
         if self.historical {
             let omega = s.im.abs().max(TAU * DC_FLOOR_HZ);
-            port[self.admittance_slot] =
-                historical_cylinder_impedance(self.gas, self.radius, self.length, omega)
-                    .recip()
-                    .scale(self.zc);
+            let z = historical_cylinder_impedance(self.gas, self.radius, self.length, omega);
+            // Keep the convention fixed between the two loss laws.
+            let z = if self.conjugate_acoustic { z.conj() } else { z };
+            port[self.admittance_slot] = z.recip().scale(self.zc);
         }
         port
     }
@@ -773,6 +858,7 @@ fn diag_hb002_lock_scan() {
                 length: 1.4,
                 zc: problem.zc(),
                 admittance_slot: 8,
+                conjugate_acoustic: true,
                 historical,
             };
             let _ = write!(
@@ -849,6 +935,7 @@ fn diag_hb003_harmonic_convergence_table() {
                     length: 0.33,
                     zc: make.zc(),
                     admittance_slot: 0,
+                    conjugate_acoustic: false,
                     historical,
                 };
                 let law = if historical {
