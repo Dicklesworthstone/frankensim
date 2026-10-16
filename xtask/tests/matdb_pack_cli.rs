@@ -89,6 +89,167 @@ mod common_material_acquisition {
         );
     }
 
+    /// G1/G3: real FPL source packs reach the requested constitutive support.
+    #[test]
+    fn g1_g3_sourced_fpl_tonewood_ratios_reach_orthotropic_state() {
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_material::{plane_stress_viscosity::MaterialPlane, state_point::*};
+        const COMPLETE: [&str; 12] = [
+            "baldcypress",
+            "birch-yellow",
+            "cedar-western-red",
+            "douglas-fir-coast",
+            "hemlock-western",
+            "larch-western",
+            "redwood-old-growth",
+            "spruce-engelmann",
+            "spruce-sitka",
+            "sweetgum",
+            "walnut-black",
+            "yellow-poplar",
+        ];
+        let mut resolved_counts = [0; 2];
+        let mut missing_counts = [0; 3];
+        for slug in TONEWOOD_SEED_PACKS {
+            let started = std::time::Instant::now();
+            let manifest = workspace_path(&format!("data/matdb/seed-v1/{slug}/manifest.tsv"));
+            let out = fixture_dir().join(format!("{slug}.fsmatpk"));
+            let run = run_compiler(&manifest, &out);
+            assert!(
+                run.status.success(),
+                "{slug}: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            let bytes = fs::read(out).unwrap();
+            let decoded = NormalizedPack::from_bytes(&bytes).unwrap();
+            let pack = NormalizedPack::from_bytes_verified(decoded.content_hash(), &bytes).unwrap();
+            let pack_hash = pack.content_hash().to_hex();
+            let card = NormalizedMaterialCardPack::new(
+                MaterialStateId {
+                    chemistry: format!("source-pack:{slug}"),
+                    phase: "clear wood".into(),
+                    process: "FPL-GTR-282 ch5 source-table data at12%MC".into(),
+                    revision: 0,
+                },
+                pack,
+            )
+            .unwrap();
+            let species = slug.strip_suffix("-fpl-gtr282").unwrap();
+            let density_missing =
+                ["balsa", "mahogany-african", "mahogany-honduras"].contains(&species);
+            let rose = species.starts_with("rosewood-");
+            for (axis, (set, set_name)) in [
+                (OrthotropicRequirementSet::Full3d, "Full3d"),
+                (
+                    OrthotropicRequirementSet::Plane(MaterialPlane::Axes12),
+                    "Plane12",
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let wanted = if axis == 0 {
+                    COMPLETE.contains(&species)
+                } else {
+                    !density_missing && !rose
+                };
+                let at = QueryPoint::new().with("moisture_content", 12.0).unwrap();
+                let result = resolve_orthotropic_elastic_state_point_from_reference_ratios(
+                    card.card(),
+                    &at,
+                    MaterialPropertySelection::SingleClaimOnly,
+                    0.01,
+                    set,
+                    PoissonReciprocityRule::MajorRatios,
+                );
+                match result {
+                    Ok(state) => {
+                        assert!(wanted, "unexpected {set_name} success for {slug}");
+                        resolved_counts[axis] += 1;
+                        let v = |name| state.resolved().property(name).unwrap().value_si();
+                        let el = v(REFERENCE_YOUNG_MODULUS_PROPERTY);
+                        let (e, g, nu) = match &state {
+                            ReferenceRatioOrthotropicStatePoint::Full3d(s) => {
+                                assert_eq!(
+                                    s.law().e.map(f64::to_bits),
+                                    [el, el * v("er_over_el"), el * v("et_over_el")]
+                                        .map(f64::to_bits)
+                                );
+                                assert_eq!(
+                                    s.law().g.map(f64::to_bits),
+                                    REFERENCE_SHEAR_RATIO_PROPERTIES.map(|p| (el * v(p)).to_bits())
+                                );
+                                assert_eq!(
+                                    s.law().nu.map(f64::to_bits),
+                                    REFERENCE_MAJOR_POISSON_PROPERTIES.map(|p| v(p).to_bits())
+                                );
+                                (s.law().e.to_vec(), s.law().g.to_vec(), s.law().nu.to_vec())
+                            }
+                            ReferenceRatioOrthotropicStatePoint::Plane(s) => {
+                                assert_eq!(
+                                    s.law().e.map(f64::to_bits),
+                                    [el, el * v("er_over_el")].map(f64::to_bits)
+                                );
+                                assert_eq!(s.law().g.to_bits(), (el * v("glr_over_el")).to_bits());
+                                assert_eq!(s.law().nu.to_bits(), v("nu_lr").to_bits());
+                                (s.law().e.to_vec(), vec![s.law().g], vec![s.law().nu])
+                            }
+                        };
+                        assert_eq!(state.density_kg_m3().to_bits(), v("density").to_bits());
+                        for p in state.resolved().properties() {
+                            card.card()
+                                .claims()
+                                .verify_receipt(&p.answer().receipt)
+                                .unwrap();
+                        }
+                        let r = state
+                            .derivation()
+                            .unwrap()
+                            .reciprocity_residuals
+                            .map(|r| r.map_or("null".into(), |v| v.to_string()));
+                        println!(
+                            "{{\"suite\":\"irp-s0\",\"bead\":\"M0.2-W1\",\"test\":\"g1_g3_sourced_fpl_tonewood_ratios_reach_orthotropic_state\",\"tier\":\"G1/G3\",\"inputs\":{{\"pack\":{slug:?},\"pack_hash\":{pack_hash:?}}},\"provenance\":\"FPL-GTR-282 ch5 Tables5-1/5-2/5-3a\",\"set\":{set_name:?},\"verdict\":\"resolved\",\"missing\":null,\"e\":{e:?},\"g\":{g:?},\"nu\":{nu:?},\"reciprocity_residuals\":[{},{},{}],\"elapsed_s\":{}}}",
+                            r[0],
+                            r[1],
+                            r[2],
+                            started.elapsed().as_secs_f64()
+                        );
+                    }
+                    Err(MaterialStatePointError::Query { property, .. }) => {
+                        assert!(
+                            !wanted,
+                            "unexpected {set_name} refusal for {slug}: {property}"
+                        );
+                        let expected = if rose {
+                            "er_over_el"
+                        } else if density_missing {
+                            "density"
+                        } else {
+                            "grt_over_el"
+                        };
+                        assert_eq!(property, expected, "{slug}/{set_name}");
+                        if axis == 0 {
+                            missing_counts[if rose {
+                                2
+                            } else if density_missing {
+                                1
+                            } else {
+                                0
+                            }] += 1;
+                        }
+                        println!(
+                            "{{\"suite\":\"irp-s0\",\"bead\":\"M0.2-W1\",\"test\":\"g1_g3_sourced_fpl_tonewood_ratios_reach_orthotropic_state\",\"tier\":\"G1/G3\",\"inputs\":{{\"pack\":{slug:?},\"pack_hash\":{pack_hash:?}}},\"provenance\":\"FPL-GTR-282 ch5 Tables5-1/5-2/5-3a\",\"set\":{set_name:?},\"verdict\":\"refused\",\"missing\":{property:?},\"e\":[],\"g\":[],\"nu\":[],\"reciprocity_residuals\":[null,null,null],\"elapsed_s\":{}}}",
+                            started.elapsed().as_secs_f64()
+                        );
+                    }
+                    Err(other) => panic!("{slug}/{set_name}: {other:?}"),
+                }
+            }
+        }
+        assert_eq!(resolved_counts, [12, 18]);
+        assert_eq!(missing_counts, [6, 3, 2]);
+    }
+
     /// G1/G3: independently sourced cubic constants reach the actual oriented
     /// tetrahedral operator. This is a cross-source engineering reference at
     /// 25 C, not qualification of a particular silicon wafer or its doping.
