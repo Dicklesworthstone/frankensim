@@ -15,6 +15,9 @@ use crate::acoustic_realize::AcousticRealizeError;
 use crate::unilateral_contact::distributed::ApertureContactStep;
 use fs_dcontact::{ContactStorage, Obstacle};
 use fs_phs::Storage;
+use fs_phs::{
+    NewtonSite, SolveBudget, SolveCertificate, admit_newton_iterate, arithmetic_rounding_floor,
+};
 /// Original regional material plates and same-basis spatial ports.
 pub mod material;
 mod viscosity;
@@ -71,6 +74,10 @@ pub struct ModalApertureFrame {
     pub contact_force_n: f64,
     /// Independent force-balance residuals, in the original coordinates [N].
     pub momentum_residual_n: Vec<f64>,
+    /// Observed work closure and its declared energy budget [J].
+    pub work_certificate: SolveCertificate,
+    /// Observed flow closure and its declared volume-flow budget [m^3/s].
+    pub flow_certificate: SolveCertificate,
 }
 
 /// A complete modal state; no acoustic network or filter is duplicated here.
@@ -104,16 +111,18 @@ impl ModalAperture {
     /// A successful construction does not validate omitted modes or mean-gap
     /// closure. Select full viscosity explicitly with `with_viscosity`;
     /// hereditary laws require a different material-history image.
-    pub fn new(spec: ModalApertureSpec, state: Vec<BladeState>, obstacle: Obstacle)
-        -> Result<Self, AcousticRealizeError>
-    {
+    pub fn new(
+        spec: ModalApertureSpec,
+        state: Vec<BladeState>,
+        obstacle: Obstacle,
+    ) -> Result<Self, AcousticRealizeError> {
         let l = spec.limits;
         if !(1..=MAX_MODES).contains(&spec.modes.len()) || state.len() != spec.modes.len()
             || ![spec.rest_opening_m, spec.width_m, spec.density_kg_m3,
                 spec.impedance_pa_s_m3, spec.time_step_s, l.maximum_abs_displacement_m,
                 l.maximum_abs_velocity_m_s, l.maximum_energy_j, l.velocity_tolerance_m_s,
                 l.relative_tolerance].iter().all(|x| x.is_finite() && *x > 0.0)
-            || l.relative_tolerance >= 1.0 || !(1..=512).contains(&l.max_evaluations)
+            || l.relative_tolerance >= 1.0/128.0 || !(1..=512).contains(&l.max_evaluations)
             || spec.max_steps == 0 || spec.max_steps > (1_u64 << 53)
             || !(spec.time_step_s * spec.max_steps as f64).is_finite()
             || obstacle.provenance().trim().is_empty() {
@@ -141,11 +150,11 @@ impl ModalAperture {
         Ok(model)
     }
     /// Original physical inputs and explicit approximation limits.
-    #[must_use] pub const fn spec(&self) -> &ModalApertureSpec { &self.spec }
+    #[must_use]pub const fn spec(&self) -> &ModalApertureSpec { &self.spec }
     /// Actual independent physical coordinates, not a single equivalent reed.
-    #[must_use] pub fn modal_states(&self) -> &[BladeState] { &self.state }
+    #[must_use]pub fn modal_states(&self) -> &[BladeState] { &self.state }
     /// Accepted mechanical samples only.
-    #[must_use] pub const fn accepted_steps(&self) -> u64 { self.samples }
+    #[must_use]pub const fn accepted_steps(&self) -> u64 { self.samples }
     fn gap(&self, state: &[BladeState]) -> f64 {
         self.spec.rest_opening_m + self.spec.modes.iter().zip(state)
             .map(|(m,s)| m.gap_projection*s.displacement_m).sum::<f64>()
@@ -157,7 +166,7 @@ impl ModalAperture {
                 + 0.5*m.stiffness_n_m*s.displacement_m*s.displacement_m).sum::<f64>()
     }
     /// Actual mechanical and contact energy [J], not accumulated input work.
-    #[must_use] pub fn stored_energy_j(&self) -> f64 { self.energy(&self.state) }
+    #[must_use]pub fn stored_energy_j(&self) -> f64 { self.energy(&self.state) }
     fn validate_state(&self, state: &[BladeState]) -> Result<(), AcousticRealizeError> {
         let l = self.spec.limits;
         if state.iter().any(|s| !s.displacement_m.is_finite() || !s.velocity_m_s.is_finite()
@@ -203,9 +212,11 @@ impl ModalAperture {
         self.state.copy_from_slice(&frame.modes);
         self.samples = frame.aperture.step;
     }
-    pub(super) fn preview(&self, drive: ApertureDrive, forces: [f64; 2])
-        -> Result<ModalApertureFrame, AcousticRealizeError>
-    {
+    pub(super) fn preview(
+        &self,
+        drive: ApertureDrive,
+        forces: [f64; 2],
+    ) -> Result<ModalApertureFrame, AcousticRealizeError> {
         self.validate_forces(forces)?;
         if self.samples >= self.spec.max_steps || ![drive.upstream_pressure_pa,
             drive.incoming_pressure_pa, drive.body_flow_m3_s].iter().all(|x| x.is_finite()) {
@@ -290,17 +301,56 @@ impl ModalAperture {
         let flow_scale = jet.abs() + swept.abs() + drive.body_flow_m3_s.abs() + wave.abs();
         let scale = self.stored_energy_j() + energy + aperture.pressure_work_j.abs()
             + mechanical.abs() + aperture.dissipated_energy_j.abs();
-        let allowance = 128.0*self.spec.limits.relative_tolerance.max(f64::EPSILON);
         if ![outgoing, aperture.bore_pressure_pa, jet, swept, wave, scale, flow_scale,
             aperture.balance_residual_j(), aperture.flow_residual_m3_s,
             aperture.dissipated_energy_j, mechanical].iter().all(|x| x.is_finite())
-            || momentum.iter().any(|x| !x.is_finite())
-            || aperture.balance_residual_j().abs() > allowance*scale.max(f64::MIN_POSITIVE)
-            || aperture.dissipated_energy_j < -allowance*scale
-            || aperture.flow_residual_m3_s.abs() > allowance*flow_scale.max(f64::MIN_POSITIVE) {
+            || momentum.iter().any(|x| !x.is_finite()) {
             return Err(invalid("modal aperture refused an unresolved physical work or flow balance"));
         }
+        let (work_certificate, flow_certificate) =
+            self.admit_balance(&aperture, scale, flow_scale, trial.evaluations)?;
         Ok(ModalApertureFrame { aperture, modes: next, pressure_drop_pa: trial.dp,
-            contact_force_n: contact.force, momentum_residual_n: momentum })
+            contact_force_n: contact.force, momentum_residual_n: momentum,
+            work_certificate, flow_certificate })
+    }
+
+    fn admit_balance(
+        &self,
+        frame: &ApertureFrame,
+        energy_scale: f64,
+        flow_scale: f64,
+        evaluations: usize,
+    ) -> Result<(SolveCertificate, SolveCertificate), AcousticRealizeError> {
+        let budget = SolveBudget {
+            relative: self.spec.limits.relative_tolerance,
+            absolute: 0.0,
+            max_iterations: 0,
+        };
+        let work = budget.certificate(
+            NewtonSite::ModalWork,
+            frame
+                .balance_residual_j()
+                .abs()
+                .max((-frame.dissipated_energy_j).max(0.0)),
+            energy_scale.max(f64::MIN_POSITIVE),
+            arithmetic_rounding_floor(4 * self.state.len() + 12, energy_scale),
+            evaluations,
+            0,
+        );
+        let flow = budget.certificate(
+            NewtonSite::ModalFlow,
+            frame.flow_residual_m3_s.abs(),
+            flow_scale.max(f64::MIN_POSITIVE),
+            arithmetic_rounding_floor(2 * self.state.len() + 8, flow_scale),
+            evaluations,
+            0,
+        );
+        Ok((
+            admit_newton_iterate(work).map_err(AcousticRealizeError::AlgebraicSolve)?,
+            admit_newton_iterate(flow).map_err(AcousticRealizeError::AlgebraicSolve)?,
+        ))
     }
 }
+
+#[cfg(test)]
+mod refusal_tests;

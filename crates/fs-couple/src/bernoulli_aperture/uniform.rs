@@ -14,6 +14,7 @@ pub(super) struct UniformTrial {
     pub dp: f64,
     pub residual: f64,
     pub scale: f64,
+    pub evaluations: usize,
 }
 fn invalid(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
@@ -49,9 +50,19 @@ pub(super) fn solve(
 /// Off-diagonal damping therefore does not need another Bernoulli/contact law.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn solve_response(
-    free: &[f64], pressure_response: &[f64], contact_response: &[f64],
-    area: &[f64], gap_shape: &[f64], gap: f64, dt: f64, width: f64, rho: f64,
-    z: f64, drive: ApertureDrive, limits: PairedApertureLimits, obstacle: &Obstacle,
+    free: &[f64],
+    pressure_response: &[f64],
+    contact_response: &[f64],
+    area: &[f64],
+    gap_shape: &[f64],
+    gap: f64,
+    dt: f64,
+    width: f64,
+    rho: f64,
+    z: f64,
+    drive: ApertureDrive,
+    limits: PairedApertureLimits,
+    obstacle: &Obstacle,
 ) -> Result<UniformTrial, AcousticRealizeError> {
     let n = free.len();
     if n == 0 || n > MAX_MODES
@@ -69,10 +80,10 @@ pub(super) fn solve_response(
         || !denominator.is_finite() || denominator <= 0.0 {
         return Err(invalid("uniform aperture swept-flow response overflowed"));
     }
-    let mut evaluations = 0;
-    let mut evaluate = |velocity: f64| -> Result<UniformTrial, AcousticRealizeError> {
-        evaluations += 1;
-        if evaluations > limits.max_evaluations {
+    let evaluations = std::cell::Cell::new(0);
+    let evaluate = |velocity: f64| -> Result<UniformTrial, AcousticRealizeError> {
+        evaluations.set(evaluations.get() + 1);
+        if evaluations.get() > limits.max_evaluations {
             return Err(invalid("uniform aperture nonlinear work budget exhausted"));
         }
         let next_gap = gap + dt*velocity;
@@ -99,13 +110,25 @@ pub(super) fn solve_response(
             || velocities[..n].iter().any(|x| !x.is_finite()) {
             return Err(invalid("uniform aperture trial left the finite physical domain"));
         }
-        Ok(UniformTrial { velocity: velocities, dp, residual, scale })
+        Ok(UniformTrial {
+            velocity: velocities,
+            dp,
+            residual,
+            scale,
+            evaluations: evaluations.get(),
+        })
     };
     let resolved = |t: UniformTrial| t.residual.abs() <= limits.velocity_tolerance_m_s
         + limits.relative_tolerance*t.scale;
+    let finished = |mut t: UniformTrial| {
+        t.evaluations = evaluations.get();
+        t
+    };
     let initial_velocity = free.iter().zip(gap_shape).map(|(v,g)| v*g).sum();
     let initial = evaluate(initial_velocity)?;
-    if resolved(initial) { return Ok(initial); }
+    if resolved(initial) {
+        return Ok(finished(initial));
+    }
     let mut span = free.iter().zip(gap_shape).map(|(v,g)| (v*g).abs()).sum::<f64>().max(0.01);
     let (mut lo, mut hi) = (-span, span);
     let (mut left, mut right) = (evaluate(lo)?, evaluate(hi)?);
@@ -116,12 +139,18 @@ pub(super) fn solve_response(
         if right.residual < 0.0 { hi = span; right = evaluate(hi)?; }
     }
     loop {
-        if resolved(left) { return Ok(left); }
-        if resolved(right) { return Ok(right); }
+        if resolved(left) {
+            return Ok(finished(left));
+        }
+        if resolved(right) {
+            return Ok(finished(right));
+        }
         let mid = f64::midpoint(lo, hi);
         if mid == lo || mid == hi { return Err(invalid("uniform aperture has unresolved gap momentum")); }
         let next = evaluate(mid)?;
-        if resolved(next) { return Ok(next); }
+        if resolved(next) {
+            return Ok(finished(next));
+        }
         if next.residual < 0.0 { lo = mid; left = next; }
         else { hi = mid; right = next; }
     }

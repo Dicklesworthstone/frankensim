@@ -32,8 +32,11 @@ fn hertz_onset_converges_within_the_original_ten_update_budget() {
     let sys = contact(); let a = initial();
     let mut raw = StepWorkspace::new(&sys).unwrap(); raw.set_iteration_limit(10).unwrap();
     let (mut x, mut y) = ([123.;2],[456.]);
-    assert!(matches!(raw.step_into_analytic(&sys,&a,&[0.],0.001,&mut x,&mut y,&tangent),
-        Err(PhsError::NewtonStalled {..})));
+    assert!(
+        matches!(raw.step_into_analytic(&sys,&a,&[0.],0.001,&mut x,&mut y,&tangent),
+        Err(PhsError::NewtonRefused {certificate}) if certificate.site == crate::NewtonSite::Prepared
+            && certificate.residual > certificate.effective_budget)
+    );
     assert_eq!(x,[123.;2]); assert_eq!(y,[456.]);
     let mut guarded = StepWorkspace::new(&sys).unwrap();
     guarded.set_iteration_limit(10).unwrap(); guarded.set_backtracking_limit(8).unwrap();
@@ -96,14 +99,18 @@ fn exhausted_search_uses_the_original_refusal_and_configuration_is_transactional
     s.set_backtracking_limit(1).unwrap(); assert!(s.set_backtracking_limit(17).is_err());
     assert_eq!(s.backtracking_halvings,1);
     let (mut x,mut y)=([123.;2],[456.]);
-    assert!(matches!(s.step_into_analytic(&sys,&a,&[0.],0.01,&mut x,&mut y,&tangent),
-        Err(PhsError::NewtonStalled {..})));
+    assert!(
+        matches!(s.step_into_analytic(&sys,&a,&[0.],0.01,&mut x,&mut y,&tangent),
+        Err(PhsError::NewtonRefused {certificate}) if certificate.site == crate::NewtonSite::Prepared
+            && certificate.residual > certificate.effective_budget)
+    );
     assert_eq!(x,[123.;2]); assert_eq!(y,[456.]);
     s.set_backtracking_limit(0).unwrap();
     s.step_into_analytic(&sys,&a,&[0.],0.001,&mut x,&mut y,&tangent).unwrap();
     assert_eq!(s.backtracking_work(),(0,0));
     s.set_backtracking_limit(8).unwrap(); s.set_iteration_limit(0).unwrap();
-    x=[123.;2];y=[456.];
+    x=[123.;2];
+    y=[456.];
     assert!(s.step_into_analytic(&sys,&a,&[0.],0.001,&mut x,&mut y,&tangent).is_err());
     assert_eq!(x,[123.;2]); assert_eq!(y,[456.]); assert_eq!(s.backtracking_work(),(0,0));
 }

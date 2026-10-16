@@ -4,7 +4,10 @@
 //! same as the reference path. Only scratch ownership and linear factorization
 //! traversal change. No polynomial truncation, fast-math authority or linearized
 //! replacement of nonlinear storage is introduced here.
-use crate::{PhsError, PortHamiltonian, NEWTON_MAX, NEWTON_TOL, discrete_gradient_into_unchecked};
+use crate::{NEWTON_MAX, PhsError, PortHamiltonian, discrete_gradient_into_unchecked};
+use crate::{
+    NewtonSite, SolveBudget, SolveCertificate, admit_default_newton_iterate, admit_newton_iterate,
+};
 use fs_la::LuWorkspace;
 mod structure;
 mod analytic;
@@ -29,6 +32,8 @@ pub struct PreparedStepRecord {
     pub newton_iters: usize,
     /// Infinity norm of the accepted equation residual.
     pub solver_residual: f64,
+    /// Explicit algebraic admission; absent only on manually assembled records.
+    pub solver_certificate: Option<SolveCertificate>,
 }
 
 impl PreparedStepRecord {
@@ -81,12 +86,14 @@ impl std::error::Error for PreparedStepError {}
 /// they are refreshed from the current operators before every step. No numerical
 /// threshold drops couplings. The full Jacobian is retained for admission and
 /// dense fallback; condensation reduces factorization work, not state dimension.
-/// No existing reference-path bit semantics are changed.
+/// The integration equation is unchanged; shared certificates now govern final
+/// algebraic admission, including the computed default roundoff allowance.
 #[derive(Debug)]
 pub struct StepWorkspace {
     n: usize,
     m: usize,
     max_iterations: usize,
+    solve_budget: Option<SolveBudget>,
     backtracking_halvings: u8,
     backtracking_work: (usize, usize),
     x: Vec<f64>,
@@ -128,7 +135,7 @@ fn zeroed(len: usize) -> Result<Vec<f64>, PhsError> {
     Ok(values)
 }
 
-#[allow(clippy::too_many_arguments)] // one residual with explicitly borrowed scratch
+#[allow(clippy::too_many_arguments)]// one residual with explicitly borrowed scratch
 fn residual_into(sys: &PortHamiltonian, x0: &[f64], x: &[f64], gu: &[f64],
     dt: f64, pattern: &FlowPattern, midpoint: &mut [f64], effort: &mut [f64], out: &mut [f64],
     dissipation: Option<Dissipation<'_>>, nonlinear_loss: &mut [f64]) -> Result<f64, PhsError>
@@ -163,7 +170,7 @@ impl StepWorkspace {
             return Err(dimensions("prepared J/R/G sizes"));
         }
         Ok(Self {
-            n, m, max_iterations: NEWTON_MAX,
+            n, m, max_iterations: NEWTON_MAX, solve_budget: None,
             backtracking_halvings: 0, backtracking_work: (0, 0),
             x: zeroed(n)?, best: zeroed(n)?, trial: zeroed(n)?,
             midpoint: zeroed(n)?, effort: zeroed(n)?, residual: zeroed(n)?,
@@ -223,7 +230,60 @@ impl StepWorkspace {
     pub fn set_iteration_limit(&mut self, limit: usize) -> Result<(), PhsError> {
         if limit > NEWTON_MAX { return Err(dimensions("prepared Newton budget")); }
         self.max_iterations = limit;
+        if let Some(budget) = &mut self.solve_budget {
+            budget.max_iterations = limit;
+        }
         Ok(())
+    }
+
+    /// Declare absolute/relative ceilings. Unlike the default API, an explicit
+    /// budget below the evaluated rounding floor refuses instead of being raised.
+    ///
+    /// # Errors
+    /// Invalid tolerances or a Newton-update cap above the reference maximum.
+    pub fn set_solve_budget(&mut self, budget: SolveBudget) -> Result<(), PhsError> {
+        let budget = budget.validate()?;
+        self.max_iterations = budget.max_iterations;
+        self.solve_budget = Some(budget);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)] // assess this candidate under its actual scope
+    fn certify(
+        &self,
+        sys: &PortHamiltonian,
+        x0: &[f64],
+        dt: f64,
+        residual: f64,
+        scale: f64,
+        iterations: usize,
+        stagnant: usize,
+    ) -> Result<SolveCertificate, PhsError> {
+        let floor = crate::newton::residual_rounding_floor(
+            sys.storage.as_ref(),
+            x0,
+            &self.x,
+            &self.effort,
+            &sys.j,
+            &sys.r,
+            &self.forcing,
+            dt,
+            self.n,
+            &self.nonlinear_loss,
+        );
+        let c = self.solve_budget.unwrap_or_default().certificate(
+            NewtonSite::Prepared,
+            residual,
+            scale,
+            floor,
+            iterations,
+            stagnant,
+        );
+        if self.solve_budget.is_some() {
+            admit_newton_iterate(c)
+        } else {
+            admit_default_newton_iterate(c.with_rounding_allowance())
+        }
     }
 
     /// Solve one held-input step, publishing `x_next` and `y` only on success.
@@ -274,7 +334,7 @@ impl StepWorkspace {
     /// including every contact, internal state and frozen material history.
     /// Return false for an unsupported action. Missing/nonfinite actions refuse;
     /// there is no silent fallback. Piecewise laws use their branch tangent.
-    /// All original equation/energy acceptance limits remain. A configured pair
+    /// The original equation and shared budget admission remain. A configured pair
     /// plan changes only the linear solve, with full dense LU as safe fallback.
     ///
     /// # Errors
@@ -308,12 +368,22 @@ impl StepWorkspace {
         self.step_with_hessian(sys, x0, u, dt, x_next, y, Some(hessian), None, cancelled)
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::type_complexity)]
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::type_complexity
+    )]
     fn step_with_hessian<F: FnMut() -> bool>(
-        &mut self, sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64,
-        x_next: &mut [f64], y: &mut [f64],
+        &mut self,
+        sys: &PortHamiltonian,
+        x0: &[f64],
+        u: &[f64],
+        dt: f64,
+        x_next: &mut [f64],
+        y: &mut [f64],
         hessian: Option<&dyn Fn(&[f64], &[f64], &mut [f64]) -> bool>,
-        dissipation: Option<Dissipation<'_>>, mut cancelled: F,
+        dissipation: Option<Dissipation<'_>>,
+        mut cancelled: F,
     ) -> Result<PreparedStepRecord, PreparedStepError> {
         self.linear_solves=(0, 0);
         self.backtracking_work=(0, 0);
@@ -350,34 +420,36 @@ impl StepWorkspace {
             scale = scale.max(increment.abs());
         }
         self.x.copy_from_slice(x0);
+        // A workspace may alternate dissipative and ordinary calls. The floor
+        // must describe this equation, never a previous call's nonlinear loss.
+        self.nonlinear_loss.fill(0.0);
         let mut best_norm = f64::INFINITY;
         let mut previous_norm = f64::INFINITY;
-        let mut initial_norm = 0.0;
         let mut stagnant = 0;
         let mut iterations = 0;
+        let target = self.solve_budget.unwrap_or_default().threshold(scale);
         loop {
             poll()?;
             let rnorm = residual_into(sys, x0, &self.x, &self.forcing, dt, &self.flow,
                 &mut self.midpoint, &mut self.effort, &mut self.residual,
                 dissipation, &mut self.nonlinear_loss)?;
-            if iterations == 0 { initial_norm = rnorm; }
             let improved = rnorm < best_norm;
             if improved { self.best.copy_from_slice(&self.x); best_norm = rnorm; }
-            if rnorm <= NEWTON_TOL * scale { break; }
+            if rnorm <= target {
+                break;
+            }
             // Contact onset may first increase the residual. Falling residuals
             // after that are progress even before they beat the entry iterate.
             // Keep the global best for admission, not for the stagnation clock.
             if rnorm < previous_norm { stagnant = 0; } else { stagnant += 1; }
             previous_norm = rnorm;
             if stagnant >= 3 || iterations >= self.max_iterations {
-                // Preserve the reference's disclosed FD-noise-floor acceptance.
-                // A zero budget must not silently admit a nonzero initial residual.
-                let acceptance_scale = norm(&self.best)?.max(scale).max(initial_norm);
-                if iterations > 0 && best_norm <= 1.0e-6 * acceptance_scale {
-                    self.x.copy_from_slice(&self.best);
-                    break;
-                }
-                return Err(PhsError::NewtonStalled { residual: best_norm }.into());
+                self.x.copy_from_slice(&self.best);
+                let residual = residual_into(sys, x0, &self.x, &self.forcing, dt, &self.flow,
+                    &mut self.midpoint, &mut self.effort, &mut self.residual,
+                    dissipation, &mut self.nonlinear_loss)?;
+                self.certify(sys, x0, dt, residual, scale, iterations, stagnant)?;
+                break;
             }
             if let Some(action) = hessian {
                 self.analytic_jacobian_into(sys, x0, dt, action, dissipation, &mut poll)?;
@@ -422,7 +494,7 @@ impl StepWorkspace {
             poll()?;
             if self.backtracking_halvings == 0 {
                 for row in 0..n { self.x[row] -= self.delta[row]; }
-            } else if !self.backtracked_update(sys, x0, dt, rnorm, NEWTON_TOL*scale,
+            } else if !self.backtracked_update(sys, x0, dt, rnorm, target,
                 dissipation, &mut poll)? {
                 // Leave the iterate intact, then use the SAME best-iterate / FD
                 // floor admission as any other stalled Newton update. This is
@@ -436,6 +508,8 @@ impl StepWorkspace {
         let solver_residual = residual_into(sys, x0, &self.x, &self.forcing, dt, &self.flow,
             &mut self.midpoint, &mut self.effort, &mut self.residual,
                 dissipation, &mut self.nonlinear_loss)?;
+        let solver_certificate =
+            self.certify(sys, x0, dt, solver_residual, scale, iterations, stagnant)?;
         let mut dissipated = 0.0;
         for row in 0..n {
             let mut value = 0.0;
@@ -454,7 +528,14 @@ impl StepWorkspace {
         let delta_h = sys.hamiltonian(&self.x) - h0;
         norm(&self.output)?;
         norm(&[delta_h, dissipated, supplied, solver_residual])?;
-        let record = PreparedStepRecord { delta_h, dissipated, supplied, newton_iters: iterations, solver_residual };
+        let record = PreparedStepRecord {
+            delta_h,
+            dissipated,
+            supplied,
+            newton_iters: iterations,
+            solver_residual,
+            solver_certificate: Some(solver_certificate),
+        };
         poll()?;
         x_next.copy_from_slice(&self.x);
         y.copy_from_slice(&self.output);
