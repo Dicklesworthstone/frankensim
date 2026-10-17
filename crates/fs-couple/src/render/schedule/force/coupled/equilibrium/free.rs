@@ -120,8 +120,13 @@ impl FreeResponse {
         for (i, &index) in self.indices.iter().enumerate() {
             poll(Some(gate))?;
             let applied = dot(&self.rows[i], solution)?;
+            // Each solved reaction carries roundoff of the whole solution's
+            // size, so scale by |a_k| ||solution||_inf rather than |a_k x_k|:
+            // an unloaded free mode whose only reaction is a rounded zero
+            // (x_k ~ 1e-22 next to 1e-5) is balanced, not 100% wrong.
+            let size = solution.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
             let mut scale = external[index].abs();
-            for (a,b) in self.rows[i].iter().zip(solution) { scale = finite(scale + finite(a*b)?.abs())?; }
+            for a in &self.rows[i] { scale = finite(scale + finite(a.abs()*size)?)?; }
             let residual = finite(applied - external[index])?.abs();
             let relative = if scale == 0.0 { 0.0 } else { residual / scale };
             if relative > tolerance {

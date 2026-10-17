@@ -86,9 +86,16 @@ impl CoupledModalSystem {
             let reaction = finite(-link.stiffness_n_m*x)?;
             limit("static connection force", reaction.abs(), self.config.maximum_abs_connection_force_n)?;
             energy = finite(energy + 0.5*link.stiffness_n_m*x*x)?;
+            // The extension is a cancelling sum; its rounding follows the
+            // magnitudes of its terms. A link that ends exactly slack (its only
+            // load is on an unloaded free mode) carries a rounded zero that is
+            // balanced, not a 100% residual.
+            let mut terms = link.rest_extension_m.abs();
+            for (b, value) in column.iter().zip(q) { terms = finite(terms + (b*value).abs())?; }
+            let reaction_scale = finite(link.stiffness_n_m*terms)?;
             for j in 0..implied.len() {
                 implied[j] = finite(implied[j]+column[j]*reaction)?;
-                scale[j] = finite(scale[j]+(column[j]*reaction).abs())?;
+                scale[j] = finite(scale[j]+column[j].abs()*reaction_scale)?;
             }
         }
         let mut relative = 0.0_f64;
