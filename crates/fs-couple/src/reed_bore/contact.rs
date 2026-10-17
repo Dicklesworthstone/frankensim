@@ -35,6 +35,10 @@ pub(crate) enum OpeningPropagator<'a> {
 struct Trial {
     residual: f64,
     scale: f64,
+    /// Rounding floor of the evaluated residual: the pressure impulse is a
+    /// difference of junction pressures, so its error follows their
+    /// magnitudes, not the (possibly cancelled) difference.
+    floor: f64,
     state: (f64, f64, f64),
 }
 
@@ -45,7 +49,9 @@ fn resolved(trial: Trial) -> bool {
 fn finish(trial: Trial) -> Result<(f64, f64, f64), AcousticRealizeError> {
     // Adjacent floating-point endpoints alone cannot establish convergence.
     // The equation and its scale are impulses, not pressure-scaled flows.
-    if trial.residual.abs() > 2e-11 * trial.scale.max(f64::MIN_POSITIVE) {
+    // Near rest the pressures nearly cancel; a residual inside the computed
+    // rounding floor is as resolved as the arithmetic allows.
+    if trial.residual.abs() > (2e-11 * trial.scale).max(trial.floor).max(f64::MIN_POSITIVE) {
         return Err(AcousticRealizeError::Reed {
             what: "implicit reed contact did not resolve the momentum balance",
         });
@@ -200,12 +206,18 @@ pub(crate) fn step_with_opening(
         let inertial = mass_mid * velocity;
         let mut residual = inertial - rhs + pressure_impulse - contact_impulse;
         let mut scale = inertial.abs() + rhs.abs() + pressure_impulse.abs() + contact_impulse.abs();
+        // The closed-form junction and the pressure difference each cost a few
+        // roundings of their operands (8 eps of their magnitudes, bounded).
+        let pressure_magnitude = half_dt * face.abs() * (p_m.abs() + p_minus.abs() + outgoing.abs()
+            + (zc * (u_body + reed_swept_flow(face, velocity))).abs());
+        let mut floor = 8.0 * f64::EPSILON * (pressure_magnitude + scale);
         if let Some(restoring) = material_force {
             // Condensed material force uses this very candidate. No lagged
             // post-step stress correction and no change to the original path.
             let impulse = half_dt * restoring(next_y)?;
             residual += impulse;
             scale += impulse.abs();
+            floor += 8.0 * f64::EPSILON * impulse.abs();
         }
         let next_v = match propagator {
             OpeningPropagator::Midpoint => 2.0 * velocity - v,
@@ -214,7 +226,7 @@ pub(crate) fn step_with_opening(
                 blade.end_velocity(start, external_n + force - face * dp, memory)
             }
         };
-        if ![residual, scale, outgoing, next_y, next_v]
+        if ![residual, scale, floor, outgoing, next_y, next_v]
             .iter()
             .all(|x| x.is_finite())
         {
@@ -225,6 +237,7 @@ pub(crate) fn step_with_opening(
         Ok(Trial {
             residual,
             scale,
+            floor,
             state: (outgoing, next_y, next_v),
         })
     };
