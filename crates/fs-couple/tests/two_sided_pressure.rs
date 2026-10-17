@@ -1,7 +1,7 @@
 //! Tests exercise the actual valve/network owners, not a stand-in output filter.
 use fs_couple::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
-use fs_couple::bernoulli_aperture::paired::{ApertureBlade, BladeState, PairedAperture,
-    PairedApertureLimits, PairedApertureSpec};
+use fs_couple::bernoulli_aperture::paired::{ApertureBlade, BladePropagator, BladeState,
+    PairedAperture, PairedApertureLimits, PairedApertureSpec};
 use fs_couple::bernoulli_aperture::two_sided::{ApertureDuctSpec,
     TwoSidedAperture, TwoSidedDrive, TwoSidedLimits, ValveSide, combined_inlet_state};
 use fs_dcontact::Obstacle;
@@ -38,7 +38,9 @@ fn blade() -> ApertureBlade {
 fn paired(z: f64, g: GasState, steps: u64, second_mass_ratio: f64) -> PairedAperture {
     let mut b = [blade(); 2];
     b[1].mass_kg *= second_mass_ratio;
-    PairedAperture::new(PairedApertureSpec {
+    // These ~1.1 kHz, strongly loaded blades lie outside the midpoint one-cent
+    // band at 48 kHz (DEF-04), so their linear blocks are propagated exactly.
+    PairedAperture::new_with_propagator(PairedApertureSpec {
         rest_opening_m: 4e-4, width_m: 0.013, blades: b,
         density_kg_m3: g.density, impedance_pa_s_m3: z, time_step_s: DT, max_steps: steps,
         limits: PairedApertureLimits {
@@ -46,7 +48,7 @@ fn paired(z: f64, g: GasState, steps: u64, second_mass_ratio: f64) -> PairedAper
             maximum_energy_j: 1.0, max_evaluations: 256,
             velocity_tolerance_m_s: 1e-13, relative_tolerance: 1e-11,
         },
-    }, [BladeState::default(); 2], contact()).unwrap()
+    }, [BladeState::default(); 2], contact(), BladePropagator::ExactZoh).unwrap()
 }
 fn system(up_delay: usize, mass_ratio: f64, steps: u64) -> TwoSidedAperture {
     let sides = [duct(gas(), up_delay, 0.7), duct(gas(), 32, -0.8)];

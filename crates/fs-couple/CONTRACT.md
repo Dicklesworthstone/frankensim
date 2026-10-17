@@ -150,7 +150,8 @@ modal owner is the control. Midpoint phase is compared to
 | KC, glottis, nonlinear plate, cavity, ODE chains and lip oscillator | Gonzalez midpoint | No common phase-budget admission; common linear-owner map only |
 | TsDriver speaker coil/cone/panel | Full coupled exact ZOH | Held voltage, independently integrated current/work/loss; dense reference step, not an allocation-free callback |
 | ImpactSystem | Gonzalez midpoint | omega*dt < 0.9*pi; the guard permits more than 600 cents of phase defect |
-| Dynamic/Paired/ModalAperture and uniform condensation | Midpoint response | Material-modal adapter caps its caller's bound at 1; authored constructors have no common angular guard |
+| Dynamic/ModalAperture, uniform condensation, PairedAperture with `BladePropagator::Midpoint` | Midpoint response | One-cent band (pole-rate bound times dt <= 0.04, DEF-04) refuses at construction and at every step; the material-modal adapter additionally caps its caller's bound at 1 |
+| PairedAperture with `BladePropagator::ExactZoh` | Exact ZOH per elastic blade (scaled 5x5 exponential; Van Loan viscous loss) | No warping at any omega*dt (audit rows ~1e-11 cents up to omega*dt 1.31). Contact/Bernoulli forces are held over the step and solved at the midpoint opening; blade material memory refuses |
 | CoupledModalSystem | Exact component ZOH plus trapezoidal reactions | Coupled algebraic Nyquist bound; measured against the exact two-body eigenproblem |
 | ModalAcousticTimeModel | Exact ZOH | Caller-declared Nyquist guard; no frequency-warping claim for its observer transfer |
 | Source-backed GasPiston | Midpoint gas/momentum | Owner-local small-signal amplitude ladder; no phase-budget admission |

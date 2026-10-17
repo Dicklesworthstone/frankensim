@@ -5,10 +5,14 @@
 //! The common gap is H+x0+x1; pressure forces are -Ai*dp and swept flow is
 //! -sum(Ai*vi). This is the same work-conjugate pressure/flow convention as
 //! DynamicAperture. fs-dcontact owns the ONE gap-contact potential and loss;
-//! moving owns the continuous Bernoulli law. Linear midpoint blade responses
-//! are condensed into a scalar gap equation for the uniform image or a coupled
+//! moving owns the continuous Bernoulli law. Each blade's linear response over
+//! a step, midpoint or exact zero-order hold ([`BladePropagator`]), is condensed
+//! to an affine mean velocity `free + mobility * F` in the held force. That
+//! feeds a scalar gap equation for the uniform image or a coupled
 //! two-velocity equation for the spatial image, never a fictitious oscillator.
-//! Antisymmetric motion therefore remains a real state.
+//! Antisymmetric motion therefore remains a real state. The exact blocks do not
+//! warp frequency; the contact/Bernoulli forces are still held over each step
+//! and solved at the midpoint opening.
 //!
 //! Fixed-state one-mode blades with a uniform slit or an explicitly selected
 //! matching-planar spatial interface. The latter retains separate nodal gaps
@@ -57,6 +61,96 @@ pub struct BladeState {
     pub displacement_m: f64,
     /// Velocity in that same coordinate [m/s].
     pub velocity_m_s: f64,
+}
+
+/// Linear blade propagator, always chosen explicitly by the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BladePropagator {
+    /// Implicit midpoint on each blade's linear block. It warps frequency, so it
+    /// is admitted only inside the one-cent band (DEF-04), and it carries the
+    /// optional Maxwell material memory.
+    Midpoint,
+    /// Exact zero-order-hold exponential of each elastic blade's mass/damping/
+    /// stiffness block, with the step's contact, pressure and external forces
+    /// held over the step. No frequency warping at any omega*dt; the nonlinear
+    /// contact/Bernoulli junction solve is unchanged. Material memory refuses.
+    ExactZoh,
+}
+
+/// Prepared exact maps of one blade over one step. The scaled state
+/// `[omega x, v, F/(m omega), omega int v, omega^2 int x]` keeps every
+/// generator entry at omega*dt or c*dt/m, and the `int v` row gives the
+/// displacement increment directly, without subtracting nearly equal values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ExactBlade {
+    omega: f64,
+    mass: f64,
+    map: [f64; 25],
+    // Exact c*int v^2 over the step as a quadratic form on the first three states.
+    viscous: [[f64; 3]; 3],
+}
+
+impl ExactBlade {
+    fn new(blade: &ApertureBlade, dt: f64) -> Result<Self, AcousticRealizeError> {
+        let refuse = |_| invalid("exact blade propagator could not be prepared");
+        let mass = blade.mass_kg;
+        let omega = fs_math::det::sqrt(blade.stiffness_n_m / mass);
+        let (w, g) = (omega * dt, blade.damping_n_s_m / mass * dt);
+        #[rustfmt::skip]
+        let generator = [
+            0.0, w, 0.0, 0.0, 0.0,
+            -w, -g, w, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, w, 0.0, 0.0, 0.0,
+            w, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let exponential = fs_phs::linear_exact::exponential(&generator, 5).map_err(refuse)?;
+        // Van Loan: exp([[-A^T, W], [0, A]] dt) = [[., F12], [0, F22]], and
+        // int_0^dt e^{A^T s} W e^{A s} ds = F22^T F12 with W = c on the velocity.
+        let mut van_loan = [0.0; 36];
+        for i in 0..3 {
+            for j in 0..3 {
+                van_loan[i * 6 + j] = -generator[j * 5 + i];
+                van_loan[(i + 3) * 6 + j + 3] = generator[i * 5 + j];
+            }
+        }
+        van_loan[6 + 4] = blade.damping_n_s_m * dt;
+        let blocks = fs_phs::linear_exact::exponential(&van_loan, 6).map_err(refuse)?;
+        let mut viscous = [[0.0; 3]; 3];
+        for (i, row) in viscous.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell = (0..3).map(|l| blocks[(l + 3) * 6 + i + 3] * blocks[l * 6 + j + 3]).sum();
+            }
+        }
+        let mut map = [0.0; 25];
+        map.copy_from_slice(&exponential);
+        if !(omega.is_finite() && omega > 0.0) || !map.iter().chain(viscous.iter().flatten()).all(|x| x.is_finite()) {
+            return Err(invalid("exact blade propagator is not representable"));
+        }
+        Ok(Self { omega, mass, map, viscous })
+    }
+    fn scaled(&self, state: BladeState, force_n: f64) -> [f64; 3] {
+        [self.omega * state.displacement_m, state.velocity_m_s, force_n / (self.mass * self.omega)]
+    }
+    fn row(&self, row: usize, z: [f64; 3]) -> f64 {
+        self.map[row * 5] * z[0] + self.map[row * 5 + 1] * z[1] + self.map[row * 5 + 2] * z[2]
+    }
+    /// Mean velocity `dx/dt` over the step is `free + mobility * F` for held F.
+    fn free_and_mobility(&self, state: BladeState, external_n: f64, dt: f64) -> (f64, f64) {
+        let free = self.row(3, self.scaled(state, external_n)) / (self.omega * dt);
+        let mobility = self.map[3 * 5 + 2] / (self.mass * self.omega * self.omega * dt);
+        (free, mobility)
+    }
+    fn end_velocity(&self, state: BladeState, held_n: f64) -> f64 {
+        self.row(1, self.scaled(state, held_n))
+    }
+    fn mean_displacement(&self, state: BladeState, held_n: f64, dt: f64) -> f64 {
+        self.row(4, self.scaled(state, held_n)) / (self.omega * self.omega * dt)
+    }
+    fn viscous_loss_j(&self, state: BladeState, held_n: f64) -> f64 {
+        let z = self.scaled(state, held_n);
+        (0..3).map(|i| (0..3).map(|j| z[i] * self.viscous[i][j] * z[j]).sum::<f64>()).sum()
+    }
 }
 
 /// Explicit physical/solver allowances; no response is clipped to these bounds.
@@ -127,6 +221,7 @@ pub struct PairedAperture {
     gas: Option<GasState>,
     relaxation: [Option<ApertureRelaxation>; 2],
     closure: Option<Box<PairedPlateClosure>>,
+    exact: Option<[ExactBlade; 2]>,
     samples: u64,
 }
 
@@ -159,6 +254,15 @@ impl PairedAperture {
     pub fn new(spec: PairedApertureSpec, blades: [BladeState; 2], contact: Obstacle)
         -> Result<Self, AcousticRealizeError>
     {
+        Self::new_with_propagator(spec, blades, contact, BladePropagator::Midpoint)
+    }
+
+    /// [`Self::new`] with an explicitly selected linear blade propagator.
+    /// `Midpoint` keeps the one-cent band refusal; `ExactZoh` admits any
+    /// omega*dt because the elastic blade blocks are propagated exactly.
+    pub fn new_with_propagator(spec: PairedApertureSpec, blades: [BladeState; 2], contact: Obstacle,
+        propagator: BladePropagator) -> Result<Self, AcousticRealizeError>
+    {
         let l = spec.limits;
         if ![spec.rest_opening_m, spec.width_m, spec.density_kg_m3,
             spec.impedance_pa_s_m3, spec.time_step_s, l.maximum_abs_displacement_m,
@@ -181,7 +285,12 @@ impl PairedAperture {
             .map_err(nonlinear)?;
         let contact_storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![contact.clone()])
             .map_err(nonlinear)?;
-        let model = Self { spec, blades, contact, contact_storage, plates: None, gas: None, relaxation: [None, None], closure: None, samples: 0 };
+        let exact = match propagator {
+            BladePropagator::Midpoint => None,
+            BladePropagator::ExactZoh => Some([ExactBlade::new(&spec.blades[0], spec.time_step_s)?,
+                ExactBlade::new(&spec.blades[1], spec.time_step_s)?]),
+        };
+        let model = Self { spec, blades, contact, contact_storage, plates: None, gas: None, relaxation: [None, None], closure: None, exact, samples: 0 };
         model.admit_linear_clock()?;
         model.validate_state(blades)?;
         Ok(model)
@@ -244,6 +353,9 @@ impl PairedAperture {
             || self.spec.blades[blade].damping_n_s_m!=0.0 {
             return Err(invalid("blade relaxation requires a valid cold blade, one attachment and zero separate damping"));
         }
+        if self.exact.is_some() {
+            return Err(invalid("material memory is not part of the exact blade block; it requires the Midpoint propagator"));
+        }
         let plate=self.plates.as_ref().ok_or_else(||invalid("blade relaxation requires its original physical plate"))?;
         let memory=ApertureRelaxation::from_plate(&plate[blade],self.spec.time_step_s,
             self.blades[blade].displacement_m,spec,initial)?;
@@ -262,6 +374,11 @@ impl PairedAperture {
     /// Original mechanical/fluid/clock choices.
     #[must_use]
     pub const fn spec(&self) -> &PairedApertureSpec { &self.spec }
+    /// The linear blade propagator selected at construction.
+    #[must_use]
+    pub const fn blade_propagator(&self) -> BladePropagator {
+        if self.exact.is_some() { BladePropagator::ExactZoh } else { BladePropagator::Midpoint }
+    }
     /// Individual accepted physical states, in original blade order.
     #[must_use]
     pub const fn blade_states(&self) -> &[BladeState; 2] { &self.blades }
@@ -375,6 +492,15 @@ impl PairedAperture {
         let mut free = [0.0; 2];
         let mut mobility = [0.0; 2];
         for i in 0..2 {
+            if let Some(exact) = &self.exact {
+                // Exact held-force map: the mean velocity dx/dt stays affine in the
+                // step's force, so the junction solve below is unchanged.
+                (free[i], mobility[i]) = exact[i].free_and_mobility(old[i], forces[i], dt);
+                if !free[i].is_finite() || !mobility[i].is_finite() || mobility[i] <= 0.0 {
+                    return Err(invalid("paired blade exact response is not representable"));
+                }
+                continue;
+            }
             let mut d = b[i].mass_kg + h*b[i].damping_n_s_m + h*h*b[i].stiffness_n_m;
             let mut numerator = b[i].mass_kg*old[i].velocity_m_s
                 - h*b[i].stiffness_n_m*old[i].displacement_m + h*forces[i];
@@ -445,16 +571,11 @@ impl PairedAperture {
             };
             trial
         };
-        let next = [BladeState { displacement_m: old[0].displacement_m+dt*trial.velocity[0],
-                velocity_m_s: 2.0*trial.velocity[0]-old[0].velocity_m_s },
-            BladeState { displacement_m: old[1].displacement_m+dt*trial.velocity[1],
-                velocity_m_s: 2.0*trial.velocity[1]-old[1].velocity_m_s }];
-        self.validate_state(next)?;
-        let next_gap = self.gap(next);
+        let after = [old[0].displacement_m+dt*trial.velocity[0], old[1].displacement_m+dt*trial.velocity[1]];
+        let next_gap = self.spec.rest_opening_m + after[0] + after[1];
         let vm = trial.velocity[0]+trial.velocity[1];
         let (contact_forces, contact_normal, contact_loss, opening) = if let Some(closure) = &self.closure {
             let before=old.map(|s|s.displacement_m);
-            let after=next.map(|s|s.displacement_m);
             let response=closure.response(before,after,trial.velocity)?;
             let middle=[f64::midpoint(before[0],after[0]),f64::midpoint(before[1],after[1])];
             (response.forces_n,response.normal_force_n,response.dissipated_power_w,
@@ -464,6 +585,18 @@ impl PairedAperture {
             ([response.force;2],response.force,response.dissipated_power,
                 f64::midpoint(gap,next_gap).max(0.0))
         };
+        // Total force each blade holds over the step: its own external load, the
+        // work-conjugate contact force and the uniform pressure drop.
+        let held = [forces[0]+contact_forces[0]-b[0].pressure_area_m2*trial.dp,
+            forces[1]+contact_forces[1]-b[1].pressure_area_m2*trial.dp];
+        let next: [BladeState; 2] = std::array::from_fn(|i| BladeState {
+            displacement_m: after[i],
+            velocity_m_s: match &self.exact {
+                Some(exact) => exact[i].end_velocity(old[i], held[i]),
+                None => 2.0*trial.velocity[i]-old[i].velocity_m_s,
+            },
+        });
+        self.validate_state(next)?;
         let jet = super::moving::volume_flow(self.spec.width_m,opening,trial.dp,self.spec.density_kg_m3);
         let swept = -b[0].pressure_area_m2*trial.velocity[0]-b[1].pressure_area_m2*trial.velocity[1];
         let no_drop = drive.upstream_pressure_pa - drive.incoming_pressure_pa;
@@ -495,14 +628,24 @@ impl PairedAperture {
             jet_flow_m3_s: jet, swept_flow_m3_s: swept, bore_flow_m3_s: wave,
             flow_residual_m3_s: jet+swept+drive.body_flow_m3_s-wave,
             stored_energy_j: energy, storage_change_j: energy-self.stored_energy_j(),
-            dissipated_energy_j: dt*(trial.dp*jet+viscous+contact_loss)+memory_loss,
+            dissipated_energy_j: match &self.exact {
+                // The exact blocks integrate c*v^2 along their own trajectories.
+                Some(exact) => dt*(trial.dp*jet+contact_loss)+memory_loss
+                    + exact[0].viscous_loss_j(old[0], held[0]) + exact[1].viscous_loss_j(old[1], held[1]),
+                None => dt*(trial.dp*jet+viscous+contact_loss)+memory_loss,
+            },
             pressure_work_j: dt*trial.dp*(wave-drive.body_flow_m3_s), mechanical_work_j: mechanical,
             relaxation_energy_j: memory_energy, relaxation_loss_j: memory_loss,
         };
         let mut momentum = [0.0; 2];
         for i in 0..2 {
+            // Step-mean displacement: exact time average, or the midpoint value.
+            let mean_x = match &self.exact {
+                Some(exact) => exact[i].mean_displacement(old[i], held[i], dt),
+                None => f64::midpoint(old[i].displacement_m,next[i].displacement_m),
+            };
             momentum[i] = b[i].mass_kg*(next[i].velocity_m_s-old[i].velocity_m_s)/dt
-                + b[i].stiffness_n_m*f64::midpoint(old[i].displacement_m,next[i].displacement_m)
+                + b[i].stiffness_n_m*mean_x
                 + b[i].damping_n_s_m*trial.velocity[i]+b[i].pressure_area_m2*trial.dp-contact_forces[i]-forces[i];
             if let Some(material) = &self.relaxation[i] {
                 momentum[i] += material.restoring_force(old[i].displacement_m, next[i].displacement_m, dt)?;
@@ -526,6 +669,8 @@ impl PairedAperture {
 
 impl PairedAperture {
     fn admit_linear_clock(&self) -> Result<(), AcousticRealizeError> {
+        // Exact blocks do not warp; the midpoint band applies only to Midpoint.
+        if self.exact.is_some() { return Ok(()); }
         let blades = self.spec.blades;
         let weights = blades.map(|b| b.pressure_area_m2 / fs_math::det::sqrt(b.mass_kg));
         let weight_sum = weights.iter().map(|a| a.abs()).sum::<f64>();

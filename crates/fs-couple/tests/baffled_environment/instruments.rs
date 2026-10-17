@@ -1,6 +1,7 @@
 use super::*;
 use fs_couple::bernoulli_aperture::paired::{
-    ApertureBlade, BladeState, PairedAperture, PairedApertureLimits, PairedApertureSpec,
+    ApertureBlade, BladePropagator, BladeState, PairedAperture, PairedApertureLimits,
+    PairedApertureSpec,
 };
 use fs_couple::bernoulli_aperture::two_sided::{
     ApertureDuctSpec, LoadedAperture, TwoSidedAperture, TwoSidedDrive,
@@ -25,13 +26,14 @@ fn reed()->(LoadedAperture,[ApertureDuctSpec;2]) {
     let b=ApertureBlade {mass_kg:1e-5,stiffness_n_m:500.0,damping_n_s_m:0.03,pressure_area_m2:1.25e-4};
     let contact=Obstacle::new(vec![-1.0],1,1,vec![0.0],vec![1.0],1e8,2.0,
         "synthetic exterior-coupled reed fixture".into()).unwrap();
-    let valve=PairedAperture::new(PairedApertureSpec {rest_opening_m:4e-4,width_m:0.013,
+    // Outside the midpoint one-cent band at this rate (DEF-04): exact blades.
+    let valve=PairedAperture::new_with_propagator(PairedApertureSpec {rest_opening_m:4e-4,width_m:0.013,
         blades:[b,ApertureBlade {mass_kg:1.3e-5,..b}],density_kg_m3:g.density,
         impedance_pa_s_m3:z,time_step_s:1.0/f64::from(RATE),max_steps:STEPS,
         limits:PairedApertureLimits {maximum_abs_displacement_m:0.01,
             maximum_abs_velocity_m_s:100.0,maximum_energy_j:1.0,max_evaluations:256,
             velocity_tolerance_m_s:1e-13,relative_tolerance:1e-11}},
-        [BladeState::default();2],contact).unwrap();
+        [BladeState::default();2],contact,BladePropagator::ExactZoh).unwrap();
     (valve.into(),sources)
 }
 fn observation(exterior:GasState,ratio:u32)->DuctRadiationSpec {

@@ -143,3 +143,73 @@ fn refusal_and_budget_exhaustion_publish_neither_blade() {
     assert!(pair.step(ApertureDrive {upstream_pressure_pa:1000.0,..ApertureDrive::default()}).is_err());
     assert_eq!(pair.accepted_steps(),0);assert_eq!(pair.stored_energy_j(),0.0);
 }
+
+/// G1: at omega*dt = 1, where Midpoint refuses (it would be 130.7 c flat), the
+/// exact blocks follow the closed-form damped oscillator of each blade.
+#[test]
+fn exact_blades_follow_the_damped_oscillator_beyond_the_midpoint_band() {
+    use fs_math::det;
+    // A negligible pressure face isolates the mechanical map (A*dp ~ 1e-26 N).
+    let blade=ApertureBlade {mass_kg:1e-5,stiffness_n_m:500.0,damping_n_s_m:2e-3,pressure_area_m2:1e-12};
+    let omega=det::sqrt(blade.stiffness_n_m/blade.mass_kg);
+    let mut s=spec();
+    s.blades=[blade;2];s.impedance_pa_s_m3=1.0;s.time_step_s=1.0/omega;
+    let initial=[BladeState {displacement_m:1e-5,velocity_m_s:0.0},
+        BladeState {displacement_m:0.0,velocity_m_s:0.05}];
+    assert!(matches!(PairedAperture::new(s,initial,contact(0.0)),Err(AcousticRealizeError::TimeResolution(_))));
+    let mut pair=PairedAperture::new_with_propagator(s,initial,contact(0.0),BladePropagator::ExactZoh).unwrap();
+    assert_eq!(pair.blade_propagator(),BladePropagator::ExactZoh);
+    let zeta=blade.damping_n_s_m/(2.0*det::sqrt(blade.stiffness_n_m*blade.mass_kg));
+    let wd=omega*det::sqrt(1.0-zeta*zeta);
+    let closed=|b:BladeState,t:f64| {
+        let decay=det::exp(-zeta*omega*t);
+        let (c,sn)=(det::cos(wd*t),det::sin(wd*t));
+        (decay*(b.displacement_m*c+(b.velocity_m_s+zeta*omega*b.displacement_m)/wd*sn),
+         decay*(b.velocity_m_s*c-(omega*omega*b.displacement_m+zeta*omega*b.velocity_m_s)/wd*sn))
+    };
+    let energy=pair.stored_energy_j();
+    for step in 1..=100 {
+        let f=pair.step(ApertureDrive::default()).unwrap();
+        let t=f64::from(step)*s.time_step_s;
+        for i in 0..2 {
+            let (x,v)=closed(initial[i],t);
+            let amplitude=initial[i].displacement_m.abs()+initial[i].velocity_m_s.abs()/omega;
+            assert!((f.blades[i].displacement_m-x).abs()<=1e-11*amplitude,"step {step} blade {i}");
+            assert!((f.blades[i].velocity_m_s-v).abs()<=1e-11*omega*amplitude,"step {step} blade {i}");
+            assert!(f.momentum_residual_n[i].abs()<=1e-10*blade.stiffness_n_m*amplitude);
+        }
+        assert!(f.aperture.balance_residual_j().abs()<=1e-12*energy);
+        assert!(f.aperture.dissipated_energy_j>=-1e-15*energy);
+    }
+}
+
+/// G0/G1: the authored reed blades (about 1.1 kHz, heavy pressure coupling)
+/// refuse under Midpoint at 48 kHz. The exact blocks run the shared contact
+/// and Bernoulli junction there with closed work, flow and momentum ledgers.
+#[test]
+fn exact_blades_run_the_reed_band_with_closed_ledgers() {
+    let b=ApertureBlade {mass_kg:1e-5,stiffness_n_m:500.0,damping_n_s_m:0.03,pressure_area_m2:1.25e-4};
+    let mut s=spec();
+    s.blades=[b,ApertureBlade {mass_kg:1.3e-5,..b}];s.time_step_s=1.0/48_000.0;s.max_steps=4_800;
+    assert!(matches!(PairedAperture::new(s,[BladeState::default();2],contact(2e9)),
+        Err(AcousticRealizeError::TimeResolution(_))));
+    let mut pair=PairedAperture::new_with_propagator(s,[BladeState::default();2],contact(2e9),
+        BladePropagator::ExactZoh).unwrap();
+    let mut moved=0.0_f64;
+    for i in 0..4_800 {
+        let drive=ApertureDrive {upstream_pressure_pa:if i<2_400 {1200.0} else {-300.0},
+            incoming_pressure_pa:75.0,body_flow_m3_s:1e-7};
+        // Each accepted step already passed the internal work/flow balance gate.
+        let f=pair.step(drive).unwrap();
+        for k in 0..2 {
+            let (blade,state)=(s.blades[k],f.blades[k]);
+            let scale=blade.mass_kg*state.velocity_m_s.abs()/s.time_step_s
+                +blade.stiffness_n_m*state.displacement_m.abs()+blade.damping_n_s_m*state.velocity_m_s.abs()
+                +blade.pressure_area_m2*f.pressure_drop_pa.abs()+f.blade_contact_forces_n[k].abs()+1e-12;
+            assert!(f.momentum_residual_n[k].abs()<=1e-9*scale,"step {i}: {:?}",f.momentum_residual_n);
+        }
+        moved=moved.max((f.blades[0].displacement_m-f.blades[1].displacement_m).abs());
+    }
+    // The unequal masses keep a real antisymmetric state.
+    assert!(moved>0.0);
+}

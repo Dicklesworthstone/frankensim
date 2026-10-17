@@ -10,7 +10,8 @@ use fs_couple::bernoulli_aperture::dynamic::{
 };
 use fs_couple::bernoulli_aperture::modal::{ApertureMode, ModalAperture, ModalApertureSpec};
 use fs_couple::bernoulli_aperture::paired::{
-    ApertureBlade, BladeState, PairedAperture, PairedApertureLimits, PairedApertureSpec,
+    ApertureBlade, BladePropagator, BladeState, PairedAperture, PairedApertureLimits,
+    PairedApertureSpec,
 };
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
@@ -42,6 +43,7 @@ enum Owner {
     Impact,
     Dynamic,
     Paired,
+    PairedExact,
     Modal,
     Coupled,
     Uncoupled,
@@ -137,6 +139,12 @@ const PATHS: &[AuditRow] = &[
         integrator: Integrator::GonzalezMidpoint,
         bound: Some(fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP),
         owner: Owner::Paired,
+    },
+    AuditRow {
+        path: "bernoulli_aperture::PairedAperture (ExactZoh blades)",
+        integrator: Integrator::ExactZoh,
+        bound: None,
+        owner: Owner::PairedExact,
     },
     AuditRow {
         path: "bernoulli_aperture::ModalAperture",
@@ -356,15 +364,20 @@ fn advance(owner: Owner, omega: f64, rate: u32, z: [f64; 2]) -> [f64; 2] {
                 omega,
             )
         }
-        Owner::Dynamic | Owner::Paired => {
+        Owner::Dynamic | Owner::Paired | Owner::PairedExact => {
             let mass = 1e-5;
             let stiffness = mass * omega * omega;
             let area = 1e-6;
             // Manufacture zero differential pressure by cancelling the swept
             // volume with an externally prescribed body flow. This isolates
             // the actual mechanical map without approximating the jet law.
+            // The exact blade sweeps its exact mean velocity dx/dt.
             let h = 0.5 * dt;
-            let vm = (v - h * omega * omega * q) / (1.0 + h * h * omega * omega);
+            let vm = if matches!(owner, Owner::PairedExact) {
+                (q * (det::cos(omega * dt) - 1.0) + v * det::sin(omega * dt) / omega) / dt
+            } else {
+                (v - h * omega * omega * q) / (1.0 + h * h * omega * omega)
+            };
             let drive = ApertureDrive {
                 body_flow_m3_s: area * vm,
                 ..ApertureDrive::default()
@@ -411,7 +424,7 @@ fn advance(owner: Owner, omega: f64, rate: u32, z: [f64; 2]) -> [f64; 2] {
                     damping_n_s_m: 0.0,
                     pressure_area_m2: area,
                 };
-                let mut model = PairedAperture::new(
+                let mut model = PairedAperture::new_with_propagator(
                     PairedApertureSpec {
                         rest_opening_m: REST,
                         width_m: 0.01,
@@ -430,6 +443,11 @@ fn advance(owner: Owner, omega: f64, rate: u32, z: [f64; 2]) -> [f64; 2] {
                         BladeState::default(),
                     ],
                     obstacle(),
+                    if matches!(owner, Owner::PairedExact) {
+                        BladePropagator::ExactZoh
+                    } else {
+                        BladePropagator::Midpoint
+                    },
                 )
                 .unwrap();
                 let frame = model.step(drive).unwrap();
@@ -759,7 +777,11 @@ fn available_render_linear_owners_are_measured_without_promoting_unmigrated_path
                 let measured = cents(phase(row.owner, omega, rate) * f64::from(rate) / exact_omega);
                 let predicted = if matches!(
                     row.owner,
-                    Owner::Exact | Owner::Speaker | Owner::Coupled | Owner::PhsExact
+                    Owner::Exact
+                        | Owner::Speaker
+                        | Owner::Coupled
+                        | Owner::PhsExact
+                        | Owner::PairedExact
                 ) {
                     Some(0.0)
                 } else {
