@@ -101,7 +101,8 @@ fn regional_outlet_uses_terminal_geometry_and_gas_with_a_causal_material_depende
 #[test]
 fn construction_refusals_and_invalid_input_preserve_the_complete_healthy_cascade() {
     let d = duct(gas(false), gas(true));
-    for n in [0, 255, 257, 16384, usize::MAX] {
+    // The next power of two above the line ladder's ceiling refuses.
+    for n in [0, 255, 257, 2 * MAX_OUTLET_FFT_SAMPLES, usize::MAX] {
         assert!(d.baffled_outlet(48000, n, location(), None).is_err());
     }
     assert!(d.baffled_outlet(0, 1024, location(), None).is_err());

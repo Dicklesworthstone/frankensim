@@ -39,8 +39,13 @@ impl From<DrivingPointError> for OutletError {
     fn from(error: DrivingPointError) -> Self { Self::Transfer(error) }
 }
 
+/// Largest outlet grid: the characteristic line's own ladder ceiling
+/// ([`crate::driving_point::LineLadder`]'s default `max_taps`), since the reed adapter passes the
+/// line's converged grid. A low-loss real bore converges above 8192 taps.
+pub const MAX_OUTLET_FFT_SAMPLES: usize = 65_536;
+
 /// Bound the explicit bulk delay plus sampled residual, before allocation.
-pub const MAX_OUTLET_TRANSFER_SAMPLES: usize = 16_384;
+pub const MAX_OUTLET_TRANSFER_SAMPLES: usize = 2 * MAX_OUTLET_FFT_SAMPLES;
 
 /// Physical binding and finite-history choices of an outlet observation.
 #[derive(Clone, Copy, Debug)]
@@ -104,7 +109,7 @@ impl OutletPressure {
 impl RegionalDuct {
     /// Observe the actual flanged outlet in its bound homogeneous exterior gas.
     ///
-    /// `fft_samples` must be 256..=8192 and a power of two. The reed adapter
+    /// `fft_samples` must be 256..=[`MAX_OUTLET_FFT_SAMPLES`] and a power of two. The reed adapter
     /// obtains it from its already-admitted characteristic line, so feedback
     /// and output use the same sampling grid without a second size heuristic.
     /// Axial whole-sample delay is removed before the inverse transform and
@@ -148,9 +153,9 @@ fn invalid(what: &'static str) -> DrivingPointError { DrivingPointError::Invalid
 fn acceleration_kernel(sample_rate_hz: u32, n: usize, one_way_time_s: f64, zc: f64,
     mut response: impl FnMut(f64) -> Result<DuctResponse, DuctError>)
     -> Result<(Vec<f64>, usize), DrivingPointError> {
-    if sample_rate_hz == 0 || !(256..=8192).contains(&n) || !n.is_power_of_two()
+    if sample_rate_hz == 0 || !(256..=MAX_OUTLET_FFT_SAMPLES).contains(&n) || !n.is_power_of_two()
         || !zc.is_finite() || zc <= 0.0 || !one_way_time_s.is_finite() || one_way_time_s <= 0.0 {
-        return Err(invalid("outlet transfer requires physical clock, impedance, travel time and a power-of-two grid in 256..=8192"));
+        return Err(invalid("outlet transfer requires physical clock, impedance, travel time and a power-of-two grid in 256..=65536"));
     }
     let rate = f64::from(sample_rate_hz);
     let delay = (one_way_time_s * rate).floor();
