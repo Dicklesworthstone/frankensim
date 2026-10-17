@@ -3,7 +3,7 @@
 //! SPD, certified residuals, bitwise resumability, and the cross-ISA
 //! golden hash.
 
-use fs_la::eigen::{LanczosState, LobpcgState, jacobi_eigh, lanczos_run, lobpcg_run};
+use fs_la::eigen::{LanczosState, LobpcgState, householder_eigh, jacobi_eigh, lanczos_run, lobpcg_run};
 
 fn lcg(seed: &mut u64) -> f64 {
     *seed = seed
@@ -98,6 +98,46 @@ fn jacobi_dense_analytic_and_reconstruction() {
     println!(
         "{{\"suite\":\"fs-la\",\"case\":\"jacobi-eigh\",\"verdict\":\"pass\",\"detail\":\"analytic 2x2 + random 24x24 reconstruct/orthogonality\"}}"
     );
+}
+
+#[test]
+fn householder_eigh_matches_jacobi_and_reconstructs() {
+    let (vals, _) = householder_eigh(&[2.0, 1.0, 1.0, 2.0], 2);
+    assert!((vals[0] - 1.0).abs() < 1e-14 && (vals[1] - 3.0).abs() < 1e-14);
+    assert_eq!(householder_eigh(&[-3.5], 1), (vec![-3.5], vec![1.0]));
+    let mut seed = 0x40C5_u64;
+    for (n, kind) in [(5, 0), (40, 0), (128, 0), (32, 1), (48, 2)] {
+        let mut a = vec![0.0f64; n * n];
+        match kind {
+            // Random symmetric.
+            0 => for i in 0..n { for j in 0..=i {
+                let v = lcg(&mut seed); a[i * n + j] = v; a[j * n + i] = v;
+            }},
+            // Repeated eigenvalues: 2 I plus a rank-two update.
+            1 => { for i in 0..n { a[i * n + i] = 2.0; }
+                for i in 0..n { for j in 0..n {
+                    a[i * n + j] += (i as f64 / n as f64) * (j as f64 / n as f64) - 0.3 * ((i + j) % 2) as f64;
+                }}},
+            // Rank-deficient PSD: B B^T with B n x 6.
+            _ => { let b: Vec<f64> = (0..n * 6).map(|_| lcg(&mut seed)).collect();
+                for i in 0..n { for j in 0..n {
+                    a[i * n + j] = (0..6).map(|k| b[i * 6 + k] * b[j * 6 + k]).sum();
+                }}},
+        }
+        let (vals, vecs) = householder_eigh(&a, n);
+        let (reference, _) = jacobi_eigh(&a, n);
+        let norm = a.iter().fold(0.0f64, |m, x| m.max(x.abs())) * n as f64;
+        for (x, y) in vals.iter().zip(&reference) {
+            assert!((x - y).abs() <= 1e-12 * norm, "eigenvalue {x} vs Jacobi {y} at n={n}");
+        }
+        for w in vals.windows(2) { assert!(w[0] <= w[1], "eigenvalues must ascend"); }
+        for p in 0..n { for q in 0..n {
+            let mut av = 0.0f64; let mut vv = 0.0f64;
+            for k in 0..n { av += a[p * n + k] * vecs[k * n + q]; vv += vecs[k * n + p] * vecs[k * n + q]; }
+            assert!((av - vals[q] * vecs[p * n + q]).abs() <= 1e-12 * norm, "A V mismatch at ({p},{q}), n={n}");
+            assert!((vv - if p == q { 1.0 } else { 0.0 }).abs() < 1e-12, "orthogonality at ({p},{q}), n={n}");
+        }}
+    }
 }
 
 #[test]

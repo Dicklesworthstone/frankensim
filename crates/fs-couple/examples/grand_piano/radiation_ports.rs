@@ -20,10 +20,11 @@ impl PortBasis {
     pub fn new(board_ports: usize, vectors: Vec<Vec<f64>>) -> Result<Self, String> {
         let ports = vectors.len();
         if !(1..=crate::linear::MAX_BOARD_MODES).contains(&board_ports)
-            || !(1..=32).contains(&ports) || ports > board_ports
+            || !(1..=MAX_PORTS).contains(&ports) || ports > board_ports
             || vectors.iter().any(|row| row.len() != board_ports
                 || row.iter().any(|v| !v.is_finite())) {
-            return Err("radiation basis requires 1..32 complete rows over 1..128 board coordinates".into());
+            return Err(format!("radiation basis requires 1..{MAX_PORTS} complete rows over 1..{} board coordinates",
+                crate::linear::MAX_BOARD_MODES));
         }
         let tolerance = 256. * f64::EPSILON * (board_ports + ports + 1) as f64;
         let mut orthogonality_error = 0.0_f64;
@@ -114,11 +115,11 @@ pub(crate) fn geometry_basis(weights:&[Vec<f64>],areas:&[f64],maximum:usize,
     let n=weights.len();let panels=areas.len();
     if !(1..=crate::linear::MAX_BOARD_MODES).contains(&n)
         || !(1..=MAX_PORTS).contains(&maximum)
-        || !(1..=fs_bem::helmholtz::MAX_DENSE_PANELS).contains(&maximum_panels)
+        || !(1..=fs_bem::helmholtz::rayleigh_modal::MAX_MODAL_RAYLEIGH_CELLS).contains(&maximum_panels)
         || !(1..=maximum_panels).contains(&panels)
         || areas.iter().any(|a|!a.is_finite() || *a<=0.)
         || weights.iter().any(|row|row.len()!=panels || row.iter().any(|v|!v.is_finite())) {
-        return Err("radiation port selection needs complete finite board fields, positive panel areas and 1..32 ports".into());
+        return Err(format!("radiation port selection needs complete finite board fields, positive panel areas and 1..{MAX_PORTS} ports"));
     }
     let mut weighted=vec![vec![0.;panels];n];let mut scale=0.0_f64;
     for (out,row) in weighted.iter_mut().zip(weights) {

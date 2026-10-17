@@ -13,14 +13,15 @@
 //! combined kinetic energy to its checked decomposition/roundoff tolerance;
 //! accuracy still requires rate convergence. No allocation in these flows.
 use fs_couple::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState,
-    ModalAcousticTimeBudget, ModalAcousticTimeModel};
+    ModalAcousticTimeBudget, ModalAcousticTimeModel, MAX_TIME_DOMAIN_ACOUSTIC_MODES};
 use fs_math::c64::C64;
 use fs_phs::{PortExchangeBudget, PreparedPortExchange};
 
-pub const MAX_AIR_STATES: usize = 1024;
+/// Every acoustic oscillator a complete passive model may carry.
+pub const MAX_AIR_STATES: usize = MAX_POLES;
 
 // Shared positive-real model; collective exchange does not alter its impedance.
-pub use fs_couple::render::plate::impact::radiation::{Model,Pole};
+pub use fs_couple::render::plate::impact::radiation::{Model,Pole,MAX_POLES,MAX_PORTS};
 use fs_couple::render::plate::impact::radiation::fit::{Fit,fit};
 
 #[path = "radiation_ports.rs"]
@@ -76,34 +77,39 @@ impl Prepared {
             return Err("acoustic model does not cover the loaded basis or mechanical rate".into());
         }
         let half_rate=rate.checked_mul(2).ok_or("acoustic half-step rate overflow")?;
-        let modes:Vec<_>=model.poles.iter().map(|p| ModalAcousticMode {
-            angular_frequency_rad_s:p.omega, damping_ratio:p.zeta,
-            pressure_per_modal_velocity:C64::ZERO,
-        }).collect();
-        let mut oscillator=ModalAcousticTimeModel::try_new(half_rate,modes,
-            ModalAcousticTimeBudget::audible_reference()).map_err(|e|e.to_string())?;
-        let zero=vec![0.;model.poles.len()];
-        let mut states:Vec<_>=model.poles.iter().map(|p|ModalAcousticState {
-            displacement_m_sqrt_kg:1./p.omega,velocity_m_sqrt_kg_per_s:0.,
-        }).collect();
-        oscillator.restore_states(&states).map_err(|e|e.to_string())?;
-        oscillator.step(&zero).map_err(|e|e.to_string())?;
-        let mut free=vec![Free::default();states.len()];
-        for ((t,s),p) in free.iter_mut().zip(oscillator.states()).zip(&model.poles) {
-            t.xx=p.omega*s.displacement_m_sqrt_kg;t.px=s.velocity_m_sqrt_kg_per_s;
-        }
-        states.fill(ModalAcousticState {displacement_m_sqrt_kg:0.,velocity_m_sqrt_kg_per_s:1.});
-        oscillator.restore_states(&states).map_err(|e|e.to_string())?;
-        oscillator.step(&zero).map_err(|e|e.to_string())?;
-        for ((t,s),p) in free.iter_mut().zip(oscillator.states()).zip(&model.poles) {
-            t.xp=p.omega*s.displacement_m_sqrt_kg;t.pp=s.velocity_m_sqrt_kg_per_s;
+        // Each oscillator's exact transition is independent of the others, so they are
+        // taken from the shared owner in groups within its own mode ceiling.
+        let mut free=vec![Free::default();model.poles.len()];
+        for (poles,free) in model.poles.chunks(MAX_TIME_DOMAIN_ACOUSTIC_MODES)
+            .zip(free.chunks_mut(MAX_TIME_DOMAIN_ACOUSTIC_MODES)) {
+            let modes:Vec<_>=poles.iter().map(|p| ModalAcousticMode {
+                angular_frequency_rad_s:p.omega, damping_ratio:p.zeta,
+                pressure_per_modal_velocity:C64::ZERO,
+            }).collect();
+            let mut oscillator=ModalAcousticTimeModel::try_new(half_rate,modes,
+                ModalAcousticTimeBudget::audible_reference()).map_err(|e|e.to_string())?;
+            let zero=vec![0.;poles.len()];
+            let mut states:Vec<_>=poles.iter().map(|p|ModalAcousticState {
+                displacement_m_sqrt_kg:1./p.omega,velocity_m_sqrt_kg_per_s:0.,
+            }).collect();
+            oscillator.restore_states(&states).map_err(|e|e.to_string())?;
+            oscillator.step(&zero).map_err(|e|e.to_string())?;
+            for ((t,s),p) in free.iter_mut().zip(oscillator.states()).zip(poles) {
+                t.xx=p.omega*s.displacement_m_sqrt_kg;t.px=s.velocity_m_sqrt_kg_per_s;
+            }
+            states.fill(ModalAcousticState {displacement_m_sqrt_kg:0.,velocity_m_sqrt_kg_per_s:1.});
+            oscillator.restore_states(&states).map_err(|e|e.to_string())?;
+            oscillator.step(&zero).map_err(|e|e.to_string())?;
+            for ((t,s),p) in free.iter_mut().zip(oscillator.states()).zip(poles) {
+                t.xp=p.omega*s.displacement_m_sqrt_kg;t.pp=s.velocity_m_sqrt_kg_per_s;
+            }
         }
         let coupling:Vec<_>=model.poles.iter().flat_map(|p|p.coupling.iter().copied()).collect();
-        // One collective half-step, not separate physical-port rotations.
-        // The old full-step infinity-norm limit .25 remains .125 per half-step.
+        // One collective half-step, not separate physical-port rotations. Its
+        // largest rotation, sigma_max(L) dt/2, stays within .125 per half-step.
         let exchange=PreparedPortExchange::new(ports,model.poles.len(),&coupling,
-            0.5/f64::from(rate),PortExchangeBudget {max_left:32,max_right:MAX_AIR_STATES,
-                max_setup_terms:64*1024*1024,maximum_dt_coupling:0.125})
+            0.5/f64::from(rate),PortExchangeBudget {max_left:MAX_PORTS,max_right:MAX_AIR_STATES,
+                max_setup_terms:60*MAX_PORTS*MAX_PORTS*MAX_AIR_STATES,maximum_dt_coupling:0.125})
             .map_err(|e|e.to_string())?;
         if free.iter().any(|t|[t.xx,t.xp,t.px,t.pp].iter().any(|x|!x.is_finite())) {
             return Err("nonfinite prepared acoustic transition".into());

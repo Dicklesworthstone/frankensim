@@ -34,7 +34,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--string-polarization bridge-frames.fspp]
     [--cavity enclosure.fspc]
     [--rayleigh-loading sides,min_hz,max_hz,samples]
-    [--radiation-ports 1..32]
+    [--radiation-ports 1..128]
     [--concert-pitch 430..450 | --stretch-tuning 430..450 | --raw-tensions]
     [--mesh-divisions 4..32] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--board-reduction SPEC]
@@ -224,8 +224,11 @@ This assumes an infinite baffle, with no lid/room scattering.
 render. Supply sides,min_hz,max_hz,samples: one or two independent half-spaces,
 an explicit frequency band and an odd sample count from 33 to 257. The band
 must cover the loaded board reference frequencies and stay below 45% of the
-output rate. The full reciprocal Rayleigh impedance is fitted by the existing
-passive owner and coupled on the mechanics clock. Supplied wood damping is
+output rate. The full reciprocal Rayleigh impedance (up to 128 board modes) is
+sampled linearly in frequency and fitted by the existing passive owner with
+resonators that resolve the board's own travel time (spacing c/6D, D its largest
+extent); training samples must be that close, so 90-2400 Hz on the concert
+grand's 2.36 m board needs at least 193 samples. It is coupled on the mechanics clock. Supplied wood damping is
 treated as intrinsic; the front microphone remains a one-side observation.
 Two-sided loading excludes a sealed --cavity below the board. Crowned shells,
 diagnostic-volume output and unsupported work/rate/fit budgets refuse.
@@ -482,7 +485,8 @@ impl Options {
         if options.radiation_ports.is_some_and(|ports|
             options.rayleigh_loading.is_none()
                 || !(1..=fs_couple::render::plate::impact::radiation::MAX_PORTS).contains(&ports)) {
-            return Err("--radiation-ports requires --rayleigh-loading and an explicit ceiling of 1..32 ports".into());
+            return Err(format!("--radiation-ports requires --rayleigh-loading and an explicit ceiling of 1..{} ports",
+                fs_couple::render::plate::impact::radiation::MAX_PORTS));
         }
         if let Some(load) = &options.rayleigh_loading {
             if !geometric || options.render.is_none() || options.diagnostic_volume {

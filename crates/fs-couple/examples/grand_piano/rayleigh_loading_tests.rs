@@ -30,10 +30,12 @@ fn fixture() -> (Bank, Vec<SurfaceSample>) {
 fn medium() -> Medium { Medium { density: 1.2, sound_speed: 343.0 } }
 
 #[test]
-fn unsupported_complete_port_count_refuses_before_the_rayleigh_sweep() {
-    let count = MAX_PORTS + 1;
-    assert!(count <= MAX_MODAL_RAYLEIGH_FIELDS,
-        "fixture must fit the kernel while exceeding the passive realization");
+fn every_admitted_board_has_a_complete_load_and_excess_area_refuses_before_the_sweep() {
+    // The passive realization now covers the whole kernel and every board the bank
+    // admits, so no complete image can fall between them.
+    assert_eq!(MAX_PORTS, MAX_MODAL_RAYLEIGH_FIELDS);
+    assert!(MAX_PORTS >= super::super::linear::MAX_BOARD_MODES);
+    let count = 2;
     let course = steinway_scale::courses().unwrap().into_iter().find(|c| c.midi == 69).unwrap();
     let course = Course { unison: 1, duplex_length_m: 0.0, ..course };
     let board: Vec<_> = (0..count).map(|i| BoardMode {
@@ -41,11 +43,11 @@ fn unsupported_complete_port_count_refuses_before_the_rayleigh_sweep() {
         bridge: [0.0; 88], volume: 0.0,
     }).collect();
     let bank = Bank::new(&[course], &board, 192_000, 8_000.0, 20, false).unwrap();
-    let surface = [SurfaceSample { position_m: [0.0, 0.0, 0.0],
-        area_m2: 0.001, mode_shape: vec![1.0; count] }];
+    let surface: Vec<_> = (0..=MAX_MODAL_RAYLEIGH_CELLS).map(|i| SurfaceSample {
+        position_m: [i as f64 * 1e-3, 0.0, 0.0], area_m2: 1e-6, mode_shape: vec![1.0; count] }).collect();
     let error = prepare(&surface, &bank, &Options::parse("1,40,500,65").unwrap(),
-        medium(), 48_000, None).err().expect("unsupported full image must refuse");
-    assert_eq!(error, format!("Rayleigh loading retains 1..{MAX_PORTS} complete board modes and 1..{} area samples; reduce the supplied physical image explicitly", fs_bem::helmholtz::MAX_DENSE_PANELS));
+        medium(), 48_000, None).err().expect("excess area samples must refuse");
+    assert_eq!(error, format!("Rayleigh loading retains 1..{MAX_PORTS} complete board modes and 1..{MAX_MODAL_RAYLEIGH_CELLS} area samples; reduce the supplied physical image explicitly"));
 }
 
 #[test]
@@ -199,7 +201,7 @@ fn projected_rayleigh_loading_builds_port_basis() {
 
 #[test]
 fn explicit_projection_reaches_the_existing_runtime_with_all_33_board_coordinates() {
-    let count = MAX_PORTS + 1;
+    let count = 33;
     let course = steinway_scale::courses().unwrap().into_iter().find(|c| c.midi == 69).unwrap();
     let course = Course { unison: 1, duplex_length_m: 0.0, ..course };
     let board: Vec<_> = (0..count).map(|i| BoardMode {

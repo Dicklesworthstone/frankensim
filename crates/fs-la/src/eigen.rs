@@ -322,6 +322,227 @@ pub fn jacobi_eigh(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
 }
 
 // ---------------------------------------------------------------------------
+// Householder tridiagonalization + implicit QL (symmetric)
+// ---------------------------------------------------------------------------
+
+/// `sqrt(a^2 + b^2)` without overflow, from `sqrt` alone (no libm `hypot`).
+fn pythag(a: f64, b: f64) -> f64 {
+    let (x, y) = (a.abs(), b.abs());
+    if x > y {
+        let r = y / x;
+        x * (1.0 + r * r).sqrt()
+    } else if y > 0.0 {
+        let r = x / y;
+        y * (1.0 + r * r).sqrt()
+    } else {
+        0.0
+    }
+}
+
+/// Eigendecomposition of a dense SYMMETRIC matrix (row-major n×n) by
+/// Householder reduction to tridiagonal form and the implicit QL iteration
+/// (EISPACK tred2/tql2). Same contract as [`jacobi_eigh`]: eigenvalues
+/// ascending, eigenvectors as columns of a row-major n×n matrix, lowest-index
+/// tie-break. About `9 n^3` flops against Jacobi's several sweeps of `4 n^3`,
+/// so it suits repeated decompositions of the same size. Deterministic: only
+/// `sqrt` and arithmetic. Falls back to [`jacobi_eigh`] if an eigenvalue does
+/// not converge within 64 QL iterations (not observed on symmetric input).
+///
+/// # Panics
+/// As [`jacobi_eigh`]: on an inadmissible size or `a.len() != n * n`.
+#[must_use]
+#[allow(clippy::many_single_char_names, clippy::too_many_lines)]
+pub fn householder_eigh(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    let admission =
+        admit_jacobi_eigh(n).expect("dense symmetric workspace must fit the practical work cap");
+    let square = admission.matrix_entries();
+    assert_eq!(a.len(), square, "a must be n*n = {square}");
+    if n == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let mut v = a.to_vec();
+    let mut d = vec![0.0f64; n];
+    let mut e = vec![0.0f64; n];
+    // tred2: V becomes the orthogonal similarity; d, e the tridiagonal.
+    for j in 0..n {
+        d[j] = v[(n - 1) * n + j];
+    }
+    for i in (1..n).rev() {
+        let mut scale = 0.0;
+        let mut h = 0.0;
+        for dk in &d[..i] {
+            scale += dk.abs();
+        }
+        if scale == 0.0 {
+            e[i] = d[i - 1];
+            for j in 0..i {
+                d[j] = v[(i - 1) * n + j];
+                v[i * n + j] = 0.0;
+                v[j * n + i] = 0.0;
+            }
+        } else {
+            for dk in &mut d[..i] {
+                *dk /= scale;
+                h += *dk * *dk;
+            }
+            let mut f = d[i - 1];
+            let mut g = h.sqrt();
+            if f > 0.0 {
+                g = -g;
+            }
+            e[i] = scale * g;
+            h -= f * g;
+            d[i - 1] = f - g;
+            for ej in &mut e[..i] {
+                *ej = 0.0;
+            }
+            for j in 0..i {
+                f = d[j];
+                v[j * n + i] = f;
+                g = e[j] + v[j * n + j] * f;
+                for k in j + 1..i {
+                    g += v[k * n + j] * d[k];
+                    e[k] += v[k * n + j] * f;
+                }
+                e[j] = g;
+            }
+            f = 0.0;
+            for j in 0..i {
+                e[j] /= h;
+                f += e[j] * d[j];
+            }
+            let hh = f / (h + h);
+            for j in 0..i {
+                e[j] -= hh * d[j];
+            }
+            for j in 0..i {
+                f = d[j];
+                g = e[j];
+                for k in j..i {
+                    v[k * n + j] -= f * e[k] + g * d[k];
+                }
+                d[j] = v[(i - 1) * n + j];
+                v[i * n + j] = 0.0;
+            }
+        }
+        d[i] = h;
+    }
+    for i in 0..n - 1 {
+        v[(n - 1) * n + i] = v[i * n + i];
+        v[i * n + i] = 1.0;
+        let h = d[i + 1];
+        if h != 0.0 {
+            for k in 0..=i {
+                d[k] = v[k * n + i + 1] / h;
+            }
+            for j in 0..=i {
+                let mut g = 0.0;
+                for k in 0..=i {
+                    g += v[k * n + i + 1] * v[k * n + j];
+                }
+                for k in 0..=i {
+                    v[k * n + j] -= g * d[k];
+                }
+            }
+        }
+        for k in 0..=i {
+            v[k * n + i + 1] = 0.0;
+        }
+    }
+    for j in 0..n {
+        d[j] = v[(n - 1) * n + j];
+        v[(n - 1) * n + j] = 0.0;
+    }
+    v[(n - 1) * n + n - 1] = 1.0;
+    e[0] = 0.0;
+    // tql2: diagonalize the tridiagonal, accumulating into V.
+    for i in 1..n {
+        e[i - 1] = e[i];
+    }
+    e[n - 1] = 0.0;
+    let mut f = 0.0f64;
+    let mut tst1 = 0.0f64;
+    let eps = f64::EPSILON;
+    for l in 0..n {
+        tst1 = tst1.max(d[l].abs() + e[l].abs());
+        let mut m = l;
+        while m < n - 1 && e[m].abs() > eps * tst1 {
+            m += 1;
+        }
+        if m > l {
+            let mut iterations = 0;
+            loop {
+                iterations += 1;
+                if iterations > 64 {
+                    return jacobi_eigh(a, n);
+                }
+                let mut g = d[l];
+                let mut p = (d[l + 1] - g) / (2.0 * e[l]);
+                let mut r = pythag(p, 1.0);
+                if p < 0.0 {
+                    r = -r;
+                }
+                d[l] = e[l] / (p + r);
+                d[l + 1] = e[l] * (p + r);
+                let dl1 = d[l + 1];
+                let mut h = g - d[l];
+                for di in &mut d[l + 2..n] {
+                    *di -= h;
+                }
+                f += h;
+                p = d[m];
+                let mut c = 1.0;
+                let mut c2 = c;
+                let mut c3 = c;
+                let el1 = e[l + 1];
+                let mut s = 0.0;
+                let mut s2 = 0.0;
+                for i in (l..m).rev() {
+                    c3 = c2;
+                    c2 = c;
+                    s2 = s;
+                    g = c * e[i];
+                    h = c * p;
+                    r = pythag(p, e[i]);
+                    e[i + 1] = s * r;
+                    s = e[i] / r;
+                    c = p / r;
+                    p = c * d[i] - s * g;
+                    d[i + 1] = h + s * (c * g + s * d[i]);
+                    for k in 0..n {
+                        h = v[k * n + i + 1];
+                        v[k * n + i + 1] = s * v[k * n + i] + c * h;
+                        v[k * n + i] = c * v[k * n + i] - s * h;
+                    }
+                }
+                p = -s * s2 * c3 * el1 * e[l] / dl1;
+                e[l] = s * p;
+                d[l] = c * p;
+                if e[l].abs() <= eps * tst1 {
+                    break;
+                }
+            }
+        }
+        d[l] += f;
+        e[l] = 0.0;
+    }
+    if d.iter().chain(&v).any(|x| !x.is_finite()) {
+        return jacobi_eigh(a, n);
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&x, &y| d[x].total_cmp(&d[y]).then(x.cmp(&y)));
+    let mut evals = vec![0.0f64; n];
+    let mut evecs = vec![0.0f64; square];
+    for (slot, &src) in order.iter().enumerate() {
+        evals[slot] = d[src];
+        for i in 0..n {
+            evecs[i * n + slot] = v[i * n + src];
+        }
+    }
+    (evals, evecs)
+}
+
+// ---------------------------------------------------------------------------
 // Lanczos (full reorthogonalization)
 // ---------------------------------------------------------------------------
 

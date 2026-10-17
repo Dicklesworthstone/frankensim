@@ -3,14 +3,17 @@ use super::{engine::radiation::{PortBasis,fit_projected},exterior_geometry::{Bou
 #[cfg(test)]
 use super::engine::radiation::validate_complete_fit;
 use fs_math::c64::C64;
-use fs_couple::render::plate::impact::radiation::MAX_PORTS;
 pub use fs_couple::render::plate::impact::radiation::fit::{Fit,fit};
+
+/// Exterior loaded playback fits a complete load with the shared fixed dictionary,
+/// whose capacity stays at 32 ports; larger boards use explicit acoustic ports.
+const MAX_COMPLETE_PORTS: usize = 32;
 
 /// Solve one modal BEM batch per frequency. Those SAME fields feed the load
 /// and receiver fits. Pressure/acceleration = pressure/velocity * i/omega.
 pub fn prepare(boundary:&Boundary,spec:&Specification,mechanics_rate:u32)->Result<(Fit,Samples),String> {
     let r=boundary.weights.len();let omega=spec.omega();
-    if r>MAX_PORTS || omega.len()<33 {return Err("loaded playback requires <=32 complete board modes and >=33 frequencies".into());}
+    if r>MAX_COMPLETE_PORTS || omega.len()<33 {return Err("loaded playback requires <=32 complete board modes and >=33 frequencies".into());}
     if mechanics_rate<8_000 || 8.*omega[omega.len()-1]>=0.9*std::f64::consts::PI*f64::from(mechanics_rate) {
         return Err("loaded playback's off-band storage poles exceed the declared mechanical-rate guard".into());
     }

@@ -2,14 +2,16 @@
 //! by the primary piano receiver. All structural columns and area samples feed
 //! the existing passive load fitter and the existing mechanical air exchange.
 use super::{board_geometry::SurfaceSample, engine::radiation::{self, Model, PortBasis}, linear::Bank};
-use fs_bem::helmholtz::{Medium, rayleigh_modal::{AreaSample, PreparedSurface, MAX_MODAL_RAYLEIGH_FIELDS}};
+use fs_bem::helmholtz::{Medium, rayleigh_modal::{AreaSample, PreparedSurface,
+    MAX_MODAL_RAYLEIGH_CELLS, MAX_MODAL_RAYLEIGH_FIELDS}};
 use fs_couple::render::plate::impact::radiation::{fit, MAX_PORTS};
 use fs_math::{c64::C64, det};
 use std::f64::consts::TAU;
 
 /// An offline ceiling on cell-mode-frequency visits, not a time guarantee.
-/// The default 3918-cell preset fits even at 32 modes and 65 frequencies.
-const MAX_SWEEP_TERMS: u64 = 64_000_000_000;
+/// A board resolved to 2.4 kHz (9,432 cells, 128 modes) fits at 257 frequencies.
+/// Frequencies are independent and are sampled in parallel.
+const MAX_SWEEP_TERMS: u64 = 4_000_000_000_000;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
@@ -20,8 +22,10 @@ pub struct Options {
 }
 
 impl Options {
-    /// sides,min_hz,max_hz,samples. The shared fitter owns its fixed dictionary;
-    /// there is no user-selected alternate fitting order or relaxed error gate.
+    /// sides,min_hz,max_hz,samples. A complete load is fitted with a dictionary
+    /// derived from the board's own largest extent (its longest travel time), a
+    /// projected load with the shared fixed dictionary; there is no user-selected
+    /// fitting order or relaxed error gate.
     pub fn parse(text: &str) -> Result<Self, String> {
         let f: Vec<_> = text.split(',').map(str::trim).collect();
         let error = || "--rayleigh-loading expects sides,min_hz,max_hz,samples; sides 1|2 and odd 33..257 samples".to_string();
@@ -77,6 +81,8 @@ pub struct Report {
     pub resistance_rms_error: f64,
     pub acoustic_ports: usize,
     pub surface_rms_error: Option<f64>,
+    /// Largest cell-pair distance and the resonator spacing it sets, for a complete load.
+    pub travel: Option<(f64, f64)>,
 }
 
 impl std::fmt::Display for Report {
@@ -87,6 +93,9 @@ impl std::fmt::Display for Report {
             self.resistance_peak_error, self.resistance_rms_error, self.reference_min_hz,
             self.reference_max_hz, self.minimum_equivalent_disc_ppw, self.sweep_terms)?;
         write!(f, " Power-consistent area-point resistance; equivalent-disc self reactance.")?;
+        if let Some((extent, spacing)) = self.travel {
+            write!(f, " Linear frequency samples; the board's {extent:.3} m extent sets {spacing:.2} Hz resonator spacing (c/6D).")?;
+        }
         if let Some(error) = self.surface_rms_error {
             write!(f, " Explicit acoustic projection: {} ports over all {} board coordinates; surface-field RMS omission {:.5}. Reported load errors include projection and fitting on the complete original matrices.", self.acoustic_ports, self.board_modes, error)?;
         }
@@ -106,7 +115,7 @@ pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium
     output_rate: u32, max_ports: Option<usize>) -> Result<PreparedLoad, String> {
     options.validate_clock(output_rate, bank.rate)?;
     if max_ports.is_some_and(|ports| !(1..=MAX_PORTS).contains(&ports)) {
-        return Err("Rayleigh acoustic reduction needs an explicit ceiling of 1..32 ports".into());
+        return Err(format!("Rayleigh acoustic reduction needs an explicit ceiling of 1..{MAX_PORTS} ports"));
     }
     let modes = bank.board_count;
     // The numerical kernel may admit more fields than the downstream passive
@@ -114,8 +123,8 @@ pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium
     let maximum_fields = if max_ports.is_some() { MAX_MODAL_RAYLEIGH_FIELDS }
         else { MAX_MODAL_RAYLEIGH_FIELDS.min(MAX_PORTS) };
     if !(1..=maximum_fields).contains(&modes) || surface.is_empty()
-        || surface.len() > fs_bem::helmholtz::MAX_DENSE_PANELS {
-        return Err(format!("Rayleigh loading retains 1..{maximum_fields} complete board modes and 1..{} area samples; reduce the supplied physical image explicitly", fs_bem::helmholtz::MAX_DENSE_PANELS));
+        || surface.len() > MAX_MODAL_RAYLEIGH_CELLS {
+        return Err(format!("Rayleigh loading retains 1..{maximum_fields} complete board modes and 1..{MAX_MODAL_RAYLEIGH_CELLS} area samples; reduce the supplied physical image explicitly"));
     }
     let count = surface.len() as u64;
     let sweep_terms = count.checked_mul(count).and_then(|v| v.checked_mul(modes as u64))
@@ -154,19 +163,31 @@ pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium
         let areas: Vec<_> = cells.iter().map(|cell| cell.area_m2).collect();
         let weights: Vec<Vec<_>> = (0..modes).map(|mode|
             cells.iter().map(|cell| cell.mode_shape[mode]).collect()).collect();
-        radiation::geometry_basis(&weights, &areas, ports,
-            fs_bem::helmholtz::MAX_DENSE_PANELS)
+        radiation::geometry_basis(&weights, &areas, ports, MAX_MODAL_RAYLEIGH_CELLS)
     }).transpose()?;
-    let low = det::ln(options.min_hz);
-    let span = det::ln(options.max_hz) - low;
-    let mut omega: Vec<_> = (0..options.samples).map(|i|
-        TAU * det::exp(low + span * i as f64 / (options.samples - 1) as f64)).collect();
+    // A complete load is sampled linearly: its kernel is a superposition of delays
+    // up to D/c, so its impedance has detail on the same c/D scale in frequency at
+    // the top of the band as at the bottom, and its dictionary resolves that scale.
+    let last = (options.samples - 1) as f64;
+    let mut omega: Vec<_> = if projection.is_some() {
+        let low = det::ln(options.min_hz);
+        let span = det::ln(options.max_hz) - low;
+        (0..options.samples).map(|i| TAU * det::exp(low + span * i as f64 / last)).collect()
+    } else {
+        (0..options.samples).map(|i|
+            TAU * (options.min_hz + (options.max_hz - options.min_hz) * i as f64 / last)).collect()
+    };
     omega[0] = TAU * options.min_hz;
     omega[options.samples - 1] = TAU * options.max_hz;
+    let extent = prepared.maximum_distance_m();
+    // A radiator small against the band (one cell: no travel time) needs at most
+    // one spacing across the band.
+    let band = omega[options.samples - 1] - omega[0];
+    let spacing = if extent > 0.0 { (TAU * medium.sound_speed / (6.0 * extent)).min(band) } else { band };
     let data = sample_impedances(&prepared, &omega, medium, options.sides)?;
     let fitted = if let Some((basis, _)) = &projection {
         radiation::fit_projected(&omega, &data, basis)?
-    } else { fit::fit(&omega, &data, modes)? };
+    } else { fit::fit_resolved(&omega, &data, modes, spacing)? };
     let report = Report {
         sides: options.sides, surface_samples: surface.len(), board_modes: modes,
         frequencies: options.samples, min_hz: options.min_hz, max_hz: options.max_hz,
@@ -176,6 +197,7 @@ pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium
         resistance_rms_error: fitted.resistance_rms_error,
         acoustic_ports: fitted.model.ports,
         surface_rms_error: projection.as_ref().map(|(_, error)| *error),
+        travel: projection.is_none().then_some((extent, spacing / TAU)),
     };
     Ok(PreparedLoad { model: fitted.model, report, basis: projection.map(|(basis, _)| basis) })
 }
@@ -185,12 +207,22 @@ pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium
 // the fitter or scale the observing microphone to hide missing work.
 fn sample_impedances(surface: &PreparedSurface, omega: &[f64], medium: Medium, sides: u8)
     -> Result<Vec<Vec<C64>>, String> {
+    // Each frequency is an independent evaluation of the same kernel, so threads
+    // change only wall time: every matrix is bit-identical to a serial sweep.
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, omega.len().max(1));
+    let chunk = omega.len().div_ceil(threads).max(1);
+    let parts: Vec<Result<Vec<Vec<C64>>, String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = omega.chunks(chunk).map(|part| scope.spawn(move || {
+            part.iter().map(|&w| {
+                let mut matrix = surface.power_consistent_impedance(w, medium).map_err(|e| e.to_string())?;
+                for value in &mut matrix { *value = value.scale(f64::from(sides)); }
+                Ok(matrix)
+            }).collect()
+        })).collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("Rayleigh sweep thread panicked".into()))).collect()
+    });
     let mut data = Vec::with_capacity(omega.len());
-    for &w in omega {
-        let mut matrix = surface.power_consistent_impedance(w, medium).map_err(|e| e.to_string())?;
-        for value in &mut matrix { *value = value.scale(f64::from(sides)); }
-        data.push(matrix);
-    }
+    for part in parts { data.extend(part?); }
     Ok(data)
 }
 

@@ -40,27 +40,33 @@ fn loaded_physical_shapes_reach_the_unchanged_passive_fitter_and_projection() {
     assert!((loaded_shape[0]-1.0).abs()>1e-5,"must use the actual string-loaded basis");
     let source = PreparedSurface::new(&[AreaSample { position_m:[0.0,0.0],area_m2:0.001,
         mode_shape:loaded_shape }]).unwrap();
-    let low=det::ln(options.min_hz);let span=det::ln(options.max_hz)-low;
+    // A complete load is sampled linearly and fitted with the travel-time dictionary;
+    // one cell has no travel time, so one spacing spans the band.
+    let last=(options.samples-1) as f64;
     let mut omega:Vec<_>=(0..options.samples).map(|i|
-        TAU*det::exp(low+span*i as f64/(options.samples-1) as f64)).collect();
+        TAU*(options.min_hz+(options.max_hz-options.min_hz)*i as f64/last)).collect();
     omega[0]=TAU*options.min_hz;omega[options.samples-1]=TAU*options.max_hz;
     // Independent assembly of the precise fitting inputs, not the adapter's
     // sampling helper. The full adapter must produce the identical realization.
     let data:Vec<_>=omega.iter().map(|&w|source.power_consistent_impedance(w,medium()).unwrap()).collect();
-    let expected=fit::fit(&omega,&data,1).unwrap();
+    let expected=fit::fit_resolved(&omega,&data,1,omega[options.samples-1]-omega[0]).unwrap();
     let full=prepare(&surface,&bank,&options,medium(),48_000,None).unwrap();
     assert!(full.report.to_string().contains("Power-consistent area-point resistance"));
     for hz in [40.0,193.0,500.0] {
         assert_eq!(full.model.impedance(TAU*hz).unwrap(),expected.model.impedance(TAU*hz).unwrap());
     }
+    // The explicit projection keeps the logarithmic grid and the shared fixed
+    // dictionary; a lossless one-port coordinate map leaves both fits on the load.
     let projected=prepare(&surface,&bank,&options,medium(),48_000,Some(1)).unwrap();
     assert!(projected.basis.is_some());
     assert_eq!(projected.report.board_modes,1);
     assert_eq!(projected.report.acoustic_ports,1);
     assert!(projected.report.surface_rms_error.unwrap()<1e-12);
     for hz in [40.0,193.0,500.0] {
-        let a=full.model.impedance(TAU*hz).unwrap()[0];
-        let b=projected.model.impedance(TAU*hz).unwrap()[0];
-        assert!((a-b).abs()<1e-10*a.abs(),"lossless one-port coordinate projection changed the load");
+        let load=source.power_consistent_impedance(TAU*hz,medium()).unwrap()[0];
+        for model in [&full.model,&projected.model] {
+            let z=model.impedance(TAU*hz).unwrap()[0];
+            assert!((z-load).abs()<0.05*load.abs(),"fit left the sampled load at {hz} Hz");
+        }
     }
 }

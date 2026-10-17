@@ -106,3 +106,19 @@ fn cold_work_rate_and_finite_limits_refuse_without_silent_rank_or_port_changes()
     assert!(PreparedPortExchange::new(2,1,&[1.0],0.01,budget()).is_err());
     assert!(PreparedPortExchange::new(1,1,&[f64::from_bits(1)],0.1,budget()).is_err());
 }
+
+#[test]
+fn rate_bound_is_the_largest_rotation_not_the_bank_size() {
+    // One port coupled equally to 1000 states: sigma_max = sqrt(1000) a, while the
+    // infinity norm is 1000 a. The rotation angle per application is sigma_max dt.
+    let coupling=vec![1.0;1000];
+    let dt=0.5/1000.0_f64.sqrt();
+    let mut work=PreparedPortExchange::new(1,1000,&coupling,dt,budget()).unwrap();
+    let mut x=[1.0];let mut y=vec![0.0;1000];
+    work.apply(&mut x,&mut y).unwrap();
+    // One rotation by angle 0.5 moves cos(0.5) of the port's unit amplitude into the bank.
+    assert!((x[0]-0.5_f64.cos()).abs()<1e-14);
+    let moved=y.iter().map(|v|v*v).sum::<f64>().sqrt();
+    assert!((moved-0.5_f64.sin()).abs()<1e-14);
+    assert!(PreparedPortExchange::new(1,1000,&coupling,3.0*dt,budget()).is_err());
+}

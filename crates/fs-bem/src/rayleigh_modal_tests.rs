@@ -237,12 +237,25 @@ fn invalid_or_unresolved_area_fields_refuse() {
 #[test]
 fn expanded_fields_refuse_excess_work_before_geometry_allocation() {
     let cell = AreaSample { position_m: [0.0, 0.0], area_m2: 1e-4, mode_shape: Vec::new() };
-    let mut oversized = vec![cell; MAX_DENSE_PANELS];
+    let mut oversized = vec![cell; MAX_MODAL_RAYLEIGH_CELLS];
     oversized[0].mode_shape = vec![1.0; MAX_MODAL_RAYLEIGH_FIELDS];
     assert!(matches!(PreparedSurface::new(&oversized), Err(HelmholtzError::BadParameter {
         what: "Rayleigh loading exceeds the per-frequency modal work limit"
     })));
+    oversized.push(oversized[0].clone());
+    assert!(matches!(PreparedSurface::new(&oversized), Err(HelmholtzError::WorkCap { .. })));
     let mut excess_fields = disc(0.1, 1);
     for cell in &mut excess_fields { cell.mode_shape = vec![1.0; MAX_MODAL_RAYLEIGH_FIELDS + 1]; }
     assert!(PreparedSurface::new(&excess_fields).is_err());
+}
+
+#[test]
+fn largest_extent_is_the_widest_cell_pair() {
+    let cells = disc(0.1, 2);
+    let prepared = PreparedSurface::new(&cells).unwrap();
+    let mut widest = 0.0_f64;
+    for a in &cells { for b in &cells {
+        widest = widest.max((a.position_m[0] - b.position_m[0]).hypot(a.position_m[1] - b.position_m[1]));
+    }}
+    assert_eq!(prepared.maximum_distance_m(), widest);
 }

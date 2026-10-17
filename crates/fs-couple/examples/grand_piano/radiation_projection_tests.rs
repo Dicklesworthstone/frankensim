@@ -129,10 +129,11 @@ fn invalid_port_spaces_are_refused_and_failed_flows_preserve_air_history() {
         (4, vec![vec![2., 0., 0., 0.]]),
         (4, vec![vec![f64::NAN, 0., 0., 0.]]),
         (4, vec![vec![1., 0., 0., 0.], vec![1., 0., 0., 0.]]),
+        // More acoustic rows than board coordinates.
         (
-            40,
-            (0..33)
-                .map(|j| (0..40).map(|i| if i == j { 1. } else { 0. }).collect())
+            4,
+            (0..5)
+                .map(|j| (0..4).map(|i| if i == j { 1. } else { 0. }).collect())
                 .collect(),
         ),
     ] {

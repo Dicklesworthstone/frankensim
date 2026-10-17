@@ -55,7 +55,7 @@ fn primary_radiation_ports_are_explicit_bounded_and_require_the_load() {
     for extra in [
         vec!["--radiation-ports", "1"],
         vec!["--rayleigh-loading", "1,20,2000,65", "--radiation-ports", "0"],
-        vec!["--rayleigh-loading", "1,20,2000,65", "--radiation-ports", "33"],
+        vec!["--rayleigh-loading", "1,20,2000,65", "--radiation-ports", "129"],
         vec!["--rayleigh-loading", "1,20,2000,65", "--radiation-ports", "1", "--radiation-ports", "2"],
         vec!["--rayleigh-loading", "1,20,2000,65", "--radiation-ports", "NaN"],
         vec!["--rayleigh-loading", "1,20,2000,65", "--radiation-ports", "2", "--diagnostic-volume"],

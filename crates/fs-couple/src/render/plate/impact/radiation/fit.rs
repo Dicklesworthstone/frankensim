@@ -2,10 +2,22 @@
 //! A fixed damped-resonator dictionary and PSD residue matrices preserve all
 //! signed cross-port terms. This is a restricted passive fit, not general MIMO
 //! vector fitting. Inadequate data/basis refuses; no entrywise repair or gain EQ.
+//!
+//! [`fit`] keeps the shared 32-term dictionary. [`fit_resolved`] derives its
+//! dictionary from the load's longest travel time instead: a radiator's kernel
+//! is a superposition of delays up to tau = D/c, so its impedance has detail on a
+//! scale of 1/tau in FREQUENCY at every frequency, which a fixed log-spaced set
+//! cannot follow over a wide band. Same solver, same unchanged error limits.
 use super::{Model,Pole,MAX_PORTS};
 use fs_math::{c64::C64,det};
 const TERMS:usize=32;
 const SWEEPS:usize=512;
+/// A resolved dictionary that needs more terms than this refuses: the band is
+/// too wide for the radiator's travel time to be represented.
+pub const MAX_RESOLVED_TERMS:usize=512;
+/// Resolved resonators continue this many spacings past the band top, so the
+/// fitted endpoint is not a truncation edge of the representation.
+const GUARD_TERMS:usize=6;
 
 pub struct Fit {
     pub model:Model,
@@ -33,6 +45,24 @@ fn dictionary(low:f64,high:f64)->Vec<(f64,f64)> {
     // an artificial minimum resistance. Its pole must still resolve at runtime.
     poles.push((8.*high,0.));poles
 }
+/// In-band resonators every `spacing` rad/s from the band bottom, each with
+/// half-power bandwidth 2*spacing (zeta = spacing/omega, at most 0.5), continued
+/// GUARD_TERMS past the top; lossless storage just above the band for the
+/// frequency-dependent added mass, which damped terms cannot supply without
+/// spurious resistance; and the shared sub-band and high-band terms.
+fn resolved_dictionary(low:f64,high:f64,spacing:f64)->Vec<(f64,f64)> {
+    let mut poles=Vec::new();
+    for &factor in &[0.35,0.55,0.80] {poles.push((low*factor,0.25));}
+    let in_band=((high-low)/spacing).floor() as usize;
+    for j in 0..=in_band+GUARD_TERMS {
+        let w=low+spacing*j as f64;poles.push((w,(spacing/w).min(0.5)));
+    }
+    for j in 1..=6 {
+        poles.push((det::exp(det::ln(high)+(det::ln(8.*high)-det::ln(high))*f64::from(j)/6.),0.25));
+    }
+    for &factor in &[1.15,1.3,1.6,2.,3.,5.,8.] {poles.push((factor*high,0.));}
+    poles
+}
 fn normalization(p:(f64,f64))->f64 {if p.1==0. {p.0} else {2.*p.1*p.0}}
 fn kernel(w:f64,p:(f64,f64))->C64 {
     let (o,z)=p;C64::new(0.,-normalization(p)*w)/C64::new(o*o-w*w,-2.*z*o*w)
@@ -58,15 +88,39 @@ fn psd(a:&[f64],n:usize,id:&[f64])->Result<Vec<f64>,String> {
     }
     Ok(out)
 }
+/// The same projection through Householder/QL, for the resolved dictionary's
+/// hundred-odd terms per sweep; the shared fixed dictionary keeps [`psd`].
+fn psd_householder(a:&[f64],n:usize)->Result<Vec<f64>,String> {
+    if a.iter().any(|x|!x.is_finite()) {return Err("passive load fit overflow".into());}
+    if n==1 {return Ok(vec![a[0].max(0.)]);}
+    let scale=a.iter().fold(0.0_f64,|s,x|s.max(x.abs()));
+    if scale==0. {return Ok(vec![0.;n*n]);}
+    let (values,vectors)=fs_la::eigen::householder_eigh(a,n);
+    let mut out=vec![0.;n*n];
+    for (k,&l) in values.iter().enumerate() {
+        let mut residual=0.0_f64;
+        for i in 0..n {
+            let mut s=0.;for j in 0..n {s+=a[i*n+j]*vectors[j*n+k];}
+            residual=residual.max((s-l*vectors[i*n+k]).abs());
+        }
+        if !l.is_finite() || !(residual<=1e-8*scale*n as f64) {
+            return Err("passive fit PSD projection did not resolve its eigenproblem".into());
+        }
+        if l<=0. {continue;}
+        for i in 0..n {for j in 0..n {out[i*n+j]+=l*vectors[i*n+k]*vectors[j*n+k];}}
+    }
+    Ok(out)
+}
 
 fn quadratic_objective(residue:&[Vec<f64>],gram:&[f64],rhs:&[Vec<f64>])->f64 {
+    let terms=residue.len();
     let mut total=0.0_f64;
-    for j in 0..TERMS {
+    for j in 0..terms {
         let mut dot_rhs=0.0_f64;
         for (&r,&b) in residue[j].iter().zip(&rhs[j]) {dot_rhs+=r*b;}
         let mut quad=0.0_f64;
-        for k in 0..TERMS {
-            let g=gram[j*TERMS+k];
+        for k in 0..terms {
+            let g=gram[j*terms+k];
             let mut inner=0.0_f64;
             for (&rj,&rk) in residue[j].iter().zip(&residue[k]) {inner+=rj*rk;}
             quad+=g*inner;
@@ -82,22 +136,23 @@ fn block_psd_sweep(
     rhs:&[Vec<f64>],
     ports:usize,
     id:&[f64],
+    householder:bool,
 )->Result<(Vec<Vec<f64>>,f64,f64),String> {
-    let size=ports*ports;
+    let size=ports*ports;let terms=start.len();
     let mut state=start.to_vec();
     let mut change=0.0_f64;
     let mut magnitude=0.0_f64;
-    for j in 0..TERMS {
+    for j in 0..terms {
         let mut candidate=vec![0.;size];
         for (a,value) in candidate.iter_mut().enumerate() {
-            *value=(rhs[j][a]-(0..TERMS).filter(|k|*k!=j)
-                .map(|k|gram[j*TERMS+k]*state[k][a]).sum::<f64>())/gram[j*TERMS+j];
+            *value=(rhs[j][a]-(0..terms).filter(|k|*k!=j)
+                .map(|k|gram[j*terms+k]*state[k][a]).sum::<f64>())/gram[j*terms+j];
         }
         for i in 0..ports {for k in 0..i {
             let v=0.5*(candidate[i*ports+k]+candidate[k*ports+i]);
             candidate[i*ports+k]=v;candidate[k*ports+i]=v;
         }}
-        let projected=psd(&candidate,ports,id)?;
+        let projected=if householder {psd_householder(&candidate,ports)?} else {psd(&candidate,ports,id)?};
         for (old,new) in state[j].iter_mut().zip(projected) {
             change=change.max((*old-new).abs());magnitude=magnitude.max(new.abs());*old=new;
         }
@@ -105,17 +160,50 @@ fn block_psd_sweep(
     Ok((state,change,magnitude))
 }
 
-/// Fit EVEN samples only. Odd samples are never used for coefficients,
-/// convergence stopping, dictionary choice or tolerance selection.
-pub fn fit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<Fit,String> {
+fn admit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<(),String> {
     if !(1..=MAX_PORTS).contains(&ports) || !(33..=257).contains(&omega.len()) || omega.len()%2==0
         || data.len()!=omega.len() || data.iter().any(|r|r.len()!=ports*ports
             || r.iter().any(|v|!v.re.is_finite()||!v.im.is_finite()))
         || omega.iter().enumerate().any(|(i,w)|!w.is_finite() || *w<=0.
             || (i>0 && *w<=omega[i-1])) {
-        return Err("passive load fit requires a complete 1..32-port matrix on an odd 33..257-frequency grid".into());
+        return Err(format!("passive load fit requires a complete 1..{MAX_PORTS}-port matrix on an odd 33..257-frequency grid"));
     }
-    let poles=dictionary(omega[0],omega[omega.len()-1]);let size=ports*ports;
+    Ok(())
+}
+
+/// Fit EVEN samples only. Odd samples are never used for coefficients,
+/// convergence stopping, dictionary choice or tolerance selection.
+pub fn fit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<Fit,String> {
+    admit(omega,data,ports)?;
+    fit_dictionary(omega,data,ports,&dictionary(omega[0],omega[omega.len()-1]),false)
+}
+
+/// Fit with a dictionary that resolves the load's longest travel time. `spacing`
+/// is the in-band resonator spacing in rad/s; a radiator of largest extent D in a
+/// medium of sound speed c needs spacing <= 2 pi c / (6 D) (a sixth of 1/tau). The
+/// training samples (even indices) must be no further apart than `spacing`, or
+/// the fit refuses rather than interpolate detail it never saw.
+pub fn fit_resolved(omega:&[f64],data:&[Vec<C64>],ports:usize,spacing:f64)->Result<Fit,String> {
+    admit(omega,data,ports)?;
+    // At most the band itself, so the guard terms stay below the 8x off-band storage.
+    if !spacing.is_finite() || spacing<=0. || spacing>omega[omega.len()-1]-omega[0] {
+        return Err("resolved load fit needs a finite positive resonator spacing no wider than its band".into());
+    }
+    let widest=(2..omega.len()).step_by(2).map(|f|omega[f]-omega[f-2]).fold(0.0_f64,f64::max);
+    if widest>spacing {
+        return Err(format!("resolved load fit: training samples are up to {:.1} Hz apart, wider than the {:.1} Hz the load's travel time needs; sample the band more densely",
+            widest/std::f64::consts::TAU,spacing/std::f64::consts::TAU));
+    }
+    let poles=resolved_dictionary(omega[0],omega[omega.len()-1],spacing);
+    if poles.len()>MAX_RESOLVED_TERMS {
+        return Err(format!("resolved load fit needs {} terms, above its {MAX_RESOLVED_TERMS}-term ceiling",poles.len()));
+    }
+    fit_dictionary(omega,data,ports,&poles,true)
+}
+
+fn fit_dictionary(omega:&[f64],data:&[Vec<C64>],ports:usize,poles:&[(f64,f64)],householder:bool)
+    ->Result<Fit,String> {
+    let size=ports*ports;let terms=poles.len();
     let scale=data.iter().step_by(2).map(|r|norm(r)).fold(0.0_f64,f64::max);
     if !scale.is_finite() {return Err("acoustic load norm overflow".into());}
     if scale==0. {
@@ -135,12 +223,12 @@ pub fn fit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<Fit,String> {
     if !real_weight.is_finite() || real_weight>1e12 {
         return Err("radiation resistance is below the load fit's relative resolution budget".into());
     }
-    let mut gram=vec![0.;TERMS*TERMS];let mut rhs=vec![vec![0.;size];TERMS];
+    let mut gram=vec![0.;terms*terms];let mut rhs=vec![vec![0.;size];terms];
     for f in (0..omega.len()).step_by(2) {
         let h:Vec<_>=poles.iter().map(|&p|kernel(omega[f],p)).collect();
-        for j in 0..TERMS {
-            for k in 0..TERMS {
-                gram[j*TERMS+k]+=h[j].re*real_weight*h[k].re*real_weight+h[j].im*h[k].im;
+        for j in 0..terms {
+            for k in 0..terms {
+                gram[j*terms+k]+=h[j].re*real_weight*h[k].re*real_weight+h[j].im*h[k].im;
             }
             for (a,value) in rhs[j].iter_mut().enumerate() {
                 let y=data[f][a].scale(1./scale);
@@ -148,10 +236,10 @@ pub fn fit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<Fit,String> {
             }
         }
     }
-    if gram.iter().any(|x|!x.is_finite()) || (0..TERMS).any(|j|gram[j*TERMS+j]<=0.) {
+    if gram.iter().any(|x|!x.is_finite()) || (0..terms).any(|j|gram[j*terms+j]<=0.) {
         return Err("unresolved passive fit dictionary".into());
     }
-    let id=identity(ports);let mut residue=vec![vec![0.;size];TERMS];
+    let id=identity(ports);let mut residue=vec![vec![0.;size];terms];
     let mut y=residue.clone();
     let mut obj=quadratic_objective(&residue,&gram,&rhs);
     let mut t=1.0_f64;
@@ -161,17 +249,17 @@ pub fn fit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<Fit,String> {
     // Monotone Nesterov extrapolation accelerates ill-conditioned dictionary
     // coupling while keeping every accepted iterate strictly in the PSD cone.
     for _ in 0..SWEEPS {
-        let (mut next,mut change,mut magnitude)=block_psd_sweep(&y,&gram,&rhs,ports,&id)?;
+        let (mut next,mut change,mut magnitude)=block_psd_sweep(&y,&gram,&rhs,ports,&id,householder)?;
         let mut next_obj=quadratic_objective(&next,&gram,&rhs);
         if !(next_obj<=obj) {
-            (next,change,magnitude)=block_psd_sweep(&residue,&gram,&rhs,ports,&id)?;
+            (next,change,magnitude)=block_psd_sweep(&residue,&gram,&rhs,ports,&id,householder)?;
             next_obj=quadratic_objective(&next,&gram,&rhs);
             t=1.0;
             y.clone_from(&next);
         } else {
             let next_t=0.5*(1.0+det::sqrt(1.0+4.0*t*t));
             let beta=(t-1.0)/next_t;
-            for j in 0..TERMS {
+            for j in 0..terms {
                 for a in 0..size {
                     y[j][a]=next[j][a]+beta*(next[j][a]-residue[j][a]);
                 }
@@ -183,7 +271,7 @@ pub fn fit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<Fit,String> {
         if change<=1e-10*(1.+magnitude) {break;}
     }
     let mut model=Model {ports,poles:Vec::new()};
-    for (matrix,&(o,z)) in residue.iter().zip(&poles) {
+    for (matrix,&(o,z)) in residue.iter().zip(poles) {
         let pairs=fs_modal::eigh_gen_dense(matrix,&id,ports).map_err(|e|e.to_string())?;
         let tolerance=1e-8*ports as f64*matrix.iter().fold(0.0_f64,|s,x|s.max(x.abs()));
         for p in pairs {
@@ -287,6 +375,35 @@ mod tests {
             assert!(fit.resistance_rms_error<0.05);assert!(fit.rms_error<0.02);
             assert!(fit.model.poles.iter().any(|p|p.zeta==0.));
         }
+    }
+    #[test]
+    fn resolved_dictionary_follows_a_rayleigh_load_the_fixed_one_cannot() {
+        use fs_bem::helmholtz::{Medium, rayleigh_modal::{AreaSample, PreparedSurface}};
+        use std::f64::consts::{PI, TAU};
+        // A baffled 2.0 m x 1.5 m plate in 5 cm cells carrying 25 fields
+        // cos(m pi x / L) cos(n pi y / W): its kernel holds delays up to about 2.4 m / c,
+        // the scale of a grand piano's soundboard (whose own 128 fields need the same).
+        let (nx, ny, h, side) = (40usize, 30usize, 0.05, 5usize);
+        let cells: Vec<_> = (0..nx * ny).map(|k| {
+            let (x, y) = (((k % nx) as f64 + 0.5) * h, ((k / nx) as f64 + 0.5) * h);
+            AreaSample { position_m: [x, y], area_m2: h * h, mode_shape: (0..side * side)
+                .map(|f| (PI * (f / side) as f64 * x / 2.0).cos() * (PI * (f % side) as f64 * y / 1.5).cos()).collect() }
+        }).collect();
+        let ports = side * side;
+        let surface = PreparedSurface::new(&cells).unwrap();
+        let medium = Medium { density: 1.2, sound_speed: 343.0 };
+        let omega: Vec<f64> = (0..129).map(|i| TAU * (90.0 + 900.0 * i as f64 / 128.0)).collect();
+        let data: Vec<Vec<C64>> = omega.iter()
+            .map(|&w| surface.power_consistent_impedance(w, medium).unwrap()).collect();
+        assert!(fit(&omega, &data, ports).is_err(), "the fixed 32-term dictionary should not resolve a 2.4 m travel time");
+        let spacing = TAU * medium.sound_speed / (6.0 * surface.maximum_distance_m());
+        let resolved = fit_resolved(&omega, &data, ports, spacing).unwrap();
+        assert!(resolved.rms_error <= 0.02 && resolved.resistance_rms_error <= 0.05);
+        // Too few training samples for that spacing refuses instead of interpolating.
+        let sparse: Vec<f64> = (0..33).map(|i| TAU * (90.0 + 900.0 * i as f64 / 32.0)).collect();
+        let sparse_data: Vec<Vec<C64>> = sparse.iter()
+            .map(|&w| surface.power_consistent_impedance(w, medium).unwrap()).collect();
+        assert!(fit_resolved(&sparse, &sparse_data, ports, spacing).is_err());
     }
     #[test]
     fn held_out_active_and_missing_loads_cannot_be_silently_repaired() {

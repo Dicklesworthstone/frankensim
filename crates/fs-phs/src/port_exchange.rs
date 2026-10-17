@@ -21,7 +21,9 @@ pub struct PortExchangeBudget {
     pub max_right: usize,
     /// Bound on `60 * max(left,right) * min(left,right)^2` SVD sweep terms.
     pub max_setup_terms: usize,
-    /// Bound on `dt * ||[0,-L^T;L,0]||_infinity` (positive and at most one).
+    /// Bound on `dt * ||[0,-L^T;L,0]||_2 = dt * sigma_max(L)`, the largest rotation
+    /// angle of one application (positive and at most one). The infinity norm only
+    /// bounds this from above and grows with the bank size, so it is not the test.
     /// Accuracy of any enclosing operator splitting remains a separate matter.
     pub maximum_dt_coupling: f64,
 }
@@ -89,15 +91,10 @@ impl PreparedPortExchange {
             || coupling.iter().any(|x|!x.is_finite()) {
             return Err(bad("port exchange dimensions, finite inputs or work budget"));
         }
-        let mut columns=zeroed(left)?;let mut maximum=0.0_f64;let mut scale=0.0_f64;
-        for row in coupling.chunks_exact(left) {
-            let mut sum=0.0;
-            for (j,&x) in row.iter().enumerate() {sum+=x.abs();columns[j]+=x.abs();scale=scale.max(x.abs());}
-            maximum=maximum.max(sum);
-        }
-        maximum=maximum.max(columns.into_iter().fold(0.0_f64,f64::max));
-        if !maximum.is_finite() || !((maximum*dt).is_finite())
-            || maximum*dt>budget.maximum_dt_coupling {
+        let mut scale=0.0_f64;
+        for &x in coupling {scale=scale.max(x.abs());}
+        if !scale.is_finite() || !((scale*dt).is_finite()) || scale*dt>budget.maximum_dt_coupling {
+            // Any entry bounds sigma_max from below, so this refuses before the SVD.
             return Err(bad("port exchange exceeds the declared rate-resolution bound"));
         }
         let mut result=Self {left,right,directions:0,left_basis:Vec::new(),right_basis:Vec::new(),
@@ -118,6 +115,10 @@ impl PreparedPortExchange {
         if svd.sigma.iter().any(|s|!s.is_finite() || *s<0.0)
             || svd.u.iter().chain(&svd.v).any(|x|!x.is_finite()) {
             return Err(bad("port exchange SVD has nonfinite factors"));
+        }
+        let largest=svd.sigma.iter().fold(0.0_f64,|m,&s|m.max(s))*scale;
+        if !(largest*dt).is_finite() || largest*dt>budget.maximum_dt_coupling {
+            return Err(bad("port exchange exceeds the declared rate-resolution bound"));
         }
         let (lb,rb)=if right>=left {(svd.v,svd.u)} else {(svd.u,svd.v)};
         let tolerance=256.0*f64::EPSILON*(tall+rank+1) as f64;

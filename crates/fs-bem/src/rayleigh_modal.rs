@@ -12,7 +12,7 @@
 //! arithmetic), including signed cancelling fields. The singular reactance
 //! retains the equivalent-disc self integral; this is NOT a complete causal
 //! passivity certificate or a finite-cell Galerkin quadrature-error bound.
-use super::{HelmholtzError, Medium, MAX_DENSE_PANELS, MIN_PANELS_PER_WAVELENGTH, green};
+use super::{HelmholtzError, Medium, MIN_PANELS_PER_WAVELENGTH, green};
 use fs_math::{c64::C64, det};
 use core::f64::consts::PI;
 
@@ -21,11 +21,18 @@ use core::f64::consts::PI;
 /// ports; that reduction must not remove coordinates from this physical matrix.
 pub const MAX_MODAL_RAYLEIGH_FIELDS: usize = 128;
 
-/// Bound on `cells^2 * modes + cells * modes^2` per frequency. This admits every
-/// previous 32-field/8192-cell case while bounding the cost of larger modal
-/// spaces. A caller preparing many frequencies must additionally bound its
-/// complete sweep. No cells or fields are silently discarded to meet this cap.
-pub const MAX_MODAL_RAYLEIGH_WORK: u64 = 2_200_000_000;
+/// Area cells retained by one prepared surface. No dense factorization happens on
+/// this path (the dense Helmholtz LU keeps its own `MAX_DENSE_PANELS`): storage is
+/// the strict pair-distance triangle, about 1.07 GB at this cap, plus one
+/// `cells * modes` complex pressure field per frequency being evaluated.
+pub const MAX_MODAL_RAYLEIGH_CELLS: usize = 16_384;
+
+/// Bound on `cells^2 * modes + cells * modes^2` per frequency: a cost ceiling,
+/// not an accuracy gate. It admits the complete 128-field image up to about
+/// 12,000 cells (a board resolved to 2.4 kHz needs about 9,400); larger surfaces
+/// retain fewer fields. A caller preparing many frequencies must additionally
+/// bound its complete sweep. No cells or fields are silently discarded.
+pub const MAX_MODAL_RAYLEIGH_WORK: u64 = 20_000_000_000;
 
 /// Admit a declared number of per-frequency Rayleigh scalar-work units.
 /// This is also the allocation-free boundary used by sweep planners.
@@ -54,9 +61,10 @@ pub struct PreparedSurface {
     areas: Vec<f64>,
     radii: Vec<f64>,
     weighted_shape: Vec<f64>,
-    /// Strict upper triangle, in row order. At 8192 cells this is under 256 MiB.
+    /// Strict upper triangle, in row order: about 1.07 GB at the cell cap.
     distances: Vec<f64>,
     maximum_radius_m: f64,
+    maximum_distance_m: f64,
 }
 
 fn invalid(what: &'static str) -> HelmholtzError {
@@ -73,12 +81,12 @@ fn reserved<T>(capacity: usize, what: &'static str) -> Result<Vec<T>, HelmholtzE
 impl PreparedSurface {
     /// Retain every supplied cell and mode. Coincident cells refuse: their
     /// distinct physical self integrals cannot be inferred from area alone.
-    /// The complete geometry and one impedance evaluation use less than
-    /// 281 MiB at the independent cell/field caps; every reservation is fallible.
+    /// The complete geometry and one impedance evaluation use about 1.1 GB at
+    /// the cell cap; every reservation is fallible.
     /// The modal work cap is checked before any geometry storage is allocated.
     pub fn new(samples: &[AreaSample]) -> Result<Self, HelmholtzError> {
         let count = samples.len();
-        if count == 0 || count > MAX_DENSE_PANELS {
+        if count == 0 || count > MAX_MODAL_RAYLEIGH_CELLS {
             return Err(HelmholtzError::WorkCap { panels: count });
         }
         let modes = samples[0].mode_shape.len();
@@ -116,6 +124,7 @@ impl PreparedSurface {
         }
         let pairs = count * (count - 1) / 2;
         let mut distances = reserved(pairs, "complete Rayleigh pair distances")?;
+        let mut maximum_distance_m = 0.0_f64;
         for i in 0..count {
             for j in i + 1..count {
                 let a = samples[i].position_m;
@@ -124,11 +133,17 @@ impl PreparedSurface {
                 if !r.is_finite() || r <= 0.0 {
                     return Err(invalid("Rayleigh area cells must have distinct, finitely separated centres"));
                 }
+                maximum_distance_m = maximum_distance_m.max(r);
                 distances.push(r);
             }
         }
-        Ok(Self { count, modes, areas, radii, weighted_shape, distances, maximum_radius_m })
+        Ok(Self { count, modes, areas, radii, weighted_shape, distances, maximum_radius_m, maximum_distance_m })
     }
+
+    /// Largest distance between two cell centres [m]. The kernel's longest travel
+    /// time is this over the sound speed, which sets how finely its impedance varies
+    /// in frequency (detail on a scale of c / distance, at every frequency).
+    pub fn maximum_distance_m(&self) -> f64 { self.maximum_distance_m }
 
     /// Wavelength divided by the largest equivalent-disc diameter. This is an
     /// area-resolution diagnostic, not a bound on shape, aspect-ratio or

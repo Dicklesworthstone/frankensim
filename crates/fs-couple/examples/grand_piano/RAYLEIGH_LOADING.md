@@ -9,15 +9,16 @@ passive radiation owner. It is available for a flat geometric board with
 ```sh
 cargo run --release -p fs-couple --example grand_piano -- \
   --preset steinway-d --render piano.wav --duration 2 \
-  --rayleigh-loading 2,20,1000,65
+  --rayleigh-loading 2,20,1000,129
 ```
 
 The four values specify the number of radiating half-spaces, the positive
-frequency-band endpoints in Hz, and an odd count of 33 through 257 logarithmic
-frequency samples. There is no inferred side count or separate fit-order knob.
+frequency-band endpoints in Hz, and an odd count of 33 through 257 frequency
+samples (linear for a complete load, logarithmic with `--radiation-ports`).
+There is no inferred side count or separate fit-order knob.
 Without this option, the existing one-way receiver path is unchanged.
 
-`--radiation-ports N`, with an explicit ceiling from 1 through 32, connects the
+`--radiation-ports N`, with an explicit ceiling from 1 through 128, connects the
 existing projected acoustic runtime to this load. It can attempt a complete
 board image of up to 128 coordinates while fitting fewer radiating combinations.
 The complete physical impedance is still sampled; every mechanical coordinate
@@ -50,11 +51,27 @@ area is included once in the pressure integral and once in its work-conjugate
 force projection. Equivalent-disc self integrals treat each cell's local
 singularity; other cells use the existing outgoing Green kernel.
 
-The unchanged shared passive fitter uses even frequency samples for its fixed
-dictionary fit and odd samples for withheld validation. Complete complex
-peak/RMS errors must meet 5%/2%; resistance errors must meet 10%/5%. No failed
-load is replaced by zeros, no signed cross term is removed, and no acceptance
-limit is relaxed. The resulting model enters `Instrument::configure_radiation`
+The shared passive fitter uses even frequency samples for its fit and odd
+samples for withheld validation. Complete complex peak/RMS errors must meet
+5%/2%; resistance errors must meet 10%/5%. No failed load is replaced by zeros,
+no signed cross term is removed, and no acceptance limit is relaxed.
+
+A complete load (no `--radiation-ports`) is sampled LINEARLY in frequency and
+fitted with a dictionary derived from the board's own geometry. The Rayleigh
+kernel is a superposition of delays up to `tau = D/c`, `D` the largest distance
+between two area cells, so the impedance varies on a scale of `1/tau` in
+frequency at the top of the band as much as at the bottom. In-band resonators
+are spaced `c/(6D)` apart with half-power bandwidth twice that, continued six
+spacings past the band top, with lossless storage just above the band (the
+frequency-dependent added mass) and the shared sub- and high-band terms. The
+training samples must be no further apart than that spacing, or the fit
+refuses. The shared fixed 32-term dictionary, log-spaced at 12% damping, cannot
+follow that detail over a wide band: on the 2.4 kHz production board it missed
+by 21%/17% (complex peak/RMS) even fully converged, and the 32-port projection
+of the same load by 13%/11%. The resolved fit of the same board passes at
+1.9%/1.5% (resistance 1.9%/1.5%) with 12,912 acoustic oscillators (D = 2.355 m,
+24.3 Hz spacing, 257 samples over 90-2400 Hz). An explicit projection keeps the
+logarithmic grid and the shared fixed dictionary. The resulting model enters `Instrument::configure_radiation`
 before excitation. Its existing collective exchange, acoustic storage, damping
 and rollback participate in the mechanical energy balance. Both microphones
 then observe the reacted motion using their existing pressure conversion.
@@ -73,25 +90,32 @@ existing mechanical-rate guard. At 48 kHz with four substeps, the upper endpoint
 must therefore be below 10.8 kHz. Broadband excitation can still reach outside
 the sampled band; the fitted load has no validated accuracy there.
 
-The direct piano path admits up to 32 complete board modes, 8,192 area samples
-and 64 billion cell-mode-frequency visits. The numerical Rayleigh kernel can
-retain 128 fields, but the shared passive fitter and runtime model still admit
-32 complete velocity ports. Without an explicit acoustic projection, the
-frontend checks their common limit before preparing any impedance sweep.
-The opt-in projection retains the larger complete board and attaches its
+The direct piano path admits up to 128 complete board modes (every board the
+bank admits), 16,384 area samples and 4 trillion cell-mode-frequency visits.
+The fitter and runtime model admit 128 complete velocity ports and 16,384
+acoustic oscillators. The runtime's collective exchange bounds its largest
+rotation per half step, `sigma_max(L) dt/2 <= 0.125`; the 2.4 kHz board's
+complete load turns by 0.029. Each oscillator's free transition is independent,
+so they are prepared in groups within the modal time owner's own ceiling.
+The opt-in projection retains the complete board and attaches a smaller
 acoustic load through the existing orthonormal port map. Its full-matrix error
 checks include every omitted acoustic direction; a small surface-field error
 alone cannot establish an adequate load. All cell, work, clock, resolution and
 fit limits remain. The kernel caches the spatial pair distances
-and projects each frequency in `O(cells^2*modes + cells*modes^2)` work. No acoustic
-port reduction or automatic spatial coarsening is performed. Preparation is
-offline work, with no real-time claim.
+and projects each frequency in `O(cells^2*modes + cells*modes^2)` work; the
+frequencies are independent and are evaluated in parallel (each matrix is
+bit-identical to a serial sweep). No acoustic port reduction or automatic
+spatial coarsening is performed. Preparation is offline work, with no
+real-time claim: on the 2.4 kHz production board (9,432 cells, 128 modes, 257
+frequencies) the sweep takes about 1.5 minutes on 28 cores and the fit about
+12 minutes on one.
 
-The default eight-division preset produces 3,918 samples. Even its worst admitted
-32-mode, 65-frequency sweep uses about 31.93 billion visits, below the ceiling.
-Its largest equivalent-disc cell admits approximately 1,097 Hz at 343 m/s under
-the existing six-cells-per-wavelength floor, so the example's 1,000 Hz endpoint
-passes this area-resolution check. These geometry/work checks do not establish
+The default eight-division preset produces 3,918 samples. Its largest
+equivalent-disc cell admits approximately 1,097 Hz at 343 m/s under the existing
+six-cells-per-wavelength floor, so the example's 1,000 Hz endpoint passes this
+area-resolution check. A 2.4 kHz band needs a finer board, for example
+`piano_geometry --divisions 12 --rib-normal-step-m 0.03` (9,432 samples, 6.32
+cells per wavelength), supplied with `--board-geometry`. These geometry/work checks do not establish
 that a particular full preset fit or WAV render will succeed. The complete
 matrix fit, loaded-reference coverage and runtime admissions still apply.
 

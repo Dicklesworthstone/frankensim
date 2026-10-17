@@ -10,8 +10,14 @@ use fs_math::c64::C64;
 /// Shared fixed-dictionary PSD-residue fit, also used by the piano runtime.
 pub mod fit;
 
-/// Maximum complete velocity ports admitted by the passive fit and model.
-pub const MAX_PORTS: usize = 32;
+/// Maximum complete velocity ports admitted by the passive fit and model: a
+/// soundboard's complete 128-mode image. Callers keep their own work ceilings
+/// (the joint impact solve still admits at most 256 poles and 1024 states).
+pub const MAX_PORTS: usize = 128;
+
+/// Maximum acoustic oscillators in one model. A travel-time-resolved fit of a
+/// complete 128-mode soundboard load to 2.4 kHz needs about 11,600.
+pub const MAX_POLES: usize = 16_384;
 
 /// One unit-mass acoustic oscillator and its signed mechanical velocity ports.
 #[derive(Clone, Debug)]
@@ -29,7 +35,7 @@ pub struct Model {
 }
 impl Model {
     pub fn validate(&self) -> Result<(), String> {
-        if !(1..=MAX_PORTS).contains(&self.ports) || self.poles.is_empty() || self.poles.len()>1024
+        if !(1..=MAX_PORTS).contains(&self.ports) || self.poles.is_empty() || self.poles.len()>MAX_POLES
             || self.poles.iter().any(|p| !p.omega.is_finite() || p.omega<=0.
                 || !p.zeta.is_finite() || !(0.0..1.0).contains(&p.zeta)
                 || p.coupling.len()!=self.ports || p.coupling.iter().any(|x|!x.is_finite())) {
