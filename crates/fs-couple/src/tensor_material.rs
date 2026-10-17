@@ -20,6 +20,9 @@ use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage, StepRecord};
 use fs_phs::linear_exact::{LinearSplit, LinearSplitBudget, split_quadratic, step_render,
     MAX_LINEAR_EXPONENTIAL_BLOCK_DIM};
 
+/// Mesh-backed constant-strain membranes with original material memory.
+pub mod membrane;
+
 mod plane_stress;
 pub use plane_stress::PlaneStressPoint;
 
