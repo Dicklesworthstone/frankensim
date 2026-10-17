@@ -127,7 +127,7 @@ mod tests {
     }
     #[test]
     fn imported_materials_change_contact_mechanics_not_the_string_scale() {
-        use crate::{board, engine, geometry};
+        use super::super::{board, engine, geometry};
         let course = geometry::demonstration_scale().unwrap()[48];
         let build = |stress| {
             let text = format!("{HEADER}\n{}branch,69,2000000,0.0002\nbranch,69,500000,0.004\n", card(69, stress));

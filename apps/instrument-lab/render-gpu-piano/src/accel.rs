@@ -3,9 +3,10 @@
 //! A stretch runs from the present sample to the next control event (at most `SEGMENT` steps), as long
 //! as the planner (`Instrument::contact_free_steps`) sees no hammer near its string. The backend steps
 //! the bank and reports every step's contact positions; the CPU then replays the hammers' free flight
-//! against those positions (`Instrument::advance_hammers_external`), which refuses any step whose contact
-//! could engage. A refusal shortens the stretch: the backend reruns it to the refused step, and that step
-//! goes to the CPU. Each stretch must close the instrument's energy ledger.
+//! against those positions in complete output frames. A refusal restores the whole frame: the backend
+//! reruns only the preceding complete frames, and the refused frame goes to the CPU. Backend limits,
+//! traces and statistics count mechanics steps; `Accelerator::advance` takes and returns output frames.
+//! Each stretch must close the instrument's energy ledger.
 use crate::emulate::Emulator;
 use crate::grand_piano::audio::Accelerator;
 use crate::grand_piano::engine::Instrument;
@@ -101,7 +102,7 @@ pub fn factory(instrument: &mut Instrument) -> Option<Box<dyn Accelerator>> {
     }
     let Some((bank, dampers)) = instrument.gpu_images() else {
         eprintln!(
-            "render-gpu-piano: this configuration uses physics the GPU path does not model (felt or point dampers, radiation, cavity, string stretching, hammer footprints or substeps); rendering on the CPU"
+            "render-gpu-piano: this configuration uses physics the GPU path does not model (felt or point dampers, radiation, cavity, string stretching or hammer footprints); rendering on the CPU"
         );
         return None;
     };
@@ -217,9 +218,7 @@ fn bench(backend: &mut dyn Backend, program: &mut Program) {
         program.dampers = engaged.clone();
         if !damp {
             program.dampers.any = false;
-            for a in &mut program.dampers.active {
-                *a = false;
-            }
+            program.dampers.active.fill(false);
         }
         if let Err(e) = backend.load_dampers(program) {
             eprintln!("bench: {e}");
@@ -326,14 +325,14 @@ impl Piano {
     fn check(
         &mut self,
         instrument: &mut Instrument,
-        q0: &[f64],
-        v0: &[f64],
-        q: &[f64],
-        v: &[f64],
+        initial: (&[f64], &[f64]),
+        actual: (&[f64], &[f64]),
         steps: usize,
         trace: &[f64],
         losses: (f64, f64),
     ) -> Result<(), String> {
+        let (q0, v0) = initial;
+        let (q, v) = actual;
         let (n, r, nc) = (self.program.n, self.program.r, self.program.contacts.len());
         let (saved_q, saved_v) = (instrument.bank.q.clone(), instrument.bank.v.clone());
         instrument.bank.q.copy_from_slice(q0);
@@ -374,7 +373,7 @@ impl Piano {
             / (modal.abs() + damper.abs()).max(1e-300);
         self.stats.max_loss = self.stats.max_loss.max(le);
         self.stats.checked += steps;
-        if self.stats.checked == steps || !(e < 1e-9) {
+        if self.stats.checked == steps || e >= 1e-9 || e.is_nan() {
             println!(
                 "render-gpu-piano check: {steps} steps, state rel {e:.2e}, board trace rel {:.2e}, contact positions {:.2e} m, losses rel {le:.2e}",
                 self.stats.max_trace, self.stats.max_position_m
@@ -393,73 +392,94 @@ impl Accelerator for Piano {
         frames: usize,
         traces: &mut [f64],
     ) -> Result<usize, String> {
-        let mut max = frames.min(SEGMENT);
+        let substeps = instrument.mechanics_substeps();
+        let mut max = frames.min(SEGMENT / substeps) * substeps;
         if self.check > 0 {
             max = max.min(self.check);
         }
-        let steps = instrument.contact_free_steps(max, PLAN_CLEARANCE_M, PLAN_MARGIN);
+        max -= max % substeps;
+        let planned = instrument.contact_free_steps(max, PLAN_CLEARANCE_M, PLAN_MARGIN);
+        let steps = planned - planned % substeps;
         if steps < MIN_SEGMENT.min(max) || steps == 0 {
             return Ok(0);
         }
-        self.sync_dampers(instrument)?;
         let (r, nc) = (self.program.r, self.program.contacts.len());
-        let (q0, v0) = (instrument.bank.q.clone(), instrument.bank.v.clone());
-        let (mut q, mut v) = (q0.clone(), v0.clone());
-        let before = instrument.energy_j();
-        self.positions.resize(steps * nc, 0.0);
-        let t = Instant::now();
-        let mut losses = self.run(&mut q, &mut v, steps, &mut traces[..steps * r])?;
-        self.stats.backend_s += t.elapsed().as_secs_f64();
-        if self.check > 0 {
-            self.check(instrument, &q0, &v0, &q, &v, steps, traces, losses)?;
+        if traces.len() < steps * r {
+            return Err("accelerator trace buffer cannot hold complete output frames".into());
         }
-        let t = Instant::now();
-        let mut hammer = [0.0; 5];
-        let mut taken = steps;
-        for s in 0..steps {
-            match instrument
-                .advance_hammers_external(&self.positions[s * nc..(s + 1) * nc], EXACT_CLEARANCE_M)
-                .map_err(|e| e.to_string())?
-            {
-                Some(e) => {
-                    for (h, x) in hammer.iter_mut().zip(e) {
-                        *h += x;
+        self.sync_dampers(instrument)?;
+        let (q0, v0) = (instrument.bank.q.clone(), instrument.bank.v.clone());
+        let saved_hammers = instrument.checkpoint_external_hammers();
+        let saved_modal = instrument.bank.last_modal_loss_j;
+        let result = (|| {
+            let (mut q, mut v) = (q0.clone(), v0.clone());
+            let before = instrument.energy_j();
+            self.positions.resize(steps * nc, 0.0);
+            let t = Instant::now();
+            let mut losses = self.run(&mut q, &mut v, steps, &mut traces[..steps * r])?;
+            self.stats.backend_s += t.elapsed().as_secs_f64();
+            if self.check > 0 {
+                self.check(instrument, (&q0, &v0), (&q, &v), steps, traces, losses)?;
+            }
+            let t = Instant::now();
+            let mut hammer = [0.0; 5];
+            let mut taken = steps;
+            for s in (0..steps).step_by(substeps) {
+                match instrument
+                    .advance_hammers_external_frame(
+                        &self.positions[s * nc..(s + substeps) * nc],
+                        EXACT_CLEARANCE_M,
+                    )
+                    .map_err(|e| e.to_string())?
+                {
+                    Some(e) => {
+                        for (h, x) in hammer.iter_mut().zip(e) {
+                            *h += x;
+                        }
+                    }
+                    None => {
+                        taken = s;
+                        break;
                     }
                 }
-                None => {
-                    taken = s;
-                    break;
+            }
+            self.stats.hammer_s += t.elapsed().as_secs_f64();
+            if taken < steps {
+                self.stats.rollbacks += 1;
+                if taken == 0 {
+                    return Ok(0);
                 }
+                q.copy_from_slice(&q0);
+                v.copy_from_slice(&v0);
+                let t = Instant::now();
+                losses = self.run(&mut q, &mut v, taken, &mut traces[..taken * r])?;
+                self.stats.backend_s += t.elapsed().as_secs_f64();
             }
-        }
-        self.stats.hammer_s += t.elapsed().as_secs_f64();
-        if taken < steps {
-            self.stats.rollbacks += 1;
-            if taken == 0 {
-                return Ok(0);
+            instrument.bank.q.copy_from_slice(&q);
+            instrument.bank.v.copy_from_slice(&v);
+            instrument.absorb_external_losses(losses.0, losses.1);
+            let after = instrument.energy_j();
+            // jack work in; shank, felt (with its relaxation) and catch losses out
+            let balance = after - before + losses.0 + losses.1 + hammer[1] + hammer[2] + hammer[4]
+                - hammer[0];
+            let tolerance = 1e-9 + 1e-10 * taken as f64 * before.abs().max(after.abs());
+            if !balance.is_finite() || balance.abs() > tolerance {
+                return Err(format!(
+                    "accelerated stretch of {taken} steps does not close the energy ledger: defect {balance:.3e} J"
+                ));
             }
-            q.copy_from_slice(&q0);
-            v.copy_from_slice(&v0);
-            let t = Instant::now();
-            losses = self.run(&mut q, &mut v, taken, &mut traces[..taken * r])?;
-            self.stats.backend_s += t.elapsed().as_secs_f64();
+            self.stats.stretches += 1;
+            self.stats.steps += taken;
+            Ok(taken / substeps)
+        })();
+        if !result.as_ref().is_ok_and(|done| *done > 0) {
+            // No trace/frame is published on refusal, including a rerun or ledger error.
+            instrument.bank.q.copy_from_slice(&q0);
+            instrument.bank.v.copy_from_slice(&v0);
+            instrument.bank.last_modal_loss_j = saved_modal;
+            instrument.restore_external_hammers(&saved_hammers);
         }
-        instrument.bank.q.copy_from_slice(&q);
-        instrument.bank.v.copy_from_slice(&v);
-        instrument.absorb_external_losses(losses.0, losses.1);
-        let after = instrument.energy_j();
-        // jack work in; shank, felt (with its relaxation) and catch losses out
-        let balance =
-            after - before + losses.0 + losses.1 + hammer[1] + hammer[2] + hammer[4] - hammer[0];
-        let tolerance = 1e-9 + 1e-10 * taken as f64 * before.abs().max(after.abs());
-        if !balance.is_finite() || balance.abs() > tolerance {
-            return Err(format!(
-                "accelerated stretch of {taken} steps does not close the energy ledger: defect {balance:.3e} J"
-            ));
-        }
-        self.stats.stretches += 1;
-        self.stats.steps += taken;
-        Ok(taken)
+        result
     }
 }
 
@@ -492,3 +512,7 @@ impl Drop for Piano {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "substeps_tests.rs"]
+mod substeps_tests;

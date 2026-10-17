@@ -283,8 +283,8 @@ unsafe fn chains(p: &Program, x: &Ptrs, st: &[usize], part: Part, dir: usize) ->
         let u = unsafe { x.u.r(st[i], st[i + 1]) };
         let c = unsafe { x.c.w(st[i], st[i + 1]) };
         let dotu = |row: &[f64]| row.iter().zip(u).map(|(a, b)| a * b).sum::<f64>();
-        for s in 0..ns {
-            c[s] = dotu(&op.t[s * ns..(s + 1) * ns]);
+        for (s, change) in c[..ns].iter_mut().enumerate() {
+            *change = dotu(&op.t[s * ns..(s + 1) * ns]);
         }
         ai[0] = dotu(&op.mu);
         unsafe { x.l.w(i, i + 1)[0] = dotu(&op.rho) };
