@@ -93,13 +93,14 @@ fn horn_wraparound_converges() {
         None,
         vec![super::bulk_delay_pole_state(geo_delay)],
         |omega| {
-            input_impedance_wall(
+            super::duct_reflectance(
                 &duct,
                 &gas,
                 omega,
                 LossModel::Bessel,
                 Termination::UnflangedOpen,
                 None,
+                zc,
             )
         },
     )

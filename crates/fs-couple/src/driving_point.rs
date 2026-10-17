@@ -8,6 +8,7 @@ pub mod regional;
 /// Explicitly terminated generic acoustic-network frequency-domain ports.
 pub mod network;
 
+use fs_duct::compose::input_reflection_wall;
 use fs_duct::{
     Duct, DuctError, DuctResponse, HoleState, LossModel, Segment, Termination,
     input_impedance_wall, segment_wave,
@@ -494,10 +495,41 @@ pub fn realize_line(
         zc,
         pole_states,
         ladder,
-        |omega| input_impedance_wall(physics, gas, omega, LossModel::Bessel, termination, wall),
+        |omega| duct_reflectance(physics, gas, omega, LossModel::Bessel, termination, wall, zc),
     )
 }
 
+/// `R` referenced to `zc` from an input impedance, as every line realizes it.
+pub(crate) fn impedance_reflectance(response: &DuctResponse, zc: f64) -> C64 {
+    reflectance(C64::new(response.impedance.re, response.impedance.im), zc)
+}
+
+/// Uniform-gas duct reflectance referenced to `zc` (DEF-01). Where the stable
+/// chain represents Z, R comes from Z exactly as before. At a lossless
+/// resonance `|1 - r_in|` vanishes: Z is unrepresentable (fs-duct refuses
+/// above its condition bound) while R stays finite, so that bin takes R from
+/// the same chain's input reflection without forming Z. Every other refusal,
+/// including the chain's own feedback bound, still propagates.
+pub(crate) fn duct_reflectance(
+    duct: &Duct,
+    gas: &GasState,
+    omega: f64,
+    loss: LossModel,
+    termination: Termination,
+    wall: Option<&WallPin>,
+    zc: f64,
+) -> Result<C64, DuctError> {
+    match input_impedance_wall(duct, gas, omega, loss, termination, wall) {
+        Ok(response) => Ok(impedance_reflectance(&response, zc)),
+        Err(DuctError::Singular) => {
+            input_reflection_wall(duct, gas, omega, loss, termination, wall)?.referenced_to(zc)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// `reflectance_at(omega)` is R referenced to `zc`, never an impedance: a
+/// characteristic line must stay realizable at lossless Z poles.
 pub(crate) fn realize_characteristic_response(
     geo_delay: f64,
     termination: Termination,
@@ -505,7 +537,7 @@ pub(crate) fn realize_characteristic_response(
     zc: f64,
     pole_states: Vec<PoleState>,
     ladder: &LineLadder,
-    mut response_at: impl FnMut(f64) -> Result<DuctResponse, DuctError>,
+    mut reflectance_at: impl FnMut(f64) -> Result<C64, DuctError>,
 ) -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
     if sample_rate_hz == 0 || !zc.is_finite() || zc <= 0.0 {
         return Err(DrivingPointError::Invalid {
@@ -525,8 +557,7 @@ pub(crate) fn realize_characteristic_response(
         | Termination::UnflangedOpen
         | Termination::UnflangedThinWall { .. }
         | Termination::FlangedOpen => {
-            if let Ok(resp) = response_at(1.0e-3) {
-                let r0 = reflectance(C64::new(resp.impedance.re, resp.impedance.im), zc);
+            if let Ok(r0) = reflectance_at(1.0e-3) {
                 if r0.re.is_finite() {
                     C64::new(r0.re.clamp(-1.0, 1.0), 0.0)
                 } else {
@@ -568,11 +599,7 @@ pub(crate) fn realize_characteristic_response(
         if r_pos.is_empty() {
             for (k, slot) in next_r_pos.iter_mut().enumerate().skip(1) {
                 let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-                let response = response_at(omega).map_err(DrivingPointError::Duct)?;
-                *slot = reflectance(
-                    C64::new(response.impedance.re, response.impedance.im),
-                    zc,
-                );
+                *slot = reflectance_at(omega).map_err(DrivingPointError::Duct)?;
             }
         } else {
             // Reuse even bins from the previous rung (bit-identical frequencies).
@@ -581,11 +608,7 @@ pub(crate) fn realize_characteristic_response(
             }
             for k in (1..half).step_by(2) {
                 let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-                let response = response_at(omega).map_err(DrivingPointError::Duct)?;
-                next_r_pos[k] = reflectance(
-                    C64::new(response.impedance.re, response.impedance.im),
-                    zc,
-                );
+                next_r_pos[k] = reflectance_at(omega).map_err(DrivingPointError::Duct)?;
             }
         }
         r_pos = next_r_pos;
@@ -787,7 +810,7 @@ pub fn characteristic_line_realized_with_ladder(
             zc,
             pole_states,
             ladder,
-            |omega| input_impedance_wall(physics, gas, omega, LossModel::Bessel, termination, wall),
+            |omega| duct_reflectance(physics, gas, omega, LossModel::Bessel, termination, wall, zc),
         );
     }
     characteristic_line_response_with_poles(
@@ -798,7 +821,7 @@ pub fn characteristic_line_realized_with_ladder(
         zc,
         n_fft_override,
         pole_states,
-        |omega| input_impedance_wall(physics, gas, omega, LossModel::Bessel, termination, wall),
+        |omega| duct_reflectance(physics, gas, omega, LossModel::Bessel, termination, wall, zc),
     )
 }
 
@@ -811,7 +834,7 @@ fn characteristic_line_response(
     n: usize,
     zc: f64,
     n_fft_override: Option<usize>,
-    response_at: impl FnMut(f64) -> Result<DuctResponse, DuctError>,
+    reflectance_at: impl FnMut(f64) -> Result<C64, DuctError>,
 ) -> Result<DelayedFilter, DrivingPointError> {
     let pole_states = vec![bulk_delay_pole_state(geo_delay)];
     characteristic_line_response_with_poles(
@@ -822,7 +845,7 @@ fn characteristic_line_response(
         zc,
         n_fft_override,
         pole_states,
-        response_at,
+        reflectance_at,
     )
     .map(|(line, _)| line)
 }
@@ -836,7 +859,7 @@ pub(crate) fn characteristic_line_response_with_poles(
     zc: f64,
     n_fft_override: Option<usize>,
     pole_states: Vec<PoleState>,
-    mut response_at: impl FnMut(f64) -> Result<DuctResponse, DuctError>,
+    mut reflectance_at: impl FnMut(f64) -> Result<C64, DuctError>,
 ) -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
     if sample_rate_hz == 0 || !zc.is_finite() || zc <= 0.0 {
         return Err(DrivingPointError::Invalid {
@@ -857,7 +880,7 @@ pub(crate) fn characteristic_line_response_with_poles(
             zc,
             pole_states,
             &LineLadder::default(),
-            response_at,
+            reflectance_at,
         );
     };
     // Clamp INSIDE the documented budget BEFORE rounding: rounding
@@ -875,8 +898,7 @@ pub(crate) fn characteristic_line_response_with_poles(
     };
     for k in 1..=n_fft / 2 {
         let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-        let response = response_at(omega).map_err(DrivingPointError::Duct)?;
-        let rac = reflectance(C64::new(response.impedance.re, response.impedance.im), zc);
+        let rac = reflectance_at(omega).map_err(DrivingPointError::Duct)?;
         // Acoustic e^{-iωt} → DFT e^{+iωt} so the IR is causal.
         buf[k] = FftC64::new(rac.re, -rac.im);
         if k != n_fft / 2 {

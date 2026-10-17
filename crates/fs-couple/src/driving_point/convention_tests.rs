@@ -153,7 +153,15 @@ fn characteristic_line_lossless_cylinder_is_delayed_delta() {
             zc,
             Some(N_FFT),
             |omega| {
-                input_impedance_wall(&duct, &gas, omega, LossModel::Lossless, termination, None)
+                super::duct_reflectance(
+                    &duct,
+                    &gas,
+                    omega,
+                    LossModel::Lossless,
+                    termination,
+                    None,
+                    zc,
+                )
             },
         )
         .expect("lossless characteristic line realizes");

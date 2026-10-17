@@ -357,6 +357,23 @@ pub fn compose_chain_controlled(
 ) -> Result<ChainResult, DuctError> {
     let (total, condition) = compose_scattering(blocks, options, &mut *cancelled)?;
     let reference = total.reference_impedance;
+    let r_load = match load_reflection(load, reference)? {
+        LoadReflection::Finite(r) => r,
+        LoadReflection::Pole {
+            numerator,
+            denominator,
+        } => return finish_projective(total, condition, numerator, denominator, options),
+    };
+    finish_chain(
+        blocks, options, cancelled, total, condition, r_load, reference,
+    )
+}
+
+enum LoadReflection {
+    Finite(C64),
+    Pole { numerator: C64, denominator: C64 },
+}
+fn load_reflection(load: Option<C64>, reference: f64) -> Result<LoadReflection, DuctError> {
     let r_load = match load {
         None => C64::ONE,
         Some(z) if finite(z) => {
@@ -366,7 +383,10 @@ pub fn compose_chain_controlled(
             let numerator = z - r;
             let denominator = z + r;
             if denominator == C64::ZERO {
-                return finish_projective(total, condition, numerator, denominator, options);
+                return Ok(LoadReflection::Pole {
+                    numerator,
+                    denominator,
+                });
             }
             numerator / denominator
         }
@@ -375,9 +395,86 @@ pub fn compose_chain_controlled(
     if !finite(r_load) {
         return Err(DuctError::Singular);
     }
-    finish_chain(
-        blocks, options, cancelled, total, condition, r_load, reference,
-    )
+    Ok(LoadReflection::Finite(r_load))
+}
+
+/// Terminated input reflection of a chain, referenced to the chain's positive
+/// real reference impedance. A lossless resonance drives `|1-r|` to zero, so
+/// `Z = R(1+r)/(1-r)` is unrepresentable there while `r` stays finite and
+/// exact (DEF-01). This result never forms Z; its feedback refusals are those
+/// of [`compose_chain`], without the input-impedance conversion bound.
+#[derive(Debug, Clone, Copy)]
+pub struct InputReflection {
+    pub reflection: C64,
+    pub reference_impedance: f64,
+    pub condition_estimate: f64,
+}
+impl InputReflection {
+    /// The same inlet wave referenced to another positive real impedance,
+    /// through homogeneous `[R(1+r), Zc(1-r)]` coordinates: Z is never formed.
+    /// Refuses where that ratio cancels (an active `Z = -Zc`).
+    pub fn referenced_to(&self, impedance: f64) -> Result<C64, DuctError> {
+        if !impedance.is_finite() || impedance <= 0.0 {
+            return Err(bad("reflection reference must be finite and positive"));
+        }
+        let a = (C64::ONE + self.reflection).scale(self.reference_impedance);
+        let b = (C64::ONE - self.reflection).scale(impedance);
+        let denominator = a + b;
+        bound(
+            (a.abs() + b.abs()) / denominator.abs(),
+            DEFAULT_MAX_CONDITION,
+        )?;
+        let r = (a - b) / denominator;
+        if finite(r) {
+            Ok(r)
+        } else {
+            Err(DuctError::Singular)
+        }
+    }
+}
+/// [`compose_chain`]'s input reflection without the impedance conversion.
+/// An active load at the reflection-coordinate pole `Z_L = -R` refuses.
+pub fn compose_chain_reflection(
+    blocks: &[TwoPort],
+    load: Option<C64>,
+    options: ComposeOptions,
+) -> Result<InputReflection, DuctError> {
+    let (total, condition) = compose_scattering(blocks, options, &mut || false)?;
+    let reference = total.reference_impedance;
+    let LoadReflection::Finite(r_load) = load_reflection(load, reference)? else {
+        return Err(DuctError::Singular);
+    };
+    let (reflection, _, condition) =
+        terminated_reflection(blocks, options, &mut || false, total, condition, r_load)?;
+    if !finite(reflection) {
+        return Err(DuctError::Singular);
+    }
+    Ok(InputReflection {
+        reflection,
+        reference_impedance: reference,
+        condition_estimate: condition,
+    })
+}
+/// The chain and analytic load of [`crate::input_impedance_wall`], returning
+/// the input reflection instead of Z. Use it where Z itself refuses at a
+/// lossless pole; elsewhere both describe the same wave.
+pub fn input_reflection_wall(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    termination: Termination,
+    wall: Option<&WallPin>,
+) -> Result<InputReflection, DuctError> {
+    let options = ComposeOptions::default();
+    let chain = duct_chain(duct, state, omega, loss, wall, options, true, || false)?;
+    let radius = duct
+        .segments
+        .last()
+        .ok_or(DuctError::EmptyDuct)?
+        .outlet_radius();
+    let (z_load, _) = crate::termination_impedance(termination, state, radius, omega)?;
+    compose_chain_reflection(&chain.blocks, z_load, options)
 }
 
 // A finite load Z=-R is a reflection-coordinate pole, not necessarily a
@@ -445,10 +542,46 @@ fn finish_chain(
     options: ComposeOptions,
     cancelled: &mut impl FnMut() -> bool,
     total: TwoPort,
-    mut condition: f64,
+    condition: f64,
     r_load: C64,
     reference: f64,
 ) -> Result<ChainResult, DuctError> {
+    let (r_in, transfer, mut condition) =
+        terminated_reflection(blocks, options, cancelled, total, condition, r_load)?;
+    let denom = C64::ONE - r_in;
+    condition = condition.max((1.0 + r_in.abs()) / denom.abs());
+    bound(condition, options.maximum_condition)?;
+    let z_in = ((C64::ONE + r_in) / denom).scale(reference);
+    let u_out_over_u_in = transfer * ((C64::ONE - r_load) / denom);
+    let p_out_over_u_in = (transfer * ((C64::ONE + r_load) / denom)).scale(reference);
+    if [z_in, u_out_over_u_in, p_out_over_u_in]
+        .iter()
+        .any(|&v| !finite(v))
+    {
+        return Err(DuctError::Singular);
+    }
+    let transmission = total.scattering[2].abs();
+    let indicator = 4.0 / (transmission * transmission);
+    let transfer_condition_estimate = indicator.is_finite().then_some(indicator);
+    Ok(ChainResult {
+        z_in,
+        u_out_over_u_in,
+        p_out_over_u_in,
+        condition_estimate: condition,
+        scattering: total,
+        transfer_condition_estimate,
+    })
+}
+/// Inlet reflection and load-to-inlet wave transfer with every feedback
+/// condition bounded; no impedance has been formed yet.
+fn terminated_reflection(
+    blocks: &[TwoPort],
+    options: ComposeOptions,
+    cancelled: &mut impl FnMut() -> bool,
+    total: TwoPort,
+    mut condition: f64,
+    r_load: C64,
+) -> Result<(C64, C64, f64), DuctError> {
     let (r_in, transfer) = match options.rule {
         Composition::Scattering => {
             let s = total.scattering;
@@ -473,29 +606,7 @@ fn finish_chain(
             (r, product.value()?)
         }
     };
-    let denom = C64::ONE - r_in;
-    condition = condition.max((1.0 + r_in.abs()) / denom.abs());
-    bound(condition, options.maximum_condition)?;
-    let z_in = ((C64::ONE + r_in) / denom).scale(reference);
-    let u_out_over_u_in = transfer * ((C64::ONE - r_load) / denom);
-    let p_out_over_u_in = (transfer * ((C64::ONE + r_load) / denom)).scale(reference);
-    if [z_in, u_out_over_u_in, p_out_over_u_in]
-        .iter()
-        .any(|&v| !finite(v))
-    {
-        return Err(DuctError::Singular);
-    }
-    let transmission = total.scattering[2].abs();
-    let indicator = 4.0 / (transmission * transmission);
-    let transfer_condition_estimate = indicator.is_finite().then_some(indicator);
-    Ok(ChainResult {
-        z_in,
-        u_out_over_u_in,
-        p_out_over_u_in,
-        condition_estimate: condition,
-        scattering: total,
-        transfer_condition_estimate,
-    })
+    Ok((r_in, transfer, condition))
 }
 
 /// Shared modal propagation: the existing exact multiplication order is kept.

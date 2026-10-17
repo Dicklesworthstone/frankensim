@@ -13,7 +13,8 @@ pub mod exterior;
 
 use super::{
     DrivingPointError, LineRealization, PoleState, bulk_delay_pole_state,
-    characteristic_line_response_with_poles, sealed_volume_compliance_gain,
+    characteristic_line_response_with_poles, duct_reflectance, impedance_reflectance,
+    sealed_volume_compliance_gain,
 };
 use fs_duct::{Duct, DuctError, DuctResponse, HoleState, LossModel, Segment, Termination,
     input_impedance_load, input_impedance_wall};
@@ -197,29 +198,39 @@ impl RegionalDuct {
                 pole_states.push(PoleState::Compliance { gain });
             }
             pole_states.push(bulk_delay_pole_state(geo_delay));
+            let zc = self.inlet_impedance();
             return characteristic_line_response_with_poles(
                 geo_delay,
                 termination,
                 sample_rate_hz,
                 n,
-                self.inlet_impedance(),
+                zc,
                 n_fft_override,
                 pole_states,
-                |omega| input_impedance_wall(&r.duct, &r.gas, omega, LossModel::Bessel, termination, wall),
+                |omega| {
+                    let loss = LossModel::Bessel;
+                    duct_reflectance(&r.duct, &r.gas, omega, loss, termination, wall, zc)
+                },
             );
         }
         let dt = 1.0 / f64::from(sample_rate_hz);
         let geo_delay = 2.0 * self.one_way_time_s / dt;
         let pole_states = vec![bulk_delay_pole_state(geo_delay)];
+        let zc = self.inlet_impedance();
+        // Regional interfaces are composed through Z; lossless regional poles
+        // are not represented here (only the uniform route has the R entry).
         characteristic_line_response_with_poles(
             geo_delay,
             termination,
             sample_rate_hz,
             n,
-            self.inlet_impedance(),
+            zc,
             n_fft_override,
             pole_states,
-            |omega| self.response(omega, LossModel::Bessel, termination, wall),
+            |omega| {
+                self.response(omega, LossModel::Bessel, termination, wall)
+                    .map(|response| impedance_reflectance(&response, zc))
+            },
         )
     }
 

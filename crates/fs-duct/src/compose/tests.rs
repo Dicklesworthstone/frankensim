@@ -902,3 +902,72 @@ fn opaque_network_edge_keeps_finite_admittance() {
     );
     assert!(y[1].abs() < 1e-300 && y[2].abs() < 1e-300 && c.is_finite());
 }
+
+/// G0/G2, DEF-01: a lossless rigid-capped cylinder at kL = pi has an input
+/// impedance pole. Z refuses there (|1-r| ~ 1e-16 exceeds the 1e12 bound),
+/// while the input reflection is exact: R = exp(2ikL) = +1. Off the pole,
+/// the Z-free reference change agrees with (Z-Zc)/(Z+Zc) from the Z route.
+#[test]
+fn input_reflection_is_exact_where_lossless_impedance_poles_refuse() {
+    let start = Instant::now();
+    let g = gas();
+    let (radius, length) = (0.005, 0.30);
+    let duct = Duct {
+        segments: vec![Segment::Cylinder { radius, length }],
+    };
+    let zc = g.characteristic_impedance / (PI * radius * radius);
+    let pole = PI * g.sound_speed / length;
+    let at = |omega: f64| {
+        let z = crate::input_impedance_wall(
+            &duct,
+            &g,
+            omega,
+            LossModel::Lossless,
+            Termination::Closed,
+            None,
+        );
+        let r = input_reflection_wall(
+            &duct,
+            &g,
+            omega,
+            LossModel::Lossless,
+            Termination::Closed,
+            None,
+        );
+        (z, r)
+    };
+    let (z, r) = at(pole);
+    assert!(matches!(z, Err(DuctError::Singular)), "{z:?}");
+    let r = r.unwrap();
+    let unit = r.referenced_to(zc).unwrap();
+    let pole_error = (unit - C64::ONE).abs();
+    assert!((r.reflection.abs() - 1.0).abs() < 1e-12 && pole_error < 1e-9);
+    emit(
+        "def01-input-reflection-at-lossless-pole",
+        "cylinder-0.30m-closed",
+        0,
+        None,
+        pole_error,
+        r.condition_estimate,
+        1e-9,
+        start,
+        "",
+    );
+    for omega in [pole / 3.0, 0.7 * pole, 1.37 * pole] {
+        let (z, r) = at(omega);
+        let z = z.unwrap().impedance;
+        let from_z = (z - C64::from_re(zc)) / (z + C64::from_re(zc));
+        let error = relative(r.unwrap().referenced_to(zc).unwrap(), from_z);
+        assert!(error < 1e-12, "omega {omega}: {error}");
+    }
+    assert!(r.referenced_to(0.0).is_err() && r.referenced_to(f64::NAN).is_err());
+    // An active load at the reflection-coordinate pole Z_L = -R refuses here;
+    // the Z route keeps its projective contraction for that algebraic probe.
+    let through = [TwoPort::through(1.0).unwrap()];
+    let active = Some(C64::from_re(-1.0));
+    assert!(matches!(
+        compose_chain_reflection(&through, active, ComposeOptions::default()),
+        Err(DuctError::Singular)
+    ));
+    assert!(compose_chain(&through, active, ComposeOptions::default()).is_ok());
+}
