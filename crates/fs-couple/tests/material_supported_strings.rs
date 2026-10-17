@@ -69,8 +69,9 @@ fn layered_torsion_keeps_its_original_basis_and_physical_force_projection() {
         ]).unwrap().with_kelvin_voigt_bending(ETA).unwrap();
         let source=MaterialStringSource::Concentric {template:template(3),section,
             prestress:StringPrestress::FixedTension(20.0)}.with_torsion("G","eta_s",2).unwrap();
-        let twisted=source.into_nonlinear(cx,gas(),48_000,0.2,initial(5,0.0),gate).unwrap();
-        let first=support::source(7800.0,200e9,2).into_nonlinear(cx,gas(),48_000,0.2,initial(2,0.0),gate).unwrap();
+        // Both strings share the support, so both take the twist-resolving clock.
+        let twisted=source.into_nonlinear(cx,gas(),TORSION_RATE_HZ,0.2,initial(5,0.0),gate).unwrap();
+        let first=support::source(7800.0,200e9,2).into_nonlinear(cx,gas(),TORSION_RATE_HZ,0.2,initial(2,0.0),gate).unwrap();
         let image=SupportedMaterialStrings::in_comoving_gas(vec![first,twisted.clone()],
             TranslatingSupport {initial_position_m:0.0,initial_velocity_m_s:0.0,..rail()},gate).unwrap();
         assert_eq!(image.mode_count(),8);assert_eq!(image.bodies().len(),2);
@@ -82,8 +83,8 @@ fn layered_torsion_keeps_its_original_basis_and_physical_force_projection() {
         assert_eq!(surface[6..],twisted.surface_shape(0.27).unwrap()[3..]);
         for end in [0.0,1.0] {assert_eq!(image.surface_shape(1,end).unwrap(),image.support_shape());}
         // Two actual runs distinguish normal force (no torsion) from tangential traction.
-        let mut plain=image.clone().prepare(config(),gate).unwrap();
-        let mut tangent=image.prepare(config(),gate).unwrap();
+        let mut plain=image.clone().prepare(config_at(TORSION_RATE_HZ),gate).unwrap();
+        let mut tangent=image.prepare(config_at(TORSION_RATE_HZ),gate).unwrap();
         for _ in 0..48 {
             plain.step(&normal.iter().map(|b|b*1e-4).collect::<Vec<_>>(),gate).unwrap();
             tangent.step(&surface.iter().map(|b|b*1e-4).collect::<Vec<_>>(),gate).unwrap();

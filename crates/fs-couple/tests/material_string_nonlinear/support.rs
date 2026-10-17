@@ -56,3 +56,12 @@ pub fn config() -> ImpactConfig {
     ImpactConfig { dt_s: 1.0/48_000.0, max_steps: 10_000, maximum_energy_j: 2.0,
         energy_absolute_tolerance_j: 1e-10, energy_relative_tolerance: 1e-8, maximum_generalized_force: 1e4 }
 }
+/// Clock for bodies with twist modes. ImpactSystem's midpoint block admits only
+/// the one-cent band, and the layered torsion pole (about 26000 rad/s) needs
+/// dt <= 1.5e-6 s.
+#[allow(dead_code)]
+pub const TORSION_RATE_HZ: u32 = 768_000;
+#[allow(dead_code)]
+pub fn config_at(rate_hz: u32) -> ImpactConfig {
+    ImpactConfig { dt_s: 1.0/f64::from(rate_hz), ..config() }
+}
