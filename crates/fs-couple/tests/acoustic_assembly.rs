@@ -478,9 +478,12 @@ fn plucked_string_fundamental_moves_with_mu_and_tension() {
     let base = realize_assembly(&plucked(80.0, 0.006, 0.003)).expect("base");
     let heavy = realize_assembly(&plucked(80.0, 0.012, 0.003)).expect("heavy");
     let taut = realize_assembly(&plucked(160.0, 0.006, 0.003)).expect("taut");
-    let p_base = dominant_period_samples(&base.pressure_pa, 40, 200);
-    let p_heavy = dominant_period_samples(&heavy.pressure_pa, 40, 220);
-    let p_taut = dominant_period_samples(&taut.pressure_pa, 30, 160);
+    // The lag windows bracket the same periods in seconds as at 8 kHz
+    // (about 11 ms base), scaled to plucked()'s band-resolved clock.
+    let lag = |n: usize| n * plucked(80.0, 0.006, 0.003).sample_rate_hz as usize / 8_000;
+    let p_base = dominant_period_samples(&base.pressure_pa, lag(40), lag(200));
+    let p_heavy = dominant_period_samples(&heavy.pressure_pa, lag(40), lag(220));
+    let p_taut = dominant_period_samples(&taut.pressure_pa, lag(30), lag(160));
     let mu_ratio = p_heavy as f64 / p_base as f64;
     let t_ratio = p_base as f64 / p_taut as f64;
     assert!(
