@@ -150,7 +150,8 @@ mod tests {
             gas(0.75,0.001),0.01).unwrap()
     }
     fn drive() -> DoublePistonInput {
-        DoublePistonInput { duration_s: 0.0005, heat_j: [0.0;2], external_force_n: 0.0 }
+        // About 118 rad/s: 0.00005 s keeps omega*dt inside the 0.04-rad band.
+        DoublePistonInput { duration_s: 0.00005, heat_j: [0.0;2], external_force_n: 0.0 }
     }
     fn solve() -> DoublePistonSolve {
         DoublePistonSolve { piston: controls(), opposing_gas: controls().gas, volume_tolerance_m3: 1e-15 }

@@ -186,8 +186,10 @@ function findings(v: Verisim): HTMLElement[] {
     ]);
   }
   const kA = hz("a3-mf", "low_knock_early_db", "ours"), kC = hz("c6-mf", "low_knock_early_db", "ours");
-  items.push(["A low resonance rings too loudly at the start.",
-    `In the first half second FrankenSim has a component near ${kA.toFixed(0)} Hz at ${num("a3-mf", "low_knock_early_db", "ours").toFixed(1)} dB relative to the fundamental. The real piano's strongest component in that band sits at ${num("a3-mf", "low_knock_early_db", "real").toFixed(1)} dB. ${Math.abs(kA - kC) < 2 ? `It appears at the same frequency when C6 is struck (${kC.toFixed(1)} Hz), so it belongs to the modelled instrument, not to the A3 string. ` : ""}Later the two agree (${num("a3-mf", "low_knock_late_db", "ours").toFixed(1)} dB and ${num("a3-mf", "low_knock_late_db", "real").toFixed(1)} dB).`]);
+  const kEarly = num("a3-mf", "low_knock_early_db", "ours") - num("a3-mf", "low_knock_early_db", "real");
+  const kLateO = num("a3-mf", "low_knock_late_db", "ours"), kLateR = num("a3-mf", "low_knock_late_db", "real");
+  items.push([kEarly > 3 ? "A low resonance rings too loudly at the start." : "The low band at the start matches the real piano within 3 dB.",
+    `In the first half second FrankenSim has a component near ${kA.toFixed(0)} Hz at ${num("a3-mf", "low_knock_early_db", "ours").toFixed(1)} dB relative to the fundamental. The real piano's strongest component in that band sits at ${num("a3-mf", "low_knock_early_db", "real").toFixed(1)} dB. ${Math.abs(kA - kC) < 2 ? `It appears at the same frequency when C6 is struck (${kC.toFixed(1)} Hz), so it belongs to the modelled instrument, not to the A3 string. ` : ""}${Math.abs(kLateO - kLateR) <= 3 ? "Later the two agree" : "Later they still differ"} (${kLateO.toFixed(1)} dB and ${kLateR.toFixed(1)} dB).`]);
   const dr = p("a3-mf")?.descriptors["partial_decay_db_s"];
   const at = (arr: unknown, k: number): number => (Array.isArray(arr) && typeof arr[k - 1] === "number" ? (arr[k - 1] as number) : NaN);
   if (dr) items.push(["Some partials ring too long, others too short.",

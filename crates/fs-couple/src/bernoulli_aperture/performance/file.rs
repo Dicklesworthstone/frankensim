@@ -196,8 +196,12 @@ impl PlateValvePerformance {
         if dt*(plate.stiffness_n_m()/plate.mass_kg()).sqrt()>parsed.max_angular_step {
             return Err(bad(0,"retained plate mode exceeds the declared mechanical angular-step allowance"));
         }
-        let mut valve=DynamicAperture::from_plate_with_closure(plate,parsed.closure,inlet_density,z,
-            dt,parsed.config.samples,parsed.initial).map_err(PlateValveInputError::Physics)?;
+        // The opening coordinate and any declared Maxwell arms are propagated
+        // exactly (DEF-04): this render path has no frequency-warping band.
+        let mut valve=DynamicAperture::from_plate_with_closure_and_propagator(plate,parsed.closure,
+            inlet_density,z,dt,parsed.config.samples,parsed.initial,
+            crate::bernoulli_aperture::paired::BladePropagator::ExactZoh)
+            .map_err(PlateValveInputError::Physics)?;
         if let Some((material,initial))=parsed.relaxation {
             valve=valve.with_plate_relaxation(material,initial).map_err(PlateValveInputError::Physics)?;
         }

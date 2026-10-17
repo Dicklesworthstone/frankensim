@@ -395,10 +395,12 @@ fn repo_root() -> std::path::PathBuf {
 }
 
 fn sidecar_field(sidecar: &str, key: &str) -> String {
-    let tag = format!("\"{key}\":\"");
+    // JSON allows whitespace after the colon; the committed sidecars are pretty-printed.
+    let tag = format!("\"{key}\":");
     let at = sidecar.find(&tag).expect("field") + tag.len();
-    let end = sidecar[at..].find('"').expect("end");
-    sidecar[at..at + end].to_string()
+    let rest = sidecar[at..].trim_start().strip_prefix('"').expect("string field");
+    let end = rest.find('"').expect("end");
+    rest[..end].to_string()
 }
 
 #[test]

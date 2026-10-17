@@ -55,16 +55,19 @@ fn zero_and_constant_power_match_existing_prescribed_heat_owners() {
 #[test]
 fn implicit_midpoint_power_matches_closed_form_and_falsifies_lagged_heating() {
     let old = piston(); let curve = curve(); let thermal = body(&curve);
-    let power = |_: &ResolvedThermochemicalGasState, s: EquilibriumPhaseState| -> Result<_, Infallible> {
-        Ok(PowerSample { power_w: 100.0+1000.0*(s.temperature_k()-400.0), source: s })
+    let dt = thermal.duration_s;
+    // Feedback B with dt*B/(2*m*cp) = 1/2 at any clock, so the implicit
+    // midpoint energy is twice the lagged dt*100 J.
+    let b = 0.5*2.0*thermal.mass_kg*500.0/dt;
+    let power = move |_: &ResolvedThermochemicalGasState, s: EquilibriumPhaseState| -> Result<_, Infallible> {
+        Ok(PowerSample { power_w: 100.0+b*(s.temperature_k()-400.0), source: s })
     };
     let candidate = old.powered_thermal_candidate(drive(0.0), thermal, controls(), bounds(), bounds(),
         link(0.0), power, ||false).unwrap();
     // W=dt*(100+B*(Tmid-T0)), Tmid=T0+W/(2*m*cp).
-    let dt = thermal.duration_s;
-    let expected = dt*100.0/(1.0-dt*1000.0/(2.0*thermal.mass_kg*500.0));
+    let expected = dt*100.0/(1.0-dt*b/(2.0*thermal.mass_kg*500.0));
     assert!((candidate.step().applied_energy_j-expected).abs()<1e-9);
-    assert!((expected-dt*100.0).abs()>0.04);
+    assert!((expected-dt*100.0).abs()>0.8*dt*100.0);
     assert!((candidate.coupled().thermal().state.temperature_k()-400.0-expected/0.5).abs()<1e-8);
     assert_eq!(candidate.coupled().piston(), &old);
 }

@@ -251,6 +251,10 @@ def main():
     ours_mf = piano("a3-mf")
     F0, B0 = own_fit(ours_mf)  # every default position below is the rendered A3's own
     f0_r, b_r = own_fit(real_mf)
+    air = "--rayleigh-loading" in render_cmd("a3-mf")  # the graded renders carry air loading
+    # Some measurements below were made on the preset's 8-division board without air loading.
+    resolved_board = "--board-geometry" in render_cmd("a3-mf")
+    old_board = "Measured earlier on the preset's 8-division board without air loading, not on the board graded above:"
 
     # 1. The early low resonance
     knock_hz = {n: r(precise_peak(piano(n, 1.6), 125, 137, 0.05, 1.5), 6) for n in ["a3-pp", "a3-mf", "a3-ff", "a3-fff", "c6-mf"]
@@ -280,7 +284,7 @@ def main():
                      + strings_txt
                      + f" At A3's bridge it is already {early['bridge_db']:.1f} dB re partial 1; radiation to the microphone adds {early['pressure_db'] - early['bridge_db']:.1f} dB."),
         "suspect": "A coupled mechanical resonance driven too strongly or damped too lightly. The measurements do not identify a single cause: either the dampered bass strings ring with the board, or the board and strings resonate together. Radiation adds only the last few dB.",
-        "test": "Render A3 with the sustain pedal down: if the resonance follows the lifted dampers, it is the bass strings. " + NEW_AIR,
+        "test": "Render A3 with the sustain pedal down: if the resonance follows the lifted dampers, it is the bass strings." + ("" if air else " " + NEW_AIR),
         "status": "open",
         "data": {"hz": knock_hz, "bridge_db": early["bridge_db"], "pressure_db": early["pressure_db"], "real_db": r(real_knock, 3),
                  "bare_board_neighbours_hz": [below, above], "loaded_board_lowest_hz": loaded[:4] if loaded else None, "string_partials": strs},
@@ -524,6 +528,7 @@ def main():
                          f"{res['bass-side receiver']['pattern_gap_db']:.1f} dB (bass side) and {res['treble-side receiver']['pattern_gap_db']:.1f} dB (treble side), "
                          f"against {base['pattern_gap_db']:.1f} dB at the default point 1 m up. "
                          + ("Listening position explains a real part of the gap. " if moved >= 3 else "These two receiver moves do not meet the 3 dB improvement criterion; they do not exclude a radiation/spatial-transfer defect. ")
+                         + (old_board + " " if resolved_board else "")
                          + "Bare-board driving-point admittance |Y(f)| at A3's bridge station (MIDI 57, 85 certified FE modes in 0-1500 Hz) sits at 2.26e-4 m/(N s) at partial 1 (0.0 dB), "
                          + "rises to 9.68e-4 (+12.6 dB) at partial 2 and 6.04e-4 (+8.5 dB) at partial 3, then drops into a 16.0 dB mobility trough at partial 4 "
                          + "(881.6 Hz: 1.53e-4 m/(N s), -3.4 dB re partial 1) and a 13.8 dB trough at partial 6 (1325.6 Hz: 1.99e-4 m/(N s), -1.1 dB re partial 1). "
@@ -534,7 +539,8 @@ def main():
         lr = next(q for q in rows if q["id"] == "low-resonance")
         lr["result"] = (f"Heard by receivers near the Iowa positions, the resonance reads {near[0]:.1f} to {near[1]:.1f} dB instead of {base['low_resonance_db']:.1f} dB: "
                         f"about {base['low_resonance_db'] - near[1]:.0f} dB of the excess came from the default listening point, 1 m above the middle of the board, where this resonance is heard far more strongly. "
-                        f"About {near[1] - lr['data']['real_db']:.0f} dB remain against the real piano's {lr['data']['real_db']:.1f} dB.")
+                        + (f"About {near[1] - lr['data']['real_db']:.0f} dB remain against the real piano's {lr['data']['real_db']:.1f} dB." if near[1] - lr["data"]["real_db"] > 1
+                           else f"That is within 1 dB of the real piano's {lr['data']['real_db']:.1f} dB, or below it: near the Iowa microphones no excess remains."))
         lr["status"] = "confirmed"
         lr["data"]["listening_db"] = r(base["low_resonance_db"] - near[1], 3)
         lr["data"]["remaining_db"] = r(near[1] - lr["data"]["real_db"], 3)
@@ -544,14 +550,16 @@ def main():
                           "Coupled board/string/damper losses and radiation remain candidates; two near receivers do not identify board-only ringing.")
         br_["result"] = (f"The two selected near receivers do not close the off-partial gap: their shares are {res['bass-side receiver']['non_partial_db']:.1f} and "
                          f"{res['treble-side receiver']['non_partial_db']:.1f} dB (default point {base['non_partial_db']:.1f} dB, real piano {np_real['mf']:.1f} dB). "
-                         "On the 1 kHz Steinway D board, adding two-sided Rayleigh air loading (--rayleigh-loading 2,290,1060,65) lowers the 0.2-1.0 s off-partial energy "
-                         "by 6.7 dB (-18.7 to -25.4 dB, dropping the 215.8 Hz satellite from -16.4 to -28.7 dB), and raising wood modal damping threefold (0.045 vs 0.015) "
-                         "lowers it by 5.2 dB (-18.7 to -23.9 dB). "
-                         "These measurements do not attribute that remainder to the board alone.")
+                         + ("" if air else
+                            "On the 1 kHz Steinway D board, adding two-sided Rayleigh air loading (--rayleigh-loading 2,290,1060,65) lowers the 0.2-1.0 s off-partial energy "
+                            "by 6.7 dB (-18.7 to -25.4 dB, dropping the 215.8 Hz satellite from -16.4 to -28.7 dB), and raising wood modal damping threefold (0.045 vs 0.015) "
+                            "lowers it by 5.2 dB (-18.7 to -23.9 dB). ")
+                         + "These measurements do not attribute that remainder to the board alone.")
     ds = next(q for q in rows if q["id"] == "decay-shape")
     ds["status"] = "confirmed"
     ds["suspect"] = "Three-string unison beating (symmetric vs antisymmetric unison modes) and two-polarization exchange across the bridge."
-    ds["result"] = ("Driving-point conductance Re(Y) at A3's bridge across 200-1400 Hz averages 2.54e-4 m/(N s) (matching Giordano 1998; Conklin 1996) "
+    ds["result"] = ((old_board + " " if resolved_board else "")
+                    + "Driving-point conductance Re(Y) at A3's bridge across 200-1400 Hz averages 2.54e-4 m/(N s) (matching Giordano 1998; Conklin 1996) "
                     "and is 1.32e-4 m/(N s) at partial 4 (881.9 Hz, 3.1x partial 1), ruling out weak board loss there. Instead, A3's three unison strings "
                     "(detune 0.8 cents, beat spacing df_n = 4.62e-4 f_n) are struck in phase, modulating the symmetric bridge force by (1 + 2 cos(2 pi df_n t))/3 "
                     "while antisymmetric unison modes decouple from the bridge. For partial 4 (df_4 = 0.408 Hz), exact three-string nulls fall at 0.82 s (-31.2 dB) "
@@ -601,23 +609,55 @@ def main():
             res["damp10"] = {"hz": r(precise_peak(y, 128, 135, 0.05, 1.5), 6), "early_db": r(band(y, 0.05, 0.5), 3), "late_db": r(band(y, 0.8, 1.55), 3)}
             drop = res["early_db"]["dampers_down"] - res["damp10"]["early_db"]
             lr["result"] += (f" With every pad's drag raised tenfold (4 N s/m per string) the early resonance falls only {drop:.1f} dB, to {res['damp10']['early_db']:.1f} dB, "
-                             f"and moves to {res['damp10']['hz']:.2f} Hz. Weak dampers explain a small part of it, not most of it. "
-                             "With two-sided Rayleigh air loading admitted on the 1 kHz Steinway D board (--rayleigh-loading 2,290,1060,65), the 128-135 Hz early resonance "
-                             "drops by 14.9 dB at the bridge (-24.9 to -39.8 dB) and 13.8 dB at the microphone (-17.8 to -31.5 dB). Raising wood modal damping threefold "
-                             "(0.045 vs 0.015) drops it by 6.9 dB at the bridge (-31.8 dB) and 2.6 dB at the microphone (-20.3 dB). Together, missing two-sided air radiation "
-                             "loading and the 1 m on-axis baffled receiver geometry account for the entire 23 dB early excess.")
+                             f"and moves to {res['damp10']['hz']:.2f} Hz. Weak dampers explain a small part of it, not most of it.")
+            if not air:
+                lr["result"] += (" With two-sided Rayleigh air loading admitted on the 1 kHz Steinway D board (--rayleigh-loading 2,290,1060,65), the 128-135 Hz early resonance "
+                                 "drops by 14.9 dB at the bridge (-24.9 to -39.8 dB) and 13.8 dB at the microphone (-17.8 to -31.5 dB). Raising wood modal damping threefold "
+                                 "(0.045 vs 0.015) drops it by 6.9 dB at the bridge (-31.8 dB) and 2.6 dB at the microphone (-20.3 dB). Together, missing two-sided air radiation "
+                                 "loading and the 1 m on-axis baffled receiver geometry account for the entire 23 dB early excess.")
             follows = drop > 6  # dampers decide it only if real-strength pads remove most of the excess
     mech = {None: "either the dampered bass strings ring with the board, or the board and strings resonate together, driven too strongly or damped too lightly.",
             True: "the dampered bass strings ring with the board (lifting the dampers moves it); the estimated dampers, 0.4 N s/m per string centred at 35% of the length, are the first suspect.",
-            False: "a coupled board-and-string resonance near 131.6 Hz (tenfold damper drag barely changes it) that is under-damped when two-sided air radiation loading and wood/rim losses are absent."}[follows]
-    if "listening_db" in lr["data"]:
+            False: ("a coupled board-and-string resonance near 131.6 Hz (tenfold damper drag barely changes it), still under-damped with air loading included; "
+                    "the wood and rim losses the model lacks are the remaining lead." if air else
+                    "a coupled board-and-string resonance near 131.6 Hz (tenfold damper drag barely changes it) that is under-damped when two-sided air radiation loading and wood/rim losses are absent.")}[follows]
+    if "listening_db" in lr["data"] and lr["data"]["remaining_db"] <= 1:
+        lr["suspect"] = (f"The listening point. Receivers near the Iowa microphone positions hear the resonance at or below the real piano's level; "
+                         f"the default point, 1 m above the middle of the board, hears it about {lr['data']['listening_db']:.0f} dB louder than they do.")
+    elif "listening_db" in lr["data"]:
         lr["suspect"] = (f"Two parts. The default listening point accounts for about {lr['data']['listening_db']:.0f} dB (shown by the receiver experiment). "
                          f"The remaining {lr['data']['remaining_db']:.0f} dB is mechanical: {mech} The measurements do not attribute that remainder to the board alone.")
     else:
         lr["suspect"] = "Mechanical, not acoustic: " + mech + " The measurements do not attribute that remainder to the board alone."
-    if follows is not None:
+    if "listening_db" in lr["data"] and lr["data"]["remaining_db"] <= 1:
+        lr["test"] = ("Grade from receivers at the Iowa microphone positions (8 inches above the bass and treble strings) as well as the default point; "
+                      "the partial-pattern card shows what those positions do to the partials.")
+    elif follows is not None:
         lr["test"] = ({True: "Render with damper pads strong enough to stop a bass string within about 0.3 s, as a real damper does, and re-measure.",
-                       False: "Raise the board's modal damping near 130 Hz and re-measure. " + NEW_AIR}[follows])
+                       False: "Raise the board's modal damping near 130 Hz and re-measure. "
+                              + ("Supply measured spruce, rib and rim loss factors and re-measure." if air else NEW_AIR)}[follows])
+    if air and has("a3-mf-noair"):
+        # The graded renders carry two-sided air loading; the same stroke without it, on the same board, is kept for comparison.
+        noair = piano("a3-mf-noair")
+        early = {"air": r(ratio_db(ours_mf, 128, 135, 0.05, 0.5), 3), "none": r(ratio_db(noair, 128, 135, 0.05, 0.5), 3)}
+        late = {"air": r(ratio_db(ours_mf, 128, 135, 0.8, 1.55), 3), "none": r(ratio_db(noair, 128, 135, 0.8, 1.55), 3)}
+        off = {"air": np_ours["mf"], "none": r(non_partial_db(noair, 0.2, 1.0), 3)}
+        abl["air_loading"] = {"early_128_135_db": early, "late_128_135_db": late, "non_partial_db": off}
+        board = ("The renders above include two-sided air loading on a soundboard resolved to 2.4 kHz: the complete reaction of all 128 board modes, "
+                 "within its accuracy limits, with its work in the energy ledger. ")
+        if early["none"] - early["air"] >= 3:
+            lr["status"] = "improved"
+        lr["fix"] = (board + f"Against the same mf stroke without air, the 128-135 Hz band 0.05-0.5 s after the strike falls from {early['none']:.1f} dB to "
+                     f"{early['air']:.1f} dB re the fundamental, and from {late['none']:.1f} to {late['air']:.1f} dB 0.8-1.55 s after it. "
+                     f"The real piano has nothing stronger than {lr['data']['real_db']:.1f} dB in 80-{0.77 * 220:.0f} Hz.")
+        br_ = next(q for q in rows if q["id"] == "board-ringing")
+        if off["none"] - off["air"] >= 3:
+            br_["status"] = "improved"
+        br_["fix"] = (board + f"Against the same stroke without air, the energy away from the string partials 0.2-1 s after the strike falls from "
+                      f"{off['none']:.1f} dB to {off['air']:.1f} dB re total (real piano {np_real['mf']:.1f} dB).")
+        br_["suspect"] = ("Coupled board/string ringing that air loading damps but does not remove: the wood and rim losses the model still lacks, "
+                          "and unplayed strings and dampers, remain candidates.")
+        br_["test"] = "Supply measured spruce, rib and rim loss factors and re-measure the off-partial energy and the satellites' decay."
     # The waves experiment on linear graded renders. Once the graded A3 renders carry the waves themselves,
     # a3-{mf,ff} are no longer the linear side of this comparison and the ff-brightness card above reports it.
     wave_paths = {d: V.CAMPAIGN / "piano" / f"a3-{d}-waves.wav" for d in ("mf", "ff")}

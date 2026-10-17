@@ -49,6 +49,37 @@ fn terminal_observation_matches_its_owner_without_changing_either_reed_model() {
 }
 
 #[test]
+fn observer_choice_leaves_reed_and_bore_state_bitwise_identical_over_a_full_note() {
+    // G3 (X-Obs1): the receiver only observes. Over the whole performance, the
+    // reed opening, both travelling waves and the bore volume flow carry the
+    // same bits under the legacy listener and the baffled outlet.
+    for replacement in ["reed 0.0004 0.013 6000 0 0 0.35", "reed 0.0004 0.013 6000 0.00001 100 0.35"] {
+        let text = SOURCE.replace("reed 0.0004 0.013 6000 0 0 0.35", replacement);
+        let mut baffled = ReedPerformance::from_bytes(text.as_bytes(), 1).unwrap();
+        let mut legacy = ReedPerformance::from_bytes(text.replace(RECEIVER, "listener_m 0.5").as_bytes(), 1).unwrap();
+        assert!(baffled.outlet_receiver().is_some() && legacy.outlet_receiver().is_none());
+        let samples = baffled.info().samples;
+        assert_eq!(samples, legacy.info().samples);
+        let flow = |v: &ReedBoreVoice| (v.p_plus_prev - v.line.incoming()) / v.zc;
+        let mut moved = false;
+        for _ in 0..samples {
+            baffled.pressure_block(&mut [0.0]).unwrap();
+            legacy.pressure_block(&mut [0.0]).unwrap();
+            let (a, b) = (voice(&baffled), voice(&legacy));
+            assert_eq!(a.reed_y.to_bits(), b.reed_y.to_bits());
+            assert_eq!(a.reed_v.to_bits(), b.reed_v.to_bits());
+            assert_eq!(a.p_plus_prev.to_bits(), b.p_plus_prev.to_bits());
+            assert_eq!(a.line.incoming().to_bits(), b.line.incoming().to_bits());
+            assert_eq!(flow(a).to_bits(), flow(b).to_bits());
+            moved |= a.p_plus_prev != 0.0 && flow(a) != 0.0;
+        }
+        assert!(moved, "the note must actually drive the bore");
+        assert_eq!(voice(&baffled).line.history(), voice(&legacy).line.history());
+        assert_eq!((baffled.remaining_samples(), legacy.remaining_samples()), (0, 0));
+    }
+}
+
+#[test]
 fn delays_partitioning_and_request_refusals_preserve_the_complete_source() {
     let mut source = ReedPerformance::from_bytes(SOURCE.as_bytes(), 113).unwrap();
     let info = source.outlet_receiver().unwrap();

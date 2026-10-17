@@ -2,7 +2,8 @@
 use super::*;
 use fs_couple::bernoulli_aperture::{BernoulliAperture,
     dynamic::{ApertureState, DynamicAperture, DynamicApertureSpec},
-    paired::{ApertureBlade, BladeState, PairedAperture, PairedApertureLimits, PairedApertureSpec},
+    paired::{ApertureBlade, BladePropagator, BladeState, PairedAperture, PairedApertureLimits,
+        PairedApertureSpec},
     fractional::FractionalTubePolicy,
     two_sided::{ApertureDuctSpec, LoadedAperture, TwoSidedAperture, TwoSidedDrive,
         TwoSidedLimits, ValveSide, combined_inlet_state},
@@ -44,21 +45,23 @@ fn valve(sources: &[ApertureDuctSpec; 2], paired: bool) -> LoadedAperture {
         "synthetic material-duct reed contact".into()).unwrap();
     if paired {
         let mut blades = [b; 2]; blades[1].mass_kg *= 1.7;
-        PairedAperture::new(PairedApertureSpec {
+        // Both images sit outside the midpoint one-cent band (DEF-04): exact blocks.
+        PairedAperture::new_with_propagator(PairedApertureSpec {
             rest_opening_m: 4e-4, width_m: 0.013, blades, density_kg_m3: g.density,
             impedance_pa_s_m3: z, time_step_s: DT, max_steps: 2048,
             limits: PairedApertureLimits { maximum_abs_displacement_m: 0.01,
                 maximum_abs_velocity_m_s: 100.0, maximum_energy_j: 1.0, max_evaluations: 256,
                 velocity_tolerance_m_s: 1e-13, relative_tolerance: 1e-11 },
-        }, [BladeState::default(); 2], contact).unwrap().into()
+        }, [BladeState::default(); 2], contact, BladePropagator::ExactZoh).unwrap().into()
     } else {
-        DynamicAperture::new(DynamicApertureSpec {
+        DynamicAperture::new_with_propagator(DynamicApertureSpec {
             aperture: BernoulliAperture { rest_opening_m: 4e-4, width_m: 0.013,
                 closing_pressure_pa: 0.5 * b.stiffness_n_m * 4e-4 / b.pressure_area_m2 },
             mass_kg: 0.5 * b.mass_kg, stiffness_n_m: 0.5 * b.stiffness_n_m,
             damping_ratio: b.damping_n_s_m / (2.0 * (b.mass_kg * b.stiffness_n_m).sqrt()),
             density_kg_m3: g.density, impedance_pa_s_m3: z, time_step_s: DT, max_steps: 2048,
-        }, ApertureState { opening_m: 4e-4, opening_velocity_m_s: 0.0 }, contact).unwrap().into()
+        }, ApertureState { opening_m: 4e-4, opening_velocity_m_s: 0.0 }, contact,
+            BladePropagator::ExactZoh).unwrap().into()
     }
 }
 fn model(s: [ApertureDuctSpec; 2], w: [Option<MaterialWallInput>; 2], paired: bool,

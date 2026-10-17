@@ -1,6 +1,7 @@
 use super::*;
 use fs_couple::bernoulli_aperture::dynamic::{ApertureDrive, ApertureState, DynamicAperture, DynamicApertureSpec};
 use fs_couple::bernoulli_aperture::BernoulliAperture;
+use fs_couple::bernoulli_aperture::paired::BladePropagator;
 use fs_couple::bernoulli_aperture::dynamic::force::PlateForceFootprint;
 use fs_couple::bernoulli_aperture::tube::{ApertureTube, TubeDrive, UniformTubeSpec};
 use fs_couple::bernoulli_aperture::network::{ApertureNetwork, NetworkNode, TubeNetworkSpec, TubeSection};
@@ -12,28 +13,49 @@ fn free_lay() -> Obstacle {
 }
 #[test]
 fn mechanical_force_matches_independent_midpoint_momentum_and_work() {
-    let spec = DynamicApertureSpec {
+    let mut spec = DynamicApertureSpec {
         aperture: BernoulliAperture { rest_opening_m: 0.0002, width_m: 0.01, closing_pressure_pa: 1000.0 },
         mass_kg: 1e-5, stiffness_n_m: 500.0, damping_ratio: 0.02,
         density_kg_m3: 1.2, impedance_pa_s_m3: 1e6, time_step_s: 1e-5, max_steps: 10,
     };
     let old = ApertureState { opening_m: 0.00021, opening_velocity_m_s: 0.003 };
-    let h = spec.time_step_s * 0.5;
-    let damping = 2.0 * spec.damping_ratio * (spec.stiffness_n_m * spec.mass_kg).sqrt();
-    let area = spec.stiffness_n_m * spec.aperture.rest_opening_m / spec.aperture.closing_pressure_pa;
-    for force in [-0.002, 0.0, 0.002] {
-        // Cancel the independently predicted swept flow. This leaves zero dp,
-        // making the exact linear midpoint mechanical solution an independent oracle.
-        let vm = (spec.mass_kg*old.opening_velocity_m_s + h*(force-spec.stiffness_n_m*(old.opening_m-spec.aperture.rest_opening_m)))
-            / (spec.mass_kg + h*damping + h*h*spec.stiffness_n_m);
-        let mut valve = DynamicAperture::new(spec, old, free_lay()).unwrap();
-        let f = valve.step_with_force(ApertureDrive { body_flow_m3_s: area*vm, ..ApertureDrive::default() }, force).unwrap();
-        near(f.state.opening_m, old.opening_m+spec.time_step_s*vm, 1e-11);
-        near(f.state.opening_velocity_m_s, 2.0*vm-old.opening_velocity_m_s, 1e-9);
-        if force != 0.0 { near(f.mechanical_work_j, force*vm*spec.time_step_s, 1e-9); }
-        assert!(f.bore_pressure_pa.abs() < 1e-9);
-        let scale=f.stored_energy_j.abs()+f.storage_change_j.abs()+f.mechanical_work_j.abs()+f.dissipated_energy_j;
-        assert!(f.balance_residual_j().abs() < 1e-9*scale);
+    let (m, k, rest) = (spec.mass_kg, spec.stiffness_n_m, spec.aperture.rest_opening_m);
+    let damping = 2.0 * spec.damping_ratio * (k * m).sqrt();
+    let area = k * rest / spec.aperture.closing_pressure_pa;
+    let omega = (k / m).sqrt();
+    // The pole-rate bound is about 8350 rad/s: midpoint runs inside its band
+    // (4e-6 s), the exact block at the original 1e-5 s clock.
+    for (propagator, dt) in [(BladePropagator::Midpoint, 4e-6), (BladePropagator::ExactZoh, 1e-5)] {
+        spec.time_step_s = dt;
+        for force in [-0.002, 0.0, 0.002] {
+            // Cancel the independently predicted swept flow. This leaves zero dp,
+            // making the linear mechanical solution an independent oracle.
+            let (next_y, next_v) = match propagator {
+                BladePropagator::Midpoint => {
+                    let h = 0.5 * dt;
+                    let vm = (m*old.opening_velocity_m_s + h*(force-k*(old.opening_m-rest)))
+                        / (m + h*damping + h*h*k);
+                    (old.opening_m + dt*vm, 2.0*vm - old.opening_velocity_m_s)
+                }
+                BladePropagator::ExactZoh => {
+                    // Closed-form underdamped response about x = rest + F/k.
+                    let a = spec.damping_ratio * omega;
+                    let b = omega * (1.0 - spec.damping_ratio * spec.damping_ratio).sqrt();
+                    let (e, c, s) = ((-a*dt).exp(), (b*dt).cos(), (b*dt).sin());
+                    let (u0, v0) = (old.opening_m - rest - force/k, old.opening_velocity_m_s);
+                    (rest + force/k + e*(u0*(c + a/b*s) + v0*s/b), e*(v0*(c - a/b*s) - u0*omega*omega/b*s))
+                }
+            };
+            let vm = (next_y - old.opening_m) / dt;
+            let mut valve = DynamicAperture::new_with_propagator(spec, old, free_lay(), propagator).unwrap();
+            let f = valve.step_with_force(ApertureDrive { body_flow_m3_s: area*vm, ..ApertureDrive::default() }, force).unwrap();
+            near(f.state.opening_m, next_y, 1e-11);
+            near(f.state.opening_velocity_m_s, next_v, 1e-9);
+            if force != 0.0 { near(f.mechanical_work_j, force*vm*dt, 1e-9); }
+            assert!(f.bore_pressure_pa.abs() < 1e-9, "{propagator:?}");
+            let scale=f.stored_energy_j.abs()+f.storage_change_j.abs()+f.mechanical_work_j.abs()+f.dissipated_energy_j;
+            assert!(f.balance_residual_j().abs() < 1e-9*scale, "{propagator:?}");
+        }
     }
 }
 

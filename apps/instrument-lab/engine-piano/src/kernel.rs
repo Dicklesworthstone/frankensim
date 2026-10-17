@@ -102,6 +102,13 @@ pub struct Config {
     pub retire_ringing_j: f64,
     /// Same threshold for a key whose dampers are engaged [J].
     pub retire_damped_j: f64,
+    /// Intrinsic string loss law. `false` is the reference's default: an
+    /// estimated common rate plus an authored viscoelastic bending spectrum.
+    /// `true` is RT-0425's published per-key R_u and eta_u (the reference's
+    /// `--rt0425-string-damping`). Against 52 recordings (FrankenPiano corpus,
+    /// fp-realism-v1) the authored law decays the bass's upper partials about
+    /// 5x too fast; the published one cuts brightness error 16.4 -> 11.4 dB.
+    pub rt0425_string_damping: bool,
 }
 impl Config {
     pub fn live(sample_rate: u32) -> Self {
@@ -120,6 +127,7 @@ impl Config {
             full_scale_pa: 10.0,
             retire_ringing_j: 1.0e-10,
             retire_damped_j: 1.0e-8,
+            rt0425_string_damping: false,
         }
     }
 }
@@ -466,16 +474,16 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 #[inline(always)]
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     let mut s = [0.0_f64; 4];
-    let mut ca = a.chunks_exact(4);
-    let mut cb = b.chunks_exact(4);
-    for (x, y) in (&mut ca).zip(&mut cb) {
+    let (ca, ra) = a.as_chunks::<4>();
+    let (cb, rb) = b.as_chunks::<4>();
+    for (x, y) in ca.iter().zip(cb) {
         s[0] += x[0] * y[0];
         s[1] += x[1] * y[1];
         s[2] += x[2] * y[2];
         s[3] += x[3] * y[3];
     }
     let mut t = (s[0] + s[1]) + (s[2] + s[3]);
-    for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
+    for (x, y) in ra.iter().zip(rb) {
         t += x * y;
     }
     t
@@ -520,7 +528,7 @@ fn pad_dots<const N: usize>(pack: &[f64], v: &[f64]) -> [f64; N] {
     let mut hi = [f64x2_splat(0.0); N];
     let (cv, rv) = v.as_chunks::<4>();
     let (cg, _) = pack.as_chunks::<4>();
-    for (x, g) in cv.iter().zip(cg.chunks_exact(N)) {
+    for (x, g) in cv.iter().zip(cg.as_chunks::<N>().0) {
         let xl = f64x2(x[0], x[1]);
         let xh = f64x2(x[2], x[3]);
         for t in 0..N {
@@ -540,18 +548,17 @@ fn pad_dots<const N: usize>(pack: &[f64], v: &[f64]) -> [f64; N] {
 #[inline]
 fn pad_dots<const N: usize>(pack: &[f64], v: &[f64]) -> [f64; N] {
     let mut s = [[0.0_f64; 4]; N];
-    let mut cv = v.chunks_exact(4);
-    let mut cg = pack.chunks_exact(4 * N);
-    for (x, g) in (&mut cv).zip(&mut cg) {
+    let (cv, rv) = v.as_chunks::<4>();
+    let (cg, _) = pack.as_chunks::<4>();
+    for (x, g) in cv.iter().zip(cg.as_chunks::<N>().0) {
         for t in 0..N {
-            s[t][0] += g[4 * t] * x[0];
-            s[t][1] += g[4 * t + 1] * x[1];
-            s[t][2] += g[4 * t + 2] * x[2];
-            s[t][3] += g[4 * t + 3] * x[3];
+            s[t][0] += g[t][0] * x[0];
+            s[t][1] += g[t][1] * x[1];
+            s[t][2] += g[t][2] * x[2];
+            s[t][3] += g[t][3] * x[3];
         }
     }
-    let rv = cv.remainder();
-    pad_dots_finish(&s, &pack[(v.len() - rv.len()) * N..], rv)
+    pad_dots_finish(&s, &pack[cv.len() * 4 * N..], rv)
 }
 
 #[inline]
@@ -572,14 +579,15 @@ fn pad_dots_finish<const N: usize>(s: &[[f64; 4]; N], tail: &[f64], rv: &[f64]) 
 /// element adds the pads in pack order).
 #[inline]
 fn pad_axpy<const N: usize>(pack: &[f64], v: &mut [f64], c: &[f64; N]) {
-    let body = v.len() / 4 * 4;
-    let (head, rv) = v.split_at_mut(body);
-    for (x, g) in head.chunks_exact_mut(4).zip(pack.chunks_exact(4 * N)) {
+    let (head, rv) = v.as_chunks_mut::<4>();
+    let body = head.len() * 4;
+    let (cg, _) = pack.as_chunks::<4>();
+    for (x, g) in head.iter_mut().zip(cg.as_chunks::<N>().0) {
         for t in 0..N {
-            x[0] += g[4 * t] * c[t];
-            x[1] += g[4 * t + 1] * c[t];
-            x[2] += g[4 * t + 2] * c[t];
-            x[3] += g[4 * t + 3] * c[t];
+            x[0] += g[t][0] * c[t];
+            x[1] += g[t][1] * c[t];
+            x[2] += g[t][2] * c[t];
+            x[3] += g[t][3] * c[t];
         }
     }
     let rem = rv.len();
@@ -704,17 +712,17 @@ fn matvec(a: &[f64], x: &[f64], y: &mut [f64]) {
     let r = x.len();
     let n = a.chunks_exact(r).len().min(y.len());
     let quads = n / 4;
-    for (block, out) in a[..quads * 4 * r].chunks_exact(4 * r).zip(y.chunks_exact_mut(4)) {
+    for (block, out) in a[..quads * 4 * r].chunks_exact(4 * r).zip(y.as_chunks_mut::<4>().0) {
         let (r0, rest) = block.split_at(r);
         let (r1, rest) = rest.split_at(r);
         let (r2, r3) = rest.split_at(r);
         let mut s = [[0.0_f64; 4]; 4];
-        let mut cx = x.chunks_exact(4);
-        let mut c0 = r0.chunks_exact(4);
-        let mut c1 = r1.chunks_exact(4);
-        let mut c2 = r2.chunks_exact(4);
-        let mut c3 = r3.chunks_exact(4);
-        for ((((v, p0), p1), p2), p3) in (&mut cx).zip(&mut c0).zip(&mut c1).zip(&mut c2).zip(&mut c3) {
+        let (cx, rv) = x.as_chunks::<4>();
+        let (c0, t0) = r0.as_chunks::<4>();
+        let (c1, t1) = r1.as_chunks::<4>();
+        let (c2, t2) = r2.as_chunks::<4>();
+        let (c3, t3) = r3.as_chunks::<4>();
+        for ((((v, p0), p1), p2), p3) in cx.iter().zip(c0).zip(c1).zip(c2).zip(c3) {
             for l in 0..4 {
                 s[0][l] += p0[l] * v[l];
                 s[1][l] += p1[l] * v[l];
@@ -722,8 +730,7 @@ fn matvec(a: &[f64], x: &[f64], y: &mut [f64]) {
                 s[3][l] += p3[l] * v[l];
             }
         }
-        let rv = cx.remainder();
-        for (k, (o, tail)) in out.iter_mut().zip([c0.remainder(), c1.remainder(), c2.remainder(), c3.remainder()]).enumerate() {
+        for (k, (o, tail)) in out.iter_mut().zip([t0, t1, t2, t3]).enumerate() {
             let mut t = (s[k][0] + s[k][1]) + (s[k][2] + s[k][3]);
             for (p, q) in tail.iter().zip(rv) {
                 t += p * q;
@@ -761,7 +768,7 @@ fn matvec(a: &[f64], x: &[f64], y: &mut [f64]) {
         t
     };
     let quads = n / 4;
-    for (block, out) in a[..quads * 4 * r].chunks_exact(4 * r).zip(y.chunks_exact_mut(4)) {
+    for (block, out) in a[..quads * 4 * r].chunks_exact(4 * r).zip(y.as_chunks_mut::<4>().0) {
         let (r0, rest) = block.split_at(r);
         let (r1, rest) = rest.split_at(r);
         let (r2, r3) = rest.split_at(r);
@@ -1289,7 +1296,8 @@ fn pre_seg(q: &[f64], v: &[f64], fq: &mut [f64], fv: &mut [f64], rec: &[PreRec],
 /// iteration, sums as in `pre_seg`.
 #[cfg(target_arch = "wasm32")]
 #[inline(always)]
-fn finish_seg(q: &mut [f64], v: &mut [f64], fq: &[f64], fv: &[f64], rec: &[FinRec], hit: &[HitRec], bbar: f64, force: f64) -> [f64; 2] {
+fn finish_seg(q: &mut [f64], v: &mut [f64], fq: &[f64], fv: &[f64], records: (&[FinRec], &[HitRec]), bbar: f64, force: f64) -> [f64; 2] {
+    let (rec, hit) = records;
     let n = q.len();
     let b = F2::splat(bbar);
     let zero = F2::splat(0.0);
@@ -1340,7 +1348,8 @@ fn finish_seg(q: &mut [f64], v: &mut [f64], fq: &[f64], fv: &[f64], rec: &[FinRe
 /// See the wasm32 `finish_seg`: the scalar loops, one mode at a time.
 #[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
-fn finish_seg(q: &mut [f64], v: &mut [f64], fq: &[f64], fv: &[f64], rec: &[FinRec], hit: &[HitRec], bbar: f64, force: f64) -> [f64; 2] {
+fn finish_seg(q: &mut [f64], v: &mut [f64], fq: &[f64], fv: &[f64], records: (&[FinRec], &[HitRec]), bbar: f64, force: f64) -> [f64; 2] {
+    let (rec, hit) = records;
     let (mut reac, mut src) = (0.0, 0.0);
     if force == 0.0 {
         let it = q.iter_mut().zip(v.iter_mut()).zip(fq.iter()).zip(fv.iter()).zip(rec.iter());
@@ -1586,6 +1595,9 @@ pub struct Counters {
     pub peak_pa: f64,
 }
 
+/// Modal count and each damper station's (shape, bridge lift, squared norm).
+type CoursePadCache = (usize, Vec<(Vec<f64>, f64, f64)>);
+
 pub struct LivePiano {
     cfg: Config,
     /// Exact admitted acoustic medium used by the Rayleigh receiver.
@@ -1655,7 +1667,7 @@ pub struct LivePiano {
     c_site: Vec<crate::fastfelt::Site>,
     c_start: Vec<f64>,
     /// Cold caches per course: damper pad projections and display table.
-    pad_cache: Vec<Option<(usize, Vec<(Vec<f64>, f64, f64)>)>>,
+    pad_cache: Vec<Option<CoursePadCache>>,
     shape_cache: Vec<Option<(usize, Vec<f32>)>>,
     last_error: Option<String>,
 }
@@ -1816,7 +1828,7 @@ impl LivePiano {
         // The reference bank is the single source of every per-partial constant
         // (frequency, bridge cross inertia, strike projection, intrinsic loss).
         let bank = Bank::new_with_string_damping(&courses, board, rate, 0.45 * f64::from(rate),
-            cfg.max_partials, true, None, false)?;
+            cfg.max_partials, true, None, cfg.rt0425_string_damping)?;
         let (losses, _) = crate::refmods::bank_string_losses(&bank);
         let n_total = bank.modes.len();
         let omega: Vec<f64> = bank.modes.iter().map(|m| m.omega).collect();
@@ -2551,15 +2563,11 @@ impl LivePiano {
                 }
             }
             // Retiring whole keys shifts slots: do it first, then activate.
-            if !retire.is_empty() {
-                if let Err(e) = self.rebuild(&[], &retire) {
-                    self.last_error = Some(e);
-                }
+            if !retire.is_empty() && let Err(e) = self.rebuild(&[], &retire) {
+                self.last_error = Some(e);
             }
-            if !activate.is_empty() {
-                if let Err(e) = self.rebuild(&activate, &[]) {
-                    self.last_error = Some(e);
-                }
+            if !activate.is_empty() && let Err(e) = self.rebuild(&activate, &[]) {
+                self.last_error = Some(e);
             }
         }
         for (ci, velocity) in pending {
@@ -2858,7 +2866,7 @@ impl LivePiano {
                 let range = s.off..s.off + s.n;
                 let m = &self.m;
                 let [mut reac, src] = finish_seg(&mut self.q[range.clone()], &mut self.v[range.clone()],
-                    &self.fq[range.clone()], &self.fv[range.clone()], &m.fin[recs(s)], &m.hit[recs(s)], bbar, s.force);
+                    &self.fq[range.clone()], &self.fv[range.clone()], (&m.fin[recs(s)], &m.hit[recs(s)]), bbar, s.force);
                 if s.force != 0.0 {
                     reac += s.hammer_lift * s.force;
                 }
@@ -3115,10 +3123,9 @@ impl LivePiano {
         }
         for i in 0..nc {
             let (ci, member) = (self.c_key[i], self.c_member[i]);
-            if let Some(slot) = self.keys[ci].slot {
-                if let Some(s) = self.active[slot].segs.iter_mut().find(|s| !s.duplex && s.member == member) {
-                    s.force = self.c_force[i];
-                }
+            if let Some(slot) = self.keys[ci].slot
+                && let Some(s) = self.active[slot].segs.iter_mut().find(|s| !s.duplex && s.member == member) {
+                s.force = self.c_force[i];
             }
         }
     }
@@ -3244,10 +3251,8 @@ impl LivePiano {
                 }
             }
         }
-        if !retire.is_empty() {
-            if let Err(e) = self.rebuild(&[], &retire) {
-                self.last_error = Some(e);
-            }
+        if !retire.is_empty() && let Err(e) = self.rebuild(&[], &retire) {
+            self.last_error = Some(e);
         }
     }
 

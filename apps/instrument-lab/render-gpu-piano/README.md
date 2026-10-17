@@ -35,7 +35,7 @@ The tool is its own cargo workspace. Nothing in the main workspace builds it or 
 
 - The contact-free step of the linear string and board bank, with or without string loss and board damping.
 - Spatial viscous dampers (`--dampers estimated`, pad files, the preset), including the pedal and lifted keys.
-- One substep per sample.
+- Whole output frames with 1–16 mechanics substeps per sample, including the default four. The bank and GPU run at the mechanics rate; the physical microphone receives every substep trace.
 
 Felt dampers, point-drag dampers, exterior radiation, the cavity, string stretching and hammer footprints are not modeled; the tool says so and renders on the CPU. The CPU also renders without a physical microphone (`--diagnostic-volume`) and when the instrument is observed between steps (`--bridge-trace-csv`). With the GPU path the CPU's own steps carry the dampers on reduced coordinates, as `--fast-dampers` does (the same flows; rounding differs at about 1e-16). If the GPU fails during a render, the remaining stretches run on the CPU phase emulator.
 
@@ -45,7 +45,7 @@ Felt dampers, point-drag dampers, exterior radiation, the cavity, string stretch
 
 - The planner (`Instrument::contact_free_steps`) flies the active hammers forward against each string's amplitude bound. The stretch it allows runs on the GPU, up to the next control event and at most 2048 steps.
 - The GPU reports every step's contact positions. The CPU then replays the hammers' free flight against those positions (`Instrument::advance_hammers_external`), which refuses any step where a contact could engage.
-- On a refusal, the stretch is rerun up to that step and the CPU takes over. Contacts, events and the frames around them always step on the CPU.
+- On a refusal, hammer/contact state and accounting are restored to the start of that output frame. Only preceding complete frames are rerun on the backend; the CPU takes the refused frame. Planner prefixes and check limits round down to complete output frames, so controls and the render horizon keep their output-sample clock.
 
 **Step as phases (`plan.rs`).** One contact-free step (damp, predict, finish with zero force, commit, damp) is linear in the bank state. The work splits into one item per bridge group (its string modes, damper pads and contacts) and one per board coordinate. Items meet only through small vectors, and every coupling is a product with a matrix composed on the host from the bank's own operators. The kernel needs 7 grid barriers per step with dampers engaged and 3 without. In exact arithmetic it is the CPU's step; only the rounding differs.
 
@@ -66,7 +66,7 @@ Felt dampers, point-drag dampers, exterior radiation, the cavity, string stretch
 
 ## Measured (Apple M5 Ultra, 80-core GPU)
 
-Strandbar piano, `--fast-dampers`:
+Historical one-substep Strandbar piano, `--fast-dampers` (these timings do not qualify four-substep throughput):
 
 | | 4 s excerpt (192,000 steps, 46 notes) | Full stem (17.4 s, 833,664 steps, 260 notes) |
 |---|---|---|

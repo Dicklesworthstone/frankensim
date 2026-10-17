@@ -29,7 +29,9 @@ fn aperture(z: f64, max_steps: u64, state: ApertureState) -> DynamicAperture {
     };
     let contact = Obstacle::new(vec![-1.0], 1, 1, vec![0.0], vec![1.0], 1e8, 2.0,
         "synthetic network contact fixture".into()).unwrap().with_internal_loss(5.0).unwrap();
-    DynamicAperture::new(mechanics, state, contact).unwrap()
+    // Outside the midpoint one-cent band at this rate (DEF-04): exact opening block.
+    DynamicAperture::new_with_propagator(mechanics, state, contact,
+        fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh).unwrap()
 }
 fn initial() -> ApertureState { ApertureState { opening_m: 4e-4, opening_velocity_m_s: 0.0 } }
 fn model(s: TubeNetworkSpec, steps: u64, state: ApertureState) -> ApertureNetwork {

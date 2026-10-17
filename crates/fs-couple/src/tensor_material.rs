@@ -12,12 +12,16 @@
 //! and independently integrates port work and dashpot loss. This module adds
 //! no time integrator, mode truncation, empirical loss or radiation observer.
 //! Scope: fixed kinematics, diagonal physical inertia, small strain, fixed
-//! material state. It is not a plane-stress or nonlinear shell reduction.
+//! material state. Plane-stress Maxwell points have an explicit alternate
+//! constructor; neither path is a nonlinear shell or a radiation model.
 use fs_exec::CancelGate;
 use fs_material::visco_tensor::{ProjectedTensorProny, TensorPronyError};
 use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage, StepRecord};
 use fs_phs::linear_exact::{LinearSplit, LinearSplitBudget, split_quadratic, step_render,
     MAX_LINEAR_EXPONENTIAL_BLOCK_DIM};
+
+mod plane_stress;
+pub use plane_stress::PlaneStressPoint;
 
 /// Explicit capacity; the unchanged exact propagator imposes its own dense cap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,7 +67,8 @@ fn finite(values:&[f64])->bool {values.iter().all(|v|v.is_finite())}
 pub enum InitialMemory {
     /// Held long enough for all Maxwell branches to relax at that displacement.
     Relaxed,
-    /// Instantaneous jump from a zero-strain relaxed material; z_j = A_j u.
+    /// Instantaneous jump from a zero-strain relaxed material. Full-3D points
+    /// initialize spring z_j=A_j*u; plane-stress points initialize viscous a_j=0.
     Instantaneous,
 }
 
@@ -74,6 +79,8 @@ pub struct TensorMaterialBody {
     split: LinearSplit,
     masses: Vec<f64>,
     points: Vec<ProjectedTensorProny>,
+    plane_points: Vec<PlaneStressPoint>,
+    plane_offsets: Vec<usize>,
 }
 impl TensorMaterialBody {
     /// Assemble from physical displacement coordinates [m], diagonal masses [kg],
@@ -142,13 +149,13 @@ impl TensorMaterialBody {
         let split=split_quadratic(&system,LinearSplitBudget {max_modes:states,
             max_omega_dt:core::f64::consts::PI}).map_err(TensorMaterialError::Propagation)?;
         poll(gate)?;
-        Ok(Self {system,split,masses:masses_kg,points})
+        Ok(Self {system,split,masses:masses_kg,points,plane_points:Vec::new(),plane_offsets:Vec::new()})
     }
     /// Original physical coordinate count.
     pub fn coordinates(&self)->usize {self.masses.len()}
     /// Full retained state count, including every material factor row.
     pub fn state_dimension(&self)->usize {self.system.state_dim()}
-    /// Original source-bound material quadrature, in assembly order.
+    /// Original full-3D quadrature, in assembly order; empty for plane-stress bodies.
     pub fn material_points(&self)->&[ProjectedTensorProny] {&self.points}
     /// Original force-input / velocity-output port-Hamiltonian system.
     pub fn port_system(&self)->&PortHamiltonian {&self.system}
@@ -160,6 +167,9 @@ impl TensorMaterialBody {
         if x.len()!=self.state_dimension() || !finite(x) {return Err(bad("nonfinite or incomplete tensor-memory state"));}
         for point in &self.points {
             point.strain(&x[..self.coordinates()]).map_err(TensorMaterialError::Material)?;
+        }
+        for (point,&offset) in self.plane_points.iter().zip(&self.plane_offsets) {
+            point.strain(&x[..self.coordinates()],&x[offset..offset+point.memory_coordinates()])?;
         }
         if !self.system.hamiltonian(x).is_finite() {return Err(bad("material-body energy overflow"));}
         Ok(())
@@ -187,6 +197,16 @@ impl TensorMaterialBody {
                 }
             }}
         }
+        for (point,&offset) in self.plane_points.iter().zip(&self.plane_offsets) {
+            poll(gate)?;
+            // Plane-stress memory stores viscous coordinates a, not spring z.
+            // Instantaneous deformation has a=0; relaxed deformation has a=B e.
+            if memory==InitialMemory::Relaxed {
+                for (i,row) in point.relaxed_memory.iter().enumerate() {
+                    state[offset+i]=row.iter().zip(displacement_m).fold(0.0,|s,(a,u)|s+a*u);
+                }
+            }
+        }
         self.admit_state(&state)?;poll(gate)?;
         let initial_energy=self.system.hamiltonian(&state);
         Ok(TensorMaterialHistory {body:self,state,time:0.0,steps:0,work:0.0,heat:0.0,initial_energy})
@@ -206,7 +226,8 @@ pub struct TensorMaterialHistory<'a> {
     initial_energy:f64,
 }
 impl TensorMaterialHistory<'_> {
-    /// Read-only [displacement, momentum, original material factor coordinates].
+    /// Read-only [displacement, momentum, material coordinates]. Full-3D
+    /// points use spring z; plane-stress points use viscous a coordinates.
     pub fn state(&self)->&[f64] {&self.state}
     /// Accepted physical displacements [m].
     pub fn displacement_m(&self)->&[f64] {&self.state[..self.body.coordinates()]}

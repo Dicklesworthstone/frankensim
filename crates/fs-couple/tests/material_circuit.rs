@@ -13,7 +13,8 @@ fn conductor(r: f64) -> ResolvedConductor {
         key:PropertyKey::new("electrical_resistivity",ELECTRICAL_RESISTIVITY_DIMS),
         value:PropertyValue::Scalar { value:r, dims:ELECTRICAL_RESISTIVITY_DIMS },
         validity:ValidityDomain::unconstrained(), uncertainty:UncertaintyModel::Unstated,
-        interpolation:InterpolationPolicy::LinearInside, observations:vec![],
+        // A scalar claim is a plateau; matdb refuses LinearInside without knots.
+        interpolation:InterpolationPolicy::ConstantWithinValidity, observations:vec![],
         provenance:Provenance { source:"synthetic circuit resistivity".into(),license:"CC0-1.0".into(),artifact:None },
     }).unwrap();
     let card=MaterialCard::assemble(MaterialStateId { chemistry:"synthetic circuit".into(),

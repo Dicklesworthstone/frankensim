@@ -122,15 +122,41 @@ fn second_contact_changes_the_first_reaction_through_the_same_body() {
     let mut released = joint(true);
     let a = released.step(&[0.0; 2], &[drive(0.001, 1.0), drive(0.0, 0.0)]).unwrap().clone();
     assert_eq!(a.ports[1].regime, ModalFrictionRegime::Released);
-    // At zero initial state, exact oscillator compliance and the bilateral
-    // spring/dashpot give the required sticking force independently of the
-    // friction solver. The original 1 N load caps static friction at 0.8 N,
-    // below the second body's required ~0.961 N: that case must slide.
+    // At zero initial state the linked bodies, spring and dashpot propagate as
+    // one exact block. The required sticking tractions are therefore the held
+    // forces that put both contact points at their drive distances after one
+    // step, independently of the friction solver. The physical two-body
+    // responses, m_i x_i'' = -m_i w_i^2 x_i -+ link + F_i, are integrated from
+    // rest with fine RK4 for unit held forces. The original 1 N load caps
+    // static friction at 0.8 N, below the second body's required ~0.960 N:
+    // that case must slide.
     let dt: f64 = 1.0 / 48000.0;
     let distance = 0.001 * dt;
-    let compliance = (1.0 - (1100.0 * dt).cos()) / 1100.0_f64.powi(2);
-    let required_second = -0.01 * distance / compliance
-        - (1e4 / 2.0 + 0.2 / dt) * (2.0 * distance);
+    let (mass, omega, k, c) = ([0.002, 0.01], [800.0, 1100.0], 1e4, 0.2);
+    let response = |force: [f64; 2]| -> [f64; 2] {
+        let rate = |s: [f64; 4]| {
+            // Link force on body 1; body 0 feels its opposite.
+            let link = -k * (s[2] - s[0]) - c * (s[3] - s[1]);
+            [s[1], (-mass[0] * omega[0] * omega[0] * s[0] - link + force[0]) / mass[0],
+                s[3], (-mass[1] * omega[1] * omega[1] * s[2] + link + force[1]) / mass[1]]
+        };
+        let steps = 20_000;
+        let h = dt / f64::from(steps);
+        let mut s = [0.0; 4];
+        for _ in 0..steps {
+            let add = |a: [f64; 4], b: [f64; 4], t: f64| std::array::from_fn(|i| a[i] + t * b[i]);
+            let k1 = rate(s);
+            let k2 = rate(add(s, k1, 0.5 * h));
+            let k3 = rate(add(s, k2, 0.5 * h));
+            let k4 = rate(add(s, k3, h));
+            s = std::array::from_fn(|i| s[i] + h / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]));
+        }
+        [s[0], s[2]]
+    };
+    let (unit0, unit1) = (response([1.0, 0.0]), response([0.0, 1.0]));
+    // Solve F0*unit0 + F1*unit1 = (distance, -distance) for F1.
+    let determinant = unit0[0] * unit1[1] - unit1[0] * unit0[1];
+    let required_second = (unit0[0] * (-distance) - unit0[1] * distance) / determinant;
     assert!(required_second.abs() > 0.8 && required_second.abs() < 1.6);
     for (normal, regime) in [(1.0, ModalFrictionRegime::Sliding),
         (2.0, ModalFrictionRegime::Sticking)] {
@@ -141,7 +167,8 @@ fn second_contact_changes_the_first_reaction_through_the_same_body() {
         assert_eq!(b.ports[1].regime, regime);
         let point = b.ports[1];
         if regime == ModalFrictionRegime::Sticking {
-            assert!((point.traction_n-required_second).abs() < 1e-10);
+            assert!((point.traction_n-required_second).abs() < 1e-10,
+                "{} vs {required_second}", point.traction_n);
             assert!(point.slip_distance_m.abs() <= config().sticking_tolerance_m);
             assert_eq!(point.dissipation_j, 0.0);
         } else {

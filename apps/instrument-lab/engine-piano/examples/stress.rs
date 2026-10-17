@@ -3,6 +3,7 @@
 //!    output, energy books;
 //! 2. a long random performance with pedal changes and more keys than the mode
 //!    budget admits: forced retirements, refusals, energy books, finite output.
+//!
 //! usage: stress [random_seconds]
 use fs_live_piano::{Config, Description, LivePiano};
 
@@ -85,7 +86,7 @@ fn main() {
         peak = peak.max(x.abs());
         max_keys = max_keys.max(p.sounding_keys());
         max_modes = max_modes.max(p.dynamic_modes());
-        if let Some(e) = p.take_error() { if errors.len() < 50 { errors.push(format!("sample {i}: {e}")); } }
+        if let Some(e) = p.take_error() && errors.len() < 50 { errors.push(format!("sample {i}: {e}")); }
         if i % 128 == 127 {
             worst_block = worst_block.max(block_start.elapsed().as_secs_f64());
             block_start = std::time::Instant::now();

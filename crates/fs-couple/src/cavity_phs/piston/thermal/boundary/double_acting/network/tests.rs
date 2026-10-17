@@ -224,7 +224,7 @@ fn solve() -> NetworkGasSolve {
             },
             newton: NewtonKrylovConfig {
                 absolute_tolerance: 1e-8,
-                relative_tolerance: 0.0,
+                relative_tolerance: 1e-14,
                 forcing_minimum: 1e-4,
                 linear_restart: 4,
                 ..NewtonKrylovConfig::default()
@@ -496,7 +496,8 @@ fn independent_external_supply_and_final_cancellation_keep_all_histories_atomic(
             },
         )
         .unwrap();
-    near(candidate.step().external_network_heat_j, 0.005);
+    // 10 W external supply over the 0.00005 s step.
+    near(candidate.step().external_network_heat_j, 10.0 * 0.00005);
     let mut count = 0;
     assert!(matches!(
         old.network_candidate(
@@ -661,7 +662,9 @@ fn source_bound_mechanism_keeps_inertia_and_identical_network_equations() {
         assert_eq!(accepted.body(), owner.body());
         assert!(report.coupled.total_energy_residual_j.abs() <= solve().total_energy_tolerance_j);
     }
-    assert!((velocities[0] - velocities[1]).abs() > 1e-9);
+    // One step from rest: the eightfold body mass changes the velocity by more
+    // than 2e-6 m/s^2 times the step (1e-9 m/s on the authored 0.0005 s step).
+    assert!((velocities[0] - velocities[1]).abs() > 2e-6 * 0.00005, "{velocities:?}");
 }
 
 #[test]

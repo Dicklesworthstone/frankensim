@@ -47,8 +47,20 @@ over 10,000 steps (1e-12 absolute at unit scale), lossless phase (0.01 cents),
 exact damping radius (1e-12 relative), independent energy balance (1e-12
 relative), a live quartic remainder, cap/cap+1, the tangent-pole refusal,
 static compliance, free inertia, stale splits and unsupported storage.
-These opt-in APIs do not establish migration of any existing render path or
-closure of IRP M5.2-W1; native execution remains the remote verification gate.
+
+`admit_midpoint_band(rate, dt)` is the one-cent admission for every midpoint
+(Gonzalez/Cayley) linear block. The caller supplies a bound on ALL its linear
+pole magnitudes, damping and coupled stiffness included. The block is admitted
+only if rate*dt <= `MIDPOINT_ONE_CENT_ANGULAR_STEP` = 0.04 rad, which keeps the
+Cayley phase error below one cent even near critical damping. Outside the band
+it refuses with `ResolvedBandError::Outside`, naming the largest admitted
+frequency; invalid inputs refuse with `Invalid`. Coefficients are never retuned
+or clamped: the remedy is a finer clock or an exact propagator. `step_render`
+uses `ExactZoh` for exactly quadratic storage and otherwise steps midpoint
+only inside this band. Tested by
+`linear_exact::tests::midpoint_resolved_band_cap_cap_plus_one_and_damped_poles`
+(cap, cap+1e-12, invalid inputs). Each render path's integrator and band is
+inventoried and measured in fs-couple `tests/integrator_warping_audit.rs`.
 
 - `Storage` trait (`hamiltonian`, analytic `gradient`);
   `QuadraticStorage` (`H = x^T Q x / 2`, `Q` admitted symmetric PSD),
@@ -150,7 +162,9 @@ closure of IRP M5.2-W1; native execution remains the remote verification gate.
   pin `X` still supplies the radiation mass; tabulated
   `R(ω)` remains the FIR path),
   `zwikker_kosten_f` / `zk_one_minus_f` (also the fs-duct Bessel TMM),
-  `foster_sqrt_omega_terms`,
+  `foster_sqrt_omega_terms` (positive by construction: the log-trapezoid
+  rule of the exact Stieltjes form of the wall law `√ω(1 - i)`, tails lumped
+  into the end poles; no collocation and no fallback split),
   `foster_match_re`, `slice_linear_taper`,
   `spherical_cone` (1-D wave on `ψ = x p`, physical ports
   `p = ψ/x` and `U = x U_ψ + (α/ρ)∫ψ` via a per-cell

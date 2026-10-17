@@ -133,8 +133,9 @@ frequency-matched energy-consistent propagation. Nonlinear storage retains its
 discrete-gradient owner; generalized-alpha is not admitted on render paths.
 Held effort exchanges use the same displacement work at both ports, rate
 changes require antialias filtering, and phase/contact/solver budgets must be
-admitted explicitly. This doctrine is a target; it does not relabel existing
-midpoint paths as migrated.
+admitted explicitly. A midpoint path that remains is admitted only inside the
+fs-phs one-cent band (`admit_midpoint_band`, pole-rate bound times dt <= 0.04);
+the table below says which paths are exact and which are banded.
 
 `tests/integrator_warping_audit.rs` contains the current path inventory and G1
 one-step-map measurements at 1/5/10 kHz and 48/96/192 kHz. The common fs-phs
@@ -142,32 +143,37 @@ linear owner is measured for its callers; that is not a complete nonlinear or
 connected render. Public ImpactSystem and Dynamic/Paired/ModalAperture seams
 are exercised directly, including the uniform scalar condensation. The exact
 modal owner is the control. Midpoint phase is compared to
-`2*atan(omega*dt/2)/dt` within 1e-6 cents; >1-cent rows remain
-`requires-migration`, not accepted instrument fidelity.
+`2*atan(omega*dt/2)/dt` within 1e-6 cents. The closure test
+`every_render_path_is_listed_with_integrator_and_measured_warping` accepts
+a row only if it is exact, admits no more than the one-cent band, is the
+first-order network row with its measured order ladder, or is a PianoAudio
+factor whose companion measurement stays within 1 cent. A path outside its
+band refuses with a typed `TimeResolution` error; nothing is retuned.
 
 | Current path | Linear owner | Current band / audit boundary |
 | --- | --- | --- |
-| KC, glottis, nonlinear plate, cavity, ODE chains and lip oscillator | Gonzalez midpoint | No common phase-budget admission; common linear-owner map only |
+| KC string (`realize_coupled_kc`) and nonlinear plate (`thin_plate::VkBody`) through fs-phs `step_render` | Exact ZOH when the storage is exactly quadratic, otherwise Gonzalez midpoint | Midpoint admits only the one-cent band on the split's pole-rate bound and refuses with `TimeResolution` |
+| Dirac joins (`realize_dirac_join` / `step_descriptor`) | Gonzalez midpoint | One-cent band on the descriptor pole-rate bound; typed `TimeResolution` refusal |
+| Glottis fold island, PlateBank cavity held-flow island, coupled ODE chains, blown and reed ODEs, brass lip held-force island, plate-cavity transformer | Exact ZOH (fs-phs `linear_exact`) | No warping; nonlinear forces are held over the step |
 | TsDriver speaker coil/cone/panel | Full coupled exact ZOH | Held voltage, independently integrated current/work/loss; dense reference step, not an allocation-free callback |
-| ImpactSystem | Gonzalez midpoint | omega*dt < 0.9*pi; the guard permits more than 600 cents of phase defect |
-| Dynamic/ModalAperture, uniform condensation, PairedAperture with `BladePropagator::Midpoint` | Midpoint response | One-cent band (pole-rate bound times dt <= 0.04, DEF-04) refuses at construction and at every step; the material-modal adapter additionally caps its caller's bound at 1 |
-| PairedAperture with `BladePropagator::ExactZoh` | Exact ZOH per elastic blade (scaled 5x5 exponential; Van Loan viscous loss) | No warping at any omega*dt (audit rows ~1e-11 cents up to omega*dt 1.31). Contact/Bernoulli forces are held over the step and solved at the midpoint opening; blade material memory refuses |
-| CoupledModalSystem | Exact component ZOH plus trapezoidal reactions | Coupled algebraic Nyquist bound; measured against the exact two-body eigenproblem |
+| ImpactSystem | Gonzalez midpoint | One-cent band on the complete retained block (modal stiffness, volume-spring dyads and resistance), typed `ImpactError::TimeResolution`; the per-mode 0.9*pi guard remains a separate validity check |
+| ModalAperture, uniform condensation, and Dynamic/PairedAperture with `BladePropagator::Midpoint` | Midpoint response | One-cent band (pole-rate bound times dt <= 0.04, DEF-04) refuses at construction and at every step; the material-modal adapter additionally caps its caller's bound at 1 |
+| PairedAperture with `BladePropagator::ExactZoh` | Exact ZOH per elastic blade (scaled exponential; Van Loan viscous loss) | No warping at any omega*dt (audit rows ~1e-11 cents up to omega*dt 1.31). Contact/Bernoulli forces are held over the step and solved at the midpoint opening; blade material memory refuses |
+| DynamicAperture with `BladePropagator::ExactZoh`, authored or plate-bound (closure, Maxwell arms), and every plate-valve performance file | Exact ZOH of the opening plus its Maxwell arms (scaled exponential; Van Loan viscous and arm loss), through `reed_bore::contact::step_with_opening` | No warping (audit rows <= 3e-10 cents up to omega*dt 1.31); arms checked against an independent RK4 integration. Contact/Bernoulli forces held over the step and solved at the midpoint opening |
+| CoupledModalSystem | Exact ZOH of the full retained bilateral pencil (component modes, connection springs and dashpots), split into connected K/C islands (cd7f65bc7); nonlinear contacts keep held discrete-gradient reactions around the same affine response | Coupled algebraic Nyquist bound; measured against the exact two-body eigenproblem; the two-body sticking traction matches an independent exact-flow integration within 1e-10 N |
 | ModalAcousticTimeModel | Exact ZOH | Caller-declared Nyquist guard; no frequency-warping claim for its observer transfer |
-| Source-backed GasPiston | Midpoint gas/momentum | Owner-local small-signal amplitude ladder; no phase-budget admission |
-| Circuit/thermal/network piston | First order in general | Owner-local four-rung temporal audit; no exact-linear claim |
-| Live PianoAudio at 1/2/4x | Exact local blocks plus finite-step coupled solves | Separate piano-workspace audit and migration still pending |
+| Source-backed GasPiston | Midpoint gas/momentum | One-cent band on the gas-spring rate sqrt(rho c^2 A^2/(m V)) at the start, midpoint and end states; typed `PistonError::TimeResolution` |
+| Circuit/thermal/network piston | First order in general | Observed order 1 +- 0.1 on the four-rung companion ladder (`FS_IRP_NETWORK_AUDIT_LOG`); no exact-linear claim |
+| Live PianoAudio at 1/2/4x | Exact local blocks plus finite-step coupled solves | Companion-measured coupled-board frequency within 1 cent, window discrepancy included, at each factor (`FS_IRP_PIANO_AUDIT_LOG`) |
 
 The coupled-mode test uses the exact symmetric stiffness eigenproblem and a
-three-rate phase-error ladder. Exact component steps with trapezoidal reactions
-are not a pure trapezoid map of the coupled stiffness; applying the scalar
-atan oracle to that map would be incorrect. Piston tests reuse the actual
-source-backed thermochemical and thermal/electrical fixtures. All new audit
-tests still require native central verification. This inventory does not close
-M5.2-W1: production migrations, resolved-band refusals, complete descriptor and
-piano measurements, and audible golden qualification remain outstanding.
-The speaker migration has a held-voltage time-partition regression and a
-public-state pole audit; the other listed midpoint paths still require migration.
+three-rate phase-error ladder. The coupled pencil steps exactly, so the scalar
+midpoint atan oracle does not apply to it. Piston tests reuse the actual
+source-backed thermochemical and thermal/electrical fixtures. The speaker
+migration has a held-voltage time-partition regression and a public-state pole
+audit. The audit and its companions pass natively (M5.2-W1 closed on ts1 b46 at
+a4b6c4c22); consumer fixtures that request clocks outside a midpoint band
+refuse with TimeResolution and must move to a resolved clock or an exact block.
 
 - `PORT_SCHEMA_VERSION = 2`; `StableId` admits a canonical transport-safe ID.
 - `PortValueShape` distinguishes scalar, non-empty vector/tensor, and field

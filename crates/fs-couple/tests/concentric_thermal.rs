@@ -63,7 +63,9 @@ fn assembly() -> AcousticAssembly {
         pluck: Some(Pluck { station_frac: 0.25, height_m: 1e-5 }), bow: None, blow: None,
         reed: None, soundboard: None, body_modes: vec![], plate: None, cavity: None,
         obstacles: vec![], contact_texture: None, listener: Listener { distance_m: 1.0 },
-        sample_rate_hz: 16000, duration_s: 0.008 }
+        // The tension-modulated string steps midpoint: its four-mode pole rate
+        // (about 2100 rad/s) needs dt <= 1.9e-5 s for the one-cent band.
+        sample_rate_hz: 64000, duration_s: 0.008 }
 }
 fn near(a: f64, b: f64) {
     assert!((a-b).abs() <= 2e-12 * a.abs().max(b.abs()).max(1.0), "{a} != {b}");
@@ -99,7 +101,7 @@ fn heating_and_expansion_data_change_tension_modes_and_actual_waveform() {
     let rc = changed.realize().unwrap();
     assert_eq!(ra.gas, rb.gas);
     assert_eq!(rb.gas, rc.gas);
-    assert_eq!(rb.pressure_pa.len(), 128);
+    assert_eq!(rb.pressure_pa.len(), 512);
     assert!(rb.pressure_pa.iter().chain(&rc.pressure_pa).all(|v| v.is_finite()));
     assert!(rb.pressure_pa.iter().any(|v| *v != 0.0));
     assert_ne!(ra.pressure_pa, rb.pressure_pa);

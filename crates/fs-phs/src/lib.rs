@@ -4343,13 +4343,17 @@ fn bessel_series_and_shunt(
     Ok(result)
 }
 
-/// Collocate `gain · √ω` with Foster terms `g s / (s + ω)`.
+/// Foster terms `g s / (s + ω_k)` for the wall law `gain · √ω`.
 ///
 /// Each term is a parallel RL in series with the cell inertance:
 /// `Re Z(jω) = Σ g_k ω² / (ω² + ω_k²)`. Poles are log-spaced on
-/// `[ω_lo, ω_hi]`. Negative residues fall back to a positive
-/// uniform split so the network stays passive. This is not the
-/// Bessel TMM and not a tabulated FIR.
+/// `[ω_lo, ω_hi]`. The residues are the trapezoidal rule in `ln p` of
+/// the exact Stieltjes form `√ω (1 - i) = (√2/π) ∫₀^∞ s/(s+p) p^(-1/2) dp`
+/// (`s = -iω`), so every residue is positive and the network passive
+/// with no fallback. The tails beyond the window go to the end poles
+/// (`2√p` each, exact as ω/ω_lo → ∞ and ω/ω_hi → 0). One term
+/// collocates at its pole. This is not the Bessel TMM and not a
+/// tabulated FIR.
 ///
 /// # Errors
 /// Non-physical gain, frequency window, or empty `n`.
@@ -4363,15 +4367,34 @@ pub fn foster_sqrt_omega_terms(
         || n > 8
         || !(gain > 0.0 && gain.is_finite())
         || !(omega_lo > 0.0)
-        || !(omega_hi > omega_lo)
+        || !(omega_hi > omega_lo && omega_hi.is_finite())
     {
         return Err(PhsError::NotPsd {
             what: "Foster √ω window",
         });
     }
     let omegas = log_spaced(omega_lo, omega_hi, n);
-    let samples: Vec<(f64, f64)> = omegas.iter().map(|&w| (w, gain * det::sqrt(w))).collect();
-    foster_match_re(&samples, n)
+    if n == 1 {
+        // g ω²/(ω² + ω²) = gain √ω at the single pole.
+        let g = 2.0 * gain * det::sqrt(omegas[0]);
+        return Ok(vec![(g, omegas[0])]);
+    }
+    let h = det::ln(omega_hi / omega_lo) / (n - 1) as f64;
+    let scale = gain * core::f64::consts::SQRT_2 / core::f64::consts::PI;
+    let terms: Vec<(f64, f64)> = omegas
+        .iter()
+        .enumerate()
+        .map(|(k, &p)| {
+            let weight = if k == 0 || k + 1 == n { 0.5 * h + 2.0 } else { h };
+            (scale * weight * det::sqrt(p), p)
+        })
+        .collect();
+    if terms.iter().any(|&(g, p)| !(g > 0.0 && g.is_finite() && p.is_finite())) {
+        return Err(PhsError::NotPsd {
+            what: "Foster √ω window",
+        });
+    }
+    Ok(terms)
 }
 
 /// Collocate a tabulated `Re Z(ω)` with Foster terms `g s/(s+ω)`.

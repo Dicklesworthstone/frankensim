@@ -25,9 +25,10 @@ fn model(stiffness: f64, resistance: f64, budget: u64) -> (ApertureNetwork, Vec<
     };
     let lay = Obstacle::new(vec![-1.0], 1, 1, vec![0.0], vec![1.0], 1e8, 2.0,
         "synthetic wall-coupling test contact".into()).unwrap().with_internal_loss(5.0).unwrap();
-    let aperture = DynamicAperture::new(spec, ApertureState {
+    // Outside the midpoint one-cent band at this rate (DEF-04): exact opening block.
+    let aperture = DynamicAperture::new_with_propagator(spec, ApertureState {
         opening_m: 4e-4, opening_velocity_m_s: 0.0,
-    }, lay).unwrap();
+    }, lay, fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh).unwrap();
     (ApertureNetwork::new(aperture, lined.network).unwrap(), lined.patches)
 }
 fn observe(model: &ApertureNetwork, patches: &[WallPatch]) -> Vec<WallState> {

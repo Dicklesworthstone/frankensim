@@ -38,7 +38,14 @@ fn source_bound_capacitor_discharge_heats_body_gas_and_motion_once() {
     assert_eq!(e.native.supplied,0.0);
     assert!(result.coupled().thermal().state.temperature_k()>400.0);
     assert!(result.coupled().piston().gas().state().state().temperature>400.0);
-    assert!(result.coupled().piston().velocity_m_s()>0.0);
+    // One step from rest the initial pressure imbalance sets the sign of the
+    // velocity; the discharge must add outward motion to that same step.
+    let cold=capacitor(&ohmic,thermal,0.0);
+    let unheated=piston.circuit_thermal_candidate(drive(0.0),thermal,controls(),bounds(),bounds(),
+        CircuitThermalSource {circuit:&cold,resistor_branch:1,body:ohmic.clone(),inputs:&[]},electrical(),
+        |g,b| layers.resolve(g,b).map_err(JouleHeatingError::Thermal),||false).unwrap();
+    assert!(result.coupled().piston().velocity_m_s()>unheated.coupled().piston().velocity_m_s(),
+        "{} vs {}",result.coupled().piston().velocity_m_s(),unheated.coupled().piston().velocity_m_s());
     let midpoint=result.coupled().step().thermal_midpoint;
     assert_eq!(e.resistors[0].material.conductor,ohmic.resolve_conductor(midpoint,thermal.volume_m3).unwrap());
     assert_eq!(circuit,saved);

@@ -38,8 +38,10 @@ fn model(scale: f64, budget: u64) -> ApertureNetwork {
     };
     let obstacle = Obstacle::new(vec![-1.0], 1, 1, vec![0.0], vec![1.0], 1e8, 2.0,
         "synthetic contact fixture".into()).unwrap().with_internal_loss(5.0).unwrap();
-    ApertureNetwork::new(DynamicAperture::new(mechanics, ApertureState {
-        opening_m: 4e-4, opening_velocity_m_s: 0.0 }, obstacle).unwrap(), spec).unwrap()
+    // Outside the midpoint one-cent band at this rate (DEF-04): exact opening block.
+    ApertureNetwork::new(DynamicAperture::new_with_propagator(mechanics, ApertureState {
+        opening_m: 4e-4, opening_velocity_m_s: 0.0 }, obstacle,
+        fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh).unwrap(), spec).unwrap()
 }
 fn frame_bits(f: ApertureNetworkFrame) -> Vec<u64> {
     [f.aperture.state.opening_m, f.aperture.state.opening_velocity_m_s,

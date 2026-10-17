@@ -103,8 +103,8 @@ fn continuous_reconstruction_is_explicit_volume_preserving_and_has_no_step_pinch
 fn source_model_d_reconstruction_exports_a_closed_continuous_skin_with_every_section() {
     // Actual existing Model D reconstruction and its physical section rows.
     // Zero shapes here construct STATIC geometry only, not artificial modes.
-    let preset=crate::steinway_d::build(4).unwrap();
-    crate::board_geometry::BoardGeometry::read(&preset.geometry).unwrap();
+    let preset=super::super::super::super::steinway_d::build(4).unwrap();
+    super::super::super::BoardGeometry::read(&preset.geometry).unwrap();
     let mut nodes=Vec::new();let mut triangles=Vec::new();
     for row in preset.geometry.lines() {
         let f:Vec<_>=row.split(',').collect();

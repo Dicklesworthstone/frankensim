@@ -15,9 +15,9 @@ fn file_load_and_receiver_match_independently_composed_reciprocal_physics() {
     let a=seed.renderer().system().aperture();let s=*a.spec();
     // Reuse the already-verified old specimen path, not the new load parser.
     // Supply the physical relaxation coefficients independently of the helper.
-    let valve=DynamicAperture::from_plate_with_closure(
+    let valve=DynamicAperture::from_plate_with_closure_and_propagator(
         a.plate_reduction().unwrap().clone(),a.plate_closure().unwrap().spec().clone(),
-        s.density_kg_m3,s.impedance_pa_s_m3,s.time_step_s,s.max_steps,a.state()).unwrap()
+        s.density_kg_m3,s.impedance_pa_s_m3,s.time_step_s,s.max_steps,a.state(),a.blade_propagator()).unwrap()
         .with_plate_relaxation(a.relaxation().unwrap().spec().clone(),InitialApertureMemory::Relaxed).unwrap();
     let CoupledAperture::Tube(tube)=seed.renderer().system() else {panic!("old source path changed")};
     let t=*tube.spec();let alpha=8.0/(3.0*core::f64::consts::PI);

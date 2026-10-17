@@ -117,6 +117,36 @@ impl ApertureRelaxation {
         }
         Ok(MemoryTrial {z_next,energy,loss,cumulative})
     }
+    /// Candidate history from an exact block that carried these arms: its end
+    /// memories, the end displacement, and its exactly integrated arm loss.
+    pub(in crate::bernoulli_aperture) fn exact_trial(&self, z_next: Vec<f64>, next: f64, loss: f64)
+        -> Result<MemoryTrial, AcousticRealizeError>
+    {
+        if z_next.len() != self.branches.len() {
+            return Err(invalid("exact memory must name every material arm"));
+        }
+        let mut energy = 0.0;
+        for (arm, &z) in self.branches.iter().zip(&z_next) {
+            energy += arm.scalar_stored_energy(next, z).map_err(map)?;
+        }
+        let cumulative = self.dissipated_j + loss;
+        if ![energy, loss, cumulative].iter().all(|x| x.is_finite()) || loss < -f64::EPSILON * energy.abs() {
+            return Err(invalid("aperture material storage or loss overflowed"));
+        }
+        Ok(MemoryTrial { z_next, energy, loss, cumulative })
+    }
+    /// The arms as states of an exact block, with the owner's own coupling.
+    pub(in crate::bernoulli_aperture) fn exact_arms(&self) -> Result<Vec<super::super::paired::ExactArm>, AcousticRealizeError> {
+        self.branches.iter().map(|arm| {
+            if arm.projection.len() != 1 {
+                return Err(invalid("exact material arms must be scalar on the opening coordinate"));
+            }
+            Ok(super::super::paired::ExactArm {
+                coupling: fs_math::det::sqrt(arm.stiffness) * arm.projection[0],
+                relaxation_time_s: arm.relaxation_time_s,
+            })
+        }).collect()
+    }
     pub(in crate::bernoulli_aperture) fn accept(&mut self, trial: MemoryTrial) {
         self.z=trial.z_next;self.energy_j=trial.energy;self.dissipated_j=trial.cumulative;
     }
@@ -159,6 +189,12 @@ impl DynamicAperture {
         let memory=ApertureRelaxation::from_plate(plate,self.spec.time_step_s,displacement,spec,initial)?;
         if !(memory.stored_energy_j()+self.energy_at(self.state)).is_finite() {
             return Err(invalid("initial material energy overflow"));
+        }
+        if self.exact.is_some() {
+            // The arms join the exact block; no midpoint memory force remains.
+            let (stiffness, damping) = crate::reed_bore::reed_structural(self.reed);
+            self.exact = Some(super::super::paired::ExactBlade::with_arms(
+                self.spec.mass_kg, damping, stiffness, &memory.exact_arms()?, self.spec.time_step_s)?);
         }
         self.relaxation=Some(memory);
         Ok(self)

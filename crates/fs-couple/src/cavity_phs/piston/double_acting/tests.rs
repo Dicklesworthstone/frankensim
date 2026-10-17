@@ -190,7 +190,10 @@ fn opposing_composition_data_changes_both_gas_and_mechanical_trajectory() {
     let a = run(0.75, 0.001);
     let b = run(0.25, 0.001);
     let c = run(0.75, 0.0);
-    assert!((a.primary().velocity_m_s() - b.primary().velocity_m_s()).abs() > 1e-8);
+    // One step with 20 J: the composition changes the step-mean acceleration by
+    // more than 2e-5 m/s^2 (1e-8 m/s on the authored 0.0005 s step).
+    let dv = (a.primary().velocity_m_s() - b.primary().velocity_m_s()).abs();
+    assert!(dv > 2e-5 * drive(0.0).duration_s, "{dv}");
     assert_ne!(
         a.primary().gas().state().state().temperature,
         b.primary().gas().state().state().temperature

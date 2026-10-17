@@ -213,3 +213,123 @@ fn exact_blades_run_the_reed_band_with_closed_ledgers() {
     // The unequal masses keep a real antisymmetric state.
     assert!(moved>0.0);
 }
+
+/// G1: the exact single-coordinate valve follows the closed-form damped
+/// oscillator at omega*dt = 1, where its Midpoint constructor refuses.
+#[test]
+fn exact_dynamic_aperture_follows_the_damped_oscillator() {
+    use fs_math::det;
+    // A 1e12 Pa closing pressure leaves a 2e-13 m^2 face: the mechanics are isolated.
+    let (m,k,zeta)=(1e-5,500.0,0.02);
+    let omega=det::sqrt(k/m);
+    let spec=DynamicApertureSpec {
+        aperture: BernoulliAperture {rest_opening_m:4e-4,width_m:0.013,closing_pressure_pa:1e12},
+        mass_kg:m,stiffness_n_m:k,damping_ratio:zeta,density_kg_m3:1.2,impedance_pa_s_m3:1.0,
+        time_step_s:1.0/omega,max_steps:100,
+    };
+    let x0=1e-5;
+    let start=ApertureState {opening_m:4e-4+x0,opening_velocity_m_s:0.0};
+    assert!(matches!(DynamicAperture::new(spec,start,contact(0.0)),Err(AcousticRealizeError::TimeResolution(_))));
+    let mut valve=DynamicAperture::new_with_propagator(spec,start,contact(0.0),BladePropagator::ExactZoh).unwrap();
+    let wd=omega*det::sqrt(1.0-zeta*zeta);
+    let energy=valve.stored_energy_j();
+    for step in 1..=100 {
+        let f=valve.step(ApertureDrive::default()).unwrap();
+        let t=f64::from(step)*spec.time_step_s;
+        let decay=det::exp(-zeta*omega*t);
+        let (c,s)=(det::cos(wd*t),det::sin(wd*t));
+        let x=decay*(x0*c+zeta*omega*x0/wd*s);
+        let v=-decay*omega*omega*x0/wd*s;
+        assert!((f.state.opening_m-4e-4-x).abs()<=1e-11*x0,"step {step}");
+        assert!((f.state.opening_velocity_m_s-v).abs()<=1e-11*omega*x0,"step {step}");
+        assert!(f.balance_residual_j().abs()<=1e-12*energy,"step {step}: {}",f.balance_residual_j());
+    }
+}
+
+/// G1: two equal exact blades are the symmetric image of one exact opening
+/// coordinate (blade mass, stiffness and damping twice the opening's), through
+/// two independent junction solvers, where both Midpoint constructors refuse.
+#[test]
+fn exact_dynamic_aperture_matches_the_exact_symmetric_paired_image() {
+    let mut s=spec();s.time_step_s=1.0/48_000.0;s.max_steps=2_400;
+    let b=s.blades[0];
+    let dynamic_spec=DynamicApertureSpec {
+        aperture: BernoulliAperture {rest_opening_m:s.rest_opening_m,width_m:s.width_m,
+            closing_pressure_pa:0.5*b.stiffness_n_m*s.rest_opening_m/b.pressure_area_m2},
+        mass_kg:0.5*b.mass_kg,stiffness_n_m:0.5*b.stiffness_n_m,
+        damping_ratio:b.damping_n_s_m/(2.0*(b.mass_kg*b.stiffness_n_m).sqrt()),
+        density_kg_m3:s.density_kg_m3,impedance_pa_s_m3:s.impedance_pa_s_m3,
+        time_step_s:s.time_step_s,max_steps:s.max_steps,
+    };
+    let rest=ApertureState {opening_m:s.rest_opening_m,opening_velocity_m_s:0.0};
+    assert!(PairedAperture::new(s,[BladeState::default();2],contact(2e9)).is_err());
+    assert!(DynamicAperture::new(dynamic_spec,rest,contact(2e9)).is_err());
+    let mut pair=PairedAperture::new_with_propagator(s,[BladeState::default();2],contact(2e9),
+        BladePropagator::ExactZoh).unwrap();
+    let mut scalar=DynamicAperture::new_with_propagator(dynamic_spec,rest,contact(2e9),
+        BladePropagator::ExactZoh).unwrap();
+    for i in 0..2_400 {
+        let drive=ApertureDrive {upstream_pressure_pa:if i<1_200 {1200.0} else {-300.0},
+            incoming_pressure_pa:75.0,body_flow_m3_s:1e-7};
+        let a=pair.step(drive).unwrap();
+        let r=scalar.step(drive).unwrap();
+        assert!((a.aperture.state.opening_m-r.state.opening_m).abs()<2e-10,"step {i}");
+        assert!((a.aperture.state.opening_velocity_m_s-r.state.opening_velocity_m_s).abs()<2e-6,"step {i}");
+        assert!((a.aperture.bore_pressure_pa-r.bore_pressure_pa).abs()<2e-3,"step {i}");
+        assert!((a.aperture.stored_energy_j-r.stored_energy_j).abs()<2e-9,"step {i}");
+        assert!(r.balance_residual_j().abs()<=1e-9*r.stored_energy_j.abs().max(1e-12),"step {i}");
+        assert_eq!(a.blades[0],a.blades[1]);
+    }
+}
+
+/// G1: the exact block with two Maxwell arms reproduces an independent
+/// fine-step RK4 integration of the same held-force ODE. That covers mean and end
+/// velocity, mean displacement, end memories, and both integrated losses, and
+/// the energy identity closes. Midpoint would refuse this omega*dt.
+#[test]
+fn exact_block_with_maxwell_arms_matches_an_independent_integration() {
+    let (m,k,c)=(1e-5,500.0,0.01);
+    let arms=[ExactArm {coupling:300.0_f64.sqrt(),relaxation_time_s:2e-4},
+        ExactArm {coupling:150.0_f64.sqrt(),relaxation_time_s:3e-3}];
+    let dt=1.0/48_000.0;
+    let blade=ExactBlade::with_arms(m,c,k,&arms,dt).unwrap();
+    let start=BladeState {displacement_m:2e-5,velocity_m_s:0.03};
+    let memory=[arms[0].coupling*1e-5,arms[1].coupling*(-5e-6)];
+    let force=0.02;
+    // State [x, v, z1, z2, int v, int x, int c v^2, int arm loss].
+    let rate=|s:&[f64;8]| -> [f64;8] {
+        let ext=[arms[0].coupling*s[0]-s[2],arms[1].coupling*s[0]-s[3]];
+        let a=(-k*s[0]-c*s[1]-arms[0].coupling*ext[0]-arms[1].coupling*ext[1]+force)/m;
+        [s[1],a,ext[0]/arms[0].relaxation_time_s,ext[1]/arms[1].relaxation_time_s,s[1],s[0],
+            c*s[1]*s[1],ext[0]*ext[0]/arms[0].relaxation_time_s+ext[1]*ext[1]/arms[1].relaxation_time_s]
+    };
+    let mut s=[start.displacement_m,start.velocity_m_s,memory[0],memory[1],0.0,0.0,0.0,0.0];
+    let n=20_000;let h=dt/f64::from(n);
+    for _ in 0..n {
+        let k1=rate(&s);
+        let k2=rate(&std::array::from_fn(|i| s[i]+0.5*h*k1[i]));
+        let k3=rate(&std::array::from_fn(|i| s[i]+0.5*h*k2[i]));
+        let k4=rate(&std::array::from_fn(|i| s[i]+h*k3[i]));
+        for i in 0..8 { s[i]+=h/6.0*(k1[i]+2.0*k2[i]+2.0*k3[i]+k4[i]); }
+    }
+    let near=|a:f64,b:f64,scale:f64,what:&str| assert!((a-b).abs()<=1e-9*scale,"{what}: {a} vs {b}");
+    let (free,mobility)=blade.free_and_mobility(start,0.0,dt,&memory);
+    near(free+mobility*force,s[4]/dt,s[4].abs()/dt,"mean velocity");
+    near(blade.end_velocity(start,force,&memory),s[1],0.03,"end velocity");
+    near(blade.mean_displacement(start,force,dt,&memory),s[5]/dt,2e-5,"mean displacement");
+    let z=blade.end_memory(start,force,&memory);
+    near(z[0],s[2],memory[0].abs(),"arm 1 memory");
+    near(z[1],s[3],memory[1].abs(),"arm 2 memory");
+    near(blade.viscous_loss_j(start,force,&memory),s[6],s[6],"viscous loss");
+    near(blade.arm_loss_j(start,force,&memory),s[7],s[7],"arm loss");
+    // H = m v^2/2 + k x^2/2 + sum (c x - z)^2/2 changes by F dx minus both losses.
+    let energy=|x:f64,v:f64,z:&[f64]| 0.5*m*v*v+0.5*k*x*x
+        +z.iter().zip(&arms).map(|(z,a)|0.5*(a.coupling*x-z)*(a.coupling*x-z)).sum::<f64>();
+    let x1=start.displacement_m+dt*(free+mobility*force);
+    let v1=blade.end_velocity(start,force,&memory);
+    let change=energy(x1,v1,&z)-energy(start.displacement_m,start.velocity_m_s,&memory);
+    let work=force*(x1-start.displacement_m)-blade.viscous_loss_j(start,force,&memory)
+        -blade.arm_loss_j(start,force,&memory);
+    assert!((change-work).abs()<=1e-12*energy(start.displacement_m,start.velocity_m_s,&memory),
+        "energy identity: {change} vs {work}");
+}

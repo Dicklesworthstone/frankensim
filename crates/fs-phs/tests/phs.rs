@@ -2190,6 +2190,31 @@ fn narrow_tube_pin_uses_poiseuille_and_still_damps() {
 }
 
 #[test]
+fn foster_sqrt_omega_stays_positive_and_on_the_wall_law_inside_guarded_bands() {
+    // The wide-tube wall loss fits √ω(1 - i) on a 64-fold guard around its
+    // band with eight arms; s/(s+p) at s = -iω is (ω² - iωp)/(ω² + p²).
+    // Collocating every pole returned negative residues on 200-400 Hz.
+    let tau = core::f64::consts::TAU;
+    for (f_lo, f_hi) in [(200.0_f64, 400.0_f64), (100.0, 1000.0), (50.0, 2000.0)] {
+        let terms =
+            foster_sqrt_omega_terms(1.0, tau * f_lo / 64.0, tau * f_hi * 64.0, 8).expect("terms");
+        assert!(terms.iter().all(|&(g, w)| g > 0.0 && w > 0.0));
+        for i in 0..=64 {
+            let omega = tau * f_lo * (f_hi / f_lo).powf(f64::from(i) / 64.0);
+            let (mut re, mut im) = (0.0, 0.0);
+            for &(g, p) in &terms {
+                let d = omega * omega + p * p;
+                re += g * omega * omega / d;
+                im -= g * omega * p / d;
+            }
+            let root = omega.sqrt();
+            let err = (re - root).hypot(im + root) / (root * 2.0_f64.sqrt());
+            assert!(err < 0.02, "{f_lo}-{f_hi} Hz at {omega} rad/s: {err}");
+        }
+    }
+}
+
+#[test]
 fn foster_sqrt_omega_matches_the_wall_law_and_adds_states() {
     let gain = 2.0e-3;
     let terms = foster_sqrt_omega_terms(gain, 200.0, 12_800.0, 3).expect("terms");

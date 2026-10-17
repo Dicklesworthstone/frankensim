@@ -28,7 +28,9 @@ fn model(volume: f64, budget: u64, state: ApertureState) -> ApertureNetwork {
     };
     let lay=Obstacle::new(vec![-1.0],1,1,vec![0.0],vec![1.0],1e8,2.0,
         "synthetic contact; not identified material data".into()).unwrap().with_internal_loss(5.0).unwrap();
-    ApertureNetwork::new(DynamicAperture::new(mechanics,state,lay).unwrap(),spec).unwrap()
+    // Outside the midpoint one-cent band at this rate (DEF-04): exact opening block.
+    ApertureNetwork::new(DynamicAperture::new_with_propagator(mechanics,state,lay,
+        fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh).unwrap(),spec).unwrap()
 }
 fn rest() -> ApertureState { ApertureState { opening_m:4e-4,opening_velocity_m_s:0.0 } }
 

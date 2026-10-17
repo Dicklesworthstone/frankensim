@@ -113,13 +113,15 @@ fn both_original_mechanical_images_see_the_same_symmetric_load() {
     let sides = [duct(gas(), 12, 0.7), duct(gas(), 32, -0.8)];
     let (g, z) = combined_inlet_state(&sides).unwrap();
     let b = blade();
-    let single = DynamicAperture::new(DynamicApertureSpec {
+    // The symmetric image of the exact blades is the exact opening coordinate.
+    let single = DynamicAperture::new_with_propagator(DynamicApertureSpec {
         aperture: BernoulliAperture { rest_opening_m: 4e-4, width_m: 0.013,
             closing_pressure_pa: (0.5*b.stiffness_n_m)*4e-4/b.pressure_area_m2 },
         mass_kg: 0.5*b.mass_kg, stiffness_n_m: 0.5*b.stiffness_n_m,
         damping_ratio: b.damping_n_s_m/(2.0*(b.mass_kg*b.stiffness_n_m).sqrt()),
         density_kg_m3: g.density, impedance_pa_s_m3: z, time_step_s: DT, max_steps: 128,
-    }, ApertureState { opening_m: 4e-4, opening_velocity_m_s: 0.0 }, contact()).unwrap();
+    }, ApertureState { opening_m: 4e-4, opening_velocity_m_s: 0.0 }, contact(),
+        BladePropagator::ExactZoh).unwrap();
     let gate = CancelGate::new_clock_free();
     let mut a = TwoSidedAperture::new(single.into(), sides, limits(), &gate).unwrap();
     let mut b = system(12, 1.0, 128);

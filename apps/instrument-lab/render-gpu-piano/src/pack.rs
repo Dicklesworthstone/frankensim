@@ -133,7 +133,7 @@ impl<T: Copy + Default> Builder<T> {
         params[slot(name)] = self.data.len() as i32;
         self.data.extend_from_slice(values);
         // keep every array 4-aligned
-        while self.data.len() % 4 != 0 {
+        while !self.data.len().is_multiple_of(4) {
             self.data.push(T::default());
         }
     }
@@ -482,13 +482,14 @@ pub fn active_flags(p: &Program) -> Vec<i32> {
     let mut v: Vec<i32> = (0..p.np())
         .map(|i| p.dampers.active.get(i).copied().unwrap_or(false) as i32)
         .collect();
-    while v.len() % 4 != 0 || v.is_empty() {
+    while !v.len().is_multiple_of(4) || v.is_empty() {
         v.push(0);
     }
     v
 }
 
 /// f64 -> double-float (hi, lo) pairs for a GPU without FP64.
+#[cfg(target_os = "macos")]
 pub fn to_df64(x: &[f64]) -> Vec<[f32; 2]> {
     x.iter()
         .map(|&v| {
@@ -497,6 +498,7 @@ pub fn to_df64(x: &[f64]) -> Vec<[f32; 2]> {
         })
         .collect()
 }
+#[cfg(target_os = "macos")]
 pub fn from_df64(x: &[[f32; 2]], out: &mut [f64]) {
     for (o, v) in out.iter_mut().zip(x) {
         *o = f64::from(v[0]) + f64::from(v[1]);

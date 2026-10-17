@@ -95,7 +95,8 @@ fn invalid_composition_and_pressure_refuse_before_cli_creates_artifacts() {
         let result = run(&input, &output, 37, true);
         assert!(!result.status.success(), "accepted {text}");
         assert!(!output.exists()); assert!(!output.with_extension("provenance.json").exists());
-        assert!(String::from_utf8_lossy(&result.stderr).contains("line"));
+        // music_render's refusal is a JSON verdict on stdout (fail()).
+        assert!(String::from_utf8_lossy(&result.stdout).contains("line"));
     }
 }
 

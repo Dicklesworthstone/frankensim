@@ -231,7 +231,7 @@ fn solve() -> NetworkGasSolve {
             },
             newton: NewtonKrylovConfig {
                 absolute_tolerance: 1e-8,
-                relative_tolerance: 0.0,
+                relative_tolerance: 1e-12,
                 forcing_minimum: 1e-4,
                 linear_restart: 4,
                 ..NewtonKrylovConfig::default()
@@ -290,7 +290,8 @@ fn conductivity_data_changes_finite_supply_two_bodies_and_actual_gas_motion() {
         let old = gas.clone();
         let h0 = thermal.energy_j();
         let mut external = 0.0;
-        for i in 1..=40 {
+        // The authored 20 ms trajectory on the resolved 0.00005 s clock.
+        for i in 1..=400 {
             let target = f64::from(i) * 0.00005;
             let drive = port(target - thermal.time_s());
             let candidate = gas
@@ -615,11 +616,12 @@ fn independent_network_and_gas_sources_are_not_counted_as_internal_exchange() {
             || false,
         )
         .unwrap();
-    near(candidate.step().external_network_heat_j, 0.015);
+    // 30 W external supply over the 0.00005 s step.
+    near(candidate.step().external_network_heat_j, 30.0 * 0.00005);
     let (next, circuit, piston, report) = candidate.into_parts();
     near(
         report.network.non_electrical_heat_j + report.boundary.exchanged_heat_j,
-        0.015,
+        30.0 * 0.00005,
     );
     let energy = next.energy_j() - thermal.energy_j()
         + (circuit.charges_c()[0].powi(2) - 1.0) / 0.02
@@ -628,5 +630,6 @@ fn independent_network_and_gas_sources_are_not_counted_as_internal_exchange() {
                 - gas.gas().state().specific_internal_energy_j_kg())
         + 0.5 * piston.mass_kg() * piston.velocity_m_s().powi(2)
         + 100000.0 * (piston.gas().volume_m3() - gas.gas().volume_m3());
-    near(energy, 0.025);
+    // The 0.01 J gas heat plus the 30 W supply over the step.
+    near(energy, 0.01 + 30.0 * 0.00005);
 }

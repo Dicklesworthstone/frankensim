@@ -103,6 +103,14 @@ impl Accounting {
     pub fn dissipated_j(self)->f64 {self.felt_loss_j+self.shank_loss_j+self.modal_loss_j+self.radiation_loss_j+self.cavity_loss_j+self.damper_loss_j+self.catch_loss_j}
 }
 
+/// Authoritative non-bank state of an unpublished external stretch. The bank's
+/// q/v checkpoint is owned by the external stepper; prepared trial scratch is
+/// rebuilt from these hammer/contact states on the next mechanics step.
+#[derive(Debug)]
+pub struct ExternalHammerCheckpoint {
+    hammers:Vec<Hammer>,contacts:Vec<Contact>,accounting:Accounting,
+}
+
 pub struct Instrument {
     pub bank:Bank,
     courses:Vec<Course>,laws:Vec<WoolFelt>,hammers:Vec<Hammer>,contacts:Vec<Contact>,
@@ -428,10 +436,10 @@ impl Instrument {
     }
     /// The bank and damper images an external contact-free stepper needs (render-gpu-piano), or None
     /// when this instrument uses something it does not model (felt dampers, point-drag dampers,
-    /// exterior radiation, cavity, string stretching, hammer footprints, substeps other than 1).
+    /// exterior radiation, cavity, string stretching, hammer footprints). Images use the mechanics rate.
     #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
     pub fn gpu_images(&mut self)->Option<(super::linear::BankImage,Option<dampers::DamperImage>)>{
-        if self.felt_dampers.is_some()||self.radiation.is_some()||self.cavity.is_some()||self.substeps!=1
+        if self.felt_dampers.is_some()||self.radiation.is_some()||self.cavity.is_some()
             ||(self.spatial_dampers.is_none()&&self.damper_drag_ns_m!=0.0) {return None;}
         let bank=self.bank.gpu_image()?;
         Some((bank,self.damper_image()))
@@ -492,6 +500,49 @@ impl Instrument {
     #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
     pub fn damper_controls(&self)->(Vec<bool>,f64){
         (self.hammers.iter().map(|h|h.held||h.latched).collect(),self.sustain)
+    }
+
+    /// Number of mechanics steps in one complete output frame.
+    #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+    pub fn mechanics_substeps(&self)->usize {self.substeps}
+
+    #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+    pub fn checkpoint_external_hammers(&self)->ExternalHammerCheckpoint {
+        ExternalHammerCheckpoint {hammers:self.hammers.clone(),contacts:self.contacts.clone(),accounting:self.accounting}
+    }
+
+    #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+    pub fn restore_external_hammers(&mut self,saved:&ExternalHammerCheckpoint) {
+        self.hammers.copy_from_slice(&saved.hammers);
+        self.contacts.clone_from_slice(&saved.contacts);
+        self.accounting=saved.accounting;
+    }
+
+    /// Replay exactly one output frame against mechanics-rate contact positions.
+    /// Any refused substep restores the entire frame, including jack time, felt
+    /// history and all work/loss entries, so the CPU can retry that frame once.
+    #[allow(dead_code)] // used by apps/instrument-lab/render-gpu-piano
+    pub fn advance_hammers_external_frame(&mut self,positions:&[f64],clearance_m:f64)->Result<Option<[f64;5]>,Error>{
+        let nc=self.contacts.len();
+        if positions.len()!=self.substeps*nc {return Err(Error::InvalidControl);}
+        self.saved_hammers.copy_from_slice(&self.hammers);
+        self.saved_contacts.clone_from_slice(&self.contacts);
+        let saved=self.accounting;
+        let mut energy=[0.0;5];
+        for step in 0..self.substeps {
+            match self.advance_hammers_external(&positions[step*nc..(step+1)*nc],clearance_m) {
+                Ok(Some(part))=>{
+                    for (total,value) in energy.iter_mut().zip(part) {*total+=value;}
+                }
+                refused=>{
+                    self.hammers.copy_from_slice(&self.saved_hammers);
+                    self.contacts.clone_from_slice(&self.saved_contacts);
+                    self.accounting=saved;
+                    return refused;
+                }
+            }
+        }
+        Ok(Some(energy))
     }
 
     /// The hammer half of one contact-free mechanics step whose bank an external stepper advanced
@@ -962,6 +1013,26 @@ impl Instrument {
         // Diagnostic box decimation; physical pressure consumes the full trace.
         Ok(average/self.substeps as f64)
     }
+}
+
+/// Small real instrument/receiver fixture shared with the external stepper's tests.
+#[cfg(test)]
+pub(crate) fn external_step_test_stream(substeps:usize,score:&str,frames:u64)->super::audio::AudioStream {
+    let courses=vec![super::geometry::demonstration_scale().unwrap()[48]];
+    let board=super::board::demonstration();
+    let surface=[super::board_geometry::SurfaceSample {position_m:[0.0;3],area_m2:0.2,
+        mode_shape:board.iter().map(|b|b.volume/0.2).collect()}];
+    let materials=vec![(felt::demonstration_law().unwrap(),relaxation::demonstration_prony())];
+    let mut piano=Instrument::new_with_string_damping(courses.clone(),&board,48_000,substeps,8,true,
+        materials,Some(ShankGeometry::published()),None,None,true).unwrap();
+    piano.configure_dampers(&dampers::Specification::estimated(&courses).unwrap()).unwrap();
+    piano.use_reduced_dampers();
+    let performance=super::performance::Performance::read(score,&[69],frames).unwrap();
+    let mut stream=super::audio::AudioStream::new(piano,performance,Some(&surface),[0.0,0.0,1.0],
+        fs_bem::helmholtz::Medium::air(),1.0).unwrap();
+    stream.disable_accelerator();
+    stream.set_horizon(frames);
+    stream
 }
 
 #[cfg(test)]

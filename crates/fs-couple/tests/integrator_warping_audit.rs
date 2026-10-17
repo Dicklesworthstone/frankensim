@@ -42,6 +42,7 @@ enum Owner {
     Piston,
     Impact,
     Dynamic,
+    DynamicExact,
     Paired,
     PairedExact,
     Modal,
@@ -133,6 +134,12 @@ const PATHS: &[AuditRow] = &[
         integrator: Integrator::GonzalezMidpoint,
         bound: Some(fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP),
         owner: Owner::Dynamic,
+    },
+    AuditRow {
+        path: "bernoulli_aperture::DynamicAperture (ExactZoh opening)",
+        integrator: Integrator::ExactZoh,
+        bound: None,
+        owner: Owner::DynamicExact,
     },
     AuditRow {
         path: "bernoulli_aperture::PairedAperture",
@@ -364,7 +371,7 @@ fn advance(owner: Owner, omega: f64, rate: u32, z: [f64; 2]) -> [f64; 2] {
                 omega,
             )
         }
-        Owner::Dynamic | Owner::Paired | Owner::PairedExact => {
+        Owner::Dynamic | Owner::DynamicExact | Owner::Paired | Owner::PairedExact => {
             let mass = 1e-5;
             let stiffness = mass * omega * omega;
             let area = 1e-6;
@@ -373,7 +380,7 @@ fn advance(owner: Owner, omega: f64, rate: u32, z: [f64; 2]) -> [f64; 2] {
             // the actual mechanical map without approximating the jet law.
             // The exact blade sweeps its exact mean velocity dx/dt.
             let h = 0.5 * dt;
-            let vm = if matches!(owner, Owner::PairedExact) {
+            let vm = if matches!(owner, Owner::PairedExact | Owner::DynamicExact) {
                 (q * (det::cos(omega * dt) - 1.0) + v * det::sin(omega * dt) / omega) / dt
             } else {
                 (v - h * omega * omega * q) / (1.0 + h * h * omega * omega)
@@ -382,8 +389,8 @@ fn advance(owner: Owner, omega: f64, rate: u32, z: [f64; 2]) -> [f64; 2] {
                 body_flow_m3_s: area * vm,
                 ..ApertureDrive::default()
             };
-            if matches!(owner, Owner::Dynamic) {
-                let mut model = DynamicAperture::new(
+            if matches!(owner, Owner::Dynamic | Owner::DynamicExact) {
+                let mut model = DynamicAperture::new_with_propagator(
                     DynamicApertureSpec {
                         aperture: BernoulliAperture {
                             rest_opening_m: REST,
@@ -403,6 +410,11 @@ fn advance(owner: Owner, omega: f64, rate: u32, z: [f64; 2]) -> [f64; 2] {
                         opening_velocity_m_s: v,
                     },
                     obstacle(),
+                    if matches!(owner, Owner::DynamicExact) {
+                        BladePropagator::ExactZoh
+                    } else {
+                        BladePropagator::Midpoint
+                    },
                 )
                 .unwrap();
                 let frame = model.step(drive).unwrap();
@@ -781,6 +793,7 @@ fn available_render_linear_owners_are_measured_without_promoting_unmigrated_path
                         | Owner::Speaker
                         | Owner::Coupled
                         | Owner::PhsExact
+                        | Owner::DynamicExact
                         | Owner::PairedExact
                 ) {
                     Some(0.0)
@@ -796,6 +809,13 @@ fn available_render_linear_owners_are_measured_without_promoting_unmigrated_path
                 }
                 let verdict = if measured.abs() <= 0.01 {
                     "exact-linear-control"
+                } else if measured.abs() <= 1.0
+                    && row.bound.is_some_and(|bound| {
+                        bound <= fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP
+                    })
+                {
+                    // A midpoint row admitted only inside its one-cent band.
+                    "one-cent-banded"
                 } else {
                     "requires-migration"
                 };

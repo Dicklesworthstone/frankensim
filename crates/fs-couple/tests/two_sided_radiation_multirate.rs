@@ -54,12 +54,13 @@ fn system(paired: bool, rate: u32, mass_ratio: f64, steps: u64) -> TwoSidedApert
                 max_evaluations: 256, velocity_tolerance_m_s: 1e-13, relative_tolerance: 1e-11 },
         },[BladeState::default();2],contact,BladePropagator::ExactZoh).unwrap().into()
     } else {
-        DynamicAperture::new(DynamicApertureSpec {
+        DynamicAperture::new_with_propagator(DynamicApertureSpec {
             aperture: BernoulliAperture { rest_opening_m: 4e-4, width_m: 0.013, closing_pressure_pa: 1000.0 },
             mass_kg: 1e-5*mass_ratio, stiffness_n_m: 500.0, damping_ratio: 0.05,
             density_kg_m3: g.density, impedance_pa_s_m3: z,
             time_step_s: 1.0/f64::from(rate), max_steps: steps,
-        },ApertureState { opening_m: 4e-4, opening_velocity_m_s: 0.0 },contact).unwrap().into()
+        },ApertureState { opening_m: 4e-4, opening_velocity_m_s: 0.0 },contact,
+            BladePropagator::ExactZoh).unwrap().into()
     };
     TwoSidedAperture::new(valve,sides,TwoSidedLimits { maximum_energy_j: 1.0,
         energy_absolute_tolerance_j: 1e-16, energy_relative_tolerance: 1e-7,

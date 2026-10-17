@@ -177,7 +177,11 @@ impl SubsteppedImpactSystem {
                     }
                 }
                 Err(error) => {
-                    if !matches!(&error, ImpactError::PreparedSolve(fs_phs::PhsError::NewtonStalled { .. })
+                    // A Newton candidate above its residual ceiling (exhausted or
+                    // refused) is what a shorter substep resolves; a budget below
+                    // the rounding floor is not, and stays terminal.
+                    if !matches!(&error, ImpactError::PreparedSolve(
+                            fs_phs::PhsError::NewtonStalled { .. } | fs_phs::PhsError::NewtonRefused { .. })
                         | ImpactError::Energy { .. }) {
                         return Err(error);
                     }

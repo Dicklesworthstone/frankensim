@@ -22,9 +22,10 @@ impl std::fmt::Display for BlockError {
 impl std::error::Error for BlockError {}
 
 /// An external stepper for contact-free stretches (render-gpu-piano): it may take up to `frames`
-/// mechanics steps of `instrument` at once, writing each step's board trace (`board_trace_len` values)
+/// complete output frames of `instrument` at once, writing each frame's board trace (`board_trace_len`
+/// mechanics-rate values, grouped by substep and then board mode)
 /// into `traces`, and leaves the instrument as CPU steps would have (its hammers stepped, its bank
-/// state loaded back). It returns how many steps it took; 0 hands the next step to the CPU.
+/// state loaded back). It returns complete output frames; 0 hands the next frame to the CPU.
 pub trait Accelerator {
     fn advance(&mut self, instrument: &mut Instrument, frames: usize, traces: &mut [f64]) -> Result<usize, String>;
 }
@@ -79,6 +80,11 @@ impl AudioStream {
     /// accelerator runs the instrument ahead of the output clock by up to one stretch, so a caller that
     /// observes or changes the instrument between frames needs this before it starts.
     pub fn disable_accelerator(&mut self) { self.accelerator=None; }
+    /// Per-stream injection avoids changing the process-global factory in tests.
+    #[cfg(test)]
+    pub fn set_test_accelerator(&mut self,accelerator:Box<dyn Accelerator>) {
+        assert!(self.pending.is_empty());self.accelerator=Some(accelerator);
+    }
     /// The last frame this stream will be asked for: an accelerator never steps the instrument past it,
     /// so the instrument's final state (and its energy report) is that of the last rendered frame.
     pub fn set_horizon(&mut self, frames: u64) { self.horizon=Some(frames); }

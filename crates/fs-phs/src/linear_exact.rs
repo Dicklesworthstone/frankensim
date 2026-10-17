@@ -279,9 +279,15 @@ pub fn split_quadratic(
         return Err(refuse("finite quadratic matrix shape required"));
     }
     crate::require_symmetric(&part.matrix, n, "split Q")?;
-    let (values, basis) = checked_eigh(&part.matrix, n)?;
-    if values.iter().any(|v| *v < 0.0) {
+    let (mut values, basis) = checked_eigh(&part.matrix, n)?;
+    // The relative floor PortHamiltonian admission uses: a zero-energy
+    // coordinate (a free mass, a rigid mode) can return from Jacobi as -eps.
+    let floor = crate::PSD_TOL * crate::matrix_scale(&part.matrix);
+    if values.iter().any(|v| *v < -floor) {
         return Err(PhsError::NotPsd { what: "split Q" });
+    }
+    for value in &mut values {
+        *value = value.max(0.0);
     }
     let mut skew = vec![0.0; extent];
     for i in 0..n {

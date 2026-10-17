@@ -25,10 +25,15 @@ fn fixture(scale: Option<f64>, axis: &str) -> (MaterialCard, ResolvedHeatCapacit
     let k = PropertyKey::with_quantity("thermal_conductivity", quantity(QuantityKind::ThermalConductivity));
     let mut claims = ClaimSet::new();
     let mut insert = |key: PropertyKey, value: PropertyValue| {
+        // A scalar claim is a plateau; only a curve has knots to interpolate.
+        let interpolation = match &value {
+            PropertyValue::Scalar { .. } => InterpolationPolicy::ConstantWithinValidity,
+            PropertyValue::Curve { .. } => InterpolationPolicy::LinearInside,
+        };
         claims.insert_claim(PropertyClaim { key, value,
             validity: ValidityDomain::unconstrained().with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 200.0, 800.0)
                 .with("lot",7.0,7.0).with("melt",0.0,1.0).with("omega",0.0,100.0),
-            interpolation: InterpolationPolicy::LinearInside, uncertainty: UncertaintyModel::Unstated,
+            interpolation, uncertainty: UncertaintyModel::Unstated,
             observations:vec![], provenance: Provenance { source:"synthetic electrothermal data".into(),
                 license:"CC0-1.0".into(), artifact:None } }).unwrap();
     };

@@ -233,7 +233,7 @@ fn solve() -> NetworkGasSolve {
             },
             newton: NewtonKrylovConfig {
                 absolute_tolerance: 1e-8,
-                relative_tolerance: 0.0,
+                relative_tolerance: 1e-14,
                 forcing_minimum: 1e-4,
                 linear_restart: 4,
                 ..NewtonKrylovConfig::default()
@@ -358,7 +358,8 @@ fn conductivity_only_swap_reaches_both_walls_circuit_and_shared_gas_motion() {
         let initial_heat = thermal.energy_j();
         let mut exterior = 0.0;
         let surfaces = surfaces();
-        for i in 1..=40 {
+        // The authored 20 ms trajectory on the resolved 0.00005 s clock.
+        for i in 1..=400 {
             let target = f64::from(i) * 0.00005;
             let dt = target - thermal.time_s();
             let candidate = gas

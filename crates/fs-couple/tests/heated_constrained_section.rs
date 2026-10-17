@@ -58,7 +58,9 @@ fn template()->AcousticAssembly {
         kelvin_voigt_bending:None,relaxation_bending:None,polarization_detune:0.0,moving_end:false,
     }),duct:None,pluck:Some(Pluck {station_frac:0.25,height_m:1e-5}),bow:None,blow:None,
         reed:None,soundboard:None,body_modes:vec![],plate:None,cavity:None,obstacles:vec![],
-        contact_texture:None,listener:Listener {distance_m:1.0},sample_rate_hz:16000,duration_s:0.008}
+        contact_texture:None,listener:Listener {distance_m:1.0},
+        // Midpoint string band: a pole rate near 1100 rad/s needs dt <= 3.7e-5 s.
+        sample_rate_hz:32000,duration_s:0.008}
 }
 fn config()->StepConfig {StepConfig {max_dt_s:0.001,energy_tolerance_j:1e-7}}
 
@@ -76,7 +78,7 @@ fn expansion_data_alone_changes_fixed_end_tension_and_actual_pressure() {
         assert_eq!(tension,heated.axial_state().unwrap().response().force_n());
         assert_eq!(initial.section().axial_stiffness_n(),heated.section().axial_stiffness_n());
         let hot=compiled.realize().unwrap();assert_eq!(cold.gas,hot.gas);assert_eq!(template,saved);
-        assert_eq!(hot.pressure_pa.len(),128);assert!(hot.pressure_pa.iter().any(|p|*p!=0.0));
+        assert_eq!(hot.pressure_pa.len(),256);assert!(hot.pressure_pa.iter().any(|p|*p!=0.0));
         assert!(hot.pressure_pa.iter().all(|p|p.is_finite()));
         (cold.pressure_pa,hot.pressure_pa,tension,heated.thermal().temperature_k(CellId(0)).unwrap(),report.electrical_energy_j)
     };

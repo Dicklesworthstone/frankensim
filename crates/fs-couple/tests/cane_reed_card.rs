@@ -331,8 +331,15 @@ fn render(card: &ValveCard, blowing_pa: f64, seconds: f64) -> (f64, f64, f64) {
     let win = (0.2 * f64::from(RATE)) as usize;
     let tail = &out[out.len() - win..];
     let mid = &out[out.len() - 2 * win..out.len() - win];
-    let rms = (tail.iter().map(|v| v * v).sum::<f64>() / tail.len() as f64).sqrt();
-    let mid_rms = (mid.iter().map(|v| v * v).sum::<f64>() / mid.len() as f64).sqrt();
+    // Oscillation is the AC part. Under steady flow the open bore holds its
+    // static Poiseuille pressure drop (about 1.7 Pa for the open lay at 80 Pa),
+    // which a total rms would mistake for a sounding reed.
+    let ac_rms = |s: &[f64]| {
+        let mean = s.iter().sum::<f64>() / s.len() as f64;
+        (s.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / s.len() as f64).sqrt()
+    };
+    let rms = ac_rms(tail);
+    let mid_rms = ac_rms(mid);
     // Spectral centroid of the tail via Goertzel-free coarse FFT.
     use fs_fft::{C64, Fft};
     let m = 8192usize;

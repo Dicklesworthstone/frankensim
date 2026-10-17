@@ -10,12 +10,13 @@ use crate::plan::{Mat, Program};
 /// The per-mode string-loss update of one group at bridge speed `b`; returns its kinetic-energy decrease.
 fn string_loss(p: &Program, range: (usize, usize), b: f64, v: &mut [f64]) -> f64 {
     let mut loss = 0.0;
-    for k in range.0..range.1 {
-        let old = v[k];
+    for (offset, velocity) in v[range.0..range.1].iter_mut().enumerate() {
+        let k = range.0 + offset;
+        let old = *velocity;
         let mid = p.inverse[k] * old + p.cross[k] * b;
         let rel = mid - p.beta[k] * b;
-        v[k] = old - p.duration * (p.mass[k] * mid + p.strain[k] * rel);
-        loss += 0.5 * (old - v[k]) * (old + v[k]);
+        *velocity = old - p.duration * (p.mass[k] * mid + p.strain[k] * rel);
+        loss += 0.5 * (old - *velocity) * (old + *velocity);
     }
     loss
 }
@@ -277,10 +278,8 @@ impl Emulator {
             let board_end: Vec<f64> = (0..r)
                 .map(|j| dot(&p.k4, j, &self.fq[n..]) + dot(&p.k5, j, &self.rea))
                 .collect();
-            for j in 0..r {
-                self.qbo[j] = self.q[n + j];
-                self.q[n + j] = board_end[j];
-            }
+            self.qbo[..r].copy_from_slice(&self.q[n..n + r]);
+            self.q[n..n + r].copy_from_slice(&board_end);
             // P3: board finish with its ledger, flow and string loss; the groups' string loss; commit
             for j in 0..r {
                 let k = n + j;

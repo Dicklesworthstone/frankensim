@@ -24,7 +24,7 @@ fn resistor(r: f64) -> MaterialResistor {
             },
             validity: ValidityDomain::unconstrained(),
             uncertainty: UncertaintyModel::Unstated,
-            interpolation: InterpolationPolicy::LinearInside,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
             observations: vec![],
             provenance: Provenance {
                 source: "synthetic motion circuit resistivity".into(),
@@ -112,7 +112,7 @@ pub(super) fn solve() -> ElectricalMotionSolve {
         },
         newton: NewtonKrylovConfig {
             absolute_tolerance: 1e-11,
-            relative_tolerance: 0.0,
+            relative_tolerance: 1e-14,
             forcing_minimum: 1e-4,
             linear_restart: 4,
             ..NewtonKrylovConfig::default()

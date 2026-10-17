@@ -43,8 +43,10 @@ fn valve() -> DynamicAperture {
         lay_triangles:(0..triangles).collect(),stiffness_pa_per_m_alpha:1e12,
         alpha:2.0,internal_loss_s_per_m:0.5,provenance:"authored scheduler test".into(),max_penetration_m:0.0002,
     };
-    DynamicAperture::from_plate_with_closure(p,closure,1.2,uniform().characteristic_impedance(1.2).unwrap(),
-        1.0/f64::from(RATE),SAMPLES,ApertureState{opening_m:h,opening_velocity_m_s:0.0}).unwrap()
+    // The opening and its Maxwell arms take the exact block (DEF-04).
+    DynamicAperture::from_plate_with_closure_and_propagator(p,closure,1.2,uniform().characteristic_impedance(1.2).unwrap(),
+        1.0/f64::from(RATE),SAMPLES,ApertureState{opening_m:h,opening_velocity_m_s:0.0},
+        fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh).unwrap()
         .with_plate_relaxation(PlateRelaxationSpec {
             regions:vec![PlateRelaxationRegion {triangles:(0..triangles).collect(),
                 material:GeneralizedMaxwell::new(4e9,vec![(2e9,0.001),(1e9,0.01)]).unwrap(),

@@ -12,11 +12,33 @@ use super::{
 };
 use crate::unilateral_contact::distributed::ApertureContactStep;
 use crate::bernoulli_aperture::moving::characteristic_pressure as solve_moving_aperture_wave;
+use crate::bernoulli_aperture::paired::{BladeState, ExactBlade};
+
+/// Linear propagation of the opening coordinate over one step.
+#[derive(Clone, Copy)]
+pub(crate) enum OpeningPropagator<'a> {
+    /// The original midpoint mechanics, unchanged.
+    Midpoint,
+    /// Exact zero-order hold of the mass/damping/stiffness block, with the
+    /// contact, pressure and this external force held over the step.
+    Exact {
+        /// Prepared exact maps of the opening coordinate and its Maxwell arms.
+        blade: &'a ExactBlade,
+        /// Held external force on the opening coordinate [N].
+        external_n: f64,
+        /// Accepted energy-normalized arm memories at the start of the step.
+        memory: &'a [f64],
+    },
+}
 
 #[derive(Clone, Copy)]
 struct Trial {
     residual: f64,
     scale: f64,
+    /// Rounding floor of the evaluated residual: the pressure impulse is a
+    /// difference of junction pressures, so its error follows their
+    /// magnitudes, not the (possibly cancelled) difference.
+    floor: f64,
     state: (f64, f64, f64),
 }
 
@@ -27,7 +49,9 @@ fn resolved(trial: Trial) -> bool {
 fn finish(trial: Trial) -> Result<(f64, f64, f64), AcousticRealizeError> {
     // Adjacent floating-point endpoints alone cannot establish convergence.
     // The equation and its scale are impulses, not pressure-scaled flows.
-    if trial.residual.abs() > 2e-11 * trial.scale.max(f64::MIN_POSITIVE) {
+    // Near rest the pressures nearly cancel; a residual inside the computed
+    // rounding floor is as resolved as the arithmetic allows.
+    if trial.residual.abs() > (2e-11 * trial.scale).max(trial.floor).max(f64::MIN_POSITIVE) {
         return Err(AcousticRealizeError::Reed {
             what: "implicit reed contact did not resolve the momentum balance",
         });
@@ -67,7 +91,7 @@ pub(super) fn step(
     lay: &Obstacle,
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
     step_with_opening(reed,rho,zc,p_minus,p_m,y,v,dt,u_body,lay,
-        |opening| Ok(opening.max(0.0)), None)
+        |opening| Ok(opening.max(0.0)), None, OpeningPropagator::Midpoint)
 }
 
 // Same nonlinear equation and solver; only the actual midpoint slit geometry
@@ -78,7 +102,15 @@ pub(crate) fn step_with_opening(
     y: f64, v: f64, dt: f64, u_body: f64, lay: &Obstacle,
     flow_opening: impl Fn(f64) -> Result<f64, AcousticRealizeError>,
     material_force: Option<&dyn Fn(f64) -> Result<f64, AcousticRealizeError>>,
+    propagator: OpeningPropagator<'_>,
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
+    if material_force.is_some() && matches!(propagator, OpeningPropagator::Exact { .. }) {
+        // The exact block already carries its Maxwell arms; a midpoint material
+        // force on top would count the same memory twice.
+        return Err(AcousticRealizeError::Reed {
+            what: "the exact opening block takes material memory as arms, not a midpoint force",
+        });
+    }
     if ![
         rho,
         zc,
@@ -113,27 +145,41 @@ pub(crate) fn step_with_opening(
     }
     let contact = ApertureContactStep::new(lay, y)
         .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
-    // The held-aperture solve is a predictor only. Even free flight must solve
-    // again: changing opening changes jet flow and hence the pressure load.
-    let free = super::step_massive_reed(
-        reed,
-        rho,
-        zc,
-        p_minus,
-        p_m,
-        y,
-        v,
-        dt,
-        u_body,
-        None,
-        ReedSolverMode::Strict,
-        &mut FastSolveStats::default(),
-    )?;
     let face = reed_pressure_face(reed);
     let (stiffness, damping) = reed_structural(reed);
     let half_dt = 0.5 * dt;
-    let mass_mid = reed.mass_kg + half_dt * damping + half_dt * half_dt * stiffness;
-    let rhs = reed.mass_kg * v - half_dt * stiffness * (y - reed.rest_opening_m);
+    let start = BladeState { displacement_m: y - reed.rest_opening_m, velocity_m_s: v };
+    // Both propagators share the impulse form mass_mid*v_mean - rhs = h*(Fc - A dp):
+    // midpoint's coefficients, or the exact map's mean velocity free + mobility*F
+    // rewritten with mass_mid = h/mobility and rhs = mass_mid*free.
+    let (mass_mid, rhs, predicted) = match propagator {
+        OpeningPropagator::Midpoint => {
+            // The held-aperture solve is a predictor only. Even free flight must
+            // solve again: changing opening changes jet flow and the pressure load.
+            let free = super::step_massive_reed(
+                reed,
+                rho,
+                zc,
+                p_minus,
+                p_m,
+                y,
+                v,
+                dt,
+                u_body,
+                None,
+                ReedSolverMode::Strict,
+                &mut FastSolveStats::default(),
+            )?;
+            (reed.mass_kg + half_dt * damping + half_dt * half_dt * stiffness,
+                reed.mass_kg * v - half_dt * stiffness * (y - reed.rest_opening_m),
+                f64::midpoint(v, free.2))
+        }
+        OpeningPropagator::Exact { blade, external_n, memory } => {
+            let (free, mobility) = blade.free_and_mobility(start, external_n, dt, memory);
+            let mass_mid = half_dt / mobility;
+            (mass_mid, mass_mid * free, free)
+        }
+    };
     if !mass_mid.is_finite() || mass_mid <= 0.0 || !rhs.is_finite() || !face.is_finite() {
         return Err(AcousticRealizeError::Reed {
             what: "implicit reed contact mechanics left the finite set",
@@ -160,15 +206,27 @@ pub(crate) fn step_with_opening(
         let inertial = mass_mid * velocity;
         let mut residual = inertial - rhs + pressure_impulse - contact_impulse;
         let mut scale = inertial.abs() + rhs.abs() + pressure_impulse.abs() + contact_impulse.abs();
+        // The closed-form junction and the pressure difference each cost a few
+        // roundings of their operands (8 eps of their magnitudes, bounded).
+        let pressure_magnitude = half_dt * face.abs() * (p_m.abs() + p_minus.abs() + outgoing.abs()
+            + (zc * (u_body + reed_swept_flow(face, velocity))).abs());
+        let mut floor = 8.0 * f64::EPSILON * (pressure_magnitude + scale);
         if let Some(restoring) = material_force {
             // Condensed material force uses this very candidate. No lagged
             // post-step stress correction and no change to the original path.
             let impulse = half_dt * restoring(next_y)?;
             residual += impulse;
             scale += impulse.abs();
+            floor += 8.0 * f64::EPSILON * impulse.abs();
         }
-        let next_v = 2.0 * velocity - v;
-        if ![residual, scale, outgoing, next_y, next_v]
+        let next_v = match propagator {
+            OpeningPropagator::Midpoint => 2.0 * velocity - v,
+            OpeningPropagator::Exact { blade, external_n, memory } => {
+                let dp = p_m - (outgoing + p_minus);
+                blade.end_velocity(start, external_n + force - face * dp, memory)
+            }
+        };
+        if ![residual, scale, floor, outgoing, next_y, next_v]
             .iter()
             .all(|x| x.is_finite())
         {
@@ -179,10 +237,11 @@ pub(crate) fn step_with_opening(
         Ok(Trial {
             residual,
             scale,
+            floor,
             state: (outgoing, next_y, next_v),
         })
     };
-    let mut velocity = f64::midpoint(v, free.2);
+    let mut velocity = predicted;
     let mut current = evaluate(velocity)?;
     if resolved(current) {
         return finish(current);

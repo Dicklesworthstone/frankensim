@@ -48,8 +48,10 @@ fn equal_opposite_heat_survives_zero_net_and_every_source_is_sampled() {
     assert_eq!(result.piston(), &old);
     assert_eq!(result.step().exchanged_heat_j, 0.0);
     assert_eq!(result.source()[0].port.id, 3);
-    assert_eq!(result.source()[0].heat_j, -0.1);
-    assert_eq!(result.source()[1].heat_j, 0.1);
+    // 2 W/K across the -100 K and +100 K port-to-gas differences, one step.
+    let dt = drive(0.0).duration_s;
+    assert!((result.source()[1].heat_j - 2.0 * 100.0 * dt).abs() <= 1e-15);
+    assert_eq!(result.source()[0].heat_j, -result.source()[1].heat_j);
     assert_eq!(result, solve(&[ports[1], ports[0]]));
     let missing = old.thermal_ports_candidate(drive(0.0), controls(), feedback_controls(), &ports, 2,
         |_, _| Err::<ConductanceSample<()>, _>("missing conductivity"), || false);

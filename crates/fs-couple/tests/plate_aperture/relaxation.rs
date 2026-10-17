@@ -18,8 +18,13 @@ fn spec(p:&PlateApertureReduction)->PlateRelaxationSpec {
     }],max_branches:64,max_dt_over_tau:0.1,max_angular_step:0.1}
 }
 fn base(p:PlateApertureReduction,z:f64,initial:ApertureState)->DynamicAperture {
+    // The opening and its Maxwell arms take the exact block (DEF-04).
+    base_with(p,z,initial,fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh)
+}
+fn base_with(p:PlateApertureReduction,z:f64,initial:ApertureState,
+    propagator:fs_couple::bernoulli_aperture::paired::BladePropagator)->DynamicAperture {
     let lay=Obstacle::new(vec![-1.0],1,1,vec![0.0],vec![1.0],0.0,2.0,"explicit no-contact control".into()).unwrap();
-    DynamicAperture::from_plate(p,1.2,z,DT,2048,initial,lay).unwrap()
+    DynamicAperture::from_plate_with_propagator(p,1.2,z,DT,2048,initial,lay,propagator).unwrap()
 }
 fn rest(p:&PlateApertureReduction)->ApertureState {ApertureState {opening_m:p.options().rest_opening_m,opening_velocity_m_s:0.0}}
 fn tube_spec()->UniformTubeSpec {
@@ -33,8 +38,9 @@ fn profiled(p:PlateApertureReduction)->DynamicAperture {
         lay_triangles:(0..p.chart().mesh.tris.len()).collect(),stiffness_pa_per_m_alpha:1e12,
         alpha:2.0,internal_loss_s_per_m:0.5,provenance:"synthetic nonuniform lay".into(),max_penetration_m:0.0002,
     };
-    DynamicAperture::from_plate_with_closure(p,closure,1.2,tube_spec().characteristic_impedance(1.2).unwrap(),
-        DT,2048,initial).unwrap().with_plate_relaxation(s,InitialApertureMemory::Unrelaxed).unwrap()
+    DynamicAperture::from_plate_with_closure_and_propagator(p,closure,1.2,tube_spec().characteristic_impedance(1.2).unwrap(),
+        DT,2048,initial,fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh).unwrap()
+        .with_plate_relaxation(s,InitialApertureMemory::Unrelaxed).unwrap()
 }
 fn near_scaled(a:f64,b:f64,scale:f64) {assert!((a-b).abs()<=2e-8*scale.max(1e-20),"{a:e} != {b:e}");}
 
@@ -66,7 +72,10 @@ fn actual_regional_bending_projection_excludes_membrane_prestress() {
 fn coupled_junction_matches_full_phs_material_mechanics_without_a_lagged_force() {
     let p=plate(0.0);let s=spec(&p);let h=p.options().rest_opening_m;
     let initial=ApertureState {opening_m:h-3e-6,opening_velocity_m_s:0.0};
-    let mut actual=base(p.clone(),1e6,initial).with_plate_relaxation(s,InitialApertureMemory::Unrelaxed).unwrap();
+    // The reference below is the full midpoint (Gonzalez) PHS owner, so this
+    // equivalence is a Midpoint statement by construction.
+    let mut actual=base_with(p.clone(),1e6,initial,fs_couple::bernoulli_aperture::paired::BladePropagator::Midpoint)
+        .with_plate_relaxation(s,InitialApertureMemory::Unrelaxed).unwrap();
     let arms=actual.relaxation().unwrap().branches().iter().map(|a|fs_phs::RelaxationBranch {
         projection:vec![1.0,0.0],stiffness:a.stiffness,relaxation_time_s:a.relaxation_time_s,
     }).collect();

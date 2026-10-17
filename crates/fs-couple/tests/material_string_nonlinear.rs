@@ -81,7 +81,7 @@ fn bonded_layers_and_torsion_survive_in_one_joint_body_prefix_without_false_norm
         let src=MaterialStringSource::Concentric {template:template(3),section,prestress:StringPrestress::FixedTension(20.0)}
             .with_torsion("G","eta_s",2).unwrap();
         let mut state=vec![ModalAcousticState::default();5];state[3].velocity_m_sqrt_kg_per_s=1e-5;
-        let image=src.into_nonlinear(cx,gas(),48_000,0.2,state,gate).unwrap();
+        let image=src.into_nonlinear(cx,gas(),TORSION_RATE_HZ,0.2,state,gate).unwrap();
         assert_eq!(image.mode_count(),5);assert_eq!(image.bodies().len(),2);
         assert_eq!(image.axial_rigidity_n(),expected.axial_stiffness_n());
         let MaterialStringSource::WithTorsion(t)=image.source() else {panic!("lost twist source")};
@@ -89,7 +89,7 @@ fn bonded_layers_and_torsion_survive_in_one_joint_body_prefix_without_false_norm
         let normal=image.transverse_shape(0.27).unwrap();let surface=image.surface_shape(0.27).unwrap();
         assert_eq!(normal[..3],surface[..3]);assert_eq!(&normal[3..],&[0.0;2]);
         assert!(surface[3..].iter().all(|x|x.abs()>0.0));
-        let mut run=ImpactSystem::new(image.bodies().to_vec(),vec![],vec![],vec![],config()).unwrap().prepare_analytic().unwrap();
+        let mut run=ImpactSystem::new(image.bodies().to_vec(),vec![],vec![],vec![],config_at(TORSION_RATE_HZ)).unwrap().prepare_analytic().unwrap();
         for _ in 0..48 {run.step(&[0.0;5],gate).unwrap();}
         assert!(run.string_observation(0).is_some());assert!(run.string_observation(1).is_none());
         assert!(run.state()[6..].iter().any(|x|*x!=0.0));

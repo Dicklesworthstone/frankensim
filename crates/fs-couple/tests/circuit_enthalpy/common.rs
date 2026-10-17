@@ -46,7 +46,9 @@ pub fn config() -> CircuitEnthalpySolve {
     CircuitEnthalpySolve {maximum_cells:8,maximum_circuit_trials:1000,maximum_newton_iterations:24,
         difference_step_j:1e-3,cell_energy_tolerance_j:1e-6,thermal_energy_tolerance_j:1e-6,
         total_energy_tolerance_j:2e-6,circuit:MaterialCircuitSolve {energy_tolerance_j:1e-8,power_tolerance_w:1e-8},
-        newton:NewtonKrylovConfig {absolute_tolerance:1e-8,relative_tolerance:0.0,
+        // fs-solver admits relative tolerances in (0,1]; 1e-14 leaves the
+        // absolute 1e-8 J criterion in control.
+        newton:NewtonKrylovConfig {absolute_tolerance:1e-8,relative_tolerance:1e-14,
             forcing_minimum:1e-4,linear_restart:8,..NewtonKrylovConfig::default()} }
 }
 pub const DESTINATIONS: [ResistorCell;2] = [

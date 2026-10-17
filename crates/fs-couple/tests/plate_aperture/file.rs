@@ -26,8 +26,10 @@ fn complete_mesh_material_and_gesture_file_matches_independent_physical_construc
     let gas=GasState::try_new_moist_air(293.15,101325.0,0.0).unwrap();
     let spec=UniformTubeSpec{length_m:0.25,radius_m:0.007,sound_speed_m_s:gas.sound_speed,
         terminal_reflection:-0.8,max_length_error_m:0.002,max_wave_memory_bytes:1048576};
-    let valve=DynamicAperture::from_plate_with_closure(plate,closure,gas.density,spec.characteristic_impedance(gas.density).unwrap(),
-        1.0/96000.0,9602,ApertureState{opening_m:0.0002,opening_velocity_m_s:0.0}).unwrap()
+    // The file path declares the exact opening block (DEF-04); match it.
+    let valve=DynamicAperture::from_plate_with_closure_and_propagator(plate,closure,gas.density,spec.characteristic_impedance(gas.density).unwrap(),
+        1.0/96000.0,9602,ApertureState{opening_m:0.0002,opening_velocity_m_s:0.0},
+        fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh).unwrap()
         .with_plate_relaxation(PlateRelaxationSpec{regions:vec![PlateRelaxationRegion{triangles:(0..24).collect(),
             material:GeneralizedMaxwell::new(4e9,vec![(2e9,0.001),(1e9,0.01)]).unwrap(),poisson_ratio:0.3,band_hz:(0.0,10000.0),
             provenance:"independent supplied material".into()}],max_branches:64,max_dt_over_tau:0.1,max_angular_step:0.5},InitialApertureMemory::Relaxed).unwrap();

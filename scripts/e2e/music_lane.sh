@@ -81,9 +81,10 @@ if [[ "$FIXTURE" == "reed-flanged-baffled" ]]; then
 import json,sys
 rows=[]
 for line in open(sys.argv[1]):
-    line=line.strip()
-    if not line.startswith("{"): continue
-    row=json.loads(line)
+    # libtest --nocapture prints a test first row after its "test name ... " prefix.
+    start=line.find("{\"case\"")
+    if start<0: continue
+    row=json.loads(line[start:].strip())
     if row.get("case")=="baffled_pressure_on_axis_piston": rows.append(row)
 assert len(rows)==3 and {r["rung"] for r in rows}=={2,10,100}
 assert all(r["verdict"]=="pass" and r["tol"]==1e-3 and 0<=r["err"]<=1e-3 for r in rows)
