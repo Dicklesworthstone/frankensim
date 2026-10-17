@@ -4,7 +4,7 @@
 //! volume through fs-material. Equilibrium stiffness is assembled ONCE; each
 //! original factor row becomes a retained internal coordinate z with energy
 //! z^2/2. With displacement u, momentum p and diagonal inertia M:
-//! u' = M^-1 p, p' = -K_eq u - sum A_j^T z_j + force,
+//! u' = M^-1 p, p' = -K_eq u - C_kv M^-1 p - sum A_j^T z_j + force,
 //! z_j' = A_j M^-1 p - z_j/tau_j.
 //! These are the original constitutive equations, not scalar modal damping.
 //!
@@ -116,7 +116,12 @@ impl TensorMaterialBody {
         let mut z=2*n;
         for point in &points {
             poll(gate)?;
-            for i in 0..n {for k in 0..n {q[i*states+k]+=point.equilibrium_stiffness()[i*n+k];}}
+            for i in 0..n {for k in 0..n {
+                q[i*states+k]+=point.equilibrium_stiffness()[i*n+k];
+                // grad H with respect to momentum is velocity. The complete
+                // projected Kelvin matrix dissipates v^T C_kv v, once only.
+                r[(n+i)*states+n+k]+=point.viscosity_matrix()[i*n+k];
+            }}
             for branch in point.branches() {
                 let rate=branch.relaxation_time_s().recip();
                 if !rate.is_finite() || rate<=0.0 {return Err(bad("material relaxation rate is unrepresentable"));}
@@ -249,3 +254,6 @@ impl TensorMaterialHistory<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod kelvin_tests;

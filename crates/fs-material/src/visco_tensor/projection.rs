@@ -8,7 +8,8 @@ use super::*;
 pub struct TensorProjectionBudget {
     /// Maximum displacement coordinates, in 1..=256.
     pub max_coordinates: usize,
-    /// Bound on (branches+1)*36*coordinates + 6*coordinates^2 scalar products.
+    /// Bound on (branches+1+kv)*36*n + (1+kv)*6*n^2 scalar products,
+    /// where kv=1 when the material supplies a Kelvin viscosity, otherwise 0.
     pub max_scalar_terms: usize,
 }
 
@@ -36,6 +37,7 @@ pub struct ProjectedTensorProny {
     columns: Vec<Voigt>,
     volume_m3: f64,
     equilibrium: Vec<f64>,
+    viscosity: Vec<f64>,
     branches: Vec<ProjectedPronyBranch>,
 }
 impl TensorProny {
@@ -58,8 +60,9 @@ impl TensorProny {
             || !volume_m3.is_finite() || volume_m3 <= 0.0 || columns.iter().any(|v| !finite(v)) {
             return Err(invalid("projection needs bounded finite strain columns and positive volume"));
         }
-        let work = (self.branches().len()+1).checked_mul(36).and_then(|v| v.checked_mul(n))
-            .and_then(|v| n.checked_mul(n).and_then(|w| w.checked_mul(6)).and_then(|w| v.checked_add(w)))
+        let tensors = 1 + usize::from(self.kv_factor.is_some());
+        let work = (self.branches().len()+tensors).checked_mul(36).and_then(|v| v.checked_mul(n))
+            .and_then(|v| n.checked_mul(n).and_then(|w| w.checked_mul(6*tensors)).and_then(|w| v.checked_add(w)))
             .ok_or_else(|| invalid("tensor projection work overflow"))?;
         if work > budget.max_scalar_terms { return Err(invalid("tensor projection exceeds scalar-work budget")); }
         let volume_root = det::sqrt(volume_m3);
@@ -84,6 +87,11 @@ impl TensorProny {
                 tau_s: branch.tau_s,
             });
         }
+        let viscous_rows = self.kv_factor.as_ref().map(|l| {
+            let rows = core::array::from_fn(|i|core::array::from_fn(|j|l[j][i]));
+            project(&rows)
+        }).transpose()?;
+        let mut viscosity = vec![0.0; n*n];
         let mut equilibrium = vec![0.0; n*n];
         for i in 0..n {
             poll(&mut cancelled)?;
@@ -91,11 +99,16 @@ impl TensorProny {
                 let value = equilibrium_rows.iter().fold(0.0, |s, row| s+row[i]*row[j]);
                 if !value.is_finite() { return Err(invalid("projected equilibrium stiffness overflow")); }
                 equilibrium[i*n+j] = value; equilibrium[j*n+i] = value;
+                if let Some(rows) = &viscous_rows {
+                    let value = rows.iter().fold(0.0,|s,row|s+row[i]*row[j]);
+                    if !value.is_finite() {return Err(invalid("projected Kelvin viscosity overflow"));}
+                    viscosity[i*n+j] = value; viscosity[j*n+i] = value;
+                }
             }
         }
         poll(&mut cancelled)?;
         Ok(ProjectedTensorProny { model:self.clone(), columns:columns.to_vec(), volume_m3,
-            equilibrium, branches })
+            equilibrium, viscosity, branches })
     }
 }
 impl ProjectedTensorProny {
@@ -109,6 +122,9 @@ impl ProjectedTensorProny {
     pub fn strain_columns(&self) -> &[Voigt] { &self.columns }
     /// Full symmetric row-major equilibrium stiffness in the caller's coordinates.
     pub fn equilibrium_stiffness(&self) -> &[f64] { &self.equilibrium }
+    /// Full symmetric Kelvin damping matrix [N s/m] in the same coordinates.
+    /// Absent viscosity is exactly zero; signed cross terms are never dropped.
+    pub fn viscosity_matrix(&self) -> &[f64] { &self.viscosity }
     /// All volume-scaled memory factors in original material branch order.
     pub fn branches(&self) -> &[ProjectedPronyBranch] { &self.branches }
 

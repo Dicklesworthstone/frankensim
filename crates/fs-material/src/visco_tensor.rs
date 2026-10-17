@@ -257,6 +257,7 @@ impl TensorProny {
     }
     /// Exact endpoint stress derivative for a prescribed linear strain ramp.
     /// Returned tensor uses the crate's tensor-shear Voigt convention.
+    /// A nonzero Kelvin viscosity requires positive dt; its tangent is C_kv/dt.
     pub fn tangent(&self, dt_s: f64) -> Result<Tangent6> {
         if !dt_s.is_finite() || dt_s < 0.0 {
             return Err(invalid("time step must be finite and nonnegative"));
@@ -270,6 +271,10 @@ impl TensorProny {
                     c[i][j] += b * branch.c_pa[i][j];
                 }
             }
+        }
+        if let Some(kv) = self.kv_pa_s().filter(|c| c.iter().flatten().any(|v| *v != 0.0)) {
+            if dt_s == 0.0 { return Err(invalid("Kelvin viscosity has no finite instantaneous strain tangent")); }
+            for i in 0..6 { for j in 0..6 { c[i][j] += kv[i][j]/dt_s; } }
         }
         for i in 0..6 {
             for j in 0..6 {
@@ -315,8 +320,10 @@ impl TensorPronyHistory {
     pub fn work(&self) -> f64 { self.work }
     /// Total generated heat density [J/m^3].
     pub fn dissipated(&self) -> f64 { self.heat }
-    /// Advance a prescribed strain ramp. dt=0 means an elastic jump with zero
-    /// heat. Cancellation/invalid input/overflow publishes no partial state.
+    /// Advance a prescribed strain ramp. Without Kelvin viscosity, dt=0 is an
+    /// elastic jump. Nonzero Kelvin viscosity refuses instantaneous strain
+    /// changes; positive-duration ramps include its stress and dashpot heat.
+    /// Cancellation/invalid input/overflow publishes no partial state.
     pub fn advance(&mut self, strain: Voigt, dt_s: f64,
         mut cancelled: impl FnMut() -> bool) -> Result<TensorPronyStep> {
         poll(&mut cancelled)?;
@@ -349,6 +356,28 @@ impl TensorPronyHistory {
             }
             stored += 0.5*dot(q,q); transpose_add(&gram_rows,q,&mut stress);
         }
+        if let Some(kv) = self.model.kv_pa_s().filter(|c| c.iter().flatten().any(|v| *v != 0.0)) {
+            if dt_s == 0.0 {
+                if delta.iter().any(|v| *v != 0.0) {
+                    return Err(invalid("Kelvin viscosity requires positive time for a strain change"));
+                }
+            } else {
+                let rate = delta.map(|v| v/dt_s);
+                let viscous = apply(kv,&rate);
+                let factor = self.model.kv_factor.as_ref()
+                    .ok_or_else(||invalid("missing admitted Kelvin viscosity factor"))?;
+                // Independent nonnegative integral dt * |L^T strain_rate|^2.
+                // Kelvin viscosity stores no energy and has no memory state.
+                let mut kelvin_heat = 0.0;
+                for i in 0..6 {
+                    stress[i] += viscous[i];
+                    let channel = (0..6).fold(0.0,|s,k|s+factor[k][i]*rate[k]);
+                    kelvin_heat += (dt_s*channel)*channel;
+                }
+                work += dot(&viscous,&delta);
+                heat += kelvin_heat;
+            }
+        }
         let residual = work-(stored-self.stored)-heat;
         let total_work=self.work+work; let total_heat=self.heat+heat;
         if !finite(&stress) || ![stored,work,heat,residual,total_work,total_heat].iter().all(|v|v.is_finite())
@@ -370,3 +399,6 @@ fn ramp(q0: f64, delta: f64, r: f64) -> (f64, f64, f64) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod kelvin_tests;
