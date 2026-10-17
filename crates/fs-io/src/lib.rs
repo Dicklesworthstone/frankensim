@@ -21,6 +21,7 @@ pub mod obj;
 pub mod ply;
 pub mod power_table;
 pub mod quarantine;
+pub mod representation;
 pub mod selection;
 pub mod step;
 pub mod step_faceted;
@@ -62,6 +63,12 @@ pub use quarantine::{
     ImportPromotionReceipt, ImportReceipt, ImportRefusalThresholds, IntersectionCensusEvidence,
     IntersectionInspection, PromotionRefusal, Quarantined, census_with_policy, promote,
     promote_with_policy,
+};
+pub use representation::{
+    DeclaredLoop, FRAME_TOLERANCE, Frame, LengthUnit, MAX_DECLARED_LOOPS, MAX_PARTS, MatchedLoop,
+    MaterialRef, PartMap, PartSelector, REPRESENTATION_SEMANTICS_VERSION, ReferenceState,
+    Representation, RepresentationDeclaration, RepresentationReceipt, RepresentationRefusal,
+    ThicknessField, admit_representation,
 };
 pub use selection::{
     AssignmentLimits, AssignmentReceipt, AssignmentRefusal, AssignmentReport, AssignmentRequest,

@@ -836,7 +836,7 @@ fn distance(a: Point3, b: Point3) -> f64 {
     norm(subtract(a, b))
 }
 
-fn simple_boundary_loops(
+pub(crate) fn simple_boundary_loops(
     soup: &Soup,
     poll_stride: usize,
     cx: &Cx<'_>,
