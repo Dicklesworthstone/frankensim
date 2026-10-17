@@ -147,6 +147,18 @@ mod common_material_acquisition {
         ] {
             let (species, pack) = compile_thermochemical_species(slug);
             let model = standard_state_from_packs(&species, &pack).unwrap();
+            // NASA/TP-2002-211556 Appendix D: these five species retain the
+            // 200..1000 K and 1000..6000 K branches. Portable cards are stored
+            // by hash; the adapter must restore physical temperature order.
+            assert_eq!(
+                model
+                    .regions()
+                    .iter()
+                    .map(|r| (r.temperature_min().value(), r.temperature_max().value()))
+                    .collect::<Vec<_>>(),
+                vec![(200.0, 1000.0), (1000.0, 6000.0)],
+                "{slug}"
+            );
             let reference_h = model
                 .evaluate(Temperature::new(298.15))
                 .unwrap()
@@ -629,7 +641,10 @@ mod common_material_acquisition {
                 } else {
                     !density_missing && !rose
                 };
-                let at = QueryPoint::new().with("moisture_content", 12.0).unwrap();
+                // FPL-GTR-282 ch5 tables specify 12 percent MC. The source
+                // compiler normalizes '%' by 0.01, so QueryPoint takes 0.12.
+                // Keep the exact 12/18 resolve partition and all physics gates.
+                let at = QueryPoint::new().with("moisture_content", 0.12).unwrap();
                 let result = resolve_orthotropic_elastic_state_point_from_reference_ratios(
                     card.card(),
                     &at,
@@ -641,6 +656,23 @@ mod common_material_acquisition {
                 match result {
                     Ok(state) => {
                         assert!(wanted, "unexpected {set_name} success for {slug}");
+                        for moisture in [0.11, 0.13, 12.0] {
+                            let outside = QueryPoint::new()
+                                .with("moisture_content", moisture)
+                                .unwrap();
+                            assert!(
+                                resolve_orthotropic_elastic_state_point_from_reference_ratios(
+                                    card.card(),
+                                    &outside,
+                                    MaterialPropertySelection::SingleClaimOnly,
+                                    0.01,
+                                    set,
+                                    PoissonReciprocityRule::MajorRatios
+                                )
+                                .is_err(),
+                                "{slug}/{set_name}: MC={moisture}"
+                            );
+                        }
                         resolved_counts[axis] += 1;
                         let v = |name| state.resolved().property(name).unwrap().value_si();
                         let el = v(REFERENCE_YOUNG_MODULUS_PROPERTY);
