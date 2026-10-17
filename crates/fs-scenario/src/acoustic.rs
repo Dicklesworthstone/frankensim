@@ -444,8 +444,24 @@ pub struct HelmholtzCavity {
     pub volume_m3: f64,
     /// Neck radius [m].
     pub neck_radius_m: f64,
-    /// Physical neck length [m] (end correction is applied in the pHS).
+    /// Physical neck length [m] (end corrections are applied in the pHS).
     pub neck_length_m: f64,
+    /// Baffle condition where the neck opens into the cavity.
+    pub inner_end: NeckEnd,
+    /// Baffle condition where the neck opens into the exterior.
+    pub outer_end: NeckEnd,
+}
+
+/// Declared baffle condition of one Helmholtz neck end (DEF-09). Each end's
+/// correction follows from it; it is never inferred from geometry. A sound
+/// hole cut in a plate is flanged on both sides; a bottle's free neck is
+/// flanged inside and unflanged outside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeckEnd {
+    /// The opening is surrounded by a large wall (infinite baffle).
+    Flanged,
+    /// The opening ends a free tube (thin wall, no baffle).
+    Unflanged,
 }
 
 /// One compact modal monopole (a body mode, a panel, a loudspeaker).

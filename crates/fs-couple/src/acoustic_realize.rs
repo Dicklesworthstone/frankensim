@@ -2148,26 +2148,17 @@ fn helmholtz_flow_cavity(
     cavity: HelmholtzCavity,
     gas: &GasState,
 ) -> Result<fs_phs::PortHamiltonian, AcousticRealizeError> {
-    use fs_phs::{MouthFlange, compact_radiation_impedance, helmholtz_resonator_flow};
-    let pi = core::f64::consts::PI;
-    let neck_area = pi * cavity.neck_radius_m * cavity.neck_radius_m;
-    let l_eff = cavity.neck_length_m + 2.0 * (8.0 / (3.0 * pi)) * cavity.neck_radius_m;
-    let omega0 = gas.sound_speed * (neck_area / (cavity.volume_m3 * l_eff)).sqrt();
-    let r_rad = compact_radiation_impedance(
-        gas.density,
-        gas.sound_speed,
-        cavity.neck_radius_m,
-        omega0,
-        MouthFlange::Unflanged,
-    )
-    .map_or(0.0, |(r, _)| r);
-    helmholtz_resonator_flow(
+    // One owner (DEF-09): the declared ends set both end corrections and the
+    // outer radiation load; the Bessel neck loss joins it at the resonance.
+    let resistance = crate::cavity_modal::resonance_neck_resistance(&cavity, gas)?;
+    fs_phs::helmholtz_resonator_flow(
         cavity.volume_m3,
         cavity.neck_radius_m,
         cavity.neck_length_m,
         gas.density,
         gas.sound_speed,
-        r_rad,
+        resistance,
+        crate::cavity_modal::neck_ends(&cavity),
     )
     .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
 }

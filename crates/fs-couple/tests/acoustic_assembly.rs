@@ -2508,6 +2508,8 @@ mod material_plate_tests {
                         volume_m3: 0.008,
                         neck_radius_m: 0.02,
                         neck_length_m: 0.03,
+                        inner_end: fs_scenario::NeckEnd::Flanged,
+                        outer_end: fs_scenario::NeckEnd::Flanged,
                         gas,
                         relative_humidity: 0.0,
                     };
@@ -2568,6 +2570,8 @@ mod material_plate_tests {
             volume_m3: 0.008,
             neck_radius_m: 0.02,
             neck_length_m: 0.03,
+            inner_end: fs_scenario::NeckEnd::Flanged,
+            outer_end: fs_scenario::NeckEnd::Flanged,
             gas: GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 101_325.0).unwrap(),
             relative_humidity: 0.0,
         };
@@ -3249,6 +3253,8 @@ mod material_plate_tests {
             volume_m3: 0.016,
             neck_radius_m: 0.02,
             neck_length_m: 0.03,
+            inner_end: fs_scenario::NeckEnd::Flanged,
+            outer_end: fs_scenario::NeckEnd::Flanged,
         });
         let regions: Vec<_> =
             regional_inputs(&chart.mesh, &material, Thickness::FixedThickness(0.003))
@@ -3679,6 +3685,8 @@ mod material_plate_tests {
             volume_m3: 0.016,
             neck_radius_m: 0.02,
             neck_length_m: 0.03,
+            inner_end: fs_scenario::NeckEnd::Flanged,
+            outer_end: fs_scenario::NeckEnd::Flanged,
         });
         for input in [inputs, reversed, split] {
             let resolved = compile_plate_material_chart(
@@ -3917,6 +3925,8 @@ mod material_plate_tests {
                     volume_m3: 0.016,
                     neck_radius_m: 0.02,
                     neck_length_m: 0.03,
+                    inner_end: fs_scenario::NeckEnd::Flanged,
+                    outer_end: fs_scenario::NeckEnd::Flanged,
                 });
             }
             assembly.plate = Some(specimen.plate());
@@ -3965,6 +3975,8 @@ mod material_plate_tests {
             volume_m3: 0.016,
             neck_radius_m: 0.02,
             neck_length_m: 0.03,
+            inner_end: fs_scenario::NeckEnd::Flanged,
+            outer_end: fs_scenario::NeckEnd::Flanged,
         });
         for variant in 0..5 {
             let material = match variant {
@@ -4659,6 +4671,8 @@ fn helmholtz_cavity_changes_the_plate_waveform() {
         volume_m3: 0.02,
         neck_radius_m: 0.02,
         neck_length_m: 0.03,
+        inner_end: fs_scenario::NeckEnd::Flanged,
+        outer_end: fs_scenario::NeckEnd::Flanged,
     });
     let a = realize_assembly(&bare).expect("free plate");
     let b = realize_assembly(&boxed).expect("cavity");
@@ -4753,6 +4767,8 @@ fn moving_end_with_cavity_is_a_three_phs_clock() {
         volume_m3: 0.016,
         neck_radius_m: 0.02,
         neck_length_m: 0.03,
+        inner_end: fs_scenario::NeckEnd::Flanged,
+        outer_end: fs_scenario::NeckEnd::Flanged,
     });
     a.duration_s = 0.04;
     let with = realize_assembly(&a).expect("three-pHS");

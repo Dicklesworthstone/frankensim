@@ -137,6 +137,7 @@ fn cavity(volume: f64, gas: GasState) -> fs_couple::bowed_string::runtime::recip
     fs_couple::bowed_string::runtime::reciprocal::plate::MaterialBodyCavity {
         cavity: HelmholtzModalCavity::new(fs_scenario::HelmholtzCavity {
             volume_m3: volume, neck_radius_m: 0.01, neck_length_m: 0.02,
+            inner_end: fs_scenario::NeckEnd::Flanged, outer_end: fs_scenario::NeckEnd::Flanged,
         }, gas, CavityNeckLoss::Resistance(100.0)).unwrap(),
         modal_budget: ModalAcousticTimeBudget::audible_reference(), listener_m: 1.0,
     }

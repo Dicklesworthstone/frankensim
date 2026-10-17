@@ -19,20 +19,72 @@
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel};
 use crate::render::schedule::force::coupled::{ModalAttachment, ModalConnection, ModalCouplingError};
+use fs_duct::LossModel;
 use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
-use fs_scenario::HelmholtzCavity;
+use fs_scenario::{HelmholtzCavity, NeckEnd};
 
 /// Explicit loss choice, separate from the cavity's reversible storage.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CavityNeckLoss {
     /// Constant acoustic resistance [Pa s/m^3]. Zero is the lossless reference.
-    /// This is caller-authored data, not an inferred viscothermal spectrum.
+    /// Caller-authored data, admitted only for named test fixtures (BR-04);
+    /// product paths use [`CavityNeckLoss::RadiationAtResonance`].
     Resistance(f64),
-    /// Existing fs-phs compact radiation resistance evaluated at the isolated
-    /// Helmholtz frequency. It is NOT broadband radiation impedance. The neck
-    /// end correction remains the original Helmholtz owner's, counted once.
-    RadiationAtResonance(fs_phs::MouthFlange),
+    /// The declared outer end's fs-phs compact radiation resistance plus the
+    /// neck's exact fs-duct Bessel viscothermal resistance, both frozen at the
+    /// isolated Helmholtz frequency. It is NOT broadband: M2.4-W3b retires
+    /// the frozen value from acceptance. End corrections stay the Helmholtz
+    /// owner's, counted once.
+    RadiationAtResonance,
+}
+
+/// fs-phs terminations of a declared cavity neck (DEF-09).
+#[must_use]
+pub fn neck_ends(geometry: &HelmholtzCavity) -> fs_phs::NeckEnds {
+    let flange = |end| match end {
+        NeckEnd::Flanged => fs_phs::MouthFlange::Flanged,
+        NeckEnd::Unflanged => fs_phs::MouthFlange::Unflanged,
+    };
+    fs_phs::NeckEnds { inner: flange(geometry.inner_end), outer: flange(geometry.outer_end) }
+}
+
+/// Series viscothermal resistance [Pa s/m^3] of a lumped neck at `omega`:
+/// `Re(-i k Zc) L` of fs-duct's exact Bessel wave (`e^{-iωt}`, mass-like
+/// `Im < 0`). It tends to Poiseuille `8 μ L / (π a⁴)` at small shear number.
+///
+/// # Errors
+/// The duct owner's refusal, or a negative/non-finite result.
+pub fn neck_viscothermal_resistance(gas: &GasState, radius_m: f64, length_m: f64, omega: f64)
+    -> Result<f64, AcousticRealizeError>
+{
+    let wave = fs_duct::segment_wave(gas, radius_m, omega, LossModel::Bessel)
+        .map_err(AcousticRealizeError::Duct)?;
+    let resistance = (C64::new(0.0, -1.0) * wave.wavenumber * wave.characteristic_impedance).re
+        * length_m;
+    if !(resistance >= 0.0 && resistance.is_finite()) {
+        return Err(invalid("neck viscothermal resistance must be finite and nonnegative"));
+    }
+    Ok(resistance)
+}
+
+/// Total neck damper of a declared cavity at its isolated resonance: the
+/// outer end's compact radiation resistance plus the Bessel neck loss. A
+/// mouth beyond the compact fit's `ka = 1` refuses; nothing is swallowed.
+///
+/// # Errors
+/// Helmholtz admission, the radiation fit's refusal or the duct owner's.
+pub fn resonance_neck_resistance(geometry: &HelmholtzCavity, gas: &GasState)
+    -> Result<f64, AcousticRealizeError>
+{
+    let ends = neck_ends(geometry);
+    let phs = |e: fs_phs::PhsError| AcousticRealizeError::Nonlinear(e.to_string());
+    let omega = fs_phs::helmholtz_natural_frequency(geometry.volume_m3, geometry.neck_radius_m,
+        geometry.neck_length_m, gas.density, gas.sound_speed, ends).map_err(phs)?;
+    let (radiation, _) = fs_phs::compact_radiation_impedance(gas.density, gas.sound_speed,
+        geometry.neck_radius_m, omega, ends.outer).map_err(phs)?;
+    Ok(radiation + neck_viscothermal_resistance(gas, geometry.neck_radius_m,
+        geometry.neck_length_m, omega)?)
 }
 
 /// Original physical inputs and their energy-equivalent modal coefficients.
@@ -65,17 +117,23 @@ impl HelmholtzModalCavity {
             .iter().any(|x| !x.is_finite() || *x <= 0.0) {
             return Err(invalid("modal cavity requires finite positive volume and neck geometry"));
         }
+        let ends = neck_ends(&geometry);
         let source = match loss {
             CavityNeckLoss::Resistance(r) => {
                 if !r.is_finite() || r < 0.0 {
                     return Err(invalid("cavity acoustic resistance must be finite and nonnegative"));
                 }
                 fs_phs::helmholtz_resonator(geometry.volume_m3, geometry.neck_radius_m,
-                    geometry.neck_length_m, gas.density, gas.sound_speed, r)
+                    geometry.neck_length_m, gas.density, gas.sound_speed, r, ends)
             }
-            CavityNeckLoss::RadiationAtResonance(flange) => {
+            CavityNeckLoss::RadiationAtResonance => {
+                let omega = fs_phs::helmholtz_natural_frequency(geometry.volume_m3,
+                    geometry.neck_radius_m, geometry.neck_length_m, gas.density,
+                    gas.sound_speed, ends).map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+                let neck = neck_viscothermal_resistance(&gas, geometry.neck_radius_m,
+                    geometry.neck_length_m, omega)?;
                 fs_phs::helmholtz_resonator_radiating(geometry.volume_m3, geometry.neck_radius_m,
-                    geometry.neck_length_m, gas.density, gas.sound_speed, flange)
+                    geometry.neck_length_m, gas.density, gas.sound_speed, ends, neck)
             }
         }.map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         let q = source.effort(&[1.0, 0.0]);

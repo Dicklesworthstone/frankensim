@@ -74,6 +74,11 @@ const NX: usize = 12;
 const NY: usize = 10;
 const CAVITY_M3: f64 = 0.0135;
 const HOLE_RADIUS: f64 = 0.043;
+/// The sound hole is cut through the top plate: flanged on both sides (DEF-09).
+const SOUND_HOLE: fs_phs::NeckEnds = fs_phs::NeckEnds {
+    inner: fs_phs::MouthFlange::Flanged,
+    outer: fs_phs::MouthFlange::Flanged,
+};
 const TOP_H: f64 = 0.0029;
 const BACK_H: f64 = 0.0024;
 
@@ -275,6 +280,7 @@ fn composed_guitar() -> GuitarBody {
         CAVITY_M3,
         HOLE_RADIUS,
         TOP_H,
+        SOUND_HOLE,
         AcousticMedium::air(),
         0.02,
         2 * n_nodes,
@@ -441,6 +447,7 @@ fn gt_001_composed_triad_vs_carcagno() {
             CAVITY_M3,
             HOLE_RADIUS,
             TOP_H,
+            SOUND_HOLE,
             AcousticMedium::air(),
             0.02,
             areas.len(),

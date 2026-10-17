@@ -103,8 +103,11 @@ impl Spec {
             "none" => None,
             "neck" => {
                 modes += 1;
+                // The `neck` record predates DEF-09: a sound hole through the
+                // body's own plate, declared flanged at both ends.
                 let description = HelmholtzCavity { volume_m3: row.positive()?, neck_radius_m: row.positive()?,
-                    neck_length_m: row.positive()? };
+                    neck_length_m: row.positive()?, inner_end: fs_scenario::NeckEnd::Flanged,
+                    outer_end: fs_scenario::NeckEnd::Flanged };
                 let resistance = row.scalar()?; let listener_m = row.positive()?;
                 Some(MaterialBodyCavity { cavity: HelmholtzModalCavity::new(description, gas,
                     CavityNeckLoss::Resistance(resistance))?, modal_budget: modal_budget(), listener_m })

@@ -13,10 +13,7 @@ use crate::air_path::{GasAbsorptionModel, absorb_pressure_history_with_model};
 use crate::thin_plate::certified_radiators;
 use fs_material::gas::GasState;
 use fs_phs::linear_exact::{LinearPropagator, LinearSplitBudget, split_quadratic, step_split};
-use fs_phs::{
-    MouthFlange, PortHamiltonian, QuadraticStorage, compact_radiation_impedance,
-    helmholtz_resonator_flow, transformer,
-};
+use fs_phs::{PortHamiltonian, QuadraticStorage, helmholtz_resonator_flow, transformer};
 
 /// Typed refusal of the plate–cavity clock.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,8 +57,12 @@ pub struct PlateCavitySpec {
     pub volume_m3: f64,
     /// Neck radius [m].
     pub neck_radius_m: f64,
-    /// Neck length [m] (end correction is applied inside the pHS).
+    /// Neck length [m] (end corrections are applied inside the pHS).
     pub neck_length_m: f64,
+    /// Baffle condition where the neck opens into the cavity.
+    pub inner_end: fs_scenario::NeckEnd,
+    /// Baffle condition where the neck opens into the exterior.
+    pub outer_end: fs_scenario::NeckEnd,
     /// Admitted ambient state used consistently by the cavity, radiation,
     /// observer and propagation path. Plate temperature is independent.
     pub gas: GasState,
@@ -185,25 +186,24 @@ fn realize_with_absorption(
     }
     let plate = plate_force_and_flow(&spec.omegas, &spec.zetas, &spec.drive, &spec.areas)
         .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
-    let pi = core::f64::consts::PI;
-    let neck_area = pi * spec.neck_radius_m * spec.neck_radius_m;
-    let l_eff = spec.neck_length_m + 2.0 * (8.0 / (3.0 * pi)) * spec.neck_radius_m;
-    let omega0 = spec.gas.sound_speed * (neck_area / (spec.volume_m3 * l_eff)).sqrt();
-    let (r_rad, _) = compact_radiation_impedance(
-        spec.gas.density,
-        spec.gas.sound_speed,
-        spec.neck_radius_m,
-        omega0,
-        MouthFlange::Unflanged,
-    )
-    .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
+    // One neck owner (DEF-09): declared ends, outer radiation + Bessel loss.
+    let geometry = fs_scenario::HelmholtzCavity {
+        volume_m3: spec.volume_m3,
+        neck_radius_m: spec.neck_radius_m,
+        neck_length_m: spec.neck_length_m,
+        inner_end: spec.inner_end,
+        outer_end: spec.outer_end,
+    };
+    let resistance = crate::cavity_modal::resonance_neck_resistance(&geometry, &spec.gas)
+        .map_err(CavityPhsError::Plate)?;
     let cavity = helmholtz_resonator_flow(
         spec.volume_m3,
         spec.neck_radius_m,
         spec.neck_length_m,
         spec.gas.density,
         spec.gas.sound_speed,
-        r_rad,
+        resistance,
+        crate::cavity_modal::neck_ends(&geometry),
     )
     .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
     // Area is already in the plate's second port. The transformer is
@@ -294,8 +294,13 @@ mod tests {
         use fs_math::det;
         let gas = air_at(293.15);
         let plate = plate_force_and_flow(&[6_000.0], &[0.0], &[1.0], &[0.08]).unwrap();
+        let ends = fs_phs::NeckEnds {
+            inner: fs_phs::MouthFlange::Flanged,
+            outer: fs_phs::MouthFlange::Flanged,
+        };
         let cavity =
-            helmholtz_resonator_flow(0.02, 0.02, 0.06, gas.density, gas.sound_speed, 0.0).unwrap();
+            helmholtz_resonator_flow(0.02, 0.02, 0.06, gas.density, gas.sound_speed, 0.0, ends)
+                .unwrap();
         let sys = transformer(plate, cavity, 1, 0, 1.0).unwrap();
         let split = split_quadratic(
             &sys,
@@ -359,6 +364,9 @@ mod tests {
             volume_m3: volume,
             neck_radius_m: 0.02,
             neck_length_m: 0.03,
+            // A port through the panel's own baffle: flanged on both sides.
+            inner_end: fs_scenario::NeckEnd::Flanged,
+            outer_end: fs_scenario::NeckEnd::Flanged,
             gas: air_at(293.15),
             relative_humidity: 0.0,
         }

@@ -1753,13 +1753,65 @@ pub fn mass_spring_damper(m: f64, k: f64, c: f64) -> Result<PortHamiltonian, Phs
     PortHamiltonian::new(2, 1, j, r, g, storage)
 }
 
+/// Declared terminations of a Helmholtz neck (DEF-09). The inner end opens
+/// into the cavity, the outer end into the exterior; a wall around either
+/// opening is a baffle. Each end's correction is derived from the reactance
+/// of [`compact_radiation_impedance`], the same owner that supplies `R`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NeckEnds {
+    /// End opening into the cavity.
+    pub inner: MouthFlange,
+    /// End opening into the exterior; also selects the radiation load.
+    pub outer: MouthFlange,
+}
+
+/// End correction `δ` [m] of one neck end, read from the low-`ka`
+/// reactance of [`compact_radiation_impedance`] (`X = -ω ρ δ / S`):
+/// `0.6133 a` unflanged, `0.8216 a` flanged. The fit's reactance is exactly
+/// linear in `ka`, so the admitted evaluation point does not matter.
+///
+/// # Errors
+/// [`PhsError::NotPsd`] on a non-physical radius.
+pub fn neck_end_correction(radius: f64, flange: MouthFlange) -> Result<f64, PhsError> {
+    let (density, sound_speed) = (1.0, 1.0);
+    let omega = 0.5 * sound_speed / radius;
+    let (_, reactance) = compact_radiation_impedance(density, sound_speed, radius, omega, flange)?;
+    let area = core::f64::consts::PI * radius * radius;
+    Ok(-reactance * area / (omega * density))
+}
+
+/// Lossless natural angular frequency [rad/s] of a lumped Helmholtz
+/// resonator: `ω₀ = c √(S / (V (L + δ_in + δ_out)))`.
+///
+/// # Errors
+/// Admission errors on non-physical geometry or gas.
+pub fn helmholtz_natural_frequency(
+    volume: f64,
+    neck_radius: f64,
+    neck_length: f64,
+    density: f64,
+    sound_speed: f64,
+    ends: NeckEnds,
+) -> Result<f64, PhsError> {
+    let (m_ac, stiffness, _) = helmholtz_parts(
+        volume,
+        neck_radius,
+        neck_length,
+        density,
+        sound_speed,
+        0.0,
+        ends,
+    )?;
+    Ok(det::sqrt(stiffness / m_ac))
+}
+
 /// Lumped Helmholtz resonator as a 1-DOF acoustic pHS.
 ///
-/// Acoustic mass `ρ L_eff / S` and compliance `V / (ρ c²)` with the
-/// unflanged end correction `L_eff = L + 2 (8/3π) a`. State is
-/// volume displacement and its momentum; the port is pressure
-/// (effort) × volume velocity (flow). A bottle, a vented enclosure,
-/// and a Helmholtz cavity are the same object.
+/// Acoustic mass `ρ L_eff / S` and compliance `V / (ρ c²)` with
+/// `L_eff = L + δ_in + δ_out` from the declared [`NeckEnds`]
+/// ([`neck_end_correction`]). State is volume displacement and its
+/// momentum; the port is pressure (effort) × volume velocity (flow). A
+/// bottle, a vented enclosure, and a Helmholtz cavity are the same object.
 ///
 /// # Errors
 /// Admission errors on non-physical geometry or gas.
@@ -1770,6 +1822,7 @@ pub fn helmholtz_resonator(
     density: f64,
     sound_speed: f64,
     resistance: f64,
+    ends: NeckEnds,
 ) -> Result<PortHamiltonian, PhsError> {
     let (m_ac, stiffness, resistance) = helmholtz_parts(
         volume,
@@ -1778,6 +1831,7 @@ pub fn helmholtz_resonator(
         density,
         sound_speed,
         resistance,
+        ends,
     )?;
     mass_spring_damper(m_ac, stiffness, resistance)
 }
@@ -1795,6 +1849,7 @@ pub fn helmholtz_resonator_flow(
     density: f64,
     sound_speed: f64,
     resistance: f64,
+    ends: NeckEnds,
 ) -> Result<PortHamiltonian, PhsError> {
     let (m_ac, stiffness, resistance) = helmholtz_parts(
         volume,
@@ -1803,6 +1858,7 @@ pub fn helmholtz_resonator_flow(
         density,
         sound_speed,
         resistance,
+        ends,
     )?;
     let q = vec![stiffness, 0.0, 0.0, 1.0 / m_ac];
     let storage = Box::new(QuadraticStorage::new(q, 2)?);
@@ -2115,30 +2171,46 @@ fn foster_radiation_series(
     foster_match_re(&samples, n)
 }
 
-/// [`helmholtz_resonator`] whose damper is the compact-mouth radiation
-/// resistance evaluated at the lossless natural frequency.
+/// [`helmholtz_resonator`] whose damper is the outer end's compact radiation
+/// resistance at the lossless natural frequency plus the caller's neck
+/// viscothermal resistance (fs-duct's exact Bessel series loss on product
+/// paths; this L2 crate does not own the duct model).
 ///
-/// Added mass stays the neck end correction already inside
-/// [`helmholtz_parts`]; this only turns `Re Z_rad(ω₀)` into the pHS
-/// `R` entry. Frequency-dependent `R(ω)` is the tabulated-impedance
-/// path, not this lumped zoo member.
+/// The same declared outer end supplies both `Re Z_rad(ω₀)` and its end
+/// correction inside [`helmholtz_parts`]. Both resistances are frozen at
+/// `ω₀`; frequency-dependent `R(ω)` is the tabulated-impedance path, not
+/// this lumped zoo member.
 ///
 /// # Errors
-/// Admission errors from the resonator or the radiation fit.
+/// Admission errors from the resonator or the radiation fit, including its
+/// `ka > 1` refusal; a negative or non-finite neck resistance.
 pub fn helmholtz_resonator_radiating(
     volume: f64,
     neck_radius: f64,
     neck_length: f64,
     density: f64,
     sound_speed: f64,
-    flange: MouthFlange,
+    ends: NeckEnds,
+    neck_resistance: f64,
 ) -> Result<PortHamiltonian, PhsError> {
-    let (m_ac, stiffness, _) =
-        helmholtz_parts(volume, neck_radius, neck_length, density, sound_speed, 0.0)?;
+    if !(neck_resistance >= 0.0 && neck_resistance.is_finite()) {
+        return Err(PhsError::NotPsd {
+            what: "neck viscothermal resistance must be finite and non-negative",
+        });
+    }
+    let (m_ac, stiffness, _) = helmholtz_parts(
+        volume,
+        neck_radius,
+        neck_length,
+        density,
+        sound_speed,
+        0.0,
+        ends,
+    )?;
     let omega0 = det::sqrt(stiffness / m_ac);
     let (r_rad, _) =
-        compact_radiation_impedance(density, sound_speed, neck_radius, omega0, flange)?;
-    mass_spring_damper(m_ac, stiffness, r_rad)
+        compact_radiation_impedance(density, sound_speed, neck_radius, omega0, ends.outer)?;
+    mass_spring_damper(m_ac, stiffness, r_rad + neck_resistance)
 }
 
 /// Series connection of two impedance-causal 1-ports: same `u`,
@@ -2305,6 +2377,7 @@ fn helmholtz_parts(
     density: f64,
     sound_speed: f64,
     resistance: f64,
+    ends: NeckEnds,
 ) -> Result<(f64, f64, f64), PhsError> {
     if !(volume > 0.0
         && neck_radius > 0.0
@@ -2323,9 +2396,10 @@ fn helmholtz_parts(
             what: "helmholtz resonator parameters",
         });
     }
-    let pi = core::f64::consts::PI;
-    let area = pi * neck_radius * neck_radius;
-    let l_eff = neck_length + 2.0 * (8.0 / (3.0 * pi)) * neck_radius;
+    let area = core::f64::consts::PI * neck_radius * neck_radius;
+    let l_eff = neck_length
+        + neck_end_correction(neck_radius, ends.inner)?
+        + neck_end_correction(neck_radius, ends.outer)?;
     let m_ac = density * l_eff / area;
     let c_ac = volume / (density * sound_speed * sound_speed);
     Ok((m_ac, 1.0 / c_ac, resistance))

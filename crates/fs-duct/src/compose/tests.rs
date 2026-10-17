@@ -971,3 +971,30 @@ fn input_reflection_is_exact_where_lossless_impedance_poles_refuse() {
     ));
     assert!(compose_chain(&through, active, ComposeOptions::default()).is_ok());
 }
+
+/// G0, DEF-09: fs-phs derives each Helmholtz neck end correction from the
+/// constants of this crate's terminations. Unflanged is the identical
+/// Levine-Schwinger fit (0.6133 a); flanged matches the multimodal model's
+/// low-ka value within its converged spread (0.8216 vs ~0.822 a).
+#[test]
+fn neck_end_corrections_match_the_duct_terminations() {
+    let g = gas();
+    let a = 0.01;
+    let omega = 1.0e-3 * g.sound_speed / a;
+    let area = PI * a * a;
+    let delta = |termination| {
+        let (z, _) = crate::termination_impedance(termination, &g, a, omega).unwrap();
+        -z.unwrap().im * area / (omega * g.density)
+    };
+    let phs = |flange| fs_phs::neck_end_correction(a, flange).unwrap();
+    let unflanged = delta(Termination::UnflangedOpen) / phs(fs_phs::MouthFlange::Unflanged);
+    assert!(
+        (unflanged - 1.0).abs() < 1e-12,
+        "unflanged ratio {unflanged}"
+    );
+    // The duct's flanged load is the 16-mode flanged pipe, qualified to
+    // 1e-3 a against 0.8216 a by `flanged_mode_ladder_converges_to_0p8216`
+    // (production 0.8224 a); the neck must sit inside that same bound.
+    let flanged = (delta(Termination::FlangedOpen) - phs(fs_phs::MouthFlange::Flanged)) / a;
+    assert!(flanged.abs() < 1e-3, "flanged end correction gap {flanged} a");
+}

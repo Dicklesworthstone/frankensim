@@ -7,17 +7,24 @@
 
 use fs_math::c64::C64;
 use fs_phs::{
-    AcousticSection, AcousticTap, MouthFlange, PhsError, PortHamiltonian, QuadraticStorage,
-    Storage, ViscothermalPin, WallPin, acoustic_chain, acoustic_chain_mouth,
+    AcousticSection, AcousticTap, MouthFlange, NeckEnds, PhsError, PortHamiltonian,
+    QuadraticStorage, Storage, ViscothermalPin, WallPin, acoustic_chain, acoustic_chain_mouth,
     acoustic_chain_mouth_wall, acoustic_cylinder, acoustic_waveguide, baffled_piston_impedance,
     common_effort_capacitor, common_effort_dirac, common_effort_star, common_flow_dirac,
     compact_radiation_impedance, discrete_gradient, duffing_oscillator, foster_sqrt_omega_terms,
-    helmholtz_resonator, helmholtz_resonator_flow, helmholtz_resonator_radiating, interconnect,
-    join_port, kirchhoff_parallel_step, lc_ladder, lc_ladder_terminated, mass_spring_damper,
-    modal_bank, modal_bank_ports, moving_end_waveguide, reduce_galerkin, regularized_coulomb,
-    series_impedance_ports, side_hole_inner_length, side_hole_mutual_length, side_hole_neck_length,
+    helmholtz_natural_frequency, helmholtz_resonator, helmholtz_resonator_flow,
+    helmholtz_resonator_radiating, interconnect, join_port, kirchhoff_parallel_step, lc_ladder,
+    lc_ladder_terminated, mass_spring_damper, modal_bank, modal_bank_ports, moving_end_waveguide,
+    neck_end_correction, reduce_galerkin, regularized_coulomb, series_impedance_ports,
+    side_hole_inner_length, side_hole_mutual_length, side_hole_neck_length,
     side_hole_series_length, slice_linear_taper, spherical_cone, step, step_descriptor,
     transformer, wall_admittance_per_metre, wall_specific_impedance, zwikker_kosten_f,
+};
+
+/// A bottle-like neck: flush into the cavity wall, free outside.
+const ENDS: NeckEnds = NeckEnds {
+    inner: MouthFlange::Flanged,
+    outer: MouthFlange::Unflanged,
 };
 
 fn max_abs(v: &[f64]) -> f64 {
@@ -334,7 +341,8 @@ fn monolithic_msd_pair(
 
 #[test]
 fn helmholtz_resonator_interconnects_with_a_modal_bank() {
-    let cavity = helmholtz_resonator(0.0135, 0.043, 0.02, 1.2, 343.0, 0.0).expect("helmholtz");
+    let cavity =
+        helmholtz_resonator(0.0135, 0.043, 0.02, 1.2, 343.0, 0.0, ENDS).expect("helmholtz");
     let plate = modal_bank(&[2.0e3], &[0.0], &[1.0]).expect("plate");
     let coupled = interconnect(plate, cavity, &[(0, 0)]).expect("plate+cavity");
     assert_eq!(coupled.state_dim(), 4);
@@ -349,12 +357,12 @@ fn helmholtz_resonator_interconnects_with_a_modal_bank() {
         (h1 - h0).abs() <= 1.0e-8 * h0.abs().max(1.0e-18),
         "lossless plate+cavity must hold H ({h1} vs {h0})"
     );
-    assert!(helmholtz_resonator(0.0, 0.01, 0.01, 1.2, 343.0, 0.0).is_err());
+    assert!(helmholtz_resonator(0.0, 0.01, 0.01, 1.2, 343.0, 0.0, ENDS).is_err());
 }
 
 #[test]
 fn flow_driven_helmholtz_pressure_tracks_injected_volume() {
-    let cav = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("flow");
+    let cav = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0, ENDS).expect("flow");
     let mut x = vec![0.0, 0.0];
     let dt = 1.0e-5;
     for _ in 0..20 {
@@ -362,7 +370,7 @@ fn flow_driven_helmholtz_pressure_tracks_injected_volume() {
     }
     let p = cav.output(&x)[0];
     assert!(p > 0.0, "injected volume must raise cavity pressure, p={p}");
-    assert!(helmholtz_resonator_flow(0.0, 0.02, 0.03, 1.2, 343.0, 0.0).is_err());
+    assert!(helmholtz_resonator_flow(0.0, 0.02, 0.03, 1.2, 343.0, 0.0, ENDS).is_err());
 }
 
 #[test]
@@ -750,7 +758,11 @@ fn compact_radiation_flanged_resists_more_than_unflanged() {
 
 #[test]
 fn radiating_helmholtz_dissipates_stored_energy() {
-    let sys = helmholtz_resonator_radiating(0.002, 0.012, 0.03, 1.2, 343.0, MouthFlange::Flanged)
+    let baffled = NeckEnds {
+        inner: MouthFlange::Flanged,
+        outer: MouthFlange::Flanged,
+    };
+    let sys = helmholtz_resonator_radiating(0.002, 0.012, 0.03, 1.2, 343.0, baffled, 0.0)
         .expect("radiating");
     let mut x = vec![1.0e-6, 0.0];
     let h0 = sys.hamiltonian(&x);
@@ -764,12 +776,77 @@ fn radiating_helmholtz_dissipates_stored_energy() {
     );
 }
 
+/// G2, DEF-09: both neck ends take their correction from the reactance of
+/// the compact-radiation owner, and the lumped resonance equals the closed
+/// form f_H = (c/2π) √(S / (V (L + δ_in + δ_out))) for every pair.
+#[test]
+fn helmholtz_closed_form_for_every_termination_pair() {
+    let (volume, a, length, rho, c) = (0.0135, 0.043, 0.02, 1.2, 343.0);
+    let declared = |f: MouthFlange| match f {
+        MouthFlange::Unflanged => 0.6133 * a,
+        MouthFlange::Flanged => 0.8216 * a,
+    };
+    for flange in [MouthFlange::Unflanged, MouthFlange::Flanged] {
+        let delta = neck_end_correction(a, flange).expect("end correction");
+        assert!(
+            (delta / declared(flange) - 1.0).abs() < 1e-12,
+            "{flange:?}: {delta}"
+        );
+    }
+    let area = core::f64::consts::PI * a * a;
+    for inner in [MouthFlange::Unflanged, MouthFlange::Flanged] {
+        for outer in [MouthFlange::Unflanged, MouthFlange::Flanged] {
+            let ends = NeckEnds { inner, outer };
+            let omega = helmholtz_natural_frequency(volume, a, length, rho, c, ends).unwrap();
+            let l_eff = length + declared(inner) + declared(outer);
+            let closed = c * (area / (volume * l_eff)).sqrt();
+            assert!(
+                (omega / closed - 1.0).abs() < 1e-12,
+                "{ends:?}: {omega} vs {closed}"
+            );
+        }
+    }
+    assert!(neck_end_correction(0.0, MouthFlange::Flanged).is_err());
+}
+
+/// G2, DEF-09: the radiating variant's damper is the declared OUTER end's
+/// compact radiation resistance at ω₀ plus the supplied neck resistance; a
+/// `ka > 1` mouth refuses instead of being swallowed.
+#[test]
+fn radiating_helmholtz_uses_the_declared_outer_end() {
+    let (volume, a, length, rho, c) = (0.002, 0.012, 0.03, 1.2, 343.0);
+    for outer in [MouthFlange::Unflanged, MouthFlange::Flanged] {
+        let ends = NeckEnds {
+            inner: MouthFlange::Flanged,
+            outer,
+        };
+        let omega = helmholtz_natural_frequency(volume, a, length, rho, c, ends).unwrap();
+        let (r_rad, _) = compact_radiation_impedance(rho, c, a, omega, outer).unwrap();
+        let neck = 3.0e4;
+        let sys = helmholtz_resonator_radiating(volume, a, length, rho, c, ends, neck).unwrap();
+        // mass_spring_damper: R = diag(0, r) on (volume displacement, momentum).
+        let r = sys.structure().1[3];
+        assert!(
+            (r / (r_rad + neck) - 1.0).abs() < 1e-12,
+            "{outer:?}: {r} vs {r_rad} + {neck}"
+        );
+        let lossless = helmholtz_resonator(volume, a, length, rho, c, 0.0, ends).unwrap();
+        assert_eq!(lossless.structure().1[3], 0.0);
+    }
+    let wide = NeckEnds {
+        inner: MouthFlange::Flanged,
+        outer: MouthFlange::Unflanged,
+    };
+    assert!(helmholtz_resonator_radiating(1e-6, 0.2, 0.0, rho, c, wide, 0.0).is_err());
+    assert!(helmholtz_resonator_radiating(volume, a, length, rho, c, wide, -1.0).is_err());
+}
+
 #[test]
 fn series_flow_cavities_add_pressure() {
-    let one = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("one");
+    let one = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0, ENDS).expect("one");
     let series = series_impedance_ports(
-        helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("a"),
-        helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("b"),
+        helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0, ENDS).expect("a"),
+        helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0, ENDS).expect("b"),
     )
     .expect("series");
     let dt = 1.0e-5;
@@ -909,8 +986,8 @@ fn common_effort_capacitor_shares_pressure() {
 
 #[test]
 fn kirchhoff_parallel_splits_flow_at_common_pressure() {
-    let a = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("a");
-    let b = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("b");
+    let a = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0, ENDS).expect("a");
+    let b = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0, ENDS).expect("b");
     let xa = vec![0.0, 0.0];
     let xb = vec![0.0, 0.0];
     let u_ext = 2.0e-4;
@@ -929,11 +1006,11 @@ fn kirchhoff_parallel_splits_flow_at_common_pressure() {
 
 #[test]
 fn common_effort_dirac_is_the_kirchhoff_dae() {
-    let a = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("a");
-    let b = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("b");
+    let a = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0, ENDS).expect("a");
+    let b = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0, ENDS).expect("b");
     let sys = common_effort_dirac(
-        helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("a2"),
-        helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("b2"),
+        helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0, ENDS).expect("a2"),
+        helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0, ENDS).expect("b2"),
     )
     .expect("dirac");
     assert_eq!(sys.state_dim(), 5);
@@ -974,7 +1051,7 @@ fn common_effort_dirac_is_the_kirchhoff_dae() {
 
 #[test]
 fn kirchhoff_star_of_three_flow_cavities_splits_volume() {
-    let mk = || helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("cav");
+    let mk = || helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0, ENDS).expect("cav");
     let sys = common_effort_star(vec![mk(), mk(), mk()]).expect("star");
     assert_eq!(sys.state_dim(), 2 * 3 + 2);
     assert_eq!(sys.differential_dim(), 6);
@@ -991,7 +1068,7 @@ fn kirchhoff_star_of_three_flow_cavities_splits_volume() {
 #[test]
 fn transformer_joins_a_mass_to_a_compliance() {
     let mass = mass_spring_damper(0.02, 0.0, 0.0).expect("mass");
-    let cav = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("cav");
+    let cav = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0, ENDS).expect("cav");
     let sys = transformer(mass, cav, 0, 0, 4.0e-4).expect("area");
     assert_eq!(sys.port_dim(), 0);
     let mut x = vec![0.0; sys.state_dim()];
@@ -1022,7 +1099,7 @@ fn moving_end_waveguide_dirac_joins_a_mass() {
 fn three_phs_string_plate_cavity_is_a_dirac_star_plus_transformer() {
     let string = moving_end_waveguide(1, 0.65, 70.0, 5.0e-3, &[0.0]).expect("string");
     let plate = modal_bank_ports(&[800.0], &[0.0], &[&[2.0], &[0.02]]).expect("plate");
-    let cav = helmholtz_resonator_flow(0.002, 0.01, 0.02, 1.2, 343.0, 0.0).expect("cav");
+    let cav = helmholtz_resonator_flow(0.002, 0.01, 0.02, 1.2, 343.0, 0.0, ENDS).expect("cav");
     let plate_cav = transformer(plate, cav, 1, 0, 1.0).expect("area in G");
     assert_eq!(plate_cav.port_dim(), 1);
     let sys = common_flow_dirac(string, plate_cav).expect("three-pHS");

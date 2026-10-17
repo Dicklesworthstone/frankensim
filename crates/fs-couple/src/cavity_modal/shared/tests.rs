@@ -2,7 +2,8 @@ use super::*;
 use fs_material::gas::GasSpec;
 
 fn source(p:f64)->HelmholtzModalCavity {
-    HelmholtzModalCavity::new(HelmholtzCavity {volume_m3:0.01,neck_radius_m:0.01,neck_length_m:0.02},
+    HelmholtzModalCavity::new(HelmholtzCavity {volume_m3:0.01,neck_radius_m:0.01,neck_length_m:0.02,
+        inner_end:fs_scenario::NeckEnd::Flanged,outer_end:fs_scenario::NeckEnd::Flanged},
         GasState::try_new(&GasSpec::dry_air_ussa1976(),293.15,p).unwrap(),CavityNeckLoss::Resistance(2000.0)).unwrap()
 }
 fn budget()->ModalCouplingConfig {

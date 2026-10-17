@@ -586,11 +586,12 @@ impl PlateBank {
         Ok(p)
     }
 
-    /// Face the bank with a flow-driven Helmholtz volume whose damper
-    /// is the compact-mouth radiation resistance at `ω₀`.
+    /// Face the bank with a flow-driven Helmholtz volume whose damper is the
+    /// declared outer end's compact radiation resistance plus the Bessel
+    /// neck loss, both at `ω₀` (DEF-09).
     ///
     /// # Errors
-    /// Non-physical cavity or pHS admission.
+    /// Non-physical cavity, a mouth beyond the compact fit, or pHS admission.
     pub fn attach_cavity(
         &mut self,
         cavity: fs_scenario::HelmholtzCavity,
@@ -601,25 +602,15 @@ impl PlateBank {
                 what: "Helmholtz cavity geometry must be physical",
             });
         }
-        let pi = core::f64::consts::PI;
-        let area = pi * cavity.neck_radius_m * cavity.neck_radius_m;
-        let l_eff = cavity.neck_length_m + 2.0 * (8.0 / (3.0 * pi)) * cavity.neck_radius_m;
-        let omega0 = gas.sound_speed * (area / (cavity.volume_m3 * l_eff)).sqrt();
-        let r_rad = fs_phs::compact_radiation_impedance(
-            gas.density,
-            gas.sound_speed,
-            cavity.neck_radius_m,
-            omega0,
-            fs_phs::MouthFlange::Unflanged,
-        )
-        .map_or(0.0, |(r, _)| r);
+        let resistance = crate::cavity_modal::resonance_neck_resistance(&cavity, gas)?;
         let sys = fs_phs::helmholtz_resonator_flow(
             cavity.volume_m3,
             cavity.neck_radius_m,
             cavity.neck_length_m,
             gas.density,
             gas.sound_speed,
-            r_rad,
+            resistance,
+            crate::cavity_modal::neck_ends(&cavity),
         )
         .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         self.cavity = Some(PlateCavity {
@@ -1855,7 +1846,8 @@ mod tests {
         let make = || {
             let mut bank = PlateBank::default();
             bank.attach_cavity(fs_scenario::HelmholtzCavity {volume_m3:0.01,
-                neck_radius_m:0.01,neck_length_m:0.02},&gas).unwrap();
+                neck_radius_m:0.01,neck_length_m:0.02,inner_end:fs_scenario::NeckEnd::Flanged,
+                outer_end:fs_scenario::NeckEnd::Flanged},&gas).unwrap();
             bank.cavity.as_mut().unwrap().x[0] = 1e-6;
             bank
         };

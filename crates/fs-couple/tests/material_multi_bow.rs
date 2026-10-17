@@ -74,7 +74,8 @@ fn base(cx:&Cx<'_>,gate:&CancelGate,rho:f64)->ReciprocalStringBank {
         modal_budget:ModalAcousticTimeBudget::audible_reference(),listener_m:1.0};
     let gas=GasState::try_new(&GasSpec::dry_air_ussa1976(),293.15,101325.0).unwrap();
     let cavity=MaterialBodyCavity {cavity:HelmholtzModalCavity::new(HelmholtzCavity {volume_m3:0.005,
-        neck_radius_m:0.006,neck_length_m:0.02},gas,CavityNeckLoss::Resistance(1000.0)).unwrap(),
+        neck_radius_m:0.006,neck_length_m:0.02,inner_end:fs_scenario::NeckEnd::Flanged,
+        outer_end:fs_scenario::NeckEnd::Flanged},gas,CavityNeckLoss::Resistance(1000.0)).unwrap(),
         modal_budget:ModalAcousticTimeBudget::audible_reference(),listener_m:1.0};
     ReciprocalStringBank::from_material_plate_with_cavity(cx,vec![source(7800.0),source(rho)],gas,body,cavity,law(),options(),gate).unwrap()
 }

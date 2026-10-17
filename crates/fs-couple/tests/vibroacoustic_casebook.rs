@@ -948,10 +948,16 @@ fn guitar_coupled_pair_vs_carcagno_2018() {
     // Helmholtz resonator: declared typical steel-string geometry.
     let volume = 0.0135;
     let hole_radius = 0.043;
+    // The sound hole is cut through the top plate: flanged on both sides.
+    let sound_hole = fs_phs::NeckEnds {
+        inner: fs_phs::MouthFlange::Flanged,
+        outer: fs_phs::MouthFlange::Flanged,
+    };
     let resonator = fs_couple::vibroacoustic::helmholtz_resonator_mode(
         volume,
         hole_radius,
         h,
+        sound_hole,
         AcousticMedium::air(),
         0.0,
         mesh.node_count(),

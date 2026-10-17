@@ -88,7 +88,8 @@ fn build(cx:&Cx<'_>,gate:&CancelGate,b:SharedMaterialPlateChartBody,selected:boo
         .with_kelvin_voigt_bending_loss().unwrap())).to_vec();
     let gas=GasState::try_new(&GasSpec::dry_air_ussa1976(),293.15,101325.0).unwrap();
     let cavity=Some(MaterialBodyCavity {cavity:HelmholtzModalCavity::new(HelmholtzCavity {
-        volume_m3:0.004,neck_radius_m:0.01,neck_length_m:0.02},gas,CavityNeckLoss::Resistance(100.0)).unwrap(),
+        volume_m3:0.004,neck_radius_m:0.01,neck_length_m:0.02,inner_end:fs_scenario::NeckEnd::Flanged,
+        outer_end:fs_scenario::NeckEnd::Flanged},gas,CavityNeckLoss::Resistance(100.0)).unwrap(),
         modal_budget:ModalAcousticTimeBudget::audible_reference(),listener_m:1.5});
     let options=StringBankOptions {sample_rate_hz:48000,bow:StringBowLocation {string:0,station_fraction:0.2},
         string_budget:ModalAcousticTimeBudget::audible_reference(),network:config(),

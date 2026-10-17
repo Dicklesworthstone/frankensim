@@ -34,7 +34,10 @@ impl Input {
         if text.len()>16384 {return Err("cavity input exceeds 16 KiB".into());}
         let mut f=text.split_ascii_whitespace();label(&mut f,"textile-cavity-v1")?;label(&mut f,"gas")?;
         let gas=read_gas_state(&mut f,None)?;label(&mut f,"cavity")?;
-        let geometry=HelmholtzCavity {volume_m3:scalar(&mut f)?,neck_radius_m:scalar(&mut f)?,neck_length_m:scalar(&mut f)?};
+        // The input predates DEF-09: this fixture's neck is a hole through the
+        // cavity's own wall, so both ends are declared flanged here.
+        let geometry=HelmholtzCavity {volume_m3:scalar(&mut f)?,neck_radius_m:scalar(&mut f)?,neck_length_m:scalar(&mut f)?,
+            inner_end:fs_scenario::NeckEnd::Flanged,outer_end:fs_scenario::NeckEnd::Flanged};
         let resistance=scalar(&mut f)?;label(&mut f,"surface")?;
         let temperature=scalar(&mut f)?;let stretch=scalar(&mut f)?;let grain=scalar(&mut f)?;let strain=scalar(&mut f)?;
         label(&mut f,"drive")?;let rate:u32=word(&mut f)?.parse()?;

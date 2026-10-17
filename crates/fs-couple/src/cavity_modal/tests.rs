@@ -8,7 +8,10 @@ fn gas(pressure: f64) -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, pressure).unwrap()
 }
 fn geometry() -> HelmholtzCavity {
-    HelmholtzCavity { volume_m3: 0.01, neck_radius_m: 0.01, neck_length_m: 0.02 }
+    HelmholtzCavity {
+        volume_m3: 0.01, neck_radius_m: 0.01, neck_length_m: 0.02,
+        inner_end: NeckEnd::Flanged, outer_end: NeckEnd::Flanged,
+    }
 }
 fn config() -> ModalCouplingConfig {
     ModalCouplingConfig {
@@ -31,10 +34,15 @@ fn lowering_preserves_original_helmholtz_storage_and_selected_radiation_loss() {
     let geo = geometry();
     for pressure in [50_000.0, 101_325.0, 200_000.0] {
         let gas = gas(pressure);
-        let model = HelmholtzModalCavity::new(geo, gas,
-            CavityNeckLoss::RadiationAtResonance(fs_phs::MouthFlange::Flanged)).unwrap();
+        let model = HelmholtzModalCavity::new(geo, gas, CavityNeckLoss::RadiationAtResonance)
+            .unwrap();
+        let ends = neck_ends(&geo);
+        let omega = fs_phs::helmholtz_natural_frequency(geo.volume_m3, geo.neck_radius_m,
+            geo.neck_length_m, gas.density, gas.sound_speed, ends).unwrap();
+        let neck = neck_viscothermal_resistance(&gas, geo.neck_radius_m, geo.neck_length_m, omega)
+            .unwrap();
         let original = fs_phs::helmholtz_resonator_radiating(geo.volume_m3, geo.neck_radius_m,
-            geo.neck_length_m, gas.density, gas.sound_speed, fs_phs::MouthFlange::Flanged).unwrap();
+            geo.neck_length_m, gas.density, gas.sound_speed, ends, neck).unwrap();
         let area = model.neck_area_m2();
         for (x, velocity) in [(0.001, 0.1), (-0.002, 0.0), (0.0, -0.02)] {
             let energy = 0.5 * model.mass * velocity * velocity + 0.5 * model.stiffness * x * x;
@@ -49,12 +57,20 @@ fn lowering_preserves_original_helmholtz_storage_and_selected_radiation_loss() {
 
 #[test]
 fn pressure_scaling_changes_inertia_stiffness_and_loss_without_fake_retuning() {
-    let loss = CavityNeckLoss::RadiationAtResonance(fs_phs::MouthFlange::Flanged);
+    let loss = CavityNeckLoss::RadiationAtResonance;
     let a = HelmholtzModalCavity::new(geometry(), gas(50_000.0), loss).unwrap();
     let b = HelmholtzModalCavity::new(geometry(), gas(100_000.0), loss).unwrap();
-    for ratio in [b.mass / a.mass, b.stiffness / a.stiffness, b.resistance / a.resistance] {
+    for ratio in [b.mass / a.mass, b.stiffness / a.stiffness] {
         assert!((ratio - 2.0).abs() < 1.0e-12);
     }
+    // Radiation scales with density but the Bessel neck loss does not (viscous
+    // ~sqrt(rho mu omega)): each loss is its own owner's value at that state.
+    for (model, pressure) in [(&a, 50_000.0), (&b, 100_000.0)] {
+        let expected = resonance_neck_resistance(&geometry(), &gas(pressure)).unwrap()
+            * model.neck_area_m2().powi(2);
+        assert!((model.resistance / expected - 1.0).abs() < 1.0e-12);
+    }
+    assert!(b.resistance / a.resistance > 1.0 && b.resistance / a.resistance < 2.0);
     // At fixed temperature this model's density scaling does not change the
     // ISOLATED resonance, although its loading of a finite body does change.
     assert!((b.isolated_omega_rad_s() / a.isolated_omega_rad_s() - 1.0).abs() < 1.0e-12);
@@ -150,7 +166,7 @@ fn neck_is_a_real_free_inertia_without_a_hidden_compression_spring() {
 fn fixed_wall_cavity_matches_the_original_phs_exact_state_and_energy() {
     let geo = geometry(); let g = gas(101_325.0); let resistance = 2_000.0;
     let source = fs_phs::helmholtz_resonator(geo.volume_m3, geo.neck_radius_m,
-        geo.neck_length_m, g.density, g.sound_speed, resistance).unwrap();
+        geo.neck_length_m, g.density, g.sound_speed, resistance, neck_ends(&geo)).unwrap();
     let inverse_compliance = source.effort(&[1.0, 0.0])[0];
     let inverse_mass = source.effort(&[0.0, 1.0])[1];
     let cavity = HelmholtzModalCavity::new(geo, g, CavityNeckLoss::Resistance(resistance)).unwrap();
@@ -200,4 +216,65 @@ fn fixed_wall_cavity_matches_the_original_phs_exact_state_and_energy() {
     }
     assert!(loss > 0.0);
     assert!((network.total_energy_j().unwrap()+loss-initial).abs() < 1e-13);
+}
+
+/// G2, DEF-09: the stepped network rings at the closed-form Helmholtz frequency
+/// f_H = (c/2π) √(S / (V (L + δ_in + δ_out))) with the declared ends' 0.8216 a.
+#[test]
+fn stepped_network_resonance_matches_the_closed_form() {
+    let geo = geometry(); let g = gas(101_325.0);
+    let area = core::f64::consts::PI * geo.neck_radius_m * geo.neck_radius_m;
+    let l_eff = geo.neck_length_m + 2.0 * 0.8216 * geo.neck_radius_m;
+    let closed = g.sound_speed * (area / (geo.volume_m3 * l_eff)).sqrt() / core::f64::consts::TAU;
+    let cavity = HelmholtzModalCavity::new(geo, g, CavityNeckLoss::Resistance(0.0)).unwrap();
+    let mut neck = cavity.neck_component(48_000, ModalAcousticTimeBudget::audible_reference()).unwrap();
+    neck.restore_states(&[ModalAcousticState {
+        displacement_m_sqrt_kg: 1.0e-6, velocity_m_sqrt_kg_per_s: 0.0,
+    }]).unwrap();
+    let gate = CancelGate::new_clock_free();
+    let mut network = CoupledModalSystem::new(vec![body(), neck],
+        cavity.connections(0, 1, &[0.0]).unwrap(), config(), &gate).unwrap();
+    let dt = network.sample_period_s();
+    let (mut previous, mut crossings) = (1.0e-6, Vec::new());
+    for step in 1..=48_000 {
+        network.step(&[0.0; 2]).unwrap();
+        let x = network.components()[1].states()[0].displacement_m_sqrt_kg;
+        if previous > 0.0 && x <= 0.0 || previous < 0.0 && x >= 0.0 {
+            // Linear interpolation of the crossing inside the sample.
+            crossings.push((f64::from(step) - x / (x - previous)) * dt);
+        }
+        previous = x;
+    }
+    let half_periods = (crossings.len() - 1) as f64;
+    let measured = half_periods / (2.0 * (crossings[crossings.len() - 1] - crossings[0]));
+    assert!(crossings.len() > 60, "{} crossings", crossings.len());
+    assert!((measured / closed - 1.0).abs() < 0.01, "stepped {measured} Hz vs closed form {closed} Hz");
+    println!("{{\"suite\":\"fs-couple\",\"case\":\"def09-stepped-helmholtz\",\"stepped_hz\":{measured},\"closed_form_hz\":{closed}}}");
+}
+
+/// G2, DEF-09: the product-path neck loss is fs-duct's exact Bessel wave. It is
+/// Poiseuille 8 μ L / (π a⁴) in the narrow limit and the viscous boundary layer
+/// √2 ω ρ L / (S r_v) in the wide limit, to within that asymptote's O(1/r_v).
+#[test]
+fn bessel_neck_resistance_spans_poiseuille_and_the_wide_tube_limit() {
+    let g = gas(101_325.0);
+    let (a, l) = (0.01, 0.02);
+    let mu = g.dynamic_viscosity;
+    let area = core::f64::consts::PI * a * a;
+    // Shear number r_v = a √(ω ρ / μ), inverted for the sample frequency.
+    let omega_at = |rv: f64| (rv / a).powi(2) * mu / g.density;
+    let poiseuille = 8.0 * mu * l / (core::f64::consts::PI * a.powi(4));
+    for rv in [0.1, 0.25, 0.5] {
+        let r = neck_viscothermal_resistance(&g, a, l, omega_at(rv)).unwrap();
+        assert!((r / poiseuille - 1.0).abs() < 0.01, "r_v {rv}: {r} vs Poiseuille {poiseuille}");
+    }
+    let mut previous = f64::INFINITY;
+    for rv in [20.0, 40.0, 80.0] {
+        let omega = omega_at(rv);
+        let r = neck_viscothermal_resistance(&g, a, l, omega).unwrap();
+        let wide = core::f64::consts::SQRT_2 * omega * g.density * l / (area * rv);
+        let relative = (r / wide - 1.0).abs();
+        assert!(relative <= 3.0 / rv && relative < previous, "r_v {rv}: {r} vs wide tube {wide}");
+        previous = relative;
+    }
 }

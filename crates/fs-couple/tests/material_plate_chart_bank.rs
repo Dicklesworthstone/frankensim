@@ -67,7 +67,8 @@ fn gas(pressure: f64) -> GasState {
 fn cavity(gas: GasState) -> MaterialBodyCavity {
     MaterialBodyCavity { cavity: HelmholtzModalCavity::new(HelmholtzCavity {
         volume_m3: 0.004, neck_radius_m: 0.01, neck_length_m: 0.02,
-    }, gas, CavityNeckLoss::RadiationAtResonance(fs_phs::MouthFlange::Flanged)).unwrap(),
+        inner_end: fs_scenario::NeckEnd::Flanged, outer_end: fs_scenario::NeckEnd::Flanged,
+    }, gas, CavityNeckLoss::RadiationAtResonance).unwrap(),
         modal_budget: ModalAcousticTimeBudget::audible_reference(), listener_m: 1.5 }
 }
 fn body() -> SharedMaterialPlateChartBody {

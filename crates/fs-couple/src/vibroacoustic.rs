@@ -308,9 +308,10 @@ fn det_cos(x: f64) -> f64 {
 
 /// Lumped Helmholtz-resonator mode for a cavity of volume `V` vented
 /// through a cylindrical neck (radius `a`, physical length `l_neck`):
-/// `omega_h = c0 sqrt(S / (V l_eff))` with the unflanged-aperture end
-/// correction `l_eff = l_neck + 2 (8 / 3 pi) a` — the Laplace-BEM
-/// closed-body recipe the epic's aperture pilot validated to +1.8%.
+/// `omega_h = c0 sqrt(S / (V l_eff))` with `l_eff = l_neck + δ_in + δ_out`
+/// from the declared [`fs_phs::NeckEnds`] (the fs-phs owner, DEF-09). A sound
+/// hole in a plate is flanged on both sides. (The epic's aperture pilot
+/// validated the earlier `2 (8/3π) a` recipe to +1.8 % against Laplace BEM.)
 /// Returned as a one-mode [`CavityModes`] with uniform interior
 /// pressure (`psi = 1`, `Lambda = V`): the resonator IS the cavity's
 /// lowest mode in the modal-coupling picture.
@@ -321,6 +322,7 @@ pub fn helmholtz_resonator_mode(
     volume: f64,
     neck_radius: f64,
     neck_length: f64,
+    ends: fs_phs::NeckEnds,
     medium: AcousticMedium,
     loss_factor: f64,
     interface_count: usize,
@@ -351,10 +353,11 @@ pub fn helmholtz_resonator_mode(
             what: "resonator interface sample points",
         });
     }
-    let pi = core::f64::consts::PI;
-    let area = pi * neck_radius * neck_radius;
-    let l_eff = neck_length + 2.0 * (8.0 / (3.0 * pi)) * neck_radius;
-    let omega = c0 * (area / (volume * l_eff)).sqrt();
+    let omega =
+        fs_phs::helmholtz_natural_frequency(volume, neck_radius, neck_length, rho0, c0, ends)
+            .map_err(|_| VibroError::BadParameter {
+                what: "Helmholtz neck admission refused by the fs-phs owner",
+            })?;
     Ok(CavityModes {
         omegas: vec![omega],
         lambdas: vec![volume],
@@ -1310,20 +1313,24 @@ mod tests {
             assert!((cav.interface[1][i] - expected).abs() < 1e-12);
         }
         assert!((cav.lambdas[1] - lx * ly * lz / 2.0).abs() < 1e-15);
-        // Resonator: 1 liter, 5 mm neck radius, 10 mm neck length ->
-        // f = omega / 2 pi ~ 112.5 Hz with the 2 * 8/(3 pi) a end
-        // correction.
-        let res = helmholtz_resonator_mode(1e-3, 0.005, 0.010, air, 0.01, 4).expect("resonator");
+        // Resonator: 1 liter, 5 mm neck radius, 10 mm neck length through a
+        // wall (flanged both ends, 2 x 0.8216 a) -> f = omega / 2 pi ~ 113.4 Hz.
+        let wall = fs_phs::NeckEnds {
+            inner: fs_phs::MouthFlange::Flanged,
+            outer: fs_phs::MouthFlange::Flanged,
+        };
+        let res =
+            helmholtz_resonator_mode(1e-3, 0.005, 0.010, wall, air, 0.01, 4).expect("resonator");
         let a = 0.005f64;
         let s_neck = core::f64::consts::PI * a * a;
-        let l_eff = 0.010 + 2.0 * (8.0 / (3.0 * core::f64::consts::PI)) * a;
+        let l_eff = 0.010 + 2.0 * 0.8216 * a;
         let omega_expected = air.c0 * (s_neck / (1e-3 * l_eff)).sqrt();
         assert!(
             (res.omegas[0] - omega_expected).abs() < 1e-12 * omega_expected,
             "resonator omega {} vs {omega_expected}",
             res.omegas[0]
         );
-        assert!((res.omegas[0] / (2.0 * core::f64::consts::PI) - 112.5).abs() < 1.0);
+        assert!((res.omegas[0] / (2.0 * core::f64::consts::PI) - 113.4).abs() < 1.0);
         println!(
             "{{\"suite\":\"fs-couple-vibro\",\"case\":\"cavity-resonator-pins\",\"resonator_hz\":{:.2},\"verdict\":\"pass\"}}",
             res.omegas[0] / (2.0 * core::f64::consts::PI)
@@ -1369,7 +1376,18 @@ mod tests {
             Err(VibroError::BadParameter { .. })
         ));
         assert!(matches!(
-            helmholtz_resonator_mode(1e-3, -0.01, 0.01, AcousticMedium::air(), 0.0, 1),
+            helmholtz_resonator_mode(
+                1e-3,
+                -0.01,
+                0.01,
+                fs_phs::NeckEnds {
+                    inner: fs_phs::MouthFlange::Flanged,
+                    outer: fs_phs::MouthFlange::Flanged,
+                },
+                AcousticMedium::air(),
+                0.0,
+                1
+            ),
             Err(VibroError::BadParameter { .. })
         ));
         let structure = StructuralModes {

@@ -43,7 +43,8 @@ fn build(cx: &Cx<'_>, gate: &CancelGate, eta: f64) -> ReciprocalStringBank {
     let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
     let cavity = MaterialBodyCavity { cavity: HelmholtzModalCavity::new(HelmholtzCavity {
         volume_m3: 0.004, neck_radius_m: 0.01, neck_length_m: 0.02,
-    }, gas, CavityNeckLoss::RadiationAtResonance(fs_phs::MouthFlange::Flanged)).unwrap(),
+        inner_end: fs_scenario::NeckEnd::Flanged, outer_end: fs_scenario::NeckEnd::Flanged,
+    }, gas, CavityNeckLoss::RadiationAtResonance).unwrap(),
         modal_budget: ModalAcousticTimeBudget::audible_reference(), listener_m: 1.5 };
     let o = StringBankOptions { sample_rate_hz: 48_000,
         bow: StringBowLocation { string: 0, station_fraction: 0.2 },

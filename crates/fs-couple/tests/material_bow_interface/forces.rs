@@ -29,7 +29,8 @@ fn bank(cx:&Cx<'_>, gate:&CancelGate, cavity:bool) -> MultiBowStringBank {
     let base=if cavity {
         let gas=GasState::try_new(&GasSpec::dry_air_ussa1976(),293.15,101_325.0).unwrap();
         let cavity=MaterialBodyCavity {
-            cavity:HelmholtzModalCavity::new(HelmholtzCavity {volume_m3:0.003,neck_radius_m:0.01,neck_length_m:0.02},
+            cavity:HelmholtzModalCavity::new(HelmholtzCavity {volume_m3:0.003,neck_radius_m:0.01,neck_length_m:0.02,
+                inner_end:fs_scenario::NeckEnd::Flanged,outer_end:fs_scenario::NeckEnd::Flanged},
                 gas,CavityNeckLoss::Resistance(100.0)).unwrap(),
             modal_budget:ModalAcousticTimeBudget::audible_reference(),listener_m:1.0,
         };

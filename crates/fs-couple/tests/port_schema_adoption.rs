@@ -79,6 +79,8 @@ fn shared() -> SharedCavity {
             volume_m3: 0.01,
             neck_radius_m: 0.01,
             neck_length_m: 0.02,
+            inner_end: fs_scenario::NeckEnd::Flanged,
+            outer_end: fs_scenario::NeckEnd::Flanged,
         },
         air(),
         CavityNeckLoss::Resistance(2000.),

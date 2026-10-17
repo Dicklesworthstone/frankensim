@@ -20,7 +20,7 @@ use fs_material::gas::{ConductivityModel, GasSpec, GasState};
 use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point};
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
-use fs_scenario::{AmbientGas, HelmholtzCavity, PrestressedString, ThinPlate,
+use fs_scenario::{AmbientGas, HelmholtzCavity, NeckEnd, PrestressedString, ThinPlate,
     gesture::{GestureSchedule, GestureTarget, GestureTrack, GestureValue}};
 use fs_tribo::FrictionLaw;
 
@@ -76,7 +76,8 @@ fn cavity(gas: GasState, volume: f64) -> MaterialBodyCavity {
     MaterialBodyCavity {
         cavity: HelmholtzModalCavity::new(HelmholtzCavity {
             volume_m3: volume, neck_radius_m: 0.01, neck_length_m: 0.02,
-        }, gas, CavityNeckLoss::RadiationAtResonance(fs_phs::MouthFlange::Flanged)).unwrap(),
+            inner_end: NeckEnd::Flanged, outer_end: NeckEnd::Flanged,
+        }, gas, CavityNeckLoss::RadiationAtResonance).unwrap(),
         modal_budget: ModalAcousticTimeBudget::audible_reference(), listener_m: 1.0,
     }
 }

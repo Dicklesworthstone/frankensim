@@ -60,6 +60,7 @@ fn gas() -> GasState { GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 1
 fn cavity() -> MaterialBodyCavity {
     MaterialBodyCavity { cavity: HelmholtzModalCavity::new(HelmholtzCavity {
         volume_m3: 0.004, neck_radius_m: 0.01, neck_length_m: 0.02,
+        inner_end: fs_scenario::NeckEnd::Flanged, outer_end: fs_scenario::NeckEnd::Flanged,
     }, gas(), CavityNeckLoss::Resistance(100.0)).unwrap(),
         modal_budget: ModalAcousticTimeBudget::audible_reference(), listener_m: 1.5 }
 }
