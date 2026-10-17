@@ -3,7 +3,8 @@
 use fs_couple::bernoulli_aperture::{BernoulliAperture, dynamic::{
     ApertureState, DynamicAperture, DynamicApertureSpec,
 }, network::{NetworkNode, TubeNetworkSpec, TubeSection}, paired::{
-    ApertureBlade, BladeState, PairedAperture, PairedApertureLimits, PairedApertureSpec,
+    ApertureBlade, BladePropagator, BladeState, PairedAperture, PairedApertureLimits,
+    PairedApertureSpec,
 }, performance::AperturePerformanceConfig, two_sided::{
     ApertureDuctSpec, LoadedAperture, TwoSidedAperture, TwoSidedDrive, TwoSidedLimits,
     ValveSide, combined_inlet_state, observer::{TwoSidedPressure, schedule::ScheduledTwoSidedPressure},
@@ -42,7 +43,8 @@ fn system(paired: bool, rate: u32, mass_ratio: f64, steps: u64) -> TwoSidedApert
     let valve: LoadedAperture = if paired {
         let a = ApertureBlade { mass_kg: 1e-5, stiffness_n_m: 500.0,
             damping_n_s_m: 0.03, pressure_area_m2: 1.25e-4 };
-        PairedAperture::new(PairedApertureSpec {
+        // Outside the midpoint one-cent band (DEF-04): exact blade blocks.
+        PairedAperture::new_with_propagator(PairedApertureSpec {
             rest_opening_m: 4e-4, width_m: 0.013,
             blades: [a,ApertureBlade { mass_kg: a.mass_kg*mass_ratio,..a }],
             density_kg_m3: g.density, impedance_pa_s_m3: z,
@@ -50,7 +52,7 @@ fn system(paired: bool, rate: u32, mass_ratio: f64, steps: u64) -> TwoSidedApert
             limits: PairedApertureLimits { maximum_abs_displacement_m: 0.01,
                 maximum_abs_velocity_m_s: 100.0, maximum_energy_j: 1.0,
                 max_evaluations: 256, velocity_tolerance_m_s: 1e-13, relative_tolerance: 1e-11 },
-        },[BladeState::default();2],contact).unwrap().into()
+        },[BladeState::default();2],contact,BladePropagator::ExactZoh).unwrap().into()
     } else {
         DynamicAperture::new(DynamicApertureSpec {
             aperture: BernoulliAperture { rest_opening_m: 4e-4, width_m: 0.013, closing_pressure_pa: 1000.0 },
