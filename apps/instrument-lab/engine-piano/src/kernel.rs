@@ -102,6 +102,13 @@ pub struct Config {
     pub retire_ringing_j: f64,
     /// Same threshold for a key whose dampers are engaged [J].
     pub retire_damped_j: f64,
+    /// Intrinsic string loss law. `false` is the reference's default: an
+    /// estimated common rate plus an authored viscoelastic bending spectrum.
+    /// `true` is RT-0425's published per-key R_u and eta_u (the reference's
+    /// `--rt0425-string-damping`). Against 52 recordings (FrankenPiano corpus,
+    /// fp-realism-v1) the authored law decays the bass's upper partials about
+    /// 5x too fast; the published one cuts brightness error 16.4 -> 11.4 dB.
+    pub rt0425_string_damping: bool,
 }
 impl Config {
     pub fn live(sample_rate: u32) -> Self {
@@ -120,6 +127,7 @@ impl Config {
             full_scale_pa: 10.0,
             retire_ringing_j: 1.0e-10,
             retire_damped_j: 1.0e-8,
+            rt0425_string_damping: false,
         }
     }
 }
@@ -1816,7 +1824,7 @@ impl LivePiano {
         // The reference bank is the single source of every per-partial constant
         // (frequency, bridge cross inertia, strike projection, intrinsic loss).
         let bank = Bank::new_with_string_damping(&courses, board, rate, 0.45 * f64::from(rate),
-            cfg.max_partials, true, None, false)?;
+            cfg.max_partials, true, None, cfg.rt0425_string_damping)?;
         let (losses, _) = crate::refmods::bank_string_losses(&bank);
         let n_total = bank.modes.len();
         let omega: Vec<f64> = bank.modes.iter().map(|m| m.omega).collect();

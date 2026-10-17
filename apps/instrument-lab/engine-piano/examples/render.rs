@@ -7,6 +7,7 @@
 //!        [--isolated] [--no-duplex] [--damper-points K] [--trace OUT.csv]
 //!        [--reduction MAX,KEEP_LOW,HZ,...] [--max-modes N] [--max-keys N]
 //!        [--board FILE.bin]   (a board file written by gen_board, as the browser fetches it)
+//!        [--rt0425-string-damping] (RT-0425 per-key string losses, as the browser plays)
 //! `--scale` + `--isolated` reproduces the reference binary run with the same
 //! sparse `--scale` (nothing else attached to the bridge, no retirement).
 use fs_live_piano::refmods::geometry;
@@ -55,6 +56,7 @@ fn run() -> Result<(), String> {
             "--trace" => { trace_path = Some(value(i)?.clone()); i += 1; }
             "--board" => { board_path = Some(value(i)?.clone()); i += 1; }
             "--isolated" => cfg.static_attachment = false,
+            "--rt0425-string-damping" => cfg.rt0425_string_damping = true,
             "--no-duplex" => cfg.duplex = false,
             other => return Err(format!("unknown option {other}")),
         }

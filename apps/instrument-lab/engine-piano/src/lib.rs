@@ -69,7 +69,7 @@ fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
             "\"microphoneM\":[{},{},{}],\"microphoneTravelSamples\":{},\"microphoneFilterDelaySamples\":{},",
             "\"microphoneLatencyMs\":{:.3},\"microphoneMultipliesPerSample\":{},",
             "\"fullScalePa\":{},\"midiMaxVelocityMS\":{},\"stations\":{},",
-            "\"retireRingingJ\":{:e},\"retireDampedJ\":{:e}}}"
+            "\"retireRingingJ\":{:e},\"retireDampedJ\":{:e},\"stringDamping\":\"{}\"}}"
         ),
         output_rate, c.sample_rate, substeps, piano.courses().len(), piano.total_strings(), piano.table_modes(),
         piano.board_modes(), piano.board_exact_low_modes(), freqs.first().copied().unwrap_or(0.0), freqs.last().copied().unwrap_or(0.0),
@@ -80,5 +80,6 @@ fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
         (travel + filter) / rate * 1000.0, microphone_work,
         c.full_scale_pa, MIDI_MAXIMUM_VELOCITY_M_S, LivePiano::stations(),
         c.retire_ringing_j, c.retire_damped_j,
+        if c.rt0425_string_damping { "rt0425" } else { "authored" },
     )
 }
