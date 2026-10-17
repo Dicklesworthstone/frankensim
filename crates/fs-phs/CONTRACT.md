@@ -162,7 +162,9 @@ inventoried and measured in fs-couple `tests/integrator_warping_audit.rs`.
   pin `X` still supplies the radiation mass; tabulated
   `R(ω)` remains the FIR path),
   `zwikker_kosten_f` / `zk_one_minus_f` (also the fs-duct Bessel TMM),
-  `foster_sqrt_omega_terms`,
+  `foster_sqrt_omega_terms` (positive by construction: the log-trapezoid
+  rule of the exact Stieltjes form of the wall law `√ω(1 - i)`, tails lumped
+  into the end poles; no collocation and no fallback split),
   `foster_match_re`, `slice_linear_taper`,
   `spherical_cone` (1-D wave on `ψ = x p`, physical ports
   `p = ψ/x` and `U = x U_ψ + (α/ρ)∫ψ` via a per-cell

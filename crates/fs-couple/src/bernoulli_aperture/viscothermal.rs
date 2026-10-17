@@ -104,7 +104,7 @@ impl WideTubeLoss {
     /// Fit only the universal sqrt(omega) kernel, never a pressure waveform.
     /// Poles use a fixed 64-fold guard band and eight existing Foster arms.
     /// Check 65 in-band frequencies: analogue and actual bilinear responses must
-    /// each meet 5% relative complex AND real-loss error. Positive fallback
+    /// each meet 5% relative complex AND real-loss error. Positive
     /// coefficients from the shared fitter confer no admission on their own.
     ///
     /// These are sampled numerical checks of a first-order model, not a physical
