@@ -662,9 +662,12 @@ fn resolve_prestress(
             stress_free_length_m,
             linear_strain_limit,
         } => {
-            if !positive(stress_free_length_m) || !positive(linear_strain_limit) {
+            if !positive(stress_free_length_m)
+                || !positive(linear_strain_limit)
+                || linear_strain_limit >= 1.0
+            {
                 return Err(refuse(
-                    "stress-free length and strain limit must be positive",
+                    "stress-free length must be positive and linear strain limit must lie in (0, 1)",
                 ));
             }
             let strain = (string.length_m - stress_free_length_m) / stress_free_length_m;

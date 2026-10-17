@@ -119,7 +119,7 @@ mod tests {
                     source:"synthetic CLI membrane fixture, not measured fabric".into(),license:"test".into(),artifact:None}}).unwrap();
         }
         MaterialCard::assemble(MaterialStateId {chemistry:"synthetic membrane".into(),phase:"solid".into(),
-            process:"fixed test construction".into(),revision:1},claims,vec![]).unwrap()
+            process:"fixed test construction".into(),revision:0},claims,vec![]).unwrap()
     }
 
     #[test]

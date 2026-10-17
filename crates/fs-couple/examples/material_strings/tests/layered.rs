@@ -18,7 +18,7 @@ fn bowed() -> input::Spec {
         id: "bow".into(), target: GestureTarget::BowStroke { string: 0 },
         initial: GestureValue::Bow { velocity_m_per_s: 0.0, normal_force_n: 0.0, station: 0.2 },
         events: vec![GestureEvent { time_s: 0.0, transition_s: 0.002,
-            value: GestureValue::Bow { velocity_m_per_s: 0.01, normal_force_n: 0.0001, station: 0.2 } }],
+            value: GestureValue::Bow { velocity_m_per_s: 0.01, normal_force_n: 0.01, station: 0.2 } }],
     }]).unwrap();
     let text = String::from_utf8(old.bytes).unwrap();
     let mut bytes = format!("{}\nschedule\n", text.split_once("\nschedule\n").unwrap().0).into_bytes();
@@ -28,6 +28,18 @@ fn bowed() -> input::Spec {
 // Synthetic external source mutation: only the named sleeve property changes.
 fn sleeve(key: &str, value: f64) -> NormalizedPack {
     let mut claims = ClaimSet::new();
+    let provenance = Provenance {
+        source: "synthetic independent sleeve property".into(),
+        license: "CC0-1.0".into(),
+        artifact: Some(fs_blake3::ContentHash([9;32])),
+    };
+    let obs = claims.register_observation(ObservationDataset {
+        specimen: "sleeve.fsmatpk".into(),
+        method: "synthetic independent sleeve property".into(),
+        artifact: fs_blake3::ContentHash([9;32]),
+        caveats: "synthetic test fixture".into(),
+        provenance: provenance.clone(),
+    }).unwrap();
     for (name, dims, original) in [("density", Density::DIMS, 7800.0),
         ("young_modulus", Pressure::DIMS, 200e9), (ETA, DynViscosity::DIMS, 10.0),
         (SHEAR, Pressure::DIMS, 80e9), (SHEAR_ETA, DynViscosity::DIMS, 1000.0)] {
@@ -36,8 +48,7 @@ fn sleeve(key: &str, value: f64) -> NormalizedPack {
             value: PropertyValue::Scalar { value, dims },
             validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0).with("omega", 0.0, 200_000.0),
             uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::ConstantWithinValidity,
-            observations: vec![], provenance: Provenance { source: "synthetic independent sleeve property".into(),
-                license: "CC0-1.0".into(), artifact: None } }).unwrap();
+            observations: vec![obs.clone()], provenance: provenance.clone() }).unwrap();
     }
     let pack = NormalizedPack::new("sleeve.fsmatpk", "synthetic-test-v1", fs_blake3::ContentHash([9;32]),
         "synthetic redistribution permitted", claims, vec![], vec![]).unwrap();

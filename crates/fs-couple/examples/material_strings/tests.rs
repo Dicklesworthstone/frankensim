@@ -2,11 +2,17 @@
 use super::*;
 use std::io::Cursor;
 use fs_evidence::ValidityDomain;
-use fs_matdb::{ClaimSet,PropertyClaim,PropertyKey,PropertyValue,Provenance,InterpolationPolicy,UncertaintyModel};
+use fs_matdb::{ClaimSet,ObservationDataset,PropertyClaim,PropertyKey,PropertyValue,Provenance,InterpolationPolicy,UncertaintyModel};
 use fs_scenario::gesture::{GestureTrack,GestureEvent};
 
 fn pack(name:&str,rho:f64,band:f64,omit:Option<&str>)->NormalizedPack {
     let mut claims=ClaimSet::new();
+    let provenance=Provenance {source:"synthetic executable test".into(),license:"CC0-1.0".into(),artifact:Some(fs_blake3::ContentHash([7;32]))};
+    let obs=claims.register_observation(ObservationDataset {
+        specimen:name.into(),method:"synthetic executable test".into(),
+        artifact:fs_blake3::ContentHash([7;32]),caveats:"synthetic test fixture".into(),
+        provenance:provenance.clone(),
+    }).unwrap();
     for (key,dims,value) in [("density",Density::DIMS,rho),("young_modulus",Pressure::DIMS,200e9),
         ("poisson_ratio",Dims::NONE,0.3),(ETA,DynViscosity::DIMS,10.0),
         (SHEAR,Pressure::DIMS,80e9),(SHEAR_ETA,DynViscosity::DIMS,1000.0)] {
@@ -14,7 +20,7 @@ fn pack(name:&str,rho:f64,band:f64,omit:Option<&str>)->NormalizedPack {
         claims.insert_claim(PropertyClaim {key:PropertyKey::new(key,dims),value:PropertyValue::Scalar {value,dims},
             validity:ValidityDomain::unconstrained().with("T",280.0,320.0).with("omega",0.0,band),
             uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::ConstantWithinValidity,
-            observations:vec![],provenance:Provenance {source:"synthetic executable test".into(),license:"CC0-1.0".into(),artifact:None}}).unwrap();
+            observations:vec![obs.clone()],provenance:provenance.clone()}).unwrap();
     }
     let pack=NormalizedPack::new(name,"synthetic-test-v1",fs_blake3::ContentHash([7;32]),
         "synthetic redistribution permitted",claims,vec![],vec![]).unwrap();
