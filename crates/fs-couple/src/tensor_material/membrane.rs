@@ -17,6 +17,9 @@ use fs_material::visco_tensor::{TensorProny, TensorProjectionBudget};
 use fs_plate::shell::{FacetGeometry, ShellMesh};
 use std::collections::BTreeSet;
 
+mod loading;
+pub use loading::MembraneEdgeTraction;
+
 /// Explicit homogeneous-through-thickness material on ONE original triangle.
 #[derive(Clone, Debug)]
 pub struct MembraneFacetMaterial {
