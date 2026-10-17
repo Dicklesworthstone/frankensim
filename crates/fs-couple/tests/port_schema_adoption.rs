@@ -363,7 +363,8 @@ fn window_audit_closes_per_module() {
     let mut d = double();
     d.step(
         DoublePistonInput {
-            duration_s: 0.0005,
+            // The fixture's resolved clock: about 120 rad/s refuses at 0.0005 s.
+            duration_s: piston_fixture::drive(0.).duration_s,
             heat_j: [20., 0.],
             external_force_n: 0.,
         },
@@ -493,7 +494,7 @@ fn double_acting_piston_faces_share_one_wall_junction() {
     ));
     d.step(
         DoublePistonInput {
-            duration_s: 0.0005,
+            duration_s: piston_fixture::drive(0.).duration_s,
             heat_j: [20., 0.],
             external_force_n: 0.,
         },
