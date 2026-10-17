@@ -351,14 +351,15 @@ pub enum Termination {
     /// used by the closed-form oracles.
     IdealOpen,
     /// Unflanged-pipe low-`ka` radiation load (Levine–Schwinger fit,
-    /// end correction 0.6133 a).
+    /// end correction 0.6133 a). Refuses above ka 1.
     UnflangedOpen,
     /// Exact thin-wall Levine-Schwinger WH load; numerical resolution is explicit.
     UnflangedThinWall {
         /// Fixed-node quadrature resolution for the original integrals.
         quadrature: levine_schwinger::LsQuadrature,
     },
-    /// Flanged-pipe low-`ka` radiation load (end correction 0.8216 a).
+    /// Multimodal flanged-pipe load ([`flanged_pipe_impedance`]), continuous up
+    /// to [`FLANGED_MAX_KA`]; its end correction tends to 0.8216 a as ka -> 0.
     FlangedOpen,
 }
 
