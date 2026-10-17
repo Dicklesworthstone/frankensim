@@ -198,12 +198,20 @@ function findings(v: Verisim): HTMLElement[] {
   const spSoft = p("splash-pp")?.descriptors["octave_early_db"]?.rms_gap_db as number | null | undefined;
   const crashes = v.cymbal_ruler.rows.filter((row) => row.real && row.label.includes("crash")).map((row) => row.rms_gap_db);
   // The same stroke on other grids shows how far the graded render's figure has converged.
-  const grids = v.cymbal_ruler.rows.filter((row) => !row.real && typeof row.grid_mm === "number").sort((a, b) => b.grid_mm! - a.grid_mm!);
   const pairGrid = /on a ([\d.]+) mm grid/.exec(p("splash-mf")?.ours.label ?? "")?.[1];
+  const grids = v.cymbal_ruler.rows.filter((row) => !row.real && typeof row.grid_mm === "number" && String(row.grid_mm) !== pairGrid).sort((a, b) => b.grid_mm! - a.grid_mm!);
   if (typeof sp === "number" && p("splash-mf")?.ours.label.includes("fs-vkplate") && crashes.length) {
     const lo = Math.min(...crashes), hi = Math.max(...crashes);
-    items.push([sp <= lo ? "The splash's octave balance is closer to the real splash than real crashes are." : sp <= hi ? "The splash's octave balance sits among the real crashes." : "The splash's octave balance sits just beyond the real crashes.",
-      `Struck at 2 m/s${pairGrid ? ` on a ${pairGrid} mm grid` : ""}, the 8-inch splash is ${sp.toFixed(1)} dB from the real splash in octave-band balance over the first 250 ms${typeof spSoft === "number" ? ` (${spSoft.toFixed(1)} dB at 0.6 m/s against the real pp)` : ""}.${grids.length ? ` The same stroke on other grids: ${grids.map((g) => `${g.rms_gap_db.toFixed(1)} dB (${g.grid_mm} mm)`).join(", ")}.` : ""} Three real crashes, struck the same way, sit ${lo.toFixed(1)}–${hi.toFixed(1)} dB from it. Its 2–8 kHz brightness is ${num("splash-mf", "high_band_db", "ours").toFixed(1)} dB against the recording's ${num("splash-mf", "high_band_db", "real").toFixed(1)} dB: its 4 kHz octave is too weak.`]);
+    // The octave furthest below the recording, from the same early octave balance the gap is measured on.
+    const oct = p("splash-mf")?.descriptors["octave_early_db"] as { bands_hz?: number[]; real?: number[]; ours?: number[] } | undefined;
+    let weak = "";
+    if (oct?.bands_hz && oct.real && oct.ours) {
+      const { real, ours } = oct;
+      const short = oct.bands_hz.map((hz, i) => ({ hz, d: (ours[i] ?? NaN) - (real[i] ?? NaN) })).filter((b) => b.hz >= 1000 && Number.isFinite(b.d)).sort((a, b) => a.d - b.d)[0];
+      if (short && short.d < -3) weak = ` Its ${short.hz / 1000} kHz octave sits ${(-short.d).toFixed(1)} dB below the recording's.`;
+    }
+    items.push([sp <= lo ? "The splash's octave balance is closer to the real splash than real crashes are." : sp <= hi ? "The splash's octave balance sits among the real crashes." : "The splash's octave balance sits beyond the real crashes.",
+      `Struck at 2 m/s${pairGrid ? ` on a ${pairGrid} mm grid` : ""}, the 8-inch splash is ${sp.toFixed(1)} dB from the real splash in octave-band balance over the first 250 ms${typeof spSoft === "number" ? ` (${spSoft.toFixed(1)} dB at 0.6 m/s against the real pp)` : ""}.${grids.length ? ` The same stroke on other grids: ${grids.map((g) => `${g.rms_gap_db.toFixed(1)} dB (${g.grid_mm} mm)`).join(", ")}.` : ""} Three real crashes, struck the same way, sit ${lo.toFixed(1)}–${hi.toFixed(1)} dB from it. Its 2–8 kHz brightness is ${num("splash-mf", "high_band_db", "ours").toFixed(1)} dB against the recording's ${num("splash-mf", "high_band_db", "real").toFixed(1)} dB.${weak}`]);
   }
   // A missing number must not reach the page as "NaN dB".
   return items.filter(([, t]) => !t.includes("NaN")).map(([h, t]) => el("li", {}, el("b", {}, h), " ", t));

@@ -337,10 +337,14 @@ def ours_clip(kind, cid):
 def piano_label(cid):
     """What the render simulated, read from its own command line."""
     log = CAMPAIGN / "piano" / f"{cid}.log"
-    cmd = next((l for l in log.read_text(errors="replace").splitlines() if l.startswith("cmd:")), "") if log.exists() else ""
+    text = log.read_text(errors="replace") if log.exists() else ""
+    cmd = next((l for l in text.splitlines() if l.startswith("cmd:")), "")
     extra = []
-    if "--string-stretching" in cmd:
-        extra.append("longitudinal string waves whose axial force drives the bridge")
+    # A stretching file can select linear strings for every key; the run reports how many channels it stretched.
+    stretched = re.search(r"String extension: .*?; (\d+) geometric speaking/duplex channels; (\d+) retained longitudinal", text)
+    if "--string-stretching" in cmd and stretched and int(stretched.group(1)) > 0:
+        extra.append("longitudinal string waves whose axial force drives the bridge" if int(stretched.group(2)) > 0
+                     else "string stretching (tension modulation)")
     if "--string-polarization" in cmd:
         extra.append("both transverse string polarizations")
     return ("FrankenSim offline render (RT-0425 Model D scale; " + "".join(e + "; " for e in extra)
