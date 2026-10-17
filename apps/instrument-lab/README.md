@@ -94,9 +94,16 @@ A card counts as confirmed only when its experiment moves the measured gap. A me
 moved into the graded renders is reported as fixed or partly fixed: the A3 renders
 (`a3-{pp,mf,ff,fff}`) carry `--string-stretching axial-a3.fspx`, whose waves drive the bridge axially,
 and when the campaign also has the same strokes on linear strings (`a3-{mf,ff,fff}-linear`) the card
-compares the two. Air loading (`--rayleigh-loading`) cannot yet be admitted on the production board:
-on a resolved board fine enough for 2.4 kHz the 32-port passive fit of the 128-mode impedance misses
-its accuracy limits (bead frankensim-h0dv2; the 1 kHz board result is on frankensim-s59w0).
+compares the two. Every piano render the page grades or diagnoses (A3, C6 and the ablations above)
+also carries two-sided air loading on a soundboard fine enough for its reaction to 2.4 kHz:
+
+    piano_geometry --divisions 12 --rib-normal-step-m 0.03 --output board-air.fsb   # 9,432 area samples
+    grand_piano --preset steinway-d --board-geometry board-air.fsb --board-band-hz 2400 \
+      --board-reduction 128,64,200,400,800,1600,2300 --rayleigh-loading 2,90,2400,257 ...
+
+When the campaign also has the same A3 mf stroke without air on that board (`a3-mf-noair`), the
+low-resonance and ringing cards compare the two. Each render first samples and fits the board's
+complete 128-mode air reaction (about 14 minutes; see the example's RAYLEIGH_LOADING.md).
 
 ## The drum kit
 

@@ -347,6 +347,11 @@ def piano_label(cid):
                      else "string stretching (tension modulation)")
     if "--string-polarization" in cmd:
         extra.append("both transverse string polarizations")
+    # Air loading is reported only when the run admitted it (its fit passed and the reaction was attached).
+    load = re.search(r"Rayleigh pressure reaction: (\d) half-space", text)
+    if "--rayleigh-loading" in cmd and load:
+        extra.append(("air loading on both faces of the soundboard" if load.group(1) == "2" else "air loading on the soundboard")
+                     + " (its complete 128-mode reaction)")
     return ("FrankenSim offline render (RT-0425 Model D scale; " + "".join(e + "; " for e in extra)
             + "one pressure point 1 m above the board, infinite baffle, no room)")
 
