@@ -20,10 +20,19 @@ fn limits() -> ModalFrictionConfig { ModalFrictionConfig { max_iterations:96,
     maximum_force_n:100.0,maximum_slip_speed_m_s:10.0,force_absolute_tolerance_n:1e-11,
     force_relative_tolerance:1e-10,sticking_tolerance_m:1e-12 } }
 fn network(omega: f64) -> CoupledModalSystem {
-    let model = ModalAcousticTimeModel::try_new(48_000,vec![ModalAcousticMode {
+    // omega = 0 is an untethered mass: a free coordinate, which the modal owner
+    // admits only through its free-coordinate constructor and without a
+    // pressure readout.
+    let free = omega == 0.0;
+    let modes = vec![ModalAcousticMode {
         angular_frequency_rad_s:omega,damping_ratio:0.0,
-        pressure_per_modal_velocity:C64::new(1.0,0.0), // authored synthetic readout
-    }],ModalAcousticTimeBudget::audible_reference()).unwrap();
+        pressure_per_modal_velocity:if free {C64::ZERO} else {C64::new(1.0,0.0)}, // authored synthetic readout
+    }];
+    let model = if free {
+        ModalAcousticTimeModel::try_new_with_free_coordinates(48_000,modes,ModalAcousticTimeBudget::audible_reference())
+    } else {
+        ModalAcousticTimeModel::try_new(48_000,modes,ModalAcousticTimeBudget::audible_reference())
+    }.unwrap();
     CoupledModalSystem::new(vec![model],vec![],ModalCouplingConfig {
         max_modes:8,max_connections:4,max_setup_terms:4096,nyquist_guard_fraction:0.9,
         maximum_total_energy_j:100.0,maximum_abs_pressure_pa:1e6,maximum_abs_connection_force_n:1e6,
