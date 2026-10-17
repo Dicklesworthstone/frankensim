@@ -214,6 +214,142 @@ def segment_by_pitch(x, exp):
     return spans
 
 
+def segment_monotone(x, exp, min_note_s=0.35):
+    """Align the YIN track to the file's known ascending notes `exp` (Viterbi).
+
+    States: leading silence, then note k and the gap after it, visited in order;
+    each file plays each note once, so no state can be re-entered. A voiced
+    frame costs its squared semitone distance to note k, capped at 1.5 so a
+    YIN harmonic confusion (oboe 3f/2, 4f/3) stays inside some note and the
+    order decides which; voiced frames cost 2 in a gap, unvoiced frames cost 1
+    inside a note and 0 in a gap. No energy threshold enters, so legato bow
+    changes, decay re-crossings and gapless loud files segment alike. Notes
+    shorter than `min_note_s` are dropped, never invented; `segment_notes`
+    verifies every span's pitch.
+    """
+    tr = yin_track(x, fmin=max(25.0, hz_of(exp[0]) * 0.7), fmax=hz_of(exp[-1]) * 1.4)
+    if not len(tr):
+        return []
+    e = env_db(x)
+    lvl = e[np.minimum(len(e) - 1, (tr[:, 0] * SR).astype(int) + 1024)]
+    f = tr[:, 1]
+    voiced = np.isfinite(f) & (f > 0) & (tr[:, 2] > 0.6) & (lvl > e.max() - 45)
+    semis = np.where(voiced, 69 + 12 * np.log2(np.where(voiced, f, 440.0) / 440), np.nan)
+    k = len(exp)
+    states = 2 * k + 1  # 0 = leading silence; 2j+1 = note j; 2j+2 = gap after note j
+    cost = np.empty((len(tr), states))
+    cost[:, 0] = np.where(voiced, 2.0, 0.0)
+    for j, m in enumerate(exp):
+        d = np.minimum((semis - m) ** 2, 1.5)
+        cost[:, 2 * j + 1] = np.where(voiced, d, 1.0)
+        cost[:, 2 * j + 2] = np.where(voiced, 2.0, 0.0)
+    # Predecessors: stay, or advance from the previous state; a note may also
+    # follow the previous note directly (legato, no gap).
+    acc = np.full(states, np.inf)
+    acc[0] = cost[0, 0]
+    acc[1] = cost[0, 1]
+    back = np.zeros((len(tr), states), dtype=np.int64)
+    for t in range(1, len(tr)):
+        nxt = np.empty(states)
+        for s in range(states):
+            best, arg = acc[s], s
+            if s >= 1 and acc[s - 1] < best:
+                best, arg = acc[s - 1], s - 1
+            if s >= 3 and s % 2 == 1 and acc[s - 2] < best:
+                best, arg = acc[s - 2], s - 2
+            nxt[s] = best + cost[t, s]
+            back[t, s] = arg
+        acc = nxt
+    s = 2 * k if acc[2 * k] <= acc[2 * k - 1] else 2 * k - 1
+    path = np.empty(len(tr), dtype=np.int64)
+    for t in range(len(tr) - 1, -1, -1):
+        path[t] = s
+        s = back[t, s]
+    notes = []
+    for j in range(k):
+        idx = np.flatnonzero(path == 2 * j + 1)
+        if len(idx) and tr[idx[-1], 0] - tr[idx[0], 0] >= min_note_s:
+            a = int(tr[idx[0], 0] * SR)
+            b = int(tr[idx[-1], 0] * SR) + 2048
+            notes.append((j, (max(0, a - int(0.02 * SR)), min(len(x), b + int(0.08 * SR)))))
+    return notes
+
+
+class ReferenceMismatch(ValueError):
+    """IRPGRADE_REFERENCE_MISMATCH: a reference whose audio contradicts its file name.
+
+    `kind` is "pitch" (a span sounds off its note), "note-absent" (the other
+    named notes verify, these never sound) or "no-named-note" (none sounds).
+    """
+
+    def __init__(self, kind, detail, verified=()):
+        super().__init__(f"IRPGRADE_REFERENCE_MISMATCH[{kind}]: {detail}")
+        self.kind = kind
+        self.detail = detail
+        # (midi, span) pairs that did verify at pitch ("note-absent" only).
+        self.verified = list(verified)
+
+
+def span_semitones(x, span, midi):
+    """Harmonic-comb f0 of one span relative to `midi` [semitones].
+
+    Subharmonic summation over [0.7, 1.4] x the named pitch, so YIN harmonic
+    confusions (an oboe F4 tracked as Bb4) cannot fail a correct span.
+    """
+    a, b = span
+    f, s = spectrum(x[a:b], 0.0, (b - a) / SR)
+    return 12 * math.log2(f0_spectral(f, s, hz_of(midi) * 0.7, hz_of(midi) * 1.4) / hz_of(midi))
+
+
+def sounding_seconds(x, midi, tol=0.5):
+    """Total voiced time anywhere in `x` within `tol` semitones of `midi` [s]."""
+    tr = yin_track(x, fmin=hz_of(midi) * 0.7, fmax=hz_of(midi) * 1.4)
+    if not len(tr):
+        return 0.0
+    f = tr[(tr[:, 2] > 0.6) & np.isfinite(tr[:, 1]), 1]
+    return float(np.sum(np.abs(12 * np.log2(f / hz_of(midi))) <= tol)) * 480 / SR
+
+
+def segment_notes(x, exp, max_semitones=0.5, min_note_s=0.35):
+    """Note spans of a UIowa file whose ascending notes `exp` are known from its name.
+
+    The silence segmenter is kept wherever it finds exactly the expected count;
+    otherwise the monotone pitch alignment decides. A full count is accepted
+    only if every span sounds its named note within `max_semitones`. A short
+    count refuses when measured: named notes that never sound anywhere
+    ("note-absent", the rest verified) or a file that sounds none of them
+    ("no-named-note", e.g. 96 kHz data under a 44.1 kHz header plays 0.459x
+    low). Anything else keeps the historical routing; the mismatch stays visible.
+    """
+    spans = segment_scale(x)
+    if len(spans) != len(exp):
+        aligned = segment_monotone(x, exp, min_note_s)
+        if len(aligned) == len(exp):
+            spans = [s for _, s in aligned]
+        else:
+            # Harmonic-comb pitch of each silence-segmented span over a wide range.
+            # YIN octave errors on a mislabelled file land on named notes, and a
+            # comb octave error can too, so a minority of named spans refuses.
+            sounding = [69 + 12 * math.log2(f0_spectral(*spectrum(x[a:b], 0.0, (b - a) / SR), 25.0, 2000.0) / 440)
+                        for a, b in spans]
+            named = sum(any(abs(p - m) <= max_semitones for m in exp) for p in sounding)
+            if spans and 2 * named < len(spans):
+                raise ReferenceMismatch("no-named-note", [name_of(m) for m in exp])
+            present = {j for j, _ in aligned}
+            missing = [m for j, m in enumerate(exp) if j not in present]
+            if (aligned and all(sounding_seconds(x, m) < min_note_s for m in missing)
+                    and all(abs(span_semitones(x, s, exp[j])) <= max_semitones for j, s in aligned)):
+                raise ReferenceMismatch("note-absent", [name_of(m) for m in missing],
+                                        [(exp[j], s) for j, s in aligned])
+            if len(exp) > 2 and len(spans) < len(exp) / 2:
+                return segment_by_pitch(x, exp)
+            return spans
+    deviations = [span_semitones(x, s, m) for s, m in zip(spans, exp)]
+    if not all(abs(d) <= max_semitones for d in deviations):
+        raise ReferenceMismatch("pitch", deviations)
+    return spans
+
+
 def expected_notes(range_token: str):
     toks = re.findall(r"[A-G]b?\d", range_token)
     if len(toks) == 1:
@@ -633,9 +769,15 @@ def build_library(wav_dir: Path, cache: Path):
             continue
         exp = expected_notes(meta["range"])
         x = highpass(load(p), hz_of(exp[0]) if exp else None)
-        spans = segment_scale(x)
-        if len(exp) > 2 and len(spans) < len(exp) / 2:
-            spans = segment_by_pitch(x, exp)
+        try:
+            spans = segment_notes(x, exp)
+            labels = exp if len(spans) == len(exp) else None
+        except ReferenceMismatch as refusal:
+            print(f"{p.name}: refused, {refusal}", file=sys.stderr)
+            if refusal.kind != "note-absent":
+                continue
+            labels = [m for m, _ in refusal.verified]
+            spans = [s for _, s in refusal.verified]
         kind = "decaying" if (meta["art"] == "pizz" or meta["inst"] in ("guitar", "xylophone", "piano")) else "sustained"
         assigned = []
         for k, (a, b) in enumerate(spans):
@@ -644,14 +786,14 @@ def build_library(wav_dir: Path, cache: Path):
             y = y[o:]
             if len(y) < int(0.35 * SR):
                 continue
-            hint = hz_of(exp[k]) if len(spans) == len(exp) else None
+            hint = hz_of(labels[k]) if labels else None
             d = describe(y, kind, hint, inharmonic=meta["inst"] in ("xylophone", "marimba"))
             if d is None:
                 continue
             midi = int(round(69 + 12 * math.log2(d["f0"] / 440))) if d["f0"] and np.isfinite(d["f0"]) else None
             if hint is None and midi is not None and exp and not (exp[0] - 1 <= midi <= exp[-1] + 1):
                 continue
-            note = exp[k] if hint is not None else midi
+            note = labels[k] if hint is not None else midi
             if note is None:
                 continue
             lib.append(dict(file=p.name, start=(a + o) / SR, end=b / SR, note=note, name=name_of(note), kind=kind,

@@ -311,21 +311,56 @@ class BlindSpotsAndDescriptors(unittest.TestCase):
             self.assertEqual(ordered, sorted(ordered))
 
     def test_segmentation_counts(self):
-        """G2: every Iowa scale file used in IRP_UIOWA_WAV48 yields its expected note count."""
+        """G2: every Iowa scale file used in IRP_UIOWA_WAV48 yields its expected note count,
+        each span sounding its named note; a refusal must be a measured header defect."""
         self.assertIsNotNone(desc_mod, "descriptors module required")
         wavdir = Path(required_env("IRP_UIOWA_WAV48"))
         wavs = sorted(wavdir.glob("*.wav"))
         self.assertTrue(wavs, "no WAV files found in IRP_UIOWA_WAV48")
+        wrong, refused = [], []
         for wav in wavs:
             meta = ig.parse_ref_name(wav.stem)
             if not meta["range"]:
                 continue
             exp = ig.expected_notes(meta["range"])
             x = ig.highpass(ig.load(wav), ig.hz_of(exp[0]))
-            spans = ig.segment_scale(x)
-            if len(exp) > 2 and len(spans) < len(exp) / 2:
-                spans = ig.segment_by_pitch(x, exp)
-            self.assertEqual(len(spans), len(exp), f"{wav.name}: got {len(spans)} spans, expected {len(exp)}")
+            try:
+                spans = ig.segment_notes(x, exp)
+            except ig.ReferenceMismatch as refusal:
+                if refusal.kind == "note-absent":
+                    # The other named notes verified at pitch; these never sound.
+                    refused.append((wav.name, refusal.kind, refusal.detail))
+                elif refusal.kind == "no-named-note":
+                    # Harmonic-comb pitch of each silence span; the header factor is
+                    # the one that maps the majority of spans onto named notes.
+                    pitches = []
+                    for a, b in ig.segment_scale(x):
+                        f, s = ig.spectrum(x[a:b], 0.0, (b - a) / ig.SR)
+                        pitches.append(ig.f0_spectral(f, s, 25.0, 2000.0))
+                    refused.append((wav.name, refusal.kind, pitches))
+                else:
+                    wrong.append(f"{wav.name}: {refusal}")
+                continue
+            if len(spans) != len(exp):
+                wrong.append(f"{wav.name}: got {len(spans)} spans, expected {len(exp)}")
+        self.assertEqual(wrong, [])
+        # A file sounding none of its notes must be a sample-rate header mislabel
+        # (96 or 48 kHz data declared 44.1 kHz), measured, not assumed: undoing
+        # that factor puts a majority of its spans on named notes.
+        mislabels = (44_100 / 96_000, 44_100 / 48_000)
+        report = []
+        for name, kind, detail in refused:
+            if kind != "no-named-note":
+                report.append(dict(file=name, kind=kind, absent=detail))
+                continue
+            exp = ig.expected_notes(ig.parse_ref_name(Path(name).stem)["range"])
+            hits = {r: sum(any(abs(12 * math.log2(p / r / ig.hz_of(m))) <= 0.5 for m in exp) for p in detail)
+                    for r in (1.0, *mislabels)}
+            factor = max(mislabels, key=hits.get)
+            report.append(dict(file=name, kind=kind, spans=len(detail), named_hits=hits[1.0],
+                               factor=factor, named_hits_after_factor=hits[factor]))
+            self.assertTrue(2 * hits[factor] > len(detail), f"{name}: {hits} over {len(detail)} spans")
+        print(json.dumps(dict(test="segmentation_counts", files=len(wavs), refused=report)))
 
 
 if __name__ == "__main__":

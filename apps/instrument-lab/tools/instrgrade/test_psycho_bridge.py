@@ -223,7 +223,10 @@ class TestPsychoBridge(unittest.TestCase):
             cands_path = root / "candidates.json"
             cands_path.write_text(json.dumps(cands))
 
-            env_vars = dict(os.environ, FS_PSYCHO_BIN=str(bin_path))
+            # The temporary scratch holds grade/library.json and real/wav48; the
+            # Reproduce rows' inherited LIBFILE and IRP_UIOWA_WAV48 must not leak.
+            env_vars = dict(os.environ, FS_PSYCHO_BIN=str(bin_path), LIBFILE="library.json",
+                            IRP_UIOWA_WAV48=str(root / "real" / "wav48"))
             grade_run_py = Path(__file__).resolve().parent / "grade_run.py"
             proc = subprocess.run(
                 [sys.executable, "-I", str(grade_run_py), str(root), str(cands_path), str(outdir)],
