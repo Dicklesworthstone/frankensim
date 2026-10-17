@@ -76,6 +76,16 @@ using the maximum possible vertices per row. Requests beyond the existing
 requested resolution or dropping structural features. The original constitutive
 constants, source labels, supports, damping and legacy constructors are retained.
 
+Within each row of a resolved board, a bridge or cut-off crossing replaces any
+interior regular position within a quarter of the row's regular spacing. Before
+this rule a crossing could land micrometres from a regular node on a rib row,
+leaving rib segments 0.04-0.13 mm long whose 12EI/L^3 stiffness pushed real
+pivots of K under the factorization's zero-pivot floor: divisions 20 with steps
+0.015 or 0.016 m, and divisions 22 with step 0.0155 m, refused at shift 0
+(`frankensim-52edk`). On the 12-division, 0.03 m board the rule removes 72 of
+1,691 nodes; the shortest edge grows from 0.29 to 1.30 mm and the worst aspect
+ratio falls from 1,229 to 372. The unrefined default constructors are unchanged.
+
 Normal row spacing is **not** a bound on every triangle diameter or aspect ratio.
 Acoustic quadrature, selected board frequency band, eigensolver budgets, retained
 mode limits, string physics and audio rate are separate controls. A finer mesh
@@ -97,10 +107,10 @@ cargo test --release -p fs-couple --example grand_piano resolution
 The first target tests physical spacing, feature retention and capacity
 admission. The second tests exporter options, physical inertia rows and exclusive
 byte-preserving writes; full builder tests stay with `grand_piano` and its actual geometry
-reader. These commands have not been executed in the development runtime,
-which has no Rust toolchain. Independent Python geometry references covered
-seven resolutions and both bridge maps, but do not constitute native Rust,
-mechanical eigenanalysis, renderer or listening validation.
+reader. On 2026-10-17 the third command passed natively (5 resolution tests,
+including the shift-0 factorization of the three formerly refused boards), as did
+the whole `grand_piano` suite. Factoring is not mechanical, renderer or listening
+validation.
 
 Publication continuation: the core resolution and its tests were recovered from
 the saved patch without source changes. The exporter additionally connects the

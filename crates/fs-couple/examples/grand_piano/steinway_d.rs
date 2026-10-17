@@ -244,6 +244,21 @@ fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: 
                 xs.push(x.clamp(lo,hi));feature_x[k]=Some(x.clamp(lo,hi));
             }
         }
+        // A resolved mesh lets each structural crossing replace an interior
+        // regular position within a quarter spacing of it. Otherwise a bridge
+        // crossing beside a regular node on a rib row leaves a rib segment tens
+        // of micrometres long, whose 12EI/L^3 stiffness pushed legitimate
+        // pivots of K under the factorization's zero-pivot floor at some exact
+        // resolutions (frankensim-52edk). Default constructors are unchanged.
+        if maximum_station_gap.is_some() && hi-lo>=1e-8 {
+            let snap=0.25*(hi-lo)/divisions as f64;
+            let crossings:Vec<f64>=feature_x.iter().flatten().copied().collect();
+            let mut index=0;
+            xs.retain(|&x| {
+                let keep=index==0||index>=divisions||crossings.iter().all(|c|(c-x).abs()>=snap);
+                index+=1; keep
+            });
+        }
         xs.sort_by(f64::total_cmp);xs.dedup_by(|a,b|(*a-*b).abs()<1e-8);
         let mut row=Row{station:t,nodes:Vec::new(),features:[None;3]};
         for x in xs {
