@@ -1,0 +1,449 @@
+{
+ "schema": "frankensim-x-obs1-result-v1",
+ "bead": "frankensim-irp-v5-instrument-realism-pexfp.229",
+ "protocol": "X-Obs1 polish r1, arms A0 (Legacy listener_m 0.5) / A1 (Baffled outlet 0 0 0.5)",
+ "arms_run": [
+  "A0",
+  "A1"
+ ],
+ "arms_open": {
+  "A2": "BLOCKED on .197 (R13 geometry)",
+  "A3": "BLOCKED: one tone-hole operator exists; never improvised"
+ },
+ "validity_gate": "render::schedule::reed::outlet::tests::observer_choice_leaves_reed_and_bore_state_bitwise_identical_over_a_full_note (7caf154fd; native ts1 b40) proves A0/A1 share one reed/bore trajectory",
+ "render": {
+  "git_sha": "c7e2712a4b15e88863b4a4674cb9309f48ca92e3",
+  "host": "threadripperje",
+  "binary": "music_render (release)",
+  "sample_rate_hz": 48000,
+  "samples": 72000,
+  "baffled_band_hz": 4800,
+  "band_note": "baffled_outlet admits fmax <= rate/10; 96 and 192 kHz renders refuse at the 65536-tap characteristic-line ceiling for these low-loss tubes, so A1 is qualified to 4.8 kHz while the grade spans the full band"
+ },
+ "grader": {
+  "version": "instrgrade-2",
+  "library_sha256": "27f681a4e5f0e946bb5a6b3eb46f2966b5d4ea5a2af19184d7a7a4d8cd5a2bb6",
+  "library": "library-v5.json (the W1 audit library)",
+  "tool_sha256": {
+   "instrgrade.py": "113536ffe27e00f40e9ae171499e70dfc52a84179e9916a0b197695c422ce59a",
+   "descriptors.py": "832646067b2ee97472d4808ee19e05fc090f2c33fbb23d4836d28ebf9a3e17e5",
+   "psycho.py": "add627a892357e777bac512ca36df436efb2903f14e859bbe22920878b34f684",
+   "grade_run.py": "efe0614ae578439977363662a41a901c35c8c8fccd4d3bfb94ab3d3f0decb4e2",
+   "radiate.py": "1f466c1c0ffd04683e87455f61a7b3adf1ff6ab285f91ed9aa36b727ac966ed1",
+   "summarize.py": "cbe2aa3005f4ec4c23d71af168ca476ecdfde43c5178d793c03c3985383e0140",
+   "buildlib.py": "dd2126e0b95795dd20ebb726779e6b39fe8a18fdd6d469df66d4efc16ff4034e",
+   "uiowa-links.json": "46b50e792be079a2b118a3adeb632ef719d2b785f3750a6b71ea2ed14960e74d"
+  },
+  "ruler": "R = min same-type (other-dynamic) ruler, as grade_run's same_ruler"
+ },
+ "inputs": [
+  {
+   "note": "D3",
+   "arm": "A0",
+   "length_m": 0.57834,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20000\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nlistener_m 0.5\ntermination flanged\nsegments 1\ncylinder 0.0073 0.57834\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "D3",
+   "arm": "A1",
+   "length_m": 0.57834,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nbaffled_outlet 0 0 0.5 16 64 4800\ntermination flanged\nsegments 1\ncylinder 0.0073 0.57834\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "E3",
+   "arm": "A0",
+   "length_m": 0.51459,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20000\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nlistener_m 0.5\ntermination flanged\nsegments 1\ncylinder 0.0073 0.51459\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "E3",
+   "arm": "A1",
+   "length_m": 0.51459,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nbaffled_outlet 0 0 0.5 16 64 4800\ntermination flanged\nsegments 1\ncylinder 0.0073 0.51459\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "F#3",
+   "arm": "A0",
+   "length_m": 0.45779,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20000\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nlistener_m 0.5\ntermination flanged\nsegments 1\ncylinder 0.0073 0.45779\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "F#3",
+   "arm": "A1",
+   "length_m": 0.45779,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nbaffled_outlet 0 0 0.5 16 64 4800\ntermination flanged\nsegments 1\ncylinder 0.0073 0.45779\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "G3",
+   "arm": "A0",
+   "length_m": 0.43176,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20000\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nlistener_m 0.5\ntermination flanged\nsegments 1\ncylinder 0.0073 0.43176\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "G3",
+   "arm": "A1",
+   "length_m": 0.43176,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nbaffled_outlet 0 0 0.5 16 64 4800\ntermination flanged\nsegments 1\ncylinder 0.0073 0.43176\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "A3",
+   "arm": "A0",
+   "length_m": 0.384,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20000\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nlistener_m 0.5\ntermination flanged\nsegments 1\ncylinder 0.0073 0.38400\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "A3",
+   "arm": "A1",
+   "length_m": 0.384,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nbaffled_outlet 0 0 0.5 16 64 4800\ntermination flanged\nsegments 1\ncylinder 0.0073 0.38400\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "B3",
+   "arm": "A0",
+   "length_m": 0.34145,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20000\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nlistener_m 0.5\ntermination flanged\nsegments 1\ncylinder 0.0073 0.34145\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "B3",
+   "arm": "A1",
+   "length_m": 0.34145,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nbaffled_outlet 0 0 0.5 16 64 4800\ntermination flanged\nsegments 1\ncylinder 0.0073 0.34145\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "C#4",
+   "arm": "A0",
+   "length_m": 0.30355,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20000\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nlistener_m 0.5\ntermination flanged\nsegments 1\ncylinder 0.0073 0.30355\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "C#4",
+   "arm": "A1",
+   "length_m": 0.30355,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nbaffled_outlet 0 0 0.5 16 64 4800\ntermination flanged\nsegments 1\ncylinder 0.0073 0.30355\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "D4",
+   "arm": "A0",
+   "length_m": 0.28617,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20000\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nlistener_m 0.5\ntermination flanged\nsegments 1\ncylinder 0.0073 0.28617\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  },
+  {
+   "note": "D4",
+   "arm": "A1",
+   "length_m": 0.28617,
+   "performance": "frankensim-reed-performance-v1\naudio 48000 72000 20\nambient 293.15 101325 0\nreed 0.0004 0.013 6000 0 0 0.35\nbaffled_outlet 0 0 0.5 16 64 4800\ntermination flanged\nsegments 1\ncylinder 0.0073 0.28617\ncompile_limits 100000 4096\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\nevent\t0e0\t2e-2\tpressure-pa\t2.8e3\nevent\t1.35e0\t6e-2\tpressure-pa\t0e0\n"
+  }
+ ],
+ "rows": [
+  {
+   "note": "D3",
+   "D_legacy_db": 26.214368223152885,
+   "D_baffled_db": 12.18347076815365,
+   "R_db": 12.931253671188463,
+   "rulers_other_dynamic_db": [
+    12.931253671188463
+   ],
+   "nearest_legacy": [
+    "clarinet",
+    24.574282968930056,
+    "BbClar.pp.D3B3.wav@Eb3"
+   ],
+   "nearest_baffled": [
+    "clarinet",
+    12.357021558688496,
+    "BbClar.mf.D3B3.wav@D3"
+   ],
+   "delta_baffled_minus_legacy": {
+    "delta_hnr_db": -17.35603163013586,
+    "delta_centroid_rel": 0.9276381684435473
+   },
+   "reference": {
+    "file": "BbClar.mf.D3B3.wav",
+    "note": "D3",
+    "dynamic": "mf",
+    "wav_sha256": "fe232536aabf17feb3611b8e59f38c9fe4c68508f650ab2e2da97c869d7e15ad"
+   },
+   "candidate_wav_sha256": {
+    "A0": "356ab83a53c1b6a0d5ccd304d094727ac1c83496cb12cdf4b695962ce01ac456",
+    "A1": "2694fd89aaffd3b0c8bcdcd2850758213c3cd6ac44560f1a18a9271e123eec64"
+   },
+   "S_obs": 1.0562957505266883,
+   "S_obs_interval_over_rulers": [
+    1.0562957505266883,
+    1.0562957505266883
+   ],
+   "S_obs_status": "defined"
+  },
+  {
+   "note": "E3",
+   "D_legacy_db": 30.109102791219787,
+   "D_baffled_db": 17.80730087663734,
+   "R_db": 10.998318810457686,
+   "rulers_other_dynamic_db": [
+    10.998318810457686,
+    23.401649178336616
+   ],
+   "nearest_legacy": [
+    "cello",
+    23.73054959615082,
+    "Cello.arco.mf.sulG.G2Gb3.mono.wav@F3"
+   ],
+   "nearest_baffled": [
+    "clarinet",
+    12.713460713625636,
+    "BbClar.mf.D3B3.wav@D3"
+   ],
+   "delta_baffled_minus_legacy": {
+    "delta_hnr_db": -4.536321393647697,
+    "delta_centroid_rel": 0.7509128238335909
+   },
+   "reference": {
+    "file": "BbClar.mf.D3B3.wav",
+    "note": "E3",
+    "dynamic": "mf",
+    "wav_sha256": "fe232536aabf17feb3611b8e59f38c9fe4c68508f650ab2e2da97c869d7e15ad"
+   },
+   "candidate_wav_sha256": {
+    "A0": "3633b6737bc78453a38f085f6cf3c28c57067a1f19ae2d016a3885bc2331384e",
+    "A1": "446026a081e04f2845a26ee1f622a1607f4d6ee5ba4e98e98d51a277e8d149c9"
+   },
+   "S_obs": 0.6437099559581687,
+   "S_obs_interval_over_rulers": [
+    0.6437099559581687,
+    1.834049495467859
+   ],
+   "S_obs_status": "defined"
+  },
+  {
+   "note": "Fs3",
+   "D_legacy_db": 27.301771633809942,
+   "D_baffled_db": 15.657946277684522,
+   "R_db": 6.765649230049341,
+   "rulers_other_dynamic_db": [
+    6.765649230049341
+   ],
+   "nearest_legacy": [
+    "clarinet",
+    18.275407178158964,
+    "BbClar.pp.D3B3.wav@G3"
+   ],
+   "nearest_baffled": [
+    "cello",
+    10.785726694765712,
+    "Cello.arco.mf.sulG.G2Gb3.mono.wav@F3"
+   ],
+   "delta_baffled_minus_legacy": {
+    "delta_hnr_db": -32.13113168082589,
+    "delta_centroid_rel": 0.42609103662754566
+   },
+   "reference": {
+    "file": "BbClar.mf.D3B3.wav",
+    "note": "Gb3",
+    "dynamic": "mf",
+    "wav_sha256": "fe232536aabf17feb3611b8e59f38c9fe4c68508f650ab2e2da97c869d7e15ad"
+   },
+   "candidate_wav_sha256": {
+    "A0": "24b83af6078d7c98be7ea8a2c81be693cae1a735dfc8ae2dcf887c2a158ef3d5",
+    "A1": "0f013faf9b8abf0415a179596902034ac137fb0b16dba404170e6db8082487c2"
+   },
+   "S_obs": 0.5669924013499836,
+   "S_obs_interval_over_rulers": [
+    0.5669924013499836,
+    0.5669924013499836
+   ],
+   "S_obs_status": "defined"
+  },
+  {
+   "note": "G3",
+   "D_legacy_db": 22.293554084180183,
+   "D_baffled_db": 15.345629370553135,
+   "R_db": 4.874314028727949,
+   "rulers_other_dynamic_db": [
+    4.874314028727949,
+    18.505873090236697
+   ],
+   "nearest_legacy": [
+    "clarinet",
+    17.70783540076464,
+    "BbClar.pp.D3B3.wav@G3"
+   ],
+   "nearest_baffled": [
+    "cello",
+    11.678659551121607,
+    "Cello.arco.mf.sulG.G2Gb3.mono.wav@F3"
+   ],
+   "delta_baffled_minus_legacy": {
+    "delta_hnr_db": -10.15421849028482,
+    "delta_centroid_rel": 0.2255242015023331
+   },
+   "reference": {
+    "file": "BbClar.mf.D3B3.wav",
+    "note": "G3",
+    "dynamic": "mf",
+    "wav_sha256": "fe232536aabf17feb3611b8e59f38c9fe4c68508f650ab2e2da97c869d7e15ad"
+   },
+   "candidate_wav_sha256": {
+    "A0": "02e8b4e4213aba84134b8d5edcf35b06b63b55b9b24fc146fe36c2dbc3251881",
+    "A1": "452df135085eb2d2a784d4b8d69c6e3dd2e998831dff5af875915f2580397742"
+   },
+   "S_obs": 0.3988649729557141,
+   "S_obs_interval_over_rulers": [
+    0.3988649729557141,
+    1.8343479096409656
+   ],
+   "S_obs_status": "defined"
+  },
+  {
+   "note": "A3",
+   "D_legacy_db": 21.06207585368226,
+   "D_baffled_db": 10.60354678028546,
+   "R_db": 9.269220671549924,
+   "rulers_other_dynamic_db": [
+    9.269220671549924,
+    23.15415964173517
+   ],
+   "nearest_legacy": [
+    "clarinet",
+    18.755309626513778,
+    "BbClar.pp.D3B3.wav@G3"
+   ],
+   "nearest_baffled": [
+    "clarinet",
+    10.653901745032718,
+    "BbClar.mf.D3B3.wav@A3"
+   ],
+   "delta_baffled_minus_legacy": {
+    "delta_hnr_db": -1.8113619653837958,
+    "delta_centroid_rel": 0.6793198805072731
+   },
+   "reference": {
+    "file": "BbClar.mf.D3B3.wav",
+    "note": "A3",
+    "dynamic": "mf",
+    "wav_sha256": "fe232536aabf17feb3611b8e59f38c9fe4c68508f650ab2e2da97c869d7e15ad"
+   },
+   "candidate_wav_sha256": {
+    "A0": "626d9c58b30b4046c7a47e1f6500a3954eaa1e7de3c2c31685ba2abf738c5698",
+    "A1": "4536594a22b66505e2b42ebb5f56e04a9ccda92d16e99ca5d4c59dce68d4a9b4"
+   },
+   "S_obs": 0.8868530064918283,
+   "S_obs_interval_over_rulers": [
+    0.8868530064918283,
+    0.8868530064918283
+   ],
+   "S_obs_status": "defined"
+  },
+  {
+   "note": "B3",
+   "D_legacy_db": 15.429176574214962,
+   "D_baffled_db": 16.62834058471377,
+   "R_db": 15.426574600682978,
+   "rulers_other_dynamic_db": [
+    15.426574600682978
+   ],
+   "nearest_legacy": [
+    "clarinet",
+    18.427120958408867,
+    "BbClar.mf.D3B3.wav@B3"
+   ],
+   "nearest_baffled": [
+    "clarinet",
+    10.54717585526781,
+    "BbClar.mf.D3B3.wav@A3"
+   ],
+   "delta_baffled_minus_legacy": {
+    "delta_hnr_db": 4.784145212963985,
+    "delta_centroid_rel": 0.9371638173086727
+   },
+   "reference": {
+    "file": "BbClar.mf.D3B3.wav",
+    "note": "B3",
+    "dynamic": "mf",
+    "wav_sha256": "fe232536aabf17feb3611b8e59f38c9fe4c68508f650ab2e2da97c869d7e15ad"
+   },
+   "candidate_wav_sha256": {
+    "A0": "0f80c46bff3db083cbd40b0bb0f221eb61751d2a3e5270175e79e57d3ae9eee0",
+    "A1": "2358d3b8357f0d2739028b5c7a8126903859bbb8a24599ed728054a5ccf0edd7"
+   },
+   "S_obs": null,
+   "S_obs_status": "degenerate: D_legacy exceeds the ruler by 0.0026 dB (< 0.1 dB grader tolerance); raw value -460.867 excluded"
+  },
+  {
+   "note": "Cs4",
+   "D_legacy_db": 18.24062099888266,
+   "D_baffled_db": 15.156046404954438,
+   "R_db": null,
+   "rulers_other_dynamic_db": [],
+   "nearest_legacy": [
+    "clarinet",
+    19.002111071637984,
+    "BbClar.mf.C4B4.wav@C4"
+   ],
+   "nearest_baffled": [
+    "clarinet",
+    11.748492751154785,
+    "BbClar.mf.D3B3.wav@B3"
+   ],
+   "delta_baffled_minus_legacy": {
+    "delta_hnr_db": -23.388732561949105,
+    "delta_centroid_rel": 0.4400176315037878
+   },
+   "reference": {
+    "file": "BbClar.mf.C4B4.wav",
+    "note": "Db4",
+    "dynamic": "mf",
+    "wav_sha256": "e815b2b29cf48b6b178a854a55807e501339953cd113b54296360689282426d9"
+   },
+   "candidate_wav_sha256": {
+    "A0": "694dcd6443a9f4c262eef4694e79637b77d35409e2c2dabc9fc03e86e170332d",
+    "A1": "ab2e5813e02713f0230816e5e92dc46ea20667389e7816395ff56b63a19d8ee6"
+   },
+   "S_obs": null,
+   "S_obs_status": "undefined: no same-type ruler in the library"
+  },
+  {
+   "note": "D4",
+   "D_legacy_db": 16.874493975154195,
+   "D_baffled_db": 14.11049333430213,
+   "R_db": null,
+   "rulers_other_dynamic_db": [],
+   "nearest_legacy": [
+    "clarinet",
+    18.228461535919532,
+    "BbClar.mf.C4B4.wav@E4"
+   ],
+   "nearest_baffled": [
+    "oboe",
+    12.861720189515117,
+    "Oboe.mf.C4B4.wav@C4"
+   ],
+   "delta_baffled_minus_legacy": {
+    "delta_hnr_db": -15.41091416789159,
+    "delta_centroid_rel": 0.9483749611241077
+   },
+   "reference": {
+    "file": "BbClar.mf.C4B4.wav",
+    "note": "D4",
+    "dynamic": "mf",
+    "wav_sha256": "e815b2b29cf48b6b178a854a55807e501339953cd113b54296360689282426d9"
+   },
+   "candidate_wav_sha256": {
+    "A0": "9f55dcc26f73b7166b23dc40e71a2072d9bca5fd9d515d9520868ccf8cfcd9d7",
+    "A1": "254a2933184db8cf336b82bee4e40ef4e57ae959f5d2a7bbb10ee765f00c47cd"
+   },
+   "S_obs": null,
+   "S_obs_status": "undefined: no same-type ruler in the library"
+  }
+ ],
+ "summary": {
+  "defined_notes": 5,
+  "median_S_obs": 0.6437099559581687,
+  "range_S_obs": [
+   0.3988649729557141,
+   1.0562957505266883
+  ],
+  "verdict": "observation-dominated",
+  "mean_D_legacy_db": 22.19064551678711,
+  "mean_D_baffled_db": 14.686596799660556
+ }
+}
