@@ -4795,6 +4795,9 @@ fn moving_end_kc_dirac_is_not_the_linear_moving_end() {
 fn bow_on_moving_end_dirac_is_a_live_port() {
     let mut a = empty_base();
     a.duration_s = 0.06;
+    // The Dirac join steps midpoint. The 4-mode string plus 2-mode panel pole
+    // rate (about 4300 rad/s) needs dt <= 9.3e-6 s for the one-cent band.
+    a.sample_rate_hz = 128_000;
     let mut s = nylon_like(80.0, 0.006);
     s.moving_end = true;
     s.n_modes = 4;
