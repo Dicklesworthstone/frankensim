@@ -133,7 +133,11 @@ fn bem_iterative_matches_dense() {
             leaf_capacity: 128,
             ..opts()
         };
-        for k in [1.0, std::f64::consts::PI] {
+        // At k=pi, s=1 resolves only 4.92 panels/wavelength (<6 required).
+        // Use k=2.5 there (6.18 panels/wavelength); finer meshes retain pi
+        // to exercise dense/iterative agreement at the fictitious frequency.
+        let high_k = if s == 1 { 2.5 } else { std::f64::consts::PI };
+        for k in [1.0, high_k] {
             let dense =
                 solve_radiation(&surface, k, Medium::air(), &v, Formulation::BurtonMiller).unwrap();
             let (actual, report, receipt) = solve_radiation_iterative(
