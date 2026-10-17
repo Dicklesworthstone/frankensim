@@ -1,5 +1,5 @@
 use super::*;
-use fs_couple::pcm_wav::observation::{DecimatedRenderer,PressureRenderer};
+use fs_couple::pcm_wav::observation::DecimatedRenderer;
 use fs_couple::pcm_wav::encode_pcm16_wav;
 const LOSSY:&str=include_str!("../../examples/plate-valve-viscothermal.performance");
 fn expected(text:&str)->Vec<u8> {
