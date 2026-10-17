@@ -682,9 +682,12 @@ dependencies = [
  "fs-blake3",
  "fs-casebook",
  "fs-evidence",
+ "fs-la",
  "fs-matdb",
  "fs-math",
  "fs-qty",
+ "fs-thermal",
+ "fs-thermochem",
 ]
 
 [[package]]
@@ -860,6 +863,19 @@ name = "fs-substrate"
 version = "0.0.1"
 dependencies = [
  "fs-obs",
+]
+
+[[package]]
+name = "fs-thermal"
+version = "0.0.1"
+
+[[package]]
+name = "fs-thermochem"
+version = "0.0.1"
+dependencies = [
+ "fs-matdb",
+ "fs-math",
+ "fs-qty",
 ]
 
 [[package]]
