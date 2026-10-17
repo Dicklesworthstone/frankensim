@@ -152,7 +152,11 @@ impl PianoEngine {
         let report = preparation::prepare(&mut desc,
             if scale_csv.is_empty() { None } else { Some(scale_csv) }, policy)
             .map_err(|e| JsError::new(&e))?;
-        let cfg = config(sample_rate, course_mode_budget, max_dynamic_modes, full_scale_pa);
+        let mut cfg = config(sample_rate, course_mode_budget, max_dynamic_modes, full_scale_pa);
+        // RT-0425's per-key losses describe the Model D's own strings. An imported scale keeps the
+        // authored law, as the reference refuses --rt0425-string-damping with a supplied scale;
+        // retuning the built-in scale (tension only, same strings) keeps the published losses.
+        cfg.rt0425_string_damping = scale_csv.is_empty();
         let piano = Playback::new(&desc, cfg, substeps).map_err(|e| JsError::new(&e))?;
         Ok(Self { piano, snap: Vec::with_capacity(4096), preparation: Some(report) })
     }
