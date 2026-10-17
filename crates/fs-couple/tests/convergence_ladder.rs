@@ -57,7 +57,10 @@ fn voice(rate: u32, fft: usize, tol: f64, mode: ReedSolverMode, pressure: f64) -
             stiffness_n_m: 0.0,
             damping_ratio: 0.35,
         },
-        Termination::UnflangedOpen,
+        // The 96 and 192 kHz rungs put Nyquist at ka 1.9 and 3.9 for this bore.
+        // The unflanged low-ka fit stops at ka 1 and the exact thin-wall load
+        // at the 3.83 cutoff; the multimodal flanged load holds to ka 20.
+        Termination::FlangedOpen,
         PlateBank::default(),
         1.0,
         rate,
@@ -511,7 +514,7 @@ fn retain(report: &LadderReport, m: &Measurement) {
     assert_eq!(clipped, 0);
     write_new(&dir.join("reed.wav"), &wav);
     let sidecar = format!(
-        "{{\"report_blake3\":{:?},\"wav_blake3\":{:?},\"sample_rate_hz\":{},\"n_fft_request\":{},\"solver_mode\":{:?},\"step_tolerance\":{},\"full_scale_pa\":100000,\"onset_horizon_s\":{},\"onset_rms_pa\":{},\"onset_bisections\":{},\"source_fixture\":\"music_render::reed_context / M-CL0\",\"inputs\":{{\"duct_length_m\":0.5,\"duct_radius_m\":0.0022,\"gas_spec\":\"dry_air_ussa1976\",\"temperature_k\":293.15,\"ambient_pressure_pa\":101325,\"rest_opening_m\":0.0004,\"reed_width_m\":0.013,\"closing_pressure_pa\":6000,\"blowing_pressure_pa\":2800,\"attack_s\":0.008,\"reed_mass_kg\":0,\"stiffness_n_m\":0,\"damping_ratio\":0.35,\"termination\":\"UnflangedOpen\",\"plates\":[],\"listener_m\":1}},\"no_claim\":\"retained-periodic-IR tail and observed flow defect do not bound acoustic QoIs; finite-horizon onset is not a bifurcation threshold; legacy M-CL0 is not realism validation\"}}\n",
+        "{{\"report_blake3\":{:?},\"wav_blake3\":{:?},\"sample_rate_hz\":{},\"n_fft_request\":{},\"solver_mode\":{:?},\"step_tolerance\":{},\"full_scale_pa\":100000,\"onset_horizon_s\":{},\"onset_rms_pa\":{},\"onset_bisections\":{},\"source_fixture\":\"music_render::reed_context / M-CL0\",\"inputs\":{{\"duct_length_m\":0.5,\"duct_radius_m\":0.0022,\"gas_spec\":\"dry_air_ussa1976\",\"temperature_k\":293.15,\"ambient_pressure_pa\":101325,\"rest_opening_m\":0.0004,\"reed_width_m\":0.013,\"closing_pressure_pa\":6000,\"blowing_pressure_pa\":2800,\"attack_s\":0.008,\"reed_mass_kg\":0,\"stiffness_n_m\":0,\"damping_ratio\":0.35,\"termination\":\"FlangedOpen\",\"plates\":[],\"listener_m\":1}},\"no_claim\":\"retained-periodic-IR tail and observed flow defect do not bound acoustic QoIs; finite-horizon onset is not a bifurcation threshold; legacy M-CL0 is not realism validation\"}}\n",
         report.hash.to_hex(),
         fs_blake3::hash_bytes(&wav).to_hex(),
         m.rate,
