@@ -9,8 +9,10 @@ use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
 use fs_material::gas::{GasSpec, GasState};
 
-const RATE: u32 = 768_000;
-const SAMPLES: u64 = 513 * 16;
+// Exact blades run the original 48 kHz clock; the outlet receiver admits at
+// most 192 kHz, so a midpoint-refined 768 kHz clock cannot be observed.
+const RATE: u32 = 48_000;
+const SAMPLES: u64 = 513;
 fn config() -> AperturePerformanceConfig {
     AperturePerformanceConfig { sample_rate_hz: RATE, samples: SAMPLES, max_block: 128,
         max_compile_work: 100_000, max_controls: 128 }
@@ -21,22 +23,22 @@ fn schedule() -> GestureSchedule {
 fn forces() -> Vec<BladeForceControl> {
     vec![
         BladeForceControl {
-            sample: 3 * 16,
+            sample: 3,
             blade: 0,
             force_n: 1e-5,
         },
         BladeForceControl {
-            sample: 3 * 16,
+            sample: 3,
             blade: 1,
             force_n: -2e-5,
         },
         BladeForceControl {
-            sample: 150 * 16,
+            sample: 150,
             blade: 1,
             force_n: 0.0,
         },
         BladeForceControl {
-            sample: 151 * 16,
+            sample: 151,
             blade: 0,
             force_n: 0.0,
         },
@@ -58,7 +60,8 @@ fn network() -> PairedApertureNetwork {
         limits: PairedApertureLimits { maximum_abs_displacement_m: 0.05, maximum_abs_velocity_m_s: 100.0,
             maximum_energy_j: 10.0, max_evaluations: 256, velocity_tolerance_m_s: 1e-15, relative_tolerance: 1e-13 } };
     let contact = Obstacle::new(vec![-1.0],1,1,vec![0.0],vec![1.0],2e9,2.0,"authored paired performance contact".into()).unwrap();
-    let aperture = PairedAperture::new(spec,[BladeState::default();2],contact).unwrap();
+    let aperture = PairedAperture::new_with_propagator(spec,[BladeState::default();2],contact,
+        crate::bernoulli_aperture::paired::BladePropagator::ExactZoh).unwrap();
     PairedApertureNetwork::new(aperture,graph,gases,&CancelGate::new_clock_free()).unwrap()
 }
 fn renderer(observation: ApertureObservation) -> PairedAperturePerformance {

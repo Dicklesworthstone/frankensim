@@ -4,8 +4,10 @@ use super::super::network::TubeSection;
 use fs_dcontact::Obstacle;
 use fs_material::gas::GasSpec;
 
-const RATE: u32 = 768_000;
-const REFINEMENT: usize = 16;
+// Exact blades run the original 48 kHz clock; the outlet receiver admits at
+// most 192 kHz, so a midpoint-refined 768 kHz clock cannot be observed.
+const RATE: u32 = 48_000;
+const REFINEMENT: usize = 1;
 
 fn gas(t:f64,p:f64)->GasState {GasState::try_new(&GasSpec::dry_air_ussa1976(),t,p).unwrap()}
 fn make(second_mass: f64, temperature: f64) -> PairedApertureNetwork {
@@ -23,7 +25,8 @@ fn make(second_mass: f64, temperature: f64) -> PairedApertureNetwork {
         limits:PairedApertureLimits {maximum_abs_displacement_m:0.05,maximum_abs_velocity_m_s:100.0,
             maximum_energy_j:10.0,max_evaluations:256,velocity_tolerance_m_s:1e-15,relative_tolerance:1e-13}};
     let law=Obstacle::new(vec![-1.0],1,1,vec![0.0],vec![1.0],2e9,2.0,"synthetic shared contact".into()).unwrap();
-    let a=PairedAperture::new(spec,[BladeState::default();2],law).unwrap();
+    let a=PairedAperture::new_with_propagator(spec,[BladeState::default();2],law,
+        super::super::paired::BladePropagator::ExactZoh).unwrap();
     PairedApertureNetwork::new(a,graph,gases,&CancelGate::new_clock_free()).unwrap()
 }
 
