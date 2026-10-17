@@ -352,8 +352,40 @@ def piano_label(cid):
     if "--rayleigh-loading" in cmd and load:
         extra.append(("air loading on both faces of the soundboard" if load.group(1) == "2" else "air loading on the soundboard")
                      + " (its complete 128-mode reaction)")
-    return ("FrankenSim offline render (RT-0425 Model D scale; " + "".join(e + "; " for e in extra)
-            + "one pressure point 1 m above the board, infinite baffle, no room)")
+    scale = ("RT-0425 Model D scale and bridge contacts" if "RT-0425 Appendix A coupling points" in text
+             else "RT-0425 Model D scale")
+    return f"FrankenSim offline render ({scale}; " + "".join(e + "; " for e in extra) + receiver_label(text) + ", infinite baffle, no room)"
+
+
+# The Iowa microphones sat 8 in above the centre of the bass strings (left channel) and of the treble strings
+# (right). These board-frame points are those centres for the Model D strings, 0.203 m above the strings
+# (README, "Listening point"). They are estimates: the Iowa page states no coordinates.
+IOWA_BASS, IOWA_TREBLE = (0.275, 0.556, 0.25), (0.867, 0.147, 0.233)
+
+
+def receivers(text):
+    """A render's (left, right) pressure points in the board frame [m], read from its own log; None where absent."""
+    point = r"microphone at \[([-\d.e]+), ([-\d.e]+), ([-\d.e]+)\] m"
+    found = (re.search(r"^Rayleigh pressure " + point, text, re.M), re.search(r"^Right Rayleigh " + point, text, re.M))
+    return tuple(None if m is None else tuple(float(v) for v in m.groups()) for m in found)
+
+
+def at_iowa(text):
+    """True when the render listened at the Iowa microphone positions (left = bass side, as graded)."""
+    near = lambda p, ref: p is not None and all(abs(a - b) < 0.01 for a, b in zip(p, ref))
+    left, right = receivers(text)
+    return near(left, IOWA_BASS) and near(right, IOWA_TREBLE)
+
+
+def receiver_label(text):
+    """Where the render listened, read from its own log."""
+    if at_iowa(text):
+        return "the left channel of two pressure points where the Iowa microphones sat, 8 in above the bass and treble strings (positions estimated)"
+    left, _ = receivers(text)
+    if left is None:
+        return "one pressure point"
+    x, y, z = left
+    return f"one pressure point {z:.2f} m above the board at ({x:.2f}, {y:.2f}) m"
 
 
 def piano_pair(pid, title, ours_id, real_name, f_guess, dur):
@@ -376,7 +408,7 @@ def piano_pair(pid, title, ours_id, real_name, f_guess, dur):
         "id": pid, "kind": "piano", "title": title, "duration_s": dur,
         "real": {"label": f"Steinway & Sons Model B · {real_name}", "url": IOWA_PIANO + real_name + ".aiff",
                  "sha256_wav48": sha(REFS / f"{real_name}.wav"), "rights": RIGHTS,
-                 "recording": "two Neumann KM 84s 8 in above the bass and treble strings (the bass-side channel is used), 16-bit 44.1 kHz, in a normal room"},
+                 "recording": "two Neumann KM 84 cardioids 8 in above the centres of the bass and treble strings (the bass-side channel is used), 16-bit 44.1 kHz, in a normal room"},
         "ours": {"clip": ours_id, "label": piano_label(ours_id)},
         "audio": {"real": encode(real_n * play, f"vs-{pid}-real"), "ours": encode(ours_n * play, f"vs-{pid}-ours"),
                   "level_match": "both scaled to equal RMS over the first 300 ms after onset; absolute levels are not comparable (different instruments, microphones and distances)"},
@@ -474,10 +506,14 @@ def main():
     def env_gap(a, b):
         common = sorted(set(a) & set(b) - {1})
         return rms_db([a[n] for n in common], [b[n] for n in common])
+    # ...and between its two microphones on the same real note: what a listening position alone does.
+    mics = [{q["n"]: q["db"] for q in partials(segment(highpass(load(REFS / "Piano.mf.A3.wav", ch)), 3.0), 220.0)["partials"]} for ch in (0, 1)]
     piano_ruler = {
         "real_pp_vs_real_mf_db": r(env_gap(ladder["pp"]["_env"][0], ladder["mf"]["_env"][0]), 3),
         "real_mf_vs_real_ff_db": r(env_gap(ladder["mf"]["_env"][0], ladder["ff"]["_env"][0]), 3),
-        "note": "RMS difference of partial envelopes between two dynamic layers of the SAME real piano: what a change of dynamic alone does",
+        "real_bass_mic_vs_treble_mic_db": r(env_gap(mics[0], mics[1]), 3),
+        "note": ("RMS difference of partial envelopes between two dynamic layers of the SAME real piano (what a change of dynamic alone does), "
+                 "and between its two microphones on the same A3 mf note (what the listening position alone does)"),
     }
     dyn_levels = {
         "real_db": {d: r(20 * math.log10(ladder[d]["_level"][0] / ladder["mf"]["_level"][0]), 3) for d in ladder},

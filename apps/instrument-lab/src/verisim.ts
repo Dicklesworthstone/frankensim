@@ -16,7 +16,7 @@ interface Pair {
 interface KitSummary { pairs: { ruler: { ours_db: number; real_other_dynamic_db: number } }[] }
 interface Verisim {
   pairs: Pair[];
-  piano_ruler: { real_pp_vs_real_mf_db: number; real_mf_vs_real_ff_db: number; note: string };
+  piano_ruler: { real_pp_vs_real_mf_db: number; real_mf_vs_real_ff_db: number; real_bass_mic_vs_treble_mic_db?: number; note: string };
   piano_dynamics: { real_db: Record<string, number>; ours_db: Record<string, number>; real_high_band_db: Record<string, number>; ours_high_band_db: Record<string, number>; note: string };
   cymbal_ruler: { reference: string; rows: { label: string; rms_gap_db: number; real: boolean; grid_mm?: number }[]; note: string };
   sources: { iowa_piano: string; iowa_cymbals: string; rights: string };
@@ -188,14 +188,18 @@ function findings(v: Verisim): HTMLElement[] {
   const kA = hz("a3-mf", "low_knock_early_db", "ours"), kC = hz("c6-mf", "low_knock_early_db", "ours");
   const kEarly = num("a3-mf", "low_knock_early_db", "ours") - num("a3-mf", "low_knock_early_db", "real");
   const kLateO = num("a3-mf", "low_knock_late_db", "ours"), kLateR = num("a3-mf", "low_knock_late_db", "real");
-  items.push([kEarly > 3 ? "A low resonance rings too loudly at the start." : "The low band at the start matches the real piano within 3 dB.",
+  items.push([kEarly > 3 ? "A low resonance rings too loudly at the start." : kEarly < -3 ? "The low band at the start is quieter than the real piano's." : "The low band at the start matches the real piano within 3 dB.",
     `In the first half second FrankenSim has a component near ${kA.toFixed(0)} Hz at ${num("a3-mf", "low_knock_early_db", "ours").toFixed(1)} dB relative to the fundamental. The real piano's strongest component in that band sits at ${num("a3-mf", "low_knock_early_db", "real").toFixed(1)} dB. ${Math.abs(kA - kC) < 2 ? `It appears at the same frequency when C6 is struck (${kC.toFixed(1)} Hz), so it belongs to the modelled instrument, not to the A3 string. ` : ""}${Math.abs(kLateO - kLateR) <= 3 ? "Later the two agree" : "Later they still differ"} (${kLateO.toFixed(1)} dB and ${kLateR.toFixed(1)} dB).`]);
   const dr = p("a3-mf")?.descriptors["partial_decay_db_s"];
   const at = (arr: unknown, k: number): number => (Array.isArray(arr) && typeof arr[k - 1] === "number" ? (arr[k - 1] as number) : NaN);
   if (dr) items.push(["Some partials ring too long, others too short.",
     `At mf, partial 4 decays at ${at(dr.ours, 4).toFixed(1)} dB/s in FrankenSim against ${at(dr.real, 4).toFixed(1)} dB/s on the real piano. Partial 2 goes the other way: ${at(dr.ours, 2).toFixed(1)} dB/s against ${at(dr.real, 2).toFixed(1)} dB/s. Decay is set by losses at the bridge and in the string, so this points at the coupling and damping model.`]);
-  items.push(["The attack is sharper.",
-    `FrankenSim rises in about ${num("a3-mf", "attack_rise_ms", "ours").toFixed(1)} ms, the recording in about ${num("a3-mf", "attack_rise_ms", "real").toFixed(1)} ms. The Iowa microphones sat 8 inches above the strings in a normal room; ours is a single point 1 m above the board with no room, so part of this gap may belong to the recording rather than the piano.`]);
+  const riseO = num("a3-mf", "attack_rise_ms", "ours"), riseR = num("a3-mf", "attack_rise_ms", "real");
+  const atIowa = p("a3-mf")?.ours.label.includes("where the Iowa microphones sat") ?? false;
+  items.push([riseO < riseR - 1.5 ? "The attack is sharper." : riseO > riseR + 1.5 ? "The attack is slower." : "The attack rises like the recording's.",
+    `FrankenSim rises in about ${riseO.toFixed(1)} ms, the recording in about ${riseR.toFixed(1)} ms. ` + (atIowa
+      ? "Both are heard 8 inches above the strings, where the Iowa microphones sat; the recording's room and cardioid microphones remain differences."
+      : "The Iowa microphones sat 8 inches above the strings in a normal room; ours is a single point 1 m above the board with no room, so part of this gap may belong to the recording rather than the piano.")]);
   const sp = p("splash-mf")?.descriptors["octave_early_db"]?.rms_gap_db as number | null | undefined;
   const spSoft = p("splash-pp")?.descriptors["octave_early_db"]?.rms_gap_db as number | null | undefined;
   const crashes = v.cymbal_ruler.rows.filter((row) => row.real && row.label.includes("crash")).map((row) => row.rms_gap_db);
@@ -382,13 +386,14 @@ export async function mountVerisim(root: HTMLElement): Promise<void> {
     el("div", { style: "margin-top: 22px" },
       el("figure", { class: "panel" },
         el("h3", {}, "Piano: a ruler made of the real piano"),
-        el("p", { class: "muted small", style: "margin: 8px 0 14px" }, "How far apart are the partial-level envelopes (partials 2–16 relative to partial 1)? Blue bars are the real Steinway against itself, one dynamic apart: what a change of touch alone does. Brass bars are FrankenSim against the real piano at the same dynamic. A brass bar left of the dashed line differs from the recording by less than the real piano differs from itself between mf and ff."),
+        el("p", { class: "muted small", style: "margin: 8px 0 14px" }, "How far apart are the partial-level envelopes (partials 2–16 relative to partial 1)? Blue bars are the real Steinway against itself: one dynamic apart (what a change of touch alone does), and the same note heard by its two microphones (what the listening position alone does). Brass bars are FrankenSim against the real piano at the same dynamic. A brass bar left of the dashed line differs from the recording by less than the real piano differs from itself between mf and ff."),
         el("div", { class: "chart" }, pianoRuler)),
     ),
   );
   rulerChart(pianoRuler, [
     { label: "real pp vs real mf", value: data.piano_ruler.real_pp_vs_real_mf_db, real: true },
     { label: "real mf vs real ff", value: data.piano_ruler.real_mf_vs_real_ff_db, real: true },
+    { label: "real mf, bass mic vs treble mic", value: data.piano_ruler.real_bass_mic_vs_treble_mic_db ?? NaN, real: true },
     { label: "FrankenSim vs real, pp", value: gap("a3-pp"), real: false },
     { label: "FrankenSim vs real, mf", value: gap("a3-mf"), real: false },
     { label: "FrankenSim vs real, ff", value: gap("a3-ff"), real: false },

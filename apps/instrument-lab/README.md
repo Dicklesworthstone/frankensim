@@ -84,8 +84,16 @@ WHY each gap exists. It uses the A3 bridge trace (`--bridge-trace-csv`) to separ
 board does from what radiation to the microphone does. It also scores ablation renders, which
 switch one mechanism on at a time, whenever they are present in the campaign:
 
-    # receivers near the Iowa microphone positions (stereo)
-    grand_piano ...a3-mf flags... --microphone 0.529,0.498,0.233 --microphone-right 0.640,0.473,0.233 --render a3-mf-close.wav
+    # the same A3 mf heard where the Iowa microphones sat (stereo; see "Listening point" below)
+    grand_piano ...a3-mf flags... --microphone 0.275,0.556,0.25 --microphone-right 0.867,0.147,0.233 --render a3-mf-close.wav
+    # ...and by stereo pairs 0.1 m either side of the bass-side point, along x and along y
+    grand_piano ...a3-mf flags... --microphone 0.175,0.556,0.25 --microphone-right 0.375,0.556,0.25 --render a3-mf-px.wav
+    grand_piano ...a3-mf flags... --microphone 0.275,0.456,0.25 --microphone-right 0.275,0.656,0.25 --render a3-mf-py.wav
+    # the former estimated bridge stations on the same mesh, with the same air and receiver
+    piano_geometry --divisions 16 --rib-normal-step-m 0.03 --output board-est16.fsb
+    grand_piano ...a3-mf flags... --board-geometry board-est16.fsb --render a3-mf-estmap.wav
+    # bare-board modes and per-key bridge displacements of the graded board (A3's driving-point mobility)
+    grand_piano --preset steinway-d --board-geometry board-rt16.fsb --board-band-hz 1600 --dump-board board-modes.csv
     # longitudinal string waves on A3 only; every other key `linear,<key>` (88 rows)
     #   waves,57,166505,0.2,10000,8,0.01,0.01   EA = E*A, E = 200 GPa, A from the scale's own EI
     grand_piano ...a3-{mf,ff} flags... --string-stretching axial-a3.fspx --render a3-{mf,ff}-waves.wav
@@ -95,11 +103,31 @@ moved into the graded renders is reported as fixed or partly fixed: the A3 rende
 (`a3-{pp,mf,ff,fff}`) carry `--string-stretching axial-a3.fspx`, whose waves drive the bridge axially,
 and when the campaign also has the same strokes on linear strings (`a3-{mf,ff,fff}-linear`) the card
 compares the two. Every piano render the page grades or diagnoses (A3, C6 and the ablations above)
-also carries two-sided air loading on a soundboard fine enough for its reaction to 2.4 kHz:
+couples each string to its bridge at the point RT-0425 publishes for it and carries two-sided air
+loading; it listens at the default point, 1 m above the middle of the board:
 
-    piano_geometry --divisions 12 --rib-normal-step-m 0.03 --output board-air.fsb   # 9,432 area samples
-    grand_piano --preset steinway-d --board-geometry board-air.fsb --board-band-hz 2400 \
-      --board-reduction 128,64,200,400,800,1600,2300 --rayleigh-loading 2,90,2400,257 ...
+    piano_geometry --divisions 16 --rib-normal-step-m 0.03 --bridge-map rt0425 --output board-rt16.fsb  # 11,772 area samples
+    grand_piano --preset steinway-d --board-geometry board-rt16.fsb --board-band-hz 2400 \
+      --board-reduction 128,64,200,400,800,1600,2300 --rayleigh-loading 2,90,2620,213 ...
+
+The former estimated stations (`--bridge-map estimated`) were spaced evenly along each bridge. With
+the published string lengths they put most agraffes over the soundboard itself (A3's 0.77 m string
+would start 0.46 m inside the board's front edge) and reversed the bass order. The reduced board keeps
+a coordinate at 2.60 kHz, so the air band runs to 2.62 kHz, and the 16-division board is the coarsest
+whose air cells still give six per wavelength there. The polarization ablation adds bridge directions
+that reach 2.62 kHz, so it runs its air to 2.64 kHz (215 samples).
+
+Listening point: the Iowa recordings used two Neumann KM 84 cardioids, "8 in above center bass
+strings" (left channel) and "8 in above center treble strings" (right). In the board frame those are
+the centroids of the bass and treble strings' speaking lengths, 0.203 m above the strings: the
+published contacts, the agraffe line the treble strings imply, and the bass agraffes continuing that
+line. The points are estimates, and ours are omnidirectional. The page does not grade there. Real
+microphones at those points sit above the strings and the cast-iron plate, which covers much of the
+board, usually under a lid; the model's receivers look at a bare board in an infinite baffle. Heard
+there, the A3 partial pattern lies 14 dB from the recording on the matching channel, against about
+8 dB at the default point, and averaging both channels' power does not change that. The real
+piano's own two microphones differ by 8.4 dB. `a3-mf-close` keeps those positions as the receiver
+experiment.
 
 When the campaign also has the same A3 mf stroke without air on that board (`a3-mf-noair`), the
 low-resonance and ringing cards compare the two. Each render first samples and fits the board's

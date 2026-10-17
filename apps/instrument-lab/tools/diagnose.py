@@ -11,8 +11,18 @@ usage: uv run --with numpy --with pillow python tools/diagnose.py CAMPAIGN_DIR R
 Inputs beyond verisim.py's:
   piano/a3-mf-bridge.csv     bridge velocity and microphone pressure of the A3 mf render
   piano/a3-mf.log            the render log (its bare-board FE mode list)
-  piano/a3-mf-close.wav      optional: A3 mf heard by two receivers 0.23 m above the board,
-                             near the Iowa microphone positions
+  piano/a3-mf-close.wav      optional: A3 mf heard by two receivers about 0.23-0.25 m above the board,
+                             where the Iowa microphones sat (when the graded renders listen elsewhere)
+  piano/a3-mf-far.wav        optional: when the graded renders listen at the Iowa microphone positions,
+                             the same A3 mf at the former default point 1 m above the board
+  piano/a3-mf-p{x,y}.wav     optional: the same A3 mf heard by stereo pairs 0.1 m either side of the bass-side
+                             Iowa position, along x and along y (how much a near-field grade depends on that estimate)
+  piano/a3-mf-estmap.wav     optional: the same A3 mf with the former estimated bridge stations (same board,
+                             air and receivers; its log names the board file it used)
+  piano/board-modes.csv      optional: --dump-board of the graded board (bare-board modes and per-key bridge
+                             displacements), for the driving-point mobility at A3's contact
+  piano/scale-et.csv         optional: --dump-scale of the rendered scale (string partials near a resonance,
+                             A3's tension, length and unison detune)
   piano/a3-{mf,ff}-waves.wav optional: A3 with longitudinal string waves (--string-stretching),
                              compared with linear graded renders
   piano/a3-fff{,-waves}.wav  optional: the same pair struck at 8 m/s
@@ -236,6 +246,60 @@ def bridge_split():
     return early, lv, lp
 
 
+def envelope_gap(x, ref, f_guess=220.0):
+    """verisim's graded partial-envelope distance: partials 2-16 found in both, 0.05-1.05 s after onset."""
+    er = {p["n"]: p["db"] for p in V.partials(ref, f_guess)["partials"]}
+    eo = {p["n"]: p["db"] for p in V.partials(x, f_guess)["partials"]}
+    common = sorted(set(er) & set(eo) - {1})
+    return V.rms_db([er[n] for n in common], [eo[n] for n in common])
+
+
+def board_admittance(key=57):
+    """Bare-board driving-point mobility Y(f) [m/(N s)] at a key's bridge contact, from a --dump-board modal CSV
+    of the graded board: sum over modes of phi^2 i w / (w_m^2 - w^2 + 2 i zeta_m w_m w), phi the mass-normalised
+    bridge displacement. Returns (Y, mode count, top mode Hz), or None without the CSV."""
+    p = V.CAMPAIGN / "piano" / "board-modes.csv"
+    if not p.exists():
+        return None
+    modes = []
+    for line in p.read_text().splitlines():
+        f = line.split(",")
+        if not line.startswith(("#", "mode")) and int(f[4]) == key:
+            modes.append((2 * math.pi * float(f[1]), float(f[2]), float(f[5])))
+
+    def y(hz):
+        w = 2 * math.pi * hz
+        return sum(phi * phi * 1j * w / (wm * wm - w * w + 2j * z * wm * w) for wm, z, phi in modes)
+    return y, len(modes), max(m[0] for m in modes) / (2 * math.pi)
+
+
+def contact_point(name, key=57):
+    """Board-frame position [m] of a key's bridge contact in the board file the render used (--board-geometry)."""
+    cmd = render_cmd(name).split()
+    if "--board-geometry" not in cmd:
+        return None
+    nodes, tris, site = {}, {}, None
+    for line in (V.CAMPAIGN / "piano" / cmd[cmd.index("--board-geometry") + 1]).read_text(errors="replace").splitlines():
+        f = line.split(",")
+        if f[0] == "node":
+            nodes[int(f[1])] = (float(f[2]), float(f[3]))
+        elif f[0] == "triangle":
+            tris[int(f[1])] = [int(v) for v in f[2:5]]
+        elif f[0] == "bridge" and int(f[1]) == key:
+            site = (int(f[2]), [float(v) for v in f[3:6]])
+    return tuple(sum(w * nodes[n][i] for w, n in zip(site[1], tris[site[0]])) for i in (0, 1))
+
+
+def scale_row(key):
+    """The rendered scale's row for a key (--dump-scale CSV), or None."""
+    p = V.CAMPAIGN / "piano" / "scale-et.csv"
+    if not p.exists():
+        return None
+    import csv
+    return next((row for row in csv.DictReader(l for l in p.read_text().splitlines() if not l.startswith("#"))
+                 if int(row["midi"]) == key), None)
+
+
 NEW_AIR = ('Air reaction (--rayleigh-loading) is not yet admitted on the production board. A resolved board mesh fine enough for 2.4 kHz (9,432'
            ' area samples, 6.3 per wavelength) clears the mesh limit once the offline work ceilings are raised, but the 32-port passive fit of the full '
            '128-mode radiation impedance then misses its accuracy limits: complex error 19% peak and 15% RMS, error in its resistive (power) part 13% peak and 14% RMS, '
@@ -255,6 +319,12 @@ def main():
     # Some measurements below were made on the preset's 8-division board without air loading.
     resolved_board = "--board-geometry" in render_cmd("a3-mf")
     old_board = "Measured earlier on the preset's 8-division board without air loading, not on the board graded above:"
+    a3_text = (V.CAMPAIGN / "piano" / "a3-mf.log").read_text(errors="replace")
+    iowa = V.at_iowa(a3_text)  # graded at the Iowa microphone positions (left channel: bass side)
+    # Strings meet the bridge at RT-0425's published points. The literal measurements below that were made at the
+    # former estimated A3 station describe another contact point; they are left out rather than relabelled.
+    published = "RT-0425 Appendix A coupling points" in a3_text
+    adm = board_admittance()
 
     # 1. The early low resonance
     knock_hz = {n: r(precise_peak(piano(n, 1.6), 125, 137, 0.05, 1.5), 6) for n in ["a3-pp", "a3-mf", "a3-ff", "a3-fff", "c6-mf"]
@@ -303,7 +373,9 @@ def main():
     lows = [p for p in peaks[:6] if p["hz"] < 0.8 * F0]
     rows.append({
         "id": "board-ringing",
-        "symptom": f"Between 0.2 and 1 s, {np_ours['mf'] - np_real['mf']:.0f} dB more of FrankenSim's energy lies away from the string partials than the real piano's (mf: {np_ours['mf']:.1f} vs {np_real['mf']:.1f} dB re total).",
+        "symptom": (f"Between 0.2 and 1 s, {np_ours['mf'] - np_real['mf']:.0f} dB more of FrankenSim's energy lies away from the string partials than the real piano's (mf: {np_ours['mf']:.1f} vs {np_real['mf']:.1f} dB re total)."
+                    if np_ours["mf"] - np_real["mf"] > 3 else
+                    f"Between 0.2 and 1 s, the share of FrankenSim's energy away from the string partials is within 3 dB of the real piano's (mf: {np_ours['mf']:.1f} vs {np_real['mf']:.1f} dB re total)."),
         "evidence": "Strongest off-partial peaks: " + ", ".join(f"{p['hz']:.0f} Hz ({p['db']:.0f} dB)" for p in peaks[:6]) + "." + (f" Those within 15 Hz of partial{'s' if len(sat) > 1 else ''} {', '.join(map(str, sat))} may be satellites from string-board coupling; proximity alone does not establish their modal participation." if sat else "") + (f" {len(lows)} lie below the struck note's fundamental; the board and unplayed strings can both participate there." if lows else ""),
         "suspect": "Coupled mechanical ringing: wood, unplayed-string/damper losses, air reaction and rim/case losses remain candidates until mode participation and controlled ablations distinguish them.",
         "test": "Raise the board's modal damping, or add air reaction, and re-measure the off-partial energy and the satellites' decay.",
@@ -316,9 +388,12 @@ def main():
     rows.append({
         "id": "partial-pattern",
         "symptom": "In the first 150 ms FrankenSim's partials 3-6 are " + ", ".join(f"{ours_lv[k]:.0f}" for k in range(2, 6)) + " dB re partial 1; the real piano's are " + ", ".join(f"{real_lv[k]:.0f}" for k in range(2, 6)) + " dB.",
-        "evidence": "At the bridge, partials 4 and 6 are already " + f"{lv[3]:.0f} and {lv[5]:.0f} dB (string and hammer side). From bridge to microphone the levels move by " + ", ".join(f"{c:+.0f}" for c in coloration[:8]) + " dB for partials 1-8: a single receiver point colours each partial by up to ±10 dB.",
-        "suspect": "Two parts: the hammer/strike pattern on the string, and the single receiver point. The Iowa microphones sat 8 inches above the strings; ours is 1 m above the board.",
-        "test": "Render receivers near the Iowa positions; compare power averaged over several receivers rather than one point.",
+        "evidence": "At the bridge, partials 4 and 6 are already " + f"{lv[3]:.0f} and {lv[5]:.0f} dB (string and hammer side). From bridge to microphone the levels move by " + ", ".join(f"{c:+.0f}" for c in coloration[:8]) + f" dB for partials 1-8: a single receiver point colours each partial by up to ±{max(abs(c) for c in coloration[:8]):.0f} dB.",
+        "suspect": ("Two parts: the hammer/strike pattern on the string, and the soundboard's mobility at A3's bridge contact, which sets how strongly each partial drives the board. "
+                    "The receiver point near the board colours each partial further." if iowa else
+                    "Two parts: the hammer/strike pattern on the string, and the single receiver point. The Iowa microphones sat 8 inches above the strings; ours is 1 m above the board."),
+        "test": ("Compare the board's driving-point mobility at A3's contact with one measured on a real grand; ours is a reconstructed Model D, the recording a Model B." if iowa else
+                 "Render receivers near the Iowa positions; compare power averaged over several receivers rather than one point."),
         "status": "open",
         "data": {"real": real_lv, "ours": ours_lv, "ours_bridge_trace": {"bridge": lv, "pressure": lp}, "radiation_coloration_db": coloration},
     })
@@ -497,8 +572,109 @@ def main():
 
     # Ablations, when their renders exist
     abl = {}
+    receiver_txt = ""  # what the receiver experiment says about the low band, kept for a card the contacts fix
     close = V.CAMPAIGN / "piano" / "a3-mf-close.wav"
-    if close.exists():
+    if iowa and has("a3-mf-far"):
+        # The graded renders listen where the Iowa microphones sat; the former default point is the ablation.
+        real_tr = V.segment(V.highpass(V.load(V.REFS / "Piano.mf.A3.wav", 1)), 3.0)
+        f0_t, b_t = own_fit(real_tr)
+        points = (("bass-side Iowa position (graded)", ours_mf, real_lv, real_mf),
+                  ("treble-side Iowa position", piano("a3-mf", channel=1), partial_levels(real_tr, 0.0, 0.15, f0=f0_t, b=b_t), real_tr),
+                  ("former default point, 1 m above the board", piano("a3-mf-far"), real_lv, real_mf))
+        res = {}
+        for lab, x, ref, ref_x in points:
+            lv_x = partial_levels(x, 0.0, 0.15)
+            res[lab] = {"partial_levels": lv_x, "pattern_gap_db": r(V.rms_db(lv_x[1:], ref[1:]), 3),
+                        "envelope_gap_db": r(envelope_gap(x, ref_x), 3),
+                        "low_resonance_db": r(ratio_db(x, 125, 137, 0.05, 0.5), 3), "non_partial_db": r(non_partial_db(x, 0.2, 1.0), 3)}
+        abl["receiver"] = res
+        bass, treble, far = (res[p[0]] for p in points)
+        row = next(q for q in rows if q["id"] == "partial-pattern")
+        # Partly fixed only when both distances agree: the first 150 ms here and the graded 0.05-1.05 s envelope.
+        early_drop, env_drop = far["pattern_gap_db"] - bass["pattern_gap_db"], far["envelope_gap_db"] - bass["envelope_gap_db"]
+        row["status"] = "improved" if min(early_drop, env_drop) >= 1 and max(early_drop, env_drop) >= 3 else "open"
+        row["result"] = (f"Graded where the Iowa microphones sat, 8 in above the bass and treble strings, the first-150-ms partial-pattern distance to the recording is "
+                         f"{bass['pattern_gap_db']:.1f} dB on the bass side and {treble['pattern_gap_db']:.1f} dB on the treble side, each against the real piano's matching channel, "
+                         f"and {far['pattern_gap_db']:.1f} dB at the former default point, 1 m above the middle of the board. The graded 0.05-1.05 s envelope distance is "
+                         f"{bass['envelope_gap_db']:.1f}, {treble['envelope_gap_db']:.1f} and {far['envelope_gap_db']:.1f} dB at the same three points. "
+                         + ("Both windows put the graded point closer to the recording than the former point. " if min(early_drop, env_drop) > 0 else
+                            "Both windows put the graded point further from the recording than the former point. " if max(early_drop, env_drop) < 0 else
+                            "The two windows disagree, so one point's partial pattern is not a robust measure here. "))
+        if has("a3-mf-px") and has("a3-mf-py"):
+            # Four more points 0.1 m from the graded one (two stereo renders of the same mechanics): how much the
+            # graded distance depends on where exactly the estimated microphone sits.
+            near = [ours_mf] + [piano(n, channel=c) for n in ("a3-mf-px", "a3-mf-py") for c in (0, 1)]
+            gaps = [envelope_gap(x, real_mf) for x in near]
+            res["position_spread"] = {"points_m": "graded (0.275, 0.556, 0.25) and 0.1 m away along x and y", "envelope_gap_db": [r(g, 3) for g in gaps]}
+            row["result"] += (f"Within 0.1 m of the graded point the graded distance ranges from {min(gaps):.1f} to {max(gaps):.1f} dB over five points; "
+                              f"the real piano's own two microphones differ by {envelope_gap(real_tr, real_mf):.1f} dB on this note. ")
+        if adm:
+            y, n_modes, top = adm
+            mob = [abs(y(fk(k))) for k in range(1, 8)]
+            row["result"] += (f"Bare-board driving-point mobility |Y| at A3's bridge contact ({n_modes} board modes to {top:.0f} Hz) is {mob[0]:.2e} m/(N s) at partial 1 and "
+                              + ", ".join(f"{round(20 * math.log10(m / mob[0])):+d}" for m in mob[1:]) + " dB relative to that at partials 2-7. ")
+        row["result"] = row["result"].rstrip()
+        lr = next(q for q in rows if q["id"] == "low-resonance")
+        lr["data"]["listening_db"] = r(far["low_resonance_db"] - bass["low_resonance_db"], 3)
+        lr["data"]["remaining_db"] = r(bass["low_resonance_db"] - lr["data"]["real_db"], 3)
+        lr["result"] = receiver_txt = (f"At the former default point, 1 m above the middle of the board, the 125-137 Hz band reads {far['low_resonance_db']:.1f} dB re the fundamental; "
+                                       f"at the graded bass-side Iowa position {bass['low_resonance_db']:.1f} dB, and on the treble side {treble['low_resonance_db']:.1f} dB.")
+        br_ = next(q for q in rows if q["id"] == "board-ringing")
+        br_["result"] = (f"Energy away from the string partials 0.2-1 s after the strike: {bass['non_partial_db']:.1f} dB re total on the bass side, "
+                         f"{treble['non_partial_db']:.1f} dB on the treble side and {far['non_partial_db']:.1f} dB at the former default point (real piano {np_real['mf']:.1f} dB).")
+    elif published and close.exists():
+        # Graded 1 m above the board; the same stroke heard where the Iowa microphones sat (a3-mf-close, stereo)
+        # is the receiver experiment, each channel against the matching real channel.
+        real_tr = V.segment(V.highpass(V.load(V.REFS / "Piano.mf.A3.wav", 1)), 3.0)
+        f0_t, b_t = own_fit(real_tr)
+        points = (("bass-side Iowa position", piano("a3-mf-close", channel=0), real_lv, real_mf),
+                  ("treble-side Iowa position", piano("a3-mf-close", channel=1), partial_levels(real_tr, 0.0, 0.15, f0=f0_t, b=b_t), real_tr),
+                  ("default point (graded)", ours_mf, real_lv, real_mf))
+        res = {}
+        for lab, x, ref, ref_x in points:
+            lv_x = partial_levels(x, 0.0, 0.15)
+            res[lab] = {"partial_levels": lv_x, "pattern_gap_db": r(V.rms_db(lv_x[1:], ref[1:]), 3),
+                        "envelope_gap_db": r(envelope_gap(x, ref_x), 3),
+                        "low_resonance_db": r(ratio_db(x, 125, 137, 0.05, 0.5), 3), "non_partial_db": r(non_partial_db(x, 0.2, 1.0), 3)}
+        abl["receiver"] = res
+        bass, treble, base = (res[p[0]] for p in points)
+        mic_gap = envelope_gap(real_tr, real_mf)
+        row = next(q for q in rows if q["id"] == "partial-pattern")
+        closer = min(base["pattern_gap_db"] - min(bass["pattern_gap_db"], treble["pattern_gap_db"]),
+                     base["envelope_gap_db"] - min(bass["envelope_gap_db"], treble["envelope_gap_db"]))
+        row["status"] = "confirmed" if closer >= 3 else "refuted"
+        row["result"] = (f"Heard where the Iowa microphones sat, 0.25 m above the board, the first-150-ms partial-pattern distance to the recording is "
+                         f"{bass['pattern_gap_db']:.1f} dB on the bass side and {treble['pattern_gap_db']:.1f} dB on the treble side, each against the real piano's matching channel, "
+                         f"against {base['pattern_gap_db']:.1f} dB at the graded point 1 m above the middle of the board; the graded 0.05-1.05 s envelope distances are "
+                         f"{bass['envelope_gap_db']:.1f}, {treble['envelope_gap_db']:.1f} and {base['envelope_gap_db']:.1f} dB. "
+                         f"The real piano's own two microphones differ by {mic_gap:.1f} dB on this note. ")
+        if has("a3-mf-px") and has("a3-mf-py"):
+            near_pts = [piano("a3-mf-close", channel=0)] + [piano(n, channel=c) for n in ("a3-mf-px", "a3-mf-py") for c in (0, 1)]
+            gaps = [envelope_gap(x, real_mf) for x in near_pts]
+            res["position_spread"] = {"points_m": "bass-side Iowa position (0.275, 0.556, 0.25) and 0.1 m away along x and y", "envelope_gap_db": [r(g, 3) for g in gaps]}
+            row["result"] += (f"Within 0.1 m of the bass-side position the envelope distance ranges from {min(gaps):.1f} to {max(gaps):.1f} dB over five points. ")
+        if closer < 3:
+            row["suspect"] = ("The board and its contact, not the listening point: moving our receivers to the Iowa positions brings the pattern no closer. "
+                              "That is also where the model is least complete. The real microphones sit above the strings and the cast-iron plate, which covers much "
+                              "of the board, under a lid; ours look at a bare board in an infinite baffle.")
+            row["test"] = ("Add the plate and lid as rigid scatterers between the board and the receivers, then re-measure at the Iowa positions; compare the board's "
+                           "driving-point mobility at A3's contact with one measured on a real grand (ours is a reconstructed Model D, the recording a Model B).")
+        if adm:
+            y, n_modes, top = adm
+            mob = [abs(y(fk(k))) for k in range(1, 8)]
+            row["result"] += (f"Bare-board driving-point mobility |Y| at A3's bridge contact ({n_modes} board modes to {top:.0f} Hz) is {mob[0]:.2e} m/(N s) at partial 1 and "
+                              + ", ".join(f"{round(20 * math.log10(m / mob[0])):+d}" for m in mob[1:]) + " dB relative to that at partials 2-7.")
+        row["result"] = row["result"].rstrip()
+        lr = next(q for q in rows if q["id"] == "low-resonance")
+        lr["data"]["listening_db"] = r(base["low_resonance_db"] - max(bass["low_resonance_db"], treble["low_resonance_db"]), 3)
+        lr["data"]["remaining_db"] = r(max(bass["low_resonance_db"], treble["low_resonance_db"]) - lr["data"]["real_db"], 3)
+        lr["result"] = receiver_txt = (f"Heard where the Iowa microphones sat, the 125-137 Hz band reads {bass['low_resonance_db']:.1f} dB re the fundamental on the bass side and "
+                                       f"{treble['low_resonance_db']:.1f} dB on the treble side; at the graded point 1 m above the board {base['low_resonance_db']:.1f} dB.")
+        br_ = next(q for q in rows if q["id"] == "board-ringing")
+        br_["result"] = (f"Energy away from the string partials 0.2-1 s after the strike: {bass['non_partial_db']:.1f} dB re total on the bass side and "
+                         f"{treble['non_partial_db']:.1f} dB on the treble side where the Iowa microphones sat, {base['non_partial_db']:.1f} dB at the graded point "
+                         f"(real piano {np_real['mf']:.1f} dB).")
+    elif close.exists():
         res = {}
         for ch, lab in ((0, "bass-side receiver"), (1, "treble-side receiver")):
             x = piano("a3-mf-close", channel=ch)
@@ -558,13 +734,35 @@ def main():
     ds = next(q for q in rows if q["id"] == "decay-shape")
     ds["status"] = "confirmed"
     ds["suspect"] = "Three-string unison beating (symmetric vs antisymmetric unison modes) and two-polarization exchange across the bridge."
-    ds["result"] = ((old_board + " " if resolved_board else "")
-                    + "Driving-point conductance Re(Y) at A3's bridge across 200-1400 Hz averages 2.54e-4 m/(N s) (matching Giordano 1998; Conklin 1996) "
-                    "and is 1.32e-4 m/(N s) at partial 4 (881.9 Hz, 3.1x partial 1), ruling out weak board loss there. Instead, A3's three unison strings "
-                    "(detune 0.8 cents, beat spacing df_n = 4.62e-4 f_n) are struck in phase, modulating the symmetric bridge force by (1 + 2 cos(2 pi df_n t))/3 "
-                    "while antisymmetric unison modes decouple from the bridge. For partial 4 (df_4 = 0.408 Hz), exact three-string nulls fall at 0.82 s (-31.2 dB) "
-                    "and 1.64 s (-34.1 dB) and constructive re-phasing peaks at 2.45 s (-9.4 dB), producing the steep 0.1-0.8 s fall (-43.4 dB/s) and 1.5-2.9 s "
-                    "recovery (+8.1 dB/s) around a true peak-to-peak decay of -4.53 dB/s (1.41x real -6.4 dB/s).")
+    if published and adm:
+        # Computed on the graded board at A3's published contact. A string ending at a bridge of conductance
+        # G = Re(Y) loses amplitude at T G / L per second; the unison's in-phase mode at three times that.
+        y, n_modes, top = adm
+        row57 = scale_row(57)
+        tension, length = (float(row57["tension_n"]), float(row57["length_m"])) if row57 else (None, None)
+        detune = float(row57["detune_cents"]) if row57 else None
+        g = [y(fk(k)).real for k in range(1, 7)]
+        mean_g = float(np.mean([y(f).real for f in np.linspace(200, 1400, 241)]))
+        ds["result"] = (f"Bare-board driving-point conductance Re(Y) at A3's bridge contact ({n_modes} board modes to {top:.0f} Hz) averages {mean_g:.2e} m/(N s) "
+                        f"across 200-1400 Hz; at partials 1-6 it is " + ", ".join(f"{v:.1e}" for v in g) + " m/(N s).")
+        if tension:
+            rates = [-3 * 8.686 * tension * v / length for v in g]
+            ds["result"] += (f" A string ending at a bridge of conductance G loses amplitude at T G / L per second (T = {tension:.0f} N, L = {length:.3f} m), "
+                             f"and the unison's in-phase mode three times as fast: " + ", ".join(f"{v:.1f}" for v in rates) + " dB/s for partials 1-6. "
+                             "So the board's own resonances near each partial set which partials decay fast; the real piano's pattern comes from a different board.")
+        if detune:
+            df = lambda k: fk(k) * (2 ** (detune / 1200) - 1)
+            ds["result"] += (f" The outer two of A3's three strings are detuned by ±{detune:g} cents and all three are struck in phase, so the in-phase bridge force beats as (1 + 2 cos(2 pi df t))/3: "
+                             f"for partial 4 (df = {df(4):.3f} Hz) it vanishes at {1 / (3 * df(4)):.2f} and {2 / (3 * df(4)):.2f} s and re-phases at {1 / df(4):.2f} s, "
+                             "while the antisymmetric unison modes barely move the bridge.")
+    else:
+        ds["result"] = ((old_board + " " if resolved_board else "")
+                        + "Driving-point conductance Re(Y) at A3's bridge across 200-1400 Hz averages 2.54e-4 m/(N s) (matching Giordano 1998; Conklin 1996) "
+                        "and is 1.32e-4 m/(N s) at partial 4 (881.9 Hz, 3.1x partial 1), ruling out weak board loss there. Instead, A3's three unison strings "
+                        "(detune 0.8 cents, beat spacing df_n = 4.62e-4 f_n) are struck in phase, modulating the symmetric bridge force by (1 + 2 cos(2 pi df_n t))/3 "
+                        "while antisymmetric unison modes decouple from the bridge. For partial 4 (df_4 = 0.408 Hz), exact three-string nulls fall at 0.82 s (-31.2 dB) "
+                        "and 1.64 s (-34.1 dB) and constructive re-phasing peaks at 2.45 s (-9.4 dB), producing the steep 0.1-0.8 s fall (-43.4 dB/s) and 1.5-2.9 s "
+                        "recovery (+8.1 dB/s) around a true peak-to-peak decay of -4.53 dB/s (1.41x real -6.4 dB/s).")
     # Compare the polarization render with the render that has the same string-stretching state.
     polar_waves = "--string-stretching" in render_cmd("a3-mf-polar")
     polar_base = "a3-mf" if polar_waves == adopted else "a3-mf-linear" if not polar_waves and has("a3-mf-linear") else None
@@ -621,15 +819,18 @@ def main():
             False: ("a coupled board-and-string resonance near 131.6 Hz (tenfold damper drag barely changes it), still under-damped with air loading included; "
                     "the wood and rim losses the model lacks are the remaining lead." if air else
                     "a coupled board-and-string resonance near 131.6 Hz (tenfold damper drag barely changes it) that is under-damped when two-sided air radiation loading and wood/rim losses are absent.")}[follows]
-    if "listening_db" in lr["data"] and lr["data"]["remaining_db"] <= 1:
+    if iowa:
+        # The graded receivers already sit where the Iowa microphones did: what remains is mechanical.
+        lr["suspect"] = "Mechanical, not the listening point (the graded receivers sit where the Iowa microphones did): " + mech
+    elif lr["data"].get("listening_db", 0) > 0 and lr["data"]["remaining_db"] <= 1:
         lr["suspect"] = (f"The listening point. Receivers near the Iowa microphone positions hear the resonance at or below the real piano's level; "
                          f"the default point, 1 m above the middle of the board, hears it about {lr['data']['listening_db']:.0f} dB louder than they do.")
-    elif "listening_db" in lr["data"]:
+    elif lr["data"].get("listening_db", 0) > 0:
         lr["suspect"] = (f"Two parts. The default listening point accounts for about {lr['data']['listening_db']:.0f} dB (shown by the receiver experiment). "
                          f"The remaining {lr['data']['remaining_db']:.0f} dB is mechanical: {mech} The measurements do not attribute that remainder to the board alone.")
     else:
         lr["suspect"] = "Mechanical, not acoustic: " + mech + " The measurements do not attribute that remainder to the board alone."
-    if "listening_db" in lr["data"] and lr["data"]["remaining_db"] <= 1:
+    if not iowa and lr["data"].get("listening_db", 0) > 0 and lr["data"]["remaining_db"] <= 1:
         lr["test"] = ("Grade from receivers at the Iowa microphone positions (8 inches above the bass and treble strings) as well as the default point; "
                       "the partial-pattern card shows what those positions do to the partials.")
     elif follows is not None:
@@ -658,6 +859,62 @@ def main():
         br_["suspect"] = ("Coupled board/string ringing that air loading damps but does not remove: the wood and rim losses the model still lacks, "
                           "and unplayed strings and dampers, remain candidates.")
         br_["test"] = "Supply measured spruce, rib and rim loss factors and re-measure the off-partial energy and the satellites' decay."
+    if published and has("a3-mf-estmap"):
+        # Same board, air and receivers; only the 88 bridge contacts differ (the former arc-length estimate).
+        est = piano("a3-mf-estmap")
+        here, there = contact_point("a3-mf"), contact_point("a3-mf-estmap")
+        k_now, k_est = ratio_db(ours_mf, 125, 137, 0.05, 0.5), ratio_db(est, 125, 137, 0.05, 0.5)
+        hz_est = precise_peak(est, 125, 137, 0.05, 1.5)
+        np_est = r(non_partial_db(est, 0.2, 1.0), 3)
+        lv_est = partial_levels(est, 0.0, 0.15)
+        abl["bridge_contacts"] = {"a3_published_m": [r(v, 4) for v in here], "a3_estimated_m": [r(v, 4) for v in there],
+                                  "low_resonance_db": {"published": r(k_now, 3), "estimated": r(k_est, 3), "estimated_hz": r(hz_est, 6)},
+                                  "non_partial_db": {"published": np_ours["mf"], "estimated": np_est},
+                                  "pattern_gap_db": {"published": r(V.rms_db(ours_lv[1:], real_lv[1:]), 3), "estimated": r(V.rms_db(lv_est[1:], real_lv[1:]), 3)}}
+        row57 = scale_row(57)
+        start = (f" A3's {float(row57['length_m']):.2f} m speaking length, running straight back from the agraffe, would then have had to begin "
+                 f"{there[1] - float(row57['length_m']):.2f} m inside the board's front edge." if row57 and there[1] > float(row57["length_m"]) else "")
+
+        def settings(name):  # the render command without its board file and outputs
+            words, kept, skip = render_cmd(name).split(), [], False
+            for w in words:
+                if skip:
+                    skip = False
+                elif w in ("--board-geometry", "--render", "--bridge-trace-csv"):
+                    skip = True
+                else:
+                    kept.append(w)
+            return kept
+        same = ("and an otherwise identical render" if settings("a3-mf-estmap") == settings("a3-mf")
+                else "in a render whose other settings differ")
+        contact = (f"Each string now meets its bridge at the coupling point RT-0425 publishes for it, projected onto the reconstructed bridge: A3 at "
+                   f"({here[0]:.2f}, {here[1]:.2f}) m. The former stations were spaced evenly along each bridge and put A3 at ({there[0]:.2f}, {there[1]:.2f}) m, "
+                   f"{math.dist(here, there):.2f} m away." + start + f" With those stations {same}, the 125-137 Hz band "
+                   f"0.05-0.5 s after the mf strike read {k_est:.1f} dB re the fundamental (peak {hz_est:.1f} Hz); with the published contacts it reads {k_now:.1f} dB. ")
+        lr["fix"] = contact + lr.get("fix", "")
+        br_ = next(q for q in rows if q["id"] == "board-ringing")
+        br_["fix"] = (f"With the former estimated bridge stations {same}, the energy away from the string partials 0.2-1 s after the mf strike was "
+                      f"{np_est:.1f} dB re total; with the published contacts it is {np_ours['mf']:.1f} dB. " + br_.get("fix", ""))
+        if abs(np_ours["mf"] - np_real["mf"]) <= 3 and np_est - np_ours["mf"] >= 3:
+            br_["status"] = "fixed"
+            br_["suspect"] = ("Board ringing driven from a misplaced bridge contact and under-damped without air loading. "
+                              "The renders above carry both corrections; wood, rim and damper losses stay estimated.")
+        if k_est - k_now >= 3:
+            lr["status"] = "fixed" if k_now - real_knock <= 3 else "improved"
+            if lr["status"] == "fixed":
+                lr["symptom"] = (f"An early resonance near {hz_est:.0f} Hz rang at {k_est:.1f} dB re the fundamental; the real piano has nothing stronger than "
+                                 f"{real_knock:.1f} dB from 80 to {0.77 * 220:.0f} Hz.")
+                lr["suspect"] = ("A misplaced bridge contact. From its estimated station A3 drove a low board mode strongly; at its published contact "
+                                 "it barely moves that mode.")
+                # The damper experiments were written for a resonance that is now gone: state what they show.
+                pedal = abl.get("sustain_pedal")
+                lr["result"] = receiver_txt + (
+                    (" " if receiver_txt else "") + f"With every damper lifted (sustain pedal) the band reads {pedal['early_db']['pedal']:.1f} dB at "
+                    f"{pedal['hz']['pedal']:.2f} Hz instead of {pedal['early_db']['dampers_down']:.1f} dB: the undamped bass strings ring with the board, "
+                    "as on a real piano with the pedal down." if pedal else "")
+                trace = bridge_split()[0]  # A3 mf's own bridge velocity and microphone pressure
+                lr["evidence"] = (f"Only the 88 bridge contacts differ between the two renders. With the published contacts the 128-135 Hz band reads "
+                                  f"{trace['bridge_db']:.1f} dB re partial 1 in A3's own bridge motion and {trace['pressure_db']:.1f} dB at the microphone.")
     # The waves experiment on linear graded renders. Once the graded A3 renders carry the waves themselves,
     # a3-{mf,ff} are no longer the linear side of this comparison and the ff-brightness card above reports it.
     wave_paths = {d: V.CAMPAIGN / "piano" / f"a3-{d}-waves.wav" for d in ("mf", "ff")}
@@ -705,16 +962,25 @@ def main():
                          f"phantom partials are present by that test at {got} of {len(sw['phantoms_ff']['waves'])} positions at ff (linear strings: {sum(q['present'] for q in ph_ours)}). "
                          f"The mf-to-ff brightness gain moves from {sw['brightness_gain_db']['linear']:.1f} dB to {sw['brightness_gain_db']['waves']:.1f} dB (real piano {sw['brightness_gain_db']['real']:.1f} dB), "
                          f"and the mf partial pattern changes by {sw['mf_unchanged_db']:.1f} dB RMS.") + extra
-    abl["air_and_damping"] = {
-        "board_1khz_baseline": {"bridge_128_135_db": -24.89, "mic_128_135_db": -17.78, "non_partial_db": -18.66},
-        "rayleigh_air_2sided": {"bridge_128_135_db": -39.83, "mic_128_135_db": -31.54, "non_partial_db": -25.37, "satellite_216hz_db": -28.7},
-        "wood_damping_3x": {"bridge_128_135_db": -31.8, "mic_128_135_db": -20.34, "non_partial_db": -23.9},
-    }
-    abl["bridge_admittance_and_felt"] = {
-        "admittance_m_ns": {"p1": 0.0002261, "p2": 0.0009675, "p3": 0.0006041, "p4": 0.0001529, "p5": 0.0003042, "p6": 0.0001988, "p7": 0.0003887},
-        "admittance_re_p1_db": [0.0, 12.63, 8.54, -3.4, 2.58, -1.12, 4.71],
-        "rt0425_felt_3x": {"p4_bridge_delta_db": -0.08, "p6_bridge_delta_db": -6.15, "p6_mic_delta_db": -6.1},
-    }
+    if published and adm:
+        # Computed on the graded board at A3's published contact.
+        y, n_modes, top = adm
+        mob = {f"p{k}": complex(y(fk(k))) for k in range(1, 8)}
+        abl["bridge_admittance"] = {"modes": n_modes, "top_hz": r(top, 5),
+                                    "abs_m_ns": {k: r(abs(v), 4) for k, v in mob.items()},
+                                    "conductance_m_ns": {k: r(v.real, 4) for k, v in mob.items()}}
+    elif not published:
+        # Measured at the former estimated A3 station on the 1 kHz and 8-division boards.
+        abl["air_and_damping"] = {
+            "board_1khz_baseline": {"bridge_128_135_db": -24.89, "mic_128_135_db": -17.78, "non_partial_db": -18.66},
+            "rayleigh_air_2sided": {"bridge_128_135_db": -39.83, "mic_128_135_db": -31.54, "non_partial_db": -25.37, "satellite_216hz_db": -28.7},
+            "wood_damping_3x": {"bridge_128_135_db": -31.8, "mic_128_135_db": -20.34, "non_partial_db": -23.9},
+        }
+        abl["bridge_admittance_and_felt"] = {
+            "admittance_m_ns": {"p1": 0.0002261, "p2": 0.0009675, "p3": 0.0006041, "p4": 0.0001529, "p5": 0.0003042, "p6": 0.0001988, "p7": 0.0003887},
+            "admittance_re_p1_db": [0.0, 12.63, 8.54, -3.4, 2.58, -1.12, 4.71],
+            "rt0425_felt_3x": {"p4_bridge_delta_db": -0.08, "p6_bridge_delta_db": -6.15, "p6_mic_delta_db": -6.1},
+        }
     out["ablations"] = abl
     out["inputs"] = {"board_modes_hz": board[:12], "a3_f0": F0, "a3_B": B0}
     (V.OUT / "data" / "diagnosis.json").write_text(json.dumps(out, separators=(",", ":")))
