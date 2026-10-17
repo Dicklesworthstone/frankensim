@@ -440,6 +440,13 @@ fn dfmm_gradient_tolerance_ladder() {
                 let op = FmmC64::new_directional(&kernel, &points, options(eps, rung)).unwrap();
                 let oracle = op.direct(&q).unwrap();
                 let actual = op.potentials(&q).unwrap();
+                assert!(
+                    actual
+                        .iter()
+                        .chain(&oracle)
+                        .all(|z| z.re.is_finite() && z.im.is_finite()),
+                    "nonfinite gradient kD={kd}, axis={axis}, eps={eps}"
+                );
                 let error = rel(&actual, &oracle).max(rel(&actual[8..], &oracle[8..]));
                 emit(
                     "dfmm-gradient",
@@ -460,6 +467,111 @@ fn dfmm_gradient_tolerance_ladder() {
                 previous = error;
             }
         }
+    }
+}
+
+#[test]
+fn dfmm_transverse_gradient_retains_coordinate_factor() {
+    // G1/G3: the original p5/kD50 failure and an axis permutation plus a
+    // translation. The untagged, identical point kernel plants the old
+    // interpolate-the-entire-component operator as an independent control.
+    struct Unfactored(fs_fmm::HelmholtzGradient);
+    impl fs_fmm::ComplexKernel for Unfactored {
+        fn eval(&self, x: [f64; 3], y: [f64; 3]) -> C64 {
+            fs_fmm::ComplexKernel::eval(&self.0, x, y)
+        }
+        fn wavenumber(&self) -> Option<f64> {
+            fs_fmm::ComplexKernel::wavenumber(&self.0)
+        }
+        fn translation_invariant(&self) -> bool {
+            true
+        }
+    }
+    let (points, _) = fixture(16);
+    let mut q = charges(points.len());
+    q[8..].fill(C64::ZERO);
+    for moved in [false, true] {
+        let started = Instant::now();
+        let (points, axis) = if moved {
+            (
+                points
+                    .iter()
+                    .map(|p| [p[2] + 8.0, p[0] - 4.0, p[1] + 2.0])
+                    .collect::<Vec<_>>(),
+                0,
+            )
+        } else {
+            (points.clone(), 2)
+        };
+        let kernel = fs_fmm::HelmholtzGradient::new(50.0 / side(&points), axis).unwrap();
+        let control = Unfactored(kernel);
+        let o = options(1e-3, 0);
+        let factored = FmmC64::new_directional(&kernel, &points, o.clone()).unwrap();
+        let unfactored = FmmC64::new_directional(&control, &points, o.clone()).unwrap();
+        let oracle = unfactored.direct(&q).unwrap();
+        assert_eq!(bits(&factored.direct(&q).unwrap()), bits(&oracle));
+        let actual = factored.potentials(&q).unwrap();
+        let old = unfactored.potentials(&q).unwrap();
+        let error = rel(&actual[8..], &oracle[8..]);
+        let old_error = rel(&old[8..], &oracle[8..]);
+        emit(
+            "dfmm-gradient-coordinate-factor",
+            format!(
+                "{{\"case\":\"dfmm-gradient-coordinate-factor\",\"inputs\":\"analytic outgoing gradient; identical unfactored point kernel control\",\"seed\":{SEED},\"axis\":\"coordinate-factor\",\"rung\":{},\"moved\":{moved},\"kd\":50,\"component\":{axis},\"order\":{},\"err\":{error},\"unfactored_err\":{old_error},\"tol\":{},\"verdict\":\"{}\",\"elapsed_s\":{}}}",
+                usize::from(moved),
+                o.order,
+                o.tolerance,
+                if error <= o.tolerance && old_error > o.tolerance {
+                    "pass"
+                } else {
+                    "fail"
+                },
+                started.elapsed().as_secs_f64()
+            ),
+        );
+        assert!(
+            actual
+                .iter()
+                .chain(&old)
+                .all(|z| z.re.is_finite() && z.im.is_finite())
+        );
+        assert!(
+            error <= o.tolerance,
+            "factored gradient moved={moved}: {error}"
+        );
+        assert!(
+            old_error > o.tolerance,
+            "unfactored control must fail: {old_error}"
+        );
+        let stats = factored.directional_stats().unwrap();
+        assert!(stats.high_frequency_pairs > 0);
+        assert_eq!(stats.order, o.order);
+        assert_eq!(
+            stats.cones_per_level,
+            unfactored.directional_stats().unwrap().cones_per_level
+        );
+    }
+}
+
+#[test]
+fn dfmm_coplanar_transverse_gradient_is_exactly_zero() {
+    // G0/G3: the affine factor vanishes identically. Neither interpolation
+    // nor a translation of the plane may manufacture a transverse field.
+    let (mut points, _) = fixture(16);
+    for p in &mut points {
+        p[2] = 2.5;
+    }
+    let kernel = fs_fmm::HelmholtzGradient::new(50.0 / side(&points), 2).unwrap();
+    let op = FmmC64::new_directional(&kernel, &points, options(1e-3, 0)).unwrap();
+    assert!(op.directional_stats().unwrap().high_frequency_pairs > 0);
+    let q = charges(points.len());
+    for value in op
+        .potentials(&q)
+        .unwrap()
+        .into_iter()
+        .chain(op.direct(&q).unwrap())
+    {
+        assert_eq!(value, C64::ZERO);
     }
 }
 

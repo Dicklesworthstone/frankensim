@@ -211,6 +211,22 @@ uncompressed matrix-free tensor M2L rather than paying for unused compression.
 translation-invariant kernels share offset blocks. Normal channels and the
 shipped single/gradient kernels have that property.
 
+Directional Cartesian gradients preserve the exact affine factor
+`d_axis G = (x_axis-y_axis) G'(r)/r`. `ComplexKernel::helmholtz_gradient`
+declares this analytic identity (default `None` for custom kernels). The
+directional owner interpolates the shared radial remainder with two diagonal
+source/target moment channels, anchored at the root lower coordinate to avoid
+large absolute-coordinate cancellation. The point/direct and exact near-field
+owners retain the original derivative kernel. Whole-request low-frequency
+delegation also retains the original W5a arithmetic. This uses the same order,
+cones and resource caps; additional moment storage/work is admitted normally.
+It avoids consuming an interpolation degree on a component's vanishing linear
+factor, which otherwise amplifies relative transverse error near an angular
+zero. `dfmm_transverse_gradient_retains_coordinate_factor` retains the failing
+kD50/p5 case, an axis permutation/translation, and a live unfactored control
+that fails the unchanged 1e-3 tolerance; the factored operator must pass.
+`dfmm_coplanar_transverse_gradient_is_exactly_zero` checks the exact planar zero.
+
 The dual-tree partition accepts equal-size cells only if center distance >=
 4*side and, for directional cells, `3*k*side^2 <= distance-sqrt(3)*side`.
 Unaccepted pairs descend both trees. At leaves they use the exact point

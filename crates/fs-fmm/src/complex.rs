@@ -48,6 +48,9 @@ pub fn helmholtz_order_for(kd: f64, tol: f64) -> Result<usize, FmmError> {
 
 enum Operator<'k> {
     Scalar(&'k dyn ComplexKernel),
+    // Two diagonal radial channels retain (x_axis-y_axis) exactly, instead
+    // of spending one interpolation degree on this vanishing linear factor.
+    Gradient(HelmholtzGradient),
     Double(HelmholtzDouble),
     Adjoint(HelmholtzAdjointDouble),
     Mixed(HelmholtzHypersingular),
@@ -57,6 +60,7 @@ impl Operator<'_> {
     fn dimensions(&self) -> (usize, usize) {
         match self {
             Self::Scalar(_) => (1, 1),
+            Self::Gradient(_) => (2, 2),
             Self::Double(_) => (3, 1),
             Self::Adjoint(_) => (1, 3),
             Self::Mixed(_) => (3, 3),
@@ -66,6 +70,7 @@ impl Operator<'_> {
     fn wavenumber(&self) -> Option<f64> {
         match self {
             Self::Scalar(k) => k.wavenumber(),
+            Self::Gradient(k) => Some(k.k),
             Self::Double(k) => Some(k.k),
             Self::Adjoint(k) => Some(k.k),
             Self::Mixed(k) => Some(k.k),
@@ -84,6 +89,11 @@ impl Operator<'_> {
             return block;
         };
         match self {
+            Self::Gradient(_) => {
+                let radial = v.gp.scale(v.inv_r);
+                block[0] = radial;
+                block[3] = radial;
+            }
             Self::Double(_) => {
                 for (a, slot) in block[..3].iter_mut().enumerate() {
                     *slot = v.gp.scale(-v.unit[a]);
@@ -354,6 +364,13 @@ impl<'k> FmmC64<'k> {
     }
 
     fn source_weight(&self, index: usize, channel: usize) -> f64 {
+        if let Operator::Gradient(kernel) = &self.operator {
+            return if channel == 0 {
+                1.0
+            } else {
+                self.geometry.points[index][kernel.axis] - self.geometry.lo[kernel.axis]
+            };
+        }
         if self.operator.dimensions().0 == 1 {
             1.0
         } else {
@@ -362,6 +379,13 @@ impl<'k> FmmC64<'k> {
     }
 
     fn target_weight(&self, index: usize, channel: usize) -> f64 {
+        if let Operator::Gradient(kernel) = &self.operator {
+            return if channel == 0 {
+                self.geometry.points[index][kernel.axis] - self.geometry.lo[kernel.axis]
+            } else {
+                -1.0
+            };
+        }
         if self.operator.dimensions().1 == 1 {
             1.0
         } else {
@@ -513,6 +537,11 @@ impl<'k> FmmC64<'k> {
     }
 
     fn pair(&self, t: usize, s: usize) -> C64 {
+        // Keep direct/near evaluation on the original analytic point kernel;
+        // it must not inherit cancellation in the far-field moment split.
+        if let Operator::Gradient(kernel) = &self.operator {
+            return kernel.eval(self.geometry.points[t], self.geometry.points[s]);
+        }
         let block = self
             .operator
             .block(self.geometry.points[t], self.geometry.points[s]);

@@ -345,6 +345,17 @@ impl<'k> FmmC64<'k> {
                 options.leaf_capacity,
             );
         }
+        // d_axis G = (x_axis-y_axis) G'(r)/r. Interpolate only the radial
+        // remainder and form the affine factor through source/target moments.
+        // Directly interpolating d_axis G loses a degree and can give a large
+        // relative error for transverse components near their angular zero.
+        // This conversion follows the unchanged whole-request W5a branch.
+        let operator = match operator {
+            Operator::Scalar(kernel) => kernel
+                .helmholtz_gradient()
+                .map_or(Operator::Scalar(kernel), Operator::Gradient),
+            other => other,
+        };
         let mut depth = 1u32;
         while 8usize.saturating_pow(depth) < points.len().div_ceil(options.leaf_capacity)
             || kd / f64::from(1u32 << depth) > options.low_freq_threshold

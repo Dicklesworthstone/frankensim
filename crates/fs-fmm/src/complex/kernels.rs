@@ -18,6 +18,14 @@ pub trait ComplexKernel {
     fn translation_invariant(&self) -> bool {
         false
     }
+
+    /// Exact analytic identity, when this kernel is a Cartesian component of
+    /// the outgoing Helmholtz gradient. Directional interpolation can then
+    /// retain its coordinate-difference factor exactly. Implementors returning
+    /// `Some(g)` promise that `eval` and `wavenumber` agree with `g`.
+    fn helmholtz_gradient(&self) -> Option<HelmholtzGradient> {
+        None
+    }
 }
 
 /// Outgoing single layer G=exp(ikr)/(4 pi r), zero on the diagonal.
@@ -93,8 +101,8 @@ impl HelmholtzHypersingular {
 /// gradient used in regularized Burton–Miller formulations.
 #[derive(Debug, Clone, Copy)]
 pub struct HelmholtzGradient {
-    k: f64,
-    axis: usize,
+    pub(super) k: f64,
+    pub(super) axis: usize,
 }
 
 impl HelmholtzGradient {
@@ -110,6 +118,9 @@ impl HelmholtzGradient {
 }
 
 impl ComplexKernel for HelmholtzGradient {
+    fn helmholtz_gradient(&self) -> Option<HelmholtzGradient> {
+        Some(*self)
+    }
     fn translation_invariant(&self) -> bool {
         true
     }
