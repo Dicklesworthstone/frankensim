@@ -94,21 +94,26 @@ fn shared_volume_and_damper_keep_all_body_cross_terms_and_separate_budgets() {
     let initial = system.frame().stored_energy_j;
     let dt = system.sample_period_s();
     let norm = weights.iter().map(|b| b*b).sum::<f64>();
-    let denominator = 1.0 + 0.5*damping*norm*dt + 0.25*stiffness*norm*dt*dt;
+    // The block is exactly quadratic, so it propagates by exact ZOH. Along
+    // x = b^T q (inverse mass b^T b) it is a damped oscillator,
+    // x'' = -norm (k x + c x'), with closed-form flow; the orthogonal
+    // complement of b translates freely.
+    let omega2 = stiffness*norm;
+    let a = 0.5*damping*norm;
+    let wd = (omega2 - a*a).sqrt();
+    let (e, c, s) = ((-a*dt).exp(), (wd*dt).cos(), (wd*dt).sin());
     let mut loss = 0.0;
     for _ in 0..512 {
-        // Independent scalar midpoint solution: x=b^T q has inverse mass
-        // b^T b. All modal momentum changes lie along b; its orthogonal
-        // complement is unchanged. Pairwise springs or diagonalized damping
-        // would both violate this exact three-body solution.
+        // Independent closed-form solution. All modal momentum changes lie
+        // along b, and its orthogonal complement is unchanged. Pairwise springs
+        // or diagonalized damping would both violate this exact three-body solution.
         let x = weights.iter().zip(&q).map(|(b,q)| b*q).sum::<f64>();
         let speed = weights.iter().zip(&v).map(|(b,v)| b*v).sum::<f64>();
-        let next_speed = ((1.0-0.5*damping*norm*dt-0.25*stiffness*norm*dt*dt)*speed
-            - stiffness*norm*dt*x)/denominator;
+        let next_x = e*(x*c + (speed + a*x)/wd*s);
+        let next_speed = e*(speed*c - (a*speed + omega2*x)/wd*s);
         for i in 0..3 {
-            let next_v = v[i] + weights[i]*(next_speed-speed)/norm;
-            q[i] += 0.5*dt*(v[i]+next_v);
-            v[i] = next_v;
+            q[i] += dt*v[i] + weights[i]*(next_x - x - dt*speed)/norm;
+            v[i] += weights[i]*(next_speed - speed)/norm;
         }
         let frame = system.step(&[0.0;3],&gate).unwrap();
         assert_eq!(frame.supplied_work_j,0.0);
