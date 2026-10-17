@@ -87,9 +87,14 @@ pub fn solve_with_rate(law: &WoolFelt, state: &State, start_m: f64, free_m: f64,
             thickness_m, area_m2, rate_n_s_m_p, dt_s);
         (end + compliance_m_n * f - free_m, 1.0 + compliance_m_n * df, f)
     };
+    // Stop at the residual's own rounding floor, not at a fixed overlap: with the
+    // R_H term the tangent is R_H p e^(p-1)/dt, so 1e-13 m of overlap could still
+    // be 1e-4 N of force, more than the contact and stretching iterations allow.
+    let floor = |end: f64, force: f64|
+        16.0 * f64::EPSILON * (end.abs() + (compliance_m_n * force).abs() + free_m.abs());
     let (rhi, _, fhi) = residual(hi);
     if rhi < -1.0e-12 { return Err("felt exceeded its admitted densification strain"); }
-    if rhi.abs() <= 1.0e-13 { return Ok(fhi); }
+    if rhi.abs() <= floor(hi, fhi) { return Ok(fhi); }
     let mut lo = start_m.min(free_m).min(0.0) - thickness_m;
     for _ in 0..16 {
         if residual(lo).0 <= 0.0 { break; }
@@ -97,12 +102,15 @@ pub fn solve_with_rate(law: &WoolFelt, state: &State, start_m: f64, free_m: f64,
     }
     if residual(lo).0 > 0.0 { return Err("felt contact could not bracket its end overlap"); }
     let mut end = 0.5 * (lo + hi);
-    for _ in 0..48 {
+    for _ in 0..64 {
         let (r, derivative, force) = residual(end);
         if !r.is_finite() || !derivative.is_finite() || !force.is_finite() || force < 0.0 {
             return Err("nonfinite or tensile discrete felt force");
         }
-        if r.abs() <= 1.0e-13 { return Ok(force); }
+        // A bracket collapsed to adjacent doubles is the root at this precision.
+        if r.abs() <= floor(end, force) || hi - lo <= 4.0 * f64::EPSILON * lo.abs().max(hi.abs()) {
+            return Ok(force);
+        }
         if r > 0.0 { hi = end; } else { lo = end; }
         let newton = end - r / derivative;
         end = if newton > lo && newton < hi { newton } else { 0.5 * (lo + hi) };
@@ -167,6 +175,27 @@ mod tests {
             thickness,area,rate,dt).unwrap();
         let end=0.001-2e-7*force;
         assert!((force-average_with_rate(&law,&state,0.0,end,thickness,area,rate,dt).0).abs()<1e-5);
+    }
+    #[test]
+    fn stiff_rate_root_resolves_force_to_the_rounding_floor() {
+        // With R_H the tangent reaches R_H p e^(p-1)/dt; a fixed 1e-13 m overlap stop left
+        // force errors that stalled the string-stretching iteration (1e-10 relative) above it.
+        let law = WoolFelt::new(2.0e6, 0.2, 2.5, 2.5, 0.0, 0.8).unwrap();
+        let state = law.initial_state();
+        let (area, thickness, rate, dt) = (1e-4, 0.008, 6.47e5, 1.0/192_000.0);
+        let mut worst = 0.0_f64;
+        for k in 1..=400 {
+            let free = 5e-6 * f64::from(k);
+            for (start, c) in [(0.0, 2e-7), (0.5 * free, 2e-7), (0.0, 3e-6), (0.9 * free, 5e-8)] {
+                let force = solve_with_rate(&law, &state, start, free, c, thickness, area, rate, dt).unwrap();
+                let end = free - c * force;
+                let (expected, tangent) = average_with_rate(&law, &state, start, end, thickness, area, rate, dt);
+                let floor = 16.0 * f64::EPSILON * (end.abs() + (c * force).abs() + free.abs());
+                let defect = (force - expected).abs() - (1e-9 + 1e-11 * expected.abs() + floor * tangent);
+                worst = worst.max(defect);
+            }
+        }
+        assert!(worst <= 0.0, "force exceeds the resolvable defect by {worst:e} N");
     }
 }
 

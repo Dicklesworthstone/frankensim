@@ -16,6 +16,11 @@ impl Prepared {
 }
 
 impl Instrument {
+    /// Whether this course's finite-footprint sites are solved as one block.
+    pub(super) fn contact_block_selected(&self,ci:usize)->bool {
+        self.contact_solver.as_ref().is_some_and(|s|s.finite[ci])
+    }
+
     pub(super) fn contact_sweep(&mut self)->Result<(),Error> {
         let mut first=0;
         while first<self.active.len() {

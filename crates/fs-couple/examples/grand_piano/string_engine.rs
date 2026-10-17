@@ -61,10 +61,21 @@ impl Instrument {
                 let material=&self.creep[i];let old=&self.contacts[i];
                 let start=old.overlap-material.deformation(&old.memory);
                 let end=self.gap[i]-material.free_deformation(&old.memory)-material.compliance()*self.force[i];
-                let expected=felt::average_with_rate(&self.laws[ci],&old.state,start,end,
+                let (expected,slope)=felt::average_with_rate(&self.laws[ci],&old.state,start,end,
                     self.contact_thickness_m[i],self.contact_areas[i],self.source_rate_n_s_m_p[i],
-                    1.0/f64::from(self.bank.rate)).0;
-                if !expected.is_finite()||(self.force[i]-expected).abs()>1e-5+1e-8*expected.abs(){converged=false;}
+                    1.0/f64::from(self.bank.rate));
+                // Scalar sites converge to what the felt law can resolve: 1e-9 N, or the
+                // force that felt::solve_with_rate's rounding floor moves through the felt's
+                // tangent (stiff with R_H). The string-stretching iteration around this solve
+                // tests 1e-10 relative, so the old 1e-5 N gate stalled it. Sites solved as one
+                // finite-footprint block keep that block solver's own 1e-5 N gate.
+                let tolerance=if self.contact_block_selected(ci) {1e-5+1e-8*expected.abs()} else {
+                    let diagonal=self.contact_h[i*nc+i];
+                    let free=self.gap[i]+diagonal*self.force[i]-material.free_deformation(&old.memory);
+                    let floor=16.0*f64::EPSILON*(end.abs()+((diagonal+material.compliance())*self.force[i]).abs()+free.abs());
+                    1e-9+1e-11*expected.abs()+floor*slope.abs()
+                };
+                if !expected.is_finite()||(self.force[i]-expected).abs()>tolerance{converged=false;}
             }
         }
         if !converged{return Err(Error::NoConvergence);}
