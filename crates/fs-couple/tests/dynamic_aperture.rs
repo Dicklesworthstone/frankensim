@@ -4,6 +4,7 @@ use fs_couple::bernoulli_aperture::dynamic::{
     ApertureDrive, ApertureFrame, ApertureState, ApertureTerminal,
     DynamicAperture, DynamicApertureSpec,
 };
+use fs_couple::bernoulli_aperture::paired::BladePropagator;
 use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
 
@@ -50,59 +51,110 @@ fn bits(f: ApertureFrame) -> Vec<u64> {
 #[test]
 fn public_step_uses_the_supplied_contact_law_and_preserves_its_identity() {
     let initial = ApertureState { opening_m: -1e-4, opening_velocity_m_s: -0.2 };
+    // The pole-rate bound is about 12100 rad/s: midpoint is admitted only
+    // below 3.3e-6 s, while the exact block takes the original 1e-5 s clock.
+    for (propagator, dt) in [(BladePropagator::Midpoint, 3e-6), (BladePropagator::ExactZoh, 1e-5)] {
+        let mut s = spec(1);
+        s.time_step_s = dt;
+        let mut soft = DynamicAperture::new_with_propagator(s, initial, lay(1e6), propagator).unwrap();
+        let mut stiff = DynamicAperture::new_with_propagator(s, initial, lay(1e9), propagator).unwrap();
+        assert_eq!(soft.contact_law().stiffness(), 1e6);
+        assert_eq!(stiff.contact_law().stiffness(), 1e9);
+        assert_eq!(soft.contact_law().provenance(), "synthetic caller-owned contact fixture");
+        let a = soft.step(ApertureDrive::default()).unwrap();
+        let b = stiff.step(ApertureDrive::default()).unwrap();
+        assert!((a.state.opening_m - b.state.opening_m).abs() > 1e-9, "{propagator:?}");
+        assert!((a.outgoing_pressure_pa - b.outgoing_pressure_pa).abs() > 1.0, "{propagator:?}");
+        for f in [a, b] {
+            let scale = f.stored_energy_j.abs() + f.storage_change_j.abs()
+                + f.dissipated_energy_j.abs() + f.pressure_work_j.abs();
+            assert!(f.balance_residual_j().abs() <= 2e-10 * scale, "{propagator:?}");
+            assert!(f.dissipated_energy_j >= 0.0, "{propagator:?}");
+        }
+    }
+    // The original clock is outside the midpoint band and refuses there.
     let mut s = spec(1);
     s.time_step_s = 1e-5;
-    let mut soft = DynamicAperture::new(s, initial, lay(1e6)).unwrap();
-    let mut stiff = DynamicAperture::new(s, initial, lay(1e9)).unwrap();
-    assert_eq!(soft.contact_law().stiffness(), 1e6);
-    assert_eq!(stiff.contact_law().stiffness(), 1e9);
-    assert_eq!(soft.contact_law().provenance(), "synthetic caller-owned contact fixture");
-    let a = soft.step(ApertureDrive::default()).unwrap();
-    let b = stiff.step(ApertureDrive::default()).unwrap();
-    assert!((a.state.opening_m - b.state.opening_m).abs() > 1e-9);
-    assert!((a.outgoing_pressure_pa - b.outgoing_pressure_pa).abs() > 1.0);
-    for f in [a, b] {
-        let scale = f.stored_energy_j.abs() + f.storage_change_j.abs()
-            + f.dissipated_energy_j.abs() + f.pressure_work_j.abs();
-        assert!(f.balance_residual_j().abs() <= 2e-10 * scale);
-        assert!(f.dissipated_energy_j >= 0.0);
-    }
+    assert!(DynamicAperture::new_with_propagator(s, initial, lay(1e6), BladePropagator::Midpoint)
+        .and_then(|mut m| m.step(ApertureDrive::default())).is_err());
 }
 
-#[test]
-fn physical_frame_matches_an_independent_manufactured_moving_aperture() {
+/// Checks one free-opening step against an independently manufactured frame:
+/// the caller supplies the end velocity and the pressure-face force that the
+/// propagator must have held to reach `next_y`. The jet uses the
+/// endpoint-average opening and the swept flow uses the step-mean velocity in
+/// both propagators.
+fn check_manufactured_frame(propagator: BladePropagator, dt: f64, (y, next_y, v): (f64, f64, f64),
+    next_v: f64, held_force_n: f64) {
     let mut s = spec(1);
-    s.time_step_s = 1e-4;
-    let (y, next_y, v) = (4e-4, 3e-4, 0.2);
-    let vm = (next_y - y) / s.time_step_s;
-    let next_v = 2.0 * vm - v;
+    s.time_step_s = dt;
+    let vm = (next_y - y) / dt;
     let face = s.stiffness_n_m * s.aperture.rest_opening_m / s.aperture.closing_pressure_pa;
-    let damping = 2.0 * s.damping_ratio * (s.stiffness_n_m * s.mass_kg).sqrt();
-    let dp = -(s.mass_kg * (next_v - v) / s.time_step_s
-        + s.stiffness_n_m * (0.5 * (y + next_y) - s.aperture.rest_opening_m)
-        + damping * vm) / face;
+    let dp = -held_force_n / face;
     let jet = s.aperture.width_m * (0.5 * (y + next_y)) * dp.signum()
         * (2.0 * dp.abs() / s.density_kg_m3).sqrt();
     let incoming = 75.0;
     let body = 2e-7;
     let outgoing = incoming + s.impedance_pa_s_m3 * (jet + body - face * vm);
-    let mut model = DynamicAperture::new(s, ApertureState {
+    let mut model = DynamicAperture::new_with_propagator(s, ApertureState {
         opening_m: y, opening_velocity_m_s: v,
-    }, lay(1e8)).unwrap();
+    }, lay(1e8), propagator).unwrap();
     let f = model.step(ApertureDrive {
         upstream_pressure_pa: dp + outgoing + incoming,
         incoming_pressure_pa: incoming,
         body_flow_m3_s: body,
     }).unwrap();
-    assert!((f.state.opening_m - next_y).abs() < 1e-13);
-    assert!((f.state.opening_velocity_m_s - next_v).abs() < 1e-9);
-    assert!((f.outgoing_pressure_pa - outgoing).abs() < 1e-8);
-    assert!((f.midpoint_opening_m - 0.5 * (y + next_y)).abs() < 1e-13);
-    assert!((f.jet_flow_m3_s - jet).abs() < 1e-14);
-    assert!(f.flow_residual_m3_s.abs() < 1e-14);
-    assert!(f.balance_residual_j().abs() < 1e-14);
+    assert!((f.state.opening_m - next_y).abs() < 1e-13, "{propagator:?}");
+    assert!((f.state.opening_velocity_m_s - next_v).abs() < 1e-9, "{propagator:?}");
+    assert!((f.outgoing_pressure_pa - outgoing).abs() < 1e-8, "{propagator:?}");
+    assert!((f.midpoint_opening_m - 0.5 * (y + next_y)).abs() < 1e-13, "{propagator:?}");
+    assert!((f.jet_flow_m3_s - jet).abs() < 1e-14, "{propagator:?}");
+    assert!(f.flow_residual_m3_s.abs() < 1e-14, "{propagator:?}");
+    assert!(f.balance_residual_j().abs() < 1e-14, "{propagator:?}");
     assert_eq!(f.step, 1);
     assert_eq!(f.time_s.to_bits(), s.time_step_s.to_bits());
+}
+
+#[test]
+fn physical_frame_matches_an_independent_manufactured_moving_aperture() {
+    let s = spec(1);
+    let (m, k) = (s.mass_kg, s.stiffness_n_m);
+    let rest = s.aperture.rest_opening_m;
+    let damping = 2.0 * s.damping_ratio * (k * m).sqrt();
+
+    // Midpoint, inside its band: next_v = 2 vm - v and the midpoint momentum
+    // balance m (next_v - v)/dt + k (y_mid - rest) + c vm = F.
+    let (dt, y, v) = (2e-6, 4e-4, 0.2);
+    let next_y = y + 0.19 * dt;
+    let vm = (next_y - y) / dt;
+    let next_v = 2.0 * vm - v;
+    let force = m * (next_v - v) / dt + k * (0.5 * (y + next_y) - rest) + damping * vm;
+    check_manufactured_frame(BladePropagator::Midpoint, dt, (y, next_y, v), next_v, force);
+
+    // Exact, at omega*dt = 0.71.
+    let (dt, y, next_y, v) = (1e-4, 4e-4, 3e-4, 0.2);
+    let (force, next_v) = exact_held_force(&s, dt, (y, next_y, v));
+    // At this clock the midpoint image (2 vm - v = -2.2 m/s) misses the exact
+    // end velocity (about -1.94 m/s) by far more than the frame tolerance.
+    assert!((next_v - (2.0 * (next_y - y) / dt - v)).abs() > 0.1);
+    check_manufactured_frame(BladePropagator::ExactZoh, dt, (y, next_y, v), next_v, force);
+}
+
+/// The force an exact step must hold to move the opening from `y` to `next_y`,
+/// and the end velocity it reaches. Closed-form underdamped response about the
+/// shifted equilibrium u = x - rest - F/k:
+/// u(t) = exp(-a t)[u0 (cos + a/b sin) + v0/b sin], with a = zeta*omega and
+/// b = omega*sqrt(1 - zeta^2).
+fn exact_held_force(s: &DynamicApertureSpec, dt: f64, (y, next_y, v): (f64, f64, f64)) -> (f64, f64) {
+    let (k, rest) = (s.stiffness_n_m, s.aperture.rest_opening_m);
+    let omega = (k / s.mass_kg).sqrt();
+    let a = s.damping_ratio * omega;
+    let b = omega * (1.0 - s.damping_ratio * s.damping_ratio).sqrt();
+    let (e, c, sn) = ((-a * dt).exp(), (b * dt).cos(), (b * dt).sin());
+    let free = |u0: f64, v0: f64| e * (u0 * (c + a / b * sn) + v0 * sn / b);
+    let free_v = |u0: f64, v0: f64| e * (v0 * (c - a / b * sn) - u0 * omega * omega / b * sn);
+    let force = k * (next_y - rest - free(y - rest, v)) / (1.0 - e * (c + a / b * sn));
+    (force, free_v(y - rest - force / k, v))
 }
 
 #[test]
