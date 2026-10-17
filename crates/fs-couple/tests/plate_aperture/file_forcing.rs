@@ -23,9 +23,9 @@ fn runtime(base: &str, block: usize) -> AperturePerformance {
 }
 fn direct(source: &AperturePerformance) -> CoupledAperture {
     let a=source.system().aperture(); let spec=a.spec();
-    let mut valve=DynamicAperture::from_plate_with_closure(a.plate_reduction().unwrap().clone(),
+    let mut valve=DynamicAperture::from_plate_with_closure_and_propagator(a.plate_reduction().unwrap().clone(),
         a.plate_closure().unwrap().spec().clone(),spec.density_kg_m3,spec.impedance_pa_s_m3,
-        spec.time_step_s,spec.max_steps,a.state()).unwrap();
+        spec.time_step_s,spec.max_steps,a.state(),a.blade_propagator()).unwrap();
     valve=valve.with_plate_relaxation(a.relaxation().unwrap().spec().clone(),InitialApertureMemory::Relaxed).unwrap();
     match source.system() {
         CoupledAperture::Tube(t)=>CoupledAperture::Tube(ApertureTube::new(valve,*t.spec()).unwrap()),

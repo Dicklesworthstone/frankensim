@@ -40,8 +40,9 @@ fn regional_file_matches_direct_local_radiation_cavity_losses_and_physical_motio
         for index in report.section_range[0]..report.section_range[1] {assert_eq!(mapped[index],gases[i]);}
     }
     let a=seed.renderer().system().aperture();let s=a.spec();
-    let valve=DynamicAperture::from_plate_with_closure(a.plate_reduction().unwrap().clone(),a.plate_closure().unwrap().spec().clone(),
-        gases[0].density,graph.inlet_impedance_with_gases(&mapped).unwrap(),dt,s.max_steps,a.state()).unwrap()
+    let valve=DynamicAperture::from_plate_with_closure_and_propagator(a.plate_reduction().unwrap().clone(),a.plate_closure().unwrap().spec().clone(),
+        gases[0].density,graph.inlet_impedance_with_gases(&mapped).unwrap(),dt,s.max_steps,a.state(),
+        a.blade_propagator()).unwrap()
         .with_plate_relaxation(a.relaxation().unwrap().spec().clone(),InitialApertureMemory::Relaxed).unwrap();
     let mut direct=ApertureNetwork::with_section_gases(valve,graph,mapped).unwrap();
     let mut mic=BaffledPressure::circular_outlet(0.007,96000,CircularOutletReceiver {

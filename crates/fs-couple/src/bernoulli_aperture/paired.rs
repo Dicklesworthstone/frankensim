@@ -70,24 +70,40 @@ pub enum BladePropagator {
     /// is admitted only inside the one-cent band (DEF-04), and it carries the
     /// optional Maxwell material memory.
     Midpoint,
-    /// Exact zero-order-hold exponential of each elastic blade's mass/damping/
-    /// stiffness block, with the step's contact, pressure and external forces
-    /// held over the step. No frequency warping at any omega*dt; the nonlinear
-    /// contact/Bernoulli junction solve is unchanged. Material memory refuses.
+    /// Exact zero-order-hold exponential of the mass/damping/stiffness block,
+    /// with the step's contact, pressure and external forces held over the
+    /// step. No frequency warping at any omega*dt; the nonlinear contact/
+    /// Bernoulli junction solve is unchanged. DynamicAperture carries Maxwell
+    /// arms inside this block; PairedAperture blade memory still refuses.
     ExactZoh,
 }
 
-/// Prepared exact maps of one blade over one step. The scaled state
-/// `[omega x, v, F/(m omega), omega int v, omega^2 int x]` keeps every
-/// generator entry at omega*dt or c*dt/m, and the `int v` row gives the
-/// displacement increment directly, without subtracting nearly equal values.
+/// One Maxwell arm on a scalar coordinate x: energy `(c x - z)^2 / 2`,
+/// memory `dz/dt = (c x - z) / tau`, restoring force `-c (c x - z)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ExactArm {
+    /// `sqrt(k_arm) * projection` [sqrt(N/m)].
+    pub(crate) coupling: f64,
+    /// Relaxation time [s].
+    pub(crate) relaxation_time_s: f64,
+}
+
+/// Prepared exact maps of one blade over one step. The scaled state
+/// `[omega x, v, F/(m omega), w_1..w_n, omega int v, omega^2 int x]` with
+/// `w_j = omega z_j / c_j` keeps every generator entry at omega*dt, c*dt/m,
+/// dt/tau or (k_j/k) omega*dt. The `int v` row gives the displacement
+/// increment directly, without subtracting nearly equal values.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ExactBlade {
     omega: f64,
     mass: f64,
-    map: [f64; 25],
-    // Exact c*int v^2 over the step as a quadratic form on the first three states.
-    viscous: [[f64; 3]; 3],
+    arms: Vec<ExactArm>,
+    // Square exponential map, side 5 + arms.
+    map: Vec<f64>,
+    // Exact c*int v^2 and arm int (c x - z)^2/tau over the step, as quadratic
+    // forms on the leading 3 + arms (state and held force) coordinates.
+    viscous: Vec<f64>,
+    arm_loss: Vec<f64>,
 }
 
 impl ExactBlade {
@@ -98,67 +114,123 @@ impl ExactBlade {
     pub(crate) fn from_mechanics(mass: f64, damping_n_s_m: f64, stiffness_n_m: f64, dt: f64)
         -> Result<Self, AcousticRealizeError>
     {
+        Self::with_arms(mass, damping_n_s_m, stiffness_n_m, &[], dt)
+    }
+    /// The same coordinate with its Maxwell arms inside the exact block.
+    pub(crate) fn with_arms(mass: f64, damping_n_s_m: f64, stiffness_n_m: f64, arms: &[ExactArm], dt: f64)
+        -> Result<Self, AcousticRealizeError>
+    {
         let refuse = |_| invalid("exact blade propagator could not be prepared");
         if !(mass > 0.0 && stiffness_n_m > 0.0 && damping_n_s_m >= 0.0 && dt > 0.0)
-            || ![mass, damping_n_s_m, stiffness_n_m, dt].iter().all(|x| x.is_finite()) {
-            return Err(invalid("exact blade propagator needs positive mass, stiffness and step"));
+            || ![mass, damping_n_s_m, stiffness_n_m, dt].iter().all(|x| x.is_finite())
+            || arms.iter().any(|a| !(a.coupling.is_finite() && a.coupling != 0.0
+                && a.relaxation_time_s.is_finite() && a.relaxation_time_s > 0.0)) {
+            return Err(invalid("exact blade propagator needs positive mass, stiffness, step and arms"));
         }
         let omega = fs_math::det::sqrt(stiffness_n_m / mass);
         let (w, g) = (omega * dt, damping_n_s_m / mass * dt);
-        #[rustfmt::skip]
-        let generator = [
-            0.0, w, 0.0, 0.0, 0.0,
-            -w, -g, w, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, w, 0.0, 0.0, 0.0,
-            w, 0.0, 0.0, 0.0, 0.0,
-        ];
-        let exponential = fs_phs::linear_exact::exponential(&generator, 5).map_err(refuse)?;
+        let a = arms.len();
+        let (core, n) = (3 + a, 5 + a);
+        let mut generator = vec![0.0; n * n];
+        generator[1] = w;
+        generator[n] = -w;
+        generator[n + 1] = -g;
+        generator[n + 2] = w;
+        for (j, arm) in arms.iter().enumerate() {
+            let beta = arm.coupling * arm.coupling / (mass * omega) * dt;
+            let rate = dt / arm.relaxation_time_s;
+            generator[n] -= beta;
+            generator[n + 3 + j] = beta;
+            generator[(3 + j) * n] = rate;
+            generator[(3 + j) * n + 3 + j] = -rate;
+        }
+        generator[(3 + a) * n + 1] = w;
+        generator[(4 + a) * n] = w;
+        let map = fs_phs::linear_exact::exponential(&generator, n).map_err(refuse)?;
         // Van Loan: exp([[-A^T, W], [0, A]] dt) = [[., F12], [0, F22]], and
-        // int_0^dt e^{A^T s} W e^{A s} ds = F22^T F12 with W = c on the velocity.
-        let mut van_loan = [0.0; 36];
-        for i in 0..3 {
-            for j in 0..3 {
-                van_loan[i * 6 + j] = -generator[j * 5 + i];
-                van_loan[(i + 3) * 6 + j + 3] = generator[i * 5 + j];
+        // int_0^dt e^{A^T s} W e^{A s} ds = F22^T F12 on the closed core block.
+        let quadratic = |weights: &[f64]| -> Result<Vec<f64>, AcousticRealizeError> {
+            let side = 2 * core;
+            let mut van_loan = vec![0.0; side * side];
+            for i in 0..core {
+                for j in 0..core {
+                    van_loan[i * side + j] = -generator[j * n + i];
+                    van_loan[(i + core) * side + j + core] = generator[i * n + j];
+                    van_loan[i * side + j + core] = weights[i * core + j] * dt;
+                }
             }
-        }
-        van_loan[6 + 4] = damping_n_s_m * dt;
-        let blocks = fs_phs::linear_exact::exponential(&van_loan, 6).map_err(refuse)?;
-        let mut viscous = [[0.0; 3]; 3];
-        for (i, row) in viscous.iter_mut().enumerate() {
-            for (j, cell) in row.iter_mut().enumerate() {
-                *cell = (0..3).map(|l| blocks[(l + 3) * 6 + i + 3] * blocks[l * 6 + j + 3]).sum();
+            let blocks = fs_phs::linear_exact::exponential(&van_loan, side).map_err(refuse)?;
+            let mut form = vec![0.0; core * core];
+            for i in 0..core {
+                for j in 0..core {
+                    form[i * core + j] = (0..core)
+                        .map(|l| blocks[(l + core) * side + i + core] * blocks[l * side + j + core])
+                        .sum();
+                }
             }
+            Ok(form)
+        };
+        let mut viscous_weights = vec![0.0; core * core];
+        viscous_weights[core + 1] = damping_n_s_m;
+        let mut arm_weights = vec![0.0; core * core];
+        for (j, arm) in arms.iter().enumerate() {
+            // (c x - z)^2 / tau = (c/omega)^2 (omega x - w)^2 / tau.
+            let k = arm.coupling * arm.coupling / (omega * omega * arm.relaxation_time_s);
+            arm_weights[0] += k;
+            arm_weights[3 + j] -= k;
+            arm_weights[(3 + j) * core] -= k;
+            arm_weights[(3 + j) * core + 3 + j] += k;
         }
-        let mut map = [0.0; 25];
-        map.copy_from_slice(&exponential);
-        if !(omega.is_finite() && omega > 0.0) || !map.iter().chain(viscous.iter().flatten()).all(|x| x.is_finite()) {
+        let (viscous, arm_loss) = (quadratic(&viscous_weights)?, quadratic(&arm_weights)?);
+        if !(omega.is_finite() && omega > 0.0)
+            || !map.iter().chain(&viscous).chain(&arm_loss).all(|x| x.is_finite()) {
             return Err(invalid("exact blade propagator is not representable"));
         }
-        Ok(Self { omega, mass, map, viscous })
+        Ok(Self { omega, mass, arms: arms.to_vec(), map, viscous, arm_loss })
     }
-    fn scaled(&self, state: BladeState, force_n: f64) -> [f64; 3] {
-        [self.omega * state.displacement_m, state.velocity_m_s, force_n / (self.mass * self.omega)]
+    fn side(&self) -> usize { 5 + self.arms.len() }
+    // Leading state: scaled displacement, velocity, held force and arm memories.
+    fn scaled(&self, state: BladeState, force_n: f64, memory: &[f64]) -> Vec<f64> {
+        assert_eq!(memory.len(), self.arms.len(), "exact blade memory must name every arm");
+        let mut z = vec![self.omega * state.displacement_m, state.velocity_m_s,
+            force_n / (self.mass * self.omega)];
+        z.extend(self.arms.iter().zip(memory).map(|(arm, m)| self.omega * m / arm.coupling));
+        z
     }
-    fn row(&self, row: usize, z: [f64; 3]) -> f64 {
-        self.map[row * 5] * z[0] + self.map[row * 5 + 1] * z[1] + self.map[row * 5 + 2] * z[2]
+    fn row(&self, row: usize, z: &[f64]) -> f64 {
+        let n = self.side();
+        z.iter().enumerate().map(|(j, value)| self.map[row * n + j] * value).sum()
+    }
+    fn form(&self, matrix: &[f64], z: &[f64]) -> f64 {
+        let core = z.len();
+        (0..core).map(|i| (0..core).map(|j| z[i] * matrix[i * core + j] * z[j]).sum::<f64>()).sum()
     }
     /// Mean velocity `dx/dt` over the step is `free + mobility * F` for held F.
-    pub(crate) fn free_and_mobility(&self, state: BladeState, external_n: f64, dt: f64) -> (f64, f64) {
-        let free = self.row(3, self.scaled(state, external_n)) / (self.omega * dt);
-        let mobility = self.map[3 * 5 + 2] / (self.mass * self.omega * self.omega * dt);
+    pub(crate) fn free_and_mobility(&self, state: BladeState, external_n: f64, dt: f64, memory: &[f64])
+        -> (f64, f64)
+    {
+        let eta = 3 + self.arms.len();
+        let free = self.row(eta, &self.scaled(state, external_n, memory)) / (self.omega * dt);
+        let mobility = self.map[eta * self.side() + 2] / (self.mass * self.omega * self.omega * dt);
         (free, mobility)
     }
-    pub(crate) fn end_velocity(&self, state: BladeState, held_n: f64) -> f64 {
-        self.row(1, self.scaled(state, held_n))
+    pub(crate) fn end_velocity(&self, state: BladeState, held_n: f64, memory: &[f64]) -> f64 {
+        self.row(1, &self.scaled(state, held_n, memory))
     }
-    fn mean_displacement(&self, state: BladeState, held_n: f64, dt: f64) -> f64 {
-        self.row(4, self.scaled(state, held_n)) / (self.omega * self.omega * dt)
+    pub(crate) fn mean_displacement(&self, state: BladeState, held_n: f64, dt: f64, memory: &[f64]) -> f64 {
+        self.row(4 + self.arms.len(), &self.scaled(state, held_n, memory)) / (self.omega * self.omega * dt)
     }
-    pub(crate) fn viscous_loss_j(&self, state: BladeState, held_n: f64) -> f64 {
-        let z = self.scaled(state, held_n);
-        (0..3).map(|i| (0..3).map(|j| z[i] * self.viscous[i][j] * z[j]).sum::<f64>()).sum()
+    pub(crate) fn viscous_loss_j(&self, state: BladeState, held_n: f64, memory: &[f64]) -> f64 {
+        self.form(&self.viscous, &self.scaled(state, held_n, memory))
+    }
+    /// End-of-step arm memories z_j, energy-normalized like the arms' own owner.
+    pub(crate) fn end_memory(&self, state: BladeState, held_n: f64, memory: &[f64]) -> Vec<f64> {
+        let z = self.scaled(state, held_n, memory);
+        self.arms.iter().enumerate().map(|(j, arm)| arm.coupling * self.row(3 + j, &z) / self.omega).collect()
+    }
+    /// Exact arm dissipation over the step [J].
+    pub(crate) fn arm_loss_j(&self, state: BladeState, held_n: f64, memory: &[f64]) -> f64 {
+        self.form(&self.arm_loss, &self.scaled(state, held_n, memory))
     }
 }
 
@@ -504,7 +576,7 @@ impl PairedAperture {
             if let Some(exact) = &self.exact {
                 // Exact held-force map: the mean velocity dx/dt stays affine in the
                 // step's force, so the junction solve below is unchanged.
-                (free[i], mobility[i]) = exact[i].free_and_mobility(old[i], forces[i], dt);
+                (free[i], mobility[i]) = exact[i].free_and_mobility(old[i], forces[i], dt, &[]);
                 if !free[i].is_finite() || !mobility[i].is_finite() || mobility[i] <= 0.0 {
                     return Err(invalid("paired blade exact response is not representable"));
                 }
@@ -601,7 +673,7 @@ impl PairedAperture {
         let next: [BladeState; 2] = std::array::from_fn(|i| BladeState {
             displacement_m: after[i],
             velocity_m_s: match &self.exact {
-                Some(exact) => exact[i].end_velocity(old[i], held[i]),
+                Some(exact) => exact[i].end_velocity(old[i], held[i], &[]),
                 None => 2.0*trial.velocity[i]-old[i].velocity_m_s,
             },
         });
@@ -640,7 +712,7 @@ impl PairedAperture {
             dissipated_energy_j: match &self.exact {
                 // The exact blocks integrate c*v^2 along their own trajectories.
                 Some(exact) => dt*(trial.dp*jet+contact_loss)+memory_loss
-                    + exact[0].viscous_loss_j(old[0], held[0]) + exact[1].viscous_loss_j(old[1], held[1]),
+                    + exact[0].viscous_loss_j(old[0], held[0], &[]) + exact[1].viscous_loss_j(old[1], held[1], &[]),
                 None => dt*(trial.dp*jet+viscous+contact_loss)+memory_loss,
             },
             pressure_work_j: dt*trial.dp*(wave-drive.body_flow_m3_s), mechanical_work_j: mechanical,
@@ -650,7 +722,7 @@ impl PairedAperture {
         for i in 0..2 {
             // Step-mean displacement: exact time average, or the midpoint value.
             let mean_x = match &self.exact {
-                Some(exact) => exact[i].mean_displacement(old[i], held[i], dt),
+                Some(exact) => exact[i].mean_displacement(old[i], held[i], dt, &[]),
                 None => f64::midpoint(old[i].displacement_m,next[i].displacement_m),
             };
             momentum[i] = b[i].mass_kg*(next[i].velocity_m_s-old[i].velocity_m_s)/dt

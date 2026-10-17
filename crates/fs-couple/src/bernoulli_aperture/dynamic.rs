@@ -193,8 +193,9 @@ impl DynamicAperture {
     /// opening coordinate. `Midpoint` keeps the one-cent band refusal;
     /// `ExactZoh` propagates the mass/damping/stiffness block exactly with the
     /// contact, pressure and any prescribed force held over the step, so it
-    /// admits any omega*dt. The exact path is the authored uniform slit only:
-    /// plate reductions, closures and material memory keep `Midpoint`.
+    /// admits any omega*dt. Plate reductions and closures use it through
+    /// [`Self::from_plate_with_propagator`]; attached Maxwell arms become
+    /// states of the same exact block, with their loss integrated exactly.
     ///
     /// # Errors
     /// As [`Self::new`], or an unrepresentable exact map.
@@ -302,9 +303,30 @@ impl DynamicAperture {
         state: ApertureState,
         lay: Obstacle,
     ) -> Result<Self, AcousticRealizeError> {
+        Self::from_plate_with_propagator(plate, density_kg_m3, impedance_pa_s_m3, time_step_s,
+            max_steps, state, lay, super::paired::BladePropagator::Midpoint)
+    }
+
+    /// [`Self::from_plate`] with an explicitly selected opening propagator
+    /// (see [`Self::new_with_propagator`]). A later
+    /// [`Self::with_plate_relaxation`] adds the material arms to the exact block.
+    ///
+    /// # Errors
+    /// As [`Self::from_plate`], or an unrepresentable exact map.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_plate_with_propagator(
+        plate: PlateApertureReduction,
+        density_kg_m3: f64,
+        impedance_pa_s_m3: f64,
+        time_step_s: f64,
+        max_steps: u64,
+        state: ApertureState,
+        lay: Obstacle,
+        propagator: super::paired::BladePropagator,
+    ) -> Result<Self, AcousticRealizeError> {
         plate.validate_opening(state.opening_m)?;
         let spec = plate.dynamic_spec(density_kg_m3, impedance_pa_s_m3, time_step_s, max_steps);
-        let mut model = Self::new(spec, state, lay)?;
+        let mut model = Self::new_with_propagator(spec, state, lay, propagator)?;
         model.plate = Some(Box::new(plate));
         Ok(model)
     }
@@ -322,11 +344,27 @@ impl DynamicAperture {
         density_kg_m3: f64, impedance_pa_s_m3: f64, time_step_s: f64,
         max_steps: u64, state: ApertureState,
     ) -> Result<Self, AcousticRealizeError> {
+        Self::from_plate_with_closure_and_propagator(plate, closure, density_kg_m3,
+            impedance_pa_s_m3, time_step_s, max_steps, state, super::paired::BladePropagator::Midpoint)
+    }
+
+    /// [`Self::from_plate_with_closure`] with an explicitly selected opening
+    /// propagator. The profiled slit area and lay law enter the same junction
+    /// solve under either propagator.
+    ///
+    /// # Errors
+    /// As [`Self::from_plate_with_closure`], or an unrepresentable exact map.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_plate_with_closure_and_propagator(
+        plate: PlateApertureReduction, closure: PlateClosureSpec,
+        density_kg_m3: f64, impedance_pa_s_m3: f64, time_step_s: f64,
+        max_steps: u64, state: ApertureState, propagator: super::paired::BladePropagator,
+    ) -> Result<Self, AcousticRealizeError> {
         let closure = plate.compile_closure(closure)?;
         closure.validate_opening(state.opening_m)?;
         let lay = closure.contact_law().clone();
-        let mut model = Self::from_plate(plate,density_kg_m3,impedance_pa_s_m3,
-            time_step_s,max_steps,state,lay)?;
+        let mut model = Self::from_plate_with_propagator(plate,density_kg_m3,impedance_pa_s_m3,
+            time_step_s,max_steps,state,lay,propagator)?;
         model.closure = Some(Box::new(closure));
         Ok(model)
     }
@@ -334,6 +372,16 @@ impl DynamicAperture {
     /// Spatial gap/contact input retained on the explicitly profiled path.
     #[must_use]
     pub fn plate_closure(&self) -> Option<&PlateClosure> { self.closure.as_deref() }
+
+    /// The opening propagator selected at construction.
+    #[must_use]
+    pub const fn blade_propagator(&self) -> super::paired::BladePropagator {
+        if self.exact.is_some() {
+            super::paired::BladePropagator::ExactZoh
+        } else {
+            super::paired::BladePropagator::Midpoint
+        }
+    }
 
     fn flow_opening(&self, coordinate: f64) -> Result<f64, AcousticRealizeError> {
         match &self.closure {
@@ -455,13 +503,15 @@ impl DynamicAperture {
             Ok(if force_n == 0.0 { restoring } else { restoring - force_n })
         };
         let has_memory=self.relaxation.as_ref().is_some_and(|m|!m.branches().is_empty());
+        // Accepted arm memories enter the exact block as its own states.
+        let arm_memory: &[f64] = self.relaxation.as_ref().map_or(&[], |m| m.memory_sqrt_j());
         let (outgoing, opening, velocity) = if let Some(blade) = &self.exact {
             // The prescribed force is held with the contact and pressure forces.
             crate::reed_bore::step_profiled_aperture(self.reed,self.spec.density_kg_m3,
                 self.spec.impedance_pa_s_m3,drive.incoming_pressure_pa,drive.upstream_pressure_pa,
                 old.opening_m,old.opening_velocity_m_s,dt,drive.body_flow_m3_s,&self.lay,
                 |opening| self.flow_opening(opening), None,
-                crate::reed_bore::OpeningPropagator::Exact { blade, external_n: force_n })?
+                crate::reed_bore::OpeningPropagator::Exact { blade, external_n: force_n, memory: arm_memory })?
         } else if self.closure.is_some() || has_memory || force_n != 0.0 {
             crate::reed_bore::step_profiled_aperture(self.reed,self.spec.density_kg_m3,
                 self.spec.impedance_pa_s_m3,drive.incoming_pressure_pa,drive.upstream_pressure_pa,
@@ -502,9 +552,22 @@ impl DynamicAperture {
             .and_then(|law| law.response(opening, vm))
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         let (_, damping) = reed_structural(self.reed);
-        let memory = self.relaxation.as_ref().map(|m|m.preview(
-            old.opening_m-self.spec.aperture.rest_opening_m,
-            opening-self.spec.aperture.rest_opening_m,dt)).transpose()?;
+        let start = super::paired::BladeState {
+            displacement_m: old.opening_m - self.reed.rest_opening_m,
+            velocity_m_s: old.opening_velocity_m_s,
+        };
+        // The force the exact block held: prescribed, contact and pressure.
+        let held = force_n + contact.force - reed_pressure_face(self.reed) * dp;
+        let memory = match (&self.exact, self.relaxation.as_ref()) {
+            (Some(blade), Some(m)) => Some(m.exact_trial(
+                blade.end_memory(start, held, arm_memory),
+                opening-self.spec.aperture.rest_opening_m,
+                blade.arm_loss_j(start, held, arm_memory))?),
+            (None, Some(m)) => Some(m.preview(
+                old.opening_m-self.spec.aperture.rest_opening_m,
+                opening-self.spec.aperture.rest_opening_m,dt)?),
+            (_, None) => None,
+        };
         let relaxation_energy_j=memory.as_ref().map_or(0.0,|m|m.energy);
         let relaxation_loss_j=memory.as_ref().map_or(0.0,|m|m.loss);
         let energy = self.energy_at(state)+relaxation_energy_j;
@@ -524,10 +587,7 @@ impl DynamicAperture {
             dissipated_energy_j: match &self.exact {
                 // The exact block integrates c*v^2 along its own trajectory.
                 Some(blade) => dt * (dp * jet + contact.dissipated_power) + relaxation_loss_j
-                    + blade.viscous_loss_j(super::paired::BladeState {
-                        displacement_m: old.opening_m - self.reed.rest_opening_m,
-                        velocity_m_s: old.opening_velocity_m_s,
-                    }, force_n + contact.force - reed_pressure_face(self.reed) * dp),
+                    + blade.viscous_loss_j(start, held, arm_memory),
                 None => dt * (dp * jet + damping * vm * vm + contact.dissipated_power) + relaxation_loss_j,
             },
             pressure_work_j: dt * dp * (wave - drive.body_flow_m3_s),

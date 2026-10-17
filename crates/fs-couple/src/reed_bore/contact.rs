@@ -22,10 +22,12 @@ pub(crate) enum OpeningPropagator<'a> {
     /// Exact zero-order hold of the mass/damping/stiffness block, with the
     /// contact, pressure and this external force held over the step.
     Exact {
-        /// Prepared exact maps of the opening coordinate.
+        /// Prepared exact maps of the opening coordinate and its Maxwell arms.
         blade: &'a ExactBlade,
         /// Held external force on the opening coordinate [N].
         external_n: f64,
+        /// Accepted energy-normalized arm memories at the start of the step.
+        memory: &'a [f64],
     },
 }
 
@@ -97,8 +99,10 @@ pub(crate) fn step_with_opening(
     propagator: OpeningPropagator<'_>,
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
     if material_force.is_some() && matches!(propagator, OpeningPropagator::Exact { .. }) {
+        // The exact block already carries its Maxwell arms; a midpoint material
+        // force on top would count the same memory twice.
         return Err(AcousticRealizeError::Reed {
-            what: "material memory is not part of the exact opening block",
+            what: "the exact opening block takes material memory as arms, not a midpoint force",
         });
     }
     if ![
@@ -164,8 +168,8 @@ pub(crate) fn step_with_opening(
                 reed.mass_kg * v - half_dt * stiffness * (y - reed.rest_opening_m),
                 f64::midpoint(v, free.2))
         }
-        OpeningPropagator::Exact { blade, external_n } => {
-            let (free, mobility) = blade.free_and_mobility(start, external_n, dt);
+        OpeningPropagator::Exact { blade, external_n, memory } => {
+            let (free, mobility) = blade.free_and_mobility(start, external_n, dt, memory);
             let mass_mid = half_dt / mobility;
             (mass_mid, mass_mid * free, free)
         }
@@ -205,9 +209,9 @@ pub(crate) fn step_with_opening(
         }
         let next_v = match propagator {
             OpeningPropagator::Midpoint => 2.0 * velocity - v,
-            OpeningPropagator::Exact { blade, external_n } => {
+            OpeningPropagator::Exact { blade, external_n, memory } => {
                 let dp = p_m - (outgoing + p_minus);
-                blade.end_velocity(start, external_n + force - face * dp)
+                blade.end_velocity(start, external_n + force - face * dp, memory)
             }
         };
         if ![residual, scale, outgoing, next_y, next_v]

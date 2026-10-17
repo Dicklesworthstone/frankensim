@@ -13,8 +13,9 @@ fn network(p:&AperturePerformance)->&ApertureNetwork {
 }
 fn fresh(seed:&PlateValvePerformance,z:f64)->DynamicAperture {
     let a=seed.renderer().system().aperture();let s=a.spec();
-    DynamicAperture::from_plate_with_closure(a.plate_reduction().unwrap().clone(),
-        a.plate_closure().unwrap().spec().clone(),s.density_kg_m3,z,s.time_step_s,s.max_steps,a.state()).unwrap()
+    DynamicAperture::from_plate_with_closure_and_propagator(a.plate_reduction().unwrap().clone(),
+        a.plate_closure().unwrap().spec().clone(),s.density_kg_m3,z,s.time_step_s,s.max_steps,a.state(),
+        a.blade_propagator()).unwrap()
         .with_plate_relaxation(a.relaxation().unwrap().spec().clone(),InitialApertureMemory::Relaxed).unwrap()
 }
 

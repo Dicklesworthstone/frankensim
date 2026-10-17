@@ -124,9 +124,10 @@ fn regional_mixtures_match_independent_aperture_cavity_loss_radiation_and_receiv
     }
     let seed = load(INPUT, 37);
     let a = seed.renderer().system().aperture();
-    let valve = DynamicAperture::from_plate_with_closure(a.plate_reduction().unwrap().clone(),
+    let valve = DynamicAperture::from_plate_with_closure_and_propagator(a.plate_reduction().unwrap().clone(),
         a.plate_closure().unwrap().spec().clone(), gases[0].density,
-        graph.inlet_impedance_with_gases(&mapped).unwrap(), dt, a.spec().max_steps, a.state()).unwrap()
+        graph.inlet_impedance_with_gases(&mapped).unwrap(), dt, a.spec().max_steps, a.state(),
+        a.blade_propagator()).unwrap()
         .with_plate_relaxation(a.relaxation().unwrap().spec().clone(), InitialApertureMemory::Relaxed).unwrap();
     let mut direct = ApertureNetwork::with_section_gases(valve, graph, mapped).unwrap();
     let mut mic = BaffledPressure::circular_outlet(0.007, 192000, CircularOutletReceiver {
