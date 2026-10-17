@@ -1591,8 +1591,15 @@ fn g3_fixed_mass_material_swap_reaches_pressure_with_bending_change() {
     );
 }
 
+/// Clock of the pressure-pitch renders. The tension-modulated string steps
+/// midpoint, and these specimens' pole rates reach about 2000 rad/s, so the
+/// one-cent band needs dt <= 2e-5 s. Refusal tests keep `assembly`'s 8 kHz.
+const PRESSURE_RATE_HZ: u32 = 64_000;
+
 fn pressure(string: PrestressedString) -> Vec<f64> {
-    realize_assembly(&assembly(string)).unwrap().pressure_pa
+    let mut scene = assembly(string);
+    scene.sample_rate_hz = PRESSURE_RATE_HZ;
+    realize_assembly(&scene).unwrap().pressure_pa
 }
 
 fn assembly(string: PrestressedString) -> AcousticAssembly {
@@ -1623,7 +1630,8 @@ fn measured_hz(pressure: &[f64]) -> f64 {
     let crossings: Vec<_> = pressure
         .windows(2)
         .enumerate()
-        .skip(160)
+        // Skip the first 20 ms.
+        .skip(PRESSURE_RATE_HZ as usize / 50)
         .filter(|(_, p)| p[0] > 0.0 && p[1] <= 0.0)
         .map(|(i, p)| i as f64 + p[0] / (p[0] - p[1]))
         .collect();
@@ -1631,7 +1639,8 @@ fn measured_hz(pressure: &[f64]) -> f64 {
         crossings.len() >= 5,
         "a live decaying pressure wave is required"
     );
-    8000.0 * (crossings.len() - 1) as f64 / (crossings.last().unwrap() - crossings[0])
+    f64::from(PRESSURE_RATE_HZ) * (crossings.len() - 1) as f64
+        / (crossings.last().unwrap() - crossings[0])
 }
 
 fn viscous_material(
@@ -5078,8 +5087,10 @@ fn g3_material_viscosity_changes_pressure_decay_without_changing_elastic_modes()
                 assert_eq!(omega.to_bits(), first);
             }
             reference_frequency = Some(omega.to_bits());
+            // Midpoint string band: pole rates near 1000 rad/s need dt <= 4e-5 s.
+            let rate = 32_000_u32;
             let mut scene = assembly(string.clone());
-            scene.sample_rate_hz = 16_000;
+            scene.sample_rate_hz = rate;
             scene.duration_s = 0.4;
             let output = realize_assembly(&scene).unwrap();
             assert!(output.pressure_pa.iter().all(|p| p.is_finite()));
@@ -5098,10 +5109,12 @@ fn g3_material_viscosity_changes_pressure_decay_without_changing_elastic_modes()
                 .pressure_pa
                 .windows(3)
                 .enumerate()
+                // The same 50-350 ms window as at the former 16 kHz clock.
                 .filter(|(i, p)| {
-                    (800..5600).contains(i) && p[1] > 0.0 && p[1] > p[0] && p[1] >= p[2]
+                    (rate as usize / 20..rate as usize * 7 / 20).contains(i)
+                        && p[1] > 0.0 && p[1] > p[0] && p[1] >= p[2]
                 })
-                .map(|(i, p)| ((i + 1) as f64 / 16_000.0, p[1]))
+                .map(|(i, p)| ((i + 1) as f64 / f64::from(rate), p[1]))
                 .collect();
             assert!(peaks.len() > 20, "live pressure oscillation required");
             let (t0, p0) = peaks[0];
