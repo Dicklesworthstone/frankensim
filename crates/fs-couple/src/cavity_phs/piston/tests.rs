@@ -154,7 +154,11 @@ pub(super) fn controls() -> PistonSolve {
             energy_tolerance_j_kg: 1e-7,
             maximum_iterations: 128,
         },
-        momentum_tolerance_n_s: 1e-10,
+        // The authored 2e-7 N force resolution over the 0.00005 s clock
+        // (1e-10 N s on the former 0.0005 s step). An absolute impulse
+        // tolerance that did not follow the clock accepted small heated
+        // or mass-changed motions as exactly no motion.
+        momentum_tolerance_n_s: 2e-7 * 0.00005,
         energy_tolerance_j: 1e-7,
         maximum_iterations: 128,
     }

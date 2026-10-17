@@ -235,7 +235,7 @@ fn solve() -> NetworkSolve {
             },
             newton: NewtonKrylovConfig {
                 absolute_tolerance: 1e-8,
-                relative_tolerance: 0.0,
+                relative_tolerance: 1e-14,
                 forcing_minimum: 1e-4,
                 linear_restart: 4,
                 ..NewtonKrylovConfig::default()
@@ -387,7 +387,8 @@ fn source_only_change_reaches_both_gases_bodies_and_finite_electrical_history() 
         let old = gases.clone();
         let energy0 = thermal.energy_j() + 50.0;
         let mut external_work = 0.0;
-        for n in 1..=20 {
+        // The authored 10 ms trajectory on the resolved 0.00005 s clock.
+        for n in 1..=200 {
             let target = f64::from(n) * 0.00005;
             let dt = target - thermal.time_s();
             let chambers = [chamber(10, &gases[0], dt), chamber(20, &gases[1], dt)];
@@ -542,7 +543,9 @@ fn finite_hot_and_cold_cells_exchange_through_one_gas_at_zero_net_heat() {
     let gas = &result.chambers()[0].boundary;
     near(gas.piston().position_m(), gases[0].position_m());
     near(gas.step().exchanged_heat_j, 0.0);
-    assert!(gas.source()[0].heat_j > 0.04 && gas.source()[1].heat_j < -0.04);
+    // More than 80 W each way over the step (0.04 J on the authored 0.0005 s step).
+    assert!(gas.source()[0].heat_j > 80.0 * 0.00005 && gas.source()[1].heat_j < -80.0 * 0.00005,
+        "{} {}", gas.source()[0].heat_j, gas.source()[1].heat_j);
     near(gas.source()[0].heat_j + gas.source()[1].heat_j, 0.0);
     near(result.thermal().energy_j(), thermal.energy_j());
 }

@@ -25,8 +25,8 @@ fn card(k: f64, r: f64, slope: f64) -> (MaterialCard, ResolvedHeatCapacityCurve)
         (
             "electrical_resistivity",
             ELECTRICAL_RESISTIVITY_DIMS,
-            r * (1.0 - 200.0 * slope),
-            r * (1.0 + 400.0 * slope),
+            r * 0.0025 * (1.0 - 200.0 * slope),
+            r * 0.0025 * (1.0 + 400.0 * slope),
         ),
         ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, k, k),
         (
@@ -163,8 +163,8 @@ fn resistor() -> [CellResistor; 1] {
             cell: CellId(0),
         },
         selection: MaterialPropertySelection::SingleClaimOnly,
-        length_m: 1.0,
-        area_m2: 1.0,
+        length_m: 0.01,
+        area_m2: 0.000025,
     }]
 }
 fn circuit(binding: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'_>) -> MaterialCircuit {
@@ -198,7 +198,7 @@ fn controls() -> NetworkGasSolve {
             circuit: motion_fixture::solve().circuit,
             newton: NewtonKrylovConfig {
                 absolute_tolerance: 1e-8,
-                relative_tolerance: 0.0,
+                relative_tolerance: 1e-14,
                 linear_restart: 4,
                 forcing_minimum: 1e-4,
                 ..NewtonKrylovConfig::default()
