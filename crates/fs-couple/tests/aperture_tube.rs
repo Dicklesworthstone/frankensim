@@ -16,7 +16,8 @@ fn tube_spec(delay: usize, reflection: f64) -> UniformTubeSpec {
     }
 }
 fn aperture(spec: UniformTubeSpec, budget: u64, state: ApertureState) -> DynamicAperture {
-    DynamicAperture::new(DynamicApertureSpec {
+    // Outside the midpoint one-cent band at this rate (DEF-04): exact opening block.
+    DynamicAperture::new_with_propagator(DynamicApertureSpec {
         aperture: BernoulliAperture {
             rest_opening_m: 4e-4, width_m: 0.013, closing_pressure_pa: 6000.0,
         },
@@ -24,7 +25,8 @@ fn aperture(spec: UniformTubeSpec, budget: u64, state: ApertureState) -> Dynamic
         density_kg_m3: 1.2, impedance_pa_s_m3: spec.characteristic_impedance(1.2).unwrap(),
         time_step_s: DT, max_steps: budget,
     }, state, Obstacle::new(vec![-1.0], 1, 1, vec![0.0], vec![1.0], 1e8, 2.0,
-        "synthetic tube/aperture fixture".into()).unwrap().with_internal_loss(5.0).unwrap()).unwrap()
+        "synthetic tube/aperture fixture".into()).unwrap().with_internal_loss(5.0).unwrap(),
+        fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh).unwrap()
 }
 fn model(delay: usize, reflection: f64, budget: u64) -> ApertureTube {
     let spec = tube_spec(delay, reflection);
