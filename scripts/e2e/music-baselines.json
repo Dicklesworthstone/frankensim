@@ -2,10 +2,11 @@
   "schema": "frankensim-music-e2e-baselines-v1",
   "determinism_class": "one-host",
   "note": "WAV blake3 hashes recorded on the first green run; the music stack claims one-host bit-determinism only (zero cross-ISA goldens exist, bead 3ez8g.13.4). Lanes compare these as a NOTE by default and gate only under --enforce-baseline on the recording host; a drift under enforcement is a golden event (explain + update same-commit).",
-  "recorded_on": "thinkstation1 (ts1, x86_64 Zen 3; central IRP verify host, clean checkout). reed re-recorded 2026-10-17 at 1b576cbe5 (release and debug identical). Cause: the characteristic line is now realized on the converged LineLadder (.82, 277d9771a; the FFT length is now converged), which only converges since the Bessel Zc conjugation fix (261f2a62f). Previous value aec80ef2 (6c5505113). string unchanged since its darwin-arm64 recording and bit-identical on ts1",
+  "recorded_on": "thinkstation1 (ts1, x86_64 Zen 3; central IRP verify host, clean checkout). reed re-recorded 2026-10-17 at 1b576cbe5 (release and debug identical). Cause: the characteristic line is now realized on the converged LineLadder (.82, 277d9771a; the FFT length is now converged), which only converges since the Bessel Zc conjugation fix (261f2a62f). Previous value aec80ef2 (6c5505113). string unchanged since its darwin-arm64 recording and bit-identical on ts1. midi-reed first registered 2026-10-17 at d45a50d32 (release and debug identical; release also identical at 9903f99e8); it renders 0.5 s of the four-note score, not the 0.25 s window above",
   "seconds": "0.25",
   "reed-flanged-baffled": null,
   "reed-flanged-baffled-status": "pending first native qualification run; registrar records the real one-host hash",
   "reed": "5d48edcb5cdd1d2894b03f4aa5e112c62e71777ef93731559504b7020b6c6b46",
+  "midi-reed": "ea806c8c4ebe9728ece529b973f412416eadb692b8fccc4f8794f965bdac442a",
   "string": "21df49fba4a3c2a8cf1663b30b023ff416b973082c58236b64f4f982175bc487"
 }
