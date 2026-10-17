@@ -38,10 +38,11 @@ fn blade() -> ApertureBlade {
     ApertureBlade { mass_kg: 1e-5, stiffness_n_m: 500.0,
         damping_n_s_m: 0.03, pressure_area_m2: 1.25e-4 }
 }
+// About 24900 rad/s of pole rate at 48 kHz is outside the midpoint band.
 fn paired(z: f64, g: GasState, steps: u64, second_mass_ratio: f64) -> PairedAperture {
     let mut b = [blade(); 2];
     b[1].mass_kg *= second_mass_ratio;
-    PairedAperture::new(PairedApertureSpec {
+    PairedAperture::new_with_propagator(PairedApertureSpec {
         rest_opening_m: 4e-4, width_m: 0.013, blades: b,
         density_kg_m3: g.density, impedance_pa_s_m3: z, time_step_s: DT, max_steps: steps,
         limits: PairedApertureLimits {
@@ -49,7 +50,8 @@ fn paired(z: f64, g: GasState, steps: u64, second_mass_ratio: f64) -> PairedAper
             maximum_energy_j: 1.0, max_evaluations: 256,
             velocity_tolerance_m_s: 1e-13, relative_tolerance: 1e-11,
         },
-    }, [BladeState::default(); 2], contact()).unwrap()
+    }, [BladeState::default(); 2], contact(),
+        fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh).unwrap()
 }
 fn drive(p: f64) -> TwoSidedDrive {
     TwoSidedDrive { source_pressure_pa: p, blade_forces_n: [0.0; 2] }
