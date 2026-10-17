@@ -475,7 +475,6 @@ def describe(
             jitter_rel=dict(value=float(jit), unit="ratio"),
             shimmer_db=dict(value=float(shim), unit="dB"),
             band_hnr_db=dict(value=float(hnr), band_hz=[80.0, 10000.0], unit="dB"),
-            fs_psycho=dict(owner="M7.5-W1", status="pending_m7_5_w1"),
         )
         if band_split_hz is not None:
             desc_block["band_split"] = band_split_statistics(seg_sustain, partials, band_split_hz, sr=SR)
