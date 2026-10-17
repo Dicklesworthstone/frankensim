@@ -1597,9 +1597,15 @@ fn g3_fixed_mass_material_swap_reaches_pressure_with_bending_change() {
 const PRESSURE_RATE_HZ: u32 = 64_000;
 
 fn pressure(string: PrestressedString) -> Vec<f64> {
+    realize_assembly(&resolved(string)).unwrap().pressure_pa
+}
+
+/// `assembly` on the band-resolved clock, so an admission test's refusals
+/// come from the check it names, not from the midpoint band.
+fn resolved(string: PrestressedString) -> AcousticAssembly {
     let mut scene = assembly(string);
     scene.sample_rate_hz = PRESSURE_RATE_HZ;
-    realize_assembly(&scene).unwrap().pressure_pa
+    scene
 }
 
 fn assembly(string: PrestressedString) -> AcousticAssembly {
@@ -4442,7 +4448,7 @@ fn g0_prony_admission_checks_total_stiffness_and_each_active_rate() {
     let w = string_mode_omega(&string, 1);
     string.relaxation_bending.as_mut().unwrap().omega_band_rad_s = (0.9 * w, 1.2 * w);
     assert!(
-        realize_assembly(&assembly(string.clone())).is_err(),
+        realize_assembly(&resolved(string.clone())).is_err(),
         "sum exceeds band"
     );
     let mut single = string.clone();
@@ -4453,21 +4459,21 @@ fn g0_prony_admission_checks_total_stiffness_and_each_active_rate() {
         .branches
         .truncate(1);
     assert!(
-        realize_assembly(&assembly(single)).is_ok(),
+        realize_assembly(&resolved(single)).is_ok(),
         "each branch alone fits"
     );
     let law = string.relaxation_bending.as_mut().unwrap();
     law.omega_band_rad_s = (1.0, 20_000.0);
     law.branches[2].relaxation_time_s = 1.0e-9;
     assert!(
-        realize_assembly(&assembly(string.clone()))
+        realize_assembly(&resolved(string.clone()))
             .unwrap_err()
             .to_string()
             .contains("dt/tau")
     );
     string.relaxation_bending.as_mut().unwrap().branches[2].relaxing_stiffness_n_m2 = 0.0;
     assert!(
-        realize_assembly(&assembly(string)).is_ok(),
+        realize_assembly(&resolved(string)).is_ok(),
         "zero stiffness has no active pole"
     );
 }
@@ -4728,12 +4734,12 @@ fn g0_sls_realization_checks_instantaneous_band_nyquist_and_polarizations() {
         .omega_band_rad_s
         .1 = 1.01 * w;
     assert!(
-        realize_assembly(&assembly(narrow)).is_err(),
+        realize_assembly(&resolved(narrow)).is_err(),
         "instantaneous stiffness exceeds admitted band"
     );
     let mut valid = string.clone();
     valid.relaxation_bending.as_mut().unwrap().omega_band_rad_s = (0.9 * w, 1.2 * w);
-    assert!(realize_assembly(&assembly(valid.clone())).is_ok());
+    assert!(realize_assembly(&resolved(valid.clone())).is_ok());
     for modified in [
         PrestressedString {
             n_modes: 2,
@@ -4753,7 +4759,7 @@ fn g0_sls_realization_checks_instantaneous_band_nyquist_and_polarizations() {
             ..string.clone()
         },
     ] {
-        assert!(realize_assembly(&assembly(modified)).is_err());
+        assert!(realize_assembly(&resolved(modified)).is_err());
     }
     let mut too_stiff = string.clone();
     too_stiff.relaxation_bending.as_mut().unwrap().branches[0].relaxing_stiffness_n_m2 *= 1.0e6;
@@ -4764,13 +4770,13 @@ fn g0_sls_realization_checks_instantaneous_band_nyquist_and_polarizations() {
         .omega_band_rad_s
         .1 = 1.0e9;
     assert!(
-        realize_assembly(&assembly(too_stiff)).is_err(),
+        realize_assembly(&resolved(too_stiff)).is_err(),
         "material band cannot license aliased modes"
     );
     let mut fast = string.clone();
     fast.relaxation_bending.as_mut().unwrap().branches[0].relaxation_time_s = 1.0e-6;
     assert!(
-        realize_assembly(&assembly(fast))
+        realize_assembly(&resolved(fast))
             .unwrap_err()
             .to_string()
             .contains("dt/tau")
@@ -5248,7 +5254,7 @@ fn g0_material_bending_loss_checks_every_retained_frequency_and_polarization() {
         .with_kelvin_voigt_bending_loss()
         .unwrap()
         .string();
-    assert!(realize_assembly(&assembly(string.clone())).is_ok());
+    assert!(realize_assembly(&resolved(string.clone())).is_ok());
     for modified in [
         PrestressedString {
             n_modes: 2,
@@ -5263,7 +5269,7 @@ fn g0_material_bending_loss_checks_every_retained_frequency_and_polarization() {
             ..string
         },
     ] {
-        assert!(realize_assembly(&assembly(modified)).is_err());
+        assert!(realize_assembly(&resolved(modified)).is_err());
     }
 }
 
