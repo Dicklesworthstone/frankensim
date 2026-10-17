@@ -45,9 +45,13 @@ fn material(p:&PlateApertureReduction,e:f64,tau:f64) -> PlateRelaxationSpec {
 fn raw(plates:[PlateApertureReduction;2],z:f64) -> PairedAperture {
     let contact=Obstacle::new(vec![-1.0],1,1,vec![0.0],vec![1.0],0.0,2.0,
         "explicit uniform no-contact comparison, replaced by selected spatial law".into()).unwrap();
+    // The spatial momentum residual has a measured evaluation floor near
+    // 3.9e-15 m/s at |v| = 1.7e-3 m/s (ts1 probe, 2026-10-17): a 1e-13
+    // relative request (1.5e-15 m/s) is below what the arithmetic resolves.
+    // 1e-11 keeps tenfold headroom, as the other paired fixtures do.
     PairedAperture::from_plates(plates,gas(),z,1.0/f64::from(RATE),4096,
         PairedApertureLimits {maximum_abs_displacement_m:0.001,maximum_abs_velocity_m_s:10.0,
-            maximum_energy_j:1.0,max_evaluations:256,velocity_tolerance_m_s:1e-15,relative_tolerance:1e-13},
+            maximum_energy_j:1.0,max_evaluations:256,velocity_tolerance_m_s:1e-15,relative_tolerance:1e-11},
         [BladeState::default();2],contact).unwrap()
 }
 fn model(z:f64) -> PairedAperture {
