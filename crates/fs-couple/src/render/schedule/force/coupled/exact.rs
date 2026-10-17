@@ -935,10 +935,17 @@ mod tests {
         let (actual, x, u) = islands.advance(&models, &external, dt).unwrap();
         assert_eq!(u, full.held_input(&external).unwrap());
         let expected = step_render(&full.system, &full.split, &x, &u, dt).unwrap();
+        // Energy changes, supplies and losses are differences of the stored
+        // energy, so their roundoff scales with H rather than with themselves.
+        let stored = full
+            .system
+            .hamiltonian(&x)
+            .abs()
+            .max(full.system.hamiltonian(&expected.x).abs());
         let close = |a: f64, b: f64| {
             assert!(
-                (a - b).abs() <= 1e-12 * a.abs().max(b.abs()).max(1e-20),
-                "{a:e} != {b:e}"
+                (a - b).abs() <= 1e-12 * a.abs().max(b.abs()).max(stored).max(1e-20),
+                "{a:e} != {b:e} (stored energy {stored:e})"
             )
         };
         let roundoff = |a: f64, b: f64| {
