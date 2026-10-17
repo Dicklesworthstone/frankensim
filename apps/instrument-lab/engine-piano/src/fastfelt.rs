@@ -17,7 +17,7 @@
 //! remain fs-material's `WoolFelt` and `felt.rs::stored`. Equivalence of the
 //! resulting motion with the reference engine is measured by
 //! `examples/validate.rs`; `tests` below compare the force itself.
-use crate::refmods::felt::State;
+use crate::refmods::felt::{State, power_law_moments};
 use fs_material::WoolFelt;
 
 const POSITION_TOL: f64 = 1.0e-13; // same displacement tolerance as felt::solve
@@ -143,6 +143,32 @@ impl Site {
         self.sig_max * self.q * x.powf(self.q - 1.0) / self.span
     }
 
+    /// Stable same-branch mean and weighted tangent, with one native power.
+    /// Coincident, crossing and distant intervals retain their existing path.
+    #[inline]
+    fn same_branch_average(&self, a: f64, b: f64) -> Option<(f64, f64)> {
+        if a == b { return None; }
+        let (origin, scale, amplitude, exponent) = if a >= self.eps_max
+            && b >= self.eps_max && a > 0.0 && b > 0.0 {
+            (0.0, self.eps_ref, self.f_ref, self.p)
+        } else if a > self.residual && b > self.residual && a <= self.eps_max && b < self.eps_max {
+            // A start at the committed maximum belongs to this unloading
+            // interval. Keep END-at-maximum stress conventions on the fallback.
+            (self.residual, self.span, self.sig_max, self.q)
+        } else { return None; };
+        let mid = 0.5 * (a - origin) + 0.5 * (b - origin);
+        if mid < f64::MIN_POSITIVE { return None; }
+        let t = 0.5 * (b - a) / mid;
+        let (mean, tangent) = power_law_moments(exponent, t)?;
+        let ratio = mid / scale;
+        let power = ratio.powf(exponent - 1.0);
+        // Computing the tangent independently of the stress preserves it even
+        // when the force underflows on a tiny positive compression interval.
+        let sigma = amplitude * power * ratio;
+        let derivative = amplitude * exponent * power / scale;
+        Some((sigma * mean, 0.5 * derivative * tangent))
+    }
+
     /// Held force [N] and its derivative with respect to END overlap [N/m]:
     /// `felt.rs::average` with the start integral prepared.
     #[inline]
@@ -150,7 +176,9 @@ impl Site {
         let a = self.start_strain;
         let b = end_m / self.thickness;
         let de = b - a;
-        let (stress, slope) = if de.abs() < 1.0e-7 * (a.abs().max(b.abs()) + 1.0e-12) {
+        let (stress, slope) = if let Some(pair) = self.same_branch_average(a, b) {
+            pair
+        } else if de.abs() < 1.0e-7 * (a.abs().max(b.abs()) + 1.0e-12) {
             let mid = 0.5 * (a + b);
             (self.primitive_and_stress(mid).1, 0.5 * self.tangent(mid))
         } else {

@@ -22,7 +22,7 @@ pub fn cholesky(a: &[f64], n: usize) -> Result<Vec<f64>, String> {
                 sum -= l[i * n + k] * l[j * n + k];
             }
             if i == j {
-                if !(sum > 0.0) || !sum.is_finite() {
+                if !sum.is_finite() || sum <= 0.0 {
                     return Err("matrix is not positive definite".into());
                 }
                 l[i * n + i] = sum.sqrt();

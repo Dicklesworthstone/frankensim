@@ -6,6 +6,107 @@ use fs_live_piano::fastfelt::Site;
 use fs_live_piano::refmods::{felt, geometry, steinway_scale};
 use fs_material::Uniaxial;
 
+// Actual repeated-contact operands, with independent 100-digit Decimal answers.
+// The live adapter must not depend on the reference implementation to detect
+// a shared arithmetic mistake. These do not establish musical fidelity.
+type CapturedFeltCase = (f64, f64, f64, f64);
+
+fn captured_felt_cases() -> (fs_material::WoolFelt, felt::State, [CapturedFeltCase; 5]) {
+    let law = fs_material::WoolFelt::new(10784971.283384772, 0.2, 2.5116355500000003,
+        3.2116355500000004, 0.25, 0.8).unwrap();
+    let state = felt::State { eps_max: 0.05313385293183455, sig_max: 386343.9999062737 };
+    let a = 0.0003418749043622657;
+    let b2 = 0.00034187507285155427;
+    let b32 = 0.00034187507285085426;
+    (law, state, [
+        (a, b2, 6.911_181_590_113_403, 45597.24015008384),
+        (b2, a, 6.911_181_590_113_403, 45597.21688026879),
+        (a, b32, 6.911181590081485, 45597.24014989049),
+        (b32, a, 6.911181590081485, 45597.21688017211),
+        (a, a, 6.91117390747077, 45597.19361045862),
+    ])
+}
+
+#[test]
+fn captured_felt_quadrature_force_matches_decimal() {
+    let (law, state, cases) = captured_felt_cases();
+    for (start, end, expected, _) in cases {
+        let (force, _) = Site::new(&law, &state, start,
+            0.007413793103448275, 3.3333333333333335e-5).force(end);
+        assert!((force - expected).abs() < 1e-12,
+            "{start:.17e}->{end:.17e}: force={force:.17e}, reference={expected:.17e}");
+    }
+}
+
+#[test]
+fn captured_felt_quadrature_derivative_matches_decimal() {
+    let (law, state, cases) = captured_felt_cases();
+    for (start, end, _, expected) in cases {
+        let (_, slope) = Site::new(&law, &state, start,
+            0.007413793103448275, 3.3333333333333335e-5).force(end);
+        assert!((slope - expected).abs() < 1e-8,
+            "{start:.17e}->{end:.17e}: slope={slope:.17e}, reference={expected:.17e}");
+    }
+}
+
+#[test]
+fn prepared_felt_cubic_boundaries_match_analytic_moments() {
+    for crushed in [false, true] {
+        let law = fs_material::WoolFelt::new(4.0, 1.0, if crushed { 2.0 } else { 3.0 },
+            3.0, if crushed { 0.25 } else { 0.0 }, 2.0).unwrap();
+        let state = if crushed { felt::State { eps_max: 1.0, sig_max: 4.0 } }
+            else { law.initial_state() };
+        let origin = if crushed { 0.25 } else { 0.0 };
+        let coefficient = if crushed { 4.0 / (0.75 * 0.75 * 0.75) } else { 4.0 };
+        let a = 0.5_f64;
+        let series_edge = |t: f64| origin + (a - origin) * (1.0 + t) / (1.0 - t);
+        for b in [a, a.next_up(), a * (1.0 + 0.999e-7), a * (1.0 + 1.001e-7),
+            series_edge((1.0 - 1e-8) / 24.0), series_edge((1.0 + 1e-8) / 24.0)] {
+            for (start, end) in [(a, b), (b, a)] {
+                let (x, y) = (start - origin, end - origin);
+                let force = coefficient * (x*x*x + x*x*y + x*y*y + y*y*y) / 4.0;
+                let slope = coefficient * (x*x + 2.0*x*y + 3.0*y*y) / 4.0;
+                let (actual_force, actual_slope) = Site::new(&law, &state, start, 1.0, 1.0).force(end);
+                assert!((actual_force - force).abs() < 1e-12,
+                    "crushed={crushed} {start:.17e}->{end:.17e}: force {actual_force} vs {force}");
+                assert!((actual_slope - slope).abs() < 1e-11,
+                    "crushed={crushed} {start:.17e}->{end:.17e}: slope {actual_slope} vs {slope}");
+            }
+        }
+    }
+}
+
+#[test]
+fn captured_felt_quadrature_committed_maximum_matches_cubic() {
+    let law = fs_material::WoolFelt::new(4.0, 1.0, 2.0, 3.0, 0.25, 2.0).unwrap();
+    let state = felt::State { eps_max: 1.0, sig_max: 4.0 };
+    let (start, end) = (1.0, 0.9999998);
+    let (x, y) = (start - 0.25, end - 0.25);
+    let coefficient = 4.0 / (0.75 * 0.75 * 0.75);
+    let force = coefficient * (x*x*x + x*x*y + x*y*y + y*y*y) / 4.0;
+    let slope = coefficient * (x*x + 2.0*x*y + 3.0*y*y) / 4.0;
+    // Starting exactly at the maximum and unloading never crosses branches.
+    // Keep both answers in the failure output so neither hides the other.
+    let actual = [
+        Site::new(&law, &state, start, 1.0, 1.0).force(end),
+        felt::average(&law, &state, start, end, 1.0, 1.0),
+    ];
+    assert!(actual.iter().all(|(f, df)| (f - force).abs() < 1e-12 && (df - slope).abs() < 1e-11),
+        "analytic ({force:.17e}, {slope:.17e}); prepared/reference {actual:?}");
+}
+
+#[test]
+fn prepared_felt_tiny_positive_width_retains_tangent() {
+    let law = fs_material::WoolFelt::new(4.0, 1.0, 2.0, 2.0, 0.0, 2.0).unwrap();
+    let a = 1e-200_f64;
+    let b = a.next_up();
+    let (_, slope) = Site::new(&law, &law.initial_state(), a, 1.0, 1.0).force(b);
+    let expected = 4.0 * (a + 2.0*b) / 3.0;
+    assert!(slope.is_finite() && slope > 0.0, "lost positive tangent: {slope:e}");
+    assert!((slope / expected - 1.0).abs() < 2e-14,
+        "tiny-interval slope {slope:e}, analytic reference {expected:e}");
+}
+
 
 fn pencil(n: usize) -> (Vec<f64>, Vec<f64>) {
     let mut k = vec![0.0; n * n];
@@ -69,8 +170,8 @@ fn spd_inverse_and_series_exponential_are_what_they_claim() {
             assert!((value - e[i * n + j]).abs() < 1.0e-14);
         }
     }
-    assert!(spd_inverse(&vec![0.0; 4], 2, "zero").is_err());
-    assert!(exp_neg_small(&vec![1.0; 4], 2).is_err());
+    assert!(spd_inverse(&[0.0; 4], 2, "zero").is_err());
+    assert!(exp_neg_small(&[1.0; 4], 2).is_err());
 }
 
 

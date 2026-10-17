@@ -68,7 +68,9 @@ fn same_branch_average(law: &WoolFelt, state: &State, a: f64, b: f64)
     let (origin, scale, amplitude, exponent) = if a >= state.eps_max
         && b >= state.eps_max && a > 0.0 && b > 0.0 {
         (0.0, law.eps_ref, law.f_ref, law.p)
-    } else if a > residual && b > residual && a < state.eps_max && b < state.eps_max {
+    } else if a > residual && b > residual && a <= state.eps_max && b < state.eps_max {
+        // Starting at the maximum and unloading is still one branch. Preserve
+        // the material's existing END-at-maximum stress convention separately.
         (residual, state.eps_max - residual, state.sig_max, law.q)
     } else { return None; };
     let mid = 0.5 * (a - origin) + 0.5 * (b - origin);
@@ -78,8 +80,21 @@ fn same_branch_average(law: &WoolFelt, state: &State, a: f64, b: f64)
     // Outside this domain retain the existing primitive/crossing evaluation.
     // Subnormal coordinates can lose the halved width used in t; leave those
     // on the original path rather than claiming the series-domain bound holds.
-    if !(mid >= f64::MIN_POSITIVE && t.abs() * exponent.max(1.0) <= 0.125) { return None; }
+    if mid < f64::MIN_POSITIVE { return None; }
+    let (mean, tangent) = power_law_moments(exponent, t)?;
     let sigma = amplitude * det::pow(mid / scale, exponent);
+    // Do not derive this from sigma/mid: sigma can underflow while its
+    // tangent is still representable on a very small positive interval.
+    let derivative = amplitude * exponent * det::pow(mid / scale, exponent - 1.0) / scale;
+    Some((sigma * mean, 0.5 * derivative * tangent))
+}
+
+/// Dimensionless mean and weighted END-tangent moments for a power law on
+/// a symmetric interval. Shared with the live adapter, whose power anchors
+/// use native powf instead of det::pow. None retains the distant fallback.
+#[inline]
+pub(crate) fn power_law_moments(exponent: f64, t: f64) -> Option<(f64, f64)> {
+    if !(t.abs() * exponent.max(1.0) <= 0.125) { return None; }
     let (mut mean, mut tangent) = (1.0, 1.0);
     let (mut mean_term, mut tangent_term) = (1.0, 1.0);
     for k in 1_u32..=24 {
@@ -96,10 +111,7 @@ fn same_branch_average(law: &WoolFelt, state: &State, a: f64, b: f64)
         // is below EPSILON/56; it is not a contact-solver tolerance change.
         if mean_term.abs().max(tangent_term.abs()) < f64::EPSILON / 8.0 { break; }
     }
-    // Do not derive this from sigma/mid: sigma can underflow while its
-    // tangent is still representable on a very small positive interval.
-    let derivative = amplitude * exponent * det::pow(mid / scale, exponent - 1.0) / scale;
-    Some((sigma * mean, 0.5 * derivative * tangent))
+    Some((mean, tangent))
 }
 
 /// Held force and its derivative with respect to END overlap. Its work is
