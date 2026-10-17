@@ -20,13 +20,15 @@ fn graph() -> TubeNetworkSpec {
     }
 }
 fn valve(density: f64, z: f64) -> DynamicAperture {
-    DynamicAperture::new(DynamicApertureSpec {
+    // Outside the midpoint one-cent band at this rate (DEF-04): exact opening block.
+    DynamicAperture::new_with_propagator(DynamicApertureSpec {
         aperture: BernoulliAperture {rest_opening_m:0.0004,width_m:0.013,closing_pressure_pa:6000.0},
         mass_kg:1e-5,stiffness_n_m:500.0,damping_ratio:0.35,density_kg_m3:density,
         impedance_pa_s_m3:z,time_step_s:DT,max_steps:2048,
     }, ApertureState {opening_m:0.0004,opening_velocity_m_s:0.0},
         Obstacle::new(vec![-1.0],1,1,vec![0.0],vec![1.0],1e8,2.0,
-            "synthetic regional-gas contact".into()).unwrap()).unwrap()
+            "synthetic regional-gas contact".into()).unwrap(),
+        fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh).unwrap()
 }
 fn model(gases: Vec<GasState>) -> ApertureNetwork {
     let s=graph(); let z=s.inlet_impedance_with_gases(&gases).unwrap();

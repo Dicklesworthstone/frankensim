@@ -152,6 +152,7 @@ pub struct DynamicAperture {
     plate: Option<Box<PlateApertureReduction>>,
     closure: Option<Box<PlateClosure>>,
     relaxation: Option<ApertureRelaxation>,
+    exact: Option<super::paired::ExactBlade>,
     state: ApertureState,
     accepted_steps: u64,
     ports: crate::port_adoption::ModulePorts,
@@ -184,6 +185,24 @@ impl DynamicAperture {
         spec: DynamicApertureSpec,
         state: ApertureState,
         lay: Obstacle,
+    ) -> Result<Self, AcousticRealizeError> {
+        Self::new_with_propagator(spec, state, lay, super::paired::BladePropagator::Midpoint)
+    }
+
+    /// [`Self::new`] with an explicitly selected linear propagator for the
+    /// opening coordinate. `Midpoint` keeps the one-cent band refusal;
+    /// `ExactZoh` propagates the mass/damping/stiffness block exactly with the
+    /// contact, pressure and any prescribed force held over the step, so it
+    /// admits any omega*dt. The exact path is the authored uniform slit only:
+    /// plate reductions, closures and material memory keep `Midpoint`.
+    ///
+    /// # Errors
+    /// As [`Self::new`], or an unrepresentable exact map.
+    pub fn new_with_propagator(
+        spec: DynamicApertureSpec,
+        state: ApertureState,
+        lay: Obstacle,
+        propagator: super::paired::BladePropagator,
     ) -> Result<Self, AcousticRealizeError> {
         if ![
             spec.aperture.rest_opening_m, spec.aperture.width_m,
@@ -231,6 +250,14 @@ impl DynamicAperture {
                 ("plate", fs_ports::PortKind::MechanicalForceVelocity),
             ],
         );
+        let exact = match propagator {
+            super::paired::BladePropagator::Midpoint => None,
+            super::paired::BladePropagator::ExactZoh => {
+                let (stiffness, damping) = reed_structural(reed);
+                Some(super::paired::ExactBlade::from_mechanics(
+                    spec.mass_kg, damping, stiffness, spec.time_step_s)?)
+            }
+        };
         let model = Self {
             spec,
             reed,
@@ -239,6 +266,7 @@ impl DynamicAperture {
             plate: None,
             closure: None,
             relaxation: None,
+            exact,
             state,
             accepted_steps: 0,
             ports,
@@ -427,12 +455,20 @@ impl DynamicAperture {
             Ok(if force_n == 0.0 { restoring } else { restoring - force_n })
         };
         let has_memory=self.relaxation.as_ref().is_some_and(|m|!m.branches().is_empty());
-        let (outgoing, opening, velocity) = if self.closure.is_some() || has_memory || force_n != 0.0 {
+        let (outgoing, opening, velocity) = if let Some(blade) = &self.exact {
+            // The prescribed force is held with the contact and pressure forces.
+            crate::reed_bore::step_profiled_aperture(self.reed,self.spec.density_kg_m3,
+                self.spec.impedance_pa_s_m3,drive.incoming_pressure_pa,drive.upstream_pressure_pa,
+                old.opening_m,old.opening_velocity_m_s,dt,drive.body_flow_m3_s,&self.lay,
+                |opening| self.flow_opening(opening), None,
+                crate::reed_bore::OpeningPropagator::Exact { blade, external_n: force_n })?
+        } else if self.closure.is_some() || has_memory || force_n != 0.0 {
             crate::reed_bore::step_profiled_aperture(self.reed,self.spec.density_kg_m3,
                 self.spec.impedance_pa_s_m3,drive.incoming_pressure_pa,drive.upstream_pressure_pa,
                 old.opening_m,old.opening_velocity_m_s,dt,drive.body_flow_m3_s,&self.lay,
                 |opening| self.flow_opening(opening),
-                if has_memory || force_n != 0.0 {Some(&material_force)} else {None})?
+                if has_memory || force_n != 0.0 {Some(&material_force)} else {None},
+                crate::reed_bore::OpeningPropagator::Midpoint)?
         } else {
             crate::reed_bore::step_massive_reed(
                 self.reed, self.spec.density_kg_m3, self.spec.impedance_pa_s_m3,
@@ -449,7 +485,12 @@ impl DynamicAperture {
         }
         if let Some(closure) = &self.closure { closure.validate_opening(opening)?; }
         let midpoint_opening_m = self.flow_opening(f64::midpoint(old.opening_m, opening))?;
-        let vm = f64::midpoint(old.opening_velocity_m_s, velocity);
+        // Step-mean velocity: dy/dt for the exact block; midpoint's own average.
+        let vm = if self.exact.is_some() {
+            (opening - old.opening_m) / dt
+        } else {
+            f64::midpoint(old.opening_velocity_m_s, velocity)
+        };
         let bore = outgoing + drive.incoming_pressure_pa;
         let dp = drive.upstream_pressure_pa - bore;
         let jet = super::moving::volume_flow(
@@ -480,7 +521,15 @@ impl DynamicAperture {
             flow_residual_m3_s: jet + swept + drive.body_flow_m3_s - wave,
             stored_energy_j: energy,
             storage_change_j: energy - self.stored_energy_j(),
-            dissipated_energy_j: dt * (dp * jet + damping * vm * vm + contact.dissipated_power) + relaxation_loss_j,
+            dissipated_energy_j: match &self.exact {
+                // The exact block integrates c*v^2 along its own trajectory.
+                Some(blade) => dt * (dp * jet + contact.dissipated_power) + relaxation_loss_j
+                    + blade.viscous_loss_j(super::paired::BladeState {
+                        displacement_m: old.opening_m - self.reed.rest_opening_m,
+                        velocity_m_s: old.opening_velocity_m_s,
+                    }, force_n + contact.force - reed_pressure_face(self.reed) * dp),
+                None => dt * (dp * jet + damping * vm * vm + contact.dissipated_power) + relaxation_loss_j,
+            },
             pressure_work_j: dt * dp * (wave - drive.body_flow_m3_s),
             mechanical_work_j: if force_n == 0.0 { 0.0 } else { dt * force_n * vm },
             relaxation_energy_j, relaxation_loss_j,
@@ -551,6 +600,8 @@ impl DynamicAperture {
 
 impl DynamicAperture {
     fn admit_linear_clock(&self) -> Result<(), AcousticRealizeError> {
+        // The exact block does not warp; the band applies only to Midpoint.
+        if self.exact.is_some() { return Ok(()); }
         let s = self.spec;
         let omega = fs_math::det::sqrt(s.stiffness_n_m / s.mass_kg);
         let area = reed_pressure_face(self.reed);

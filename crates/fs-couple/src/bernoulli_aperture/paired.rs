@@ -82,7 +82,7 @@ pub enum BladePropagator {
 /// generator entry at omega*dt or c*dt/m, and the `int v` row gives the
 /// displacement increment directly, without subtracting nearly equal values.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct ExactBlade {
+pub(crate) struct ExactBlade {
     omega: f64,
     mass: f64,
     map: [f64; 25],
@@ -92,10 +92,19 @@ struct ExactBlade {
 
 impl ExactBlade {
     fn new(blade: &ApertureBlade, dt: f64) -> Result<Self, AcousticRealizeError> {
+        Self::from_mechanics(blade.mass_kg, blade.damping_n_s_m, blade.stiffness_n_m, dt)
+    }
+    /// One mass/viscous-damper/spring coordinate with positive mass and stiffness.
+    pub(crate) fn from_mechanics(mass: f64, damping_n_s_m: f64, stiffness_n_m: f64, dt: f64)
+        -> Result<Self, AcousticRealizeError>
+    {
         let refuse = |_| invalid("exact blade propagator could not be prepared");
-        let mass = blade.mass_kg;
-        let omega = fs_math::det::sqrt(blade.stiffness_n_m / mass);
-        let (w, g) = (omega * dt, blade.damping_n_s_m / mass * dt);
+        if !(mass > 0.0 && stiffness_n_m > 0.0 && damping_n_s_m >= 0.0 && dt > 0.0)
+            || ![mass, damping_n_s_m, stiffness_n_m, dt].iter().all(|x| x.is_finite()) {
+            return Err(invalid("exact blade propagator needs positive mass, stiffness and step"));
+        }
+        let omega = fs_math::det::sqrt(stiffness_n_m / mass);
+        let (w, g) = (omega * dt, damping_n_s_m / mass * dt);
         #[rustfmt::skip]
         let generator = [
             0.0, w, 0.0, 0.0, 0.0,
@@ -114,7 +123,7 @@ impl ExactBlade {
                 van_loan[(i + 3) * 6 + j + 3] = generator[i * 5 + j];
             }
         }
-        van_loan[6 + 4] = blade.damping_n_s_m * dt;
+        van_loan[6 + 4] = damping_n_s_m * dt;
         let blocks = fs_phs::linear_exact::exponential(&van_loan, 6).map_err(refuse)?;
         let mut viscous = [[0.0; 3]; 3];
         for (i, row) in viscous.iter_mut().enumerate() {
@@ -136,18 +145,18 @@ impl ExactBlade {
         self.map[row * 5] * z[0] + self.map[row * 5 + 1] * z[1] + self.map[row * 5 + 2] * z[2]
     }
     /// Mean velocity `dx/dt` over the step is `free + mobility * F` for held F.
-    fn free_and_mobility(&self, state: BladeState, external_n: f64, dt: f64) -> (f64, f64) {
+    pub(crate) fn free_and_mobility(&self, state: BladeState, external_n: f64, dt: f64) -> (f64, f64) {
         let free = self.row(3, self.scaled(state, external_n)) / (self.omega * dt);
         let mobility = self.map[3 * 5 + 2] / (self.mass * self.omega * self.omega * dt);
         (free, mobility)
     }
-    fn end_velocity(&self, state: BladeState, held_n: f64) -> f64 {
+    pub(crate) fn end_velocity(&self, state: BladeState, held_n: f64) -> f64 {
         self.row(1, self.scaled(state, held_n))
     }
     fn mean_displacement(&self, state: BladeState, held_n: f64, dt: f64) -> f64 {
         self.row(4, self.scaled(state, held_n)) / (self.omega * self.omega * dt)
     }
-    fn viscous_loss_j(&self, state: BladeState, held_n: f64) -> f64 {
+    pub(crate) fn viscous_loss_j(&self, state: BladeState, held_n: f64) -> f64 {
         let z = self.scaled(state, held_n);
         (0..3).map(|i| (0..3).map(|j| z[i] * self.viscous[i][j] * z[j]).sum::<f64>()).sum()
     }
