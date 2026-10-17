@@ -241,18 +241,19 @@ pub(super) fn run_with_gas_sources(
     )?;
     let parts: Vec<_> = sources.iter().zip(renderer.part_info()).map(|(source, aligned)| {
         let o = aligned.observation;
-        let scope = if !source.exterior_json.is_empty() {
-            source.exterior_json.as_str()
+        let default_scope = if source.exterior_json.contains("\"observation_scope\":") {
+            ""
         } else if source.kind == Kind::Reed {
             ",\"observation_scope\":\"bore-pressure-plus-compact-jet-proxy; not exterior microphone\""
         } else if source.kind == Kind::Valve {
             ",\"observation_scope\":\"internal coupled tube pressure; not an exterior microphone\""
         } else { "" };
+        let scope = source.exterior_json.as_str();
         format!("{{\"kind\":\"{}\",\"schema\":\"{}\",\"blake3\":\"{}\",\
             \"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"ratio\":{},\
             \"filter\":\"{}\",\"filter_delay_output_samples\":{},\"alignment_delay_samples\":{},\
             \"first_output_source_index\":{},\"source_full_scale_pa\":{:e},\"source_pcm_scale_applied\":false,\
-            \"components\":{},\"modes\":{},\"compiled_controls\":{}{scope}}}",
+            \"components\":{},\"modes\":{},\"compiled_controls\":{}{default_scope}{scope}}}",
             source.kind.label(), source.schema, source.hash.to_hex(), source.rate, source.samples,
             o.ratio, o.filter_profile, o.delay_output_samples, aligned.alignment_delay_samples,
             o.first_output_source_index, source.source_full_scale_pa, source.components, source.modes, source.controls)
