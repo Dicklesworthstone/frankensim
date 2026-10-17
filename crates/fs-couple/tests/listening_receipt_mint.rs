@@ -41,7 +41,8 @@ fn wav_to_pascals(bytes: &[u8], full_scale_pa: f64) -> Vec<f64> {
 fn sidecar_field(sidecar: &str, key: &str) -> String {
     let tag = format!("\"{key}\":");
     let start = sidecar.find(&tag).expect("sidecar field") + tag.len();
-    let rest = &sidecar[start..];
+    // JSON allows whitespace after the colon; the committed sidecars are pretty-printed.
+    let rest = sidecar[start..].trim_start();
     let rest = rest.strip_prefix('"').unwrap_or(rest);
     let end = rest.find(['"', ',', '}']).expect("field end");
     rest[..end].to_string()
