@@ -467,16 +467,19 @@ fn hb_002_brass_slot_map_locks_on_impedance_peaks() {
         .collect();
     assert!(peak_hz.len() >= 3);
     // Tension sweep, concentrated on the measured lock-in band.
-    // MEASURED FINDING (diag_hb002 fine scan, 120-iteration Newton from
-    // four seeds per point): under Q=10 damping this configuration
-    // self-oscillates ONLY in a razor-thin band around f_lip = 270 Hz
-    // (locking onto the ~302 Hz bore peak); every other tension in
-    // 90..420 refuses. The lock-in zone is genuinely narrow — recorded
-    // here rather than papered over with a wider sweep.
+    // MEASURED (c175d33a6, after f8bc7dbd3 conjugated the lip's bore
+    // load into the exp(+i omega t) synthesis; the old 270 Hz band was
+    // measured on the conjugated, non-physical load): from these cold
+    // seeds ONLY f_lip = 295 locks, at 313.2 Hz (3.8% above the 301.8 Hz
+    // peak, every seed, identical at 64/256/1024 AFT nodes); every other
+    // 5 Hz cell in 240..320 stalls. Continuing that orbit in tension
+    // finds it at 292.5 and 297.5 and collapsing onto the equilibrium by
+    // 290 and 300: a ~10 Hz Hopf-bounded band whose centre alone is
+    // reachable cold. Recorded rather than papered over.
     let mass = 2.0e-3;
     let mut locks = Vec::new();
     let mut refused = 0usize;
-    for &f_lip in &[260.0f64, 265.0, 270.0, 275.0] {
+    for &f_lip in &[285.0f64, 290.0, 295.0, 300.0, 305.0] {
         let k = mass * (TAU * f_lip) * (TAU * f_lip);
         let problem = LipHb {
             duct: Duct {
@@ -523,7 +526,7 @@ fn hb_002_brass_slot_map_locks_on_impedance_peaks() {
     }
     println!(
         "frankensim-hb-receipt-v1\nkind\tbrass-slot-map\nlocks\t{locks:?}\n\
-refused-tensions\t{refused}\nlock-in-zone\tnarrow (single 5 Hz cell at 270)\n\
+refused-tensions\t{refused}\nlock-in-zone\tnarrow (cold seeds lock at 295 only; continued band ~290-300)\n\
 bore-authority\tplane-TMM Bessel IdealOpen"
     );
     // The map is honestly narrow: one lock survives the guard at this
@@ -571,7 +574,7 @@ bore-authority\tplane-TMM Bessel IdealOpen"
         }
     }
     // Breadth gates rewritten to the MEASURED regime: under Q=10 the
-    // lock-in band is a single 5 Hz cell (see diag_hb002 fine scan),
+    // cold-seeded lock-in band is a single 5 Hz cell (see above),
     // so captured/slots-visited breadth assertions would encode
     // optimism, not physics. What IS gated per lock: slot capture
     // within 8% when near a peak, or residence inside the pull
@@ -621,7 +624,7 @@ fn hb_003_truncation_falsifier_produces_the_disagreement_receipt() {
     // endpoint (the warm-descent endpoint conflates orbit existence
     // with Newton reach and is truncation-sensitive — measured 9%;
     // recorded as part of the receipt, not gated): at a fixed
-    // supra-threshold pressure the N=9 and N=13 orbits must agree.
+    // supra-threshold pressure the continued orbit must converge in N.
     let gas = air();
     let duct = clarinet_bore();
     let omega_res = first_resonance(&duct, &gas);
@@ -633,43 +636,61 @@ fn hb_003_truncation_falsifier_produces_the_disagreement_receipt() {
         closing_pressure_pa: 2_000.0,
         blowing_pressure_pa: 1_200.0,
     };
-    let solve_at = |n: usize| {
-        [0.6f64, 0.35]
-            .iter()
-            .find_map(|&g| {
-                solve_hb(
-                    &make,
-                    HbAnchor::Autonomous {
-                        omega_guess: omega_res,
-                    },
-                    g,
-                    &HbBudget {
-                        harmonics: n,
-                        max_newton: 60,
-                        tolerance: 1.0e-9,
-                        deflate_equilibrium: false,
-                    },
-                )
-                .ok()
-            })
-            .expect("supra-threshold orbit")
+    let anchor = HbAnchor::Autonomous {
+        omega_guess: omega_res,
     };
-    // Convergence probe pair chosen from the measured harmonic table
-    // (diag_hb003): N9 and N11 agree at this operating point; N13+
-    // DIVERGES and N17 refuses outright — the orbit approaches a
-    // truncation-sensitivity boundary (likely a representation limit:
-    // a period-doubled component needs sub-omega harmonics the AFT
-    // basis cannot express). Disclosed as the finding, not gated away.
-    let (o9, o11) = (solve_at(9), solve_at(11));
-    let dw = (o11.omega / o9.omega - 1.0).abs();
-    let da = (o11.first_harmonic_amplitude(0) / o9.first_harmonic_amplitude(0) - 1.0).abs();
-    assert!(dw < 5.0e-3, "orbit frequency drift N9->N11: {dw:.2e}");
-    assert!(da < 2.0e-2, "orbit amplitude drift N9->N11: {da:.2e}");
+    let budget = |n: usize| HbBudget {
+        harmonics: n,
+        max_newton: 60,
+        tolerance: 1.0e-9,
+        deflate_equilibrium: false,
+    };
+    let o9 = [0.6f64, 0.35]
+        .iter()
+        .find_map(|&g| solve_hb(&make, anchor, g, &budget(9)).ok())
+        .expect("supra-threshold orbit");
+    // Truncation convergence is a property of ONE orbit, so each finer
+    // truncation continues the previous orbit (new harmonics start at
+    // zero). Independent cold solves per N are not a ladder: under exact
+    // ZK a cold N11 solve lands on a second, non-convergent family (a1
+    // 0.56 at N11 falling to 0.31 at N15, measured at 1024 AFT nodes).
+    // MEASURED on this family (c175d33a6): a1 0.650/0.675/0.695/0.704
+    // for N9/11/13/15, identical to <0.2% at 64 and 1024 AFT nodes, so
+    // the drift is truncation, not quadrature. N9 and N11 no longer
+    // agree (3.8%); the beating reed's harmonics decay slowly. N17
+    // still stalls from the N15 orbit. Gate: the ladder contracts and
+    // its finest pair meets the bands the old N9/N11 pair was held to.
+    let mut ladder = vec![o9];
+    for n in [11usize, 13, 15] {
+        let mut padded = ladder.last().expect("rung").clone();
+        for harmonics in &mut padded.coeffs {
+            harmonics.resize(n + 1, C64::new(0.0, 0.0));
+        }
+        let seed = padded.packed_seed(&anchor);
+        let orbit = fs_orbit::solve_hb_seeded(&make, anchor, seed, &budget(n))
+            .unwrap_or_else(|e| panic!("N={n} continuation of the N9 orbit refused: {e}"));
+        ladder.push(orbit);
+    }
+    let a1: Vec<f64> = ladder
+        .iter()
+        .map(|o| o.first_harmonic_amplitude(0))
+        .collect();
+    let steps: Vec<f64> = a1.windows(2).map(|w| (w[1] / w[0] - 1.0).abs()).collect();
+    assert!(
+        steps.windows(2).all(|s| s[1] < s[0]),
+        "the continued N9..N15 amplitude ladder must contract: {steps:?}"
+    );
+    let dw = (ladder[3].omega / ladder[2].omega - 1.0).abs();
+    let da = steps[2];
+    assert!(dw < 5.0e-3, "orbit frequency drift N13->N15: {dw:.2e}");
+    assert!(da < 2.0e-2, "orbit amplitude drift N13->N15: {da:.2e}");
+    let n9_from_n15 = (a1[0] / a1[3] - 1.0).abs();
     println!(
         "{{\"suite\":\"fs-couple\",\"case\":\"hb-003-convergence\",\
          \"omega_drift\":{dw:.2e},\"amplitude_drift\":{da:.2e},\
-         \"probe_pair\":\"N9/N11\",\
-         \"truncation_boundary_disclosed\":\"N13 amplitude leaves the N9/N11 family and N17 refuses; see diag_hb003 harmonic table\",\
+         \"probe_pair\":\"N13/N15\",\"ladder\":\"N9/N11/N13/N15 continued\",\
+         \"a1\":{a1:?},\"amplitude_steps\":{steps:?},\"n9_deviation_from_n15\":{n9_from_n15:.3e},\
+         \"truncation_boundary_disclosed\":\"N17 stalls when continued from N15\",\
          \"endpoint_sensitivity_recorded\":0.09}}"
     );
 }

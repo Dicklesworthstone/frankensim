@@ -3,13 +3,19 @@
 A supplied stationary receiver can observe the **actual outward terminal volume
 flow** through a uniform circular outlet in an infinite rigid baffle:
 
+The fixture is `plate-valve.performance` with its PCM full scale set to 0.01 and
+`observation inlet` replaced by `observation baffled-outlet 0 0 0.2 8 32 4000`.
+It shipped as `plate-valve-exterior.performance` until that name was reused for
+the regional exterior-mixture comparison (`PLATE_EXTERIOR_GAS.md`); the
+`music_render_wind` valve tests rebuild it byte-identically. Render it with:
+
 ```bash
 cargo run --release -p fs-couple --bin music_render -- \
-  wind crates/fs-couple/examples/plate-valve-exterior.performance \
+  wind /tmp/plate-valve-one-way.performance \
   /tmp/plate-valve-exterior.wav --decimate --block 37
 ```
 
-This example preserves the mesh, contact, material, pressure program and tube of
+This fixture preserves the mesh, contact, material, pressure program and tube of
 `plate-valve.performance`. It explicitly selects a receiver 0.2 m above the
 outlet, 8 equal-area radial rings, 32 azimuthal samples and a 4 kHz resolution
 band. Its declared PCM full scale is 0.01 Pa, suitable for examining this small

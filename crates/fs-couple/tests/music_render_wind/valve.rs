@@ -82,11 +82,26 @@ fn source_physics_and_clock_refusals_precede_output_creation() {
     }
 }
 
-const EXTERIOR:&str=include_str!("../../examples/plate-valve-exterior.performance");
+// The one-way receiver fixture, byte-identical to plate-valve-exterior.performance
+// before 9b648c0b1 reused that name for the regional exterior-mixture comparison
+// (gas_mixture/exterior.rs, which pins the new content).
+fn exterior() -> String {
+    INPUT.replace("audio 96000 9602 20", "audio 96000 9602 0.01")
+        .replace("observation inlet", "observation baffled-outlet 0 0 0.2 8 32 4000")
+}
+const NETWORK_EXTERIOR:&str=include_str!("../../examples/plate-valve-exterior.performance");
 #[test]
 fn supplied_exterior_receiver_reaches_native_and_decimated_wav_with_physical_delays() {
-    let dir=directory();let input=dir.join("baffled.performance");
-    for (i,text) in [EXTERIOR.to_string(),EXTERIOR.replace("audio 96000 9602","audio 48000 4801")].iter().enumerate() {
+    let dir=directory();let input=dir.join("baffled.performance");let base=exterior();
+    // The network example's 0.125 m sections are 17.49 samples at 48 kHz, outside
+    // their declared 2 mm transit allowance: refused, never silently shortened.
+    let network=NETWORK_EXTERIOR.replace("audio 96000 9602","audio 48000 4801");
+    let refusal=format!("{:?}",PlateValvePerformance::from_bytes(network.as_bytes(),37,&CancelGate::new()).err().unwrap());
+    assert!(refusal.contains("transit exceeds its length-error allowance"),"{refusal}");
+    std::fs::write(&input,&network).unwrap();let refused=dir.join("network-48k.wav");
+    assert!(!run(&input,&refused,37,false).status.success());
+    assert!(!refused.exists());assert!(!refused.with_extension("provenance.json").exists());
+    for (i,text) in [base.clone(),base.replace("audio 96000 9602","audio 48000 4801")].iter().enumerate() {
         std::fs::write(&input,text).unwrap();let (pressure,_)=reference(text);
         let (expected,_)=encode_pcm16_wav(&pressure,48000,0.01).unwrap();
         assert!(pressure.iter().any(|p|p.abs()>1e-10));
@@ -104,14 +119,14 @@ fn supplied_exterior_receiver_reaches_native_and_decimated_wav_with_physical_del
 
 #[test]
 fn exterior_ensemble_preserves_physical_travel_delays_not_just_filter_alignment() {
-    let dir=directory();let high=dir.join("close.performance");let low=dir.join("far.performance");
-    let distant=EXTERIOR.replace("audio 96000 9602","audio 48000 4801")
+    let dir=directory();let high=dir.join("close.performance");let low=dir.join("far.performance");let base=exterior();
+    let distant=base.replace("audio 96000 9602","audio 48000 4801")
         .replace("baffled-outlet 0 0 0.2","baffled-outlet 0.1 0 0.4");
-    std::fs::write(&low,&distant).unwrap();let (a,da)=reference(EXTERIOR);let (b,db)=reference(&distant);
+    std::fs::write(&low,&distant).unwrap();let (a,da)=reference(&base);let (b,db)=reference(&distant);
     let delay=da-db;let mut mixed=a.clone();
     for (out,p) in mixed[delay..].iter_mut().zip(&b) {*out+=p;}
     let (expected,_)=encode_pcm16_wav(&mixed,48000,0.02).unwrap();
-    for (i,text) in [EXTERIOR.to_string(),EXTERIOR.replace("9602 0.01","9602 100")].iter().enumerate() {
+    for (i,text) in [base.clone(),base.replace("9602 0.01","9602 100")].iter().enumerate() {
         std::fs::write(&high,text).unwrap();let output=dir.join(format!("receivers-{i}.wav"));
         success(Command::new(env!("CARGO_BIN_EXE_music_render")).arg("ensemble").arg(&output)
             .arg("--valve").arg(&high).arg("--valve").arg(&low)
