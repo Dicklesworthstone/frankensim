@@ -383,10 +383,15 @@ fn viscous_bending_reaches_bridge_shear_and_modal_decay() {
     }
 }
 
-/// Verified playable point of THIS rig (see the flattening-sweep table):
-/// violin-like beta = 0.11 from the bridge, forte bow speed, firm force.
+/// Playable point of THIS rig: violin-like beta = 0.11 from the bridge, forte
+/// bow speed, moderate force, chosen where regime and steady pitch converge in
+/// the substep ladder (`playable_point_is_converged_across_substeps`). The
+/// former 3.9 N sits at the rig's Schelleng ceiling: there the regime flipped
+/// between playable and surface/dead across 4..64 substeps under both the old
+/// capture-window contact and the set-valued one, so a gate there certified
+/// one substep count rather than the physics.
 fn playable_gesture() -> BowGesture {
-    BowGesture::admit(0.45, 3.9, 0.11).expect("canonical gesture admits")
+    BowGesture::admit(0.45, 2.0, 0.11).expect("canonical gesture admits")
 }
 
 fn config(gesture: BowGesture, island: FrictionIsland, steps: usize) -> BowedRunConfig {
@@ -523,18 +528,21 @@ fn falsifier_viscous_only_friction_fails_the_stick_slip_gate() {
 }
 
 /// GATE (d): within the playable band, higher bow force flattens the pitch
-/// (the classic effect): measured cents drift DOWN vs F_n, logged as a
-/// table. Thresholds are this rig's declared tolerances, not literature
-/// constants transcribed as truth.
+/// (the classic effect): measured cents drift DOWN at every step in F_n,
+/// logged as a table. The window is the last 100 ms of 500 ms: at 300 ms the
+/// 2.75 N motion is still settling (-141 cents there, -29 by 500 ms). The
+/// band stops below the aperiodic Schelleng ceiling (see `playable_gesture`).
+/// Thresholds are this rig's declared tolerances, not literature constants
+/// transcribed as truth.
 #[test]
 fn pitch_flattens_as_bow_force_rises_inside_the_playable_band() {
     let c = card();
     let sr = f64::from(c.sample_rate_hz);
-    let forces = [2.0, 2.75, 3.25, 3.9];
+    let forces = [1.5, 2.0, 2.75, 3.25];
     let mut cents_rows = Vec::new();
     for force in forces {
         let gesture = BowGesture::admit(0.45, force, 0.11).expect("sweep gesture admits");
-        let log = run_bowed(&config(gesture, FrictionIsland::Stribeck(rosin()), 14_400))
+        let log = run_bowed(&config(gesture, FrictionIsland::Stribeck(rosin()), 24_000))
             .expect("flattening sweep run stays bounded");
         let win_start = log.bow_point_velocity_m_s.len() - 4_800;
         let cents = cents_deviation(
@@ -550,13 +558,60 @@ fn pitch_flattens_as_bow_force_rises_inside_the_playable_band() {
     let first = cents_rows[0].1;
     let last = cents_rows[cents_rows.len() - 1].1;
     println!("flattening span: {first:+.1} -> {last:+.1} cents");
-    assert!(
-        last < first,
-        "higher bow force must not SHARPEN the pitch in this rig (got {first:+.1} -> {last:+.1})"
-    );
+    for pair in cents_rows.windows(2) {
+        assert!(
+            pair[1].1 < pair[0].1,
+            "higher bow force must not SHARPEN the pitch in this rig: {cents_rows:?}"
+        );
+    }
     assert!(
         first - last < 200.0,
         "flattening beyond two semitones means the sweep left the playable band"
+    );
+}
+
+/// GATE (e), G1: the playable point is converged in the substep axis. Every
+/// rung classifies playable and the steady pitch agrees within a measured
+/// band (spread 5.1 cents over 4..64 substeps on ts1; band 12 cents). The
+/// discrete contact mobility shrinks with the substep, so coarse rungs can
+/// meet several contact roots and fine rungs only one: agreement across the
+/// ladder also bounds what the root-selection rule contributes.
+#[test]
+fn playable_point_is_converged_across_substeps() {
+    let c = card();
+    let sr = f64::from(c.sample_rate_hz);
+    let mut rows = Vec::new();
+    for subsamples in [4, 8, 16, 32, 64] {
+        let mut cfg = config(
+            playable_gesture(),
+            FrictionIsland::Stribeck(rosin()),
+            24_000,
+        );
+        cfg.subsamples = subsamples;
+        let log = run_bowed(&cfg).expect("substep rung stays bounded");
+        let m = gate_metrics(&log, &c);
+        let n = log.bow_point_velocity_m_s.len();
+        let cents = cents_deviation(
+            &log.bow_point_velocity_m_s[n - 4_800..],
+            c.fundamental_hz() * 0.92,
+            c.fundamental_hz() * 1.10,
+            c.fundamental_hz(),
+            sr,
+        );
+        println!(
+            "{{\"suite\":\"bowed-gates\",\"case\":\"substep-ladder\",\"subsamples\":{subsamples},\"class\":\"{}\",\"cents\":{cents},\"slip_fraction\":{},\"intervals_per_period\":{}}}",
+            classify(&m),
+            m.slip_frac,
+            m.intervals_per_period
+        );
+        assert_eq!(classify(&m), "playable", "substep rung {subsamples}: {m:?}");
+        rows.push(cents);
+    }
+    let high = rows.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let low = rows.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(
+        high - low <= 12.0,
+        "steady pitch must agree across substeps: {rows:?}"
     );
 }
 

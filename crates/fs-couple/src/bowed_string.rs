@@ -10,16 +10,14 @@
 //!   `omega_k² = (T kappa² + EI kappa⁴)/mu`, `kappa = k pi/L`.
 //!   Unit-mass shapes `phi_k(x) = sin(k pi x / L) / sqrt(mu L / 2)`
 //!   are stepped by the exact-ZOH [`ModalAcousticTimeModel`].
-//! - Bow: constant-velocity driver with EVENT-BASED COULOMB STICTION.
-//!   The runtime uses the shared exact-ZOH endpoint response for sticking,
-//!   breaking away when the required force exceeds `mu_static * F_n`.
-//!   This is endpoint no-slip, not a continuous-time constraint. While slipping
-//!   the implicit endpoint traction follows the regularized kinetic
-//!   Stribeck curve `mu_k + (mu_s - mu_k) exp(-(v/v0)^2)`. Capture fires
-//!   when the relative velocity changes sign between sub-steps or is
-//!   already inside `stiction_m_s`: a regularized ramp alone can never
-//!   capture this contact (point mass ~2e-5 kg crosses any velocity window
-//!   within one sub-step).
+//! - Bow: constant-velocity driver with a SET-VALUED Stribeck contact.
+//!   Each substep solves the shared exact-ZOH endpoint load line against the
+//!   unregularized kinetic curve `mu_k + (mu_s - mu_k) exp(-(v/v0)^2)` and the
+//!   static cone `mu_s F_n` ([`crate::stribeck_friction::StribeckLoadLine`]).
+//!   Sticking is endpoint no-slip, not a continuous-time constraint. Where
+//!   the load line meets both the cone and a sliding root, the contact keeps
+//!   the branch it is on (hysteresis) and changes only where that branch ends.
+//!   There is no capture window or ramp scale in the bow path.
 //! - Bridge: rigid v1 logs only the string; the second configuration drives
 //!   a one-port [`CompactBody`] with the transmitted bridge force (rigid,
 //!   massless bridge approximation; the reaction is one-way and disclosed).
@@ -271,6 +269,20 @@ impl FrictionIsland {
                 )),
             },
             Self::ViscousOnly { .. } => Ok(None),
+        }
+    }
+
+    /// The unregularized fs-tribo law that owns set-valued bow contact.
+    fn kinetic_law(&self) -> Option<fs_tribo::FrictionLaw> {
+        match self {
+            Self::Stribeck(law) => Some(fs_tribo::FrictionLaw::Stribeck {
+                static_mu: law.mu_static,
+                kinetic_mu: law.mu_dynamic,
+                characteristic_speed: law.stiction_m_s,
+                viscous_per_speed: 0.0,
+            }),
+            Self::InterfaceStribeck { card, .. } => Some(card.friction_law().clone()),
+            Self::ViscousOnly { .. } => None,
         }
     }
 

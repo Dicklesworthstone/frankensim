@@ -356,9 +356,9 @@ transactional state/pressure budgets accompany every sample.
 using free modal motion plus unit-port-force mobility, with conjugate force
 and velocity projections. It refuses invalid/nonpositive mobility and
 nonfinite inputs/results without changing state. The ordinary step still
-admits state and energy budgets. The bowed consumer of this query was withdrawn:
-endpoint matching alone failed its playable-motion gate. Bowed hold/capture
-retains its approximate acceleration/velocity correction under the static cap.
+admits state and energy budgets. The bowed runtime's set-valued contact uses
+the same free-motion plus unit-force endpoint response, cached per bow station
+(see the Bow bullet under the string paths).
 G1 compares an independent oscillator solution
 and demonstrates the old pinning error; G3 checks mixed-sign multimode ports
 in all damping regimes and full/half/subsample durations. This enforces only
@@ -1129,17 +1129,30 @@ clarinet is one filling of those objects.
   pHS step, with the same stiff-string frequencies overwriting the
   linear ω_n. Bridge force `T_eff y'(0)` drives every listed body mode
   (Carcagno-band Sitka pair is a constructor, not a named guitar).
-- Bow: MWS regularized friction (steep stiction ramp + falling kinetic
-  shoulder). Helmholtz motion is possible with enough modes; it is not
-  guaranteed and not a measured rosin curve. `stribeck_friction` delegates
-  traction to `fs-tribo::FrictionLaw::regularized_traction_1d`, reversing the
-  port's driver-minus-body velocity to the owner's body-minus-driver
-  convention. The shared owner supplies deterministic exponential evaluation
-  and refuses malformed coefficients, negative/non-finite normal loads, and
+- Bow: a set-valued Stribeck contact (`stribeck_friction::StribeckLoadLine`).
+  Each substep solves the exact-ZOH endpoint load line `v = v_free - m F`
+  against the unregularized kinetic law of `fs-tribo::FrictionLaw::Stribeck`
+  and its static cone `mu_s N`. The residual has at most one local maximum and
+  one local minimum, so its stable roots are bracketed exactly. Where a stick
+  reaction and sliding roots coexist, the contact keeps its branch
+  (McIntyre–Schumacher–Woodhouse hysteresis) and changes only at a fold, a
+  slip reversal or a lift. No capture window or ramp scale enters the bow
+  path. G1 checks root selection against a dense-scan oracle, the hysteresis
+  loop against an independent fold scan, and the Coulomb closed form. The
+  bowed gates measure a 4..64 substep ladder at the playable point (playable
+  on every rung, steady pitch within 12 cents). The former capture window
+  (`max(stiction, 0.02)` and a 0.15 m/s flip basin) is gone; at 3.9 N, its old
+  gate point, the regime was not converged in substeps under either contact.
+  Helmholtz motion is possible with enough modes; it is not guaranteed and
+  not a measured rosin curve. For explicit ODE embeddings elsewhere,
+  `StribeckFriction` delegates traction to
+  `fs-tribo::FrictionLaw::regularized_traction_1d`, reversing the port's
+  driver-minus-body velocity to the owner's body-minus-driver convention. The
+  shared owner supplies deterministic exponential evaluation and refuses
+  malformed coefficients, negative/non-finite normal loads, and
   unrepresentable force. G1/G3 checks compare the force with an independent
-  Stribeck formula and the work of equal-and-opposite contact forces.
-  This wiring neither admits sourced interface data nor replaces the bowed
-  fixture's event-based stiction algorithm or authored modal losses.
+  Stribeck formula and the work of equal-and-opposite contact forces. This
+  wiring admits no sourced interface data or authored modal losses.
   `BowedStringCard::from_material_specimen` lowers a resolved circular specimen
   using the shared pinned-beam dispersion, Kelvin–Voigt loss and cylinder-air
   drag owners. It requires a matching loss/material identity and frequency
@@ -1153,7 +1166,8 @@ clarinet is one filling of those objects.
   G1 tests compare independent held-load motion, energy and support shear;
   G3 checks shared pluck/bow losses and sensitivity to material viscosity and
   ambient pressure. This does not evolve material state, route damping heat,
-  model nonlinear stretch, or establish bow-contact convergence/passivity.
+  model nonlinear stretch, or establish bow-contact passivity; substep
+  convergence is measured at the playable point only.
   `FrictionIsland::InterfaceStribeck` consumes an ordered dry-interface card
   through `fs-tribo`, retaining its identity, history and caller authority.
   The complete sliding law, including velocity strengthening, drives force;

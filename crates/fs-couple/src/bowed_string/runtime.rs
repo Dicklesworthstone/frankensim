@@ -9,7 +9,9 @@ use crate::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
     ModalAcousticWorkspace, advance_exact_zoh,
 };
-use crate::stribeck_friction::{StribeckFriction, ImplicitFrictionError, solve_implicit_friction};
+use crate::stribeck_friction::{
+    ContactBranch, ImplicitFrictionError, StribeckFriction, StribeckLoadLine, solve_implicit_friction,
+};
 use crate::thin_plate::CompactBody;
 use fs_exec::CancelGate;
 
@@ -46,9 +48,10 @@ pub struct BowedSample {
 /// The string's candidate states reuse a workspace; a plate retains its own
 /// allocation behavior. No blanket real-time guarantee is implied.
 ///
-/// Sticking and sliding use the same exact-ZOH port response. Sticking enforces
-/// endpoint no-slip within the static capacity; sliding solves the original
-/// material-owned regularized law at the endpoint, not at the old velocity.
+/// Sticking and sliding use the same exact-ZOH port response. One set-valued
+/// step per substep ([`StribeckLoadLine`]) chooses endpoint no-slip within the
+/// static capacity or the unregularized kinetic law at the endpoint, keeping the
+/// contact's current branch where several roots exist.
 /// The velocity response is cached from the shared modal transition, with no
 /// state subtraction to recover small mobilities. This is not a continuous-time
 /// constraint, a continuous-time passivity certificate or a new friction law.
@@ -59,6 +62,9 @@ pub struct BowedStringState {
     card: BowedStringCard,
     island: FrictionIsland,
     stribeck: Option<StribeckFriction>,
+    kinetic_law: Option<fs_tribo::FrictionLaw>,
+    load_line: Option<StribeckLoadLine>,
+    branch: ContactBranch,
     gesture: BowGesture,
     model: ModalAcousticTimeModel,
     workspace: ModalAcousticWorkspace,
@@ -74,9 +80,6 @@ pub struct BowedStringState {
     dt: f64,
     sub_dt: f64,
     subsamples: usize,
-    capture_tol: f64,
-    stuck: bool,
-    prev_v_rel: f64,
     peak_energy_j: f64,
     samples: u64,
     max_block: usize,
@@ -85,6 +88,15 @@ pub struct BowedStringState {
 
 fn invalid(what: &'static str) -> BowedRunError {
     BowedRunError::InvalidRequest { what }
+}
+
+fn friction_refusal<E>(error: ImplicitFrictionError<E>, source: impl FnOnce(E) -> BowedRunError) -> BowedRunError {
+    match error {
+        ImplicitFrictionError::Constitutive(cause) => source(cause),
+        ImplicitFrictionError::InvalidInput(what) => BowedRunError::Friction(what),
+        ImplicitFrictionError::NonDissipative => BowedRunError::Friction("implicit contact would drive relative slip"),
+        ImplicitFrictionError::NoConvergence => BowedRunError::Friction("implicit contact did not resolve the declared sliding law"),
+    }
 }
 
 impl BowedStringState {
@@ -177,12 +189,11 @@ impl BowedStringState {
         let peak_energy_j = frame_total_energy(&model);
         Ok(Self {
             card: card.clone(), island: config.island.clone(), stribeck,
+            kinetic_law: config.island.kinetic_law(), load_line: None, branch: ContactBranch::Fresh,
             gesture: config.gesture, model, workspace, shapes_at_bow, contact_velocity_rows,
             bridge_force_factors, bridge_viscous_factors, plate,
             listener_m: config.listener_m, forces: vec![0.0; card.mode_count],
-            dt, sub_dt, subsamples,
-            capture_tol: stribeck.map_or(0.0, |law| law.stiction_m_s.max(0.02)),
-            stuck: false, prev_v_rel: f64::NAN, peak_energy_j,
+            dt, sub_dt, subsamples, peak_energy_j,
             samples: 0, max_block, poisoned: false,
         })
     }
@@ -215,9 +226,9 @@ impl BowedStringState {
     /// zero normal force explicitly LIFTS the bow and bypasses friction, including
     /// the viscous falsifier. It does not silence or reset the string or body.
     ///
-    /// Changes in speed or station invalidate the old contact's capture history,
-    /// not the modal state. A load change alone retains stiction until its force
-    /// cap is evaluated on the next substep. Refusals leave all state untouched.
+    /// A speed, station or load change keeps the contact branch; the next substep
+    /// evaluates it on the new load line. Lifting or landing the bow clears that
+    /// history, so a new touch starts fresh. Refusals leave all state untouched.
     /// The positive-load, legacy [`BowGesture::admit`] contract is unchanged.
     pub fn set_bow(&mut self, velocity_m_s: f64, normal_force_n: f64, station: f64)
         -> Result<(), BowedRunError>
@@ -249,12 +260,8 @@ impl BowedStringState {
                 self.island.sliding_traction(law, velocity_m_s - velocity, normal_force_n)?;
             }
         }
-        if velocity_m_s.to_bits() != self.gesture.v_bow_m_s.to_bits()
-            || station.to_bits() != self.gesture.station_fraction.to_bits()
-            || normal_force_n == 0.0 || self.gesture.normal_force_n == 0.0
-        {
-            self.stuck = false;
-            self.prev_v_rel = f64::NAN;
+        if normal_force_n == 0.0 || self.gesture.normal_force_n == 0.0 {
+            self.branch = ContactBranch::Fresh;
         }
         // Repeating an unchanged station preserves the original reduction bits.
         if station.to_bits() != self.gesture.station_fraction.to_bits() {
@@ -333,32 +340,35 @@ impl BowedStringState {
         Ok((free_relative, mobility))
     }
 
-    fn implicit_sliding_traction(&self, free_relative: f64, mobility: f64)
+    fn implicit_viscous_traction(&self, viscous_n_s_per_m: f64, free_relative: f64, mobility: f64)
         -> Result<f64, BowedRunError>
     {
-        let step = solve_implicit_friction(free_relative, mobility, |velocity| {
-            match &self.island {
-                FrictionIsland::Stribeck(_) | FrictionIsland::InterfaceStribeck { .. } => {
-                    let law = self.stribeck.ok_or(BowedRunError::Friction("missing Stribeck law"))?;
-                    // Preserve the interface owner's viscous strengthening term.
-                    // Numerical root trials use the declared analytic law; source
-                    // applicability is checked at both actual physical endpoints.
-                    self.island.sliding_traction(law, velocity, self.gesture.normal_force_n)
-                }
-                FrictionIsland::ViscousOnly { viscous_n_s_per_m } => Ok(viscous_n_s_per_m * velocity),
-            }
-        }).map_err(|error| match error {
-            ImplicitFrictionError::Constitutive(source) => source,
-            ImplicitFrictionError::InvalidInput(what) => BowedRunError::Friction(what),
-            ImplicitFrictionError::NonDissipative => BowedRunError::Friction("implicit contact would drive relative slip"),
-            ImplicitFrictionError::NoConvergence => BowedRunError::Friction("implicit contact did not resolve the declared sliding law"),
-        })?;
-        self.island.check_state(step.relative_velocity_m_s, self.gesture.normal_force_n)?;
+        let step = solve_implicit_friction(free_relative, mobility,
+            |velocity| Ok::<_, BowedRunError>(viscous_n_s_per_m * velocity))
+            .map_err(|error| friction_refusal(error, |source| source))?;
+        Ok(step.traction_n)
+    }
+
+    // The owner's set-valued step: stick inside the static cone or slide on the
+    // unregularized kinetic law, keeping the branch the contact is on. Source
+    // applicability is checked at the committed endpoint, zero when sticking.
+    fn set_valued_traction(&mut self, free_relative: f64, mobility: f64) -> Result<f64, BowedRunError> {
+        let normal = self.gesture.normal_force_n;
+        if !self.load_line.as_ref().is_some_and(|line| line.matches(normal, mobility)) {
+            let law = self.kinetic_law.as_ref().ok_or(BowedRunError::Friction("missing Stribeck law"))?;
+            let line = StribeckLoadLine::new(law, normal, mobility)
+                .map_err(|error| friction_refusal(error, BowedRunError::Interface))?;
+            self.load_line = Some(line);
+        }
+        let line = self.load_line.as_ref().ok_or(BowedRunError::Friction("missing load line"))?;
+        let step = line.step(free_relative, self.branch)
+            .map_err(|error| friction_refusal(error, BowedRunError::Interface))?;
+        self.island.check_state(step.relative_velocity_m_s, normal)?;
+        self.branch = step.branch;
         Ok(step.traction_n)
     }
 
     fn advance_sample(&mut self) -> Result<BowedSample, BowedRunError> {
-        const CAPTURE_BASIN_M_S: f64 = 0.15;
         for _ in 0..self.subsamples {
             let v_str: f64 = self.model.states().iter().zip(&self.shapes_at_bow)
                 .map(|(s, phi)| phi * s.velocity_m_sqrt_kg_per_s).sum();
@@ -366,36 +376,15 @@ impl BowedStringState {
             // No contact exists while the bow is lifted. In particular the
             // interface's positive-load domain is not queried at zero load.
             let traction = if self.gesture.normal_force_n == 0.0 {
-                self.stuck = false;
-                self.prev_v_rel = f64::NAN;
+                self.branch = ContactBranch::Fresh;
                 0.0
             } else {
                 self.island.check_state(v_rel, self.gesture.normal_force_n)?;
-                let flip_speed = self.prev_v_rel.abs().max(v_rel.abs());
-                let flipped = self.prev_v_rel.is_finite() && !self.stuck
-                    && self.prev_v_rel.signum() != v_rel.signum()
-                    && flip_speed <= CAPTURE_BASIN_M_S;
-                self.prev_v_rel = v_rel;
                 let (free_relative, mobility) = self.contact_response()?;
-                match &self.island {
-                    FrictionIsland::Stribeck(_) | FrictionIsland::InterfaceStribeck { .. } => {
-                        let law = self.stribeck.ok_or(BowedRunError::Friction("missing Stribeck law"))?;
-                        let hold_cap = law.mu_static * self.gesture.normal_force_n;
-                        let pin = free_relative / mobility;
-                        if (self.stuck || flipped || v_rel.abs() <= self.capture_tol)
-                            && pin.abs() <= hold_cap
-                        {
-                            self.island.check_state(0.0, self.gesture.normal_force_n)?;
-                            self.stuck = true;
-                            pin
-                        } else {
-                            self.stuck = false;
-                            self.implicit_sliding_traction(free_relative, mobility)?
-                        }
-                    }
-                    FrictionIsland::ViscousOnly { .. } => {
-                        self.implicit_sliding_traction(free_relative, mobility)?
-                    }
+                if let FrictionIsland::ViscousOnly { viscous_n_s_per_m } = self.island {
+                    self.implicit_viscous_traction(viscous_n_s_per_m, free_relative, mobility)?
+                } else {
+                    self.set_valued_traction(free_relative, mobility)?
                 }
             };
             for (q, phi) in self.forces.iter_mut().zip(&self.shapes_at_bow) { *q = traction * phi; }
@@ -473,6 +462,12 @@ pub enum BowedRenderOutcome {
 mod exact_stiction_tests {
     use super::*;
 
+    // The unregularized kinetic traction a sliding set-valued step commits.
+    fn kinetic_traction(cfg: &BowedRunConfig, slip: f64) -> f64 {
+        let law = cfg.island.kinetic_law().unwrap();
+        slip.signum() * law.kinetic_coefficient(slip.abs()).unwrap() * cfg.gesture.normal_force_n
+    }
+
     // Numerical mechanics fixtures, not claims of measured instrument timbre.
     fn config(length: f64, mu: f64, tension: f64, bending: f64) -> BowedRunConfig {
         BowedRunConfig {
@@ -500,7 +495,7 @@ mod exact_stiction_tests {
                 let mut voice = BowedStringState::new(&cfg, 64).unwrap();
                 for _ in 0..64 {
                     let frame = voice.step().unwrap();
-                    assert!(voice.stuck);
+                    assert_eq!(voice.branch, ContactBranch::Stuck);
                     assert!(frame.relative_velocity_m_s.abs() < 2.0e-11,
                         "endpoint slip {} with {subsamples} substeps", frame.relative_velocity_m_s);
                 }
@@ -513,18 +508,19 @@ mod exact_stiction_tests {
         let cfg = config(0.328, 0.003, 50.0, 1.0e-5);
         let mut voice = BowedStringState::new(&cfg, 1).unwrap();
         voice.step().unwrap();
-        // Pass through rest so recapture remains inside the existing basin.
+        // A held contact follows the bow through rest and reversal: the cone
+        // still holds, so the branch is kept across the speed changes.
         for velocity in [0.0, -0.01] {
             voice.set_bow(velocity, 100.0, 0.13).unwrap();
             let frame = voice.step().unwrap();
-            assert!(voice.stuck);
+            assert_eq!(voice.branch, ContactBranch::Stuck);
             assert!(frame.relative_velocity_m_s.abs() < 2.0e-11);
         }
         let mut free = voice.model.clone();
         free.step_duration(&vec![0.0; cfg.card.mode_count], voice.sub_dt).unwrap();
         voice.set_bow(0.5, 0.0, 0.13).unwrap();
         voice.step().unwrap();
-        assert!(!voice.stuck);
+        assert_eq!(voice.branch, ContactBranch::Fresh);
         assert_eq!(voice.model.states(), free.states());
         assert!(voice.total_modal_energy_j() > 0.0);
     }
@@ -539,13 +535,12 @@ mod exact_stiction_tests {
         ).unwrap();
         assert!(required > 0.8 * cfg.gesture.normal_force_n);
         let frame = voice.step().unwrap();
-        assert!(!voice.stuck);
+        assert_ne!(voice.branch, ContactBranch::Stuck);
         assert!(frame.relative_velocity_m_s > 0.009);
-        // The actual load is the declared kinetic law at the NEW endpoint.
-        let law = voice.stribeck.unwrap();
-        let traction = cfg.island.sliding_traction(
-            law, frame.relative_velocity_m_s, cfg.gesture.normal_force_n,
-        ).unwrap();
+        // The actual load is the unregularized kinetic law at the NEW endpoint,
+        // here inside the island's ODE ramp scale, which the bow never uses.
+        assert!(frame.relative_velocity_m_s < voice.stribeck.unwrap().regularization_m_s);
+        let traction = kinetic_traction(&cfg, frame.relative_velocity_m_s);
         for (force, phi) in voice.forces.iter().zip(&voice.shapes_at_bow) {
             assert!((*force - traction * phi).abs() < 1.0e-12);
         }
@@ -579,15 +574,13 @@ mod exact_stiction_tests {
             let mut cfg = config(length, mu, tension, bending);
             cfg.gesture = BowGesture::admit(0.2, 0.02, 0.13).unwrap();
             let mut voice = BowedStringState::new(&cfg, 64).unwrap();
-            let law = voice.stribeck.unwrap();
             for sample in 0..64 {
                 // Exercise a geometry gesture too; it changes both conjugate
                 // projections without resetting the cached material response.
                 if sample == 32 { voice.set_bow(0.2, 0.02, 0.19).unwrap(); }
                 let frame = voice.step().unwrap();
-                assert!(!voice.stuck);
-                let expected = cfg.island.sliding_traction(law,
-                    frame.relative_velocity_m_s, cfg.gesture.normal_force_n).unwrap();
+                assert_ne!(voice.branch, ContactBranch::Stuck);
+                let expected = kinetic_traction(&cfg, frame.relative_velocity_m_s);
                 for (force, phi) in voice.forces.iter().zip(&voice.shapes_at_bow) {
                     assert!((*force - expected * phi).abs() < 1.0e-10);
                 }
