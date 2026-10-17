@@ -809,6 +809,13 @@ fn available_render_linear_owners_are_measured_without_promoting_unmigrated_path
                 }
                 let verdict = if measured.abs() <= 0.01 {
                     "exact-linear-control"
+                } else if measured.abs() <= 1.0
+                    && row.bound.is_some_and(|bound| {
+                        bound <= fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP
+                    })
+                {
+                    // A midpoint row admitted only inside its one-cent band.
+                    "one-cent-banded"
                 } else {
                     "requires-migration"
                 };
