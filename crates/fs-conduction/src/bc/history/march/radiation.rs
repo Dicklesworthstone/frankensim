@@ -10,6 +10,8 @@
 //! All schedules use explicit endpoint quadrature. This adds no enclosure,
 //! occlusion, pointwise T(x)^4 integral, evolving emissivity or latent-heat model.
 
+mod adaptive;
+
 use super::{ThermalBoundaryHistory, ThermalHistoryMethod, ThermalHistoryRun, invalid, poll};
 use super::events;
 use crate::{AmbientRadiationConfig, AmbientRadiationPatch, ConductionError,

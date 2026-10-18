@@ -1,21 +1,29 @@
-//! Local enthalpy/fraction accuracy and atomic adaptive phase publication.
+//! Latent error coordinates, radiative material retention and accepted-pair work.
 mod support;
 
 use fs_conduction::bc::history::ThermalBoundaryHistory;
-use fs_conduction::bc::history::march::{HeatSourceHistory, ThermalHistoryProblem};
+use fs_conduction::bc::history::march::{HeatSourceHistory, ThermalHistoryProblem, ThermalHistoryRun};
 use fs_conduction::bc::history::march::events::adaptive::AdaptiveHistoryConfig;
 use fs_conduction::bc::history::march::enthalpy::{EnthalpyHistoryBudget, EnthalpyHistoryMaterials, EnthalpyHistoryRun};
 use fs_conduction::bc::history::march::enthalpy::adaptive::PhaseErrorTolerance;
+use fs_conduction::bc::history::march::enthalpy::radiation::RadiativeEnthalpyHistoryRun;
+use fs_conduction::bc::history::march::radiation::{RadiationRegionHistory, RadiativeThermalHistoryRun};
+use fs_conduction::transient::{VolumetricHeatCapacity, backward_euler::{BackwardEuler, StepConfig}};
 use fs_conduction::transient::enthalpy::{EnthalpyBudget, EnthalpyStepConfig};
 use fs_conduction::transient::enthalpy::heterogeneous::ReferenceEnthalpyMaterial;
-use fs_conduction::{ConductionMesh, ConductivityModel, ThermalBc, ThermalBoundaryBuilder, VOLUMETRIC_SOURCE_DIMS};
+use fs_conduction::{AmbientRadiationConfig, AmbientRadiationPatch, ConductionMesh, ConductionProblem,
+    ConductivityModel, LinearConfig, ScalarField, SurfaceEmissivity, ThermalBc, ThermalBoundaryBuilder,
+    EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY, TEMPERATURE_DIMS, VOLUMETRIC_SOURCE_DIMS};
 use fs_blake3::ContentHash;
+use fs_evidence::ValidityDomain;
 use fs_exec::Cx;
+use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
+    PropertyKey, PropertyValue, Provenance, SelectionPolicy, UncertaintyModel};
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 use fs_qty::{Dims, QtyAny};
 use fs_rep_mesh::TetComplex;
 use fs_scenario::scenario::Environment;
-use fs_scenario::signal::TimeSignal;
+use fs_scenario::signal::{Interp, TimeSignal};
 use fs_solver::NewtonKrylovConfig;
 use support::{with_cancelled_cx, with_cx};
 
@@ -63,6 +71,17 @@ fn run<'h,'m,'c>(cx:&Cx<'_>, history:&'h ThermalBoundaryHistory<'m>, material:&'
         phase_conductivity:None }, &[150.+offset;4], EnthalpyHistoryBudget {
             spatial:EnthalpyBudget { max_vertices:4,max_elements:1 }, max_steps:4 }).unwrap()
 }
+fn emissivity() -> SurfaceEmissivity {
+    let mut claims=ClaimSet::new();
+    claims.insert_claim(PropertyClaim { key:PropertyKey::new(SURFACE_EMISSIVITY_PROPERTY,EMISSIVITY_DIMS),
+        value:PropertyValue::Scalar { value:0.8,dims:EMISSIVITY_DIMS },
+        validity:ValidityDomain::unconstrained().with("T",280.,380.), uncertainty:UncertaintyModel::Unstated,
+        interpolation:InterpolationPolicy::ConstantWithinValidity, observations:Vec::new(),
+        provenance:Provenance { source:"synthetic adaptive radiation fixture".into(), license:"internal-test-use".into(),artifact:None }}).unwrap();
+    let card=MaterialCard::assemble(MaterialStateId { chemistry:"gray fixture".into(),phase:"solid".into(),
+        process:"synthetic".into(),revision:0 },claims,Vec::new()).unwrap();
+    SurfaceEmissivity::from_card("surface",&card,320.,SelectionPolicy::SingleClaimOnly).unwrap()
+}
 
 #[test]
 fn g1_phase_error_rejects_an_inaccurate_isothermal_plateau_and_ignores_enthalpy_origin() {
@@ -107,5 +126,64 @@ fn g0_rejected_phase_trials_and_cancellation_publish_no_partial_half_step() {
         let enthalpy_only=PhaseErrorTolerance { absolute_enthalpy_j_kg:0.05,absolute_liquid_fraction:1.,..phase() };
         let accepted=model.advance_adaptive_step(cx,1.,1.,controls(),adaptive(),enthalpy_only).unwrap();
         assert!(accepted.rejected_attempts>0); assert!(accepted.normalized_error<=1.);
+    });
+}
+
+#[test]
+fn g1_radiative_phase_adaptation_retains_latent_heat_and_reservoir_time() {
+    let mesh=mesh(); let material=ConductivityModel::isotropic_declared(2.).unwrap(); let chart=curve(0.);
+    with_cx(|cx| {
+        let history=boundary(cx,&mesh);
+        let patch=RadiationRegionHistory { region:"surface".into(),emissivity:emissivity(),
+            ambient_temperature:ramp(310.,340.,0.02,TEMPERATURE_DIMS) };
+        let mut model=RadiativeEnthalpyHistoryRun::new(cx,run(cx,&history,&material,&chart,0.,
+            HeatSourceHistory::Fixed(ScalarField::Uniform(0.))),vec![patch.clone()],AmbientRadiationConfig::default()).unwrap();
+        let step=model.advance_adaptive_step(cx,0.02,0.02,controls(),adaptive(),phase()).unwrap();
+        assert!(step.rejected_attempts>0); assert!(step.normalized_error<=1.);
+        assert!(model.conduction().temperature().iter().all(|&t| t==310.));
+        let flux=|time:f64| 0.8*fs_conduction::STEFAN_BOLTZMANN_W_M2_K4*((310.+1500.*time).powi(4)-310.0_f64.powi(4));
+        let supplied=flux(step.midpoint_time_s)*step.midpoint_time_s
+            +flux(step.end_time_s)*(step.end_time_s-step.midpoint_time_s);
+        for (node,&h) in model.conduction().specific_enthalpy_j_kg().iter().enumerate() {
+            let weight=if node==0 { 0.5 } else { (1.+3.0_f64.sqrt()/2.)/3. };
+            assert!((h-(150.+weight*supplied/(1./24.))).abs()<1e-7);
+        }
+        for half in [&step.first_half,&step.second_half] {
+            assert!(half.physical_energy_residual_j.abs()<=controls().energy_tolerance_j);
+            assert_eq!(half.convective_out_w,0.); assert!(half.convective_robin_fluxes.is_empty());
+            assert_eq!(half.radiation.patches[0].patch.emissivity(),&patch.emissivity);
+        }
+        assert_eq!(model.conduction().accepted_steps(),2);
+        assert_eq!(model.patches(),&[patch]);
+    });
+}
+
+#[test]
+fn g1_radiative_temperature_adaptation_matches_the_actual_two_endpoint_solves() {
+    let mesh=mesh();let material=ConductivityModel::isotropic_declared(2.).unwrap();
+    with_cx(|cx| {
+        let history=boundary(cx,&mesh);let zero=ScalarField::Uniform(0.);
+        let base=ThermalHistoryRun::new(cx,problem(&history,&material,HeatSourceHistory::Fixed(zero.clone())),
+            VolumetricHeatCapacity::declared(15.).unwrap(),&[350.;4],2).unwrap();
+        let patch=RadiationRegionHistory { region:"surface".into(),emissivity:emissivity(),
+            ambient_temperature:TimeSignal::Table { times:vec![0.,0.004],values:vec![300.,340.],
+                dims:TEMPERATURE_DIMS,interp:Interp::Hold }};
+        let mut model=RadiativeThermalHistoryRun::new(cx,base,vec![patch.clone()],AmbientRadiationConfig::default()).unwrap();
+        let config=StepConfig { linear:LinearConfig { tolerance:1e-12,..LinearConfig::default() },energy_tolerance_j:1e-7 };
+        let selected=model.advance_adaptive_step(cx,0.01,0.01,config,adaptive()).unwrap();
+        assert!(selected.end_time_s<=0.004);assert!(selected.normalized_error<=1.);
+        let engine=BackwardEuler::uniform(cx,&mesh,VolumetricHeatCapacity::declared(15.).unwrap()).unwrap();
+        let boundary=history.at(cx,0.).unwrap();
+        let original=ConductionProblem { mesh:&mesh,boundary:&boundary,material:&material,source:&zero,element_materials:None };
+        let fixed=AmbientRadiationPatch::new("surface",patch.emissivity.clone(),300.).unwrap();
+        let first=engine.advance_prescribed_with_ambient_radiation(cx,original,None,&[350.;4],
+            selected.midpoint_time_s,config,None,&[fixed.clone()],AmbientRadiationConfig::default()).unwrap();
+        let second=engine.advance_prescribed_with_ambient_radiation(cx,original,None,&first.conduction.temperature,
+            selected.end_time_s-selected.midpoint_time_s,config,None,&[fixed],AmbientRadiationConfig::default()).unwrap();
+        assert_eq!(selected.first_half.conduction.temperature,first.conduction.temperature);
+        assert_eq!(selected.second_half.conduction.temperature,second.conduction.temperature);
+        assert_eq!(selected.second_half.radiation,second.radiation);
+        assert_eq!(model.conduction().temperature(),second.conduction.temperature.as_slice());
+        assert_eq!(model.conduction().accepted_steps(),2);
     });
 }

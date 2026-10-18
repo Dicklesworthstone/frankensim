@@ -6,6 +6,8 @@
 //! energy-admitted enthalpy/temperature/fraction endpoint. No inner iteration
 //! advances physical time, and no latent heat is deposited a second time.
 
+mod adaptive;
+
 use super::{EnthalpyHistoryRun, conduction, invalid, poll};
 use super::super::radiation::{RadiationRegionHistory, admit_histories, patches_before};
 use super::super::events;
