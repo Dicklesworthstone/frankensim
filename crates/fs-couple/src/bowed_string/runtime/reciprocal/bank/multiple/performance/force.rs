@@ -5,7 +5,7 @@
 //! preload, motion, friction, work and pressure. No additional physics stepper.
 
 use super::{MultiBowPerformance, MultiBowStringBank, render_invalid};
-use crate::bowed_string::runtime::reciprocal::{ReciprocalStringError, bank::{StringBowLocation, shape}};
+use crate::bowed_string::runtime::reciprocal::{ReciprocalStringError, bank::StringBowLocation};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::render::schedule::force::{ForceInitialization, ForceRenderConfig, ModalForceEvent};
@@ -16,7 +16,8 @@ use fs_exec::CancelGate;
 /// Which physical motion is work-conjugate to the applied transverse force.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StringForceCoupling {
-    /// Transverse centreline force, with zero applied torque.
+    /// Transverse centreline force along the source's bow direction in both
+    /// selected planes, with zero applied torque.
     Centreline,
     /// Force at the same signed outer surface used by bow contact. Includes
     /// radius times angular velocity/torque when the source has torsional modes.
@@ -102,11 +103,7 @@ impl MultiBowStringBank {
             let card = &self.cards[index];
             let local = match port.coupling {
                 StringForceCoupling::Surface => source.source.surface_shape(card, station).map_err(source_error)?,
-                StringForceCoupling::Centreline => {
-                    let mut column = shape(card, station);
-                    if column.len() > count { return Err(render_invalid("string force basis is inconsistent")); }
-                    column.resize(count, 0.0); column
-                },
+                StringForceCoupling::Centreline => source.source.transverse_shape(card, station).map_err(source_error)?,
             };
             if local.len() != count || local.iter().any(|x| !x.is_finite()) {
                 return Err(render_invalid("string force map differs from its actual finite basis"));

@@ -1305,6 +1305,36 @@ clarinet is one filling of those objects.
   refuse non-finite volume flow or pressure. G0/G3 checks cover malformed
   distances and inverse-distance pressure scaling with identical motion.
   This compact observer adds no propagation delay or general near-field claim.
+  The material string bank can retain both transverse displacement planes
+  through `MaterialStringSource::with_transverse_polarizations(TransverseDirections::try_new(bow, bridge)?)`.
+  Both planes use the same original circular section, installed tension, density,
+  bending stiffness, material loss and gas drag. Their physical directions project
+  displacement and force with the same work-conjugate map; shared body compliance
+  determines polarization mixing without an authored detuning. Coordinate order is
+  first transverse plane, second plane, then optional material torsion. Surface
+  bow/pluck ports include the original radius-times-angle contribution; centreline
+  loads and unilateral stops carry no invented radial torque. Stops follow the
+  source's declared centreline/bow axis. Existing explicit torque/rotation bridge
+  connections compose with both planes and retain their own source-derived angular
+  maps and passive laws. Material body/cavity pressure and scheduling remain in the
+  original joint solver.
+
+  `frankensim-material-strings-v3` extends the v2 section/support grammar with one
+  required `polarizations single` or `polarizations two BOW_X BOW_Y BRIDGE_X BRIDGE_Y`
+  record after each string section. Both directions must be finite unit vectors.
+  Existing v1/v2 files and optional `rotational-bridges` records retain their
+  semantics. `polarized-pluck.material-strings` exercises the data-to-PCM route.
+  This circular, frozen-state linear model does not supply arbitrary
+  six-degree-of-freedom bridge motion, independent stop-normal geometry, shared
+  nonlinear two-plane tension, helical winding/slip, or a measured-instrument timbre
+  guarantee. Nonlinear string conversion explicitly refuses a two-plane source
+  until its shared stretching law exists.
+
+  Seven focused physical tests cover material-mode identity, rotational
+  covariance, directional sound changes, force work conjugacy, constructor
+  ordering/refusals, combined rotational-bridge response and two-plane unilateral
+  contact. Three example tests cover source input, material/angle swaps,
+  PCM/callback identity and admission. Native verification is recorded separately.
 - Reed path: quasistatic or massive Bernoulli valve. Reeds with explicit
   positive stiffness derive their effective pressure area from the
   declared closing relation `A = k H / Pc`. Characteristic-line motion and

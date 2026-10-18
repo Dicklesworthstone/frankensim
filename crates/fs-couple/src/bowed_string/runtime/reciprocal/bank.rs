@@ -37,6 +37,8 @@ use fs_tribo::FrictionLaw;
 /// Original source data, not an averaged material or an authored modal preset.
 #[derive(Clone, Debug)]
 pub enum MaterialStringSource {
+    /// Both physical transverse planes of the same source, with explicit directions.
+    WithPolarizations(Box<polarization::PolarizedStringSource>),
     /// Original bending source extended by material-derived small-angle twist.
     WithTorsion(Box<torsion::TorsionalStringSource>),
     /// Homogeneous circular specimen, with its complete material/loss receipts.
@@ -53,7 +55,8 @@ pub enum MaterialStringSource {
 }
 impl MaterialStringSource {
     fn modes(&self) -> usize {
-        match self { Self::WithTorsion(t) => t.total_modes(),
+        match self { Self::WithPolarizations(p) => p.total_modes(),
+            Self::WithTorsion(t) => t.total_modes(),
             Self::Homogeneous(s) => s.string().n_modes,
             Self::Concentric { template, .. } => template.n_modes }
     }
@@ -61,6 +64,7 @@ impl MaterialStringSource {
         -> Result<BowedStringCard, ReciprocalStringError>
     {
         match self {
+            Self::WithPolarizations(p) => return p.source().lower(cx, gas, rate),
             Self::WithTorsion(t) => return t.bending().lower(cx, gas, rate),
             Self::Homogeneous(s) => BowedStringCard::from_material_specimen_with_gas(cx, s, gas, rate),
             Self::Concentric { template, section, prestress } =>
@@ -383,8 +387,10 @@ fn assemble_sources(
             }
             // This connection is transverse. Separately declared rotation ports
             // below supply torque; a centreline connection never invents one.
-            let mut bridge_shape = shape(card, connection.station_fraction);
-            bridge_shape.resize(total_modes, 0.0);
+            let bridge_shape = match source {
+                Some(source) => source.bridge_shape(card, connection.station_fraction)?,
+                None => shape(card, connection.station_fraction),
+            };
             links.push(ModalConnection {
                 left: ModalAttachment { component: index, shapes: bridge_shape },
                 right: ModalAttachment { component: cards.len() + connection.body.component,
@@ -397,8 +403,11 @@ fn assemble_sources(
             angular_frequency_rad_s: card.mode_omega_rad_s(k+1), damping_ratio: card.zetas[k],
             pressure_per_modal_velocity: fs_math::c64::C64::ZERO,
         }).collect();
-        if let Some(MaterialStringSource::WithTorsion(twist)) = source {
-            twist.append_modes(card, &mut modes, gate)?;
+        if let Some(source) = source {
+            source.append_extra_modes(card, &mut modes, gate)?;
+        }
+        if modes.len() != total_modes {
+            return Err(invalid("material string source differs from its complete modal basis"));
         }
         components.push(ModalAcousticTimeModel::try_new(options.sample_rate_hz, modes, options.string_budget)
             .map_err(|source| ReciprocalStringError::Network(ModalCouplingError::Component { component: index, source }))?);
@@ -443,6 +452,9 @@ pub mod chart;
 
 /// Several source-bound bow contacts without resetting the shared mechanics.
 pub mod multiple;
+
+/// Physical transverse directions in the same material/body/friction solve.
+pub mod polarization;
 
 /// Material-derived surface twisting in the same reciprocal contact solve.
 pub mod torsion;

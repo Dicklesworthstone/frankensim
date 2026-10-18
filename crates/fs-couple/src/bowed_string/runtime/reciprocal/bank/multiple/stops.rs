@@ -11,7 +11,7 @@ use crate::render::schedule::force::coupled::contact::{ModalContact, ModalContac
 use crate::render::schedule::force::coupled::contact::friction::multiple::obstacles::FrictionObstacleConfig;
 use fs_dcontact::Obstacle;
 
-/// Side of the original transverse coordinate on which the stop is situated.
+/// Side of the source's centreline/bow axis on which the stop is situated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StringStopSide {
     /// Positive relative transverse motion closes the contact.
@@ -66,8 +66,10 @@ impl MultiBowStringBank {
     /// it cannot falsely claim equilibrium while ignoring nonlinear contacts.
     /// A vibrating string may leave and re-enter a stop without a state reset.
     ///
-    /// This is fixed-geometry one-polarization compliant contact. It does not
-    /// solve finger motion, changing contact area, contact friction, geometric
+    /// This is fixed-geometry contact along the source's centreline/bow axis.
+    /// A two-plane source projects that same physical direction into both planes;
+    /// no independent stop-normal direction is inferred. It does not solve
+    /// finger motion, changing contact area, contact friction, geometric
     /// tension, a moving fret, rigid constraints or contact-induced adaptivity.
     /// Material source domains and spatial/time refinement remain necessary.
     pub fn with_string_stops(mut self, stops: Vec<MaterialStringStop>,

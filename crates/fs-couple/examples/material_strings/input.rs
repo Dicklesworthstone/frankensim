@@ -3,6 +3,7 @@ use super::*;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_material::gas_species::input::read_gas_state;
 use fs_scenario::gesture::GestureValue;
+use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::TransverseDirections;
 
 pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
@@ -17,6 +18,7 @@ pub struct Wire {
     pub pack: String, pub length: f64, pub radius: f64, pub prestress: StringPrestress,
     pub section: WireSection,
     pub bending_modes: usize, pub twist_modes: usize, pub bridge: SharedPlateBridge,
+    pub polarizations: Option<TransverseDirections>,
 }
 /// V2 describes perfectly bonded circular layers, never helical winding/slip.
 #[derive(Clone, Debug)]
@@ -57,11 +59,13 @@ impl Spec {
         let mut r = Reader { lines: header.lines(), line: 0 };
         // V1 retains its original whitespace acceptance and record semantics.
         let mut version = r.raw_row()?;
-        let layered = match version.word()? {
-            "frankensim-material-strings-v1" => false,
-            "frankensim-material-strings-v2" => true,
+        let format = match version.word()? {
+            "frankensim-material-strings-v1" => 1,
+            "frankensim-material-strings-v2" => 2,
+            "frankensim-material-strings-v3" => 3,
             _ => return Err("unsupported material-string input version".into()),
         };
+        let layered = format >= 2;
         version.end()?;
         let mut row = r.row("audio")?;
         let rate: u32 = row.parse()?; let samples: u64 = row.parse()?;
@@ -95,19 +99,32 @@ impl Spec {
                 }
             } else { StringPrestress::FixedTension(row.positive()?) };
             let mut wire = Wire { pack, length, radius, prestress, section: WireSection::Homogeneous,
+                polarizations: None,
                 bending_modes: row.count(MAX_MODES)?, twist_modes: row.count(MAX_MODES)?,
                 bridge: SharedPlateBridge { station_fraction: row.scalar()?, stiffness_n_m: row.scalar()?,
                     damping_n_s_m: row.scalar()?, rest_extension_m: 0.0 } };
             row.end()?;
             if layered { wire.section = r.section(radius)?; }
+            if format >= 3 {
+                let mut row = r.row("polarizations")?;
+                wire.polarizations = match row.word()? {
+                    "single" => None,
+                    "two" => Some(TransverseDirections::try_new(
+                        [row.scalar()?, row.scalar()?], [row.scalar()?, row.scalar()?])?),
+                    _ => return Err("polarizations must be single or two BOW_X BOW_Y BRIDGE_X BRIDGE_Y".into()),
+                };
+                row.end()?;
+            }
             if wire.bending_modes == 0 || !(0.0 < wire.bridge.station_fraction && wire.bridge.station_fraction < 1.0)
                 || wire.bridge.stiffness_n_m < 0.0 || wire.bridge.damping_n_s_m < 0.0
                 || !(wire.bridge.stiffness_n_m > 0.0 || wire.bridge.damping_n_s_m > 0.0) {
                 return Err("string needs transverse modes and a physical interior bridge connection".into());
             }
-            modes += wire.bending_modes + wire.twist_modes; strings.push(wire);
+            modes += wire.bending_modes * if wire.polarizations.is_some() { 2 } else { 1 }
+                + wire.twist_modes;
+            strings.push(wire);
         }
-        // Optional in both existing versions. The following cavity row is left
+        // Optional in every version. The following cavity row is left
         // untouched when absent; no new default joint or body rotation is inferred.
         let mut rotational_bridges = Vec::new();
         if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("rotational-bridges") {

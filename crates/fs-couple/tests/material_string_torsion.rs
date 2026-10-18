@@ -538,3 +538,6 @@ fn g0_rotation_geometry_refusals_and_stress_free_angle_have_physical_units() {
         assert!((bank.system().total_energy_j().unwrap() + loss - initial).abs() < 1e-13);
     });
 }
+
+#[path = "material_string_torsion/polarization.rs"]
+mod polarization;

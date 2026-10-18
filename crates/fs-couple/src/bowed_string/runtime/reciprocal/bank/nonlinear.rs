@@ -73,6 +73,7 @@ impl MaterialStringSource {
             Self::Homogeneous(s) => s.string().axial_stiffness_n,
             Self::Concentric { section, .. } => section.elastic().axial_stiffness_n(),
             Self::WithTorsion(_) => return Err(invalid("nested torsion is not a physical string source")),
+            Self::WithPolarizations(_) => return Err(invalid("nonlinear stretching currently requires one transverse plane; two-plane shared tension is not implemented")),
         };
         if !axial_rigidity_n.is_finite() || axial_rigidity_n <= 0.0 {
             return Err(invalid("material string stretching requires its positive source-derived EA"));

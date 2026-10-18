@@ -131,9 +131,8 @@ impl StringBodyRotationConnection {
     ) -> Result<ModalConnection, ReciprocalStringError> {
         let member = members.get(self.string)
             .ok_or_else(|| invalid("rotational connection names an unknown material string"))?;
-        let MaterialStringSource::WithTorsion(twist) = &member.source else {
-            return Err(invalid("a rotational connection requires material-derived string torsion"));
-        };
+        let twist = member.source.torsion_source()
+            .ok_or_else(|| invalid("a rotational connection requires material-derived string torsion"))?;
         let card = cards.get(self.string)
             .ok_or_else(|| invalid("rotational connection has no aligned string realization"))?;
         let body = bodies.get(self.body.component)
@@ -164,7 +163,8 @@ impl StringBodyRotationConnection {
                 .any(|(scaled, original)| !scaled.is_finite() || (*original != 0.0 && *scaled == 0.0)) {
             return Err(invalid("rotational bridge's work-conjugate metre/Newton lowering is not representable"));
         }
-        let mut left = twist.angular_shape(card, self.station_fraction)?;
+        let transverse_modes = member.source.modes() - twist.mode_count;
+        let mut left = twist.angular_shape(card, self.station_fraction, transverse_modes)?;
         for value in &mut left {
             let scaled = *value * radius;
             if !scaled.is_finite() || (*value != 0.0 && scaled == 0.0) {
@@ -172,7 +172,7 @@ impl StringBodyRotationConnection {
             }
             *value = scaled;
         }
-        if left.iter().any(|x| !x.is_finite()) || left[card.mode_count..].iter().all(|x| *x == 0.0) {
+        if left.iter().any(|x| !x.is_finite()) || left[transverse_modes..].iter().all(|x| *x == 0.0) {
             return Err(invalid("rotational bridge's string surface map is not representable"));
         }
         Ok(ModalConnection {
@@ -264,6 +264,9 @@ impl MaterialStringSource {
     pub fn with_torsion(self, shear_property: &str, viscosity_property: &str, modes: usize)
         -> Result<Self, MaterialStatePointError>
     {
+        if let Self::WithPolarizations(p) = self {
+            return p.add_torsion(shear_property, viscosity_property, modes);
+        }
         let invalid = |quantity| MaterialStatePointError::InvalidDerived { quantity };
         if modes == 0 || modes > 4096 || matches!(&self, Self::WithTorsion(_)) {
             return Err(invalid("torsional extension requires 1..=4096 modes and a non-nested source"));
@@ -276,6 +279,7 @@ impl MaterialStringSource {
             }])?,
             Self::Concentric { section, .. } => section.elastic().clone(),
             Self::WithTorsion(_) => return Err(invalid("nested torsion is not a new physical section")),
+            Self::WithPolarizations(_) => return Err(invalid("polarized torsion must retain its original source")),
         };
         // The correction multiplies transverse GA only; it never changes GJ.
         let section = elastic.with_shear_modulus(shear_property, 1.0)?
@@ -288,14 +292,15 @@ impl MaterialStringSource {
     pub(super) fn surface_shape(&self, card: &BowedStringCard, station: f64)
         -> Result<Vec<f64>, ReciprocalStringError>
     {
-        let mut shapes = shape(card, station);
-        if let Self::WithTorsion(twist) = self {
+        let mut shapes = self.transverse_shape(card, station)?;
+        if let Some(twist) = self.torsion_source() {
             let inertia = twist.section.rotary_inertia_kg_m();
             let radius = twist.section.shear().elastic().outer_radius_m();
+            let offset = shapes.len() - twist.mode_count;
             for k in 0..twist.mode_count {
                 let value = radius * unit_shape(k, station, card.length_m, inertia);
                 if !value.is_finite() { return Err(invalid("torsional surface shape is not representable")); }
-                shapes.push(value);
+                shapes[offset + k] = value;
             }
         }
         Ok(shapes)
@@ -313,11 +318,11 @@ impl TorsionalStringSource {
     pub const fn mode_count(&self) -> usize { self.mode_count }
     pub(super) const fn total_modes(&self) -> usize { self.total_modes }
 
-    fn angular_shape(&self, card: &BowedStringCard, station: f64)
+    fn angular_shape(&self, card: &BowedStringCard, station: f64, transverse_modes: usize)
         -> Result<Vec<f64>, ReciprocalStringError>
     {
         let inertia = self.section.rotary_inertia_kg_m();
-        let mut row = vec![0.0; card.mode_count];
+        let mut row = vec![0.0; transverse_modes];
         for k in 0..self.mode_count {
             let value = unit_shape(k, station, card.length_m, inertia);
             if !value.is_finite() { return Err(invalid("torsional angular shape is not representable")); }
