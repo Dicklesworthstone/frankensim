@@ -66,9 +66,10 @@ impl BackwardEuler<'_> {
     /// advance_prescribed. Supply an explicit nonlinear policy for k(T);
     /// otherwise the ordinary constant-conductivity refusal remains in force.
     ///
-    /// Patches bind distinct uniform Robin regions and retain their sourced
-    /// emissivity validity. This is the existing area-mean T^4 patch model,
-    /// applied through the pointwise Robin trace, with a black ambient reservoir.
+    /// Patches bind distinct uniform Robin or explicit zero-flux regions and
+    /// retain their sourced emissivity validity. Zero flux declares no convection.
+    /// This is the existing area-mean T^4 patch model, applied through the
+    /// pointwise Robin trace, with a black ambient reservoir.
     ///
     /// The nonlinear physical target is atol + rtol * ||R_predictor||. The
     /// linear target is linear_tolerance * ||R_predictor|| plus 1% of the caller's
@@ -300,12 +301,16 @@ pub(super) fn boundary_at_temperature(
             .iter()
             .position(|name| name == patch.region())
             .ok_or_else(|| invalid("unknown transient radiation region"))?;
-        let ThermalBc::Robin {
-            htc: ScalarField::Uniform(h),
-            t_ref: ScalarField::Uniform(reference),
-        } = problem.boundary.conditions()[region]
-        else {
-            return Err(invalid("radiation requires a uniform Robin region"));
+        let (h, reference) = match &problem.boundary.conditions()[region] {
+            ThermalBc::Robin {
+                htc: ScalarField::Uniform(h), t_ref: ScalarField::Uniform(reference),
+            } => (*h, *reference),
+            ThermalBc::Neumann { outward_flux: ScalarField::Uniform(flux) } if *flux == 0.0 => {
+                // No nonradiative exchange. The zero-weight reference is only
+                // the already declared reservoir, never an invented ambient.
+                (0.0, patch.ambient_temperature_k())
+            }
+            _ => return Err(invalid("radiation requires a uniform Robin or explicit zero-flux region")),
         };
         let mut area = 0.0;
         let mut integral = 0.0;
@@ -333,5 +338,5 @@ pub(super) fn boundary_at_temperature(
         )?;
         replacements.push((region, combined, reference));
     }
-    Ok(problem.boundary.with_uniform_robin_replacements(&replacements)?)
+    Ok(problem.boundary.with_radiative_robin_replacements(&replacements)?)
 }

@@ -11,6 +11,9 @@
 //! in reaction heat. Failed sampling, cancellation, solve or energy checks
 //! leave temperature, time and the accepted-step budget unchanged.
 
+/// Sourced radiative surfaces and independent reservoir-temperature histories.
+pub mod radiation;
+
 use super::{ThermalBoundaryHistory, poll};
 use crate::{ConductionError, ConductionProblem, ConductivityModel, ElementMaterials,
     ScalarField, ThermalBoundary, ThermalInterfaces, VOLUMETRIC_SOURCE_DIMS};
