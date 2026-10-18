@@ -510,8 +510,11 @@ def main():
                       f"{b['former']['ff']:.1f} to {b['published']['ff']:.1f} dB at ff (real piano {b['real']['mf']:.1f} and {b['real']['ff']:.1f} dB).")
         row["status"] = "improved"
         if dull8 is not None and abs(dull8) <= 3 and loud8 is not None and abs(loud8) <= 3:
-            row["suspect"] = ("Loudness, not timbre: the 4.5 m/s stroke is quieter than the real ff, and at nearly matched loudness the brightness agrees. "
-                              "String stretching supplies the phantom partials; the published hammer law supplies the rest.")
+            ph8_now = phantoms(piano("a3-fff"))
+            row["suspect"] = ("Loudness, not timbre, for the broadband brightness: the 4.5 m/s stroke is quieter than the real ff, and at nearly matched "
+                              "loudness the brightness agrees. The phantom partials still fall short: "
+                              f"{sum(q['present'] for q in ph8_now)} of {len(ph8_now)} positions at 8 m/s against the real ff's "
+                              f"{sum(q['present'] for q in ph_real)} of {len(ph_real)}.")
             row["test"] = "Map the recording's dynamic layers to hammer speeds by loudness before comparing their brightness."
     rows.append(row)
 
