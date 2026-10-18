@@ -30,6 +30,8 @@ pub mod field_storage;
 /// Shared gas/liquid transport for material-driven flow and heat consumers.
 pub mod fluid_transport;
 pub mod gas;
+/// Prescribed axial temperature/composition fields on the shared gas laws.
+pub mod gas_field;
 pub mod gas_mixture;
 pub mod gas_species;
 mod gas_state;

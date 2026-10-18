@@ -128,6 +128,56 @@ impl ThermochemicalGasModel {
         &self.source_packs
     }
 
+    /// Explicitly identified water species, if any; never inferred from a name
+    /// or molar mass. A zero-fraction composition replacement omits its label.
+    #[must_use]
+    pub fn water_species(&self) -> Option<&SpeciesId> {
+        self.water_component.map(|index| self.thermodynamics.components()[index].species())
+    }
+
+    /// Replace composition while retaining each active species' NASA-9 law,
+    /// pure transport source, phase label and original pack identity. Fractions refer
+    /// to [`Self::thermodynamics`]' canonical component order, not the order in
+    /// which the original model was constructed. This creates a new static
+    /// constitutive model; it does not change the mass or energy of a gas parcel.
+    /// Explicit zero fractions are omitted before calling the shared active-
+    /// species owner, so a source-backed gas can enter a field from zero without
+    /// an invented trace concentration. `self` retains the full source set.
+    ///
+    /// # Errors
+    /// The existing mixture owner refuses an unsupported basis, missing
+    /// fractions, or a composition whose canonical sum is not exact one.
+    pub fn with_composition(
+        &self,
+        composition: fs_thermochem::Composition,
+    ) -> Result<Self, MaterialError> {
+        let components = self.thermodynamics.components();
+        let fractions = composition.fractions();
+        if fractions.len() != components.len() {
+            return Err(invalid("replacement composition must cover every source species in canonical order"));
+        }
+        let active = fractions.iter().enumerate().filter(|(_, fraction)| **fraction > 0.0)
+            .map(|(index, _)| index).collect::<Vec<_>>();
+        let thermodynamics = FrozenIdealGasMixtureModelV1::new(
+            active.iter().map(|&index| components[index].clone()).collect(),
+            fs_thermochem::Composition::new(composition.basis(),
+                active.iter().map(|&index| fractions[index]).collect())
+                .map_err(|error| failure("active composition", error))?,
+        )
+        .map_err(|error| failure("composition replacement", error))?;
+        let water = self.water_component.filter(|&index| fractions[index] > 0.0)
+            .map(|index| components[index].species());
+        let mut revised = Self::new(
+            thermodynamics,
+            active.iter().map(|&index| self.transport[index].clone()).collect(),
+            water,
+        )?;
+        revised.source_packs = self.source_packs.iter().filter(|receipt|
+            revised.thermodynamics.components().iter().any(|component| component.species() == &receipt.species))
+            .cloned().collect();
+        Ok(revised)
+    }
+
     /// Resolve a declared vapor in equilibrium with liquid water. The caller
     /// chooses this phase condition explicitly; the ordinary frozen-gas
     /// evaluator makes no condensation claim. Uses the existing Buck owner
@@ -288,4 +338,4 @@ impl FluidTransport for ResolvedThermochemicalGasState {
 
 #[cfg(test)]
 #[path = "thermochemical_gas_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -604,6 +604,42 @@ Geometry remains fixed during the performance. No automatic wall-material
 response is implied. Gas-model validity
 limits do not certify the fixed solid specimen at extreme temperatures.
 
+The file-driven path also accepts `frankensim-flue-performance-v1`:
+`music_render wind crates/fs-couple/examples/flue.performance OUT.wav --block 512`.
+The fixed-order SI records explicitly supply mechanical/output clocks, the output
+sample window and pascal scale/ceiling, bore and exterior gas, cylinder dimensions
+and prescribed terminal reflection, mouth dimensions, jet card/gain/onset seed,
+jet limits, wave memory, fractional phase band/budget, optional viscothermal cells
+and band, receiver position/resolution/band, and control compilation limits. The
+suffix is the existing canonical, typed blowing-pressure gesture schedule.
+`jet_card tonal-interim` explicitly selects the retained stage-I source card;
+`jet_card json {CANONICAL_JSON}` supplies a complete one-line card. No filename or
+instrument name selects physical dimensions, material properties or calibration.
+`gas` and `exterior` accept the same legacy, named-mixture and source-backed NASA-9
+records as other wind sources; `exterior same` shares the supplied bore gas. A
+separate exterior must have the same static pressure. Gas changes enter jet speed,
+Reynolds number, propagation, selected viscothermal loss and physical radiation.
+The optional `windway none` or `windway slit LENGTH_M` record after `flue`
+selects the existing `FlueVoice::with_viscous_windway` before performance setup.
+The supplied rectangular channel uses the same source gas to set viscous
+pressure drop, jet speed, convection and injected flow; its actual length and
+viscosity remain in the output sidecar. Omitted/`none` retains the ideal jet.
+A finite channel is explicit physical geometry; no lip-channel length is
+invented for a transverse flute. The quasi-steady parallel-plate law adds no
+entrance-profile development, windway inertia or resolved turbulence.
+
+This loader constructs the existing `FlueVoice::from_fractional_network` and
+`FlueOutletPerformance::with_multirate_radiation`. Every mechanical outlet-flow
+sample reaches the shared differentiating Rayleigh receiver before the sole PCM
+owner. The file declares 48 kHz CLI output and an integer mechanical/output ratio;
+`--decimate` refuses a second observer. The sidecar retains both clocks, original
+input/card identities, source gas coefficients and the actual receiver delay.
+This is an **EstimateOnly** composition of a tonal jet and stationary rigid
+cylindrical pipe with a prescribed reflection and one-way infinite-baffle outlet
+radiation. The selected card keeps its narrower laboratory scope. It supplies no
+resolved turbulence, matched radiation feedback, measured flute geometry, wall
+material response or calibrated SPL claim; `--acceptance` refuses this source.
+
 ### `bakeoff`
 
 Bake-off receipt schema and protocol for the music-program claims registry
@@ -1097,6 +1133,29 @@ polarizations, and body/contact composition in fixed and moving-end paths.
 This remains linear bending memory at a fixed state. No measured spectrum fit,
 axial creep, evolving temperature, phase change, arbitrary pre-release loading,
 or in-band certificate for nonlinear harmonics is supplied.
+
+### `driving_point::regional::field`
+
+`RegionalDuct::from_gas_field` discretizes the shared `fs_material::gas_field::AxialGasField`
+at explicitly refinable midpoint cells (at most 64 total), retaining the
+existing cylinder/cone TMM and pressure/volume-flow interconnection. It adds no
+propagation or loss law. The exact x=0 state feeds source density and the inlet
+characteristic impedance, and x=L feeds the existing terminal radiation load;
+an independent exterior can still be supplied explicitly. Uniform fields keep
+the original complete geometry and arithmetic. Nonuniform tone holes and smooth
+radius profiles refuse pending the corresponding continuous-field duct support.
+`ReedBoreVoice::new_with_gas_field` feeds this same regional line into the existing
+reed runtime and compact-jet observer. No instrument constants, tuning law,
+evolving breath or calibrated exterior observation are added.
+
+The focused field tests compare uniform responses bitwise, exercise cone
+radiation and endpoint states, and refine a supplied 1 K axial temperature
+gradient over 4/8/16/32/64 cells. Fundamental resonance convergence is second
+order; the third-to-first register interval is checked against independent
+energy-weighted perturbation. A rendered-pressure test checks uniform legacy
+identity, exact source density and the gradient's nonzero audio effect. These
+are numerical tests of prescribed fields, not measured instrument qualification;
+native results are recorded separately.
 
 ### `acoustic_realize` / `pcm_wav`
 

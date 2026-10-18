@@ -10,6 +10,8 @@
 pub mod outlet;
 /// Independent exterior gas at the terminal pressure/volume-flow port.
 pub mod exterior;
+/// Primitive gas-field sampling through the existing regional propagation law.
+pub mod field;
 
 use super::{
     DrivingPointError, LineRealization, PoleState, bulk_delay_pole_state,
@@ -43,6 +45,7 @@ pub struct RegionalDuct {
     gases: Vec<GasState>,
     one_way_time_s: f64,
     exterior_gas: Option<GasState>,
+    inlet_gas_override: Option<GasState>,
 }
 
 fn invalid(what: &'static str) -> DuctError { DuctError::BadParameter { what } }
@@ -114,7 +117,8 @@ impl RegionalDuct {
         if !one_way_time_s.is_finite() || one_way_time_s <= 0.0 {
             return Err(invalid("regional travel time must be positive and finite"));
         }
-        Ok(Self { regions, gases: gases.to_vec(), one_way_time_s, exterior_gas: None })
+        Ok(Self { regions, gases: gases.to_vec(), one_way_time_s, exterior_gas: None,
+            inlet_gas_override: None })
     }
 
     /// Resolved media in authored segment order, including hole records.
@@ -123,7 +127,7 @@ impl RegionalDuct {
 
     /// Actual inlet medium for Bernoulli density and the characteristic port.
     #[must_use]
-    pub fn inlet_gas(&self) -> &GasState { &self.gases[0] }
+    pub fn inlet_gas(&self) -> &GasState { self.inlet_gas_override.as_ref().unwrap_or(&self.gases[0]) }
 
     /// Actual internal medium at the terminal axial segment. Radiation uses
     /// [`Self::exterior_gas`], which defaults to this state.

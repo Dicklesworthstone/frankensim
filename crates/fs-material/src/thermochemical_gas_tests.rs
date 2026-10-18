@@ -11,7 +11,7 @@ use fs_thermochem::{Composition, CompositionBasis, ElementalReferenceIdV1,
     StandardStateConventionV1, StandardStatePhaseV1, required_nasa9_parameter_dims,
     UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 
-pub(super) fn species(name: &str, mass: f64, cp_r: f64, slope: f64) -> Nasa9StandardStateModelV1 {
+pub(crate) fn species(name: &str, mass: f64, cp_r: f64, slope: f64) -> Nasa9StandardStateModelV1 {
     let mut coefficients = [0.0; 9];
     coefficients[2] = cp_r;
     coefficients[3] = slope;
@@ -34,7 +34,7 @@ pub(super) fn species(name: &str, mass: f64, cp_r: f64, slope: f64) -> Nasa9Stan
         vec![Nasa9RegionV1::from_card(card).unwrap()]).unwrap()
 }
 
-pub(super) fn transport(name: &str, mu: f64, k: f64) -> SpeciesTransportMaterial {
+pub(crate) fn transport(name: &str, mu: f64, k: f64) -> SpeciesTransportMaterial {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [("dynamic_viscosity", DynViscosity::DIMS, mu),
         (THERMAL_CONDUCTIVITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS, k)] {
@@ -58,13 +58,13 @@ pub(super) fn transport(name: &str, mu: f64, k: f64) -> SpeciesTransportMaterial
         selection: MaterialPropertySelection::SingleClaimOnly }
 }
 
-pub(super) fn model(fractions: Vec<f64>, slope: f64) -> ThermochemicalGasModel {
+pub(crate) fn model(fractions: Vec<f64>, slope: f64) -> ThermochemicalGasModel {
     ThermochemicalGasModel::new(FrozenIdealGasMixtureModelV1::new(
         vec![species("A", 0.028, 3.5, slope), species("B", 0.004, 2.5, 0.0)],
         Composition::new(CompositionBasis::MoleFraction, fractions).unwrap()).unwrap(),
         vec![transport("B", 2.0e-5, 0.15), transport("A", 1.7e-5, 0.025)], None).unwrap()
 }
-pub(super) fn point(t: f64, p: f64) -> QueryPoint {
+pub(crate) fn point(t: f64, p: f64) -> QueryPoint {
     QueryPoint::new()
         .with_quantity("temperature", typed(QuantityKind::AbsoluteTemperature), t).unwrap()
         .with_quantity("pressure", typed(QuantityKind::Pressure), p).unwrap()

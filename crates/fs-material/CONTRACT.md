@@ -410,6 +410,25 @@ test failures after accounting separately for each printed half-unit. Relative
 bands are unchanged; cp also satisfies its relative-only gate. Rows absent from
 the source are recorded as absent, never interpolated into alleged facts.
 
+`gas_field::AxialGasField` stores 2..=4096 supplied axial stations with
+temperature and canonical mole composition at one explicit common pressure.
+It interpolates only primitive coordinates; NASA-9 thermodynamics, EOS, Wilke
+viscosity and WMS conductivity are reevaluated by the existing owner at every
+sample. Uniform fields and original station values preserve direct-evaluation
+bits. No extrapolation, invented transport data or independent interpolation of
+rho/c/cp/mu is allowed. `with_composition` retains the active species' original
+laws, transport selections and pack identities; explicit zeros omit inactive
+species without fabricating trace concentrations. The full source model remains
+on the field. Only generated interpolation roundoff receives a bounded simplex
+correction; authored fractions remain subject to the existing exact-sum rule.
+The existing liquid-water phase policy is explicit; supersaturation refuses
+instead of silently removing water. The field is prescribed, not a heat/species
+transport or condensation solver, and source-station measurement uncertainty
+remains with its caller. Construction and sampling are synchronous bounded
+operations; callers can chunk sampling. Focused tests cover uniform bit identity,
+fresh primitive evaluation, zero-concentration ingress, source retention and
+station/sample/domain/phase refusals. Native verification is recorded separately.
+
 The five-species acoustic fixture binds NASA/TP-2002-211556 Appendix D to
 primary zero-density transport correlations: Lemmon/Jacobsen (N2/O2/Ar),
 Laesecke/Muzny and Huber (CO2), and IAPWS R12-08/R15-11 (H2O). The stored

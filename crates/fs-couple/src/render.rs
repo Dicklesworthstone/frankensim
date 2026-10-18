@@ -56,6 +56,9 @@ use fs_material::gas::GasState;
 use fs_scenario::BeatingReed;
 
 #[cfg(test)]
+mod gas_field_tests;
+
+#[cfg(test)]
 mod inlet_geometry_tests {
     use super::*;
     use fs_duct::Segment;
@@ -235,6 +238,43 @@ impl ReedBoreVoice {
     ) -> Result<Self, AcousticRealizeError> {
         let regional = crate::driving_point::regional::RegionalDuct::new(physics, gases)
             .map_err(|e| crate::acoustic_realize::map_drive(crate::driving_point::DrivingPointError::Duct(e)))?;
+        Self::with_line(physics, regional.inlet_gas(), reed, plates, listener_m, sample_rate_hz, |_| {
+            regional.characteristic_line_realized(termination, sample_rate_hz, line_samples, wall, None)
+                .map_err(crate::acoustic_realize::map_drive)
+        })
+    }
+
+    /// Render the same reed mechanics against a prescribed continuous
+    /// temperature/composition field. Local NASA-9 and material transport
+    /// evaluations feed the existing regional characteristic line; the exact
+    /// inlet state supplies source density and characteristic impedance.
+    /// `cells_per_segment` is the explicit midpoint field-refinement axis.
+    ///
+    /// This keeps the existing reed and compact-jet observer model. The field
+    /// is fixed during rendering and does not simulate breath heat transfer,
+    /// species advection, a player or a calibrated complete instrument.
+    ///
+    /// # Errors
+    /// Existing field/source, geometry/subdivision, reed or line refusals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_gas_field(
+        physics: &Duct,
+        field: &fs_material::gas_field::AxialGasField,
+        cells_per_segment: usize,
+        reed: BeatingReed,
+        termination: Termination,
+        plates: PlateBank,
+        listener_m: f64,
+        sample_rate_hz: u32,
+        line_samples: usize,
+        wall: Option<&fs_phs::WallPin>,
+    ) -> Result<Self, AcousticRealizeError> {
+        use crate::driving_point::regional::{RegionalDuct, field::GasFieldDuctError};
+        let regional = RegionalDuct::from_gas_field(physics, field, cells_per_segment)
+            .map_err(|error| match error {
+                GasFieldDuctError::Material(error) => AcousticRealizeError::Ambient(error.to_string()),
+                GasFieldDuctError::Duct(error) => AcousticRealizeError::Duct(error),
+            })?;
         Self::with_line(physics, regional.inlet_gas(), reed, plates, listener_m, sample_rate_hz, |_| {
             regional.characteristic_line_realized(termination, sample_rate_hz, line_samples, wall, None)
                 .map_err(crate::acoustic_realize::map_drive)
