@@ -2,7 +2,7 @@
 
 use fs_phs::circuit::{Branch, CircuitGraph, assemble_circuit};
 use fs_phs::{
-    DescriptorPortHamiltonian, QuadraticStorage, Storage, discrete_gradient, step_descriptor,
+    DescriptorPortHamiltonian, PhsError, QuadraticStorage, Storage, discrete_gradient, step_descriptor,
 };
 
 struct QuarticCapacitor;
@@ -180,4 +180,218 @@ fn descriptor_constructor_rejects_invalid_partition_and_structure() {
         )
         .is_err()
     );
+}
+
+struct BoundedPlateStorage {
+    epsilon_area: f64,
+    mass: f64,
+    gap_limits: [f64; 2],
+}
+
+impl BoundedPlateStorage {
+    fn supported(&self, x: &[f64]) -> bool {
+        self.gap_limits[0] < x[1] && x[1] < self.gap_limits[1]
+    }
+}
+
+impl Storage for BoundedPlateStorage {
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        if !self.supported(x) {
+            return f64::NAN;
+        }
+        0.5 * x[0] * (x[0] / self.epsilon_area) * x[1] + 0.5 * x[2] * (x[2] / self.mass)
+    }
+
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        if !self.supported(x) {
+            out.fill(f64::NAN);
+            return;
+        }
+        out[0] = (x[0] / self.epsilon_area) * x[1];
+        out[1] = 0.5 * x[0] * (x[0] / self.epsilon_area);
+        out[2] = x[2] / self.mass;
+    }
+
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], _: &[f64]) -> Option<f64> {
+        if !self.supported(a) || !self.supported(b) {
+            return Some(f64::NAN);
+        }
+        let dq = b[0] - a[0];
+        Some(0.125 * dq * (dq / self.epsilon_area) * (b[1] - a[1]))
+    }
+}
+
+const PLATE_EPSILON_AREA: f64 = 8.854_187_812_8e-12 * 0.01;
+const PLATE_MASS: f64 = 0.1;
+
+fn bounded_plate() -> DescriptorPortHamiltonian {
+    // [isolated charge, gap, momentum, source voltage, source current].
+    // The last pair imposes voltage=u and current=0. This unloaded source
+    // changes the global Newton scale without adding charge or energy.
+    let mut j = vec![0.0; 25];
+    j[7] = 1.0;
+    j[11] = -1.0;
+    j[19] = 1.0;
+    j[23] = -1.0;
+    DescriptorPortHamiltonian::new(
+        5,
+        3,
+        1,
+        j,
+        vec![0.0; 25],
+        vec![0.0, 0.0, 0.0, 0.0, 1.0],
+        Box::new(BoundedPlateStorage {
+            epsilon_area: PLATE_EPSILON_AREA,
+            mass: PLATE_MASS,
+            gap_limits: [5e-5, 2e-4],
+        }),
+    )
+    .unwrap()
+}
+
+#[test]
+fn narrow_physical_gap_with_high_voltage_uses_finite_centered_probes() {
+    let gap = 1e-4;
+    let voltage = 100.0;
+    let charge = PLATE_EPSILON_AREA * voltage / gap;
+    let dt = 1e-3;
+    let system = bounded_plate();
+    let before = [charge, gap, 0.0, 0.0, 0.0];
+
+    // At fixed isolated charge, plate attraction is constant, so midpoint
+    // exactly gives the elementary constant-acceleration trajectory.
+    let attraction = charge.powi(2) / (2.0 * PLATE_EPSILON_AREA);
+    let expected_momentum = -attraction * dt;
+    let expected_gap = gap - 0.5 * attraction / PLATE_MASS * dt * dt;
+    let record = step_descriptor(&system, &before, &[voltage], dt).unwrap();
+    assert!((record.x[0] - charge).abs() < 1e-18);
+    assert!((record.x[1] - expected_gap).abs() < 2e-12);
+    assert!((record.x[2] - expected_momentum).abs() < 5e-11);
+    assert!(record.y[0].abs() < 1e-12);
+    assert!(record.delta_h.abs() < 1e-14);
+    assert!(record.balance_residual().abs() < 1e-14);
+    assert_eq!(record.dissipated, 0.0);
+    assert_eq!(record.supplied, 0.0);
+    assert!(record.x[1] > 5e-5 && record.x[1] < 2e-4);
+}
+
+struct InvalidEffort;
+impl Storage for InvalidEffort {
+    fn hamiltonian(&self, _: &[f64]) -> f64 {
+        0.0
+    }
+    fn gradient(&self, _: &[f64], out: &mut [f64]) {
+        out.fill(f64::NAN);
+    }
+}
+
+#[test]
+fn descriptor_refuses_nonfinite_state_storage_effort_and_flow() {
+    let system = bounded_plate();
+    for (before, input) in [
+        ([1e-8, 5e-5, 0.0, 0.0, 0.0], 100.0),
+        ([f64::NAN, 1e-4, 0.0, 0.0, 0.0], 100.0),
+        ([1e-8, 1e-4, 0.0, 0.0, 0.0], f64::NAN),
+    ] {
+        assert!(matches!(
+            step_descriptor(&system, &before, &[input], 1e-3),
+            Err(PhsError::DescriptorDomain { .. })
+        ));
+    }
+
+    let invalid_effort = DescriptorPortHamiltonian::new(
+        1,
+        1,
+        0,
+        vec![0.0],
+        vec![0.0],
+        vec![],
+        Box::new(InvalidEffort),
+    )
+    .unwrap();
+    assert!(matches!(
+        step_descriptor(&invalid_effort, &[0.0], &[], 1.0),
+        Err(PhsError::DescriptorDomain { .. })
+    ));
+    let overflowing_flow = DescriptorPortHamiltonian::new(
+        2,
+        2,
+        0,
+        vec![0.0, f64::MAX, -f64::MAX, 0.0],
+        vec![0.0; 4],
+        vec![],
+        Box::new(QuadraticStorage::new(vec![2.0, 0.0, 0.0, 2.0], 2).unwrap()),
+    )
+    .unwrap();
+    assert!(matches!(
+        step_descriptor(&overflowing_flow, &[1.0, 1.0], &[], 1.0),
+        Err(PhsError::DescriptorDomain { .. })
+    ));
+}
+
+struct BoundedQuartic;
+
+impl BoundedQuartic {
+    fn supported(x: &[f64]) -> bool {
+        0.01 < x[0] && x[0] < 1.5
+    }
+}
+
+impl Storage for BoundedQuartic {
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        if Self::supported(x) {
+            QuarticCapacitor.hamiltonian(x)
+        } else {
+            f64::NAN
+        }
+    }
+
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        if Self::supported(x) {
+            QuarticCapacitor.gradient(x, out);
+        } else {
+            out.fill(f64::NAN);
+        }
+    }
+
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
+        if Self::supported(a) && Self::supported(b) {
+            QuarticCapacitor.midpoint_energy_remainder(a, b, mid)
+        } else {
+            Some(f64::NAN)
+        }
+    }
+}
+
+#[test]
+fn descriptor_backtracks_only_to_regain_supported_nonlinear_storage() {
+    let system = DescriptorPortHamiltonian::new(
+        2,
+        1,
+        1,
+        vec![0.0, 1.0, -1.0, 0.0],
+        vec![0.0, 0.0, 0.0, 1.0],
+        vec![0.0, 1.0],
+        Box::new(BoundedQuartic),
+    )
+    .unwrap();
+    let q0 = 0.1_f64;
+    let voltage = 2.0;
+    let dt = 1.0;
+    // The first undamped Newton update exceeds the explicit upper bound,
+    // but the independent implicit scalar root lies inside support.
+    let mut lower = q0;
+    let mut upper = 1.5;
+    for _ in 0..60 {
+        let q1 = f64::midpoint(lower, upper);
+        let effort = (q1.powi(3) + q1.powi(2) * q0 + q1 * q0.powi(2) + q0.powi(3)) / 4.0;
+        if q1 - q0 - dt * (voltage - effort) > 0.0 {
+            upper = q1;
+        } else {
+            lower = q1;
+        }
+    }
+    let record = step_descriptor(&system, &[q0, voltage - q0.powi(3)], &[voltage], dt).unwrap();
+    assert!((record.x[0] - f64::midpoint(lower, upper)).abs() < 2e-12);
+    assert!(record.balance_residual().abs() < 5e-12);
 }

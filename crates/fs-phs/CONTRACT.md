@@ -232,8 +232,15 @@ inventoried and measured in fs-couple `tests/integrator_warping_audit.rs`.
   lifted with an exactly zero algebraic block. The descriptor Gonzalez norm,
   cancellation guard and corresponding rounding estimate exclude algebraic
   coordinates; actual multiplier efforts remain their original midpoints.
+  Nonfinite state, storage, effort, flow or ledger refuses as `DescriptorDomain`;
+  a NaN residual cannot count as convergence. Centered Jacobian probes and Newton
+  updates retain their original size when finite, with at most 24 halvings to
+  regain the declared storage support. No state clamping, material extrapolation
+  or convergence-budget relaxation occurs.
   `tests/descriptor_storage.rs` exercises a nonlinear RC energy defect, changed
-  algebraic coordinate scales, native RLC reconstruction and source-law admission.
+  algebraic coordinate scales, native RLC reconstruction, source-law admission,
+  a 100-micrometre charged plate with a 100-volt algebraic source, explicit
+  nonfinite refusals and a supported nonlinear root requiring update backtracking.
 - `transformer(a, b, port_a, port_b, n)` — power-conserving
   `u_a = n y_b`, `u_b = −n y_a`. A plate area, a hydraulic ram,
   and a lever are this object.
@@ -436,8 +443,17 @@ matches the dissipation ledger within 2%.
   row into the power-exact current pair) — passivity by construction,
   never bookkeeping. Admission is loud (floating node, shorted or
   parallel ideal sources, non-physical elements refuse BY NAME);
-  consistent ICs solve as a dt=0 descriptor step and a stall refuses
-  as inconsistent rather than NaN-ing later. The ledger stays exact
+  consistent ICs start with the dt=0 descriptor step. If redundant ideal
+  constraints leave that Newton matrix singular, the existing fs-la SVD owner
+  solves only algebraic efforts with the original charge and flux held exactly.
+  The represented midpoint must satisfy the original unscaled rows under the
+  same native solve budget; incompatible clamps still refuse. The minimum-norm
+  multiplier choice does not claim uniquely determined initial branch currents.
+  Source-free circuits expose an exactly empty n-by-zero G, so their native
+  stamps reconstruct through the same descriptor constructor.
+  `tests/circuit_initial_constraints.rs` checks compatible and conflicting
+  voltage clamps, a subsequent physical RLC step, and source-free reconstruction.
+  The ledger stays exact
   through constraints, and `step_audited` returns the SUPPLY-DEFECT
   residual |dH + dissipated - supplied| — the independent check
   (balance alone is tautological under sign mutations; the audit's

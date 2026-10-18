@@ -266,6 +266,11 @@ pub enum PhsError {
         /// What disagreed.
         what: &'static str,
     },
+    /// A descriptor evaluation left finite storage support or arithmetic.
+    DescriptorDomain {
+        /// Refused evaluation, probe, update, or ledger.
+        what: &'static str,
+    },
     /// A Maxwell memory branch has invalid or unrepresentable coefficients.
     RelaxationParameters,
     /// The implicit step's Newton iteration exhausted its budget.
@@ -299,6 +304,7 @@ impl core::fmt::Display for PhsError {
             PhsError::NotSymmetric { what } => write!(f, "{what} violates its symmetry class"),
             PhsError::NotPsd { what } => write!(f, "{what} is not positive semidefinite"),
             PhsError::Dimension { what } => write!(f, "dimension mismatch: {what}"),
+            PhsError::DescriptorDomain { what } => write!(f, "descriptor domain refused: {what}"),
             PhsError::RelaxationParameters => write!(
                 f,
                 "relaxation needs finite nonzero strain coupling, positive stiffness, and a representable positive relaxation rate"
@@ -1021,7 +1027,9 @@ pub fn common_effort_star(
 /// with effort `e = [∇H(x), λ]` (multipliers are not stored energy).
 ///
 /// # Errors
-/// Dimension / `dt` refusals; [`PhsError::NewtonStalled`].
+/// Dimension / `dt` refusals; [`PhsError::NewtonStalled`];
+/// [`PhsError::DescriptorDomain`] for nonfinite storage, effort, flow, or
+/// exhausted bounded attempts to keep Newton probes and updates in support.
 #[allow(clippy::too_many_lines)] // one coherent physics stage
 pub fn step_descriptor(
     sys: &DescriptorPortHamiltonian,
@@ -1041,23 +1049,52 @@ pub fn step_descriptor(
             what: "dt must be finite and non-negative",
         });
     }
+    if x0.iter().chain(u).any(|v| !v.is_finite()) {
+        return Err(PhsError::DescriptorDomain {
+            what: "state and held input must be finite",
+        });
+    }
+    let h0 = sys.storage.hamiltonian(x0);
+    if !h0.is_finite() {
+        return Err(PhsError::DescriptorDomain {
+            what: "initial storage is outside its finite support",
+        });
+    }
     let mut gu = vec![0.0; n];
     for i in 0..n {
         for p in 0..sys.m {
             gu[i] += sys.g[i * sys.m + p] * u[p];
         }
     }
+    if gu.iter().any(|v| !v.is_finite()) {
+        return Err(PhsError::DescriptorDomain {
+            what: "held port forcing is nonfinite",
+        });
+    }
     // Multipliers are efforts, not stored coordinates: e = [∇H(x), λ].
     // Gonzalez still owns the differential block; λ enters J as itself
     // so Ga λ / −Gb λ actually drive the ports.
-    let effort = |x1: &[f64]| -> Vec<f64> {
+    let effort = |x1: &[f64]| -> Option<Vec<f64>> {
+        if x1.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
         // The Gonzalez correction belongs entirely to stored coordinates.
         // Including changes of algebraic multipliers in its norm allocates
         // part of the energy remainder to efforts that are overwritten below.
         // Their magnitudes must not suppress the differential roundoff guard.
         let mut endpoint = x1.to_vec();
         endpoint[n_d..].copy_from_slice(&x0[n_d..]);
-        let mut midpoint = vec![0.0; n];
+        if !sys.storage.hamiltonian(&endpoint).is_finite() {
+            return None;
+        }
+        let mut midpoint: Vec<f64> = x0
+            .iter()
+            .zip(&endpoint)
+            .map(|(&a, &b)| f64::midpoint(a, b))
+            .collect();
+        if !sys.storage.hamiltonian(&midpoint).is_finite() {
+            return None;
+        }
         let mut e = vec![0.0; n];
         discrete_gradient_into_prefix_unchecked(
             sys.storage.as_ref(), x0, &endpoint, &mut midpoint, &mut e, n_d,
@@ -1065,22 +1102,34 @@ pub fn step_descriptor(
         for i in n_d..n {
             e[i] = f64::midpoint(x0[i], x1[i]);
         }
-        e
+        e.iter().all(|v| v.is_finite()).then_some(e)
     };
-    let residual = |x1: &[f64], dg: &[f64]| -> Vec<f64> {
+    let residual = |x1: &[f64], dg: &[f64]| -> Option<Vec<f64>> {
         let mut res = vec![0.0; n];
         for i in 0..n {
             let mut flow = 0.0;
             for k in 0..n {
                 flow += (sys.j[i * n + k] - sys.r[i * n + k]) * dg[k];
             }
+            let total_flow = flow + gu[i];
+            if !flow.is_finite() || !total_flow.is_finite() {
+                return None;
+            }
             if i < n_d {
-                res[i] = x1[i] - x0[i] - dt * (flow + gu[i]);
+                res[i] = x1[i] - x0[i] - dt * total_flow;
             } else {
-                res[i] = flow + gu[i];
+                res[i] = total_flow;
+            }
+            if !res[i].is_finite() {
+                return None;
             }
         }
-        res
+        Some(res)
+    };
+    let evaluate = |x: &[f64]| -> Option<(Vec<f64>, Vec<f64>)> {
+        let dg = effort(x)?;
+        let res = residual(x, &dg)?;
+        Some((dg, res))
     };
     let scale = x0
         .iter()
@@ -1088,13 +1137,22 @@ pub fn step_descriptor(
         .chain(gu.iter().map(|v| (dt * v).abs()))
         .chain(u.iter().map(|v| v.abs()))
         .fold(1.0e-30f64, f64::max);
+    if !scale.is_finite() {
+        return Err(PhsError::DescriptorDomain {
+            what: "descriptor residual scale is nonfinite",
+        });
+    }
+    // Keep the existing full probe/update whenever it is finite. Shrinking
+    // only regains the caller's storage support; it never clamps a coordinate,
+    // extrapolates material data, or changes the convergence budget.
     let mut x1 = x0.to_vec();
     let mut iters = 0usize;
     let mut stagnant = 0usize;
     let mut best: Option<(Vec<f64>, f64)> = None;
     loop {
-        let dg = effort(&x1);
-        let res = residual(&x1, &dg);
+        let (_, res) = evaluate(&x1).ok_or(PhsError::DescriptorDomain {
+            what: "current storage, effort, or flow is nonfinite",
+        })?;
         let rnorm = res.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
         let improved = best.as_ref().is_none_or(|(_, b)| rnorm < *b);
         if improved {
@@ -1110,7 +1168,9 @@ pub fn step_descriptor(
         }
         if stagnant >= 3 || iters >= NEWTON_MAX {
             let (bx, brnorm) = best.expect("at least one iterate");
-            let dg = effort(&bx);
+            let (dg, _) = evaluate(&bx).ok_or(PhsError::DescriptorDomain {
+                what: "best Newton iterate is outside finite storage support",
+            })?;
             let floor = newton::residual_rounding_floor(sys.storage.as_ref(), x0, &bx,
                 &dg, &sys.j, &sys.r, &gu, dt, n_d, &[]);
             admit_default_newton_iterate(SolveBudget::default().certificate(
@@ -1121,17 +1181,39 @@ pub fn step_descriptor(
         let jac = {
             let mut jac = vec![0.0; n * n];
             for col in 0..n {
-                let h = 1.0e-6 * (1.0 + scale + x1[col].abs());
-                let mut xp = x1.clone();
-                let mut xm = x1.clone();
-                xp[col] += h;
-                xm[col] -= h;
-                let dgp = effort(&xp);
-                let dgm = effort(&xm);
-                let rp = residual(&xp, &dgp);
-                let rm = residual(&xm, &dgm);
-                for row in 0..n {
-                    jac[row * n + col] = (rp[row] - rm[row]) / (2.0 * h);
+                let mut h = 1.0e-6 * (1.0 + scale + x1[col].abs());
+                let mut admitted = false;
+                for _ in 0..=DESCRIPTOR_DOMAIN_HALVINGS {
+                    if !h.is_finite() || h <= 0.0 {
+                        break;
+                    }
+                    let mut xp = x1.clone();
+                    let mut xm = x1.clone();
+                    xp[col] += h;
+                    xm[col] -= h;
+                    if xp[col] == x1[col] || xm[col] == x1[col] {
+                        break;
+                    }
+                    if let (Some((_, rp)), Some((_, rm))) = (evaluate(&xp), evaluate(&xm)) {
+                        let column: Vec<f64> = rp
+                            .iter()
+                            .zip(&rm)
+                            .map(|(p, m)| (p - m) / (2.0 * h))
+                            .collect();
+                        if column.iter().all(|v| v.is_finite()) {
+                            for row in 0..n {
+                                jac[row * n + col] = column[row];
+                            }
+                            admitted = true;
+                            break;
+                        }
+                    }
+                    h *= 0.5;
+                }
+                if !admitted {
+                    return Err(PhsError::DescriptorDomain {
+                        what: "no finite centered Jacobian probe within 24 halvings",
+                    });
                 }
             }
             jac
@@ -1142,12 +1224,35 @@ pub fn step_descriptor(
         };
         let mut dx = res;
         fact.solve(&mut dx);
-        for i in 0..n {
-            x1[i] -= dx[i];
+        if dx.iter().any(|v| !v.is_finite()) {
+            return Err(PhsError::DescriptorDomain {
+                what: "Newton update is nonfinite",
+            });
         }
+        let mut weight = 1.0;
+        let mut candidate = x1.clone();
+        let mut admitted = false;
+        for _ in 0..=DESCRIPTOR_DOMAIN_HALVINGS {
+            for i in 0..n {
+                candidate[i] = x1[i] - weight * dx[i];
+            }
+            if evaluate(&candidate).is_some() {
+                admitted = true;
+                break;
+            }
+            weight *= 0.5;
+        }
+        if !admitted {
+            return Err(PhsError::DescriptorDomain {
+                what: "no finite Newton update within 24 halvings",
+            });
+        }
+        x1 = candidate;
         iters += 1;
     }
-    let dg = effort(&x1);
+    let (dg, res) = evaluate(&x1).ok_or(PhsError::DescriptorDomain {
+        what: "accepted storage, effort, or flow is nonfinite",
+    })?;
     let mut y = vec![0.0; sys.m];
     for p in 0..sys.m {
         let mut acc = 0.0;
@@ -1156,8 +1261,8 @@ pub fn step_descriptor(
         }
         y[p] = acc;
     }
-    let h0 = sys.storage.hamiltonian(x0);
     let h1 = sys.storage.hamiltonian(&x1);
+    let delta_h = h1 - h0;
     let mut dissipated = 0.0;
     for i in 0..n {
         let mut rd = 0.0;
@@ -1172,7 +1277,16 @@ pub fn step_descriptor(
         supplied += u[p] * y[p];
     }
     supplied *= dt;
-    let res = residual(&x1, &dg);
+    if y.iter().any(|v| !v.is_finite())
+        || !h1.is_finite()
+        || !delta_h.is_finite()
+        || !dissipated.is_finite()
+        || !supplied.is_finite()
+    {
+        return Err(PhsError::DescriptorDomain {
+            what: "accepted port output or energy ledger is nonfinite",
+        });
+    }
     let solver_residual = res.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
     let floor = newton::residual_rounding_floor(
         sys.storage.as_ref(),
@@ -1201,7 +1315,7 @@ pub fn step_descriptor(
     Ok(StepRecord {
         x: x1,
         y,
-        delta_h: h1 - h0,
+        delta_h,
         dissipated,
         supplied,
         newton_iters: iters,
@@ -1335,6 +1449,8 @@ impl StepRecord {
 /// implicit discrete-gradient solve.
 const NEWTON_TOL: f64 = 1.0e-13;
 const NEWTON_MAX: usize = 50;
+// Bounded attempts to regain descriptor storage support, including probes.
+const DESCRIPTOR_DOMAIN_HALVINGS: usize = 24;
 
 /// One Gonzalez discrete-gradient step of size `dt` under held input
 /// `u`: solves `x1 = x0 + dt (J - R) dg(x0, x1) + dt G u` by Newton

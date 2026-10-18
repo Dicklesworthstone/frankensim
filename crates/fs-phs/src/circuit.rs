@@ -29,8 +29,9 @@
 //! Admission is LOUD: floating nodes, shorted or parallel voltage
 //! sources, and non-physical element values refuse BY NAME before any
 //! stepping; consistent initial conditions are solved by a `dt = 0`
-//! descriptor step (the algebraic subsystem alone), and a stall there
-//! refuses as inconsistent ICs rather than NaN-ing later.
+//! descriptor step (the algebraic subsystem alone). A rank-aware SVD fallback
+//! admits compatible redundant constraints without changing flux or charge;
+//! incompatible original rows still refuse as inconsistent ICs.
 //!
 //! NO-CLAIMS (v1): no event switching — diodes/triodes arrive as
 //! SMOOTH device laws in the device bead, and switching topologies
@@ -117,10 +118,10 @@ pub enum CircuitError {
         /// The two branch indices.
         branches: (usize, usize),
     },
-    /// The `dt = 0` consistency solve stalled: the supplied initial
-    /// differential state contradicts the algebraic constraints.
+    /// The supplied initial differential state and sources contradict
+    /// the original algebraic constraints within the native solve budget.
     InconsistentInitialConditions {
-        /// Newton residual at the stall.
+        /// Original algebraic residual after the refused consistency solve.
         residual: f64,
     },
     /// Underlying pHS admission/step refusal.
@@ -281,7 +282,7 @@ pub fn assemble_circuit(graph: &CircuitGraph) -> Result<CircuitDae, CircuitError
 
     let mut j = vec![0.0; n * n];
     let mut r = vec![0.0; n * n];
-    let mut g = vec![0.0; n * ports.max(1)];
+    let mut g = vec![0.0; n * ports];
     let mut q_storage = vec![0.0; n * n];
     let mut flux_index = Vec::new();
     let mut charge_index = Vec::new();
@@ -409,9 +410,17 @@ impl CircuitDae {
     /// state (fluxes/charges kept; algebraic coordinates solved by a
     /// `dt = 0` descriptor step).
     ///
+    /// Compatible redundant constraints can leave branch-current splitting
+    /// free, such as a capacitor directly across an ideal voltage source.
+    /// After a Newton refusal, the existing SVD owner solves only the linear
+    /// algebraic block. Original rows and the original solve budget must
+    /// accept the represented midpoint efforts; stored coordinates never move.
+    /// A minimum-norm multiplier choice does not claim unique initial currents.
+    ///
     /// # Errors
-    /// [`CircuitError::InconsistentInitialConditions`] when the
-    /// algebraic solve stalls; dimension refusals.
+    /// [`CircuitError::InconsistentInitialConditions`] when the supplied
+    /// storage and sources contradict the algebraic constraints; dimension
+    /// or nonfinite-arithmetic refusals.
     pub fn consistent_initial_state(
         &self,
         x0: &[f64],
@@ -419,16 +428,146 @@ impl CircuitDae {
     ) -> Result<Vec<f64>, CircuitError> {
         match step_descriptor(&self.system, x0, u0, 0.0) {
             Ok(rec) => Ok(rec.x),
-            Err(PhsError::NewtonStalled { residual }) => {
-                Err(CircuitError::InconsistentInitialConditions { residual })
-            }
-            Err(PhsError::NewtonRefused { certificate }) => {
-                Err(CircuitError::InconsistentInitialConditions {
-                    residual: certificate.residual,
-                })
+            Err(PhsError::NewtonStalled { .. } | PhsError::NewtonRefused { .. }) => {
+                self.consistent_initial_state_rank_aware(x0, u0)
             }
             Err(e) => Err(CircuitError::Phs(e)),
         }
+    }
+
+    #[allow(clippy::too_many_lines)] // one fixed-storage algebraic consistency solve
+    fn consistent_initial_state_rank_aware(
+        &self,
+        x0: &[f64],
+        u0: &[f64],
+    ) -> Result<Vec<f64>, CircuitError> {
+        let sys = &self.system;
+        let n = sys.n;
+        let nd = sys.n_diff;
+        let na = n - nd;
+        let invalid = || CircuitError::Invalid {
+            what: "initial algebraic constraints require finite represented arithmetic",
+        };
+        if x0.len() != n || u0.len() != sys.m {
+            return Err(CircuitError::Phs(PhsError::Dimension {
+                what: "descriptor state/input length",
+            }));
+        }
+        if x0.iter().chain(u0).any(|v| !v.is_finite())
+            || !sys.storage.hamiltonian(x0).is_finite()
+        {
+            return Err(invalid());
+        }
+        let mut effort = vec![0.0; n];
+        sys.storage.gradient(x0, &mut effort);
+        let mut gu = vec![0.0; n];
+        for row in 0..n {
+            for port in 0..sys.m {
+                gu[row] += sys.g[row * sys.m + port] * u0[port];
+            }
+        }
+        if effort.iter().chain(&gu).any(|v| !v.is_finite()) {
+            return Err(invalid());
+        }
+
+        // A*lambda = -[(J-R)_ad*gradH(x0) + G_a*u0]. No differential
+        // unknown occurs in this solve, including when its rows are redundant.
+        let mut a = vec![0.0; na * na];
+        let mut rhs = vec![0.0; na];
+        for row in 0..na {
+            let physical_row = nd + row;
+            let mut known = gu[physical_row];
+            for col in 0..nd {
+                known += (sys.j[physical_row * n + col] - sys.r[physical_row * n + col])
+                    * effort[col];
+            }
+            rhs[row] = -known;
+            for col in 0..na {
+                a[row * na + col] =
+                    sys.j[physical_row * n + nd + col] - sys.r[physical_row * n + nd + col];
+            }
+        }
+        if a.iter().chain(&rhs).any(|v| !v.is_finite()) {
+            return Err(invalid());
+        }
+        // Uniform scaling preserves both the solution and its nullspace while
+        // keeping the existing SVD's squared column norms representable.
+        let magnitude = a.iter().fold(0.0_f64, |s, v| s.max(v.abs()));
+        if magnitude > 0.0 {
+            for value in &mut a {
+                *value /= magnitude;
+            }
+            for value in &mut rhs {
+                *value /= magnitude;
+            }
+        }
+        if rhs.iter().any(|v| !v.is_finite()) {
+            return Err(invalid());
+        }
+        let svd = fs_la::factor::svd_jacobi(&a, na, na);
+        if svd.sigma.iter().chain(&svd.u).chain(&svd.v).any(|v| !v.is_finite()) {
+            return Err(invalid());
+        }
+        let largest = svd.sigma.first().copied().unwrap_or(0.0);
+        let cutoff = f64::EPSILON * na as f64 * largest;
+        let mut lambda = vec![0.0; na];
+        for mode in 0..na {
+            if svd.sigma[mode] <= cutoff {
+                continue;
+            }
+            let mut projection = 0.0;
+            for row in 0..na {
+                projection = svd.u[row * na + mode].mul_add(rhs[row], projection);
+            }
+            let coefficient = projection / svd.sigma[mode];
+            for col in 0..na {
+                lambda[col] = svd.v[col * na + mode].mul_add(coefficient, lambda[col]);
+            }
+        }
+        let mut candidate = x0.to_vec();
+        for col in 0..na {
+            // Preserve the dt=0 endpoint convention: the algebraic effort is
+            // midpoint(x0_alg, x1_alg), not the returned endpoint by itself.
+            candidate[nd + col] = lambda[col] + (lambda[col] - x0[nd + col]);
+            effort[nd + col] = f64::midpoint(x0[nd + col], candidate[nd + col]);
+        }
+        if candidate.iter().chain(&effort).any(|v| !v.is_finite())
+            || !sys.storage.hamiltonian(&candidate).is_finite()
+        {
+            return Err(invalid());
+        }
+
+        // Check original, unscaled rows using the actually represented
+        // midpoint. A least-squares answer never repairs an incompatible clamp.
+        let mut residual = 0.0_f64;
+        for row in 0..n {
+            let mut flow = 0.0;
+            for col in 0..n {
+                flow += (sys.j[row * n + col] - sys.r[row * n + col]) * effort[col];
+            }
+            let total_flow = flow + gu[row];
+            if !flow.is_finite() || !total_flow.is_finite() {
+                return Err(invalid());
+            }
+            if row >= nd {
+                residual = residual.max(total_flow.abs());
+            }
+        }
+        let scale = x0.iter().chain(u0).fold(1e-30_f64, |s, v| s.max(v.abs()));
+        let floor = crate::newton::residual_rounding_floor(
+            sys.storage.as_ref(), x0, &candidate, &effort,
+            &sys.j, &sys.r, &gu, 0.0, nd, &[],
+        );
+        if !floor.is_finite() {
+            return Err(invalid());
+        }
+        crate::admit_default_newton_iterate(
+            crate::SolveBudget::default()
+                .certificate(crate::NewtonSite::Descriptor, residual, scale, floor, 0, 0)
+                .with_rounding_allowance(),
+        )
+        .map_err(|_| CircuitError::InconsistentInitialConditions { residual })?;
+        Ok(candidate)
     }
 
     /// One audited step: advances the DAE and returns the record plus
