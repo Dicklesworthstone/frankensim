@@ -20,9 +20,9 @@ pub struct StripEnthalpyReport<S>{
 }
 
 pub struct StripEnthalpyCandidate<'t,'m,S>{
-    pub(super) thermal:DepositionSimulation<'t>,
-    pub(super) strip:LayeredStrip<'m>,
-    pub(super) report:StripEnthalpyReport<S>,
+    pub(in crate::strip_enthalpy) thermal:DepositionSimulation<'t>,
+    pub(in crate::strip_enthalpy) strip:LayeredStrip<'m>,
+    pub(in crate::strip_enthalpy) report:StripEnthalpyReport<S>,
 }
 impl<'t,'m,S> StripEnthalpyCandidate<'t,'m,S>{
     pub const fn thermal(&self)->&DepositionSimulation<'t>{&self.thermal}
