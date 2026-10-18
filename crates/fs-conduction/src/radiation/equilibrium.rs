@@ -1,5 +1,7 @@
 //! Reassemble the coupled discrete equations at the proposed final field.
 //! A temperature update is not a substitute for the actual radiative load.
+mod state;
+
 use super::{
     ConductionError, ConductionProblem, ConductionSolution, Cx, DofMap,
     GrayDiffuseEnclosure, PreparedRadiosity, RadiosityReport, ThermalInterfaces,

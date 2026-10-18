@@ -4,6 +4,9 @@
 //! implementation makes the same immutable chart available to electrical,
 //! thermal and mechanical consumers without a dependency on a FEM solver.
 
+/// Shared material/phase conditions for conduction, electricity and radiation.
+pub mod source;
+
 use crate::phase::EquilibriumEnthalpyPhaseCurve;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 
