@@ -310,6 +310,7 @@ class ReferenceTests(unittest.TestCase):
                 pinned, pins = fetch(directory, [bad], mode="--pin")
             finally:
                 server.shutdown()
+                server.server_close()
             refs = Path(directory) / "refs"
             self.assertEqual(result.returncode, 1)
             self.assertEqual([e["event"] for e in events], ["fetched", "refused"])
