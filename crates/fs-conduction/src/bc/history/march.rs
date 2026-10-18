@@ -3,8 +3,9 @@
 //! All loads are sampled at the explicitly requested END time, including the
 //! scenario owner's right-continuous held tables. This is backward-Euler
 //! endpoint quadrature, not exact integration of a discontinuous schedule.
-//! There is no hidden event splitting, timestep selection, continuous-peak
-//! bound or Crank-Nicolson claim. The caller owns the time grid.
+//! The original advance_to methods keep that endpoint rule. The opt-in
+//! advance_event_step methods resolve schedule knots and use their left limits.
+//! Neither path supplies a temporal error bound or a continuous-peak bound.
 //!
 //! The same old field feeds every attempted step. Prescribed-temperature
 //! changes use the existing endpoint solvers, including boundary capacity
@@ -19,6 +20,9 @@ pub mod enthalpy;
 
 mod capacity;
 pub use capacity::ThermalHistoryCapacity;
+
+/// Event-aligned steps that do not skip scheduled loads or backdate their jumps.
+pub mod events;
 
 use super::{ThermalBoundaryHistory, poll};
 use crate::{ConductionError, ConductionProblem, ConductivityModel, ElementMaterials,
