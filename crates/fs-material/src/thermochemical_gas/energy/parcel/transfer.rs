@@ -12,6 +12,9 @@
 //! assumed thermalized in the receiving well-mixed volume; no resolved momentum
 //! is stored here. A rate/port owner must bound and refine its physical timestep.
 
+/// Source-backed converging-nozzle flow and pressure-driven paired exchange.
+pub mod nozzle;
+
 use std::collections::BTreeMap;
 use super::ClosedGasParcel;
 use super::super::{GasEnergyError, GasEnergySolve, poll, positive, updated_point};
