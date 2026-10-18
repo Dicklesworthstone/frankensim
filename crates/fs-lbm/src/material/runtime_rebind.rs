@@ -17,7 +17,9 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
     /// conservative transfer operator rather than an in-place coefficient swap.
     /// The current lattice must still carry the previous plan's uniform
     /// relaxation values, so non-Newtonian or manually edited fields are never
-    /// silently overwritten.
+    /// silently overwritten. The supplied previous plan must also match the
+    /// slab's retained physical units and storage; matching diffusivities alone
+    /// cannot identify density or heat capacity.
     ///
     /// # Errors
     /// Refuses dx/dt changes, density/cp changes, independently modified
@@ -29,6 +31,11 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
         gravity_m_s2: f64,
         expansion_per_k: f64,
     ) -> Result<(), MaterialLbmError> {
+        if slab.force_units != forcing::ForceUnits::from_scale(previous) {
+            return Err(MaterialLbmError::Invalid(
+                "previous material scale must match the slab's retained physical state",
+            ));
+        }
         if self.cell_size_m.to_bits() != previous.cell_size_m.to_bits()
             || self.timestep_s.to_bits() != previous.timestep_s.to_bits()
         {
@@ -85,6 +92,11 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
         gravity_m_s2: f64,
         expansion_per_k: f64,
     ) -> Result<(), MaterialLbmError> {
+        if slab.force_units != forcing::ForceUnits::from_scale(previous) {
+            return Err(MaterialLbmError::Invalid(
+                "previous material scale must match the slab's retained physical state",
+            ));
+        }
         if self.cell_size_m.to_bits() != previous.cell_size_m.to_bits()
             || self.timestep_s.to_bits() != previous.timestep_s.to_bits()
         {
@@ -243,5 +255,40 @@ mod tests {
         assert!(other_units
             .rebind_thermal_slab(&mut slab, &old, 9.81, 2.0e-4)
             .is_err());
+    }
+
+    #[test]
+    fn matching_diffusivities_cannot_disguise_a_foreign_mass_and_heat_mapping() {
+        let fluid = FluidTransportState::try_new(1000.0, 4000.0, 0.5, 0.001).unwrap();
+        // The foreign fluid has identical nu and alpha, hence identical taus,
+        // but twice the physical mass and heat storage per represented volume.
+        let foreign = FluidTransportState::try_new(2000.0, 4000.0, 1.0, 0.002).unwrap();
+        let changed = FluidTransportState::try_new(2000.0, 4000.0, 2.0, 0.004).unwrap();
+        let actual = plan_scaling_from_material(&fluid, 1e-3, 1e-3, 0.01).unwrap();
+        let wrong_previous = plan_scaling_from_material(&foreign, 1e-3, 1e-3, 0.01).unwrap();
+        let next = plan_scaling_from_material(&changed, 1e-3, 1e-3, 0.01).unwrap();
+        assert_eq!(actual.flow().tau, wrong_previous.flow().tau);
+        assert_eq!(actual.thermal_relaxation_time(), wrong_previous.thermal_relaxation_time());
+
+        let mut slab = actual.thermal_slab(slab_input()).unwrap();
+        let force_units = slab.force_units;
+        let population = slab.lattice.gpop.clone();
+        let tau = slab.lattice.grid.tau.clone();
+        assert!(next.rebind_thermal_slab(&mut slab, &wrong_previous, 9.81, 2e-4).is_err());
+        assert!(slab.force_units == force_units);
+        assert_eq!(slab.lattice.gpop, population);
+        assert_eq!(slab.lattice.grid.tau, tau);
+
+        let mut slab = actual.thermal_slab3(MaterialThermalSlab3 {
+            nx: 3, ny: 2, nz: 6, bottom_temperature_k: 310.0, top_temperature_k: 300.0,
+            gravity_m_s2: 9.81, expansion_per_k: 2e-4, max_cells: 48,
+        }).unwrap();
+        let force_units = slab.force_units;
+        let population = slab.lattice.gpop.clone();
+        let tau = slab.lattice.grid.tau.clone();
+        assert!(next.rebind_thermal_slab3(&mut slab, &wrong_previous, 9.81, 2e-4).is_err());
+        assert!(slab.force_units == force_units);
+        assert_eq!(slab.lattice.gpop, population);
+        assert_eq!(slab.lattice.grid.tau, tau);
     }
 }

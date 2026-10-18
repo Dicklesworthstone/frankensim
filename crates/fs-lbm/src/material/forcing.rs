@@ -12,7 +12,7 @@ use super::{MaterialLbmError, MaterialScaling, MaterialSlab};
 
 // Capture the slab's original units, so stepping cannot accidentally use a
 // different material's density or a different plan's dx/dt conversion.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(super) struct ForceUnits {
     transport: FluidTransportState,
     cell_size_m: f64,
