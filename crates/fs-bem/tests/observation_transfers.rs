@@ -666,6 +666,40 @@ fn fir_ladder_is_scale_invariant_and_rejects_unresolved_tails() {
 }
 
 #[test]
+fn zero_by_symmetry_components_are_judged_with_their_gradient_vector() {
+    // An on-axis receiver's transverse gradient vanishes by symmetry; a real BEM
+    // producer leaves roundoff there (~1e-17 of |grad p|), whose self-relative
+    // tail is ~3/4 at every DFT size. Against the whole gradient vector that
+    // roundoff passes, while 1e-3 of an unresolved Q=1000 resonance in the same
+    // component is still refused.
+    let d = declaration();
+    let reference = analytic_bake(&d);
+    let expected = reference.ladder.last().unwrap();
+    let transverse = |extra: fn(f64, C64) -> C64| {
+        move |w: f64| {
+            let mut row = analytic_sphere(C64::new(0.0, -w), A, R, (R - A) / C);
+            row[1] = extra(w, row[3]);
+            Ok::<_, helmholtz::HelmholtzError>(row)
+        }
+    };
+    let roundoff: fn(f64, C64) -> C64 = |w, g| phase(1.0e4 * w).scale(1e-17 * g.abs());
+    let baked = bake_observation_transfers(transverse(roundoff), &d, || false).unwrap();
+    let actual = baked.ladder.last().unwrap();
+    assert!(
+        (actual.tail_energy_fraction - expected.tail_energy_fraction).abs()
+            < 1e-3 * expected.tail_energy_fraction + 1e-20
+    );
+    let resonance: fn(f64, C64) -> C64 = |w, g| {
+        let w0 = core::f64::consts::TAU * 500.0;
+        g.scale(1e-3 * w0 * w0) * C64::new(w0 * w0 - w * w, -w * w0 / 1000.0).recip()
+    };
+    assert!(matches!(
+        bake_observation_transfers(transverse(resonance), &d, || false),
+        Err(TransferError::NotConverged { .. })
+    ));
+}
+
+#[test]
 fn damped_boundary_and_receiver_match_the_original_real_frequency_owner() {
     let surface = SpherePanels::icosphere(0.001, 1).unwrap();
     let velocity = vec![C64::ONE; surface.areas().len()];

@@ -23,9 +23,12 @@ provenance/uncertainty, and an entry budget. The taper is exactly one in the
 pass band. Output time includes the declared additional filter latency. No
 passivity enforcement, allpass approximation or rational fit is applied.
 
-Every DFT rung records worst-channel tail energy after N/4, wrap-around energy
-in the second half, and the maximum per-channel relative L2 DTFT change on a
-fixed 127-point withheld pass-band grid. Pa and Pa/m are never mixed in a norm.
+Every DFT rung records worst-quantity tail energy after N/4, wrap-around energy
+in the second half, and the maximum per-quantity relative L2 DTFT change on a
+fixed 127-point withheld pass-band grid. A quantity is the pressure [Pa] or the
+whole Cartesian gradient vector [Pa/m] of one source/receiver pair; Pa and Pa/m
+are never mixed in a norm. Per-component fractions are frame-dependent: an
+on-axis receiver's zero-by-symmetry components hold only roundoff.
 Only the first half is retained, after measuring the full untrimmed inverse.
 The final tail must meet the caller's <=1e-10 tolerance, wrap must be <1e-10,
 and inter-rung DTFT change must be strictly below the caller's <=1e-4 tolerance.

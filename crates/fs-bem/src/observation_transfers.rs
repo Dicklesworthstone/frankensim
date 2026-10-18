@@ -107,8 +107,9 @@ impl core::fmt::Display for TransferError {
 }
 impl std::error::Error for TransferError {}
 
-/// One computed DFT rung; fractions are the worst channel, never a mixture of
-/// Pa and Pa/m. Tail is energy after N/4; wrap is energy in the second half.
+/// One computed DFT rung; fractions are the worst physical quantity, never a
+/// mixture of Pa and Pa/m. Tail is energy after N/4; wrap is energy in the
+/// second half. The Cartesian gradient is ONE vector quantity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LadderRung {
     pub n_fft: usize,
@@ -343,26 +344,38 @@ fn observation_taper(f_hz: f64, pass_hz: f64, stop_hz: f64) -> f64 {
     if x <= 0.5 { 1.0 - low(x) } else { low(1.0 - x) }
 }
 
+/// Channel ranges of the physical quantities, in kernel order p, dp/dx, dp/dy,
+/// dp/dz per source/receiver pair: pressure [Pa] alone, and the Cartesian
+/// gradient [Pa/m] as one vector. A component's fraction of its own energy is
+/// frame-dependent, and an on-axis receiver's zero-by-symmetry components hold
+/// only roundoff whose self-relative tail is ~3/4 at every resolution, so gates
+/// measure each component against its whole vector.
+fn quantities(channels: usize) -> impl Iterator<Item = core::ops::Range<usize>> {
+    (0..channels / 4).flat_map(|pair| [4 * pair..4 * pair + 1, 4 * pair + 1..4 * pair + 4])
+}
+
 fn dtft_change(
     a: &[FirKernel],
     b: &[FirKernel],
     decl: &TransferDeclaration,
 ) -> Result<f64, TransferError> {
     let mut largest = 0.0_f64;
-    for (a, b) in a.iter().zip(b) {
-        let mut samples = Vec::with_capacity(127);
+    for range in quantities(a.len().min(b.len())) {
+        let mut samples = Vec::with_capacity(127 * range.len());
         let mut scale = 0.0_f64;
-        for i in 0..127 {
-            let w = core::f64::consts::TAU * decl.pass_band_upper_hz * (i as f64 + 0.371)
-                / (127.0 * decl.fs_hz);
-            let av = a.transfer_at(w)?;
-            let bv = b.transfer_at(w)?;
-            scale = scale
-                .max(av.re.abs())
-                .max(av.im.abs())
-                .max(bv.re.abs())
-                .max(bv.im.abs());
-            samples.push((av, bv));
+        for (a, b) in a[range.clone()].iter().zip(&b[range]) {
+            for i in 0..127 {
+                let w = core::f64::consts::TAU * decl.pass_band_upper_hz * (i as f64 + 0.371)
+                    / (127.0 * decl.fs_hz);
+                let av = a.transfer_at(w)?;
+                let bv = b.transfer_at(w)?;
+                scale = scale
+                    .max(av.re.abs())
+                    .max(av.im.abs())
+                    .max(bv.re.abs())
+                    .max(bv.im.abs());
+                samples.push((av, bv));
+            }
         }
         // Normalize before subtracting/squaring: finite large/small physical
         // units must not turn a convergence discrepancy into inf/inf or 0/0.
@@ -447,7 +460,6 @@ pub fn bake_observation_transfers(
         let fft = Fft::new(n);
         let mut scratch = vec![FftComplex::default(); n];
         let mut kernels = Vec::with_capacity(channels);
-        let (mut tail, mut wrap) = (0.0_f64, 0.0_f64);
         for (c, spectrum) in spectra.iter_mut().enumerate() {
             fft.inverse(spectrum, &mut scratch);
             if spectrum
@@ -475,10 +487,6 @@ pub fn bake_observation_transfers(
             if imaginary > 1e-24 * total {
                 return Err(TransferError::Invalid("nonreal observation kernel"));
             }
-            if total > 0.0 {
-                tail = tail.max(spectrum[n / 4..].iter().map(energy).sum::<f64>() / total);
-                wrap = wrap.max(spectrum[n / 2..].iter().map(energy).sum::<f64>() / total);
-            }
             let pair = c / 4;
             kernels.push(FirKernel {
                 input: pair / decl.receivers.len(),
@@ -487,6 +495,28 @@ pub fn bake_observation_transfers(
                     as usize,
                 taps: spectrum[..n / 2].iter().map(|v| v.re).collect(),
             });
+        }
+        let (mut tail, mut wrap) = (0.0_f64, 0.0_f64);
+        for range in quantities(channels) {
+            let group = &spectra[range];
+            let scale = group
+                .iter()
+                .flatten()
+                .fold(0.0_f64, |s, v| s.max(v.re.abs()).max(v.im.abs()));
+            if scale == 0.0 {
+                continue;
+            }
+            let energy = |v: &FftComplex| (v.re / scale).powi(2) + (v.im / scale).powi(2);
+            let part = |from: usize| {
+                group
+                    .iter()
+                    .flat_map(|s| &s[from..])
+                    .map(energy)
+                    .sum::<f64>()
+            };
+            let total = part(0);
+            tail = tail.max(part(n / 4) / total);
+            wrap = wrap.max(part(n / 2) / total);
         }
         let change = previous
             .as_ref()
