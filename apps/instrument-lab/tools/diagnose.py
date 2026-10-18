@@ -15,6 +15,8 @@ Inputs beyond verisim.py's:
                              where the Iowa microphones sat (when the graded renders listen elsewhere)
   piano/a3-mf-far.wav        optional: when the graded renders listen at the Iowa microphone positions,
                              the same A3 mf at the former default point 1 m above the board
+  piano/a3-{mf,ff,fff}-legacyfelt.wav  optional: when the graded renders use RT-0425's hammer law
+                             (--rt0425-hammer-stiffness), the same strokes with the former felt law
   piano/a3-mf-p{x,y}.wav     optional: the same A3 mf heard by stereo pairs 0.1 m either side of the bass-side
                              Iowa position, along x and along y (how much a near-field grade depends on that estimate)
   piano/a3-mf-estmap.wav     optional: the same A3 mf with the former estimated bridge stations (same board,
@@ -448,9 +450,19 @@ def main():
     ph_real, ph_ours = phantoms(real_ff), phantoms(ours_ff)
     gain_real = V.band_ratio(real_ff) - V.band_ratio(real_mf)
     gain_ours = V.band_ratio(ours_ff) - V.band_ratio(ours_mf)
+    # The 8 m/s stroke is the one whose loudness matches the real ff (piano_dynamics); its brightness decides the tail of the symptom.
+    dull8 = V.band_ratio(real_ff) - V.band_ratio(piano("a3-fff")) if has("a3-fff") else None
+    peak_db = lambda x: 20 * math.log10(float(np.abs(x).max()))
+    # How far the 8 m/s stroke's peak level above mf falls short of the real ff's (positive: quieter than the real ff).
+    loud8 = ((peak_db(real_ff) - peak_db(real_mf)) - (peak_db(piano("a3-fff")) - peak_db(ours_mf))) if has("a3-fff") else None
+    at8 = "" if loud8 is None else f" (8 m/s, {abs(loud8):.1f} dB {'quieter' if loud8 > 0 else 'louder'} than the real ff relative to mf)"
+    matched = ("." if dull8 is None else
+               f", and stays {abs(dull8):.1f} dB {'duller' if dull8 > 0 else 'brighter'} even when struck about as hard as the real ff{at8}."
+               if abs(dull8) > 3 else
+               f". Struck about as hard as the real ff{at8}, it lands within {abs(dull8):.1f} dB of the real ff's brightness.")
     row = {
         "id": "ff-brightness",
-        "symptom": f"From mf to ff the real piano gains {gain_real:.1f} dB of 2-8 kHz brightness; FrankenSim gains {gain_ours:.1f} dB, and stays dull even when struck hard enough to match the real ff's loudness.",
+        "symptom": f"From mf to ff the real piano gains {gain_real:.1f} dB of 2-8 kHz brightness; FrankenSim at 4.5 m/s gains {gain_ours:.1f} dB" + matched,
         "evidence": f"Sum tones f_m + f_n of a tension-modulated string (phantom partials) stand at least 10 dB above the local floor and within 40 dB of the true partial at {sum(q['present'] for q in ph_real)} of {len(ph_real)} resolvable positions (partials {ph_real[0]['k']}-{ph_real[-1]['k']}) in the real ff, as close as {max(q['re_partial_db'] for q in ph_real):.0f} dB to the true partial; in FrankenSim's ff at {sum(q['present'] for q in ph_ours)} of {len(ph_ours)}, the highest at {max(q['re_partial_db'] for q in ph_ours):.0f} dB. Each piano's positions come from its own inharmonicity fit.",
         "suspect": "No geometric string nonlinearity: a hard strike stretches the string, modulating its tension and driving longitudinal waves. For the A3 wire the first longitudinal mode is about 3.3 kHz, inside the missing band.",
         "test": "Render A3 mf and ff with --string-stretching waves (EA from the scale's own EI with E = 200 GPa) and compare brightness gain and phantom levels.",
@@ -485,6 +497,22 @@ def main():
                       "(about 1.8 degrees of downbearing plus a 28 mm bridge-cap lever arm), with the work in the energy ledger. Against the same strokes with linear strings: "
                       f"phantom partials at ff stand at {count(ph_ours)} of {len(ph_ours)} positions (linear {count(ph_lin)}; real Steinway {count(ph_real)}), and the mf-to-ff "
                       f"brightness gain is {gain_ours:.1f} dB (linear {gain_lin:.1f} dB; real piano {gain_real:.1f} dB).") + hard
+    hammer = "--rt0425-hammer-stiffness" in render_cmd("a3-ff")
+    if hammer and has("a3-mf-legacyfelt") and has("a3-ff-legacyfelt"):
+        # The graded renders use RT-0425's published hammer law; the same strokes with the former felt law are kept.
+        b = {k: {"mf": V.band_ratio(x_mf), "ff": V.band_ratio(x_ff)} for k, x_mf, x_ff in
+             (("real", real_mf, real_ff), ("published", ours_mf, ours_ff), ("former", piano("a3-mf-legacyfelt"), piano("a3-ff-legacyfelt")))}
+        row["data"]["hammer_brightness_db"] = {k: {d: r(v, 3) for d, v in x.items()} for k, x in b.items()}
+        row["fix"] = (row.get("fix", "") + (" " if row.get("fix") else "")
+                      + "The hammers follow RT-0425's published law: its stiffness K_H on each unison string (the former conversion divided it across the "
+                      "unison, leaving each string too soft) and its dissipation R_H, with RT-0425's string losses. Against the same strokes with the former "
+                      f"felt law, 2-8 kHz brightness moves from {b['former']['mf']:.1f} to {b['published']['mf']:.1f} dB at mf and from "
+                      f"{b['former']['ff']:.1f} to {b['published']['ff']:.1f} dB at ff (real piano {b['real']['mf']:.1f} and {b['real']['ff']:.1f} dB).")
+        row["status"] = "improved"
+        if dull8 is not None and abs(dull8) <= 3 and loud8 is not None and abs(loud8) <= 3:
+            row["suspect"] = ("Loudness, not timbre: the 4.5 m/s stroke is quieter than the real ff, and at nearly matched loudness the brightness agrees. "
+                              "String stretching supplies the phantom partials; the published hammer law supplies the rest.")
+            row["test"] = "Map the recording's dynamic layers to hammer speeds by loudness before comparing their brightness."
     rows.append(row)
 
     # 6. Cymbal

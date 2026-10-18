@@ -352,8 +352,12 @@ def piano_label(cid):
     if "--rayleigh-loading" in cmd and load:
         extra.append(("air loading on both faces of the soundboard" if load.group(1) == "2" else "air loading on the soundboard")
                      + " (its complete 128-mode reaction)")
-    scale = ("RT-0425 Model D scale and bridge contacts" if "RT-0425 Appendix A coupling points" in text
-             else "RT-0425 Model D scale")
+    # Which of RT-0425's published sets the render used besides its scale.
+    sources = [name for name, used in (("bridge contacts", "RT-0425 Appendix A coupling points" in text),
+                                       ("hammers", "--rt0425-hammer-stiffness" in cmd),
+                                       ("string losses", "--rt0425-string-damping" in cmd)) if used]
+    scale = "RT-0425 Model D scale" + ("" if not sources else ", " + ", ".join(sources[:-1]) + " and " + sources[-1]
+                                       if len(sources) > 1 else " and " + sources[0])
     return f"FrankenSim offline render ({scale}; " + "".join(e + "; " for e in extra) + receiver_label(text) + ", infinite baffle, no room)"
 
 

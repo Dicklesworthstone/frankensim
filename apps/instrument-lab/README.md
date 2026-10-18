@@ -108,7 +108,13 @@ carries two-sided air loading and listens at the default point, 1 m above the mi
 
     piano_geometry --divisions 16 --rib-normal-step-m 0.03 --bridge-map rt0425 --output board-rt16.fsb  # 11,772 area samples
     grand_piano --preset steinway-d --board-geometry board-rt16.fsb --board-band-hz 2400 \
-      --board-reduction 128,64,200,400,800,1600,2300 --rayleigh-loading 2,90,2620,213 ...
+      --board-reduction 128,64,200,400,800,1600,2300 --rayleigh-loading 2,90,2620,213 \
+      --rt0425-hammer-stiffness --rt0425-hammer-dissipation --rt0425-string-damping ...
+
+The hammers follow RT-0425's published law: its stiffness K_H acts on each unison string (the preset's
+former felt conversion divided it across the unison, which its own comment calls too soft) with the
+published dissipation R_H, and the strings take RT-0425's published losses. The same mf/ff/8 m/s strokes
+with the former felt law, `a3-{mf,ff,fff}-legacyfelt`, let the ff-brightness card show what changed.
 
 The former estimated stations (`--bridge-map estimated`) were spaced evenly along each bridge. With
 the published string lengths they put most agraffes over the soundboard itself (A3's 0.77 m string,
