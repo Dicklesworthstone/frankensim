@@ -20,6 +20,8 @@ use std::collections::BTreeMap;
 
 /// Typed time/frame histories feeding these same physical load integrals.
 pub mod history;
+/// Spatially varying P1 pressure, traction and volume fields.
+pub mod fields;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LoadError3 {
@@ -196,6 +198,13 @@ impl<'m> TetLoadGeometry3<'m> {
                 } }
             }
         }
+        self.finish_forces(forces, nodal, cx)
+    }
+
+    // Shared nodal superposition and canonical publication for uniform/P1 fields.
+    fn finish_forces<'g>(&'g self, mut forces: Vec<f64>, nodal: &[(usize, f64)],
+        cx: &Cx<'_>) -> Result<TetLoadCase3<'g, 'm>, LoadError3> {
+        let full_dofs = self.nodes.len() * 3;
         let mut previous = None;
         for &(dof, force) in nodal {
             poll(cx)?;
