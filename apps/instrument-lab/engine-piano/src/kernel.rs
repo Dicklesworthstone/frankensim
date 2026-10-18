@@ -1633,6 +1633,8 @@ pub struct LivePiano {
     wu: Vec<f64>,
     /// gl_a . resp_b for every pair of active slots, K x K: the board part of the
     /// hammer contact compliance (`solve_contacts`), constant between rebuilds.
+    /// Emptied when a rebuild starts and filled when it succeeds, so a failed
+    /// rebuild leaves it unusable rather than stale.
     contact_gl_resp: Vec<f64>,
     // Board state in loaded coordinates and scratch.
     bq: Vec<f64>,
@@ -2230,6 +2232,7 @@ impl LivePiano {
     /// motion across. Energy-continuous for activation; the relative energy of
     /// retired strings goes to `ledger.retired_j`.
     fn rebuild(&mut self, activate: &[usize], retire: &[(usize, usize)]) -> Result<(), String> {
+        self.contact_gl_resp.clear();
         self.settle_damp();
         let r = self.r;
         // Physical board motion (static coordinates) before the basis changes.
@@ -2435,7 +2438,6 @@ impl LivePiano {
         self.wu.clear();
         self.wu.resize(k, 0.0);
         // The same dots solve_contacts formed every contact step, formed once.
-        self.contact_gl_resp.clear();
         for a in 0..k {
             for b in 0..k {
                 self.contact_gl_resp.push(dot(&self.active[a].gl, &self.active[b].resp));
@@ -3042,6 +3044,9 @@ impl LivePiano {
         self.c_h.clear();
         self.c_h.resize(nc * nc, 0.0);
         let k = self.active.len();
+        // After a failed rebuild the table no longer matches the active set:
+        // form the dots directly, as before the table existed.
+        let cached = self.contact_gl_resp.len() == k * k;
         for i in 0..nc {
             let (ki, mi) = (self.c_key[i], self.c_member[i]);
             let si = self.keys[ki].slot.unwrap_or(0);
@@ -3049,7 +3054,8 @@ impl LivePiano {
             for j in i..nc {
                 let kj = self.c_key[j];
                 let sj = self.keys[kj].slot.unwrap_or(0);
-                let mut h = self.c_lift[i] * self.c_lift[j] * self.contact_gl_resp[si * k + sj];
+                let gl_resp = if cached { self.contact_gl_resp[si * k + sj] } else { dot(&ai.gl, &self.active[sj].resp) };
+                let mut h = self.c_lift[i] * self.c_lift[j] * gl_resp;
                 if ki == kj {
                     h += self.keys[ki].model.compliance();
                     if mi == self.c_member[j] {
