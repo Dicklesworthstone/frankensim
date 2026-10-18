@@ -1,0 +1,247 @@
+//! Material-derived field storage on the existing Kirchhoff circuit runtime.
+//!
+//! Charge and flux linkage survive material/geometry updates. The change in
+//! their Hamiltonian is explicit parameter work, never unearned Joule heat or
+//! a reset of electrical state. The caller must couple that work to the body,
+//! heat reservoir or external control that actually changed the coefficient.
+
+use fs_material::field_storage::{ResolvedCapacitor, ResolvedInductor};
+use fs_phs::circuit::{Branch, CircuitGraph};
+
+use super::{MaterialCircuit, MaterialCircuitError, MaterialResistor, poll};
+
+/// The original field-storage source and geometry for one graph branch.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MaterialStorageElement {
+    /// Uniform dielectric-gap reduction, C = epsilon A / d.
+    Capacitor(ResolvedCapacitor),
+    /// Uniform magnetic-path reduction, L = mu N^2 A / l.
+    Inductor(ResolvedInductor),
+}
+
+/// Bind a material storage element to an ORIGINAL circuit branch index.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialStorage {
+    /// Full graph index, not the capacitor-only or inductor-only position.
+    pub branch: usize,
+    /// Source material and geometry; a numeric graph coefficient is replaced.
+    pub element: MaterialStorageElement,
+}
+
+/// Exactly one capacitor's or inductor's parameter work at fixed coordinate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StorageParameterWork {
+    /// Original graph branch.
+    pub branch: usize,
+    /// Electric or magnetic field energy before reconfiguration [J].
+    pub stored_before_j: f64,
+    /// Same charge/flux linkage evaluated with the new coefficient [J].
+    pub stored_after_j: f64,
+    /// Positive means supplied TO the electrical system; negative means returned.
+    pub supplied_work_j: f64,
+}
+
+/// An uncommitted source/material update with explicitly required parameter work.
+/// A proposal never changes the original circuit; the caller publishes this
+/// together with the physical owner that pays/receives the reported work.
+pub struct MaterialStorageCandidate {
+    circuit: MaterialCircuit,
+    work: Vec<StorageParameterWork>,
+    parameter_work_j: f64,
+}
+impl MaterialStorageCandidate {
+    /// New material coefficients and unchanged conserved charge/flux coordinates.
+    pub const fn circuit(&self) -> &MaterialCircuit {
+        &self.circuit
+    }
+    /// Ordered per-branch field-energy changes.
+    pub fn work(&self) -> &[StorageParameterWork] {
+        &self.work
+    }
+    /// External parameter work required by this update, with its physical sign.
+    pub const fn parameter_work_j(&self) -> f64 {
+        self.parameter_work_j
+    }
+    /// Move the candidate and its work account into a joint physical transaction.
+    pub fn into_parts(self) -> (MaterialCircuit, Vec<StorageParameterWork>, f64) {
+        (self.circuit, self.work, self.parameter_work_j)
+    }
+}
+
+fn invalid(message: &'static str) -> MaterialCircuitError {
+    MaterialCircuitError::Invalid(message)
+}
+
+fn lower(
+    graph: &CircuitGraph,
+    sources: &mut [MaterialStorage],
+) -> Result<CircuitGraph, MaterialCircuitError> {
+    if graph.node_count > super::MAX_MATERIAL_CIRCUIT_NODES
+        || graph.branches.len() > super::MAX_MATERIAL_CIRCUIT_BRANCHES
+    {
+        return Err(invalid(
+            "material storage graph exceeds the circuit capacity",
+        ));
+    }
+    let count = graph
+        .branches
+        .iter()
+        .filter(|(_, _, branch)| {
+            matches!(branch, Branch::Capacitor { .. } | Branch::Inductor { .. })
+        })
+        .count();
+    if sources.len() != count {
+        return Err(invalid(
+            "every capacitor and inductor requires exactly one material storage binding",
+        ));
+    }
+    sources.sort_by_key(|source| source.branch);
+    if sources
+        .windows(2)
+        .any(|pair| pair[0].branch == pair[1].branch)
+    {
+        return Err(invalid("duplicate material storage branch"));
+    }
+    let mut result = graph.clone();
+    for source in sources {
+        let branch = result
+            .branches
+            .get_mut(source.branch)
+            .ok_or_else(|| invalid("unknown material storage branch"))?;
+        branch.2 = match (&source.element, branch.2) {
+            (MaterialStorageElement::Capacitor(capacitor), Branch::Capacitor { .. }) => {
+                Branch::Capacitor {
+                    farads: capacitor.capacitance_f(),
+                }
+            }
+            (MaterialStorageElement::Inductor(inductor), Branch::Inductor { .. }) => {
+                Branch::Inductor {
+                    henries: inductor.inductance_h(),
+                }
+            }
+            _ => {
+                return Err(invalid(
+                    "material storage type does not match its circuit branch",
+                ));
+            }
+        };
+    }
+    Ok(result)
+}
+
+impl MaterialCircuit {
+    /// Construct the ordinary circuit with ALL R, C and L values supplied by
+    /// their material owners. Numeric graph values are placeholders only.
+    /// No alternate circuit solver or stored-state representation is introduced.
+    ///
+    /// Initial source/constraint consistency is checked by the existing DAE.
+    /// Uniform-field approximations and source validity belong to the material
+    /// reductions. C/L remain fixed during each ordinary `step_candidate`.
+    pub fn new_with_storage(
+        graph: CircuitGraph,
+        resistors: Vec<MaterialResistor>,
+        mut storage: Vec<MaterialStorage>,
+        fluxes_wb: Vec<f64>,
+        charges_c: Vec<f64>,
+        initial_inputs: &[f64],
+    ) -> Result<Self, MaterialCircuitError> {
+        let graph = lower(&graph, &mut storage)?;
+        let mut circuit = Self::new(graph, resistors, fluxes_wb, charges_c, initial_inputs)?;
+        circuit.storage = storage;
+        Ok(circuit)
+    }
+
+    /// Source-bound storage, retained unchanged through ordinary circuit steps.
+    /// Empty on the original constructor's explicitly authored C/L path.
+    pub fn storage(&self) -> &[MaterialStorage] {
+        &self.storage
+    }
+
+    /// Rebind source-derived C/L at fixed charge and flux linkage, without time
+    /// advance. This is an impulse-free parameter change with explicit work:
+    /// W = sum(q^2/2 * delta(1/C) + lambda^2/2 * delta(1/L)).
+    ///
+    /// The existing descriptor must admit the SAME coordinates under the new
+    /// algebraic constraints. A capacitor clamped by an ideal voltage source,
+    /// for example, cannot generally change C with both q and voltage fixed;
+    /// that update refuses instead of inventing an unaccounted current impulse.
+    ///
+    /// This does not solve mechanical force, heat, hysteresis or continuous
+    /// parameter evolution. Positive work must be supplied by the changing
+    /// material/geometry's physical owner, and negative work returned to it.
+    /// Any source, budget, constraint or cancellation refusal leaves `self`
+    /// unchanged. Every branch remains on the same circuit topology.
+    pub fn rebind_storage_candidate(
+        &self,
+        storage: Vec<MaterialStorage>,
+        inputs: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MaterialStorageCandidate, MaterialCircuitError> {
+        poll(&mut cancelled)?;
+        let storage_count = self
+            .graph
+            .branches
+            .iter()
+            .filter(|(_, _, branch)| {
+                matches!(branch, Branch::Capacitor { .. } | Branch::Inductor { .. })
+            })
+            .count();
+        if self.storage.len() != storage_count {
+            return Err(invalid(
+                "live storage changes require source-bound original capacitors and inductors",
+            ));
+        }
+        let candidate = Self::new_with_storage(
+            self.graph.clone(),
+            self.resistors.clone(),
+            storage,
+            self.fluxes_wb.clone(),
+            self.charges_c.clone(),
+            inputs,
+        )?;
+        poll(&mut cancelled)?;
+        let mut charges = self.charges_c.iter();
+        let mut fluxes = self.fluxes_wb.iter();
+        let mut source = 0;
+        let mut work = Vec::with_capacity(storage_count);
+        let mut total = 0.0;
+        for (index, &(_, _, branch)) in self.graph.branches.iter().enumerate() {
+            poll(&mut cancelled)?;
+            let coordinate = match branch {
+                Branch::Capacitor { .. } => *charges
+                    .next()
+                    .ok_or_else(|| invalid("missing capacitor charge"))?,
+                Branch::Inductor { .. } => *fluxes
+                    .next()
+                    .ok_or_else(|| invalid("missing inductor flux linkage"))?,
+                _ => continue,
+            };
+            let evaluate = |element: &MaterialStorageElement| match element {
+                MaterialStorageElement::Capacitor(c) => c.stored_energy_j(coordinate),
+                MaterialStorageElement::Inductor(l) => l.stored_energy_j(coordinate),
+            };
+            let before = evaluate(&self.storage[source].element)?;
+            let after = evaluate(&candidate.storage[source].element)?;
+            let supplied = after - before;
+            total += supplied;
+            if !supplied.is_finite() || !total.is_finite() {
+                return Err(invalid(
+                    "material storage parameter work is unrepresentable",
+                ));
+            }
+            work.push(StorageParameterWork {
+                branch: index,
+                stored_before_j: before,
+                stored_after_j: after,
+                supplied_work_j: supplied,
+            });
+            source += 1;
+        }
+        poll(&mut cancelled)?;
+        Ok(MaterialStorageCandidate {
+            circuit: candidate,
+            work,
+            parameter_work_j: total,
+        })
+    }
+}

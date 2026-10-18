@@ -2620,3 +2620,20 @@ axes, retained limitations, dynamics-driven edge/shock/KC and configuration
 coverage. Native execution is pending central verification. No audio golden or
 wire schema changes; no specimen-fidelity, resolved anatomy/flow or model-form
 equivalence claim follows from this token.
+
+## Material-derived circuit storage
+
+`MaterialCircuit::new_with_storage` binds every R/C/L branch to its material
+owner, lowering dielectric/core coefficients through `fs-material::field_storage`
+into the existing Kirchhoff descriptor. Original branch ordering, conserved
+charge/flux linkage, source receipts and per-resistor Joule heat are retained.
+Changing dielectric or core data changes the actual electrical evolution.
+
+`rebind_storage_candidate` proposes a zero-time material/geometry change at the
+exact same charge and flux linkage. It returns each branch's field-energy change
+and the total signed parameter work. The coupled physical owner must supply or
+receive that work when accepting the candidate; it is not counted as resistor
+heat or source-port work. Incompatible ideal-source constraints, incomplete or
+duplicate bindings, unrepresentable energy and cancellation refuse atomically.
+C/L remain fixed within an ordinary circuit step. This linear lossless update
+does not supply continuous thermal/mechanical feedback or switching impulses.

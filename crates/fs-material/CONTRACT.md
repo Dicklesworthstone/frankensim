@@ -96,6 +96,17 @@ homogenization, the P2 milestone.
   concentric sections can mix conductivity- and resistivity-sourced layers in
   their existing parallel-current and layer-specific Joule-heat calculation.
   This scalar reciprocal law does not invert tensors or admit AC response.
+- `field_storage::{ResolvedCapacitor, ResolvedInductor}` adopt complete material
+  state bundles and derive `C = epsilon A / d` and `L = mu N^2 A / l` from
+  explicit uniform geometry. Absolute SI electric permittivity [F/m] and
+  magnetic permeability [H/m] are required; relative coefficients cannot be
+  silently substituted. Original source claims and state receipts are retained.
+  Charge and flux-linkage energies use `q^2/(2C)` and `lambda^2/(2L)`.
+  Only linear isotropic, nondispersive, lossless uniform-field reductions are
+  admitted. Temperature-only coefficients may be resolved at a fixed state;
+  frequency- or field-restricted sources require another storage model.
+  Invalid geometry, ambiguous sources and unrepresentable coefficients/energy
+  refuse. These reductions introduce no circuit solver, hysteresis or loss law.
 - `liquid::resolve_liquid_state` resolves positive density, specific heat,
   conductivity and dynamic viscosity at one caller-supplied source condition.
   It retains the complete four-property bundle and derives kinematic viscosity,

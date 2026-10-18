@@ -25,6 +25,8 @@ pub mod liquid;
 pub mod liquid_temperature;
 pub mod elastic;
 pub mod fiber;
+/// Source-derived dielectric and magnetic storage for shared circuit consumers.
+pub mod field_storage;
 /// Shared gas/liquid transport for material-driven flow and heat consumers.
 pub mod fluid_transport;
 pub mod gas;

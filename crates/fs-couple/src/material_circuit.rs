@@ -8,6 +8,8 @@
 
 /// Joint finite-supply, material-enthalpy, gas and piston evolution.
 pub mod thermal;
+/// Material/geometry-derived C and L, with explicit work on live reconfiguration.
+pub mod storage;
 
 use fs_material::conductor::{ConductorError, OhmicDrive, ResolvedConductor};
 use fs_phs::circuit::{Branch, CircuitDae, CircuitError, CircuitGraph, assemble_circuit};
@@ -48,6 +50,8 @@ pub enum MaterialCircuitError {
     Circuit(CircuitError),
     /// Original material-conductor evaluation refusal.
     Conductor(ConductorError),
+    /// Source-derived electric/magnetic storage or field-energy refusal.
+    Storage(fs_material::field_storage::FieldStorageError),
     /// Independent branch heat or total electrical balance did not close.
     Balance(&'static str),
     /// Cancellation before publication.
@@ -59,6 +63,9 @@ impl From<CircuitError> for MaterialCircuitError {
 impl From<ConductorError> for MaterialCircuitError {
     fn from(e: ConductorError) -> Self { Self::Conductor(e) }
 }
+impl From<fs_material::field_storage::FieldStorageError> for MaterialCircuitError {
+    fn from(e: fs_material::field_storage::FieldStorageError) -> Self { Self::Storage(e) }
+}
 impl core::fmt::Display for MaterialCircuitError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "material circuit: {self:?}")
@@ -66,16 +73,17 @@ impl core::fmt::Display for MaterialCircuitError {
 }
 impl std::error::Error for MaterialCircuitError {}
 
-/// One accepted graph and its conserved electrical coordinates. C, L, source
-/// port mapping and transformer topology stay fixed; only resistor material
-/// states change between proposals. A live C/L or topology change needs its
-/// own work/charge transfer, not a silent coefficient replacement.
+/// One accepted graph and its conserved electrical coordinates. C/L are held
+/// during each step; source-bound changes between steps use
+/// [explicit parameter work](Self::rebind_storage_candidate). Source-port
+/// mapping and transformer topology stay fixed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterialCircuit {
     graph: CircuitGraph,
     resistors: Vec<MaterialResistor>,
     fluxes_wb: Vec<f64>,
     charges_c: Vec<f64>,
+    storage: Vec<storage::MaterialStorage>,
 }
 
 /// Branch quantities use the SAME algebraic midpoint as the descriptor's
@@ -213,13 +221,13 @@ impl MaterialCircuit {
                 return Err(MaterialCircuitError::Invalid("algebraic initialization changed a conserved electrical coordinate"));
             }
         }
-        Ok(Self { graph, resistors, fluxes_wb, charges_c })
+        Ok(Self { graph, resistors, fluxes_wb, charges_c, storage: Vec::new() })
     }
     /// Original graph topology with the last accepted material resistor values.
     pub const fn graph(&self) -> &CircuitGraph { &self.graph }
     /// Original source bindings at construction or the last accepted step midpoint.
     pub fn resistors(&self) -> &[MaterialResistor] { &self.resistors }
-    /// Conserved inductor flux history [Wb], in inductor branch order.
+    /// Conserved inductor flux linkage history [Wb], in inductor branch order.
     pub fn fluxes_wb(&self) -> &[f64] { &self.fluxes_wb }
     /// Conserved capacitor charge history [C], in capacitor branch order.
     pub fn charges_c(&self) -> &[f64] { &self.charges_c }
@@ -291,7 +299,8 @@ impl MaterialCircuit {
         }
         let next = Self { graph, resistors,
             fluxes_wb:dae.flux_index.iter().map(|&i| record.x[i]).collect(),
-            charges_c:dae.charge_index.iter().map(|&i| record.x[i]).collect() };
+            charges_c:dae.charge_index.iter().map(|&i| record.x[i]).collect(),
+            storage:self.storage.clone() };
         poll(&mut cancelled)?;
         Ok(MaterialCircuitCandidate { circuit:next, step:MaterialCircuitStep {
             native:record, stored_before_j:h0, stored_after_j:h1, resistors:heat,
