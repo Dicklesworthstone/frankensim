@@ -1656,9 +1656,8 @@ pub struct LivePiano {
     wmk: Vec<f64>,
     wu: Vec<f64>,
     /// gl_a . resp_b for every pair of active slots, K x K: the board part of the
-    /// hammer contact compliance (`solve_contacts`), constant between rebuilds.
-    /// Emptied when a rebuild starts and filled when it succeeds, so a failed
-    /// rebuild leaves it unusable rather than stale.
+    /// hammer contact compliance (`solve_contacts`), constant between rebuilds
+    /// (a failed rebuild restores it with the rest of the set).
     contact_gl_resp: Vec<f64>,
     // Board state in loaded coordinates and scratch.
     bq: Vec<f64>,
@@ -1699,6 +1698,8 @@ pub struct LivePiano {
     pad_cache: Vec<Option<CoursePadCache>>,
     shape_cache: Vec<Option<(usize, Vec<f32>)>>,
     last_error: Option<String>,
+    /// Test hook (`fail_next_rebuild`): the next rebuild fails after changing the set.
+    rebuild_failure_armed: bool,
 }
 
 /// A copy steps bit for bit as the original would from the same point: every
@@ -1774,6 +1775,7 @@ impl Clone for LivePiano {
             pad_cache: self.pad_cache.clone(),
             shape_cache: self.shape_cache.clone(),
             last_error: self.last_error.clone(),
+            rebuild_failure_armed: self.rebuild_failure_armed,
         }
     }
 }
@@ -2128,6 +2130,7 @@ impl LivePiano {
             pad_cache: vec![None; n_courses],
             shape_cache: vec![None; n_courses],
             last_error: None,
+            rebuild_failure_armed: false,
             cfg,
         };
         piano.rebuild(&[], &[])?;
@@ -2149,6 +2152,10 @@ impl LivePiano {
     pub fn dynamic_modes(&self) -> usize { self.active.iter().map(|a| a.modes).sum() }
     pub fn dynamic_strings(&self) -> usize { self.active.iter().map(|a| a.segs.iter().filter(|s| !s.duplex).count()).sum() }
     pub fn take_error(&mut self) -> Option<String> { self.last_error.take() }
+    /// Test hook (frankensim-ahffu): the next rebuild fails just before its
+    /// eigensolve, after it has changed the set, as a real failure there would.
+    #[doc(hidden)]
+    pub fn fail_next_rebuild(&mut self) { self.rebuild_failure_armed = true; }
     pub fn microphone_delay_samples(&self) -> (usize, f64) { (self.mic.delay_samples.0, self.mic.filter_delay_samples()) }
     pub fn microphone_multiplies(&self) -> usize { self.mic.multiply_adds_per_sample() }
     pub fn total_strings(&self) -> usize { self.segs.iter().filter(|s| !s.duplex).count() }
@@ -2267,9 +2274,57 @@ impl LivePiano {
     /// strings, re-diagonalize the loaded board and carry the physical board
     /// motion across. Energy-continuous for activation; the relative energy of
     /// retired strings goes to `ledger.retired_j`.
+    ///
+    /// All or nothing (frankensim-ahffu): the fallible steps (eigensolve, band
+    /// check, flows, Schur inverses) run after the set, the slots and the string
+    /// state have changed, so a failure restores every state the change touched.
+    /// The engine keeps stepping the old set and the caller refuses the strikes.
     fn rebuild(&mut self, activate: &[usize], retire: &[(usize, usize)]) -> Result<(), String> {
-        self.contact_gl_resp.clear();
+        // Owed damper flows settle first either way: the same motion, kept on failure.
         self.settle_damp();
+        // Named fields, so a restore cannot swap two same-typed states.
+        struct Saved {
+            active: Vec<ACourse>, slots: Vec<Option<usize>>, q: Vec<f64>, v: Vec<f64>, bq: Vec<f64>, bvel: Vec<f64>,
+            phi: Vec<f64>, k_phys: Vec<f64>, flow: Vec<f64>, bz: Vec<Zoh>, s_inv: Vec<f64>, sd_inv: Vec<f64>,
+            wmk: Vec<f64>, wu: Vec<f64>, contact_gl_resp: Vec<f64>, ledger: Ledger, counters: Counters,
+        }
+        let saved = Saved {
+            active: self.active.clone(), slots: self.keys.iter().map(|key| key.slot).collect(),
+            q: self.q.clone(), v: self.v.clone(), bq: self.bq.clone(), bvel: self.bvel.clone(),
+            phi: self.phi.clone(), k_phys: self.k_phys.clone(), flow: self.flow.clone(), bz: self.bz.clone(),
+            s_inv: self.s_inv.clone(), sd_inv: self.sd_inv.clone(), wmk: self.wmk.clone(), wu: self.wu.clone(),
+            contact_gl_resp: self.contact_gl_resp.clone(), ledger: self.ledger, counters: self.counters,
+        };
+        let result = self.rebuild_in_place(activate, retire);
+        if result.is_err() {
+            let Saved {
+                active, slots, q, v, bq, bvel, phi, k_phys, flow, bz, s_inv, sd_inv, wmk, wu, contact_gl_resp, ledger, counters,
+            } = saved;
+            for (key, slot) in self.keys.iter_mut().zip(slots) {
+                key.slot = slot;
+            }
+            self.active = active;
+            self.q = q;
+            self.v = v;
+            self.bq = bq;
+            self.bvel = bvel;
+            self.phi = phi;
+            self.k_phys = k_phys;
+            self.flow = flow;
+            self.bz = bz;
+            self.s_inv = s_inv;
+            self.sd_inv = sd_inv;
+            self.wmk = wmk;
+            self.wu = wu;
+            self.contact_gl_resp = contact_gl_resp;
+            self.ledger = ledger;
+            self.counters = counters;
+        }
+        result
+    }
+
+    fn rebuild_in_place(&mut self, activate: &[usize], retire: &[(usize, usize)]) -> Result<(), String> {
+        self.contact_gl_resp.clear();
         let r = self.r;
         // Physical board motion (static coordinates) before the basis changes.
         let mut qs = vec![0.0; r];
@@ -2385,6 +2440,9 @@ impl LivePiano {
                     k_loaded[i * r + j] += mek * g[i] * g[j];
                 }
             }
+        }
+        if std::mem::take(&mut self.rebuild_failure_armed) {
+            return Err("injected rebuild failure".into());
         }
         let (lambda, phi) = crate::dense::eigh_gen(&k_loaded, &mass, r)?;
         let band = 0.45 * f64::from(self.cfg.sample_rate);
@@ -2612,11 +2670,15 @@ impl LivePiano {
                     self.last_error = Some(format!("key {}: no room in the dynamic mode budget; strike refused", self.keys[ci].midi));
                 }
             }
-            // Retiring whole keys shifts slots: do it first, then activate.
+            // Retiring whole keys shifts slots: do it first, then activate. A failed
+            // retirement leaves the set as it was, so there is no room: the batch is
+            // refused rather than admitted over the mode and key budgets.
+            let mut room = true;
             if !retire.is_empty() && let Err(e) = self.rebuild(&[], &retire) {
                 self.last_error = Some(e);
+                room = false;
             }
-            if !activate.is_empty() && let Err(e) = self.rebuild(&activate, &[]) {
+            if room && !activate.is_empty() && let Err(e) = self.rebuild(&activate, &[]) {
                 self.last_error = Some(e);
             }
         }
@@ -3080,8 +3142,8 @@ impl LivePiano {
         self.c_h.clear();
         self.c_h.resize(nc * nc, 0.0);
         let k = self.active.len();
-        // After a failed rebuild the table no longer matches the active set:
-        // form the dots directly, as before the table existed.
+        // The table matches the active set (a failed rebuild restores both). Should
+        // it ever not, form the dots directly, as before the table existed.
         let cached = self.contact_gl_resp.len() == k * k;
         for i in 0..nc {
             let (ki, mi) = (self.c_key[i], self.c_member[i]);
