@@ -1,0 +1,54 @@
+(fsim-sdf3-study :version 1
+  (metadata
+    :name "sampled-3d-cantilever"
+    :created "2026-10-18"
+    :context-of-use "Native CutFEM optimization of a trilinearly reconstructed sampled domain; no source-surface error claim"
+    :intended-decision "Explore material layout under two loads on a sampled roof with an interior tent feature"
+    :decision-gate scoping-estimate
+    :consequence advisory)
+  (seeds :root 1337)
+  (budgets
+    :wall-seconds 300.0
+    :memory-bytes 536870912
+    :linear-iterations 250000
+    :per-solve-iterations 50000
+    :quadrature-boxes 1000000
+    :quadrature-points 1000000)
+  (capabilities
+    "optimization.marquee-topopt"
+    "geometry.sdf"
+    "physics.cutfem")
+  (units :storage "SI")
+  (domain
+    :type sampled-grid-sdf
+    :bounds ((0.0 0.0 0.0) (1.0 1.0 1.0))
+    :origin-m (0.0 0.0 0.0)
+    :spacing-m (0.5 0.5 0.5)
+    :shape (3 3 3)
+    :values-m (
+      -0.625 -0.625 -0.625 -0.625 -0.75 -0.625 -0.625 -0.625 -0.625
+      -0.125 -0.125 -0.125 -0.125 -0.25 -0.125 -0.125 -0.125 -0.125
+       0.375  0.375  0.375  0.375  0.25  0.375  0.375  0.375  0.375))
+  (physics
+    :type elasticity-3d
+    :initial-level 1
+    :maximum-level 3
+    :maximum-leaves 512
+    :youngs-modulus-pa 1.0
+    :poissons-ratio 0.3)
+  (scenario
+    :fixed-boundary left
+    :body-loads (
+      (load :density-n-m3 (0.0 -1.0 0.0) :weight 0.3)
+      (load :density-n-m3 (0.0 0.0 -1.0) :weight 0.7)))
+  (objective :type compliance :sense minimize :unit "J")
+  (optimizer
+    :type adaptive-simp
+    :initial-density 0.5
+    :volume-fraction 0.5
+    :filter-radius-m 0.15
+    :updates-per-stage 2
+    :move-limit 0.15
+    :marking-fraction 0.5
+    :max-marks 2
+    :schedule ((1.0 1.0) (2.0 2.0))))

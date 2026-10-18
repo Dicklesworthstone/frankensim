@@ -136,13 +136,13 @@ pub(super) fn validate(spec: &Spec) -> Result<()> {
     {
         return Err(invalid("physical domain requires aspect <=64 and a positive filter radius within the domain envelope"));
     }
-    if let Some(domain) = &spec.constructive {
+    if let Some(domain) = spec.authored_domain() {
         let range = domain.enclose(lo, hi);
         if !range.lo().is_finite() || !range.hi().is_finite() {
-            return Err(invalid("constructive field overflows on the declared physical bounds"));
+            return Err(invalid("authored implicit field overflows on the declared physical bounds"));
         }
         if range.lo() >= 0.0 {
-            return Err(invalid("constructive field proves no material interior in the declared box"));
+            return Err(invalid("authored implicit field proves no material interior in the declared box"));
         }
         // A sign range does not prove connectivity, support, or resolved cuts.
         // The unchanged bounded quadrature and elasticity owner admit those.

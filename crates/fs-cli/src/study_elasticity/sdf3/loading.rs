@@ -62,10 +62,10 @@ pub(super) fn build_operator(
     // This is the shared construction seam for compliance, every goal-refined
     // background, replay, and minimum-volume stress studies. Never replace an
     // authored shape with the legacy height-field placeholder in one branch.
-    let domain: &dyn CutSdf3 = match &spec.constructive {
+    let domain: &dyn CutSdf3 = match spec.authored_domain() {
         Some(shape) => {
-            // Boolean switches can spoil a height direction away from the zero
-            // set. Refine only those unresolved leaves; keep all global work
+            // Boolean switches and sample seams can spoil a height direction.
+            // Refine only those unresolved leaves; keep all global work
             // caps and the certified derivative/normal admission unchanged.
             quadrature.set_unresolved_refinement_limit(2)?;
             shape

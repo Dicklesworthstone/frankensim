@@ -7,6 +7,8 @@ use fs_topopt::sdf3::stress::{StressMeasure3, StressOptions3};
 
 #[path = "spec/csg.rs"]
 mod csg;
+#[path = "spec/sampled.rs"]
+mod sampled;
 
 #[derive(Clone, Debug)]
 pub(super) struct Spec {
@@ -20,6 +22,7 @@ pub(super) struct Spec {
     pub boxes: usize,
     pub points: usize,
     pub constructive: Option<fs_cutfem::csg3::CsgDomain3>,
+    pub sampled: Option<sampled::SampledInput>,
     pub physical: bool,
     pub bounds: ([f64; 3], [f64; 3]),
     pub fixed: FixedFace,
@@ -176,17 +179,22 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
     let is_constructive = domain_items.get(2).is_some_and(|node| {
         matches!(&node.kind, NodeKind::Symbol(s) | NodeKind::Str(s) if s == "constructive-implicit")
     });
+    let is_sampled = domain_items.get(2).is_some_and(|node| {
+        matches!(&node.kind, NodeKind::Symbol(s) | NodeKind::Str(s) if s == "sampled-grid-sdf")
+    });
     let domain = fields(&items[8], "domain",
         if is_constructive { &["type", "bounds", "shape"] }
+        else if is_sampled { &["type", "bounds", "origin-m", "spacing-m", "shape", "values-m"] }
         else { &["type", "bounds", "height-m", "curvature-per-m"] },
     )?;
     let constructive = if is_constructive { Some(csg::parse(domain[2])?) } else { None };
-    let physical = is_constructive || matches!(&domain[0].kind,
+    let physical = is_constructive || is_sampled || matches!(&domain[0].kind,
         NodeKind::Symbol(s) | NodeKind::Str(s) if s == "physical-curved-height-sdf");
     if !physical { word(domain[0], "curved-height-sdf")?; }
     let bounds = super::super::list(domain[1], "bounds")?;
     if bounds.len() != 2 { return Err(invalid("bounds require lower and upper SI vectors")); }
     let bounds = (vector(&bounds[0])?, vector(&bounds[1])?);
+    let sampled = if is_sampled { Some(sampled::parse(&domain[2..], bounds)?) } else { None };
     let physics = fields(&items[9], "physics", &[
         "type", "initial-level", "maximum-level", "maximum-leaves", "youngs-modulus-pa", "poissons-ratio",
     ])?;
@@ -298,9 +306,9 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         canonical, id, seed,
         wall_s: scalar(budgets[0])?, memory: count(budgets[1])?, linear: count(budgets[2])?,
         per_solve: count(budgets[3])?, boxes: count(budgets[4])?, points: count(budgets[5])?,
-        constructive, physical, bounds, fixed,
-        height: if is_constructive { 0.0 } else { scalar(domain[2])? },
-        curvature: if is_constructive { 0.0 } else { scalar(domain[3])? },
+        constructive, sampled, physical, bounds, fixed,
+        height: if is_constructive || is_sampled { 0.0 } else { scalar(domain[2])? },
+        curvature: if is_constructive || is_sampled { 0.0 } else { scalar(domain[3])? },
         level: u32::try_from(count(physics[1])?).map_err(|_| invalid("initial-level overflow"))?,
         max_level: u32::try_from(count(physics[2])?).map_err(|_| invalid("maximum-level overflow"))?,
         leaves: count(physics[3])?, youngs: scalar(physics[4])?, poisson: scalar(physics[5])?,
@@ -316,6 +324,12 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
 }
 
 impl Spec {
+    /// One authored geometry seam for all equilibrium, refinement and replay paths.
+    pub(super) fn authored_domain(&self) -> Option<&dyn CutSdf3> {
+        if let Some(input) = &self.sampled { return Some(&input.field); }
+        self.constructive.as_ref().map(|shape| shape as &dyn CutSdf3)
+    }
+
     fn validate(&self) -> Result<()> {
         if !(0.0 < self.wall_s && self.wall_s <= 86_400.0)
             || !(128 * 1024 * 1024..=8 * 1024 * 1024 * 1024).contains(&self.memory)
@@ -338,6 +352,7 @@ impl Spec {
         let stress_memory = self.stress.map_or(0, |s| 1024usize.saturating_mul(s.stress.max_points));
         let admitted_memory = (64 * 1024 * 1024 + 256 * self.points + 65_536 * self.leaves)
             .saturating_add(stress_memory)
+            .saturating_add(self.sampled.as_ref().map_or(0, |s| s.memory_envelope))
             .saturating_add(self.solver.memory_envelope(self.level));
         if admitted_memory > self.memory {
             return Err(invalid("declared memory is too small for the requested geometry/field/solver envelope"));
