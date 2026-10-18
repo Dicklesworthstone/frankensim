@@ -27,6 +27,9 @@
 //! solve never has to guess which ambient a coefficient was fitted
 //! against.
 
+/// Time-dependent scenario rows on an immutable, mesh-bound partition.
+pub mod history;
+
 use fs_scenario::bc::{BcKind, BcValue, BoundaryCondition, Expectation, Physics, expectation};
 use fs_scenario::scenario::Environment;
 
@@ -229,8 +232,8 @@ fn uniform_value(row: &BoundaryCondition) -> Result<fs_qty::QtyAny, ConductionEr
         Some(BcValue::Signal(_)) => Err(ConductionError::ScenarioRow {
             region: row.region.clone(),
             what: "the row carries a time signal".to_string(),
-            fix: "this crate is STEADY-only; evaluate the signal at the instant being \
-                  solved and pass a uniform value"
+            fix: "use ThermalBc::from_scenario_row_at with an explicit time, or \
+                  bc::history::ThermalBoundaryHistory for a transient boundary"
                 .to_string(),
         }),
         Some(BcValue::Profile(_)) => Err(ConductionError::ScenarioRow {
