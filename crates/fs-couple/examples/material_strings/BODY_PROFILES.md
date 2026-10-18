@@ -79,12 +79,11 @@ Profile input is bounded to 64 KiB; the original source-pack and complete-networ
 limits remain. Viscous projection is capped at 16,777,216 operations and 16 body
 modes. The dashpot factor uses a 1 N s/m coordinate scale; this changes neither
 the projected damping matrix nor material coefficients. The exact profile bytes,
-original packs, regional material state, tensor and projected damping remain
+original packs, regional material states, tensors and projected damping remain
 attached to the performer. No live source-state mutation is implied.
 
-The current model is a fixed-state, flat, linear rectangular DKT plate with one
-uniform material region, not a carved shell, soundpost, bass bar, glue interface
-or empirical instrument model. Pressure remains the inherited compact baffled
+The current model is a fixed-state, flat, linear rectangular DKT plate, not a
+carved shell, soundpost, bass bar, glue interface or empirical instrument model. Pressure remains the inherited compact baffled
 body/neck observation, not full exterior radiation or radiation back-loading.
 
 Native regression target:
@@ -92,3 +91,78 @@ Native regression target:
 ```bash
 cargo test -p fs-couple --example material_strings body::tests -- --test-threads=1
 ```
+
+## Regional packs and separate string attachments
+
+A v2 profile assigns material data to nonoverlapping grid-cell rectangles on ONE
+shared plate mesh. It also supplies one physical bridge node per material string,
+in the performance's string order. It does not create independent body voices or
+recombine their PCM output. Source values are never averaged across regions.
+
+```text
+frankensim-string-body-v2
+mesh 4 4
+support simply-supported
+pretension 0
+window 1 100000000
+regions 2
+region left @body orthotropic12 1 0.17 0 2 0 4
+region right @body orthotropic12 1 -0.23 2 4 0 4
+bridges 1
+bridge 2 2
+```
+
+This is the supplied `regional.body` fixture. It is runnable with the same
+performance and directional material pack as the v1 example: replace the final
+profile argument with `crates/fs-couple/examples/material_strings/regional.body`
+and choose a new output name.
+
+Each region record is:
+
+```text
+region NAME PACK ELASTIC_MODEL THICKNESS_RATIO GRAIN_RAD X0 X1 Y0 Y1
+```
+
+The half-open CELL rectangle `[X0,X1) x [Y0,Y1)` owns both original triangles in
+each named cell. Every cell must belong to exactly one region; gaps, overlaps,
+empty/out-of-grid rectangles and repeated names refuse. There are at most 16
+regions. `THICKNESS_RATIO` multiplies the performance's physical body thickness;
+no material stiffness is adjusted to disguise a thickness change. Density,
+elasticity and all six viscosity coefficients are resolved from that region's
+original pack, at the unchanged performance material query point.
+
+`@body` references the pack in the original performance `body` record. At least
+one region must use it, so selecting a profile cannot silently discard that
+authored material. Other regions may select another normalized pack, for example
+`right-body.fsmatpk`; paths are relative to the PERFORMANCE directory, not the
+profile directory, and retain the same no-traversal policy. Repeated paths load
+once and share the exact decoded pack; different source selections keep their
+original material identities. A missing tensor entry in even one region is a
+refusal, not permission to borrow the adjacent region's viscosity.
+
+The v2 `bridges` count must equal the actual string count (1..=8), including
+sympathetic/unplayed strings. Each `bridge IX IY` must be an interior node.
+Different nodes project onto the same actual body eigenbasis and can excite
+different signed mode combinations. Repeated nodes are allowed and retain
+separate connections. For a two-string performance, for example, use:
+
+```text
+bridges 2
+bridge 1 2
+bridge 3 2
+```
+
+The existing spatial-port constructor accounts for these forces, their body
+reaction, cavity volume response, full material damping and pressure together.
+The first bridge is only the reducer's reference drive; it does not add a duplicate
+physical load. Each string retains the stiffness/damping/station of its original
+bridge declaration, and surface torsion and preload/release remain unchanged.
+
+Regions are perfectly connected parts of one linear plate field. This is not a
+model of a glue joint, separated component, bridge rotation or interlayer slip.
+The same mesh, modal, time-step and compact-radiation limitations still apply.
+
+Five additional native regressions cover same-material subdivision, changing
+only one region's loss, different spatial bridge maps and sympathetic motion,
+callback equivalence, original geometry indexing and source/coverage refusals.
+They are included in the existing `--example material_strings` test command.

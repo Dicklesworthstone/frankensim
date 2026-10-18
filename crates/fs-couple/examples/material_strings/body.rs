@@ -2,7 +2,7 @@
 //! Every physical operator, tensor rotation, mode, bridge and pressure projection
 //! remains in the existing plate/material/reciprocal owners.
 use super::*;
-use fs_couple::bowed_string::runtime::reciprocal::bank::chart::SharedMaterialPlateChartBody;
+use fs_couple::bowed_string::runtime::reciprocal::bank::chart::{SharedMaterialPlateChartBody, PlateBridgeFootprints};
 use fs_couple::plate_viscosity::{PlateViscosity, PlateViscosityLimits};
 use fs_couple::thin_plate::{compile_plate_material_chart, PlateChartRadiation, PlateRegionMaterial};
 use fs_material::plane_stress_viscosity::PLANE_STRESS_VISCOSITY_PROPERTIES as VISCOSITY;
@@ -17,25 +17,42 @@ const MAX_GRID: usize = 12;
 pub struct Profile {
     pub bytes: Vec<u8>,
     nx: usize, ny: usize,
-    model: PlateMaterialModel,
-    grain_rad: f64,
+    layout: Layout,
     support: EdgeSupport,
     pretension_n_m: f64,
     window: (f64, f64),
-    bridge: (usize, usize),
+}
+#[derive(Clone, Debug)]
+enum Layout {
+    Uniform { model:PlateMaterialModel, grain_rad:f64, bridge:(usize,usize) },
+    Regional { regions:Vec<Region>, bridges:Vec<(usize,usize)> },
+}
+#[derive(Clone, Debug)]
+struct Region {
+    name:String, pack:String, model:PlateMaterialModel, thickness_ratio:f64, grain_rad:f64,
+    // Half-open structured CELL ranges, never independent meshes or glued parts.
+    x:(usize,usize), y:(usize,usize),
 }
 impl Profile {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() > MAX_BYTES { return Err("body profile exceeds 64 KiB".into()); }
         let mut input = Records { lines: std::str::from_utf8(bytes)?.lines(), line: 0 };
-        input.row("frankensim-string-body-v1", 0)?;
+        let mut version=input.lines.next().ok_or("missing body profile version")?.split_ascii_whitespace();
+        input.line=1;
+        let regional=match version.next() {
+            Some("frankensim-string-body-v1")=>false,
+            Some("frankensim-string-body-v2")=>true,
+            _=>return Err("unsupported body profile version".into()),
+        };
+        if version.next().is_some() { return Err("unconsumed body profile version field".into()); }
         let v = input.row("mesh", 2)?;
         let nx: usize = v[0].parse()?; let ny: usize = v[1].parse()?;
         if !(2..=MAX_GRID).contains(&nx) || !(2..=MAX_GRID).contains(&ny) {
             return Err("body grid requires 2..=12 intervals along each axis".into());
         }
-        let model = model(input.row("elastic", 1)?[0])?;
-        let grain_rad = scalar(input.row("grain", 1)?[0])?;
+        let uniform=if regional { None } else {
+            Some((model(input.row("elastic",1)?[0])?,scalar(input.row("grain",1)?[0])?))
+        };
         let support = match input.row("support", 1)?[0] {
             "simply-supported" => EdgeSupport::SimplySupported,
             "clamped" => EdgeSupport::Clamped,
@@ -46,13 +63,11 @@ impl Profile {
         let v = input.row("window", 2)?;
         let window = (scalar(v[0])?, scalar(v[1])?);
         if window.0 < 0.0 || window.1 <= window.0 { return Err("body eigenvalue window must be nonnegative and increasing".into()); }
-        let v = input.row("bridge", 2)?;
-        let bridge = (v[0].parse()?, v[1].parse()?);
-        if bridge.0 == 0 || bridge.0 >= nx || bridge.1 == 0 || bridge.1 >= ny {
-            return Err("body bridge must be an interior grid node".into());
-        }
+        let layout=if let Some((model,grain_rad))=uniform {
+            Layout::Uniform { model,grain_rad,bridge:read_bridge(&mut input,nx,ny)? }
+        } else { read_regions(&mut input,nx,ny)? };
         if input.lines.next().is_some() { return Err("unconsumed body profile record".into()); }
-        Ok(Self { bytes:bytes.to_vec(),nx,ny,model,grain_rad,support,pretension_n_m,window,bridge })
+        Ok(Self { bytes:bytes.to_vec(),nx,ny,layout,support,pretension_n_m,window })
     }
 
     /// Reduce one sourced tensor on the same elastic basis as every physical
@@ -62,34 +77,114 @@ impl Profile {
         settings:StringBankOptions, cx:&Cx<'_>, gate:&CancelGate) -> Result<ReciprocalStringBank>
     {
         poll(gate)?;
-        let requirements = requirements(self.model)?;
-        let material = resolve_properties(&spec.body.pack,catalog,loader,spec,&requirements)?;
-        poll(gate)?;
+        let inputs=self.region_inputs();
         let mesh = PlateMesh::rectangle(spec.body.length,spec.body.width,self.nx,self.ny);
         let nodes = mesh.nodes.len(); let elements = mesh.tris.len();
-        let region = PlateRegionMaterial {
-            region:PlateRegion { name:"body".into(),triangle_indices:(0..elements).collect() },
-            material,model:self.model,
-            thickness_constraint:PlateThicknessConstraint::FixedThickness(spec.body.thickness),
-            material_angle_rad:self.grain_rad,
+        let spatial=match &self.layout {
+            Layout::Uniform { .. }=>None,
+            Layout::Regional { bridges,.. }=> {
+                if bridges.len()!=spec.strings.len() {
+                    return Err("body profile requires one bridge node per actual material string".into());
+                }
+                Some(PlateBridgeFootprints { weights:bridges.iter().map(|&b|self.footprint(b)).collect(),
+                    max_projection_terms:input::MAX_WORK as usize })
+            },
         };
-        let mut footprint = vec![0.0;nodes];
-        footprint[self.bridge.1*(self.nx+1)+self.bridge.0] = 1.0;
-        let specimen = compile_plate_material_chart(mesh,PlateMesh::rectangle_boundary(self.nx,self.ny),vec![region])?;
+        let reference=match &self.layout {
+            Layout::Uniform { bridge,.. }=>*bridge,
+            Layout::Regional { bridges,.. }=>bridges[0],
+        };
+        let mut regions=Vec::with_capacity(inputs.len());
+        for region in inputs {
+            poll(gate)?;
+            let pack=if region.pack=="@body" { &spec.body.pack } else { &region.pack };
+            let material=resolve_properties(pack,catalog,loader,spec,&requirements(region.model)?)?;
+            let thickness=spec.body.thickness*region.thickness_ratio;
+            if !thickness.is_finite() || thickness<=0.0 { return Err("regional body thickness is unrepresentable".into()); }
+            regions.push(PlateRegionMaterial {
+                region:PlateRegion { name:region.name.clone(),triangle_indices:self.triangles(&region) },
+                material,model:region.model,material_angle_rad:region.grain_rad,
+                thickness_constraint:PlateThicknessConstraint::FixedThickness(thickness),
+            });
+        }
+        let specimen=compile_plate_material_chart(mesh,PlateMesh::rectangle_boundary(self.nx,self.ny),regions)?;
         let viscosity = PlateViscosity::from_chart(&specimen,VISCOSITY,gate)?;
         let body = SharedMaterialPlateChartBody {
             specimen,reduction:PlateChartRadiation {
                 assembly:AssemblyOptions { pretension:self.pretension_n_m,support:self.support },
                 eigenvalue_window:self.window,n_modes:spec.body.modes,damping_ratio:0.0,
-                unit_force_weights:footprint,
+                unit_force_weights:self.footprint(reference),
             },
             bridges:spec.strings.iter().map(|w|w.bridge).collect(),
             max_plate_dofs:3*nodes,max_plate_elements:elements,modal_budget:modal_budget(),listener_m:spec.body.listener,
         };
-        Ok(ReciprocalStringBank::from_viscous_material_plate_chart(cx,sources,spec.gas,body,viscosity,
-            PlateViscosityLimits { max_modes:16,max_projection_terms:input::MAX_WORK as usize,
-                reference_resistance_n_s_m:1.0 },spec.cavity.clone(),spec.law.clone(),settings,gate)?)
+        let limits=PlateViscosityLimits { max_modes:16,max_projection_terms:input::MAX_WORK as usize,
+            reference_resistance_n_s_m:1.0 };
+        Ok(if let Some(footprints)=spatial {
+            ReciprocalStringBank::from_viscous_material_plate_chart_with_force_ports(cx,sources,spec.gas,
+                body,footprints,viscosity,limits,spec.cavity.clone(),spec.law.clone(),settings,gate)?
+        } else {
+            ReciprocalStringBank::from_viscous_material_plate_chart(cx,sources,spec.gas,body,viscosity,
+                limits,spec.cavity.clone(),spec.law.clone(),settings,gate)?
+        })
     }
+    fn footprint(&self,node:(usize,usize))->Vec<f64> {
+        let mut weights=vec![0.0;(self.nx+1)*(self.ny+1)];
+        weights[node.1*(self.nx+1)+node.0]=1.0;weights
+    }
+    fn region_inputs(&self)->Vec<Region> {
+        match &self.layout {
+            Layout::Uniform { model,grain_rad,.. }=>vec![Region {name:"body".into(),pack:"@body".into(),
+                model:*model,thickness_ratio:1.0,grain_rad:*grain_rad,x:(0,self.nx),y:(0,self.ny)}],
+            Layout::Regional { regions,.. }=>regions.clone(),
+        }
+    }
+    fn triangles(&self,region:&Region)->Vec<usize> {
+        // PlateMesh::rectangle emits two triangles per cell, x varying fastest.
+        (region.y.0..region.y.1).flat_map(|j|(region.x.0..region.x.1)
+            .flat_map(move |i|[2*(j*self.nx+i),2*(j*self.nx+i)+1])).collect()
+
+    }
+}
+
+fn read_bridge(input:&mut Records<'_>,nx:usize,ny:usize)->Result<(usize,usize)> {
+    let v=input.row("bridge",2)?;let b=(v[0].parse()?,v[1].parse()?);
+    if b.0==0 || b.0>=nx || b.1==0 || b.1>=ny {return Err("body bridge must be an interior grid node".into());}
+    Ok(b)
+}
+fn read_regions(input:&mut Records<'_>,nx:usize,ny:usize)->Result<Layout> {
+    let n:usize=input.row("regions",1)?[0].parse()?;
+    if n==0 || n>16 {return Err("body profile requires 1..=16 explicit regions".into());}
+    let mut regions=Vec::<Region>::with_capacity(n);let mut occupied=vec![false;nx*ny];
+    let mut uses_body=false;
+    for _ in 0..n {
+        let v=input.row("region",9)?;
+        if v[0].is_empty() || v[0].chars().any(char::is_control) || regions.iter().any(|r|r.name==v[0]) {
+            return Err("body region labels must be unique nonempty tokens".into());
+        }
+        if v[1]!="@body" && (v[1].chars().any(char::is_control) || Path::new(v[1]).is_absolute() || v[1].contains('\\')
+            || Path::new(v[1]).components().any(|c|!matches!(c,std::path::Component::Normal(_)))) {
+            return Err("regional material pack must be a relative path without traversal".into());
+        }
+        let region=Region {name:v[0].into(),pack:v[1].into(),model:model(v[2])?,
+            thickness_ratio:scalar(v[3])?,grain_rad:scalar(v[4])?,
+            x:(v[5].parse()?,v[6].parse()?),y:(v[7].parse()?,v[8].parse()?)};
+        if region.thickness_ratio<=0.0 || region.x.0>=region.x.1 || region.x.1>nx
+            || region.y.0>=region.y.1 || region.y.1>ny {
+            return Err("body region needs positive thickness and a nonempty in-grid cell rectangle".into());
+        }
+        for j in region.y.0..region.y.1 { for i in region.x.0..region.x.1 {
+            if std::mem::replace(&mut occupied[j*nx+i],true) {return Err("body regions overlap".into());}
+        } }
+        uses_body|=region.pack=="@body";regions.push(region);
+    }
+    if !uses_body || occupied.contains(&false) {
+        return Err("body regions must cover every cell exactly once and use the performance body pack".into());
+    }
+    let n:usize=input.row("bridges",1)?[0].parse()?;
+    if n==0 || n>8 {return Err("body profile requires 1..=8 ordered bridge nodes".into());}
+    let bridges=(0..n).map(|_|read_bridge(input,nx,ny)).collect::<Result<Vec<_>>>()?;
+    Ok(Layout::Regional {regions,bridges})
 }
 
 fn requirements(model:PlateMaterialModel) -> Result<Vec<Requirement>> {

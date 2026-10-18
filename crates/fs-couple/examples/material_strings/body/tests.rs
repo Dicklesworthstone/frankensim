@@ -126,3 +126,6 @@ fn profile_rejects_unbounded_mesh_silent_fields_and_fixed_boundary_bridge() {
     }
     assert!(Profile::parse(format!("{text}extra\n").as_bytes()).is_err());
 }
+
+#[path="regions.rs"]
+mod regions;
