@@ -19,6 +19,20 @@ readonly -a EXPECTED_TESTS=(
   "fs-vvreg:instrument_data:committed_clarinet_grader_receipts_are_fixture_only"
   "fs-vvreg:instrument_data:committed_ledger_seed_covers_existing_music_sources"
   "fs-vvreg:instrument_data:falsifier_licence_mismatch_is_caught"
+  "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_schema_and_required_fields"
+  "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_ids_and_urls_unique"
+  "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_every_uiowa_link_is_manifested_or_excluded"
+  "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_mono_stereo_pairing_is_explicit"
+  "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_stereo_not_gradable_until_derivation_documented"
+  "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_chain_assignment_by_era"
+  "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_ambient_entry_or_absence_per_session"
+  "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_ledger_rows_resolve_both_ways"
+  "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_measured_content_defects_are_recorded"
+  "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_fetch_refuses_data_volume_destination"
+  "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_fetch_refuses_mismatched_existing_file_and_deletes_nothing"
+  "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_fetch_verify_mode_never_downloads_when_present"
+  "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_fetch_refuses_escaping_paths"
+  "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_fetch_checks_remote_bytes_before_retaining"
 )
 
 exec python3 -I - "$REPO_ROOT" "${1:---check}" "${EXPECTED_TESTS[@]}" <<'PY'

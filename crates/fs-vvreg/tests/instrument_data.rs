@@ -884,7 +884,6 @@ fn committed_ledger_seed_covers_existing_music_sources() {
         "met-1995-541-8",
         "horniman-m32-1990",
         "swift-bosworth-2021",
-        "uiowa-mis",
     ] {
         let row = ledger
             .by_source(id)
@@ -898,6 +897,13 @@ fn committed_ledger_seed_covers_existing_music_sources() {
             "unacquired lead must not provide artifacts"
         );
     }
+    // M8-W6a acquired the UIowa lead: admitted for grading use and indexed by
+    // references.json (resolved by scripts/tests/test_instrument_references.py).
+    let uiowa = ledger.by_source("uiowa-mis").expect("uiowa-mis row");
+    assert_eq!(uiowa.decision, Decision::Admit);
+    assert!(uiowa.artifacts.contains(&ArtifactRef::Table(
+        "data/instruments/references.json".to_owned()
+    )));
     let jawari = ledger.for_artifact(&ArtifactRef::Matdb("contact-jawari-bone-bridge".to_owned()));
     assert!(
         jawari[0]
