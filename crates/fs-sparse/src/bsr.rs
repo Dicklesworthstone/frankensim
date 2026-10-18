@@ -145,6 +145,42 @@ impl Bsr {
         crate::fma::bsr_spmv_dispatch(self, x, y);
     }
 
+    /// Y = A·X for row-major X (ncols × nrhs) and Y (nrows × nrhs).
+    /// Traverses stored blocks directly, retaining scalar ascending-column
+    /// accumulation and bitwise agreement with CSR's blocked SpMM.
+    pub fn spmm_blocked(&self, x: &[f64], nrhs: usize, y: &mut [f64]) {
+        let x_len = self.ncols.checked_mul(nrhs).expect("spmm: X size overflow");
+        let y_len = self.nrows.checked_mul(nrhs).expect("spmm: Y size overflow");
+        assert_eq!(x.len(), x_len, "spmm: X is ncols x nrhs");
+        assert_eq!(y.len(), y_len, "spmm: Y is nrows x nrhs");
+        const NB: usize = 8;
+        let mut acc = [0.0f64; NB];
+        for j0 in (0..nrhs).step_by(NB) {
+            let width = NB.min(nrhs - j0);
+            for rb in 0..self.brow_ptr.len() - 1 {
+                for i in 0..self.br {
+                    acc[..width].fill(0.0);
+                    for slot in self.brow_ptr[rb]..self.brow_ptr[rb + 1] {
+                        let cb = self.bcol_idx[slot];
+                        let block_row =
+                            &self.blocks[slot * self.br * self.bc + i * self.bc..][..self.bc];
+                        for (k, &value) in block_row.iter().enumerate() {
+                            let col_offset = (cb * self.bc + k) * nrhs + j0;
+                            for (a, &v) in acc[..width]
+                                .iter_mut()
+                                .zip(&x[col_offset..col_offset + width])
+                            {
+                                *a = value.mul_add(v, *a);
+                            }
+                        }
+                    }
+                    let dst = (rb * self.br + i) * nrhs + j0;
+                    y[dst..dst + width].copy_from_slice(&acc[..width]);
+                }
+            }
+        }
+    }
+
     /// The spmv loop body, extracted so the x86 FMA-codegen capsule can
     /// recompile it under `target_feature` (bead nabk). MUST stay
     /// `inline(always)`: a non-inlined call keeps baseline codegen and
@@ -241,6 +277,30 @@ mod tests {
         println!(
             "{{\"suite\":\"fs-sparse\",\"case\":\"bsr-bitwise\",\"verdict\":\"pass\",\"detail\":\"BSR spmv == CSR spmv bitwise, 3 block shapes\"}}"
         );
+    }
+
+    #[test]
+    fn spmm_matches_csr_bitwise() {
+        for (n, br, bc, nrhs) in [
+            (60usize, 3usize, 5usize, 1usize),
+            (60, 4, 3, 7),
+            (64, 2, 2, 13),
+            (64, 4, 4, 0),
+        ] {
+            let a = random_coo(n, n, 7, 0xB57 + n as u64).assemble();
+            let b = Bsr::from_csr(&a, br, bc);
+            let x: Vec<f64> = (0..n * nrhs)
+                .map(|k| (k as f64 * 0.013).sin())
+                .collect();
+            let (mut expected, mut actual) =
+                (vec![0.0; n * nrhs], vec![0.0; n * nrhs]);
+            a.spmm_blocked(&x, nrhs, &mut expected);
+            b.spmm_blocked(&x, nrhs, &mut actual);
+            assert!(
+                actual.iter().zip(&expected).all(|(x, y)| x.to_bits() == y.to_bits()),
+                "BSR {br}x{bc} nrhs={nrhs} must agree bitwise with CSR"
+            );
+        }
     }
 
     #[test]
