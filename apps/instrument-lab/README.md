@@ -165,7 +165,7 @@ the cymbal-shimmer experiment on the kit's crash.
 ## Larger live soundboards
 
 The live piano embeds a 32-coordinate board; `public/live/piano/boards/` holds 48/64/96/128-coordinate
-boards (not committed, ~6 MB) that the browser fetches only when its timing probe says it can afford
+boards (not committed, ~17 MB) that the browser fetches only when its timing probe says it can afford
 them (`boards.js`). The score lanes (Strandbar, the player) choose board and mode cap together on a
 sustained probe (`chooseQuality`); the keyboard section chooses the largest board whose 12-key probe runs
 1.4x faster than real time (`chooseBoard`) and leaves the mode budget to its load governor. For the lanes,
@@ -177,16 +177,24 @@ copy (a wasm from an older build) builds the chosen board again. On a device too
 embedded board at the 700-mode start floor, the piano falls back to its 16 exact low modes, started at
 the mode cap its own timing predicts (not below 700) rather than the full 2,400; the load governor takes
 it lower from there. The boards are the offline
-binary's reductions of the same FE slice; generate them natively with the engine's `gen_board` example:
+binary's reductions of the same FE slice of the 16-division board the graded renders use
+(`board-rt16.fsb`); generate them natively with the engine's `gen_board` example:
 
     gen_board public/live/piano/boards/model-d-board-2400-r64.bin 2400 64,32,200,400,800,1600,2300
     # r48: 48,24,...  r96: 96,48,...  r128: 128,64,... (the studio render's reduction)
+    # a fourth argument picks the mesh: 16,0.03 (default) or preset (the unrefined 8 divisions)
+
+The 16-division board carries 11,772 surface points to the 8-division board's 3,918, so the files are
+2.8x larger (the wasm with its embedded 32-coordinate board 1.8 MB gzipped, r128 5.8 MB); building an
+engine takes about as long. On the 128-coordinate board it brought the live A3 mf from -41.7 to
+-35.2 dB at 2-8 kHz (real -33.2), its partial pattern from 9.6 to 8.4 dB and C6's from 9.0 to 2.7 dB;
+the smaller reductions gain and lose by size (graded per size in frankensim-u4ugc).
 
 Measured on the Strandbar piano part against the studio stem (RMS octave-balance error, 63 Hz-8 kHz,
-same contacts, hammer law and string losses): 32 coordinates 4.18 dB, 48 3.28, 64 2.16, 96 1.78,
-128 1.89. Above 64 the rest is mostly silent strings: on the same 128-coordinate board an offline A3
-has 4.3 dB more energy above 2 kHz than the live one, whose budget (0.1 dB) and single mechanical step
-(0.2 dB) barely matter.
+same 16-division board, contacts, hammer law and string losses): 32 coordinates 5.99 dB, 48 3.54,
+64 3.03, 96 2.77, 128 1.76. At 128 the rest is mostly silent strings: on the same board an offline A3
+has 3.2 dB more energy above 2 kHz than the live one, whose budget and single mechanical step move it
+by 0.1 dB.
 
 The browser plays RT-0425's published laws (`wasm.rs`): its string losses, its hammer stiffness K_H on
 each unison string and its rate loss R_H in place of the estimated crush and Prony terms
@@ -233,9 +241,9 @@ other wasm the table is ignored and the gain is used as given. The same applies 
 ## Strandbar
 
 The studio loop is three native renders that start 0.15 s before the first downbeat:
-`grand_piano --performance strandbar-piano.csv` (Steinway D preset, 128 board coordinates up to
-2.4 kHz, one substep, `--rt0425-hammer-stiffness --rt0425-hammer-dissipation --rt0425-string-damping`
-as the live piano plays) and fs-vkplate `perform` for the kick and the closed hi-hat. Long fs-vkplate
+`grand_piano --performance strandbar-piano.csv` (Steinway D preset on `--board-geometry board-rt16.fsb`,
+128 board coordinates up to 2.4 kHz, one substep, `--rt0425-hammer-stiffness --rt0425-hammer-dissipation
+--rt0425-string-damping`, as the live piano plays) and fs-vkplate `perform` for the kick and the closed hi-hat. Long fs-vkplate
 parts can be rendered as bar-sized simulations, each with a pre-roll of real strokes, and stitched
 (the stitched kick matched a continuous render to 0.9 % RMS). The hi-hat's banded Airy solve is
 memory-bound: run one or two such processes per L3 cache (`taskset`, `-C target-cpu=native`).

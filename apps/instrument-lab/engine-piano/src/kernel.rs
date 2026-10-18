@@ -372,8 +372,12 @@ impl Description {
     /// `max` coordinates, `keep_low` exact low modes plus static and harmonic
     /// bridge responses at the listed frequencies, with its full damping matrix.
     pub fn with_reduction(courses: Vec<Course>, source_band_hz: f64, spec: &str) -> Result<Self, String> {
+        Self::with_reduction_on(&steinway_d::build(8)?, courses, source_band_hz, spec)
+    }
+    /// `with_reduction` of a given board, e.g. `steinway_d::build_resolved(16, 0.03, true)`:
+    /// the mesh the graded offline renders take as `--board-geometry`.
+    pub fn with_reduction_on(preset: &steinway_d::Preset, courses: Vec<Course>, source_band_hz: f64, spec: &str) -> Result<Self, String> {
         let options = board_geometry::ritz::RitzOptions::parse(spec)?;
-        let preset = steinway_d::build(8)?;
         let keys: Vec<u8> = courses.iter().map(|c| c.midi).collect();
         let prepared = board_geometry::BoardGeometry::read(&preset.geometry)?
             .prepare_reduced(&keys, source_band_hz, false, false, false, false, &options)?;
@@ -381,13 +385,16 @@ impl Description {
             return Err("reduced soundboard requires its full projected material damping".into());
         }
         let exact = prepared.reduction.as_ref().map_or(0, |report| report.protected_low_modes);
+        // build_resolved states its mesh in a leading comment; the unrefined preset has none.
+        let mesh = preset.geometry.lines().find_map(|l| l.strip_prefix("# mechanical mesh: "))
+            .and_then(|m| m.split(';').next()).map_or(String::new(), |m| format!("; {m}"));
         Ok(Self {
             exact_low_modes: exact,
             courses,
             board: prepared.modes,
             damping: prepared.physical_damping,
             surface: prepared.surface,
-            board_provenance: format!("{}; bridge-informed reduction {spec} of the (0,{source_band_hz}] Hz FE slice", prepared.provenance),
+            board_provenance: format!("{}{mesh}; bridge-informed reduction {spec} of the (0,{source_band_hz}] Hz FE slice", prepared.provenance),
             board_mass_kg: prepared.mass_kg,
             board_area_m2: prepared.area_m2,
         })
