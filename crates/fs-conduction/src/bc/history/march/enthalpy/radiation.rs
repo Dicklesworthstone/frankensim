@@ -7,7 +7,8 @@
 //! advances physical time, and no latent heat is deposited a second time.
 
 use super::{EnthalpyHistoryRun, conduction, invalid, poll};
-use super::super::radiation::{RadiationRegionHistory, admit_histories};
+use super::super::radiation::{RadiationRegionHistory, admit_histories, patches_before};
+use super::super::events;
 use crate::{AmbientRadiationConfig, ConductionProblem};
 use crate::transient::enthalpy::EnthalpyStepConfig;
 use crate::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyError;
@@ -92,5 +93,41 @@ impl<'h, 'm, 'c> RadiativeEnthalpyHistoryRun<'h, 'm, 'c> {
         }, self.run.problem.interfaces, &self.run.specific_h, dt_s, config, &patches, self.config)?;
         self.run.publish(cx, time_s, &solved.conduction)?;
         Ok(solved)
+    }
+
+    /// Advance ONE event-aligned phase/radiation step, preserving every source.
+    /// Reservoir, heat-source and natural-boundary knots all constrain the next
+    /// endpoint. Held values use the exact left limit of this interval; latent
+    /// heat and phase remain in the original constitutive charts and solver.
+    /// Repeat until `conduction().time_s() == target_s` to traverse a window.
+    ///
+    /// # Errors
+    /// Invalid target/cap or the existing budget, domain, solve and cancellation
+    /// refusals. A failed interval publishes none of its caloric fields or time.
+    pub fn advance_event_step(&mut self, cx: &Cx<'_>, target_s: f64,
+        max_step_s: f64, config: EnthalpyStepConfig)
+        -> Result<events::HistoryEventStep<EnthalpyRadiationStepSolution>, HeterogeneousEnthalpyError>
+    {
+        poll(cx, self.run.accepted_steps()).map_err(conduction)?;
+        if self.run.accepted_steps() >= self.run.max_steps() {
+            return Err(invalid("enthalpy history step budget exhausted"));
+        }
+        let start_time_s = self.run.time_s();
+        let end_time_s = events::next_endpoint(cx, self.run.problem.boundary, &self.run.problem.source,
+            self.patches.iter().map(|p| &p.ambient_temperature), start_time_s, target_s, max_step_s)
+            .map_err(conduction)?;
+        let boundary = events::boundary_before(cx, self.run.problem.boundary, end_time_s).map_err(conduction)?;
+        super::natural_only(&boundary)?;
+        let source = events::source_before(&self.run.problem.source, end_time_s, self.run.specific_h.len())
+            .map_err(conduction)?;
+        let patches = patches_before(cx, &self.patches, end_time_s).map_err(conduction)?;
+        let report = self.run.storage.advance_with_ambient_radiation(cx, ConductionProblem {
+            mesh: self.run.problem.boundary.mesh(), boundary: &boundary,
+            material: self.run.problem.material, element_materials: self.run.problem.element_materials,
+            source: &source,
+        }, self.run.problem.interfaces, &self.run.specific_h, end_time_s-start_time_s,
+            config, &patches, self.config)?;
+        self.run.publish(cx, end_time_s, &report.conduction)?;
+        Ok(events::HistoryEventStep { start_time_s, end_time_s, report })
     }
 }

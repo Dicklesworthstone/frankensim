@@ -15,6 +15,7 @@
 pub mod radiation;
 
 use super::{ThermalHistoryProblem, poll};
+use super::events;
 use crate::{ConductionError, ConductionProblem, ScalarField, ThermalBc, ThermalBoundary};
 use crate::material::LiquidMassFractionConductivity;
 use crate::transient::enthalpy::{EnthalpyBudget, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution};
@@ -177,6 +178,39 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
         }, self.problem.interfaces, &self.specific_h, dt_s, config)?;
         self.publish(cx, time_s, &solved)?;
         Ok(solved)
+    }
+
+    /// Advance ONE interval ending at the next load/boundary knot or step cap.
+    /// Held data use their exact interval-end left limits, so short heat pulses
+    /// change latent enthalpy even when their switch-on and switch-off both lie
+    /// before the requested target. Repeat until `time_s() == target_s`.
+    /// The original Newton, phase, energy and natural-boundary checks remain.
+    ///
+    /// # Errors
+    /// Invalid time/cap, exhausted budget, cancellation or any original solve
+    /// refusal. All caloric fields and time remain unchanged on a failed call.
+    pub fn advance_event_step(&mut self, cx: &Cx<'_>, target_s: f64,
+        max_step_s: f64, config: EnthalpyStepConfig)
+        -> Result<events::HistoryEventStep<EnthalpyStepSolution>, HeterogeneousEnthalpyError>
+    {
+        poll(cx, self.accepted_steps).map_err(conduction)?;
+        if self.accepted_steps >= self.max_steps {
+            return Err(invalid("enthalpy history step budget exhausted"));
+        }
+        let start_time_s = self.time_s;
+        let end_time_s = events::next_endpoint(cx, self.problem.boundary, &self.problem.source,
+            std::iter::empty(), start_time_s, target_s, max_step_s).map_err(conduction)?;
+        let boundary = events::boundary_before(cx, self.problem.boundary, end_time_s).map_err(conduction)?;
+        natural_only(&boundary)?;
+        let source = events::source_before(&self.problem.source, end_time_s, self.specific_h.len())
+            .map_err(conduction)?;
+        let report = self.storage.advance(cx, ConductionProblem {
+            mesh: self.problem.boundary.mesh(), boundary: &boundary,
+            material: self.problem.material, element_materials: self.problem.element_materials,
+            source: &source,
+        }, self.problem.interfaces, &self.specific_h, end_time_s-start_time_s, config)?;
+        self.publish(cx, end_time_s, &report)?;
+        Ok(events::HistoryEventStep { start_time_s, end_time_s, report })
     }
 
     fn prepare_endpoint(&self, cx: &Cx<'_>, time_s: f64)

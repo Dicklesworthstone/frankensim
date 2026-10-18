@@ -11,6 +11,7 @@
 //! occlusion, pointwise T(x)^4 integral, evolving emissivity or latent-heat model.
 
 use super::{ThermalBoundaryHistory, ThermalHistoryMethod, ThermalHistoryRun, invalid, poll};
+use super::events;
 use crate::{AmbientRadiationConfig, AmbientRadiationPatch, ConductionError,
     ConductionProblem, ScalarField, SurfaceEmissivity, ThermalBc, TEMPERATURE_DIMS};
 use crate::transient::backward_euler::{RadiationStepSolution, StepConfig};
@@ -135,6 +136,63 @@ impl<'h, 'm> RadiativeThermalHistoryRun<'h, 'm> {
         self.run.publish(cx, time_s, &solution.conduction)?;
         Ok(solution)
     }
+
+    /// Advance ONE event-aligned interval without dropping attached radiation.
+    /// Source, boundary and ALL reservoir knots constrain the next endpoint.
+    /// Exact left-limit sampling keeps a reservoir switch out of the preceding
+    /// interval; smooth exchange still uses the original implicit gray model.
+    /// Repeat until `conduction().time_s() == target_s` to traverse a window.
+    ///
+    /// # Errors
+    /// The existing transactional refusals plus invalid target/maximum step.
+    pub fn advance_event_step(&mut self, cx: &Cx<'_>, target_s: f64,
+        max_step_s: f64, config: StepConfig)
+        -> Result<events::HistoryEventStep<RadiationStepSolution>, ConductionError>
+    {
+        poll(cx, self.run.accepted_steps())?;
+        if self.run.accepted_steps() >= self.run.max_steps() {
+            return Err(invalid("thermal history step budget exhausted"));
+        }
+        let start_time_s = self.run.time_s();
+        let end_time_s = events::next_endpoint(cx, self.run.problem.boundary, &self.run.problem.source,
+            self.patches.iter().map(|p| &p.ambient_temperature), start_time_s, target_s, max_step_s)?;
+        let boundary = events::boundary_before(cx, self.run.problem.boundary, end_time_s)?;
+        let source = events::source_before(&self.run.problem.source, end_time_s, self.run.temperature.len())?;
+        let patches = patches_before(cx, &self.patches, end_time_s)?;
+        let nonlinear = match self.run.method {
+            ThermalHistoryMethod::Linear => None,
+            ThermalHistoryMethod::Nonlinear(policy) => Some(policy),
+        };
+        let report = self.run.stepper.advance_prescribed_with_ambient_radiation(cx,
+            ConductionProblem { mesh: self.run.problem.boundary.mesh(), boundary: &boundary,
+                material: self.run.problem.material, source: &source,
+                element_materials: self.run.problem.element_materials },
+            self.run.problem.interfaces, &self.run.temperature, end_time_s-start_time_s, config,
+            nonlinear, &patches, self.config)?;
+        self.run.publish(cx, end_time_s, &report.conduction)?;
+        Ok(events::HistoryEventStep { start_time_s, end_time_s, report })
+    }
+}
+
+// One left-limit patch constructor for temperature and latent storage paths.
+pub(super) fn patches_before(cx: &Cx<'_>, histories: &[RadiationRegionHistory],
+    time: f64) -> Result<Vec<AmbientRadiationPatch>, ConductionError>
+{
+    let mut patches = Vec::with_capacity(histories.len());
+    for (at, history) in histories.iter().enumerate() {
+        poll(cx, at)?;
+        let value = events::value_before(&history.ambient_temperature, time)?;
+        if value.dims != TEMPERATURE_DIMS {
+            return Err(ConductionError::Dimensions {
+                context: format!("radiative reservoir on {:?}", history.region),
+                expected: TEMPERATURE_DIMS.0, found: value.dims.0,
+            });
+        }
+        patches.push(AmbientRadiationPatch::new(
+            history.region.clone(), history.emissivity.clone(), value.value)?);
+    }
+    poll(cx, histories.len())?;
+    Ok(patches)
 }
 
 // One binding contract for both temperature-capacity and primary-enthalpy runs.
