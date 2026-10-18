@@ -14,6 +14,9 @@
 /// Radiative reservoir histories driving the same persistent enthalpy state.
 pub mod radiation;
 
+/// Local time-error control in temperature, enthalpy and liquid fraction.
+pub mod adaptive;
+
 use super::{ThermalHistoryProblem, poll};
 use super::events;
 use crate::{ConductionError, ConductionProblem, ScalarField, ThermalBc, ThermalBoundary};
