@@ -213,17 +213,20 @@ pub(crate) fn residual_rounding_floor(
     additional_flow: &[f64],
 ) -> f64 {
     let n = x.len();
-    let state_scale = x0
+    // Match the descriptor's differential-only Gonzalez correction. Algebraic
+    // efforts enter the flow arithmetic below, never the energy quotient.
+    let state_scale = x0[..n_diff]
         .iter()
-        .chain(x)
+        .chain(&x[..n_diff])
         .fold(f64::MIN_POSITIVE, |a, v| a.max(v.abs()));
-    let length2: f64 = x.iter().zip(x0).map(|(b, a)| (b - a) * (b - a)).sum();
+    let length2: f64 = x[..n_diff].iter().zip(&x0[..n_diff])
+        .map(|(b, a)| (b - a) * (b - a)).sum();
     let guard = 1.0e-14 * state_scale;
     let energy_magnitude = storage.hamiltonian(x0).abs()
         + storage.hamiltonian(x).abs()
-        + effort
+        + effort[..n_diff]
             .iter()
-            .zip(x.iter().zip(x0))
+            .zip(x[..n_diff].iter().zip(&x0[..n_diff]))
             .map(|(g, (b, a))| (g * (b - a)).abs())
             .sum::<f64>();
     let energy_floor =

@@ -645,7 +645,123 @@ pub struct DescriptorPortHamiltonian {
     storage: Box<dyn Storage>,
 }
 
+// The caller's energy law never sees algebraic multipliers. Its optional
+// quadratic declaration is lifted with an exactly zero algebraic block.
+struct DifferentialStorage {
+    inner: Box<dyn Storage>,
+    n: usize,
+    n_diff: usize,
+    exact_quadratic: Option<Vec<f64>>,
+}
+
+fn pad_differential_matrix(matrix: &[f64], n_diff: usize, n: usize) -> Option<Vec<f64>> {
+    if matrix.len() != n_diff.checked_mul(n_diff)? || n_diff > n {
+        return None;
+    }
+    let mut result = vec![0.0; n.checked_mul(n)?];
+    for i in 0..n_diff {
+        result[i * n..i * n + n_diff]
+            .copy_from_slice(&matrix[i * n_diff..(i + 1) * n_diff]);
+    }
+    Some(result)
+}
+
+impl Storage for DifferentialStorage {
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        self.inner.hamiltonian(&x[..self.n_diff])
+    }
+
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        out.fill(0.0);
+        self.inner.gradient(&x[..self.n_diff], &mut out[..self.n_diff]);
+    }
+
+    fn exact_quadratic_matrix(&self) -> Option<&[f64]> {
+        self.exact_quadratic.as_deref()
+    }
+
+    fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
+        let part = self.inner.quadratic_part()?;
+        Some(linear_exact::QuadraticPart {
+            matrix: pad_differential_matrix(&part.matrix, self.n_diff, self.n)?,
+            exact: part.exact,
+        })
+    }
+
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
+        self.inner.midpoint_energy_remainder(
+            &a[..self.n_diff], &b[..self.n_diff], &mid[..self.n_diff],
+        )
+    }
+}
+
 impl DescriptorPortHamiltonian {
+    /// Admit an implicit system with a leading differential block and trailing
+    /// algebraic multipliers. `J` and `R` are full `n x n` matrices; `G` is
+    /// `n x m`. All entries must be finite, `J` skew and `R` symmetric PSD.
+    ///
+    /// The storage receives ONLY the first `n_diff` coordinates. Algebraic
+    /// multipliers therefore cannot acquire fictitious energy or contribute to
+    /// its analytic gradient. The returned read-only storage lifts this law to
+    /// the full state, including a zero algebraic quadratic block when declared.
+    ///
+    /// This allows material/mechanical energy laws to reuse an assembled
+    /// circuit's structure. The caller owns state/port maps, analytic gradient,
+    /// source support, initial constraint consistency and physical model limits.
+    /// Structural admission does not prove nonlinear uniqueness or stability.
+    ///
+    /// # Errors
+    /// Invalid dimensions, nonfinite matrices, non-skew `J` or non-PSD `R`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        n: usize,
+        n_diff: usize,
+        m: usize,
+        j: Vec<f64>,
+        r: Vec<f64>,
+        g: Vec<f64>,
+        differential_storage: Box<dyn Storage>,
+    ) -> Result<Self, PhsError> {
+        let square = n.checked_mul(n).ok_or(PhsError::Dimension {
+            what: "descriptor matrix dimensions overflow",
+        })?;
+        let ports = n.checked_mul(m).ok_or(PhsError::Dimension {
+            what: "descriptor port dimensions overflow",
+        })?;
+        if n_diff > n || j.len() != square || r.len() != square || g.len() != ports {
+            return Err(PhsError::Dimension { what: "descriptor J/R/G sizes and differential prefix" });
+        }
+        if j.iter().chain(&r).chain(&g).any(|value| !value.is_finite()) {
+            return Err(PhsError::Dimension { what: "descriptor structure must be finite" });
+        }
+        require_skew(&j, n, "J")?;
+        require_symmetric(&r, n, "R")?;
+        require_psd(&r, n, "R")?;
+        let exact_quadratic = differential_storage.exact_quadratic_matrix()
+            .map(|matrix| pad_differential_matrix(matrix, n_diff, n).ok_or(PhsError::Dimension {
+                what: "declared differential quadratic matrix size",
+            }))
+            .transpose()?;
+        Ok(Self { n, n_diff, m, j, r, g, storage: Box::new(DifferentialStorage {
+            inner: differential_storage, n, n_diff, exact_quadratic,
+        }) })
+    }
+
+    /// Read-only full structure matrices `(J, R, G)` in the original state and
+    /// port order. Coupled owners preserve these stamps under an explicit map.
+    #[must_use]
+    pub fn structure(&self) -> (&[f64], &[f64], &[f64]) {
+        (&self.j, &self.r, &self.g)
+    }
+
+    /// Original full-state storage and any explicitly declared quadratic data.
+    /// Systems made by [`Self::new`] expose the differential law lifted with
+    /// zero algebraic storage; assembled circuits retain their original law.
+    #[must_use]
+    pub fn storage(&self) -> &dyn Storage {
+        self.storage.as_ref()
+    }
+
     /// Differential-state count (the leading block of `E = I`).
     #[must_use]
     pub fn differential_dim(&self) -> usize {
@@ -935,7 +1051,17 @@ pub fn step_descriptor(
     // Gonzalez still owns the differential block; λ enters J as itself
     // so Ga λ / −Gb λ actually drive the ports.
     let effort = |x1: &[f64]| -> Vec<f64> {
-        let mut e = discrete_gradient(sys.storage.as_ref(), x0, x1);
+        // The Gonzalez correction belongs entirely to stored coordinates.
+        // Including changes of algebraic multipliers in its norm allocates
+        // part of the energy remainder to efforts that are overwritten below.
+        // Their magnitudes must not suppress the differential roundoff guard.
+        let mut endpoint = x1.to_vec();
+        endpoint[n_d..].copy_from_slice(&x0[n_d..]);
+        let mut midpoint = vec![0.0; n];
+        let mut e = vec![0.0; n];
+        discrete_gradient_into_prefix_unchecked(
+            sys.storage.as_ref(), x0, &endpoint, &mut midpoint, &mut e, n_d,
+        );
         for i in n_d..n {
             e[i] = f64::midpoint(x0[i], x1[i]);
         }
@@ -1107,6 +1233,20 @@ fn discrete_gradient_into_unchecked(
     mid: &mut [f64],
     dg: &mut [f64],
 ) {
+    discrete_gradient_into_prefix_unchecked(storage, a, b, mid, dg, a.len());
+}
+
+// Descriptor calls freeze the algebraic tail and restrict the correction and
+// its cancellation guard to the differential prefix. ODE/prepared calls use
+// the complete state and retain exactly the same formula.
+fn discrete_gradient_into_prefix_unchecked(
+    storage: &dyn Storage,
+    a: &[f64],
+    b: &[f64],
+    mid: &mut [f64],
+    dg: &mut [f64],
+    n_diff: usize,
+) {
     let n = a.len();
     for i in 0..n {
         mid[i] = f64::midpoint(a[i], b[i]);
@@ -1115,7 +1255,7 @@ fn discrete_gradient_into_unchecked(
     storage.gradient(mid, dg);
     let mut dx_norm_sq = 0.0;
     let mut mid_dot = 0.0;
-    for i in 0..n {
+    for i in 0..n_diff {
         let dx = b[i] - a[i];
         dx_norm_sq += dx * dx;
         mid_dot += dg[i] * dx;
@@ -1123,9 +1263,9 @@ fn discrete_gradient_into_unchecked(
     // Cancellation guard (review finding): for |dx| below the roundoff
     // scale the correction quotient amplifies eps*|H|/|dx| without
     // bound; grad(mid) is already exact to available precision there.
-    let state_scale = a
+    let state_scale = a[..n_diff]
         .iter()
-        .chain(b.iter())
+        .chain(b[..n_diff].iter())
         .fold(f64::MIN_POSITIVE, |acc, &v| acc.max(v.abs()));
     let dx_floor = 1.0e-14 * state_scale;
     if dx_norm_sq > dx_floor * dx_floor {
@@ -1133,7 +1273,7 @@ fn discrete_gradient_into_unchecked(
             .midpoint_energy_remainder(a, b, mid)
             .unwrap_or_else(|| storage.hamiltonian(b) - storage.hamiltonian(a) - mid_dot);
         let corr = remainder / dx_norm_sq;
-        for i in 0..n {
+        for i in 0..n_diff {
             dg[i] += corr * (b[i] - a[i]);
         }
     }

@@ -224,6 +224,16 @@ inventoried and measured in fs-couple `tests/integrator_warping_audit.rs`.
   mechanical 1-junction (common velocity, forces split). Gonzalez
   on the differential block; algebraic rows are the common-output
   residual. The capacitor and the Newton split are regularizations.
+  `DescriptorPortHamiltonian::new` admits explicit finite J/R/G matrices and
+  a differential prefix, enforcing zero algebraic storage by passing only that
+  prefix to the supplied energy law. Read-only `structure()` and `storage()`
+  let coupled material owners reuse original circuit stamps and declared Q
+  rather than build another circuit solver. Differential quadratic metadata is
+  lifted with an exactly zero algebraic block. The descriptor Gonzalez norm,
+  cancellation guard and corresponding rounding estimate exclude algebraic
+  coordinates; actual multiplier efforts remain their original midpoints.
+  `tests/descriptor_storage.rs` exercises a nonlinear RC energy defect, changed
+  algebraic coordinate scales, native RLC reconstruction and source-law admission.
 - `transformer(a, b, port_a, port_b, n)` — power-conserving
   `u_a = n y_b`, `u_b = −n y_a`. A plate area, a hydraulic ram,
   and a lever are this object.
