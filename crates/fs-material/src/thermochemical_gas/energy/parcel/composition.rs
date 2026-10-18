@@ -152,7 +152,18 @@ mod tests {
         let report = gas.replace_model_conserving_mass_energy(
             model(vec![0.75, 0.25], 0.001), controls(), || false,
         ).unwrap();
-        assert_eq!(gas.state(), before.state());
+        // The new model re-solves T(rho, u), so the state agrees within the
+        // inversion's declared energy tolerance, not bitwise: |dT| <= tol / cv
+        // with the ideal-gas cv = R / (gamma - 1) of the accepted state.
+        let (after, initial) = (gas.state().state(), before.state().state());
+        let cv = initial.specific_gas_constant / (initial.gamma - 1.0);
+        let temperature_tolerance = controls().energy_tolerance_j_kg / cv;
+        assert!((after.temperature - initial.temperature).abs() <= temperature_tolerance);
+        assert!(
+            (after.pressure / initial.pressure - 1.0).abs()
+                <= temperature_tolerance / initial.temperature + 72.0 * f64::EPSILON
+        );
+        assert!((after.density / initial.density - 1.0).abs() <= 64.0 * f64::EPSILON);
         assert_eq!(gas.mass_kg(), before.mass_kg());
         assert_eq!(gas.volume_m3(), before.volume_m3());
         assert!(report.stored_energy_change_j.abs()
@@ -164,8 +175,12 @@ mod tests {
     fn failed_or_cancelled_replacement_is_atomic() {
         let mut gas = parcel();
         let before = gas.clone();
-        let narrow = GasEnergySolve { minimum_temperature_k: 200.0,
-            maximum_temperature_k: 250.0, ..controls() };
+        // A bracket that provably excludes the replacement's actual solution.
+        let solved = gas.clone().replace_model_conserving_mass_energy(
+            model(vec![0.25, 0.75], 0.001), controls(), || false,
+        ).unwrap().final_state.state().temperature;
+        let narrow = GasEnergySolve { minimum_temperature_k: solved + 50.0,
+            maximum_temperature_k: solved + 100.0, ..controls() };
         assert!(gas.replace_model_conserving_mass_energy(
             model(vec![0.25, 0.75], 0.001), narrow, || false,
         ).is_err());
