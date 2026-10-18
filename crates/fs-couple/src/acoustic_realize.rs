@@ -209,7 +209,11 @@ pub enum BoreRealizationReceipt {
         min_admissible_cells: usize,
         /// Spatial dispersion model-form pitch error at `cells` [cents].
         dispersion_error_cents: f64,
-        /// Measured time-domain pitch error against the characteristic line [cents].
+        /// Pitch error against the characteristic line [cents]. This is the
+        /// analytic quarter-wave dispersion bound, equal to
+        /// `dispersion_error_cents`; no time-domain comparison is run here. The
+        /// measured line-vs-ladder change is reported by the
+        /// `reed_default_is_characteristic_line` regression.
         pitch_error_cents: f64,
         /// Declared pitch-error tolerance [cents].
         max_pitch_error_cents: f64,

@@ -2,7 +2,9 @@
 //! gas/material parameter motion, deterministic PCM16, typed refusals.
 
 use fs_couple::acoustic_realize::{
-    AcousticRealizeError, assembly_wav, realize_assembly, string_mode_omega,
+    AcousticRealizeError, BoreRealization, BoreRealizationReceipt, RealizeOptions, assembly_wav,
+    min_admissible_lumped_cells, realize_assembly, realize_assembly_with_options,
+    string_mode_omega,
 };
 use fs_couple::pcm_wav::{WavError, encode_pcm16_wav};
 use fs_scenario::{
@@ -1065,10 +1067,10 @@ fn narrow_bore_decays_faster_from_the_viscothermal_pin() {
     );
 }
 
-#[test]
-fn massive_reed_speaks_on_the_ode_clock() {
+/// The beating reed on a 0.5 m unflanged cylinder (`mass_kg` 0 is memoryless).
+fn reed_on_cylinder(mass_kg: f64, duration_s: f64) -> AcousticAssembly {
     let mut a = empty_base();
-    a.duration_s = 0.12;
+    a.duration_s = duration_s;
     a.duct = Some(ViscothermalDuct {
         segments: vec![CylinderSegment {
             radius_m: 0.0075,
@@ -1085,15 +1087,27 @@ fn massive_reed_speaks_on_the_ode_clock() {
         closing_pressure_pa: 6_000.0,
         blowing_pressure_pa: 2_800.0,
         attack_s: 0.008,
-        mass_kg: 3.0e-4,
+        mass_kg,
         stiffness_n_m: 0.0,
         damping_ratio: 0.35,
     });
-    let out = realize_assembly(&a).expect("massive reed");
-    let tail = &out.pressure_pa[out.pressure_pa.len() / 2..];
+    a
+}
+
+/// Steady-state (second half) zero-crossing period [samples] and AC rms [Pa].
+fn tail_period_and_rms(p: &[f64]) -> (f64, f64) {
+    let tail = &p[p.len() / 2..];
     let mean = tail.iter().sum::<f64>() / tail.len() as f64;
-    let ac: Vec<f64> = tail.iter().map(|p| p - mean).collect();
-    let rms: f64 = (ac.iter().map(|p| p * p).sum::<f64>() / ac.len() as f64).sqrt();
+    let ac: Vec<f64> = tail.iter().map(|v| v - mean).collect();
+    let rms = (ac.iter().map(|v| v * v).sum::<f64>() / ac.len() as f64).sqrt();
+    (zero_cross_period(&ac), rms)
+}
+
+fn massive_reed_speaks(bore: BoreRealization) {
+    let a = reed_on_cylinder(3.0e-4, 0.12);
+    let options = RealizeOptions { bore };
+    let out = realize_assembly_with_options(&a, &options).expect("massive reed");
+    let (_, rms) = tail_period_and_rms(&out.pressure_pa);
     assert!(
         rms > 1.0,
         "massive reed-bore must self-oscillate, rms={rms}"
@@ -1102,10 +1116,92 @@ fn massive_reed_speaks_on_the_ode_clock() {
     if let Some(reed) = silent.reed.as_mut() {
         reed.blowing_pressure_pa = 0.0;
     }
-    let quiet = realize_assembly(&silent).expect("silent massive reed");
+    let quiet = realize_assembly_with_options(&silent, &options).expect("silent massive reed");
     assert!(
         peak_abs(&quiet.pressure_pa) < 0.05 * peak_abs(&out.pressure_pa),
         "zero blowing pressure must not speak"
+    );
+}
+
+/// The lumped LC ladder ODE clock, requested explicitly (IRP M2.2-W4).
+#[test]
+fn massive_reed_speaks_on_the_ode_clock() {
+    massive_reed_speaks(BoreRealization::lumped_ladder(min_admissible_lumped_cells(
+        1.0,
+    )));
+}
+
+/// The characteristic-line twin: the same massive reed on the default bore.
+#[test]
+fn massive_reed_speaks_on_the_characteristic_line() {
+    massive_reed_speaks(BoreRealization::default());
+}
+
+/// G3 (IRP M2.2-W4): the reed bore's default realization is the
+/// convergence-sized characteristic line. The lumped LC ladder runs only on
+/// request and refuses below its dispersion band. The measured line-vs-ladder
+/// change in pitch and level is printed for the record.
+#[test]
+fn reed_default_is_characteristic_line() {
+    let a = reed_on_cylinder(0.0, 0.10);
+    let line = realize_assembly(&a).expect("default reed");
+    let Some(BoreRealizationReceipt::CharacteristicLine(receipt)) = &line.bore_receipt else {
+        panic!(
+            "default bore must be the characteristic line: {:?}",
+            line.bore_receipt
+        );
+    };
+    let explicit = realize_assembly_with_options(
+        &a,
+        &RealizeOptions {
+            bore: BoreRealization::default(),
+        },
+    )
+    .expect("explicit line");
+    assert!(
+        line.pressure_pa
+            .iter()
+            .zip(&explicit.pressure_pa)
+            .all(|(x, y)| x.to_bits() == y.to_bits()),
+        "the default is exactly the characteristic line"
+    );
+    let cells = min_admissible_lumped_cells(1.0);
+    let ladder = realize_assembly_with_options(
+        &a,
+        &RealizeOptions {
+            bore: BoreRealization::lumped_ladder(cells),
+        },
+    )
+    .expect("requested ladder");
+    assert!(matches!(
+        ladder.bore_receipt,
+        Some(BoreRealizationReceipt::LumpedLadder { cells: c, .. }) if c == cells
+    ));
+    assert!(matches!(
+        realize_assembly_with_options(
+            &a,
+            &RealizeOptions {
+                bore: BoreRealization::lumped_ladder(cells - 1),
+            },
+        ),
+        Err(AcousticRealizeError::LumpedLadderBand { .. })
+    ));
+    let (line_period, line_rms) = tail_period_and_rms(&line.pressure_pa);
+    let (ladder_period, ladder_rms) = tail_period_and_rms(&ladder.pressure_pa);
+    assert!(
+        line_rms > 5.0 && ladder_rms > 5.0,
+        "{line_rms} {ladder_rms}"
+    );
+    println!(
+        "{{\"suite\":\"fs-couple\",\"case\":\"reed-default-is-characteristic-line\",\
+         \"line_n_fft\":{},\"ladder_cells\":{cells},\"line_period_samples\":{line_period:.3},\
+         \"ladder_period_samples\":{ladder_period:.3},\"pitch_change_cents\":{:.2},\
+         \"line_rms_pa\":{line_rms:.3},\"ladder_rms_pa\":{ladder_rms:.3},\
+         \"level_change_db\":{:.2}}}",
+        receipt.n_fft,
+        // The ladder relative to the line: pitch from the period ratio, level from rms.
+        1200.0 * (line_period / ladder_period).log2(),
+        20.0 * (ladder_rms / line_rms).log10(),
     );
 }
 
