@@ -295,7 +295,7 @@ impl ModalAperture {
     }
     /// Original material plates, shapes and projection ranges, not copied state.
     pub fn material_plates(&self) -> &[MaterialModalPlate] { &self.material_plates }
-    /// Exact material gas on the plate-driven path; absent on the raw modal path.
+    /// Exact gas retained by material plates or a source-bound viscous channel.
     pub const fn gas(&self) -> Option<&GasState> { self.material_gas.as_ref() }
     /// Actual nodal transverse displacement and velocity [m,m/s] on one source.
     /// This is a read of the retained signed basis, never another vibration solve.

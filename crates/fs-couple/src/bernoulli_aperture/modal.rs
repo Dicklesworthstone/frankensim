@@ -172,6 +172,8 @@ impl ModalAperture {
     /// Select the common channel law before stepping. Every mode sees the SAME
     /// pressure drop and its own conjugate swept area; adding modes never adds
     /// parallel slits or multiplies the physical flow width.
+    /// A source-bound law retains its full gas for subsequent network admission;
+    /// it must agree with any gas already supplied by the material construction.
     pub fn set_viscous_slit(&mut self, law: super::viscous::ViscousSlit)
         -> Result<(), AcousticRealizeError>
     {
@@ -179,6 +181,14 @@ impl ModalAperture {
             return Err(invalid("modal viscous slit must be selected before the first accepted sample"));
         }
         law.evaluate(self.spec.width_m, self.gap(&self.state).max(0.0), self.spec.density_kg_m3, 0.0)?;
+        // Preserve the complete source binding for connected network admission.
+        // Density alone cannot identify viscosity, heat capacity or temperature.
+        if let Some(gas) = law.gas().copied() {
+            if self.material_gas.is_some_and(|retained| retained != gas) {
+                return Err(invalid("modal viscous slit must use the complete retained source gas"));
+            }
+            self.material_gas = Some(gas);
+        }
         self.viscous_slit = Some(law);
         Ok(())
     }

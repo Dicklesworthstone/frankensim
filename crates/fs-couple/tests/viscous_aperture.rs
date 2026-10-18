@@ -229,3 +229,53 @@ fn g1_forced_viscous_contact_cycle_preserves_flow_and_work_in_both_propagators()
         assert!(transitions.iter().all(|seen| *seen), "{propagator:?}: {transitions:?}");
     }
 }
+
+#[test]
+fn source_bound_channels_retain_full_gas_and_refuse_acoustically_equal_substitutions() {
+    use fs_material::gas::{GasSpec, GasState};
+    let source = GasSpec::dry_air_ussa1976();
+    let gas = GasState::try_new(&source, 293.15, 101325.0).unwrap();
+    // A synthetic coherent gas isolates the full-state binding: rho and c
+    // match, while temperature, pressure and viscosity are different.
+    let ratio = 1.1;
+    let other = GasState::try_new(&GasSpec { gamma: source.gamma/ratio, ..source },
+        293.15*ratio, 101325.0*ratio).unwrap();
+    assert!((other.density-gas.density).abs() < 64.0*f64::EPSILON*gas.density);
+    assert!((other.sound_speed-gas.sound_speed).abs() < 64.0*f64::EPSILON*gas.sound_speed);
+    assert_ne!(other.dynamic_viscosity, gas.dynamic_viscosity);
+    let mut p = *paired(BladePropagator::Midpoint).spec();
+    p.density_kg_m3 = gas.density;
+    let modes = p.blades.iter().enumerate().map(|(i,b)| ApertureMode {
+        mass_kg:b.mass_kg, stiffness_n_m:b.stiffness_n_m, damping_n_s_m:b.damping_n_s_m,
+        pressure_area_m2:b.pressure_area_m2, gap_projection:1.0,
+        force_projection:if i==0 {[1.0,0.0]} else {[0.0,1.0]},
+    }).collect();
+    let mut pair = PairedAperture::new(p, [BladeState::default();2], slit_lay(1e8,1.5).unwrap()).unwrap();
+    let mut modal = ModalAperture::new(ModalApertureSpec {
+        rest_opening_m:p.rest_opening_m, width_m:p.width_m, modes,
+        density_kg_m3:p.density_kg_m3, impedance_pa_s_m3:p.impedance_pa_s_m3,
+        time_step_s:p.time_step_s, max_steps:p.max_steps, limits:p.limits,
+    }, vec![BladeState::default();2], slit_lay(1e8,1.5).unwrap()).unwrap();
+    let law = ViscousSlit::from_gas(&gas, 1e-3).unwrap();
+    let mismatched = ViscousSlit::from_gas(&other, 1e-3).unwrap();
+    // This would pass the old density-only setter admission.
+    assert!(mismatched.evaluate(p.width_m, p.rest_opening_m, gas.density, 0.0).is_ok());
+    pair.set_viscous_slit(law).unwrap();
+    modal.set_viscous_slit(law).unwrap();
+    assert_eq!(pair.gas(), Some(&gas));
+    assert_eq!(modal.gas(), Some(&gas));
+    assert!(pair.set_viscous_slit(mismatched).is_err());
+    assert!(modal.set_viscous_slit(mismatched).is_err());
+    assert_eq!(pair.gas(), Some(&gas));
+    assert_eq!(modal.gas(), Some(&gas));
+    assert_eq!(pair.viscous_slit(), Some(law));
+    assert_eq!(modal.viscous_slit(), Some(law));
+    assert_eq!(pair.accepted_steps(), 0);
+    assert_eq!(modal.accepted_steps(), 0);
+    assert_eq!(pair.blade_states(), &[BladeState::default();2]);
+    assert_eq!(modal.modal_states(), &[BladeState::default();2]);
+    pair.set_material_viscous_slit(2e-3).unwrap();
+    modal.set_material_viscous_slit(2e-3).unwrap();
+    assert_eq!(pair.viscous_slit().unwrap().gas(), Some(&gas));
+    assert_eq!(modal.viscous_slit().unwrap().gas(), Some(&gas));
+}

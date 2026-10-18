@@ -46,7 +46,9 @@ fn forces() -> Vec<BladeForceControl> {
 }
 fn network() -> PairedApertureNetwork {
     let gas = |t| GasState::try_new(&GasSpec::dry_air_ussa1976(), t, 101325.0).unwrap();
-    let gases = vec![gas(293.15), gas(323.15)];
+    network_with_gas_slit(vec![gas(293.15), gas(323.15)], None)
+}
+fn network_with_gas_slit(gases: Vec<GasState>, channel_length: Option<f64>) -> PairedApertureNetwork {
     let graph = TubeNetworkSpec { nodes: vec![NetworkNode::Inlet, NetworkNode::Junction,
         NetworkNode::Termination { reflection: -0.8 }],
         sections: vec![TubeSection { nodes: [0,1], length_m: 0.12, radius_m: 0.006, max_length_error_m: 0.005 },
@@ -60,8 +62,12 @@ fn network() -> PairedApertureNetwork {
         limits: PairedApertureLimits { maximum_abs_displacement_m: 0.05, maximum_abs_velocity_m_s: 100.0,
             maximum_energy_j: 10.0, max_evaluations: 256, velocity_tolerance_m_s: 1e-15, relative_tolerance: 1e-13 } };
     let contact = Obstacle::new(vec![-1.0],1,1,vec![0.0],vec![1.0],2e9,2.0,"authored paired performance contact".into()).unwrap();
-    let aperture = PairedAperture::new_with_propagator(spec,[BladeState::default();2],contact,
+    let mut aperture = PairedAperture::new_with_propagator(spec,[BladeState::default();2],contact,
         crate::bernoulli_aperture::paired::BladePropagator::ExactZoh).unwrap();
+    if let Some(length) = channel_length {
+        let law = crate::bernoulli_aperture::viscous::ViscousSlit::from_gas(&gases[0], length).unwrap();
+        aperture.set_viscous_slit(law).unwrap();
+    }
     PairedApertureNetwork::new(aperture,graph,gases,&CancelGate::new_clock_free()).unwrap()
 }
 fn renderer(observation: ApertureObservation) -> PairedAperturePerformance {
@@ -177,4 +183,30 @@ fn bad_requests_leave_state_and_outputs_untouched_and_failed_physics_cannot_resu
     assert!(PairedAperturePerformance::new(network(),ApertureObservation::Inlet,schedule(),bad).is_err());
     bad=config();bad.max_controls=1;
     assert!(PairedAperturePerformance::new(network(),ApertureObservation::Inlet,schedule(),bad).is_err());
+}
+
+
+#[test]
+fn gas_and_channel_geometry_change_physical_double_blade_microphone_pressure() {
+    let location = CircularOutletReceiver { position_m:[0.0,0.0,0.25], radial_rings:4,
+        angular_points:16, maximum_frequency_hz:2000.0 };
+    let observation = ApertureObservation::NetworkBaffled { node:2, receiver:location };
+    let air = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+    let lower_pressure = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 76_000.0).unwrap();
+    let make = |gas, length| PairedAperturePerformance::new(
+        network_with_gas_slit(vec![gas,gas], length), observation, schedule(), config()).unwrap();
+    let (reference, sound) = render(make(air, Some(3e-3)), 1);
+    let (blocked, blocked_sound) = render(make(air, Some(3e-3)), 64);
+    assert_eq!(sound, blocked_sound);
+    assert_eq!(reference.last_frame(), blocked.last_frame());
+    assert_eq!(reference.system().aperture().gas(), Some(&air));
+    let energy = sound.iter().map(|x| x*x).sum::<f64>();
+    assert!(energy>0.0 && sound.iter().all(|x| x.is_finite()));
+    for (gas, length) in [(air,None), (air,Some(3e-4)), (lower_pressure,Some(3e-3))] {
+        let (changed, other) = render(make(gas,length), 64);
+        let difference = sound.iter().zip(&other).map(|(a,b)|(a-b)*(a-b)).sum::<f64>();
+        assert!(difference>1e-8*energy, "the physical change did not reach the microphone");
+        assert_ne!(reference.system().aperture().blade_states(), changed.system().aperture().blade_states());
+        assert!(other.iter().all(|x| x.is_finite()));
+    }
 }

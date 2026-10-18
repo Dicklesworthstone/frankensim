@@ -415,6 +415,8 @@ impl PairedAperture {
 
     /// Select one common viscous channel before the first accepted step. Both
     /// independent blades share its pressure and flow; width is counted once.
+    /// A source-bound law retains its full gas for subsequent network admission;
+    /// it must agree with any gas already supplied by the material construction.
     pub fn set_viscous_slit(&mut self, law: super::viscous::ViscousSlit)
         -> Result<(), AcousticRealizeError>
     {
@@ -425,6 +427,14 @@ impl PairedAperture {
             Some(closure) => { closure.viscous_flow(law, self.blades.map(|s| s.displacement_m),
                 self.spec.density_kg_m3, 0.0)?; }
             None => { law.evaluate(self.spec.width_m, self.gap(self.blades).max(0.0), self.spec.density_kg_m3, 0.0)?; }
+        }
+        // Preserve the complete source binding for connected network admission.
+        // Density alone cannot identify viscosity, heat capacity or temperature.
+        if let Some(gas) = law.gas().copied() {
+            if self.gas.is_some_and(|retained| retained != gas) {
+                return Err(invalid("paired viscous slit must use the complete retained source gas"));
+            }
+            self.gas = Some(gas);
         }
         self.viscous_slit = Some(law);
         Ok(())
@@ -495,7 +505,7 @@ impl PairedAperture {
     /// Exact independent plate sources, absent on the authored-scalar path.
     #[must_use]
     pub fn plates(&self) -> Option<&[PlateApertureReduction; 2]> { self.plates.as_deref() }
-    /// Complete source gas retained by the material/geometry constructor.
+    /// Complete source gas retained by material geometry or a source-bound channel.
     #[must_use]
     pub const fn gas(&self) -> Option<&GasState> { self.gas.as_ref() }
     /// Accepted sample count; refusals never advance it.
