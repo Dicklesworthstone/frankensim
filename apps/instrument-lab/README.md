@@ -102,20 +102,21 @@ A card counts as confirmed only when its experiment moves the measured gap. A me
 moved into the graded renders is reported as fixed or partly fixed: the A3 renders
 (`a3-{pp,mf,ff,fff}`) carry `--string-stretching axial-a3.fspx`, whose waves drive the bridge axially,
 and when the campaign also has the same strokes on linear strings (`a3-{mf,ff,fff}-linear`) the card
-compares the two. Every piano render the page grades or diagnoses (A3, C6 and the ablations above)
-couples each string to its bridge at the point RT-0425 publishes for it and carries two-sided air
-loading; it listens at the default point, 1 m above the middle of the board:
+compares the two. Every piano render the page grades (A3, C6), and every ablation above except in
+the one thing it changes, couples each string to its bridge at the point RT-0425 publishes for it,
+carries two-sided air loading and listens at the default point, 1 m above the middle of the board:
 
     piano_geometry --divisions 16 --rib-normal-step-m 0.03 --bridge-map rt0425 --output board-rt16.fsb  # 11,772 area samples
     grand_piano --preset steinway-d --board-geometry board-rt16.fsb --board-band-hz 2400 \
       --board-reduction 128,64,200,400,800,1600,2300 --rayleigh-loading 2,90,2620,213 ...
 
 The former estimated stations (`--bridge-map estimated`) were spaced evenly along each bridge. With
-the published string lengths they put most agraffes over the soundboard itself (A3's 0.77 m string
-would start 0.46 m inside the board's front edge) and reversed the bass order. The reduced board keeps
-a coordinate at 2.60 kHz, so the air band runs to 2.62 kHz, and the 16-division board is the coarsest
-whose air cells still give six per wavelength there. The polarization ablation adds bridge directions
-that reach 2.62 kHz, so it runs its air to 2.64 kHz (215 samples).
+the published string lengths they put most agraffes over the soundboard itself (A3's 0.77 m string,
+running straight back from its contact, would start 0.38 m inside the board's front edge) and
+reversed the bass order. The reduced board keeps a coordinate at 2.60 kHz, so the air band runs to
+2.62 kHz. Of the meshes tried, 12 to 15 divisions left the air cells under six per wavelength there;
+16 divisions with a 0.03 m step is the coarsest that passes. The polarization ablation adds bridge
+directions that reach 2.62 kHz, so it runs its air to 2.64 kHz (215 samples).
 
 Listening point: the Iowa recordings used two Neumann KM 84 cardioids, "8 in above center bass
 strings" (left channel) and "8 in above center treble strings" (right). In the board frame those are
@@ -131,7 +132,8 @@ experiment.
 
 When the campaign also has the same A3 mf stroke without air on that board (`a3-mf-noair`), the
 low-resonance and ringing cards compare the two. Each render first samples and fits the board's
-complete 128-mode air reaction (about 14 minutes; see the example's RAYLEIGH_LOADING.md).
+complete 128-mode air reaction (15 minutes or more on the 16-division board; see the example's
+RAYLEIGH_LOADING.md).
 
 ## The drum kit
 

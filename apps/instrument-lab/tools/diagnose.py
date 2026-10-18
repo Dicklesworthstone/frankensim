@@ -77,6 +77,16 @@ def has(name):
     return (V.CAMPAIGN / "piano" / f"{name}.wav").exists()
 
 
+def heard(name):
+    """Where a render listened, from its own log: a phrase for the cards and its receiver points."""
+    log = V.CAMPAIGN / "piano" / f"{name}.log"
+    text = log.read_text(errors="replace") if log.exists() else ""
+    points = [p for p in V.receivers(text) if p is not None]
+    if V.at_iowa(text):
+        return "where the Iowa microphones sat", points
+    return "at " + " and ".join(f"({x:.2f}, {y:.2f}, {z:.2f}) m" for x, y, z in points), points
+
+
 def stretching_row(name, key):
     """The waves row for one key in the --string-stretching file the render used, or None."""
     cmd = render_cmd(name).split()
@@ -275,12 +285,11 @@ def board_admittance(key=57):
 
 def contact_point(name, key=57):
     """Board-frame position [m] of a key's bridge contact in the board file the render used (--board-geometry)."""
-    cmd = render_cmd(name).split()
-    if "--board-geometry" not in cmd:
+    rows_ = board_rows(name)
+    if rows_ is None:
         return None
     nodes, tris, site = {}, {}, None
-    for line in (V.CAMPAIGN / "piano" / cmd[cmd.index("--board-geometry") + 1]).read_text(errors="replace").splitlines():
-        f = line.split(",")
+    for f in rows_:
         if f[0] == "node":
             nodes[int(f[1])] = (float(f[2]), float(f[3]))
         elif f[0] == "triangle":
@@ -288,6 +297,23 @@ def contact_point(name, key=57):
         elif f[0] == "bridge" and int(f[1]) == key:
             site = (int(f[2]), [float(v) for v in f[3:6]])
     return tuple(sum(w * nodes[n][i] for w, n in zip(site[1], tris[site[0]])) for i in (0, 1))
+
+
+def board_rows(name):
+    """The node, triangle, clamped-node and bridge rows of the board file a render used (--board-geometry)."""
+    cmd = render_cmd(name).split()
+    if "--board-geometry" not in cmd:
+        return None
+    path = V.CAMPAIGN / "piano" / cmd[cmd.index("--board-geometry") + 1]
+    return [line.split(",") for line in path.read_text(errors="replace").splitlines()]
+
+
+def front_edge_y(name, x, halfwidth=0.03):
+    """The board's front (keyboard-side) edge at x [m]: the lowest clamped boundary node within halfwidth of x."""
+    rows_ = board_rows(name) or []
+    nodes = {int(f[1]): (float(f[2]), float(f[3])) for f in rows_ if f[0] == "node"}
+    ys = [nodes[int(f[1])][1] for f in rows_ if f[0] == "fixed" and abs(nodes[int(f[1])][0] - x) < halfwidth]
+    return min(ys) if ys else None
 
 
 def scale_row(key):
@@ -605,8 +631,11 @@ def main():
             # graded distance depends on where exactly the estimated microphone sits.
             near = [ours_mf] + [piano(n, channel=c) for n in ("a3-mf-px", "a3-mf-py") for c in (0, 1)]
             gaps = [envelope_gap(x, real_mf) for x in near]
-            res["position_spread"] = {"points_m": "graded (0.275, 0.556, 0.25) and 0.1 m away along x and y", "envelope_gap_db": [r(g, 3) for g in gaps]}
-            row["result"] += (f"Within 0.1 m of the graded point the graded distance ranges from {min(gaps):.1f} to {max(gaps):.1f} dB over five points; "
+            centre = heard("a3-mf")[1][0]
+            around = [p for n in ("a3-mf-px", "a3-mf-py") for p in heard(n)[1]]
+            reach = max(math.dist(p, centre) for p in around) if around else float("nan")
+            res["position_spread"] = {"points_m": [list(centre)] + [list(p) for p in around], "envelope_gap_db": [r(g, 3) for g in gaps]}
+            row["result"] += (f"Within {reach:.1f} m of the graded point the graded distance ranges from {min(gaps):.1f} to {max(gaps):.1f} dB over {len(gaps)} points; "
                               f"the real piano's own two microphones differ by {envelope_gap(real_tr, real_mf):.1f} dB on this note. ")
         if adm:
             y, n_modes, top = adm
@@ -623,12 +652,12 @@ def main():
         br_["result"] = (f"Energy away from the string partials 0.2-1 s after the strike: {bass['non_partial_db']:.1f} dB re total on the bass side, "
                          f"{treble['non_partial_db']:.1f} dB on the treble side and {far['non_partial_db']:.1f} dB at the former default point (real piano {np_real['mf']:.1f} dB).")
     elif published and close.exists():
-        # Graded 1 m above the board; the same stroke heard where the Iowa microphones sat (a3-mf-close, stereo)
-        # is the receiver experiment, each channel against the matching real channel.
+        # Graded away from the board; the same stroke heard by a near stereo pair (a3-mf-close, normally where the
+        # Iowa microphones sat) is the receiver experiment, each channel against the matching real channel.
         real_tr = V.segment(V.highpass(V.load(V.REFS / "Piano.mf.A3.wav", 1)), 3.0)
         f0_t, b_t = own_fit(real_tr)
-        points = (("bass-side Iowa position", piano("a3-mf-close", channel=0), real_lv, real_mf),
-                  ("treble-side Iowa position", piano("a3-mf-close", channel=1), partial_levels(real_tr, 0.0, 0.15, f0=f0_t, b=b_t), real_tr),
+        points = (("near receiver, bass side", piano("a3-mf-close", channel=0), real_lv, real_mf),
+                  ("near receiver, treble side", piano("a3-mf-close", channel=1), partial_levels(real_tr, 0.0, 0.15, f0=f0_t, b=b_t), real_tr),
                   ("default point (graded)", ours_mf, real_lv, real_mf))
         res = {}
         for lab, x, ref, ref_x in points:
@@ -639,24 +668,34 @@ def main():
         abl["receiver"] = res
         bass, treble, base = (res[p[0]] for p in points)
         mic_gap = envelope_gap(real_tr, real_mf)
+        where, near_points = heard("a3-mf-close")
+        at_iowa_points = V.at_iowa((V.CAMPAIGN / "piano" / "a3-mf-close.log").read_text(errors="replace"))
+        heights = sorted(p[2] for p in near_points)
+        height = f"{heights[0]:.2f}" + (f"-{heights[-1]:.2f}" if heights[-1] - heights[0] >= 0.005 else "")
+        graded = heard("a3-mf")[1]
+        graded_at = ("the graded point 1 m above the middle of the board" if len(graded) == 1 and math.dist(graded[0], (0.675, 1.0, 1.0)) < 0.01
+                     else "the graded point " + heard("a3-mf")[0])
         row = next(q for q in rows if q["id"] == "partial-pattern")
         closer = min(base["pattern_gap_db"] - min(bass["pattern_gap_db"], treble["pattern_gap_db"]),
                      base["envelope_gap_db"] - min(bass["envelope_gap_db"], treble["envelope_gap_db"]))
         row["status"] = "confirmed" if closer >= 3 else "refuted"
-        row["result"] = (f"Heard where the Iowa microphones sat, 0.25 m above the board, the first-150-ms partial-pattern distance to the recording is "
+        row["result"] = (f"Heard {where}, {height} m above the board, the first-150-ms partial-pattern distance to the recording is "
                          f"{bass['pattern_gap_db']:.1f} dB on the bass side and {treble['pattern_gap_db']:.1f} dB on the treble side, each against the real piano's matching channel, "
-                         f"against {base['pattern_gap_db']:.1f} dB at the graded point 1 m above the middle of the board; the graded 0.05-1.05 s envelope distances are "
+                         f"against {base['pattern_gap_db']:.1f} dB at {graded_at}; the graded 0.05-1.05 s envelope distances are "
                          f"{bass['envelope_gap_db']:.1f}, {treble['envelope_gap_db']:.1f} and {base['envelope_gap_db']:.1f} dB. "
                          f"The real piano's own two microphones differ by {mic_gap:.1f} dB on this note. ")
         if has("a3-mf-px") and has("a3-mf-py"):
+            # Two more stereo renders of the same mechanics around the near bass-side receiver: how much one near point varies.
             near_pts = [piano("a3-mf-close", channel=0)] + [piano(n, channel=c) for n in ("a3-mf-px", "a3-mf-py") for c in (0, 1)]
             gaps = [envelope_gap(x, real_mf) for x in near_pts]
-            res["position_spread"] = {"points_m": "bass-side Iowa position (0.275, 0.556, 0.25) and 0.1 m away along x and y", "envelope_gap_db": [r(g, 3) for g in gaps]}
-            row["result"] += (f"Within 0.1 m of the bass-side position the envelope distance ranges from {min(gaps):.1f} to {max(gaps):.1f} dB over five points. ")
+            around = [p for n in ("a3-mf-px", "a3-mf-py") for p in heard(n)[1]]
+            reach = max(math.dist(p, near_points[0]) for p in around) if around and near_points else float("nan")
+            res["position_spread"] = {"points_m": [list(near_points[0])] + [list(p) for p in around], "envelope_gap_db": [r(g, 3) for g in gaps]}
+            row["result"] += (f"Within {reach:.1f} m of the bass-side point the envelope distance ranges from {min(gaps):.1f} to {max(gaps):.1f} dB over {len(gaps)} points. ")
         if closer < 3:
-            row["suspect"] = ("The board and its contact, not the listening point: moving our receivers to the Iowa positions brings the pattern no closer. "
-                              "That is also where the model is least complete. The real microphones sit above the strings and the cast-iron plate, which covers much "
-                              "of the board, under a lid; ours look at a bare board in an infinite baffle.")
+            row["suspect"] = ("The board and its contact, not the listening point: moving our receivers near the board brings the pattern no closer. "
+                              + ("That is also where the model is least complete. The real microphones sit above the strings and the cast-iron plate, which covers much "
+                                 "of the board, under a lid; ours look at a bare board in an infinite baffle." if at_iowa_points else ""))
             row["test"] = ("Add the plate and lid as rigid scatterers between the board and the receivers, then re-measure at the Iowa positions; compare the board's "
                            "driving-point mobility at A3's contact with one measured on a real grand (ours is a reconstructed Model D, the recording a Model B).")
         if adm:
@@ -668,12 +707,11 @@ def main():
         lr = next(q for q in rows if q["id"] == "low-resonance")
         lr["data"]["listening_db"] = r(base["low_resonance_db"] - max(bass["low_resonance_db"], treble["low_resonance_db"]), 3)
         lr["data"]["remaining_db"] = r(max(bass["low_resonance_db"], treble["low_resonance_db"]) - lr["data"]["real_db"], 3)
-        lr["result"] = receiver_txt = (f"Heard where the Iowa microphones sat, the 125-137 Hz band reads {bass['low_resonance_db']:.1f} dB re the fundamental on the bass side and "
-                                       f"{treble['low_resonance_db']:.1f} dB on the treble side; at the graded point 1 m above the board {base['low_resonance_db']:.1f} dB.")
+        lr["result"] = receiver_txt = (f"Heard {where}, the 125-137 Hz band reads {bass['low_resonance_db']:.1f} dB re the fundamental on the bass side and "
+                                       f"{treble['low_resonance_db']:.1f} dB on the treble side; at {graded_at} {base['low_resonance_db']:.1f} dB.")
         br_ = next(q for q in rows if q["id"] == "board-ringing")
-        br_["result"] = (f"Energy away from the string partials 0.2-1 s after the strike: {bass['non_partial_db']:.1f} dB re total on the bass side and "
-                         f"{treble['non_partial_db']:.1f} dB on the treble side where the Iowa microphones sat, {base['non_partial_db']:.1f} dB at the graded point "
-                         f"(real piano {np_real['mf']:.1f} dB).")
+        br_["result"] = (f"Energy away from the string partials 0.2-1 s after the strike, heard {where}: {bass['non_partial_db']:.1f} dB re total on the bass side and "
+                         f"{treble['non_partial_db']:.1f} dB on the treble side; {base['non_partial_db']:.1f} dB at {graded_at} (real piano {np_real['mf']:.1f} dB).")
     elif close.exists():
         res = {}
         for ch, lab in ((0, "bass-side receiver"), (1, "treble-side receiver")):
@@ -872,8 +910,11 @@ def main():
                                   "non_partial_db": {"published": np_ours["mf"], "estimated": np_est},
                                   "pattern_gap_db": {"published": r(V.rms_db(ours_lv[1:], real_lv[1:]), 3), "estimated": r(V.rms_db(lv_est[1:], real_lv[1:]), 3)}}
         row57 = scale_row(57)
+        # A3's string runs straight back from its agraffe to its contact (an explicit simplification of the layout).
+        agraffe_y = there[1] - float(row57["length_m"]) if row57 else None
+        edge = front_edge_y("a3-mf-estmap", there[0]) if row57 else None
         start = (f" A3's {float(row57['length_m']):.2f} m speaking length, running straight back from the agraffe, would then have had to begin "
-                 f"{there[1] - float(row57['length_m']):.2f} m inside the board's front edge." if row57 and there[1] > float(row57["length_m"]) else "")
+                 f"{agraffe_y - edge:.2f} m inside the board's front edge." if edge is not None and agraffe_y > edge else "")
 
         def settings(name):  # the render command without its board file and outputs
             words, kept, skip = render_cmd(name).split(), [], False
@@ -885,8 +926,11 @@ def main():
                 else:
                     kept.append(w)
             return kept
-        same = ("and an otherwise identical render" if settings("a3-mf-estmap") == settings("a3-mf")
-                else "in a render whose other settings differ")
+        # The two board files must be the same mesh, materials and supports: only the bridge rows (and the source label) may differ.
+        boards_match = ([f for f in board_rows("a3-mf") if f[0] not in ("bridge", "source")]
+                        == [f for f in board_rows("a3-mf-estmap") if f[0] not in ("bridge", "source")])
+        only_contacts = boards_match and settings("a3-mf-estmap") == settings("a3-mf")
+        same = "and an otherwise identical render" if only_contacts else "in a render that also differs in other ways"
         contact = (f"Each string now meets its bridge at the coupling point RT-0425 publishes for it, projected onto the reconstructed bridge: A3 at "
                    f"({here[0]:.2f}, {here[1]:.2f}) m. The former stations were spaced evenly along each bridge and put A3 at ({there[0]:.2f}, {there[1]:.2f}) m, "
                    f"{math.dist(here, there):.2f} m away." + start + f" With those stations {same}, the 125-137 Hz band "
@@ -897,24 +941,32 @@ def main():
                       f"{np_est:.1f} dB re total; with the published contacts it is {np_ours['mf']:.1f} dB. " + br_.get("fix", ""))
         if abs(np_ours["mf"] - np_real["mf"]) <= 3 and np_est - np_ours["mf"] >= 3:
             br_["status"] = "fixed"
-            br_["suspect"] = ("Board ringing driven from a misplaced bridge contact and under-damped without air loading. "
-                              "The renders above carry both corrections; wood, rim and damper losses stay estimated.")
+            br_["suspect"] = (("Board ringing driven from a misplaced bridge contact and under-damped without air loading. "
+                               "The renders above carry both corrections; " if only_contacts else
+                               "The contact experiment changes more than the contacts, so it does not attribute this alone; ")
+                              + "wood, rim and damper losses stay estimated.")
         if k_est - k_now >= 3:
-            lr["status"] = "fixed" if k_now - real_knock <= 3 else "improved"
+            # Fixed only when nothing in the band the real piano's figure covers (80 Hz-0.77 f1) exceeds it by more than 3 dB.
+            band_now = ratio_db(ours_mf, 80, 0.77 * 220, 0.05, 0.5)
+            lr["status"] = "fixed" if band_now - real_knock <= 3 else "improved"
             if lr["status"] == "fixed":
                 lr["symptom"] = (f"An early resonance near {hz_est:.0f} Hz rang at {k_est:.1f} dB re the fundamental; the real piano has nothing stronger than "
                                  f"{real_knock:.1f} dB from 80 to {0.77 * 220:.0f} Hz.")
                 lr["suspect"] = ("A misplaced bridge contact. From its estimated station A3 drove a low board mode strongly; at its published contact "
-                                 "it barely moves that mode.")
+                                 "it barely moves that mode." if only_contacts else
+                                 "The bridge contacts, together with whatever else differs in the contact experiment; it does not isolate them.")
                 # The damper experiments were written for a resonance that is now gone: state what they show.
                 pedal = abl.get("sustain_pedal")
-                lr["result"] = receiver_txt + (
-                    (" " if receiver_txt else "") + f"With every damper lifted (sustain pedal) the band reads {pedal['early_db']['pedal']:.1f} dB at "
-                    f"{pedal['hz']['pedal']:.2f} Hz instead of {pedal['early_db']['dampers_down']:.1f} dB: the undamped bass strings ring with the board, "
-                    "as on a real piano with the pedal down." if pedal else "")
+                pedal_txt = ""
+                if pedal:
+                    up, down = pedal["early_db"]["pedal"], pedal["early_db"]["dampers_down"]
+                    pedal_txt = (f"With every damper lifted (sustain pedal) the band reads {up:.1f} dB at {pedal['hz']['pedal']:.2f} Hz instead of {down:.1f} dB"
+                                 + (": the undamped bass strings ring with the board, as on a real piano with the pedal down." if up - down >= 3 else "."))
+                lr["result"] = receiver_txt + (" " if receiver_txt and pedal_txt else "") + pedal_txt
                 trace = bridge_split()[0]  # A3 mf's own bridge velocity and microphone pressure
-                lr["evidence"] = (f"Only the 88 bridge contacts differ between the two renders. With the published contacts the 128-135 Hz band reads "
-                                  f"{trace['bridge_db']:.1f} dB re partial 1 in A3's own bridge motion and {trace['pressure_db']:.1f} dB at the microphone.")
+                lr["evidence"] = (("Only the 88 bridge contacts differ between the two renders. " if only_contacts else "")
+                                  + f"With the published contacts the 128-135 Hz band reads {trace['bridge_db']:.1f} dB re partial 1 in A3's own bridge motion "
+                                  f"and {trace['pressure_db']:.1f} dB at the microphone.")
     # The waves experiment on linear graded renders. Once the graded A3 renders carry the waves themselves,
     # a3-{mf,ff} are no longer the linear side of this comparison and the ff-brightness card above reports it.
     wave_paths = {d: V.CAMPAIGN / "piano" / f"a3-{d}-waves.wav" for d in ("mf", "ff")}

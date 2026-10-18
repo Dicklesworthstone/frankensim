@@ -80,7 +80,7 @@ fn resolved_rib_rows_keep_no_sliver_beam_segments() {
             (a[0] - b[0]).hypot(a[1] - b[1])
         }).fold(f64::INFINITY, f64::min);
         // 1.479 mm is the drawing's own closest pair of feature stations
-        // (a bridge vertex 0.8 raster units from rib 2), present at every resolution.
+        // (a long-bridge vertex 0.8 raster units from rib 3), present at every resolution.
         assert!(shortest > 1.4e-3, "{divisions}/{step}: {shortest} m stiffener segment");
     }
 }

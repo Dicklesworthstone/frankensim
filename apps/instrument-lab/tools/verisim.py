@@ -381,11 +381,12 @@ def receiver_label(text):
     """Where the render listened, read from its own log."""
     if at_iowa(text):
         return "the left channel of two pressure points where the Iowa microphones sat, 8 in above the bass and treble strings (positions estimated)"
-    left, _ = receivers(text)
+    left, right = receivers(text)
     if left is None:
         return "one pressure point"
     x, y, z = left
-    return f"one pressure point {z:.2f} m above the board at ({x:.2f}, {y:.2f}) m"
+    where = f"{z:.2f} m above the board at ({x:.2f}, {y:.2f}) m"
+    return f"the left channel of two pressure points, {where}" if right is not None else f"one pressure point {where}"
 
 
 def piano_pair(pid, title, ours_id, real_name, f_guess, dur):

@@ -192,8 +192,12 @@ function findings(v: Verisim): HTMLElement[] {
     `In the first half second FrankenSim has a component near ${kA.toFixed(0)} Hz at ${num("a3-mf", "low_knock_early_db", "ours").toFixed(1)} dB relative to the fundamental. The real piano's strongest component in that band sits at ${num("a3-mf", "low_knock_early_db", "real").toFixed(1)} dB. ${Math.abs(kA - kC) < 2 ? `It appears at the same frequency when C6 is struck (${kC.toFixed(1)} Hz), so it belongs to the modelled instrument, not to the A3 string. ` : ""}${Math.abs(kLateO - kLateR) <= 3 ? "Later the two agree" : "Later they still differ"} (${kLateO.toFixed(1)} dB and ${kLateR.toFixed(1)} dB).`]);
   const dr = p("a3-mf")?.descriptors["partial_decay_db_s"];
   const at = (arr: unknown, k: number): number => (Array.isArray(arr) && typeof arr[k - 1] === "number" ? (arr[k - 1] as number) : NaN);
-  if (dr) items.push(["Some partials ring too long, others too short.",
-    `At mf, partial 4 decays at ${at(dr.ours, 4).toFixed(1)} dB/s in FrankenSim against ${at(dr.real, 4).toFixed(1)} dB/s on the real piano. Partial 2 goes the other way: ${at(dr.ours, 2).toFixed(1)} dB/s against ${at(dr.real, 2).toFixed(1)} dB/s. Decay is set by losses at the bridge and in the string, so this points at the coupling and damping model.`]);
+  if (dr) {
+    // A slower fall (less negative dB/s) than the recording means the partial rings too long.
+    const way = (k: number): string => (at(dr.ours, k) > at(dr.real, k) ? "rings too long" : "dies away too fast");
+    items.push([way(4) !== way(2) ? "Some partials ring too long, others too short." : `Partials 2 and 4 both ${way(4).replace("rings", "ring").replace("dies", "die")}.`,
+      `At mf, partial 4 decays at ${at(dr.ours, 4).toFixed(1)} dB/s in FrankenSim against ${at(dr.real, 4).toFixed(1)} dB/s on the real piano: it ${way(4)}. Partial 2 decays at ${at(dr.ours, 2).toFixed(1)} dB/s against ${at(dr.real, 2).toFixed(1)} dB/s: it ${way(2)}. Decay is set by losses at the bridge and in the string, and by how the three strings of a unison beat against each other, so this points at the coupling, the damping and the unison tuning.`]);
+  }
   const riseO = num("a3-mf", "attack_rise_ms", "ours"), riseR = num("a3-mf", "attack_rise_ms", "real");
   const atIowa = p("a3-mf")?.ours.label.includes("where the Iowa microphones sat") ?? false;
   items.push([riseO < riseR - 1.5 ? "The attack is sharper." : riseO > riseR + 1.5 ? "The attack is slower." : "The attack rises like the recording's.",
