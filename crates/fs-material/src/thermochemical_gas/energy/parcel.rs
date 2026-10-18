@@ -3,8 +3,8 @@
 //! One existing isochoric parcel owns mass, geometry and the resolved state.
 //! Heating holds its current volume; a separate isentropic operation changes
 //! volume without heat. Composition, source selection and extra query axes
-//! survive both operations. No piston inertia, combustion or mass exchange is
-//! implied. The opt-in [`midpoint`] update couples heat and volume work in
+//! survive both operations. The separate [`transfer`] operation exchanges mass
+//! between volumes; no piston inertia or combustion is implied. The opt-in [`midpoint`] update couples heat and volume work in
 //! conservative coordinates; it is not an exact finite isentropic operation.
 
 /// Conservative composition/model replacement at fixed mass, volume and total internal energy.
@@ -13,6 +13,8 @@ pub mod composition;
 pub mod mechanics;
 /// Simultaneous heating and volume work through the original material laws.
 pub mod midpoint;
+/// Conservative paired gas mass, species and enthalpy transfer at fixed volumes.
+pub mod transfer;
 
 use super::entropy::{GasEntropyError, GasEntropySolve, map_context};
 use super::{GasEnergyError, GasEnergySolve, GasHeatStep, IsochoricGasParcel,
