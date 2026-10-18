@@ -10,6 +10,9 @@
 //! Robin reference temperature is an independently dimensioned history, or the
 //! explicitly supplied scenario ambient. No ambient history is inferred from h.
 
+/// Resumable, energy-checked backward Euler driven by these boundary histories.
+pub mod march;
+
 use super::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 use crate::{ConductionError, TEMPERATURE_DIMS};
 use crate::mesh::ConductionMesh;
