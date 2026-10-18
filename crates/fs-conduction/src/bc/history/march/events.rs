@@ -14,6 +14,9 @@
 //! capacity reaction; no instantaneous impulse is invented. At a jump, accepted
 //! fields and reports describe the interval-ending, pre-jump state.
 
+/// Local-error-controlled implicit stepping that retains every schedule event.
+pub mod adaptive;
+
 use super::{HeatSourceHistory, ThermalHistoryMethod, ThermalHistoryRun,
     ThermalHistoryStep, invalid, poll};
 use super::super::ThermalBoundaryHistory;
