@@ -9,6 +9,14 @@ use fs_thermal::enthalpy::{DepositionError,DepositionSimulation};
 use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep,StepCoefficients};
 use super::types::*;
 
+fn finite(value:f64)->Result<f64,DepositionError>{
+    if value.is_finite(){Ok(value)}else{Err(DepositionError::Arithmetic)}
+}
+fn same_positive(a:f64,b:f64)->bool{
+    a.is_finite()&&b.is_finite()&&a>0.0&&b>0.0
+        &&(a-b).abs()<=64.0*f64::EPSILON*a.abs().max(b.abs())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn step_candidate<'t, 'm, S, E>(
     thermal: &DepositionSimulation<'t>, strip: &LayeredStrip<'m>,
