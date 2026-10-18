@@ -250,7 +250,30 @@ impl<'a> LayeredStrip<'a> {
     /// No accepted state is mutated by trials, refusals or cancellation.
     /// `checkpoint` can be bound directly to an executor Cx cancellation gate.
     pub fn advance_to(&self, target_s: f64, temperatures_k: &BTreeMap<u64, f64>,
-        control: Control, config: Config, mut checkpoint: impl FnMut() -> Result<(), Error>)
+        control: Control, config: Config, checkpoint: impl FnMut() -> Result<(), Error>)
+        -> Result<(Self, Report), Error> {
+        self.advance_recorded(target_s, temperatures_k, control, config, None, checkpoint)
+    }
+
+    /// The identical section solve, retaining each layer's extensive energy [J].
+    /// These are the original Gauss-point updates, not a second material step or
+    /// a partition of the total loss by area/mass. Thermal consumers can deposit
+    /// each layer's physical `dissipated` energy at its actual heat destination.
+    /// Numerical dissipation and thermal/modulus work remain distinct accounts.
+    /// Failure returns neither geometry, history nor a partial layer report.
+    pub fn advance_with_layer_energy(&self, target_s: f64,
+        temperatures_k: &BTreeMap<u64, f64>, control: Control, config: Config,
+        checkpoint: impl FnMut() -> Result<(), Error>)
+        -> Result<(Self, Report, BTreeMap<u64, Energy>), Error> {
+        let mut layers = BTreeMap::new();
+        let (next, report) = self.advance_recorded(target_s, temperatures_k, control,
+            config, Some(&mut layers), checkpoint)?;
+        Ok((next, report, layers))
+    }
+
+    fn advance_recorded(&self, target_s: f64, temperatures_k: &BTreeMap<u64, f64>,
+        control: Control, config: Config, mut layer_reports: Option<&mut BTreeMap<u64, Energy>>,
+        mut checkpoint: impl FnMut() -> Result<(), Error>)
         -> Result<(Self, Report), Error> {
         checkpoint()?;
         let dt = target_s-self.time_s; positive(dt)?;
@@ -286,14 +309,17 @@ impl<'a> LayeredStrip<'a> {
             let area = 0.5*layer.geometry.area_m2; let volume = area*self.length_m;
             let tolerance = config.energy_tolerance_j/(2.0*self.layers.len() as f64)/volume;
             let mut updated = layer.clone();
+            let mut layer_energy = Energy::default();
             for (q, z) in layer.geometry.points().into_iter().enumerate() {
                 let step = layer.points[q].advance(temperatures_k[&id], strain-z*curvature, dt, tolerance)?;
                 report.axial_force_n += area*step.stress_pa;
                 report.bending_moment_nm -= area*z*step.stress_pa;
                 add_energy(&mut report.energy_j, step.energy, volume);
+                if layer_reports.is_some() { add_energy(&mut layer_energy, step.energy, volume); }
                 report.material_point_updates += 1; updated.points[q] = step.point;
             }
             next.layers.insert(id, updated);
+            if let Some(reports) = layer_reports.as_deref_mut() { reports.insert(id, layer_energy); }
         }
         next.time_s = target_s; next.strain = strain; next.curvature_per_m = curvature;
         if prescribed0.is_some() { report.axial_reaction_n = report.axial_force_n; }
