@@ -660,6 +660,20 @@ impl PcbHomogenizedConductivity {
         self.tensor_w_mk
     }
 
+    /// Conservative propagated lower-bound global symmetric conductivity tensor
+    /// rotated in the stackup frame, W/(m K).
+    #[must_use]
+    pub fn conservative_tensor_w_mk(&self) -> [[f64; 3]; 3] {
+        rotate_principal(self.frame.axes, self.principal.lower_w_mk)
+    }
+
+    /// Propagated upper-bound global symmetric conductivity tensor rotated in
+    /// the stackup frame, W/(m K).
+    #[must_use]
+    pub fn upper_tensor_w_mk(&self) -> [[f64; 3]; 3] {
+        rotate_principal(self.frame.axes, self.principal.upper_w_mk)
+    }
+
     /// Nominal Reuss/Voigt structural bracket.
     #[must_use]
     pub const fn structural_bounds(&self) -> PcbStructuralBounds {
@@ -802,7 +816,15 @@ impl PcbStackup {
             });
         }
         let tensor = rotate_principal(self.frame.axes, principal.nominal_w_mk);
-        if tensor.iter().flatten().any(|value| !value.is_finite()) {
+        let lower_tensor = rotate_principal(self.frame.axes, principal.lower_w_mk);
+        let upper_tensor = rotate_principal(self.frame.axes, principal.upper_w_mk);
+        if tensor
+            .iter()
+            .flatten()
+            .chain(lower_tensor.iter().flatten())
+            .chain(upper_tensor.iter().flatten())
+            .any(|value| !value.is_finite())
+        {
             return Err(PcbHomogenizationError::InvalidField {
                 field: "conductivity-tensor",
                 detail: "the admitted frame overflowed while rotating the effective conductivity"

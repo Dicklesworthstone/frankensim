@@ -855,6 +855,45 @@ impl ConductivityModel {
     pub fn from_pcb_homogenization(
         homogenized: &PcbHomogenizedConductivity,
     ) -> Result<ConductivityModel, ConductionError> {
+        Self::from_pcb_homogenization_tensor(homogenized, homogenized.tensor_w_mk())
+    }
+
+    /// Construct a constant symmetric conductivity tensor from the conservative
+    /// lower-bound principals of an `fs-matdb` PCB homogenization result rotated
+    /// in the stackup frame, preserving all constituent property-use receipts.
+    ///
+    /// # Errors
+    ///
+    /// [`ConductionError::Conductivity`] when the homogenization schema is not
+    /// the closed version this adapter knows, when it carries no material
+    /// receipts, or when its tensor is non-finite, asymmetric, or not positive
+    /// definite.
+    pub fn from_pcb_homogenization_conservative(
+        homogenized: &PcbHomogenizedConductivity,
+    ) -> Result<ConductivityModel, ConductionError> {
+        Self::from_pcb_homogenization_tensor(homogenized, homogenized.conservative_tensor_w_mk())
+    }
+
+    /// Construct a constant symmetric conductivity tensor from the propagated
+    /// upper-bound principals of an `fs-matdb` PCB homogenization result rotated
+    /// in the stackup frame, preserving all constituent property-use receipts.
+    ///
+    /// # Errors
+    ///
+    /// [`ConductionError::Conductivity`] when the homogenization schema is not
+    /// the closed version this adapter knows, when it carries no material
+    /// receipts, or when its tensor is non-finite, asymmetric, or not positive
+    /// definite.
+    pub fn from_pcb_homogenization_upper(
+        homogenized: &PcbHomogenizedConductivity,
+    ) -> Result<ConductivityModel, ConductionError> {
+        Self::from_pcb_homogenization_tensor(homogenized, homogenized.upper_tensor_w_mk())
+    }
+
+    fn from_pcb_homogenization_tensor(
+        homogenized: &PcbHomogenizedConductivity,
+        tensor: [[f64; 3]; 3],
+    ) -> Result<ConductivityModel, ConductionError> {
         if homogenized.schema_version() != PCB_HOMOGENIZATION_SCHEMA_VERSION {
             return Err(ConductionError::Conductivity {
                 what: format!(
@@ -874,7 +913,6 @@ impl ConductivityModel {
                 what: "PCB homogenization carries no material property-use receipts".to_string(),
             });
         }
-        let tensor = homogenized.tensor_w_mk();
         check_spd(&tensor)?;
         Ok(ConductivityModel {
             kind: ConductivityKind::ConstantTensor {

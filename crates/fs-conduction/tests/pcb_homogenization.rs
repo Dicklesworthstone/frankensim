@@ -173,23 +173,15 @@ fn mean_x_flux(material: &ConductivityModel, temperature: &[f64]) -> f64 {
     flux.iter().map(|value| value[0].abs()).sum::<f64>() / flux.len() as f64
 }
 
-fn diagonal(principal: [f64; 3]) -> [[f64; 3]; 3] {
-    [
-        [principal[0], 0.0, 0.0],
-        [0.0, principal[1], 0.0],
-        [0.0, 0.0, principal[2]],
-    ]
-}
-
 #[test]
 fn pcb_anisotropy_and_bounds_reach_the_board_solve_with_receipts() {
     let homogenized = homogenized_board();
     let nominal =
         ConductivityModel::from_pcb_homogenization(&homogenized).expect("receipt-backed model");
-    let lower = ConductivityModel::constant_tensor(diagonal(homogenized.principal().lower_w_mk))
-        .expect("lower tensor");
-    let upper = ConductivityModel::constant_tensor(diagonal(homogenized.principal().upper_w_mk))
-        .expect("upper tensor");
+    let lower = ConductivityModel::from_pcb_homogenization_conservative(&homogenized)
+        .expect("receipt-backed lower model");
+    let upper = ConductivityModel::from_pcb_homogenization_upper(&homogenized)
+        .expect("receipt-backed upper model");
     let isotropic_fr4 = ConductivityModel::isotropic_declared(0.25).expect("isotropic");
 
     let nominal_solution = solve_board(&nominal);
@@ -201,14 +193,16 @@ fn pcb_anisotropy_and_bounds_reach_the_board_solve_with_receipts() {
     let upper_qoi = mean_x_flux(&upper, &upper_solution.temperature);
     let isotropic_qoi = mean_x_flux(&isotropic_fr4, &isotropic_solution.temperature);
 
-    assert_eq!(
-        nominal_solution.report.material_provenance,
-        ProvenanceClass::MatdbReceipts
-    );
-    assert_eq!(
-        nominal_solution.report.material_receipts,
-        homogenized.material_uses().len()
-    );
+    for solution in [&nominal_solution, &lower_solution, &upper_solution] {
+        assert_eq!(
+            solution.report.material_provenance,
+            ProvenanceClass::MatdbReceipts
+        );
+        assert_eq!(
+            solution.report.material_receipts,
+            homogenized.material_uses().len()
+        );
+    }
     assert!(
         lower_qoi <= nominal_qoi && nominal_qoi <= upper_qoi,
         "propagated board QoI [{lower_qoi}, {upper_qoi}] must bracket {nominal_qoi}"
@@ -240,5 +234,78 @@ fn pcb_anisotropy_and_bounds_reach_the_board_solve_with_receipts() {
         upper_qoi,
         isotropic_qoi,
         nominal_solution.report.material_receipts
+    );
+}
+
+#[test]
+fn conservative_laminate_bound_is_a_receipt_backed_material_selection() {
+    let copper = material_card("C11000", "rolled-foil", 400.0);
+    let fr4 = material_card("FR4", "cured-laminate", 0.25);
+    let plane = PcbLayer::new(
+        "L1-plane",
+        0.2e-3,
+        datum(&copper),
+        datum(&fr4),
+        coverage("coverage/L1", 0.95, 0.90, 1.0),
+    )
+    .expect("plane");
+    let core = PcbLayer::new(
+        "core",
+        0.8e-3,
+        datum(&copper),
+        datum(&fr4),
+        coverage("coverage/core", 0.05, 0.0, 0.10),
+    )
+    .expect("core");
+    // Rotate stackup so board-normal (principal axis 2) points along -x.
+    let rotated_frame =
+        PcbPrincipalFrame::new([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]])
+            .expect("right-handed rotated frame");
+    let homogenized = PcbStackup::new(
+        "reference-pcb-rotated",
+        vec![plane, core],
+        rotated_frame,
+        PcbScaleSeparation::new(25.0e-6, 0.05).expect("separation"),
+    )
+    .expect("stackup")
+    .homogenize()
+    .expect("homogenize");
+
+    // In the rotated frame, global xx is the through-plane principal axis.
+    let conservative_tensor = homogenized.conservative_tensor_w_mk();
+    assert_eq!(
+        conservative_tensor[0][0].to_bits(),
+        homogenized.principal().lower_w_mk[2].to_bits(),
+        "rotated conservative tensor K_xx must be through-plane lower, not unrotated in-plane lower"
+    );
+
+    let nominal =
+        ConductivityModel::from_pcb_homogenization(&homogenized).expect("nominal rotated model");
+    let conservative = ConductivityModel::from_pcb_homogenization_conservative(&homogenized)
+        .expect("conservative rotated model");
+    let upper =
+        ConductivityModel::from_pcb_homogenization_upper(&homogenized).expect("upper rotated model");
+
+    let nominal_solution = solve_board(&nominal);
+    let conservative_solution = solve_board(&conservative);
+    let upper_solution = solve_board(&upper);
+
+    for solution in [&nominal_solution, &conservative_solution, &upper_solution] {
+        assert_eq!(
+            solution.report.material_provenance,
+            ProvenanceClass::MatdbReceipts
+        );
+        assert_eq!(
+            solution.report.material_receipts,
+            homogenized.material_uses().len()
+        );
+    }
+
+    let nominal_qoi = mean_x_flux(&nominal, &nominal_solution.temperature);
+    let conservative_qoi = mean_x_flux(&conservative, &conservative_solution.temperature);
+    let upper_qoi = mean_x_flux(&upper, &upper_solution.temperature);
+    assert!(
+        conservative_qoi < nominal_qoi && nominal_qoi < upper_qoi,
+        "rotated through-plane QoI must strictly satisfy conservative ({conservative_qoi}) < nominal ({nominal_qoi}) < upper ({upper_qoi})"
     );
 }
