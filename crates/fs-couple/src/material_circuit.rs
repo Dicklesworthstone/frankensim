@@ -10,6 +10,9 @@
 pub mod thermal;
 /// Material/geometry-derived C and L, with explicit work on live reconfiguration.
 pub mod storage;
+/// Source-bound electrical contacts in series with original bulk branches.
+pub mod contacts;
+use contacts::{SeriesElectricalContact, ContactHeat};
 
 use fs_material::conductor::{ConductorError, OhmicDrive, ResolvedConductor};
 use fs_phs::circuit::{Branch, CircuitDae, CircuitError, CircuitGraph, assemble_circuit};
@@ -81,6 +84,7 @@ impl std::error::Error for MaterialCircuitError {}
 pub struct MaterialCircuit {
     graph: CircuitGraph,
     resistors: Vec<MaterialResistor>,
+    contacts: Vec<SeriesElectricalContact>,
     fluxes_wb: Vec<f64>,
     charges_c: Vec<f64>,
     storage: Vec<storage::MaterialStorage>,
@@ -93,7 +97,8 @@ pub struct MaterialCircuit {
 pub struct ResistorHeat {
     /// Original source binding, retained without dropping any bundle properties.
     pub material: MaterialResistor,
-    /// Signed voltage from first to second branch terminal [V].
+    /// Signed voltage across the BULK conductor [V], excluding series contacts.
+    /// With no contacts this is the original terminal-to-terminal voltage.
     pub voltage_v: f64,
     /// Signed first-to-second-terminal current [A].
     pub current_a: f64,
@@ -113,7 +118,9 @@ pub struct MaterialCircuitStep {
     pub stored_after_j: f64,
     /// Heat by original branch index, once per resistor (never by node degree).
     pub resistors: Vec<ResistorHeat>,
-    /// Sum of physical resistor heat, independently checked against native loss.
+    /// Heat in each original electrical interface, in stable contact-ID order.
+    pub contacts: Vec<ContactHeat>,
+    /// Sum of bulk AND contact heat, checked against the original native loss.
     pub heat_j: f64,
     /// Actual storage change plus branch heat minus source work [J].
     pub energy_residual_j: f64,
@@ -138,7 +145,7 @@ fn positive(x: f64) -> bool { x.is_finite() && x > 0.0 }
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), MaterialCircuitError> {
     if cancelled() { Err(MaterialCircuitError::Cancelled) } else { Ok(()) }
 }
-fn bind(graph: &CircuitGraph, mut sources: Vec<MaterialResistor>)
+fn bind(graph: &CircuitGraph, mut sources: Vec<MaterialResistor>, contacts: &[SeriesElectricalContact])
     -> Result<(CircuitGraph, Vec<MaterialResistor>, CircuitDae), MaterialCircuitError>
 {
     use MaterialCircuitError::Invalid;
@@ -183,6 +190,7 @@ fn bind(graph: &CircuitGraph, mut sources: Vec<MaterialResistor>)
         if !positive(r) || !positive(1.0/r) { return Err(Invalid("resistor conductance is unrepresentable")); }
         branch.2 = Branch::Resistor { ohms: r };
     }
+    contacts::lower(&mut lowered, contacts)?;
     let dae = assemble_circuit(&lowered)?;
     Ok((lowered, sources, dae))
 }
@@ -208,7 +216,20 @@ impl MaterialCircuit {
     pub fn new(graph: CircuitGraph, sources: Vec<MaterialResistor>, fluxes_wb: Vec<f64>,
         charges_c: Vec<f64>, initial_inputs: &[f64]) -> Result<Self, MaterialCircuitError>
     {
-        let (graph, resistors, dae) = bind(&graph, sources)?;
+        Self::new_with_contacts(graph, sources, Vec::new(), fluxes_wb, charges_c, initial_inputs)
+    }
+
+    /// Bind bulk conductors and separately sourced contact drops on those same
+    /// branches. Every contact is R''/area in SERIES, never replacement bulk
+    /// resistivity. Contact heat remains distinct from bulk heat in the report.
+    /// The existing descriptor owns initialization and all electrical storage.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_contacts(graph: CircuitGraph, sources: Vec<MaterialResistor>,
+        mut contacts: Vec<SeriesElectricalContact>, fluxes_wb: Vec<f64>,
+        charges_c: Vec<f64>, initial_inputs: &[f64]) -> Result<Self, MaterialCircuitError>
+    {
+        contacts::admit(&mut contacts)?;
+        let (graph, resistors, dae) = bind(&graph, sources, &contacts)?;
         let x = extended(&dae, &fluxes_wb, &charges_c, initial_inputs)?;
         let initial = dae.consistent_initial_state(&x, initial_inputs)?;
         let h = dae.system.hamiltonian(&x);
@@ -221,12 +242,14 @@ impl MaterialCircuit {
                 return Err(MaterialCircuitError::Invalid("algebraic initialization changed a conserved electrical coordinate"));
             }
         }
-        Ok(Self { graph, resistors, fluxes_wb, charges_c, storage: Vec::new() })
+        Ok(Self { graph, resistors, contacts, fluxes_wb, charges_c, storage: Vec::new() })
     }
     /// Original graph topology with the last accepted material resistor values.
     pub const fn graph(&self) -> &CircuitGraph { &self.graph }
     /// Original source bindings at construction or the last accepted step midpoint.
     pub fn resistors(&self) -> &[MaterialResistor] { &self.resistors }
+    /// Explicit electrical contact sources, in stable ID order.
+    pub fn contacts(&self) -> &[SeriesElectricalContact] { &self.contacts }
     /// Conserved inductor flux linkage history [Wb], in inductor branch order.
     pub fn fluxes_wb(&self) -> &[f64] { &self.fluxes_wb }
     /// Conserved capacitor charge history [C], in capacitor branch order.
@@ -253,10 +276,34 @@ impl MaterialCircuit {
         -> Result<MaterialCircuitCandidate, MaterialCircuitError>
     {
         poll(&mut cancelled)?;
+        if !self.contacts.is_empty() {
+            return Err(MaterialCircuitError::Invalid("contact-bound circuits require explicit refreshed contact sources"));
+        }
+        self.step_with_contacts_candidate(sources, Vec::new(), inputs, dt, controls, cancelled)
+    }
+
+    /// Advance through the SAME circuit solver, retaining individual interface
+    /// drops and losses as well as bulk Joule heat. Contacts are re-evaluated by
+    /// the caller at the same state as the bulk material. IDs/branch assignments
+    /// cannot change during a step; explicit reconfiguration is a separate call.
+    /// Source and geometry swaps do not reset charge, flux, or storage provenance.
+    /// Nonzero contact area and zero interfacial energy storage are assumptions;
+    /// opening a circuit, arcing and dynamic interface memory are not modeled.
+    pub fn step_with_contacts_candidate(&self, sources: Vec<MaterialResistor>,
+        mut contacts: Vec<SeriesElectricalContact>, inputs: &[f64], dt: f64,
+        controls: MaterialCircuitSolve, mut cancelled: impl FnMut() -> bool)
+        -> Result<MaterialCircuitCandidate, MaterialCircuitError>
+    {
+        poll(&mut cancelled)?;
+        contacts::admit(&mut contacts)?;
+        if contacts.len() != self.contacts.len() || contacts.iter().zip(&self.contacts)
+            .any(|(a,b)| (a.id(),a.branch()) != (b.id(),b.branch())) {
+            return Err(MaterialCircuitError::Invalid("electrical contact identities changed inside a physical step"));
+        }
         if !positive(dt) || !positive(controls.energy_tolerance_j) || !positive(controls.power_tolerance_w) {
             return Err(MaterialCircuitError::Invalid("positive finite clock and absolute work/power tolerances required"));
         }
-        let (graph, resistors, dae) = bind(&self.graph, sources)?;
+        let (graph, resistors, dae) = bind(&self.graph, sources, &contacts)?;
         let x0 = extended(&dae, &self.fluxes_wb, &self.charges_c, inputs)?;
         poll(&mut cancelled)?;
         let (record, _) = dae.step_audited(&x0, inputs, dt)?;
@@ -275,11 +322,21 @@ impl MaterialCircuit {
         };
         let mut heat_j = 0.0;
         let mut heat = Vec::with_capacity(resistors.len());
+        let mut contact_heat = Vec::with_capacity(contacts.len());
         for source in &resistors {
             poll(&mut cancelled)?;
-            let (a,b,_) = graph.branches[source.branch];
-            let v = voltage(a)-voltage(b);
-            let i = source.conductor.current_a_for_drive(OhmicDrive::Voltage(v))?;
+            let (a,b,branch) = graph.branches[source.branch];
+            let terminal_v = voltage(a)-voltage(b);
+            let has_contact = contacts.iter().any(|c| c.branch() == source.branch);
+            // Preserve the exact legacy conductor arithmetic on contact-free branches.
+            let (v,i) = if has_contact {
+                let Branch::Resistor { ohms } = branch else { unreachable!("admitted resistor") };
+                let current = terminal_v/ohms;
+                if !current.is_finite() || (terminal_v != 0.0 && current == 0.0) {
+                    return Err(MaterialCircuitError::Balance("series current is unrepresentable"));
+                }
+                (current*source.conductor.resistance_ohm(),current)
+            } else { (terminal_v,source.conductor.current_a_for_drive(OhmicDrive::Voltage(terminal_v))?) };
             let p = source.conductor.joule_power_w(i)?;
             let q = dt*p;
             let defect = v*i-p;
@@ -288,8 +345,21 @@ impl MaterialCircuit {
                 return Err(MaterialCircuitError::Balance("resistor electrical work and material heat disagree"));
             }
             heat_j += q;
+            let mut branch_power = p;
+            for contact in contacts.iter().filter(|c| c.branch() == source.branch) {
+                poll(&mut cancelled)?;
+                let loss = contact.heat(i, dt)?;
+                branch_power += loss.power_w;
+                heat_j += loss.heat_j;
+                contact_heat.push(loss);
+            }
+            let terminal_defect = terminal_v*i-branch_power;
+            if !terminal_defect.is_finite() || terminal_defect.abs() > controls.power_tolerance_w {
+                return Err(MaterialCircuitError::Balance("bulk and contact powers do not close terminal work"));
+            }
             heat.push(ResistorHeat { material:source.clone(), voltage_v:v, current_a:i, power_w:p, heat_j:q });
         }
+        contact_heat.sort_by_key(|h| h.contact.id());
         let residual = (h1-h0)+heat_j-record.supplied;
         if !heat_j.is_finite() || !residual.is_finite()
             || (heat_j-record.dissipated).abs() > controls.energy_tolerance_j
@@ -297,13 +367,13 @@ impl MaterialCircuit {
             || residual.abs() > controls.energy_tolerance_j {
             return Err(MaterialCircuitError::Balance("branch heat, electrical storage and external supply do not close"));
         }
-        let next = Self { graph, resistors,
+        let next = Self { graph, resistors, contacts,
             fluxes_wb:dae.flux_index.iter().map(|&i| record.x[i]).collect(),
             charges_c:dae.charge_index.iter().map(|&i| record.x[i]).collect(),
             storage:self.storage.clone() };
         poll(&mut cancelled)?;
         Ok(MaterialCircuitCandidate { circuit:next, step:MaterialCircuitStep {
             native:record, stored_before_j:h0, stored_after_j:h1, resistors:heat,
-            heat_j, energy_residual_j:residual } })
+            contacts:contact_heat, heat_j, energy_residual_j:residual } })
     }
 }

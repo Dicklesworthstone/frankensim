@@ -191,14 +191,14 @@ impl MaterialCircuit {
                 "live storage changes require source-bound original capacitors and inductors",
             ));
         }
-        let candidate = Self::new_with_storage(
-            self.graph.clone(),
-            self.resistors.clone(),
-            storage,
-            self.fluxes_wb.clone(),
-            self.charges_c.clone(),
-            inputs,
+        // Storage changes must retain the accepted contact drops and sources.
+        let mut storage = storage;
+        let graph = lower(&self.graph, &mut storage)?;
+        let mut candidate = Self::new_with_contacts(
+            graph, self.resistors.clone(), self.contacts.clone(),
+            self.fluxes_wb.clone(), self.charges_c.clone(), inputs,
         )?;
+        candidate.storage = storage;
         poll(&mut cancelled)?;
         let mut charges = self.charges_c.iter();
         let mut fluxes = self.fluxes_wb.iter();
