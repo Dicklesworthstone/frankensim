@@ -1,4 +1,4 @@
-//! Typed refusals for layered thermal feedback.
+// Typed refusals for layered thermal feedback.
 use fs_material::thermovisco::source::SourceError;
 use fs_material::thermovisco::thermal::FeedbackError;
 use fs_solid::deposition;

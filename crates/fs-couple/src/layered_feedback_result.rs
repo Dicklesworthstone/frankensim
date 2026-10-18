@@ -1,4 +1,4 @@
-//! Candidate histories and final reports for layered thermal feedback.
+// Candidate histories and final reports for layered thermal feedback.
 use std::collections::BTreeMap;
 use fs_material::thermovisco::Energy;
 use fs_solid::deposition::{self,LayeredStrip};

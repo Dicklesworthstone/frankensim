@@ -1,4 +1,4 @@
-//! Nonlinear solve for the public layered thermo-mechanical coupling.
+// Nonlinear solve for the public layered thermo-mechanical coupling.
 use std::cell::{Cell,RefCell};
 use std::collections::{BTreeMap,BTreeSet};
 use fs_material::thermovisco::thermal::CaloricPoint;

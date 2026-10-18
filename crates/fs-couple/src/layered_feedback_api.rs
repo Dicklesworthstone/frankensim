@@ -1,4 +1,4 @@
-//! Public bindings and numerical controls for layered thermal feedback.
+// Public bindings and numerical controls for layered thermal feedback.
 use std::collections::BTreeMap;
 use fs_material::phase::ResolvedHeatCapacityCurve;
 use fs_material::thermovisco::source::ResolvedThermoMaxwell;
