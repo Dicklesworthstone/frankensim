@@ -114,7 +114,9 @@ carries two-sided air loading and listens at the default point, 1 m above the mi
 The hammers follow RT-0425's published law: its stiffness K_H acts on each unison string (the preset's
 former felt conversion divided it across the unison, which its own comment calls too soft) with the
 published dissipation R_H, and the strings take RT-0425's published losses. The same mf/ff/8 m/s strokes
-with the former felt law, `a3-{mf,ff,fff}-legacyfelt`, let the ff-brightness card show what changed.
+with the former felt law, `a3-{mf,ff,fff}-legacyfelt` (the graded command without its two hammer flags),
+let the ff-brightness card show what the hammer law alone changes; the card says so only when the
+commands differ in nothing else.
 
 The former estimated stations (`--bridge-map estimated`) were spaced evenly along each bridge. With
 the published string lengths they put most agraffes over the soundboard itself (A3's 0.77 m string,

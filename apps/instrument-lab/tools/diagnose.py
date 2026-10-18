@@ -17,6 +17,7 @@ Inputs beyond verisim.py's:
                              the same A3 mf at the former default point 1 m above the board
   piano/a3-{mf,ff,fff}-legacyfelt.wav  optional: when the graded renders use RT-0425's hammer law
                              (--rt0425-hammer-stiffness), the same strokes with the former felt law
+                             (the graded command without its hammer flags)
   piano/a3-mf-p{x,y}.wav     optional: the same A3 mf heard by stereo pairs 0.1 m either side of the bass-side
                              Iowa position, along x and along y (how much a near-field grade depends on that estimate)
   piano/a3-mf-estmap.wav     optional: the same A3 mf with the former estimated bridge stations (same board,
@@ -73,6 +74,19 @@ def render_cmd(name):
     if not log.exists():
         return ""
     return next((line for line in log.read_text(errors="replace").splitlines() if line.startswith("cmd:")), "")
+
+
+def render_settings(name):
+    """The render command without its board file and outputs: two renders whose settings match differ only in those."""
+    words, kept, skip = render_cmd(name).split(), [], False
+    for w in words:
+        if skip:
+            skip = False
+        elif w in ("--board-geometry", "--render", "--bridge-trace-csv"):
+            skip = True
+        else:
+            kept.append(w)
+    return kept
 
 
 def has(name):
@@ -497,22 +511,31 @@ def main():
                       "(about 1.8 degrees of downbearing plus a 28 mm bridge-cap lever arm), with the work in the energy ledger. Against the same strokes with linear strings: "
                       f"phantom partials at ff stand at {count(ph_ours)} of {len(ph_ours)} positions (linear {count(ph_lin)}; real Steinway {count(ph_real)}), and the mf-to-ff "
                       f"brightness gain is {gain_ours:.1f} dB (linear {gain_lin:.1f} dB; real piano {gain_real:.1f} dB).") + hard
-    hammer = "--rt0425-hammer-stiffness" in render_cmd("a3-ff")
-    if hammer and has("a3-mf-legacyfelt") and has("a3-ff-legacyfelt"):
+    hammer_flags = ("--rt0425-hammer-stiffness", "--rt0425-hammer-dissipation")
+    if hammer_flags[0] in render_cmd("a3-ff") and has("a3-mf-legacyfelt") and has("a3-ff-legacyfelt"):
         # The graded renders use RT-0425's published hammer law; the same strokes with the former felt law are kept.
+        # They isolate the hammer law only when the commands differ in nothing else.
+        felt_only = all([w for w in render_settings(graded) if w not in hammer_flags] == render_settings(former)
+                        for graded, former in (("a3-mf", "a3-mf-legacyfelt"), ("a3-ff", "a3-ff-legacyfelt")))
         b = {k: {"mf": V.band_ratio(x_mf), "ff": V.band_ratio(x_ff)} for k, x_mf, x_ff in
              (("real", real_mf, real_ff), ("published", ours_mf, ours_ff), ("former", piano("a3-mf-legacyfelt"), piano("a3-ff-legacyfelt")))}
         row["data"]["hammer_brightness_db"] = {k: {d: r(v, 3) for d, v in x.items()} for k, x in b.items()}
+        law = ("stiffness K_H on each unison string (the former conversion divided it across the unison, leaving each string too soft)"
+               + (" and dissipation R_H" if hammer_flags[1] in render_cmd("a3-ff") else ""))
         row["fix"] = (row.get("fix", "") + (" " if row.get("fix") else "")
-                      + "The hammers follow RT-0425's published law: its stiffness K_H on each unison string (the former conversion divided it across the "
-                      "unison, leaving each string too soft) and its dissipation R_H, with RT-0425's string losses. Against the same strokes with the former "
-                      f"felt law, 2-8 kHz brightness moves from {b['former']['mf']:.1f} to {b['published']['mf']:.1f} dB at mf and from "
+                      + f"The hammers use RT-0425's published {law}. "
+                      + ("Against the same strokes with the former felt law" if felt_only else
+                         "Against strokes with the former felt law, in renders that also differ in other settings")
+                      + f", 2-8 kHz brightness moves from {b['former']['mf']:.1f} to {b['published']['mf']:.1f} dB at mf and from "
                       f"{b['former']['ff']:.1f} to {b['published']['ff']:.1f} dB at ff (real piano {b['real']['mf']:.1f} and {b['real']['ff']:.1f} dB).")
-        row["status"] = "improved"
-        if dull8 is not None and abs(dull8) <= 3 and loud8 is not None and abs(loud8) <= 3:
+        if all(abs(b["published"][d] - b["real"][d]) < abs(b["former"][d] - b["real"][d]) for d in ("mf", "ff")):
+            row["status"] = "improved"
+        # How far the 4.5 m/s stroke's peak level above mf falls short of the real ff's (positive: quieter than the real ff).
+        loud45 = (peak_db(real_ff) - peak_db(real_mf)) - (peak_db(ours_ff) - peak_db(ours_mf))
+        if dull8 is not None and abs(dull8) <= 3 and loud8 is not None and abs(loud8) <= 3 and loud45 > 3:
             ph8_now = phantoms(piano("a3-fff"))
-            row["suspect"] = ("Loudness, not timbre, for the broadband brightness: the 4.5 m/s stroke is quieter than the real ff, and at nearly matched "
-                              "loudness the brightness agrees. The phantom partials still fall short: "
+            row["suspect"] = (f"Loudness, not timbre, for the broadband brightness: the 4.5 m/s stroke rises {loud45:.1f} dB less above mf than the real ff, "
+                              "and at nearly matched loudness the brightness agrees. The phantom partials still fall short: "
                               f"{sum(q['present'] for q in ph8_now)} of {len(ph8_now)} positions at 8 m/s against the real ff's "
                               f"{sum(q['present'] for q in ph_real)} of {len(ph_real)}.")
             row["test"] = "Map the recording's dynamic layers to hammer speeds by loudness before comparing their brightness."
@@ -947,20 +970,10 @@ def main():
         start = (f" A3's {float(row57['length_m']):.2f} m speaking length, running straight back from the agraffe, would then have had to begin "
                  f"{agraffe_y - edge:.2f} m inside the board's front edge." if edge is not None and agraffe_y > edge else "")
 
-        def settings(name):  # the render command without its board file and outputs
-            words, kept, skip = render_cmd(name).split(), [], False
-            for w in words:
-                if skip:
-                    skip = False
-                elif w in ("--board-geometry", "--render", "--bridge-trace-csv"):
-                    skip = True
-                else:
-                    kept.append(w)
-            return kept
         # The two board files must be the same mesh, materials and supports: only the bridge rows (and the source label) may differ.
         boards_match = ([f for f in board_rows("a3-mf") if f[0] not in ("bridge", "source")]
                         == [f for f in board_rows("a3-mf-estmap") if f[0] not in ("bridge", "source")])
-        only_contacts = boards_match and settings("a3-mf-estmap") == settings("a3-mf")
+        only_contacts = boards_match and render_settings("a3-mf-estmap") == render_settings("a3-mf")
         same = "and an otherwise identical render" if only_contacts else "in a render that also differs in other ways"
         contact = (f"Each string now meets its bridge at the coupling point RT-0425 publishes for it, projected onto the reconstructed bridge: A3 at "
                    f"({here[0]:.2f}, {here[1]:.2f}) m. The former stations were spaced evenly along each bridge and put A3 at ({there[0]:.2f}, {there[1]:.2f}) m, "
