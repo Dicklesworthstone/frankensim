@@ -9,4 +9,7 @@
 //! executor, implicit FEM, bonding and fracture adapters remain in
 //! [`super::enthalpy::deposition`]. No physical or numerical law is replaced.
 
+/// Material-state radiosity sources and implicit finite-cell heat exchange.
+pub mod radiation;
+
 pub use fs_thermal::enthalpy::*;
