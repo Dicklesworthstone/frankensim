@@ -339,9 +339,26 @@ fn transport_ladder(sources: &[Source]) {
 
 fn lossless_resonance(gas: &GasState, mode: usize) -> f64 {
     let expected = (2 * mode - 1) as f64 * gas.sound_speed / (4.0 * 0.57);
+    // The bisection converges onto the lossless pole, where fs-duct refuses to
+    // form Z (DEF-01). The input reflection stays finite there, so the
+    // admittance is formed from it: Y = (1 - r) / (R (1 + r)).
     let admittance_imaginary = |f| {
-        let z = impedance(gas, f, fs_duct::LossModel::Lossless);
-        -z.im / z.norm_sq()
+        let r = fs_duct::compose::input_reflection_wall(
+            &fs_duct::Duct {
+                segments: vec![fs_duct::Segment::Cylinder {
+                    radius: 0.0073,
+                    length: 0.57,
+                }],
+            },
+            gas,
+            core::f64::consts::TAU * f,
+            fs_duct::LossModel::Lossless,
+            fs_duct::Termination::IdealOpen,
+            None,
+        )
+        .unwrap();
+        let one = fs_math::c64::C64::ONE;
+        ((one - r.reflection) / (one + r.reflection).scale(r.reference_impedance)).im
     };
     let (mut lo, mut hi) = (0.9 * expected, 1.1 * expected);
     let mut left = admittance_imaginary(lo);
