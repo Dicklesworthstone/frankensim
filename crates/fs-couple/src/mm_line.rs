@@ -25,7 +25,7 @@
 
 use fs_duct::modal::{
     ModalResponse, mm_input_impedance, mm_input_impedance_tabulated,
-    modal_characteristic_impedances, modal_reflection_from_impedance,
+    modal_reflection_from_impedance,
 };
 use fs_duct::{Duct, DuctError, LossModel, Segment, TabulatedLoad, Termination};
 use fs_fft::{C64 as FftC64, Fft};
@@ -268,33 +268,6 @@ fn input_radius(duct: &Duct) -> Result<f64, MmLineError> {
     }
 }
 
-/// Eight-round-trip FFT sizing for the [`MatrixFirLine`] bake-off arm.
-/// [`MmLineBank`] uses the shared convergence ladder instead (bead .82).
-/// This is the driving_point clamp-first discipline (u6pph precedent;
-/// bead frankensim-mxw6x): the grid
-/// DENSIFIES to fit eight round trips of the bore, and only an authored
-/// hard ceiling refuses — typed and loud. Sizing must never grow first
-/// and clamp after, which silently truncates reflectance memory into
-/// wrap-around aliasing exactly where the longest bores need it most.
-const MM_FFT_CEILING_TAPS: usize = 65_536;
-
-fn mm_fft_taps_for(geo_delay: f64) -> Result<usize, MmLineError> {
-    let want = 8.0 * geo_delay;
-    if !want.is_finite() {
-        return Err(MmLineError::Invalid {
-            what: "eight-round-trip demand is not finite",
-        });
-    }
-    if want > MM_FFT_CEILING_TAPS as f64 {
-        return Err(MmLineError::Invalid {
-            what: "eight round trips exceed the 65536-tap authored ceiling",
-        });
-    }
-    Ok((want.ceil() as usize)
-        .next_power_of_two()
-        .clamp(256, MM_FFT_CEILING_TAPS))
-}
-
 impl MmLineBank {
     /// Realize one exact-FIR plane-mode line per valve combination.
     ///
@@ -451,17 +424,8 @@ impl MmLineBank {
                 let (peak, peaks) = crate::driving_point::analyze_reflectance_ir(&ir, dt, geo_delay);
                 let shift = if rungs_tried == 1 {
                     f64::INFINITY
-                } else if rung.peaks.is_empty() && peaks.is_empty() {
-                    0.0
-                } else if rung.peaks.is_empty() || peaks.is_empty() {
-                    f64::INFINITY
                 } else {
-                    let take = rung.peaks.len().min(peaks.len()).min(3);
-                    rung.peaks[..take]
-                        .iter()
-                        .zip(&peaks[..take])
-                        .map(|(&a, &b)| (1200.0 * (b / a).log2()).abs())
-                        .fold(0.0_f64, f64::max)
+                    peak_shift_cents(&rung.peaks, &peaks)
                 };
                 all_converged &= (n_fft as f64) > geo_delay + 2.0
                     && tail_energy < ladder.tail_tol
@@ -690,21 +654,112 @@ pub struct MatrixFirLine {
     write: usize,
     incoming: Vec<f64>,
     energy: Vec<f64>,
+    receipt: MatrixLineReceipt,
+    zc0: f64,
+}
+
+/// Convergence receipt of one [`MatrixFirLine`] realization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatrixLineReceipt {
+    /// FIR length (= FFT size) of every entry.
+    pub n_fft: usize,
+    /// Number of [`crate::driving_point::LineLadder`] rungs evaluated.
+    pub rungs_tried: usize,
+    /// Fourth-quarter tail energy over total energy, summed over all N^2
+    /// entries (the Frobenius form of the scalar line's criterion).
+    pub tail_energy: f64,
+    /// Each entry's fourth-quarter energy over the same matrix total, row-major.
+    pub entry_tail_energy: Vec<f64>,
+    /// Worst shift in cents of the plane entry's first three impedance peaks
+    /// vs the preceding rung.
+    pub peak_shift_cents: f64,
+    /// Plane-entry peak `|R|` over the 4x-oversampled realization grid.
+    pub peak_reflectance: f64,
+}
+
+/// Worst first-three-peak shift [cents] between successive rungs; `+inf`
+/// when only one side found peaks.
+fn peak_shift_cents(previous: &[f64], current: &[f64]) -> f64 {
+    if previous.is_empty() && current.is_empty() {
+        0.0
+    } else if previous.is_empty() || current.is_empty() {
+        f64::INFINITY
+    } else {
+        let take = previous.len().min(current.len()).min(3);
+        previous[..take]
+            .iter()
+            .zip(&current[..take])
+            .map(|(&a, &b)| (1200.0 * (b / a).log2()).abs())
+            .fold(0.0_f64, f64::max)
+    }
+}
+
+/// Row-major `N x N` modal reflection matrix at the input plane, against the
+/// constant plane reference `zc0 = rho c / S` for every mode.
+///
+/// The reference must be constant for a realizable line: the lossy modal
+/// `Zc(omega)` has a `sqrt(omega)` boundary-layer cusp at DC, which leaves an
+/// algebraic tail in the IR. It would also disagree with the `zc0` a junction
+/// drives the line with. With wall-normalized modes, `Zc_n = Zc_0 k_0 / k_n`
+/// tends to `zc0` above cutoff, so `zc0` is each mode's propagating limit
+/// (the same reference as [`MmLineBank`]).
+fn matrix_reflection_at(
+    duct: &Duct,
+    gas: &GasState,
+    omega: f64,
+    config: &MmLineConfig,
+    load: &MmLoad<'_>,
+    zc0: f64,
+) -> Result<Vec<C64>, MmLineError> {
+    let n = config.n_modes;
+    let (response, _) = resolve_load(duct, gas, omega, config, load)?;
+    let zc = vec![C64::new(zc0, 0.0); n];
+    Ok(modal_reflection_from_impedance(
+        &response.impedance_matrix,
+        &zc,
+        n,
+    )?)
 }
 
 impl MatrixFirLine {
     /// Realize the full N x N reflection-matrix impulse responses from
     /// the MM authority (one sweep serves all entries) and the per-mode
-    /// characteristic impedances at the input plane.
+    /// characteristic impedances at the input plane, sized by
+    /// [`crate::driving_point::LineLadder::default`].
     ///
     /// # Errors
     /// [`MmLineError`] on refusal.
-    #[allow(clippy::too_many_lines)] // one realization pipeline
     pub fn new(
         duct: &Duct,
         gas: &GasState,
         load: &MmLoad<'_>,
         config: &MmLineConfig,
+    ) -> Result<MatrixFirLine, MmLineError> {
+        Self::with_ladder(
+            duct,
+            gas,
+            load,
+            config,
+            &crate::driving_point::LineLadder::default(),
+        )
+    }
+
+    /// [`MatrixFirLine::new`] on an explicit convergence ladder (DEF-02, bead
+    /// .82). The ladder starts at four round trips and doubles until the
+    /// matrix tail energy is below `tail_tol` and the plane entry's first
+    /// three impedance peaks move less than `peak_tol_cents`; passivity of the
+    /// plane entry is checked on the 4x-oversampled grid without clipping.
+    ///
+    /// # Errors
+    /// [`MmLineError`] on refusal, including
+    /// [`MmLineError::LadderUnconverged`] at the ladder ceiling.
+    #[allow(clippy::too_many_lines)] // one realization pipeline
+    pub fn with_ladder(
+        duct: &Duct,
+        gas: &GasState,
+        load: &MmLoad<'_>,
+        config: &MmLineConfig,
+        ladder: &crate::driving_point::LineLadder,
     ) -> Result<MatrixFirLine, MmLineError> {
         let n = config.n_modes;
         if n == 0 {
@@ -712,61 +767,166 @@ impl MatrixFirLine {
                 what: "at least the plane mode",
             });
         }
+        if config.sample_rate_hz == 0 {
+            return Err(MmLineError::Invalid {
+                what: "sample rate must be positive",
+            });
+        }
+        if !(ladder.tail_tol > 0.0
+            && ladder.tail_tol.is_finite()
+            && ladder.peak_tol_cents > 0.0
+            && ladder.peak_tol_cents.is_finite()
+            && ladder.max_taps >= 256
+            && ladder.max_taps.is_power_of_two())
+        {
+            return Err(MmLineError::Invalid {
+                what: "line ladder needs positive finite tolerances and a power-of-two ceiling >= 256",
+            });
+        }
         let dt = 1.0 / f64::from(config.sample_rate_hz);
         let length = duct_axial_length(duct);
+        if !(length > 0.0) {
+            return Err(MmLineError::Invalid {
+                what: "combo needs positive axial length",
+            });
+        }
         let geo_delay = 2.0 * length / gas.sound_speed / dt;
-        let n_fft = mm_fft_taps_for(geo_delay)?;
-        let half = n_fft / 2;
+        if geo_delay < 2.0 {
+            return Err(MmLineError::Invalid {
+                what: "round-trip delay below two samples",
+            });
+        }
+        if !(4.0 * geo_delay <= ladder.max_taps as f64) {
+            return Err(MmLineError::Invalid {
+                what: "round trip does not fit the 65536-tap line ladder",
+            });
+        }
         let r_in = input_radius(duct)?;
-        // One positive-frequency spectrum buffer per matrix entry.
-        let mut r_pos_mat = vec![vec![C64::ZERO; half + 1]; n * n];
-        for (m, r_pos) in r_pos_mat.iter_mut().enumerate() {
-            // DC: plane reflects -1 off the open mouth; higher modes are
-            // fully evanescent at DC (no propagating reflection).
-            r_pos[0] = if m == 0 {
-                C64::new(-1.0, 0.0)
-            } else {
-                C64::ZERO
-            };
-        }
-        for k in 1..=half {
-            let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-            let (response, _) = resolve_load(duct, gas, omega, config, load)?;
-            let zc = match modal_characteristic_impedances(gas, r_in, omega, config.loss, n) {
-                Ok(zc) => zc,
-                Err(DuctError::TooNarrow { .. })
-                    if matches!(config.loss, LossModel::WideTube) =>
-                {
-                    modal_characteristic_impedances(gas, r_in, omega, LossModel::Bessel, n)?
-                }
-                Err(e) => return Err(e.into()),
-            };
-            let r = modal_reflection_from_impedance(&response.impedance_matrix, &zc, n)?;
-            for (m, r_pos) in r_pos_mat.iter_mut().enumerate() {
-                r_pos[k] = r[m];
+        let zc0 = gas.density * gas.sound_speed / (core::f64::consts::PI * r_in * r_in);
+        // DC: the matrix's own low-frequency limit, kept real for a real IR.
+        // The old fixed -1 (plane) / 0 (higher modes) disagreed with bin 1:
+        // a spectral jump, which leaves an N-independent tail in the IR.
+        let mut r_dc = Vec::with_capacity(n * n);
+        for (entry, r) in matrix_reflection_at(duct, gas, 1.0e-3, config, load, zc0)?
+            .into_iter()
+            .enumerate()
+        {
+            if !r.re.is_finite() {
+                return Err(MmLineError::Invalid {
+                    what: "matrix reflection has no finite low-frequency limit",
+                });
             }
+            let re = if entry == 0 {
+                r.re.clamp(-1.0, 1.0)
+            } else {
+                r.re
+            };
+            r_dc.push(C64::new(re, 0.0));
         }
-        let mut taps = Vec::with_capacity(n * n);
-        for r_pos in &r_pos_mat {
-            taps.push(
-                crate::driving_point::realize_reflectance_ir_from_positive_spectrum(
-                    r_pos, n_fft, geo_delay, false,
-                ),
-            );
+
+        let mut n_fft = ((4.0 * geo_delay).ceil() as usize)
+            .max(256)
+            .next_power_of_two()
+            .min(ladder.max_taps / 2)
+            .max(256);
+        let mut spectra: Vec<Vec<C64>> = Vec::new();
+        let mut previous_peaks: Option<Vec<f64>> = None;
+        let mut rungs_tried = 0usize;
+        loop {
+            rungs_tried += 1;
+            let half = n_fft / 2;
+            // One positive-frequency spectrum buffer per matrix entry.
+            let mut next = vec![vec![C64::ZERO; half + 1]; n * n];
+            let fresh: Vec<usize> = if spectra.is_empty() {
+                (1..=half).collect()
+            } else {
+                // Reuse the even bins (bit-identical frequencies).
+                for (r_pos, previous) in next.iter_mut().zip(&spectra) {
+                    for (k_prev, &v) in previous.iter().enumerate() {
+                        r_pos[2 * k_prev] = v;
+                    }
+                }
+                (1..half).step_by(2).collect()
+            };
+            for (r_pos, &dc) in next.iter_mut().zip(&r_dc) {
+                r_pos[0] = dc;
+            }
+            for k in fresh {
+                let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
+                let r = matrix_reflection_at(duct, gas, omega, config, load, zc0)?;
+                for (r_pos, &v) in next.iter_mut().zip(&r) {
+                    r_pos[k] = v;
+                }
+            }
+            let taps: Vec<Vec<f64>> = next
+                .iter()
+                .map(|r_pos| {
+                    crate::driving_point::realize_reflectance_ir_from_positive_spectrum(
+                        r_pos, n_fft, geo_delay, true,
+                    )
+                })
+                .collect();
+            let total_energy: f64 = taps.iter().flatten().map(|&h| h * h).sum();
+            let entry_tail: Vec<f64> = taps
+                .iter()
+                .map(|ir| ir[3 * (n_fft / 4)..].iter().map(|&h| h * h).sum::<f64>())
+                .collect();
+            let scale = if total_energy > 0.0 {
+                total_energy
+            } else {
+                1.0
+            };
+            let entry_tail_energy: Vec<f64> = entry_tail.iter().map(|&t| t / scale).collect();
+            let tail_energy = entry_tail.iter().sum::<f64>() / scale;
+            let (peak, peaks) =
+                crate::driving_point::analyze_reflectance_ir(&taps[0], dt, geo_delay);
+            let shift = previous_peaks
+                .as_deref()
+                .map_or(f64::INFINITY, |previous| peak_shift_cents(previous, &peaks));
+            let converged = (n_fft as f64) > geo_delay + 2.0
+                && tail_energy < ladder.tail_tol
+                && shift < ladder.peak_tol_cents;
+            if converged {
+                if peak > 1.0 + 1.0e-12 {
+                    return Err(MmLineError::Invalid {
+                        what: "realized matrix plane entry violates 4x-oversampled passivity",
+                    });
+                }
+                return Ok(MatrixFirLine {
+                    n_modes: n,
+                    n_fft,
+                    taps,
+                    history: vec![vec![0.0; n_fft]; n],
+                    write: 0,
+                    incoming: vec![0.0; n],
+                    energy: vec![0.0; n],
+                    zc0,
+                    receipt: MatrixLineReceipt {
+                        n_fft,
+                        rungs_tried,
+                        tail_energy,
+                        entry_tail_energy,
+                        peak_shift_cents: shift,
+                        peak_reflectance: peak,
+                    },
+                });
+            }
+            if n_fft >= ladder.max_taps {
+                return Err(MmLineError::LadderUnconverged {
+                    max_taps: ladder.max_taps,
+                    tail_energy,
+                    peak_shift_cents: shift,
+                });
+            }
+            spectra = next;
+            previous_peaks = Some(peaks);
+            n_fft *= 2;
         }
-        Ok(MatrixFirLine {
-            n_modes: n,
-            n_fft,
-            taps,
-            history: vec![vec![0.0; n_fft]; n],
-            write: 0,
-            incoming: vec![0.0; n],
-            energy: vec![0.0; n],
-        })
     }
 
     /// Push the per-mode outgoing waves; returns the per-mode incoming
-    /// waves `b_m = sum_n R_mn * a_n`.
+    /// waves `b_m = sum_n R_mn * a_n`. Every mode's waves are pressure waves
+    /// against the constant reference [`MatrixFirLine::zc0`].
     ///
     /// # Errors
     /// [`MmLineError::Invalid`] on a length mismatch or non-finite input.
@@ -814,6 +974,18 @@ impl MatrixFirLine {
     #[must_use]
     pub fn n_fft(&self) -> usize {
         self.n_fft
+    }
+
+    /// Ladder convergence receipt.
+    #[must_use]
+    pub fn receipt(&self) -> &MatrixLineReceipt {
+        &self.receipt
+    }
+
+    /// Wave reference impedance `rho c / S` at the input plane, shared by every mode.
+    #[must_use]
+    pub fn zc0(&self) -> f64 {
+        self.zc0
     }
 }
 
@@ -1111,11 +1283,14 @@ mod mm_line_tests {
         let energy = matrix.mode_energy();
         let plane_fraction = energy[0] / energy.iter().sum::<f64>().max(f64::MIN_POSITIVE);
         let cost_ratio = (n * n) as f64;
+        let ladder = matrix.receipt();
         println!(
             "{{\"suite\":\"fs-couple\",\"case\":\"ml-002-bakeoff-receipt\",\
              \"peaks_dominant_hz\":{:?},\"peaks_matrix_hz\":{:?},\
              \"worst_cents_delta\":{worst:.3},\"plane_energy_fraction\":{plane_fraction:.6},\
              \"cost_ratio_matrix_over_dominant\":{cost_ratio:.0},\
+             \"n_fft_dominant\":{},\"n_fft_matrix\":{},\"matrix_rungs\":{},\
+             \"matrix_tail_energy\":{:e},\"matrix_entry_tail_energy\":{:?},\
              \"decision\":\"dominant (equal accuracy for plane-driven sources, {cost_ratio:.0}x cheaper); matrix retained for higher-mode sources\"}}",
             peaks_dom
                 .iter()
@@ -1125,6 +1300,11 @@ mod mm_line_tests {
                 .iter()
                 .map(|p| (p * 10.0).round() / 10.0)
                 .collect::<Vec<_>>(),
+            bank.receipts()[0].n_fft,
+            ladder.n_fft,
+            ladder.rungs_tried,
+            ladder.tail_energy,
+            ladder.entry_tail_energy,
         );
         // Peaks must agree tightly (the matrix arm's off-plane input
         // coupling is evanescent-small at a 6 mm throat) and the plane
@@ -1406,15 +1586,30 @@ mod mm_line_tests {
             Err(MmLineError::Invalid { what })
                 if what.contains("65536")
         );
-        // Single-duct matrix path shares the identical discipline.
-        let matrix_long = MatrixFirLine::new(&long, &gas, &load, &cfg).is_ok();
-        let pass = dense_ok && refused && matrix_long;
+        // The single-duct matrix path runs the same ladder over all N^2 entries.
+        let matrix = MatrixFirLine::new(&long, &gas, &load, &cfg);
+        let matrix_detail = match &matrix {
+            Ok(m) => format!("{:?}", m.receipt()),
+            Err(e) => format!("refused: {e}"),
+        };
+        let matrix_long = matrix.as_ref().is_ok_and(|m| {
+            let r = m.receipt();
+            r.rungs_tried >= 2
+                && r.n_fft == m.n_fft()
+                && r.tail_energy < ladder.tail_tol
+                && r.peak_shift_cents < ladder.peak_tol_cents
+        });
+        let matrix_refused = matches!(
+            MatrixFirLine::new(&absurd, &gas, &load, &cfg),
+            Err(MmLineError::Invalid { what }) if what.contains("65536")
+        );
+        let pass = dense_ok && refused && matrix_long && matrix_refused;
         verdict(
             "ml-007-fft-densify-or-refuse",
             pass,
             &format!(
                 "converged n_fft={} after {} rungs (tail {:.3e} < {:e}, shift {:.4} c < {}); \
-                 ceiling refusal={refused}; matrix path ok={matrix_long}",
+                 ceiling refusal={refused}; matrix {matrix_detail}, ceiling refusal={matrix_refused}",
                 receipt.n_fft,
                 receipt.rungs_tried,
                 receipt.tail_energy,

@@ -271,7 +271,17 @@ impl TractVoice {
     ) -> Result<Self, TractError> {
         let area0 = chart.sections[0].area_m2;
         let zc_flow = gas.density * gas.sound_speed / area0;
-        let mut line = characteristic_line_dense(
+        // WHY THE WALL MATTERS FOR THE REALIZATION ITSELF: with rigid
+        // walls and an ideal mouth the tract's Q is unphysical (only
+        // Bessel losses), and a fixed 85 ms (4096-tap) realization
+        // time-aliased the ringing IR; the closed loop measured ACTIVE
+        // (echo energy 5e132). The tissue wall gives formants their real
+        // ~50-100 Hz bandwidths. The line is now sized by the convergence
+        // ladder (DEF-02): it grows until tail and peaks converge, and a
+        // converged line that is not passive on the 4x-oversampled grid
+        // refuses instead of being clipped (a firing clip flattens the
+        // tract shape, also measured).
+        let line = characteristic_line_dense(
             &chart.to_duct(),
             gas,
             Termination::IdealOpen,
@@ -284,23 +294,8 @@ impl TractVoice {
             // bare-delay comb at 577 Hz instead of the 827 Hz formant).
             zc_flow,
             wall,
-            Some(4096),
+            None,
         )?;
-        // WHY THE WALL MATTERS FOR THE REALIZATION ITSELF: with rigid
-        // walls and an ideal mouth the tract's Q is unphysical (only
-        // Bessel losses; the IR rings past the 85 ms realization,
-        // time-aliasing corrupts the FIR, and the closed loop measured
-        // ACTIVE — echo energy 5e132). The tissue wall is what gives
-        // formants their real ~50-100 Hz bandwidths; realized WITH it
-        // the IR decays inside the window and the loop is passive. The
-        // uniform clip below is a BACKSTOP that does not fire on a
-        // passive realization (a firing clip flattens the tract shape
-        // — also measured).
-        let dt = 1.0 / f64::from(rate);
-        let grid: Vec<f64> = (1..=8192usize)
-            .map(|k| core::f64::consts::TAU * k as f64 / (16_384.0 * dt))
-            .collect();
-        line.enforce_scattering_passivity(&grid);
         Ok(Self {
             line,
             chart,
@@ -355,7 +350,8 @@ impl TractVoice {
         };
         let gas_state = gas;
         let history = self.line.history();
-        let mut line = characteristic_line_dense(
+        // Same convergence ladder and passivity refusal as `new`.
+        let line = characteristic_line_dense(
             &chart.to_duct(),
             gas_state,
             Termination::IdealOpen,
@@ -363,13 +359,8 @@ impl TractVoice {
             8192,
             self.gas_density * self.gas_sound_speed / chart.sections[0].area_m2,
             self.wall.as_ref(),
-            Some(4096),
+            None,
         )?;
-        let dt = 1.0 / f64::from(self.rate);
-        let grid: Vec<f64> = (1..=8192usize)
-            .map(|k| core::f64::consts::TAU * k as f64 / (16_384.0 * dt))
-            .collect();
-        line.enforce_scattering_passivity(&grid);
         // Carry: replay the recent outgoing history into the fresh
         // line so its state is primed, not zeroed.
         if history.is_empty() {

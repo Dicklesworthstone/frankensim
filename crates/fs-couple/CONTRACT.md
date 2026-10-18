@@ -1738,14 +1738,19 @@ None.
 - `mm_line` module (bead 3ez8g.4.2): the multimodal characteristic-line
   runtime for brass. `MmLineBank` realizes one exact-FIR plane-mode
   reflectance line PER VALVE COMBINATION from the fs-duct multimodal
-  authority (eight round trips of impulse response — an executed
-  lesson: a four-trip tail left the lowest peak 92 cents flat from
-  wrap-around aliasing), terminated into the tabulated bell load
-  inside its support with a DISCLOSED analytic fallback outside it
-  (splice bins counted in the per-combo receipt). Passivity (`|R| <=
-  1` on the realization grid) is enforced ON THE STORED TAPS — a
-  valve switch rebuilds from them, so enforcing only the live line
-  would resurrect an unenforced reflectance mid-performance. Valve
+  authority. Its length comes from the shared `LineLadder`
+  convergence ladder (DEF-02, IRP .82), not from a fixed round-trip
+  multiple; an executed lesson is that a four-trip tail left the
+  lowest peak 92 cents flat from wrap-around aliasing. The ladder
+  starts at four round trips and doubles until every combo's
+  fourth-quarter tail energy is below `tail_tol` and its first three
+  peaks move less than `peak_tol_cents`. It refuses with
+  `LadderUnconverged` at the ceiling. The line is terminated into the
+  tabulated bell load. A spliced analytic fallback outside the
+  table's support is a spectral jump, so the ladder refuses it by
+  name. Passivity (`|R| <= 1 + 1e-12` on the 4x-oversampled grid) is
+  checked on the stored taps without clipping and refuses otherwise.
+  A valve switch rebuilds from those taps. Valve
   switches at block boundaries use the carry-outgoing-history lift
   (in-flight waves persist; the new taps govern future reflections)
   plus an optional linear CROSSFADE from the old line — an
@@ -1753,6 +1758,11 @@ None.
   and the crossfade is the no-click lane; every switch is logged with
   its lift name and carried sample count. `MatrixFirLine` is the
   full N^2-FIR bake-off arm with per-mode incoming-energy logging.
+  It is sized by the same ladder:
+  - DC is the matrix's own low-frequency limit;
+  - the convergence tail is the Frobenius sum over all N^2 entries;
+  - peak shift and passivity are checked on the plane entry;
+  - its `MatrixLineReceipt` records each entry's tail.
   `cup_junction` + `CupState` is the D18 mouthpiece-cup lumped
   compliance, TRAPEZOIDAL so the runtime matches the analytic shunt
   `Z/(1 + i omega C Z)` to `O((omega dt)^2)`. Realization doctrine

@@ -264,7 +264,13 @@ impl GlottalIsland {
             })?;
         let area = core::f64::consts::PI * inlet_r * inlet_r;
         let zc_flow = gas.density * gas.sound_speed / area;
-        let mut line = characteristic_line(
+        // The MM-bank lesson: a short wrap-truncated FIR overshoots |R| > 1
+        // between realization bins, and the active line self-rings at the
+        // wrap period (measured: a 179 Hz pressure-independent ring at
+        // fs/256). The convergence ladder sizes the line until its tail and
+        // peaks converge and refuses a converged line that is not passive
+        // on the 4x-oversampled grid, so nothing is clipped here (DEF-02).
+        let line = characteristic_line(
             tract,
             gas,
             termination,
@@ -275,17 +281,6 @@ impl GlottalIsland {
             // flattened R toward +1 (found via the tract lane)
             None,
         )?;
-        // The MM-bank lesson, executed here too: the realized FIR's
-        // DTFT overshoots |R| > 1 between realization bins (a SHORT
-        // low-loss tract wraps hard), and an active line self-rings at
-        // the wrap period regardless of blowing pressure (measured:
-        // a 179 Hz pressure-independent ring at fs/256). Enforce
-        // passivity on a 4x-oversampled grid before the loop closes.
-        let dt = 1.0 / f64::from(sample_rate_hz);
-        let grid: Vec<f64> = (1..=8192usize)
-            .map(|k| core::f64::consts::TAU * k as f64 / (16_384.0 * dt))
-            .collect();
-        line.enforce_scattering_passivity(&grid);
         let valve = if two_mass {
             // The S-H rest state is an UNSTABLE equilibrium whose
             // driving pressure is exactly zero while the masses stay
