@@ -340,6 +340,8 @@ mod common_material_acquisition {
             volume_m3: 0.003,
             neck_radius_m: 0.0073,
             neck_length_m: 0.057,
+            inner_end: fs_scenario::NeckEnd::Flanged,
+            outer_end: fs_scenario::NeckEnd::Flanged,
         };
         let duct = fs_duct::Duct {
             segments: vec![fs_duct::Segment::Cylinder {
@@ -1710,9 +1712,20 @@ mod common_material_acquisition {
                 max_damped_undamped_delta_pa =
                     max_damped_undamped_delta_pa.max((pressure - undamped_pressure).abs());
                 if step == 0 {
-                    let expected_initial_pressure = 1.2 * body.area_m2 * generalized_force
-                        / body.mass_kg
-                        / (2.0 * core::f64::consts::PI);
+                    let wd = body.omega * (1.0 - body.zeta * body.zeta).sqrt();
+                    let decay = (-body.zeta * body.omega * dt_s).exp();
+                    let expected_y = generalized_force / (body.mass_kg * body.omega.powi(2))
+                        * (1.0
+                            - decay
+                                * ((wd * dt_s).cos()
+                                    + body.zeta * body.omega / wd * (wd * dt_s).sin()));
+                    let expected_v =
+                        generalized_force / (body.mass_kg * wd) * decay * (wd * dt_s).sin();
+                    let expected_acc = generalized_force / body.mass_kg
+                        - 2.0 * body.zeta * body.omega * expected_v
+                        - body.omega.powi(2) * expected_y;
+                    let expected_initial_pressure =
+                        1.2 * body.area_m2 * expected_acc / (2.0 * core::f64::consts::PI);
                     relative_close(pressure, expected_initial_pressure);
                 }
                 assert_eq!(pressure.to_bits(), replay_pressure.to_bits());

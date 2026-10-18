@@ -499,6 +499,8 @@ pub(super) fn mixture_reaches_consumers() {
             volume_m3: 0.003,
             neck_radius_m: 0.0073,
             neck_length_m: 0.057,
+            inner_end: fs_scenario::NeckEnd::Flanged,
+            outer_end: fs_scenario::NeckEnd::Flanged,
         };
         let cavity =
             HelmholtzModalCavity::new(geometry, *gas, CavityNeckLoss::Resistance(0.0)).unwrap();
