@@ -11,10 +11,14 @@ fn electrical() -> CircuitThermalSolve {
         total_energy_tolerance_j:1e-6,maximum_circuit_trials:130 }
 }
 fn capacitor(heater:&MaterialOhmicBody<'_>,thermal:UniformEnthalpyStepInput<'_>,charge:f64) -> MaterialCircuit {
+    capacitor_with_basis(heater,thermal,charge,ElectricalPropertyBasis::Resistivity)
+}
+fn capacitor_with_basis(heater:&MaterialOhmicBody<'_>,thermal:UniformEnthalpyStepInput<'_>,charge:f64,
+    basis:ElectricalPropertyBasis) -> MaterialCircuit {
     MaterialCircuit::new(CircuitGraph {node_count:2,branches:vec![
         (1,0,Branch::Capacitor {farads:0.002}),(1,0,Branch::Resistor {ohms:1.0}),
     ],transformers:vec![]},vec![MaterialResistor {branch:1,
-        conductor:heater.resolve_conductor(thermal.initial,thermal.volume_m3).unwrap()}],vec![],vec![charge],&[]).unwrap()
+        conductor:heater.resolve_conductor_with_basis(thermal.initial,thermal.volume_m3,basis).unwrap()}],vec![],vec![charge],&[]).unwrap()
 }
 fn link(_: &ResolvedThermochemicalGasState,b:EquilibriumPhaseState)
     -> Result<ConductanceSample<EquilibriumPhaseState>,JouleHeatingError> {
@@ -166,4 +170,37 @@ fn unbound_resistive_sinks_cannot_be_counted_as_whole_body_heat() {
     assert!(matches!(old_piston().circuit_thermal_candidate(drive(0.0),thermal,controls(),bounds(),bounds(),
         CircuitThermalSource {circuit:&circuit,resistor_branch:1,body:ohmic,inputs:&[]},electrical(),link,||false),
         Err(ThermalPistonError::Invalid(_))));
+}
+
+#[test]
+fn conductivity_only_card_drives_actual_circuit_body_gas_and_piston_transaction() {
+    let basis=ElectricalPropertyBasis::Conductivity;
+    // This authored source is sigma(T)=0.1*T S/m, independently evaluated
+    // before deriving rho=1/sigma. The card supplies no resistivity claim.
+    let (card,caloric,key)=fixture_with_basis(Some(1600.0),"T",basis);let context=point(300.0);
+    assert!(card.claims_for("electrical_resistivity").is_empty());
+    let ideal=heater(&card,&context,OhmicDrive::Voltage(50.0));let ohmic=ideal.ohmic_body();
+    let thermal=body(caloric.curve(),100000.0);let piston=old_piston();
+    assert!(ideal.resolve(thermal.initial,thermal.volume_m3).is_err());
+    let power=ideal.resolve_with_basis(thermal.initial,thermal.volume_m3,basis).unwrap();
+    assert!((power.power_w-250.0).abs()<1e-10);
+    let circuit=capacitor_with_basis(&ohmic,thermal,0.2,basis);let saved=circuit.clone();
+    let layers=ideal.conduction_layers(&key,MaterialPropertySelection::SingleClaimOnly,0.02,0.001,0.02);
+    let supply=||CircuitThermalSource {circuit:&circuit,resistor_branch:1,body:ohmic.clone(),inputs:&[]};
+    assert!(piston.circuit_thermal_candidate(drive(0.0),thermal,controls(),bounds(),bounds(),supply(),electrical(),
+        |g,b|layers.resolve(g,b).map_err(JouleHeatingError::Thermal),||false).is_err());
+    let next=piston.circuit_thermal_candidate_with_basis(drive(0.0),thermal,controls(),bounds(),bounds(),
+        supply(),electrical(),basis,|g,b|layers.resolve(g,b).map_err(JouleHeatingError::Thermal),||false).unwrap();
+    let midpoint=next.coupled().step().thermal_midpoint;
+    let electrical=next.electrical().step();let conductor=&electrical.resistors[0].material.conductor;
+    assert_eq!(conductor.source_basis(),basis);
+    assert_eq!(conductor, &ohmic.resolve_conductor_with_basis(midpoint,thermal.volume_m3,basis).unwrap());
+    assert_eq!(conductor.source_property().answer().receipt.selected,card.claims_for(basis.property_name())[0].0);
+    assert!((conductor.resistance_ohm()-4000.0/midpoint.temperature_k()).abs()<1e-10);
+    assert!(electrical.heat_j>0.0 && electrical.stored_after_j<10.0);
+    assert!(next.coupled().thermal().state.temperature_k()>400.0);
+    assert!(next.coupled().piston().gas().state().state().temperature>400.0);
+    assert!((electrical.stored_after_j+electrical.heat_j-10.0).abs()<1e-8);
+    assert!(next.total_energy_residual_j().abs()<1e-6);
+    assert_eq!(circuit,saved);
 }

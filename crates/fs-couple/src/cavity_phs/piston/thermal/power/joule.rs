@@ -6,10 +6,11 @@ use super::PowerSample;
 use super::super::layers::MaterialConductionLayers;
 use fs_matdb::PropertyKey;
 use super::super::source::{ThermalMaterialError, ThermalMaterialPoint};
-use fs_material::conductor::{ConductorError, OhmicDrive, ResolvedConductor,
-    ELECTRICAL_RESISTIVITY_PROPERTY, resolve_uniform_conductor};
+use fs_material::conductor::{ConductorError, ElectricalPropertyBasis, OhmicDrive,
+    ResolvedConductor, ResolvedConductorState};
 use fs_material::phase::EquilibriumPhaseState;
-use fs_material::state_point::MaterialPropertySelection;
+use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint,
+    resolve_material_state_point};
 
 /// One whole-body uniform conductor. Geometry stays fixed over the thermal
 /// step; phase-dependent properties may change but expansion is not inferred.
@@ -17,7 +18,7 @@ use fs_material::state_point::MaterialPropertySelection;
 pub struct MaterialJouleHeating<'a> {
     /// Same source/coordinates as the finite body's enthalpy and heat transport.
     pub material: ThermalMaterialPoint<'a>,
-    /// Exact existing resistivity claim-selection/pinning policy.
+    /// Exact electrical source selection; the legacy entrypoint uses resistivity.
     pub selection: MaterialPropertySelection,
     /// Physical conducting length [m], not a reference for implicit expansion.
     pub length_m: f64,
@@ -30,7 +31,7 @@ pub struct MaterialJouleHeating<'a> {
 /// Original source-bound electrical state and actually delivered electrical work rate.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JouleHeatingSample {
-    /// Original resistivity query, geometry and usage receipt.
+    /// Original electrical source query, geometry and usage receipt.
     pub conductor: ResolvedConductor,
     /// Signed current from the existing ideal-drive owner [A].
     pub current_a: f64,
@@ -75,7 +76,7 @@ impl std::error::Error for JouleHeatingError {}
 pub struct MaterialOhmicBody<'a> {
     /// Original enthalpy-card identity and thermal/phase coordinates.
     pub material: ThermalMaterialPoint<'a>,
-    /// Existing explicit resistivity claim selection.
+    /// Existing explicit electrical source selection/pins.
     pub selection: MaterialPropertySelection,
     /// Fixed physical current path length [m].
     pub length_m: f64,
@@ -88,18 +89,43 @@ impl MaterialOhmicBody<'_> {
     /// heating, without inventing a zero-current drive for a dynamic circuit.
     pub fn resolve_conductor(&self, body: EquilibriumPhaseState, body_volume_m3: f64)
         -> Result<ResolvedConductor, JouleHeatingError> {
+        self.resolve_conductor_with_basis(body, body_volume_m3, ElectricalPropertyBasis::Resistivity)
+    }
+
+    /// Resolve the explicitly selected electrical source at the actual thermal
+    /// state. Conductivity is evaluated before the common conductor owner takes
+    /// its reciprocal; missing selected data never falls back to another basis.
+    pub fn resolve_conductor_with_basis(&self, body: EquilibriumPhaseState, body_volume_m3: f64,
+        basis: ElectricalPropertyBasis) -> Result<ResolvedConductor, JouleHeatingError> {
+        let point = self.material.at(body)?;
+        let requirement = basis.requirement().map_err(ConductorError::from)?;
+        let material = resolve_material_state_point(self.material.material, &point, &[requirement],
+            self.selection.clone()).map_err(ConductorError::from)?;
+        self.conductor_from_material(body, body_volume_m3, material, basis)
+    }
+
+    /// Lower an existing complete thermal/electrical bundle without querying a
+    /// second material state. Its card, all coordinates and quantity descriptors
+    /// must match this body's actual phase point. Extra properties stay intact.
+    pub(crate) fn conductor_from_material(&self, body: EquilibriumPhaseState, body_volume_m3: f64,
+        material: ResolvedMaterialStatePoint, basis: ElectricalPropertyBasis)
+        -> Result<ResolvedConductor, JouleHeatingError> {
         let volume = self.length_m*self.area_m2;
         if !volume.is_finite() || volume <= 0.0 || !body_volume_m3.is_finite() || body_volume_m3 <= 0.0
             || (volume/body_volume_m3-1.0).abs() > 64.0*f64::EPSILON {
             return Err(JouleHeatingError::Invalid("conductor geometry must represent the whole thermal body"));
         }
         let point = self.material.at(body)?;
-        let conductor = resolve_uniform_conductor(self.material.material, &point, self.selection.clone(),
-            self.length_m, self.area_m2)?;
-        let property = conductor.material().property(ELECTRICAL_RESISTIVITY_PROPERTY)
-            .ok_or(JouleHeatingError::Invalid("resolved electrical resistivity is absent"))?;
-        self.material.admit_static(property)?;
-        Ok(conductor)
+        if material.card_identity() != self.material.material.content_hash()
+            || material.axis_quantities() != point.axis_quantities()
+            || material.query_point().len() != point.axes().len()
+            || material.query_point().iter().any(|(axis, value)|
+                point.axes().get(axis).is_none_or(|expected| expected.to_bits() != value.to_bits())) {
+            return Err(JouleHeatingError::Invalid("conductor bundle must retain the actual complete thermal material point"));
+        }
+        let conductor = ResolvedConductorState::try_from_material_with_basis(material, basis)?;
+        self.material.admit_static(conductor.source_property())?;
+        Ok(conductor.into_uniform_conductor(self.length_m, self.area_m2)?)
     }
 }
 
@@ -135,7 +161,15 @@ impl<'source> MaterialJouleHeating<'source> {
     /// the electrical heat and both thermal/mechanical owners accept together.
     pub fn resolve(&self, body: EquilibriumPhaseState, body_volume_m3: f64)
         -> Result<PowerSample<JouleHeatingSample>, JouleHeatingError> {
-        let conductor = self.ohmic_body().resolve_conductor(body, body_volume_m3)?;
+        self.resolve_with_basis(body, body_volume_m3, ElectricalPropertyBasis::Resistivity)
+    }
+
+    /// Use the same ideal-drive and thermal-power owners with an explicit
+    /// conductivity or resistivity source. The legacy `resolve` keeps requiring
+    /// resistivity, so introducing conductivity data never changes that choice.
+    pub fn resolve_with_basis(&self, body: EquilibriumPhaseState, body_volume_m3: f64,
+        basis: ElectricalPropertyBasis) -> Result<PowerSample<JouleHeatingSample>, JouleHeatingError> {
+        let conductor = self.ohmic_body().resolve_conductor_with_basis(body, body_volume_m3, basis)?;
         let current = conductor.current_a_for_drive(self.drive)?;
         let power = conductor.joule_power_w(current)?;
         let voltage = match self.drive {

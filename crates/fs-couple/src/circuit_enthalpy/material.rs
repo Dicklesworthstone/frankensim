@@ -7,6 +7,7 @@ use super::*;
 use crate::cavity_phs::piston::thermal::source::{ThermalMaterialError, ThermalMaterialPoint};
 use crate::cavity_phs::piston::thermal::power::joule::{JouleHeatingError, MaterialOhmicBody};
 use crate::material_circuit::MAX_MATERIAL_CIRCUIT_BRANCHES;
+use fs_material::conductor::ElectricalPropertyBasis;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, PhaseStateError};
 use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS, resolve_material_state_point};
@@ -32,7 +33,7 @@ pub struct MaterialCell<'a> {
 pub struct CellResistor {
     /// Original circuit branch and its sole receiving cell.
     pub destination: ResistorCell,
-    /// Original electrical resistivity claim selection.
+    /// Original electrical source selection; legacy methods require resistivity.
     pub selection: MaterialPropertySelection,
     /// Fixed current path length [m].
     pub length_m: f64,
@@ -84,7 +85,8 @@ pub struct CellMaterialSample {
     pub cell: CellId,
     /// Actual endpoint enthalpy/phase, bound to its original chart/card.
     pub phase: EquilibriumPhaseState,
-    /// Original conductivity bundle, never a scalar-only material replacement.
+    /// Complete same-point transport bundle for a conductive thermal cell,
+    /// including its electrical property when it also binds a resistor.
     pub conductivity: Option<ResolvedMaterialStatePoint>,
 }
 /// Actual link law used by the shared thermal residual.
@@ -117,6 +119,43 @@ impl MaterialNetwork<'_> {
     /// explicit zero conductivity/area means isolation. Missing data refuses.
     pub fn resolve(&self, thermal:&DepositionSimulation<'_>, mut cancelled:impl FnMut()->bool)
         -> Result<CircuitThermalCoefficients<MaterialNetworkSample>,MaterialNetworkError> {
+        if cancelled() {return Err(MaterialNetworkError::Thermal(DepositionError::Cancelled));}
+        if self.resistors.len()>MAX_MATERIAL_CIRCUIT_BRANCHES {
+            return Err(MaterialNetworkError::Invalid("material resistor bindings exceed circuit capacity"));
+        }
+        let bases=self.resistors.iter().map(|r|(r.destination.branch,ElectricalPropertyBasis::Resistivity)).collect::<Vec<_>>();
+        self.resolve_with_bases(thermal,&bases,&mut cancelled)
+    }
+
+    /// Resolve an explicit basis for every resistor branch. Thermal conductivity
+    /// and electrical response share one original material bundle per cell.
+    /// Missing/duplicate branch choices and missing selected sources refuse.
+    pub fn resolve_with_bases(&self, thermal:&DepositionSimulation<'_>,
+        electrical_bases:&[(usize,ElectricalPropertyBasis)], mut cancelled:impl FnMut()->bool)
+        -> Result<CircuitThermalCoefficients<MaterialNetworkSample>,MaterialNetworkError> {
+        if cancelled() {return Err(MaterialNetworkError::Thermal(DepositionError::Cancelled));}
+        let bases=self.basis_plan(electrical_bases)?;
+        self.resolve_bound(thermal,&bases,None,cancelled)
+    }
+
+    fn basis_plan(&self, electrical_bases:&[(usize,ElectricalPropertyBasis)])
+        -> Result<BTreeMap<usize,ElectricalPropertyBasis>,MaterialNetworkError> {
+        if self.resistors.len()>MAX_MATERIAL_CIRCUIT_BRANCHES
+            || electrical_bases.len()!=self.resistors.len() {
+            return Err(MaterialNetworkError::Invalid("complete bounded electrical basis plan required"));
+        }
+        let bases:BTreeMap<_,_>=electrical_bases.iter().copied().collect();
+        if bases.len()!=electrical_bases.len()
+            || self.resistors.iter().any(|r|!bases.contains_key(&r.destination.branch)) {
+            return Err(MaterialNetworkError::Invalid("exactly one explicit electrical basis per resistor is required"));
+        }
+        Ok(bases)
+    }
+
+    fn resolve_bound(&self, thermal:&DepositionSimulation<'_>,
+        bases:&BTreeMap<usize,ElectricalPropertyBasis>,
+        pinned:Option<&BTreeMap<CellId,MaterialPropertySelection>>, mut cancelled:impl FnMut()->bool)
+        -> Result<CircuitThermalCoefficients<MaterialNetworkSample>,MaterialNetworkError> {
         let invalid=MaterialNetworkError::Invalid;
         let mut check=|| if cancelled() {Err(DepositionError::Cancelled)} else {Ok(())};
         check()?;
@@ -124,7 +163,14 @@ impl MaterialNetwork<'_> {
             || self.resistors.len()>MAX_MATERIAL_CIRCUIT_BRANCHES {
             return Err(invalid("complete bounded cell/link bindings required"));
         }
-        let mut bindings=BTreeMap::new(); let mut samples=BTreeMap::new();
+        let mut resistor_cells=BTreeMap::new(); let mut seen_branches=BTreeMap::new();
+        for resistor in self.resistors {
+            if seen_branches.insert(resistor.destination.branch,()).is_some()
+                || resistor_cells.insert(resistor.destination.cell,resistor).is_some() {
+                return Err(invalid("duplicate whole-cell resistor or branch binding"));
+            }
+        }
+        let mut bindings=BTreeMap::new(); let mut samples=BTreeMap::new();let mut materials=BTreeMap::new();
         for binding in self.cells {
             check()?;
             let cell=thermal.cells().get(&binding.cell).ok_or(invalid("inactive material cell"))?;
@@ -134,7 +180,8 @@ impl MaterialNetwork<'_> {
             }
             let phase=binding.curve.state_at_specific_enthalpy(cell.specific_h_j_kg).map_err(MaterialNetworkError::Phase)?;
             let point=binding.point.at(phase).map_err(MaterialNetworkError::Material)?;
-            let conductivity=if let Some((key,selection))=&binding.conductivity {
+            let mut requested=Vec::new();
+            if let Some((key,selection))=&binding.conductivity {
                 let q=key.quantity();
                 if q!=QuantitySpec::dimensional(THERMAL_CONDUCTIVITY_DIMS)
                     && q!=QuantitySpec::semantic(SemanticType::new(QuantityKind::ThermalConductivity,ValueForm::Static)) {
@@ -142,27 +189,50 @@ impl MaterialNetwork<'_> {
                 }
                 let requirement=ScalarPropertyRequirement::try_with_key(key,ScalarAdmissibility::NonNegative)
                     .map_err(|e|MaterialNetworkError::Material(ThermalMaterialError::Material(e)))?;
-                let source=resolve_material_state_point(binding.point.material,&point,&[requirement],selection.clone())
+                requested.push((requirement,selection.clone()));
+            }
+            if let Some(resistor)=resistor_cells.get(&binding.cell) {
+                let basis=bases[&resistor.destination.branch];
+                let requirement=basis.requirement()
                     .map_err(|e|MaterialNetworkError::Material(ThermalMaterialError::Material(e)))?;
-                let property=source.property(key.name()).ok_or(invalid("resolved conductivity is absent"))?;
-                binding.point.admit_static(property).map_err(MaterialNetworkError::Material)?;
-                Some(source)
-            } else {None};
+                requested.push((requirement,resistor.selection.clone()));
+            }
+            let conductivity=if requested.is_empty() {None} else {
+                let selection=if let Some(pins)=pinned {
+                    pins.get(&binding.cell).ok_or(invalid("initial transport source pins are absent"))?.clone()
+                } else {
+                    let mut pins=Vec::with_capacity(requested.len());
+                    for (requirement,selection) in &requested {
+                        let selected=resolve_material_state_point(binding.point.material,&point,
+                            std::slice::from_ref(requirement),selection.clone())
+                            .map_err(|e|MaterialNetworkError::Material(ThermalMaterialError::Material(e)))?;
+                        let property=&selected.properties()[0];
+                        pins.push((requirement.name().to_owned(),property.answer().receipt.selected));
+                    }
+                    MaterialPropertySelection::PinnedByProperty(pins)
+                };
+                let requirements=requested.into_iter().map(|(r,_)|r).collect::<Vec<_>>();
+                let material=resolve_material_state_point(binding.point.material,&point,&requirements,selection)
+                    .map_err(|e|MaterialNetworkError::Material(ThermalMaterialError::Material(e)))?;
+                for property in material.properties() {
+                    binding.point.admit_static(property).map_err(MaterialNetworkError::Material)?;
+                }
+                let conductivity=binding.conductivity.as_ref().map(|_|material.clone());
+                materials.insert(binding.cell,material);
+                conductivity
+            };
             samples.insert(binding.cell,CellMaterialSample {cell:binding.cell,phase,conductivity});
         }
         let mut resistors=Vec::with_capacity(self.resistors.len());
-        let mut seen_branches=BTreeMap::new(); let mut seen_cells=BTreeMap::new();
         for resistor in self.resistors {
             check()?;
             let d=resistor.destination;
-            if seen_branches.insert(d.branch,()).is_some() || seen_cells.insert(d.cell,()).is_some() {
-                return Err(invalid("duplicate whole-cell resistor or branch binding"));
-            }
             let binding=bindings.get(&d.cell).ok_or(invalid("resistor cell lacks material binding"))?;
             let cell=&thermal.cells()[&d.cell];
             let body=MaterialOhmicBody {material:binding.point,selection:resistor.selection.clone(),
                 length_m:resistor.length_m,area_m2:resistor.area_m2};
-            let conductor=body.resolve_conductor(samples[&d.cell].phase,cell.geometry.volume_m3)
+            let material=materials.remove(&d.cell).ok_or(invalid("resistor material bundle is absent"))?;
+            let conductor=body.conductor_from_material(samples[&d.cell].phase,cell.geometry.volume_m3,material,bases[&d.branch])
                 .map_err(MaterialNetworkError::Conductor)?;
             resistors.push(MaterialResistor {branch:d.branch,conductor});
         }
@@ -201,16 +271,47 @@ impl MaterialNetwork<'_> {
     #[allow(clippy::too_many_arguments)]
     pub fn step_candidate<'m>(&self, thermal:&DepositionSimulation<'m>, target_s:f64,
         circuit:&MaterialCircuit, ports:&[f64], controls:CircuitEnthalpySolve,
-        guess_j:&[f64], cancelled:impl FnMut()->bool)
+        guess_j:&[f64], mut cancelled:impl FnMut()->bool)
+        -> Result<CircuitEnthalpyCandidate<'m,MaterialNetworkSample>,CircuitEnthalpyError<MaterialNetworkError>> {
+        if cancelled() {return Err(CircuitEnthalpyError::Cancelled);}
+        if self.resistors.len()>MAX_MATERIAL_CIRCUIT_BRANCHES {
+            return Err(CircuitEnthalpyError::Invalid("material resistor bindings exceed circuit capacity"));
+        }
+        let bases=self.resistors.iter().map(|r|(r.destination.branch,ElectricalPropertyBasis::Resistivity)).collect::<Vec<_>>();
+        self.step_candidate_with_bases(thermal,target_s,circuit,ports,&bases,controls,guess_j,cancelled)
+    }
+
+    /// Run the existing coupled solve with an explicit electrical basis for
+    /// every resistor. Initially selected transport claims stay pinned through
+    /// all nonlinear trials and final admission; crossing their support refuses
+    /// the whole candidate. Supplied source pins also remain authoritative.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_candidate_with_bases<'m>(&self, thermal:&DepositionSimulation<'m>, target_s:f64,
+        circuit:&MaterialCircuit, ports:&[f64], electrical_bases:&[(usize,ElectricalPropertyBasis)],
+        controls:CircuitEnthalpySolve, guess_j:&[f64], cancelled:impl FnMut()->bool)
         -> Result<CircuitEnthalpyCandidate<'m,MaterialNetworkSample>,CircuitEnthalpyError<MaterialNetworkError>> {
         let cancel=RefCell::new(cancelled);
         if (*cancel.borrow_mut())() { return Err(CircuitEnthalpyError::Cancelled); }
         if self.resistors.len()>MAX_MATERIAL_CIRCUIT_BRANCHES {
             return Err(CircuitEnthalpyError::Invalid("material resistor bindings exceed circuit capacity"));
         }
+        let bases=self.basis_plan(electrical_bases).map_err(CircuitEnthalpyError::Source)?;
+        let initial=match self.resolve_bound(thermal,&bases,None,||(*cancel.borrow_mut())()) {
+            Err(MaterialNetworkError::Thermal(DepositionError::Cancelled)) => return Err(CircuitEnthalpyError::Cancelled),
+            other => other.map_err(CircuitEnthalpyError::Source)?,
+        };
+        let selection=|material:&ResolvedMaterialStatePoint|MaterialPropertySelection::PinnedByProperty(
+            material.properties().iter().map(|p|(p.requirement().name().to_owned(),p.answer().receipt.selected)).collect());
+        let mut pins=BTreeMap::new();
+        for sample in &initial.source.cells {
+            if let Some(material)=&sample.conductivity {pins.insert(sample.cell,selection(material));}
+        }
+        for (binding,resistor) in self.resistors.iter().zip(&initial.resistors) {
+            pins.insert(binding.destination.cell,selection(resistor.conductor.material()));
+        }
         let destinations:Vec<_>=self.resistors.iter().map(|r|r.destination).collect();
         let result=super::step_candidate(thermal,target_s,CircuitEnthalpyInput {circuit,ports,destinations:&destinations},
-            controls,guess_j,|s|self.resolve(s,||(*cancel.borrow_mut())()),||(*cancel.borrow_mut())());
+            controls,guess_j,|s|self.resolve_bound(s,&bases,Some(&pins),||(*cancel.borrow_mut())()),||(*cancel.borrow_mut())());
         match result {
             Err(CircuitEnthalpyError::Source(MaterialNetworkError::Thermal(DepositionError::Cancelled))) => Err(CircuitEnthalpyError::Cancelled),
             other=>other,

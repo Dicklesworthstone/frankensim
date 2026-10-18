@@ -13,6 +13,7 @@ use crate::cavity_phs::piston::thermal::{ConductanceSample, HeatExchangeSolve,
 use crate::cavity_phs::piston::thermal::power::{PowerSample, PowerFeedbackStep, PoweredThermalCandidate};
 use crate::cavity_phs::piston::thermal::power::joule::{JouleHeatingError, MaterialOhmicBody};
 use fs_material::phase::{EquilibriumPhaseState, UniformEnthalpyStep, UniformEnthalpyStepInput};
+use fs_material::conductor::ElectricalPropertyBasis;
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 
 /// One uniform thermal body receiving ALL resistive heat from a circuit. The
@@ -120,6 +121,23 @@ impl GasPiston {
         &self, input:PistonInput, body:UniformEnthalpyStepInput<'_>,
         piston:PistonSolve, exchange:HeatExchangeSolve, source:HeatExchangeSolve,
         supply:CircuitThermalSource<'_>, electrical:CircuitThermalSolve,
+        conductance:impl FnMut(&ResolvedThermochemicalGasState,EquilibriumPhaseState)
+            -> Result<ConductanceSample<I>,E>,
+        cancelled:impl FnMut()->bool,
+    ) -> Result<CircuitThermalCandidate<I>,ThermalPistonError<CircuitHeatingError<E>>> {
+        self.circuit_thermal_candidate_with_basis(input,body,piston,exchange,source,supply,electrical,
+            ElectricalPropertyBasis::Resistivity,conductance,cancelled)
+    }
+
+    /// The same finite-circuit/body/gas/momentum transaction with an explicitly
+    /// chosen conductivity or resistivity source. The body's original selection
+    /// and pins remain authoritative at each shared thermal midpoint; no failed
+    /// source is replaced by the other electrical representation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn circuit_thermal_candidate_with_basis<I,E>(
+        &self, input:PistonInput, body:UniformEnthalpyStepInput<'_>,
+        piston:PistonSolve, exchange:HeatExchangeSolve, source:HeatExchangeSolve,
+        supply:CircuitThermalSource<'_>, electrical:CircuitThermalSolve, basis:ElectricalPropertyBasis,
         mut conductance:impl FnMut(&ResolvedThermochemicalGasState,EquilibriumPhaseState)
             -> Result<ConductanceSample<I>,E>,
         cancelled:impl FnMut()->bool,
@@ -138,7 +156,7 @@ impl GasPiston {
             |_,phase| {
                 if trials==electrical.maximum_circuit_trials { return Err(CircuitHeatingError::Budget); }
                 trials+=1;
-                let conductor=supply.body.resolve_conductor(phase,body.volume_m3)
+                let conductor=supply.body.resolve_conductor_with_basis(phase,body.volume_m3,basis)
                     .map_err(CircuitHeatingError::Conductor)?;
                 let candidate=supply.circuit.step_candidate(
                     vec![MaterialResistor {branch:supply.resistor_branch,conductor}],

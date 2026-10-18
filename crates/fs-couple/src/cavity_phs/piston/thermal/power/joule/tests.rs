@@ -3,7 +3,7 @@ use super::*;
 use crate::cavity_phs::piston::{GasPiston, thermal::{ConductanceSample, HeatExchangeSolve}};
 use crate::cavity_phs::piston::tests::{gas, controls, drive};
 use fs_evidence::ValidityDomain;
-use fs_material::conductor::ELECTRICAL_RESISTIVITY_DIMS;
+use fs_material::conductor::resolve_uniform_conductor;
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, HeatCapacitySourceQuery,
     ResolvedHeatCapacityCurve, SolidLiquidPhase, UniformEnthalpyStepInput};
 use fs_material::state_point::{SPECIFIC_HEAT_CAPACITY_DIMS, THERMAL_CONDUCTIVITY_DIMS};
@@ -20,6 +20,10 @@ fn point(t: f64) -> QueryPoint {
         .with("lot", 7.0).unwrap().with("melt", 0.0).unwrap().with("omega", 1.0).unwrap()
 }
 fn fixture(scale: Option<f64>, axis: &str) -> (MaterialCard, ResolvedHeatCapacityCurve, PropertyKey) {
+    fixture_with_basis(scale,axis,ElectricalPropertyBasis::Resistivity)
+}
+fn fixture_with_basis(scale: Option<f64>, axis: &str, basis:ElectricalPropertyBasis)
+    -> (MaterialCard, ResolvedHeatCapacityCurve, PropertyKey) {
     let cp = PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS);
     let rho = PropertyKey::new("density", Density::DIMS);
     let k = PropertyKey::with_quantity("thermal_conductivity", quantity(QuantityKind::ThermalConductivity));
@@ -47,8 +51,8 @@ fn fixture(scale: Option<f64>, axis: &str) -> (MaterialCard, ResolvedHeatCapacit
             "melt" => (Dims([0;6]), vec![(0.0,0.025*scale),(1.0,0.05*scale)]),
             _ => (Dims([0,0,-1,0,0,0]), vec![(0.0,0.025*scale),(100.0,0.05*scale)]),
         };
-        insert(PropertyKey::new(ELECTRICAL_RESISTIVITY_PROPERTY,ELECTRICAL_RESISTIVITY_DIMS),
-            PropertyValue::Curve { abscissa:axis.into(),abscissa_dims:dims,knots,dims:ELECTRICAL_RESISTIVITY_DIMS });
+        insert(PropertyKey::new(basis.property_name(),basis.dimensions()),
+            PropertyValue::Curve { abscissa:axis.into(),abscissa_dims:dims,knots,dims:basis.dimensions() });
     }
     let card = MaterialCard::assemble(MaterialStateId { chemistry:"authored resistor".into(),
         phase:"declared by chart".into(),process:"synthetic".into(),revision:0 },claims,vec![]).unwrap();

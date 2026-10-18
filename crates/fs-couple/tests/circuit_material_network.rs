@@ -7,6 +7,7 @@ use fs_couple::cavity_phs::piston::thermal::source::ThermalMaterialPoint;
 use fs_material::state_point::{MaterialPropertySelection,THERMAL_CONDUCTIVITY_DIMS};
 use fs_matdb::{MaterialCard,PropertyKey,QueryPoint};
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve,ResolvedHeatCapacityCurve};
+use fs_material::conductor::ElectricalPropertyBasis;
 use fs_thermal::enthalpy::*;
 
 fn bound_cells<'a>(cards:&'a [MaterialCard;2],curves:&'a [ResolvedHeatCapacityCurve;2],
@@ -124,4 +125,100 @@ fn latent_energy_data_changes_resistance_and_other_body_heat_at_identical_kelvin
     };
     let a=run(20.0);let b=run(80.0);
     assert!(a.0>b.0 && a.1<b.1);
+}
+
+#[test]
+fn electrical_conductivity_only_material_drives_shared_heat_and_finite_circuit_feedback() {
+    use fs_couple::material_circuit::MaterialCircuit;
+    use fs_phs::circuit::{Branch,CircuitGraph};
+    let run=|sigma:f64| {
+        let (a,ca)=material_with_electrical_basis(ElectricalPropertyBasis::Conductivity,sigma,1.0,0.001,0.5);
+        let (b,cb)=material(3.0,2.0,0.0);
+        assert!(a.claims_for("electrical_resistivity").is_empty());
+        let cards=[a,b];let curves=[ca,cb];let context=point(300.0);
+        let key=PropertyKey::new("thermal_conductivity",THERMAL_CONDUCTIVITY_DIMS);
+        let cells=bound_cells(&cards,&curves,&context,&key);let resistors=branches();let links=links();
+        let binding=MaterialNetwork {cells:&cells,resistors:&resistors,links:&links};
+        let bases=[(DESTINATIONS[1].branch,ElectricalPropertyBasis::Resistivity),
+            (DESTINATIONS[0].branch,ElectricalPropertyBasis::Conductivity)];
+        let mut thermal=initial(&curves,999.0,None);
+        assert!(binding.resolve(&thermal,||false).is_err()); // Legacy choice stays resistivity-only.
+        assert!(binding.resolve_with_bases(&thermal,&bases[..1],||false).is_err());
+        assert!(binding.resolve_with_bases(&thermal,&[bases[0];2],||false).is_err());
+        let initial=binding.resolve_with_bases(&thermal,&bases,||false).unwrap();
+        let mut circuit=MaterialCircuit::new(CircuitGraph {node_count:3,branches:vec![
+            (1,0,Branch::Capacitor {farads:1.0}),(1,2,Branch::Resistor {ohms:999.0}),
+            (2,0,Branch::Resistor {ohms:999.0})],transformers:vec![]},
+            initial.resistors,vec![],vec![10.0],&[]).unwrap();
+        let total0=thermal.energy_j()+50.0;
+        for n in 1..=5 {
+            let candidate=binding.step_candidate_with_bases(&thermal,n as f64*0.1,&circuit,&[],&bases,
+                config(),&[0.0;2],||false).unwrap();
+            let report=candidate.report();
+            let sample=report.source.cells.iter().find(|s|s.cell==DESTINATIONS[0].cell).unwrap();
+            let conductor=&report.electrical.resistors[0].material.conductor;
+            assert_eq!(conductor.source_basis(),ElectricalPropertyBasis::Conductivity);
+            assert_eq!(conductor.material(),sample.conductivity.as_ref().unwrap());
+            assert_eq!(conductor.material().properties().len(),2);
+            assert!(conductor.material().property("electrical_resistivity").is_none());
+            assert_eq!(conductor.source_property().answer().receipt.selected,
+                cards[0].claims_for("electrical_conductivity")[0].0);
+            near(conductor.resistance_ohm(),1.0/(sigma*(1.0+0.001*(sample.phase.temperature_k()-300.0))));
+            near(sample.phase.temperature_k(),candidate.thermal().temperature_k(sample.cell).unwrap());
+            near(candidate.thermal().energy_j()+report.electrical.stored_after_j,total0);
+            let (t,c,_)=candidate.into_parts();thermal=t;circuit=c;
+        }
+        (thermal.temperature_k(DESTINATIONS[1].cell).unwrap(),circuit.charges_c()[0],thermal.energy_j())
+    };
+    let low=run(0.5);let high=run(1.0);
+    assert!(high.0>low.0 && high.1<low.1 && high.2>low.2);
+}
+
+#[test]
+fn initial_electrical_and_thermal_sources_stay_pinned_through_circuit_trials() {
+    use fs_couple::material_circuit::MaterialCircuit;
+    use fs_material::phase::{HeatCapacitySourceQuery,SolidLiquidPhase};
+    use fs_material::state_point::SPECIFIC_HEAT_CAPACITY_DIMS;
+    use fs_matdb::{ClaimSet,SelectionPolicy};
+    use fs_phs::circuit::{Branch,CircuitGraph};
+    use fs_qty::Density;
+    for split in ["thermal_conductivity","electrical_conductivity"] {
+        let (original,_)=material_with_electrical_basis(ElectricalPropertyBasis::Conductivity,1.0,1.0,0.0,1.0);
+        let mut claims=ClaimSet::new();
+        for (_,claim) in original.claims().claims_ordered() {
+            if claim.key.name()==split {
+                for (low,high) in [(200.0,300.00001),(300.00002,2000.0)] {
+                    let mut selected=claim.clone();
+                    selected.validity=selected.validity.with("T",low,high);
+                    claims.insert_claim(selected).unwrap();
+                }
+            } else {claims.insert_claim(claim.clone()).unwrap();}
+        }
+        let a=MaterialCard::assemble(original.id().clone(),claims,vec![]).unwrap();
+        let heat=PropertyKey::new("specific_heat_capacity",SPECIFIC_HEAT_CAPACITY_DIMS);
+        let density=PropertyKey::new("density",Density::DIMS);
+        let ca=ResolvedHeatCapacityCurve::try_new(&a,HeatCapacitySourceQuery {heat_capacity:&heat,density:&density,
+            temperature_axis:"T",lower:&point(200.0),upper:&point(2000.0),selection:SelectionPolicy::SingleClaimOnly},
+            SolidLiquidPhase::Solid,0.0,1e-6).unwrap();
+        let (b,cb)=material(3.0,2.0,0.0);let cards=[a,b];let curves=[ca,cb];let context=point(300.0);
+        let key=PropertyKey::new("thermal_conductivity",THERMAL_CONDUCTIVITY_DIMS);
+        let cells=bound_cells(&cards,&curves,&context,&key);let resistors=branches();let links=links();
+        let network=MaterialNetwork {cells:&cells,resistors:&resistors,links:&links};
+        let bases=[(1,ElectricalPropertyBasis::Conductivity),(2,ElectricalPropertyBasis::Resistivity)];
+        let thermal=initial(&curves,1.0,None);let saved=thermal.cells().clone();
+        let first=network.resolve_with_bases(&thermal,&bases,||false).unwrap();
+        let source=first.resistors[0].conductor.material();
+        let requirement=source.property(split).unwrap().requirement().clone();
+        let alternate=fs_material::state_point::resolve_material_state_point(&cards[0],&point(301.0),&[requirement],
+            MaterialPropertySelection::SingleClaimOnly).unwrap();
+        assert_ne!(source.property(split).unwrap().answer().receipt.selected,
+            alternate.property(split).unwrap().answer().receipt.selected);
+        let circuit=MaterialCircuit::new(CircuitGraph {node_count:3,branches:vec![
+            (1,0,Branch::Capacitor {farads:1.0}),(1,2,Branch::Resistor {ohms:999.0}),
+            (2,0,Branch::Resistor {ohms:999.0})],transformers:vec![]},
+            first.resistors,vec![],vec![10.0],&[]).unwrap();let saved_circuit=circuit.clone();
+        assert!(matches!(network.step_candidate_with_bases(&thermal,0.5,&circuit,&[],&bases,config(),&[0.0;2],||false),
+            Err(fs_couple::circuit_enthalpy::CircuitEnthalpyError::Source(MaterialNetworkError::Material(_)))));
+        assert_eq!(thermal.cells(),&saved);assert_eq!(thermal.time_s(),0.0);assert_eq!(circuit,saved_circuit);
+    }
 }
