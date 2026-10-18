@@ -78,7 +78,7 @@ fn sample(value: &VectorPayload, dims: Dims, frames: &FrameTree, time_s: f64, cx
         return Err(LoadHistoryError3::Quantity { expected: dims, found: value.meta().contract() });
     }
     if value.meta().orientation() != OrientationParity::Even {
-        return Err(LoadHistoryError3::Invalid("force and acceleration require ordinary even-parity vectors"));
+        return Err(LoadHistoryError3::Invalid("physical vector histories require ordinary even-parity vectors"));
     }
     let mut checkpoint = || if cx.checkpoint().is_err() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) };
     value.world_vector_at(frames, time_s, &mut checkpoint).map(|v| v.values).map_err(|error| {
@@ -179,3 +179,6 @@ impl TetLoadHistory3<'_> {
         Ok(TetLoadSample3 { case, problem, time_s })
     }
 }
+
+/// Explicit absolute support-motion histories sharing the load endpoint time.
+pub mod supports;
