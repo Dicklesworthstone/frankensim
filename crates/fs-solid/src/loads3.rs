@@ -286,6 +286,37 @@ impl TetLoadCase3<'_, '_> {
             thermal, &self.nodal_forces_n, config, cx)?;
         let stress = problem.recover_thermal_stress_with_nodal_forces(&displacement,
             thermal, &self.nodal_forces_n, mesh_frame, maximum_strain, cx)?;
+        self.finish_solution(problem, displacement, stress, cx)
+    }
+
+    /// Solve the same mechanical/thermal load with explicit absolute support
+    /// motion. Each sorted `(full_xyz_dof, metres)` entry must already be fixed
+    /// in the problem; omitted fixed components stay zero. Loads at moving
+    /// supports remain in the reaction calculation. The returned displacement
+    /// is the FULL field, not the zero-support correction used inside PCG.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_with_prescribed_dofs(
+        &self, problem: &TetLinearElasticProblem<'_>, thermal: TetThermalStrainField<'_>,
+        prescribed_m: &[(usize, f64)], maximum_prescribed_displacement_m: f64,
+        config: TetStaticSolveConfig, mesh_frame: ContentHash, maximum_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TetLoadSolution3, LoadError3> {
+        poll(cx)?;
+        if problem.nodes_m != self.geometry.nodes || problem.tetrahedra != self.geometry.tets {
+            return Err(LoadError3::Invalid("loads belong to a different reference volume mesh"));
+        }
+        let displacement = problem.solve_thermal_displacement_with_prescribed_dofs(
+            thermal, &self.nodal_forces_n, prescribed_m, maximum_prescribed_displacement_m,
+            config, cx)?;
+        let stress = problem.recover_thermal_stress_with_prescribed_dofs(&displacement,
+            thermal, &self.nodal_forces_n, prescribed_m, maximum_prescribed_displacement_m,
+            mesh_frame, maximum_strain, cx)?;
+        self.finish_solution(problem, displacement, stress, cx)
+    }
+
+    fn finish_solution(&self, problem: &TetLinearElasticProblem<'_>,
+        displacement: TetThermalDisplacementSolution, stress: TetThermalStressReport,
+        cx: &Cx<'_>) -> Result<TetLoadSolution3, LoadError3> {
         let mut imbalance = stress.nodal_internal_force_n().to_vec();
         for &(dof, value) in &self.nodal_forces_n { poll(cx)?; imbalance[dof/3][dof%3] = finite(imbalance[dof/3][dof%3] - value)?; }
         let mut support_reactions_n = vec![[0.0; 3]; self.geometry.nodes.len()];

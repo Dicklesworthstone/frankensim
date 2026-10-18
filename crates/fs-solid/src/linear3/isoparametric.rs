@@ -154,3 +154,6 @@ fn mandel_b<const N: usize, const D: usize>(gradients: [[f64; 3]; N]) -> [[f64; 
     }
     b
 }
+
+// Public P1 support-motion methods reuse the private linear3 assembly/solve owners.
+mod prescribed;
