@@ -76,8 +76,12 @@ impl Playback {
 fn config(sample_rate: u32, course_mode_budget: usize, max_dynamic_modes: usize,
     full_scale_pa: f64) -> Config {
     let mut cfg = Config::live(sample_rate);
-    // The browser plays the published RT-0425 string losses (Config field docs).
+    // The browser plays the published RT-0425 string losses and hammer law, K_H on each string
+    // with its R_H (Config field docs). The reference admits that law with a supplied scale too:
+    // both felt laws key K_H by key number, and the published one only stops dividing it by the unison.
     cfg.rt0425_string_damping = true;
+    cfg.rt0425_hammer_stiffness = true;
+    cfg.rt0425_hammer_dissipation = true;
     if course_mode_budget > 0 { cfg.course_mode_budget = course_mode_budget; }
     if max_dynamic_modes > 0 { cfg.max_dynamic_modes = max_dynamic_modes.min(1 << 24); }
     if full_scale_pa > 0.0 { cfg.full_scale_pa = full_scale_pa; }

@@ -109,6 +109,16 @@ pub struct Config {
     /// fp-realism-v1) the authored law decays the bass's upper partials about
     /// 5x too fast; the published one cuts brightness error 16.4 -> 11.4 dB.
     pub rt0425_string_damping: bool,
+    /// Hammer felt stiffness. `false` is the reference preset's default card,
+    /// whose legacy conversion divides RT-0425's K_H across the unison (each
+    /// string too soft, by the reference's own comment). `true` applies K_H to
+    /// each unison string as published (the reference's `--rt0425-hammer-stiffness`);
+    /// both keep the estimated crush and Prony relaxation.
+    pub rt0425_hammer_stiffness: bool,
+    /// Hammer felt loss. `true` replaces the estimated crush and Prony terms with
+    /// RT-0425's published R_H rate term (the reference's `--rt0425-hammer-dissipation`).
+    /// Requires `rt0425_hammer_stiffness`, as the reference does.
+    pub rt0425_hammer_dissipation: bool,
 }
 impl Config {
     pub fn live(sample_rate: u32) -> Self {
@@ -128,6 +138,8 @@ impl Config {
             retire_ringing_j: 1.0e-10,
             retire_damped_j: 1.0e-8,
             rt0425_string_damping: false,
+            rt0425_hammer_stiffness: false,
+            rt0425_hammer_dissipation: false,
         }
     }
 }
@@ -1556,6 +1568,8 @@ struct Key {
     law: WoolFelt,
     creep: relaxation::Prepared,
     area: f64,
+    /// RT-0425's R_H on each contact [N s/m^p] (0 without `rt0425_hammer_dissipation`).
+    rate_n_s_m_p: f64,
     thickness: f64,
     contacts: Vec<Contact>,
     has_damper: bool,
@@ -1985,10 +1999,19 @@ impl LivePiano {
         }
         // Hammers: the reference preset's shank geometry and per-key felt cards.
         let geometry = shank::Geometry::published();
+        if cfg.rt0425_hammer_dissipation && !cfg.rt0425_hammer_stiffness {
+            return Err("hammer dissipation R_H requires RT-0425's per-string stiffness K_H".into());
+        }
         let mut keys = Vec::with_capacity(courses.len());
         for (ci, c) in courses.iter().enumerate() {
-            let (law, prony) = steinway_scale::hammer_material(c)?;
+            let (law, prony) = if cfg.rt0425_hammer_dissipation { steinway_scale::hammer_material_rt0425_damped(c) }
+                else if cfg.rt0425_hammer_stiffness { steinway_scale::hammer_material_rt0425(c) }
+                else { steinway_scale::hammer_material(c) }?;
             let area = c.felt_area_m2 / c.unison as f64;
+            // engine.rs `configure_source_hammer_dissipation`: the per-string R_H on this site's area.
+            let rate_n_s_m_p = if cfg.rt0425_hammer_dissipation {
+                steinway_scale::hammer_relaxation_rt0425(c.midi)? * area * c.unison as f64 / c.felt_area_m2
+            } else { 0.0 };
             let thickness = c.felt_thickness_m;
             let creep = relaxation::Spectrum::from_prony(&prony)?.prepare(area, thickness, dt)?;
             let model = shank::Prepared::from_geometry(geometry, c.hammer_mass_kg, rate)?;
@@ -2013,6 +2036,7 @@ impl LivePiano {
                 law,
                 creep,
                 area,
+                rate_n_s_m_p,
                 thickness,
                 contacts,
                 has_damper: c.midi <= LAST_DAMPED_MIDI,
@@ -3085,7 +3109,8 @@ impl LivePiano {
             let old = &key.contacts[self.c_member[i]];
             let start = old.overlap - key.creep.deformation(&old.memory);
             self.c_start.push(key.creep.free_deformation(&old.memory));
-            self.c_site.push(crate::fastfelt::Site::new(&key.law, &old.state, start, key.thickness, key.area));
+            self.c_site.push(crate::fastfelt::Site::new(&key.law, &old.state, start, key.thickness, key.area)
+                .with_rate(key.rate_n_s_m_p, self.dt));
         }
         let mut converged = false;
         let mut failed: Option<usize> = None;

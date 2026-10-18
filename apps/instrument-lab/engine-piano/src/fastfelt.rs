@@ -49,6 +49,11 @@ pub struct Site {
     thickness: f64,
     area: f64,
     maximum_m: f64,
+    /// RT-0425's R_H [N s/m^p] for this site (0: no rate term), the step [s],
+    /// and the start overlap raised to p.
+    rate: f64,
+    dt: f64,
+    start_power: f64,
 }
 
 impl Site {
@@ -71,11 +76,22 @@ impl Site {
             thickness: thickness_m,
             area: area_m2,
             maximum_m: thickness_m * law.eps_densify,
+            rate: 0.0,
+            dt: 1.0,
+            start_power: if start_m <= 0.0 { 0.0 } else { start_m.powf(law.p) },
         };
         site.stored_max = if span > 0.0 { state.sig_max * span / (law.q + 1.0) } else { 0.0 };
         site.virgin_max = site.virgin(state.eps_max);
         site.primitive_start = site.primitive(site.start_strain);
         site
+    }
+
+    /// Add RT-0425's Kelvin-Voigt term R_H d(e^p)/dt over a step of `dt_s`
+    /// (`felt.rs::average_with_rate`); R_H = 0 leaves the elastic force alone.
+    pub fn with_rate(mut self, rate_n_s_m_p: f64, dt_s: f64) -> Self {
+        self.rate = rate_n_s_m_p;
+        self.dt = dt_s;
+        self
     }
 
     /// Integral of the virgin envelope from zero strain.
@@ -168,9 +184,28 @@ impl Site {
     }
 
     /// Held force [N] and its derivative with respect to END overlap [N/m]:
-    /// `felt.rs::average` with the start integral prepared.
+    /// `felt.rs::average_with_rate` with the start integral prepared. The rate
+    /// difference is passive because e^p is monotone; on the unilateral branch a
+    /// net tensile force is dropped (its unrecovered potential books as loss).
     #[inline]
     pub fn force(&self, end_m: f64) -> (f64, f64) {
+        let (elastic, slope) = self.elastic_force(end_m);
+        if self.rate == 0.0 {
+            return (elastic, slope);
+        }
+        let end_power = if end_m <= 0.0 { 0.0 } else { end_m.powf(self.p) };
+        let total = elastic + self.rate * (end_power - self.start_power) / self.dt;
+        if total <= 0.0 {
+            return (0.0, 0.0);
+        }
+        // R_H p e^(p-1) / dt from the same power.
+        let tangent = if end_m > 0.0 { self.rate * self.p * end_power / end_m / self.dt } else { 0.0 };
+        (total, slope + tangent)
+    }
+
+    /// `felt.rs::average`: the conservative part of `force`.
+    #[inline]
+    fn elastic_force(&self, end_m: f64) -> (f64, f64) {
         let a = self.start_strain;
         let b = end_m / self.thickness;
         let de = b - a;

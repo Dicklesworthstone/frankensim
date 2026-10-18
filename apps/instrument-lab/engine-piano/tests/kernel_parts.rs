@@ -180,9 +180,12 @@ fn prepared_force_and_solve_reproduce_the_reference_felt_adapter() {
     let scale = geometry::read_scale(fs_live_piano::kernel::SCALE_CSV).unwrap();
     let mut worst_force = 0.0_f64;
     let mut worst_solve = 0.0_f64;
-    for &midi in &[21u8, 40, 60, 84, 108] {
+    // Both felt cards the kernel can play: the preset's legacy one and RT-0425's per-string K_H.
+    let cards = [21u8, 40, 60, 84, 108].into_iter().flat_map(|midi| {
         let c = scale[usize::from(midi - 21)];
-        let (law, _) = steinway_scale::hammer_material(&c).unwrap();
+        [steinway_scale::hammer_material(&c), steinway_scale::hammer_material_rt0425(&c)].map(move |m| (c, m.unwrap().0))
+    });
+    for (c, law) in cards {
         let (t, area) = (c.felt_thickness_m, c.felt_area_m2 / c.unison as f64);
         let mut state = law.initial_state();
         for commit in [0.0, 0.05, 0.18, 0.4] {
@@ -215,6 +218,48 @@ fn prepared_force_and_solve_reproduce_the_reference_felt_adapter() {
             }
         }
     }
+    assert!(worst_force < 1.0e-12, "relative force deviation {worst_force:e}");
+    assert!(worst_solve <= 2.0e-13, "overlap deviation {worst_solve:e} m");
+}
+
+#[test]
+fn rate_site_reproduces_the_reference_published_hammer_law() {
+    // RT-0425's conservative K_H card with its R_H rate term (felt.rs::average_with_rate):
+    // loading, unloading through the start, and the unilateral release where the rate term
+    // would pull. The live site raises e to p with powf, the reference with det::pow.
+    let scale = geometry::read_scale(fs_live_piano::kernel::SCALE_CSV).unwrap();
+    let dt = 1.0 / 48_000.0;
+    let (mut worst_force, mut worst_solve, mut released) = (0.0_f64, 0.0_f64, 0usize);
+    for &midi in &[21u8, 40, 60, 84, 108] {
+        let c = scale[usize::from(midi - 21)];
+        let (law, _) = steinway_scale::hammer_material_rt0425_damped(&c).unwrap();
+        let rate = steinway_scale::hammer_relaxation_rt0425(midi).unwrap();
+        let (t, area) = (c.felt_thickness_m, c.felt_area_m2 / c.unison as f64);
+        let state = law.initial_state();
+        for &start in &[-0.02 * t, 0.0, 0.01 * t, 0.1 * t, 0.3 * t] {
+            let site = Site::new(&law, &state, start, t, area).with_rate(rate, dt);
+            for i in 0..60 {
+                let end = (-0.05 + 0.012 * i as f64) * t;
+                let (f, df) = site.force(end);
+                let (rf, rdf) = felt::average_with_rate(&law, &state, start, end, t, area, rate, dt);
+                if rf == 0.0 && end > 0.0 && start > end { released += 1; }
+                worst_force = worst_force.max((f - rf).abs() / (1.0e-9 + rf.abs()));
+                assert!((df - rdf).abs() <= 1.0e-8 * (1.0 + rdf.abs()), "tangent {df} {rdf}");
+            }
+            for &free in &[-1.0e-4, 0.0, 2.0e-5, 2.0e-4, 8.0e-4] {
+                for &compliance in &[2.0e-8, 3.0e-6] {
+                    let reference = felt::solve_with_rate(&law, &state, start, free, compliance, t, area, rate, dt);
+                    match (reference, site.solve(free, compliance, 0.0)) {
+                        (Ok(a), Ok(b)) => worst_solve = worst_solve.max((a - b).abs() * compliance),
+                        (Err(_), Err(_)) => {}
+                        other => panic!("solver admission differs: {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+    println!("R_H site: relative force deviation {worst_force:e}, overlap deviation {worst_solve:e} m, {released} released samples");
+    assert!(released > 0, "no sample exercised the unilateral release");
     assert!(worst_force < 1.0e-12, "relative force deviation {worst_force:e}");
     assert!(worst_solve <= 2.0e-13, "overlap deviation {worst_solve:e} m");
 }

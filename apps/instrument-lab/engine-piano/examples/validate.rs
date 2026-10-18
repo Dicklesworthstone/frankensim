@@ -6,13 +6,19 @@
 //! not the live reductions.
 //!
 //! usage: validate [board_band_hz] [partials] [seconds] [reduction_spec]
+//!        [--rt0425-string-damping] [--rt0425-hammer-stiffness] [--rt0425-hammer-dissipation]
 //! With a reduction spec the board is the reference's bridge-informed
 //! reduction of the (0, band] slice and both models use its full damping matrix.
+//! The flags select the published laws in both models (the browser plays all three).
 use fs_live_piano::refmods::{engine, geometry, steinway_scale};
 use fs_live_piano::{Config, Description, LivePiano};
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let all: Vec<String> = std::env::args().collect();
+    let string_damping = all.iter().any(|a| a == "--rt0425-string-damping");
+    let hammer_stiffness = all.iter().any(|a| a == "--rt0425-hammer-stiffness");
+    let hammer_dissipation = all.iter().any(|a| a == "--rt0425-hammer-dissipation");
+    let args: Vec<String> = all.into_iter().filter(|a| !a.starts_with("--rt0425-")).collect();
     let band: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(800.0);
     let partials: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(64);
     let seconds: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1.0);
@@ -36,10 +42,16 @@ fn main() {
                 Some(spec) => Description::with_reduction(vec![course], band, spec),
                 None => Description::with_courses(vec![course], band),
             }.expect("board");
-            let material = steinway_scale::hammer_material(&course).expect("felt card");
+            let material = if hammer_dissipation { steinway_scale::hammer_material_rt0425_damped(&course) }
+                else if hammer_stiffness { steinway_scale::hammer_material_rt0425(&course) }
+                else { steinway_scale::hammer_material(&course) }.expect("felt card");
             let mut reference = engine::Instrument::new_with_string_damping(vec![course], &desc.board, rate, 1,
-                partials, true, vec![material], Some(engine::ShankGeometry::published()), None, None, false)
+                partials, true, vec![material], Some(engine::ShankGeometry::published()), None, None, string_damping)
                 .expect("reference engine");
+            if hammer_dissipation {
+                let r_h = steinway_scale::hammer_relaxation_rt0425(midi).expect("R_H");
+                reference.configure_source_hammer_dissipation(&[r_h]).expect("reference R_H");
+            }
             if let Some(c) = &desc.damping {
                 reference.configure_bare_board_damping(c).expect("reference board damping");
             }
@@ -50,6 +62,9 @@ fn main() {
             cfg.course_mode_budget = usize::MAX / 4;
             cfg.static_attachment = false;
             cfg.damper_points = 1;
+            cfg.rt0425_string_damping = string_damping;
+            cfg.rt0425_hammer_stiffness = hammer_stiffness;
+            cfg.rt0425_hammer_dissipation = hammer_dissipation;
             let mut live = LivePiano::new(&desc, cfg).expect("live kernel");
             let rest_energy = reference.energy_j();
             reference.note_on(midi, velocity).expect("reference strike");

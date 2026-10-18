@@ -8,6 +8,8 @@
 //!        [--reduction MAX,KEEP_LOW,HZ,...] [--max-modes N] [--max-keys N]
 //!        [--board FILE.bin]   (a board file written by gen_board, as the browser fetches it)
 //!        [--rt0425-string-damping] (RT-0425 per-key string losses, as the browser plays)
+//!        [--rt0425-hammer-stiffness] (RT-0425's K_H on each unison string, as the browser plays)
+//!        [--rt0425-hammer-dissipation] (with it, RT-0425's R_H instead of crush and Prony, as the browser plays)
 //! `--scale` + `--isolated` reproduces the reference binary run with the same
 //! sparse `--scale` (nothing else attached to the bridge, no retirement).
 use fs_live_piano::refmods::geometry;
@@ -57,6 +59,8 @@ fn run() -> Result<(), String> {
             "--board" => { board_path = Some(value(i)?.clone()); i += 1; }
             "--isolated" => cfg.static_attachment = false,
             "--rt0425-string-damping" => cfg.rt0425_string_damping = true,
+            "--rt0425-hammer-stiffness" => cfg.rt0425_hammer_stiffness = true,
+            "--rt0425-hammer-dissipation" => cfg.rt0425_hammer_dissipation = true,
             "--no-duplex" => cfg.duplex = false,
             other => return Err(format!("unknown option {other}")),
         }
