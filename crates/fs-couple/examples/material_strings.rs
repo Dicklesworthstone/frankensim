@@ -4,6 +4,8 @@
 mod input;
 #[path = "material_strings/construction.rs"]
 mod construction;
+#[path = "material_strings/body.rs"]
+mod body;
 use std::{collections::BTreeMap, error::Error, fs::{File,OpenOptions}, io::{Read,Seek,Write}, path::Path};
 use fs_couple::bowed_string::runtime::reciprocal::bank::{
     MaterialStringSource,ReciprocalStringBank,StringBankOptions,StringBowLocation};
@@ -61,13 +63,6 @@ type Catalog = BTreeMap<String,CatalogEntry>;
 fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<NormalizedPack>,
     spec:&input::Spec, body:bool, twist:bool) -> Result<ResolvedMaterialStatePoint>
 {
-    if !catalog.contains_key(name) {
-        let pack=loader(name)?;
-        let card=MaterialCard::assemble(MaterialStateId { chemistry:format!("source-pack:{}",pack.pack_id()),
-            phase:"declared solid model".into(),process:"frozen source-pack realization".into(),revision:0 },
-            pack.claims().clone(),vec![])?;
-        catalog.insert(name.into(),CatalogEntry { pack,card });
-    }
     let mut requirements=vec![Requirement::try_new("density",Density::DIMS,Admit::StrictlyPositive)?,
         Requirement::try_new("young_modulus",Pressure::DIMS,Admit::StrictlyPositive)?,
         Requirement::try_new(ETA,DynViscosity::DIMS,Admit::Finite)?];
@@ -76,30 +71,38 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
         requirements.push(Requirement::try_new(SHEAR,Pressure::DIMS,Admit::StrictlyPositive)?);
         requirements.push(Requirement::try_new(SHEAR_ETA,DynViscosity::DIMS,Admit::Finite)?);
     }
+    resolve_properties(name,catalog,loader,spec,&requirements)
+}
+fn resolve_properties(name:&str, catalog:&mut Catalog,
+    loader:&mut impl FnMut(&str)->Result<NormalizedPack>, spec:&input::Spec,
+    requirements:&[Requirement]) -> Result<ResolvedMaterialStatePoint>
+{
+    if !catalog.contains_key(name) {
+        let pack=loader(name)?;
+        let card=MaterialCard::assemble(MaterialStateId { chemistry:format!("source-pack:{}",pack.pack_id()),
+            phase:"declared solid model".into(),process:"frozen source-pack realization".into(),revision:0 },
+            pack.claims().clone(),vec![])?;
+        catalog.insert(name.into(),CatalogEntry { pack,card });
+    }
     // This compact input profile explicitly declares bare SI T and omega axes.
     // Incompatible typed/context axes refuse in the original resolver; they are
     // never removed, guessed, coerced or supplied from an unrelated source.
     let query=QueryPoint::new().with("T",spec.temperature)?.with("omega",spec.omega)?;
-    Ok(resolve_material_state_point(&catalog[name].card,&query,&requirements,Pick::SingleClaimOnly)?)
+    Ok(resolve_material_state_point(&catalog[name].card,&query,requirements,Pick::SingleClaimOnly)?)
 }
-struct Ready { spec: input::Spec, catalog: Catalog, performance: MultiBowPerformance }
+struct Ready { spec: input::Spec, catalog: Catalog, performance: MultiBowPerformance, body_profile: Option<body::Profile> }
 impl input::Spec {
-    fn compile(self,cx:&Cx<'_>,gate:&CancelGate,mut loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
+    fn compile(self,cx:&Cx<'_>,gate:&CancelGate,loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
+        self.compile_with_body(cx,gate,None,loader)
+    }
+    fn compile_with_body(self,cx:&Cx<'_>,gate:&CancelGate,profile:Option<body::Profile>,
+        mut loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
         poll(gate)?;
         let mut catalog=Catalog::new(); let mut sources=Vec::with_capacity(self.strings.len());
         for wire in &self.strings {
             poll(gate)?;
             sources.push(wire.resolve_source(&mut catalog, &mut loader, &self, gate)?);
         }
-        let material=resolve(&self.body.pack,&mut catalog,&mut loader,&self,true,false)?;
-        let body=SharedMaterialPlateBody {
-            specimen:with_uniform_plate_material_state(ThinPlate { length_m:self.body.length,width_m:self.body.width,
-                thickness_m:1.0,density_kg_m3:1.0,e1_pa:1.0,e2_pa:1.0,nu12:0.0,g12_pa:1.0,material_angle_rad:0.0,
-                damping_ratio:0.0,thermoelastic:None,kelvin_voigt_bending:None,n_modes:self.body.modes,
-                geometric_nonlinearity:false,pretension_n_m:0.0,clamped:false },&material,PlateMaterialModel::Isotropic,
-                PlateThicknessConstraint::FixedThickness(self.body.thickness))?.with_kelvin_voigt_bending_loss()?,
-            bridges:self.strings.iter().map(|w|w.bridge).collect(),modal_budget:modal_budget(),listener_m:self.body.listener,
-        };
         let mut contacts=Vec::with_capacity(self.schedule.tracks().len());
         for track in self.schedule.tracks() {
             let GestureTarget::BowStroke { string }=track.target else { return Err("non-bow track".into()); };
@@ -107,10 +110,23 @@ impl input::Spec {
             contacts.push(StringBowLocation { string:usize::from(string),station_fraction:station });
         }
         let settings=options(self.rate,contacts[0]);
-        let bank=match self.cavity.clone() {
-            Some(cavity)=>ReciprocalStringBank::from_material_plate_with_cavity(cx,sources,self.gas,body,cavity,
-                self.law.clone(),settings.clone(),gate)?,
-            None=>ReciprocalStringBank::from_material_plate(cx,sources,self.gas,body,self.law.clone(),settings.clone(),gate)?,
+        let bank=if let Some(body_profile)=&profile {
+            body_profile.compile(&self,sources,&mut catalog,&mut loader,settings.clone(),cx,gate)?
+        } else {
+            let material=resolve(&self.body.pack,&mut catalog,&mut loader,&self,true,false)?;
+            let body=SharedMaterialPlateBody {
+                specimen:with_uniform_plate_material_state(ThinPlate { length_m:self.body.length,width_m:self.body.width,
+                    thickness_m:1.0,density_kg_m3:1.0,e1_pa:1.0,e2_pa:1.0,nu12:0.0,g12_pa:1.0,material_angle_rad:0.0,
+                    damping_ratio:0.0,thermoelastic:None,kelvin_voigt_bending:None,n_modes:self.body.modes,
+                    geometric_nonlinearity:false,pretension_n_m:0.0,clamped:false },&material,PlateMaterialModel::Isotropic,
+                    PlateThicknessConstraint::FixedThickness(self.body.thickness))?.with_kelvin_voigt_bending_loss()?,
+                bridges:self.strings.iter().map(|w|w.bridge).collect(),modal_budget:modal_budget(),listener_m:self.body.listener,
+            };
+            match self.cavity.clone() {
+                Some(cavity)=>ReciprocalStringBank::from_material_plate_with_cavity(cx,sources,self.gas,body,cavity,
+                    self.law.clone(),settings.clone(),gate)?,
+                None=>ReciprocalStringBank::from_material_plate(cx,sources,self.gas,body,self.law.clone(),settings.clone(),gate)?,
+            }
         };
         let additional=contacts[1..].iter().map(|location|MaterialBowContact { location:*location,
             law:self.law.clone(),friction:settings.friction }).collect();
@@ -121,7 +137,7 @@ impl input::Spec {
             samples:self.samples,max_block:self.block,max_work:input::MAX_WORK,max_events:input::MAX_CONTROLS })?;
         if let Some(forces)=&self.forces { performance=performance.with_string_forces(forces.clone(),gate)?; }
         performance.validate_sample_rate(self.rate)?;performance.validate_sample_count(self.samples)?;poll(gate)?;
-        Ok(Ready { spec:self,catalog,performance })
+        Ok(Ready { spec:self,catalog,performance,body_profile:profile })
     }
 }
 impl Ready {
@@ -142,7 +158,12 @@ fn read_bounded(path:&Path,cap:usize)->Result<Vec<u8>> {
 }
 fn main()->Result<()> {
     let args:Vec<_>=std::env::args_os().collect();
-    if args.len()!=3 {return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav".into());}
+    if args.len()!=3 && !(args.len()==5 && args[3]=="--body-profile") {
+        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE]".into());
+    }
+    let profile=if args.len()==5 {
+        Some(body::Profile::parse(&read_bounded(Path::new(&args[4]),body::MAX_BYTES)?)?)
+    } else { None };
     let path=Path::new(&args[1]);let parent=path.parent().unwrap_or(Path::new("."));
     let spec=input::Spec::parse(&read_bounded(path,input::MAX_INPUT_BYTES)?)?;
     let gate=CancelGate::new_clock_free();let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -150,7 +171,7 @@ fn main()->Result<()> {
     let mut ready=pool.scope(|arena| {
         let cx=Cx::new(&gate,arena,fs_exec::StreamKey {seed:0,kernel_id:0,tile:0,iteration:0},
             fs_exec::Budget::INFINITE,fs_exec::ExecMode::Deterministic);
-        spec.compile(&cx,&gate,|name| {
+        spec.compile_with_body(&cx,&gate,profile,|name| {
             let bytes=read_bounded(&parent.join(name),input::MAX_PACK_BYTES.min(remaining))?;
             remaining=remaining.checked_sub(bytes.len()).ok_or("material pack byte budget exceeded")?;
             Ok(NormalizedPack::from_bytes(&bytes)?)
@@ -160,6 +181,7 @@ fn main()->Result<()> {
         eprintln!("source={path:?}; pack={:?}; hash={}; artifact={}",source.pack.pack_id(),
             source.pack.content_hash(),source.pack.source_artifact());
     }
+    if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
     eprintln!("input_bytes={}; gas={:?}; preload_J={:?}",ready.spec.bytes.len(),ready.spec.gas,ready.performance.preload_energy_j());
     // Complete source, geometry, frequency, schedule and preload admission is
     // finished before creating output. Never overwrite any existing path.

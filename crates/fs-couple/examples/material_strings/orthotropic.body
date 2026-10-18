@@ -1,0 +1,8 @@
+frankensim-string-body-v1
+mesh 4 4
+elastic orthotropic12
+grain 0.17
+support simply-supported
+pretension 0
+window 1 100000000
+bridge 2 2

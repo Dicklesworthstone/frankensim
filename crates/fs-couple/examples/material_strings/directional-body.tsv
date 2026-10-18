@@ -1,0 +1,46 @@
+frankensim.matdb-source.v1
+observation	synthetic	Synthetic directional body	Manufactured coefficients for integration tests	Not measured wood, metal or instrument data
+scalar	density	synthetic	density	600	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	200000	rad/s
+scalar	young_modulus_1	synthetic	young_modulus_1	8e+09	Pa	constant
+uncertainty	young_modulus_1	unstated	-	-	-	-
+validity	young_modulus_1	T	280	320	K
+validity	young_modulus_1	omega	0	200000	rad/s
+scalar	young_modulus_2	synthetic	young_modulus_2	2e+09	Pa	constant
+uncertainty	young_modulus_2	unstated	-	-	-	-
+validity	young_modulus_2	T	280	320	K
+validity	young_modulus_2	omega	0	200000	rad/s
+scalar	poisson_ratio_12	synthetic	poisson_ratio_12	0.2	1	constant
+uncertainty	poisson_ratio_12	unstated	-	-	-	-
+validity	poisson_ratio_12	T	280	320	K
+validity	poisson_ratio_12	omega	0	200000	rad/s
+scalar	shear_modulus_12	synthetic	shear_modulus_12	6e+08	Pa	constant
+uncertainty	shear_modulus_12	unstated	-	-	-	-
+validity	shear_modulus_12	T	280	320	K
+validity	shear_modulus_12	omega	0	200000	rad/s
+scalar	plane_stress_viscosity_11	synthetic	plane_stress_viscosity_11	300000	Pa*s	constant
+uncertainty	plane_stress_viscosity_11	unstated	-	-	-	-
+validity	plane_stress_viscosity_11	T	280	320	K
+validity	plane_stress_viscosity_11	omega	0	200000	rad/s
+scalar	plane_stress_viscosity_22	synthetic	plane_stress_viscosity_22	60000	Pa*s	constant
+uncertainty	plane_stress_viscosity_22	unstated	-	-	-	-
+validity	plane_stress_viscosity_22	T	280	320	K
+validity	plane_stress_viscosity_22	omega	0	200000	rad/s
+scalar	plane_stress_viscosity_66	synthetic	plane_stress_viscosity_66	40000	Pa*s	constant
+uncertainty	plane_stress_viscosity_66	unstated	-	-	-	-
+validity	plane_stress_viscosity_66	T	280	320	K
+validity	plane_stress_viscosity_66	omega	0	200000	rad/s
+scalar	plane_stress_viscosity_12	synthetic	plane_stress_viscosity_12	10000	Pa*s	constant
+uncertainty	plane_stress_viscosity_12	unstated	-	-	-	-
+validity	plane_stress_viscosity_12	T	280	320	K
+validity	plane_stress_viscosity_12	omega	0	200000	rad/s
+scalar	plane_stress_viscosity_16	synthetic	plane_stress_viscosity_16	4000	Pa*s	constant
+uncertainty	plane_stress_viscosity_16	unstated	-	-	-	-
+validity	plane_stress_viscosity_16	T	280	320	K
+validity	plane_stress_viscosity_16	omega	0	200000	rad/s
+scalar	plane_stress_viscosity_26	synthetic	plane_stress_viscosity_26	-3000	Pa*s	constant
+uncertainty	plane_stress_viscosity_26	unstated	-	-	-	-
+validity	plane_stress_viscosity_26	T	280	320	K
+validity	plane_stress_viscosity_26	omega	0	200000	rad/s

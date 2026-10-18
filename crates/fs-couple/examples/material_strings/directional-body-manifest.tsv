@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	synthetic-directional-string-body
+redistribution	permitted	Synthetic integration coefficients; not measured wood
+citation	Manufactured directional material body fixture
+license	CC0-1.0
+source	fixture	directional-body.tsv	material-tsv-v1
