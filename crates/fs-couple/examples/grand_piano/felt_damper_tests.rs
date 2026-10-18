@@ -10,6 +10,7 @@ fn course() -> Course {
         linear_density_kg_m: 0.02,
         tension_n: 1000.,
         flexural_rigidity_nm2: 0.,
+        bonded_section: None,
         strike_fraction: 0.12,
         hammer_mass_kg: 0.008,
         felt_thickness_m: 0.008,

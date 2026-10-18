@@ -57,8 +57,9 @@ fn layer(key: u8, ordinal: usize, radius: f64, density: f64, young: f64,
     Ok(ConcentricMaterialLayer { outer_radius_m: radius, material })
 }
 
-/// Replace physical string coefficients for every admitted key, all-or-nothing.
+/// Replace mass, bending and axial coefficients for every key, all-or-nothing.
 /// Does not change tension or the equations in the string/bridge/contact solver.
+/// The retained section binding also supplies the stretching file's `section` EA.
 /// The source model is perfectly bonded concentric layers; winding is NOT bonded.
 ///
 /// # Errors
@@ -117,6 +118,122 @@ pub fn apply(text: &str, courses: &[Course]) -> Result<Vec<Course>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::linear::{Bank, BoardMode, string_stretching::{Specification, MAX_TRIALS}};
+
+    fn material_course(density: f64, young: f64) -> Course {
+        let template = Course { length_m: 1.0, tension_n: 400.0, unison: 1,
+            duplex_length_m: 0.0, detune_cents: 0.0,
+            ..super::super::geometry::demonstration_scale().unwrap()[48] };
+        apply(&format!("{HEADER}\n{ROW}\nlayer,69,0.001,{density},{young},synthetic,CC0-1.0\n"),
+            &[template]).unwrap()[0]
+    }
+
+    fn bank(course: Course) -> Bank {
+        Bank::new(&[course], &[BoardMode { frequency_hz: 100.0, damping_ratio: 0.0,
+            bridge: [0.0; 88], volume: 0.0 }], 48_000, 3_000.0, 2, false).unwrap()
+    }
+
+    fn specification(row: &str, course: Course) -> Result<Specification, String> {
+        Specification::read(&format!("{}\n{row}\n", super::super::linear::string_stretching::HEADER), &[course])
+    }
+
+    fn near(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() <= 1e-11 * expected.abs().max(1e-12),
+            "{actual} != {expected}");
+    }
+
+    // G1/G3: one data substitution drives every section coefficient and the
+    // actual nonlinear owner. The independent reference is sinusoidal strain.
+    #[test]
+    fn section_data_drives_mass_bending_and_nonlinear_tension_together() {
+        let mut responses = Vec::new();
+        for (rho, young) in [(8000.0, 80e9), (10000.0, 200e9)] {
+            let course = material_course(rho, young);
+            let area = core::f64::consts::PI * 1e-6;
+            let ea = young * area;
+            near(course.linear_density_kg_m, rho * area);
+            near(course.flexural_rigidity_nm2, young * core::f64::consts::PI * 1e-12 / 4.0);
+            near(course.bonded_section.unwrap().axial_rigidity_n(), ea);
+            let selection = specification("stretch,69,section,0.2", course).unwrap();
+            near(selection.courses[&69].unwrap().axial_rigidity_n, ea);
+            let mut mechanics = bank(course);
+            mechanics.configure_string_stretching(&[course], &selection).unwrap();
+            let amplitude = 1e-3;
+            mechanics.q[0] = amplitude * course.modal_mass_kg().sqrt();
+            let strain = (core::f64::consts::PI * amplitude / course.length_m).powi(2) / 4.0;
+            let response = mechanics.string_stretching_observation(0).unwrap();
+            near(response.additional_strain, strain);
+            near(response.tension_n - course.tension_n, ea * strain);
+            near(response.stretching_energy_j, 0.5 * ea * course.length_m * strain * strain);
+            responses.push((course.partial_hz(1, course.tension_n), response));
+        }
+        assert_ne!(responses[0].0, responses[1].0);
+        assert!(responses[1].1.tension_n > responses[0].1.tension_n);
+        near(responses[1].1.stretching_energy_j / responses[0].1.stretching_energy_j, 2.5);
+    }
+
+    // The same waves row is re-resolved without copying EA. Changes in the
+    // actual material wave speed alter retained modes and the solved trajectory.
+    #[test]
+    fn section_data_reaches_longitudinal_wave_retention_and_motion() {
+        let mut counts = Vec::new();
+        let mut states = Vec::new();
+        for (rho, young) in [(8000.0_f64, 80e9_f64), (10000.0, 200e9)] {
+            let course = material_course(rho, young);
+            let selection = specification("waves,69,section,0.2,4000,4,0,0.05", course).unwrap();
+            let mut mechanics = bank(course);
+            mechanics.configure_string_stretching(&[course], &selection).unwrap();
+            let f_axial = 0.5 * (young / rho).sqrt() / course.length_m;
+            let expected_count = (4000.0 / f_axial).floor() as usize;
+            assert_eq!(mechanics.longitudinal_mode_count(), expected_count);
+            let scale = course.modal_mass_kg().sqrt();
+            mechanics.q[0] = 1e-4 * scale;
+            mechanics.q[1] = 0.5e-4 * scale;
+            let initial_energy = mechanics.energy();
+            let mut loss = 0.0;
+            let forces = vec![0.0; mechanics.contact_strings.len()];
+            for _ in 0..32 {
+                mechanics.begin_string_stretching_step();
+                let mut converged = false;
+                for _ in 0..MAX_TRIALS {
+                    mechanics.predict(); mechanics.finish(&forces);
+                    if mechanics.correct_string_stretching_step().unwrap() {
+                        converged = true; break;
+                    }
+                }
+                assert!(converged);
+                loss += mechanics.last_modal_loss_j;
+                mechanics.commit();
+                assert!((mechanics.energy() + loss - initial_energy).abs() < 1e-10);
+            }
+            let (q, v) = mechanics.string_longitudinal_state(0).unwrap();
+            assert!(q.iter().chain(v).any(|value| value.abs() > 1e-16));
+            counts.push(expected_count);
+            states.push((mechanics.q.clone(), v.to_vec()));
+        }
+        assert_eq!(counts, vec![2, 1]);
+        assert_ne!(states[0], states[1]);
+    }
+
+    #[test]
+    fn missing_duplicate_and_stale_axial_material_bindings_refuse() {
+        let ordinary = super::super::geometry::demonstration_scale().unwrap()[48];
+        assert!(specification("stretch,69,section,0.2", ordinary).is_err());
+        let original = material_course(8000.0, 80e9);
+        assert!(specification("stretch,69,250000,0.2", original).is_err());
+        assert!(specification("waves,69,250000,0.2,4000,4,0,0.05", original).is_err());
+        assert!(Course { linear_density_kg_m: 2.0 * original.linear_density_kg_m, ..original }.validate().is_err());
+        assert!(Course { flexural_rigidity_nm2: 2.0 * original.flexural_rigidity_nm2, ..original }.validate().is_err());
+        let stale = specification("stretch,69,section,0.2", original).unwrap();
+        let replaced = material_course(10000.0, 200e9);
+        let mut mechanics = bank(replaced);
+        let before = (mechanics.q.clone(), mechanics.v.clone());
+        assert!(mechanics.configure_string_stretching(&[replaced], &stale).is_err());
+        assert!(!mechanics.has_string_stretching());
+        assert_eq!((mechanics.q.clone(), mechanics.v.clone()), before);
+        mechanics.configure_string_stretching(&[replaced],
+            &specification("stretch,69,section,0.2", replaced).unwrap()).unwrap();
+    }
 
     #[test]
     fn material_change_reaches_string_spectrum_without_tension_retuning() {

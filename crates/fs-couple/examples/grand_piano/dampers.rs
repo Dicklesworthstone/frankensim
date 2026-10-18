@@ -526,6 +526,7 @@ mod tests {
     fn course() -> Course {
         Course { midi: 69, unison: 1, length_m: 1.0, linear_density_kg_m: 0.02,
             tension_n: 100.0, flexural_rigidity_nm2: 0.0, strike_fraction: 0.12,
+            bonded_section: None,
             hammer_mass_kg: 0.008, felt_thickness_m: 0.008, felt_area_m2: 0.0001,
             duplex_length_m: 0.0, detune_cents: 0.0 }
     }

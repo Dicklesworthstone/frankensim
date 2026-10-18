@@ -46,6 +46,41 @@ all-linear selection. All-linear files preserve the original playback
 arithmetic, including the Model D preset. Acoustic assumptions remain
 those of `grand_piano`, not the finite-body exterior renderer above.
 
+### One material section for transverse and axial mechanics
+
+`grand_piano` also accepts `--string-sections bonded.fsss` together with
+`--string-stretching axial.fspx`. Each bonded section supplies its original
+layer geometry, density and Young modulus to `fs-material`. The same section
+integrals supply linear mass density, bending rigidity EI and axial rigidity EA.
+Select `section` in place of the numeric EA in each nonlinear row:
+
+```text
+frankensim-piano-string-stretching-v1
+waves,69,section,0.2,4000,4,0,0.05
+stretch,72,section,0.2
+linear,74
+```
+
+Changing only a material layer's density or modulus now propagates through
+transverse frequencies and mass normalization, nonlinear tension and stored
+extension energy, longitudinal wave speed and mode retention, and the existing
+reciprocal string/bridge forces. Installed tension remains fixed unless the
+caller explicitly requests tuning. The slope and strain limits, longitudinal
+band, mode budget and axial loss remain explicit model inputs; the layer data
+does not identify those independently.
+
+`section` refuses when no material section was resolved. A numeric EA alongside
+a bonded section also refuses, preventing a second source of axial stiffness.
+A cached stretching specification must be resolved again after changing its
+section EA. Original scale CSVs remain valid for effective linear coefficients;
+their twelve columns do not preserve the material binding, so retain and supply
+the section file when reloading a material study.
+
+These are solid or perfectly bonded concentric members. A helical winding with
+slip requires its own physical model; this option does not treat a piano bass
+string's winding as bonded. Material-specific measured damping from RT-0425
+remains excluded for substituted sections.
+
 Five focused `grand_piano` regressions cover CLI/source admission, malformed and
 incomplete material files, changing actual tension with the original energy
 ledger, bitwise all-linear playback, and nonlinear MIDI/CSV stereo equivalence
@@ -83,7 +118,7 @@ waves,key,EA_N,maximum_slope,axial_band_hz,mode_cap,damping_ratio,maximum_strain
 | Field | Meaning and admission |
 | --- | --- |
 | `key` | One supplied scale key, covered exactly once by `linear`, `stretch` or `waves`. |
-| `EA_N` | Positive finite axial rigidity in newtons. |
+| `EA_N` | Positive finite axial rigidity in newtons, or `section` when a bonded material section supplies EA. |
 | `maximum_slope` | Bound on the complete transverse slope, in `(0,0.3]`. |
 | `axial_band_hz` | Positive finite axial frequency ceiling, at most `0.45` times the mechanical sample rate. |
 | `mode_cap` | Integer in `1..32`, applied to each physical speaking or duplex segment. A cap below the modes needed for the supplied band refuses. |

@@ -107,14 +107,16 @@ only the struck keys. Missing, duplicate or invalid cards refuse without fallbac
 These cards change physical contact forces and relaxation, not an output EQ.
 The preset shank and the scale's hammer mass/patch geometry remain unchanged.
 See HAMMERS.md for the SI format; importing values does not certify measurements.
---string-sections overrides the inertial and bending coefficients of every
+--string-sections overrides the inertial, bending and axial coefficients of every
 selected speaking course using immutable fs-material source-claim layers.
 The v1 input is a strictly ordered, complete solid concentric section per key,
 NOT a surrogate for a helically wound bass string. Tension remains unchanged
 unless explicit tuning is requested. The resulting scale is passed unchanged
 to modal mechanics, hammer/bridge coupling and observation, with no timbre knob.
-This mode excludes RT-0425 measured string damping and --string-stretching:
-those lanes need a separately admitted material-derived loss/axial law.
+With --string-stretching, use section in place of numeric EA so extension and
+longitudinal waves use the same layer integrals. Slope/strain limits remain
+explicit. This mode excludes RT-0425 measured string damping, which is not
+identified for a substituted material.
 --hammer-footprints supplies point, uniform span or authored crown profile for
 EVERY key. Profiles supply one to four ordered sites with longitudinal offsets,
 face recession, local felt thickness and positive fractions of the original area.
@@ -158,8 +160,9 @@ It requires --render and full geometric motion. See CAVITY.md for the format;
 no cavity geometry or sealed-enclosure assumption is inferred from the preset.
 --string-stretching supplies linear, averaged-extension (stretch), or finite
 longitudinal-wave (waves) selection for EVERY scale key. All nonlinear rows
-supply axial rigidity EA in N and a moderate-slope bound. A waves row also
-supplies axial band, mode cap, damping ratio and material-strain bound; these
+supply axial rigidity EA in N (or section for --string-sections) and a
+moderate-slope bound. A waves row also supplies axial band, mode cap, damping
+ratio and material-strain bound; these
 are not inferred from tension, EI or winding mass. Axial modes share the
 existing string/contact clock and react through the moving transverse bridge;
 the speaking end's axial force also drives the bridge through the declared
@@ -437,9 +440,6 @@ impl Options {
         }
         if options.string_sections.as_deref().is_some_and(|path| path.is_empty() || path.starts_with("--")) {
             return Err("--string-sections requires a nonempty material-data path".into());
-        }
-        if options.string_sections.is_some() && options.string_stretching.is_some() {
-            return Err("--string-sections and --string-stretching cannot coexist until axial EA is sourced from the same material section".into());
         }
         if options.hammers.is_some() && options.render.is_none() {
             return Err("--hammers requires --render; material input is not an export-only option".into());
@@ -1516,6 +1516,7 @@ mod render_tests {
         // loss. Its node at x/L=.35 defeats the original point damper.
         let c = geometry::Course { midi:69, unison:1, length_m:1.0,
             linear_density_kg_m:0.02, tension_n:100.0, flexural_rigidity_nm2:0.0,
+            bonded_section:None,
             strike_fraction:0.12, hammer_mass_kg:0.008, felt_thickness_m:0.008,
             felt_area_m2:0.0001, duplex_length_m:0.0, detune_cents:0.0 };
         let board = [linear::BoardMode { frequency_hz:100.0, damping_ratio:0.0,

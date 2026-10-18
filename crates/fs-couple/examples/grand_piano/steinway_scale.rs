@@ -209,6 +209,7 @@ pub fn courses() -> Result<Vec<Course>, String> {
             midi, unison: if midi < 31 { 1 } else if midi <= 40 { 2 } else { 3 },
             length_m: length, linear_density_kg_m: rho * PI * d * d / 4.0,
             tension_n: tension, flexural_rigidity_nm2: E * PI * d.powi(4) / 64.0,
+            bonded_section: None,
             strike_fraction: strike / length, hammer_mass_kg: hammer_parameters(midi)?.0,
             felt_thickness_m: 0.009 - 0.003 * fraction, felt_area_m2: 1.0e-4,
             duplex_length_m: if midi <= 40 { 0.0 } else { length / 3.03 },

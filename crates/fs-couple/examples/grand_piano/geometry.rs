@@ -49,6 +49,9 @@ pub struct Course {
     pub linear_density_kg_m: f64,
     pub tension_n: f64,
     pub flexural_rigidity_nm2: f64,
+    /// Coefficients integrated together by the shared bonded-section owner.
+    /// Effective scale CSVs do not identify axial rigidity and leave this None.
+    pub bonded_section: Option<BondedSection>,
     pub strike_fraction: f64,
     pub hammer_mass_kg: f64,
     pub felt_thickness_m: f64,
@@ -59,8 +62,20 @@ pub struct Course {
     pub detune_cents: f64,
 }
 
+/// Frozen numerical section binding. Private fields prevent an independent EA
+/// override from impersonating an integral of the supplied material layers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BondedSection {
+    linear_density_kg_m: f64,
+    flexural_rigidity_nm2: f64,
+    axial_rigidity_n: f64,
+}
+impl BondedSection {
+    pub const fn axial_rigidity_n(self) -> f64 { self.axial_rigidity_n }
+}
+
 impl Course {
-    /// Replace a speaking string's inertial and bending coefficients with those
+    /// Replace a speaking string's inertial, bending and axial coefficients with those
     /// of an independently resolved, perfectly bonded concentric material section.
     /// The string PDE and its acoustic/bridge/contact coupling are unchanged:
     /// they consume the updated physical coefficients at their normal call sites.
@@ -84,11 +99,23 @@ impl Course {
         let mut changed = *self;
         changed.linear_density_kg_m = section.line_density_kg_m();
         changed.flexural_rigidity_nm2 = section.bending_stiffness_n_m2();
+        changed.bonded_section = Some(BondedSection {
+            linear_density_kg_m: section.line_density_kg_m(),
+            flexural_rigidity_nm2: section.bending_stiffness_n_m2(),
+            axial_rigidity_n: section.axial_stiffness_n(),
+        });
         changed.validate()?;
         Ok(changed)
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(section) = self.bonded_section {
+            if self.linear_density_kg_m != section.linear_density_kg_m
+                || self.flexural_rigidity_nm2 != section.flexural_rigidity_nm2
+                || !section.axial_rigidity_n.is_finite() || section.axial_rigidity_n <= 0.0 {
+                return Err("bound string mass, EI and EA must come from the same material section".into());
+            }
+        }
         if !(21..=108).contains(&self.midi) || !(1..=3).contains(&self.unison) {
             return Err("course needs a piano MIDI key (21..108) and 1..3 strings".into());
         }
@@ -227,7 +254,7 @@ pub fn demonstration_scale() -> Result<Vec<Course>, String> {
         let course = Course {
             midi, unison: if midi < 31 { 1 } else if bass { 2 } else { 3 },
             length_m: length, linear_density_kg_m: mu, tension_n: tension,
-            flexural_rigidity_nm2: ei, strike_fraction: 0.12,
+            flexural_rigidity_nm2: ei, bonded_section: None, strike_fraction: 0.12,
             hammer_mass_kg: 0.011 - 0.006 * fraction,
             felt_thickness_m: 0.009 - 0.003 * fraction,
             felt_area_m2: 0.00010, duplex_length_m: if bass { 0.0 } else { length / 3.03 },
@@ -259,7 +286,7 @@ pub fn read_scale(text: &str) -> Result<Vec<Course>, String> {
         let midi = values[0].parse::<u8>().map_err(|_| format!("line {}: invalid MIDI key", line + 1))?;
         let unison = values[1].parse::<usize>().map_err(|_| format!("line {}: invalid unison count", line + 1))?;
         let c = Course { midi, unison, length_m: parse(2)?, linear_density_kg_m: parse(3)?,
-            tension_n: parse(4)?, flexural_rigidity_nm2: parse(5)?, strike_fraction: parse(6)?,
+            tension_n: parse(4)?, flexural_rigidity_nm2: parse(5)?, bonded_section: None, strike_fraction: parse(6)?,
             hammer_mass_kg: parse(7)?, felt_thickness_m: parse(8)?, felt_area_m2: parse(9)?,
             duplex_length_m: parse(10)?, detune_cents: parse(11)? };
         c.validate().map_err(|e| format!("line {}: {e}", line + 1))?;
@@ -273,6 +300,9 @@ pub fn read_scale(text: &str) -> Result<Vec<Course>, String> {
     Ok(courses)
 }
 
+/// Export the effective linear scale. A material-bound study must also retain
+/// its original section file: this twelve-column format carries neither EA nor
+/// source claims and cannot reconstruct a bonded material binding by itself.
 pub fn write_scale(courses: &[Course]) -> String {
     let mut text = format!("{CSV_HEADER}\n");
     for c in courses {

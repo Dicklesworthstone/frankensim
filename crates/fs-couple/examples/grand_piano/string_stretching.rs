@@ -52,9 +52,19 @@ impl Specification {
             let fields:Vec<_>=row.split(',').map(str::trim).collect();
             if !matches!(fields.len(),2|4|8){return Err(bad());}
             let key=fields[1].parse::<u8>().map_err(|_|bad())?;
+            let axial = |token: &str| -> Result<f64, String> {
+                let course = courses.iter().find(|course| course.midi == key)
+                    .ok_or_else(|| format!("string stretching key {key} is absent from the scale"))?;
+                match (token, course.bonded_section) {
+                    ("section", Some(section)) => Ok(section.axial_rigidity_n()),
+                    ("section", None) => Err(format!("key {key}: section EA requires a resolved bonded material section")),
+                    (_, Some(_)) => Err(format!("key {key}: use section for EA; a separate number would duplicate the material input")),
+                    (_, None) => token.parse().map_err(|_| bad()),
+                }
+            };
             let material=match (fields[0],fields.len()) {
                 ("linear",2)=>None,
-                ("stretch",4)=>Some(Material {axial_rigidity_n:fields[2].parse().map_err(|_|bad())?,
+                ("stretch",4)=>Some(Material {axial_rigidity_n:axial(fields[2])?,
                     maximum_slope:fields[3].parse().map_err(|_|bad())?}),
                 ("waves",8)=>{
                     waves.insert(key,WaveMaterial {
@@ -63,7 +73,7 @@ impl Specification {
                         damping_ratio:fields[6].parse().map_err(|_|bad())?,
                         maximum_strain:fields[7].parse().map_err(|_|bad())?,
                     });
-                    Some(Material {axial_rigidity_n:fields[2].parse().map_err(|_|bad())?,
+                    Some(Material {axial_rigidity_n:axial(fields[2])?,
                         maximum_slope:fields[3].parse().map_err(|_|bad())?})
                 },
                 _=>return Err(bad()),
@@ -87,6 +97,9 @@ impl Specification {
             c.validate()?;
             let p=self.courses.get(&c.midi).ok_or_else(||format!("missing string stretching key {}",c.midi))?;
             if let Some(p)=p {
+                if c.bonded_section.is_some_and(|section| p.axial_rigidity_n != section.axial_rigidity_n()) {
+                    return Err(format!("key {}: stretching EA is stale relative to the bound material section; resolve the specification again", c.midi));
+                }
                 if !p.axial_rigidity_n.is_finite()||p.axial_rigidity_n<=0.
                     || !p.maximum_slope.is_finite()||p.maximum_slope<=0.||p.maximum_slope>0.3 {
                     return Err("string stretching requires finite positive EA and slope bound in (0,0.3]".into());

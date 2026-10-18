@@ -45,6 +45,25 @@ fn extension_option_composes_with_existing_playback_and_protects_all_output_path
 }
 
 #[test]
+fn material_section_and_axial_selection_share_the_render_preparation() {
+    let course = geometry::Course { length_m: 1.0, tension_n: 400.0, unison: 1,
+        duplex_length_m: 0.0, detune_cents: 0.0,
+        ..geometry::demonstration_scale().unwrap()[48] };
+    let section_path = input(&format!("{}\n{}\nlayer,69,0.001,8000,80000000000,synthetic,CC0-1.0\n",
+        string_sections::HEADER, string_sections::ROW));
+    let axial_path = selection("waves,69,section,0.2,4000,4,0,0.05");
+    let o = options(&["--render", "p.wav", "--modes", "4",
+        "--string-sections", &section_path, "--string-stretching", &axial_path]).unwrap();
+    let scale = selected_scale(Some(&geometry::write_scale(&[course])), &o).unwrap();
+    let ea = scale[0].bonded_section.unwrap().axial_rigidity_n();
+    let admitted = load_string_stretching(&scale, &o).unwrap().unwrap();
+    assert_eq!(admitted.courses[&69].unwrap().axial_rigidity_n, ea);
+    let piano = prepare_instrument(scale, &board::demonstration(), &o).unwrap();
+    assert!(piano.bank.has_string_stretching());
+    assert_eq!(piano.bank.longitudinal_mode_count(), 2);
+}
+
+#[test]
 fn supplied_extension_is_never_ignored_or_replaced_by_an_estimate() {
     let c = geometry::demonstration_scale().unwrap()[48];
     let mut o = options(&["--render", "p.wav", "--modes", "12"]).unwrap();
