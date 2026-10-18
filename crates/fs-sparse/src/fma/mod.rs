@@ -89,7 +89,11 @@ macro_rules! fma_dispatch {
 }
 
 fma_dispatch!(bsr_spmv_dispatch, Bsr, spmv_body, (x: &[f64], y: &mut [f64]));
+fma_dispatch!(bsr_spmm_dispatch, Bsr, spmm_body, (x: &[f64], nrhs: usize, y: &mut [f64]));
+fma_dispatch!(bsr_spmm_blocked_dispatch, Bsr, spmm_blocked_body, (x: &[f64], nrhs: usize, y: &mut [f64]));
 fma_dispatch!(sell_spmv_dispatch, Sell, spmv_body, (x: &[f64], y: &mut [f64]));
+fma_dispatch!(sell_spmm_dispatch, Sell, spmm_body, (x: &[f64], nrhs: usize, y: &mut [f64]));
+fma_dispatch!(sell_spmm_blocked_dispatch, Sell, spmm_blocked_body, (x: &[f64], nrhs: usize, y: &mut [f64]));
 fma_dispatch!(sell_spmv_chunked_dispatch, Sell, spmv_chunked_body, (x: &[f64], y: &mut [f64]));
 fma_dispatch!(sell_shard_dispatch, Sell, shard_body, (x: &[f64], lo: usize, hi: usize) -> Vec<(usize, f64)>);
 fma_dispatch!(compact_spmv_dispatch, CsrCompact, spmv_body, (x: &[f64], y: &mut [f64]));
@@ -116,7 +120,11 @@ mod paste_x86 {
     }
 
     fma_body!(bsr_spmv_dispatch, Bsr, spmv_body, (x: &[f64], y: &mut [f64]));
+    fma_body!(bsr_spmm_dispatch, Bsr, spmm_body, (x: &[f64], nrhs: usize, y: &mut [f64]));
+    fma_body!(bsr_spmm_blocked_dispatch, Bsr, spmm_blocked_body, (x: &[f64], nrhs: usize, y: &mut [f64]));
     fma_body!(sell_spmv_dispatch, Sell, spmv_body, (x: &[f64], y: &mut [f64]));
+    fma_body!(sell_spmm_dispatch, Sell, spmm_body, (x: &[f64], nrhs: usize, y: &mut [f64]));
+    fma_body!(sell_spmm_blocked_dispatch, Sell, spmm_blocked_body, (x: &[f64], nrhs: usize, y: &mut [f64]));
     fma_body!(sell_spmv_chunked_dispatch, Sell, spmv_chunked_body, (x: &[f64], y: &mut [f64]));
     fma_body!(sell_shard_dispatch, Sell, shard_body, (x: &[f64], lo: usize, hi: usize) -> Vec<(usize, f64)>);
     fma_body!(compact_spmv_dispatch, CsrCompact, spmv_body, (x: &[f64], y: &mut [f64]));
