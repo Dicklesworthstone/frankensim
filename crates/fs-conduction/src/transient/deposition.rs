@@ -11,5 +11,7 @@
 
 /// Material-state radiosity sources and implicit finite-cell heat exchange.
 pub mod radiation;
+/// Ordered material contacts in series with existing bulk transport.
+pub mod contact;
 
 pub use fs_thermal::enthalpy::*;
