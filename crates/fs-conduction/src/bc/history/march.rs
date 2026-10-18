@@ -14,6 +14,9 @@
 /// Sourced radiative surfaces and independent reservoir-temperature histories.
 pub mod radiation;
 
+/// Scheduled reference-mass enthalpy transport, including latent phase changes.
+pub mod enthalpy;
+
 mod capacity;
 pub use capacity::ThermalHistoryCapacity;
 
