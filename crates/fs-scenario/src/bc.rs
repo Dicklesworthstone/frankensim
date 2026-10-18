@@ -180,6 +180,10 @@ pub fn expectation(physics: Physics, kind: BcKind) -> Expectation {
     use Expectation::{NoValue, Typed, Unsupported, Value};
     match (physics, kind) {
         (Physics::IncompressibleFlow, BcKind::Dirichlet) => Value(dims::VELOCITY),
+        (Physics::IncompressibleFlow, BcKind::Neumann) => Typed {
+            kind: PayloadKind::Vector,
+            dims: Some(dims::VELOCITY),
+        },
         (Physics::IncompressibleFlow, BcKind::MassFlowInlet) => Value(dims::MASS_FLOW),
         (Physics::IncompressibleFlow, BcKind::PressureOutlet | BcKind::Traction) => {
             Value(dims::PRESSURE)
@@ -189,6 +193,10 @@ pub fn expectation(physics: Physics, kind: BcKind) -> Expectation {
         (Physics::Thermal, BcKind::Neumann) => Value(dims::HEAT_FLUX),
         (Physics::Thermal, BcKind::Robin) => Value(dims::HTC),
         (Physics::Elasticity, BcKind::Dirichlet) => Value(dims::DISPLACEMENT),
+        (Physics::Elasticity, BcKind::Neumann) => Typed {
+            kind: PayloadKind::Vector,
+            dims: Some(dims::PRESSURE),
+        },
         (Physics::Elasticity, BcKind::Traction) => Value(dims::PRESSURE),
         (Physics::Magnetics, BcKind::MagneticVectorPotential) => Typed {
             kind: PayloadKind::Vector,
@@ -553,6 +561,26 @@ mod validation_internal_tests {
     use super::{BcKind, BoundaryCondition, BoundaryDiagnosticContext, Compat, Physics, dims};
     use crate::bc::BcValue;
     use fs_qty::QtyAny;
+
+    #[test]
+    fn vector_neumann_boundary_admission_is_dimensioned() {
+        use super::Expectation;
+        use crate::payload::PayloadKind;
+        assert_eq!(
+            super::expectation(Physics::IncompressibleFlow, BcKind::Neumann),
+            Expectation::Typed {
+                kind: PayloadKind::Vector,
+                dims: Some(dims::VELOCITY),
+            }
+        );
+        assert_eq!(
+            super::expectation(Physics::Elasticity, BcKind::Neumann),
+            Expectation::Typed {
+                kind: PayloadKind::Vector,
+                dims: Some(dims::PRESSURE),
+            }
+        );
+    }
 
     #[test]
     fn diagnostic_context_is_borrowed_and_output_stable() {
