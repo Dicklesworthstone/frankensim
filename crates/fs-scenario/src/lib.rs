@@ -39,6 +39,8 @@ pub mod rans_validation;
 pub mod scenario;
 pub mod sensor;
 pub mod signal;
+/// Executable Cartesian samples of the existing typed vector payloads.
+pub mod vector;
 
 pub use acoustic::{
     AcousticAssembly, AmbientGas, BeatingReed, BowStroke, ContactTexture, CylinderSegment,
