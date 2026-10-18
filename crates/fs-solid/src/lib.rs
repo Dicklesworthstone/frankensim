@@ -47,6 +47,8 @@ pub mod hyper3;
 pub mod koiter;
 pub mod linear;
 pub mod linear3;
+/// Consistent exterior pressure, traction and volume loads on P1 tetrahedra.
+pub mod loads3;
 /// Source-bound finite-deformation textile membranes on the shared P1 mesh.
 pub mod membrane;
 /// Initial-stress vibration pencils from the existing thermal equilibrium owner.
