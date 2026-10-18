@@ -15,6 +15,9 @@
 use super::*;
 use super::super::network_response;
 
+/// Compliant obstacles in the same joint solve as prescribed-load friction.
+pub mod obstacles;
+
 /// Bounded joint setup and nonlinear work, in addition to each port's limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MultiFrictionConfig {
@@ -67,7 +70,11 @@ pub struct MultiFrictionFrame {
     pub network_dissipation_j: f64,
     /// Sum of actual sliding losses [J].
     pub friction_dissipation_j: f64,
-    /// Storage change + both losses - external and surface work [J].
+    /// Stored unilateral-contact potential, separate from network storage [J].
+    pub obstacle_energy_j: f64,
+    /// Nonadhesive loss at the optional compliant obstacles [J].
+    pub obstacle_dissipation_j: f64,
+    /// Change of ALL storage + all losses - external and surface work [J].
     pub energy_residual_j: f64,
     /// Original network's energy allowance, scaled by absolute surface work.
     pub energy_tolerance_j: f64,
@@ -100,6 +107,7 @@ pub struct MultiFrictionModalSystem {
     frame: MultiFrictionFrame,
     accepted: bool,
     interfaces: Vec<Option<interface::DryFrictionBinding>>,
+    obstacles: Option<obstacles::ObstacleSet>,
 }
 impl FrictionModalSystem {
     /// Add prescribed friction contacts without resetting the original network.
@@ -157,7 +165,7 @@ impl MultiFrictionModalSystem {
             regimes: vec![ModalFrictionRegime::Released; p], iterations: vec![0; p],
             staged_ports: vec![FrictionPortFrame::default(); p],
             frame: MultiFrictionFrame { ports: vec![FrictionPortFrame::default(); p], ..MultiFrictionFrame::default() },
-            accepted: false, interfaces: vec![None; p-1] })
+            accepted: false, interfaces: vec![None; p-1], obstacles: None })
     }
     /// Accepted components in their original basis and order.
     #[must_use] pub fn components(&self) -> &[ModalAcousticTimeModel] { self.core.components() }
@@ -171,8 +179,14 @@ impl MultiFrictionModalSystem {
     #[must_use] pub fn port_count(&self) -> usize { self.points.len() }
     /// Original geometry and law, with no mutable bypass of admission.
     #[must_use] pub fn port(&self, index: usize) -> Option<&ModalFrictionPort> { self.points.get(index).map(|p| &p.port) }
-    /// Actual modal and bilateral stored energy [J].
-    pub fn total_energy_j(&self) -> Result<f64, ModalCouplingError> { self.core.total_energy_j() }
+    /// Actual modal, bilateral and optional obstacle stored energy [J].
+    pub fn total_energy_j(&self) -> Result<f64, ModalCouplingError> {
+        let network = self.core.total_energy_j()?;
+        match &self.obstacles {
+            Some(obstacles) => finite(network + obstacles.energy(self.components())?),
+            None => Ok(network),
+        }
+    }
     /// Original full-network static preload with EVERY contact released before
     /// the performance window. Neither the contact law nor its fixed compliance
     /// changes. Refuses after any sample or nonzero initial vibration; keeps all
@@ -181,6 +195,9 @@ impl MultiFrictionModalSystem {
     pub fn initialize_released_equilibrium(&mut self, external: &[f64], gate: &CancelGate)
         -> Result<f64, ModalFrictionError>
     {
+        if self.obstacles.is_some() {
+            return Err(invalid("linear preload cannot ignore nonlinear obstacles; preload before binding them or drive the contact dynamically").into());
+        }
         self.core.initialize_released_equilibrium(external, gate)
     }
     /// Last joint report; absent until this wrapper accepts a sample.
@@ -204,7 +221,7 @@ impl MultiFrictionModalSystem {
             || !d.normal_force_n.is_finite() || d.normal_force_n < 0.0) {
             return Err(invalid("simultaneous friction requires one finite speed and nonnegative load per port").into());
         }
-        if p == 1 {
+        if p == 1 && self.obstacles.is_none() {
             let f = *self.core.step_inner(external, drives[0], gate)?;
             self.frame.ports[0] = FrictionPortFrame { traction_n: f.traction_n, slip_distance_m: f.slip_distance_m,
                 drive_work_j: f.drive_work_j, dissipation_j: f.friction_dissipation_j,
@@ -222,9 +239,12 @@ impl MultiFrictionModalSystem {
             interface::check_endpoint(self.interface(i), &self.points[i].column,
                 &self.core.network.models, drives[i])?;
         }
-        let before = self.core.total_energy_j()?;
+        let before = self.total_energy_j()?;
         self.core.network.prepare_prediction(external, gate)?;
         self.free_delta.copy_from_slice(&self.core.network.free_delta);
+        if let Some(obstacles) = &mut self.obstacles {
+            obstacles.prepare(&self.core.network.old_q, &self.free_delta, gate)?;
+        }
         for i in 0..p {
             self.free_slip[i] = finite(finite(drives[i].speed_m_s*self.sample_period_s())?
                 - dot(&self.points[i].column, &self.free_delta)?)?;
@@ -232,10 +252,14 @@ impl MultiFrictionModalSystem {
         self.tractions.fill(0.0); self.iterations.fill(0);
         let mut sweeps = 0;
         for sweep in 1..=self.config.max_sweeps {
+            if let Some(obstacles) = &mut self.obstacles {
+                obstacles.sweep(&self.tractions, self.core.network.dt, gate)?;
+            }
             for i in 0..p {
                 poll(gate)?;
                 let mut free = self.free_slip[i];
                 for j in 0..p { if j != i { free = finite(free - self.compliance[i*p+j]*self.tractions[j])?; } }
+                if let Some(obstacles) = &self.obstacles { free = finite(free + obstacles.slip_shift(i)?)?; }
                 let point = &self.points[i];
                 let (force, regime, iterations) = scalar::solve(&point.port.law, point.config,
                     self.compliance[i*p+i], self.sample_period_s(), free, drives[i].normal_force_n, gate)?;
@@ -244,10 +268,13 @@ impl MultiFrictionModalSystem {
             }
             // Joint convergence, not just small force updates or each coordinate's
             // last local root. Temporary physical-limit failures cannot publish.
-            let mut failure = None;
+            let mut failure = self.obstacles.as_ref().and_then(|obstacles|
+                obstacles.check_prediction(&self.tractions, self.core.network.dt, gate).err())
+                .map(ModalFrictionError::Network);
             for i in 0..p {
                 poll(gate)?;
-                let slip = finite(self.free_slip[i] - dot(&self.compliance[i*p..(i+1)*p], &self.tractions)?)?;
+                let mut slip = finite(self.free_slip[i] - dot(&self.compliance[i*p..(i+1)*p], &self.tractions)?)?;
+                if let Some(obstacles) = &self.obstacles { slip = finite(slip + obstacles.slip_shift(i)?)?; }
                 if let Err(error) = scalar::check(&self.points[i].port.law, self.points[i].config,
                     self.sample_period_s(), drives[i], self.tractions[i], slip, self.regimes[i], self.iterations[i]) {
                     if failure.is_none() { failure = Some(error); }
@@ -265,7 +292,12 @@ impl MultiFrictionModalSystem {
                 for (force, &b) in self.core.forces.iter_mut().zip(&point.column) { *force = finite(*force+b*traction)?; }
             }
         }
+        if let Some(obstacles) = &self.obstacles { obstacles.add_forces(&mut self.core.forces, gate)?; }
         self.core.network.stage_inner(&self.core.forces, gate)?;
+        let (obstacle_energy, obstacle_loss) = match &mut self.obstacles {
+            Some(obstacles) => obstacles.stage(&self.core.network.candidates, self.core.network.dt, gate)?,
+            None => (0.0, 0.0),
+        };
         let (mut loss, mut work, mut absolute_work) = (0.0, 0.0, 0.0);
         for i in 0..p {
             poll(gate)?;
@@ -284,11 +316,17 @@ impl MultiFrictionModalSystem {
         }
         let pressure = self.core.staged_observer_pressure(gate)?;
         let staged = &self.core.network.staged_frame;
-        let after = finite(staged.modal_energy_j+staged.connection_energy_j)?;
+        let network_energy = finite(staged.modal_energy_j+staged.connection_energy_j)?;
+        let after = if self.obstacles.is_some() { finite(network_energy+obstacle_energy)? } else { network_energy };
         let network_loss = finite(staged.component_dissipation_j+staged.connection_dissipation_j)?;
         let external_work = dot(external, &self.core.network.free_delta)?;
-        let residual = finite((after-before)+network_loss+loss-external_work-work)?;
-        let scale = before.max(after).max(network_loss).max(loss).max(external_work.abs()).max(absolute_work);
+        let residual = if self.obstacles.is_some() {
+            finite((after-before)+network_loss+loss+obstacle_loss-external_work-work)?
+        } else { finite((after-before)+network_loss+loss-external_work-work)? };
+        let scale = before.max(after).max(network_loss).max(loss).max(obstacle_loss).max(external_work.abs()).max(absolute_work);
+        if self.obstacles.is_some() {
+            limit("total energy including friction obstacles", after, self.core.network.config.maximum_total_energy_j)?;
+        }
         let tolerance = finite(self.core.network.config.energy_absolute_tolerance_j
             +self.core.network.config.energy_relative_tolerance*scale)?;
         if loss < 0.0 || residual.abs() > tolerance {
@@ -298,10 +336,12 @@ impl MultiFrictionModalSystem {
         poll(gate)?;
         self.core.network.staged_frame.observer_pressure_pa = pressure;
         self.core.network.publish_staged();
+        if let Some(obstacles) = &mut self.obstacles { obstacles.publish(); }
         self.frame.sample = sample; self.frame.observer_pressure_pa = pressure;
-        self.frame.network_energy_j = after; self.frame.external_work_j = external_work;
+        self.frame.network_energy_j = network_energy; self.frame.external_work_j = external_work;
         self.frame.drive_work_j = work; self.frame.network_dissipation_j = network_loss;
         self.frame.friction_dissipation_j = loss; self.frame.energy_residual_j = residual;
+        self.frame.obstacle_energy_j = obstacle_energy; self.frame.obstacle_dissipation_j = obstacle_loss;
         self.frame.energy_tolerance_j = tolerance; self.frame.sweeps = sweeps;
         self.frame.ports.copy_from_slice(&self.staged_ports); self.accepted = true;
         Ok(&self.frame)
