@@ -47,6 +47,7 @@ pub mod bickley;
 pub mod curle2d;
 pub mod jetcard;
 pub mod jetlab;
+pub mod material;
 pub mod noisetable;
 pub mod regime;
 pub mod slot_jet_3d;

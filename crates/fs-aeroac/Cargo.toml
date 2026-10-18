@@ -13,6 +13,7 @@ layer = "L3"
 [dependencies]
 fs-fft = { path = "../fs-fft" }
 fs-lbm = { path = "../fs-lbm" }
+fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 
 [dev-dependencies]

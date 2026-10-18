@@ -948,6 +948,7 @@ version = "0.0.1"
 dependencies = [
  "fs-fft",
  "fs-lbm",
+ "fs-material",
  "fs-math",
  "fsci-runtime",
  "fsci-special",

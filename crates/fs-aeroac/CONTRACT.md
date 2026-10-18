@@ -126,6 +126,39 @@ scope law, pinned as data and by test).
 
 ## Invariants
 
+### Shared material integration
+
+`material::MaterialJetLabium` binds geometry and physical speed/dx/dt inputs
+to the shared `GasState` and `fs-lbm::material::MaterialScaling` owner. Gas
+coherence is admitted before compilation. The existing jet-labium solver
+receives material-derived viscosity; its actual surface force is converted
+to N/m with `rho * dx^3 / dt^2`. Physical frequency and the same gas's sound
+speed supply `k = 2 pi f / c` to the existing Curle observer. No independent
+rho, viscosity, Reynolds number or acoustic speed can override the binding.
+Pure, humid, mixed and thermochemical gas evaluations use the same path.
+`MaterialJetLabiumRun::observe_spectral_line` transforms its own accepted
+force history with `fs-fft`, mean removal and the existing symmetric Hann
+window. Coherent-gain normalization preserves resolved sinusoid amplitude;
+conjugation makes the phase convention `exp(-i omega t)` relative to the first
+recorded sample. Physical bin frequency and same-medium pressure are returned
+together. An independent direct DFT checks force amplitude and phase.
+
+The physical Mach envelope is strictly below 0.3 and is checked separately
+from numerical lattice Mach. Grid allocation is budgeted before construction.
+An observed speed-envelope violation refuses output; diagnostics sample the
+existing two planes every 16 steps and do not prove the full-field bound.
+Observer frequencies at or above the force record's Nyquist limit refuse.
+The medium is homogeneous and frozen during a run. Compressible feedback,
+reaction, relaxation/absorption, global flow validity and quantitative
+experimental accuracy are not established by this adapter; the crate's
+two-dimensional shape/scaling scope remains unchanged.
+
+`tests/material.rs` verifies the actual lattice-to-SI force/frequency mapping,
+same-state radiation, independent physical/numerical Mach admission, and
+data-only pressure/temperature/mixture changes through executed flow and
+observer outputs (G0/G3). These short transient tests establish integration,
+not a converged tonal spectrum or absolute sound level.
+
 1. EXACT Wronskian: `J1 Y0 - J0 Y1 = 2/(pi x)` holds within 5e-13
    over a log grid 1e-3..3e3 including the series/asymptotic
    crossover from both sides. Honest limits (review-measured against

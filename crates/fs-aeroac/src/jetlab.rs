@@ -129,7 +129,7 @@ fn jet_profile(cfg: &JetLabiumConfig, y: usize) -> f64 {
 }
 
 /// Shared parameter validation for fixed runs and ramps.
-fn validate_config(cfg: &JetLabiumConfig) -> Result<(), AeroacError> {
+pub(crate) fn validate_config(cfg: &JetLabiumConfig) -> Result<(), AeroacError> {
     for (v, what) in [
         (cfg.slot_half, "slot_half"),
         (cfg.slot_smoothing, "slot_smoothing"),
@@ -158,9 +158,9 @@ fn validate_config(cfg: &JetLabiumConfig) -> Result<(), AeroacError> {
             what: "jet geometry (domain, slot, speed, tau) out of range",
         });
     }
-    if cfg.nozzle_thickness + 2 + cfg.edge_distance + cfg.plate_length + cfg.fringe_width + 8
-        > cfg.nx
-    {
+    let occupied = [cfg.nozzle_thickness, 2, cfg.edge_distance, cfg.plate_length, cfg.fringe_width, 8]
+        .into_iter().try_fold(0usize, usize::checked_add);
+    if occupied.is_none_or(|length| length > cfg.nx) {
         return Err(AeroacError::InvalidParameter {
             what: "nozzle + plate + fringe do not fit in the domain",
         });
