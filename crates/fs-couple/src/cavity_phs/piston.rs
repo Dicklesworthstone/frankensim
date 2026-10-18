@@ -1,4 +1,4 @@
-//! A moving inertial wall coupled to a closed, source-backed gas cavity.
+//! A moving inertial wall coupled to a source-backed gas cavity.
 //!
 //! The gas owns caloric state, EOS, source support, transport and acoustic
 //! properties. This module owns ONE translational boundary coordinate and its
@@ -8,6 +8,8 @@
 /// Two source-resolved gases acting on one inertial wall and one momentum state.
 pub mod double_acting;
 mod impulse;
+/// Conservative nozzle exchange with a finite reservoir and the same wall step.
+pub mod exchange;
 
 /// Shared source-resolved rigid-body inertia coupled to the same gas dynamics.
 pub mod material;
@@ -21,7 +23,9 @@ use fs_material::thermochemical_gas::energy::parcel::midpoint::{
     GasHeatVolumeCandidate, GasHeatVolumeStep,
 };
 
-/// Closed constant-area cavity with a translating inertial end wall.
+/// Constant-area cavity with a translating inertial end wall.
+/// `step` conserves chamber mass; `step_with_nozzle` admits conservative exchange
+/// with a finite reservoir before advancing the same gas and wall equations.
 /// Volume is the single position owner: the effective wall coordinate is V/A.
 /// Other rigid-body coordinates, contact stops and crank linkages are not modeled.
 #[derive(Clone, Debug)]
@@ -93,7 +97,7 @@ pub enum PistonError {
 }
 impl core::fmt::Display for PistonError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "closed gas/piston coupling: {self:?}")
+        write!(f, "gas/piston coupling: {self:?}")
     }
 }
 impl std::error::Error for PistonError {}

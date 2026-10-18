@@ -15,7 +15,7 @@ use super::double_acting::{
     DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve, DoublePistonStep,
 };
 
-/// A rigid material-bound moving wall and its coupled closed gas.
+/// A rigid material-bound moving wall and its coupled source-resolved gas.
 ///
 /// All regions of `body` translate together at the piston velocity. Rotations
 /// are constrained; centre-of-mass offsets and rotational inertia therefore do
@@ -66,6 +66,21 @@ impl MaterialGasPiston {
         cancelled: impl FnMut() -> bool,
     ) -> Result<PistonStep, PistonError> {
         self.piston.step(input, controls, cancelled)
+    }
+
+    /// Use the same conservative finite-reservoir exchange with the original
+    /// source-resolved rigid-body inertia and retained material regions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_nozzle(
+        &mut self, reservoir: &mut ClosedGasParcel,
+        nozzle: fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::GasNozzle,
+        input: PistonInput,
+        exchange: fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::GasNozzleStepSolve,
+        controls: PistonSolve, total_energy_tolerance_j: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<super::exchange::PistonNozzleStep, PistonError> {
+        self.piston.step_with_nozzle(reservoir, nozzle, input, exchange, controls,
+            total_energy_tolerance_j, cancelled)
     }
 }
 

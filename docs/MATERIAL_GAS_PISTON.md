@@ -39,10 +39,11 @@ diagnostics. No gas name selects a solver branch. Thermodynamic/calibration
 support stays with fs-material/fs-thermochem, while the moving wall and coupled
 momentum/energy step live in fs-couple.
 
-This is one spatially uniform, closed ideal-gas cavity and one translational
-inertial wall. It is not combustion, valves, gas exchange, friction, piston-wall
-contact, a crankshaft, radiation feedback, a shock solver or an exact-isentropic
-integrator. Entropy is reported by the gas owner, not certified nondecreasing.
+The ordinary `step` is one spatially uniform, closed ideal-gas cavity and one
+translational inertial wall. `step_with_nozzle`, described below, adds conservative
+exchange with a finite reservoir. Neither models combustion, valve actuation,
+friction, piston-wall contact, a crankshaft, radiation feedback, shocks or exact
+isentropic integration. Entropy is reported by the gas owner, not certified nondecreasing.
 A material source model is not experimental qualification of a real engine.
 
 Six focused Rust regressions cover stationary equilibrium, heat-driven motion,
@@ -82,3 +83,40 @@ centre-of-mass offsets are retained on the body but do not generate rotation.
 Three additional Rust tests exercise density-only trajectory changes, composite
 source retention and exact agreement with the numerical mass path, and atomic
 failure/cancellation including immutable solid-source history.
+
+## Conservative nozzle exchange and moving walls
+
+`GasPiston::step_with_nozzle` accepts a mutable finite `ClosedGasParcel` reservoir,
+the existing `GasNozzle` area/discharge coefficient and `GasNozzleStepSolve`, the
+ordinary piston drive/controls, and a whole-pair energy tolerance. The
+`MaterialGasPiston` adapter exposes the same operation with its source-resolved
+solid inertia. Both gases and the piston publish together only after all source,
+inventory, clock, momentum and combined energy checks succeed.
+
+The upstream side is selected from the actual initial pressures. The original
+material nozzle computes subsonic or choked flow using the source's enthalpy,
+entropy and sound speed. Its paired transfer moves actual species and upstream
+total enthalpy at fixed volumes. The existing midpoint piston step then uses
+that newly resolved chamber composition, density, temperature, pressure,
+transport and acoustic state. Incoming enthalpy is already present; supply only
+independent external heat in `PistonInput::heat_j`.
+
+This is an explicitly first-order transfer-then-motion split over one physical
+time interval. Refine that interval to assess splitting error. The nozzle's
+donor-fraction and pressure-crossing checks remain active; no transfer is clipped
+to fit them. The reservoir is a well-mixed fixed volume and incoming jet energy
+thermalizes there or in the chamber. No resolved jet thrust, shock, valve motion
+or simultaneous compressible-flow solution is implied.
+
+`PistonNozzleStep` preserves both original stage reports and independently checks
+`delta_U_chamber + delta_U_reservoir + delta_K + exterior_work - force_work - Q`.
+Total gas mass and the transfer owner's per-species balances remain explicit.
+The transferred enthalpy cancels inside this two-gas accounting boundary.
+
+After nonzero mass exchange, the piston still exposes its real wall and heat
+transfers, but its existing two-port `PortedModule` window audit is unavailable:
+that schema lacks the stream port needed for an open chamber. The returned
+paired report supplies the complete energy/mass account for this composition.
+A closed nozzle retains the ordinary closed-step audit and arithmetic. Failed
+transfer, failed subsequent motion and late cancellation preserve both parcels,
+the wall state and the prior accepted port account.
