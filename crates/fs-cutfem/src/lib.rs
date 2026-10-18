@@ -59,6 +59,7 @@ pub mod grid;
 pub mod octree3;
 pub mod quad;
 pub mod quad3;
+pub mod sampled3;
 pub mod sdf;
 
 pub use agg::AggPolicy;
