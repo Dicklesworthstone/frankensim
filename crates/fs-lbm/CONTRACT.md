@@ -14,6 +14,24 @@ dimension checks, `fs-exec` for cancel gates and pooled sweeps, and
 `fs-sparse` (COO/CSR assembly and ILU(0)) for the conjugate energy and
 projection solves. Pure, deterministic (fixed tile/cell/link order).
 
+### Material-bound enthalpy transport
+
+With `enthalpy-coupling`, `conjugate::enthalpy::transport::material::MaterialCell`
+binds an active thermal cell to its actual borrowed caloric law and original
+material card. One atomic source query supplies thermal conductivity and the
+explicitly chosen electrical resistivity/conductivity basis at the same evolving
+temperature and liquid mass fraction. The common material conductor owns any
+reciprocal; original source claims remain on `MaterialTransportState`. Initial
+claims are pinned for the binding's lifetime; evolving state cannot silently
+select another measurement after leaving the original source's support. Explicit
+insulation differs from missing data. The binding plugs directly into the
+existing explicit and implicit current/enthalpy callbacks; link geometry and
+thermal interfaces retain their existing owners. Endpoint source refusals prevent
+publication. Fixed mass/geometry, scalar DC conduction and the declared caloric
+chart remain the model limits; this does not implement moving melt or induction.
+`tests/joule_enthalpy_material.rs` exercises source-driven phase/current/heat
+changes on a latent plateau, equivalent electrical source bases and rollback.
+
 ## Public types and semantics
 
 - D2Q9 constants: `Q` (9), `CS2` (`1/3`), `MACH_LIMIT` (`0.3`).

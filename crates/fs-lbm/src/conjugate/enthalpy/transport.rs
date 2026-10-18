@@ -3,6 +3,8 @@
 //! bulk and electrical-contact heating. No mass or apparent Cp is re-assigned.
 /// Same-epoch electrical interface laws, bulk transport and source history.
 pub mod interfaces;
+/// Original material cards drive current and thermal transport on one phase state.
+pub mod material;
 
 use super::*;
 use std::sync::Arc;
