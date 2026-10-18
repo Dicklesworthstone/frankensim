@@ -1134,6 +1134,142 @@ pub fn quadratic_eigenvalues(
     })
 }
 
+/// Largest M-Gram defect `max |φ_iᵀMφ_j − δ_ij|` a cluster may carry and
+/// still be tightened by [`quadratic_radii`].
+pub const QUADRATIC_GRAM_DEFECT_MAX: f64 = 1.0e-12;
+
+/// Quadratic (Kato–Temple) eigenvalue radii for an inertia-certified slice.
+///
+/// The value certificate `|λ − λ̂| ≤ r` has a floating-point floor in `r` on
+/// fine meshes. A certified slice also knows its spectral gaps, because
+/// `modes.len() == expected` counts every eigenvalue in the window. That
+/// admits the quadratic residual bound `|λ_j − θ_j| ≤ ‖R‖² / δ`:
+/// Temple (1928) and Kato (1949) for one vector; Mathias, SIAM J. Matrix
+/// Anal. Appl. 19(2), 1998 for a cluster of M-orthonormal Ritz vectors.
+/// `R` is the cluster's `M⁻¹`-norm residual block and `δ` the distance from
+/// its Ritz values to every eigenvalue outside it.
+///
+/// How the radii are built:
+/// 1. With `F² = Σ r_i²` over the whole report, `F ≥ ‖R‖₂`. By Kahan's
+///    theorem, the `n` modes match `n` distinct eigenvalues, each within `F`
+///    of its Ritz value. If every `[θ_i − F, θ_i + F]` lies inside the window,
+///    those are exactly the window's eigenvalues.
+/// 2. Overlapping widened intervals form clusters.
+/// 3. `δ` is bounded below by the neighbouring clusters' widened intervals
+///    and by the window edges. The window counts `[low, high)`; every other
+///    eigenvalue is `< low` or `≥ high`.
+/// 4. A cluster of several modes is tightened only if its measured M-Gram
+///    defect `η` is at most [`QUADRATIC_GRAM_DEFECT_MAX`]. The cluster bound
+///    is stated for Rayleigh–Ritz values. The diagonal Ritz values `θ` differ
+///    from those by at most `e = ‖QᵀKQ − diag θ‖_F` (Weyl), and the
+///    Rayleigh–Ritz residual is no larger than `R`. So the gap becomes
+///    `δ − e`, and `e + 2η·max|θ|` is added.
+/// 5. Each radius is
+///    `min(r_i, Σ_c r² / (δ_c − e) + e + 2η·max|θ| + 4ε·max|θ|)`. The last
+///    term covers the rounding of the computed Ritz values themselves.
+///
+/// Modes that fail any step keep their linear residual. The report's
+/// `interval`s, and every digest over them, are unchanged.
+///
+/// # Panics
+/// If a mode shape's length disagrees with `k`/`m` (programmer error).
+#[must_use]
+pub fn quadratic_radii(report: &SliceReport, k: &Csr, m: &Csr) -> Vec<f64> {
+    let modes = &report.modes;
+    let mut radii: Vec<f64> = modes.iter().map(|mode| mode.residual).collect();
+    let n = modes.len();
+    if n == 0 || n != report.expected {
+        return radii;
+    }
+    let (low, high) = report.window;
+    let frobenius = modes
+        .iter()
+        .map(|mode| mode.residual * mode.residual)
+        .sum::<f64>()
+        .sqrt();
+    if !frobenius.is_finite()
+        || modes
+            .iter()
+            .any(|mode| mode.lambda - frobenius < low || mode.lambda + frobenius >= high)
+    {
+        return radii;
+    }
+    let mut clusters: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0;
+    for i in 1..=n {
+        if i == n || modes[i].lambda - frobenius > modes[i - 1].lambda + frobenius {
+            clusters.push((start, i));
+            start = i;
+        }
+    }
+    for (c, &(first, end)) in clusters.iter().enumerate() {
+        let below = if c == 0 {
+            low
+        } else {
+            modes[clusters[c - 1].1 - 1].lambda + frobenius
+        };
+        let above = if c + 1 == clusters.len() {
+            high
+        } else {
+            modes[clusters[c + 1].0].lambda - frobenius
+        };
+        let gap = (modes[first].lambda - below).min(above - modes[end - 1].lambda);
+        if !(gap > 0.0 && gap.is_finite()) {
+            continue;
+        }
+        let mut defect = 0.0_f64;
+        let mut off_diagonal_sq = 0.0_f64;
+        if end - first > 1 {
+            let mut stiff_phi = vec![0.0; k.nrows()];
+            let mut mass_phi = vec![0.0; m.nrows()];
+            for i in first..end {
+                assert_eq!(modes[i].phi.len(), m.nrows(), "mode/mass size mismatch");
+                assert_eq!(
+                    modes[i].phi.len(),
+                    k.nrows(),
+                    "mode/stiffness size mismatch"
+                );
+                k.spmv(&modes[i].phi, &mut stiff_phi);
+                m.spmv(&modes[i].phi, &mut mass_phi);
+                for (j, other) in modes.iter().enumerate().take(end).skip(first) {
+                    let gram: f64 = other.phi.iter().zip(&mass_phi).map(|(a, b)| a * b).sum();
+                    let rayleigh: f64 = other.phi.iter().zip(&stiff_phi).map(|(a, b)| a * b).sum();
+                    let (identity, diagonal) = if i == j {
+                        (1.0, modes[i].lambda)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    defect = defect.max((gram - identity).abs());
+                    off_diagonal_sq += (rayleigh - diagonal).powi(2);
+                }
+            }
+            if !(defect <= QUADRATIC_GRAM_DEFECT_MAX) {
+                continue;
+            }
+        }
+        let galerkin = off_diagonal_sq.sqrt();
+        let effective_gap = gap - galerkin;
+        if !(effective_gap > 0.0) {
+            continue;
+        }
+        let block: f64 = modes[first..end]
+            .iter()
+            .map(|mode| mode.residual * mode.residual)
+            .sum();
+        let scale = modes[first..end]
+            .iter()
+            .map(|mode| mode.lambda.abs())
+            .fold(0.0_f64, f64::max);
+        // The computed Rayleigh quotient itself carries rounding of a few ulps.
+        let quadratic =
+            block / effective_gap + galerkin + 2.0 * defect * scale + 4.0 * f64::EPSILON * scale;
+        for radius in &mut radii[first..end] {
+            *radius = radius.min(quadratic);
+        }
+    }
+    radii
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1608,5 +1744,152 @@ mod tests {
         println!(
             "{{\"suite\":\"fs-modal\",\"case\":\"bitwise-determinism\",\"verdict\":\"pass\"}}"
         );
+    }
+
+    /// Re-certify a perturbed shape under `M = I`: Rayleigh quotient,
+    /// Euclidean residual, linear interval.
+    fn recertify(k: &Csr, phi: &[f64]) -> ModePair {
+        let norm = phi.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let phi: Vec<f64> = phi.iter().map(|v| v / norm).collect();
+        let mut kphi = vec![0.0; phi.len()];
+        k.spmv(&phi, &mut kphi);
+        let lambda: f64 = phi.iter().zip(&kphi).map(|(a, b)| a * b).sum();
+        let residual = kphi
+            .iter()
+            .zip(&phi)
+            .map(|(kv, v)| (kv - lambda * v).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        ModePair {
+            lambda,
+            phi,
+            residual,
+            interval: (lambda - residual, lambda + residual),
+        }
+    }
+
+    #[test]
+    fn quadratic_radii_contain_the_truth_far_below_the_linear_bound() {
+        // Perturbed Ritz vectors of tridiag(-1, 2, -1) carry residuals near
+        // 1e-4; the quadratic radius r^2/gap must still contain the analytic
+        // eigenvalue while sitting orders of magnitude below r.
+        let n = 40;
+        let k = tridiag_k(n);
+        let m = diag(n, 1.0);
+        let truth = analytic_tridiag(n);
+        let window = (
+            f64::midpoint(truth[0], truth[1]),
+            f64::midpoint(truth[5], truth[6]),
+        );
+        let mut report = slice_window(&k, &m, window, &SliceOptions::default()).expect("slice");
+        assert_eq!(report.modes.len(), 5);
+        for mode in &mut report.modes {
+            let shifted: Vec<f64> = mode
+                .phi
+                .iter()
+                .enumerate()
+                .map(|(j, v)| v + 1.0e-4 * (0.37 * j as f64).sin())
+                .collect();
+            *mode = recertify(&k, &shifted);
+        }
+        let radii = quadratic_radii(&report, &k, &m);
+        for ((mode, &radius), &exact) in report.modes.iter().zip(&radii).zip(&truth[1..6]) {
+            assert!(mode.residual > 1.0e-6, "the perturbation must be live");
+            // r^2/gap with r ~ 1e-4 and gaps ~ 1e-2 tightens by r/gap ~ 1e-2.
+            assert!(
+                radius < 5.0e-2 * mode.residual,
+                "{radius} vs {}",
+                mode.residual
+            );
+            assert!(
+                (mode.lambda - exact).abs() <= radius,
+                "{} vs {exact} at radius {radius}",
+                mode.lambda
+            );
+        }
+    }
+
+    #[test]
+    fn quadratic_radii_tighten_an_orthonormal_cluster_and_refuse_a_defective_one() {
+        // K = diag(1, 1 + 1e-6, 3, 4): a near-double pair inside (0.5, 2.0).
+        // Hand-built orthonormal Ritz pair (1, 0, e, 0) and (0, 1, 0, e) has
+        // residuals ~2e-3 >> the pair's 1e-6 split, so the widened intervals
+        // overlap and the two modes form one cluster.
+        let mut coo = Coo::new(4, 4);
+        for (i, v) in [1.0, 1.0 + 1.0e-6, 3.0, 4.0].into_iter().enumerate() {
+            coo.push(i, i, v);
+        }
+        let k = coo.assemble();
+        let m = diag(4, 1.0);
+        // A real report supplies the stats; its window and modes are replaced.
+        let mut report = slice_window(
+            &tridiag_k(8),
+            &diag(8, 1.0),
+            (0.05, 0.5),
+            &SliceOptions::default(),
+        )
+        .expect("donor report");
+        let e = 1.0e-3;
+        report.window = (0.5, 2.0);
+        report.expected = 2;
+        report.modes = vec![
+            recertify(&k, &[1.0, 0.0, e, 0.0]),
+            recertify(&k, &[0.0, 1.0, 0.0, e]),
+        ];
+        let radii = quadratic_radii(&report, &k, &m);
+        for ((mode, &radius), exact) in report.modes.iter().zip(&radii).zip([1.0, 1.0 + 1.0e-6]) {
+            assert!(mode.residual > 1.0e-3, "the perturbation must be live");
+            assert!(
+                radius < 2.0e-2 * mode.residual,
+                "{radius} vs {}",
+                mode.residual
+            );
+            assert!(
+                (mode.lambda - exact).abs() <= radius,
+                "{} vs {exact} at radius {radius}",
+                mode.lambda
+            );
+        }
+        // Two copies of one shape are not an M-orthonormal cluster: no tightening.
+        let mut defective = report.clone();
+        defective.modes = vec![
+            recertify(&k, &[1.0, 0.0, e, 0.0]),
+            recertify(&k, &[1.0, 0.0, e, 0.0]),
+        ];
+        let kept = quadratic_radii(&defective, &k, &m);
+        for (mode, &radius) in defective.modes.iter().zip(&kept) {
+            assert_eq!(radius.to_bits(), mode.residual.to_bits());
+        }
+    }
+
+    #[test]
+    fn quadratic_radii_keep_the_linear_bound_when_a_mode_reaches_the_window_edge() {
+        let n = 30;
+        let k = tridiag_k(n);
+        let m = diag(n, 1.0);
+        let truth = analytic_tridiag(n);
+        let mut report = slice_window(
+            &k,
+            &m,
+            (
+                f64::midpoint(truth[0], truth[1]),
+                f64::midpoint(truth[3], truth[4]),
+            ),
+            &SliceOptions::default(),
+        )
+        .expect("slice");
+        let shifted: Vec<f64> = report.modes[0]
+            .phi
+            .iter()
+            .enumerate()
+            .map(|(j, v)| v + 1.0e-3 * (0.37 * j as f64).sin())
+            .collect();
+        report.modes[0] = recertify(&k, &shifted);
+        // Move the low edge inside the first mode's widened interval.
+        report.window.0 = report.modes[0].lambda - 0.5 * report.modes[0].residual;
+        let radii = quadratic_radii(&report, &k, &m);
+        for (mode, &radius) in report.modes.iter().zip(&radii) {
+            assert_eq!(radius.to_bits(), mode.residual.to_bits());
+        }
     }
 }

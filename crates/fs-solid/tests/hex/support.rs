@@ -57,7 +57,7 @@ pub fn assembly(
 ) -> TetElasticAssembly {
     problem(m, law, fixed).assemble(cx).unwrap()
 }
-pub fn modes(a: &TetElasticAssembly, window: (f64, f64)) -> Vec<fs_modal::ModePair> {
+fn slice(a: &TetElasticAssembly, window: (f64, f64)) -> fs_modal::SliceReport {
     fs_modal::slice_window(
         &a.stiffness,
         &a.mass,
@@ -71,7 +71,20 @@ pub fn modes(a: &TetElasticAssembly, window: (f64, f64)) -> Vec<fs_modal::ModePa
         },
     )
     .unwrap()
-    .modes
+}
+pub fn modes(a: &TetElasticAssembly, window: (f64, f64)) -> Vec<fs_modal::ModePair> {
+    slice(a, window).modes
+}
+/// [`modes`] paired with each mode's quadratic (Kato–Temple) eigenvalue
+/// radius from the same certified slice. The linear residual `r` sits at its
+/// floating-point floor on fine meshes; `r^2/gap` does not.
+pub fn certified_modes(
+    a: &TetElasticAssembly,
+    window: (f64, f64),
+) -> Vec<(fs_modal::ModePair, f64)> {
+    let report = slice(a, window);
+    let radii = fs_modal::quadratic_radii(&report, &a.stiffness, &a.mass);
+    report.modes.into_iter().zip(radii).collect()
 }
 pub fn bending(p: [f64; 3], nu: f64) -> [f64; 3] {
     let [x, y, z] = p;

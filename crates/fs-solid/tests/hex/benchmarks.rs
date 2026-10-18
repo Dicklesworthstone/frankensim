@@ -161,7 +161,11 @@ fn timo_oracle() -> ([f64; 3], [f64; 3]) {
     (beta.map(|b| b * b * scale), eb.map(|b| b * b * scale))
 }
 fn bar_modes(a: &TetElasticAssembly, nodes: &[[f64; 3]]) -> ([f64; 7], [f64; 7]) {
-    let flex = modes(a, (1e-5, 1.0));
+    // Eigen error bounds are the slice's quadratic (Kato–Temple) radii: the
+    // linear residual box is at its floating-point floor on the finest rung
+    // (measured 1.5e-7, which no solver budget lowers), while the window's
+    // certified count also certifies the gaps that r^2/gap needs.
+    let flex = certified_modes(a, (1e-5, 1.0));
     assert!(flex.len() >= 6);
     let eb_roots = roots(|b| {
         let (ch, _) = hyperbolic(b);
@@ -185,7 +189,7 @@ fn bar_modes(a: &TetElasticAssembly, nodes: &[[f64; 3]]) -> ([f64; 7], [f64; 7])
                     }
                 })
                 .collect::<Vec<_>>();
-            for mode in pair {
+            for (mode, _) in pair {
                 projection_trace += overlap(a, &mode.phi, &reference).powi(2);
             }
         }
@@ -197,8 +201,8 @@ fn bar_modes(a: &TetElasticAssembly, nodes: &[[f64; 3]]) -> ([f64; 7], [f64; 7])
     let mut values = [0.0; 7];
     let mut bounds = [0.0; 7];
     for i in 0..6 {
-        values[i] = flex[i].lambda;
-        bounds[i] = flex[i].residual;
+        values[i] = flex[i].0.lambda;
+        bounds[i] = flex[i].1;
     }
     // First longitudinal mode is selected by mass overlap, not by its index
     // among interleaved higher flexural/torsional modes.
@@ -214,16 +218,16 @@ fn bar_modes(a: &TetElasticAssembly, nodes: &[[f64; 3]]) -> ([f64; 7], [f64; 7])
             }
         })
         .collect::<Vec<_>>();
-    let window = modes(a, (0.95 * target, 1.05 * target));
-    let axial = window
+    let window = certified_modes(a, (0.95 * target, 1.05 * target));
+    let (axial, axial_radius) = window
         .iter()
         .max_by(|a1, b1| {
-            overlap(a, &a1.phi, &reference).total_cmp(&overlap(a, &b1.phi, &reference))
+            overlap(a, &a1.0.phi, &reference).total_cmp(&overlap(a, &b1.0.phi, &reference))
         })
         .unwrap();
     assert!(overlap(a, &axial.phi, &reference) > 0.99);
     values[6] = axial.lambda;
-    bounds[6] = axial.residual;
+    bounds[6] = *axial_radius;
     (values, bounds)
 }
 pub fn slender_bar() {

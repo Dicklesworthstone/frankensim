@@ -40,6 +40,19 @@ Bead frankensim-fsim-vibration-eig-jw6yq.
   the matrix-free core (caller brings the shifted inverse): returns
   mass-normalized Ritz pairs nearest σ WITHOUT certified intervals or count
   certification (no M-solve, no factorization — recorded no-claim).
+- `quadratic_radii(report, k, m) -> Vec<f64>` — per-mode Kato–Temple radii
+  `‖R‖²/δ` for a certified slice. The radii are additive: the report's
+  linear `interval`s and every digest over them are unchanged. The gap `δ`
+  comes from the slice's exact in-window count:
+  - Kahan's matching uses the full-block Frobenius residual;
+  - clusters are runs of overlapping widened intervals;
+  - the neighbouring clusters and the `[low, high)` window edges bound `δ`.
+
+  A multi-mode cluster is tightened only with M-Gram defect
+  ≤ `QUADRATIC_GRAM_DEFECT_MAX` (Mathias 1998). Its measured Galerkin defect
+  `e = ‖QᵀKQ − diag θ‖_F` shrinks the gap to `δ − e`, and `e`, `2η|θ|` and a
+  4-ulp rounding term are added. Otherwise, or whenever a widened interval
+  leaves the window, the linear residual is kept.
 - `quadratic_eigenvalues(m, c, k, n) -> Vec<C64>` — all 2n eigenvalues of
   `(λ²M + λC + K)φ = 0` via companion linearization `[[0, I], [−M⁻¹K,
   −M⁻¹C]]` and the fs-la dense complex QR path. Values only.
