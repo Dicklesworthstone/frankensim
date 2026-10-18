@@ -144,3 +144,6 @@ fn both_interfaces_survive_joint_scheduling_and_callback_partitions() {
 
 #[path = "material_bow_interface/forces.rs"]
 mod forces;
+
+#[path = "material_bow_interface/stops.rs"]
+mod stops;

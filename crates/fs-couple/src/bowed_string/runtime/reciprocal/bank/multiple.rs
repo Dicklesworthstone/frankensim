@@ -35,6 +35,7 @@ pub struct MultiBowStringBankSource {
     bank: MaterialStringBankSource,
     bows: Vec<MaterialBowContact>,
     joint: MultiFrictionConfig,
+    stops: Vec<stops::MaterialStringStop>,
 }
 impl MultiBowStringBankSource {
     /// Original strings, layers, regional/uniform body, cavity, gas and supports.
@@ -105,7 +106,7 @@ impl ReciprocalStringBank {
             .map_err(ReciprocalStringError::Friction)?;
         poll(gate)?;
         Ok(MultiBowStringBank { source: MultiBowStringBankSource {
-            bank: self.source, bows, joint,
+            bank: self.source, bows, joint, stops: Vec::new(),
         }, cards: self.cards, system })
     }
 }
@@ -133,6 +134,9 @@ impl MultiBowStringBank {
 
 /// Common gesture-clock playback of all contacts and the shared pressure observer.
 pub mod performance;
+
+/// Material-derived unilateral stops in the same bow/string/body mechanics.
+pub mod stops;
 
 
 /// Source/interface applicability retained through the existing bow performers.
