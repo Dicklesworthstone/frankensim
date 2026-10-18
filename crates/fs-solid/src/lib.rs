@@ -59,6 +59,8 @@ pub mod rod;
 pub mod shell;
 pub mod shell_time;
 pub mod stability;
+/// Typed vector histories bound to body-fitted plane elasticity.
+pub mod vector_boundary2;
 
 pub use beamcol::{ForceBasedElement, PushoverStep};
 pub use continuation::{ArcSettings, PathEvent, PathResidual, PathState, advance, switch_branch};
