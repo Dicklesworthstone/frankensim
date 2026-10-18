@@ -18,6 +18,9 @@ use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use std::collections::BTreeMap;
 
+/// Typed time/frame histories feeding these same physical load integrals.
+pub mod history;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum LoadError3 {
     Invalid(&'static str),
