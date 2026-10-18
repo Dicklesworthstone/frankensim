@@ -1,4 +1,4 @@
-//! Advance scenario boundary/source histories through the existing solid stepper.
+//! Advance scenario boundary/source histories through the existing solid steppers.
 //!
 //! All loads are sampled at the explicitly requested END time, including the
 //! scenario owner's right-continuous held tables. This is backward-Euler
@@ -7,15 +7,16 @@
 //! bound or Crank-Nicolson claim. The caller owns the time grid.
 //!
 //! The same old field feeds every attempted step. Prescribed-temperature
-//! changes use BackwardEuler::advance_prescribed, including boundary capacity
+//! changes use the existing endpoint solvers, including boundary capacity
 //! in reaction heat. Failed sampling, cancellation, solve or energy checks
 //! leave temperature, time and the accepted-step budget unchanged.
 
 use super::{ThermalBoundaryHistory, poll};
 use crate::{ConductionError, ConductionProblem, ConductivityModel, ElementMaterials,
-    ScalarField, ThermalInterfaces, VOLUMETRIC_SOURCE_DIMS};
+    ScalarField, ThermalBoundary, ThermalInterfaces, VOLUMETRIC_SOURCE_DIMS};
 use crate::transient::VolumetricHeatCapacity;
-use crate::transient::backward_euler::{BackwardEuler, StepConfig, StepSolution};
+use crate::transient::backward_euler::{BackwardEuler, NonlinearStepConfig,
+    NonlinearStepSolution, StepConfig, StepSolution};
 use fs_exec::Cx;
 use fs_qty::Dims;
 use fs_scenario::signal::TimeSignal;
@@ -61,9 +62,9 @@ impl HeatSourceHistory {
 pub struct ThermalHistoryProblem<'h, 'm> {
     /// Boundary histories, including the exact mesh and initial instant.
     pub boundary: &'h ThermalBoundaryHistory<'m>,
-    /// Original conductivity model; must be temperature independent.
+    /// Original conductivity model. k(T) requires an explicit nonlinear method.
     pub material: &'h ConductivityModel,
-    /// Optional exact per-element assignment; each model must be temperature independent.
+    /// Optional exact per-element assignment, subject to the same method policy.
     pub element_materials: Option<&'h ElementMaterials>,
     /// Optional matching-face thermal contacts, passed unchanged to the stepper.
     pub interfaces: Option<&'h ThermalInterfaces>,
@@ -71,15 +72,48 @@ pub struct ThermalHistoryProblem<'h, 'm> {
     pub source: HeatSourceHistory,
 }
 
+/// Immutable choice of endpoint transport and its nonlinear work budget.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ThermalHistoryMethod {
+    /// Constant conductivity only; retains the original linear solve and refusal.
+    Linear,
+    /// Newton/FGMRES on the actual endpoint k(T), not a frozen old-temperature law.
+    Nonlinear(NonlinearStepConfig),
+}
+
+/// Original solver response, including nonlinear evidence when that path is used.
+#[derive(Debug, Clone)]
+pub enum ThermalHistoryStep {
+    /// Constant-conductivity endpoint.
+    Linear(StepSolution),
+    /// Nonlinear endpoint with its actual Newton work and residual threshold.
+    Nonlinear(NonlinearStepSolution),
+}
+
+impl ThermalHistoryStep {
+    /// Accepted temperatures, fluxes, storage change and discrete energy closure.
+    #[must_use]
+    pub fn solution(&self) -> &StepSolution {
+        match self { Self::Linear(step) => step, Self::Nonlinear(solved) => &solved.step }
+    }
+
+    /// Consume the response when only the common physical observations are needed.
+    #[must_use]
+    pub fn into_solution(self) -> StepSolution {
+        match self { Self::Linear(step) => step, Self::Nonlinear(solved) => solved.step }
+    }
+}
+
 /// In-memory, resumable thermal trajectory with an explicit lifetime step budget.
 ///
-/// This is a driver of the existing linear backward-Euler owner, not a new
-/// integrator. It retains only the accepted field; callers retain any desired
-/// StepSolution history. Durable checkpointing and nonlinear/radiative transport
-/// are not added by this interface.
+/// This drives the existing backward-Euler owners, not a new integrator. It
+/// retains only the accepted field; callers retain any desired step reports.
+/// Heat capacity and contact resistance remain temperature independent.
+/// No durable checkpointing or latent-heat model is added by this interface.
 pub struct ThermalHistoryRun<'h, 'm> {
     problem: ThermalHistoryProblem<'h, 'm>,
     stepper: BackwardEuler<'m>,
+    method: ThermalHistoryMethod,
     temperature: Vec<f64>,
     time_s: f64,
     accepted_steps: usize,
@@ -87,9 +121,10 @@ pub struct ThermalHistoryRun<'h, 'm> {
 }
 
 impl<'h, 'm> ThermalHistoryRun<'h, 'm> {
-    /// Start at the boundary history's explicit initial instant with uniform
-    /// volumetric capacity. Initial temperatures must already match prescribed
-    /// data: admission never resets boundary storage without accounting for it.
+    /// Start a LINEAR run at the boundary history's explicit initial instant.
+    /// Initial temperatures must already match prescribed data: admission never
+    /// resets boundary storage without accounting for it. k(T) remains refused;
+    /// use [`Self::new_with_method`] to select a nonlinear policy explicitly.
     ///
     /// # Errors
     /// Bad initial field/budget, incompatible initial prescribed temperatures,
@@ -101,7 +136,30 @@ impl<'h, 'm> ThermalHistoryRun<'h, 'm> {
         initial: &[f64],
         max_steps: usize,
     ) -> Result<Self, ConductionError> {
+        Self::new_with_method(cx, problem, capacity, initial, max_steps, ThermalHistoryMethod::Linear)
+    }
+
+    /// Start with an explicitly selected linear or nonlinear endpoint method.
+    ///
+    /// Nonlinear transport evaluates the original conductivity and its tangent
+    /// at every candidate field, including NEW prescribed temperatures. The
+    /// Newton policy remains fixed for this run; each step's `StepConfig` retains
+    /// the production total Krylov budget and independent joule-closure gate.
+    /// Material range checks stay with the solver; no curve is extrapolated here.
+    ///
+    /// # Errors
+    /// Invalid nonlinear policy, or any admission refusal from [`Self::new`]
+    /// except that the nonlinear method admits temperature-dependent conductivity.
+    pub fn new_with_method(
+        cx: &Cx<'_>,
+        problem: ThermalHistoryProblem<'h, 'm>,
+        capacity: VolumetricHeatCapacity,
+        initial: &[f64],
+        max_steps: usize,
+        method: ThermalHistoryMethod,
+    ) -> Result<Self, ConductionError> {
         poll(cx, 0)?;
+        if let ThermalHistoryMethod::Nonlinear(policy) = method { policy.validate()?; }
         if max_steps == 0 { return Err(invalid("the accepted-step budget must be positive")); }
         let mesh = problem.boundary.mesh();
         if initial.len() != mesh.vertex_count() {
@@ -119,8 +177,8 @@ impl<'h, 'm> ThermalHistoryRun<'h, 'm> {
             let material = match problem.element_materials {
                 Some(materials) => materials.model_for(e)?, None => problem.material,
             };
-            if material.is_temperature_dependent() {
-                return Err(invalid("history run requires temperature-independent conductivity; no frozen k(T) approximation is implicit"));
+            if matches!(method, ThermalHistoryMethod::Linear) && material.is_temperature_dependent() {
+                return Err(invalid("history run requires an explicit nonlinear method for k(T); no frozen-conductivity approximation is implicit"));
             }
         }
         let time_s = problem.boundary.initial_time_s();
@@ -134,7 +192,7 @@ impl<'h, 'm> ThermalHistoryRun<'h, 'm> {
         problem.source.at(time_s, mesh.vertex_count())?;
         let stepper = BackwardEuler::uniform(cx, mesh, capacity)?;
         poll(cx, 0)?;
-        Ok(Self { problem, stepper, temperature: initial.to_vec(), time_s, accepted_steps: 0, max_steps })
+        Ok(Self { problem, stepper, method, temperature: initial.to_vec(), time_s, accepted_steps: 0, max_steps })
     }
 
     /// Accepted full nodal field, including prescribed vertices, in kelvin.
@@ -153,6 +211,10 @@ impl<'h, 'm> ThermalHistoryRun<'h, 'm> {
     #[must_use]
     pub const fn max_steps(&self) -> usize { self.max_steps }
 
+    /// Original immutable endpoint method and nonlinear policy.
+    #[must_use]
+    pub const fn method(&self) -> ThermalHistoryMethod { self.method }
+
     /// Increase the lifetime budget without resetting temperature or physical time.
     ///
     /// # Errors
@@ -165,9 +227,9 @@ impl<'h, 'm> ThermalHistoryRun<'h, 'm> {
 
     /// Advance to one explicitly requested, strictly later finite endpoint.
     ///
-    /// The returned production StepSolution includes source/Neumann/Robin heat,
-    /// prescribed-temperature reaction, storage change and independent energy
-    /// closure. No separate audit formula or widened solve tolerance is used.
+    /// The common response retains physical flux/storage/energy observations.
+    /// Use [`Self::advance_to_report`] to also retain the nonlinear solver's
+    /// Newton/backtrack counts and its independently checked residual gate.
     /// Resume after cancellation with a fresh Cx and the same endpoint; after
     /// exhaustion, explicitly extend the budget. Result errors publish nothing.
     ///
@@ -180,6 +242,42 @@ impl<'h, 'm> ThermalHistoryRun<'h, 'm> {
         time_s: f64,
         config: StepConfig,
     ) -> Result<StepSolution, ConductionError> {
+        self.advance_to_report(cx, time_s, config).map(ThermalHistoryStep::into_solution)
+    }
+
+    /// Advance with the full response from the explicitly selected solver.
+    ///
+    /// Nonlinear iterations all reuse the SAME old field and endpoint loads.
+    /// Only a residual- and energy-admitted endpoint advances physical time.
+    /// Constant materials may use the nonlinear method for an independent
+    /// comparison, but are not silently redirected to the linear implementation.
+    ///
+    /// # Errors
+    /// The same transactional refusals as [`Self::advance_to`].
+    pub fn advance_to_report(
+        &mut self, cx: &Cx<'_>, time_s: f64, config: StepConfig,
+    ) -> Result<ThermalHistoryStep, ConductionError> {
+        let (dt_s, boundary, source) = self.prepare_endpoint(cx, time_s)?;
+        let problem = ConductionProblem {
+            mesh: self.problem.boundary.mesh(), boundary: &boundary,
+            material: self.problem.material, source: &source,
+            element_materials: self.problem.element_materials,
+        };
+        let report = match self.method {
+            ThermalHistoryMethod::Linear => ThermalHistoryStep::Linear(
+                self.stepper.advance_prescribed(cx, problem, self.problem.interfaces,
+                    &self.temperature, dt_s, config)?),
+            ThermalHistoryMethod::Nonlinear(policy) => ThermalHistoryStep::Nonlinear(
+                self.stepper.advance_nonlinear_prescribed(cx, problem, self.problem.interfaces,
+                    &self.temperature, dt_s, config, policy)?),
+        };
+        self.publish(cx, time_s, report.solution())?;
+        Ok(report)
+    }
+
+    fn prepare_endpoint(&self, cx: &Cx<'_>, time_s: f64)
+        -> Result<(f64, ThermalBoundary, ScalarField), ConductionError>
+    {
         poll(cx, self.accepted_steps)?;
         if self.accepted_steps >= self.max_steps { return Err(invalid("thermal history step budget exhausted")); }
         let dt_s = time_s - self.time_s;
@@ -187,20 +285,19 @@ impl<'h, 'm> ThermalHistoryRun<'h, 'm> {
             return Err(invalid("thermal history endpoint must be finite and strictly later with a representable positive interval"));
         }
         let boundary = self.problem.boundary.at(cx, time_s)?;
-        let mesh = self.problem.boundary.mesh();
-        let source = self.problem.source.at(time_s, mesh.vertex_count())?;
+        let source = self.problem.source.at(time_s, self.problem.boundary.mesh().vertex_count())?;
         poll(cx, self.accepted_steps)?;
-        let solution = self.stepper.advance_prescribed(cx, ConductionProblem {
-            mesh, boundary: &boundary, material: self.problem.material, source: &source,
-            element_materials: self.problem.element_materials,
-        }, self.problem.interfaces, &self.temperature, dt_s, config)?;
+        Ok((dt_s, boundary, source))
+    }
+
+    fn publish(&mut self, cx: &Cx<'_>, time_s: f64, solution: &StepSolution) -> Result<(), ConductionError> {
         // Prepare the published copy before changing any accepted state.
         let temperature = solution.temperature.clone();
         poll(cx, self.accepted_steps)?;
         self.temperature = temperature;
         self.time_s = time_s;
         self.accepted_steps += 1;
-        Ok(solution)
+        Ok(())
     }
 }
 
