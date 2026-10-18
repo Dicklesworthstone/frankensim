@@ -14,6 +14,9 @@
 /// Sourced radiative surfaces and independent reservoir-temperature histories.
 pub mod radiation;
 
+mod capacity;
+pub use capacity::ThermalHistoryCapacity;
+
 use super::{ThermalBoundaryHistory, poll};
 use crate::{ConductionError, ConductionProblem, ConductivityModel, ElementMaterials,
     ScalarField, ThermalBoundary, ThermalInterfaces, VOLUMETRIC_SOURCE_DIMS};
@@ -161,6 +164,31 @@ impl<'h, 'm> ThermalHistoryRun<'h, 'm> {
         max_steps: usize,
         method: ThermalHistoryMethod,
     ) -> Result<Self, ConductionError> {
+        Self::new_with_capacity(cx, problem, ThermalHistoryCapacity::Uniform(capacity),
+            initial, max_steps, method)
+    }
+
+    /// Start with uniform, element-wise, or material-ID-bound heat storage.
+    ///
+    /// Every capacity is a declared constant rho*c_p in J/(m^3 K). The original
+    /// lumped P1 assembly is reused; values are never averaged across materials
+    /// before assembly. Material-ID binding uses the SAME element assignment
+    /// as conductivity and refuses missing, duplicate or unused capacity rows.
+    /// The resulting capacity matrix stays fixed through nonlinear iterations,
+    /// radiation, cancellation and resume. No temperature-dependent capacity or
+    /// latent-heat approximation is introduced.
+    ///
+    /// # Errors
+    /// The same refusals as [`Self::new_with_method`], plus mismatched element
+    /// counts, invalid material bindings or unrepresentable capacity assembly.
+    pub fn new_with_capacity(
+        cx: &Cx<'_>,
+        problem: ThermalHistoryProblem<'h, 'm>,
+        capacity: ThermalHistoryCapacity<'_>,
+        initial: &[f64],
+        max_steps: usize,
+        method: ThermalHistoryMethod,
+    ) -> Result<Self, ConductionError> {
         poll(cx, 0)?;
         if let ThermalHistoryMethod::Nonlinear(policy) = method { policy.validate()?; }
         if max_steps == 0 { return Err(invalid("the accepted-step budget must be positive")); }
@@ -193,7 +221,7 @@ impl<'h, 'm> ThermalHistoryRun<'h, 'm> {
             }
         }
         problem.source.at(time_s, mesh.vertex_count())?;
-        let stepper = BackwardEuler::uniform(cx, mesh, capacity)?;
+        let stepper = capacity.prepare(cx, mesh, problem.element_materials)?;
         poll(cx, 0)?;
         Ok(Self { problem, stepper, method, temperature: initial.to_vec(), time_s, accepted_steps: 0, max_steps })
     }

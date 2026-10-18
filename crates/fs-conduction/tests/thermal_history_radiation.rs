@@ -195,3 +195,48 @@ fn g0_binding_and_outer_solve_refusals_do_not_enable_an_incomplete_radiation_mod
         assert_eq!(limited.conduction().accepted_steps(), 0);
     });
 }
+
+#[test]
+fn g1_prescribed_radiating_body_retains_material_capacity_with_no_free_temperature() {
+    use fs_conduction::{ElementMaterials, MaterialId, MaterialTable, STEFAN_BOLTZMANN_W_M2_K4};
+    use fs_conduction::bc::history::march::ThermalHistoryCapacity;
+    let mesh = mesh();
+    let material = ConductivityModel::isotropic_declared(20.0).unwrap();
+    let assigned = ElementMaterials::new(MaterialTable::new([(MaterialId(7), material.clone())]).unwrap(),
+        vec![MaterialId(7)]).unwrap();
+    let capacities = [(MaterialId(7), VolumetricHeatCapacity::declared(150.0).unwrap())];
+    with_cx(|cx| {
+        let builder = ThermalBoundaryBuilder::new(&mesh)
+            .region("diagonal", |f| (f.centroid.iter().sum::<f64>()-1.0).abs()<1e-12,
+                ThermalBc::dirichlet(300.0).unwrap()).unwrap()
+            .region("bottom", |f| f.centroid[2] == 0.0, ThermalBc::dirichlet(300.0).unwrap()).unwrap()
+            .remainder("surface", ThermalBc::adiabatic()).unwrap();
+        let rows = ["diagonal", "bottom"].into_iter().map(|name| ThermalRegionHistory {
+            row: BoundaryCondition { region: name.into(), physics: Physics::Thermal,
+                kind: BcKind::Dirichlet, compatibility: None, frame: 0,
+                value: Some(BcValue::Signal(TimeSignal::Ramp { t_start: 0.0, t_end: 1.0,
+                    from: QtyAny::new(300.0, TEMPERATURE_DIMS), to: QtyAny::new(360.0, TEMPERATURE_DIMS) })) },
+            reference_temperature: None,
+        }).collect();
+        let history = ThermalBoundaryHistory::new(cx, builder, &Environment::earth_lab(), rows, 0.0).unwrap();
+        assert_eq!(history.at(cx, 0.0).unwrap().dirichlet().len(), 4);
+        for method in [ThermalHistoryMethod::Linear, ThermalHistoryMethod::Nonlinear(NonlinearStepConfig::default())] {
+            let base = ThermalHistoryRun::new_with_capacity(cx, ThermalHistoryProblem {
+                boundary: &history, material: &material, element_materials: Some(&assigned),
+                interfaces: None, source: HeatSourceHistory::Fixed(ScalarField::Uniform(0.0)),
+            }, ThermalHistoryCapacity::ByMaterial(&capacities), &[300.0; 4], 1, method).unwrap();
+            let mut driver = RadiativeThermalHistoryRun::new(cx, base,
+                vec![reservoir("surface", constant(300.0))], AmbientRadiationConfig::default()).unwrap();
+            let step = driver.advance_to(cx, 0.25, controls()).unwrap();
+            let radiation_w = 0.8 * STEFAN_BOLTZMANN_W_M2_K4 * (315.0_f64.powi(4) - 300.0_f64.powi(4));
+            assert_eq!(step.conduction.temperature, vec![315.0; 4]);
+            assert!(step.physical_residual_tolerance_j.is_finite());
+            assert_eq!(step.physical_residual_norm_j, 0.0);
+            assert!((step.conduction.stored_energy_change_j - 375.0).abs() < 1e-8);
+            assert!((step.radiation.nonlinear_radiation_out_w - radiation_w).abs() < 1e-8);
+            assert!((step.physical_dirichlet_in_w - 1500.0 - radiation_w).abs() < 1e-8);
+            assert_eq!(step.convective_out_w, 0.0);
+            assert!(step.physical_energy_residual_j.abs() <= controls().energy_tolerance_j);
+        }
+    });
+}

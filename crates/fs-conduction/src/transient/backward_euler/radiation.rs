@@ -141,6 +141,10 @@ impl BackwardEuler<'_> {
             Some(policy) => finite(
                 policy.residual_atol_j + policy.residual_rtol * initial_norm_j,
             )?,
+            // With no free temperatures, the residual vector is empty and
+            // exactly zero. Do not divide the rounding allowance by sqrt(0);
+            // still run every radiative and physical-energy acceptance check.
+            None if dofs.n() == 0 => 0.0,
             None => finite(
                 step_config.linear.tolerance * initial_norm_j
                     + (step_config.energy_tolerance_j * 0.01) / (dofs.n() as f64).sqrt(),
