@@ -1631,6 +1631,9 @@ pub struct LivePiano {
     /// S^-1 x = D^-1 x + Y M Y^T x, Y = [wy_k], M = W^1/2 (I - W^1/2 Y^T G W^1/2)^-1 W^1/2.
     wmk: Vec<f64>,
     wu: Vec<f64>,
+    /// gl_a . resp_b for every pair of active slots, K x K: the board part of the
+    /// hammer contact compliance (`solve_contacts`), constant between rebuilds.
+    contact_gl_resp: Vec<f64>,
     // Board state in loaded coordinates and scratch.
     bq: Vec<f64>,
     bvel: Vec<f64>,
@@ -1710,6 +1713,7 @@ impl Clone for LivePiano {
             sd_inv: self.sd_inv.clone(),
             wmk: spare(&self.wmk),
             wu: spare(&self.wu),
+            contact_gl_resp: spare(&self.contact_gl_resp),
             bq: self.bq.clone(),
             bvel: self.bvel.clone(),
             bfq: self.bfq.clone(),
@@ -2051,6 +2055,7 @@ impl LivePiano {
             sd_inv: identity(r),
             wmk: Vec::with_capacity(32 * 32),
             wu: Vec::with_capacity(32),
+            contact_gl_resp: Vec::with_capacity(32 * 32),
             bq: vec![0.0; r],
             bvel: vec![0.0; r],
             bfq: vec![0.0; r],
@@ -2429,6 +2434,13 @@ impl LivePiano {
         }
         self.wu.clear();
         self.wu.resize(k, 0.0);
+        // The same dots solve_contacts formed every contact step, formed once.
+        self.contact_gl_resp.clear();
+        for a in 0..k {
+            for b in 0..k {
+                self.contact_gl_resp.push(dot(&self.active[a].gl, &self.active[b].resp));
+            }
+        }
         self.engagement_cached = f64::NAN; // pad coefficients depend on gl
         self.counters.rebuilds += 1;
         Ok(())
@@ -2590,7 +2602,12 @@ impl LivePiano {
     }
 
     fn contact_position(&self, ac: &ACourse, s: &ASeg) -> f64 {
-        let b = dot(&ac.gl, &self.bq);
+        self.contact_position_at(s, dot(&ac.gl, &self.bq))
+    }
+
+    /// `contact_position` given the course's bridge coordinate `b = gl . bq`,
+    /// which is the same for every string of the course.
+    fn contact_position_at(&self, s: &ASeg, b: f64) -> f64 {
         dot(&self.m.hs[s.off..s.off + s.n], &self.q[s.off..s.off + s.n]) + s.hammer_lift * b
     }
 
@@ -3024,13 +3041,15 @@ impl LivePiano {
         // Reciprocal contact compliance among the active contacts.
         self.c_h.clear();
         self.c_h.resize(nc * nc, 0.0);
+        let k = self.active.len();
         for i in 0..nc {
             let (ki, mi) = (self.c_key[i], self.c_member[i]);
-            let ai = &self.active[self.keys[ki].slot.unwrap_or(0)];
+            let si = self.keys[ki].slot.unwrap_or(0);
+            let ai = &self.active[si];
             for j in i..nc {
                 let kj = self.c_key[j];
-                let aj = &self.active[self.keys[kj].slot.unwrap_or(0)];
-                let mut h = self.c_lift[i] * self.c_lift[j] * dot(&ai.gl, &aj.resp);
+                let sj = self.keys[kj].slot.unwrap_or(0);
+                let mut h = self.c_lift[i] * self.c_lift[j] * self.contact_gl_resp[si * k + sj];
                 if ki == kj {
                     h += self.keys[ki].model.compliance();
                     if mi == self.c_member[j] {
@@ -3143,8 +3162,9 @@ impl LivePiano {
             let mut forces = [0.0_f64; 3];
             if let Some(slot) = slot {
                 let ac = &self.active[slot];
+                let b = dot(&ac.gl, &self.bq);
                 for s in ac.segs.iter().filter(|s| !s.duplex) {
-                    positions[s.member] = self.contact_position(ac, s);
+                    positions[s.member] = self.contact_position_at(s, b);
                     forces[s.member] = s.force;
                 }
             }
