@@ -4,6 +4,9 @@
 //! heating adapter supplies SI conversions. The existing thermal/flow kernels
 //! evolve the populations. No constitutive interpolation is invented here.
 
+/// Density-resolved buoyancy with explicit, fixed reference storage.
+pub mod boussinesq;
+
 use super::{HeatBalance, HeatSourceLimits, MaterialSlab, ThermalLbm, ThermalLbm3, ThermalSourceError};
 use crate::material::{MaterialLbmError, plan_scaling_from_material};
 use crate::thermal::sources::{Slab, source_step_transport_mapped, transport::RelaxationField};
@@ -199,6 +202,15 @@ fn candidate_with_input<S: Slab<D, Q>, F, const D: usize, const Q: usize>(
     slab: &MaterialSlab<S>, input: super::Inputs<D>, applied: &[TransportSample<F>],
     gate: &CancelGate,
 ) -> Result<(S, HeatBalance), MaterialTransportError> {
+    candidate_with_prepared_input::<S, F, D, Q>(slab, input, applied, gate, |_| {})
+}
+
+// A material force owner may replace background buoyancy on this tentative
+// state. It still uses the same transport kernel, SI balance and rollback.
+fn candidate_with_prepared_input<S: Slab<D, Q>, F, const D: usize, const Q: usize>(
+    slab: &MaterialSlab<S>, input: super::Inputs<D>, applied: &[TransportSample<F>],
+    gate: &CancelGate, prepare: impl FnOnce(&mut S),
+) -> Result<(S, HeatBalance), MaterialTransportError> {
     let (cells, plane) = slab.lattice.layout()?;
     if applied.len() != cells - 2 * plane
         || applied.iter().enumerate().any(|(i, s)| s.cell != plane + i)
@@ -219,6 +231,7 @@ fn candidate_with_input<S: Slab<D, Q>, F, const D: usize, const Q: usize>(
     // original type. As in electrical coupling, original, trial and thermal
     // tentative grids coexist; max_cells is a cell budget, not a byte budget.
     let (mut trial, _) = slab.lattice.snapshot();
+    prepare(&mut trial);
     let heat = source_step_transport_mapped::<S, D, Q, _>(
         &mut trial, &input.heat, &input.force, input.limits,
         Some(RelaxationField { momentum: &momentum, thermal: &thermal }),

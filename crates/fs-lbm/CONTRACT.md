@@ -108,6 +108,28 @@ changes on a latent plateau, equivalent electrical source bases and rollback.
 - `thermal::ThermalLbm` and `thermal::gbeta_for_rayleigh` — D2Q9 flow plus
   D2Q5 temperature populations for Rayleigh-Bénard-style onset fixtures with
   fixed-temperature wall rows.
+- `MaterialSlab::step_with_boussinesq_material_transport` (2-D and 3-D) —
+  evaluates actual local material density for `(rho(T)-rho0)*gravity`, and
+  the same evaluation's dynamic viscosity and conductivity for
+  `nu=mu/rho0`, `alpha=k/(rho0*cp0)`. The shared material sampler, thermal
+  source step, lattice kernels, independent wall heat accounting and endpoint
+  checks own the advance. Original source payloads and unmodified transport
+  remain on `transport::boussinesq::BoussinesqMaterial`; its explicit projected
+  transport retains the original reference density and heat capacity.
+  `BoussinesqConfig` requires finite signed gravity and caller-selected relative
+  density/Cp departure bounds in `[0,1)`, enforced at initial and proposed
+  endpoint states. No mass, heat storage or physical units are rebound.
+  Density-resolved force replaces the independent background beta load for
+  this step; prescribed external forces remain additive. The background beta
+  and relaxation fields are retained for other explicit solver entry points.
+  Any refusal or observed cancellation preserves the entire accepted state.
+  These are explicit initial-state coefficients, with support checked again
+  at the endpoint; the numerical bounds do not establish physical validity.
+  The caller must justify small neglected density/Cp departures and timestep
+  refinement. No compressible work, phase/species evolution or gravitational
+  energy account is introduced. G1/G3 ideal-gas pressure/temperature checks,
+  three-dimensional source/force ownership and G0/G4 refusal/retry coverage
+  live in `tests/material_transport_feedback.rs`.
 - `freesurface::FreeSurface`, `ContactModel`, `dam_break`, and `surge_front`
   — dense-grid VOF-style mass tracking with interface/gas/fluid conversion
   bookkeeping, conservative carry redistribution, contact-model bracketing,
