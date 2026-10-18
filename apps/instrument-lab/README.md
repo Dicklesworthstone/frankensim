@@ -182,8 +182,19 @@ binary's reductions of the same FE slice; generate them natively with the engine
     gen_board public/live/piano/boards/model-d-board-2400-r64.bin 2400 64,32,200,400,800,1600,2300
     # r48: 48,24,...  r96: 96,48,...  r128: 128,64,... (the studio render's reduction)
 
-Measured on the Strandbar piano part against the studio stem (RMS octave-balance error, 63 Hz-8 kHz):
-32 coordinates 2.95 dB, 48 2.66, 64 1.28, 96 0.77, 128 0.36.
+Measured on the Strandbar piano part against the studio stem (RMS octave-balance error, 63 Hz-8 kHz,
+same contacts, hammer law and string losses): 32 coordinates 4.18 dB, 48 3.28, 64 2.16, 96 1.78,
+128 1.89. Above 64 the rest is mostly silent strings: on the same 128-coordinate board an offline A3
+has 4.3 dB more energy above 2 kHz than the live one, whose budget (0.1 dB) and single mechanical step
+(0.2 dB) barely matter.
+
+The browser plays RT-0425's published laws (`wasm.rs`): its string losses, its hammer stiffness K_H on
+each unison string and its rate loss R_H in place of the estimated crush and Prony terms
+(`Config::rt0425_*`, the reference's `--rt0425-*` flags). With nothing but one key on the bridge,
+`examples/validate.rs 800 256 1 --rt0425-string-damping --rt0425-hammer-stiffness --rt0425-hammer-dissipation`
+agrees with the reference engine to 4e-12 in bridge velocity (8 keys, 3 speeds, 1 s); run it with and
+without the flags after changing the reference's felt, contact or string-loss code, whose fast paths
+the live kernel re-implements.
 
 ## The live kit
 
@@ -223,7 +234,8 @@ other wasm the table is ignored and the gain is used as given. The same applies 
 
 The studio loop is three native renders that start 0.15 s before the first downbeat:
 `grand_piano --performance strandbar-piano.csv` (Steinway D preset, 128 board coordinates up to
-2.4 kHz, one substep) and fs-vkplate `perform` for the kick and the closed hi-hat. Long fs-vkplate
+2.4 kHz, one substep, `--rt0425-hammer-stiffness --rt0425-hammer-dissipation --rt0425-string-damping`
+as the live piano plays) and fs-vkplate `perform` for the kick and the closed hi-hat. Long fs-vkplate
 parts can be rendered as bar-sized simulations, each with a pre-roll of real strokes, and stitched
 (the stitched kick matched a continuous render to 0.9 % RMS). The hi-hat's banded Airy solve is
 memory-bound: run one or two such processes per L3 cache (`taskset`, `-C target-cpu=native`).

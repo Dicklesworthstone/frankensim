@@ -1,9 +1,11 @@
 // Soundboard resolution for the live piano (shared by worker.js and lane-worker.js).
 //
 // The number of soundboard coordinates is the audible lever of the live piano. Measured against
-// the studio render of the same Strandbar score (grand_piano, 128 coordinates), octave balance
-// error / 2-8 kHz share at the attacks: 32 -> 2.95 dB / -6.2 dB, 48 -> 2.66 / -3.4,
-// 64 -> 1.28 / -0.7, 96 -> 0.77 / -1.7, 128 -> 0.36 / -1.3 (engine-piano README of the patch).
+// the studio render of the same Strandbar score (grand_piano, 128 coordinates, the same RT-0425
+// contacts, hammer law and string losses), octave balance error (63 Hz-8 kHz) / 2-8 kHz balance
+// relative to the studio part: 32 -> 4.18 dB / -7.5 dB, 48 -> 3.28 / -4.2, 64 -> 2.16 / -2.5,
+// 96 -> 1.78 / -1.2, 128 -> 1.89 / -2.1. Above 64 the rest is mostly silent strings, which the
+// studio render keeps ringing and the live piano does not have.
 // The 32-coordinate board is embedded in the wasm; larger bridge-informed reductions of the same
 // (0, 2400] Hz FE slice (examples/gen_board.rs, spec N,N/2,200,400,800,1600,2300) are fetched
 // from ./boards/ only when this device can compute them fast enough.

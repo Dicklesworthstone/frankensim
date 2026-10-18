@@ -26,7 +26,7 @@ const KEY_OFFSETS: Record<string, number> = {
  * RMS octave-balance error [dB, 63 Hz-8 kHz] of the live piano part of Strandbar on each board against the
  * studio render (grand_piano, 128 coordinates); public/live/piano/boards.js, README "Larger live soundboards".
  */
-const BOARD_ERROR_DB: Record<number, number> = { 32: 2.95, 48: 2.66, 64: 1.28, 96: 0.77, 128: 0.36 };
+const BOARD_ERROR_DB: Record<number, number> = { 32: 4.18, 48: 3.28, 64: 2.16, 96: 1.78, 128: 1.89 };
 const SPEED_MIN = 0.5;
 const SPEED_MAX = 4.5;
 
@@ -384,25 +384,26 @@ export class LivePianoSection {
         board
           ? `One shared soundboard: ${board} coordinates of the Model D board (${exact} exact modes plus ${board - exact} bridge-response vectors from the 0–2400 Hz slice), with its full damping matrix: the largest board this device computed fast enough when you pressed Start (32 to 128).`
           : 'One shared soundboard: a reduction of the Model D board (exact low modes plus bridge-response vectors from the 0–2400 Hz slice) with its full damping matrix, 32 to 128 coordinates: the largest this device computes fast enough, chosen when you press Start.',
-        'The published hammer shank (rigid rotation plus bending), the per-key wool-felt card with crush memory and Prony relaxation, contact solved implicitly every step.',
+        'The published hammer shank (rigid rotation plus bending) and RT-0425\'s published felt law: its stiffness on each string of the unison and its rate loss R_H, contact solved implicitly every step.',
         'The estimated damper pad on every string up to E6 (four quadrature points), and a continuous sustain pedal.',
         'Pressure from the time-domain Rayleigh integral at a microphone 1 m above the board, at a fixed 10 Pa full scale. No samples, no normalisation, no EQ, no reverb.',
       ], 'in'),
       column('Reduced or absent', [
-        'One mechanical step per sample at 48 kHz; the offline reference uses four.',
+        'One mechanical step per sample at 48 kHz; the offline reference uses four (on A3 that is 0.2 dB of the energy above 2 kHz).',
+        'The preset board mesh (8 divisions); the graded offline renders use 16, which gives A3 5.4 dB more energy above 2 kHz.',
         !board
           ? `32 to 128 board coordinates where the offline render keeps 128: the live piano part of Strandbar sits ${BOARD_ERROR_DB[32]} dB from the studio render in octave balance on 32 coordinates, ${BOARD_ERROR_DB[96]} dB on 96 and ${BOARD_ERROR_DB[128]} dB on 128.`
           : board >= 128
           ? `${board} board coordinates, as many as the offline render: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[128]} dB from the studio render in octave balance.`
-          : `${board} board coordinates instead of the offline render's 128: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[board] ?? '—'} dB from the studio render in octave balance (128 coordinates: ${BOARD_ERROR_DB[128]} dB)${board === 32 ? '; on A3, about 10 dB less energy above 2 kHz than the offline render' : ''}.`,
-        'Strings of silent keys neither resonate nor absorb: offline, their dampers soak up about 10 % of an A3 strike, so the live notes decay more slowly early on (≈ −9.6 against −15.2 dB/s).',
+          : `${board} board coordinates instead of the offline render's 128: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[board] ?? '—'} dB from the studio render in octave balance (128 coordinates: ${BOARD_ERROR_DB[128]} dB).`,
+        'Strings of silent keys neither resonate nor absorb. Offline, on the same board, an A3 mf strike loses about 14 % of its energy to their dampers, so the live note decays more slowly early on (−7.0 against −11.0 dB/s), and their undamped strings ring along: the live A3 has 4.3 dB less energy above 2 kHz.',
         `A polyphony budget of ${info ? info.maxDynamicModes.toLocaleString('en-US') : '2,400'} string modes and ${info ? info.maxSoundingKeys : 24} keys. Beyond it the quietest key is returned to rest early; this is counted ("Forced out") and its energy appears as retired in the ledger. A load governor may lower the budget for new keys on a slow device, and says so.`,
         'No una corda or sostenuto, no key or action beyond the shank, no room, lid or case, no air loading of the board.',
       ], 'out'),
     );
     body.append(lists);
     body.append(el('h4', undefined, 'Checked against the offline reference'));
-    body.append(el('p', undefined, 'With nothing but one key on the bridge, the live kernel and the reference engine (the same source files) agree on bridge velocity to within 2.3 × 10⁻⁹ relative over one second, for eight keys at three hammer speeds, and their energy books agree to about ten digits. For an isolated C4 on the same 32-coordinate board, the live model\'s pressure, compiled natively, equals the offline renderer\'s file in all but 137 of 48,000 float32 samples, which differ by at most 1.5 × 10⁻⁸ Pa; the WebAssembly build in this tab sums its string modes in two lanes, which moves its output by less than 10⁻¹⁰ (rms, relative). Against the full offline render, the first 15 partials of A3 sit within 2.5 cents and the fitted inharmonicity is 2.42 × 10⁻⁴ (offline 2.47 × 10⁻⁴).'));
+    body.append(el('p', undefined, 'With nothing but one key on the bridge, the live kernel and the reference engine (the same source files) agree on bridge velocity to within 4 × 10⁻¹² relative over one second, for eight keys at three hammer speeds, with the published string, felt and hammer laws this page plays; their energy books agree to about ten digits. The WebAssembly build in this tab reproduces the native build sample for sample on an isolated A3 and C6. Against the full offline render, the first 15 partials of A3 sit within 2.7 cents and the fitted inharmonicity is 2.37 × 10⁻⁴ (offline 2.41 × 10⁻⁴).'));
     const chips = (title: string, cls: string, items: string[]): HTMLElement => {
       const row = el('div', 'lp-chiprow');
       row.append(el('h4', undefined, title));
@@ -412,13 +413,13 @@ export class LivePianoSection {
       return row;
     };
     body.append(
-      chips('Published', 'pub', ['RT-0425 string scale, 84 keys', 'RT-0425 hammer mass, exponent, stiffness', 'Model D dimensions', 'Model D board drawing (Boutillon et al.)', 'Hammer shank geometry (Chabassier & Durufle)']),
-      chips('Estimated', 'est', ['4 end keys of the scale', 'Felt crush and relaxation', 'Unison detune 0.8 cents', 'String loss law', 'Damper pads, 0.4 N s/m', 'Board damping 1.5 %', 'Bridge stations, rib sections']),
+      chips('Published', 'pub', ['RT-0425 string scale, 84 keys', 'RT-0425 hammer mass, exponent, stiffness, dissipation', 'RT-0425 string losses', 'RT-0425 bridge coupling points', 'Model D dimensions', 'Model D board drawing (Boutillon et al.)', 'Hammer shank geometry (Chabassier & Durufle)']),
+      chips('Estimated', 'est', ['4 end keys of the scale', 'Unison detune 0.8 cents', 'Damper pads, 0.4 N s/m', 'Board damping 1.5 %', 'Rib and bridge widths']),
       chips('Not modelled live', 'not', ['Silent-string resonance', 'Silent-string damper loss', ...(!board ? ['Board beyond what the device affords'] : board < 128 ? [`Board above ${board} coordinates`] : []), 'Una corda, sostenuto', 'Action beyond the shank', 'Room, lid, case']),
     );
     if (info) {
       const prov = el('p', 'small muted');
-      prov.textContent = `Engine statement: ${info.boardCoordinates} board coordinates (${info.boardExactLowModes} exact); ${info.speakingStrings} strings on the bridge; ${info.tablePartials.toLocaleString('en-US')} partials in the string tables; microphone at ${info.microphoneM.join(', ')} m. Board: ${info.boardProvenance}.`;
+      prov.textContent = `Engine statement: ${info.boardCoordinates} board coordinates (${info.boardExactLowModes} exact); ${info.speakingStrings} strings on the bridge; ${info.tablePartials.toLocaleString('en-US')} partials in the string tables; microphone at ${info.microphoneM.join(', ')} m.${info.hammerLaw ? ` Hammers: ${info.hammerLaw}.` : ''} Board: ${info.boardProvenance}.`;
       body.append(prov);
     }
     details.append(body);

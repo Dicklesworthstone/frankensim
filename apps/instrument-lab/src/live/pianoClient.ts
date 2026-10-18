@@ -42,6 +42,8 @@ export interface PianoInfo {
   boardCoordinateHz: [number, number];
   /** Where the board came from and how it was reduced (the reference modules' own statement). */
   boardProvenance: string;
+  /** Hammer felt law (engines built before it was reported omit it). */
+  hammerLaw?: string;
   /** String partials above this frequency are not retained [Hz]. */
   partialBandHz: number;
   maxPartialsPerString: number;
