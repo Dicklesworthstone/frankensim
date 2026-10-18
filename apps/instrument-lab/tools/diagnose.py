@@ -671,7 +671,7 @@ def main():
         where, near_points = heard("a3-mf-close")
         at_iowa_points = V.at_iowa((V.CAMPAIGN / "piano" / "a3-mf-close.log").read_text(errors="replace"))
         heights = sorted(p[2] for p in near_points)
-        height = f"{heights[0]:.2f}" + (f"-{heights[-1]:.2f}" if heights[-1] - heights[0] >= 0.005 else "")
+        height = (f"{heights[0]:.2f}" + (f"-{heights[-1]:.2f}" if heights[-1] - heights[0] >= 0.005 else "")) if heights else "?"
         graded = heard("a3-mf")[1]
         graded_at = ("the graded point 1 m above the middle of the board" if len(graded) == 1 and math.dist(graded[0], (0.675, 1.0, 1.0)) < 0.01
                      else "the graded point " + heard("a3-mf")[0])
