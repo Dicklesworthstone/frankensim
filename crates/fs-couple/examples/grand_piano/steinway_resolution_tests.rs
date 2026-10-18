@@ -35,7 +35,7 @@ fn sweep_station(p: [f64; 2]) -> f64 {
 #[test]
 fn unrefined_resolution_differs_from_the_default_only_by_replaced_regular_nodes() {
     let old = build(8).unwrap();
-    let resolved = build_resolved(8, 1.0, false).unwrap();
+    let resolved = build_resolved(8, 1.0, true).unwrap();
     let mesh = ["#", "node,", "triangle,", "stiffener,", "bridge,", "fixed,"];
     let rows = |g: &str| g.lines().filter(|l| !mesh.iter().any(|m| l.starts_with(m)))
         .map(str::to_owned).collect::<Vec<_>>();

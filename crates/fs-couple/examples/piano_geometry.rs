@@ -14,7 +14,10 @@ const USAGE: &str = "piano_geometry [--divisions 4..32]
     [--bridge-map estimated|rt0425] [--format fsb|obj]
     [--panel-rotary-mass lumped|consistent-cubic]
     [--stiffener-mass lumped|consistent-hermite|consistent-eccentric] --output fresh_path
-Defaults: 8 transverse divisions, original row spacing, estimated bridge map, FSB.
+Defaults: 8 transverse divisions, original row spacing, rt0425 bridge map, FSB.
+The rt0425 map projects the source's published coupling points onto the bridges.
+The estimated map (stations spaced evenly along each bridge) puts most agraffes
+over the soundboard itself; it only reproduces earlier boards.
 The step is the maximum distance perpendicular to the ribs between mesh rows.
 All source feature stations are retained; this is not acoustic-only refinement.
 Output contains the same source-derived panel/ribs/bridges and estimated material
@@ -40,7 +43,7 @@ struct Options {
 impl Options {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut options=Self {divisions:8,rib_normal_step_m:None,
-            published_contacts:false,format:Format::Fsb,output:String::new(),
+            published_contacts:true,format:Format::Fsb,output:String::new(),
             panel_rotary_mass:None,stiffener_mass:None};
         let mut seen=BTreeSet::new();
         let mut args=args.iter();
@@ -127,7 +130,7 @@ fn run(options: &Options) -> Result<(),String> {
     let preset=match options.rib_normal_step_m {
         Some(step)=>steinway_d::build_resolved(options.divisions,step,options.published_contacts),
         None if options.published_contacts=>steinway_d::build_with_rt0425_contacts(options.divisions),
-        None=>steinway_d::build(options.divisions),
+        None=>steinway_d::build_with_estimated_contacts(options.divisions),
     }?;
     let nodes=preset.geometry.lines().filter(|s|s.starts_with("node,")).count();
     let triangles=preset.geometry.lines().filter(|s|s.starts_with("triangle,")).count();
@@ -166,11 +169,12 @@ mod tests {
     fn default_and_explicit_resolution_have_no_hidden_source_switch() {
         let default=parse(&["--output","a.fsb"]).unwrap();
         assert_eq!(default.divisions,8);assert!(default.rib_normal_step_m.is_none());
-        assert!(!default.published_contacts);assert_eq!(default.format,Format::Fsb);
+        assert!(default.published_contacts);assert_eq!(default.format,Format::Fsb);
         let fine=parse(&["--output","a.obj","--divisions","48","--rib-normal-step-m","0.02",
-            "--bridge-map","rt0425","--format","obj"]).unwrap();
+            "--bridge-map","estimated","--format","obj"]).unwrap();
         assert_eq!(fine.divisions,48);assert_eq!(fine.rib_normal_step_m,Some(0.02));
-        assert!(fine.published_contacts);assert_eq!(fine.format,Format::Obj);
+        assert!(!fine.published_contacts);assert_eq!(fine.format,Format::Obj);
+        assert!(parse(&["--output","a.fsb","--bridge-map","rt0425"]).unwrap().published_contacts);
         assert!(USAGE.contains("not measured"));
     }
     #[test]

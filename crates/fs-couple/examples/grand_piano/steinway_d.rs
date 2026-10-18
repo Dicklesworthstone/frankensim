@@ -167,12 +167,21 @@ fn locate(p:[f64;2],xy:&[[f64;2]],tris:&[[usize;3]])->Result<(usize,[f64;3]),Str
 /// Rib-aligned, conforming sweep of this particular drawing. Feature points are
 /// inserted in each row, so structural bridges/cut-off and ribs are actual mesh
 /// beams, not nearest-node decorations. `divisions` controls transverse refinement.
+/// Strings meet their bridges at RT-0425's published coupling points.
 pub fn build(divisions: usize) -> Result<Preset,String> {
-    build_with_contacts(divisions, false)
+    build_with_contacts(divisions, true)
 }
 
+/// The same board as `build`, named for callers that state the contact source.
 pub fn build_with_rt0425_contacts(divisions: usize) -> Result<Preset,String> {
     build_with_contacts(divisions, true)
+}
+
+/// The former default: stations spaced evenly along each bridge. With the
+/// published string lengths they put most agraffes over the soundboard itself
+/// and reverse the bass order. Kept only to reproduce earlier renders.
+pub fn build_with_estimated_contacts(divisions: usize) -> Result<Preset,String> {
+    build_with_contacts(divisions, false)
 }
 
 fn build_with_contacts(divisions: usize, published_contacts: bool) -> Result<Preset,String> {
@@ -185,8 +194,8 @@ fn build_with_contacts(divisions: usize, published_contacts: bool) -> Result<Pre
 /// not a pixel increment, acoustic quadrature level or global triangle diameter.
 /// Sections and beam tapers are sampled from the SAME authored source fields;
 /// this is not subdivision of a frozen piecewise-constant material mesh.
-/// Both the historical and RT-0425-projected key maps remain available.
-/// Default constructors above keep their original geometry and arithmetic.
+/// Both the RT-0425-projected and the former estimated key maps remain available.
+/// The unrefined constructors above keep their original mesh arithmetic.
 pub fn build_resolved(divisions: usize, maximum_rib_normal_step_m: f64,
     published_contacts: bool) -> Result<Preset,String> {
     if !(4..=64).contains(&divisions) {
@@ -385,9 +394,9 @@ fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: 
         }
         vertices+=8;
     }
-    // The legacy preset estimated stations by arc length. The explicit
-    // RT-0425 variant places the 84 published contacts on the closest point of
-    // each reconstructed bridge. Four end keys remain extrapolations.
+    // RT-0425's 84 published contacts go to the closest point of each
+    // reconstructed bridge; four end keys remain extrapolations. The former
+    // estimate spaced stations by arc length (build_with_estimated_contacts).
     for key in 21u8..=108 {
         let p=if published_contacts { published_bridge_point(key).0 }
             else {
@@ -474,7 +483,25 @@ mod tests {
         assert!((a4[0] - 0.81).abs() < 0.03);
         assert!((a4[1] - 0.30).abs() < 0.03);
         assert!(correction < 0.03);
-        assert_ne!(p.geometry, build(12).unwrap().geometry);
+        assert_eq!(p.geometry, build(12).unwrap().geometry);
+        assert_ne!(p.geometry, build_with_estimated_contacts(12).unwrap().geometry);
+    }
+    /// Why the published contacts are the default: run each string straight back
+    /// from its contact by its speaking length (a simplification for the
+    /// overstrung bass). Every published contact puts the agraffe in front of the
+    /// board; the former estimate put most of them over the soundboard itself.
+    #[test]
+    fn published_contacts_put_every_agraffe_in_front_of_the_board() {
+        let lengths: BTreeMap<u8, f64> = super::super::steinway_scale::courses().unwrap()
+            .iter().map(|c| (c.midi, c.length_m)).collect();
+        let estimated = |key: u8| si(if key <= 40 { curve_point(BASS_BRIDGE, 0.95 - 0.90 * f64::from(key - 21) / 19.) }
+            else { curve_point(LONG_BRIDGE, 0.04 + 0.92 * f64::from(key - 41) / 67.) });
+        let agraffe_y = |contact: [f64; 2], key: u8| contact[1] - lengths[&key];
+        // The front edge runs from y = 0 at the treble corner to its bass corner.
+        let front_corner = si([55.0, 920.0])[1];
+        assert!((21u8..=108).all(|key| agraffe_y(published_bridge_point(key).0, key) < 0.0));
+        let over_board = (21u8..=108).filter(|&key| agraffe_y(estimated(key), key) > front_corner).count();
+        assert!(over_board > 40, "{over_board} estimated agraffes beyond the front edge");
     }
 }
 

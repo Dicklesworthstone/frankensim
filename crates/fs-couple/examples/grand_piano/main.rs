@@ -25,7 +25,7 @@ mod rayleigh_loading;
 
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d] [--board board.csv | --board-geometry panel.fsb|panel.fss]
-    [--rt0425-bridge-contacts] [--rt0425-hammer-stiffness]
+    [--rt0425-bridge-contacts | --estimated-bridge-contacts] [--rt0425-hammer-stiffness]
     [--rt0425-hammer-dissipation] [--rt0425-string-damping]
     [--equilibrate-board-mass] [--consistent-board-mass | --edge-cubic-board-mass]
     [--hammers materials.fsh] [--string-sections bonded.fsss]
@@ -58,8 +58,12 @@ felt cards and shank mechanics. Its native header selects flat FSB or crowned
 3-D shell FSS. An invalid/missing supplied board never falls back to the preset.
 Mesh-generation/export controls cannot accompany a supplied board override.
 The preset cannot be combined with --board modal CSV.
---rt0425-bridge-contacts projects the source's 84 published coupling points
-onto this approximate board's bridges; four end keys remain extrapolated.
+The preset's strings meet its bridges at the source's 84 published coupling
+points, projected onto this approximate board's bridges; four end keys remain
+extrapolated (--rt0425-bridge-contacts names this default). The former estimate,
+--estimated-bridge-contacts, spaces stations evenly along each bridge: with the
+published string lengths it puts most agraffes over the soundboard itself and
+reverses the bass order, so it only reproduces earlier renders.
 --rt0425-hammer-stiffness applies the source K_H to each unison string.
 --rt0425-hammer-dissipation requires that stiffness and uses the published
 per-key R_H d(e^p)/dt instead of estimated crush and Prony relaxation.
@@ -279,7 +283,7 @@ struct Options {
     string_stretching: Option<String>, string_polarization: Option<String>, cavity: Option<String>,
     midi: Option<String>, midi_mapping: midi::Mapping,
     concert_pitch: Option<f64>, stretch_tuning: Option<f64>, raw_tensions: bool, fast_dampers: bool,
-    rt0425_bridge_contacts: bool, rt0425_hammer_stiffness: bool,
+    rt0425_bridge_contacts: bool, estimated_bridge_contacts: bool, rt0425_hammer_stiffness: bool,
     rt0425_hammer_dissipation: bool, rt0425_string_damping: bool,
     equilibrate_board_mass: bool, consistent_board_mass: bool, edge_cubic_board_mass: bool,
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
@@ -300,7 +304,7 @@ impl Default for Options {
     fn default() -> Self {
         Self { render: None, scale: None, board: None, board_geometry: None,
             performance: None, preset: None, hammers: None, string_sections: None, hammer_footprints: None, dampers: None, concert_pitch: None, stretch_tuning: None, raw_tensions: false, fast_dampers: false,
-            rt0425_bridge_contacts: false, rt0425_hammer_stiffness: false,
+            rt0425_bridge_contacts: false, estimated_bridge_contacts: false, rt0425_hammer_stiffness: false,
             rt0425_hammer_dissipation: false, rt0425_string_damping: false,
             equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
             string_stretching: None, string_polarization: None, cavity: None,
@@ -329,6 +333,7 @@ impl Options {
             if flag == "--raw-tensions" { options.raw_tensions = true; continue; }
             if flag == "--fast-dampers" { options.fast_dampers = true; continue; }
             if flag == "--rt0425-bridge-contacts" { options.rt0425_bridge_contacts = true; continue; }
+            if flag == "--estimated-bridge-contacts" { options.estimated_bridge_contacts = true; continue; }
             if flag == "--rt0425-hammer-stiffness" { options.rt0425_hammer_stiffness = true; continue; }
             if flag == "--rt0425-hammer-dissipation" { options.rt0425_hammer_dissipation = true; continue; }
             if flag == "--rt0425-string-damping" { options.rt0425_string_damping = true; continue; }
@@ -419,11 +424,12 @@ impl Options {
         if options.preset.as_deref().is_some_and(|p| p != "steinway-d") {
             return Err("unknown piano preset; available: steinway-d".into());
         }
-        if (options.rt0425_bridge_contacts && !options.uses_preset_board())
+        if ((options.rt0425_bridge_contacts || options.estimated_bridge_contacts) && !options.uses_preset_board())
+            || (options.rt0425_bridge_contacts && options.estimated_bridge_contacts)
             || (options.rt0425_hammer_stiffness && (options.preset.is_none()
                 || options.hammers.is_some() || options.render.is_none()))
             || (options.rt0425_hammer_dissipation && !options.rt0425_hammer_stiffness) {
-            return Err("RT-0425 contacts need the preset board; hammer stiffness needs a preset render without --hammers; hammer dissipation also requires source stiffness".into());
+            return Err("bridge-contact choices need the preset board and exclude each other; hammer stiffness needs a preset render without --hammers; hammer dissipation also requires source stiffness".into());
         }
         if options.rt0425_string_damping && (options.preset.is_none()
             || options.scale.is_some() || options.string_sections.is_some() || options.render.is_none()) {
@@ -1163,8 +1169,8 @@ fn run_with(args: &[String]) -> Result<(), String> {
         "RT-0425 Appendix A wrapped-string MODEL: 84 published courses plus four estimated extensions"
     } else { "ESTIMATED demonstration" });
     let tuning_source = options.tuning_report();
-    let preset = options.uses_preset_board().then(|| if options.rt0425_bridge_contacts {
-        steinway_d::build_with_rt0425_contacts(options.mesh_divisions)
+    let preset = options.uses_preset_board().then(|| if options.estimated_bridge_contacts {
+        steinway_d::build_with_estimated_contacts(options.mesh_divisions)
     } else { steinway_d::build(options.mesh_divisions) }).transpose()?;
     if let Some(preset) = &preset {
         if let Some(path) = &options.dump_geometry { write_fresh_output(path, preset.geometry.as_bytes())?; }
@@ -1569,10 +1575,15 @@ mod render_tests {
         let o = options(&["--preset", "steinway-d", "--render", "piano.wav",
             "--rt0425-bridge-contacts", "--rt0425-hammer-stiffness"]).unwrap();
         assert!(o.rt0425_bridge_contacts && o.rt0425_hammer_stiffness);
-        assert!(!options(&["--preset", "steinway-d", "--render", "piano.wav"])
-            .unwrap().rt0425_bridge_contacts);
+        let plain = options(&["--preset", "steinway-d", "--render", "piano.wav"]).unwrap();
+        assert!(!plain.rt0425_bridge_contacts && !plain.estimated_bridge_contacts);
+        assert!(options(&["--preset", "steinway-d", "--render", "piano.wav", "--estimated-bridge-contacts"])
+            .unwrap().estimated_bridge_contacts);
         for args in [
             vec!["--rt0425-bridge-contacts"],
+            vec!["--estimated-bridge-contacts"],
+            vec!["--preset", "steinway-d", "--render", "piano.wav", "--rt0425-bridge-contacts", "--estimated-bridge-contacts"],
+            vec!["--preset", "steinway-d", "--board-geometry", "board.fsb", "--estimated-bridge-contacts"],
             vec!["--rt0425-hammer-stiffness"],
             vec!["--preset", "steinway-d", "--rt0425-hammer-stiffness"],
             vec!["--preset", "steinway-d", "--board-geometry", "board.fsb", "--rt0425-bridge-contacts"],

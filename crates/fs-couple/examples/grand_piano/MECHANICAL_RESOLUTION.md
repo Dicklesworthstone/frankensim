@@ -17,7 +17,7 @@ beams to actual panel edges; it does not decorate a mesh with unattached ribs.
 
 ```sh
 cargo run --release -p fs-couple --example piano_geometry -- \
-  --divisions 32 --rib-normal-step-m 0.02 --bridge-map estimated \
+  --divisions 32 --rib-normal-step-m 0.02 --bridge-map rt0425 \
   --panel-rotary-mass consistent-cubic --stiffener-mass consistent-eccentric \
   --output resolved-board.fsb
 
@@ -27,10 +27,12 @@ cargo run --release -p fs-couple --example grand_piano -- \
   --note 69 --duration 0.2 --render resolved-note.wav
 ```
 
-`--bridge-map rt0425` instead selects the already-existing source table projected
-to the reconstructed structural bridges, including its four extrapolated end
-keys. Keep that choice unchanged across mesh comparisons; it is independent of
-resolution. `--format obj --output resolved-board.obj` exports the same builder's
+`--bridge-map rt0425`, the default, projects the source's published coupling
+points onto the reconstructed structural bridges, including its four
+extrapolated end keys. `--bridge-map estimated` reproduces the former stations,
+spaced evenly along each bridge; with the published string lengths they put most
+agraffes over the soundboard itself. Keep that choice unchanged across mesh
+comparisons; it is independent of resolution. `--format obj --output resolved-board.obj` exports the same builder's
 three-dimensional visualization. That OBJ is not a complete piano enclosure or
 a certified watertight assembly of the overlapping rib and panel solids.
 

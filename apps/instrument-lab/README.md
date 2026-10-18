@@ -90,7 +90,7 @@ switch one mechanism on at a time, whenever they are present in the campaign:
     grand_piano ...a3-mf flags... --microphone 0.175,0.556,0.25 --microphone-right 0.375,0.556,0.25 --render a3-mf-px.wav
     grand_piano ...a3-mf flags... --microphone 0.275,0.456,0.25 --microphone-right 0.275,0.656,0.25 --render a3-mf-py.wav
     # the former estimated bridge stations on the same mesh, with the same air and receiver
-    piano_geometry --divisions 16 --rib-normal-step-m 0.03 --output board-est16.fsb
+    piano_geometry --divisions 16 --rib-normal-step-m 0.03 --bridge-map estimated --output board-est16.fsb
     grand_piano ...a3-mf flags... --board-geometry board-est16.fsb --render a3-mf-estmap.wav
     # bare-board modes and per-key bridge displacements of the graded board (A3's driving-point mobility)
     grand_piano --preset steinway-d --board-geometry board-rt16.fsb --board-band-hz 1600 --dump-board board-modes.csv
