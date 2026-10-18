@@ -1126,9 +1126,12 @@ fn massive_reed_speaks(bore: BoreRealization) {
 /// The lumped LC ladder ODE clock, requested explicitly (IRP M2.2-W4).
 #[test]
 fn massive_reed_speaks_on_the_ode_clock() {
-    massive_reed_speaks(BoreRealization::lumped_ladder(min_admissible_lumped_cells(
-        1.0,
-    )));
+    // A declared coarse model-form rung: its measured pitch error is several
+    // cents (see reed_default_is_characteristic_line), so a 1-cent ladder refuses.
+    massive_reed_speaks(BoreRealization::lumped_ladder_with_tolerance(
+        min_admissible_lumped_cells(1.0),
+        100.0,
+    ));
 }
 
 /// The characteristic-line twin: the same massive reed on the default bore.
@@ -1166,17 +1169,44 @@ fn reed_default_is_characteristic_line() {
         "the default is exactly the characteristic line"
     );
     let cells = min_admissible_lumped_cells(1.0);
+    // A declared coarse rung runs and receipts the MEASURED passive error.
     let ladder = realize_assembly_with_options(
+        &a,
+        &RealizeOptions {
+            bore: BoreRealization::lumped_ladder_with_tolerance(cells, 100.0),
+        },
+    )
+    .expect("requested coarse ladder");
+    let Some(BoreRealizationReceipt::LumpedLadder {
+        cells: received,
+        pitch_error_cents: passive_cents,
+        dispersion_error_cents,
+        ..
+    }) = ladder.bore_receipt
+    else {
+        panic!("explicit ladder receipt: {:?}", ladder.bore_receipt);
+    };
+    assert_eq!(received, cells);
+    assert!(passive_cents.is_finite() && passive_cents.abs() <= 100.0);
+    assert_ne!(
+        passive_cents.to_bits(),
+        dispersion_error_cents.to_bits(),
+        "the receipt reports the measured error, not the dispersion formula"
+    );
+    // The 1-cent request admits exactly when that measured error is within 1 cent.
+    match realize_assembly_with_options(
         &a,
         &RealizeOptions {
             bore: BoreRealization::lumped_ladder(cells),
         },
-    )
-    .expect("requested ladder");
-    assert!(matches!(
-        ladder.bore_receipt,
-        Some(BoreRealizationReceipt::LumpedLadder { cells: c, .. }) if c == cells
-    ));
+    ) {
+        Ok(_) => assert!(passive_cents.abs() <= 1.0, "{passive_cents} cents admitted"),
+        Err(AcousticRealizeError::LumpedLadderBand {
+            pitch_error_cents, ..
+        }) => assert_eq!(pitch_error_cents.to_bits(), passive_cents.to_bits()),
+        Err(other) => panic!("unexpected refusal: {other}"),
+    }
+    // Below the dispersion bound the request refuses before any measurement.
     assert!(matches!(
         realize_assembly_with_options(
             &a,
@@ -1192,15 +1222,24 @@ fn reed_default_is_characteristic_line() {
         line_rms > 5.0 && ladder_rms > 5.0,
         "{line_rms} {ladder_rms}"
     );
+    // The ladder relative to the line: pitch from the period ratio, level from rms.
+    let rendered_cents = 1200.0 * (line_period / ladder_period).log2();
+    if rendered_cents.abs() > 1.0 && passive_cents.abs() > 1.0 {
+        assert_eq!(
+            rendered_cents.signum(),
+            passive_cents.signum(),
+            "passive {passive_cents} vs rendered {rendered_cents} cents"
+        );
+    }
     println!(
         "{{\"suite\":\"fs-couple\",\"case\":\"reed-default-is-characteristic-line\",\
          \"line_n_fft\":{},\"ladder_cells\":{cells},\"line_period_samples\":{line_period:.3},\
-         \"ladder_period_samples\":{ladder_period:.3},\"pitch_change_cents\":{:.2},\
+         \"ladder_period_samples\":{ladder_period:.3},\"pitch_change_cents\":{rendered_cents:.2},\
+         \"passive_pitch_error_cents\":{passive_cents:.3},\
+         \"dispersion_bound_cents\":{dispersion_error_cents:.3},\
          \"line_rms_pa\":{line_rms:.3},\"ladder_rms_pa\":{ladder_rms:.3},\
          \"level_change_db\":{:.2}}}",
         receipt.n_fft,
-        // The ladder relative to the line: pitch from the period ratio, level from rms.
-        1200.0 * (line_period / ladder_period).log2(),
         20.0 * (ladder_rms / line_rms).log10(),
     );
 }

@@ -92,9 +92,11 @@ pub enum AcousticRealizeError {
     LumpedLadderBand {
         /// Requested total cell count.
         cells: usize,
-        /// First admissible cell count with pitch error <= `max_pitch_error_cents`.
+        /// Smallest cell count whose spatial dispersion alone meets the
+        /// tolerance. This is a necessary condition, not an admission.
         min_admissible_cells: usize,
-        /// Model-form pitch error at `cells` [cents].
+        /// Refusing pitch error at `cells` [cents]: the dispersion bound below
+        /// `min_admissible_cells`, otherwise the measured passive error.
         pitch_error_cents: f64,
         /// Declared pitch-error tolerance [cents].
         max_pitch_error_cents: f64,
@@ -205,15 +207,15 @@ pub enum BoreRealizationReceipt {
     LumpedLadder {
         /// Total lumped LC cells assembled across the bore.
         cells: usize,
-        /// First admissible cell count with pitch error <= `max_pitch_error_cents`.
+        /// Smallest cell count whose spatial dispersion alone meets the
+        /// tolerance. This is a necessary condition, not an admission.
         min_admissible_cells: usize,
         /// Spatial dispersion model-form pitch error at `cells` [cents].
         dispersion_error_cents: f64,
-        /// Pitch error against the characteristic line [cents]. This is the
-        /// analytic quarter-wave dispersion bound, equal to
-        /// `dispersion_error_cents`; no time-domain comparison is run here. The
-        /// measured line-vs-ladder change is reported by the
-        /// `reed_default_is_characteristic_line` regression.
+        /// Measured, signed model-form pitch error against the characteristic
+        /// line [cents]. It is taken from the strongest passive input-impedance
+        /// peak near the quarter-wave fundamental: the ladder's port-Hamiltonian
+        /// `Z(iω)` against the line's own TMM. Positive means the ladder is sharp.
         pitch_error_cents: f64,
         /// Declared pitch-error tolerance [cents].
         max_pitch_error_cents: f64,
@@ -4371,6 +4373,24 @@ fn realize_reed_on_duct(
                     what: "duct cannot be sliced into a lumped ladder",
                 },
             )?;
+            // Dispersion alone is a necessary condition. The admission is the
+            // ladder's MEASURED passive pitch against the line's own TMM.
+            let pitch_error_cents = lumped_ladder_pitch_error_cents(
+                &physics,
+                &sections,
+                &taps,
+                duct,
+                termination,
+                gas,
+            )?;
+            if pitch_error_cents.abs() > max_pitch_error_cents {
+                return Err(AcousticRealizeError::LumpedLadderBand {
+                    cells,
+                    min_admissible_cells,
+                    pitch_error_cents,
+                    max_pitch_error_cents,
+                });
+            }
             let samples = realize_reed_ode(
                 &sections,
                 duct_mouth(duct.termination),
@@ -4389,7 +4409,7 @@ fn realize_reed_on_duct(
                     cells,
                     min_admissible_cells,
                     dispersion_error_cents,
-                    pitch_error_cents: dispersion_error_cents,
+                    pitch_error_cents,
                     max_pitch_error_cents,
                 },
             ))
@@ -4421,6 +4441,155 @@ pub fn min_admissible_lumped_cells(max_pitch_error_cents: f64) -> usize {
         cells += 1;
     }
     cells
+}
+
+/// Passive input impedance of a linear single-port bore chain,
+/// `Z(iω) = Gᵀ Q (iω I − (J − R) Q)⁻¹ G`, read from its port-Hamiltonian
+/// structure. `Q` comes column by column from the (linear) effort map.
+struct ChainImpedance {
+    n: usize,
+    a: Vec<f64>,
+    g: Vec<f64>,
+    gq: Vec<f64>,
+}
+
+impl ChainImpedance {
+    fn new(line: &fs_phs::PortHamiltonian) -> Result<Self, AcousticRealizeError> {
+        let n = line.state_dim();
+        if line.port_dim() != 1 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "passive ladder impedance needs exactly one inlet port",
+            });
+        }
+        let (j, r, g) = line.structure();
+        let mut q = vec![0.0; n * n];
+        let mut unit = vec![0.0; n];
+        for col in 0..n {
+            unit[col] = 1.0;
+            for (row, value) in line.effort(&unit).into_iter().enumerate() {
+                q[row * n + col] = value;
+            }
+            unit[col] = 0.0;
+        }
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            for k in 0..n {
+                a[i * n + k] = (0..n)
+                    .map(|l| (j[i * n + l] - r[i * n + l]) * q[l * n + k])
+                    .sum();
+            }
+        }
+        let gq = (0..n)
+            .map(|k| (0..n).map(|i| g[i] * q[i * n + k]).sum())
+            .collect();
+        Ok(Self {
+            n,
+            a,
+            g: g.to_vec(),
+            gq,
+        })
+    }
+
+    fn magnitude(&self, omega: f64) -> Result<f64, AcousticRealizeError> {
+        let n = self.n;
+        let mut m: Vec<C64> = self.a.iter().map(|&v| C64::new(-v, 0.0)).collect();
+        for i in 0..n {
+            m[i * n + i] = m[i * n + i] + C64::new(0.0, omega);
+        }
+        let lu = fs_la::eigen_complex::lu_complex(&m, n).map_err(|_| {
+            AcousticRealizeError::InvalidDescription {
+                what: "lumped ladder chain is singular at a sampled frequency",
+            }
+        })?;
+        let mut x: Vec<C64> = self.g.iter().map(|&v| C64::new(v, 0.0)).collect();
+        lu.solve(&mut x);
+        let z = self
+            .gq
+            .iter()
+            .zip(&x)
+            .fold(C64::ZERO, |acc, (&w, &xv)| acc + xv.scale(w));
+        Ok(z.abs())
+    }
+}
+
+/// Angular frequency of the largest `|Z|` on `[lo, hi]`: a uniform scan, then
+/// golden-section refinement inside the winning cell.
+fn impedance_peak(
+    lo: f64,
+    hi: f64,
+    mut magnitude: impl FnMut(f64) -> Result<f64, AcousticRealizeError>,
+) -> Result<f64, AcousticRealizeError> {
+    const SCAN: usize = 240;
+    let step = (hi - lo) / SCAN as f64;
+    let (mut best, mut best_omega) = (f64::NEG_INFINITY, lo);
+    for i in 0..=SCAN {
+        let omega = lo + step * i as f64;
+        let value = magnitude(omega)?;
+        if value > best {
+            best = value;
+            best_omega = omega;
+        }
+    }
+    let (mut a, mut b) = ((best_omega - step).max(lo), (best_omega + step).min(hi));
+    let ratio = 0.5 * (det::sqrt(5.0) - 1.0);
+    let (mut c, mut d) = (b - ratio * (b - a), a + ratio * (b - a));
+    let (mut fc, mut fd) = (magnitude(c)?, magnitude(d)?);
+    for _ in 0..48 {
+        if fc > fd {
+            b = d;
+            d = c;
+            fd = fc;
+            c = b - ratio * (b - a);
+            fc = magnitude(c)?;
+        } else {
+            a = c;
+            c = d;
+            fc = fd;
+            d = a + ratio * (b - a);
+            fd = magnitude(d)?;
+        }
+    }
+    Ok(f64::midpoint(a, b))
+}
+
+/// Signed model-form pitch error [cents] of the lumped ladder against the
+/// characteristic line's own TMM (exact Bessel losses, the same termination
+/// and wall). Both are scanned for their strongest passive input-impedance
+/// peak around the quarter-wave fundamental; positive means the ladder is sharp.
+fn lumped_ladder_pitch_error_cents(
+    physics: &Duct,
+    sections: &[AcousticSection],
+    taps: &[AcousticTap],
+    duct: &ViscothermalDuct,
+    termination: Termination,
+    gas: &GasState,
+) -> Result<f64, AcousticRealizeError> {
+    let length: f64 = physics.segments.iter().map(Segment::axial_length).sum();
+    let quarter = core::f64::consts::TAU * gas.sound_speed / (4.0 * length);
+    let (lo, hi) = (0.5 * quarter, 1.5 * quarter);
+    let chain = ChainImpedance::new(&ode_bore_chain(
+        sections,
+        duct_mouth(duct.termination),
+        1,
+        taps,
+        gas,
+        duct.wall,
+    )?)?;
+    let ladder = impedance_peak(lo, hi, |omega| chain.magnitude(omega))?;
+    let wall = wall_pin(duct.wall);
+    let line = impedance_peak(lo, hi, |omega| {
+        fs_duct::input_impedance_wall(
+            physics,
+            gas,
+            omega,
+            fs_duct::LossModel::Bessel,
+            termination,
+            wall.as_ref(),
+        )
+        .map(|response| response.impedance.abs())
+        .map_err(AcousticRealizeError::Duct)
+    })?;
+    Ok(1200.0 * det::ln(ladder / line) / core::f64::consts::LN_2)
 }
 
 fn viscothermal_pin(gas: &GasState) -> ViscothermalPin {
