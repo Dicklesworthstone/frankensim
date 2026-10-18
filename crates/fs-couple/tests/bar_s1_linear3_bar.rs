@@ -1,5 +1,5 @@
-//! Bar-S1 (.266), G0/G1/G2: existing P1 solid (TET10 for the locking-free
-//! beam cross-check), certified modal slicer, Burton--Miller radiation and
+//! Bar-S1 (.266), G0/G1/G2: existing TET10 solid (P1 kept as a reported
+//! locking diagnostic), certified modal slicer, Burton--Miller radiation and
 //! material Hertz owners composed as fixture data.
 //!
 //! This is module evidence, never a reconstruction of the Iowa specimen.
@@ -20,10 +20,12 @@ use fs_exec::Cx;
 use fs_material::OrthotropicElastic;
 use fs_math::{c64::C64, det};
 use fs_modal::{ModePair, SliceOptions, SliceReport, eigh_gen_dense, slice_window};
-use fs_solid::linear3::tet10::{QuadraticTetProblem, TetQuadrature, promote_p1_to_p2};
+use fs_solid::linear3::tet10::{
+    BoundaryProjection, QuadraticTetProblem, TetQuadrature, promote_p1_to_p2,
+};
 use fs_solid::linear3::{
-    TetAssemblyBudget, TetElasticAssembly, TetElasticMaterial, TetLinearElasticProblem,
-    TetMaterialField,
+    TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetElasticMaterial,
+    TetLinearElasticProblem, TetMaterialField,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -65,7 +67,7 @@ const KINDS: [&str; 5] = [
 ];
 static SERIAL: Mutex<()> = Mutex::new(());
 static UNIFORM: OnceLock<Ladder> = OnceLock::new();
-static UNIFORM_TET10: OnceLock<Vec<Rung>> = OnceLock::new();
+static UNIFORM_TET10: OnceLock<Ladder> = OnceLock::new();
 static UNDERCUT: OnceLock<Ladder> = OnceLock::new();
 static RADIATION: OnceLock<RadiationLadder> = OnceLock::new();
 
@@ -327,17 +329,35 @@ fn strike_node(mesh: &Mesh) -> usize {
     ((nx / 4) * (ny + 1) + ny / 2) * (nz + 1) + nz
 }
 
+/// Canonical phase for reproducible pressure comparisons and the render.
+fn canonical_phase(modes: &mut [ModePair]) {
+    for m in modes {
+        let at = m
+            .phi
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+            .unwrap()
+            .0;
+        if m.phi[at] < 0.0 {
+            for v in &mut m.phi {
+                *v = -*v;
+            }
+        }
+    }
+}
+
 /// Preserve all six free-body coordinates in contact. Dropping them would
 /// spuriously anchor a nominally free-free bar. The analytic affine fields
 /// are M-orthonormalized on the actual assembled body, including the cut.
-fn rigid_projectors(mesh: &Mesh, a: &TetElasticAssembly) -> Vec<f64> {
+/// `nodes` are the assembly's nodes (the TET10 mid-edge nodes included).
+fn rigid_projectors(mesh: &Mesh, nodes: &[[f64; 3]], a: &TetElasticAssembly) -> Vec<f64> {
     let mut basis: Vec<Vec<f64>> = Vec::new();
     let mut mass_basis: Vec<Vec<f64>> = Vec::new();
     let mut scratch = vec![0.0; a.free_dofs.len()];
     let mut projections = Vec::new();
     for axis in 0..6 {
-        let mut field: Vec<f64> = mesh
-            .nodes
+        let mut field: Vec<f64> = nodes
             .iter()
             .flat_map(|&[x, y, z]| match axis {
                 0 => [1.0, 0.0, 0.0],
@@ -388,21 +408,7 @@ fn calculate_ladder(design: Design, bar: &str) -> Ladder {
             let mesh = mesh([24 * r, 2 * r, r], design);
             let a = assemble(&mesh, &mat, cx);
             let mut report = slice(&a, 20.0, FMAX / design.scale);
-            // Canonical phase for reproducible pressure comparisons/render.
-            for m in &mut report.modes {
-                let at = m
-                    .phi
-                    .iter()
-                    .enumerate()
-                    .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
-                    .unwrap()
-                    .0;
-                if m.phi[at] < 0.0 {
-                    for v in &mut m.phi {
-                        *v = -*v;
-                    }
-                }
-            }
+            canonical_phase(&mut report.modes);
             let selected = classify(&mesh, &report.modes);
             let frequencies = selected.map(|i| hz(&report.modes[i]));
             let eigen_errors = selected.map(|i| hz_error(&report.modes[i]));
@@ -432,7 +438,7 @@ fn calculate_ladder(design: Design, bar: &str) -> Ladder {
                 eigen_errors,
             });
             let rigid = if r == RUNGS[3] {
-                rigid_projectors(&mesh, &a)
+                rigid_projectors(&mesh, &mesh.nodes, &a)
             } else {
                 Vec::new()
             };
@@ -454,67 +460,133 @@ fn uniform() -> &'static Ladder {
     UNIFORM.get_or_init(|| calculate_ladder(Design::PRISM, "A-uniform"))
 }
 
-/// The same prism, meshes and slicer on the existing quadratic element. The
-/// prism's faces are planar, so straight P1 edge midpoints are exact and the
-/// promotion needs no boundary projection. Promotion keeps the P1 node IDs,
-/// so `classify` reads the same end-section vertex DOFs.
-fn uniform_tet10() -> &'static [Rung] {
-    UNIFORM_TET10.get_or_init(|| {
-        with_cx(|cx| {
-            let mat = material(HONDURAS);
-            TET10_RUNGS
-                .iter()
-                .map(|&r| {
-                    let started = Instant::now();
-                    cx.checkpoint().expect("cancel before rung");
-                    let mesh = mesh([24 * r, 2 * r, r], Design::PRISM);
-                    let (nodes, elements) = promote_p1_to_p2(&mesh.nodes, &mesh.tets, None, cx)
-                        .expect("P1 to TET10 promotion");
-                    let a = QuadraticTetProblem {
-                        nodes_m: &nodes,
-                        elements: &elements,
-                        materials: TetMaterialField::Uniform(&mat),
-                        fixed_dofs: &[],
-                        budget: TetAssemblyBudget::standard(),
-                        // Affine minima: stiffness degree 2, consistent mass degree 4.
-                        quadrature: TetQuadrature {
-                            stiffness_points_per_dir: 3,
-                            mass_points_per_dir: 4,
-                        },
-                    }
-                    .assemble(cx)
-                    .expect("free-free TET10 assembly");
-                    let report = slice(&a, 20.0, FMAX);
-                    let selected = classify(&mesh, &report.modes);
-                    let frequencies = selected.map(|i| hz(&report.modes[i]));
-                    let eigen_errors = selected.map(|i| hz_error(&report.modes[i]));
-                    let h = (L / (24 * r) as f64)
-                        .max(W / (2 * r) as f64)
-                        .max(T / r as f64);
-                    row(
-                        "structural-rung",
-                        "h",
-                        "pass",
-                        &format!(
-                            "{{\"bar_id\":\"A-uniform\",\"element\":\"TET10\",\"rung_h_m\":{h},\"n_tets\":{},\"free_dofs\":{},\"f_modes_hz\":{frequencies:?},\"eigen_uncertainty_hz\":{eigen_errors:?},\"factor_peak_bytes\":{},\"factor_nnz_l\":{},\"window_hz\":[20,{FMAX}],\"inertia_count\":{}}}",
-                            elements.len(),
-                            a.free_dofs.len(),
-                            report.stats.factor_peak_bytes,
-                            report.stats.factor_nnz_l,
-                            report.expected
-                        ),
-                        started,
-                    );
-                    Rung {
-                        h,
-                        n_tets: elements.len(),
-                        frequencies,
-                        eigen_errors,
-                    }
-                })
-                .collect()
-        })
+/// Boundary mid-edge nodes land on the exact declared surface. The undercut
+/// face is curved, so straight midpoints would leave a P1 geometry error
+/// under the quadratic field; on the prism this is the identity.
+struct DesignSurface(Design);
+
+impl Design {
+    fn reference(self, p: [f64; 3]) -> [f64; 3] {
+        let u0 = p[0] / (L * self.scale);
+        let a = ((u0 - 0.5) / 0.3).abs();
+        let cut = if a < 1.0 {
+            self.depth * (1.0 - a * a).powi(2)
+        } else {
+            0.0
+        };
+        [
+            u0,
+            p[1] / (W * self.scale) + 0.5,
+            (p[2] / (T * self.scale) + 0.5 - cut) / (1.0 - cut),
+        ]
+    }
+}
+
+impl BoundaryProjection for DesignSurface {
+    /// x and y are linear in the reference coordinates, so a boundary-edge
+    /// midpoint keeps the exact reference average along the face; only its
+    /// face coordinate moves off the face (by the cut's sag, ~1e-3 in u),
+    /// and is snapped back to the nearest face of the reference box.
+    fn project(&self, p: [f64; 3]) -> Result<[f64; 3], TetElasticError> {
+        let mut u = self.0.reference(p);
+        let axis = (0..3)
+            .min_by(|&a, &b| u[a].min(1.0 - u[a]).total_cmp(&u[b].min(1.0 - u[b])))
+            .unwrap();
+        u[axis] = if u[axis] < 0.5 { 0.0 } else { 1.0 };
+        Ok(self.0.point(u))
+    }
+}
+
+/// The P1 mesh promoted to TET10 on the existing quadratic owner. Promotion
+/// keeps the P1 node IDs, so `classify`, the strike node and the BEM vertex
+/// map read the same vertex DOFs as on P1.
+fn tet10_assemble(
+    mesh: &Mesh,
+    design: Design,
+    mat: &TetElasticMaterial,
+    cx: &Cx<'_>,
+) -> (Vec<[f64; 3]>, usize, TetElasticAssembly) {
+    let surface = DesignSurface(design);
+    let (nodes, elements) = promote_p1_to_p2(&mesh.nodes, &mesh.tets, Some(&surface), cx)
+        .expect("P1 to TET10 promotion");
+    let a = QuadraticTetProblem {
+        nodes_m: &nodes,
+        elements: &elements,
+        materials: TetMaterialField::Uniform(mat),
+        fixed_dofs: &[],
+        budget: TetAssemblyBudget::standard(),
+        // Affine minima: stiffness degree 2, consistent mass degree 4.
+        quadrature: TetQuadrature {
+            stiffness_points_per_dir: 3,
+            mass_points_per_dir: 4,
+        },
+    }
+    .assemble(cx)
+    .expect("free-free TET10 assembly");
+    (nodes, elements.len(), a)
+}
+
+/// TET10 counterpart of [`calculate_ladder`] on rungs [`TET10_RUNGS`].
+fn calculate_tet10_ladder(design: Design, bar: &str) -> Ladder {
+    with_cx(|cx| {
+        let mat = material(HONDURAS);
+        let mut rows = Vec::new();
+        let mut last = None;
+        for r in TET10_RUNGS {
+            let started = Instant::now();
+            cx.checkpoint().expect("cancel before rung");
+            let mesh = mesh([24 * r, 2 * r, r], design);
+            let (nodes, n_tets, a) = tet10_assemble(&mesh, design, &mat, cx);
+            let mut report = slice(&a, 20.0, FMAX / design.scale);
+            canonical_phase(&mut report.modes);
+            let selected = classify(&mesh, &report.modes);
+            let frequencies = selected.map(|i| hz(&report.modes[i]));
+            let eigen_errors = selected.map(|i| hz_error(&report.modes[i]));
+            let h = (L / (24 * r) as f64)
+                .max(W / (2 * r) as f64)
+                .max(T / r as f64)
+                * design.scale;
+            row(
+                "structural-rung",
+                "h",
+                "pass",
+                &format!(
+                    "{{\"bar_id\":\"{bar}\",\"element\":\"TET10\",\"rung_h_m\":{h},\"n_tets\":{n_tets},\"free_dofs\":{},\"f_modes_hz\":{frequencies:?},\"eigen_uncertainty_hz\":{eigen_errors:?},\"factor_peak_bytes\":{},\"factor_nnz_l\":{},\"window_hz\":[20,{}],\"inertia_count\":{}}}",
+                    a.free_dofs.len(),
+                    report.stats.factor_peak_bytes,
+                    report.stats.factor_nnz_l,
+                    FMAX / design.scale,
+                    report.expected
+                ),
+                started,
+            );
+            rows.push(Rung {
+                h,
+                n_tets,
+                frequencies,
+                eigen_errors,
+            });
+            let rigid = if r == *TET10_RUNGS.last().unwrap() {
+                rigid_projectors(&mesh, &nodes, &a)
+            } else {
+                Vec::new()
+            };
+            last = Some((mesh, report.modes, selected, rigid));
+        }
+        let (mesh, modes, selected, rigid_projectors) = last.unwrap();
+        Ladder {
+            design,
+            rungs: rows,
+            mesh,
+            modes,
+            selected,
+            rigid_projectors,
+        }
     })
+}
+
+fn uniform_tet10() -> &'static Ladder {
+    UNIFORM_TET10.get_or_init(|| calculate_tet10_ladder(Design::PRISM, "A-uniform"))
 }
 
 /// Exact free-free Timoshenko characteristic equations, split into parity
@@ -675,7 +747,7 @@ fn uniform_prism_3d_ladder_converges_to_free_free_beam_theory() {
             ),
             started,
         );
-        let est = tet10_estimate(tet10, mode);
+        let est = tet10_estimate(&tet10.rungs, mode);
         let error = (est.limit_hz / timoshenko[mode] - 1.0).abs();
         row(
             "uniform-prism-vs-free-free-Timoshenko",
@@ -688,6 +760,7 @@ fn uniform_prism_3d_ladder_converges_to_free_free_beam_theory() {
             &format!(
                 "{{\"element\":\"TET10\",\"rungs\":{TET10_RUNGS:?},\"f_hz\":{:?},\"observed_order\":{:?},\"formal_order\":4,\"order_band\":[3.5,4.3],\"extrapolated_hz\":{},\"oracle_hz\":{},\"euler_bernoulli_hz\":{},\"relative_error\":{error},\"tolerance\":{BEAM_TOL},\"numerical_uncertainty_hz\":{}}}",
                 tet10
+                    .rungs
                     .iter()
                     .map(|r| r.frequencies[mode])
                     .collect::<Vec<_>>(),
@@ -854,12 +927,18 @@ fn mode_window_cap_is_live() {
     });
 }
 
+/// The design is solved on the locking-free TET10 owner at rung 3. On the
+/// coarse P1 grid that solved it before, shear locking lifted the
+/// fundamental, so the converged bar sounded about 330 cents under Db5.
+const DESIGN_GRID: [usize; 3] = [72, 6, 3];
+
 fn tune_design() -> Design {
     with_cx(|cx| {
         let mat = material(HONDURAS);
         let evaluate = |depth: f64| {
-            let mesh = mesh([48, 4, 2], Design { depth, scale: 1.0 });
-            let a = assemble(&mesh, &mat, cx);
+            let design = Design { depth, scale: 1.0 };
+            let mesh = mesh(DESIGN_GRID, design);
+            let (_, _, a) = tet10_assemble(&mesh, design, &mat, cx);
             let report = slice(&a, 20.0, FMAX);
             let ids = classify(&mesh, &report.modes);
             (
@@ -897,7 +976,7 @@ fn tune_design() -> Design {
             "cut-depth",
             "pass",
             &format!(
-                "{{\"bar_id\":\"B-undercut\",\"profile\":\"(1-((x/L-0.5)/0.3)^2)^2 on central 60 percent\",\"depth_fraction\":{depth},\"uniform_scale\":{},\"targeted_ratio\":3,\"achieved_design_grid_ratio\":{ratio},\"targeted_et_note\":\"Db5\",\"target_hz\":{ET_DB5_HZ},\"design_grid\":[48,4,2],\"target_is_not_validation\":true,\"same_specimen\":false}}",
+                "{{\"bar_id\":\"B-undercut\",\"profile\":\"(1-((x/L-0.5)/0.3)^2)^2 on central 60 percent\",\"depth_fraction\":{depth},\"uniform_scale\":{},\"targeted_ratio\":3,\"achieved_design_grid_ratio\":{ratio},\"targeted_et_note\":\"Db5\",\"target_hz\":{ET_DB5_HZ},\"design_grid\":{DESIGN_GRID:?},\"design_element\":\"TET10\",\"target_is_not_validation\":true,\"same_specimen\":false}}",
                 design.scale
             ),
             Instant::now(),
@@ -907,7 +986,7 @@ fn tune_design() -> Design {
 }
 
 fn undercut() -> &'static Ladder {
-    UNDERCUT.get_or_init(|| calculate_ladder(tune_design(), "B-undercut"))
+    UNDERCUT.get_or_init(|| calculate_tet10_ladder(tune_design(), "B-undercut"))
 }
 
 #[test]
@@ -917,7 +996,7 @@ fn undercut_bar_ladder_reports_modes_with_uncertainty() {
     let mut qualified = true;
     for (mode, kind) in KINDS.iter().enumerate() {
         let started = Instant::now();
-        let est = estimate(ladder, mode);
+        let est = tet10_estimate(&ladder.rungs, mode);
         let f = ladder.rungs.last().unwrap().frequencies[mode];
         let cents = 1200.0 * det::ln(1.0 + est.uncertainty_hz / f) / det::ln(2.0);
         let admitted = est.asymptotic && cents <= 1.0;
@@ -929,15 +1008,15 @@ fn undercut_bar_ladder_reports_modes_with_uncertainty() {
             kind,
             if admitted { "pass" } else { "refused" },
             &format!(
-                "{{\"bar_id\":\"B-undercut\",\"f_hz\":{f},\"extrapolated_hz\":{},\"observed_order\":{:?},\"formal_order\":2,\"uncertainty_hz\":{},\"uncertainty_cents\":{cents},\"tolerance_cents\":1,\"uncertainty_kind\":\"Richardson estimate plus eigen residual; not certified\",\"asymptotic\":{},\"route\":\"{}\"}}",
+                "{{\"bar_id\":\"B-undercut\",\"element\":\"TET10\",\"f_hz\":{f},\"extrapolated_hz\":{},\"observed_order\":{:?},\"formal_order\":4,\"order_band\":[3.5,4.3],\"uncertainty_hz\":{},\"uncertainty_cents\":{cents},\"tolerance_cents\":1,\"uncertainty_kind\":\"Richardson estimate plus eigen residual; not certified\",\"asymptotic\":{},\"route\":\"{}\"}}",
                 est.limit_hz,
                 est.orders,
                 est.uncertainty_hz,
                 est.asymptotic,
                 if admitted {
-                    "P1-qualified-numerical-band-only"
+                    "TET10-qualified-numerical-band-only"
                 } else {
-                    "TET10:M1.3-W1a"
+                    "finer TET10 rung"
                 }
             ),
             started,
@@ -949,13 +1028,17 @@ fn undercut_bar_ladder_reports_modes_with_uncertainty() {
             assert!(cents > 1.0 || !est.asymptotic);
         }
     }
+    // The design target is reported against the extrapolated fundamental; it
+    // is a construction target, never a validation.
+    let fundamental = tet10_estimate(&ladder.rungs, 0).limit_hz;
     row(
         "undercut-band",
         "h",
         if qualified { "pass" } else { "refused" },
         &format!(
-            "{{\"targeted_partials\":[1,2],\"ratio_target\":3,\"finest_ratio\":{},\"route\":\"TET10:M1.3-W1a when refused\"}}",
-            ladder.rungs[3].frequencies[1] / ladder.rungs[3].frequencies[0]
+            "{{\"targeted_partials\":[1,2],\"ratio_target\":3,\"finest_ratio\":{},\"extrapolated_fundamental_hz\":{fundamental},\"target_hz\":{ET_DB5_HZ},\"fundamental_cents_vs_target\":{},\"route\":\"finer TET10 rung when refused\"}}",
+            ladder.rungs[3].frequencies[1] / ladder.rungs[3].frequencies[0],
+            1200.0 * det::ln(fundamental / ET_DB5_HZ) / det::ln(2.0)
         ),
         Instant::now(),
     );
@@ -1490,16 +1573,16 @@ fn write_artifacts(
     let hash = fs_blake3::hash_domain("org.frankensim.music-render.wav.v1", &wav).to_hex();
     std::fs::write(out.join("bar-s1-after.wav"), wav).unwrap();
     let finest = &ladder.rungs[3];
-    let est = estimate(ladder, 0);
+    let est = tet10_estimate(&ladder.rungs, 0);
     let p: Vec<_> = transfer.iter().map(|p| [p.re, p.im]).collect();
     let band = (0..2).all(|mode| {
-        let e = estimate(ladder, mode);
+        let e = tet10_estimate(&ladder.rungs, mode);
         e.asymptotic
             && 1200.0 * det::ln(1.0 + e.uncertainty_hz / finest.frequencies[mode]) / det::ln(2.0)
                 <= 1.0
     });
     let metadata = format!(
-        "{{\"bar_id\":\"B-undercut\",\"rung_h_m\":{},\"n_tets\":{},\"f_modes_hz\":{:?},\"observed_order\":{:?},\"panel_count\":{},\"p_receiver_pa\":{p:?},\"contact_time_s\":{contact_time},\"wav_blake3\":\"{hash}\",\"sample_rate_hz\":{RATE},\"full_scale_pa\":{FULL_SCALE_PA},\"clipped_samples\":0,\"rigid_contact_coordinates\":6,\"direct_rigid_acceleration_radiation\":\"not modelled\",\"grader_json_path\":\"data/instruments/grades/bars/bar-s1-after.json\",\"before_db\":28.4,\"after_db\":null,\"targeted_ratio\":3,\"targeted_et_note\":\"Db5\",\"cut_depth_fraction\":{},\"uniform_geometry_scale\":{},\"same_specimen\":false,\"numerical_one_cent_band\":{},\"band_refusal_route\":\"TET10:M1.3-W1a\",\"wood_loss\":\"unknown:M8-W2c\",\"decay_prediction\":\"unknown\",\"radiation_feedback\":false,\"supports\":false,\"resonator\":false,\"mallet\":\"ideal elastic silicone sphere; no shaft; unknown rate loss\",\"material_scenario\":\"Indian rosewood E_L with bounded correlated hardwood transverse-ratio scenarios\",\"receiver_m\":{RECEIVER:?},\"observer\":\"narrow-band modal transfer at five retained elastic poles\",\"acceptance\":false}}\n",
+        "{{\"bar_id\":\"B-undercut\",\"rung_h_m\":{},\"n_tets\":{},\"f_modes_hz\":{:?},\"observed_order\":{:?},\"panel_count\":{},\"p_receiver_pa\":{p:?},\"contact_time_s\":{contact_time},\"wav_blake3\":\"{hash}\",\"sample_rate_hz\":{RATE},\"full_scale_pa\":{FULL_SCALE_PA},\"clipped_samples\":0,\"rigid_contact_coordinates\":6,\"direct_rigid_acceleration_radiation\":\"not modelled\",\"grader_json_path\":\"data/instruments/grades/bars/bar-s1-after.json\",\"before_db\":28.4,\"after_db\":null,\"targeted_ratio\":3,\"targeted_et_note\":\"Db5\",\"cut_depth_fraction\":{},\"uniform_geometry_scale\":{},\"same_specimen\":false,\"element\":\"TET10\",\"numerical_one_cent_band\":{},\"band_refusal_route\":\"finer TET10 rung\",\"wood_loss\":\"unknown:M8-W2c\",\"decay_prediction\":\"unknown\",\"radiation_feedback\":false,\"supports\":false,\"resonator\":false,\"mallet\":\"ideal elastic silicone sphere; no shaft; unknown rate loss\",\"material_scenario\":\"Indian rosewood E_L with bounded correlated hardwood transverse-ratio scenarios\",\"receiver_m\":{RECEIVER:?},\"observer\":\"narrow-band modal transfer at five retained elastic poles\",\"acceptance\":false}}\n",
         finest.h,
         finest.n_tets,
         finest.frequencies,
