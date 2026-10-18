@@ -9,6 +9,8 @@
 
 /// Data-only caloric/card, resistor and conductive-link bindings.
 pub mod material;
+/// Two-sided deposition of source-backed electrical contact heat.
+pub mod contacts;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -220,6 +222,19 @@ pub(crate) fn driven_candidate<'m, S, E>(
     resolve: impl Fn(&DepositionSimulation<'m>, usize) -> Result<DrivenCoefficients<S>, CircuitEnthalpyError<E>>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<CircuitEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
+    driven_with_contacts_candidate(thermal, target_s, input, &[], controls,
+        initial_energy_increments_j, resolve, cancelled)
+}
+
+// One physical/numerical owner for bulk-only and contact-heated networks.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn driven_with_contacts_candidate<'m, S, E>(
+    thermal: &DepositionSimulation<'m>, target_s: f64,
+    input: CircuitEnthalpyInput<'_>, contact_cells: &[contacts::ContactHeatCells],
+    controls: CircuitEnthalpySolve, initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>, usize) -> Result<DrivenCoefficients<S>, CircuitEnthalpyError<E>>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<CircuitEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
     let cancel = RefCell::new(cancelled);
     let checkpoint = || if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
     checkpoint()?;
@@ -242,6 +257,7 @@ pub(crate) fn driven_candidate<'m, S, E>(
             return Err(CircuitEnthalpyError::Invalid("duplicate, foreign or inactive resistor destination"));
         }
     }
+    let contact_routes = contacts::admit_routes(thermal, input.circuit, contact_cells, checkpoint)?;
     let step = BackwardEulerStep::new(thermal, target_s, checkpoint)?;
     let dt = step.duration_s();
     let trials = Cell::new(0usize);
@@ -267,6 +283,7 @@ pub(crate) fn driven_candidate<'m, S, E>(
             let sum = powers.entry(cell).or_insert(0.0);
             *sum = finite(*sum + power)?;
         }
+        contacts::deposit(&circuit.step().contacts, &contact_routes, dt, &mut powers, checkpoint)?;
         let deposited = finite(dt * powers.values().try_fold(0.0, |s, &p| finite(s+p))?)?;
         if (deposited-circuit.step().heat_j).abs() > controls.total_energy_tolerance_j {
             return Err(CircuitEnthalpyError::Invalid("branch heat and receiving-cell power disagree"));
