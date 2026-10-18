@@ -10,6 +10,7 @@ use std::{collections::BTreeMap, error::Error, fs::{File,OpenOptions}, io::{Read
 use fs_couple::bowed_string::runtime::reciprocal::bank::{
     MaterialStringSource,ReciprocalStringBank,StringBankOptions,StringBowLocation};
 use fs_couple::bowed_string::runtime::reciprocal::bank::plate::{SharedMaterialPlateBody,SharedPlateBridge};
+use fs_couple::bowed_string::runtime::reciprocal::bank::torsion::{StringBodyRotationConnection,StringBridgeLocation};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::MaterialBowContact;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::{MultiBowPerformance,MultiBowPerformanceConfig};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::force::{StringForceCoupling,StringForcePort,StringForceProgram};
@@ -90,7 +91,8 @@ fn resolve_properties(name:&str, catalog:&mut Catalog,
     let query=QueryPoint::new().with("T",spec.temperature)?.with("omega",spec.omega)?;
     Ok(resolve_material_state_point(&catalog[name].card,&query,requirements,Pick::SingleClaimOnly)?)
 }
-struct Ready { spec: input::Spec, catalog: Catalog, performance: MultiBowPerformance, body_profile: Option<body::Profile> }
+struct Ready { spec: input::Spec, catalog: Catalog, performance: MultiBowPerformance,
+    body_profile: Option<body::Profile>, rotational_bridge_baselines_m: Vec<f64> }
 impl input::Spec {
     fn compile(self,cx:&Cx<'_>,gate:&CancelGate,loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
         self.compile_with_body(cx,gate,None,loader)
@@ -98,6 +100,11 @@ impl input::Spec {
     fn compile_with_body(self,cx:&Cx<'_>,gate:&CancelGate,profile:Option<body::Profile>,
         mut loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
         poll(gate)?;
+        let mut baselines = Vec::with_capacity(self.rotational_bridges.len());
+        for joint in &self.rotational_bridges {
+            let body = profile.as_ref().ok_or("rotational bridges require --body-profile with distinct physical bridge footprints")?;
+            baselines.push(body.bridge_separation_m(&self, joint.positive_bridge_string, joint.negative_bridge_string)?);
+        }
         let mut catalog=Catalog::new(); let mut sources=Vec::with_capacity(self.strings.len());
         for wire in &self.strings {
             poll(gate)?;
@@ -128,6 +135,22 @@ impl input::Spec {
                 None=>ReciprocalStringBank::from_material_plate(cx,sources,self.gas,body,self.law.clone(),settings.clone(),gate)?,
             }
         };
+        let bank = if self.rotational_bridges.is_empty() { bank } else {
+            let mut joints = Vec::with_capacity(self.rotational_bridges.len());
+            for (joint, &separation_m) in self.rotational_bridges.iter().zip(&baselines) {
+                poll(gate)?;
+                let rotation = bank.source().rotation_between_bridges(
+                    StringBridgeLocation { string: joint.positive_bridge_string, connection: 0 },
+                    StringBridgeLocation { string: joint.negative_bridge_string, connection: 0 }, separation_m,
+                )?;
+                joints.push(StringBodyRotationConnection {
+                    string: joint.string, station_fraction: joint.station_fraction, body: rotation,
+                    stiffness_n_m_per_rad: joint.stiffness_n_m_per_rad,
+                    damping_n_m_s_per_rad: joint.damping_n_m_s_per_rad, rest_angle_rad: joint.rest_angle_rad,
+                });
+            }
+            bank.with_rotational_body_connections(joints, gate)?
+        };
         let additional=contacts[1..].iter().map(|location|MaterialBowContact { location:*location,
             law:self.law.clone(),friction:settings.friction }).collect();
         let bank=bank.with_additional_bows(additional,MultiFrictionConfig { max_ports:16,max_sweeps:128,
@@ -137,7 +160,7 @@ impl input::Spec {
             samples:self.samples,max_block:self.block,max_work:input::MAX_WORK,max_events:input::MAX_CONTROLS })?;
         if let Some(forces)=&self.forces { performance=performance.with_string_forces(forces.clone(),gate)?; }
         performance.validate_sample_rate(self.rate)?;performance.validate_sample_count(self.samples)?;poll(gate)?;
-        Ok(Ready { spec:self,catalog,performance,body_profile:profile })
+        Ok(Ready { spec:self,catalog,performance,body_profile:profile,rotational_bridge_baselines_m:baselines })
     }
 }
 impl Ready {
@@ -182,6 +205,9 @@ fn main()->Result<()> {
             source.pack.content_hash(),source.pack.source_artifact());
     }
     if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
+    for (joint, baseline) in ready.spec.rotational_bridges.iter().zip(&ready.rotational_bridge_baselines_m) {
+        eprintln!("rotational_bridge={joint:?}; body_footprint_separation_m={baseline}");
+    }
     eprintln!("input_bytes={}; gas={:?}; preload_J={:?}",ready.spec.bytes.len(),ready.spec.gas,ready.performance.preload_energy_j());
     // Complete source, geometry, frequency, schedule and preload admission is
     // finished before creating output. Never overwrite any existing path.

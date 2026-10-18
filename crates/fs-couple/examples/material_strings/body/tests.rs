@@ -127,5 +127,137 @@ fn profile_rejects_unbounded_mesh_silent_fields_and_fixed_boundary_bridge() {
     assert!(Profile::parse(format!("{text}extra\n").as_bytes()).is_err());
 }
 
+const ROTATIONAL_BRIDGE_ROW: &str = "rotational-bridge 0 0.8 0 1 0.001 1e-7 0";
+const ROTATIONAL_BRIDGE_BLOCK: &str = "rotational-bridges 1\nrotational-bridge 0 0.8 0 1 0.001 1e-7 0\n";
+fn rotational_input() -> String {
+    include_str!("../torsional-bridge.material-strings")
+        .replace("audio 48000 4096 0.01 128", "audio 48000 256 0.01 128")
+}
+fn rotational_profile() -> Profile {
+    Profile::parse(include_bytes!("../torsional-bridge.body")).unwrap()
+}
+
+#[test]
+fn rotational_bridge_file_drives_released_body_with_original_material_loss_and_pcm() {
+    scoped(|cx, gate| {
+        // The only initial energy is this explicitly declared small-angle
+        // spring preload. Every bow is lifted and there are no external loads.
+        let unforced = rotational_input().replace(
+            "forces preload 1 1\nport 0 0.2 surface 0.002\nforce 0 0 0",
+            "forces retain 0 0",
+        );
+        let active = unforced.replace(ROTATIONAL_BRIDGE_ROW,
+            "rotational-bridge 0 0.8 0 1 0.001 1e-7 0.002");
+        let omitted = unforced.replace(ROTATIONAL_BRIDGE_BLOCK, "");
+        let s = input::Spec::parse(active.as_bytes()).unwrap();
+        assert!(s.forces.is_none());
+        let p = rotational_profile();
+        assert_eq!(p.bridge_separation_m(&s, 0, 1).unwrap(), 0.2);
+        let mut connected = s.compile_with_body(cx, gate, Some(p.clone()),
+            |name| Ok(pack(name, 1.0, None))).unwrap();
+        let mut silent = input::Spec::parse(omitted.as_bytes()).unwrap()
+            .compile_with_body(cx, gate, Some(p.clone()), |name| Ok(pack(name, 1.0, None))).unwrap();
+        assert_eq!(connected.spec.bytes, active.as_bytes());
+        assert_eq!(connected.rotational_bridge_baselines_m, vec![0.2]);
+        let source = connected.performance.bank().source().bank();
+        let original = silent.performance.bank().source().bank();
+        let joint = &source.rotational_body_connections()[0];
+        assert_eq!((joint.string, joint.station_fraction, joint.body.component), (0, 0.8, 0));
+        assert_eq!((joint.stiffness_n_m_per_rad, joint.damping_n_m_s_per_rad, joint.rest_angle_rad),
+            (0.001, 1e-7, 0.002));
+        let a = &source.strings()[0].connections[0].body.shapes;
+        let b = &source.strings()[1].connections[0].body.shapes;
+        assert_eq!(joint.body.angular_shapes, a.iter().zip(b).map(|(a,b)| (a-b)/0.2).collect::<Vec<_>>());
+        assert_eq!(source.body_connections(), original.body_connections());
+        assert_eq!(source.material_chart_viscosity().unwrap().damping().matrix_per_s(),
+            original.material_chart_viscosity().unwrap().damping().matrix_per_s());
+        assert_eq!(connected.performance.bank().system().components()[2].modes(),
+            silent.performance.bank().system().components()[2].modes());
+
+        let actual_pressure = pressure(&mut connected, 37);
+        assert!(actual_pressure.iter().any(|p| p.abs() > 1e-16));
+        assert!(pressure(&mut silent, 128).iter().all(|p| *p == 0.0));
+        let body = &connected.performance.bank().system().components()[2];
+        assert!(body.states().iter().any(|s|
+            s.displacement_m_sqrt_kg != 0.0 || s.velocity_m_sqrt_kg_per_s != 0.0));
+        let frame = connected.performance.bank().system().last_frame().unwrap();
+        assert_eq!(frame.external_work_j, 0.0);
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+
+        // The ordinary file performer's streaming writer consumes exactly the
+        // same coupled pressure; the joint is not an output-stage sound effect.
+        let mut replay = input::Spec::parse(active.as_bytes()).unwrap()
+            .compile_with_body(cx, gate, Some(p), |name| Ok(pack(name, 1.0, None))).unwrap();
+        let expected = fs_couple::pcm_wav::encode_pcm16_wav(
+            &actual_pressure, replay.spec.rate, replay.spec.full_scale).unwrap().0;
+        let (wav, report) = replay.write(std::io::Cursor::new(Vec::<u8>::new()), gate).unwrap();
+        assert_eq!(wav.into_inner(), expected);
+        assert_eq!(report.samples, 256);
+    });
+}
+
+#[test]
+fn rotational_bridge_records_are_optional_bounded_and_version_independent() {
+    let text = rotational_input();
+    let s = input::Spec::parse(text.as_bytes()).unwrap();
+    assert_eq!(s.rotational_bridges.len(), 1);
+    assert!(input::Spec::parse(text.replace(ROTATIONAL_BRIDGE_BLOCK, "").as_bytes())
+        .unwrap().rotational_bridges.is_empty());
+    assert!(input::Spec::parse(text.replace(ROTATIONAL_BRIDGE_BLOCK, "rotational-bridges 0\n").as_bytes())
+        .unwrap().rotational_bridges.is_empty());
+    let v2 = text.replace("frankensim-material-strings-v1", "frankensim-material-strings-v2")
+        .replace("wire.fsmatpk 0.5 0.0003 20", "wire.fsmatpk 0.5 0.0003 tension 20")
+        .replace("wire.fsmatpk 0.5 0.0003 22", "wire.fsmatpk 0.5 0.0003 tension 22")
+        .replace("0.8 3000 0.1\n", "0.8 3000 0.1\nsection homogeneous\n");
+    assert_eq!(input::Spec::parse(v2.as_bytes()).unwrap().rotational_bridges, s.rotational_bridges);
+    for record in [
+        "rotational-bridge 2 0.8 0 1 0.001 1e-7 0",
+        "rotational-bridge 0 0.8 2 1 0.001 1e-7 0",
+        "rotational-bridge 0 0.8 0 2 0.001 1e-7 0",
+        "rotational-bridge 0 0 0 1 0.001 1e-7 0",
+        "rotational-bridge 0 1 0 1 0.001 1e-7 0",
+        "rotational-bridge 0 0.8 0 0 0.001 1e-7 0",
+        "rotational-bridge 0 0.8 0 1 -0.001 1e-7 0",
+        "rotational-bridge 0 0.8 0 1 0.001 -1e-7 0",
+        "rotational-bridge 0 0.8 0 1 0 0 0",
+        "rotational-bridge 0 0.8 0 1 0.001 1e-7 NaN",
+        "rotational-bridge 0 0.8 0 1 0.001 1e-7 0 ignored",
+    ] {
+        assert!(input::Spec::parse(text.replace(ROTATIONAL_BRIDGE_ROW, record).as_bytes()).is_err(),
+            "accepted {record}");
+    }
+    for (from, to) in [
+        ("rotational-bridges 1", "rotational-bridges 17"),
+        ("rotational-bridges 1", "rotational-bridges 2"),
+        ("20 4 3 0.8", "20 4 0 0.8"),
+    ] {
+        assert!(input::Spec::parse(text.replace(from, to).as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn rotational_bridge_geometry_refuses_before_loading_materials() {
+    scoped(|cx, gate| {
+        let s = input::Spec::parse(rotational_input().as_bytes()).unwrap();
+        let text = include_str!("../torsional-bridge.body");
+        let coincident = Profile::parse(text.replace("bridge 3 2", "bridge 1 2").as_bytes()).unwrap();
+        let missing = Profile::parse(text.replace("bridges 2\nbridge 1 2\nbridge 3 2",
+            "bridges 1\nbridge 1 2").as_bytes()).unwrap();
+        for profile in [None, Some(profile()), Some(coincident), Some(missing)] {
+            let mut loads = 0;
+            assert!(s.clone().compile_with_body(cx, gate, profile, |name| {
+                loads += 1; Ok(pack(name, 1.0, None))
+            }).is_err());
+            assert_eq!(loads, 0);
+        }
+        let p = rotational_profile();
+        assert_eq!(p.bridge_separation_m(&s, 0, 1).unwrap(), p.bridge_separation_m(&s, 1, 0).unwrap());
+        assert!(p.bridge_separation_m(&s, 0, 2).is_err());
+        let mut collapsed = s;
+        collapsed.body.length = f64::from_bits(1);
+        assert!(p.bridge_separation_m(&collapsed, 0, 1).is_err());
+    });
+}
+
 #[path="regions.rs"]
 mod regions;

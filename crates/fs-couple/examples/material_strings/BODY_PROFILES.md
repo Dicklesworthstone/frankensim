@@ -159,10 +159,70 @@ physical load. Each string retains the stiffness/damping/station of its original
 bridge declaration, and surface torsion and preload/release remain unchanged.
 
 Regions are perfectly connected parts of one linear plate field. This is not a
-model of a glue joint, separated component, bridge rotation or interlayer slip.
+model of a glue joint, separated component, three-dimensional bridge contact or interlayer slip.
 The same mesh, modal, time-step and compact-radiation limitations still apply.
 
 Five additional native regressions cover same-material subdivision, changing
 only one region's loss, different spatial bridge maps and sympathetic motion,
 callback equivalence, original geometry indexing and source/coverage refusals.
 They are included in the existing `--example material_strings` test command.
+
+## Reciprocal rotational bridges
+
+A performance can additionally connect sourced string twist to scalar body
+rocking without supplying a modal rotation vector. After its last complete
+string/section record and before `cavity`, include:
+
+```text
+rotational-bridges 1
+rotational-bridge 0 0.8 0 1 0.001 1e-7 0
+```
+
+This selects string 0 at station 0.8, the ordered pair of body bridge footprints
+belonging to strings 0 and 1, angular stiffness 0.001 N m/rad, damping
+1e-7 N m s/rad, and stress-free relative angle zero. The selected string must
+declare positive twist-mode count and supply its original shear material data.
+The profile must be v2 with distinct physical nodes for the chosen pair.
+
+If the retained nodal displacements are `w_positive` and `w_negative`, body
+rotation is `(w_positive - w_negative) / separation_m`. The separation is the
+Euclidean distance of those SAME nodes in the performance's declared body
+length and width; it is recalculated when geometry changes. Swapping the ordered
+pair reverses this scalar coordinate. Its sign and direction declare the
+rocking axis assumed by the string joint; no 3D string/body orientation is
+inferred or certified. This chord rotation is exact for rigid rocking and a
+secant approximation for a deforming plate, not a resolved local slope claim.
+
+The body angular row is derived from its original spatial bridge projections.
+The string angular row uses its sourced polar inertia and its actual outer
+radius. One angular spring/dashpot then supplies opposite string/body torques in
+the existing joint mechanical solve. Its stored energy and dissipated work enter
+the same ledger as transverse bridge reactions, all material body damping cross
+terms and the cavity. Twist can reach body pressure while bows are released;
+no direct torsional pressure gain or separate audio voice is added.
+
+Using the `$demo` directory and directional body pack built above:
+
+```bash
+cp crates/fs-couple/examples/material_strings/torsional-bridge.material-strings "$demo/"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/torsional-bridge.material-strings" "$demo/torsional-bridge.wav" \
+  --body-profile crates/fs-couple/examples/material_strings/torsional-bridge.body
+```
+
+The supplied fixture has two strings, one shared regional body, a cavity and a
+surface preload released at sample zero. All bow loads stay zero. Its 0.2 m
+footprint baseline and explicitly synthetic joint law demonstrate the input
+path; they are not fitted violin/cello bridge mechanics. The normal render
+report includes each declared angular law and its derived physical separation,
+while the original performance/profile bytes and material sources stay attached
+to the performer.
+
+The optional block works with both v1 and v2 performance files. At most 16 joints
+are accepted, within the existing complete-network connection/work limits.
+Omitting it preserves the old construction. Missing profiles, v1 single-footprint
+profiles, absent string indices, coincident or unrepresentable baselines,
+unsourced twist and nonpassive laws refuse before a WAV is created. Native tests
+exercise file admission, version compatibility, geometry refusals before pack
+loading, and actual released-body pressure/PCM from an explicitly preloaded
+rotational spring while retaining the original full material damping.

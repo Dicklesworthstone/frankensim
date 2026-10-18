@@ -27,6 +27,14 @@ pub enum WireSection {
 #[derive(Clone, Debug)]
 pub struct WireLayer { pub pack: String, pub outer_radius_m: f64 }
 const MAX_LAYERS: usize = 16;
+const MAX_ROTATIONAL_BRIDGES: usize = 16;
+/// A scalar rotational joint referencing actual body-profile point footprints.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RotationalBridge {
+    pub string: usize, pub station_fraction: f64,
+    pub positive_bridge_string: usize, pub negative_bridge_string: usize,
+    pub stiffness_n_m_per_rad: f64, pub damping_n_m_s_per_rad: f64, pub rest_angle_rad: f64,
+}
 #[derive(Clone, Debug)]
 pub struct Body {
     pub pack: String, pub length: f64, pub width: f64, pub thickness: f64,
@@ -36,6 +44,7 @@ pub struct Body {
 pub struct Spec {
     pub bytes: Vec<u8>, pub rate: u32, pub samples: u64, pub full_scale: f64, pub block: usize,
     pub temperature: f64, pub omega: f64, pub gas: GasState, pub body: Body, pub strings: Vec<Wire>,
+    pub rotational_bridges: Vec<RotationalBridge>,
     pub cavity: Option<MaterialBodyCavity>, pub law: FrictionLaw, pub forces: Option<StringForceProgram>,
     pub schedule: GestureSchedule,
 }
@@ -97,6 +106,32 @@ impl Spec {
                 return Err("string needs transverse modes and a physical interior bridge connection".into());
             }
             modes += wire.bending_modes + wire.twist_modes; strings.push(wire);
+        }
+        // Optional in both existing versions. The following cavity row is left
+        // untouched when absent; no new default joint or body rotation is inferred.
+        let mut rotational_bridges = Vec::new();
+        if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("rotational-bridges") {
+            let mut row = r.row("rotational-bridges")?;
+            let joints = row.count(MAX_ROTATIONAL_BRIDGES)?; row.end()?;
+            rotational_bridges.reserve(joints);
+            for _ in 0..joints {
+                let mut row = r.row("rotational-bridge")?;
+                let joint = RotationalBridge {
+                    string: row.count(count - 1)?, station_fraction: row.scalar()?,
+                    positive_bridge_string: row.count(count - 1)?, negative_bridge_string: row.count(count - 1)?,
+                    stiffness_n_m_per_rad: row.scalar()?, damping_n_m_s_per_rad: row.scalar()?,
+                    rest_angle_rad: row.scalar()?,
+                };
+                row.end()?;
+                if strings[joint.string].twist_modes == 0
+                    || !(0.0 < joint.station_fraction && joint.station_fraction < 1.0)
+                    || joint.positive_bridge_string == joint.negative_bridge_string
+                    || joint.stiffness_n_m_per_rad < 0.0 || joint.damping_n_m_s_per_rad < 0.0
+                    || (joint.stiffness_n_m_per_rad == 0.0 && joint.damping_n_m_s_per_rad == 0.0) {
+                    return Err("rotational bridge needs sourced twist, an interior station, distinct body footprints and a nonzero passive law".into());
+                }
+                rotational_bridges.push(joint);
+            }
         }
         let mut row = r.row("cavity")?;
         let cavity = match row.word()? {
@@ -192,7 +227,7 @@ impl Spec {
             }
         }
         Ok(Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
-            gas, body, strings, cavity, law, forces, schedule })
+            gas, body, strings, rotational_bridges, cavity, law, forces, schedule })
     }
 }
 

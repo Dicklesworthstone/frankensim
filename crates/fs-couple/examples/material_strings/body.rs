@@ -70,6 +70,26 @@ impl Profile {
         Ok(Self { bytes:bytes.to_vec(),nx,ny,layout,support,pretension_n_m,window })
     }
 
+    /// Actual length of the ordered point-footprint chord [m]. Its order sets
+    /// the sign of the scalar rocking coordinate; no 3D axis is inferred here.
+    pub fn bridge_separation_m(&self, spec: &input::Spec, positive: usize, negative: usize) -> Result<f64> {
+        let Layout::Regional { bridges, .. } = &self.layout else {
+            return Err("rotational bridges require a v2 body profile with separate physical footprints".into());
+        };
+        if bridges.len() != spec.strings.len() {
+            return Err("rotational body profile must retain one footprint per string".into());
+        }
+        let p = bridges.get(positive).ok_or("unknown positive body footprint")?;
+        let n = bridges.get(negative).ok_or("unknown negative body footprint")?;
+        let dx = (p.0 as f64 - n.0 as f64) * (spec.body.length / self.nx as f64);
+        let dy = (p.1 as f64 - n.1 as f64) * (spec.body.width / self.ny as f64);
+        let separation = fs_math::det::hypot(dx, dy);
+        if !separation.is_finite() || separation <= 0.0 {
+            return Err("rotational body footprints must have a finite nonzero physical separation".into());
+        }
+        Ok(separation)
+    }
+
     /// Reduce one sourced tensor on the same elastic basis as every physical
     /// bridge/radiation map; no scalar damping is added to these body modes.
     pub fn compile(&self, spec:&input::Spec, sources:Vec<MaterialStringSource>,

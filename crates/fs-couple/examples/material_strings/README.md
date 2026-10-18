@@ -104,6 +104,47 @@ loads may ramp or reverse; zero normal load lifts that bow without silencing the
 instrument. Commands outside the observed control window and station changes
 refuse rather than disappearing or silently rebuilding geometry.
 
+## Rotational bridges from physical footprints
+
+Both input versions accept an optional block after ALL string/section records
+and before `cavity`:
+
+```text
+rotational-bridges COUNT
+rotational-bridge STRING STATION POSITIVE_BODY_BRIDGE_STRING NEGATIVE_BODY_BRIDGE_STRING K_NM_PER_RAD D_NMS_PER_RAD REST_ANGLE_RAD
+```
+
+Each row joins the selected string's sourced twist to the body's scalar rocking
+coordinate with one reciprocal angular spring/dashpot. The two body indices
+select the original point footprints in a **v2 `--body-profile`**, in string
+order. The compiler derives their separation from that profile's actual mesh
+nodes and the performance's body dimensions, then projects their signed
+displacement difference on the same material body eigenbasis. No modal angular
+shape or invented string radius is accepted in the file. Changing the string's
+shear material or the body's material/geometry therefore changes the joint's
+physical response through the original source owners.
+
+The ordered footprint pair declares the scalar rocking direction assumed to
+align with this string torque joint. This is a small-angle chord rotation, exact
+for rigid rocking and a secant approximation for a deforming plate. The input
+does not supply or infer a full 3D string/body orientation or certify a local
+bridge slope. Joint stiffness and damping remain explicitly supplied mechanical
+data; bulk material identity does not determine a bridge contact law.
+
+String and body receive opposite torques in their existing coupled solve, with
+angular spring energy and dashpot loss included in its work ledger. Body motion
+and pressure can consequently respond to twist after every bow is lifted. The
+original transverse bridges, full body viscosity, shared gas and cavity remain
+active. Omit the block, or select zero joints, to retain the original path.
+Missing twist modes, absent/v1 profiles, coincident footprints, bad indices and
+nonpassive or unrepresentable coefficients refuse before output creation.
+
+The runnable `torsional-bridge.material-strings` and `torsional-bridge.body`
+fixtures use a surface pluck/release and two strings on one material body. Build
+them with the directional body pack as shown in
+[BODY_PROFILES.md](BODY_PROFILES.md#reciprocal-rotational-bridges). They remain
+synthetic integration data, not a measured bridge or instrument.
+
 ## V2: independent material layers and support constraints
 
 V1 files remain accepted unchanged. V2 changes only the version header and string
@@ -152,8 +193,9 @@ cargo run --release -p fs-couple --example material_strings -- \
 Change only the sleeve source or geometry to compare constructions. Plucks,
 surface torque, simultaneous bows, shared body/cavity feedback, gas loading and
 PCM all use their original owners. Torsion has no invented direct pressure gain:
-it affects sound through the physical surface/contact coupling when that coupling
-is active. None of these fixtures is a measurement of gold, silver or a real string.
+it affects sound through physical surface/contact coupling and, when explicitly
+selected, reciprocal rotational bridges. None of these fixtures is a measurement
+of gold, silver or a real string.
 
 ## Material profile and physical limits
 
@@ -172,17 +214,21 @@ and shear loss must have an explicit valid angular-frequency band; all actual
 retained modes, not only the source query frequency, undergo the existing checks.
 
 This executable selects homogeneous or bonded circular strings, fixed tension or
-fixed-extension supports, fixed rotational ends, one simply supported **isotropic flat plate**, and one
-optional uniform-pressure cavity/circular neck. Bridges are interior transverse
-connections on the full span **including afterlength**. It does not model carved
-wood shells, torque-bearing bridge contact, f-hole geometry, distributed cavity
+fixed-extension supports and fixed rotational ends. Its shared body is the legacy
+simply supported isotropic flat plate or the explicit material chart described in
+[BODY_PROFILES.md](BODY_PROFILES.md), with an optional uniform-pressure
+cavity/circular neck. Bridges are interior transverse connections on the full
+span **including afterlength**, plus explicitly selected scalar rotational
+spring/dashpot joints. It does not model carved wood shells, a full 3D unilateral
+bridge-contact law, f-hole geometry, distributed cavity
 modes, helical winding/slip, nonlinear tension, solved finger disengagement,
 bow-hair normal-load distribution, or exterior radiation back-loading. The body
 and neck observations retain the existing compact baffled, zero-retardation
 approximation. Source-state validity is not measured instrument-fidelity evidence.
 
 Input caps: 1 MiB performance; 8 MiB per distinct material pack and 64 MiB total
-raw packs; 8 strings, at most 16 layers per string, 16 bow contacts, 64 force ports, 128 complete-network modes,
+raw packs; 8 strings, at most 16 layers per string, 16 bow contacts, 16 rotational
+bridges, 64 force ports, 128 complete-network modes,
 16 plate modes; 16,384 events per input family; 262,144 compiled controls per
 family; 16,777,216 source/projection work units per compiler; at most 192 kHz,
 600 seconds or 28,800,000 samples. Existing numerical owners retain their stricter
