@@ -96,6 +96,9 @@ impl FlueFilePerformance {
     /// Parse the fixed-order source shown in `examples/flue.performance`.
     /// `jet_card tonal-interim` explicitly selects the retained stage-I card;
     /// `jet_card json {CANONICAL_JSON}` supplies a complete one-line card.
+    /// An optional `windway none` or `windway slit LENGTH_M` row after `flue`
+    /// selects the existing source-gas viscous windway. Its length is actual
+    /// channel geometry, never an inferred lip channel for a transverse flute.
     /// Gains, seed, dimensions, limits, clocks and the pressure phrase are data.
     /// `exterior same` shares the bore gas; another gas record changes only the
     /// receiver environment at the same static pressure.
@@ -170,6 +173,22 @@ impl FlueFilePerformance {
             bore_area_m2: core::f64::consts::PI * radius_m * radius_m,
         };
         row.end()?;
+        // Optional in V1 so existing authored sources retain their ideal jet.
+        // A finite channel is geometry supplied by data, not by instrument name.
+        let windway_length_m = if rows.lines.clone().next().is_some_and(|line|
+            line.trim_ascii().split_ascii_whitespace().next() == Some("windway"))
+        {
+            let declaration = rows.record("windway")?;
+            if declaration == "none" { None } else {
+                let mut row = Row { fields: declaration.split_ascii_whitespace(), line: rows.line };
+                if row.fields.next() != Some("slit") {
+                    return Err(bad(rows.line, "windway requires none or slit followed by length in metres"));
+                }
+                let length_m = row.scalar()?;
+                row.end()?;
+                Some(length_m)
+            }
+        } else { None };
         let card_source = rows.record("jet_card")?;
         let (card, jet_card_source) = if card_source == "tonal-interim" {
             (mint_tonal_interim_card(), "tonal-interim")
@@ -241,6 +260,9 @@ impl FlueFilePerformance {
         let voice = FlueVoice::from_fractional_network(Some(&card), displacement_gain, seed_amplitude_rel,
             geometry, source, None, policy, mechanics_rate_hz, voice_seed, voice_index, gate)
             .map_err(FlueInputError::Physics)?;
+        let voice = if let Some(length_m) = windway_length_m {
+            voice.with_viscous_windway(length_m).map_err(FlueInputError::Physics)?
+        } else { voice };
         let renderer = FlueOutletPerformance::with_multirate_radiation(voice, schedule,
             FlueOutletConfig { sample_rate_hz, samples, max_block, max_controls, max_compile_work,
                 outlet_node: 1, receiver, maximum_abs_pressure_pa },

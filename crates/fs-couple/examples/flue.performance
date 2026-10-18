@@ -5,6 +5,7 @@ gas 293.15 101325 0
 exterior same
 tube 0.3 0.006 1e-10 -0.9
 flue 0.010 0.001 0.004 0 0 0.02
+windway none
 jet_card tonal-interim
 jet 90 1e-6 3 0
 jet_limits 1 0.3 8192
