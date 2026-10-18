@@ -1,5 +1,6 @@
-//! Bar-S1 (.266), G0/G1/G2: existing P1 solid, certified modal slicer,
-//! Burton--Miller radiation and material Hertz owners composed as fixture data.
+//! Bar-S1 (.266), G0/G1/G2: existing P1 solid (TET10 for the locking-free
+//! beam cross-check), certified modal slicer, Burton--Miller radiation and
+//! material Hertz owners composed as fixture data.
 //!
 //! This is module evidence, never a reconstruction of the Iowa specimen.
 //! Geometry and longitudinal material data reuse `xylophone_bar.rs`. Unknown
@@ -19,6 +20,7 @@ use fs_exec::Cx;
 use fs_material::OrthotropicElastic;
 use fs_math::{c64::C64, det};
 use fs_modal::{ModePair, SliceOptions, SliceReport, eigh_gen_dense, slice_window};
+use fs_solid::linear3::tet10::{QuadraticTetProblem, TetQuadrature, promote_p1_to_p2};
 use fs_solid::linear3::{
     TetAssemblyBudget, TetElasticAssembly, TetElasticMaterial, TetLinearElasticProblem,
     TetMaterialField,
@@ -40,6 +42,19 @@ const FULL_SCALE_PA: f64 = 0.1;
 // Four rungs allow two independently observed orders. No historical rung is
 // substituted. Long native qualification: the last has 147456 P1 tetrahedra.
 const RUNGS: [usize; 4] = [1, 2, 4, 8];
+// DEF-08: P1 tetrahedra lock in bending, so the beam cross-check is gated on
+// TET10 (M1.3-W1a). The finest rung has 18432 quadratic tetrahedra; rung 3 is
+// not nested in rung 2, so orders use the actual h ratios.
+const TET10_RUNGS: [usize; 4] = [1, 2, 3, 4];
+// A mode whose whole bound |p| + u stays below this fraction of the strongest
+// mode's receiver pressure (per unit modal velocity, i.e. per unit kinetic
+// energy) is a near-null radiator: relative error is undefined as |p| -> 0,
+// so it is BOUNDED against the dominant scale, never claimed resolved. The
+// prism's torsion-1 is a near-cancelled quadrupole: |p| falls 3x per rung.
+const NEAR_NULL_FRACTION: f64 = 0.1;
+// Formal order 1: separation is detected on the substep grid and the mallet
+// uses explicit symplectic Euler; the modal body step itself is exact.
+const SUBSTEPS: [u32; 4] = [2, 4, 8, 16];
 const FMAX: f64 = 4_500.0;
 const KINDS: [&str; 5] = [
     "vertical-1",
@@ -50,6 +65,7 @@ const KINDS: [&str; 5] = [
 ];
 static SERIAL: Mutex<()> = Mutex::new(());
 static UNIFORM: OnceLock<Ladder> = OnceLock::new();
+static UNIFORM_TET10: OnceLock<Vec<Rung>> = OnceLock::new();
 static UNDERCUT: OnceLock<Ladder> = OnceLock::new();
 static RADIATION: OnceLock<RadiationLadder> = OnceLock::new();
 
@@ -438,6 +454,69 @@ fn uniform() -> &'static Ladder {
     UNIFORM.get_or_init(|| calculate_ladder(Design::PRISM, "A-uniform"))
 }
 
+/// The same prism, meshes and slicer on the existing quadratic element. The
+/// prism's faces are planar, so straight P1 edge midpoints are exact and the
+/// promotion needs no boundary projection. Promotion keeps the P1 node IDs,
+/// so `classify` reads the same end-section vertex DOFs.
+fn uniform_tet10() -> &'static [Rung] {
+    UNIFORM_TET10.get_or_init(|| {
+        with_cx(|cx| {
+            let mat = material(HONDURAS);
+            TET10_RUNGS
+                .iter()
+                .map(|&r| {
+                    let started = Instant::now();
+                    cx.checkpoint().expect("cancel before rung");
+                    let mesh = mesh([24 * r, 2 * r, r], Design::PRISM);
+                    let (nodes, elements) = promote_p1_to_p2(&mesh.nodes, &mesh.tets, None, cx)
+                        .expect("P1 to TET10 promotion");
+                    let a = QuadraticTetProblem {
+                        nodes_m: &nodes,
+                        elements: &elements,
+                        materials: TetMaterialField::Uniform(&mat),
+                        fixed_dofs: &[],
+                        budget: TetAssemblyBudget::standard(),
+                        // Affine minima: stiffness degree 2, consistent mass degree 4.
+                        quadrature: TetQuadrature {
+                            stiffness_points_per_dir: 3,
+                            mass_points_per_dir: 4,
+                        },
+                    }
+                    .assemble(cx)
+                    .expect("free-free TET10 assembly");
+                    let report = slice(&a, 20.0, FMAX);
+                    let selected = classify(&mesh, &report.modes);
+                    let frequencies = selected.map(|i| hz(&report.modes[i]));
+                    let eigen_errors = selected.map(|i| hz_error(&report.modes[i]));
+                    let h = (L / (24 * r) as f64)
+                        .max(W / (2 * r) as f64)
+                        .max(T / r as f64);
+                    row(
+                        "structural-rung",
+                        "h",
+                        "pass",
+                        &format!(
+                            "{{\"bar_id\":\"A-uniform\",\"element\":\"TET10\",\"rung_h_m\":{h},\"n_tets\":{},\"free_dofs\":{},\"f_modes_hz\":{frequencies:?},\"eigen_uncertainty_hz\":{eigen_errors:?},\"factor_peak_bytes\":{},\"factor_nnz_l\":{},\"window_hz\":[20,{FMAX}],\"inertia_count\":{}}}",
+                            elements.len(),
+                            a.free_dofs.len(),
+                            report.stats.factor_peak_bytes,
+                            report.stats.factor_nnz_l,
+                            report.expected
+                        ),
+                        started,
+                    );
+                    Rung {
+                        h,
+                        n_tets: elements.len(),
+                        frequencies,
+                        eigen_errors,
+                    }
+                })
+                .collect()
+        })
+    })
+}
+
 /// Exact free-free Timoshenko characteristic equations, split into parity
 /// about the midpoint. Dimensionless lambda = rho*A*omega²*L⁴/(E*I),
 /// r=I/(A*L²), s=E*I/(kappa*G*A*L²). The coupled ODE gives
@@ -523,15 +602,80 @@ fn estimate(ladder: &Ladder, mode: usize) -> Estimate {
     }
 }
 
+fn h_pow(h: f64, p: f64) -> f64 {
+    det::exp(p * det::ln(h))
+}
+
+/// Observed order from three rungs with arbitrary refinement ratios: the root
+/// p of (f0-f1)/(f1-f2) = (h0^p-h1^p)/(h1^p-h2^p). The right side increases
+/// with p for h0 > h1 > h2; outside the [0.25, 12] bracket there is no order.
+fn observed_order(h: [f64; 3], f: [f64; 3]) -> f64 {
+    let target = (f[0] - f[1]) / (f[1] - f[2]);
+    let ratio = |p: f64| (h_pow(h[0], p) - h_pow(h[1], p)) / (h_pow(h[1], p) - h_pow(h[2], p));
+    let (mut lo, mut hi) = (0.25, 12.0);
+    if !(target.is_finite() && ratio(lo) <= target && target <= ratio(hi)) {
+        return f64::NAN;
+    }
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if ratio(mid) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// TET10 counterpart of [`estimate`]: formal eigenfrequency order 2p = 4,
+/// the canonical owner's admitted band [3.5, 4.3] (fs-solid tet10 benchmarks),
+/// and Richardson at the formal order with the actual final h ratio.
+fn tet10_estimate(rungs: &[Rung], mode: usize) -> Estimate {
+    let f: Vec<_> = rungs.iter().map(|r| r.frequencies[mode]).collect();
+    let h: Vec<_> = rungs.iter().map(|r| r.h).collect();
+    let orders = [
+        observed_order([h[0], h[1], h[2]], [f[0], f[1], f[2]]),
+        observed_order([h[1], h[2], h[3]], [f[1], f[2], f[3]]),
+    ];
+    let last = f[2] - f[3];
+    let weight = h_pow(h[3], 4.0) / (h_pow(h[2], 4.0) - h_pow(h[3], 4.0));
+    let correction = last * weight;
+    let [e2, e3] = [rungs[2].eigen_errors[mode], rungs[3].eigen_errors[mode]];
+    let asymptotic = f.windows(2).all(|w| w[0] > w[1])
+        && (3.5..=4.3).contains(&orders[1])
+        && e2 + e3 < 0.1 * last;
+    Estimate {
+        orders,
+        limit_hz: f[3] - correction,
+        // Same diagnostic Richardson allowance as P1, not a certified bound.
+        uncertainty_hz: 2.0 * correction.abs() + e3 + (e2 + e3) * weight,
+        asymptotic,
+    }
+}
+
 #[test]
 fn uniform_prism_3d_ladder_converges_to_free_free_beam_theory() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let ladder = uniform();
+    let p1 = uniform();
+    let tet10 = uniform_tet10();
     let timoshenko = beam_for(HONDURAS);
     let eb = beam_frequencies(0.0, 0.0);
     for mode in 0..3 {
         let started = Instant::now();
-        let est = estimate(ladder, mode);
+        // The P1 ladder is reported against its formal order 2, never gated:
+        // at 147456 tetrahedra it is still locking (DEF-08).
+        let locked = estimate(p1, mode);
+        row(
+            "uniform-prism-P1-locking-diagnostic",
+            KINDS[mode],
+            if locked.asymptotic { "pass" } else { "refused" },
+            &format!(
+                "{{\"element\":\"P1\",\"observed_order\":{:?},\"formal_order\":2,\"extrapolated_hz\":{},\"oracle_hz\":{},\"route\":\"TET10:M1.3-W1a\"}}",
+                locked.orders, locked.limit_hz, timoshenko[mode]
+            ),
+            started,
+        );
+        let est = tet10_estimate(tet10, mode);
         let error = (est.limit_hz / timoshenko[mode] - 1.0).abs();
         row(
             "uniform-prism-vs-free-free-Timoshenko",
@@ -542,8 +686,16 @@ fn uniform_prism_3d_ladder_converges_to_free_free_beam_theory() {
                 "fail"
             },
             &format!(
-                "{{\"observed_order\":{:?},\"formal_order\":2,\"extrapolated_hz\":{},\"oracle_hz\":{},\"euler_bernoulli_hz\":{},\"relative_error\":{error},\"tolerance\":{BEAM_TOL},\"numerical_uncertainty_hz\":{}}}",
-                est.orders, est.limit_hz, timoshenko[mode], eb[mode], est.uncertainty_hz
+                "{{\"element\":\"TET10\",\"rungs\":{TET10_RUNGS:?},\"f_hz\":{:?},\"observed_order\":{:?},\"formal_order\":4,\"order_band\":[3.5,4.3],\"extrapolated_hz\":{},\"oracle_hz\":{},\"euler_bernoulli_hz\":{},\"relative_error\":{error},\"tolerance\":{BEAM_TOL},\"numerical_uncertainty_hz\":{}}}",
+                tet10
+                    .iter()
+                    .map(|r| r.frequencies[mode])
+                    .collect::<Vec<_>>(),
+                est.orders,
+                est.limit_hz,
+                timoshenko[mode],
+                eb[mode],
+                est.uncertainty_hz
             ),
             started,
         );
@@ -553,7 +705,7 @@ fn uniform_prism_3d_ladder_converges_to_free_free_beam_theory() {
         );
         assert!(
             est.asymptotic,
-            "P1 locking/pre-asymptotic orders {:?}; no convergence claim",
+            "TET10 pre-asymptotic orders {:?}; no convergence claim",
             est.orders
         );
         assert!(
@@ -988,31 +1140,48 @@ fn radiation() -> &'static RadiationLadder {
 fn bem_panel_ladder_converges_modal_radiated_pressure() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let radiation = radiation();
+    let finest = radiation.pressures.last().unwrap();
+    let dominant = finest.iter().map(|p| p.abs()).fold(0.0, f64::max);
     for (mode, kind) in KINDS.iter().enumerate() {
         let started = Instant::now();
         let p: Vec<_> = radiation.pressures.iter().map(|r| r[mode]).collect();
-        let d0 = (p[1] - p[0]).abs();
-        let d1 = (p[2] - p[1]).abs();
+        let differences: Vec<f64> = p.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+        let [d0, d1] = [differences[0], differences[1]];
         let order = det::ln(d0 / d1) / det::ln(2.0);
         assert!(
             d0.is_finite() && d1.is_finite() && d0 > d1 && d1 > 0.0,
-            "{kind} complex receiver pressure must converge: {p:?}; differences {d0},{d1}"
+            "{kind} complex receiver pressure must converge: {p:?}; differences {differences:?}"
         );
         let uncertainty = d1 / (d0 / d1 - 1.0);
-        let relative = uncertainty / p[2].abs();
+        let bound = finest[mode].abs() + uncertainty;
+        // A mode that is not resolved to 10% of itself may still be claimed
+        // as a near-null radiator, only if its whole bound |p| + u lies under
+        // the near-null threshold; the same 10% band then applies to that
+        // threshold scale. A resolved mode is never downgraded to a bound.
+        let resolved = uncertainty <= 0.1 * finest[mode].abs();
+        let near_null = !resolved && bound <= NEAR_NULL_FRACTION * dominant;
+        let (scale, claim) = if near_null {
+            (
+                NEAR_NULL_FRACTION * dominant,
+                "near-null radiator: bounded, not resolved",
+            )
+        } else {
+            (finest[mode].abs(), "resolved")
+        };
+        let relative = uncertainty / scale;
         row(
             "panel-pressure-convergence",
             kind,
             if relative <= 0.1 { "pass" } else { "fail" },
             &format!(
-                "{{\"panel_counts\":{:?},\"observed_order\":{order},\"uncertainty_pa_per_unit_modal_velocity\":{uncertainty},\"relative_uncertainty\":{relative},\"tolerance_relative\":0.1,\"uncertainty_kind\":\"three-rung Richardson estimate; phase retained\"}}",
+                "{{\"panel_counts\":{:?},\"differences_pa_per_unit_modal_velocity\":{differences:?},\"observed_order\":{order},\"uncertainty_pa_per_unit_modal_velocity\":{uncertainty},\"claim\":\"{claim}\",\"gate_scale_pa_per_unit_modal_velocity\":{scale},\"dominant_pa_per_unit_modal_velocity\":{dominant},\"near_null_fraction\":{NEAR_NULL_FRACTION},\"bound_pa_per_unit_modal_velocity\":{bound},\"relative_uncertainty\":{relative},\"tolerance_relative\":0.1,\"uncertainty_kind\":\"three-rung Richardson estimate; phase retained\"}}",
                 radiation.panel_counts
             ),
             started,
         );
         assert!(
             relative <= 0.1,
-            "{kind} receiver uncertainty {relative}; refine panels, do not loosen"
+            "{kind} ({claim}) receiver uncertainty {relative} of {scale}; refine panels, do not loosen"
         );
     }
 }
@@ -1335,7 +1504,7 @@ fn write_artifacts(
         finest.n_tets,
         finest.frequencies,
         est.orders,
-        radiation().panel_counts[2],
+        radiation().panel_counts.last().unwrap(),
         ladder.design.depth,
         ladder.design.scale,
         band
@@ -1348,10 +1517,10 @@ fn bar_s1_material_strike_radiated_render_replays_and_time_axis_is_live() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let started = Instant::now();
     let ladder = undercut();
-    let transfer = radiation().pressures[2];
+    let transfer = *radiation().pressures.last().unwrap();
     let mut last = None;
     let mut differences = Vec::new();
-    for substeps in [2, 4, 8] {
+    for substeps in SUBSTEPS {
         let (signal, contact) = render(ladder, transfer, substeps, 0.0);
         if let Some((_, previous)) = &last {
             let energy: f64 = signal.iter().map(|p| p * p).sum();
@@ -1379,12 +1548,20 @@ fn bar_s1_material_strike_radiated_render_replays_and_time_axis_is_live() {
         );
         last = Some((contact, signal));
     }
+    let orders: Vec<f64> = differences
+        .windows(2)
+        .map(|d| det::ln(d[0] / d[1]) / det::ln(2.0))
+        .collect();
+    let finest_order = *orders.last().unwrap();
     assert!(
-        differences[1] < differences[0] && differences[1] < 0.01,
-        "strike time ladder needs refinement: {differences:?}"
+        differences.windows(2).all(|d| d[1] < d[0])
+            && *differences.last().unwrap() < 0.01
+            && (0.7..=1.3).contains(&finest_order),
+        "strike time ladder needs refinement: {differences:?}, orders {orders:?} vs formal 1"
     );
     let (contact, signal) = last.unwrap();
-    let (replay, replay_contact) = render(ladder, transfer, 8, 0.0);
+    let finest = *SUBSTEPS.last().unwrap();
+    let (replay, replay_contact) = render(ladder, transfer, finest, 0.0);
     assert_eq!(contact.to_bits(), replay_contact.to_bits());
     assert!(
         signal
@@ -1402,26 +1579,45 @@ fn bar_s1_material_strike_radiated_render_replays_and_time_axis_is_live() {
         local_ratio < 0.01,
         "local half-space rigidity needs a finer contact model"
     );
-    let (softest, _) = render(ladder, transfer, 8, local_ratio);
-    let contact_material_effect = (signal
-        .iter()
-        .zip(&softest)
-        .map(|(a, b)| (a - b).powi(2))
-        .sum::<f64>()
-        / signal.iter().map(|p| p * p).sum::<f64>())
-    .sqrt();
-    assert!(
-        contact_material_effect < 0.01,
-        "finite-head/wood compliance endpoint needs a fuller contact model"
-    );
+    let change = |other: &[f64]| {
+        (signal
+            .iter()
+            .zip(other)
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            / signal.iter().map(|p| p * p).sum::<f64>())
+        .sqrt()
+    };
+    let (softest, _) = render(ladder, transfer, finest, local_ratio);
+    let contact_material_effect = change(&softest);
+    // The rigid-wood idealization is admitted only while its bound stays an
+    // order of magnitude under the receiver change that the DECLARED head
+    // input envelope (Johnston E spread x nu interval) already carries. An
+    // absolute waveform band would demand more of this omission than of the
+    // inputs: the lossless six-second receiver is phase-sensitive at 2.6 kHz.
+    let nominal = hertz_law(HEAD_E, HEAD_NU).reduced_modulus;
+    let head_envelope_effects = [(1.25e6, 0.45), (1.39e6, 0.499)].map(|(e, nu)| {
+        let softening = nominal / hertz_law(e, nu).reduced_modulus - 1.0;
+        change(&render(ladder, transfer, finest, softening).0)
+    });
+    let envelope = head_envelope_effects[0].min(head_envelope_effects[1]);
+    let dominance = contact_material_effect / envelope;
+    // Liveness: ten times the compliance bound must fail the same gate.
+    let planted = change(&render(ladder, transfer, finest, 10.0 * local_ratio).0) / envelope;
+    assert!(planted > 0.1, "compliance gate is not live: {planted}");
+    let verdict = if dominance <= 0.1 { "pass" } else { "fail" };
     row(
         "local-contact-compliance-endpoint",
         "material",
-        "pass",
+        verdict,
         &format!(
-            "{{\"local_half_space_compliance_ratio_bound\":{local_ratio},\"receiver_relative_l2_endpoint_change\":{contact_material_effect},\"tolerance\":0.01,\"finite_body_contact_qualified\":false}}"
+            "{{\"local_half_space_compliance_ratio_bound\":{local_ratio},\"receiver_relative_l2_endpoint_change\":{contact_material_effect},\"head_envelope_receiver_relative_l2_changes\":{head_envelope_effects:?},\"omission_to_input_envelope_ratio\":{dominance},\"tolerance_ratio\":0.1,\"planted_10x_ratio\":{planted},\"finite_body_contact_qualified\":false}}"
         ),
         started,
+    );
+    assert!(
+        dominance <= 0.1,
+        "finite-head/wood compliance endpoint needs a fuller contact model: {dominance}"
     );
     if let Some(out) = artifact_dir() {
         write_artifacts(&out, ladder, transfer, &signal, contact);
@@ -1431,7 +1627,7 @@ fn bar_s1_material_strike_radiated_render_replays_and_time_axis_is_live() {
         "time",
         "pass",
         &format!(
-            "{{\"relative_l2_differences\":{differences:?},\"tolerance_relative_l2\":0.01,\"replay_bits_equal\":true,\"contact_time_s\":{contact},\"acceptance\":false}}"
+            "{{\"substeps\":{SUBSTEPS:?},\"relative_l2_differences\":{differences:?},\"observed_orders\":{orders:?},\"formal_order\":1,\"order_band\":[0.7,1.3],\"tolerance_relative_l2\":0.01,\"replay_bits_equal\":true,\"contact_time_s\":{contact},\"acceptance\":false}}"
         ),
         started,
     );
