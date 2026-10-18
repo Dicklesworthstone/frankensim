@@ -20,8 +20,6 @@
 use crate::refmods::felt::{State, power_law_moments};
 use fs_material::WoolFelt;
 
-const POSITION_TOL: f64 = 1.0e-13; // same displacement tolerance as felt::solve
-
 /// `felt.rs::stored`: recoverable compression energy density [J/m^3] on a
 /// committed branch, evaluated with `powf`.
 pub fn stored(law: &WoolFelt, e: f64, state: &State) -> f64 {
@@ -190,19 +188,22 @@ impl Site {
     }
 
     /// Solve `F = force(free - compliance*F)` for the end overlap, keeping a
-    /// bracket and accepting only a 1e-13 m overlap residual, exactly as
-    /// `felt.rs::solve`; `warm_force` only seeds the iteration.
+    /// bracket and stopping at the overlap residual's own rounding floor (16 ulps
+    /// of its terms) or a bracket collapsed to adjacent doubles, exactly as
+    /// `felt.rs::solve_with_rate`; `warm_force` only seeds the iteration.
     pub fn solve(&self, free_m: f64, compliance_m_n: f64, warm_force: f64) -> Result<f64, &'static str> {
         let residual = |end: f64| {
             let (f, df) = self.force(end);
             (end + compliance_m_n * f - free_m, 1.0 + compliance_m_n * df, f)
         };
+        let floor = |end: f64, force: f64|
+            16.0 * f64::EPSILON * (end.abs() + (compliance_m_n * force).abs() + free_m.abs());
         let mut hi = free_m.min(self.maximum_m);
         let (rhi, _, fhi) = residual(hi);
         if rhi < -1.0e-12 {
             return Err("felt exceeded its admitted densification strain");
         }
-        if rhi.abs() <= POSITION_TOL {
+        if rhi.abs() <= floor(hi, fhi) {
             return Ok(fhi);
         }
         let start_m = self.start_strain * self.thickness;
@@ -225,7 +226,8 @@ impl Site {
             if !r.is_finite() || !derivative.is_finite() || !force.is_finite() || force < 0.0 {
                 return Err("nonfinite or tensile discrete felt force");
             }
-            if r.abs() <= POSITION_TOL {
+            // A bracket collapsed to adjacent doubles is the root at this precision.
+            if r.abs() <= floor(end, force) || hi - lo <= 4.0 * f64::EPSILON * lo.abs().max(hi.abs()) {
                 return Ok(force);
             }
             if r > 0.0 { hi = end; } else { lo = end; }

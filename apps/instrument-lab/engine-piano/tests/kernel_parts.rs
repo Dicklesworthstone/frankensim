@@ -202,7 +202,7 @@ fn prepared_force_and_solve_reproduce_the_reference_felt_adapter() {
                         let fast = site.solve(free, compliance, 0.0);
                         match (reference, fast) {
                             (Ok(a), Ok(b)) => {
-                                // Both satisfy |end + C F - free| <= 1e-13 m.
+                                // Both stop at the rounding floor of |end + C F - free| (16 ulps).
                                 worst_solve = worst_solve.max((a - b).abs() * compliance);
                                 let warm = site.solve(free, compliance, a * 1.01).unwrap();
                                 worst_solve = worst_solve.max((a - warm).abs() * compliance);

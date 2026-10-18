@@ -1053,6 +1053,9 @@ struct Seg {
     t_over_l: f64,
     /// Distributed velocity-loss rate 2R [1/s] of this segment's partials.
     mass_rate: f64,
+    /// Strain-rate loss time 2 eta_u [s] (RT-0425 law; 0 for the authored one).
+    /// With T/L it drags the chord endpoint, as `linear.rs` books it.
+    strain_time: f64,
     length_m: f64,
     modal_mass_kg: f64,
     strike_fraction: f64,
@@ -1878,6 +1881,7 @@ impl LivePiano {
             let tension = c.tension_at_cents(cents)?;
             let length = if s.duplex { c.duplex_length_m } else { c.length_m };
             let mass_rate = s.modes.clone().next().map_or(0.0, |k| losses[k].mass_rate);
+            let strain_time = if cfg.rt0425_string_damping { 2.0 * steinway_scale::string_damping_rt0425(c.midi)?.1 } else { 0.0 };
             segs.push(Seg {
                 course: s.course,
                 member: s.member,
@@ -1889,6 +1893,7 @@ impl LivePiano {
                 endpoint_mass: c.linear_density_kg_m * length / 3.0,
                 t_over_l: tension / length,
                 mass_rate,
+                strain_time,
                 length_m: length,
                 modal_mass_kg: 0.5 * c.linear_density_kg_m * length,
                 strike_fraction: c.strike_fraction,
@@ -2186,7 +2191,7 @@ impl LivePiano {
             cdiag += m.bq[k] * m.hs[k] * m.hs[k];
         }
         let residual_mass = seg.endpoint_mass - beta2;
-        let endpoint_drag = seg.mass_rate * residual_mass;
+        let endpoint_drag = seg.mass_rate * residual_mass + seg.strain_time * seg.t_over_l;
         let half = 0.25 * self.dt;
         loss_w += half * endpoint_drag;
         let mut pad = Vec::new();
@@ -3110,8 +3115,16 @@ impl LivePiano {
             for i in 0..nc {
                 let key = &self.keys[self.c_key[i]];
                 let end = self.c_gap[i] - self.c_start[i] - key.creep.compliance() * self.c_force[i];
-                let expected = self.c_site[i].force(end).0;
-                if !expected.is_finite() || (self.c_force[i] - expected).abs() > 1e-5 + 1e-8 * expected.abs() {
+                let (expected, slope) = self.c_site[i].force(end);
+                // The reference's scalar-site gate (string_engine.rs): 1e-9 N, or the force that
+                // the felt root's rounding floor moves through the felt's tangent. A 1e-5 N gate
+                // is a large share of a light strike's force and left the unison keys 1e-6 off.
+                let diagonal = self.c_h[i * nc + i];
+                let free = self.c_gap[i] + diagonal * self.c_force[i] - self.c_start[i];
+                let floor = 16.0 * f64::EPSILON
+                    * (end.abs() + ((diagonal + key.creep.compliance()) * self.c_force[i]).abs() + free.abs());
+                let tolerance = 1e-9 + 1e-11 * expected.abs() + floor * slope.abs();
+                if !expected.is_finite() || (self.c_force[i] - expected).abs() > tolerance {
                     converged = false;
                 }
             }
