@@ -1,4 +1,4 @@
-//! Supplied primitive or geometry-derived valve pressure to the sole WAV owner.
+//! File-driven wind sources through the shared pressure and WAV owners.
 use std::io::{Read, Write};
 use std::path::Path;
 use fs_blake3::ContentHash;
@@ -7,6 +7,7 @@ use fs_couple::render::schedule::reed::{ReedPerformance, REED_PERFORMANCE_SCHEMA
 use fs_couple::bernoulli_aperture::performance::{ApertureObservation, AperturePerformance, CoupledAperture};
 use fs_couple::bernoulli_aperture::performance::file::{PlateValvePerformance, MAX_PLATE_VALVE_PERFORMANCE_BYTES, PLATE_VALVE_PERFORMANCE_SCHEMA};
 use fs_couple::bernoulli_aperture::radiation::BaffledRadiationLoad;
+use fs_couple::flue_loop::network::performance::file::{FlueFilePerformance, FLUE_PERFORMANCE_SCHEMA};
 use fs_exec::CancelGate;
 use fs_material::gas_species::input::ThermochemicalSources;
 use super::{RATE, create_outputs, json_string, stream_output};
@@ -82,6 +83,9 @@ pub(super) fn outlet_provenance(p: &AperturePerformance, radiation: Option<Baffl
 struct Loaded {
     source: Box<dyn PressureRenderer>, rate:u32, samples:u64, full_scale_pa:f64,
     hash:ContentHash, fixture:&'static str, source_json:String,
+    // A source that already owns multirate physical observation reports THAT
+    // clock/filter history; the identity PCM wrapper must not call it 48k mechanics.
+    observation_json:Option<String>,
 }
 fn load(bytes: &[u8], block: usize, policy: ObservationPolicy) -> Result<Loaded, String> {
     load_with_gas_sources(bytes, block, policy, None)
@@ -94,7 +98,47 @@ fn load_with_gas_sources(
 ) -> Result<Loaded, String> {
     // Exact versioned source header selects the existing owner; filenames and
     // instrument labels never choose geometry or material constants.
-    if bytes.starts_with(b"frankensim-plate-valve-performance-v1\n") {
+    if bytes.starts_with(b"frankensim-flue-performance-v1\n") {
+        if policy == ObservationPolicy::Acceptance {
+            return Err("flue files use an explicitly estimated tonal-jet/rigid-pipe image; --acceptance requires an independently qualified physical model".into());
+        }
+        let p = FlueFilePerformance::from_bytes_with_gas_sources(bytes, block,
+            &CancelGate::new(), sources).map_err(|e| e.to_string())?;
+        let i = p.info();
+        if i.sample_rate_hz != RATE {
+            return Err("flue wind output must declare 48000 Hz; its file separately declares the faster mechanical clock".into());
+        }
+        let renderer = p.renderer();
+        let network = renderer.voice().network().expect("file admits the physical network");
+        let section = &network.source().graph.sections[0];
+        let gas = network.source().gases[0];
+        let exterior = renderer.radiation_input().expect("file binds exterior explicitly").exterior;
+        let geometry = p.geometry();
+        let island = renderer.voice().island();
+        let (phase, details) = network.fractional_sections().expect("file selects fractional travel");
+        let actual_length: f64 = details.iter().map(|s|s.realized_dc_length_m).sum();
+        let phase_error: f64 = details.iter().map(|s|s.phase_error_bound_rad).sum();
+        let input_hash = i.input_hash.to_hex();
+        let gas_sources = super::thermochemical::provenance(p.gas_records());
+        let receiver = renderer.config().receiver;
+        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"tube_length_m\":{:e},\"tube_radius_m\":{:e},\"represented_length_m\":{actual_length:e},\"terminal_reflection\":{},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"model_scope\":\"estimated tonal jet and supplied rigid cylindrical pipe; one-way infinite-baffle outlet pressure; prescribed reflection, no matched radiation feedback, resolved turbulence or measured flute/SPL claim\"{gas_sources}}}",
+            i.jet_card_source,i.jet_card_hash,p.card().claim.kind(),p.card().authority.label(),i.compiled_controls,
+            section.length_m,section.radius_m,
+            match network.source().graph.nodes[1] {fs_couple::bernoulli_aperture::network::NetworkNode::Termination {reflection}=>reflection,_=>unreachable!("file terminal")},
+            geometry.flue_width_m,geometry.flue_height_m,geometry.cut_up_m,geometry.labium_offset_m,
+            geometry.jet_angle_rad,geometry.mouth_loss_rel,island.displacement_gain,island.seed_amplitude_rel,
+            gas.temperature,gas.pressure,gas.density,gas.sound_speed,gas.dynamic_viscosity,
+            exterior.density,exterior.sound_speed,network.viscothermal_sections().len(),phase.maximum_frequency_hz,
+            receiver.position_m[0],receiver.position_m[1],receiver.position_m[2],receiver.maximum_frequency_hz);
+        let ratio = renderer.mechanics_per_output();
+        let mechanical_samples = i.samples*ratio as u64; // already checked by the performance owner
+        let observation_json = format!("{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{mechanical_samples},\"output_sample_rate_hz\":{RATE},\"ratio\":{ratio},\"filter\":\"shared multirate differentiating Rayleigh receiver with bandlimited propagation\",\"delay_output_samples\":{},\"propagation_fir_support_output_samples\":[{},{}],\"first_output_source_index\":{},\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
+            i.mechanics_rate_hz,renderer.receiver().filter_delay_samples(),renderer.receiver().delay_samples.0,
+            renderer.receiver().delay_samples.1,ratio-1);
+        Ok(Loaded { source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,
+            full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"flue-input",source_json,
+            observation_json:Some(observation_json) })
+    } else if bytes.starts_with(b"frankensim-plate-valve-performance-v1\n") {
         if policy == ObservationPolicy::Acceptance {
             return Err("--acceptance selects the explicit ReedPerformance flanged-development path; plate-valve files require explicit matched-load builder admission".into());
         }
@@ -128,7 +172,7 @@ fn load_with_gas_sources(
             i.input_hash.to_hex(),i.nodes,i.triangles,i.sections,i.memory_branches,i.compiled_controls,
             requested,i.represented_tube_length_m,plate.mass_kg(),plate.stiffness_n_m(),plate.pressure_area_m2());
         Ok(Loaded{source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,
-            full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"plate-valve-input",source_json})
+            full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"plate-valve-input",source_json,observation_json:None})
     } else {
         let p=ReedPerformance::from_bytes_with_gas_sources(bytes,block,policy,sources).map_err(|e|e.to_string())?;
         let i=p.info();
@@ -137,7 +181,7 @@ fn load_with_gas_sources(
         let source_json=format!("\"reed_input\":{{\"schema\":\"{REED_PERFORMANCE_SCHEMA}\",\"observation_policy\":\"{policy_name}\",\"blake3\":\"{}\",\"segments\":{},\"tone_holes\":{},\"massive_reed\":{},\"gesture_events\":{},\"compiled_controls\":{}{observer_json}}}",
             i.input_hash.to_hex(),i.segments,i.tone_holes,i.massive_reed,i.gesture_events,i.compiled_controls);
         Ok(Loaded{source:Box::new(p),rate:i.sample_rate_hz,samples:i.samples,
-            full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"reed-input",source_json})
+            full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"reed-input",source_json,observation_json:None})
     }
 }
 
@@ -159,6 +203,9 @@ pub(super) fn run_with_gas_sources(
     file.take((MAX_PLATE_VALVE_PERFORMANCE_BYTES + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("wind input read failed: {e}"))?;
     let loaded = load_with_gas_sources(&bytes, block, policy, sources)?;
+    if decimate && loaded.observation_json.is_some() {
+        return Err("flue files already declare mechanical and output clocks; omit --decimate to avoid a second observer".into());
+    }
     if !decimate && loaded.rate != RATE {
         return Err("non-48000-Hz mechanics require explicit --decimate; no implicit resampling".into());
     }
@@ -181,19 +228,18 @@ pub(super) fn run_with_gas_sources(
     let input_hash = loaded.hash.to_hex();
     let wav_hash = rendered.hash.to_hex();
     let fixture=loaded.fixture;
+    let observation_json = loaded.observation_json.unwrap_or_else(|| format!(
+        "{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"output_sample_rate_hz\":{RATE},\"ratio\":{},\"filter\":\"{}\",\"delay_output_samples\":{},\"first_output_source_index\":{},\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
+        loaded.rate,loaded.samples,observation.ratio,observation.filter_profile,
+        observation.delay_output_samples,observation.first_output_source_index));
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"{fixture}\",\
          \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\
          \"full_scale_pa\":{:e},\"clipped_samples\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\
          \"wav_blake3\":\"{wav_hash}\",\
          \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",{},\
-         \"observation\":{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\
-         \"output_sample_rate_hz\":{RATE},\"ratio\":{},\"filter\":\"{}\",\
-         \"delay_output_samples\":{},\"first_output_source_index\":{},\
-         \"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}}}",
+         \"observation\":{observation_json}}}",
         loaded.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,loaded.source_json,
-        loaded.rate, loaded.samples, observation.ratio, observation.filter_profile,
-        observation.delay_output_samples, observation.first_output_source_index,
     );
     writeln!(metadata, "{provenance}").and_then(|_| metadata.flush())
         .map_err(|e| format!("sidecar write failed: {e}"))?;

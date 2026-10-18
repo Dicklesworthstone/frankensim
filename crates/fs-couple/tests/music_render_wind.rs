@@ -136,3 +136,6 @@ mod valve;
 
 #[path = "music_render_wind/gas_mixture.rs"]
 mod gas_mixture;
+
+#[path = "music_render_wind/flue.rs"]
+mod flue;

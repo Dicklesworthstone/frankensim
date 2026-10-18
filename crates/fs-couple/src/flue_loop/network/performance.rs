@@ -8,6 +8,9 @@
 //! flute/mouth/body radiation, inter-opening reaction or room scattering.
 //! The original tonal/estimated jet remains tonal/estimated, not turbulent CFD.
 
+/// Versioned data-driven flue construction through this same pressure renderer.
+pub mod file;
+
 use super::{FlueError, FlueResonator, FlueVoice};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::flue_loop::FlueControl;
