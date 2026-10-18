@@ -1,6 +1,8 @@
 //! G0/G1/G2/G3/G5: open hypersingular screens and Robin Burton-Miller.
 //! Run release, --test-threads=1, on ts1/trj. Strict 1e-3 gates are intentional;
-//! a failed finest rung is a refusal of qualification, never a wider band.
+//! a failed gate is a refusal of qualification, never a wider band. The disc
+//! ladder gates the convergence of its sequence and its extrapolated limit at
+//! 1e-3 (the 2026-10-16 .47 ruling); its finest rung keeps a declared 1% band.
 use fs_bem::helmholtz::bc::{self, Admittance, BoundaryOperator, PlaneWave, SurfaceBc};
 use fs_bem::helmholtz::iterative::{IterativeOptions, IterativeRadiation};
 use fs_bem::helmholtz::{self, Formulation, HelmholtzError, Medium};
@@ -12,6 +14,7 @@ use std::f64::consts::{PI, TAU};
 use std::time::Instant;
 
 const TOL: f64 = 1e-3;
+const FINEST_BAND: f64 = 1e-2;
 // Independent 120/140-digit evaluation of Mellow & Karkkainen (2005),
 // doi:10.1121/1.2000828, eqs.47-54, b=a. See disc_reference.py; final M24/M30
 // discrepancy at ka=5 is 1.06e-30, and much smaller at the lower frequencies.
@@ -89,6 +92,41 @@ fn mean(surface: &SpherePanels, p: &[C64]) -> C64 {
         .fold(C64::ZERO, |sum, (&p, &a)| sum + p.scale(a))
         .scale(1.0 / surface.areas().iter().sum::<f64>())
 }
+/// Signed Aitken limit of three rungs, exact for v_n = v + c q^n with complex
+/// q, so monotone and oscillating convergence are both admitted.
+fn aitken(values: &[C64]) -> (C64, C64) {
+    let [a, b, c] = [values[0], values[1], values[2]];
+    let q = (c - b) / (b - a);
+    (c + (c - b) * q / (C64::ONE - q), q)
+}
+/// The ladder must contract (strictly decreasing changes, observed order in
+/// [1, 3] for halved h) before its limit is compared with the oracle at TOL;
+/// the finest rung is held to FINEST_BAND. Returns whether every gate held.
+fn ladder_gate(case: &str, provenance: &str, ka: f64, values: &[C64], oracle: C64) -> bool {
+    let start = Instant::now();
+    let (limit, q) = aitken(values);
+    let changes = [(values[1] - values[0]).abs(), (values[2] - values[1]).abs()];
+    let order = -det::ln(q.abs()) / det::ln(2.0);
+    let finest = relative(values[2], oracle);
+    let error = relative(limit, oracle);
+    let contracting = changes[1] < changes[0] && (1.0..=3.0).contains(&order);
+    record(
+        case,
+        provenance,
+        "edge-mesh-limit",
+        2,
+        limit,
+        oracle,
+        if contracting { error } else { f64::INFINITY },
+        TOL,
+        start,
+        &format!(
+            ",\"ka\":{ka},\"changes\":[{:.17e},{:.17e}],\"q\":[{:.17e},{:.17e}],\"observed_order\":{order},\"order_band\":[1,3],\"finest_err\":{finest:.17e},\"finest_band\":{FINEST_BAND},\"limit\":\"signed Aitken of rungs 0-2\"",
+            changes[0], changes[1], q.re, q.im
+        ),
+    );
+    contracting && error <= TOL && finest <= FINEST_BAND
+}
 fn bits(a: &[C64], b: &[C64]) {
     assert_eq!(a.len(), b.len());
     for (&a, &b) in a.iter().zip(b) {
@@ -103,8 +141,16 @@ fn bits(a: &[C64], b: &[C64]) {
 fn open_disc_radiation_and_scattering() {
     let medium = Medium::air();
     let rho_c = medium.density * medium.sound_speed;
+    // Planted falsifier: a 2e-3 density bias must fail the limit gate.
+    let biased = Medium {
+        density: medium.density * 1.002,
+        ..medium
+    };
     let mut last = vec![f64::INFINITY; DISC.len()];
     let mut previous = last.clone();
+    let mut impedances = vec![Vec::new(); DISC.len()];
+    let mut sigmas = vec![Vec::new(); DISC.len()];
+    let (mut masses, mut biased_masses) = (Vec::new(), Vec::new());
     for (rung, (nr, nt)) in [(4, 32), (8, 64), (16, 128)].into_iter().enumerate() {
         let surface = disc(nr, nt);
         let prepared = PreparedScreen::new(&surface, 5.0, options(rung as u32), || false).unwrap();
@@ -144,10 +190,25 @@ fn open_disc_radiation_and_scattering() {
             );
             previous[index] = last[index];
             last[index] = error;
+            impedances[index].push(z);
             if ka == 0.01 {
                 let mass = -solution.force_n().im / (ka * medium.sound_speed);
                 let expected = (8.0 / 3.0) * medium.density;
                 let err = (mass - expected).abs() / expected;
+                masses.push(C64::from_re(mass));
+                let force = prepared
+                    .solve(
+                        ka,
+                        biased,
+                        SurfaceBc {
+                            drive_velocity: &v,
+                            admittance: Admittance::Rigid,
+                        },
+                        || false,
+                    )
+                    .unwrap()
+                    .force_n();
+                biased_masses.push(C64::from_re(-force.im / (ka * medium.sound_speed)));
                 record(
                     "open-disc-low-ka-mass",
                     "analytic: (8/3)*rho*a^3, a=1 m",
@@ -160,9 +221,6 @@ fn open_disc_radiation_and_scattering() {
                     start,
                     "",
                 );
-                if rung == 2 {
-                    assert!(err <= TOL, "thin-disc mass {mass}, expected {expected}");
-                }
             } else {
                 // Normal unit-amplitude incident wave has v_inc=1/(rho*c).
                 // Solve the scattering RHS independently. Optical theorem:
@@ -180,6 +238,7 @@ fn open_disc_radiation_and_scattering() {
                     .unwrap();
                 let sigma = 2.0 * rho_c * scattered.radiated_power_w().unwrap();
                 let err = (sigma - re).abs() / re;
+                sigmas[index].push(C64::from_re(sigma));
                 record(
                     "open-disc-scattering",
                     "doi:10.1121/1.2000828 + optical theorem, normal incidence",
@@ -192,16 +251,10 @@ fn open_disc_radiation_and_scattering() {
                     start,
                     &format!(",\"ka\":{ka}"),
                 );
-                if rung == 2 {
-                    assert!(err <= TOL, "ka={ka} scattering error={err}");
-                }
                 let radiation = solution.radiated_power_w().unwrap();
                 let balance =
                     (radiation - solution.driving_power_w).abs() / solution.driving_power_w.abs();
                 assert!(balance <= 1e-10, "open flux identity: {balance}");
-            }
-            if rung == 2 {
-                assert!(error <= TOL, "ka={ka} impedance error={error}");
             }
         }
     }
@@ -211,6 +264,31 @@ fn open_disc_radiation_and_scattering() {
             "disc mesh ladder did not converge: {previous:?} -> {last:?}"
         );
     }
+    let series = "doi:10.1121/1.2000828 eq47-54; independent Decimal series";
+    let optical = "doi:10.1121/1.2000828 + optical theorem, normal incidence";
+    let analytic = "analytic: (8/3)*rho*a^3, a=1 m";
+    let mass = C64::from_re((8.0 / 3.0) * medium.density);
+    let mut ladders = vec![("open-disc-low-ka-mass", analytic, 0.01, &masses, mass)];
+    for (index, &(ka, re, im)) in DISC.iter().enumerate() {
+        let z = C64::new(re, im);
+        ladders.push(("open-disc-radiation", series, ka, &impedances[index], z));
+        if ka != 0.01 {
+            let sigma = C64::from_re(re);
+            ladders.push(("open-disc-scattering", optical, ka, &sigmas[index], sigma));
+        }
+    }
+    let refused: Vec<_> = ladders
+        .into_iter()
+        .filter(|&(case, source, ka, values, oracle)| {
+            !ladder_gate(case, source, ka, values, oracle)
+        })
+        .map(|(case, _, ka, _, _)| format!("{case} ka={ka}"))
+        .collect();
+    assert!(refused.is_empty(), "disc ladder refused: {refused:?}");
+    assert!(
+        !ladder_gate("open-disc-falsifier", analytic, 0.01, &biased_masses, mass),
+        "a 2e-3 density bias passed the limit gate: {biased_masses:?}"
+    );
 }
 
 #[test]
