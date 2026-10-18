@@ -6,6 +6,12 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::{
 use fs_couple::bowed_string::runtime::reciprocal::bank::plate::{SharedMaterialPlateBody, SharedPlateBridge};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::{MaterialBowContact, MultiBowStringBank};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::MultiBowPerformanceConfig;
+use fs_couple::bowed_string::runtime::reciprocal::bank::torsion::{
+    ModalRotationAttachment, StringBodyRotationConnection, StringBridgeLocation,
+};
+use fs_couple::bowed_string::runtime::reciprocal::bank::chart::{
+    SharedMaterialPlateChartBody, PlateBridgeFootprints,
+};
 use fs_couple::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeModel, ModalAcousticTimeBudget};
 use fs_couple::pcm_wav::observation::PressureRenderer;
 use fs_couple::render::schedule::force::coupled::{ModalAttachment, ModalCouplingConfig};
@@ -13,7 +19,8 @@ use fs_couple::render::schedule::force::coupled::contact::friction::{FrictionDri
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::MultiFrictionConfig;
 use fs_couple::string_specimen::{KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY as ETA,
     StringPrestress, with_uniform_circular_material_state};
-use fs_couple::thin_plate::{PlateMaterialModel, PlateThicknessConstraint, with_uniform_plate_material_state};
+use fs_couple::thin_plate::{PlateMaterialModel, PlateThicknessConstraint, with_uniform_plate_material_state,
+    PlateRegionMaterial, PlateChartRadiation, compile_plate_material_chart};
 use fs_evidence::ValidityDomain;
 use fs_exec::{CancelGate, Cx};
 use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
@@ -23,6 +30,7 @@ use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
 use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point};
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
+use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateRegion};
 use fs_scenario::{PrestressedString, ThinPlate, gesture::{GestureSchedule, GestureTarget, GestureTrack, GestureValue}};
 use fs_tribo::FrictionLaw;
 
@@ -249,5 +257,284 @@ fn refused_steps_keep_both_transverse_and_twist_history() {
         assert_eq!(a.system().samples_rendered(),16);
         assert_eq!(a.system().components()[0].states(),before);
         assert_eq!(a.step(&zero,drive()).unwrap(),b.step(&zero,drive()).unwrap());
+    });
+}
+
+fn rotational_link(body: ModalRotationAttachment) -> StringBodyRotationConnection {
+    StringBodyRotationConnection {
+        string: 0, station_fraction: 0.8, body,
+        stiffness_n_m_per_rad: 0.001, damping_n_m_s_per_rad: 1e-7,
+        rest_angle_rad: 0.0,
+    }
+}
+
+fn radiating_rotation(cx: &Cx<'_>, gate: &CancelGate, g: f64) -> ReciprocalStringBank {
+    let bank = radiating(cx, gate, g);
+    let moving = &bank.source().strings()[0].connections[0].body;
+    // Small-angle chord from an explicitly fixed body support to its actual
+    // material-derived moving footprint, over a declared 0.1 m baseline.
+    let fixed = ModalAttachment { component: moving.component, shapes: vec![0.0; moving.shapes.len()] };
+    let rotation = ModalRotationAttachment::from_displacement_footprints(moving, &fixed, 0.1).unwrap();
+    bank.with_rotational_body_connections(vec![rotational_link(rotation)], gate).unwrap()
+}
+
+#[test]
+fn g3_torsional_bridge_radiates_after_release_and_shear_swap_changes_that_physical_response() {
+    with_cx(|cx, gate| {
+        let mut unconnected = radiating(cx, gate, 80e9);
+        let mut original = radiating_rotation(cx, gate, 80e9);
+        let mut changed = radiating_rotation(cx, gate, 20e9);
+        assert_eq!(original.cards()[0].fundamental_hz(), changed.cards()[0].fundamental_hz());
+        assert_eq!(original.cards()[0].zetas, changed.cards()[0].zetas);
+        assert_eq!(original.system().components()[1].modes(), changed.system().components()[1].modes());
+        assert_eq!(original.system().acceleration_pressure_weights(), unconnected.system().acceleration_pressure_weights());
+        assert_eq!(original.source().rotational_body_connections(), changed.source().rotational_body_connections());
+        let mut force = vec![0.0; original.system().mode_count()];
+        let released = FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };
+        let mut peak_pressure = 0.0_f64;
+        let mut changed_pressure = 0.0_f64;
+        let mut previous_energy = [0.0_f64; 2];
+        for sample in 0..512 {
+            // Directly excite ONLY one twist coordinate with a finite held
+            // force, then release it. No bow can relay torque to the body here.
+            force[4] = if sample < 32 { 0.02 } else { 0.0 };
+            let baseline = *unconnected.step(&force, released).unwrap();
+            let a = *original.step(&force, released).unwrap();
+            let b = *changed.step(&force, released).unwrap();
+            assert_eq!(baseline.observer_pressure_pa, 0.0);
+            for (i, frame) in [a, b].iter().enumerate() {
+                assert_eq!(frame.regime, ModalFrictionRegime::Released);
+                assert_eq!(frame.drive_work_j, 0.0);
+                assert_eq!(frame.friction_dissipation_j, 0.0);
+                assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+                assert!(frame.network_dissipation_j >= 0.0);
+                if sample >= 32 {
+                    assert_eq!(frame.external_work_j, 0.0);
+                    assert!(frame.network_energy_j <= previous_energy[i] + frame.energy_tolerance_j);
+                }
+                previous_energy[i] = frame.network_energy_j;
+            }
+            if sample >= 32 {
+                peak_pressure = peak_pressure.max(a.observer_pressure_pa.abs());
+                changed_pressure = changed_pressure.max((a.observer_pressure_pa - b.observer_pressure_pa).abs());
+            }
+        }
+        assert!(peak_pressure > 1e-12, "released torque never reached physical body pressure: {peak_pressure:e}");
+        assert!(changed_pressure > 1e-12, "shear swap never reached the released body: {changed_pressure:e}");
+        assert!(original.system().components()[1].states().iter().any(|s| s.displacement_m_sqrt_kg != 0.0));
+        assert!(unconnected.system().components()[1].states().iter().all(|s| s.displacement_m_sqrt_kg == 0.0));
+    });
+}
+
+#[test]
+fn g2_reciprocal_torque_matches_independent_two_oscillator_solution() {
+    with_cx(|cx, gate| {
+        let o = options();
+        let receiver = |omega| ModalAcousticTimeModel::try_new(o.sample_rate_hz, vec![ModalAcousticMode {
+            angular_frequency_rad_s: omega, damping_ratio: 0.0,
+            pressure_per_modal_velocity: fs_math::c64::C64::ZERO,
+        }], ModalAcousticTimeBudget::audible_reference()).unwrap();
+        let src = source(80e9, 0.0).with_torsion("G", "eta_s", 1).unwrap();
+        let mut bank = ReciprocalStringBank::new(cx, vec![MaterialStringMember {
+            source: src, connections: vec![InteriorStringConnection {
+                station_fraction: 0.8, body: ModalAttachment { component: 0, shapes: vec![2.0] },
+                stiffness_n_m: 3000.0, damping_n_s_m: 0.0, rest_extension_m: 0.0,
+            }],
+        }], gas(), vec![receiver(450.0), receiver(300.0)], law(), o, gate).unwrap();
+        let mut link = rotational_link(ModalRotationAttachment { component: 1, angular_shapes: vec![100.0] });
+        link.damping_n_m_s_per_rad = 0.0;
+        bank = bank.with_rotational_body_connections(vec![link.clone()], gate).unwrap();
+        let MaterialStringSource::WithTorsion(twist) = &bank.source().strings()[0].source else { panic!("missing source") };
+        let angular = (core::f64::consts::PI * link.station_fraction).sin()
+            / (twist.section().rotary_inertia_kg_m() * bank.cards()[0].length_m * 0.5).sqrt();
+        let w = bank.system().components()[0].modes()[4].angular_frequency_rad_s;
+        // Independent physical angular spring: K += k*[phi_s,-phi_b]^T*[phi_s,-phi_b].
+        // Its only driven subspace is the one twist and one receiving body mode.
+        let aa = w * w + link.stiffness_n_m_per_rad * angular * angular;
+        let dd = 300.0_f64.powi(2) + link.stiffness_n_m_per_rad * 100.0_f64.powi(2);
+        let off = -link.stiffness_n_m_per_rad * angular * 100.0;
+        let centre = 0.5 * (aa + dd);
+        let spread = (0.5 * (aa - dd)).hypot(off);
+        let hi = centre + spread;
+        let lo = (aa * dd - off * off) / hi;
+        let mut force = vec![0.0; bank.system().mode_count()];
+        force[4] = 1.0;
+        let released = FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };
+        for sample in 1..=128 {
+            let frame = *bank.step(&force, released).unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            let time = f64::from(sample) / 48_000.0;
+            let g = |lambda: f64| (1.0 - (lambda.sqrt() * time).cos()) / lambda;
+            let h = |lambda: f64| (lambda.sqrt() * time).sin() / lambda.sqrt();
+            let apply = |f: &dyn Fn(f64) -> f64| {
+                let gradient = (f(hi) - f(lo)) / (hi - lo);
+                [f(lo) + gradient * (aa - lo), gradient * off]
+            };
+            let q = apply(&g);
+            let v = apply(&h);
+            let actual = [bank.system().components()[0].states()[4], bank.system().components()[2].states()[0]];
+            for i in 0..2 {
+                assert!((actual[i].displacement_m_sqrt_kg - q[i]).abs() <= 1e-16 + 1e-7 * q[i].abs(),
+                    "sample {sample}, coordinate {i}: q={:?}, expected={q:?}", actual);
+                assert!((actual[i].velocity_m_sqrt_kg_per_s - v[i]).abs() <= 1e-12 + 1e-7 * v[i].abs());
+            }
+            assert!(bank.system().components()[0].states()[..4].iter().all(|s| s.displacement_m_sqrt_kg == 0.0));
+            assert_eq!(bank.system().components()[1].states()[0].displacement_m_sqrt_kg, 0.0);
+        }
+    });
+}
+
+#[test]
+fn g0_rotational_bridge_rejects_missing_sources_bad_units_dimensions_and_live_rebinding() {
+    with_cx(|cx, gate| {
+        let make = || raw(cx, gate, source(80e9, 1000.0).with_torsion("G", "eta_s", 1).unwrap(), options()).unwrap();
+        let good = rotational_link(ModalRotationAttachment { component: 0, angular_shapes: vec![20.0] });
+        for case in 0..11 {
+            let mut bad = good.clone();
+            match case {
+                0 => bad.string = 1,
+                1 => bad.station_fraction = 0.0,
+                2 => bad.station_fraction = 1.0,
+                3 => bad.body.component = 1,
+                4 => bad.body.angular_shapes = vec![],
+                5 => bad.body.angular_shapes[0] = 0.0,
+                6 => bad.body.angular_shapes[0] = f64::NAN,
+                7 => bad.stiffness_n_m_per_rad = -1.0,
+                8 => bad.damping_n_m_s_per_rad = f64::INFINITY,
+                9 => bad.rest_angle_rad = f64::NAN,
+                _ => { bad.stiffness_n_m_per_rad = 0.0; bad.damping_n_m_s_per_rad = 0.0; }
+            }
+            assert!(make().with_rotational_body_connections(vec![bad], gate).is_err(), "case {case}");
+        }
+        assert!(raw(cx, gate, source(80e9, 1000.0), options()).unwrap()
+            .with_rotational_body_connections(vec![good.clone()], gate).is_err());
+        let mut small = options();
+        small.network.max_connections = 1;
+        assert!(raw(cx, gate, source(80e9, 1000.0).with_torsion("G", "eta_s", 1).unwrap(), small).unwrap()
+            .with_rotational_body_connections(vec![good.clone()], gate).is_err());
+        assert!(make().with_rotational_body_connections(vec![good.clone()], gate).unwrap()
+            .with_rotational_body_connections(vec![good.clone()], gate).is_err());
+        let mut playing = make();
+        playing.step(&vec![0.0; playing.system().mode_count()], drive()).unwrap();
+        assert!(playing.with_rotational_body_connections(vec![good.clone()], gate).is_err());
+        let pending = make();
+        gate.request();
+        assert!(pending.with_rotational_body_connections(vec![good], gate).is_err());
+    });
+}
+
+fn spatial_rotation_bank(cx: &Cx<'_>, gate: &CancelGate, body_density: f64) -> ReciprocalStringBank {
+    let mesh = PlateMesh::rectangle(0.4, 0.3, 5, 4);
+    let region = PlateRegionMaterial {
+        region: PlateRegion { name: "body".into(), triangle_indices: (0..mesh.tris.len()).collect() },
+        material: material(body_density, 80e9, 1000.0, 200_000.0),
+        model: PlateMaterialModel::Isotropic,
+        thickness_constraint: PlateThicknessConstraint::FixedThickness(0.001), material_angle_rad: 0.0,
+    };
+    let point = |at: usize| { let mut row = vec![0.0; mesh.nodes.len()]; row[at] = 1.0; row };
+    let weights = vec![point(14), point(15)];
+    let body = SharedMaterialPlateChartBody {
+        specimen: compile_plate_material_chart(mesh, PlateMesh::rectangle_boundary(5, 4), vec![region]).unwrap(),
+        reduction: PlateChartRadiation {
+            assembly: AssemblyOptions { pretension: 0.0, support: EdgeSupport::SimplySupported },
+            eigenvalue_window: (1.0, 1e8), n_modes: 4, damping_ratio: 0.0,
+            unit_force_weights: weights[0].clone(),
+        },
+        bridges: vec![SharedPlateBridge { station_fraction: 0.8, stiffness_n_m: 3000.0,
+            damping_n_s_m: 0.1, rest_extension_m: 0.0 }; 2],
+        max_plate_dofs: 90, max_plate_elements: 40,
+        modal_budget: ModalAcousticTimeBudget::audible_reference(), listener_m: 1.0,
+    };
+    ReciprocalStringBank::from_material_plate_chart_with_force_ports(cx,
+        vec![source(80e9, 1000.0).with_torsion("G", "eta_s", 1).unwrap(); 2],
+        gas(), body, PlateBridgeFootprints { weights, max_projection_terms: 100_000 }, None,
+        law(), options(), gate).unwrap()
+}
+
+#[test]
+fn g3_material_body_swap_rebuilds_rotation_from_original_spatial_footprints_in_joint_bowing() {
+    with_cx(|cx, gate| {
+        let mut rows = Vec::new();
+        let mut signals = Vec::new();
+        for density in [7800.0, 15_600.0] {
+            let bank = spatial_rotation_bank(cx, gate, density);
+            let rotation = bank.source().rotation_between_bridges(
+                StringBridgeLocation { string: 0, connection: 0 },
+                StringBridgeLocation { string: 1, connection: 0 }, 0.08,
+            ).unwrap();
+            let bridge = |string: usize| &bank.source().strings()[string].connections[0].body.shapes;
+            let expected: Vec<_> = bridge(0).iter().zip(bridge(1)).map(|(p, n)| (p - n) / 0.08).collect();
+            assert_eq!(rotation.angular_shapes, expected);
+            rows.push(rotation.angular_shapes.clone());
+            let old_weights = bank.system().acceleration_pressure_weights().unwrap().to_vec();
+            let old_body = bank.system().components()[2].modes().to_vec();
+            let link = rotational_link(rotation);
+            let mut bank = bank.with_rotational_body_connections(vec![link.clone()], gate).unwrap()
+                .with_additional_bows(vec![MaterialBowContact {
+                    location: StringBowLocation { string: 1, station_fraction: 0.31 },
+                    law: law(), friction: options().friction,
+                }], MultiFrictionConfig { max_ports: 4, max_sweeps: 128, max_setup_terms: 16_384 }, gate).unwrap();
+            assert_eq!(bank.source().bank().rotational_body_connections(), &[link]);
+            assert!(bank.source().bank().material_chart_bridges().is_some());
+            assert_eq!(bank.system().acceleration_pressure_weights().unwrap(), old_weights);
+            assert_eq!(bank.system().components()[2].modes(), old_body);
+            let zero = vec![0.0; bank.system().mode_count()];
+            let mut signal = Vec::new();
+            for sample in 0..128 {
+                let drives = [
+                    FrictionDrive { speed_m_s: 0.01, normal_force_n: if sample < 32 { 0.001 } else { 0.0 } },
+                    FrictionDrive { speed_m_s: -0.01, normal_force_n: if sample < 32 { 0.001 } else { 0.0 } },
+                ];
+                let frame = bank.step(&zero, &drives).unwrap();
+                assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+                signal.push(frame.observer_pressure_pa);
+            }
+            signals.push(signal);
+        }
+        assert!(rows[0].iter().any(|x| x.abs() > 1e-6));
+        for (a, b) in rows[0].iter().zip(&rows[1]) {
+            // Doubling only body density changes mass normalization by sqrt(2).
+            // Mode sign remains arbitrary; the physical row scales in magnitude.
+            assert!((a.abs() / 2.0_f64.sqrt() - b.abs()).abs() < 1e-8 * a.abs().max(1.0));
+        }
+        assert!(signals[0][32..].iter().any(|x| x.abs() > 1e-12));
+        assert!(signals[0][32..].iter().zip(&signals[1][32..]).any(|(a, b)| (a - b).abs() > 1e-12));
+    });
+}
+
+#[test]
+fn g0_rotation_geometry_refusals_and_stress_free_angle_have_physical_units() {
+    let positive = ModalAttachment { component: 0, shapes: vec![2.0, -1.0] };
+    let negative = ModalAttachment { component: 0, shapes: vec![-1.0, 1.0] };
+    let rotation = ModalRotationAttachment::from_displacement_footprints(&positive, &negative, 0.2).unwrap();
+    assert_eq!(rotation.angular_shapes, vec![15.0, -10.0]);
+    for separation in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+        assert!(ModalRotationAttachment::from_displacement_footprints(&positive, &negative, separation).is_err());
+    }
+    assert!(ModalRotationAttachment::from_displacement_footprints(&positive, &positive, 0.2).is_err());
+    let mut other = negative.clone(); other.component = 1;
+    assert!(ModalRotationAttachment::from_displacement_footprints(&positive, &other, 0.2).is_err());
+    other = negative.clone(); other.shapes.pop();
+    assert!(ModalRotationAttachment::from_displacement_footprints(&positive, &other, 0.2).is_err());
+    with_cx(|cx, gate| {
+        let mut link = rotational_link(ModalRotationAttachment { component: 0, angular_shapes: vec![20.0] });
+        link.rest_angle_rad = 0.01;
+        let mut bank = raw(cx, gate, source(80e9, 1000.0).with_torsion("G", "eta_s", 1).unwrap(), options()).unwrap()
+            .with_rotational_body_connections(vec![link.clone()], gate).unwrap();
+        let initial = bank.system().total_energy_j().unwrap();
+        let expected = 0.5 * link.stiffness_n_m_per_rad * link.rest_angle_rad.powi(2);
+        assert!((initial / expected - 1.0).abs() < 1e-14);
+        let zero = vec![0.0; bank.system().mode_count()];
+        let released = FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };
+        let mut loss = 0.0;
+        for _ in 0..128 {
+            let frame = bank.step(&zero, released).unwrap();
+            loss += frame.network_dissipation_j;
+            assert_eq!(frame.external_work_j, 0.0);
+            assert_eq!(frame.drive_work_j, 0.0);
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
+        assert!(loss > 0.0);
+        assert!((bank.system().total_energy_j().unwrap() + loss - initial).abs() < 1e-13);
     });
 }

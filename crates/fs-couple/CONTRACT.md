@@ -687,6 +687,32 @@ The runtime owns visible per-filter state, superposes in fixed input order, and 
 whole samples transactionally. EstimateOnly covers the fixed reference before `1/r`;
 moving-source, FW-H, near-field, feedback, room, head, and passivity remain unclaimed.
 
+### Material string bank rotational bridges
+
+`bowed_string::runtime::reciprocal::bank` admits explicit small-angle
+`StringBodyRotationConnection` laws between a sourced torsional string mode
+and a body rotation. The same polar inertia and GJ/shear-viscosity sources that
+drive bow surface motion supply the string angle map. A body rotation can come
+from two retained bridge footprints in the original material plate basis and
+their physical separation; this is a secant rotation, exact for rigid rocking,
+with a spatial approximation for a deforming plate. It is not an independently
+tuned body mode. Raw angular modal maps retain their producer's authority.
+
+The existing coupled-modal owner receives the exact work-conjugate conversion
+`x = r theta`, `k_x = k_theta/r²`, `c_x = c_theta/r²`, using the sourced outer
+string radius. Reciprocal torque, rotational spring storage and dashpot loss
+therefore enter the same solve as bending, all other strings and the shared
+body/cavity. Its force limit bounds `|torque|/r`. Body acceleration supplies the
+existing pressure observer after bow release; twist receives no direct audio
+gain. The new binding must precede playback and string motion. Original source,
+body, gas, pressure and interface bindings survive multiple-bow scheduling.
+G2 checks an independent two-oscillator angular-spring solution; G3 exercises
+torque-only release, shear and body-density substitutions, original spatial
+footprints and joint bowing; G0 covers rotational preload energy and refusals.
+This does not establish nonlinear bridge contact, moving endpoints, local
+plate-slope convergence, large-angle torsion, exterior radiation loading, or
+measured violin/cello/bass fidelity.
+
 ### `string_specimen`
 
 `acoustic_realize::LinearMaterialStringRuntime` incrementally advances an explicitly
