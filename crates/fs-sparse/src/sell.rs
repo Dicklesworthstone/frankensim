@@ -245,6 +245,38 @@ impl Sell {
         crate::fma::sell_spmv_dispatch(self, x, y);
     }
 
+    /// Y = A·X for row-major X (ncols × nrhs) and Y (nrows × nrhs).
+    /// Reads the true row lengths directly from SELL storage, never padding;
+    /// sorted rows are scattered back to their original positions. Each
+    /// right-hand side follows CSR's ascending-column FMA accumulation.
+    pub fn spmm_blocked(&self, x: &[f64], nrhs: usize, y: &mut [f64]) {
+        let x_len = self.ncols.checked_mul(nrhs).expect("spmm: X size overflow");
+        let y_len = self.nrows.checked_mul(nrhs).expect("spmm: Y size overflow");
+        assert_eq!(x.len(), x_len, "spmm: X is ncols x nrhs");
+        assert_eq!(y.len(), y_len, "spmm: Y is nrows x nrhs");
+        const NB: usize = 8;
+        let mut acc = [0.0f64; NB];
+        for j0 in (0..nrhs).step_by(NB) {
+            let width = NB.min(nrhs - j0);
+            for (pos, &orig) in self.perm.iter().enumerate() {
+                let (ch, lane) = (pos / self.c, pos % self.c);
+                acc[..width].fill(0.0);
+                for k in 0..self.row_len[pos] {
+                    let slot = self.chunk_ptr[ch] + k * self.c + lane;
+                    let x_offset = self.col_idx[slot] * nrhs + j0;
+                    for (a, &v) in acc[..width]
+                        .iter_mut()
+                        .zip(&x[x_offset..x_offset + width])
+                    {
+                        *a = self.vals[slot].mul_add(v, *a);
+                    }
+                }
+                let dst = orig * nrhs + j0;
+                y[dst..dst + width].copy_from_slice(&acc[..width]);
+            }
+        }
+    }
+
     /// The spmv loop body — recompiled by the x86 FMA-codegen capsule
     /// (bead nabk); MUST stay `inline(always)`.
     #[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
@@ -450,6 +482,34 @@ mod tests {
         println!(
             "{{\"suite\":\"fs-sparse\",\"case\":\"sell-bitwise\",\"verdict\":\"pass\",\"detail\":\"SELL spmv == CSR spmv bitwise, 3 configs incl ragged+skewed\"}}"
         );
+    }
+
+    #[test]
+    fn spmm_matches_csr_bitwise_with_sorting_and_padding() {
+        for (n, c, sigma, nrhs) in [
+            (81usize, 4usize, 16usize, 1usize),
+            (64, 8, 64, 7),
+            (33, 16, 16, 13),
+            (7, 4, 32, 0),
+        ] {
+            let mut coo = random_coo(n, n, 4, 0x5E11 + n as u64);
+            for col in 0..n {
+                coo.push(n / 2, col, 0.25);
+            }
+            let a = coo.assemble();
+            let s = Sell::from_csr(&a, c, sigma).expect("valid SELL geometry");
+            let x: Vec<f64> = (0..n * nrhs)
+                .map(|k| (k as f64 * 0.013).cos())
+                .collect();
+            let (mut expected, mut actual) =
+                (vec![0.0; n * nrhs], vec![0.0; n * nrhs]);
+            a.spmm_blocked(&x, nrhs, &mut expected);
+            s.spmm_blocked(&x, nrhs, &mut actual);
+            assert!(
+                actual.iter().zip(&expected).all(|(x, y)| x.to_bits() == y.to_bits()),
+                "SELL C={c} sigma={sigma} nrhs={nrhs} must agree bitwise with CSR"
+            );
+        }
     }
 
     #[test]
