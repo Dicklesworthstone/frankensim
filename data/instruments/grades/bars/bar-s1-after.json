@@ -1,0 +1,212 @@
+{
+ "schema": "frankensim-bar-s1-grade-v1",
+ "bead": "frankensim-irp-v5-instrument-realism-pexfp.266",
+ "clause": "(e) grader JSON vs the Iowa xylophone, before (Appendix A xylophone strike 1) and after",
+ "grader": {
+  "version": "instrgrade-2",
+  "library": "library-v5.json (the W1 audit library)",
+  "library_sha256": "27f681a4e5f0e946bb5a6b3eb46f2966b5d4ea5a2af19184d7a7a4d8cd5a2bb6",
+  "tool_sha256": {
+   "instrgrade.py": "113536ffe27e00f40e9ae171499e70dfc52a84179e9916a0b197695c422ce59a",
+   "descriptors.py": "832646067b2ee97472d4808ee19e05fc090f2c33fbb23d4836d28ebf9a3e17e5",
+   "psycho.py": "add627a892357e777bac512ca36df436efb2903f14e859bbe22920878b34f684",
+   "grade_run.py": "efe0614ae578439977363662a41a901c35c8c8fccd4d3bfb94ab3d3f0decb4e2",
+   "radiate.py": "1f466c1c0ffd04683e87455f61a7b3adf1ff6ab285f91ed9aa36b727ac966ed1",
+   "summarize.py": "cbe2aa3005f4ec4c23d71af168ca476ecdfde43c5178d793c03c3985383e0140",
+   "buildlib.py": "dd2126e0b95795dd20ebb726779e6b39fe8a18fdd6d469df66d4efc16ff4034e",
+   "uiowa-links.json": "46b50e792be079a2b118a3adeb632ef719d2b785f3750a6b71ea2ed14960e74d"
+  },
+  "tool_git_sha": "d10250830",
+  "host": "thinkstation1",
+  "command": "LIBFILE=library-v5.json uv run --with numpy --with matplotlib python3 -I apps/instrument-lab/tools/instrgrade/grade_run.py /home/ubuntu/irp-verify/grade-scratch cands.json out",
+  "reference": "xylophone.rosewood.mf.C5B5.wav@Db5.mf (UIowa MIS xylophone, rosewood mallets)",
+  "excerpt_s": [
+   0.0,
+   1.0
+  ]
+ },
+ "render": {
+  "bar_id": "B-undercut",
+  "rung_h_m": 0.002251343107633446,
+  "n_tets": 147456,
+  "f_modes_hz": [
+   447.4882194844086,
+   1366.8232081823844,
+   2611.4855890194162,
+   940.427997336234,
+   1058.3487957683171
+  ],
+  "observed_order": [
+   1.4074624073072899,
+   1.7599735592769519
+  ],
+  "panel_count": 2432,
+  "p_receiver_pa": [
+   [
+    -0.18308705335709208,
+    0.4378095605759613
+   ],
+   [
+    -0.3536423240503072,
+    0.7748141502716316
+   ],
+   [
+    3.9962704773283475,
+    6.599436062850366
+   ],
+   [
+    -0.03128492171445629,
+    0.03641254935555788
+   ],
+   [
+    0.2010593341810371,
+    -0.03680543767442736
+   ]
+  ],
+  "contact_time_s": 0.0031471354166666666,
+  "wav_blake3": "e705028a45e26083e77c9e6b75dfe68cabf93e96bcbb3921781f295d6382c147",
+  "sample_rate_hz": 48000,
+  "full_scale_pa": 0.1,
+  "clipped_samples": 0,
+  "rigid_contact_coordinates": 6,
+  "direct_rigid_acceleration_radiation": "not modelled",
+  "grader_json_path": "data/instruments/grades/bars/bar-s1-after.json",
+  "before_db": 28.4,
+  "after_db": null,
+  "targeted_ratio": 3,
+  "targeted_et_note": "Db5",
+  "cut_depth_fraction": 0.25374937057495106,
+  "uniform_geometry_scale": 0.9479339400561878,
+  "same_specimen": false,
+  "numerical_one_cent_band": false,
+  "band_refusal_route": "TET10:M1.3-W1a",
+  "wood_loss": "unknown:M8-W2c",
+  "decay_prediction": "unknown",
+  "radiation_feedback": false,
+  "supports": false,
+  "resonator": false,
+  "mallet": "ideal elastic silicone sphere; no shaft; unknown rate loss",
+  "material_scenario": "Indian rosewood E_L with bounded correlated hardwood transverse-ratio scenarios",
+  "receiver_m": [
+   0.114,
+   0.2,
+   1.0
+  ],
+  "observer": "narrow-band modal transfer at five retained elastic poles",
+  "acceptance": false,
+  "test_commit": "1320e1784",
+  "verified_tree": "d10250830 + the 1320e1784 test file (ts1 bisect b125)"
+ },
+ "rows": [
+  {
+   "id": "xylophone-before",
+   "label": "xylophone-strike.wav strike 1 (prismatic rosewood bar, 544 Hz; Appendix A)",
+   "target": "xylophone.rosewood.mf.C5B5.wav@Db5.mf",
+   "wav_sha256": "db9ba9881c569f9ae49821947dceda35999ec0b1ae38d8e6ac14521dec3386ba",
+   "f0_hz": 539.8293899916738,
+   "cents_vs_et": -45.99999999999987,
+   "spec_db": 30.617624524719123,
+   "distance": {
+    "env_db": 21.649929925252433,
+    "harm_db": null,
+    "spec_db": 30.617624524719123,
+    "hnr_gap": -56.4456208479491,
+    "centroid_ratio": 2.3123465215458046,
+    "hi_share_gap": -22.058484698686442,
+    "attack_erb_distance_db": 26.64762110599185,
+    "sustain_erb_distance_db": 24.21374874389591,
+    "release_erb_distance_db": 22.43707254112219,
+    "partial_onset_order_tau": -0.1414241184540981
+   },
+   "rulers": {
+    "other_dynamic": [
+     10.817504901872349,
+     18.300612378513062
+    ],
+    "neighbour": [
+     10.818461662803266,
+     11.633203567216281,
+     13.549580996956058
+    ],
+    "other_instruments": {}
+   },
+   "nearest": [
+    [
+     "xylophone",
+     21.194817123939938,
+     "xylophone.rosewood.ff.C5B5.wav@C5"
+    ]
+   ],
+   "peak_ratios": [
+    1.0,
+    1.0312283136710618,
+    1.0624566273421234,
+    2.8428174878556556,
+    5.573213046495489
+   ],
+   "decay_db_s": -36.34723537602442,
+   "hnr_db": -4.496029603420561,
+   "centroid_rel": 2.325765009438232,
+   "attack_ms": 1.9166666666666665
+  },
+  {
+   "id": "bar-s1-after",
+   "label": "Bar-S1 B-undercut lossless strike (147456 P1 tets, 2432 BM panels, 16 substeps)",
+   "target": "xylophone.rosewood.mf.C5B5.wav@Db5.mf",
+   "wav_sha256": "6af3a84ce3bc7f9e8911b1148d03c0207af056b8c2f6dddb628d68eeaff94480",
+   "f0_hz": 456.3066008645376,
+   "cents_vs_et": -37.00000000000006,
+   "spec_db": 38.97561701701243,
+   "distance": {
+    "env_db": 27.559923093659286,
+    "harm_db": null,
+    "spec_db": 38.97561701701243,
+    "hnr_gap": -44.019031555362716,
+    "centroid_ratio": 2.5621695595163465,
+    "hi_share_gap": 31.375190186926815,
+    "attack_erb_distance_db": 25.697364962095662,
+    "sustain_erb_distance_db": 30.907913943188944,
+    "release_erb_distance_db": 41.108264189194415,
+    "partial_onset_order_tau": 0.0
+   },
+   "rulers": {
+    "other_dynamic": [
+     10.817504901872349,
+     18.300612378513062
+    ],
+    "neighbour": [
+     10.818461662803266,
+     11.633203567216281,
+     13.549580996956058
+    ],
+    "other_instruments": {}
+   },
+   "nearest": [
+    [
+     "xylophone",
+     27.804363690585696,
+     "xylophone.rosewood.pp.C5B5.wav@C5"
+    ]
+   ],
+   "peak_ratios": [
+    1.0,
+    1.0312236286919831,
+    1.0624472573839663,
+    3.149789029535865,
+    6.017721518987342
+   ],
+   "decay_db_s": 0.03529211687571437,
+   "hnr_db": 7.930559689165822,
+   "centroid_rel": 2.5770377641268447,
+   "attack_ms": 0.0
+  }
+ ],
+ "appendix_a_before_db": 28.4,
+ "findings": [
+  "after grades WORSE than before against Db5 (see rows).",
+  "The before value reproduces at the instrgrade-2 / library-v5 value, not the Appendix A audit-grader 28.4.",
+  "Pitch: the B-undercut bar sounds at its P1 rung-3 first mode 447.5 Hz (grader f0 456.3 Hz), about 330-370 cents below its Db5 design target. The undercut depth and scale were solved on the coarse [48,4,2] P1 design grid, where shear locking inflates frequency; on the converged mesh the bar relaxes toward A4. Re-solving the design on the locking-free TET10 owner is the route.",
+  "Envelope: the render is lossless by declaration (wood and head loss UNKNOWN, M8-W2c), so it never decays; the reference decays.",
+  "Not an acceptance render: acceptance=false in the render metadata."
+ ]
+}
