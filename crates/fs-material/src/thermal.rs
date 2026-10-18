@@ -6,6 +6,8 @@
 
 /// Shared material/phase conditions for conduction, electricity and radiation.
 pub mod source;
+/// Ordered two-surface thermal conditions shared by interface physics.
+pub mod interface;
 
 use crate::phase::EquilibriumEnthalpyPhaseCurve;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
