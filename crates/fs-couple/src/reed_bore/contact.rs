@@ -3,8 +3,8 @@
 //! Opening, velocity, pressure and contact work share one midpoint state.
 //! The contact potential remains fs-dcontact-owned. Incoming characteristic
 //! pressure and external body flow are held inputs, not an implicit whole-bore
-//! or plate solve. Dynamic jets use a continuous, algebraically solved
-//! Bernoulli junction. Second-order accuracy is limited to smooth branches.
+//! or plate solve. The selected continuous slit law enters every candidate
+//! characteristic junction. Second-order accuracy is limited to smooth branches.
 
 use super::{
     AcousticRealizeError, BeatingReed, FastSolveStats, Obstacle, ReedSolverMode,
@@ -29,6 +29,22 @@ pub(crate) enum OpeningPropagator<'a> {
         /// Accepted energy-normalized arm memories at the start of the step.
         memory: &'a [f64],
     },
+}
+
+impl OpeningPropagator<'_> {
+    // A selected constitutive junction shares the existing mechanics/contact
+    // solve. Keep the original free function for inviscid callers.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_with_junction(
+        self, reed: BeatingReed, rho: f64, zc: f64, p_minus: f64, p_m: f64,
+        y: f64, v: f64, dt: f64, u_body: f64, lay: &Obstacle,
+        flow_opening: impl Fn(f64) -> Result<f64, AcousticRealizeError>,
+        material_force: Option<&dyn Fn(f64) -> Result<f64, AcousticRealizeError>>,
+        junction_pressure: impl Fn(f64, f64) -> Result<f64, AcousticRealizeError>,
+    ) -> Result<(f64, f64, f64), AcousticRealizeError> {
+        step_with_opening_and_junction(reed, rho, zc, p_minus, p_m, y, v, dt, u_body,
+            lay, flow_opening, material_force, self, junction_pressure)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -103,6 +119,23 @@ pub(crate) fn step_with_opening(
     flow_opening: impl Fn(f64) -> Result<f64, AcousticRealizeError>,
     material_force: Option<&dyn Fn(f64) -> Result<f64, AcousticRealizeError>>,
     propagator: OpeningPropagator<'_>,
+) -> Result<(f64, f64, f64), AcousticRealizeError> {
+    step_with_opening_and_junction(reed, rho, zc, p_minus, p_m, y, v, dt, u_body,
+        lay, flow_opening, material_force, propagator,
+        |opening, moving| solve_moving_aperture_wave(reed.width_m, opening, rho,
+            zc, p_minus, p_m, moving))
+}
+
+// The constitutive junction is evaluated at each trial gap and swept flow,
+// not applied as an after-the-fact pressure or energy correction.
+#[allow(clippy::too_many_arguments)]
+fn step_with_opening_and_junction(
+    reed: BeatingReed, rho: f64, zc: f64, p_minus: f64, p_m: f64,
+    y: f64, v: f64, dt: f64, u_body: f64, lay: &Obstacle,
+    flow_opening: impl Fn(f64) -> Result<f64, AcousticRealizeError>,
+    material_force: Option<&dyn Fn(f64) -> Result<f64, AcousticRealizeError>>,
+    propagator: OpeningPropagator<'_>,
+    junction_pressure: impl Fn(f64, f64) -> Result<f64, AcousticRealizeError>,
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
     if material_force.is_some() && matches!(propagator, OpeningPropagator::Exact { .. }) {
         // The exact block already carries its Maxwell arms; a midpoint material
@@ -192,15 +225,7 @@ pub(crate) fn step_with_opening(
         // Clamp the MIDPOINT opening, not each endpoint separately. This is
         // the same configuration used by the midpoint spring and velocity.
         let opening = flow_opening(f64::midpoint(y, next_y))?;
-        let outgoing = solve_moving_aperture_wave(
-            reed.width_m,
-            opening,
-            rho,
-            zc,
-            p_minus,
-            p_m,
-            u_body + reed_swept_flow(face, velocity),
-        )?;
+        let outgoing = junction_pressure(opening, u_body + reed_swept_flow(face, velocity))?;
         let pressure_impulse = half_dt * face * (p_m - (outgoing + p_minus));
         let contact_impulse = half_dt * force;
         let inertial = mass_mid * velocity;

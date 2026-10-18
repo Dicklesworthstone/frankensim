@@ -19,6 +19,7 @@ pub mod force;
 use relaxation::{ApertureRelaxation, MemoryTrial};
 
 use super::{BernoulliAperture, plate::{PlateApertureReduction, closure::{PlateClosure, PlateClosureSpec}}};
+use super::viscous::ViscousSlit;
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::reed_bore::{FastSolveStats, ReedSolverMode, reed_pressure_face, reed_structural};
 use crate::unilateral_contact::distributed::ApertureContactStep;
@@ -87,7 +88,7 @@ pub struct ApertureFrame {
     pub outgoing_pressure_pa: f64,
     /// Sum of incoming and outgoing characteristic pressure [Pa].
     pub bore_pressure_pa: f64,
-    /// Signed Bernoulli jet flow [m^3/s].
+    /// Signed slit flow [m^3/s], including explicitly selected viscous resistance.
     pub jet_flow_m3_s: f64,
     /// Signed flow due to moving pressure face, -A v_mid [m^3/s].
     pub swept_flow_m3_s: f64,
@@ -99,7 +100,8 @@ pub struct ApertureFrame {
     pub stored_energy_j: f64,
     /// Change in stored energy over this step [J].
     pub storage_change_j: f64,
-    /// Jet, structural and nonadhesive contact dissipation over this step [J].
+    /// Slit (separation plus any selected wall resistance), structural and
+    /// nonadhesive contact dissipation over this step [J].
     pub dissipated_energy_j: f64,
     /// Differential-pressure work on this junction [J]. This excludes any
     /// storage/loss in a downstream bore or an externally driven plate.
@@ -151,6 +153,7 @@ pub struct DynamicAperture {
     // A physical reduction is retained, not flattened into unguarded scalars.
     plate: Option<Box<PlateApertureReduction>>,
     closure: Option<Box<PlateClosure>>,
+    viscous_slit: Option<ViscousSlit>,
     relaxation: Option<ApertureRelaxation>,
     exact: Option<super::paired::ExactBlade>,
     state: ApertureState,
@@ -266,6 +269,7 @@ impl DynamicAperture {
             contact_storage,
             plate: None,
             closure: None,
+            viscous_slit: None,
             relaxation: None,
             exact,
             state,
@@ -281,6 +285,32 @@ impl DynamicAperture {
         }
         Ok(model)
     }
+
+    /// Select uniform-slit wall resistance before the first accepted sample.
+    /// Both the implicit pressure/contact solve and the reported slit loss use
+    /// this law. Existing inviscid behavior remains the default, with no inferred
+    /// viscosity or streamwise length. Tube/network owners retain this choice.
+    ///
+    /// # Errors
+    /// An already advanced model, spatially profiled closure, or unrepresentable
+    /// initial resistance. Area-equivalent gaps cannot represent h^-3 resistance.
+    /// A refusal leaves all physical parameters and accepted state unchanged.
+    pub fn set_viscous_slit(&mut self, law: ViscousSlit) -> Result<(), AcousticRealizeError> {
+        if self.accepted_steps != 0 {
+            return Err(invalid("viscous slit law must be selected before the first accepted sample"));
+        }
+        if self.closure.is_some() {
+            return Err(invalid("uniform viscous slit resistance cannot be applied to a spatially profiled closure"));
+        }
+        law.evaluate(self.spec.aperture.width_m, self.state.opening_m.max(0.0),
+            self.spec.density_kg_m3, 0.0)?;
+        self.viscous_slit = Some(law);
+        Ok(())
+    }
+
+    /// Explicit fluid wall-loss choice; None retains the original Bernoulli law.
+    #[must_use]
+    pub const fn viscous_slit(&self) -> Option<ViscousSlit> { self.viscous_slit }
 
     /// Bind the actual plate specimen to the existing nonlinear slit junction.
     /// Geometry-derived mass, stiffness, width and pressure area cannot be
@@ -505,7 +535,22 @@ impl DynamicAperture {
         let has_memory=self.relaxation.as_ref().is_some_and(|m|!m.branches().is_empty());
         // Accepted arm memories enter the exact block as its own states.
         let arm_memory: &[f64] = self.relaxation.as_ref().map_or(&[], |m| m.memory_sqrt_j());
-        let (outgoing, opening, velocity) = if let Some(blade) = &self.exact {
+        let (outgoing, opening, velocity) = if let Some(law) = self.viscous_slit {
+            let propagator = match &self.exact {
+                Some(blade) => crate::reed_bore::OpeningPropagator::Exact {
+                    blade, external_n: force_n, memory: arm_memory,
+                },
+                None => crate::reed_bore::OpeningPropagator::Midpoint,
+            };
+            propagator.step_with_junction(self.reed, self.spec.density_kg_m3,
+                self.spec.impedance_pa_s_m3, drive.incoming_pressure_pa, drive.upstream_pressure_pa,
+                old.opening_m, old.opening_velocity_m_s, dt, drive.body_flow_m3_s, &self.lay,
+                |opening| self.flow_opening(opening),
+                if self.exact.is_none() && (has_memory || force_n != 0.0) { Some(&material_force) } else { None },
+                |opening, moving| law.characteristic_pressure(self.reed.width_m, opening,
+                    self.spec.density_kg_m3, self.spec.impedance_pa_s_m3,
+                    drive.incoming_pressure_pa, drive.upstream_pressure_pa, moving))?
+        } else if let Some(blade) = &self.exact {
             // The prescribed force is held with the contact and pressure forces.
             crate::reed_bore::step_profiled_aperture(self.reed,self.spec.density_kg_m3,
                 self.spec.impedance_pa_s_m3,drive.incoming_pressure_pa,drive.upstream_pressure_pa,
@@ -543,9 +588,13 @@ impl DynamicAperture {
         };
         let bore = outgoing + drive.incoming_pressure_pa;
         let dp = drive.upstream_pressure_pa - bore;
-        let jet = super::moving::volume_flow(
-            self.reed.width_m, midpoint_opening_m, dp, self.spec.density_kg_m3,
-        );
+        let jet = match self.viscous_slit {
+            Some(law) => law.evaluate(self.reed.width_m, midpoint_opening_m,
+                self.spec.density_kg_m3, dp)?.flow_m3_s,
+            None => super::moving::volume_flow(
+                self.reed.width_m, midpoint_opening_m, dp, self.spec.density_kg_m3,
+            ),
+        };
         let swept = -reed_pressure_face(self.reed) * vm;
         let wave = (outgoing - drive.incoming_pressure_pa) / self.spec.impedance_pa_s_m3;
         let contact = ApertureContactStep::new(&self.lay, old.opening_m)
