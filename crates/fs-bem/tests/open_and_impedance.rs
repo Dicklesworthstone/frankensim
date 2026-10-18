@@ -827,7 +827,9 @@ fn impedance_bc_passivity() {
 #[test]
 fn impedance_bc_fictitious_frequency_robust() {
     let start = Instant::now();
-    let surface = SpherePanels::icosphere(1.0, 1).unwrap();
+    // Level 2 (320 panels, ~10 per wavelength at ka = pi): level 1 sits at
+    // 4.95, under the solver's MIN_PANELS_PER_WAVELENGTH floor of 6.
+    let surface = SpherePanels::icosphere(1.0, 2).unwrap();
     let n = surface.areas().len();
     let drive = vec![C64::ONE; n];
     let gate = CancelGate::new_clock_free();
@@ -1154,7 +1156,9 @@ fn open_and_impedance_bitwise_repeat() {
     let surface = disc(3, 16);
     let medium = Medium::air();
     let v = vec![C64::ONE; surface.vertices().len()];
-    let p = PreparedScreen::new(&surface, 1.0, options(0), || false).unwrap();
+    // The damped query below has |k| = sqrt(1 + (0.01/c)^2) > 1, so the
+    // prepared band must reach past the real-frequency solves at k = 1.
+    let p = PreparedScreen::new(&surface, 1.001, options(0), || false).unwrap();
     let a = p
         .solve(
             1.0,
