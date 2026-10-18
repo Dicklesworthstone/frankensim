@@ -163,13 +163,15 @@ pub struct ElectrothermalSectionResponse {
 }
 
 impl<'a> ConcentricThermalTransport<'a> {
-    /// Bind finite, positive DC resistivity from the SAME complete layer bundles.
+    /// Bind finite, positive DC response from the SAME complete layer bundles.
     /// Reuses the conductor owner's admission, geometry and Joule-power laws.
-    /// Every layer must be an admitted Ohmic conductor; missing resistivity
-    /// does not silently become an insulating layer or a standard metal.
+    /// Each layer declares one electrical source basis: resistivity or
+    /// conductivity. Different layers may use different bases without changing
+    /// mechanics, heat transport or electrical solver code. Missing or ambiguous
+    /// source data never becomes insulation or a standard metal.
     ///
     /// # Errors
-    /// Invalid length, incomplete/incompatible resistivity data and
+    /// Invalid length, incomplete/incompatible electrical data and
     /// unrepresentable resistance/conductance refuse atomically.
     pub fn with_ohmic_transport(
         self,
@@ -445,6 +447,41 @@ mod tests {
         assert_ne!(ra.axial_heat_flow_w, rb.axial_heat_flow_w);
         assert_ne!(ra.joule_power_w, rb.joule_power_w);
         assert_eq!(ra.layers[1], rb.layers[1]);
+    }
+
+    #[test]
+    fn conductivity_data_drives_the_existing_layered_electrothermal_path() {
+        use crate::conductor::{
+            ELECTRICAL_CONDUCTIVITY_DIMS, ELECTRICAL_CONDUCTIVITY_PROPERTY,
+            ELECTRICAL_RESISTIVITY_PROPERTY, ElectricalPropertyBasis, OhmicDrive,
+        };
+        let make = |conductivity| section(
+            source(8000.0, 400.0, 20.0, &[(ELECTRICAL_CONDUCTIVITY_PROPERTY,
+                conductivity, ELECTRICAL_CONDUCTIVITY_DIMS)]),
+            electrical_source(2700.0, 900.0, 200.0, 4e-7),
+        );
+        let original = section(electrical_source(8000.0, 400.0, 20.0, 1e-7),
+            electrical_source(2700.0, 900.0, 200.0, 4e-7));
+        let equivalent = make(1e7);
+        let changed = make(2e7);
+        let lower = |s: &ConcentricElasticSection| s.thermal_transport().unwrap()
+            .with_ohmic_transport(2.0).unwrap()
+            .evaluate(OhmicDrive::Voltage(3.0), 5.0).unwrap();
+        let reference = lower(&original);
+        let same = lower(&equivalent);
+        let swapped = lower(&changed);
+        assert_eq!(reference, same);
+        near(swapped.layers[0].current_a, 2.0 * same.layers[0].current_a);
+        near(swapped.layers[0].joule_power_w, 2.0 * same.layers[0].joule_power_w);
+        assert_eq!(swapped.layers[0].heat_capacity_j_k, same.layers[0].heat_capacity_j_k);
+        assert_eq!(swapped.layers[1], same.layers[1]);
+        assert_eq!(swapped.axial_heat_flow_w, same.axial_heat_flow_w);
+        near(swapped.joule_power_w, 3.0 * swapped.current_a);
+        let transport = changed.thermal_transport().unwrap().with_ohmic_transport(2.0).unwrap();
+        assert_eq!(transport.conductors[0].source_basis(), ElectricalPropertyBasis::Conductivity);
+        assert_eq!(transport.conductors[1].source_basis(), ElectricalPropertyBasis::Resistivity);
+        assert!(transport.conductors[0].material().property(ELECTRICAL_RESISTIVITY_PROPERTY).is_none());
+        assert_eq!(transport.conductors[0].material(), &changed.layers()[0].material);
     }
 
     #[test]

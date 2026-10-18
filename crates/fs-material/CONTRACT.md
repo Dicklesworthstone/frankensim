@@ -84,6 +84,18 @@ homogenization, the P2 milestone.
   `current_a_for_drive` resolves `I` or `V/R`, refusing nonfinite inputs and
   unrepresentable nonzero currents. The same `joule_power_w` law then supplies
   nonnegative source dissipation. No dynamic circuit or source impedance is inferred.
+  `ElectricalPropertyBasis` also admits explicit scalar DC conductivity through
+  `resolve_conductor_state_with_basis` and `resolve_uniform_conductor_with_basis`.
+  The source is evaluated at the query point before taking its reciprocal;
+  reciprocal knot interpolation is not substituted. The original property,
+  uncertainty and receipts remain intact under `source_property()`; derived
+  resistivity is never inserted as a measured claim. Existing resistivity query
+  entrypoints keep their requirement unchanged. `try_from_material` can adopt a
+  complete multiphysics bundle with either one source basis; two bases require
+  an explicit independent-variable choice and are not averaged. Consequently,
+  concentric sections can mix conductivity- and resistivity-sourced layers in
+  their existing parallel-current and layer-specific Joule-heat calculation.
+  This scalar reciprocal law does not invert tensors or admit AC response.
 - `liquid::resolve_liquid_state` resolves positive density, specific heat,
   conductivity and dynamic viscosity at one caller-supplied source condition.
   It retains the complete four-property bundle and derives kinematic viscosity,

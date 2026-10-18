@@ -12,7 +12,8 @@ use fs_qty::{Dims, QuantitySpec};
 
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
-    ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
+    ResolvedScalarProperty, ScalarAdmissibility, ScalarPropertyRequirement,
+    resolve_material_state_point,
 };
 
 /// Canonical source property for bulk electrical resistivity.
@@ -20,6 +21,52 @@ pub const ELECTRICAL_RESISTIVITY_PROPERTY: &str = "electrical_resistivity";
 
 /// Electrical resistivity dimensions `[L, M, t, T, I, N]` for ohm metre.
 pub const ELECTRICAL_RESISTIVITY_DIMS: Dims = Dims([3, 1, -3, 0, -2, 0]);
+
+/// Canonical source property for isotropic DC electrical conductivity.
+pub const ELECTRICAL_CONDUCTIVITY_PROPERTY: &str = "electrical_conductivity";
+
+/// Electrical conductivity dimensions for siemens per metre.
+pub const ELECTRICAL_CONDUCTIVITY_DIMS: Dims = Dims([-3, -1, 3, 0, 2, 0]);
+
+/// Independent scalar source quantity for the same isotropic DC Ohmic law.
+///
+/// Conductivity and resistivity are reciprocals only under this stated scalar
+/// law. This does not invert anisotropic tensors, AC admittances, or infer a
+/// relation between independently measured curves at different conditions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElectricalPropertyBasis {
+    /// A measured/declared resistivity is used directly.
+    Resistivity,
+    /// Resistivity is derived as `1 / electrical_conductivity` at the query point.
+    Conductivity,
+}
+
+impl ElectricalPropertyBasis {
+    /// Exact canonical property name supplied by the retained source bundle.
+    #[must_use]
+    pub const fn property_name(self) -> &'static str {
+        match self {
+            Self::Resistivity => ELECTRICAL_RESISTIVITY_PROPERTY,
+            Self::Conductivity => ELECTRICAL_CONDUCTIVITY_PROPERTY,
+        }
+    }
+
+    /// Dimensional source requirement; no quantity semantics are inferred.
+    #[must_use]
+    pub const fn dimensions(self) -> Dims {
+        match self {
+            Self::Resistivity => ELECTRICAL_RESISTIVITY_DIMS,
+            Self::Conductivity => ELECTRICAL_CONDUCTIVITY_DIMS,
+        }
+    }
+
+    /// Requirement for inclusion in an existing multiphysics material bundle.
+    pub fn requirement(self) -> Result<ScalarPropertyRequirement, MaterialStatePointError> {
+        ScalarPropertyRequirement::try_new(
+            self.property_name(), self.dimensions(), ScalarAdmissibility::StrictlyPositive,
+        )
+    }
+}
 
 /// Ideal quasi-static electrical boundary condition for a uniform resistor.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,6 +84,7 @@ pub enum OhmicDrive {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedConductorState {
     material: ResolvedMaterialStatePoint,
+    source_basis: ElectricalPropertyBasis,
     resistivity_ohm_m: f64,
 }
 
@@ -47,32 +95,89 @@ impl ResolvedConductorState {
     /// This does not refresh or expand the source's domain of validity.
     ///
     /// # Errors
-    /// Missing/ambiguous resistivity, incompatible quantity semantics, and
-    /// nonfinite/nonpositive resistivity refuse. Extra resolved properties are
-    /// preserved rather than silently dropped.
+    /// The requested bundle must contain exactly one electrical source basis:
+    /// resistivity or conductivity. Thus changing that source requirement is a
+    /// data change for consumers of this method, including layered conductors.
+    /// A bundle containing both bases requires an explicit independent-variable
+    /// choice through [`Self::try_from_material_with_basis`]; conflicting data is
+    /// never averaged, repaired or silently used as a fallback.
+    ///
+    /// Missing/ambiguous sources, incompatible quantities, nonpositive values
+    /// and an unrepresentable reciprocal refuse. Extra properties are retained.
     pub fn try_from_material(
         material: ResolvedMaterialStatePoint,
     ) -> Result<Self, ConductorError> {
-        let property = material.property(ELECTRICAL_RESISTIVITY_PROPERTY)
+        let has = |name| material.properties().iter().any(|p| p.requirement().name() == name);
+        let basis = match (has(ELECTRICAL_RESISTIVITY_PROPERTY), has(ELECTRICAL_CONDUCTIVITY_PROPERTY)) {
+            (true, false) => ElectricalPropertyBasis::Resistivity,
+            (false, true) => ElectricalPropertyBasis::Conductivity,
+            (true, true) => return Err(ConductorError::InvalidInput {
+                quantity: "both electrical source bases are present; select the independent quantity explicitly",
+            }),
+            (false, false) => return Err(ConductorError::InvalidInput {
+                quantity: "resolved electrical_resistivity or electrical_conductivity",
+            }),
+        };
+        Self::try_from_material_with_basis(material, basis)
+    }
+
+    /// Adopt one explicitly selected independent quantity from a complete
+    /// source bundle. Other observations remain available unchanged; they are
+    /// not treated as independent inputs to, or silently reconciled with, this
+    /// scalar Ohmic law. Source uncertainty remains on the original property;
+    /// taking a reciprocal does not turn it into an independent measurement.
+    ///
+    /// # Errors
+    /// Missing/ambiguous selected properties, wrong quantities, invalid values
+    /// or an unrepresentable conductivity-to-resistivity conversion.
+    pub fn try_from_material_with_basis(
+        material: ResolvedMaterialStatePoint,
+        source_basis: ElectricalPropertyBasis,
+    ) -> Result<Self, ConductorError> {
+        let property = material.property(source_basis.property_name())
             .ok_or(ConductorError::InvalidInput {
-                quantity: "resolved electrical_resistivity",
+                quantity: source_basis.property_name(),
             })?;
-        let resistivity_ohm_m = property.value_si();
+        let value = property.value_si();
         if property.requirement().quantity()
-            != QuantitySpec::dimensional(ELECTRICAL_RESISTIVITY_DIMS)
-            || !resistivity_ohm_m.is_finite() || resistivity_ohm_m <= 0.0
+            != QuantitySpec::dimensional(source_basis.dimensions())
+            || !value.is_finite() || value <= 0.0
         {
             return Err(ConductorError::InvalidInput {
-                quantity: "finite positive dimension-only electrical_resistivity [ohm m]",
+                quantity: source_basis.property_name(),
             });
         }
-        Ok(Self { material, resistivity_ohm_m })
+        let resistivity_ohm_m = match source_basis {
+            ElectricalPropertyBasis::Resistivity => value,
+            ElectricalPropertyBasis::Conductivity => {
+                let reciprocal = 1.0 / value;
+                if !reciprocal.is_finite() || reciprocal <= 0.0 {
+                    return Err(ConductorError::InvalidDerived {
+                        quantity: "resistivity from electrical conductivity",
+                    });
+                }
+                reciprocal
+            }
+        };
+        Ok(Self { material, source_basis, resistivity_ohm_m })
     }
 
     /// Exact source-resolved material bundle, including its usage receipt.
     #[must_use]
     pub const fn material(&self) -> &ResolvedMaterialStatePoint {
         &self.material
+    }
+
+    /// Independent source quantity and its explicit algebraic interpretation.
+    #[must_use]
+    pub const fn source_basis(&self) -> ElectricalPropertyBasis { self.source_basis }
+
+    /// Original selected property, including support, uncertainty and receipt.
+    /// A derived resistivity is never inserted into the material bundle.
+    #[must_use]
+    pub fn source_property(&self) -> &ResolvedScalarProperty {
+        self.material.property(self.source_basis.property_name())
+            .expect("the immutable conductor retains its admitted source property")
     }
 
     /// Isotropic bulk resistivity [ohm m], suitable for spatial current balance.
@@ -98,6 +203,7 @@ impl ResolvedConductorState {
             uniform_resistance_ohm(self.resistivity_ohm_m, length_m, area_m2)?;
         Ok(ResolvedConductor {
             material: self.material,
+            source_basis: self.source_basis,
             length_m,
             area_m2,
             resistance_ohm,
@@ -120,19 +226,36 @@ pub fn resolve_conductor_state(
     point: &QueryPoint,
     selection: MaterialPropertySelection,
 ) -> Result<ResolvedConductorState, ConductorError> {
-    let requirement = ScalarPropertyRequirement::try_new(
-        ELECTRICAL_RESISTIVITY_PROPERTY,
-        ELECTRICAL_RESISTIVITY_DIMS,
-        ScalarAdmissibility::StrictlyPositive,
-    )?;
+    resolve_conductor_state_with_basis(card, point, selection, ElectricalPropertyBasis::Resistivity)
+}
+
+/// Resolve an explicitly chosen resistivity or conductivity source at ONE
+/// common material state. For conductivity, interpolate/evaluate the original
+/// source first, then derive its reciprocal. Interpolating reciprocal samples
+/// would be a different material law and is never done here.
+///
+/// The exact source requirements, pins and uncertainty are retained. An absent
+/// or inadmissible chosen source cannot fall back to the other representation.
+///
+/// # Errors
+/// All source/selection refusals from [`resolve_conductor_state`] and an
+/// unrepresentable reciprocal. No synthetic property claims are produced.
+pub fn resolve_conductor_state_with_basis(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+    source_basis: ElectricalPropertyBasis,
+) -> Result<ResolvedConductorState, ConductorError> {
+    let requirement = source_basis.requirement()?;
     let material = resolve_material_state_point(card, point, &[requirement], selection)?;
-    ResolvedConductorState::try_from_material(material)
+    ResolvedConductorState::try_from_material_with_basis(material, source_basis)
 }
 
 /// A uniform conductor resolved from one source-supported material state.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedConductor {
     material: ResolvedMaterialStatePoint,
+    source_basis: ElectricalPropertyBasis,
     length_m: f64,
     area_m2: f64,
     resistance_ohm: f64,
@@ -148,6 +271,17 @@ impl ResolvedConductor {
     #[must_use]
     pub const fn material(&self) -> &ResolvedMaterialStatePoint {
         &self.material
+    }
+
+    /// Independent source basis used to derive this conductor's resistance.
+    #[must_use]
+    pub const fn source_basis(&self) -> ElectricalPropertyBasis { self.source_basis }
+
+    /// The original resistivity or conductivity source, never a synthetic claim.
+    #[must_use]
+    pub fn source_property(&self) -> &ResolvedScalarProperty {
+        self.material.property(self.source_basis.property_name())
+            .expect("the immutable conductor retains its admitted source property")
     }
 
     /// Uniform DC resistance [ohm].
@@ -313,6 +447,25 @@ pub fn resolve_uniform_conductor(
     // all material resolution and lowering to the common bulk-state path.
     validate_geometry(length_m, area_m2)?;
     resolve_conductor_state(card, point, selection)?.into_uniform_conductor(length_m, area_m2)
+}
+
+/// Resolve and geometrically lower an explicitly selected electrical source.
+/// Shares exactly the same geometry, ideal-drive and Joule-power owners as
+/// [`resolve_uniform_conductor`]. Only the independent source quantity differs.
+///
+/// # Errors
+/// Invalid geometry, source/selection failures or unrepresentable derivation.
+pub fn resolve_uniform_conductor_with_basis(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+    source_basis: ElectricalPropertyBasis,
+    length_m: f64,
+    area_m2: f64,
+) -> Result<ResolvedConductor, ConductorError> {
+    validate_geometry(length_m, area_m2)?;
+    resolve_conductor_state_with_basis(card, point, selection, source_basis)?
+        .into_uniform_conductor(length_m, area_m2)
 }
 
 #[cfg(test)]
