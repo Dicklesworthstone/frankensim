@@ -1,5 +1,5 @@
 //! Fixed-window separation -> original jet/bore feedback -> exterior pressure.
-//! Usage: flue_contraction NEW_OUTPUT.wav AREA_RATIO_OR_none AMBIENT_PA FULL_SCALE_PA
+//! Usage: flue_contraction NEW_OUTPUT.wav AREA_RATIO_OR_none AMBIENT_PA FULL_SCALE_PA [WINDWAY_LENGTH_M]
 //! The jet card and coefficient are reduced-model data, not a calibrated flute.
 use fs_aeroac::jetcard::mint_tonal_interim_card;
 use fs_couple::bernoulli_aperture::contraction::ContractionSpec;
@@ -17,12 +17,15 @@ use std::io::Write;
 
 fn run()->Result<(),String> {
     let args:Vec<_>=std::env::args().skip(1).collect();
-    let [destination,ratio,ambient,scale]=args.as_slice() else {
-        return Err("usage: flue_contraction NEW_OUTPUT.wav AREA_RATIO_OR_none AMBIENT_PA FULL_SCALE_PA".into());
+    let (destination,ratio,ambient,scale,windway)=match args.as_slice() {
+        [d,r,a,s] => (d,r,a,s,None),
+        [d,r,a,s,l] => (d,r,a,s,Some(l)),
+        _ => return Err("usage: flue_contraction NEW_OUTPUT.wav AREA_RATIO_OR_none AMBIENT_PA FULL_SCALE_PA [WINDWAY_LENGTH_M]".into()),
     };
     let parse=|x:&str|x.parse::<f64>().map_err(|_|format!("invalid SI number: {x}"));
     let ratio=if ratio=="none" {None} else {Some(parse(ratio)?)};
     let ambient=parse(ambient)?;let scale=parse(scale)?;
+    let windway=windway.map(|length|parse(length)).transpose()?;
     if !scale.is_finite() || scale<=0.0 {return Err("pressure full-scale must be positive finite Pa".into());}
     let gate=CancelGate::new_clock_free();
     let mechanics=96000;let rate=48000;let samples=4800;
@@ -41,6 +44,9 @@ fn run()->Result<(),String> {
     let policy=FractionalTubePolicy {maximum_frequency_hz:2000.0,maximum_summed_phase_error_rad:0.002};
     let mut voice=FlueVoice::from_fractional_network(Some(&mint_tonal_interim_card().map_err(|e|format!("{e:?}"))?),
         90.0,1e-6,geometry,source,None,policy,mechanics,3,0,&gate).map_err(|e|e.to_string())?;
+    if let Some(length)=windway {
+        voice=voice.with_viscous_windway(length).map_err(|e|e.to_string())?;
+    }
     if let Some(area_ratio)=ratio {
         voice=voice.with_mouth_contraction(ContractionSpec {area_ratio,maximum_contracted_mach:0.2,
             provenance:"authored symmetric fixed-mouth separation experiment; not measured flute edges".into()})
@@ -68,6 +74,7 @@ fn run()->Result<(),String> {
         .map_err(|e|e.to_string())?;
     file.write_all(&wav).and_then(|()|file.flush()).map_err(|e|e.to_string())?;
     eprintln!("rho_kg_m3={:.9}; c_m_s={:.9}; area_ratio={ratio:?}; separation_j={loss:.9e}; max_mouth_balance_j={defect:.9e}; clips={clips}; full_scale_pa={scale}",gas.density,gas.sound_speed);
+    eprintln!("windway_length_m={windway:?}; gas_viscosity_pa_s={:.9e}",gas.dynamic_viscosity);
     eprintln!("retained_network_energy_j={:.9e}; source_samples={}; output_samples={samples}; no normalization",
         voice.network().expect("physical source retained").stored_energy_j(),voice.samples_rendered());
     Ok(())

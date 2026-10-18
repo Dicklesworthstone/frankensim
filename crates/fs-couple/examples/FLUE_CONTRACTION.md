@@ -43,10 +43,12 @@ Use new output filenames and the SAME full-scale pressure for comparisons:
 cargo run --release -p fs-couple --example flue_contraction -- linear.wav none 101325 1
 cargo run --release -p fs-couple --example flue_contraction -- contracted.wav 0.6 101325 1
 cargo run --release -p fs-couple --example flue_contraction -- dense-gas.wav 0.6 202650 1
+cargo run --release -p fs-couple --example flue_contraction -- finite-windway.wav 0.6 101325 1 0.015
 ```
 
 Arguments are destination, area ratio (or `none`), static ambient pressure [Pa],
-and PCM full-scale [Pa]. The example is a 0.3 m, 6 mm radius tube and a fixed
+PCM full-scale [Pa], and an optional finite windway length [m]. Omitting the
+length preserves the original ideal jet. The example is a 0.3 m, 6 mm radius tube and a fixed
 10 mm by 4 mm mouth window, with a 1 mm exciting jet thickness. It runs the
 original tonal-interim jet at 96 kHz with fractional tube travel and the
 existing gas/geometry-derived compact baffled termination. Its canonical
@@ -66,6 +68,37 @@ clipping. Changing ambient pressure reconstructs the source, mouth, propagation,
 termination and receiver from the same changed gas, not an independent density
 knob applied to an existing waveform.
 
+## Finite rectangular windway
+
+`FlueVoice::with_viscous_windway(length_m)` uses the existing exit width and
+height, plus the actual inlet `GasState`, in the shared `ViscousSlit` law:
+
+```
+p_blow = 12 mu L v / h^2 + rho v^2 / 2
+Q_jet = w h v
+tau = cut_up / (convection_ratio v)
+```
+
+The solved bulk speed drives injected volume, Reynolds number, jet transit and
+amplification band before the acoustic feedback runs. A viscosity-only material
+data change can therefore alter microphone pressure even at unchanged density
+and sound speed. Both schedule compilation and applied controls admit the
+actual viscous speed against the declared low-Mach/history limits; they never
+validate an ideal speed and then silently clamp a slower jet's delay. Attachment
+also rechecks an already held pressure and refuses after the first sample.
+
+This adds a quasi-steady parallel-plate windway resistance. The quadratic term
+is exit kinetic head; it is not added again to the acoustic mouth loss ledger.
+The existing jet-card profile remains fixed. Entrance development, profile
+reshaping, windway inertia, turbulent flow and acoustic modulation of the mean
+jet require richer models. Supply a physical rectangular channel length for a
+recorder/organ windway or another justified channel; the example's optional
+15 mm length is authored geometry, not a measured transverse-flute lip length.
+The significance of windway profile and length is established experimentally
+by Segoufin et al., *Acta Acustica* 86 (2000), pp.649–661
+([author record](https://research.tue.nl/en/publications/experimental-study-of-the-influence-of-the-mouth-geometry-on-soun/));
+the present reduced law does not reproduce that measured instrument model.
+
 ## Scope and evidence
 
 This is a symmetric fixed-window, incompressible quasi-steady separation
@@ -81,7 +114,7 @@ timbre, broadband/real-time qualification or piano-level fidelity is claimed.
 Focused native checks:
 
 ```sh
-cargo test -p fs-couple --test contraction_loss --test flue_contraction
+cargo test -p fs-couple --test contraction_loss --test flue_contraction --test flue_windway
 cargo test -p fs-couple --lib flue_loop::mouth_loss::
 cargo check -p fs-couple --example flue_contraction
 ```

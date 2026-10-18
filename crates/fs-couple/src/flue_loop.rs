@@ -26,8 +26,10 @@
 //! from the delay shrinking as the jet speeds up.
 //!
 //! Model (Fletcher-Rossing jet drive, time domain):
-//! - the jet speed is Bernoulli from blowing pressure and the medium,
-//!   `U = sqrt(2 p_blow / rho)`; the card is SHAPE/SCALING authority
+//! - the default jet speed is Bernoulli from blowing pressure and the medium,
+//!   `U = sqrt(2 p_blow / rho)`. An explicitly supplied rectangular windway
+//!   adds the shared material-gas viscous slit pressure drop before computing
+//!   the bulk jet speed, injected flow and convection; the card is SHAPE/SCALING authority
 //!   only (the lab works in lattice units), so every dimensional number
 //!   comes from the geometry chart and the medium;
 //! - the transverse acoustic velocity at the mouth, `v = q / S_m`,
@@ -389,7 +391,7 @@ pub struct FlueBlockDiag {
     pub block: u64,
     /// Blowing pressure [Pa].
     pub blow_pa: f64,
-    /// Jet centerline speed [m/s].
+    /// Jet reference speed [m/s], the bulk speed with a viscous windway.
     pub jet_speed_m_s: f64,
     /// Jet Reynolds number `U * 2b / nu`.
     pub reynolds: f64,
@@ -433,11 +435,13 @@ pub struct FlueVoice {
     line: FlueResonator,
     gas: GasState,
     mouth_contraction: Option<crate::bernoulli_aperture::contraction::ContractionLoss>,
+    viscous_windway: Option<crate::bernoulli_aperture::viscous::ViscousSlit>,
     rho: f64,
     nu: f64,
     zc: f64,
     dt: f64,
     blow_pa: f64,
+    jet_speed_m_s: f64,
     // Mouth transverse velocity history (ring, oldest overwritten).
     history: Vec<f64>,
     head: usize,
@@ -552,11 +556,13 @@ impl FlueVoice {
             line,
             gas: *gas,
             mouth_contraction: None,
+            viscous_windway: None,
             rho,
             nu,
             zc,
             dt,
             blow_pa: 0.0,
+            jet_speed_m_s: 0.0,
             history: vec![0.0; history_len],
             head: 0,
             q_prev: 0.0,
@@ -612,8 +618,9 @@ impl FlueVoice {
         if self.poisoned { return Err(FlueError::Invalid { what: "flue voice is poisoned by a previous failed sample" }); }
         match control {
             FlueControl::SetBlowingPressure(p) => {
-                self.validate_blowing_pressure(p)?;
+                let speed = self.validated_jet_speed(p)?;
                 self.blow_pa = p;
+                self.jet_speed_m_s = speed;
             }
             FlueControl::Fingering {
                 index,
@@ -623,10 +630,63 @@ impl FlueVoice {
         Ok(())
     }
 
-    /// Jet centerline speed for the current blowing pressure.
+    /// Jet speed for the current blowing pressure. With a viscous windway this
+    /// is the bulk speed driving the existing fixed-profile jet-card model.
     #[must_use]
     pub fn jet_speed_m_s(&self) -> f64 {
-        (2.0 * self.blow_pa / self.rho).sqrt()
+        self.jet_speed_m_s
+    }
+
+    /// Attach a finite, uniform rectangular windway before any accepted sample.
+    /// Its actual exit width/height and retained inlet gas determine
+    /// `p = 12 mu L v/h^2 + rho v^2/2`; the shared slit owner solves for bulk
+    /// speed. That SAME speed sets injected volume, Reynolds number, convective
+    /// delay, amplification band and the subsequent acoustic feedback.
+    ///
+    /// The streamwise length is supplied physical geometry, never inferred
+    /// from an instrument name or the mouth cut-up. This is a quasi-steady
+    /// parallel-plate resistance plus ideal exit kinetic head. It retains the
+    /// existing card profile; it does not resolve entrance/profile development,
+    /// windway inertia, turbulent flow or acoustic modulation of the mean jet.
+    /// Use only for a declared rectangular channel (e.g. a recorder windway),
+    /// not an invented lip-channel length for a transverse flute.
+    ///
+    /// # Errors
+    /// Invalid/unrepresentable geometry, repeated/late attachment, a poisoned
+    /// voice, or a held pressure outside the ACTUAL jet-speed/history domain.
+    pub fn with_viscous_windway(mut self, length_m: f64) -> Result<Self, FlueError> {
+        if self.poisoned || self.samples != 0 || self.viscous_windway.is_some() {
+            return Err(FlueError::Invalid { what: "viscous windway requires one cold attachment" });
+        }
+        self.viscous_windway = Some(crate::bernoulli_aperture::viscous::ViscousSlit::from_gas(
+            &self.gas, length_m).map_err(FlueError::Physics)?);
+        self.jet_speed_m_s = self.validated_jet_speed(self.blow_pa)?;
+        Ok(self)
+    }
+
+    /// The actual source-gas viscosity and supplied windway length. None retains
+    /// the original ideal jet relation. The slit law's quadratic pressure term
+    /// represents exit kinetic head here, not a loss in the acoustic mouth loop.
+    #[must_use]
+    pub const fn viscous_windway(&self) -> Option<&crate::bernoulli_aperture::viscous::ViscousSlit> {
+        self.viscous_windway.as_ref()
+    }
+
+    fn speed_at_pressure(&self, pressure_pa: f64) -> Result<f64, FlueError> {
+        match self.viscous_windway {
+            Some(law) => {
+                let flow = law.evaluate(self.geometry.flue_width_m, self.geometry.flue_height_m,
+                    self.rho, pressure_pa).map_err(FlueError::Physics)?;
+                let speed = flow.flow_m3_s / (self.geometry.flue_width_m * self.geometry.flue_height_m);
+                let delay = self.geometry.cut_up_m / (self.island.convection_ratio * speed);
+                if !speed.is_finite() || (pressure_pa > 0.0
+                    && delay > (self.history.len() - 2) as f64 * self.dt) {
+                    return Err(FlueError::Invalid { what: "viscous windway jet exceeds finite speed or convection history" });
+                }
+                Ok(speed)
+            }
+            None => Ok((2.0 * pressure_pa / self.rho).sqrt()),
+        }
     }
 
     /// Jet Reynolds number `U * 2b / nu` for the current blowing pressure.

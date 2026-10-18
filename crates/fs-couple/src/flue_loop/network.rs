@@ -198,12 +198,11 @@ impl FlueResonator {
             Self::Network(_) => Err(invalid("a physical flue graph has no TMM fingering bank; use explicit terminal controls")),
         }
     }
-    pub(super) fn validate_pressure(&self, p: f64, rho: f64) -> Result<(), FlueError> {
+    pub(super) fn validate_jet_speed(&self, speed: f64, blowing: bool) -> Result<(), FlueError> {
         if let Self::Network(n) = self {
             let source = &n.source;
-            let speed = (2.0 * p / rho).sqrt();
             let inlet = source.graph.inlet_section_index().map_err(physical)?;
-            if !speed.is_finite() || (p > 0.0 && speed < source.minimum_jet_speed_m_s)
+            if !speed.is_finite() || (blowing && speed < source.minimum_jet_speed_m_s)
                 || speed > source.maximum_jet_mach * source.gases[inlet].sound_speed {
                 return Err(invalid("blowing pressure exceeds the declared convection-history or low-Mach jet domain"));
             }
@@ -342,11 +341,16 @@ impl FlueVoice {
     }
     /// Validate a held physical pressure before compiling a source schedule.
     pub fn validate_blowing_pressure(&self, pressure_pa: f64) -> Result<(), FlueError> {
+        self.validated_jet_speed(pressure_pa).map(|_| ())
+    }
+    pub(super) fn validated_jet_speed(&self, pressure_pa: f64) -> Result<f64, FlueError> {
         if self.poisoned { return Err(invalid("flue voice is poisoned by a previous failed sample")); }
         if !pressure_pa.is_finite() || pressure_pa < 0.0 {
             return Err(invalid("blowing pressure must be finite and non-negative"));
         }
-        self.line.validate_pressure(pressure_pa, self.rho)
+        let speed = self.speed_at_pressure(pressure_pa)?;
+        self.line.validate_jet_speed(speed, pressure_pa > 0.0)?;
+        Ok(speed)
     }
 }
 

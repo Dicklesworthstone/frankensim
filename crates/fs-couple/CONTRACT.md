@@ -1893,6 +1893,20 @@ None.
   so `claim_check` refuses every claim from this fixture: that boundary
   is inherited by the flue-gates bead, not papered over.
 
+  Optional `with_viscous_windway(length_m)` binds the same material-gas
+  `ViscousSlit` used by reeds to the actual flue exit width/height. Its solved
+  bulk speed reaches volume injection, Reynolds number, convective delay,
+  amplification and the physical outlet receiver. Schedule admission and
+  accepted pressure controls check that actual speed against history/Mach
+  bounds; cold attachment also rechecks a previously held pressure. Omission
+  preserves the ideal jet. `flue_windway` tests cover viscosity-only material
+  swaps at unchanged density/sound speed, actual microphone pressure, control
+  refusals and callback partition invariance with simultaneous mouth loss.
+  The supplied rectangular channel is a quasi-steady parallel-plate reduction,
+  retaining the card profile; exit kinetic head is not acoustic mouth loss.
+  No entrance/profile development, windway inertia, turbulent jet, transverse
+  flute lip geometry or measured instrument fidelity follows from this option.
+
 - `wind_line` module (bead 3ez8g.6.3): the wind articulation runtime —
   `WindLineBank` holds per-fingering exact-FIR characteristic lines
   over a typed `FingeringTable` with the carry-history + crossfade
