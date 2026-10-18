@@ -1,5 +1,9 @@
 //! Physical latent storage, material ownership and transactional schedule execution.
+#![allow(clippy::float_cmp)] // Exact published-state, plateau and resume comparisons.
 mod support;
+
+#[path = "thermal_history_enthalpy/radiation.rs"]
+mod radiation;
 
 use fs_blake3::ContentHash;
 use fs_conduction::bc::history::{ThermalBoundaryHistory, ThermalRegionHistory};

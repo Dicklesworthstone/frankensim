@@ -10,7 +10,7 @@
 //! All schedules use explicit endpoint quadrature. This adds no enclosure,
 //! occlusion, pointwise T(x)^4 integral, evolving emissivity or latent-heat model.
 
-use super::{ThermalHistoryMethod, ThermalHistoryRun, invalid, poll};
+use super::{ThermalBoundaryHistory, ThermalHistoryMethod, ThermalHistoryRun, invalid, poll};
 use crate::{AmbientRadiationConfig, AmbientRadiationPatch, ConductionError,
     ConductionProblem, ScalarField, SurfaceEmissivity, ThermalBc, TEMPERATURE_DIMS};
 use crate::transient::backward_euler::{RadiationStepSolution, StepConfig};
@@ -77,38 +77,7 @@ impl<'h, 'm> RadiativeThermalHistoryRun<'h, 'm> {
         if run.accepted_steps() != 0 {
             return Err(invalid("radiation histories must be attached before the first accepted step"));
         }
-        if patches.is_empty() {
-            return Err(invalid("radiative history requires at least one declared patch; use the original run for no radiation"));
-        }
-        let boundary = run.problem.boundary.at(cx, run.time_s())?;
-        let mut seen = BTreeSet::new();
-        for (at, patch) in patches.iter().enumerate() {
-            poll(cx, at)?;
-            let Some(index) = boundary.region_names().iter().position(|name| name == &patch.region) else {
-                return Err(refused(&patch.region, "radiative patch has no matching boundary region"));
-            };
-            if !seen.insert(index) {
-                return Err(refused(&patch.region, "radiative region is declared more than once"));
-            }
-            let admitted = match &boundary.conditions()[index] {
-                ThermalBc::Robin { htc: ScalarField::Uniform(_), t_ref: ScalarField::Uniform(_) } => true,
-                ThermalBc::Neumann { outward_flux: ScalarField::Uniform(flux) } => *flux == 0.0,
-                _ => false,
-            };
-            if !admitted {
-                return Err(refused(&patch.region, "radiation requires a uniform Robin or explicit zero-flux region"));
-            }
-            let mut owns_face = false;
-            for slot in 0..run.problem.boundary.mesh().boundary().len() {
-                if slot % 512 == 0 { poll(cx, slot)?; }
-                owns_face |= boundary.region_for(slot) == Some(index);
-            }
-            if !owns_face {
-                return Err(refused(&patch.region, "radiative region owns no boundary faces"));
-            }
-            patch.at(run.time_s())?;
-        }
-        poll(cx, patches.len())?;
+        admit_histories(cx, run.problem.boundary, run.time_s(), &patches)?;
         Ok(Self { run, patches, config })
     }
 
@@ -166,6 +135,46 @@ impl<'h, 'm> RadiativeThermalHistoryRun<'h, 'm> {
         self.run.publish(cx, time_s, &solution.conduction)?;
         Ok(solution)
     }
+}
+
+// One binding contract for both temperature-capacity and primary-enthalpy runs.
+pub(super) fn admit_histories(
+    cx: &Cx<'_>, history: &ThermalBoundaryHistory<'_>, time_s: f64,
+    patches: &[RadiationRegionHistory],
+) -> Result<(), ConductionError> {
+    poll(cx, 0)?;
+    if patches.is_empty() {
+        return Err(invalid("radiative history requires at least one declared patch; use the original run for no radiation"));
+    }
+    let boundary = history.at(cx, time_s)?;
+    let mut seen = BTreeSet::new();
+    for (at, patch) in patches.iter().enumerate() {
+        poll(cx, at)?;
+        let Some(index) = boundary.region_names().iter().position(|name| name == &patch.region) else {
+            return Err(refused(&patch.region, "radiative patch has no matching boundary region"));
+        };
+        if !seen.insert(index) {
+            return Err(refused(&patch.region, "radiative region is declared more than once"));
+        }
+        let admitted = match &boundary.conditions()[index] {
+            ThermalBc::Robin { htc: ScalarField::Uniform(_), t_ref: ScalarField::Uniform(_) } => true,
+            ThermalBc::Neumann { outward_flux: ScalarField::Uniform(flux) } => *flux == 0.0,
+            _ => false,
+        };
+        if !admitted {
+            return Err(refused(&patch.region, "radiation requires a uniform Robin or explicit zero-flux region"));
+        }
+        let mut owns_face = false;
+        for slot in 0..history.mesh().boundary().len() {
+            if slot % 512 == 0 { poll(cx, slot)?; }
+            owns_face |= boundary.region_for(slot) == Some(index);
+        }
+        if !owns_face {
+            return Err(refused(&patch.region, "radiative region owns no boundary faces"));
+        }
+        patch.at(time_s)?;
+    }
+    poll(cx, patches.len())
 }
 
 fn refused(region: &str, what: &str) -> ConductionError {

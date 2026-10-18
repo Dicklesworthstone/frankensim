@@ -11,6 +11,9 @@
 //! interfaces or remeshing. Constitutive charts, conductivity assignments,
 //! phase multipliers and matching-face contact remain with their existing owners.
 
+/// Radiative reservoir histories driving the same persistent enthalpy state.
+pub mod radiation;
+
 use super::{ThermalHistoryProblem, poll};
 use crate::{ConductionError, ConductionProblem, ScalarField, ThermalBc, ThermalBoundary};
 use crate::material::LiquidMassFractionConductivity;
