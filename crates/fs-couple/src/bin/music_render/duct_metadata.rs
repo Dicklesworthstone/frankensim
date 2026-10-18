@@ -15,7 +15,10 @@ pub(super) fn provenance(p:&PlateValvePerformance)->String {
     // already binds the exact authored species, basis and fractions.
     let exterior = p.exterior_gas().map_or_else(String::new, |gas|
         format!(",\"exterior_gas\":{}", gas_state(gas)));
-    let force_json = format!(",\"ambient_gas\":{}{exterior}{}", gas_state(p.ambient_gas()), force_provenance(p));
+    let slit = p.renderer().system().aperture().viscous_slit().map_or_else(String::new, |law|
+        format!(",\"slit_flow\":{{\"model\":\"spatial-laminar-bernoulli-v1\",\"length_m\":{:e},\"dynamic_viscosity_pa_s\":{:e},\"viscosity_source\":\"inlet-gas\",\"scope\":\"quasi-steady Newtonian slit with separated outflow; not resolved channel flow or pressure recovery\"}}",
+            law.length_m(), law.dynamic_viscosity_pa_s()));
+    let force_json = format!(",\"ambient_gas\":{}{exterior}{slit}{}", gas_state(p.ambient_gas()), force_provenance(p));
     let CoupledAperture::Network(n)=p.renderer().system() else {return force_json};
     let i=p.info();
     // Name the node even in a one-section graph: node zero need not be the inlet.

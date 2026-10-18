@@ -6,12 +6,15 @@
 //! the second is the existing separated-jet loss, with no pressure recovery.
 //! Width is the physical slit width, not a fitted discharge coefficient.
 //!
-//! This is not an unsteady boundary-layer, entrance-flow, compressible-flow,
-//! turbulence or spatially varying gap model. In particular, replacing a
-//! nonuniform gap by area / width does NOT preserve its viscous resistance.
+//! A P1 gap varying ACROSS the width is integrated as parallel local channels,
+//! including its exact positive portion through closure. No gap is replaced by
+//! area / width, which would change the h^-3 resistance. The streamwise length
+//! is common; this does not resolve transverse flow, unsteady boundary layers,
+//! entrance flow, pressure recovery, compressibility or turbulence.
 //! Material parameters are explicit; existing inviscid callers are unchanged.
 
 use crate::acoustic_realize::AcousticRealizeError;
+use fs_material::gas::GasState;
 use fs_math::det;
 
 /// Explicit fluid viscosity and uniform slit length. Both are strictly positive.
@@ -19,6 +22,7 @@ use fs_math::det;
 pub struct ViscousSlit {
     dynamic_viscosity_pa_s: f64,
     length_m: f64,
+    gas: Option<GasState>,
 }
 
 /// Signed flow, local tangents and nonnegative loss of the reduced slit law.
@@ -34,6 +38,16 @@ pub struct ViscousSlitFlow {
     pub viscous_dissipation_w: f64,
     /// Separated-jet loss [W], without pressure recovery.
     pub separation_dissipation_w: f64,
+}
+
+/// Integrated flow of parallel channels across a nonuniform physical slit.
+/// Its single pressure drop supplies nonnegative loss `dp * flow_m3_s`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ViscousProfileFlow {
+    /// Signed physical volume flow [m³/s].
+    pub flow_m3_s: f64,
+    /// Nonnegative derivative of integrated flow with pressure [m³/(s Pa)].
+    pub flow_per_pressure_m3_s_pa: f64,
 }
 
 impl ViscousSlitFlow {
@@ -69,7 +83,29 @@ impl ViscousSlit {
         }
         let numerator = 12.0 * (dynamic_viscosity_pa_s * length_m);
         if !numerator.is_finite() || numerator <= 0.0 { return Err(numerical()); }
-        Ok(Self { dynamic_viscosity_pa_s, length_m })
+        Ok(Self { dynamic_viscosity_pa_s, length_m, gas: None })
+    }
+
+    /// Bind viscosity and density to one complete material gas snapshot.
+    /// Composition, pressure and temperature therefore reach the channel
+    /// without an air constant; its streamwise length remains explicit geometry.
+    pub fn from_gas(gas: &GasState, length_m: f64) -> Result<Self, AcousticRealizeError> {
+        gas.validate_coherence().map_err(|_| invalid("viscous slit requires one coherent source gas"))?;
+        let mut law = Self::new(gas.dynamic_viscosity, length_m)?;
+        law.gas = Some(*gas);
+        Ok(law)
+    }
+
+    /// Original material state, when constructed from a complete source gas.
+    #[must_use]
+    pub const fn gas(&self) -> Option<&GasState> { self.gas.as_ref() }
+
+    fn admit_density(self, density: f64) -> Result<(), AcousticRealizeError> {
+        if self.gas.is_some_and(|gas| (gas.density - density).abs()
+            > 64.0 * f64::EPSILON * gas.density.abs().max(density.abs())) {
+            return Err(invalid("viscous slit viscosity and density must use the same source gas"));
+        }
+        Ok(())
     }
 
     /// Supplied Newtonian dynamic viscosity [Pa s].
@@ -96,6 +132,7 @@ impl ViscousSlit {
         -> Result<ViscousSlitFlow, AcousticRealizeError>
     {
         let area = admitted_area(width_m, opening_m, density_kg_m3)?;
+        self.admit_density(density_kg_m3)?;
         if !pressure_drop_pa.is_finite() {
             return Err(invalid("viscous slit pressure drop must be finite"));
         }
@@ -140,6 +177,7 @@ impl ViscousSlit {
         upstream_pressure_pa: f64, moving_flow_m3_s: f64,
     ) -> Result<f64, AcousticRealizeError> {
         let area = admitted_area(width_m, opening_m, density_kg_m3)?;
+        self.admit_density(density_kg_m3)?;
         if ![impedance_pa_s_m3, incoming_pressure_pa, upstream_pressure_pa, moving_flow_m3_s]
             .iter().all(|v| v.is_finite()) || impedance_pa_s_m3 <= 0.0
         {
@@ -165,6 +203,130 @@ impl ViscousSlit {
         if ![dp, jet_pressure, outgoing].iter().all(|v| v.is_finite()) { return Err(numerical()); }
         Ok(outgoing)
     }
+
+    /// Eliminate dp + Z U(dp) = drive after condensing mechanical swept flow.
+    /// Return dp directly: subtracting large wave pressures can erase it.
+    pub(super) fn fixed_opening_pressure_drop(
+        self, width_m: f64, opening_m: f64, density_kg_m3: f64,
+        impedance_pa_s_m3: f64, drive_pa: f64,
+    ) -> Result<f64, AcousticRealizeError> {
+        let area = admitted_area(width_m, opening_m, density_kg_m3)?;
+        self.admit_density(density_kg_m3)?;
+        if !impedance_pa_s_m3.is_finite() || impedance_pa_s_m3 <= 0.0 || !drive_pa.is_finite() {
+            return Err(invalid("viscous slit condensation requires positive impedance and finite drive"));
+        }
+        if opening_m == 0.0 || drive_pa == 0.0 { return Ok(drive_pa); }
+        let linear = self.linear_pressure(opening_m)?;
+        let velocity = solve_velocity(linear + impedance_pa_s_m3 * area, density_kg_m3, drive_pa)?;
+        let dp = linear * velocity + (0.5 * density_kg_m3 * velocity) * velocity.abs();
+        if !dp.is_finite() { return Err(numerical()); }
+        Ok(dp)
+    }
+
+    /// Integrate this same law over a linearly varying widthwise gap. Negative
+    /// gaps contribute no flow; a partially closed edge retains its actual open
+    /// fraction. The pressure derivative is integrated analytically as well.
+    ///
+    /// With K=12 mu L and C=2 rho |dp|, flow per width is
+    /// `(sqrt(K²+C h⁴)-K)/(rho h)`. Its primitive on h>0 is
+    /// `[r-K ln(K+r)]/(2 rho)`, r=sqrt(K²+C h⁴). The divided difference below
+    /// rationalizes delta-r and log1p so nearly equal gaps and the laminar limit
+    /// do not subtract nearly equal primitives. This is exact for the declared
+    /// parallel-channel P1 model, not a spatial Navier--Stokes solution.
+    pub fn linear_gap_flow(self, width_m: f64, gaps_m: [f64; 2], density_kg_m3: f64,
+        pressure_drop_pa: f64) -> Result<ViscousProfileFlow, AcousticRealizeError>
+    {
+        if gaps_m.iter().any(|g| !g.is_finite()) || !pressure_drop_pa.is_finite() {
+            return Err(invalid("viscous slit profile requires finite gaps and pressure"));
+        }
+        let lower = gaps_m[0].min(gaps_m[1]);
+        let upper = gaps_m[0].max(gaps_m[1]).max(0.0);
+        admitted_area(width_m, upper, density_kg_m3)?;
+        self.admit_density(density_kg_m3)?;
+        if upper == 0.0 { return Ok(ViscousProfileFlow::default()); }
+        if lower == upper {
+            let flow = self.evaluate(width_m, upper, density_kg_m3, pressure_drop_pa)?;
+            return Ok(ViscousProfileFlow { flow_m3_s: flow.flow_m3_s,
+                flow_per_pressure_m3_s_pa: flow.flow_per_pressure_m3_s_pa });
+        }
+        let open_fraction = if lower >= 0.0 { 1.0 } else {
+            let scale = upper.max(-lower);
+            (upper / scale) / (upper / scale + (-lower) / scale)
+        };
+        let ratio = lower.max(0.0) / upper;
+        let linear = self.linear_pressure(upper)?;
+        let quadratic = (std::f64::consts::SQRT_2 * det::sqrt(density_kg_m3))
+            * det::sqrt(pressure_drop_pa.abs());
+        if !quadratic.is_finite() { return Err(numerical()); }
+        let scale = linear.max(quadratic);
+        let (l, s) = (linear / scale, quadratic / scale);
+        let r0 = det::hypot(l, s * ratio * ratio);
+        let r1 = det::hypot(l, s);
+        let polynomial = (1.0 + ratio) * (1.0 + ratio * ratio);
+        let tangent = (width_m * open_fraction) * (upper / scale)
+            * (polynomial / (2.0 * (r0 + r1)));
+        let delta = s * s * (1.0 - ratio) * polynomial / (r0 + r1);
+        let log_argument = delta / (l + r0);
+        let log_ratio = if !log_argument.is_finite() { 0.0 } else {
+            let sum = 1.0 + log_argument;
+            if sum == 1.0 { 1.0 } else { det::ln(sum) / (sum - 1.0) }
+        };
+        let factor = if l == 0.0 { 1.0 } else { 1.0 - (l / (l + r0)) * log_ratio };
+        let flow = (pressure_drop_pa * tangent) * (2.0 * factor);
+        if !flow.is_finite() || !tangent.is_finite() || tangent < 0.0 {
+            return Err(numerical());
+        }
+        Ok(ViscousProfileFlow { flow_m3_s: flow, flow_per_pressure_m3_s_pa: tangent })
+    }
+}
+
+/// Shared monotone passive pressure solve for a supplied spatial slit integral.
+/// The constitutive law is odd and increasing. All 96 bounded evaluations are
+/// at the same mechanical trial; no accepted state or pressure history changes.
+pub(super) fn profiled_pressure_drop(
+    impedance: f64, drive: f64,
+    flow: impl Fn(f64) -> Result<ViscousProfileFlow, AcousticRealizeError>,
+) -> Result<f64, AcousticRealizeError> {
+    if !impedance.is_finite() || impedance <= 0.0 || !drive.is_finite() {
+        return Err(invalid("profiled slit requires finite drive and positive passive impedance"));
+    }
+    if drive == 0.0 { return Ok(0.0); }
+    let source = drive.abs();
+    let (mut lo, mut hi, mut p) = (0.0, source, source);
+    for _ in 0..96 {
+        let value = flow(p)?;
+        let load = impedance * value.flow_m3_s;
+        let derivative = 1.0 + impedance * value.flow_per_pressure_m3_s_pa;
+        let residual = p + load - source;
+        if ![load, derivative, residual].iter().all(|x| x.is_finite())
+            || value.flow_m3_s < 0.0 || value.flow_per_pressure_m3_s_pa < 0.0 {
+            return Err(numerical());
+        }
+        if residual.abs() <= 32.0 * f64::EPSILON * source {
+            return Ok(drive.signum() * p);
+        }
+        if residual > 0.0 { hi = p; } else { lo = p; }
+        let newton = p - residual / derivative;
+        p = if newton > lo && newton < hi { newton } else { f64::midpoint(lo, hi) };
+        if p == lo || p == hi { break; }
+    }
+    Err(invalid("profiled viscous slit pressure balance did not converge within its bounded work"))
+}
+
+/// Same spatial pressure solve before mechanical swept-flow condensation.
+pub(super) fn profiled_characteristic_pressure(
+    impedance: f64, incoming: f64, upstream: f64, moving: f64,
+    flow: impl Fn(f64) -> Result<ViscousProfileFlow, AcousticRealizeError>,
+) -> Result<f64, AcousticRealizeError> {
+    let no_jet = incoming + impedance * moving;
+    let no_drop = upstream - incoming;
+    let dp = profiled_pressure_drop(impedance, no_drop - no_jet, &flow)?;
+    let jet_pressure = impedance * flow(dp)?.flow_m3_s;
+    let outgoing = if no_drop.abs().max(dp.abs()) <= no_jet.abs().max(jet_pressure.abs()) {
+        no_drop - dp
+    } else { no_jet + jet_pressure };
+    if !outgoing.is_finite() { return Err(numerical()); }
+    Ok(outgoing)
 }
 
 fn admitted_area(width: f64, opening: f64, rho: f64) -> Result<f64, AcousticRealizeError> {
@@ -204,6 +366,66 @@ mod tests {
     fn close(actual: f64, expected: f64, relative: f64) {
         assert!((actual - expected).abs() <= relative * expected.abs().max(1e-250),
             "actual={actual:e}, expected={expected:e}");
+    }
+
+    #[test]
+    fn g3_material_gas_supplies_viscosity_and_cannot_be_mixed_with_another_density() {
+        use fs_material::gas::GasSpec;
+        let cold = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap();
+        let hot = GasState::try_new(&GasSpec::dry_air_ussa1976(), 393.15, 101325.0).unwrap();
+        let a = ViscousSlit::from_gas(&cold, 0.001).unwrap();
+        let b = ViscousSlit::from_gas(&hot, 0.001).unwrap();
+        assert_eq!(a.gas(), Some(&cold));
+        assert_eq!(a.dynamic_viscosity_pa_s(), cold.dynamic_viscosity);
+        let flow = |law: ViscousSlit, gas: GasState| law.evaluate(0.01, 1e-5, gas.density, 100.0).unwrap().flow_m3_s;
+        assert!(flow(b, hot) < flow(a, cold), "a thin channel must respond to material viscosity, not only density");
+        assert!(a.evaluate(0.01, 1e-5, hot.density, 100.0).is_err());
+        let mut corrupt = cold; corrupt.dynamic_viscosity *= 2.0;
+        assert!(ViscousSlit::from_gas(&corrupt, 0.001).is_err());
+    }
+
+    #[test]
+    fn g1_spatial_laminar_limit_integrates_cubic_gap_and_partial_closure() {
+        let (width, h, dp) = (0.013, 4e-5, 1e-8);
+        let k = 12.0 * 1.81e-5 * 1e-3;
+        let triangular = law().linear_gap_flow(width, [0.0, 2.0*h], 1.2, dp).unwrap();
+        let mean_gap = law().evaluate(width, h, 1.2, dp).unwrap();
+        close(triangular.flow_m3_s, width*dp*(2.0*h).powi(3)/(4.0*k), 1e-10);
+        close(triangular.flow_m3_s/mean_gap.flow_m3_s, 2.0, 1e-10);
+        let partial = law().linear_gap_flow(width, [-2.0*h, 2.0*h], 1.2, dp).unwrap();
+        close(partial.flow_m3_s, 0.5*triangular.flow_m3_s, 1e-14);
+        let tangent = law().linear_gap_flow(width, [0.0, 2.0*h], 1.2, 0.0).unwrap();
+        close(tangent.flow_per_pressure_m3_s_pa, width*(2.0*h).powi(3)/(4.0*k), 1e-14);
+        assert_eq!(law().linear_gap_flow(width, [-h, 0.0], 1.2, dp).unwrap(), ViscousProfileFlow::default());
+    }
+
+    #[test]
+    fn g1_spatial_integral_matches_independent_point_quadrature_and_pressure_tangent() {
+        let (width, rho) = (0.013, 1.2);
+        for gaps in [[-4e-5, 8e-5], [1e-5, 1e-4], [1e-4, 1e-4*(1.0+1e-14)]] {
+            for dp in [-2000.0, 0.1, 2000.0] {
+                let exact = law().linear_gap_flow(width, gaps, rho, dp).unwrap();
+                let mut numerical = 0.0;
+                for i in 0..8192 {
+                    let t = (i as f64 + 0.5)/8192.0;
+                    let h = ((1.0-t)*gaps[0]+t*gaps[1]).max(0.0);
+                    numerical += law().evaluate(width/8192.0, h, rho, dp).unwrap().flow_m3_s;
+                }
+                close(exact.flow_m3_s, numerical, 4e-8);
+                let delta = dp.abs()*1e-5;
+                let left = law().linear_gap_flow(width, gaps, rho, dp-delta).unwrap();
+                let right = law().linear_gap_flow(width, gaps, rho, dp+delta).unwrap();
+                close(exact.flow_per_pressure_m3_s_pa, (right.flow_m3_s-left.flow_m3_s)/(2.0*delta), 2e-9);
+                let mid = f64::midpoint(gaps[0], gaps[1]);
+                let a = law().linear_gap_flow(width/2.0, [gaps[0],mid], rho, dp).unwrap();
+                let b = law().linear_gap_flow(width/2.0, [mid,gaps[1]], rho, dp).unwrap();
+                close(exact.flow_m3_s, a.flow_m3_s+b.flow_m3_s, 2e-13);
+                let z = 1e6;
+                let solved = profiled_pressure_drop(z, dp+z*exact.flow_m3_s,
+                    |p| law().linear_gap_flow(width, gaps, rho, p)).unwrap();
+                close(solved, dp, 1e-12);
+            }
+        }
     }
 
     #[test]

@@ -90,6 +90,7 @@ pub struct ModalAperture {
     samples: u64,
     material_plates: Vec<material::MaterialModalPlate>,
     material_gas: Option<fs_material::gas::GasState>,
+    viscous_slit: Option<super::viscous::ViscousSlit>,
     viscosity: Option<viscosity::ApertureViscosity>,
     ports: crate::port_adoption::ModulePorts,
 }
@@ -156,7 +157,7 @@ impl ModalAperture {
             ],
         );
         let model = Self { spec, state, obstacle, contact_storage, samples: 0,
-            material_plates: Vec::new(), material_gas: None, viscosity: None, ports };
+            material_plates: Vec::new(), material_gas: None, viscous_slit: None, viscosity: None, ports };
         model.admit_linear_clock()?;
         model.validate_state(&model.state)?;
         Ok(model)
@@ -167,6 +168,31 @@ impl ModalAperture {
     #[must_use]pub fn modal_states(&self) -> &[BladeState] { &self.state }
     /// Accepted mechanical samples only.
     #[must_use]pub const fn accepted_steps(&self) -> u64 { self.samples }
+
+    /// Select the common channel law before stepping. Every mode sees the SAME
+    /// pressure drop and its own conjugate swept area; adding modes never adds
+    /// parallel slits or multiplies the physical flow width.
+    pub fn set_viscous_slit(&mut self, law: super::viscous::ViscousSlit)
+        -> Result<(), AcousticRealizeError>
+    {
+        if self.samples != 0 {
+            return Err(invalid("modal viscous slit must be selected before the first accepted sample"));
+        }
+        law.evaluate(self.spec.width_m, self.gap(&self.state).max(0.0), self.spec.density_kg_m3, 0.0)?;
+        self.viscous_slit = Some(law);
+        Ok(())
+    }
+
+    /// Derive channel viscosity from the retained material gas and supplied
+    /// streamwise geometry. Missing source gas is refused, never replaced by air.
+    pub fn set_material_viscous_slit(&mut self, length_m: f64) -> Result<(), AcousticRealizeError> {
+        let gas = self.material_gas.as_ref().ok_or_else(|| invalid("modal channel requires its retained material gas"))?;
+        self.set_viscous_slit(super::viscous::ViscousSlit::from_gas(gas, length_m)?)
+    }
+
+    /// Original explicit or source-bound channel law.
+    #[must_use]
+    pub const fn viscous_slit(&self) -> Option<super::viscous::ViscousSlit> { self.viscous_slit }
     fn gap(&self, state: &[BladeState]) -> f64 {
         self.spec.rest_opening_m + self.spec.modes.iter().zip(state)
             .map(|(m,s)| m.gap_projection*s.displacement_m).sum::<f64>()
@@ -270,11 +296,11 @@ impl ModalAperture {
             c.solve_free(&mut free[..n])?;
             uniform::solve_response(&free[..n], c.pressure_response(), c.contact_response(),
                 &area[..n], &shape[..n], gap, dt, self.spec.width_m,
-                self.spec.density_kg_m3, z, drive, self.spec.limits, &self.obstacle)?
+                self.spec.density_kg_m3, z, drive, self.spec.limits, &self.obstacle, self.viscous_slit)?
         } else {
             uniform::solve(&free[..n], &mobility[..n], &area[..n], &shape[..n],
                 gap, dt, self.spec.width_m, self.spec.density_kg_m3, z, drive,
-                self.spec.limits, &self.obstacle)?
+                self.spec.limits, &self.obstacle, self.viscous_slit)?
         };
         let next: Vec<_> = self.state.iter().zip(&trial.velocity).map(|(s,v)| BladeState {
             displacement_m: s.displacement_m + dt*v, velocity_m_s: 2.0*v - s.velocity_m_s,
@@ -285,7 +311,10 @@ impl ModalAperture {
         let contact = ApertureContactStep::new(&self.obstacle, gap)
             .and_then(|c| c.response(next_gap, vm)).map_err(nonlinear)?;
         let opening = f64::midpoint(gap, next_gap).max(0.0);
-        let jet = super::moving::volume_flow(self.spec.width_m, opening, trial.dp, self.spec.density_kg_m3);
+        let jet = match self.viscous_slit {
+            Some(law) => law.evaluate(self.spec.width_m, opening, self.spec.density_kg_m3, trial.dp)?.flow_m3_s,
+            None => super::moving::volume_flow(self.spec.width_m, opening, trial.dp, self.spec.density_kg_m3),
+        };
         let swept = -area[..n].iter().zip(&trial.velocity).map(|(a,v)| a*v).sum::<f64>();
         let no_drop = drive.upstream_pressure_pa - drive.incoming_pressure_pa;
         let load_pressure = z*(jet + swept + drive.body_flow_m3_s);

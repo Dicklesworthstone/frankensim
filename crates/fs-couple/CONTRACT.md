@@ -541,6 +541,37 @@ between modes beyond onset — the self-oscillating loop amplifies
 per-sample root differences into phase-divergent (O(kPa)) waveforms,
 so waveform equality is never a claim either mode makes.
 
+### Material-driven viscous slit flow
+
+`bernoulli_aperture::viscous::ViscousSlit` owns the shared reduced channel law
+`dp = 12 mu L U/(w h^3) + rho U|U|/(2 w^2 h^2)`. `from_gas` retains one
+coherent `GasState`, derives viscosity from it, and refuses a different density
+at evaluation. `PairedAperture` and `ModalAperture` can select that law from
+their retained material gas plus the physical channel length. `DynamicAperture`
+accepts the same source-bound law; a plate-valve performance's optional
+`slit_length` record uses its actual regional inlet gas, not the exterior gas.
+
+All three mechanical owners use this flow inside their same-sample pressure,
+contact and swept-volume solve and account for the channel loss as `dp * U`.
+Independent blades and signed modes retain their own conjugate pressure areas;
+the shared slit width is counted once. Spatial single/symmetric/independent
+plate closures integrate the same law analytically along each positive P1 edge
+segment, with an analytic pressure tangent. Closed portions contribute zero.
+An area-equivalent height is never substituted into the cubic viscous term.
+Spatial pressure condensation uses safeguarded Newton with a passive bracket,
+96 evaluations and a 32-epsilon relative pressure-balance target; failure
+refuses the trial before any mechanical, material-memory or wave state advances.
+Law attachment is allowed only before the first accepted step.
+
+G1/G3 tests in `viscous_aperture`, `modal_aperture::viscosity`, the paired spatial
+module and the constitutive owner cover flow/work closure, material-gas swaps,
+the cubic-gap laminar limit, independent point quadrature, partial closure,
+edge subdivision, paired/modal equivalence and full modal damping. This remains
+a fixed-state, parallel-channel, quasi-steady model with one common streamwise
+length. It does not resolve transverse/entrance flow, channel inertance,
+pressure recovery, gas evolution, compressible flow or measured instrument
+accuracy; it is not the plan's resolved-flow acceptance rung.
+
 ### `music_render` (binary)
 
 The music lane's render CLI (bead ib15w): `music_render <reed|string>

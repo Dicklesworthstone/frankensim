@@ -12,6 +12,7 @@ pub mod paired;
 use super::{AcousticRealizeError, PlateApertureReduction, invalid};
 use fs_dcontact::Obstacle;
 use crate::unilateral_contact::distributed::MAX_APERTURE_CONTACT_POINTS;
+use crate::bernoulli_aperture::viscous::{ViscousProfileFlow, ViscousSlit};
 
 /// Complete explicit clearance/contact description on the original plate mesh.
 #[derive(Debug, Clone)]
@@ -151,6 +152,27 @@ impl PlateClosure {
         }
         if !area.is_finite() || area < 0.0 { return Err(invalid("plate slit area overflowed")); }
         Ok(area)
+    }
+
+    /// Integrate the channel law over the actual positive P1 gaps, edge by edge.
+    /// A material change can alter the retained blade shape and therefore this
+    /// flow even when its mean aperture is unchanged. No effective-height
+    /// substitution or doubling for a symmetric opposed pair is performed.
+    pub fn viscous_flow(&self, law: ViscousSlit, opening_m: f64,
+        density_kg_m3: f64, pressure_drop_pa: f64)
+        -> Result<ViscousProfileFlow, AcousticRealizeError>
+    {
+        let mut total = ViscousProfileFlow::default();
+        for &(edge, length) in &self.edges {
+            let gaps = [self.nodal_gap_m(edge[0], opening_m)?, self.nodal_gap_m(edge[1], opening_m)?];
+            let local = law.linear_gap_flow(length, gaps, density_kg_m3, pressure_drop_pa)?;
+            total.flow_m3_s += local.flow_m3_s;
+            total.flow_per_pressure_m3_s_pa += local.flow_per_pressure_m3_s_pa;
+        }
+        if !total.flow_m3_s.is_finite() || !total.flow_per_pressure_m3_s_pa.is_finite() {
+            return Err(invalid("spatial viscous slit flow overflowed"));
+        }
+        Ok(total)
     }
     /// Inspect area, nodal activity and penetration without moving physical state.
     ///

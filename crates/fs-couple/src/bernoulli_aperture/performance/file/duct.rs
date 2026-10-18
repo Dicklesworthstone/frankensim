@@ -275,9 +275,9 @@ impl PreparedDuct {
         Ok(())
     }
 
-    pub fn inlet_density(&self, default: f64) -> Result<f64, PlateValveInputError> {
+    pub fn inlet_gas(&self, default: GasState) -> Result<GasState, PlateValveInputError> {
         if let (Some(graph), Some(gases)) = (&self.graph, &self.gases) {
-            return Ok(gases[graph.inlet_section_index().map_err(PlateValveInputError::Physics)?].density);
+            return Ok(gases[graph.inlet_section_index().map_err(PlateValveInputError::Physics)?]);
         }
         Ok(default)
     }

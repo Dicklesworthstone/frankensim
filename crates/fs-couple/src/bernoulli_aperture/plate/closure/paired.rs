@@ -11,6 +11,7 @@ use super::{PlateApertureReduction, PlateClosure, PlateClosureProbe, PlateClosur
 use crate::unilateral_contact::distributed::ApertureContactStep;
 use fs_dcontact::ContactStorage;
 use fs_phs::Storage;
+use crate::bernoulli_aperture::viscous::{ViscousProfileFlow, ViscousSlit};
 
 /// Same-time contact pullback into each original blade coordinate.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -145,6 +146,26 @@ impl PairedPlateClosure {
         }
         if !area.is_finite() || area<0.0 { return Err(invalid("paired slit area overflowed")); }
         Ok(area)
+    }
+
+    /// Actual widthwise channel flow from both independently moving shapes.
+    /// Each shared interface edge contributes once; its local P1 gap enters
+    /// the same analytic viscous integral used by a single material blade.
+    pub fn viscous_flow(&self, law: ViscousSlit, displacement: [f64; 2],
+        density_kg_m3: f64, pressure_drop_pa: f64)
+        -> Result<ViscousProfileFlow, AcousticRealizeError>
+    {
+        let mut total = ViscousProfileFlow::default();
+        for &(edge, length) in &self.reference.edges {
+            let gaps = [self.nodal_gap_m(edge[0], displacement)?, self.nodal_gap_m(edge[1], displacement)?];
+            let local = law.linear_gap_flow(length, gaps, density_kg_m3, pressure_drop_pa)?;
+            total.flow_m3_s += local.flow_m3_s;
+            total.flow_per_pressure_m3_s_pa += local.flow_per_pressure_m3_s_pa;
+        }
+        if !total.flow_m3_s.is_finite() || !total.flow_per_pressure_m3_s_pa.is_finite() {
+            return Err(invalid("paired spatial viscous slit flow overflowed"));
+        }
+        Ok(total)
     }
     /// Read physical slit area, contact activity and worst local penetration.
     pub fn probe(&self,displacement:[f64;2]) -> Result<PlateClosureProbe,AcousticRealizeError> {

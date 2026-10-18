@@ -5,7 +5,8 @@
 use fs_couple::bernoulli_aperture::{
     BernoulliAperture,
     dynamic::{ApertureDrive, ApertureState, DynamicAperture, DynamicApertureSpec},
-    paired::BladePropagator,
+    paired::{ApertureBlade, BladePropagator, BladeState, PairedAperture, PairedApertureLimits, PairedApertureSpec},
+    modal::{ApertureMode, ModalAperture, ModalApertureSpec},
     viscous::ViscousSlit,
 };
 use fs_couple::unilateral_contact::slit_lay;
@@ -31,6 +32,91 @@ fn model(propagator: BladePropagator) -> DynamicAperture {
         slit_lay(1e8, 1.5).unwrap(),
         propagator,
     ).unwrap()
+}
+
+fn paired(propagator: BladePropagator) -> PairedAperture {
+    PairedAperture::new_with_propagator(PairedApertureSpec {
+        rest_opening_m: 4e-5, width_m: 0.013,
+        blades: [ApertureBlade { mass_kg: 1e-5, stiffness_n_m: 500.0,
+            damping_n_s_m: 0.03, pressure_area_m2: 8e-6 },
+            ApertureBlade { mass_kg: 1.5e-5, stiffness_n_m: 850.0,
+                damping_n_s_m: 0.025, pressure_area_m2: 6e-6 }],
+        density_kg_m3: 1.2, impedance_pa_s_m3: 1e6, time_step_s: 1e-6, max_steps: 4096,
+        limits: PairedApertureLimits { maximum_abs_displacement_m: 0.01,
+            maximum_abs_velocity_m_s: 100.0, maximum_energy_j: 1.0,
+            max_evaluations: 256, velocity_tolerance_m_s: 1e-13, relative_tolerance: 1e-11 },
+    }, [BladeState::default(); 2], slit_lay(1e8, 1.5).unwrap(), propagator).unwrap()
+}
+
+fn assert_account(frame: &fs_couple::bernoulli_aperture::dynamic::ApertureFrame) {
+    let flow_scale = frame.jet_flow_m3_s.abs()+frame.swept_flow_m3_s.abs()+frame.bore_flow_m3_s.abs()+1e-15;
+    assert!(frame.flow_residual_m3_s.abs() < 2e-9*flow_scale);
+    let work_scale = frame.storage_change_j.abs()+frame.dissipated_energy_j.abs()
+        +frame.pressure_work_j.abs()+frame.mechanical_work_j.abs()+1e-15;
+    assert!(frame.balance_residual_j().abs() < 2e-8*work_scale);
+    assert!(frame.dissipated_energy_j >= 0.0);
+}
+
+#[test]
+fn g1_independent_blades_use_one_viscous_channel_in_both_propagators() {
+    for propagator in [BladePropagator::Midpoint, BladePropagator::ExactZoh] {
+        let mut inviscid = paired(propagator);
+        let mut viscous = paired(propagator);
+        let law = ViscousSlit::new(1.81e-5, 1e-3).unwrap();
+        viscous.set_viscous_slit(law).unwrap();
+        let drive = ApertureDrive { upstream_pressure_pa: 2000.0, ..ApertureDrive::default() };
+        let old = inviscid.step(drive).unwrap();
+        let first = viscous.step(drive).unwrap();
+        assert!(first.aperture.jet_flow_m3_s < old.aperture.jet_flow_m3_s);
+        assert_ne!(first.blades, old.blades);
+        for sample in 0..512 {
+            let drive = ApertureDrive { upstream_pressure_pa: if sample < 384 { 20000.0 } else { -2000.0 },
+                ..ApertureDrive::default() };
+            let frame = viscous.step_with_forces(drive, [0.001, -0.0003]).unwrap();
+            let expected = law.evaluate(viscous.spec().width_m, frame.aperture.midpoint_opening_m,
+                viscous.spec().density_kg_m3, frame.pressure_drop_pa).unwrap();
+            assert_eq!(frame.aperture.jet_flow_m3_s, expected.flow_m3_s);
+            assert_account(&frame.aperture);
+        }
+        let state = *viscous.blade_states();
+        let steps = viscous.accepted_steps();
+        assert!(viscous.set_viscous_slit(law).is_err());
+        assert_eq!(*viscous.blade_states(), state);
+        assert_eq!(viscous.accepted_steps(), steps);
+    }
+}
+
+#[test]
+fn g3_modal_and_paired_representations_preserve_shared_viscous_flow_and_work() {
+    let mut pair = paired(BladePropagator::Midpoint);
+    let p = *pair.spec();
+    let modes = p.blades.iter().enumerate().map(|(i,b)| ApertureMode {
+        mass_kg:b.mass_kg, stiffness_n_m:b.stiffness_n_m, damping_n_s_m:b.damping_n_s_m,
+        pressure_area_m2:b.pressure_area_m2, gap_projection:1.0,
+        force_projection: if i==0 {[1.0,0.0]} else {[0.0,1.0]},
+    }).collect();
+    let mut modal = ModalAperture::new(ModalApertureSpec {
+        rest_opening_m:p.rest_opening_m, width_m:p.width_m, modes, density_kg_m3:p.density_kg_m3,
+        impedance_pa_s_m3:p.impedance_pa_s_m3, time_step_s:p.time_step_s,
+        max_steps:p.max_steps, limits:p.limits,
+    }, vec![BladeState::default();2], slit_lay(1e8,1.5).unwrap()).unwrap();
+    let law = ViscousSlit::new(1.81e-5,1e-3).unwrap();
+    pair.set_viscous_slit(law).unwrap(); modal.set_viscous_slit(law).unwrap();
+    for sample in 0..512 {
+        let input = ApertureDrive { upstream_pressure_pa:if sample<384 {20000.0} else {-2000.0},
+            ..ApertureDrive::default() };
+        let a = pair.step_with_forces(input,[0.001,-0.0003]).unwrap();
+        let b = modal.step(input,[0.001,-0.0003]).unwrap();
+        for (a,b) in a.blades.iter().zip(&b.modes) {
+            assert!((a.displacement_m-b.displacement_m).abs()<1e-11);
+            assert!((a.velocity_m_s-b.velocity_m_s).abs()<1e-6);
+        }
+        assert!((a.aperture.jet_flow_m3_s-b.aperture.jet_flow_m3_s).abs()<1e-12);
+        assert_account(&b.aperture);
+    }
+    let state = modal.modal_states().to_vec();
+    assert!(modal.set_viscous_slit(law).is_err());
+    assert_eq!(modal.modal_states(),state);
 }
 
 #[test]

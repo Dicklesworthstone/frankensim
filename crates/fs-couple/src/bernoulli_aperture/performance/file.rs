@@ -10,6 +10,9 @@
 //! TOTAL gaps. Both blades use that same source and equal mirrored histories.
 //! Force records, when present, prescribe TOTAL force equally split between
 //! the blades. Asymmetric specimens/loads are outside this declared subspace.
+//! An optional `slit_length LENGTH_M` record immediately after `aperture`
+//! selects spatial viscous channel flow. Its viscosity comes from the actual
+//! inlet gas, including regional composition and temperature declarations.
 mod force;
 use super::force::ApertureForceProgram;
 use super::{AperturePerformance, AperturePerformanceConfig, ApertureObservation, CoupledAperture};
@@ -21,6 +24,7 @@ use crate::bernoulli_aperture::plate::closure::PlateClosureSpec;
 use crate::bernoulli_aperture::tube::{ApertureTube, UniformTubeSpec};
 use crate::bernoulli_aperture::network::{ApertureNetwork, NetworkNode, TubeNetworkSpec, TubeSection};
 use crate::bernoulli_aperture::radiation::BaffledRadiationLoad;
+use crate::bernoulli_aperture::viscous::ViscousSlit;
 use crate::render::schedule::GestureCompileError;
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use fs_blake3::{ContentHash, hash_domain};
@@ -179,7 +183,8 @@ impl PlateValvePerformance {
         // constitutive loads still come from their original regional states.
         let duct=parsed.duct.prepare_in_exterior(&parsed.air,dt,parsed.observation,
             parsed.exterior.as_ref(),gate)?;
-        let inlet_density=duct.inlet_density(parsed.air.density)?;
+        let inlet_gas=duct.inlet_gas(parsed.air)?;
+        let inlet_density=inlet_gas.density;
         let z=duct.inlet_impedance(inlet_density)?;
         let observation=duct.observation;
         let radiation_load=duct.observed_radiation();
@@ -204,6 +209,11 @@ impl PlateValvePerformance {
             .map_err(PlateValveInputError::Physics)?;
         if let Some((material,initial))=parsed.relaxation {
             valve=valve.with_plate_relaxation(material,initial).map_err(PlateValveInputError::Physics)?;
+        }
+        if let Some(length_m)=parsed.slit_length_m {
+            let slit=ViscousSlit::from_gas(&inlet_gas,length_m)
+                .map_err(PlateValveInputError::Physics)?;
+            valve.set_viscous_slit(slit).map_err(PlateValveInputError::Physics)?;
         }
         let memory_branches=valve.relaxation().map_or(0,|r|r.branches().len());
         let system=duct.bind(valve)?;
@@ -284,6 +294,7 @@ struct Parsed {
     chart: PlateChart,
     plate: PlateApertureOptions,
     symmetry: PlateApertureSymmetry,
+    slit_length_m: Option<f64>,
     initial: ApertureState,
     closure: PlateClosureSpec,
     relaxation: Option<(PlateRelaxationSpec, InitialApertureMemory)>,
@@ -370,6 +381,15 @@ impl Parsed {
             Some(_) => return Err(bad(r.line,"aperture symmetry must be single-blade or symmetric-opposed-pair")),
         };
         row.finish()?;
+        let slit_length_m=if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("slit_length") {
+            let mut row=r.row("slit_length")?;
+            let length_m=row.scalar()?;
+            row.finish()?;
+            if length_m<=0.0 {
+                return Err(bad(r.line,"viscous slit channel length must be positive"));
+            }
+            Some(length_m)
+        } else {None};
         let mut row=r.row("initial")?;
         let initial=ApertureState{opening_m:row.scalar()?,opening_velocity_m_s:row.scalar()?};
         row.finish()?;
@@ -480,7 +500,7 @@ impl Parsed {
         if r.lines.next().is_some() {return Err(bad(r.line+1,"unexpected trailing geometry record"));}
         let config=AperturePerformanceConfig{sample_rate_hz:rate,samples,max_block,max_compile_work,max_controls};
         let schedule=decode_schedule(gestures)?;
-        Ok(Self{gas_records,config,full_scale_pa,air,duct,exterior,observation,chart,plate,symmetry,initial,closure,relaxation,forces,max_angular_step,
+        Ok(Self{gas_records,config,full_scale_pa,air,duct,exterior,observation,chart,plate,symmetry,slit_length_m,initial,closure,relaxation,forces,max_angular_step,
             schedule,nodes:node_count,triangles:triangle_count,sections:section_count})
     }
 }

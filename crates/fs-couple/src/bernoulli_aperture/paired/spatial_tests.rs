@@ -64,6 +64,37 @@ fn model(z:f64) -> PairedAperture {
 }
 
 #[test]
+fn material_viscosity_and_local_gaps_share_both_blade_histories_and_contact() {
+    let mut viscous = model(1e6);
+    viscous.set_material_viscous_slit(0.002).unwrap();
+    let law = viscous.viscous_slit().unwrap();
+    assert_eq!(law.gas(), Some(&gas()));
+    let mut differs_from_area_equivalent = false;
+    let mut partial_contact = false;
+    for sample in 0..800 {
+        let before = viscous.blades.map(|s|s.displacement_m);
+        let frame = viscous.step(ApertureDrive { upstream_pressure_pa: if sample<600 {50.0} else {0.0},
+            ..ApertureDrive::default() }).unwrap();
+        let after = frame.blades.map(|s|s.displacement_m);
+        let middle = [f64::midpoint(before[0],after[0]),f64::midpoint(before[1],after[1])];
+        let closure = viscous.plate_closure().unwrap();
+        let flow = closure.viscous_flow(law,middle,gas().density,frame.pressure_drop_pa).unwrap();
+        assert_eq!(flow.flow_m3_s,frame.aperture.jet_flow_m3_s);
+        let equivalent = law.evaluate(viscous.spec.width_m,frame.aperture.midpoint_opening_m,
+            gas().density,frame.pressure_drop_pa).unwrap().flow_m3_s;
+        differs_from_area_equivalent |= (equivalent-flow.flow_m3_s).abs()>1e-9*flow.flow_m3_s.abs();
+        partial_contact |= closure.probe(after).unwrap().active_lay_points>0 && flow.flow_m3_s!=0.0;
+        let scale = frame.aperture.stored_energy_j+frame.aperture.storage_change_j.abs()
+            +frame.aperture.dissipated_energy_j+frame.aperture.pressure_work_j.abs();
+        assert!(frame.aperture.balance_residual_j().abs()<3e-9*scale.max(1e-30));
+        assert!(frame.momentum_residual_n.iter().all(|r|r.abs()<1e-9));
+    }
+    assert!(differs_from_area_equivalent && partial_contact);
+    assert!(viscous.blade_relaxation(0).unwrap().dissipated_energy_j()>0.0);
+    assert!(viscous.blade_relaxation(1).unwrap().dissipated_energy_j()>0.0);
+}
+
+#[test]
 fn spatial_contact_flow_and_both_material_histories_share_one_accepted_step() {
     let mut m=model(1e6);
     let mut contacted=false; let mut partially_open=false;

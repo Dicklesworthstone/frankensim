@@ -28,6 +28,7 @@ pub(super) fn solve(
     free: &[f64], mobility: &[f64], area: &[f64], gap_shape: &[f64],
     gap: f64, dt: f64, width: f64, rho: f64, z: f64, drive: ApertureDrive,
     limits: PairedApertureLimits, obstacle: &Obstacle,
+    viscous_slit: Option<super::viscous::ViscousSlit>,
 ) -> Result<UniformTrial, AcousticRealizeError> {
     let n = free.len();
     if n == 0 || n > MAX_MODES || [mobility.len(), area.len(), gap_shape.len()]
@@ -41,7 +42,7 @@ pub(super) fn solve(
         contact_response[i] = mobility[i]*gap_shape[i];
     }
     solve_response(free, &pressure_response[..n], &contact_response[..n], area,
-        gap_shape, gap, dt, width, rho, z, drive, limits, obstacle)
+        gap_shape, gap, dt, width, rho, z, drive, limits, obstacle, viscous_slit)
 }
 
 /// Same scalar contact/flow solve with an already condensed FULL mechanical
@@ -63,6 +64,7 @@ pub(super) fn solve_response(
     drive: ApertureDrive,
     limits: PairedApertureLimits,
     obstacle: &Obstacle,
+    viscous_slit: Option<super::viscous::ViscousSlit>,
 ) -> Result<UniformTrial, AcousticRealizeError> {
     let n = free.len();
     if n == 0 || n > MAX_MODES
@@ -97,8 +99,10 @@ pub(super) fn solve_response(
         }
         let source = (drive.upstream_pressure_pa - 2.0*drive.incoming_pressure_pa - z*moving)/denominator;
         let opening = f64::midpoint(gap, next_gap).max(0.0);
-        let dp = super::moving::fixed_opening_pressure_drop(width, opening, rho,
-            z/denominator, source)?;
+        let dp = match viscous_slit {
+            Some(law) => law.fixed_opening_pressure_drop(width, opening, rho, z/denominator, source)?,
+            None => super::moving::fixed_opening_pressure_drop(width, opening, rho, z/denominator, source)?,
+        };
         let mut residual = velocity;
         let mut scale = velocity.abs();
         for i in 0..n {

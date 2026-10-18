@@ -39,6 +39,9 @@ impl PairedAperture {
         let plates=self.plates.as_ref().ok_or_else(||invalid("spatial paired closure requires both original source plates"))?;
         let closure=plates[0].compile_paired_closure(&plates[1],spec)?;
         closure.validate_displacements(self.blades.map(|s|s.displacement_m))?;
+        if let Some(law) = self.viscous_slit {
+            closure.viscous_flow(law, self.blades.map(|s|s.displacement_m), self.spec.density_kg_m3, 0.0)?;
+        }
         self.closure=Some(Box::new(closure));
         self.validate_state(self.blades)?;
         self.validate_energy(self.stored_energy_j())?;
@@ -74,11 +77,18 @@ impl PairedAperture {
             let base=[free[0]+mobility[0]*contact.forces_n[0],free[1]+mobility[1]*contact.forces_n[1]];
             let moving=drive.body_flow_m3_s-areas[0]*base[0]-areas[1]*base[1];
             let source=(drive.upstream_pressure_pa-2.0*drive.incoming_pressure_pa-z*moving)/denominator;
-            let opening=closure.open_area_m2(middle)?/self.spec.width_m;
-            // The same algebraic Bernoulli/swept-volume elimination as the
-            // uniform path; no old pressure or guessed shared contact force.
-            let dp=crate::bernoulli_aperture::moving::fixed_opening_pressure_drop(
-                self.spec.width_m,opening,self.spec.density_kg_m3,z/denominator,source)?;
+            // Eliminate the same mechanical swept response for either channel
+            // law. Viscous resistance uses local gaps, not the area-equivalent
+            // opening that suffices only for the Bernoulli contribution.
+            let dp = match self.viscous_slit {
+                Some(law) => crate::bernoulli_aperture::viscous::profiled_pressure_drop(z/denominator, source,
+                    |dp| closure.viscous_flow(law, middle, self.spec.density_kg_m3, dp))?,
+                None => {
+                    let opening = closure.open_area_m2(middle)?/self.spec.width_m;
+                    crate::bernoulli_aperture::moving::fixed_opening_pressure_drop(
+                        self.spec.width_m, opening, self.spec.density_kg_m3, z/denominator, source)?
+                }
+            };
             let predicted=[base[0]-mobility[0]*areas[0]*dp,base[1]-mobility[1]*areas[1]*dp];
             let residual=[velocity[0]-predicted[0],velocity[1]-predicted[1]];
             let scale=[velocity[0].abs()+predicted[0].abs()+free[0].abs(),

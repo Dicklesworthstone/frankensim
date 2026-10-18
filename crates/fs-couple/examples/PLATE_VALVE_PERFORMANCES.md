@@ -34,6 +34,7 @@ tube LENGTH_M RADIUS_M TERMINAL_REFLECTION LENGTH_ERROR_M MAX_WAVE_BYTES
 observation inlet|terminal
 plate clamped|simply-supported PRETENSION_N_PER_M DAMPING_RATIO LOW_HZ HIGH_HZ MODE_INDEX MAX_ANGULAR_STEP
 aperture REST_COORDINATE_M MAX_SLIT_VARIATION MAX_SLOPE
+# Optional: slit_length STREAMWISE_LENGTH_M
 initial OPENING_COORDINATE_M VELOCITY_M_PER_S
 contact K_PA_PER_M_ALPHA ALPHA CHI_S_PER_M MAX_PENETRATION_M
 source SINGLE_TOKEN_SOURCE_LABEL
@@ -66,6 +67,26 @@ opening coordinate is the retained structural coordinate, not necessarily the
 physical mean clearance of an asymmetric slit. Contact provenance retains the
 source label as supplied numeric data; it does not mint material-identification
 or measured-data authority.
+
+To include viscous flow through the reed channel, insert `slit_length 0.001`
+immediately after the `aperture` record, replacing that illustrative one-millimetre
+length with the specimen's measured streamwise channel length. The solver uses
+the actual local positive gap along each slit edge. The gap resistance therefore
+changes as the blade moves or contacts its lay. It solves viscous pressure loss
+and separated outflow together with the same-sample bore feedback.
+
+Viscosity and density come from the same inlet gas. A regional gas declaration
+on the inlet section takes precedence over the ambient default, and a separate
+exterior gas changes radiation without changing the channel medium. Temperature
+and mixture changes consequently update channel flow as well as acoustic
+propagation. The optional record also works with `symmetric-opposed-pair`; the
+declared gap is the total opening between the blades and is counted once.
+
+The WAV sidecar records the selected `slit_flow` law, channel length and resolved
+viscosity. Omitting the record retains the existing inviscid channel. This is a
+quasi-steady Newtonian slit with separated outflow, not resolved unsteady channel
+flow, pressure recovery or validation of an oboe/clarinet specimen. The supplied
+solid sections and their constitutive memory remain independent material inputs.
 
 Immediately after `schedule`, append the existing exact canonical bytes of one
 `GestureSchedule` blowing-pressure track. The example uses 700 Hz controls on
@@ -139,6 +160,6 @@ The accepted prefix and pending controls remain inspectable, never reported as a
 complete successful callback.
 
 This remains one linear structural mode with uniform face pressure, a fixed lay
-and quasisteady Bernoulli flow. Supplied constitutive data is not wet-cane
+and quasisteady gap flow. Supplied constitutive data is not wet-cane
 identification, mesh conformity is the caller's responsibility, and there is no
 new continuum-convergence, calibrated-microphone or real-time-throughput claim.

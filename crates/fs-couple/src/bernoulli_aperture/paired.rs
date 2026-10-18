@@ -300,6 +300,7 @@ pub struct PairedAperture {
     contact_storage: ContactStorage,
     plates: Option<Box<[PlateApertureReduction; 2]>>,
     gas: Option<GasState>,
+    viscous_slit: Option<super::viscous::ViscousSlit>,
     relaxation: [Option<ApertureRelaxation>; 2],
     closure: Option<Box<PairedPlateClosure>>,
     exact: Option<[ExactBlade; 2]>,
@@ -371,7 +372,7 @@ impl PairedAperture {
             BladePropagator::ExactZoh => Some([ExactBlade::new(&spec.blades[0], spec.time_step_s)?,
                 ExactBlade::new(&spec.blades[1], spec.time_step_s)?]),
         };
-        let model = Self { spec, blades, contact, contact_storage, plates: None, gas: None, relaxation: [None, None], closure: None, exact, samples: 0 };
+        let model = Self { spec, blades, contact, contact_storage, plates: None, gas: None, viscous_slit: None, relaxation: [None, None], closure: None, exact, samples: 0 };
         model.admit_linear_clock()?;
         model.validate_state(blades)?;
         Ok(model)
@@ -411,6 +412,34 @@ impl PairedAperture {
         model.validate_state(states)?;
         Ok(model)
     }
+
+    /// Select one common viscous channel before the first accepted step. Both
+    /// independent blades share its pressure and flow; width is counted once.
+    pub fn set_viscous_slit(&mut self, law: super::viscous::ViscousSlit)
+        -> Result<(), AcousticRealizeError>
+    {
+        if self.samples != 0 {
+            return Err(invalid("paired viscous slit must be selected before the first accepted sample"));
+        }
+        match &self.closure {
+            Some(closure) => { closure.viscous_flow(law, self.blades.map(|s| s.displacement_m),
+                self.spec.density_kg_m3, 0.0)?; }
+            None => { law.evaluate(self.spec.width_m, self.gap(self.blades).max(0.0), self.spec.density_kg_m3, 0.0)?; }
+        }
+        self.viscous_slit = Some(law);
+        Ok(())
+    }
+
+    /// Derive viscosity from the retained gas, preserving its material identity.
+    /// The shared streamwise channel length is supplied geometry, not a preset.
+    pub fn set_material_viscous_slit(&mut self, length_m: f64) -> Result<(), AcousticRealizeError> {
+        let gas = self.gas.as_ref().ok_or_else(|| invalid("paired channel requires its retained material gas"))?;
+        self.set_viscous_slit(super::viscous::ViscousSlit::from_gas(gas, length_m)?)
+    }
+
+    /// Original explicit or material-bound channel law, shared by both blades.
+    #[must_use]
+    pub const fn viscous_slit(&self) -> Option<super::viscous::ViscousSlit> { self.viscous_slit }
 
     /// Attach regional hereditary bending to ONE original source blade, before
     /// any accepted step. Call separately for the other blade; its material,
@@ -615,8 +644,12 @@ impl PairedAperture {
                 // Eliminate the independent pressure/swept-motion response first.
                 // This is the ORIGINAL continuous Bernoulli junction at its reduced
                 // impedance, not an extra source or a fixed-opening approximation.
-                let dp = super::moving::fixed_opening_pressure_drop(self.spec.width_m, opening,
-                    self.spec.density_kg_m3, z/denominator, source)?;
+                let dp = match self.viscous_slit {
+                    Some(law) => law.fixed_opening_pressure_drop(self.spec.width_m, opening,
+                        self.spec.density_kg_m3, z/denominator, source)?,
+                    None => super::moving::fixed_opening_pressure_drop(self.spec.width_m, opening,
+                        self.spec.density_kg_m3, z/denominator, source)?,
+                };
                 let velocities = [base[0]-mobility[0]*b[0].pressure_area_m2*dp,
                     base[1]-mobility[1]*b[1].pressure_area_m2*dp];
                 let residual = velocity - velocities[0] - velocities[1];
@@ -678,7 +711,17 @@ impl PairedAperture {
             },
         });
         self.validate_state(next)?;
-        let jet = super::moving::volume_flow(self.spec.width_m,opening,trial.dp,self.spec.density_kg_m3);
+        let jet = match self.viscous_slit {
+            Some(law) => match &self.closure {
+                Some(closure) => {
+                    let middle = [f64::midpoint(old[0].displacement_m, after[0]),
+                        f64::midpoint(old[1].displacement_m, after[1])];
+                    closure.viscous_flow(law, middle, self.spec.density_kg_m3, trial.dp)?.flow_m3_s
+                }
+                None => law.evaluate(self.spec.width_m, opening, self.spec.density_kg_m3, trial.dp)?.flow_m3_s,
+            },
+            None => super::moving::volume_flow(self.spec.width_m,opening,trial.dp,self.spec.density_kg_m3),
+        };
         let swept = -b[0].pressure_area_m2*trial.velocity[0]-b[1].pressure_area_m2*trial.velocity[1];
         let no_drop = drive.upstream_pressure_pa - drive.incoming_pressure_pa;
         let load_pressure = z*(jet+swept+drive.body_flow_m3_s);

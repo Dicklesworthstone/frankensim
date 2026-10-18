@@ -292,18 +292,18 @@ impl DynamicAperture {
     /// viscosity or streamwise length. Tube/network owners retain this choice.
     ///
     /// # Errors
-    /// An already advanced model, spatially profiled closure, or unrepresentable
-    /// initial resistance. Area-equivalent gaps cannot represent h^-3 resistance.
+    /// An already advanced model or unrepresentable initial resistance. A spatial
+    /// closure integrates the actual positive local gaps, never area/width.
     /// A refusal leaves all physical parameters and accepted state unchanged.
     pub fn set_viscous_slit(&mut self, law: ViscousSlit) -> Result<(), AcousticRealizeError> {
         if self.accepted_steps != 0 {
             return Err(invalid("viscous slit law must be selected before the first accepted sample"));
         }
-        if self.closure.is_some() {
-            return Err(invalid("uniform viscous slit resistance cannot be applied to a spatially profiled closure"));
+        match &self.closure {
+            Some(closure) => { closure.viscous_flow(law, self.state.opening_m, self.spec.density_kg_m3, 0.0)?; }
+            None => { law.evaluate(self.spec.aperture.width_m, self.state.opening_m.max(0.0),
+                self.spec.density_kg_m3, 0.0)?; }
         }
-        law.evaluate(self.spec.aperture.width_m, self.state.opening_m.max(0.0),
-            self.spec.density_kg_m3, 0.0)?;
         self.viscous_slit = Some(law);
         Ok(())
     }
@@ -545,11 +545,16 @@ impl DynamicAperture {
             propagator.step_with_junction(self.reed, self.spec.density_kg_m3,
                 self.spec.impedance_pa_s_m3, drive.incoming_pressure_pa, drive.upstream_pressure_pa,
                 old.opening_m, old.opening_velocity_m_s, dt, drive.body_flow_m3_s, &self.lay,
-                |opening| self.flow_opening(opening),
+                |opening| Ok(opening),
                 if self.exact.is_none() && (has_memory || force_n != 0.0) { Some(&material_force) } else { None },
-                |opening, moving| law.characteristic_pressure(self.reed.width_m, opening,
-                    self.spec.density_kg_m3, self.spec.impedance_pa_s_m3,
-                    drive.incoming_pressure_pa, drive.upstream_pressure_pa, moving))?
+                |opening, moving| match &self.closure {
+                    Some(closure) => super::viscous::profiled_characteristic_pressure(
+                        self.spec.impedance_pa_s_m3, drive.incoming_pressure_pa, drive.upstream_pressure_pa, moving,
+                        |dp| closure.viscous_flow(law, opening, self.spec.density_kg_m3, dp)),
+                    None => law.characteristic_pressure(self.reed.width_m, opening.max(0.0),
+                        self.spec.density_kg_m3, self.spec.impedance_pa_s_m3,
+                        drive.incoming_pressure_pa, drive.upstream_pressure_pa, moving),
+                })?
         } else if let Some(blade) = &self.exact {
             // The prescribed force is held with the contact and pressure forces.
             crate::reed_bore::step_profiled_aperture(self.reed,self.spec.density_kg_m3,
@@ -589,8 +594,12 @@ impl DynamicAperture {
         let bore = outgoing + drive.incoming_pressure_pa;
         let dp = drive.upstream_pressure_pa - bore;
         let jet = match self.viscous_slit {
-            Some(law) => law.evaluate(self.reed.width_m, midpoint_opening_m,
-                self.spec.density_kg_m3, dp)?.flow_m3_s,
+            Some(law) => match &self.closure {
+                Some(closure) => closure.viscous_flow(law, f64::midpoint(old.opening_m, opening),
+                    self.spec.density_kg_m3, dp)?.flow_m3_s,
+                None => law.evaluate(self.reed.width_m, midpoint_opening_m,
+                    self.spec.density_kg_m3, dp)?.flow_m3_s,
+            },
             None => super::moving::volume_flow(
                 self.reed.width_m, midpoint_opening_m, dp, self.spec.density_kg_m3,
             ),

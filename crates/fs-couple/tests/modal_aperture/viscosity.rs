@@ -12,6 +12,26 @@ fn coupled(s: ModalApertureSpec, c: Vec<f64>) -> ModalAperture {
 }
 
 #[test]
+fn signed_modes_full_material_damping_and_channel_viscosity_close_one_work_balance() {
+    let mut s = undamped(); s.rest_opening_m = 4e-5;
+    let mut aperture = coupled(s, matrix());
+    let law = fs_couple::bernoulli_aperture::viscous::ViscousSlit::new(1.81e-5, 0.001).unwrap();
+    aperture.set_viscous_slit(law).unwrap();
+    for sample in 0..256 {
+        let input = drive(if sample<192 {2000.0} else {-100.0});
+        let frame = aperture.step(input,[0.001,-0.0003]).unwrap();
+        let expected = law.evaluate(aperture.spec().width_m,frame.aperture.midpoint_opening_m,
+            aperture.spec().density_kg_m3,frame.pressure_drop_pa).unwrap();
+        assert_eq!(frame.aperture.jet_flow_m3_s,expected.flow_m3_s);
+        assert!(frame.momentum_residual_n.iter().all(|r|r.abs()<1e-8));
+        let scale = frame.aperture.storage_change_j.abs()+frame.aperture.dissipated_energy_j
+            +frame.aperture.pressure_work_j.abs()+frame.aperture.mechanical_work_j.abs();
+        assert!(frame.aperture.balance_residual_j().abs()<1e-8*scale.max(1e-30));
+    }
+    assert!(aperture.modal_states().iter().all(|m|m.displacement_m!=0.0));
+}
+
+#[test]
 fn full_viscosity_matches_manufactured_simultaneous_momentum_flow_and_work() {
     let mut s = undamped(); s.modes.truncate(2);
     s.modes[0].force_projection = [1.0,0.0];
