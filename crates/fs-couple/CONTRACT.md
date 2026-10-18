@@ -2651,3 +2651,36 @@ heat or source-port work. Incompatible ideal-source constraints, incomplete or
 duplicate bindings, unrepresentable energy and cancellation refuse atomically.
 C/L remain fixed within an ordinary circuit step. This linear lossless update
 does not supply continuous thermal/mechanical feedback or switching impulses.
+
+## Reciprocal material capacitor motion
+
+`material_circuit::motion::MaterialCapacitorMotion` composes the existing
+source-bound RLC circuit, uniform dielectric capacitor and regional rigid-body
+inertia. The active capacitor's original quadratic term is replaced exactly once
+by q²d/(2 epsilon A); all other C/L storage and original J/R/G topology are retained.
+The same descriptor solve advances charge, flux, gap and momentum. Voltage and
+attractive force are derivatives of the same field energy; mass comes only from
+`ResolvedBody`. Changing supported dielectric or electrode material data changes
+the coupled motion and electrical history without changing a physics law.
+
+Original electrical ports keep their order and an external force port appends.
+Bulk conductor and electrical contact losses reuse the existing native-effort
+accounting and remain separately sourced heat destinations. Explicit refreshed
+contacts must retain their IDs/branch assignments. Their losses are counted once.
+The combined field/kinetic storage, original source work, force times actual
+displacement, and heat must close before any joint candidate is returned.
+
+The endpoint retains exact proposed charge/flux and rechecks the original circuit
+constraints at the new gap. Incompatible ideal clamps, unsupported source data,
+open gap bounds, unrepresentable values, balance failures and cancellation refuse
+without partial publication or charge projection. Native domain-aware finite
+differences shrink unsupported probes rather than expanding material validity.
+A validity-wide constant dielectric coefficient, fixed area, ideal electrodes
+and a rigid translational guide are required. Thermal dielectric curves require
+field entropy before electrocaloric coupling; fringing, breakdown, impact,
+dielectric loss and electrode deformation are not inferred.
+
+Focused regressions cover data-only density/permittivity swaps, both charge
+signs and zero-charge motion, nontrivial driven RLC/contact topology, a 100 µm
+gap at 100 V, and atomic constraint/domain refusal. Native execution is pending;
+source review and independent numerical oracles are not a Rust test pass.

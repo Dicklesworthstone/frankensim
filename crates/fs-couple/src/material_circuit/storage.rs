@@ -72,7 +72,7 @@ fn invalid(message: &'static str) -> MaterialCircuitError {
     MaterialCircuitError::Invalid(message)
 }
 
-fn lower(
+pub(super) fn lower(
     graph: &CircuitGraph,
     sources: &mut [MaterialStorage],
 ) -> Result<CircuitGraph, MaterialCircuitError> {
