@@ -25,7 +25,11 @@ pub fn step_candidate<'t, 'm, S, E>(
     resolve: impl Fn(&DepositionSimulation<'t>) -> Result<ThermalCoefficients<S>, E>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<StripEnthalpyCandidate<'t, 'm, S>, StripEnthalpyError<E>> {
-    let numerical = |e:FiniteDifferenceError<StripEnthalpyError<E>>| match e {\n        FiniteDifferenceError::Source(e)=>e,\n        FiniteDifferenceError::Invalid(s)=>StripEnthalpyError::Invalid(s),\n    };\n    let cancel = RefCell::new(cancelled);
+    let numerical = |e:FiniteDifferenceError<StripEnthalpyError<E>>| match e {
+        FiniteDifferenceError::Source(e)=>e,
+        FiniteDifferenceError::Invalid(s)=>StripEnthalpyError::Invalid(s),
+    };
+    let cancel = RefCell::new(cancelled);
     let checkpoint = || if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
     checkpoint()?;
     config.newton.validate()?;
