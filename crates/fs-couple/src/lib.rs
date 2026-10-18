@@ -70,6 +70,7 @@ pub mod sheet_plate;
 pub mod speaker;
 pub mod stribeck_friction;
 pub mod string_specimen;
+pub mod strip_enthalpy;
 /// Full tensor material memory coupled to structural inertia and force ports.
 pub mod tensor_material;
 pub mod thin_plate;

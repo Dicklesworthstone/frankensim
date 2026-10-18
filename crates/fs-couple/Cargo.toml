@@ -34,6 +34,7 @@ fs-ports = { path = "../fs-ports" }
 fs-qty = { path = "../fs-qty" }
 fs-rand = { path = "../fs-rand" }
 fs-scenario = { path = "../fs-scenario" }
+fs-solid = { path = "../fs-solid" }
 fs-solver = { path = "../fs-solver" }
 fs-thermal = { path = "../fs-thermal" }
 fs-tribo = { path = "../fs-tribo" }
@@ -55,7 +56,6 @@ fs-material = { path = "../fs-material" }
 fs-modal = { path = "../fs-modal" }
 fs-plate = { path = "../fs-plate" }
 fs-query = { path = "../fs-query" }
-fs-solid = { path = "../fs-solid" }
 fs-solver = { path = "../fs-solver" }
 fs-evidence = { path = "../fs-evidence" }
 fs-thermochem = { path = "../fs-thermochem" }
