@@ -12,6 +12,9 @@
 /// Footprint-relative motion limits for scan timestep selection.
 pub mod motion;
 
+/// Instantaneous normalized source derivatives for scan optimization.
+pub mod sensitivity;
+
 use super::{events, invalid, poll};
 use crate::{ConductionError, ConductionMesh, ScalarField, COMPONENT_POWER_DIMS};
 use fs_exec::Cx;
