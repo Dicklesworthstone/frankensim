@@ -74,3 +74,38 @@ fn a_silent_key_stays_attached_while_held_and_returns_when_released() {
     assert!(p.hammer_force(64).is_some());
     assert_eq!(p.counters.note_ons, 2);
 }
+
+#[test]
+fn a_silent_key_stays_attached_while_anything_holds_its_dampers_up() {
+    let mut block = vec![0.0_f32; RATE as usize / 4];
+    // Pressed silently, caught by the sostenuto, released: nothing else plays, so it has no
+    // energy at all, yet its dampers are up and it stays attached until the rod rises.
+    let mut p = LivePiano::new(&Description::embedded().unwrap(), Config::live(RATE)).unwrap();
+    p.silent_key_down(62).unwrap();
+    p.render(&mut block[..64]);
+    p.set_sostenuto(true);
+    p.note_off(62);
+    for _ in 0..4 {
+        p.render(&mut block);
+    }
+    assert_eq!(p.sounding_keys(), 1, "caught by the sostenuto");
+    p.set_sostenuto(false);
+    p.render(&mut block);
+    assert_eq!(p.sounding_keys(), 0, "the rod rose: damped and quiet, it returns");
+    // The same under the full sustain pedal.
+    p.set_sustain(1.0).unwrap();
+    p.silent_key_down(62).unwrap();
+    p.render(&mut block[..64]);
+    p.note_off(62);
+    p.render(&mut block);
+    assert_eq!(p.sounding_keys(), 1, "held up by the sustain pedal");
+    p.set_sustain(0.0).unwrap();
+    p.render(&mut block);
+    assert_eq!(p.sounding_keys(), 0);
+    // Above E6 there is no damper: once released, a quiet silent key returns as any key does.
+    p.silent_key_down(100).unwrap();
+    p.render(&mut block[..64]);
+    p.note_off(100);
+    p.render(&mut block);
+    assert_eq!(p.sounding_keys(), 0, "a released key without dampers is not kept forever");
+}
