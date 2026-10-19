@@ -15,6 +15,66 @@ fn crossings_hz(x: &[f64], rate: f64) -> f64 {
 
 const NO_LOSS: [(f64, f64); 2] = [(100.0, 1e12), (1000.0, 1e12)];
 
+fn point_contact_plate() -> Body {
+    Body::plate("contact", &PlateSpec {
+        radius: 0.1, hole: 0.0, grid: 0.02, edge: Edge::Free,
+        thickness: &|_| 1e-3, rest_height: &|_| 0.0, young: 1e11,
+        poisson: 0.33, density: 8600.0, tension: 0.0, bending: true,
+        nonlinear: Nonlinear::None, t60: NO_LOSS, support: None, muffle: None,
+    }).unwrap()
+}
+
+#[test]
+fn point_contact_retains_its_position_and_reconstructs_an_affine_surface() {
+    let b = point_contact_plate();
+    let (x, y) = (1.35 * b.h, -0.4 * b.h);
+    let footprint = b.footprint(x, y, 0.0);
+    assert_eq!(footprint.len(), 4);
+    assert!(footprint.iter().all(|&(_, w)| w > 0.0 && w < 1.0));
+    let sum: f64 = footprint.iter().map(|&(_, w)| w).sum();
+    let px: f64 = footprint.iter().map(|&(i, w)| w * b.xy[i][0]).sum();
+    let py: f64 = footprint.iter().map(|&(i, w)| w * b.xy[i][1]).sum();
+    let surface: f64 = footprint.iter().map(|&(i, w)| w * (2.0 + 3.0 * b.xy[i][0] - 4.0 * b.xy[i][1])).sum();
+    assert!((sum - 1.0).abs() < 1e-14);
+    assert!((px - x).abs() < 1e-14 && (py - y).abs() < 1e-14);
+    assert!((surface - (2.0 + 3.0 * x - 4.0 * y)).abs() < 1e-14);
+}
+
+#[test]
+fn point_contact_moves_continuously_across_the_nearest_node_boundary() {
+    let b = point_contact_plate();
+    let centres: Vec<f64> = [0.49, 0.51].iter().map(|x| {
+        b.footprint(x * b.h, 0.0, 0.0).iter().map(|&(i, w)| w * b.xy[i][0]).sum()
+    }).collect();
+    assert!((centres[1] - centres[0] - 0.02 * b.h).abs() < 1e-14);
+    let node = b.node_at(b.h, -b.h).unwrap();
+    assert_eq!(b.footprint(b.h, -b.h, 0.0), vec![(node, 1.0)]);
+}
+
+#[test]
+fn interpolated_point_force_and_surface_velocity_do_the_same_work() {
+    let b = point_contact_plate();
+    let (x, y, force) = (-0.3 * b.h, 1.7 * b.h, 23.0);
+    let footprint = b.footprint(x, y, 0.0);
+    let nodal_work: f64 = footprint.iter().map(|&(i, w)| {
+        force * w * (0.3 + 2.0 * b.xy[i][0] - b.xy[i][1])
+    }).sum();
+    let point_work = force * (0.3 + 2.0 * x - y);
+    assert!((nodal_work - point_work).abs() < 1e-13);
+}
+
+#[test]
+fn finite_contact_faces_and_incomplete_grid_cells_keep_their_existing_rules() {
+    let b = point_contact_plate();
+    let face = b.footprint(0.0, 0.0, 1.1 * b.h);
+    assert_eq!(face.len(), 5);
+    assert!(face.iter().all(|&(_, w)| w == 0.2));
+    // The free-edge plate retains the union of complete curvature stencils;
+    // its axial grid boundary is one node inside this geometric radius.
+    let nearest = b.node_at(4.0 * b.h, 0.0).unwrap();
+    assert_eq!(b.footprint(6.0 * b.h, 0.0, 0.0), vec![(nearest, 1.0)]);
+}
+
 #[test]
 fn membrane_fundamental_matches_bessel_zero() {
     let (r, t, th) = (0.15, 2000.0, 2.54e-4);

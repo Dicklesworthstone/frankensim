@@ -665,8 +665,39 @@ impl Body {
         [d(at(1, 0), at(-1, 0)), d(at(0, 1), at(0, -1))]
     }
 
-    /// Nodes within `radius` of (x, y), equally weighted (a felt face); at least the nearest node.
+    /// A point contact uses bilinear grid weights, preserving its position and total force.
+    /// A finite felt face uses equally weighted nodes within `radius`. At an incomplete
+    /// boundary cell, retain the nearest-node fallback rather than extrapolating off the body.
     pub fn footprint(&self, x: f64, y: f64, radius: f64) -> Vec<(usize, f64)> {
+        if radius == 0.0 && (x / self.h).abs() < i64::MAX as f64 && (y / self.h).abs() < i64::MAX as f64 {
+            let (gx, gy) = (x / self.h, y / self.h);
+            let (i, j) = (gx.floor() as i64, gy.floor() as i64);
+            let (tx, ty) = (gx - i as f64, gy - j as f64);
+            let corners = [
+                ((i, j), (1.0 - tx) * (1.0 - ty)),
+                ((i + 1, j), tx * (1.0 - ty)),
+                ((i, j + 1), (1.0 - tx) * ty),
+                ((i + 1, j + 1), tx * ty),
+            ];
+            let mut point = Vec::with_capacity(4);
+            let mut complete = true;
+            for (cell, weight) in corners {
+                if weight == 0.0 {
+                    continue;
+                }
+                if let Some(&node) = self.grid_index.get(&cell) {
+                    point.push((node, weight));
+                } else {
+                    complete = false;
+                    break;
+                }
+            }
+            if complete && !point.is_empty() {
+                // The same weights read the contact displacement and distribute its
+                // force, so interpolation and loading remain reciprocal in work.
+                return point;
+            }
+        }
         let mut v: Vec<usize> = (0..self.n)
             .filter(|&k| ((self.xy[k][0] - x).powi(2) + (self.xy[k][1] - y).powi(2)).sqrt() <= radius)
             .collect();

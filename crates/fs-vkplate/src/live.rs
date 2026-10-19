@@ -51,7 +51,6 @@ impl Live {
             c.grid *= scale;
             Ok((kit::cymbal(&c, &[])?, c.radius, 0.0))
         };
-        let rim = Law::Power { k: 2.0e9, alpha: 1.5, mu: 3.0 };
         let hat = kit::hihat_spec().0.radius;
         let (mut p, radius, foot) = match piece {
             "kick" => drum(kit::kick())?,
@@ -59,8 +58,8 @@ impl Live {
             "snare-off" => drum(kit::snare_wires_off())?,
             "tom-12" => drum(kit::tom(12.0))?,
             "tom-14" => drum(kit::tom(14.0))?,
-            "hihat-closed" => (kit::hihat_grid(0.0, 80.0, &[], rim, 0.8, scale)?, hat, 0.0),
-            "hihat-open" => (kit::hihat_grid(0.002, 0.0, &[], rim, 0.8, scale)?, hat, 0.0),
+            "hihat-closed" => (kit::hihat_scaled(0.0, 80.0, &[], scale)?, hat, 0.0),
+            "hihat-open" => (kit::hihat_scaled(0.002, 0.0, &[], scale)?, hat, 0.0),
             "crash" => cym(kit::crash())?,
             "ride" => cym(kit::ride())?,
             other => return Err(format!("unknown piece {other}")),
@@ -189,6 +188,22 @@ impl Live {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_hats_keep_the_offline_models_rim_contact_law() {
+        for (name, gap, pedal) in [("hihat-closed", 0.0, 80.0), ("hihat-open", 0.002, 0.0)] {
+            let live = Live::new(name, 8.0).unwrap();
+            let reference = kit::hihat_scaled(gap, pedal, &[], 8.0).unwrap();
+            let expected = &reference.instrument.contacts;
+            assert!(!expected.is_empty());
+            assert_eq!(live.ins.contacts.len(), expected.len() + 1, "one extra live stick contact");
+            for (actual, expected) in live.ins.contacts.iter().zip(expected) {
+                let Law::Power { k: ak, alpha: aa, mu: am } = actual.law;
+                let Law::Power { k: ek, alpha: ea, mu: em } = expected.law;
+                assert_eq!((ak, aa, am), (ek, ea, em), "{name}: grid choice changed the rim material");
+            }
+        }
+    }
 
     #[test]
     fn every_piece_builds_at_the_live_grid_strikes_and_falls_asleep() {

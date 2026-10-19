@@ -27,7 +27,9 @@ on a 7 mm grid carries 3356 nodes and resolves the whole audio band.
 - **Loss**: `s0 + s1 beta^2` per mode, fixed by two (frequency, T60) points.
 - **Contacts** (stick, felt beater, snare wires, hi-hat rims): one-sided power laws with
   Hunt-Crossley loss, `f = K d^alpha (1 + mu d_dot)`, each solved implicitly as a monotone scalar
-  equation, so a hickory tip on bronze is stable at audio rates.
+  equation, so a hickory tip on bronze is stable at audio rates. A zero-radius tip uses bilinear
+  grid weights for both displacement and force; an incomplete boundary cell falls back to its
+  nearest node. A finite striker face retains its equal-weight footprint.
 - **Air**: a lumped adiabatic cavity couples a drum's two heads; each head's volume motion
   carries the radiation mass of a baffled piston (`8 rho a^3 / 3`, implicit); a monopole
   radiation resistance acts on the drum's NET volume flow (two heads moving the same way in
@@ -108,11 +110,12 @@ the open hat, whose rims seldom touch, is unchanged (balance 4.8 dB, decay 2.6 o
 time in WebAssembly), struck anywhere on its playing surface, stepped in 48 kHz blocks, and not
 stepped at all once its motion is 70 dB below its peak. On grids too coarse to put four nodes in
 the 6.5-20 mm annulus round a cymbal's hole, the felt washers and the hi-hat clutch spread their
-total stiffness and damping over the first ring of nodes instead. The live hi-hats keep the rim
-contact law from before the retuning (Hunt-Crossley `mu` 3.0 s/m, set in `live.rs`) and a 5 mm
-stick tip; the offline hat's lighter rim damping (0.08 s/m) and 4 mm tip were not carried over to
-real-time play (at 4x the two rim laws measure the same). They rub with the same friction as offline:
-at 4x / 4.5x the closed hat's 500 Hz-1 kHz T60 falls from 1.3-2.8 s to 0.5-0.7 s, and a stroke puts
+total stiffness and damping over the first ring of nodes instead. Live hi-hats share the offline
+rim contact law (Hunt-Crossley `mu` 0.08 s/m) through `kit::hihat_scaled`, with a 5 mm stick tip
+rather than the offline hat's 4 mm tip. They rub with the same friction as offline. The following
+live-grid measurements came from the earlier nearest-node build with `mu` 3.0 s/m; they have
+not been rerun for the shared-law, interpolated-tip source: at 4x / 4.5x the closed hat's
+500 Hz-1 kHz T60 falls from 1.3-2.8 s to 0.5-0.7 s, and a stroke puts
 87-91 % of its energy in its first 50 ms (65-75 % without; the real closed hat 90-93 %). On grids of
 22-25 mm it still carries little above ~3.5 kHz. A clone of a `Live` steps bit for bit as the original would, so the browser kit
 settles each grid once: it plays a clone kept from before the timing stroke.

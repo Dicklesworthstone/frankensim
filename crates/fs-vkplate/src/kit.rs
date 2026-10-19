@@ -415,8 +415,13 @@ pub fn hihat_spec() -> (CymbalSpec, CymbalSpec) {
 /// Hi-hat: two shells on one rod. `gap` is the rim opening (0 = closed under pedal force); with no
 /// pedal force the rims rest at most 0.14 mm apart (a sloshy open hat whose rims chatter).
 pub fn hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)]) -> Result<Piece, String> {
+    hihat_scaled(gap, pedal_n, hits, 1.0)
+}
+
+/// The same physical hi-hat and rim loss on an explicitly coarsened grid.
+pub fn hihat_scaled(gap: f64, pedal_n: f64, hits: &[(f64, f64)], scale: f64) -> Result<Piece, String> {
     // bronze rims pressed together: stiff and lightly damped so rim chatter radiates 4-16 kHz sizzle
-    hihat_with(gap, pedal_n, hits, Law::Power { k: 2.0e9, alpha: 1.5, mu: 0.08 }, 0.8)
+    hihat_grid(gap, pedal_n, hits, Law::Power { k: 2.0e9, alpha: 1.5, mu: 0.08 }, 0.8, scale)
 }
 
 /// The same with an explicit rim contact law and the inner edge of the contact annulus (fraction of the radius).
