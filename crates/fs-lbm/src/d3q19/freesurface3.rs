@@ -145,6 +145,22 @@ impl FsTile {
     }
 }
 
+/// Wet-cell state from the native sparse populations and tracked fill.
+///
+/// Velocity includes the same Guo half-force correction used by collision.
+/// Density and velocity are numerical lattice quantities, not a gas EOS.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FreeSurfaceSample3 {
+    /// Fluid or interface; gas cells have no liquid sample.
+    pub cell: Cell3,
+    /// Native tracked liquid fill fraction.
+    pub fill_fraction: f64,
+    /// Sum of the wet cell's populations (reference density one).
+    pub density: f64,
+    /// Lattice velocity including half the constant Guo force density.
+    pub velocity: [f64; 3],
+}
+
 /// 3-D free surface over a sparse active-tile D3Q19 grid.
 pub struct FreeSurface3 {
     grid: SparseGrid3,
@@ -189,6 +205,29 @@ fn lane_of(lx: usize, ly: usize, lz: usize) -> usize {
 }
 
 impl FreeSurface3 {
+    /// Bound used by the current smoothed-fill curvature approximation.
+    /// This numerical clamp is not an assertion about physical interface shape.
+    pub const CURVATURE_LIMIT: f64 = 1.0;
+
+    /// Sample a wet cell by global coordinates, using the native population
+    /// moments and Guo force convention. Gas, wall and out-of-domain return None.
+    /// This is a read-only diagnostic; it cannot change the solver trajectory.
+    #[must_use]
+    pub fn sample_at(&self, x: usize, y: usize, z: usize) -> Option<FreeSurfaceSample3> {
+        let (slot, lane) = self.grid.resolve_source(
+            i64::try_from(x).ok()?, i64::try_from(y).ok()?, i64::try_from(z).ok()?,
+        )?;
+        let key = self.grid.active_keys()[slot];
+        let cell = self.tiles.get(&key)?.cells[lane];
+        if cell == Cell3::Gas { return None; }
+        let (density, raw_velocity) = self.grid.cell_macros(slot, lane);
+        let (_, force) = self.grid.collision();
+        Some(FreeSurfaceSample3 {
+            cell, fill_fraction: self.fill(key, lane), density,
+            velocity: core::array::from_fn(|axis| raw_velocity[axis] + 0.5 * force[axis] / density),
+        })
+    }
+
     /// Build a free surface over an `nx × ny × nz` domain: `fluid`
     /// classifies each global cell; tiles containing fluid plus their
     /// in-domain neighbor margin are activated (the margin holds the gas
@@ -637,7 +676,7 @@ impl FreeSurface3 {
         let div = (nhat(1, 0, 0)[0] - nhat(-1, 0, 0)[0]) / 2.0
             + (nhat(0, 1, 0)[1] - nhat(0, -1, 0)[1]) / 2.0
             + (nhat(0, 0, 1)[2] - nhat(0, 0, -1)[2]) / 2.0;
-        div.clamp(-1.0, 1.0)
+        div.clamp(-Self::CURVATURE_LIMIT, Self::CURVATURE_LIMIT)
     }
 
     /// One free-surface step (2-D `step` port): refresh fill, collide wet

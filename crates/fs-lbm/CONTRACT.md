@@ -1628,3 +1628,38 @@ gate recorder does not yet own an LBM lane. Therefore this driver can collect
 the first honest rows, but cannot mint a citable pass or failure. Both reference
 ISA rows, floor authorization, durable LBM ledger recording, and sealed tile
 tuning remain explicit follow-on acceptance work.
+
+## Material-bound isothermal free surface
+
+`material::free_surface::plan_free_surface_from_material` lowers a frozen
+`fs_material::liquid::surface::ResolvedLiquidSurfaceState` into the existing
+`d3q19::freesurface3::FreeSurface3`. The source bundle requests density and the
+explicit dynamic/kinematic viscosity basis, plus surface tension only for
+`LiquidCapillarity::Sourced`. Thermal conductivity and heat capacity are not
+invented for an isothermal momentum solve. The complete source point and usage
+receipts retain temperature, pressure, composition and surface-environment
+conditions, including stated unknowns. An already resolved multiphysics bundle
+can be adopted intact; the surface consumer does not query independently or
+drop other properties. Constants and temperature-only curves are supported,
+including an explicitly typed absolute-temperature axis under any source name.
+Other response curves and dynamic frequency/rate/strain bounds refuse.
+
+The existing material momentum-scaling helper owns nu_lattice and tau for both
+thermal and free-surface consumers. Explicit dx/dt convert rho0*g to the native
+constant Guo force density and sigma to sigma/(rho0*(dx/dt)^2*dx). Construction
+bounds the full possible voxel domain, validates tile coordinates and refuses
+initial liquid inside a permanently solid tile. The source-bound wrapper returns
+native ledger, regional mass and unregioned carry in kg, and wet-cell density,
+Guo-corrected velocity and incompressible pressure perturbation in SI. Gas
+populations are never presented as liquid samples.
+
+The capillary reconstruction must remain positive at both signs of the native
+smoothed-fill curvature clamp; its identical bound is exposed as
+`FreeSurface3::CURVATURE_LIMIT`. This is a necessary numerical gate, not a
+capillary accuracy or stability certificate. The existing neutral/wetting ghosts
+remain explicit numerical scenario choices; no measured contact angle, surface
+energy balance, Marangoni force, gas evolution, thermal update, phase transfer or
+moving-wall law is inferred. Lattice sound speed is not physical liquid/gas sound
+speed. `tests/material_free_surface.rs` covers dimensional Young-Laplace
+bookkeeping, material similitude, separate viscosity/capillary substitutions in
+real native evolution, mass accounting, Guo samples and domain refusals.

@@ -6,6 +6,8 @@
 //! supplies no equation of state, phase boundary, concentration conversion,
 //! chemistry-name default, corrosion model, or experimental-accuracy claim.
 
+pub mod surface;
+
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, Dims, QuantitySpec};

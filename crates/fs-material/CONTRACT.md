@@ -1477,3 +1477,40 @@ graph-level proof.
   represent — the phase no-claim made structural at this constructor's
   input; the plain try_new window no-claim stands). CO2 fraction is
   not modeled (the USSA dry-air M already carries the standard CO2).
+
+### Material-card J2 plasticity
+
+`plastic::source::resolve_j2_plasticity` resolves Young modulus, Poisson ratio,
+yield stress and an explicitly selected hardening datum at one common physical
+state. `ResolvedJ2Plasticity::try_from_material` retains an existing complete
+multiphysics bundle, including additional properties and original source receipts.
+Its `law()` supplies the existing J2 radial return and consistent tangent directly
+to native small-strain solvers, including `fs-solid::SmallStrainTetProblem`.
+
+The selected hardening basis is either the plastic-strain modulus H or a
+monotonic uniaxial total-strain tangent Et. For the latter, H = Et E/(E-Et) is
+derived after resolving both coefficients at the same state; 0 <= Et < E is
+required. Perfect plasticity needs an explicit zero source. The original Et
+claim and uncertainty remain intact, and no derived measured-H claim is created.
+Source, quantity, domain, parameter and representability errors refuse.
+Coefficients remain frozen within one load path; temperature re-resolution
+starts a different law, not an energy-accounted transfer of plastic history.
+The declared strain bound is limited to 0.05 and remains a caller obligation.
+Creep, rate effects, softening, phase changes and finite strain are outside this law.
+
+### Isothermal liquid momentum and free-surface source bundle
+
+`liquid::surface::resolve_liquid_surface_state` requires sourced density and an
+explicit dynamic/kinematic viscosity basis. `LiquidCapillarity::Sourced`
+additionally requires positive surface tension at the same complete query;
+`Neglected` is an explicit approximation, not a zero-valued material claim.
+An existing shared material bundle can be adopted without losing extra receipts.
+Kinematic conversion uses the same resolved density. Source/domain/unit/selection
+errors and unsupported dynamic coefficients refuse the complete reduction.
+
+The actual consumer is `fs-lbm::material::free_surface`. No heat-capacity or
+conductivity tuple is needed for this isothermal momentum model. Source conditions
+and surface context remain frozen; the adapter supplies no phase diagram, ambient
+gas, wetting or purity default, runtime material-state transfer, or evolving
+surface-energy account. Scalar constants and supported temperature coefficients
+do not authorize frequency- or rate-dependent Newtonian flow.

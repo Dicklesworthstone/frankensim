@@ -350,8 +350,10 @@ impl ResolvedScalarProperty {
 
     /// Whether this source supplies a constant coefficient when temperature is
     /// held at the resolved state. Accepts validity-wide scalar constants or
-    /// curves depending only on positive absolute `T` [K]. Other curves,
-    /// including angular/cyclic frequency under any axis name, are not frozen.
+    /// positive absolute-temperature curves. A semantic AbsoluteTemperature/Static
+    /// descriptor identifies a temperature axis under any source name; legacy
+    /// untyped or purely dimensional temperature coordinates require the name T.
+    /// Other curves, including frequency under any axis name, are not frozen.
     ///
     /// This classifies the declared source model, not its physical accuracy.
     /// The consumer must still intersect all coefficient applicability domains
@@ -363,8 +365,7 @@ impl ResolvedScalarProperty {
         let Some((axis, dims)) = &self.source_curve_axis else {
             return self.answer.receipt.decision == EvaluationDecision::ConstantWithinValidity;
         };
-        if axis != "T"
-            || *dims != fs_qty::Temperature::DIMS
+        if *dims != fs_qty::Temperature::DIMS
             || !matches!(
                 self.answer.receipt.decision,
                 EvaluationDecision::ExactTabulated { .. } | EvaluationDecision::LinearInside { .. }
@@ -373,18 +374,17 @@ impl ResolvedScalarProperty {
             return false;
         }
         let receipt = &self.answer.receipt;
-        receipt
-            .query_point
-            .iter()
-            .any(|(name, value)| name == "T" && value.is_finite() && *value > 0.0)
-            && receipt.axis_quantities.get("T").is_none_or(|quantity| {
-                *quantity == QuantitySpec::dimensional(fs_qty::Temperature::DIMS)
-                    || *quantity
-                        == QuantitySpec::semantic(SemanticType::new(
-                            QuantityKind::AbsoluteTemperature,
-                            ValueForm::Static,
-                        ))
-            })
+        let temperature_axis = match receipt.axis_quantities.get(axis) {
+            Some(quantity) => {
+                *quantity == QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::AbsoluteTemperature, ValueForm::Static,
+                )) || axis == "T" && *quantity == QuantitySpec::dimensional(fs_qty::Temperature::DIMS)
+            }
+            None => axis == "T",
+        };
+        temperature_axis && receipt.query_point.iter().any(|(name, value)| {
+            name == axis && value.is_finite() && *value > 0.0
+        })
     }
 
     /// Frequency applicability of the selected claim, expressed in rad/s.
@@ -2794,6 +2794,8 @@ mod tests {
         ));
         for (axis, dims, quantity, lo, at, expected) in [
             ("T", temperature, Some(absolute), 300.0, 325.0, true),
+            ("temperature", temperature, Some(absolute), 300.0, 325.0, true),
+            ("temperature", temperature, Some(QuantitySpec::dimensional(temperature)), 300.0, 325.0, false),
             ("T", temperature, Some(absolute), 300.0, 300.0, true),
             ("T", temperature, None, 300.0, 325.0, true),
             (

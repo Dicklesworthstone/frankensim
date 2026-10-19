@@ -12,6 +12,7 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
 mod forcing;
+pub mod free_surface;
 pub use forcing::{electrothermal, transport};
 mod runtime_rebind;
 mod three_dimensional;
@@ -26,6 +27,8 @@ pub enum MaterialLbmError {
     Transport(MaterialError),
     /// An external thermal-flow force field was refused before stepping.
     Forcing(crate::thermal::ThermalForcingError),
+    /// The existing sparse free-surface owner refused construction or evolution.
+    FreeSurface(crate::d3q19::freesurface3::FreeSurfaceError3),
     /// Invalid or unrepresentable physical/numerical input.
     Invalid(&'static str),
 }
@@ -34,6 +37,7 @@ impl core::fmt::Display for MaterialLbmError {
         match self {
             Self::Transport(error) => write!(f, "material LBM: {error}"),
             Self::Forcing(error) => write!(f, "material LBM: {error}"),
+            Self::FreeSurface(error) => write!(f, "material LBM: {error}"),
             Self::Invalid(message) => write!(f, "material LBM: {message}"),
         }
     }
@@ -44,6 +48,9 @@ impl From<crate::thermal::ThermalForcingError> for MaterialLbmError {
 }
 impl From<MaterialError> for MaterialLbmError {
     fn from(error: MaterialError) -> Self { Self::Transport(error) }
+}
+impl From<crate::d3q19::freesurface3::FreeSurfaceError3> for MaterialLbmError {
+    fn from(error: crate::d3q19::freesurface3::FreeSurfaceError3) -> Self { Self::FreeSurface(error) }
 }
 
 /// A frozen source binding and its common momentum/thermal lattice conversion.
@@ -97,26 +104,16 @@ pub fn plan_scaling_from_material<F: FluidTransport + ?Sized>(
     timestep_s: f64,
     max_speed_m_s: f64,
 ) -> Result<MaterialScaling<'_, F>, MaterialLbmError> {
-    positive(cell_size_m, "cell size must be finite and positive")?;
-    positive(timestep_s, "timestep must be finite and positive")?;
-    if !max_speed_m_s.is_finite() || max_speed_m_s < 0.0 {
-        return Err(MaterialLbmError::Invalid("maximum speed must be finite and nonnegative"));
-    }
     let transport = material.transport_state()?;
-    let velocity_scale = positive(cell_size_m / timestep_s, "velocity unit is unrepresentable")?;
+    let (flow, velocity_scale) = plan_momentum_scaling(
+        transport.kinematic_viscosity_m2_s(), cell_size_m, timestep_s, max_speed_m_s,
+    )?;
     let diffusivity_scale = positive((timestep_s / cell_size_m) / cell_size_m, "diffusivity conversion is unrepresentable")?;
-    let viscosity = positive(transport.kinematic_viscosity_m2_s() * diffusivity_scale, "lattice viscosity is unrepresentable")?;
     let thermal_diffusivity_lattice = positive(transport.thermal_diffusivity_m2_s() * diffusivity_scale, "lattice thermal diffusivity is unrepresentable")?;
-    let tau = relaxation(viscosity)?;
     let thermal_relaxation_time = relaxation(thermal_diffusivity_lattice)?;
-    let u_lattice = max_speed_m_s / velocity_scale;
-    let mach = u_lattice / CS2.sqrt();
-    if !mach.is_finite() || mach >= MACH_LIMIT {
-        return Err(MaterialLbmError::Invalid("scenario speed exceeds the existing lattice Mach limit"));
-    }
     Ok(MaterialScaling {
         material, transport, cell_size_m, timestep_s, velocity_scale,
-        flow: ScalingPlan { tau, viscosity, u_lattice, mach, tau_margin: tau - 0.5, stable: true },
+        flow,
         thermal_diffusivity_lattice, thermal_relaxation_time,
     })
 }
@@ -264,6 +261,32 @@ impl<L> MaterialSlab<L> {
     /// Physical temperature scale used by both wall mapping and buoyancy.
     #[must_use]
     pub const fn temperature_difference_k(&self) -> f64 { self.temperature_difference_k }
+}
+
+// Both caloric and isothermal liquid consumers use exactly the same numerical
+// momentum contract. Heat capacity/conductivity are not momentum prerequisites.
+fn plan_momentum_scaling(
+    kinematic_viscosity_m2_s: f64,
+    cell_size_m: f64,
+    timestep_s: f64,
+    max_speed_m_s: f64,
+) -> Result<(ScalingPlan, f64), MaterialLbmError> {
+    positive(cell_size_m, "cell size must be finite and positive")?;
+    positive(timestep_s, "timestep must be finite and positive")?;
+    positive(kinematic_viscosity_m2_s, "kinematic viscosity must be finite and positive")?;
+    if !max_speed_m_s.is_finite() || max_speed_m_s < 0.0 {
+        return Err(MaterialLbmError::Invalid("maximum speed must be finite and nonnegative"));
+    }
+    let velocity_scale = positive(cell_size_m / timestep_s, "velocity unit is unrepresentable")?;
+    let diffusivity_scale = positive((timestep_s / cell_size_m) / cell_size_m, "diffusivity conversion is unrepresentable")?;
+    let viscosity = positive(kinematic_viscosity_m2_s * diffusivity_scale, "lattice viscosity is unrepresentable")?;
+    let tau = relaxation(viscosity)?;
+    let u_lattice = max_speed_m_s / velocity_scale;
+    let mach = u_lattice / CS2.sqrt();
+    if !mach.is_finite() || mach >= MACH_LIMIT {
+        return Err(MaterialLbmError::Invalid("scenario speed exceeds the existing lattice Mach limit"));
+    }
+    Ok((ScalingPlan { tau, viscosity, u_lattice, mach, tau_margin: tau - 0.5, stable: true }, velocity_scale))
 }
 
 fn relaxation(diffusivity: f64) -> Result<f64, MaterialLbmError> {
