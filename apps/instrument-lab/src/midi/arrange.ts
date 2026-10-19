@@ -70,6 +70,34 @@ export interface Arrangement {
   };
 }
 
+/**
+ * Restart a sorted piano performance at `from` seconds, re-striking keys still
+ * held there. This restores key/pedal controls, not the earlier vibration.
+ * Boundary events win: a key released or struck exactly at `from` needs no
+ * synthetic strike. Work from key events so overlapping notes remain one key.
+ */
+export function pianoEventsFrom(events: readonly PianoEvent[], from: number): PianoEvent[] {
+  const held = new Map<number, PianoEvent>();
+  let pedal = 0, i = 0;
+  for (; i < events.length && events[i]!.t < from; i++) {
+    const e = events[i]!;
+    if (e.on !== undefined) held.set(e.on, e);
+    else if (e.off !== undefined) held.delete(e.off);
+    else if (e.sustain !== undefined) pedal = e.sustain;
+  }
+  let j = i, pedalAtStart = false;
+  for (; j < events.length && events[j]!.t === from; j++) {
+    const e = events[j]!;
+    if (e.on !== undefined) held.delete(e.on);
+    else if (e.off !== undefined) held.delete(e.off);
+    else if (e.sustain !== undefined) pedalAtStart = true;
+  }
+  const out = events.slice(i, j);
+  if (pedal > 0 && !pedalAtStart) out.unshift({ t: from, sustain: pedal });
+  for (const [key, e] of held) out.push({ t: from, on: key, speed: e.speed });
+  return out.concat(events.slice(j));
+}
+
 // ----------------------------------------------------------------- calibrations
 /** MIDI velocity to post-escapement hammer speed [m/s]: 1 → 0.6, 64 → 2 (mf), 127 → 5, log-linear between. */
 export function hammerSpeed(velocity: number): number {

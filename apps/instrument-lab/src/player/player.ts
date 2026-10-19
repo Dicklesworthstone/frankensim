@@ -11,7 +11,7 @@ import { createLiveAudioContext } from "../live/liveAudio";
 import { createLiveMix, KitLane, LaneDisposed, PianoLane, type KitReady, type KitScoreEvent, type LaneWorkerStats, type LiveMix, type PianoReady } from "../live/mix";
 import { parsePianoSnapshot } from "../live/pianoClient";
 import { decodeMidi, MAX_MIDI_BYTES } from "../midi/smf";
-import { arrange, gmInstrument, PIECE_NAMES, type Arrangement, type PieceId } from "../midi/arrange";
+import { arrange, gmInstrument, pianoEventsFrom, PIECE_NAMES, type Arrangement, type PieceId } from "../midi/arrange";
 import { RollView } from "./roll";
 import { SoundboardView } from "./soundboard3d";
 import { KitView, fmtJ } from "./kit3d";
@@ -632,17 +632,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     master.gain.linearRampToValueAtTime(1, startFrame / SR - 0.005);
     const at = (t: number): number => startFrame + ((t - from) / tempoFactor) * SR;
     if (piano) {
-      const ev: { frame: number; on?: number; off?: number; speed?: number; sustain?: number }[] = [];
-      let pedal = 0;
-      for (const p of a.pedal) { if (p.t > from) break; pedal = p.value; }
-      if (pedal > 0) ev.push({ frame: at(from), sustain: pedal });
-      for (const e of a.events) {
-        if (e.t < from) continue;
-        if (e.on !== undefined) ev.push({ frame: at(e.t), on: e.on, speed: e.speed });
-        else if (e.off !== undefined) ev.push({ frame: at(e.t), off: e.off });
-        else if (e.sustain !== undefined) ev.push({ frame: at(e.t), sustain: e.sustain });
-      }
-      piano.score(ev);
+      piano.score(pianoEventsFrom(a.events, from).map(({ t, ...e }) => ({ frame: at(t), ...e })));
     }
     for (const [p, k] of kits) k.lane.score(kitScore(p, from));
     snaps.length = 0;
@@ -1169,6 +1159,7 @@ function evidenceBody(): HTMLElement {
       el("h4", {}, "The mapping"),
       p("Every pitched channel plays the one grand piano; General MIDI channel 10 plays the drum kit. Notes outside A0–C8 are moved by octaves into the keyboard. Notes that start within 30 ms on the same key are one strike, and a key held by two parts is released only when the last of them ends."),
       p("Velocity sets the hammer's speed as it leaves the escapement, log-linear between 0.6 m/s (velocity 1), 2 m/s (64, mezzo-forte) and 5 m/s (127). Controller 64 is the sustain pedal, with half-pedal positions kept. Channel volume (7) and expression (11) scale each note's velocity as it starts, and a note they fade to silence is not played; other controllers are not used."),
+      p("Resuming, seeking or changing tempo re-strikes keys held at that point and restores the pedal position. It does not reconstruct the earlier vibration."),
       p("Drum notes go to the piece their General MIDI number names: kick, snare (side stick near the rim, claps on the snare), rack and floor toms, crash (china and splash too), ride and its bell; bongos and congas to the toms, timbales to the snare with its wires off. Anything else is skipped and listed. Velocity scales the piece's standard stroke, and each stroke lands a little away from the last, so no two are identical."),
       p("Hi-hats: closed strokes play the closed hat, open strokes the open one, and a pedal note a softer closed stroke (the pedal's own chick is not simulated). The two cymbals rub at their rims with dry friction, so a closed stroke dies within a few tenths of a second, as on a real hat; on the coarse grids a browser can afford, it is darker than a real hat (little above 4 kHz). The open and closed hats are separate simulations, so a closed stroke does not choke an open one still ringing."),
       p("The engines have limits, and the roll keeps within them where it can: a chord of more than ten notes keeps its bass, its top and its loudest notes; no more than sixteen strikes in any quarter second. The piano simulates 24 sounding keys at once; beyond that the quietest strings are retired early.")),
