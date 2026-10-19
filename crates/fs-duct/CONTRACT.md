@@ -564,6 +564,18 @@ explicit per solve; axial-field edges and time-domain characteristic networks
 are not claimed. Calls are synchronous and bounded; frequency sweeps can be
 caller-chunked, with the same existing no-Cx boundary.
 
+`NetworkResponse::drive_coupled` also takes one `CoupledTermination`: a
+row-major acoustic impedance matrix [Pa s/m³] over named external ports, with
+`p = -Z U` for currents into the network. It carries the response's exact
+`omega` (bitwise) and a nonempty `source_id`, for example an fs-bem aperture
+matrix declaration. Its ports are always unknowns and are disjoint from the
+SISO `loads`; together they terminate every non-driven port exactly once. The
+block enters the port Schur complement whole, `A = Z_live + Z_L`. Admission
+refuses non-finite or non-square matrices, a frequency mismatch, and a
+Hermitian part with an eigenvalue below `-1e-12 max|Z|`. Reciprocity is not
+required: a collocation radiation matrix is reciprocal only to its
+discretization error. `drive` is the no-coupled case with unchanged arithmetic.
+
 Unit tests in `src/network/tests.rs`: G2 T-branch parallel admittance, lossless
 and Bessel (1e-12); G2 200-frequency Herschel–Quincke TL (1e-10 dB), independently
 re-derived from Selamet, Dickey & Novak, JASA 96,3177 (1994), Eq.(8)
@@ -574,6 +586,11 @@ finite dB clamp. G3 long-chimney ToneHole equivalence with corrections disabled
 (1e-10), G0 reciprocity/PSD at 100 fs-rand frequencies (1e-12), cap/cap+1 and
 invalid/singular cases, G3 exact node-reindexing and G5 bitwise repeat. Additional
 tests cover self-loops, supplied-junction stamps and actual exact-LS consumption.
+`network_coupled_termination_even_mode_and_diagonal_limit` drives a symmetric
+Y-branch. A coupled `[[z,m],[m,z]]` load equals the SISO even-mode load `z+m`
+within 1e-12 and differs from the uncoupled answer by more than 1e-3. The
+diagonal-matrix limit and a mixed one-port coupled case are bitwise equal to
+SISO `drive`, and each admission rule refuses.
 The existing `cross_isa_golden` chain is unchanged and must still pass centrally.
 The new tests emit stderr JSON receipts. Numeric claims await native execution.
 

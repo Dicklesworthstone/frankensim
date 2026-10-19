@@ -262,6 +262,59 @@ pub struct PortTermination {
     pub load: NetworkLoad,
 }
 
+/// One passive boundary shared by several labelled ports, in Pa s/m³:
+/// `p = -Z U` with `U` into the network (so `-U` flows into the load). Mutual
+/// entries carry, for example, the external radiation interaction of open tone
+/// holes and a bell, taken from one multi-aperture radiation matrix.
+#[derive(Debug, Clone)]
+pub struct CoupledTermination {
+    /// Exact angular frequency of the supplied matrix [rad/s].
+    pub omega: f64,
+    /// Port labels, in matrix order.
+    pub labels: Vec<String>,
+    /// Row-major acoustic impedance [Pa s/m³].
+    pub z: Vec<C64>,
+    /// Explicit source identity, for example a bake declaration hash.
+    pub source_id: String,
+}
+
+/// Finite, nonempty, square, at the response frequency, with a positive
+/// semidefinite Hermitian part (an active coupled load refuses). Exact
+/// reciprocity is not required: a collocation radiation matrix is reciprocal
+/// only to its discretization error.
+fn admit_coupled(coupled: &CoupledTermination, omega: f64) -> Result<(), DuctError> {
+    let n = coupled.labels.len();
+    if n == 0
+        || n > MAX_NETWORK_PORTS
+        || coupled.z.len() != n * n
+        || coupled.source_id.trim().is_empty()
+        || coupled.omega.to_bits() != omega.to_bits()
+        || coupled.z.iter().any(|&v| !finite(v))
+    {
+        return Err(bad(
+            "network coupled termination needs the response frequency, a source and a finite square matrix",
+        ));
+    }
+    let scale = coupled.z.iter().map(|z| z.abs()).fold(0.0, f64::max);
+    let mut embedding = vec![0.0; 4 * n * n];
+    for a in 0..n {
+        for b in 0..n {
+            let h = (coupled.z[a * n + b] + coupled.z[b * n + a].conj()).scale(0.5);
+            embedding[a * 2 * n + b] = h.re;
+            embedding[(a + n) * 2 * n + b + n] = h.re;
+            embedding[a * 2 * n + b + n] = -h.im;
+            embedding[(a + n) * 2 * n + b] = h.im;
+        }
+    }
+    let (values, _) = fs_la::eigen::jacobi_eigh(&embedding, 2 * n);
+    if values[0] < -1.0e-12 * scale {
+        return Err(bad(
+            "network coupled termination has an active Hermitian part",
+        ));
+    }
+    Ok(())
+}
+
 fn bad(what: &'static str) -> DuctError {
     DuctError::BadParameter { what }
 }
@@ -770,6 +823,30 @@ impl NetworkResponse {
         loads: &[PortTermination],
         gas: &GasState,
     ) -> Result<NetworkDriveResponse, DuctError> {
+        self.drive_with(active, loads, None, gas)
+    }
+
+    /// [`Self::drive`] with one coupled boundary: the ports in
+    /// `coupled.labels` are terminated together through its full matrix, and
+    /// every other port through `loads`. Each non-active port is terminated
+    /// exactly once.
+    pub fn drive_coupled(
+        &self,
+        active: &str,
+        loads: &[PortTermination],
+        coupled: &CoupledTermination,
+        gas: &GasState,
+    ) -> Result<NetworkDriveResponse, DuctError> {
+        self.drive_with(active, loads, Some(coupled), gas)
+    }
+
+    fn drive_with(
+        &self,
+        active: &str,
+        loads: &[PortTermination],
+        coupled: Option<&CoupledTermination>,
+        gas: &GasState,
+    ) -> Result<NetworkDriveResponse, DuctError> {
         validate_medium(gas, self.omega)?;
         if *gas != self.gas {
             return Err(bad("network response and termination gas states differ"));
@@ -787,7 +864,8 @@ impl NetworkResponse {
         {
             return Err(bad("invalid network response matrix"));
         }
-        if loads.len() != n - 1 {
+        let coupled_count = coupled.map_or(0, |c| c.labels.len());
+        if loads.len() + coupled_count != n - 1 {
             return Err(bad(
                 "every other network port needs an explicit termination",
             ));
@@ -795,6 +873,23 @@ impl NetworkResponse {
         let mut resolved = vec![None; n];
         let mut seen = vec![false; n];
         seen[active] = true;
+        // Port index of each coupled-matrix row, and each port's coupled row.
+        let mut coupled_rows = vec![None; n];
+        if let Some(c) = coupled {
+            admit_coupled(c, self.omega)?;
+            for (row, label) in c.labels.iter().enumerate() {
+                let index = self
+                    .ports
+                    .iter()
+                    .position(|s| s == label)
+                    .ok_or(bad("unknown network coupled-termination label"))?;
+                if seen[index] {
+                    return Err(bad("duplicate or active-port coupled termination"));
+                }
+                seen[index] = true;
+                coupled_rows[index] = Some(row);
+            }
+        }
         for load in loads {
             let index = self
                 .ports
@@ -811,8 +906,9 @@ impl NetworkResponse {
             return Err(bad("network port termination omitted"));
         }
         // A rigid external termination imposes U=0, so it needs no unknown.
+        // Coupled ports are always unknowns.
         let mut live: Vec<usize> = (0..n)
-            .filter(|&j| j != active && resolved[j].is_some())
+            .filter(|&j| j != active && (resolved[j].is_some() || coupled_rows[j].is_some()))
             .collect();
         live.sort_unstable_by(|&a, &b| self.ports[a].cmp(&self.ports[b]));
         let mut currents = vec![C64::ZERO; n];
@@ -822,7 +918,9 @@ impl NetworkResponse {
         for (i, &p) in live.iter().enumerate() {
             for (j, &q) in live.iter().enumerate() {
                 a[i * m + j] = self.z[p * n + q];
-                if i == j {
+                if let (Some(c), Some(r), Some(s)) = (coupled, coupled_rows[p], coupled_rows[q]) {
+                    a[i * m + j] = a[i * m + j] + c.z[r * c.labels.len() + s];
+                } else if i == j {
                     a[i * m + j] = a[i * m + j] + resolved[p].expect("finite load");
                 }
             }
