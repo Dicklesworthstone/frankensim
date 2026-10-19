@@ -24,8 +24,8 @@ use fs_matdb::{
 };
 use fs_qty::{Dims, Pressure, Temperature};
 use fs_solid::{
-    IncrementRecord, IncrementSettings, SmallStrainTetProblem, SmallStrainTetSolution,
-    TetAssemblyBudget,
+    IncrementRecord, IncrementSettings, SmallStrainLawField, SmallStrainTetProblem,
+    SmallStrainTetSolution, TetAssemblyBudget,
 };
 
 #[derive(Clone, Copy)]
@@ -169,7 +169,7 @@ fn solve(resolved: &ResolvedJ2Plasticity, path: &[f64]) -> SmallStrainTetSolutio
     let problem = SmallStrainTetProblem {
         nodes_m: &NODES,
         tetrahedra: &TETS,
-        law: resolved.law(),
+        laws: SmallStrainLawField::Uniform(resolved),
         prescribed_m: &prescribed,
         nodal_forces_n: &[],
         load_path: path,

@@ -611,7 +611,7 @@ or refuse); no mesh-convergence claim from one run.
 
 ### Incremental small-strain inelasticity (`plastic3`)
 
-`SmallStrainTetProblem { nodes_m, tetrahedra, law, prescribed_m,
+`SmallStrainTetProblem { nodes_m, tetrahedra, laws, prescribed_m,
 nodal_forces_n, load_path, budget, settings }.solve(cx)` follows a load path
 on P1 tetrahedra for ANY `fs-material::SmallStrainLaw` (J2 radial return
 with the Simo–Hughes algorithmic tangent, isotropic/orthotropic
@@ -625,6 +625,22 @@ committed only after convergence. The solution carries displacements,
 element strain/stress/states, and per-increment reactions, residual
 histories, and counts of evolving elements. `internal_force` and
 `tangent_matrix` take explicit committed states for verification.
+
+`SmallStrainLawField::Uniform(&law)` and
+`SmallStrainLawField::PerElement(&laws)` use this same numerical owner.
+Per-element entries follow tetrahedron connectivity order and may come from
+different material cards or spatially varying resolved conditions. Each
+tetrahedron initializes its own law's state and uses that law for every trial
+stress, consistent tangent, converged history update, and final stress.
+A wrong field cardinality returns `LawCountMismatch` before assembly.
+No effective-property averaging or separate heterogeneous solver is introduced.
+Constitutive coefficients remain fixed throughout the load path.
+`ResolvedJ2Plasticity` implements the native `SmallStrainLaw` interface directly,
+so fields can borrow complete resolved material inputs and retain all source
+receipts without extracting bare coefficients. This field alone does not add
+thermal feedback, state remapping, or finite-strain mechanics.
+
+The homogeneous numerical measurements below predate this field extension.
 
 Conformance (`tests/plastic3.rs`, executed): homogeneous uniaxial tension
 with linear hardening (E = 1000, nu = 0.3, sigma_y = 1, H = 100) follows the

@@ -86,8 +86,8 @@ pub use linear3::{
 };
 pub use mesh2::{Mesh2, Patch};
 pub use plastic3::{
-    IncrementRecord, IncrementSettings, SmallStrainTetError, SmallStrainTetProblem,
-    SmallStrainTetSolution,
+    IncrementRecord, IncrementSettings, SmallStrainLawField, SmallStrainTetError,
+    SmallStrainTetProblem, SmallStrainTetSolution,
 };
 pub use rod::{Rod, RodSection, TipLoad};
 pub use shell::{

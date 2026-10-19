@@ -15,7 +15,10 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::plastic::{J2Plasticity, J2State};
 use fs_material::{IsotropicElastic, SmallStrainLaw};
 use fs_solid::linear3::{TetLinearElasticProblem, TetMaterialField};
-use fs_solid::{IncrementSettings, SmallStrainTetProblem, TetAssemblyBudget, TetElasticMaterial};
+use fs_solid::{
+    IncrementSettings, SmallStrainLawField, SmallStrainTetProblem, TetAssemblyBudget,
+    TetElasticMaterial,
+};
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
@@ -129,7 +132,7 @@ fn uniaxial_hardening_path_and_unloading_match_closed_form() {
     let problem = SmallStrainTetProblem {
         nodes_m: &nodes,
         tetrahedra: &tets,
-        law: &law,
+        laws: SmallStrainLawField::Uniform(&law),
         prescribed_m: &prescribed,
         nodal_forces_n: &[],
         load_path: &path,
@@ -190,7 +193,7 @@ fn problem_for<'a, L: SmallStrainLaw>(
     SmallStrainTetProblem {
         nodes_m: nodes,
         tetrahedra: tets,
-        law,
+        laws: SmallStrainLawField::Uniform(law),
         prescribed_m: &[],
         nodal_forces_n: &[],
         load_path: &[1.0],
@@ -206,7 +209,7 @@ fn algorithmic_tangent_is_the_derivative_at_a_plastic_state() {
     let problem = SmallStrainTetProblem {
         nodes_m: &nodes,
         tetrahedra: &tets,
-        law: &law,
+        laws: SmallStrainLawField::Uniform(&law),
         prescribed_m: &[],
         nodal_forces_n: &[],
         load_path: &[1.0],
@@ -256,7 +259,7 @@ fn algorithmic_tangent_is_the_derivative_at_a_plastic_state() {
     let elastic = IsotropicElastic::new(E, NU, 0.05).unwrap();
     let k_elastic = with_cx(|cx| {
         SmallStrainTetProblem {
-            law: &elastic,
+            laws: SmallStrainLawField::Uniform(&elastic),
             ..problem_for(&nodes, &tets, &elastic)
         }
         .tangent_matrix(&u, &vec![elastic.initial_state(); tets.len()], cx)
@@ -297,7 +300,7 @@ fn elastic_law_tangent_equals_the_linear3_stiffness() {
     let problem = SmallStrainTetProblem {
         nodes_m: &nodes,
         tetrahedra: &tets,
-        law: &law,
+        laws: SmallStrainLawField::Uniform(&law),
         prescribed_m: &[],
         nodal_forces_n: &[],
         load_path: &[1.0],
@@ -355,7 +358,7 @@ fn cantilever_yields_progressively() {
     let problem = SmallStrainTetProblem {
         nodes_m: &nodes,
         tetrahedra: &tets,
-        law: &law,
+        laws: SmallStrainLawField::Uniform(&law),
         prescribed_m: &prescribed,
         nodal_forces_n: &[],
         load_path: &path,

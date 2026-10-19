@@ -13,11 +13,12 @@
 
 use core::fmt;
 
+use fs_evidence::ModelCard;
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Dims, Pressure, QuantitySpec};
 
-use super::J2Plasticity;
-use crate::MaterialError;
+use super::{J2Plasticity, J2State};
+use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voigt};
 use crate::elastic::IsotropicElastic;
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, POISSON_RATIO_PROPERTY,
@@ -89,6 +90,11 @@ pub fn j2_requirements(
 }
 
 /// An immutable native J2 law together with its complete source-use evidence.
+///
+/// Implements [`SmallStrainLaw`] directly so native uniform or per-element
+/// solvers can borrow the complete resolved inputs. Constitutive operations
+/// delegate to the same J2 owner; the material receipts remain available through
+/// [`Self::material`] alongside the native model assumptions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedJ2Plasticity {
     material: ResolvedMaterialStatePoint,
@@ -182,6 +188,34 @@ impl ResolvedJ2Plasticity {
     pub fn hardening_source(&self) -> &ResolvedScalarProperty {
         self.material.property(self.basis.property_name())
             .expect("the immutable J2 bundle retains its admitted hardening source")
+    }
+}
+
+impl SmallStrainLaw for ResolvedJ2Plasticity {
+    type State = J2State;
+
+    fn initial_state(&self) -> J2State {
+        self.law.initial_state()
+    }
+
+    fn stress(&self, strain: &Voigt, state: &J2State) -> Voigt {
+        self.law.stress(strain, state)
+    }
+
+    fn tangent(&self, strain: &Voigt, state: &J2State) -> Tangent6 {
+        self.law.tangent(strain, state)
+    }
+
+    fn update_state(&self, strain: &Voigt, state: &J2State) -> J2State {
+        self.law.update_state(strain, state)
+    }
+
+    fn admissibility(&self) -> MaterialAdmissibility {
+        self.law.admissibility()
+    }
+
+    fn card(&self) -> ModelCard {
+        self.law.card()
     }
 }
 

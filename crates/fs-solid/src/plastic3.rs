@@ -2,7 +2,10 @@
 //! (plan §8.2 "J2 plasticity with return mapping"), generic over any
 //! `fs-material` [`SmallStrainLaw`]: the law's algorithmic stress update and
 //! consistent tangent drive a load-path-following Newton solve, and the
-//! internal variables are committed only at converged increments.
+//! internal variables are committed only at converged increments. Uniform and
+//! per-element material fields use the same assembly and Newton solve. Each
+//! tetrahedron selects its own law for initialization, stress, tangent, and
+//! history update; material regions are never averaged into one effective law.
 //!
 //! # Discretization
 //!
@@ -75,6 +78,42 @@ impl Default for IncrementSettings {
     }
 }
 
+/// Constitutive data over a tetrahedral mesh.
+///
+/// Use `Uniform` for one material and `PerElement` for different material
+/// cards or spatially varying states of the same constitutive family. Entries
+/// follow the tetrahedron connectivity order. All coefficients remain fixed
+/// over this problem's load path; each element evolves its own internal state.
+/// Retain source receipts alongside these laws when lowering material cards.
+#[derive(Debug, Clone, Copy)]
+pub enum SmallStrainLawField<'a, L: SmallStrainLaw> {
+    /// One constitutive law for every tetrahedron.
+    Uniform(&'a L),
+    /// One constitutive law per tetrahedron, without homogenization.
+    PerElement(&'a [L]),
+}
+
+impl<L: SmallStrainLaw> SmallStrainLawField<'_, L> {
+    fn validate_count(&self, expected: usize) -> Result<(), SmallStrainTetError> {
+        if let Self::PerElement(laws) = self
+            && laws.len() != expected
+        {
+            return Err(SmallStrainTetError::LawCountMismatch {
+                expected,
+                got: laws.len(),
+            });
+        }
+        Ok(())
+    }
+
+    fn at(&self, element: usize) -> &L {
+        match self {
+            Self::Uniform(law) => law,
+            Self::PerElement(laws) => &laws[element],
+        }
+    }
+}
+
 /// A load-path problem on a tetrahedral mesh.
 #[derive(Debug, Clone, Copy)]
 pub struct SmallStrainTetProblem<'a, L: SmallStrainLaw> {
@@ -82,8 +121,8 @@ pub struct SmallStrainTetProblem<'a, L: SmallStrainLaw> {
     pub nodes_m: &'a [[f64; 3]],
     /// Four vertex indices per conforming tetrahedron.
     pub tetrahedra: &'a [[usize; 4]],
-    /// The constitutive law (uniform over the mesh).
-    pub law: &'a L,
+    /// Uniform or per-element constitutive laws, in connectivity order.
+    pub laws: SmallStrainLawField<'a, L>,
     /// Reference prescribed displacements: (`3 node + component`, m).
     pub prescribed_m: &'a [(usize, f64)],
     /// Reference dead nodal forces: (`3 node + component`, N).
@@ -135,6 +174,13 @@ pub enum SmallStrainTetError {
         /// What was refused.
         what: String,
     },
+    /// A per-element field does not cover exactly the mesh connectivity.
+    LawCountMismatch {
+        /// Number of tetrahedra.
+        expected: usize,
+        /// Number of supplied constitutive laws.
+        got: usize,
+    },
     /// A reference tetrahedron is degenerate or inverted.
     DegenerateElement {
         /// Element index.
@@ -166,6 +212,10 @@ impl core::fmt::Display for SmallStrainTetError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidInput { what } => write!(f, "FS-SOLID-PLASTIC3-INPUT: {what}"),
+            Self::LawCountMismatch { expected, got } => write!(
+                f,
+                "FS-SOLID-PLASTIC3-LAW-COUNT: expected {expected} laws, got {got}"
+            ),
             Self::DegenerateElement {
                 element,
                 scaled_jacobian,
@@ -242,6 +292,7 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         if n == 0 || self.tetrahedra.is_empty() || self.load_path.is_empty() {
             return invalid("empty mesh or load path".into());
         }
+        self.laws.validate_count(self.tetrahedra.len())?;
         if n > self.budget.maximum_nodes || self.tetrahedra.len() > self.budget.maximum_tetrahedra {
             return invalid(format!("mesh exceeds the budget {:?}", self.budget));
         }
@@ -349,7 +400,10 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
             if index % 4096 == 0 {
                 checkpoint(cx)?;
             }
-            let sigma = self.law.stress(&Self::strain(element, u), &states[index]);
+            let sigma = self
+                .laws
+                .at(index)
+                .stress(&Self::strain(element, u), &states[index]);
             for (a, &node) in element.nodes.iter().enumerate() {
                 for i in 0..3 {
                     let col = b_column(element.gradients[a], i);
@@ -376,7 +430,10 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
             if index % 4096 == 0 {
                 checkpoint(cx)?;
             }
-            let c: Tangent6 = self.law.tangent(&Self::strain(element, u), &states[index]);
+            let c: Tangent6 = self
+                .laws
+                .at(index)
+                .tangent(&Self::strain(element, u), &states[index]);
             let cols: Vec<Voigt> = (0..12)
                 .map(|k| b_column(element.gradients[k / 3], k % 3))
                 .collect();
@@ -462,7 +519,9 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         for (row, &dof) in free.iter().enumerate() {
             row_of[dof] = row;
         }
-        let mut states: Vec<L::State> = vec![self.law.initial_state(); elements.len()];
+        let mut states: Vec<L::State> = (0..elements.len())
+            .map(|index| self.laws.at(index).initial_state())
+            .collect();
         let mut u = vec![0.0f64; dofs];
         let mut increments = Vec::with_capacity(self.load_path.len());
         for (increment, &load) in self.load_path.iter().enumerate() {
@@ -549,7 +608,8 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
             let mut evolving = 0usize;
             for (index, element) in elements.iter().enumerate() {
                 let next = self
-                    .law
+                    .laws
+                    .at(index)
                     .update_state(&Self::strain(element, &u), &states[index]);
                 evolving += usize::from(next != states[index]);
                 states[index] = next;
@@ -570,7 +630,8 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         let element_stress = element_strain
             .iter()
             .zip(&states)
-            .map(|(eps, state)| self.law.stress(eps, state))
+            .enumerate()
+            .map(|(index, (eps, state))| self.laws.at(index).stress(eps, state))
             .collect();
         Ok(SmallStrainTetSolution {
             displacement_m: u.as_chunks::<3>().0.to_vec(),
