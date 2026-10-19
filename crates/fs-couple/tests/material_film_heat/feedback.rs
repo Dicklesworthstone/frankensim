@@ -330,3 +330,103 @@ fn endpoint_source_refusal_and_late_cancellation_preserve_every_accepted_owner()
         );
     }
 }
+
+#[test]
+fn mechanical_heat_and_conservative_advection_share_the_original_flux_and_cfl() {
+    use fs_thermal::enthalpy::advection::{Advected, MassBoundary, MassFlow};
+    let card = card(0.2, 0.001);
+    let c = curve(card.content_hash(), 0.2, 1.0);
+    let mut live = coupled(&card, &c);
+    let mut thermal = network(&c);
+    // Fast prescribed circulation forces the ADVECTIVE timestep below the
+    // authored mechanical period. Inflow and outflow balance each fixed mass;
+    // exported enthalpy belongs to the outside reservoir, never a heat repair.
+    let rate = MASS / (DT / 8.0);
+    let mut observer = Advected::new(
+        (),
+        vec![MassFlow {
+            id: 10,
+            a: CellId(1),
+            b: CellId(2),
+            kg_s: rate,
+        }],
+        3,
+    )
+    .unwrap()
+    .with_boundaries(
+        vec![
+            MassBoundary::Inlet {
+                id: 11,
+                cell: CellId(1),
+                kg_s: rate,
+                material_id: MaterialId(1),
+                specific_h_j_kg: 0.0,
+            },
+            MassBoundary::Outlet {
+                id: 12,
+                cell: CellId(2),
+                kg_s: rate,
+            },
+        ],
+        3,
+    )
+    .unwrap();
+    let bindings = [
+        ReservoirCell {
+            reservoir: "fluid".into(),
+            cell: CellId(1),
+        },
+        ReservoirCell {
+            reservoir: "sink".into(),
+            cell: CellId(2),
+        },
+    ];
+    let initial = live.system().mechanics().stored_energy_j();
+    let mut external = 0.0;
+    for _ in 0..32 {
+        let frame = live
+            .step_with_thermal_network(
+                &mut thermal,
+                &mut observer,
+                &bindings,
+                StepConfig {
+                    max_dt_s: DT,
+                    energy_tolerance_j: 1e-13,
+                },
+                &[0.0; 2],
+                &CancelGate::new_clock_free(),
+                |_, _| Ok(None),
+            )
+            .unwrap();
+        let transport = observer.audit();
+        assert_eq!(transport.substeps, frame.network.substeps);
+        assert!(transport.substeps >= 10);
+        assert!(transport.maximum_courant <= 0.8);
+        assert!(transport.absolute_enthalpy_transfer_j > 0.0);
+        assert!(transport.external_enthalpy_j < 0.0);
+        near(transport.inlet_mass_kg, rate * DT, 1e-16);
+        near(transport.outlet_mass_kg, transport.inlet_mass_kg, 1e-16);
+        near(frame.external_heat_j, transport.external_enthalpy_j, 1e-18);
+        external += frame.external_heat_j;
+        for (i, binding) in bindings.iter().enumerate() {
+            assert_eq!(
+                live.system().reservoirs()[i]
+                    .state()
+                    .specific_enthalpy_j_kg(),
+                thermal.cells()[&binding.cell].specific_h_j_kg
+            );
+        }
+    }
+    near(
+        live.system().mechanics().stored_energy_j()
+            + live
+                .system()
+                .reservoirs()
+                .iter()
+                .map(CaloricReservoir::storage_change_j)
+                .sum::<f64>()
+            - external,
+        initial,
+        1e-13,
+    );
+}
