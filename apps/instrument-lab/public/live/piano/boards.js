@@ -5,7 +5,8 @@
 // 128-coordinate reduction, the same RT-0425 contacts, hammer law and string losses), octave balance
 // error (63 Hz-8 kHz) / 2-8 kHz balance relative to the studio part: 32 -> 2.51 dB / -0.8 dB,
 // 48 -> 1.92 / +1.7, 64 -> 2.06 / +2.5, 96 -> 1.80 / +0.0, 128 -> 1.74 / -1.0. At 128 the rest is
-// mostly silent strings, which the studio render keeps ringing and the live piano does not have.
+// mostly the silent strings: the studio render moves them (their dampers take about 13 % of an A3
+// strike), the live piano holds them as rigid chords.
 // The 32-coordinate board is embedded in the wasm; larger bridge-informed POD reductions of the same
 // (0, 2400] Hz FE slice (examples/gen_board.rs, spec pod,N,N/2,16,8000) are fetched from ./boards/
 // only when this device can compute them fast enough.
