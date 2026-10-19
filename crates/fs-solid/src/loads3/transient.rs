@@ -20,6 +20,9 @@ use fs_solver::op::LinearOp;
 use fs_sparse::{Csr, precond::Precond};
 use std::sync::Arc;
 
+/// Physical stress, inertia and support reactions at accepted endpoints.
+pub mod response;
+
 /// Explicit resource, solve, motion and energy allowances, all in coherent SI.
 #[derive(Debug, Clone, Copy)]
 pub struct TransientConfig3 {
@@ -195,7 +198,9 @@ pub struct TetTransientRun3<'g, 'm, 'p, 's> {
     operators: Arc<TetElasticAssembly>,
     state: DynamicState,
     thermal: Vec<f64>,
+    thermal_strains: Option<response::FrozenThermal3>,
     force: Vec<f64>,
+    full_force: Vec<(usize, f64)>,
     config: TransientConfig3,
 }
 impl<'g, 'm> TetLoadCase3<'g, 'm> {
@@ -244,16 +249,19 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
             }
         }
         let n = operators.free_dofs.len();
+        let thermal_field = thermal;
         let thermal = match thermal {
             Some(field) => request.assemble_thermal_load(field, cx)?.reduced_force_n,
             None => vec![0.0; n],
         };
+        let thermal_strains = thermal_field.map(|field| response::FrozenThermal3::capture(field, cx)).transpose()?;
         let q: Vec<_> = operators.free_dofs.iter().map(|&d| displacement_m[d/3][d%3]).collect();
         let v: Vec<_> = operators.free_dofs.iter().map(|&d| velocity_m_s[d/3][d%3]).collect();
         let mut run = TetTransientRun3 { geometry: self.geometry, problem, operators,
             state: DynamicState { time_s, step: 0, displacement: q, velocity: v,
                 acceleration: vec![0.0; n], kinetic_energy_j: 0.0, strain_energy_j: 0.0,
-                total_energy_j: 0.0 }, thermal, force: vec![0.0; n], config };
+                total_energy_j: 0.0 }, thermal, thermal_strains, force: vec![0.0; n],
+            full_force: self.nodal_forces_n().to_vec(), config };
         run.force = run.reduce_force(self, cx)?;
         let ku = run.apply(0.0, 1.0, &run.state.displacement, cx)?;
         let cv = run.apply(config.mass_damping_per_s, config.stiffness_damping_s, &run.state.velocity, cx)?;
@@ -365,11 +373,13 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         }
         let report = TransientStep3 { time_s: next_time, step_size_s: h_s, iterations, force_residual_n,
             mechanical_work_j, thermal_equivalent_work_j, damping_loss_j, quadratic_energy_j, balance_error_j };
+        let full_force = load_next.nodal_forces_n().to_vec();
         check(cx)?;
         self.state = DynamicState { time_s: next_time, step: self.state.step.checked_add(1).ok_or(TransientError3::Budget)?,
             displacement: q, velocity: v, acceleration: a, kinetic_energy_j: kinetic,
             strain_energy_j: strain, total_energy_j: quadratic_energy_j };
         self.force = force;
+        self.full_force = full_force;
         Ok(report)
     }
 }
