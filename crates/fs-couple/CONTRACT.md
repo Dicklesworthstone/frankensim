@@ -1996,6 +1996,20 @@ None.
   No entrance/profile development, windway inertia, turbulent jet, transverse
   flute lip geometry or measured instrument fidelity follows from this option.
 
+  `flue_loop::network::performance::file` also admits explicit branched tube
+  graphs, section-local material gas records, addressed viscothermal sections,
+  passive endpoint/interior R-L-C loads, and multiple coplanar radiating
+  openings. The jet and windway bind the actual inlet section's complete gas,
+  independent of source order. The same physical graph, fractional/loss owner
+  and multirate receiver retain the original node addresses through loss
+  subdivision. CLI provenance describes every supplied node, section gas and
+  selected opening. The single-tube grammar retains its original construction.
+  `music_render_wind::flue::network` supplies G0/G3 source/direct-construction,
+  gas/branch/receiver sensitivity, callback/PCM and refusal regressions. This
+  adds data access to existing physics; it does not add finger-pad mechanics,
+  junction end corrections, mutual radiation feedback, gas evolution or
+  measured-instrument authority. See `examples/FLUE_NETWORK_PERFORMANCES.md`.
+
 - `wind_line` module (bead 3ez8g.6.3): the wind articulation runtime —
   `WindLineBank` holds per-fingering exact-FIR characteristic lines
   over a typed `FingeringTable` with the carry-history + crossfade

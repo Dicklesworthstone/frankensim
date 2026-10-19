@@ -87,6 +87,47 @@ struct Loaded {
     // clock/filter history; the identity PCM wrapper must not call it 48k mechanics.
     observation_json:Option<String>,
 }
+fn flue_duct_provenance(p: &fs_couple::flue_loop::network::performance::FlueOutletPerformance) -> String {
+    use fs_couple::bernoulli_aperture::network::NetworkNode;
+    let source = p.voice().network().expect("physical flue network").source();
+    let inlet = source.graph.inlet_section_index().expect("unique inlet");
+    let nodes = source.graph.nodes.iter().map(|node| match node {
+        NetworkNode::Inlet => "{\"kind\":\"inlet\"}".to_string(),
+        NetworkNode::Junction => "{\"kind\":\"junction\"}".to_string(),
+        NetworkNode::Termination { reflection } => format!("{{\"kind\":\"reflection\",\"reflection\":{reflection:e}}}"),
+        node => {
+            let (kind, load) = match node {
+                NetworkNode::Impedance { load } => ("impedance", *load),
+                NetworkNode::Series { load } => ("series", load.base()),
+                NetworkNode::Shunt { load } => ("shunt", load.base()),
+                _ => unreachable!("file declares only explicit R-L-C loads"),
+            };
+            let compliance = load.compliance_m3_pa.map_or_else(|| "null".to_string(), |c| format!("{c:e}"));
+            format!("{{\"kind\":\"{kind}\",\"resistance_pa_s_m3\":{:e},\"inertance_pa_s2_m3\":{:e},\"compliance_m3_pa\":{compliance}}}",
+                load.resistance_pa_s_m3, load.inertance_pa_s2_m3)
+        }
+    }).collect::<Vec<_>>().join(",");
+    let sections = source.graph.sections.iter().zip(&source.gases).map(|(s,g)| format!(
+        "{{\"nodes\":[{},{}],\"length_m\":{:e},\"radius_m\":{:e},\"temperature_k\":{:e},\"pressure_pa\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"dynamic_viscosity_pa_s\":{:e}}}",
+        s.nodes[0],s.nodes[1],s.length_m,s.radius_m,g.temperature,g.pressure,g.density,g.sound_speed,g.dynamic_viscosity
+    )).collect::<Vec<_>>().join(",");
+    let radiation = p.radiation_input().expect("explicit flue exterior");
+    let mut outlets = format!("{{\"node\":{},\"center_m\":[0,0]}}",p.config().outlet_node);
+    for outlet in &radiation.additional_outlets {
+        outlets.push_str(&format!(",{{\"node\":{},\"center_m\":[{:e},{:e}]}}",
+            outlet.node,outlet.center_m[0],outlet.center_m[1]));
+    }
+    let mut text = format!(",\"duct_network\":{{\"inlet_section\":{inlet},\"nodes\":[{nodes}],\"sections\":[{sections}],\"outlets\":[{outlets}]}}");
+    if source.graph.sections.len() == 1 {
+        let section = source.graph.sections[0];
+        text.push_str(&format!(",\"tube_length_m\":{:e},\"tube_radius_m\":{:e}",section.length_m,section.radius_m));
+        if let NetworkNode::Termination { reflection } = source.graph.nodes[p.config().outlet_node] {
+            text.push_str(&format!(",\"terminal_reflection\":{reflection:e}"));
+        }
+    }
+    text
+}
+
 fn load(bytes: &[u8], block: usize, policy: ObservationPolicy) -> Result<Loaded, String> {
     load_with_gas_sources(bytes, block, policy, None)
 }
@@ -110,8 +151,8 @@ fn load_with_gas_sources(
         }
         let renderer = p.renderer();
         let network = renderer.voice().network().expect("file admits the physical network");
-        let section = &network.source().graph.sections[0];
-        let gas = network.source().gases[0];
+        let inlet = network.source().graph.inlet_section_index().expect("admitted unique inlet");
+        let gas = network.source().gases[inlet];
         let exterior = renderer.radiation_input().expect("file binds exterior explicitly").exterior;
         let geometry = p.geometry();
         let island = renderer.voice().island();
@@ -125,10 +166,9 @@ fn load_with_gas_sources(
         let input_hash = i.input_hash.to_hex();
         let gas_sources = super::thermochemical::provenance(p.gas_records());
         let receiver = renderer.config().receiver;
-        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"tube_length_m\":{:e},\"tube_radius_m\":{:e},\"represented_length_m\":{actual_length:e},\"terminal_reflection\":{},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"model_scope\":\"estimated tonal jet and supplied rigid cylindrical pipe; one-way infinite-baffle outlet pressure; prescribed reflection, no matched radiation feedback, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}}}",
+        let duct_json = flue_duct_provenance(renderer);
+        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"model_scope\":\"estimated tonal jet and supplied rigid cylindrical graph; one-way infinite-baffle outlet pressure; supplied passive loads, no matched radiation feedback, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{duct_json}}}",
             i.jet_card_source,i.jet_card_hash,p.card().claim.kind(),p.card().authority.label(),i.compiled_controls,
-            section.length_m,section.radius_m,
-            match network.source().graph.nodes[1] {fs_couple::bernoulli_aperture::network::NetworkNode::Termination {reflection}=>reflection,_=>unreachable!("file terminal")},
             geometry.flue_width_m,geometry.flue_height_m,geometry.cut_up_m,geometry.labium_offset_m,
             geometry.jet_angle_rad,geometry.mouth_loss_rel,island.displacement_gain,island.seed_amplitude_rel,
             gas.temperature,gas.pressure,gas.density,gas.sound_speed,gas.dynamic_viscosity,

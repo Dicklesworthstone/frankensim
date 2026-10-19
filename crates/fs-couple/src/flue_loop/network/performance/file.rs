@@ -1,8 +1,8 @@
-//! File-driven jet, gas, cylindrical resonator and physical outlet pressure.
+//! File-driven jet, regional gas, tube graph and physical outlet pressure.
 //!
 //! The versioned source selects existing owners, including fractional travel,
 //! optional gas-derived wide-tube loss, and the multirate Rayleigh receiver.
-//! It supplies no instrument-name defaults. This is a rigid cylindrical pipe
+//! It supplies no instrument-name defaults. This is a rigid cylindrical graph
 //! with an estimated tonal jet and a prescribed terminal reflection, not a
 //! measured Boehm flute, resolved turbulent jet or matched radiation load.
 
@@ -20,6 +20,8 @@ use fs_material::gas::GasState;
 use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSources, read_gas_record};
 use fs_scenario::gesture::GestureSchedule;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
+
+mod duct;
 
 /// Versioned SI source grammar; the suffix is the existing gesture format.
 pub const FLUE_PERFORMANCE_SCHEMA: &str = "frankensim-flue-performance-v1";
@@ -100,8 +102,12 @@ impl FlueFilePerformance {
     /// selects the existing source-gas viscous windway. Its length is actual
     /// channel geometry, never an inferred lip channel for a transverse flute.
     /// Gains, seed, dimensions, limits, clocks and the pressure phrase are data.
-    /// `exterior same` shares the bore gas; another gas record changes only the
-    /// receiver environment at the same static pressure.
+    /// `exterior same` shares the default gas; another gas record changes only
+    /// the receiver environment at the same static pressure. `network` replaces
+    /// `tube` with explicit branches, section gases and passive loads. The jet
+    /// always uses the actual inlet section. A network explicitly names its
+    /// radiating outlets; each outlet contributes its own accepted volume flow
+    /// to the same physical receiver.
     ///
     /// The original jet card keeps its own narrow lab scope. The complete
     /// authored composition remains EstimateOnly, including outside-card
@@ -160,12 +166,10 @@ impl FlueFilePerformance {
             row.end()?;
             state
         };
-        let mut row = rows.row("tube")?;
-        let length_m = row.scalar()?;
-        let radius_m = row.scalar()?;
-        let max_length_error_m = row.scalar()?;
-        let reflection = row.scalar()?;
-        row.end()?;
+        let mut duct = duct::Input::read(&mut rows, gas, sources, &mut gas_records, gate)?;
+        let inlet = duct.graph.inlet_section_index().map_err(|source|
+            FlueInputError::Physics(FlueError::Physics(source)))?;
+        let radius_m = duct.graph.sections[inlet].radius_m;
         let mut row = rows.row("flue")?;
         let geometry = FlueGeometry {
             flue_width_m: row.scalar()?, flue_height_m: row.scalar()?, cut_up_m: row.scalar()?,
@@ -215,16 +219,7 @@ impl FlueFilePerformance {
         let policy = FractionalTubePolicy { maximum_frequency_hz: row.scalar()?,
             maximum_summed_phase_error_rad: row.scalar()? };
         row.end()?;
-        let loss_record = rows.record("viscothermal")?;
-        let viscothermal = if loss_record == "none" {
-            Vec::new()
-        } else {
-            let mut row = Row { fields: loss_record.split_ascii_whitespace(), line: rows.line };
-            let loss = ViscothermalSectionSpec { section: 0, cells: row.number()?,
-                minimum_frequency_hz: row.scalar()?, maximum_frequency_hz: row.scalar()? };
-            row.end()?;
-            vec![loss]
-        };
+        let viscothermal = duct.read_losses(&mut rows)?;
         let mut row = rows.row("receiver")?;
         let receiver = CircularOutletReceiver { position_m: [row.scalar()?,row.scalar()?,row.scalar()?],
             radial_rings: row.number()?, angular_points: row.number()?, maximum_frequency_hz: row.scalar()? };
@@ -232,6 +227,7 @@ impl FlueFilePerformance {
         if receiver.maximum_frequency_hz > policy.maximum_frequency_hz {
             return Err(bad(rows.line, "fractional phase band must cover the receiver's declared band"));
         }
+        let (outlet_node, additional_outlets) = duct.read_outlets(&mut rows)?;
         let mut row = rows.row("controls")?;
         let max_controls: usize = row.number()?;
         let max_compile_work = row.number()?;
@@ -251,12 +247,9 @@ impl FlueFilePerformance {
             return Err(bad(rows.line+1,"gesture suffix must be canonical without ignored trailing data"));
         }
         poll(gate)?;
-        let source = FlueNetworkSpec {
-            graph: TubeNetworkSpec { nodes: vec![NetworkNode::Inlet, NetworkNode::Termination { reflection }],
-                sections: vec![TubeSection { nodes: [0,1], length_m, radius_m, max_length_error_m }],
-                sound_speed_m_s: gas.sound_speed, max_wave_memory_bytes },
-            gases: vec![gas], viscothermal, minimum_jet_speed_m_s, maximum_jet_mach, max_jet_history_samples,
-        };
+        duct.graph.max_wave_memory_bytes = max_wave_memory_bytes;
+        let source = FlueNetworkSpec { graph: duct.graph, gases: duct.gases,
+            viscothermal, minimum_jet_speed_m_s, maximum_jet_mach, max_jet_history_samples };
         let voice = FlueVoice::from_fractional_network(Some(&card), displacement_gain, seed_amplitude_rel,
             geometry, source, None, policy, mechanics_rate_hz, voice_seed, voice_index, gate)
             .map_err(FlueInputError::Physics)?;
@@ -265,8 +258,8 @@ impl FlueFilePerformance {
         } else { voice };
         let renderer = FlueOutletPerformance::with_multirate_radiation(voice, schedule,
             FlueOutletConfig { sample_rate_hz, samples, max_block, max_controls, max_compile_work,
-                outlet_node: 1, receiver, maximum_abs_pressure_pa },
-            FlueRadiationInput { exterior, additional_outlets: Vec::new() }, mechanics_rate_hz)
+                outlet_node, receiver, maximum_abs_pressure_pa },
+            FlueRadiationInput { exterior, additional_outlets }, mechanics_rate_hz)
             .map_err(FlueInputError::Performance)?;
         poll(gate)?;
         let info = FluePerformanceInfo { input_hash: hash_domain("org.frankensim.fs-couple.flue-performance.v1",bytes),
@@ -278,7 +271,7 @@ impl FlueFilePerformance {
     #[must_use] pub const fn info(&self) -> FluePerformanceInfo { self.info }
     /// Actual physical runtime; inspect its original and lowered gas/tube inputs.
     #[must_use] pub const fn renderer(&self) -> &FlueOutletPerformance { &self.renderer }
-    /// Supplied mouth geometry, with bore area derived from the same tube radius.
+    /// Supplied mouth geometry, with bore area derived from the inlet section.
     #[must_use] pub const fn geometry(&self) -> FlueGeometry { self.geometry }
     /// The complete selected card, including its narrower lab-validity scope.
     #[must_use] pub const fn card(&self) -> &JetCard { &self.card }
@@ -290,6 +283,10 @@ impl FlueFilePerformance {
 
 struct Rows<'a> { lines: Lines<'a>, line: usize }
 impl<'a> Rows<'a> {
+    fn next_is(&self, expected: &str) -> bool {
+        self.lines.clone().next().is_some_and(|line|
+            line.trim_ascii().split_ascii_whitespace().next() == Some(expected))
+    }
     fn record(&mut self, expected: &'static str) -> Result<&'a str, FlueInputError> {
         self.line += 1;
         let text = self.lines.next().ok_or_else(|| bad(self.line,"missing source record"))?.trim_ascii();
