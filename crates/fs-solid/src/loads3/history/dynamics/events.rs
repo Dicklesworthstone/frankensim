@@ -248,3 +248,6 @@ impl<'g, 'm, 'p, 's> EventTransientRun3<'_, '_, 'g, 'm, 'p, 's> {
         Ok(ScheduledStep3 { start_time_s, end_time_s, interval, jump })
     }
 }
+
+/// Event-preserving local motion-error control over the original integrator.
+pub mod adaptive;
