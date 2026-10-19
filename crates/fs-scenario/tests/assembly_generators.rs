@@ -760,10 +760,13 @@ fn ag_011_arching_second_order_and_existing_mesh_lift() {
         ReferenceLoadState::Unloaded,
     )
     .unwrap();
+    // 25 controls x 4 homogeneous coordinates x 5 evaluations: a node on a
+    // seam corner of this degree-one chart needs four one-sided partials and
+    // its exact point. The hole's axis points lie on the x = 0 and y = 0 seams.
     let budget = fs_plate::shell::profile::ProfileBudget {
         max_nodes: plate.nodes.len(),
         max_triangles: plate.tris.len(),
-        max_feature_evaluations: 100 * plate.nodes.len(),
+        max_feature_evaluations: 500 * plate.nodes.len(),
     };
     let lifted = arch.lift(&plate, budget, || false).unwrap();
     assert_eq!(lifted.mesh.tris, plate.tris);

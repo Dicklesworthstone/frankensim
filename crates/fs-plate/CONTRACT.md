@@ -120,9 +120,13 @@ Jacobian must reproduce x/y and identity (16 eps positional, 1e-12 derivative
 tolerances). General parametric charts refuse rather than silently changing
 coordinates. Derivatives come from the representation owner; this adapter
 does not fit, resample, smooth or duplicate the measured surface. The lift
-charges four control-net visits per query and retains its existing caps and
-cancellation boundaries. Degree-one graphs have C0 cell seams and one-sided
-directors there; the bicubic C1 claim above applies only to the bicubic path.
+charges twenty control-net visits per query (four per evaluation; a seam
+corner takes four one-sided partials and the exact point) and retains its
+existing caps and cancellation boundaries. Degree-one graphs have C0 cell
+seams, where the ordinary first partial is undefined. A node on a seam keeps
+the exact surface height, and its director uses the mean of the one-sided
+slopes, each evaluated 2^-26 of the shorter adjacent span inside that span.
+The bicubic C1 claim above applies only to the bicubic path.
 `fs-scenario::assembly_generators::ag_011_arching_second_order_and_existing_mesh_lift`
 tests the measured outline → existing mesher → shared NURBS → existing lift.
 

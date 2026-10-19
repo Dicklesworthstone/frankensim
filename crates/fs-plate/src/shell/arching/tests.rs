@@ -200,3 +200,66 @@ fn g0_lifted_directors_unit_and_consistent() {
             .is_err()
     );
 }
+
+#[test]
+fn g0_nurbs_seam_director_is_the_mean_of_one_sided_slopes() {
+    use fs_rep_nurbs::KnotVector;
+    // z = |x| + 0.25 y + 0.1 x y on [-1, 1]^2: a degree-one graph whose cell
+    // line x = 0 is a C0 seam with one-sided slopes dz/dx = -1 + 0.1 y and
+    // 1 + 0.1 y. The ordinary first partial is undefined there.
+    let z = |x: f64, y: f64| x.abs() + 0.25 * y + 0.1 * x * y;
+    let chart = |knots_x: Vec<f64>, degree: usize, xs: &[f64]| {
+        let points: Vec<Vec<[f64; 3]>> = xs
+            .iter()
+            .map(|&x| [-1.0, 1.0].iter().map(|&y| [x, y, z(x, y)]).collect())
+            .collect();
+        Arc::new(
+            NurbsSurface::new(
+                KnotVector::new(knots_x, degree).unwrap(),
+                KnotVector::new(vec![-1.0, -1.0, 1.0, 1.0], 1).unwrap(),
+                &points,
+                &vec![vec![1.0; 2]; xs.len()],
+            )
+            .unwrap(),
+        )
+    };
+    let seam = chart(vec![-1.0, -1.0, 0.0, 1.0, 1.0], 1, &[-1.0, 0.0, 1.0]);
+    let arch = ArchingSurface::new(
+        ArchingParameters::NurbsHeightMap(seam.clone()),
+        ReferenceLoadState::Unloaded,
+    )
+    .unwrap();
+    assert!(
+        seam.partials(0.0, 0.3).is_err(),
+        "the ordinary partial refuses"
+    );
+    for y in [-1.0, 0.3, 0.75] {
+        // Off the seam: the ordinary partial.
+        let (h, [dx, dy]) = arch.sample([0.5, y]).unwrap();
+        assert!((h - z(0.5, y)).abs() < 1e-15);
+        assert!((dx - (1.0 + 0.1 * y)).abs() < 1e-14 && (dy - 0.3).abs() < 1e-14);
+        // On the seam: the exact height and the mean of the one-sided slopes.
+        let (h, [dx, dy]) = arch.sample([0.0, y]).unwrap();
+        assert!((h - z(0.0, y)).abs() < 1e-15, "{h}");
+        assert!((dx - 0.1 * y).abs() < 1e-14, "{dx}");
+        assert!((dy - 0.25).abs() < 1e-12, "{dy}");
+    }
+    // A C1 interior knot (degree two, multiplicity one) is not a seam: the
+    // sample is the ordinary partial, bit for bit.
+    let smooth = chart(
+        vec![-1.0, -1.0, -1.0, 0.0, 1.0, 1.0, 1.0],
+        2,
+        &[-1.0, -0.5, 0.5, 1.0],
+    );
+    let arch = ArchingSurface::new(
+        ArchingParameters::NurbsHeightMap(smooth.clone()),
+        ReferenceLoadState::Unloaded,
+    )
+    .unwrap();
+    let (point, du, dv) = smooth.partials(0.0, 0.3).unwrap();
+    let (h, [dx, dy]) = arch.sample([0.0, 0.3]).unwrap();
+    assert_eq!(
+        [h, dx, dy].map(f64::to_bits),
+        [point[2], du[2], dv[2]].map(f64::to_bits)
+    );
+}

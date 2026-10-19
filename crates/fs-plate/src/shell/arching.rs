@@ -202,12 +202,14 @@ impl ArchingParameters {
     fn sections_per_query(&self) -> usize {
         match self {
             Self::HeightMap(grid) => grid.y_m.len(),
+            // A query on a C0 seam corner costs four one-sided partials plus
+            // the exact point (`nurbs_graph_sample`).
             Self::NurbsHeightMap(surface) => surface.admit().map_or(usize::MAX, |s| {
                 s.homogeneous_control_net()
                     .iter()
                     .map(Vec::len)
                     .sum::<usize>()
-                    .saturating_mul(4)
+                    .saturating_mul(4 * 5)
             }),
             Self::LoftedSections { cross, .. } => cross.len().saturating_add(1),
         }
@@ -238,26 +240,7 @@ impl ArchingParameters {
     fn sample(&self, p: [f64; 2]) -> Result<(f64, [f64; 2]), PlateError> {
         match self {
             Self::HeightMap(grid) => grid.sample(p),
-            Self::NurbsHeightMap(surface) => {
-                let (point, du, dv) = surface
-                    .partials(p[0], p[1])
-                    .map_err(|_| bad("NURBS graph query refused"))?;
-                // A general parametric surface cannot be silently interpreted
-                // as a physical-coordinate graph by the plate lift.
-                if (point[0] - p[0]).abs() > 16.0 * f64::EPSILON * p[0].abs().max(1.0)
-                    || (point[1] - p[1]).abs() > 16.0 * f64::EPSILON * p[1].abs().max(1.0)
-                    || (du[0] - 1.0).abs() > 1e-12
-                    || du[1].abs() > 1e-12
-                    || dv[0].abs() > 1e-12
-                    || (dv[1] - 1.0).abs() > 1e-12
-                    || !point[2].is_finite()
-                    || !du[2].is_finite()
-                    || !dv[2].is_finite()
-                {
-                    return Err(bad("NURBS chart must use physical x/y graph parameters"));
-                }
-                Ok((point[2], [du[2], dv[2]]))
-            }
+            Self::NurbsHeightMap(surface) => nurbs_graph_sample(surface, p),
             Self::LoftedSections { long, cross } => {
                 let stations: Vec<_> = cross.iter().map(|(s, _)| *s).collect();
                 let mut z = Vec::new();
@@ -281,6 +264,85 @@ impl ArchingParameters {
             }
         }
     }
+}
+
+/// Parameters at which a first partial along one direction is evaluated: `t`
+/// itself, or one point inside each adjacent span when `t` is an interior knot
+/// whose multiplicity leaves the ordinary first derivative undefined. That is a
+/// C0 seam, e.g. every cell line of a degree-one measured contour table. The
+/// points sit 2^-26 of the shorter adjacent span from the seam: a degree-one
+/// slope across the seam is constant inside each span, so it is exact, and the
+/// slope along the seam is within that offset of its value on the seam.
+fn seam_parameters(knots: &[f64], degree: usize, (lo, hi): (f64, f64), t: f64) -> Vec<f64> {
+    let multiplicity = knots.iter().filter(|&&knot| knot == t).count();
+    if !(t > lo && t < hi) || multiplicity == 0 || multiplicity < degree {
+        return vec![t];
+    }
+    let below = knots
+        .iter()
+        .copied()
+        .filter(|&knot| knot < t)
+        .fold(lo, f64::max);
+    let above = knots
+        .iter()
+        .copied()
+        .filter(|&knot| knot > t)
+        .fold(hi, f64::min);
+    let offset = (t - below).min(above - t) / f64::from(1u32 << 26);
+    vec![t - offset, t + offset]
+}
+
+/// Height and slope of a NURBS graph whose parameters are physical x/y. Off a
+/// seam this is the ordinary first partial. On a C0 seam the director slope is
+/// the mean of the one-sided slopes ([`seam_parameters`]); the height is still
+/// the exact surface point.
+fn nurbs_graph_sample(
+    surface: &NurbsSurface<f64>,
+    p: [f64; 2],
+) -> Result<(f64, [f64; 2]), PlateError> {
+    let refused = |_| bad("NURBS graph query refused");
+    let admitted = surface.admit().map_err(refused)?;
+    let (ku, kv) = (admitted.knots_u(), admitted.knots_v());
+    let us = seam_parameters(ku.knots(), ku.degree(), ku.domain(), p[0]);
+    let vs = seam_parameters(kv.knots(), kv.degree(), kv.domain(), p[1]);
+    // A general parametric surface cannot be silently interpreted as a
+    // physical-coordinate graph by the plate lift.
+    let graph = |q: [f64; 2], point: [f64; 3]| {
+        (point[0] - q[0]).abs() <= 16.0 * f64::EPSILON * q[0].abs().max(1.0)
+            && (point[1] - q[1]).abs() <= 16.0 * f64::EPSILON * q[1].abs().max(1.0)
+            && point[2].is_finite()
+    };
+    let not_graph = || bad("NURBS chart must use physical x/y graph parameters");
+    let mut samples = Vec::with_capacity(us.len() * vs.len());
+    for &u in &us {
+        for &v in &vs {
+            let (point, du, dv) = admitted.partials(u, v).map_err(refused)?;
+            if !graph([u, v], point)
+                || (du[0] - 1.0).abs() > 1e-12
+                || du[1].abs() > 1e-12
+                || dv[0].abs() > 1e-12
+                || (dv[1] - 1.0).abs() > 1e-12
+                || !du[2].is_finite()
+                || !dv[2].is_finite()
+            {
+                return Err(not_graph());
+            }
+            samples.push((point[2], [du[2], dv[2]]));
+        }
+    }
+    if let [only] = samples.as_slice() {
+        return Ok(*only);
+    }
+    let point = admitted.eval(p[0], p[1]).map_err(refused)?;
+    if !graph(p, point) {
+        return Err(not_graph());
+    }
+    let sum = samples
+        .iter()
+        .fold([0.0; 2], |s, (_, d)| [s[0] + d[0], s[1] + d[1]]);
+    #[allow(clippy::cast_precision_loss)]
+    let n = samples.len() as f64;
+    Ok((point[2], [sum[0] / n, sum[1] / n]))
 }
 
 /// Admitted geometric chart with explicit reference load state.
