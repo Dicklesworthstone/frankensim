@@ -96,6 +96,7 @@ pub struct ResistiveFilm {
     cells: Vec<FilmCell>,
     channels: Vec<FilmChannel>,
     factors: Vec<f64>,
+    viscosity_pa_s: f64,
     ports: usize,
     limits: FilmLimits,
 }
@@ -168,9 +169,33 @@ impl ResistiveFilm {
             cells,
             channels,
             factors,
+            viscosity_pa_s,
             ports,
             limits,
         })
+    }
+
+    /// Dynamic viscosity used by every channel conductance [Pa s].
+    #[must_use]
+    pub const fn viscosity_pa_s(&self) -> f64 {
+        self.viscosity_pa_s
+    }
+
+    /// Recompile only the Newtonian transport coefficient on this exact graph.
+    ///
+    /// Cells, apertures, force ports and validity limits remain unchanged. This
+    /// stateless resistance has no stored energy to remap. The caller must hold
+    /// the returned coefficient fixed during its mechanical solve and account
+    /// for the resulting viscous work with that same operator. This does not
+    /// update a compressible film's gas storage or infer thermal expansion.
+    pub fn with_viscosity(&self, viscosity_pa_s: f64) -> Result<Self, FilmError> {
+        Self::new(
+            self.cells.clone(),
+            self.channels.clone(),
+            self.ports,
+            viscosity_pa_s,
+            self.limits,
+        )
     }
 
     /// Number of work-conjugate mechanical coordinates.
@@ -422,3 +447,7 @@ fn solve_factored(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod viscosity_tests;
+

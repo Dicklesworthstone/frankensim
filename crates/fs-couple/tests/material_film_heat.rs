@@ -1,5 +1,7 @@
 //! Sourced liquid viscosity -> joint mechanical force -> finite material heat.
 //! Synthetic constitutive data test wiring and balances, not measured fluids.
+#[path = "material_film_heat/feedback.rs"]
+mod feedback;
 use fs_blake3::ContentHash;
 use fs_couple::render::plate::impact::{ImpactBody, ImpactConfig, ImpactSystem};
 use fs_couple::render::plate::impact::material::heating::{

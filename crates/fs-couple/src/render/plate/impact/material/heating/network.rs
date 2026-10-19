@@ -97,7 +97,7 @@ impl<'m> HeatedImpactSystem<'m> {
             return Err(invalid("network transport cannot enlarge the mechanical heat allowance"));
         }
         let mut staged = None;
-        let mut impact = self.step_with_material_feedback(forces, gate, resolve, |trial| {
+        let impact = self.step_with_material_feedback(forces, gate, resolve, |trial| {
             let (prepared, report, protected_links) = prepare(&trial, thermal)?;
             let (next, next_observer, audit, proposals) = propose(
                 &prepared, observer, bindings, config, &trial, gate, protected_links)?;
@@ -107,25 +107,34 @@ impl<'m> HeatedImpactSystem<'m> {
         // Original source, thermal and mechanical gates have all succeeded.
         // Publication is infallible; no callback runs after this point.
         let (next, next_observer, network, report) = staged.expect("accepted thermal callback ran once");
-        // Keep the independently accumulated boundary audit authoritative.
-        // Per-cell exchange is reconstructed from storage; its roundoff must not
-        // be relabelled as physical outside heat in the collection report.
-        let deposited_heat_j = impact.thermal.transfers.iter()
-            .map(|transfer| transfer.report.deposited_heat_j).sum::<f64>();
-        let external_heat_j = network.external_heat_j - deposited_heat_j;
-        impact.thermal.boundary_heat_j = external_heat_j;
-        impact.thermal.impact.combined_energy_residual_j =
-            impact.thermal.impact.mechanical.balance_residual_j + network.residual_j
-            + (deposited_heat_j - impact.thermal.impact.deposited_heat_j);
+        let frame = finish(impact, network);
         *thermal = next;
         *observer = next_observer;
-        Ok((NetworkImpactFrame { external_heat_j, impact, network }, report))
+        Ok((frame, report))
     }
 }
 
-type Proposed<'n, O> = (DepositionSimulation<'n>, O, EnergyAudit,
+// Shared accounting for the same thermal proposal with additional constitutive
+// endpoint gates. No second boundary/heat integration takes place here.
+pub(super) fn finish(
+    mut impact: MaterialFeedbackFrame<NetworkCellHeat>, network: EnergyAudit,
+) -> NetworkImpactFrame {
+    // Keep the independently accumulated boundary audit authoritative.
+    // Per-cell exchange is reconstructed from storage; its roundoff must not
+    // be relabelled as physical outside heat in the collection report.
+    let deposited_heat_j = impact.thermal.transfers.iter()
+        .map(|transfer| transfer.report.deposited_heat_j).sum::<f64>();
+    let external_heat_j = network.external_heat_j - deposited_heat_j;
+    impact.thermal.boundary_heat_j = external_heat_j;
+    impact.thermal.impact.combined_energy_residual_j =
+        impact.thermal.impact.mechanical.balance_residual_j + network.residual_j
+        + (deposited_heat_j - impact.thermal.impact.deposited_heat_j);
+    NetworkImpactFrame { external_heat_j, impact, network }
+}
+
+pub(super) type Proposed<'n, O> = (DepositionSimulation<'n>, O, EnergyAudit,
     CoupledThermalStep<NetworkCellHeat>);
-fn propose<'n, O: DepositionObserver>(
+pub(super) fn propose<'n, O: DepositionObserver>(
     thermal: &DepositionSimulation<'n>, observer: &O, bindings: &[ReservoirCell],
     config: StepConfig, trial: &ImpactThermalTrial<'_>, gate: &CancelGate,
     protected_links: BTreeSet<u64>,

@@ -14,6 +14,12 @@ impl ImpactSystem {
     /// remain stable through prepared execution and finite thermal heat routes.
     pub fn squeeze_film_count(&self) -> usize { self.squeeze_films.len() }
 
+    /// Exact pressure operator at the current accepted constitutive state.
+    /// Its insertion index stays fixed when temperature changes viscosity.
+    pub fn squeeze_film(&self, index: usize) -> Option<&ResistiveFilm> {
+        self.squeeze_films.get(index)
+    }
+
     /// Add one immutable fluid pressure island without replacing contacts,
     /// resetting body/history state, or creating a second time integrator.
     /// Construction is cold. The film's ports must cover every mechanical mode,

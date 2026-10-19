@@ -13,6 +13,8 @@ pub mod transport;
 pub mod feedback;
 /// Joint contact heating through the existing material enthalpy network.
 pub mod network;
+/// Live sourced liquid viscosity, joint film work and the original heat owners.
+pub mod liquid_film;
 use fs_exec::CancelGate;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
 use fs_phs::PreparedStepRecord;

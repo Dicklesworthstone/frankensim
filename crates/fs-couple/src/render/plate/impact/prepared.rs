@@ -284,4 +284,16 @@ impl PreparedImpactSystem {
         ->super::material::refresh::ContactRefresh {
         self.inner.swap_contact_refresh(next)
     }
+
+    // Only admitted existing islands may be replaced at an exclusive accepted
+    // boundary. The caller stages every coefficient before this infallible
+    // publication; no mechanical coordinate or prepared workspace is rebuilt.
+    pub(crate) fn swap_squeeze_films(
+        &mut self, updates: &mut [(usize, super::squeeze::ResistiveFilm)],
+    ) {
+        for (index, film) in updates {
+            std::mem::swap(&mut self.inner.squeeze_films[*index], film);
+        }
+    }
 }
+
