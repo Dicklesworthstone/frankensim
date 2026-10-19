@@ -7,6 +7,9 @@
 //! This is not a derivative of mesh geometry, schedule times, event selection,
 //! the support-count admission rule, or incident optical absorption.
 
+/// Chain sampled physical controls into authored scalar schedule values.
+pub mod schedule;
+
 use super::{MovingHeatSample, MovingHeatSource, invalid, poll, zeros};
 use crate::{ConductionError, ConductionMesh, ScalarField, COMPONENT_POWER_DIMS};
 use fs_exec::Cx;
