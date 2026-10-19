@@ -110,7 +110,7 @@ impl input::Spec {
         stop_profile:Option<stops::Profile>,
         mut loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
         poll(gate)?;
-        if let Some(stops)=&stop_profile { stops.validate_members(self.strings.len())?; }
+        if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
         // Count every fluid inertia and physical connection before pack I/O.
         // The exact owner still applies its stricter connected-island bound.
         self.network_dimensions(profile.is_some())?;
@@ -182,6 +182,7 @@ impl input::Spec {
         let mut performance=bank.into_scheduled(self.schedule.clone(),names,MultiBowPerformanceConfig {
             samples:self.samples,max_block:self.block,max_work:input::MAX_WORK,max_events:input::MAX_CONTROLS })?;
         if let Some(forces)=&self.forces { performance=performance.with_string_forces(forces.clone(),gate)?; }
+        if let Some(stops)=&stop_profile { performance=stops.bind_motion(performance,gate)?; }
         performance.validate_sample_rate(self.rate)?;performance.validate_sample_count(self.samples)?;poll(gate)?;
         Ok(Ready { spec:self,catalog,performance,body_profile:profile,rotational_bridge_baselines_m:baselines,stop_profile })
     }

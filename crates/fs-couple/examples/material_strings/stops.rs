@@ -1,4 +1,4 @@
-//! File-driven fixed stops in the original material/bow/contact performer.
+//! File-driven compliant stops and normal trajectories in the original material/bow/contact performer.
 //! This profile describes authored contact laws, never inferred tissue or fret
 //! properties. Existing source-derived centreline and receiver shapes own force
 //! projection; the common contact, preload and time solvers own all mechanics.
@@ -14,6 +14,11 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::Transverse
 
 pub const MAX_BYTES: usize = 16_384;
 const MAX_STOPS: usize = 32;
+const MAX_MOTION_KNOTS: usize = 128;
+const MAX_MOTION_COORDINATES: usize = MAX_STOPS * MAX_MOTION_KNOTS;
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::motion::{
+    StopMotionProgram, StopMotionKnot, ObstacleMotionLimits,
+};
 
 #[derive(Clone, Debug)]
 struct Entry {
@@ -30,6 +35,7 @@ struct Entry {
 pub struct Profile {
     pub bytes: Vec<u8>,
     entries: Vec<Entry>,
+    motion: Option<StopMotionProgram>,
 }
 
 fn scalar(word: &str) -> Result<f64> {
@@ -46,9 +52,14 @@ impl Profile {
             return Err("unsupported string-stop profile version".into());
         }
         let mut entries: Vec<Entry> = Vec::new();
-        for line in lines {
-            if entries.len() == MAX_STOPS { return Err("stop profile exceeds 32 contacts".into()); }
+        let mut motion = None;
+        while let Some(line) = lines.next() {
             let fields: Vec<_> = line.split_ascii_whitespace().collect();
+            if fields.first() == Some(&"motion") {
+                motion = Some(parse_motion(&fields, &mut lines, entries.len())?);
+                break;
+            }
+            if entries.len() == MAX_STOPS { return Err("stop profile exceeds 32 contacts".into()); }
             if fields.len() < 5 || fields[0] != "stop" {
                 return Err("expected stop ID STRING STATION SIDE RECEIVER GAP K ALPHA LOSS MAX_FORCE MAX_PENETRATION".into());
             }
@@ -89,7 +100,7 @@ impl Profile {
                     force_relative_tolerance: 1e-9 } });
         }
         if entries.is_empty() { return Err("stop profile must declare at least one contact".into()); }
-        Ok(Self { bytes: bytes.to_vec(), entries })
+        Ok(Self { bytes: bytes.to_vec(), entries, motion })
     }
 
     // Reject unknown member IDs before loading material packs or reducing bodies.
@@ -99,6 +110,26 @@ impl Profile {
             return Err("stop or receiver footprint names an absent material string".into());
         }
         Ok(())
+    }
+
+    /// Reuse the runtime's complete trajectory admission before pack I/O.
+    pub fn validate_performance(&self, spec: &input::Spec, gate: &CancelGate) -> Result<()> {
+        poll(gate)?;
+        self.validate_members(spec.strings.len())?;
+        if let Some(motion) = &self.motion {
+            motion.validate(self.entries.len(), spec.samples, spec.rate, gate)?;
+        }
+        Ok(())
+    }
+
+    pub fn motion_program(&self) -> Option<&StopMotionProgram> { self.motion.as_ref() }
+
+    /// Bind on the already assembled and optionally preloaded instrument.
+    pub fn bind_motion(&self, performance: MultiBowPerformance, gate: &CancelGate) -> Result<MultiBowPerformance> {
+        match &self.motion {
+            Some(motion) => Ok(performance.with_stop_motion(motion.clone(), gate)?),
+            None => Ok(performance),
+        }
     }
 
     pub fn bind(&self, bank: MultiBowStringBank, gate: &CancelGate) -> Result<MultiBowStringBank> {
@@ -154,4 +185,34 @@ pub fn profile_paths(args: &[std::ffi::OsString]) -> Result<(Option<&Path>, Opti
         *slot = Some(Path::new(&pair[1]));
     }
     Ok((body, stops))
+}
+
+// A terminal motion block retains the exact authored knots in stop declaration
+// order. The shared runtime validates timing, units and speeds on the real clock.
+// There is no alternate interpolation, contact law or source-gap mutation here.
+fn parse_motion(fields: &[&str], lines: &mut std::str::Lines<'_>, stops: usize) -> Result<StopMotionProgram> {
+    if fields.len() != 4 || stops == 0 {
+        return Err("motion requires existing stops and MAX_OFFSET_M MAX_SPEED_M_S KNOT_COUNT".into());
+    }
+    let limits = ObstacleMotionLimits {
+        maximum_abs_offset_m: scalar(fields[1])?, maximum_speed_m_s: scalar(fields[2])?,
+    };
+    limits.validate()?;
+    let count: usize = fields[3].parse()?;
+    if count == 0 || count > MAX_MOTION_KNOTS
+        || stops.checked_mul(count).is_none_or(|n| n > MAX_MOTION_COORDINATES) {
+        return Err("motion exceeds its nonempty knot/coordinate budget".into());
+    }
+    let mut knots = Vec::with_capacity(count);
+    for _ in 0..count {
+        let row: Vec<_> = lines.next().ok_or("missing motion knot")?.split_ascii_whitespace().collect();
+        if row.len() != stops + 2 || row[0] != "knot" {
+            return Err("expected knot ELAPSED_SAMPLE OFFSET_M for every declared stop".into());
+        }
+        knots.push(StopMotionKnot { sample: row[1].parse()?,
+            offsets_m: row[2..].iter().map(|x| scalar(x)).collect::<Result<Vec<_>>>()? });
+    }
+    if lines.next().is_some() { return Err("motion block must end the stop profile".into()); }
+    Ok(StopMotionProgram { knots, limits, max_knots: MAX_MOTION_KNOTS,
+        max_coordinate_values: MAX_MOTION_COORDINATES })
 }

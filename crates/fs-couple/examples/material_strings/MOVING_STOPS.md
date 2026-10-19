@@ -65,5 +65,47 @@ not experimental accuracy or a nonlinear anti-aliasing guarantee.
 `StopMotionProgram::validate` exposes the same preflight for scene/file loaders.
 It does not evolve the instrument or replace per-step endpoint admission.
 
-This increment is a Rust API. The existing `--stop-profile` file grammar still
-specifies static reference geometry; it does not yet accept motion knots.
+## File-driven motion
+
+The same `--stop-profile` now accepts an optional terminal motion block, after
+all the ordinary `stop` records. Existing profiles without this block are
+unchanged. For the existing 4096-sample pluck fixture:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  /path/to/pluck.material-strings /path/to/new-moving-stops.wav \
+  --stop-profile crates/fs-couple/examples/material_strings/press-and-withdraw.stops
+```
+
+```text
+frankensim-string-stops-v1
+stop support 0 0.43 positive fixed 0 5000 1 0.2 10 0.001
+motion 0.001 0.1 3
+knot 480 -0.000003
+knot 960 -0.000003
+knot 1440 0
+```
+
+`motion MAX_OFFSET_M MAX_SPEED_M_S KNOT_COUNT` declares the physical bounds and
+number of following knots. Each `knot ELAPSED_SAMPLE OFFSET_M...` gives one
+absolute offset per stop, in its declaration order; no stop is implicitly
+omitted or disabled. Each offset moves along THAT stop's existing normal.
+Independent normals, two-plane strings, torsion, receiver footprints and the
+original material/gas construction are retained. The example's contact data
+are synthetic, not measured finger/fret properties.
+
+The sample-zero offset is implicitly zero. Integer knot times must increase,
+lie within the performance, and satisfy the original runtime's translation and
+speed limits. The complete path is validated before material-pack I/O; it is
+then bound to the same optionally preloaded performer. No additional control
+clock, force envelope, gap rewrite or pressure effect is introduced. Knots are
+limited to 128, with at most 4096 coordinates, inside the original 16 KiB profile
+byte cap. The final knot ends the profile. Admission does not replace per-step
+physical checks or guarantee a nonlinear contact solve will converge.
+
+Focused native checks (not run in the authoring environment):
+
+```bash
+cargo test -p fs-couple --example material_strings moving_stops:: -- --test-threads=1
+cargo test -p fs-couple --test material_bow_interface stops::motion -- --test-threads=1
+```

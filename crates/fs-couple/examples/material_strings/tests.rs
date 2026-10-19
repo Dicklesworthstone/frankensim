@@ -149,3 +149,6 @@ mod fluid;
 
 #[path = "tests/prepared.rs"]
 mod prepared;
+
+#[path = "stops/motion_tests.rs"]
+mod moving_stops;

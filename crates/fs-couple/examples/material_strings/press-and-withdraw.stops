@@ -1,0 +1,6 @@
+frankensim-string-stops-v1
+stop support 0 0.43 positive fixed 0 5000 1 0.2 10 0.001
+motion 0.001 0.1 3
+knot 480 -0.000003
+knot 960 -0.000003
+knot 1440 0
