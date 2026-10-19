@@ -1,14 +1,14 @@
 // Soundboard resolution for the live piano (shared by worker.js and lane-worker.js).
 //
 // The number of soundboard coordinates is the audible lever of the live piano. Measured against
-// the studio render of the same Strandbar score (grand_piano on the same 16-division board, 128
-// coordinates, the same RT-0425 contacts, hammer law and string losses), octave balance error
-// (63 Hz-8 kHz) / 2-8 kHz balance relative to the studio part: 32 -> 5.99 dB / -3.4 dB,
-// 48 -> 3.54 / -3.6, 64 -> 3.03 / -4.0, 96 -> 2.77 / -4.1, 128 -> 1.76 / -1.0. At 128 the rest is
+// the studio render of the same Strandbar score (grand_piano on the same 16-division board and
+// 128-coordinate reduction, the same RT-0425 contacts, hammer law and string losses), octave balance
+// error (63 Hz-8 kHz) / 2-8 kHz balance relative to the studio part: 32 -> 2.51 dB / -0.8 dB,
+// 48 -> 1.92 / +1.7, 64 -> 2.06 / +2.5, 96 -> 1.80 / +0.0, 128 -> 1.74 / -1.0. At 128 the rest is
 // mostly silent strings, which the studio render keeps ringing and the live piano does not have.
-// The 32-coordinate board is embedded in the wasm; larger bridge-informed reductions of the same
-// (0, 2400] Hz FE slice (examples/gen_board.rs, spec N,N/2,200,400,800,1600,2300) are fetched
-// from ./boards/ only when this device can compute them fast enough.
+// The 32-coordinate board is embedded in the wasm; larger bridge-informed POD reductions of the same
+// (0, 2400] Hz FE slice (examples/gen_board.rs, spec pod,N,N/2,16,8000) are fetched from ./boards/
+// only when this device can compute them fast enough.
 export const BOARD_SIZES = [128, 96, 64, 48];
 export const boardUrl = (n) => new URL(`./boards/model-d-board-2400-r${n}.bin`, import.meta.url);
 

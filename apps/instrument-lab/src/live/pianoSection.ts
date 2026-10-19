@@ -26,7 +26,7 @@ const KEY_OFFSETS: Record<string, number> = {
  * RMS octave-balance error [dB, 63 Hz-8 kHz] of the live piano part of Strandbar on each board against the
  * studio render (grand_piano, 128 coordinates); public/live/piano/boards.js, README "Larger live soundboards".
  */
-const BOARD_ERROR_DB: Record<number, number> = { 32: 5.99, 48: 3.54, 64: 3.03, 96: 2.77, 128: 1.76 };
+const BOARD_ERROR_DB: Record<number, number> = { 32: 2.51, 48: 1.92, 64: 2.06, 96: 1.8, 128: 1.74 };
 const SPEED_MIN = 0.5;
 const SPEED_MAX = 4.5;
 
@@ -382,8 +382,8 @@ export class LivePianoSection {
         'All 88 keys of the published scale, 234 speaking strings on the bridge. Only the sounding keys are dynamic: every unison string and duplex segment, up to 200 string modes per key (low trichords keep partials to about 5–7 kHz).',
         'Every other string stays attached as a quasi-static chord (its mass and tension load the bridge); a key becomes dynamic at its strike and returns to rest when quiet.',
         board
-          ? `One shared soundboard: ${board} coordinates of the Model D board, on the 16-division mesh of the graded offline renders (${exact} exact modes plus ${board - exact} bridge-response vectors from the 0–2400 Hz slice), with its full damping matrix: the largest board this device computed fast enough when you pressed Start (32 to 128).`
-          : 'One shared soundboard: a reduction of the Model D board on the 16-division mesh of the graded offline renders (exact low modes plus bridge-response vectors from the 0–2400 Hz slice) with its full damping matrix, 32 to 128 coordinates: the largest this device computes fast enough, chosen when you press Start.',
+          ? `One shared soundboard: ${board} coordinates of the Model D board, on the 16-division mesh of the graded offline renders, with its full damping matrix: ${exact} exact modes, plus the ${board - exact} shapes that best reproduce every key's bridge response from there up to 8 kHz (a proper orthogonal decomposition of the 0–2400 Hz slice). This is the largest board this device computed fast enough when you pressed Start (32 to 128).`
+          : 'One shared soundboard: a reduction of the Model D board on the 16-division mesh of the graded offline renders, with its full damping matrix: exact low modes, plus the shapes that best reproduce every key\'s bridge response up to 8 kHz (a proper orthogonal decomposition of the 0–2400 Hz slice). It has 32 to 128 coordinates, the largest this device computes fast enough, chosen when you press Start.',
         'The published hammer shank (rigid rotation plus bending) and RT-0425\'s published felt law: its stiffness on each string of the unison and its rate loss R_H, contact solved implicitly every step.',
         'The estimated damper pad on every string up to E6 (four quadrature points), and a continuous sustain pedal.',
         'Pressure from the time-domain Rayleigh integral at a microphone 1 m above the board, at a fixed 10 Pa full scale. No samples, no normalisation, no EQ, no reverb.',
@@ -395,14 +395,14 @@ export class LivePianoSection {
           : board >= 128
           ? `${board} board coordinates, as many as the offline render: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[128]} dB from the studio render in octave balance.`
           : `${board} board coordinates instead of the offline render's 128: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[board] ?? '—'} dB from the studio render in octave balance (128 coordinates: ${BOARD_ERROR_DB[128]} dB).`,
-        'Strings of silent keys neither resonate nor absorb. Offline, on the same board, an A3 mf strike loses about 13 % of its energy to their dampers, so the live note decays more slowly early on (−7.1 against −14.8 dB/s), and their undamped strings ring along: the live A3 has 3.2 dB less energy above 2 kHz.',
+        'Strings of silent keys neither resonate nor absorb. Offline, on the same board, an A3 mf strike loses about 13 % of its energy to their dampers, so the live note decays more slowly early on (−7.1 against −14.8 dB/s), and their undamped strings ring along: the live A3 has 2.4 dB less energy above 2 kHz.',
         `A polyphony budget of ${info ? info.maxDynamicModes.toLocaleString('en-US') : '2,400'} string modes and ${info ? info.maxSoundingKeys : 24} keys. Beyond it the quietest key is returned to rest early; this is counted ("Forced out") and its energy appears as retired in the ledger. A load governor may lower the budget for new keys on a slow device, and says so.`,
         'No una corda or sostenuto, no key or action beyond the shank, no room, lid or case, no air loading of the board.',
       ], 'out'),
     );
     body.append(lists);
     body.append(el('h4', undefined, 'Checked against the offline reference'));
-    body.append(el('p', undefined, 'With nothing but one key on the bridge, the live kernel and the reference engine (the same source files) agree on bridge velocity to within 4 × 10⁻¹² relative over one second, for eight keys at three hammer speeds, with the published string, felt and hammer laws this page plays; their energy books agree to about ten digits. The WebAssembly build in this tab reproduces the native build sample for sample on an isolated A3 and C6. Against the full offline render, the first 15 partials of A3 mf sit within 1.3 cents and the fitted inharmonicity is 2.37–2.38 × 10⁻⁴ (offline 2.41 × 10⁻⁴).'));
+    body.append(el('p', undefined, 'With nothing but one key on the bridge, the live kernel and the reference engine (the same source files) agree on bridge velocity to within 4 × 10⁻¹² relative over one second, for eight keys at three hammer speeds, with the published string, felt and hammer laws this page plays; their energy books agree to about ten digits. The WebAssembly build in this tab reproduces the native build sample for sample on an isolated A3 and C6. Against the full offline render, the first 15 partials of A3 mf sit within 3 cents on every board (0.8 cents on 96 and 128 coordinates) and the fitted inharmonicity is 2.38–2.40 × 10⁻⁴ (offline 2.41 × 10⁻⁴).'));
     const chips = (title: string, cls: string, items: string[]): HTMLElement => {
       const row = el('div', 'lp-chiprow');
       row.append(el('h4', undefined, title));

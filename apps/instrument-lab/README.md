@@ -177,24 +177,31 @@ copy (a wasm from an older build) builds the chosen board again. On a device too
 embedded board at the 700-mode start floor, the piano falls back to its 16 exact low modes, started at
 the mode cap its own timing predicts (not below 700) rather than the full 2,400; the load governor takes
 it lower from there. The boards are the offline
-binary's reductions of the same FE slice of the 16-division board the graded renders use
+binary's POD reductions of the same FE slice of the 16-division board the graded renders use
 (`board-rt16.fsb`); generate them natively with the engine's `gen_board` example:
 
-    gen_board public/live/piano/boards/model-d-board-2400-r64.bin 2400 64,32,200,400,800,1600,2300
-    # r48: 48,24,...  r96: 96,48,...  r128: 128,64,... (the studio render's reduction)
+    gen_board public/live/piano/boards/model-d-board-2400-r64.bin 2400 pod,64,32,16,8000
+    # r48: pod,48,24,16,8000  r96: pod,96,48,...  r128: pod,128,64,... (the studio render's reduction)
     # a fourth argument picks the mesh: 16,0.03 (default) or preset (the unrefined 8 divisions)
+
+Each keeps N/2 exact low modes, plus the leading proper orthogonal decomposition of every key's static
+and damped bridge responses at 16 frequencies, log-spaced from the first unprotected mode to 8 kHz.
+`examples/board_admittance.rs` measures a reduction against its complete slice
+(crates/fs-couple/examples/grand_piano/BOARD_REDUCTION.md has the table). The former boards
+(`N,N/2,200,400,800,1600,2300`, largest-residual pivots) sampled nothing above 2.3 kHz. String partials
+still drive the slice there, through its mass line, so the pressure those boards radiated above 2 kHz
+swung with size. The live A3 mf read -41.7/-37.6/-45.4/-45.0/-35.2 dB at 2-8 kHz for 32...128
+coordinates (real -33.2); on the POD boards it reads -34.7/-36.8/-35.4/-36.8/-36.1.
 
 The 16-division board carries 11,772 surface points to the 8-division board's 3,918, so the files are
 2.8x larger (the wasm with its embedded 32-coordinate board 1.8 MB gzipped, r128 5.8 MB); building an
-engine takes about as long. On the 128-coordinate board it brought the live A3 mf from -41.7 to
--35.2 dB at 2-8 kHz (real -33.2), its partial pattern from 9.6 to 8.4 dB and C6's from 9.0 to 2.7 dB;
-the smaller reductions gain and lose by size (graded per size in frankensim-u4ugc).
+engine takes about as long.
 
 Measured on the Strandbar piano part against the studio stem (RMS octave-balance error, 63 Hz-8 kHz,
-same 16-division board, contacts, hammer law and string losses): 32 coordinates 5.99 dB, 48 3.54,
-64 3.03, 96 2.77, 128 1.76. At 128 the rest is mostly silent strings: on the same board an offline A3
-has 3.2 dB more energy above 2 kHz than the live one, whose budget and single mechanical step move it
-by 0.1 dB.
+same 16-division board and 128-coordinate POD reduction, contacts, hammer law and string losses):
+32 coordinates 2.51 dB, 48 1.92, 64 2.06, 96 1.80, 128 1.74; on the pivoted boards it was 5.99, 3.54, 3.03,
+2.77, 1.76. At 128 the rest is mostly silent strings: on the same board an offline A3 has 2.4 dB
+more energy above 2 kHz than the live one, whose budget and single mechanical step move it by 0.1 dB.
 
 The browser plays RT-0425's published laws (`wasm.rs`): its string losses, its hammer stiffness K_H on
 each unison string and its rate loss R_H in place of the estimated crush and Prony terms
@@ -242,8 +249,9 @@ other wasm the table is ignored and the gain is used as given. The same applies 
 
 The studio loop is three native renders that start 0.15 s before the first downbeat:
 `grand_piano --performance strandbar-piano.csv` (Steinway D preset on `--board-geometry board-rt16.fsb`,
-128 board coordinates up to 2.4 kHz, one substep, `--rt0425-hammer-stiffness --rt0425-hammer-dissipation
---rt0425-string-damping`, as the live piano plays) and fs-vkplate `perform` for the kick and the closed hi-hat. Long fs-vkplate
+`--board-band-hz 2400 --board-reduction pod,128,64,16,8000` as the live piano's largest board, one substep,
+`--rt0425-hammer-stiffness --rt0425-hammer-dissipation --rt0425-string-damping`, as the live piano plays) and
+fs-vkplate `perform` for the kick and the closed hi-hat. Long fs-vkplate
 parts can be rendered as bar-sized simulations, each with a pre-roll of real strokes, and stitched
 (the stitched kick matched a continuous render to 0.9 % RMS). The hi-hat's banded Airy solve is
 memory-bound: run one or two such processes per L3 cache (`taskset`, `-C target-cpu=native`).
