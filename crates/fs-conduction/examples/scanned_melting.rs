@@ -9,6 +9,7 @@ use fs_conduction::bc::history::march::{HeatSourceHistory,ThermalHistoryProblem}
 use fs_conduction::bc::history::march::enthalpy::{EnthalpyHistoryRun,EnthalpyHistoryMaterials,EnthalpyHistoryBudget};
 use fs_conduction::bc::history::march::enthalpy::scanning::ScanningEnthalpyRun;
 use fs_conduction::bc::history::march::moving::{MovingHeatSource,MovingHeatBudget};
+use fs_conduction::bc::history::march::moving::motion::ScanMotionLimit;
 use fs_conduction::fixtures::box_grid;
 use fs_conduction::transient::enthalpy::{EnthalpyBudget,EnthalpyStepConfig};
 use fs_conduction::transient::enthalpy::heterogeneous::ReferenceEnthalpyMaterial;
@@ -47,6 +48,7 @@ fn run(cx:&Cx<'_>,power:f64,latent:f64)->Result<(),Box<dyn Error>> {
             max_vertices:mesh.vertex_count(),max_elements:mesh.element_count(),min_active_vertices:4,
             power_relative_tolerance:1e-10})?;
     let mut run=ScanningEnthalpyRun::new(cx,base,vec![source],1,None)?;
+    run.set_motion_limit(cx,ScanMotionLimit {max_normalized_travel:0.05,max_chebyshev_coefficients:0})?;
     let config=EnthalpyStepConfig {newton:NewtonKrylovConfig {absolute_tolerance:1e-10,
         relative_tolerance:1e-12,linear_restart:40,max_linear_cycles:32,forcing_minimum:1e-12,
         forcing_maximum:1e-3,..Default::default()},max_newton_iterations:128,energy_tolerance_j:1e-7};

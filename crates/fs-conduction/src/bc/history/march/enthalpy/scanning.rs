@@ -10,6 +10,7 @@ use super::{EnthalpyHistoryRun, EnthalpyStepConfig, EnthalpyStepSolution,
     HeterogeneousEnthalpyError, conduction, invalid, natural_only, poll};
 use super::adaptive::{PhaseErrorTolerance, phase_error};
 use super::super::{events, moving::MovingHeatSource};
+use super::super::moving::motion::ScanMotionLimit;
 use super::super::events::adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep,
     admit_proposal, select_step};
 use super::super::radiation::{RadiationRegionHistory, admit_histories, patches_before};
@@ -74,6 +75,7 @@ pub struct ScanningEnthalpyRun<'h, 'm, 'c> {
     run: EnthalpyHistoryRun<'h, 'm, 'c>,
     sources: Vec<MovingHeatSource>,
     radiation: Option<ScanRadiation>,
+    motion_limit: Option<ScanMotionLimit>,
 }
 impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
     /// Attach one or more independently moving/controlled sources before the
@@ -95,7 +97,7 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
             radiation.config.validate().map_err(conduction)?;
             admit_histories(cx, run.problem.boundary, run.time_s(), &radiation.patches).map_err(conduction)?;
         }
-        let model = Self { run, sources, radiation };
+        let model = Self { run, sources, radiation, motion_limit: None };
         model.source_at(cx, model.run.time_s(), false)?;
         poll(cx, 0).map_err(conduction)?;
         Ok(model)
@@ -109,6 +111,33 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
     #[must_use]
     pub fn sources(&self) -> &[MovingHeatSource] { &self.sources }
 
+    /// Attach a footprint-relative motion limit before the first accepted step.
+    /// This independently bounds source travel even when thermal step doubling
+    /// sees identical endpoint loads. All moving sources participate, including
+    /// off-source travel. Refusal changes neither policy nor caloric state.
+    ///
+    /// Event and adaptive steps shorten automatically. Explicit `advance_to`
+    /// instead refuses an interval exceeding the bound or crossing a path knot;
+    /// it never silently changes the requested endpoint or its right-side rule.
+    /// The limit cannot be changed or removed after stepping begins.
+    pub fn set_motion_limit(&mut self, cx: &Cx<'_>, policy: ScanMotionLimit)
+        -> Result<(), HeterogeneousEnthalpyError>
+    {
+        poll(cx, self.run.accepted_steps()).map_err(conduction)?;
+        if self.run.accepted_steps() != 0 {
+            return Err(invalid("scan motion policy must be selected before the first accepted step"));
+        }
+        policy.validate().map_err(conduction)?;
+        for source in &self.sources { source.admit_motion_limit(cx, policy).map_err(conduction)?; }
+        poll(cx, self.sources.len()).map_err(conduction)?;
+        self.motion_limit = Some(policy);
+        Ok(())
+    }
+
+    /// Selected geometric motion resolution; None preserves caller-owned steps.
+    #[must_use]
+    pub const fn motion_limit(&self) -> Option<ScanMotionLimit> { self.motion_limit }
+
     /// Increase the physical step allowance without changing scan or phase history.
     pub fn extend_step_budget(&mut self, maximum: usize) -> Result<(), HeterogeneousEnthalpyError> {
         self.run.extend_step_budget(maximum)
@@ -120,6 +149,9 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
         -> Result<ScanStep, HeterogeneousEnthalpyError>
     {
         self.admit(cx, time)?;
+        if self.motion_endpoint(cx, self.run.time_s(), time)? < time {
+            return Err(invalid("explicit scan interval exceeds the motion limit; shorten it or use event/adaptive stepping"));
+        }
         let step = self.solve(cx, &self.run.specific_h, self.run.time_s(), time, false, config)?;
         self.run.publish(cx, time, step.solution())?;
         Ok(step)
@@ -127,7 +159,8 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
 
     /// Advance one interval capped by all background, boundary, scan-position,
     /// scan-power and reservoir knots. Held data use exact end-left values.
-    /// A finite maximum time step still must resolve continuous source motion.
+    /// A selected motion limit also caps travel relative to every footprint.
+    /// Without it, the caller's maximum time step must resolve continuous motion.
     pub fn advance_event_step(&mut self, cx: &Cx<'_>, target: f64,
         max_step: f64, config: EnthalpyStepConfig)
         -> Result<events::HistoryEventStep<ScanStep>, HeterogeneousEnthalpyError>
@@ -136,6 +169,7 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
         let start = self.run.time_s();
         let end = events::next_endpoint(cx, self.run.problem.boundary, &self.run.problem.source,
             self.signals(), start, target, max_step).map_err(conduction)?;
+        let end = self.motion_endpoint(cx, start, end)?;
         let report = self.solve(cx, &self.run.specific_h, start, end, true, config)?;
         self.run.publish(cx, end, report.solution())?;
         Ok(events::HistoryEventStep { start_time_s: start, end_time_s: end, report })
@@ -145,7 +179,9 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
     /// phase-error coordinates. Each coarse/half solve resamples the moving
     /// field at its own endpoint. Publish only the actual two-half-step path,
     /// atomically, reserving two lifetime slots. This is a local estimate, not a
-    /// bound on unsampled source motion, interpolation error or melt-front position.
+    /// solution-error bound. A selected motion limit restricts the initial trial
+    /// independently of its endpoint discrepancy. Like a nearby event, this may
+    /// fall below the adaptive minimum; the original error test still must pass.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_adaptive_step(&mut self, cx: &Cx<'_>, target: f64, proposed: f64,
         step: EnthalpyStepConfig, adaptive: AdaptiveHistoryConfig, phase: PhaseErrorTolerance)
@@ -158,6 +194,7 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
         let start = self.run.time_s();
         let end = events::next_endpoint(cx, self.run.problem.boundary, &self.run.problem.source,
             self.signals(), start, target, cap).map_err(conduction)?;
+        let end = self.motion_endpoint(cx, start, end)?;
         let selected = select_step(cx, start, end, adaptive, conduction, |mid, end| {
             let coarse = self.solve(cx, &self.run.specific_h, start, end, true, step)?;
             let first = self.solve(cx, &self.run.specific_h, start, mid, true, step)?;
@@ -168,6 +205,17 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
         self.run.publish(cx, selected.end_time_s, selected.second_half.solution())?;
         self.run.accepted_steps += 1;
         Ok(selected)
+    }
+
+    fn motion_endpoint(&self, cx: &Cx<'_>, start: f64, mut end: f64)
+        -> Result<f64, HeterogeneousEnthalpyError>
+    {
+        if let Some(policy) = self.motion_limit {
+            for source in &self.sources {
+                end = source.motion_limited_endpoint(cx, start, end, policy).map_err(conduction)?;
+            }
+        }
+        Ok(end)
     }
 
     fn admit(&self, cx: &Cx<'_>, target: f64) -> Result<(), HeterogeneousEnthalpyError> {

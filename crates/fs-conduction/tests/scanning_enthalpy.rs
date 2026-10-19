@@ -4,6 +4,7 @@ use fs_blake3::ContentHash;
 use fs_conduction::bc::history::{ThermalBoundaryHistory};
 use fs_conduction::bc::history::march::{HeatSourceHistory, ThermalHistoryProblem};
 use fs_conduction::bc::history::march::moving::{MovingHeatBudget, MovingHeatSource};
+use fs_conduction::bc::history::march::moving::motion::ScanMotionLimit;
 use fs_conduction::bc::history::march::enthalpy::{EnthalpyHistoryRun, EnthalpyHistoryMaterials, EnthalpyHistoryBudget};
 use fs_conduction::bc::history::march::enthalpy::scanning::{ScanningEnthalpyRun, ScanRadiation, ScanTransport};
 use fs_conduction::bc::history::march::enthalpy::adaptive::PhaseErrorTolerance;
@@ -60,6 +61,67 @@ fn base<'h,'m,'c>(cx:&Cx<'_>,history:&'h ThermalBoundaryHistory<'m>,
         EnthalpyHistoryMaterials { table:&[ReferenceEnthalpyMaterial {curve,reference_density_kg_m3:1.}],
             of_element:&[0,0],phase_conductivity:None },&[150.;8],
         EnthalpyHistoryBudget {spatial:EnthalpyBudget {max_vertices:8,max_elements:2},max_steps}).unwrap()
+}
+
+#[test]
+fn g1_motion_limited_scan_retains_original_endpoints_and_step_budgets() {
+    let mesh=mesh();let curve=curve();let material=ConductivityModel::isotropic_declared(2.).unwrap();
+    with_cx(|cx| {
+        let history=history(cx,&mesh);
+        let source=heater(TimeSignal::Ramp {t_start:0.,t_end:1.,
+            from:QtyAny::new(0.1,LENGTH),to:QtyAny::new(0.5,LENGTH)},constant(0.1,COMPONENT_POWER_DIMS));
+        let make=||ScanningEnthalpyRun::new(cx,base(cx,&history,&material,&curve,20),vec![source.clone()],1,None).unwrap();
+        let mut limited=make();let mut manual=make();
+        let policy=ScanMotionLimit {max_normalized_travel:0.125,max_chebyshev_coefficients:0};
+        limited.set_motion_limit(cx,policy).unwrap();
+        let before=limited.conduction().specific_enthalpy_j_kg().to_vec();
+        assert!(limited.advance_to(cx,1.,config()).is_err());
+        assert_eq!(limited.conduction().specific_enthalpy_j_kg(),before.as_slice());
+        assert_eq!(limited.conduction().accepted_steps(),0);
+        let mut energy=0.;
+        while limited.conduction().time_s()<0.5 {
+            let step=limited.advance_event_step(cx,0.5,1.,config()).unwrap();
+            assert!(step.end_time_s-step.start_time_s<=0.125);
+            let reference=manual.advance_to(cx,step.end_time_s,config()).unwrap();
+            assert_eq!(step.report.solution().specific_enthalpy_j_kg,reference.solution().specific_enthalpy_j_kg);
+            energy+=step.report.solution().stored_energy_change_j;
+        }
+        assert!((energy-0.5*(0.1+2.*mesh.total_volume())).abs()<1e-8);
+        assert!(limited.set_motion_limit(cx,policy).is_err());
+        assert_eq!(limited.motion_limit(),Some(policy));
+        assert_eq!(limited.conduction().accepted_steps(),manual.conduction().accepted_steps());
+    });
+}
+
+#[test]
+fn g4_adaptive_scan_applies_the_tightest_motion_limit_and_resumes_without_partial_state() {
+    let mesh=mesh();let curve=curve();let material=ConductivityModel::isotropic_declared(2.).unwrap();
+    let history=with_cx(|cx|history(cx,&mesh));
+    let path=|speed|TimeSignal::Ramp {t_start:0.,t_end:1.,from:QtyAny::new(0.1,LENGTH),to:QtyAny::new(0.1+speed,LENGTH)};
+    let sources=vec![heater(path(0.2),constant(0.1,COMPONENT_POWER_DIMS)),
+        heater(path(0.4),constant(0.1,COMPONENT_POWER_DIMS))];
+    let mut run=with_cx(|cx|ScanningEnthalpyRun::new(cx,base(cx,&history,&material,&curve,2),sources,2,None).unwrap());
+    let policy=ScanMotionLimit {max_normalized_travel:0.125,max_chebyshev_coefficients:0};
+    with_cancelled_cx(|cx|assert!(run.set_motion_limit(cx,policy).is_err()));
+    assert_eq!(run.motion_limit(),None);
+    with_cx(|cx|{run.set_motion_limit(cx,policy).unwrap();});
+    let adaptive=AdaptiveHistoryConfig {absolute_temperature_k:1.,relative_temperature:0.,
+        min_step_s:1e-6,max_step_s:1.,max_attempts:8};
+    let phase=PhaseErrorTolerance {absolute_enthalpy_j_kg:100.,relative_enthalpy:0.,absolute_liquid_fraction:1.};
+    let initial=run.conduction().specific_enthalpy_j_kg().to_vec();
+    with_cancelled_cx(|cx|assert!(run.advance_adaptive_step(cx,0.5,1.,config(),adaptive,phase).is_err()));
+    assert_eq!(run.conduction().specific_enthalpy_j_kg(),initial.as_slice());
+    with_cx(|cx| {
+        let pair=run.advance_adaptive_step(cx,0.5,1.,config(),adaptive,phase).unwrap();
+        assert!((pair.end_time_s-0.125).abs()<1e-13);
+        assert_eq!(pair.rejected_attempts,0);
+        assert_eq!(run.conduction().accepted_steps(),2);
+        assert!(run.advance_event_step(cx,0.5,1.,config()).is_err());
+        run.extend_step_budget(3).unwrap();
+        let next=run.advance_event_step(cx,0.5,1.,config()).unwrap();
+        assert!(next.end_time_s-next.start_time_s<=0.125);
+        assert_eq!(run.motion_limit(),Some(policy));
+    });
 }
 
 #[test]
