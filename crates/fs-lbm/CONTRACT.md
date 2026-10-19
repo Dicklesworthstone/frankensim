@@ -681,12 +681,14 @@ oracles through degree6, refusal boundaries, G4 cancellation and G5 actual
 workers1/2/7. Its new product-state collision hash has an independent dyadic
 oracle; native reproduction is pending. G1 requires >=1.8 shear-decay error
 order on200/100/50micrometre acoustic rungs and live, shrinking higher-rate
-spread. G2 uses three Gaussian axial-jet cross-section rungs and Fourier
+spread. G2 uses four Gaussian axial-jet cross-section rungs (n = 16 to 128;
+the central-moment operator converges slowest at tau - 1/2 = 0.003) and Fourier
 angular interpolation: all D3Q27 collisions decrease m4/m0 below0.5%, while
 same-polynomial D3Q19 BGK must be at least2x worse, or the fixture is refused.
 The rotational fixture uses diffusive scaling, separate from the fixed-c
 acoustic ladder. `scripts/e2e/music/lbm_qualification.sh` retains both release
-lanes. Numeric gates await central native execution; no green claim is made.
+lanes. G1 and G2 pass natively in release; G2's 128 rung takes about ten
+minutes there and does not finish within 90 minutes in a debug build.
 
 This is not a White--Chong nozzle reproduction, full jet/edge-tone campaign,
 total-energy/NSF solver, 3-D multiblock refinement, transparent boundary,
