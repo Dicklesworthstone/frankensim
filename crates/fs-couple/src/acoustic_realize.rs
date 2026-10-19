@@ -4724,7 +4724,15 @@ fn bore_spec_inner(
         return None;
     }
     let budget = total_cells as f64;
-    let length_scale = if staggered_half_cell_align {
+    // The half-cell alignment offsets the LC chain's (N + 1/2) dx effective
+    // length. fs-phs realizes a lone widening taper as a psi line instead,
+    // which has no such offset (lossless -1.3% at 8 cells against -6% for a
+    // cylinder), so it is not shortened.
+    let psi_cone = matches!(
+        duct.segments.as_slice(),
+        [s] if s.is_taper() && s.outlet_radius_m > s.radius_m
+    );
+    let length_scale = if staggered_half_cell_align && !psi_cone {
         budget / (budget + 0.5)
     } else {
         1.0
@@ -5989,11 +5997,10 @@ mod lumped_ladder_resonance_tests {
                             "{}",
                             line / cone_oracle
                         );
-                        // The psi chain carries a near-field shunt on every
-                        // cell (frankensim-d1j6s) and its resonance runs away
-                        // under refinement (2.6, 3.3 x c/4L at 6, 12 cells):
-                        // refused.
-                        assert_eq!(ladder, None, "{name} {cells}");
+                        // The psi cone with its one inlet near-field shunt is
+                        // admitted and measured (frankensim-d1j6s); with a
+                        // shunt on every cell it ran away to 2.6 and 3.3 x c/4L.
+                        assert!(cents.is_some_and(|c| c.abs() < 100.0), "{name} {cells}");
                     }
                     _ => {
                         // The open hole at mid-bore shortens the speaking length.

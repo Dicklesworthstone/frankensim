@@ -2378,11 +2378,11 @@ fn linear_taper_is_not_the_inlet_cylinder() {
     assert!(flare[0].outlet_radius > flare[0].radius);
     let a = acoustic_chain(&cyl, 1.2, c, false, 1, &[], None).expect("cyl chain");
     let b = acoustic_chain(&flare, 1.2, c, false, 1, &[], None).expect("flare chain");
-    // Cylinder LC is 2 states/cell; the cone adds one near-field
-    // shunt inertance per cell. Equal dimensions would mean the
-    // flare reprinted the inlet ladder.
+    // Cylinder LC is 2 states/cell; the lone widening cone is a ψ line
+    // with its one inlet near-field shunt inertance. Equal dimensions
+    // would mean the flare reprinted the inlet ladder.
     assert_eq!(a.state_dim(), 16);
-    assert_eq!(b.state_dim(), 24);
+    assert_eq!(b.state_dim(), 17);
     let dt = 1.0 / 8_000.0;
     let ring = |sys: &PortHamiltonian| {
         let mut x = vec![0.0; sys.state_dim()];
@@ -2416,7 +2416,8 @@ fn linear_taper_is_not_the_inlet_cylinder() {
 fn spherical_cone_is_not_a_broken_line_horn() {
     let c = 343.0;
     let sph = spherical_cone(0.006, 0.018, 0.34, 1.2, c, 4, None, 1, &[], None).expect("ψ");
-    assert_eq!(sph.state_dim(), 12);
+    // Four ψ cells plus the one inlet near-field shunt.
+    assert_eq!(sph.state_dim(), 9);
     // Broken-line horn: two tapers, different slopes. Same-slope
     // halves would be one ψ-line; this must stay two.
     let halves = [
@@ -2434,7 +2435,8 @@ fn spherical_cone_is_not_a_broken_line_horn() {
         },
     ];
     let web = acoustic_chain(&halves, 1.2, c, false, 1, &[], None).expect("broken line");
-    assert_eq!(web.state_dim(), 12);
+    // Two tapered runs are four frustum LC cells.
+    assert_eq!(web.state_dim(), 8);
     let dt = 1.0 / 8_000.0;
     let ring = |sys: &PortHamiltonian| {
         let mut x = vec![0.0; sys.state_dim()];
@@ -2493,10 +2495,11 @@ fn mixed_cylinder_and_taper_is_not_the_pipe_or_the_full_cone() {
     let a = acoustic_chain(&pipe, 1.2, c, false, 1, &[], None).expect("pipe");
     let b = acoustic_chain(&mix, 1.2, c, false, 1, &[], None).expect("mix");
     let d = acoustic_chain(&cone, 1.2, c, false, 1, &[], None).expect("cone");
-    // 8 LC cells; the four cone cells add one near-field shunt each.
+    // 8 LC cells each. The cylinder + taper run is frustum cells; the lone
+    // widening cone is a ψ line with its one inlet near-field shunt.
     assert_eq!(a.state_dim(), 16);
-    assert_eq!(b.state_dim(), 20);
-    assert_eq!(d.state_dim(), 24);
+    assert_eq!(b.state_dim(), 16);
+    assert_eq!(d.state_dim(), 17);
     let dt = 1.0 / 8_000.0;
     let ring = |sys: &PortHamiltonian| {
         let mut x = vec![0.0; sys.state_dim()];
@@ -2561,4 +2564,137 @@ fn dominant_zero_period(x: &[f64], dt: f64) -> f64 {
     }
     assert!(times.len() >= 3, "need crossings, got {}", times.len());
     (times[times.len() - 1] - times[0]) / (times.len() - 1) as f64
+}
+
+/// Lowest input-|Z| resonance [rad/s] of a single-port chain on
+/// `[lo, hi]`: the first interior maximum of a uniform scan, refined by
+/// golden section. An LU refusal is a lossless pole (`|Z| = inf`).
+fn first_resonance(sys: &PortHamiltonian, lo: f64, hi: f64) -> f64 {
+    let n = sys.state_dim();
+    let (j, r, g) = sys.structure();
+    let mut q = vec![0.0; n * n];
+    let mut unit = vec![0.0; n];
+    for col in 0..n {
+        unit[col] = 1.0;
+        for (row, value) in sys.effort(&unit).into_iter().enumerate() {
+            q[row * n + col] = value;
+        }
+        unit[col] = 0.0;
+    }
+    let magnitude = |w: f64| {
+        let mut m = vec![C64::ZERO; n * n];
+        for i in 0..n {
+            for k in 0..n {
+                let a: f64 = (0..n)
+                    .map(|l| (j[i * n + l] - r[i * n + l]) * q[l * n + k])
+                    .sum();
+                m[i * n + k] = C64::new(-a, if i == k { w } else { 0.0 });
+            }
+        }
+        let Ok(lu) = fs_la::eigen_complex::lu_complex(&m, n) else {
+            return f64::INFINITY;
+        };
+        let mut x: Vec<C64> = g.iter().map(|&v| C64::new(v, 0.0)).collect();
+        lu.solve(&mut x);
+        (0..n)
+            .fold(C64::ZERO, |z, k| {
+                z + x[k].scale((0..n).map(|i| g[i] * q[i * n + k]).sum())
+            })
+            .abs()
+    };
+    let samples = 600;
+    let step = (hi - lo) / f64::from(samples);
+    let (mut before, mut here) = (magnitude(lo), magnitude(lo + step));
+    for i in 2..=samples {
+        let after = magnitude(lo + step * f64::from(i));
+        if here > before && here >= after {
+            let (mut a, mut b) = (lo + step * f64::from(i - 2), lo + step * f64::from(i));
+            let ratio = 0.5 * (5.0_f64.sqrt() - 1.0);
+            for _ in 0..80 {
+                let (c, d) = (b - ratio * (b - a), a + ratio * (b - a));
+                if magnitude(c) > magnitude(d) {
+                    b = d;
+                } else {
+                    a = c;
+                }
+            }
+            return 0.5 * (a + b);
+        }
+        (before, here) = (here, after);
+    }
+    f64::NAN
+}
+
+/// G1 (frankensim-d1j6s): tapered chains converge to the lossless
+/// spherical-wave resonance with p = 0 at the outlet. Oracles:
+/// a truncated cone from x1 = L r1/(r2 - r1) has k L + atan(k x1) = pi;
+/// a cylinder L1 feeding that cone (x1 = L2 a0/(a2 - a0)) has
+/// sin(k L2 + t) cos(k L1) = sin(k L2) sin(t) sin(k L1), t = atan(k x1).
+/// The psi chain that carried a near-field shunt on every cell drifted
+/// AWAY from these (+60 / +110 / +174 % at 8 / 16 / 32 cells for the cone).
+#[test]
+fn tapered_chains_converge_to_the_spherical_wave_resonance() {
+    let c = 343.0;
+    // First sign change on [0.5, 20], then bisection.
+    let root = |f: &dyn Fn(f64) -> f64| {
+        let (mut lo, mut hi) = (0.5, 0.5);
+        while f(hi).signum() == f(lo).signum() {
+            hi += 1e-3;
+            assert!(hi < 20.0, "no root");
+        }
+        for _ in 0..200 {
+            let mid = 0.5 * (lo + hi);
+            if f(mid).signum() == f(lo).signum() {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        0.5 * (lo + hi)
+    };
+    let (r1, r2, l) = (0.003, 0.02, 0.5);
+    let x1 = l * r1 / (r2 - r1);
+    let cone_k = root(&|k: f64| k * l + (k * x1).atan() - core::f64::consts::PI);
+    let (l1, l2, a0, a2) = (0.25, 0.25, 0.0075, 0.02);
+    let xh = l2 * a0 / (a2 - a0);
+    let hybrid_k = root(&|k: f64| {
+        let t = (k * xh).atan();
+        (k * l2 + t).sin() * (k * l1).cos() - (k * l2).sin() * t.sin() * (k * l1).sin()
+    });
+    let section = |length, radius, outlet_radius, cells| AcousticSection {
+        length,
+        radius,
+        outlet_radius,
+        cells,
+    };
+    // (case, exact k, finest-rung band of about 4x the measured error).
+    let cases: [(&str, f64, f64); 3] = [
+        ("cylinder", core::f64::consts::FRAC_PI_2 / 0.5, 0.06),
+        ("cone", cone_k, 0.012),
+        ("cylinder+cone", hybrid_k, 0.1),
+    ];
+    for (name, k, band) in cases {
+        let mut errors = Vec::new();
+        for cells in [8, 16, 32] {
+            let sections = match name {
+                "cylinder" => vec![section(0.5, 0.0075, 0.0075, cells)],
+                "cone" => vec![section(l, r1, r2, cells)],
+                _ => vec![
+                    section(l1, a0, a0, cells / 2),
+                    section(l2, a0, a2, cells / 2),
+                ],
+            };
+            let sys = acoustic_chain_mouth(&sections, 1.2, c, None, 1, &[], None).unwrap();
+            let w = first_resonance(&sys, 0.6 * k * c, 1.2 * k * c);
+            errors.push(w / (k * c) - 1.0);
+        }
+        println!(
+            "{{\"suite\":\"fs-phs\",\"case\":\"tapered-chain-resonance\",\"geometry\":\"{name}\",\"k_exact\":{k},\"cells\":[8,16,32],\"relative_error\":{errors:?},\"finest_band\":{band}}}"
+        );
+        assert!(
+            errors.windows(2).all(|e| e[0].abs() >= 1.8 * e[1].abs()),
+            "{name}: the chain must converge to the spherical-wave resonance: {errors:?}"
+        );
+        assert!(errors[2].abs() < band, "{name}: {errors:?}");
+    }
 }

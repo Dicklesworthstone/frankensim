@@ -179,15 +179,20 @@ inventoried and measured in fs-couple `tests/integrator_warping_audit.rs`.
   rule of the exact Stieltjes form of the wall law `√ω(1 - i)`, tails lumped
   into the end poles; no collocation and no fallback split),
   `foster_match_re`, `slice_linear_taper`,
-  `spherical_cone` (1-D wave on `ψ = x p`, physical ports
-  `p = ψ/x` and `U = x U_ψ + (α/ρ)∫ψ` via a per-cell
-  shunt `L = ρ|x|/α`; open mouth is the same compact
-  `(R, X)` on the last ψ-flux with `Z_ψ = x_out² Z_phys`;
-  a single taper in `acoustic_chain` is this object; any
-  multi-section chain that contains a taper stitches
-  ψ-lines to the LC ladder with transformer `x` at each
-  interface; a long open tap on a cone or hybrid is the
-  same physical 2-cell chimney, joined at `1/x`), `modal_bank`
+  `spherical_cone` (a widening cone as a 1-D wave on `ψ = x p`.
+  Physical ports are `p = ψ/x` and `U = x U_ψ + (α/ρ)∫ψ`. The
+  near-field term enters only where ψ meets physical flow, so the
+  inlet port carries the one shunt `L = ρ x₁/α`; an interior tap
+  joins at `1/x` with no near-field term. The open mouth is the same
+  compact `(R, X)` on the last ψ-flux with `Z_ψ = x_out² Z_phys`.
+  Narrowing tapers are refused. A lone widening taper in
+  `acoustic_chain` is this object. Any other taper, alone or in a
+  multi-section chain, is frustum LC cells with the exact
+  `ρ dx/(π r_a r_b)` inertance and frustum volume.
+  G1 `tapered_chains_converge_to_the_spherical_wave_resonance` checks
+  the lossless p = 0 resonance against `k L + atan(k x1) = π` and
+  the cylinder+cone root. The former per-cell shunt diverged,
+  frankensim-d1j6s), `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
 - `compact_radiation_impedance` — low-`ka` Levine–Schwinger /

@@ -1788,11 +1788,11 @@ clarinet is one filling of those objects.
   `ViscothermalPin` from `GasState` (`μ`, `γ`, `Pr`;
   series `R` and thermal `G` are three-term Foster networks
   collocated to Bessel Zwikker–Kosten `F(r_v)`, all shear
-  numbers). A single linear taper is `spherical_cone`
-  (`ψ = x p` plus the Euler near-field shunt). Any
-  multi-section chain that contains a taper stitches
-  ψ-lines onto the LC ladder with transformer `x` at
-  each interface.
+  numbers). A single widening taper is `spherical_cone`
+  (`ψ = x p` plus the one inlet Euler near-field shunt).
+  Any other taper, alone or in a multi-section chain, is
+  frustum LC cells (exact frustum inertance and volume),
+  frankensim-d1j6s.
   Open tone holes are `AcousticTap` side branches on
   the ODE path: a compact neck is one inductor; a long
   neck (`kℓ > 0.2` or `ℓ > 4b`) is the same 2-cell LC
