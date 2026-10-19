@@ -65,3 +65,22 @@ impl TetTransientRun3<'_, '_, '_, '_> {
 
 /// Finite schedule indexing and exact left/right transient load events.
 pub mod events;
+
+impl crate::loads3::transient::adjoint::trajectory::RecordedTransient3<'_, '_, '_, '_> {
+    /// Use the original typed source sampler, retaining its actual endpoint
+    /// load for control differentiation. The reverse result is with respect to
+    /// integrated endpoint forces; source parameters chain through load
+    /// directions/interpolation weights supplied by their owner. This method
+    /// does not discover events or differentiate source frame/time parameters.
+    pub fn advance_history(&mut self, history: &TetLoadHistory3<'_>, h_s: f64, cx: &Cx<'_>)
+        -> Result<TransientStep3, crate::loads3::transient::adjoint::TransientAdjointError3> {
+        let start = self.run().state().time_s;
+        let time = start + h_s;
+        if !h_s.is_finite() || h_s <= 0.0 || !time.is_finite() || time <= start {
+            return Err(TransientError3::Invalid("recorded history step must reach a finite later time").into());
+        }
+        let geometry = self.run().geometry; let problem = self.run().problem;
+        let endpoint = history.at(geometry, problem, time, cx)?;
+        self.advance(&endpoint.case, h_s, cx)
+    }
+}

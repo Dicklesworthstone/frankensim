@@ -35,6 +35,7 @@ pub enum TransientAdjointError3 {
     /// Residual of the normalized cotangent equation, not a force in newtons.
     Solve { iterations: usize, relative_residual: f64, tolerance: f64 },
     Dynamics(TransientError3),
+    History(crate::loads3::history::LoadHistoryError3),
     Cancelled,
 }
 impl std::fmt::Display for TransientAdjointError3 {
@@ -247,5 +248,15 @@ impl TransientAdjoint3<'_, '_> {
             if let Ok(i) = self.free_dofs().binary_search(&d) { result = number(value.mul_add(force[i], result))?; }
         }
         check(cx)?; Ok(result)
+    }
+}
+
+/// End-to-end load-control gradients on a bounded recorded trajectory.
+pub mod trajectory;
+
+impl From<crate::loads3::history::LoadHistoryError3> for TransientAdjointError3 {
+    fn from(error: crate::loads3::history::LoadHistoryError3) -> Self {
+        if error == crate::loads3::history::LoadHistoryError3::Cancelled { Self::Cancelled }
+        else { Self::History(error) }
     }
 }
