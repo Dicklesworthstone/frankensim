@@ -24,6 +24,8 @@ use std::sync::Arc;
 pub mod response;
 /// Explicit finite load discontinuities without artificial impulses.
 pub mod events;
+/// Discrete state and load pullbacks through the original inertial equations.
+pub mod adjoint;
 
 /// Explicit resource, solve, motion and energy allowances, all in coherent SI.
 #[derive(Debug, Clone, Copy)]
