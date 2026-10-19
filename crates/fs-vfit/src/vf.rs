@@ -212,7 +212,12 @@ pub fn initial_poles(omega: &[f64], order: usize) -> Vec<PoleTerm> {
 /// otherwise span many orders of magnitude and poison the QR
 /// (executed: a clarinet impedance at |Z| ~ 1e7 fit to only ~40%
 /// weighted error before equilibration).
-fn solve_ls_equilibrated(a: &mut [f64], nrows: usize, ncols: usize, rhs: &[f64]) -> Vec<f64> {
+pub(crate) fn solve_ls_equilibrated(
+    a: &mut [f64],
+    nrows: usize,
+    ncols: usize,
+    rhs: &[f64],
+) -> Vec<f64> {
     let mut col_scale = vec![1.0f64; ncols];
     for (k, scale) in col_scale.iter_mut().enumerate() {
         let mut sq = 0.0f64;
@@ -252,7 +257,7 @@ fn band_edges(omega: &[f64]) -> (f64, f64) {
 /// Per-pole real basis values at `s = i*omega`: for each term, one
 /// column (real pole) or two columns (pair), matching the coordinate
 /// layout used everywhere in this crate.
-fn basis_columns(terms: &[PoleTerm], s: C64) -> Vec<C64> {
+pub(crate) fn basis_columns(terms: &[PoleTerm], s: C64) -> Vec<C64> {
     let mut cols = Vec::new();
     for t in terms {
         match *t {
@@ -274,7 +279,7 @@ fn basis_columns(terms: &[PoleTerm], s: C64) -> Vec<C64> {
 
 /// Rebuild terms from real residue coordinates (same layout as
 /// [`basis_columns`]).
-fn terms_with_residues(terms: &[PoleTerm], coords: &[f64]) -> Vec<PoleTerm> {
+pub(crate) fn terms_with_residues(terms: &[PoleTerm], coords: &[f64]) -> Vec<PoleTerm> {
     let mut out = Vec::with_capacity(terms.len());
     let mut at = 0usize;
     for t in terms {
@@ -341,7 +346,7 @@ pub fn vector_fit(omega: &[f64], h: &[C64], opts: &FitOptions) -> Result<FitOutc
 }
 
 /// Geometric-mean magnitude of the samples (the normalization scale).
-fn magnitude_scale(h: &[C64]) -> f64 {
+pub(crate) fn magnitude_scale(h: &[C64]) -> f64 {
     let mut acc = 0.0f64;
     let mut n = 0usize;
     for v in h {
@@ -509,7 +514,7 @@ fn relocate_once(
 /// near-real eigenvalues become real poles; the rest pair up by sorted
 /// order (the solver's canonical (re, im) ordering makes the pairing
 /// deterministic).
-fn conjugate_close(zeros: &[C64]) -> Vec<PoleTerm> {
+pub(crate) fn conjugate_close(zeros: &[C64]) -> Vec<PoleTerm> {
     let mut real_poles: Vec<f64> = Vec::new();
     let mut upper: Vec<C64> = Vec::new();
     for &z in zeros {
@@ -562,7 +567,7 @@ fn conjugate_close(zeros: &[C64]) -> Vec<PoleTerm> {
     terms
 }
 
-fn pole_movement(old: &[PoleTerm], new: &[PoleTerm]) -> f64 {
+pub(crate) fn pole_movement(old: &[PoleTerm], new: &[PoleTerm]) -> f64 {
     // Greedy nearest-match movement metric (diagnostic only).
     let expand = |ts: &[PoleTerm]| -> Vec<C64> {
         let mut v = Vec::new();

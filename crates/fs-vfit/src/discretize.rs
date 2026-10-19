@@ -891,13 +891,35 @@ impl DelayedFilter {
         self.last = 0.0;
     }
 
+    /// Largest `|H(omega)|` of the residual on `omegas`. This only measures;
+    /// it changes nothing. A passive 1-D scatterer has a peak of at most 1.
+    /// An empty grid gives 0. A non-finite frequency or response gives
+    /// `f64::INFINITY`, so a caller's `<= 1` admission fails closed.
+    #[must_use]
+    pub fn scattering_peak(&self, omegas: &[f64]) -> f64 {
+        let mut peak = 0.0_f64;
+        for &omega in omegas {
+            let magnitude = if self.fir.is_empty() {
+                self.filter.peak_abs(&[omega])
+            } else {
+                fir_dtft(&self.fir, omega, self.filter.t_s).abs()
+            };
+            if !omega.is_finite() || !magnitude.is_finite() {
+                return f64::INFINITY;
+            }
+            peak = peak.max(magnitude);
+        }
+        peak
+    }
+
     /// Project the residual so `|H(ω)| ≤ 1` on `omegas`.
     ///
-    /// A passive 1-D scatterer cannot return more than it is sent.
-    /// Call this after [`Self::pin_magnitude_at`] so a speaking-frequency
-    /// gain pin cannot create an active band elsewhere. An empty/non-finite
-    /// grid, a non-finite evaluated response, or an already-passive response
-    /// leaves runtime state unchanged.
+    /// DEF-03: a global `1/peak` gain rescales the whole reflection, so it
+    /// is not a passive realization. It survives only as a test diagnostic.
+    /// Render paths measure [`Self::scattering_peak`] and refuse instead.
+    /// An empty/non-finite grid, a non-finite evaluated response, or an
+    /// already-passive response leaves runtime state unchanged.
+    #[cfg(test)]
     pub fn enforce_scattering_passivity(&mut self, omegas: &[f64]) {
         if omegas.is_empty() || omegas.iter().any(|omega| !omega.is_finite()) {
             return;

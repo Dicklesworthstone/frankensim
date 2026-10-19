@@ -32,6 +32,8 @@ pub mod discretize;
 /// Reactive characteristic loads with physical storage and resistive loss.
 pub mod impedance;
 pub mod loewner;
+/// Multiport impedances with shared poles: fit, realization, passivity.
+pub mod mimo;
 pub mod model;
 /// One-way, data-only acoustic observation FIRs; no passivity constraint.
 pub mod observation;

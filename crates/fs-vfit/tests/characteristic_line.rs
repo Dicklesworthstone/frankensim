@@ -64,21 +64,28 @@ fn open_cylinder_reflectance_returns_an_inverted_pulse() {
 }
 
 #[test]
-fn scattering_passivity_caps_an_active_residual() {
-    let filter = fs_vfit::discretize::DigitalFilter {
-        sections: Vec::new(),
-        direct: 1.25,
-        t_s: 1.0 / 16_000.0,
-        prewarp: 0.0,
+fn scattering_peak_measures_an_active_residual() {
+    // DEF-03: render paths measure and refuse; nothing rescales the line.
+    let line = |direct: f64| {
+        let filter = fs_vfit::discretize::DigitalFilter {
+            sections: Vec::new(),
+            direct,
+            t_s: 1.0 / 16_000.0,
+            prewarp: 0.0,
+        };
+        DelayedFilter::new(8.0, filter).expect("line")
     };
-    let mut line = DelayedFilter::new(8.0, filter).expect("line");
-    line.enforce_scattering_passivity(&[200.0, 800.0, 2_000.0]);
+    let grid = [200.0, 800.0, 2_000.0];
+    let active = line(1.25);
+    assert!((active.scattering_peak(&grid) - 1.25).abs() <= 1.0e-12);
+    assert!(line(0.8).scattering_peak(&grid) <= 1.0);
+    assert_eq!(active.scattering_peak(&[]).to_bits(), 0.0_f64.to_bits());
+    assert!(active.scattering_peak(&[f64::NAN]).is_infinite());
+    // Measuring leaves the active line unchanged: it still amplifies.
+    let mut probe = active.clone();
     let mut y = 0.0;
     for _ in 0..12 {
-        y = line.push(1.0).expect("step");
+        y = probe.push(1.0).expect("step");
     }
-    assert!(
-        y.abs() <= 1.0 + 1.0e-12,
-        "passive residual cannot amplify, got {y}"
-    );
+    assert!((y - 1.25).abs() <= 1.0e-12, "unchanged residual, got {y}");
 }

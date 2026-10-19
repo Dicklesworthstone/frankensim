@@ -88,8 +88,10 @@ to parallel biquad sections and discrete state-space.
   door after `repair_passivity` (`Re Z ≥ 0`); repair exhaustion
   keeps the raw stable fit. `DigitalFilter::enforce_abs_bound` is
   the scattering projection `|H| ≤ bound`. `DelayedFilter` is a
-  characteristic port (delay ⊕ residual filter) with
-  `enforce_scattering_passivity` (`|R| ≤ 1` on a caller grid).
+  characteristic port (delay ⊕ residual filter). `scattering_peak`
+  measures `max |R|` on a caller grid and changes nothing; render callers
+  refuse a peak above 1. DEF-03: the global `1/peak` gain projection
+  `enforce_scattering_passivity` is a `#[cfg(test)]` diagnostic only.
   `from_impulse_response` is the exact sampled-`R(ω)` or sampled-`Z(ω)`
   FIR filling of the same port (scattering vs impedance). A TMM bore,
   a muffler, a pulse tube, and a BEM radiation load are fillings of
@@ -207,10 +209,60 @@ deterministic. Invalid input or output overflow leaves all history unchanged.
 `observation::tests` covers delayed two-input summation, error/retry identity,
 empty/index errors and each allocation-free cap/cap+1 admission.
 
+## Multiport impedances (IRP M2.5-W3b)
+
+`mimo::mimo_vector_fit(omega, data, ports, opts, reciprocal)` fits a row-major
+`ports x ports` impedance with one shared pole set.
+- It uses relaxed vector fitting with a single sigma shared across all fitted
+  entries.
+- With `reciprocal`, it fits the upper triangle of the data's symmetric part.
+- Each frequency is weighted by the inverse Frobenius norm of its data matrix,
+  so the fit controls matrix-relative error.
+- The report gives the max and RMS matrix-relative misfit against the
+  original data (asymmetry included) and the data's reciprocity defect.
+
+`MimoModel::state_space` is the scalar block realization times the port
+identity. `MimoStateSpace::eval` is the independent parity route.
+
+`check_mimo_passivity` tests `Z + Z^H >= 0`.
+- It uses the dense log grid plus the impedance Hamiltonian
+  `[[A - B R0^-1 C, -B R0^-1 B^T], [C^T R0^-1 C, -(A - B R0^-1 C)^T]]` with
+  `R0 = D + D^T`.
+- A singular `R0` downgrades the certificate to `GridOnly`.
+- It refuses unstable models, and models whose `E` is not symmetric PSD or
+  whose `R0` is indefinite.
+
+`repair_mimo_passivity` moves residues only.
+- Each `(frequency, eigenvector)` pair is an exact linear constraint on the
+  Rayleigh quotient, anchored on the original model.
+- The constraints accumulate over at most 12 rounds, with re-certification
+  after each round.
+- It reports the coordinate perturbation and the in-band matrix-relative
+  change.
+
+`delayed_mimo_vector_fit` fits the entries after removing caller-declared
+delays (`Z_ab = exp(-s tau_ab) Zhat_ab`).
+- A delayed entry never carries the improper `s E` term: under a delay that
+  term puts `2 w E sin(w tau)` into the Hermitian part.
+- `check_delayed_mimo_passivity` and `repair_delayed_mimo_passivity` work on
+  the restored model, grid only.
+
+The tests check the following:
+- known-model recovery (`< 1e-8`) and pole recovery;
+- realization parity;
+- an exact Hamiltonian certificate on a passive model;
+- a planted violation located by the Hamiltonian and repaired;
+- delayed known-answer recovery;
+- refusals.
+
+fs-bem `mimo_rational_order_ladder` realizes a real aperture matrix.
+
 ## No-claim boundaries
 
-- SISO only; matrix-valued (MIMO) vector fitting and pencil
-  identification are follow-ups.
+- MIMO covers vector fitting, realization and passivity only. MIMO Loewner
+  pencil identification, a causality (dispersion-relation) test of the data,
+  and the closed-loop audit of an in-loop MIMO load are follow-ups (M2.5-W3b
+  remains open on them).
 - Scattering-form fitting (`|S| <= 1` enforcement for waveguide
   reflection filters) is a recorded follow-up; the impedance form is
   the v1 passivity law.

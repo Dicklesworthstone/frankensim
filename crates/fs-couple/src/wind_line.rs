@@ -497,11 +497,19 @@ fn realize_hold_line(
     let peeled = modulate_delay(&omega, &h, delay_samples * dt, 1.0)?;
     let filter = realize_tabulated(&omega, &peeled, dt, &opts, prewarp)
         .map_err(|_| WindLineError::Invalid { what: "hold-image rational realization refused" })?;
-    let mut line = DelayedFilter::new(delay_samples - 1.0, filter)?;
+    let line = DelayedFilter::new(delay_samples - 1.0, filter)?;
     let grid: Vec<f64> = (1..=64)
         .map(|k| core::f64::consts::TAU * 3000.0 * f64::from(k) / 64.0)
         .collect();
-    line.enforce_scattering_passivity(&grid);
+    // DEF-03: admit the hold image only when its fit is already
+    // scattering-passive on this grid; a global 1/peak gain would rescale the
+    // whole reflection. Measured on the wind_line tests' fingerings
+    // (2026-10-19): the former clip never fired (gain 1.0).
+    if !(line.scattering_peak(&grid) <= 1.0) {
+        return Err(WindLineError::Invalid {
+            what: "VFIT hold image is not scattering-passive (|R| > 1 on its grid); no gain clip",
+        });
+    }
     Ok(line)
 }
 
