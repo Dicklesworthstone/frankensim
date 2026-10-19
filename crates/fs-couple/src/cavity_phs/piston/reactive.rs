@@ -526,10 +526,7 @@ impl GasPiston {
                 storage_change_j: Some(gas_energy + piston.kinetic_energy_change_j),
                 loss_j: Some(0.0),
                 included_work_j: 0.0,
-                entropy_change_j_k: piston
-                    .gas
-                    .entropy_change_j_k
-                    .map(|s| s + reaction.entropy_change_j_k),
+                entropy_change_j_k: piston.gas.entropy_change_j_k + reaction.entropy_change_j_k,
                 tolerance_j: Some(controls.energy_tolerance_j),
                 unavailable: None,
             },
