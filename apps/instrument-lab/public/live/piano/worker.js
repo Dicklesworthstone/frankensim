@@ -19,6 +19,7 @@
 //   {type:'cmd', name, args?, id?}
 //       noteOn(midi, speedMS)   post-escapement hammer velocity in m/s, (0, 8]
 //       noteOff(midi)
+//       silentKeyDown(midi)     hold a key down without a strike: its strings ring along
 //       sustain(value)          pedal travel 0..1
 //       sostenuto(on)           latch the dampers of the keys held now (and all, with sustain fully down)
 //       unaCorda(on)            strikes from now on miss the last string of each course
@@ -232,6 +233,7 @@ function command(message) {
       break;
     }
     case 'noteOff': engine.noteOff(Number(args[0])); break;
+    case 'silentKeyDown': if (!engine.silentKeyDown(Number(args[0]))) fail(`silentKeyDown(${args[0]}) refused: key must be 21..108`, { id, command: name, code: 'refused' }); break;
     case 'sustain': if (!engine.sustain(Number(args[0]))) fail('sustain must lie in [0,1]', { id, command: name, code: 'refused' }); break;
     case 'sostenuto': if (!engine.sostenuto(Boolean(args[0]))) fail('sostenuto refused', { id, command: name, code: 'refused' }); break;
     case 'unaCorda': if (!engine.unaCorda(Boolean(args[0]))) fail('una corda refused', { id, command: name, code: 'refused' }); break;

@@ -114,6 +114,10 @@ impl PianoAudio {
         self.healthy()?;
         self.piano.note_on(midi, velocity_m_s)
     }
+    pub fn silent_key_down(&mut self, midi: u8) -> Result<(), String> {
+        self.healthy()?;
+        self.piano.silent_key_down(midi)
+    }
     pub fn note_off(&mut self, midi: u8) { self.piano.note_off(midi); }
     pub fn all_notes_off(&mut self) { self.piano.all_notes_off(); }
     pub fn set_sustain(&mut self, value: f64) -> Result<(), String> {

@@ -417,6 +417,11 @@ export class LivePianoClient {
     this.send('unaCorda', on);
   }
 
+  /** Hold a key down without a strike: its dampers lift and its strings ring along. Release with noteOff. */
+  silentKeyDown(midi: number): void {
+    this.send('silentKeyDown', midi);
+  }
+
   allNotesOff(): void {
     this.send('allNotesOff');
   }

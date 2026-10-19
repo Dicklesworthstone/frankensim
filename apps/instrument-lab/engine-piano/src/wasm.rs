@@ -42,6 +42,9 @@ impl Playback {
     fn note_on(&mut self, midi: u8, speed: f64) -> Result<(), String> {
         match self { Self::Single(p) => p.note_on(midi, speed), Self::Multirate(a) => a.note_on(midi, speed) }
     }
+    fn silent_key_down(&mut self, midi: u8) -> Result<(), String> {
+        match self { Self::Single(p) => p.silent_key_down(midi), Self::Multirate(a) => a.silent_key_down(midi) }
+    }
     fn note_off(&mut self, midi: u8) {
         match self { Self::Single(p) => p.note_off(midi), Self::Multirate(a) => a.note_off(midi) }
     }
@@ -196,6 +199,10 @@ impl PianoEngine {
     pub fn note_on(&mut self, midi: u8, hammer_velocity_m_s: f64) -> bool {
         self.piano.note_on(midi, hammer_velocity_m_s).is_ok()
     }
+    /// Hold a key down without striking it: its dampers lift and its strings, attached
+    /// from rest, ring along with what the board drives into them. False when refused.
+    #[wasm_bindgen(js_name = silentKeyDown)]
+    pub fn silent_key_down(&mut self, midi: u8) -> bool { self.piano.silent_key_down(midi).is_ok() }
     #[wasm_bindgen(js_name = noteOff)]
     pub fn note_off(&mut self, midi: u8) { self.piano.note_off(midi); }
     /// Sustain pedal travel in [0,1]; damper drag scales with (1-travel)^2.

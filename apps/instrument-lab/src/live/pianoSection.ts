@@ -70,6 +70,16 @@ const DEMOS: Record<string, Demo> = {
       ];
     },
   },
+  sympathetic: {
+    label: 'Sympathetic strings',
+    text: 'C4, E4 and G4 held down without a sound, then C3 struck short. Their dampers are up, so the soundboard drives their strings, and the partials of C3 that match theirs keep ringing in them after C3 itself is damped. After four seconds the three keys come up and their dampers fall.',
+    build: (s) => [
+      { at: 0, run: () => [60, 64, 67].forEach((m) => s.pressSilent(m)) },
+      { at: 100, run: () => s.press(48, 4.0, 'demo') },
+      { at: 320, run: () => s.release(48, 'demo') },
+      { at: 4300, run: () => [60, 64, 67].forEach((m) => s.release(m, 'demo')) },
+    ],
+  },
   lowest: {
     label: 'Lowest string (A0)',
     text: 'A0: one wound string, 2.01 m long. Its partials follow from its tension, bending stiffness and mass, so they stretch progressively above whole multiples of 27.5 Hz. This live model keeps its first 200 of them.',
@@ -152,6 +162,7 @@ export class LivePianoSection {
   private pedalBeforeSpace = 0;
   private sostenuto = false;
   private unaCorda = false;
+  private silentKeys = false;
   private demoTimers: number[] = [];
   private demoName: string | null = null;
   private lastStats: PianoStats | null = null;
@@ -233,6 +244,12 @@ export class LivePianoSection {
         <div class="lp-row">
           <button type="button" class="btn sm lp-sostenuto-btn" aria-pressed="false" title="Holds up the dampers of the keys held down when you press it">Sostenuto</button>
           <button type="button" class="btn sm lp-una-btn" aria-pressed="false" title="The hammers miss the last string of each key">Una corda</button>
+        </div>
+      </div>
+      <div class="field lp-silent">
+        <span class="label"><span>Silent keys</span></span>
+        <div class="lp-row">
+          <button type="button" class="btn sm lp-silent-btn" aria-pressed="false" title="Keys you press go down without a strike: their dampers lift and their strings ring along with what the board plays into them">Press silently</button>
         </div>
       </div>
       <div class="field lp-midi" hidden>
@@ -404,7 +421,7 @@ export class LivePianoSection {
           : board >= 128
           ? `${board} board coordinates, as many as the offline render: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[128]} dB from the studio render in octave balance.`
           : `${board} board coordinates instead of the offline render's 128: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[board] ?? '—'} dB from the studio render in octave balance (128 coordinates: ${BOARD_ERROR_DB[128]} dB).`,
-        'Strings of silent keys stay on the bridge as rigid chords: their mass and tension load it, but they do not move. Offline, on the same board, they move: their partials near the struck note\'s partials take about 13 % of an A3 mf strike into their dampers, and above each of their partials that partial\'s share of their mass no longer loads the bridge. So the live A3 decays more slowly early on (−7.1 against −14.8 dB/s) and has 2.4 dB less energy above 2 kHz. The strings without dampers make no measurable difference.',
+        'Strings of silent keys stay on the bridge as rigid chords: their mass and tension load it, but they do not move. Offline, on the same board, they move: their partials near the struck note\'s partials take about 13 % of an A3 mf strike into their dampers, and above each of their partials that partial\'s share of their mass no longer loads the bridge. So the live A3 decays more slowly early on (−7.1 against −14.8 dB/s) and has 2.4 dB less energy above 2 kHz. The strings without dampers make no measurable difference. A key you hold down silently (Press silently) is not reduced: its strings join from rest and ring along with what you play.',
         `A polyphony budget of ${info ? info.maxDynamicModes.toLocaleString('en-US') : '2,400'} string modes and ${info ? info.maxSoundingKeys : 24} keys. Beyond it the quietest key is returned to rest early; this is counted ("Forced out") and its energy appears as retired in the ledger. A load governor may lower the budget for new keys on a slow device, and says so.`,
         'No key or action beyond the shank, no room, lid or case, no air loading of the board. Una corda shifts no felt: the hammer meets the same felt card on fewer strings.',
       ], 'out'),
@@ -479,6 +496,10 @@ export class LivePianoSection {
     q<HTMLButtonElement>(this.root, '.lp-pedal-btn').addEventListener('click', () => this.setPedal(this.pedal > 0 ? 0 : 1, 'ui'));
     q<HTMLButtonElement>(this.root, '.lp-sostenuto-btn').addEventListener('click', () => this.setSostenuto(!this.sostenuto));
     q<HTMLButtonElement>(this.root, '.lp-una-btn').addEventListener('click', () => this.setUnaCorda(!this.unaCorda));
+    q<HTMLButtonElement>(this.root, '.lp-silent-btn').addEventListener('click', () => {
+      this.silentKeys = !this.silentKeys;
+      q<HTMLButtonElement>(this.root, '.lp-silent-btn').setAttribute('aria-pressed', String(this.silentKeys));
+    });
     this.paintPedal();
 
     // MIDI
@@ -627,10 +648,27 @@ export class LivePianoSection {
     this.down.set(midi, count + 1);
     if (source === 'demo') this.demoKeys.add(midi);
     if (count > 0) return;
+    if (this.silentKeys && source !== 'demo') {
+      this.client.silentKeyDown(midi);
+      this.keyEls.get(midi)?.classList.add('on');
+      setText(q(this.root, '.lp-speed-out'), `${noteName(midi)} held down silently`);
+      return;
+    }
     const v = Math.max(0.05, Math.min(8, speed));
     this.client.noteOn(midi, v);
     this.keyEls.get(midi)?.classList.add('on');
     setText(q(this.root, '.lp-speed-out'), `${noteName(midi)} at ${v.toFixed(2)} m/s`);
+  }
+
+  /** A demo holds a key down without striking it: its dampers lift and its strings ring along. */
+  pressSilent(midi: number): void {
+    if (!this.client || midi < FIRST || midi > LAST) return;
+    const count = this.down.get(midi) ?? 0;
+    this.down.set(midi, count + 1);
+    this.demoKeys.add(midi);
+    if (count > 0) return;
+    this.client.silentKeyDown(midi);
+    this.keyEls.get(midi)?.classList.add('on');
   }
 
   release(midi: number, source: 'pointer' | 'kbd' | 'midi' | 'demo'): void {

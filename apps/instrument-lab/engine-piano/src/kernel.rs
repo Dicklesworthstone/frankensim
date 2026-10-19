@@ -1334,6 +1334,9 @@ struct Key {
     held: bool,
     /// Caught by the sostenuto rod: its dampers stay lifted until the pedal rises.
     latched: bool,
+    /// Held down without a strike (engine.rs `silent_key_down`): its strings stay
+    /// dynamic, so they can ring along, until the key is released.
+    silent: bool,
     slot: Option<usize>,
     model: shank::Prepared,
     rest: shank::State,
@@ -1811,6 +1814,7 @@ impl LivePiano {
                 midi: c.midi,
                 held: false,
                 latched: false,
+                silent: false,
                 slot: None,
                 model,
                 rest,
@@ -2410,11 +2414,31 @@ impl LivePiano {
             return Err("key is not present in the scale".into());
         };
         self.keys[ci].held = true;
+        self.keys[ci].silent = false;
         // Strikes received between two samples start together: one cold
         // voice-set change serves the whole chord (see `apply_pending_notes`).
         self.pending_on.retain(|(key, _)| *key != ci);
         self.pending_on.push((ci, hammer_velocity_m_s));
         self.counters.note_ons += 1;
+        Ok(())
+    }
+
+    /// Depress a key without a strike (engine.rs `silent_key_down`): its dampers lift
+    /// and its strings join the dynamic set from rest (energy-continuous, through the
+    /// same budget as a strike), so the board can drive them. They stay dynamic while
+    /// the key is held; `note_off` releases it. A strike already queued is kept.
+    pub fn silent_key_down(&mut self, midi: u8) -> Result<(), String> {
+        let Some(ci) = self.key_index(midi) else {
+            self.counters.refused_note_ons += 1;
+            return Err("key is not present in the scale".into());
+        };
+        let key = &mut self.keys[ci];
+        key.held = true;
+        if !self.pending_on.iter().any(|(k, _)| *k == ci) {
+            key.silent = true;
+            // Velocity 0 marks an activation without a launch (note_on admits none).
+            self.pending_on.push((ci, 0.0));
+        }
         Ok(())
     }
 
@@ -2453,7 +2477,11 @@ impl LivePiano {
                         && !self.keys[ac.ci].active && self.keys[ac.ci].pending_velocity.is_none())
                     .map(|(slot, ac)| {
                         let key = &self.keys[ac.ci];
-                        (self.relative_energy(ac) * if key.held || key.latched { 1.0e6 } else { 1.0 }, slot, ac.modes)
+                        // A key held down silently has almost no energy of its own; it goes last.
+                        let weight = if key.silent && key.held { f64::INFINITY }
+                            else if key.held || key.latched { 1.0e6 * self.relative_energy(ac) }
+                            else { self.relative_energy(ac) };
+                        (weight, slot, ac.modes)
                     })
                     .collect();
                 victims.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -2502,6 +2530,9 @@ impl LivePiano {
             if !ready {
                 self.counters.refused_note_ons += 1;
                 continue;
+            }
+            if velocity == 0.0 {
+                continue; // silent_key_down: attached, not struck
             }
             if self.keys[ci].active {
                 // The hammer has not come back yet: relaunch as soon as it is clear.
@@ -2565,6 +2596,7 @@ impl LivePiano {
     pub fn note_off(&mut self, midi: u8) {
         if let Some(ci) = self.key_index(midi) {
             self.keys[ci].held = false;
+            self.keys[ci].silent = false;
         }
     }
 
@@ -2572,6 +2604,7 @@ impl LivePiano {
         self.pending_on.clear();
         for key in &mut self.keys {
             key.held = false;
+            key.silent = false;
             key.pending_velocity = None;
         }
         self.sustain = 0.0;
@@ -3201,7 +3234,8 @@ impl LivePiano {
         let mut retire = Vec::new();
         for (slot, ac) in self.active.iter().enumerate().rev() {
             let key = &self.keys[ac.ci];
-            if key.active || key.pending_velocity.is_some() || ac.age < 2048 {
+            // A silently held key is attached for what the board drives into it.
+            if key.active || key.pending_velocity.is_some() || ac.age < 2048 || (key.silent && key.held) {
                 continue;
             }
             let damped = self.is_damped(ac);
