@@ -25,6 +25,7 @@ pub mod product_control_variate;
 pub mod product_copula;
 pub mod product_copula_qmc;
 pub mod product_execution;
+pub mod product_lhs;
 pub mod product_plan;
 pub mod product_qmc;
 pub mod product_sensitivity;
@@ -37,6 +38,7 @@ pub use product_control_variate::{LinearControlEstimate, LinearControlVariate, U
 pub use product_copula::GaussianCopulaExecution;
 pub use product_copula_qmc::GaussianCopulaQmcExecution;
 pub use product_execution::UqExecution;
+pub use product_lhs::{LhsEstimate, LhsExecution, LhsPlan, LhsReport};
 pub use product_sensitivity::{SobolEffect, SobolEstimate, SobolExecution, SobolReport};
 pub use product_qmc::{QmcConfig, QmcEstimate, QmcExecution, QmcReport};
 pub use product_plan::{
