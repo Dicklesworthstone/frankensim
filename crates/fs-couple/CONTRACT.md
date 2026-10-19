@@ -1381,8 +1381,9 @@ clarinet is one filling of those objects.
   fluid damping is not counted twice.
 
   All material-string performance versions accept the optional
-  `cylinder-gas-loading X_MIN X_MAX INTERVALS` row immediately before `cavity`,
-  after any section, polarization and rotational-bridge records. The same
+  `cylinder-gas-loading X_MIN X_MAX INTERVALS` row before an optional
+  `prepared-linear` row and then `cavity`, after any section, polarization and
+  rotational-bridge records. The same
   original geometry/gas supplies the operator; no extra material coefficients
   are authored. This binding precedes additional bows, stop profiles, static
   preload and the physical pressure/PCM schedule. File construction counts all
@@ -1410,8 +1411,9 @@ clarinet is one filling of those objects.
   Refine all three axes and the actual coupled response. Every branch adds one
   coordinate and one connection per transverse mode. The shared mechanical
   connection ceiling is 4096, with caller mode/connection/setup budgets still
-  enforced before allocation; the existing exact connected-island limit is
-  not raised by that port capacity. Repeated/live bindings and loaded elastic
+  enforced before allocation; that port capacity alone does not raise the
+  ordinary exact connected-island limit. An explicit prepared linear budget
+  admits the complete larger system as described below. Repeated/live bindings and loaded elastic
   modes outside their original material bands refuse.
 
   Operator regressions compare complex force with an independent modified
@@ -2919,3 +2921,46 @@ interventions, physical microphone output and transactional refusals; native
 execution and measured clarinet/oboe validation remain separate requirements.
 
 `SteadyAxialGas::solve` in fs-material can feed its source-retaining `AxialGasField` directly to the existing regional duct, reed-bore and scheduled ReedPerformance field constructors. Wall cooling and explicit gas injections therefore change the same EOS/transport medium used for bore propagation, reed inlet loading and physical termination. The shared thermal owner supplies stationary enthalpy/species balances; the emitted field is frozen for acoustics. Its grid, caloric, conservation and low-Mach limits remain explicit and do not imply resolved transient breath evolution or measured clarinet/oboe equivalence.
+
+### Explicit prepared propagation for complete modal networks
+
+`PreparedModalBudget` selects cold preparation of the complete, fixed-period
+linear mechanical operator. `CoupledModalSystem::new_prepared` and
+`new_with_columns_prepared` admit initially larger networks; consuming
+`with_prepared_linear_propagation` on the coupled, friction or reciprocal
+string-bank owner preserves its original state and sources. The budget has
+positive `max_modes`, `max_dense_bytes` and `max_multiply_terms` fields, with
+a shared ceiling of 512 mechanical modes. Checked conservative additional
+dense-storage and cold multiply-work counts precede prepared allocations.
+Original setup-work, physical, material-band and transaction checks remain.
+
+The prepared state retains every displacement, velocity and held force.
+Original signed spring/damper columns, rest loads and material damping form
+the same mass-normalized stiffness and damping matrices. A scaled full-state
+exponential gives the held-force transition; separate component and individual
+connection loss Gramians retain physical resistance ownership. Short-interval
+Van Loan integration and Gramian doubling avoid a stiff inverse exponential
+over the full sample period. Independent transition refinement, symmetry and
+the complete quadratic energy identity gate cold acceptance; original sample
+energy, per-port work and force/pressure ceilings gate publication. Preparation
+does not truncate modes, replace the nonlinear friction solve or change clocks.
+
+The bank retains the selected budget across cold torque and gas reconstruction,
+and its complete owner continues through additional bows, stops, preload and
+pressure/PCM rendering. All material-string performance versions accept
+`prepared-linear MAX_MODES MAX_DENSE_BYTES MAX_MULTIPLY_TERMS` after the optional
+cylinder record and before `cavity`. The file retains its 128-coordinate cap
+and selects preparation before attaching torque/fluid. Its initial bank must
+still fit the ordinary constructor; use the direct prepared constructors for
+an initially larger generic network. Omission retains the ordinary path and
+its existing 42-mode connected-island limit.
+
+The supplied two-plane layered-string fixture contains 54 total mechanical
+coordinates, including torsion, body, cavity and 48 free gas-memory inertias.
+Its explicit 64 MiB / 200-billion-multiply-term budget authorizes costly cold
+preparation, not a runtime or real-time guarantee. Regression sources cover
+ordinary/prepared equivalence, noncommuting matrices and rest loads, individual
+loss/work integrals, timestep partition, an analytic 43-mode connected system,
+stiff free inertia, complete resource refusal and actual prepared material-string
+preload/pressure. Native execution, numerical convergence of the chosen physical
+basis and measured violin/cello/bass fidelity remain separate requirements.

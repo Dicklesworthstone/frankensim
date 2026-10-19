@@ -22,7 +22,7 @@ use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
 use fs_couple::pcm_wav::observation::PressureRenderer;
 use fs_couple::pcm_wav::stream::{Pcm16WavStream,WavStreamSummary,render_pressure_pcm16,ScheduledWavProgress};
 use fs_couple::render::schedule::force::{ForceInitialization,ForceRenderConfig,ModalForceEvent};
-use fs_couple::render::schedule::force::coupled::{ModalCouplingConfig,MAX_MODAL_CONNECTIONS};
+use fs_couple::render::schedule::force::coupled::{ModalCouplingConfig,MAX_MODAL_CONNECTIONS,PreparedModalBudget};
 use fs_couple::air_path::cylinder::CylinderFlowResolution;
 use fs_couple::render::schedule::force::coupled::contact::friction::ModalFrictionConfig;
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::MultiFrictionConfig;
@@ -149,6 +149,11 @@ impl input::Spec {
                 None=>ReciprocalStringBank::from_material_plate(cx,sources,self.gas,body,self.law.clone(),settings.clone(),gate)?,
             }
         };
+        // Select the active prepared owner before either attachment can enlarge
+        // its connected linear block. No record means the ordinary owner.
+        let bank = if let Some(budget) = self.prepared_linear {
+            bank.with_prepared_linear_propagation(budget, gate)?
+        } else { bank };
         let bank = if self.rotational_bridges.is_empty() { bank } else {
             let mut joints = Vec::with_capacity(self.rotational_bridges.len());
             for (joint, &separation_m) in self.rotational_bridges.iter().zip(&baselines) {
@@ -227,6 +232,9 @@ fn main()->Result<()> {
         profile.bytes.len(),ready.performance.bank().source().stops().len()); }
     for (joint, baseline) in ready.spec.rotational_bridges.iter().zip(&ready.rotational_bridge_baselines_m) {
         eprintln!("rotational_bridge={joint:?}; body_footprint_separation_m={baseline}");
+    }
+    if let Some(budget)=ready.performance.bank().source().bank().prepared_linear_budget() {
+        eprintln!("prepared_linear={budget:?}");
     }
     if let Some(loading)=ready.performance.bank().source().bank().cylinder_gas_loading() {
         let (modes,links,terms)=ready.spec.network_dimensions(ready.body_profile.is_some())?;

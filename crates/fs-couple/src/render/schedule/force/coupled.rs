@@ -17,6 +17,7 @@ use crate::modal_acoustic_time::{
 };
 
 mod exact;
+pub use exact::prepared::{MAX_PREPARED_MODAL_MODES, PreparedModalBudget};
 
 /// One attachment in a component's unchanged mass-normalized modal basis.
 #[derive(Clone, Debug, PartialEq)]
@@ -182,6 +183,7 @@ pub struct CoupledModalSystem {
     models: Vec<ModalAcousticTimeModel>,
     candidates: Vec<ModalAcousticTimeModel>,
     exact: Option<exact::ExactNetwork>,
+    prepared_budget: Option<PreparedModalBudget>,
     offsets: Vec<usize>,
     connections: Vec<ConnectionLaw>,
     columns: Vec<Vec<f64>>,
@@ -208,6 +210,30 @@ impl CoupledModalSystem {
         config: ModalCouplingConfig,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
+        Self::new_inner(models, connections, config, None, gate)
+    }
+
+    /// Explicit cold preparation of the complete held-force transition and
+    /// individual loss integrals. Larger retained systems are admitted only
+    /// within both the original physical/setup limits and this dense budget.
+    /// No input trajectory, damping, connection or state is approximated away.
+    pub fn new_prepared(
+        models: Vec<ModalAcousticTimeModel>,
+        connections: Vec<ModalConnection>,
+        config: ModalCouplingConfig,
+        budget: PreparedModalBudget,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        Self::new_inner(models, connections, config, Some(budget), gate)
+    }
+
+    fn new_inner(
+        models: Vec<ModalAcousticTimeModel>,
+        connections: Vec<ModalConnection>,
+        config: ModalCouplingConfig,
+        prepared: Option<PreparedModalBudget>,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
         let (offsets, count, _) = connection_layout(&models, connections.len(), config, gate)?;
         let mut complete = Vec::with_capacity(connections.len());
         for link in connections {
@@ -228,7 +254,7 @@ impl CoupledModalSystem {
                 damping_n_s_m: link.damping_n_s_m, rest_extension_m: link.rest_extension_m,
             });
         }
-        Self::new_with_columns(models, complete, config, gate)
+        Self::new_with_columns_inner(models, complete, config, prepared, gate)
     }
 
     /// Prepare simultaneous bilateral reactions on complete signed columns.
@@ -240,6 +266,27 @@ impl CoupledModalSystem {
         models: Vec<ModalAcousticTimeModel>,
         connections: Vec<ModalColumnConnection>,
         config: ModalCouplingConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        Self::new_with_columns_inner(models, connections, config, None, gate)
+    }
+
+    /// Complete signed-column version of [`Self::new_prepared`].
+    pub fn new_with_columns_prepared(
+        models: Vec<ModalAcousticTimeModel>,
+        connections: Vec<ModalColumnConnection>,
+        config: ModalCouplingConfig,
+        budget: PreparedModalBudget,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        Self::new_with_columns_inner(models, connections, config, Some(budget), gate)
+    }
+
+    fn new_with_columns_inner(
+        models: Vec<ModalAcousticTimeModel>,
+        connections: Vec<ModalColumnConnection>,
+        config: ModalCouplingConfig,
+        prepared: Option<PreparedModalBudget>,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         let (offsets, count, dt) = connection_layout(&models, connections.len(), config, gate)?;
@@ -277,7 +324,11 @@ impl CoupledModalSystem {
         }
         let guard = core::f64::consts::PI / dt * config.nyquist_guard_fraction;
         if upper_squared.sqrt() > guard { return Err(invalid("coupled stiffness bound exceeds the Nyquist guard")); }
-        let exact = if connections
+        let exact = if let Some(budget) = prepared {
+            Some(exact::ExactNetwork::new_prepared(
+                &models, &columns, &connections, count, dt, budget, gate,
+            )?)
+        } else if connections
             .iter()
             .any(|link| link.stiffness_n_m != 0.0 || link.damping_n_s_m != 0.0)
         {
@@ -317,7 +368,7 @@ impl CoupledModalSystem {
             }
         }
         let system = Self {
-            models, candidates, exact, offsets, connections, columns,
+            models, candidates, exact, prepared_budget: prepared, offsets, connections, columns,
             config, dt, old_q: vec![0.0; count], free_delta: vec![0.0; count],
             forces: vec![0.0; count],
             reactions: vec![0.0; links],
@@ -329,6 +380,30 @@ impl CoupledModalSystem {
         poll(Some(gate))?;
         Ok(system)
     }
+
+    /// Prepare this unchanged physical operator before its first sample.
+    /// Existing initial conditions, port ledgers and all source coordinates stay
+    /// owned by this system. Use before adding components that need the larger
+    /// explicit capacity; this method cannot rescue a constructor already refused.
+    pub fn with_prepared_linear_propagation(
+        mut self, budget: PreparedModalBudget, gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        poll(Some(gate))?;
+        if self.samples_rendered() != 0 || self.prepared_budget.is_some() {
+            return Err(invalid("prepared exact propagation requires one cold budget binding"));
+        }
+        self.exact = Some(exact::ExactNetwork::new_prepared(
+            &self.models, &self.columns, &self.connections, self.mode_count(),
+            self.dt, budget, gate,
+        )?);
+        self.prepared_budget = Some(budget);
+        poll(Some(gate))?;
+        Ok(self)
+    }
+
+    /// Explicit dense preparation choice, retained through owner conversions.
+    #[must_use]
+    pub const fn prepared_budget(&self) -> Option<PreparedModalBudget> { self.prepared_budget }
 
     /// Accepted components in original order; callers cannot mutate their basis.
     #[must_use]

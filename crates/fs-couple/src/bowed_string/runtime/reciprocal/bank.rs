@@ -21,6 +21,7 @@ use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget, Mod
 use crate::render::schedule::{GestureCompileError, ScheduledRenderer};
 use crate::render::schedule::force::coupled::{
     CoupledModalSystem, ModalAttachment, ModalConnection, ModalCouplingConfig, ModalCouplingError,
+    PreparedModalBudget,
 };
 use crate::render::schedule::force::coupled::contact::friction::{
     FrictionDrive, FrictionModalFrame, FrictionModalSystem, ModalFrictionConfig,
@@ -116,6 +117,7 @@ pub struct MaterialStringBankSource {
     body_connections: Vec<ModalConnection>,
     rotational_body_connections: Vec<torsion::StringBodyRotationConnection>,
     fluid_loading: Option<fluid::StringBankFluidLoading>,
+    prepared_linear: Option<PreparedModalBudget>,
     material_plate: Option<plate::SharedMaterialPlateBody>,
     material_chart: Option<chart::SharedMaterialPlateChartBody>,
     material_chart_viscosity: Option<crate::plate_viscosity::ViscousPlateImage>,
@@ -141,6 +143,10 @@ impl MaterialStringBankSource {
     pub fn rotational_body_connections(&self) -> &[torsion::StringBodyRotationConnection] {
         &self.rotational_body_connections
     }
+    /// Explicit complete-operator preparation budget, retained through fluid,
+    /// torque, multiple-bow and scheduled-performance ownership.
+    #[must_use]
+    pub const fn prepared_linear_budget(&self) -> Option<PreparedModalBudget> { self.prepared_linear }
     /// Original source-bound plate and complete physical bridge/observer inputs.
     #[must_use]
     pub const fn material_plate(&self) -> Option<&plate::SharedMaterialPlateBody> { self.material_plate.as_ref() }
@@ -209,11 +215,31 @@ impl ReciprocalStringBank {
         }
         let connections: Vec<&[InteriorStringConnection]> = strings.iter()
             .map(|member| member.connections.as_slice()).collect();
-        let system = assemble_sources(&cards, Some(&strings), bodies, &connections, &body_connections, &[], None, law, &options, gate)?;
+        let system = assemble_sources(&cards, Some(&strings), bodies, &connections, &body_connections, &[], None, None, law, &options, gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, rotational_body_connections: Vec::new(), fluid_loading: None, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_cavity: None }, cards, system })
+        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, rotational_body_connections: Vec::new(), fluid_loading: None, prepared_linear: None, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_cavity: None }, cards, system })
+    }
+
+    /// Select bounded cold exact propagation before playback or before adding
+    /// a larger material-gas memory network. The same complete coordinates,
+    /// source receipts, physical limits, initial state, pressure and friction
+    /// interface remain present; each later fluid/torque rebuild reuses this
+    /// explicit budget. No ordinary constructor silently selects this path.
+    ///
+    /// The initial bank must first fit its ordinary constructor. For a bank
+    /// whose added cylinder memory exceeds that capacity, call this method
+    /// BEFORE with_cylinder_gas_loading. Larger byte/work budgets can refuse
+    /// without substituting a reduced model.
+    pub fn with_prepared_linear_propagation(
+        mut self, budget: PreparedModalBudget, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        self.system = self.system.with_prepared_linear_propagation(budget, gate)
+            .map_err(ReciprocalStringError::Friction)?;
+        self.source.prepared_linear = Some(budget);
+        poll(gate)?;
+        Ok(self)
     }
 
     /// Complete source assignments survive rendering and sympathetic vibration.
@@ -354,7 +380,7 @@ pub(super) fn assemble(
     connections: &[&[InteriorStringConnection]], body_connections: &[ModalConnection],
     law: FrictionLaw, options: &StringBankOptions, gate: &CancelGate,
 ) -> Result<FrictionModalSystem, ReciprocalStringError> {
-    assemble_sources(cards, None, bodies, connections, body_connections, &[], None, law, options, gate)
+    assemble_sources(cards, None, bodies, connections, body_connections, &[], None, None, law, options, gate)
 }
 
 // Keep the original one-string API in the same assembler. Its absent source
@@ -365,7 +391,8 @@ fn assemble_sources(
     bodies: Vec<ModalAcousticTimeModel>, connections: &[&[InteriorStringConnection]],
     body_connections: &[ModalConnection],
     rotational_body_connections: &[torsion::StringBodyRotationConnection],
-    fluid_loading: Option<&fluid::StringBankFluidLoading>, law: FrictionLaw,
+    fluid_loading: Option<&fluid::StringBankFluidLoading>, prepared: Option<PreparedModalBudget>,
+    law: FrictionLaw,
     options: &StringBankOptions, gate: &CancelGate,
 ) -> Result<FrictionModalSystem, ReciprocalStringError> {
     poll(gate)?;
@@ -436,8 +463,10 @@ fn assemble_sources(
         let sources = sources.ok_or_else(|| invalid("cylinder loading requires original material string sources"))?;
         loading.append_components(cards, sources, &mut components, &mut links, options, gate)?;
     }
-    let network = CoupledModalSystem::new(components, links, options.network, gate)
-        .map_err(ReciprocalStringError::Network)?;
+    let network = match prepared {
+        Some(budget) => CoupledModalSystem::new_prepared(components, links, options.network, budget, gate),
+        None => CoupledModalSystem::new(components, links, options.network, gate),
+    }.map_err(ReciprocalStringError::Network)?;
     let bow_card = &cards[options.bow.string];
     let bow_shape = match sources {
         Some(members) => members[options.bow.string].source.surface_shape(bow_card, options.bow.station_fraction)?,

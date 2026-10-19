@@ -163,6 +163,24 @@ impl FrictionModalSystem {
             config, column, compliance, last: None, acceleration_pressure: None, interface: None })
     }
 
+    /// Explicitly prepare the SAME full linear operator before playback.
+    /// Refresh its exact held-force compliance; preserve the original friction
+    /// law, material interface, pressure weights and component initial states.
+    pub fn with_prepared_linear_propagation(
+        mut self, budget: super::super::PreparedModalBudget, gate: &CancelGate,
+    ) -> Result<Self, ModalFrictionError> {
+        self.network = self.network.with_prepared_linear_propagation(budget, gate)?;
+        self.compliance = effective_compliance(&self.network, &self.column, gate)?;
+        poll(Some(gate))?;
+        Ok(self)
+    }
+
+    /// Explicit complete-operator preparation choice, if supplied.
+    #[must_use]
+    pub const fn prepared_budget(&self) -> Option<super::super::PreparedModalBudget> {
+        self.network.prepared_budget()
+    }
+
     /// Accepted components, with their existing basis, budgets and state.
     #[must_use]
     pub fn components(&self) -> &[ModalAcousticTimeModel] { self.network.components() }

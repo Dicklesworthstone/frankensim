@@ -201,7 +201,7 @@ of gold, silver or a real string.
 
 All three input versions accept one optional numerical-resolution record after
 the complete string/section/polarization records and any rotational-bridge block,
-immediately before `cavity`:
+before an optional `prepared-linear` row and then `cavity`:
 
 ```text
 cylinder-gas-loading 0.001 30 12
@@ -270,7 +270,7 @@ every string bridge, angular joint, memory dashpot, body tensor column and cavit
 compression/neck-loss channel. The original setup estimate
 `N * (L + 1)^2` remains bounded by 16,777,216 work units and the shared connection
 ceiling is 4096. A zero body-viscosity tensor may consume fewer columns than the
-declared allowance. The existing dense propagator additionally admits at most
+declared allowance. The ordinary exact propagator additionally admits at most
 **42 modes in each connected linear island**; this stricter computational bound
 can refuse a model that fits the file-level counts. No requested mode or memory
 branch is silently removed. The render report includes the declared resolution
@@ -282,6 +282,66 @@ flow along the string. It does not resolve finite-amplitude wakes, neighboring
 strings, end/axial flow, rotary drag, rarefaction or compressible radiation.
 The atmosphere remains fixed during one realization. Body/neck observation keeps
 its existing compact-radiation approximation.
+
+### Explicit preparation for larger coupled gas models
+
+An optional record after `cylinder-gas-loading` (when present) and before
+`cavity` selects the shared prepared exact propagator:
+
+```text
+prepared-linear MAX_MODES MAX_DENSE_BYTES MAX_MULTIPLY_TERMS
+```
+
+All three values must be positive. The shared owner accepts at most 512 modes;
+this executable retains its stricter **128 complete-coordinate limit**.
+`MAX_DENSE_BYTES` bounds additional dense preparation/cache storage, and
+`MAX_MULTIPLY_TERMS` bounds cold scalar multiply-add work. Both are explicit
+refusal budgets, not accuracy parameters or permissions to drop weak modes.
+
+The selection is activated before torque joints and gas memory are attached.
+It caches the complete fixed-period transition and separate physical resistance
+integrals while retaining every original position, velocity, held-force input,
+material state and signed connection. Fluid kinetic energy, intrinsic material
+loss, body viscosity, contact compliance, pressure and per-connection work keep
+their existing owners. The ordinary path remains selected when the row is absent.
+
+`prepared-cylinder-flow.material-strings` has one layered two-plane string with
+both bridge-direction components nonzero, one twist mode, two body modes and a
+cavity. It requests 24 fluid branches per transverse mode: **54 coordinates**
+and 51 linear connections. Its declaration is:
+
+```text
+cylinder-gas-loading 0.001 30 24
+prepared-linear 64 67108864 200000000000
+```
+
+For the supplied positive-loss materials, the final operator's conservative
+preflight estimate is about **37.6 MB of additional dense storage and
+161.2 billion scalar multiply-add terms**, within its explicit 64 MiB and
+200-billion-term budgets. The work estimate reserves worst-case Taylor products
+and scaling levels; it is not elapsed runtime or a real-time performance claim.
+Preparation can be expensive even though the accepted fixed-period transition is
+cached. The native regression therefore performs one such construction and only
+32 release samples.
+
+With the existing wire, body and sleeve packs built, render to a new output:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/prepared-cylinder-flow.material-strings" "$demo/prepared-cylinder-flow.wav"
+```
+
+Omitting only `prepared-linear` from this fixture produces the ordinary
+connected-block capacity refusal. Undersized mode, byte or work allowances also
+refuse. Increasing the prepared capacity does not establish convergence of the
+fluid spectrum or the instrument basis.
+
+The initial string/body bank must still fit its ordinary constructor before this
+cold selection can be applied. The option admits larger subsequent torque/fluid
+connections; it does not rescue an initial bank already refused by that
+constructor. Generic callers needing an initially larger network can explicitly
+use `CoupledModalSystem::new_prepared` or `new_with_columns_prepared` with their
+own complete models and budgets.
 
 ## Material profile and physical limits
 

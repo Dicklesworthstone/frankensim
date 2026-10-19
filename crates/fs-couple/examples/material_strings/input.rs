@@ -48,6 +48,7 @@ pub struct Spec {
     pub temperature: f64, pub omega: f64, pub gas: GasState, pub body: Body, pub strings: Vec<Wire>,
     pub rotational_bridges: Vec<RotationalBridge>,
     pub cylinder_gas_loading: Option<CylinderFlowResolution>,
+    pub prepared_linear: Option<PreparedModalBudget>,
     pub cavity: Option<MaterialBodyCavity>, pub law: FrictionLaw, pub forces: Option<StringForceProgram>,
     pub schedule: GestureSchedule,
 }
@@ -161,6 +162,18 @@ impl Spec {
             resolution.validate()?;
             Some(resolution)
         } else { None };
+        let prepared_linear = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("prepared-linear") {
+            let mut row = r.row("prepared-linear")?;
+            let budget = PreparedModalBudget {
+                max_modes: row.parse()?,
+                max_dense_bytes: row.parse()?,
+                max_multiply_terms: row.parse()?,
+            };
+            row.end()?;
+            budget.validate()?;
+            Some(budget)
+        } else { None };
         let mut row = r.row("cavity")?;
         let cavity = match row.word()? {
             "none" => None,
@@ -253,7 +266,7 @@ impl Spec {
             }
         }
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
-            gas, body, strings, rotational_bridges, cylinder_gas_loading, cavity, law, forces, schedule };
+            gas, body, strings, rotational_bridges, cylinder_gas_loading, prepared_linear, cavity, law, forces, schedule };
         spec.network_dimensions(false)?;
         Ok(spec)
     }
@@ -285,6 +298,12 @@ impl Spec {
                 .ok_or("fluid memory dimension overflow")?;
             modes = modes.checked_add(memory).ok_or("complete fluid mode count overflow")?;
             links = links.checked_add(memory).ok_or("complete fluid connection count overflow")?;
+        }
+        if let Some(budget) = self.prepared_linear {
+            budget.validate()?;
+            if modes > budget.max_modes {
+                return Err("complete instrument exceeds the explicit prepared mode budget".into());
+            }
         }
         if modes == 0 || modes > MAX_MODES {
             return Err("complete instrument, including gas memory, exceeds 128 modes".into());

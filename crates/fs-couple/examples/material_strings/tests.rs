@@ -146,3 +146,6 @@ mod stopped;
 
 #[path = "tests/fluid.rs"]
 mod fluid;
+
+#[path = "tests/prepared.rs"]
+mod prepared;

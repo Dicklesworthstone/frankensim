@@ -21,6 +21,19 @@ second-order oscillator), and the augmented exponential is capped at dimension
 256. No modal truncation is performed. Nonfinite operators, stale splits,
 unsupported storage, capacity exhaustion and unrepresentable work refuse.
 
+`linear_exact::exponential_with_budget` exposes the same dense Taylor/scaling
+algorithm to explicit cold preparation callers. `DenseExponentialBudget`
+declares matrix-dimension, simultaneous dense-byte and multiply-term ceilings;
+the opt-in dimension limit is 4096. Checked preflight reserves five square
+matrices including the supplied input, plus 32 Taylor products and 48 squarings
+before workspace allocation. Overflow, insufficient budgets, nonfinite input,
+unconverged series and unrepresentable output refuse. The ordinary
+`exponential`, split and ZOH paths retain their original 256-dimensional cap
+and arithmetic. This entry permits complete-operator preparation; it supplies
+no truncation, hot-path timing or physical-validity guarantee. Its regression
+source checks larger explicit admission, unchanged default refusal and exact
+byte/work boundaries. Native execution is pending.
+
 `ExactZoh` advances the full coupled `(J-R)Q` operator with held input. Port
 outputs are step averages; dissipation is the independently evaluated integral
 of `grad H^T R grad H`, obtained by a Van Loan block exponential. It is NOT

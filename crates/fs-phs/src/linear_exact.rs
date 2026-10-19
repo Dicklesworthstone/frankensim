@@ -180,8 +180,53 @@ fn quadratic(a: &[f64], x: &[f64]) -> f64 {
 /// Refuses invalid shape, nonfinite entries, work-cap overflow or failure of
 /// the bounded Taylor/scaling iteration. No stability certificate is inferred.
 pub fn exponential(a: &[f64], n: usize) -> Result<Vec<f64>, PhsError> {
+    exponential_with_budget(a, n, DenseExponentialBudget {
+        max_dimension: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
+        max_dense_bytes: usize::MAX,
+        max_multiply_terms: u64::MAX,
+    })
+}
+
+/// Explicit cold dense-exponential admission for owners that prepare and cache
+/// a complete operator. This does not enlarge the ordinary split/ZOH capacity.
+/// The checked byte count covers input, output and all simultaneous matrix
+/// workspace; the term count reserves 32 Taylor products and 48 squarings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DenseExponentialBudget {
+    /// Matrix dimension ceiling, at most MAX_PREPARED_EXPONENTIAL_DIM (4096).
+    pub max_dimension: usize,
+    /// Maximum simultaneous dense matrix bytes, including the supplied input.
+    pub max_dense_bytes: usize,
+    /// Maximum scalar multiply-add terms in dense products.
+    pub max_multiply_terms: u64,
+}
+
+/// Hard capacity of the explicit budgeted cold path; defaults remain 256.
+pub const MAX_PREPARED_EXPONENTIAL_DIM: usize = 4096;
+
+/// The same deterministic Taylor/scaling exponential under an explicit larger
+/// cold work/byte budget. No approximate backend, state removal, stability
+/// certificate or hot-path timing guarantee is selected by this entry point.
+///
+/// # Errors
+/// Refuses capacity/workspace/work overflow before allocating a matrix, and
+/// the same nonfinite or unconverged operators as [`exponential`].
+pub fn exponential_with_budget(
+    a: &[f64],
+    n: usize,
+    budget: DenseExponentialBudget,
+) -> Result<Vec<f64>, PhsError> {
+    let extent = n.checked_mul(n).ok_or_else(|| refuse("exponential extent overflow"))?;
+    let bytes = extent.checked_mul(5).and_then(|x| x.checked_mul(core::mem::size_of::<f64>()))
+        .ok_or_else(|| refuse("exponential workspace overflow"))?;
+    let terms = (n as u64).checked_pow(3).and_then(|x| x.checked_mul(80))
+        .ok_or_else(|| refuse("exponential work overflow"))?;
+    if budget.max_dimension == 0 || budget.max_dimension > MAX_PREPARED_EXPONENTIAL_DIM
+        || bytes > budget.max_dense_bytes || terms > budget.max_multiply_terms {
+        return Err(refuse("exponential dense byte/work admission"));
+    }
     if n == 0
-        || n > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
+        || n > budget.max_dimension
         || n.checked_mul(n) != Some(a.len())
         || a.iter().any(|x| !x.is_finite())
     {
@@ -865,6 +910,28 @@ fn gonzalez(
 mod tests {
     use super::*;
     use crate::{QuadraticStorage, ScalarLaw, SeparableStorage, mass_spring_damper};
+
+    #[test]
+    fn explicit_prepared_exponential_preserves_default_and_checks_dense_resources() {
+        let n = MAX_LINEAR_EXPONENTIAL_BLOCK_DIM + 1;
+        let input = vec![0.0; n * n];
+        let budget = DenseExponentialBudget {
+            max_dimension: n,
+            max_dense_bytes: 5 * n * n * core::mem::size_of::<f64>(),
+            max_multiply_terms: 80 * (n as u64).pow(3),
+        };
+        assert!(exponential(&input, n).is_err());
+        assert_eq!(exponential_with_budget(&input, n, budget).unwrap(), identity(n));
+        assert!(exponential_with_budget(&input, n, DenseExponentialBudget {
+            max_dense_bytes: budget.max_dense_bytes - 1, ..budget }).is_err());
+        assert!(exponential_with_budget(&input, n, DenseExponentialBudget {
+            max_multiply_terms: budget.max_multiply_terms - 1, ..budget }).is_err());
+        assert!(exponential_with_budget(&input, n, DenseExponentialBudget {
+            max_dimension: MAX_PREPARED_EXPONENTIAL_DIM + 1, ..budget }).is_err());
+        let ordinary = [-0.37, 0.2, -0.1, -0.8];
+        assert_eq!(exponential(&ordinary, 2).unwrap(),
+            exponential_with_budget(&ordinary, 2, budget).unwrap());
+    }
 
     #[test]
     fn public_exponential_shape_cap_and_scalar_oracle() {

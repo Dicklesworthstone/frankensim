@@ -7,8 +7,11 @@ use fs_phs::linear_exact::{
 };
 use fs_phs::{PortHamiltonian, QuadraticStorage, StepRecord};
 
+pub(super) mod prepared;
+
 pub(super) struct ExactNetwork {
     blocks: Vec<(Vec<usize>, ExactBlock)>,
+    prepared: Option<prepared::PreparedNetwork>,
     count: usize,
 }
 
@@ -21,6 +24,21 @@ pub(super) struct ExactNetwork {
 // Thus these actual K/C columns exhaust every possible inter-mode coupling.
 // This changes no retained coordinate, physical limit or dense-block capacity.
 impl ExactNetwork {
+    pub(super) fn new_prepared(
+        models: &[ModalAcousticTimeModel],
+        columns: &[Vec<f64>],
+        links: &[ConnectionLaw],
+        count: usize,
+        dt: f64,
+        budget: PreparedModalBudget,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        let prepared = prepared::PreparedNetwork::new(
+            models, columns, links, count, dt, budget, gate,
+        )?;
+        Ok(Self { blocks: Vec::new(), prepared: Some(prepared), count })
+    }
+
     pub(super) fn new(
         models: &[ModalAcousticTimeModel],
         columns: &[Vec<f64>],
@@ -76,7 +94,7 @@ impl ExactNetwork {
             let block = ExactBlock::new(&local_modes, &local_columns, links, gate)?;
             blocks.push((indices, block));
         }
-        Ok(Self { blocks, count })
+        Ok(Self { blocks, prepared: None, count })
     }
 
     fn local_state(indices: &[usize], x: &[f64]) -> Vec<f64> {
@@ -87,6 +105,9 @@ impl ExactNetwork {
     }
 
     fn hamiltonian(&self, x: &[f64]) -> f64 {
+        if let Some(prepared) = &self.prepared {
+            return prepared.hamiltonian(x);
+        }
         self.blocks
             .iter()
             .map(|(indices, b)| b.system.hamiltonian(&Self::local_state(indices, x)))
@@ -103,6 +124,9 @@ impl ExactNetwork {
             return Err(invalid(
                 "external forces must match every original modal coordinate",
             ));
+        }
+        if let Some(prepared) = &self.prepared {
+            return prepared.advance(models, external, dt);
         }
         let x = flatten(models);
         let mut u = vec![0.0; self.count];
@@ -143,6 +167,9 @@ impl ExactNetwork {
         if column.len() != self.count {
             return Err(invalid("complete contact force column"));
         }
+        if let Some(prepared) = &self.prepared {
+            return prepared.response(column, dt);
+        }
         let mut response = vec![0.0; self.count];
         for (indices, block) in &self.blocks {
             let local_column: Vec<_> = indices.iter().map(|&i| column[i]).collect();
@@ -160,6 +187,9 @@ impl ExactNetwork {
         dt: f64,
         total: f64,
     ) -> Result<(f64, f64), ModalCouplingError> {
+        if let Some(prepared) = &self.prepared {
+            return prepared.losses(x, u, dt, total);
+        }
         let (mut component, mut connection) = (0.0, 0.0);
         for (indices, block) in &self.blocks {
             let local_x = Self::local_state(indices, x);
@@ -191,6 +221,9 @@ impl ExactNetwork {
         connection_loss: f64,
         gate: Option<&CancelGate>,
     ) -> Result<Vec<crate::port_adoption::PortTransfer>, ModalCouplingError> {
+        if let Some(prepared) = &self.prepared {
+            return prepared.connection_work(x, u, endpoint, dt, columns, links, connection_loss, gate);
+        }
         let mut work = vec![0.0; links.len()];
         for (indices, block) in &self.blocks {
             poll(gate)?;
