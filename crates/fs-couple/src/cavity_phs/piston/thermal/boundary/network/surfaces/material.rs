@@ -3,6 +3,7 @@ use super::*;
 use crate::circuit_enthalpy::material::{MaterialNetwork, MaterialNetworkError, MaterialNetworkSample};
 use crate::cavity_phs::piston::thermal::boundary::network::material::{GasConductionGeometry, resolve_contact};
 use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_material::conductor::ElectricalPropertyBasis;
 
 /// One non-overlapping patch of a material-bound thermal cell.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -42,7 +43,28 @@ impl GasPiston {
     pub fn material_network_surfaces_candidate<'m>(
         &self, binding: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
         circuit: &MaterialCircuit, electrical_ports: &[f64], drive: MaterialSurfacesDrive<'_>,
-        controls: NetworkGasSolve, guess_j: &[f64], cancelled: impl FnMut() -> bool,
+        controls: NetworkGasSolve, guess_j: &[f64], mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NetworkSurfacesCandidate<'m, MaterialNetworkSample, ResolvedMaterialStatePoint>,
+        CircuitEnthalpyError<NetworkGasError<MaterialNetworkError, MaterialNetworkError>>> {
+        if cancelled() { return Err(CircuitEnthalpyError::Cancelled); }
+        if binding.resistors.len() > crate::material_circuit::MAX_MATERIAL_CIRCUIT_BRANCHES {
+            return Err(CircuitEnthalpyError::Invalid("material circuit binding exceeds capacity"));
+        }
+        let bases = binding.resistors.iter()
+            .map(|r| (r.destination.branch, ElectricalPropertyBasis::Resistivity)).collect::<Vec<_>>();
+        self.material_network_surfaces_candidate_with_bases(binding, thermal, target_s,
+            circuit, electrical_ports, &bases, drive, controls, guess_j, cancelled)
+    }
+
+    /// Multiple finite surfaces with explicit electrical bases. One prepared
+    /// source selection drives every thermal trial and gas-wall snapshot; no
+    /// conductivity-only card is forced through a resistivity fallback.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn material_network_surfaces_candidate_with_bases<'m>(
+        &self, binding: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
+        circuit: &MaterialCircuit, electrical_ports: &[f64], electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        drive: MaterialSurfacesDrive<'_>, controls: NetworkGasSolve,
+        guess_j: &[f64], cancelled: impl FnMut() -> bool,
     ) -> Result<NetworkSurfacesCandidate<'m, MaterialNetworkSample, ResolvedMaterialStatePoint>,
         CircuitEnthalpyError<NetworkGasError<MaterialNetworkError, MaterialNetworkError>>> {
         let cancel = RefCell::new(cancelled);
@@ -68,12 +90,16 @@ impl GasPiston {
                 return Err(CircuitEnthalpyError::Invalid("summed gas patches exceed exposed area or duplicate ambient convection"));
             }
         }
+        let prepared = match binding.prepare_with_bases(thermal, electrical_bases, || (*cancel.borrow_mut())()) {
+            Err(MaterialNetworkError::Thermal(DepositionError::Cancelled)) => return Err(CircuitEnthalpyError::Cancelled),
+            other => other.map_err(|e| CircuitEnthalpyError::Source(NetworkGasError::Material(e)))?,
+        };
         let ports: Vec<_> = surfaces.values().map(|s| s.port).collect();
         let destinations: Vec<_> = binding.resistors.iter().map(|r| r.destination).collect();
         let result = self.network_surfaces_candidate(thermal, target_s,
             CircuitEnthalpyInput { circuit, ports: electrical_ports, destinations: &destinations },
             NetworkSurfacesDrive { ports: &ports, input: drive.input, piston: drive.piston, exchange: drive.exchange },
-            controls, guess_j, |state| binding.resolve(state, || (*cancel.borrow_mut())()),
+            controls, guess_j, |state| prepared.resolve(state, || (*cancel.borrow_mut())()),
             |port, state, source, gas| {
                 resolve_contact(binding, port.cell, state, source, gas, surfaces[&port.id].geometry)
             }, || (*cancel.borrow_mut())());

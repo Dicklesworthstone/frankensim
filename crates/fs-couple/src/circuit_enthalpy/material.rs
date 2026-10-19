@@ -3,6 +3,9 @@
 //! ThermalMaterialPoint and MaterialOhmicBody, then lowers scalar conduction
 //! across caller-declared uniform half-cell distances.
 
+mod prepared;
+pub use prepared::PreparedMaterialNetwork;
+
 use super::*;
 use crate::cavity_phs::piston::thermal::source::{ThermalMaterialError, ThermalMaterialPoint};
 use crate::cavity_phs::piston::thermal::power::joule::{JouleHeatingError, MaterialOhmicBody};
@@ -295,23 +298,13 @@ impl MaterialNetwork<'_> {
         if self.resistors.len()>MAX_MATERIAL_CIRCUIT_BRANCHES {
             return Err(CircuitEnthalpyError::Invalid("material resistor bindings exceed circuit capacity"));
         }
-        let bases=self.basis_plan(electrical_bases).map_err(CircuitEnthalpyError::Source)?;
-        let initial=match self.resolve_bound(thermal,&bases,None,||(*cancel.borrow_mut())()) {
+        let prepared=match self.prepare_with_bases(thermal,electrical_bases,||(*cancel.borrow_mut())()) {
             Err(MaterialNetworkError::Thermal(DepositionError::Cancelled)) => return Err(CircuitEnthalpyError::Cancelled),
             other => other.map_err(CircuitEnthalpyError::Source)?,
         };
-        let selection=|material:&ResolvedMaterialStatePoint|MaterialPropertySelection::PinnedByProperty(
-            material.properties().iter().map(|p|(p.requirement().name().to_owned(),p.answer().receipt.selected)).collect());
-        let mut pins=BTreeMap::new();
-        for sample in &initial.source.cells {
-            if let Some(material)=&sample.conductivity {pins.insert(sample.cell,selection(material));}
-        }
-        for (binding,resistor) in self.resistors.iter().zip(&initial.resistors) {
-            pins.insert(binding.destination.cell,selection(resistor.conductor.material()));
-        }
         let destinations:Vec<_>=self.resistors.iter().map(|r|r.destination).collect();
         let result=super::step_candidate(thermal,target_s,CircuitEnthalpyInput {circuit,ports,destinations:&destinations},
-            controls,guess_j,|s|self.resolve_bound(s,&bases,Some(&pins),||(*cancel.borrow_mut())()),||(*cancel.borrow_mut())());
+            controls,guess_j,|s|prepared.resolve(s,||(*cancel.borrow_mut())()),||(*cancel.borrow_mut())());
         match result {
             Err(CircuitEnthalpyError::Source(MaterialNetworkError::Thermal(DepositionError::Cancelled))) => Err(CircuitEnthalpyError::Cancelled),
             other=>other,

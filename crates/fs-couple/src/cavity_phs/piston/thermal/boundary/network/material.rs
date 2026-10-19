@@ -3,6 +3,7 @@ use super::*;
 use crate::circuit_enthalpy::material::{MaterialNetwork,MaterialNetworkError,MaterialNetworkSample};
 use crate::cavity_phs::piston::thermal::layers::MaterialConductionLayers;
 use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_material::conductor::ElectricalPropertyBasis;
 
 /// Explicit uniform conduction geometry, distinct from electrical current paths.
 #[derive(Clone,Copy,Debug,PartialEq)]
@@ -30,17 +31,39 @@ impl GasPiston {
     pub fn material_network_candidate<'m>(
         &self,binding:&MaterialNetwork<'_>,thermal:&DepositionSimulation<'m>,target_s:f64,
         circuit:&MaterialCircuit,ports:&[f64],drive:NetworkGasDrive,controls:NetworkGasSolve,
-        geometry:GasConductionGeometry,guess_j:&[f64],cancelled:impl FnMut()->bool,
+        geometry:GasConductionGeometry,guess_j:&[f64],mut cancelled:impl FnMut()->bool,
     )->Result<NetworkGasCandidate<'m,MaterialNetworkSample,ResolvedMaterialStatePoint>,
         CircuitEnthalpyError<NetworkGasError<MaterialNetworkError,MaterialNetworkError>>> {
-        let cancel=RefCell::new(cancelled);
-        if (*cancel.borrow_mut())() {return Err(CircuitEnthalpyError::Cancelled);}
+        if cancelled() {return Err(CircuitEnthalpyError::Cancelled);}
         if binding.resistors.len()>crate::material_circuit::MAX_MATERIAL_CIRCUIT_BRANCHES {
             return Err(CircuitEnthalpyError::Invalid("material circuit binding exceeds capacity"));
         }
+        let bases=binding.resistors.iter()
+            .map(|r|(r.destination.branch,ElectricalPropertyBasis::Resistivity)).collect::<Vec<_>>();
+        self.material_network_candidate_with_bases(binding,thermal,target_s,circuit,ports,&bases,
+            drive,controls,geometry,guess_j,cancelled)
+    }
+
+    /// Same coupled path with an explicit conductivity/resistivity basis per
+    /// electrical branch. Initial transport claims stay pinned throughout the
+    /// nonlinear solve; temperatures and coefficients remain live trial values.
+    /// The legacy entry point above continues to choose resistivity explicitly.
+    #[allow(clippy::too_many_arguments,clippy::type_complexity)]
+    pub fn material_network_candidate_with_bases<'m>(
+        &self,binding:&MaterialNetwork<'_>,thermal:&DepositionSimulation<'m>,target_s:f64,
+        circuit:&MaterialCircuit,ports:&[f64],electrical_bases:&[(usize,ElectricalPropertyBasis)],
+        drive:NetworkGasDrive,controls:NetworkGasSolve,geometry:GasConductionGeometry,
+        guess_j:&[f64],cancelled:impl FnMut()->bool,
+    )->Result<NetworkGasCandidate<'m,MaterialNetworkSample,ResolvedMaterialStatePoint>,
+        CircuitEnthalpyError<NetworkGasError<MaterialNetworkError,MaterialNetworkError>>> {
+        let cancel=RefCell::new(cancelled);
+        let prepared=match binding.prepare_with_bases(thermal,electrical_bases,||(*cancel.borrow_mut())()) {
+            Err(MaterialNetworkError::Thermal(DepositionError::Cancelled)) => return Err(CircuitEnthalpyError::Cancelled),
+            other => other.map_err(|e|CircuitEnthalpyError::Source(NetworkGasError::Material(e)))?,
+        };
         let destinations:Vec<_>=binding.resistors.iter().map(|r|r.destination).collect();
         let result=self.network_candidate(thermal,target_s,CircuitEnthalpyInput {circuit,ports,destinations:&destinations},
-            drive,controls,guess_j,|state|binding.resolve(state,||(*cancel.borrow_mut())()),
+            drive,controls,guess_j,|state|prepared.resolve(state,||(*cancel.borrow_mut())()),
             |state,source,gas| resolve_contact(binding,drive.cell,state,source,gas,geometry),
             ||(*cancel.borrow_mut())());
         match result {
@@ -81,3 +104,6 @@ pub(crate) fn resolve_contact(
     layers.resolve_from_material(gas,sample.phase,snapshot.clone())
         .map_err(MaterialNetworkError::Material)
 }
+
+#[cfg(test)]
+mod tests;
