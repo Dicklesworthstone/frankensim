@@ -5,7 +5,7 @@
 //! usage: render PERFORMANCE.csv SECONDS OUT.wav [--band HZ] [--budget MODES]
 //!        [--partials N] [--partial-band HZ] [--full-scale PA] [--scale SUBSET.csv]
 //!        [--isolated] [--no-duplex] [--damper-points K] [--trace OUT.csv]
-//!        [--reduction MAX,KEEP_LOW,HZ,...] [--max-modes N] [--max-keys N]
+//!        [--reduction MAX,KEEP_LOW,HZ,... | pod,MAX,KEEP_LOW,COUNT,TOP_HZ] [--max-modes N] [--max-keys N]
 //!        [--board FILE.bin]   (a board file written by gen_board, as the browser fetches it)
 //!        [--rt0425-string-damping] (RT-0425 per-key string losses, as the browser plays)
 //!        [--rt0425-hammer-stiffness] (RT-0425's K_H on each unison string, as the browser plays)

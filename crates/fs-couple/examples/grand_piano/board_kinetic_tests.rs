@@ -114,7 +114,7 @@ fn kinetic_basis_and_material_damping_survive_reduction_and_acoustic_refinement(
     let source=board.prepare_with_motion_edge_cubic_transverse_mass(&[69],20_000.,true).unwrap();
     let source_q:Vec<_>=source.motion.as_ref().unwrap().shapes.iter().map(|s|vector(&model,s)).collect();
     let options=ritz::RitzOptions {max_modes:5,keep_low_modes:1,
-        sample_hz:vec![100.,700.],transfer_tolerance:None};
+        sample_hz:vec![100.,700.],selection:ritz::Selection::Pivoted,transfer_tolerance:None};
     let reduced=board.prepare_reduced(&[69],20_000.,true,true,false,true,&options).unwrap();
     let r=reduced.modes.len();assert!(r>1 && r<source.modes.len());
     let q:Vec<_>=reduced.motion.as_ref().unwrap().shapes.iter().map(|s|vector(&model,s)).collect();

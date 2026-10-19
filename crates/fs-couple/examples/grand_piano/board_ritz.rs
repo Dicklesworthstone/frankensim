@@ -1,11 +1,13 @@
 //! Cold bridge-response Ritz spaces in an existing mass-normalized modal basis.
-//! No eigenproblem is solved here. The source model has M=I, positive diagonal
+//! No board eigenproblem is solved here (POD selection diagonalizes only its
+//! snapshot Gram matrix). The source model has M=I, positive diagonal
 //! K and nonnegative diagonal C. Projection retains the complete K and C;
 //! a caller may subsequently diagonalize K through the existing modal owner.
 //! The snapshot error is a relative modal displacement projection norm, not
 //! a transfer-function error bound, source-spectrum certificate or convergence
 //! claim. Source eigenvalue certificates do not transfer to Ritz frequencies.
 
+use fs_math::det;
 use std::f64::consts::TAU;
 
 #[path = "board_ritz_adaptive.rs"]
@@ -21,13 +23,31 @@ const MAX_PORTS: usize = 176;
 /// residual measurement and projected-matrix construction, checked before
 /// allocating snapshots. This is a work admission bound, not a timing claim.
 const MAX_SCALAR_WORK: usize = 250_000_000;
+/// The same kind of admission bound for the POD selection, whose Gram matrix
+/// and dense eigensolve replace the pivot passes.
+const MAX_POD_WORK: f64 = 8.0e9;
+
+/// How the unprotected coordinates are chosen from the bridge responses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Selection {
+    /// Largest-residual pivots over the static and listed harmonic responses,
+    /// one snapshot at a time.
+    Pivoted,
+    /// Proper orthogonal decomposition: the leading directions of every port's
+    /// static response and `count` harmonic responses log-spaced from the first
+    /// unprotected source mode to `top_hz`, which may lie above the source band
+    /// (string partials drive the board there too, against the slice's mass line).
+    Pod { count: usize, top_hz: f64 },
+}
 
 #[derive(Clone, Debug)]
 pub struct RitzOptions {
     pub max_modes: usize,
     pub keep_low_modes: usize,
     /// Positive, strictly increasing harmonic samples; statics are implicit.
+    /// Empty for `Selection::Pod`, which derives its own from the source slice.
     pub sample_hz: Vec<f64>,
+    pub selection: Selection,
     /// Optional complex bridge-transfer tolerance on the explicit source-pole,
     /// midpoint and seed grid. Cross transfers are normalized by the geometric
     /// mean of the source driving-point magnitudes, not by a near-zero transfer.
@@ -36,10 +56,28 @@ pub struct RitzOptions {
 }
 
 impl RitzOptions {
-    /// `max_modes,keep_low_modes,frequency_hz,...`, or
-    /// `adaptive,max_modes,keep_low_modes,tolerance,seed_hz,...`.
+    /// `max_modes,keep_low_modes,frequency_hz,...`,
+    /// `adaptive,max_modes,keep_low_modes,tolerance,seed_hz,...`, or
+    /// `pod,max_modes,keep_low_modes,count,top_hz`.
     pub fn parse(text: &str) -> Result<Self, String> {
         let fields: Vec<_> = text.split(',').take(MAX_SAMPLE_FREQUENCIES + 5).collect();
+        if fields.first().is_some_and(|s| s.trim() == "pod") {
+            if fields.len() != 5 {
+                return Err("POD board reduction needs pod,max_modes,keep_low_modes,count,top_hz".into());
+            }
+            let options = Self {
+                max_modes: fields[1].trim().parse().map_err(|_| "invalid Ritz mode budget")?,
+                keep_low_modes: fields[2].trim().parse().map_err(|_| "invalid protected low-mode count")?,
+                sample_hz: Vec::new(),
+                selection: Selection::Pod {
+                    count: fields[3].trim().parse().map_err(|_| "invalid POD response count")?,
+                    top_hz: fields[4].trim().parse().map_err(|_| "invalid POD response ceiling")?,
+                },
+                transfer_tolerance: None,
+            };
+            options.validate()?;
+            return Ok(options);
+        }
         let adaptive = fields.first().is_some_and(|s| s.trim() == "adaptive");
         let start = usize::from(adaptive);
         let samples = if adaptive { 4 } else { 2 };
@@ -51,6 +89,7 @@ impl RitzOptions {
             keep_low_modes: fields[start + 1].trim().parse().map_err(|_| "invalid protected low-mode count")?,
             sample_hz: fields[samples..].iter().map(|s| s.trim().parse::<f64>()
                 .map_err(|_| "invalid Ritz sample frequency".to_string())).collect::<Result<_,_>>()?,
+            selection: Selection::Pivoted,
             transfer_tolerance: if adaptive { Some(fields[3].trim().parse()
                 .map_err(|_| "invalid adaptive bridge response tolerance")?) } else { None },
         };
@@ -59,6 +98,14 @@ impl RitzOptions {
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
+        if let Selection::Pod { count, top_hz } = self.selection {
+            if !(1..=MAX_RITZ_MODES).contains(&self.max_modes) || self.keep_low_modes > self.max_modes
+                || !self.sample_hz.is_empty() || self.transfer_tolerance.is_some()
+                || !(2..=MAX_SAMPLE_FREQUENCIES).contains(&count) || !top_hz.is_finite() || top_hz <= 0.0 {
+                return Err("POD reduction requires 1..=128 modes, keep_low_modes <= max_modes, 2..=16 responses below a finite positive ceiling, and no listed frequencies or adaptive tolerance".into());
+            }
+            return Ok(());
+        }
         if !(1..=MAX_RITZ_MODES).contains(&self.max_modes) || self.keep_low_modes > self.max_modes
             || !(1..=MAX_SAMPLE_FREQUENCIES).contains(&self.sample_hz.len())
             || self.sample_hz.iter().any(|f| !f.is_finite() || *f <= 0.0)
@@ -100,6 +147,9 @@ pub struct RitzBasis {
     /// Nonzero static, harmonic-real and harmonic-imaginary snapshots, before
     /// rank selection. Duplicate directions still count as supplied snapshots.
     pub snapshot_count: usize,
+    /// Harmonic frequencies actually sampled: the listed ones, or those POD
+    /// derived from the source slice.
+    pub sample_hz: Vec<f64>,
     /// Bridge-transfer checks only: no receiver, mesh-convergence, or
     /// continuous-frequency transfer certificate is implied.
     pub adaptive_response: Option<AdaptiveResponseReport>,
@@ -144,20 +194,46 @@ pub fn bridge_basis(lambda: &[f64], damping: &[f64], ports: &[Vec<f64>], options
         return adaptive::build(lambda, damping, ports, options);
     }
     let target = options.max_modes.min(n);
-    let extra = target-options.keep_low_modes;
-    let snapshot_bound = ports.len()*(1+2*options.sample_hz.len());
-    // Five visits per candidate/added column: twice dot+subtract, then norm.
-    // Final direct projection uses two per column. Remaining terms bound
-    // snapshot normalization, pivot reorthogonalization and both dense forms.
-    let work = n.checked_mul(snapshot_bound.checked_mul(5*extra+2*target+10)
-        .and_then(|v| v.checked_add(6*target*target)).ok_or("Ritz work estimate overflow")?)
-        .ok_or("Ritz work estimate overflow")?;
-    if work > MAX_SCALAR_WORK {
-        return Err(format!("Ritz snapshot work estimate {work} exceeds {MAX_SCALAR_WORK}; use fewer explicit source modes, retained modes, bridge ports or frequency samples"));
+    let keep = options.keep_low_modes;
+    let extra = target-keep;
+    // POD samples the band its protected modes leave out: log-spaced from the
+    // first unprotected source mode to its ceiling.
+    let samples: Vec<f64> = match options.selection {
+        Selection::Pivoted => options.sample_hz.clone(),
+        Selection::Pod { count, top_hz } => match lambda.get(keep) {
+            None => Vec::new(),
+            Some(&first) => {
+                let low = det::sqrt(first)/TAU;
+                if !(top_hz > low) {
+                    return Err(format!("POD response ceiling {top_hz} Hz must lie above the first unprotected source mode at {low} Hz"));
+                }
+                (0..count).map(|j| low*det::pow(top_hz/low, j as f64/(count-1) as f64)).collect()
+            }
+        },
+    };
+    let snapshot_bound = ports.len()*(1+2*samples.len());
+    if let Selection::Pod { .. } = options.selection {
+        let (s, t, m, r) = (snapshot_bound as f64, (n-keep) as f64, n as f64, target as f64);
+        // Snapshots and their normalization, the Gram matrix's upper triangle, a
+        // generous cyclic-Jacobi bound, the final residual report and both dense forms.
+        let work = 4.0*s*m + s*t*t + 40.0*t*t*t + 2.0*s*r*m + 6.0*r*r*m;
+        if !(work <= MAX_POD_WORK) {
+            return Err(format!("POD work estimate {work:e} exceeds {MAX_POD_WORK:e}; use fewer explicit source modes, bridge ports or responses"));
+        }
+    } else {
+        // Five visits per candidate/added column: twice dot+subtract, then norm.
+        // Final direct projection uses two per column. Remaining terms bound
+        // snapshot normalization, pivot reorthogonalization and both dense forms.
+        let work = n.checked_mul(snapshot_bound.checked_mul(5*extra+2*target+10)
+            .and_then(|v| v.checked_add(6*target*target)).ok_or("Ritz work estimate overflow")?)
+            .ok_or("Ritz work estimate overflow")?;
+        if work > MAX_SCALAR_WORK {
+            return Err(format!("Ritz snapshot work estimate {work} exceeds {MAX_SCALAR_WORK}; use fewer explicit source modes, retained modes, bridge ports or frequency samples"));
+        }
     }
     // Refuse exact undamped poles even when a particular port vanishes there.
     // Adding a damping floor would change the supplied mechanical model.
-    for &hz in &options.sample_hz {
+    for &hz in &samples {
         let omega = TAU*hz;
         let squared = omega*omega;
         if !squared.is_finite() || squared == 0.0 {
@@ -174,7 +250,7 @@ pub fn bridge_basis(lambda: &[f64], damping: &[f64], ports: &[Vec<f64>], options
     };
     for port in ports {
         push(port.iter().zip(lambda).map(|(b,k)| b/k).collect())?;
-        for &hz in &options.sample_hz {
+        for &hz in &samples {
             let omega = TAU*hz;
             let mut real = vec![0.0;n];
             let mut imaginary = vec![0.0;n];
@@ -195,16 +271,49 @@ pub fn bridge_basis(lambda: &[f64], damping: &[f64], ports: &[Vec<f64>], options
         }
     }
     let mut residuals = snapshots.clone();
-    for v in &mut residuals { v[..options.keep_low_modes].fill(0.0); }
-    let mut selected = vec![false;snapshots.len()];
+    for v in &mut residuals { v[..keep].fill(0.0); }
     let mut columns = Vec::with_capacity(target);
-    for i in 0..options.keep_low_modes {
+    for i in 0..keep {
         let mut q = vec![0.0;n];q[i] = 1.0;columns.push(q);
     }
     // Relative to each FULL normalized snapshot, before removing low modes.
     // The final measured residual includes every numerically dependent tail.
     let rank_tolerance = 64.0*f64::EPSILON*n as f64;
-    while columns.len() < target {
+    if let Selection::Pod { .. } = options.selection {
+        if extra > 0 {
+            // The leading eigenvectors of sum(s s^T) over the unprotected parts of
+            // the normalized snapshots: the space that represents the whole response
+            // set best in the mass norm, independent of snapshot order.
+            let t = n-keep;
+            let mut gram = vec![0.0;t*t];
+            for v in &residuals {
+                for i in 0..t {
+                    let a = v[keep+i];
+                    if a == 0.0 { continue; }
+                    for j in i..t { gram[i*t+j] += a*v[keep+j]; }
+                }
+            }
+            for i in 0..t { for j in 0..i { gram[i*t+j] = gram[j*t+i]; } }
+            let mut identity = vec![0.0;t*t];
+            for i in 0..t { identity[i*t+i] = 1.0; }
+            let pairs = fs_modal::eigh_gen_dense(&gram, &identity, t)
+                .map_err(|e| format!("POD response basis: {e}"))?;
+            // The Gram matrix squares the snapshots' singular values, and its own
+            // roundoff is of order n eps times the largest eigenvalue: a direction
+            // below that carries no resolvable response, so spare capacity stays empty.
+            let largest = pairs.last().map_or(0.0, |pair| pair.lambda);
+            for pair in pairs.iter().rev().take(extra) {
+                if !(pair.lambda > rank_tolerance*largest) { break; }
+                let mut q = vec![0.0;n];
+                q[keep..].copy_from_slice(&pair.phi);
+                for _ in 0..2 { for old in &columns[keep..] { remove(&mut q,old); } }
+                if !normalize(&mut q)? { break; }
+                columns.push(q);
+            }
+        }
+    }
+    let mut selected = vec![false;snapshots.len()];
+    while options.selection == Selection::Pivoted && columns.len() < target {
         let mut pivot = None;let mut largest = rank_tolerance*rank_tolerance;
         for (i,v) in residuals.iter().enumerate() {
             if selected[i] { continue; }
@@ -237,7 +346,7 @@ pub fn bridge_basis(lambda: &[f64], damping: &[f64], ports: &[Vec<f64>], options
     }
     let (stiffness, projected_damping) = projected_forms(lambda, damping, &columns)?;
     Ok(RitzBasis { columns, stiffness, damping: projected_damping,
-        max_relative_snapshot_error, snapshot_count: snapshots.len(), adaptive_response: None })
+        max_relative_snapshot_error, snapshot_count: snapshots.len(), sample_hz: samples, adaptive_response: None })
 }
 
 fn projected_forms(lambda: &[f64], damping: &[f64], columns: &[Vec<f64>])
@@ -267,7 +376,7 @@ mod tests {
     fn fixture(max_modes: usize, keep_low_modes: usize) -> (Vec<f64>,Vec<f64>,Vec<Vec<f64>>,RitzOptions) {
         (vec![1.,4.,9.,16.,25.,36.],vec![0.11,0.07,0.43,0.2,0.31,0.6],
             vec![vec![0.7,-0.4,1.2,0.3,-0.8,0.9]],
-            RitzOptions { max_modes,keep_low_modes,sample_hz:vec![0.31],transfer_tolerance:None })
+            RitzOptions { max_modes,keep_low_modes,sample_hz:vec![0.31],selection:Selection::Pivoted,transfer_tolerance:None })
     }
     fn coordinates(columns: &[Vec<f64>], x: &[f64]) -> Vec<f64> {
         columns.iter().map(|q|dot(q,x)).collect()
@@ -369,7 +478,8 @@ mod tests {
         assert!(RitzOptions::parse(&too_many).is_err());
         let lambda: Vec<_>=(1..=MAX_SOURCE_MODES).map(|i|i as f64).collect();
         let c=vec![0.1;lambda.len()];let ports=vec![vec![1.;lambda.len()];MAX_PORTS];
-        let expensive=RitzOptions {max_modes:128,keep_low_modes:0,sample_hz:(1..=16).map(f64::from).collect(),transfer_tolerance:None};
+        let expensive=RitzOptions {max_modes:128,keep_low_modes:0,sample_hz:(1..=16).map(f64::from).collect(),
+            selection:Selection::Pivoted,transfer_tolerance:None};
         assert!(bridge_basis(&lambda,&c,&ports,&expensive).unwrap_err().contains("work estimate"));
         let admitted=bridge_basis(&lambda,&c,&ports[..1],&RitzOptions::parse("1,1,0.1").unwrap()).unwrap();
         assert_eq!(admitted.columns[0].len(),MAX_SOURCE_MODES);
@@ -400,5 +510,64 @@ mod tests {
         assert!(bridge_basis(&lambda,&[0.1],&[],&options).is_err());
         assert!(bridge_basis(&lambda,&[0.1],&vec![vec![1.];MAX_PORTS+1],&options).is_err());
         assert!(bridge_basis(&lambda,&[0.1],&[vec![0.]],&options).is_err());
+    }
+
+    /// Twelve modes 100..1200 Hz at 1 % damping, three ports.
+    fn pod_source() -> (Vec<f64>,Vec<f64>,Vec<Vec<f64>>) {
+        let lambda: Vec<f64> = (1..=12).map(|i| (TAU*100.*f64::from(i)).powi(2)).collect();
+        let c = lambda.iter().map(|k| 0.02*k.sqrt()).collect();
+        let ports = (0..3).map(|p| (0..12).map(|i| ((i*(p+2)+p) as f64*0.7).sin()+0.3).collect()).collect();
+        (lambda,c,ports)
+    }
+    fn projector(columns: &[Vec<f64>]) -> Vec<f64> {
+        let n = columns[0].len();
+        (0..n*n).map(|e| columns.iter().map(|q| q[e/n]*q[e%n]).sum()).collect()
+    }
+
+    #[test]
+    fn pod_parser_samples_the_band_left_out_and_refuses_what_it_cannot_honour() {
+        let a=RitzOptions::parse("pod,64,32,16,8000").unwrap();
+        assert_eq!(a.selection,Selection::Pod {count:16,top_hz:8000.});
+        assert!(a.sample_hz.is_empty() && a.transfer_tolerance.is_none());
+        for text in ["pod,64,32,16","pod,64,32,1,8000","pod,64,32,17,8000","pod,64,65,16,8000",
+            "pod,129,0,16,8000","pod,64,32,16,-1","pod,64,32,16,NaN","pod,64,32,16,8000,9000"] {
+            assert!(RitzOptions::parse(text).is_err(),"{text}");
+        }
+        let (lambda,c,ports)=pod_source();
+        let basis=bridge_basis(&lambda,&c,&ports,&RitzOptions::parse("pod,6,3,4,3200").unwrap()).unwrap();
+        // Log-spaced from the first unprotected mode (400 Hz) to the ceiling, above the 1200 Hz band.
+        assert_eq!(basis.sample_hz.len(),4);
+        for (got,want) in basis.sample_hz.iter().zip([400.,800.,1600.,3200.]) { assert!((got/want-1.).abs()<1e-12,"{got}"); }
+        assert_eq!(basis.snapshot_count,3*(1+2*4));
+        let below=bridge_basis(&lambda,&c,&ports,&RitzOptions::parse("pod,6,3,4,350").unwrap());
+        assert!(below.unwrap_err().contains("above the first unprotected source mode"));
+    }
+
+    #[test]
+    fn pod_keeps_protected_modes_spans_its_responses_and_ignores_port_order() {
+        let (lambda,c,ports)=pod_source();
+        let options=RitzOptions::parse("pod,8,2,3,2400").unwrap();
+        let basis=bridge_basis(&lambda,&c,&ports,&options).unwrap();
+        assert_eq!(basis.columns.len(),8);
+        for low in 0..2 {
+            assert_eq!(basis.columns[low],(0..12).map(|i|if i==low {1.} else {0.}).collect::<Vec<_>>());
+            assert!(basis.columns[2..].iter().all(|q|q[low]==0.));
+        }
+        for (i,a) in basis.columns.iter().enumerate() { for (j,b) in basis.columns.iter().enumerate() {
+            assert!((dot(a,b)-if i==j {1.} else {0.}).abs()<1e-13);
+        } }
+        // The same response set in another port order gives the same space; pivots need not.
+        let reversed: Vec<_>=ports.iter().rev().cloned().collect();
+        let again=bridge_basis(&lambda,&c,&reversed,&options).unwrap();
+        let (p,q)=(projector(&basis.columns),projector(&again.columns));
+        assert!(p.iter().zip(&q).all(|(a,b)|(a-b).abs()<1e-9),"POD space depends on port order");
+        assert_eq!(basis.columns,bridge_basis(&lambda,&c,&ports,&options).unwrap().columns,"repeatable");
+        // With room for every independent response the space holds them all, and no more.
+        let full=bridge_basis(&lambda,&c,&ports,&RitzOptions::parse("pod,12,0,2,2400").unwrap()).unwrap();
+        assert!(full.max_relative_snapshot_error<1e-10,"{}",full.max_relative_snapshot_error);
+        let one=bridge_basis(&lambda,&c,&ports[..1],&RitzOptions::parse("pod,12,11,2,2400").unwrap()).unwrap();
+        assert_eq!(one.columns.len(),12);
+        let rank=bridge_basis(&lambda,&c,&[vec![1.;12]],&RitzOptions::parse("pod,12,0,2,2400").unwrap());
+        assert!(rank.is_ok_and(|b| b.columns.len()==5),"one port's static and two complex harmonics: no invented rank");
     }
 }

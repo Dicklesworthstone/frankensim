@@ -7,7 +7,13 @@
 //! library with `include_bytes!`. Re-run it whenever the reference board
 //! modules change; the output path must not exist.
 //!
-//! usage: gen_board OUT.bin [source_band_hz=2400] [spec=32,16,200,400,800,1600,2300] [mesh=16,0.03]
+//! usage: gen_board OUT.bin [source_band_hz=2400] [spec=pod,32,16,16,8000] [mesh=16,0.03]
+//! `spec` is the reference's --board-reduction. The live boards take N/2 exact low modes and the
+//! POD of every key's static and 16 harmonic bridge responses from the first unprotected mode to
+//! 8 kHz (`pod,N,N/2,16,8000`). Above 2 kHz they follow the complete slice about 3x more closely
+//! in radiated pressure and 7-17x in bridge conductance than the pivoted
+//! `N,N/2,200,400,800,1600,2300` boards did, and improve steadily with N
+//! (examples/board_admittance.rs; grand_piano/BOARD_REDUCTION.md).
 //! `mesh` is DIVISIONS,RIB_NORMAL_STEP_M of `steinway_d::build_resolved` (the board the graded
 //! offline renders use: piano_geometry --divisions 16 --rib-normal-step-m 0.03), or `preset` for
 //! the unrefined `steinway_d::build(8)`.
@@ -22,7 +28,7 @@ fn main() {
         std::process::exit(2);
     };
     let band: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2400.0);
-    let spec = args.get(3).cloned().unwrap_or_else(|| "32,16,200,400,800,1600,2300".to_owned());
+    let spec = args.get(3).cloned().unwrap_or_else(|| "pod,32,16,16,8000".to_owned());
     let mesh = args.get(4).map_or("16,0.03", String::as_str);
     let preset = if mesh == "preset" {
         steinway_d::build(8)

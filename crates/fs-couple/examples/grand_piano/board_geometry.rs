@@ -400,7 +400,15 @@ impl BoardGeometry {
         frames: Option<&[motion::SourceBridgeFrame]>,
     ) -> Result<PreparedBoard, String> {
         self.prepare_inner_with_reduction(keys, upper_hz, retain_motion, mass_equilibrated,
-            consistent_mass, edge_cubic_mass, Some(options), frames)
+            consistent_mass, edge_cubic_mass, Some(options), frames, false)
+    }
+    /// The complete certified source slice that `prepare_reduced` projects
+    /// (at most 512 modes), unreduced, so a reduction can be measured against
+    /// it (apps/instrument-lab/engine-piano/examples/board_admittance.rs).
+    /// Playback still admits at most 128 coordinates.
+    #[allow(dead_code)]
+    pub fn prepare_source_slice(&self, keys: &[u8], upper_hz: f64) -> Result<PreparedBoard, String> {
+        self.prepare_inner_with_reduction(keys, upper_hz, false, false, false, false, None, None, true)
     }
     fn prepare_inner(
         &self,
@@ -412,7 +420,7 @@ impl BoardGeometry {
         edge_cubic_transverse_mass: bool,
     ) -> Result<PreparedBoard, String> {
         self.prepare_inner_with_reduction(keys, upper_hz, retain_motion, mass_equilibrated,
-            consistent_transverse_mass, edge_cubic_transverse_mass, None, None)
+            consistent_transverse_mass, edge_cubic_transverse_mass, None, None, false)
     }
     #[allow(clippy::too_many_arguments)]
     fn prepare_inner_with_reduction(
@@ -425,6 +433,7 @@ impl BoardGeometry {
         edge_cubic_transverse_mass: bool,
         reduction_options: Option<&ritz::RitzOptions>,
         source_frames: Option<&[motion::SourceBridgeFrame]>,
+        source_slice: bool,
     ) -> Result<PreparedBoard, String> {
         if self.consistent_rotary_mass && !edge_cubic_transverse_mass {
             return Err("consistent-cubic panel rotary mass requires the edge-cubic board mass/motion image".into());
@@ -476,7 +485,7 @@ impl BoardGeometry {
         let report = fs_plate::modes(&model, (0.0, (TAU * upper_hz).powi(2)), &modal_options)
             .map_err(|e| e.to_string())?;
         if report.below_low != 0 { return Err("unstable soundboard has negative stiffness eigenvalues".into()); }
-        if reduction_options.is_some() {
+        if reduction_options.is_some() || source_slice {
             if report.modes.is_empty() || report.modes.len() > ritz::MAX_SOURCE_MODES {
                 return Err(format!("certified band contains {} modes; explicit reduction admits a complete source slice of 1..={}", report.modes.len(), ritz::MAX_SOURCE_MODES));
             }
@@ -640,6 +649,10 @@ impl BoardGeometry {
                 value.report.source_modes, modes.len(), value.report.protected_low_modes));
             if source_frames.is_some() {
                 provenance.push_str("; Ritz targets include both supplied transverse bridge directions");
+            }
+            if let (Some(ritz::Selection::Pod { count, .. }), Some(first), Some(last)) = (reduction_options.map(|o| o.selection),
+                value.report.sample_hz.first(), value.report.sample_hz.last()) {
+                provenance.push_str(&format!("; POD of every port's static and {count} harmonic responses, {first:.0}-{last:.0} Hz"));
             }
             (Some(value.physical_damping), Some(value.report))
         } else { (None, None) };
@@ -993,7 +1006,7 @@ mod tests {
             assert!(source.modes.len() > 12, "fixture must exercise a reduced tail");
             let options = ritz::RitzOptions {
                 max_modes: source.modes.len(), keep_low_modes: 2, sample_hz: vec![90.0, 700.0],
-                transfer_tolerance: None,
+                selection: ritz::Selection::Pivoted, transfer_tolerance: None,
             };
             let prepared = geometry.prepare_reduced(
                 &keys, 20_000.0, true, true, false, cubic, &options).unwrap();
@@ -1096,7 +1109,8 @@ mod tests {
         for cubic in [false,true] {
             let source=geometry.prepare_inner(&[69],100.,true,true,false,cubic).unwrap();
             assert_eq!((source.free_dofs,source.modes.len()),(3,3));
-            let options=ritz::RitzOptions {max_modes:3,keep_low_modes:1,sample_hz:vec![10.,30.],transfer_tolerance:None};
+            let options=ritz::RitzOptions {max_modes:3,keep_low_modes:1,sample_hz:vec![10.,30.],
+                selection:ritz::Selection::Pivoted,transfer_tolerance:None};
             let primary_only=geometry.prepare_reduced(&[69],100.,true,true,false,cubic,&options).unwrap();
             let both=geometry.prepare_reduced_with_ports(&[69],100.,true,true,false,cubic,
                 &options,Some(&frames)).unwrap();

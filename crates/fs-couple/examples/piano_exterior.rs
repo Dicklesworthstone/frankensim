@@ -107,8 +107,9 @@ it leaves geometry, materials, mode cap and original residual admission unchange
 selects the existing cubic transverse field for inertia, bridge coupling and
 acoustic surface motion, including its analytic physical rotations. Both retain
 the same eigensolve throughout playback and can compose with string polarization.
---board-reduction SPEC accepts max_modes,keep_low_modes,Hz,... or
-adaptive,max_modes,keep_low_modes,tolerance,Hz,... (0 < tolerance < 1).
+--board-reduction SPEC accepts max_modes,keep_low_modes,Hz,...,
+adaptive,max_modes,keep_low_modes,tolerance,Hz,... (0 < tolerance < 1) or
+pod,max_modes,keep_low_modes,count,top_hz (grand_piano/BOARD_REDUCTION.md).
 It admits up to 512 certified source modes within the supplied
 FSPE board-band-hz, then retains at most 128 coordinates using bridge
 static/harmonic response directions and the requested exact low modes. Both

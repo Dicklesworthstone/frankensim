@@ -25,7 +25,7 @@ fn adaptive_bridge_accuracy_survives_tail_rotation_and_full_physical_damping() {
             restarts:0,factor_nnz_l:0,factor_peak_bytes:0,pivots_delayed:0},
     };
     let options=ritz::RitzOptions {max_modes:7,keep_low_modes:1,
-        sample_hz:vec![120.0],transfer_tolerance:Some(0.002)};
+        sample_hz:vec![120.0],selection:ritz::Selection::Pivoted,transfer_tolerance:Some(0.002)};
     let reduced=project_modal(n,damping_ratio,&source,&ports,&options,
         |x,y|for i in 0..n {y[i]=mass[i]*x[i];}).unwrap();
     let r=reduced.modes.len();

@@ -44,7 +44,8 @@ fn played_frontend_requires_and_applies_the_full_reduced_material_operator() {
     selected.modes = 12;
     selected.dampers = Some("estimated".into());
     selected.board_reduction = Some(board_geometry::ritz::RitzOptions {
-        max_modes:modes.len(),keep_low_modes:0,sample_hz:vec![100.],transfer_tolerance:None,
+        max_modes:modes.len(),keep_low_modes:0,sample_hz:vec![100.],
+        selection:board_geometry::ritz::Selection::Pivoted,transfer_tolerance:None,
     });
     assert!(prepare_instrument_with_physical_controls(vec![course],&modes,&selected,None,None)
         .err().unwrap().contains("full projected material damping"));

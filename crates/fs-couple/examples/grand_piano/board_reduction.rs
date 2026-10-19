@@ -234,7 +234,7 @@ pub(crate) fn project_modal(
             protected_low_modes: low,
             source_frequency_intervals_hz: source.modes.iter().map(|pair|
                 (det::sqrt(pair.interval.0) / TAU, det::sqrt(pair.interval.1) / TAU)).collect(),
-            sample_hz: options.sample_hz.clone(),
+            sample_hz: basis.sample_hz,
             snapshot_count: basis.snapshot_count,
             max_relative_snapshot_error: basis.max_relative_snapshot_error,
             adaptive_response: basis.adaptive_response,
@@ -272,7 +272,8 @@ mod tests {
         let nodal=|phi:&[f64],node:usize|std::array::from_fn(|c|phi[6*node+c]);
         append_secondary_ports(&[69],&[frame],&mesh,false,&source,&mut ports,nodal).unwrap();
         assert_eq!(ports,vec![vec![1.,0.],vec![0.,1.]]);
-        let options=ritz::RitzOptions {max_modes:2,keep_low_modes:0,sample_hz:vec![0.3],transfer_tolerance:None};
+        let options=ritz::RitzOptions {max_modes:2,keep_low_modes:0,sample_hz:vec![0.3],
+            selection:ritz::Selection::Pivoted,transfer_tolerance:None};
         let reduce=|ports:&[Vec<f64>]|project_modal(18,0.01,&source,ports,&options,
             |x,y|y.copy_from_slice(x)).unwrap();
         let one=reduce(&original);let both=reduce(&ports);
@@ -309,7 +310,8 @@ mod tests {
             stats:fs_modal::SliceStats {shift:0.,factorizations:0,lanczos_iters:0,
                 restarts:0,factor_nnz_l:0,factor_peak_bytes:0,pivots_delayed:0},
         };
-        let options=ritz::RitzOptions {max_modes:1,keep_low_modes:1,sample_hz:vec![1.],transfer_tolerance:None};
+        let options=ritz::RitzOptions {max_modes:1,keep_low_modes:1,sample_hz:vec![1.],
+            selection:ritz::Selection::Pivoted,transfer_tolerance:None};
         let mut port=vec![0.;n];port[0]=1.;let ports=vec![port];
         let run=|source:&SliceReport|project_modal(n,0.01,source,&ports,&options,
             |x,y|y.copy_from_slice(x));

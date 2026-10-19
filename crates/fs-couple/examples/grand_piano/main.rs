@@ -198,6 +198,10 @@ scaled by the geometric mean of the source driving-point magnitudes, including
 the original relative error on the diagonal. Enrichment continues until the
 tolerance is met; insufficient rank or work budget refuses preparation. This
 finite source-model grid does not certify continuous-band or acoustic accuracy.
+SPEC pod,max_modes,keep_low_modes,count,top_hz instead keeps the leading proper
+orthogonal decomposition of every port's static and count (2..16) damped responses
+log-spaced from the first unprotected source mode to top_hz, which may exceed
+--board-band-hz: string partials drive the slice there too. See BOARD_REDUCTION.md.
 Full projected wood damping, bridge motion and the
 radiating field stay in the same basis.
 For supplied downbearing, reduction uses the solved equilibrium tangent modes.

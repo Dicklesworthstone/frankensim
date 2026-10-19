@@ -76,6 +76,56 @@ Geometry-only exports do not perform this reduction. A reduced modal table must
 not be re-imported as though per-mode damping ratios were its complete material
 law.
 
+## POD selection
+
+```text
+--board-reduction pod,max_modes,keep_low_modes,count,top_hz
+```
+
+The pivoted form above picks one normalized snapshot at a time, the one least
+represented so far. Which snapshots win depends on their order and on a few
+listed frequencies, and nothing samples the board above the source band, where
+string partials still drive it: above every source mode its response approaches
+the slice's mass line, `-b/omega^2` in modal coordinates. On the Model D slice
+this left the radiated pressure above 2 kHz unconverged even at 128 coordinates,
+and smaller reductions swung by up to 10 dB at one microphone from one size to
+the next.
+
+`pod` keeps the same normalized snapshots (every admitted port's static
+response, and the real and imaginary damped responses at `count` frequencies,
+2 through 16, log-spaced from the first unprotected source mode to `top_hz`),
+removes the protected coordinates, and retains the leading eigenvectors of the
+sum of their outer products. That is the proper orthogonal decomposition: the
+subspace that represents the whole response set best in the mass norm, and it does
+not depend on snapshot or port order. `top_hz` may exceed the source band. The
+derived frequencies are reported as `sample_hz`. A direction whose Gram eigenvalue
+is below `64 n eps` of the largest is not resolvable and is not used; spare
+capacity stays empty. Preparation is bounded by an estimated 8e9 scalar visits.
+
+Measured with `apps/instrument-lab/engine-piano/examples/board_admittance.rs` on the
+16-division Model D slice below 2.4 kHz (166 modes; `board-rt16.fsb`), N/2 exact low
+modes. Each value is the mean |dB| error against the complete slice, taken over nine
+keys A0-C8 and the octave bands (125 Hz-8 kHz) that hold one of each key's partials.
+P is the mean-square Rayleigh pressure at three microphones. G is the driving-point
+conductance. The pivoted rows use seeds `200,400,800,1600,2300`; the POD rows use
+`16,8000`:
+
+| N | P < 2 kHz | P >= 2 kHz | G < 2 kHz | G >= 2 kHz | brightness rms (max), dB |
+|---|---|---|---|---|---|
+| 32 pivoted / POD | 3.44 / 1.85 | 4.71 / 1.70 | 3.66 / 1.88 | 5.75 / 0.82 | 4.6 (11.3) / 2.5 (3.9) |
+| 48 | 1.80 / 0.96 | 4.18 / 1.47 | 2.20 / 0.95 | 4.15 / 0.30 | 3.8 (8.9) / 1.8 (2.6) |
+| 64 | 1.05 / 0.58 | 3.00 / 1.01 | 1.16 / 0.55 | 2.19 / 0.15 | 2.5 (6.2) / 1.3 (2.4) |
+| 96 | 0.24 / 0.10 | 2.51 / 0.72 | 0.34 / 0.14 | 1.02 / 0.06 | 1.5 (3.5) / 0.6 (1.2) |
+| 128 | 0.01 / 0.00 | 1.14 / 0.36 | 0.00 / 0.00 | 0.25 / 0.00 | 1.0 (2.0) / 0.4 (0.9) |
+
+Brightness is the mean dB error at and above 2 kHz minus that below, per key. The POD
+errors fall with N in every column. They change by about 0.5 dB or less for 8 to 24
+frequencies, or for a ceiling of 4.8 to 16 kHz instead of 8 kHz. Neither change helps
+alone: POD on the pivoted form's five seeds, and pivots over POD's sixteen, both keep
+most of the error above 2 kHz. These figures compare the reduction with its source
+slice only. They say nothing about the slice's own band limit, about the mesh, or
+about a real board.
+
 ## Adaptive bridge-response accuracy
 
 Fixed snapshots can describe their selected displacement directions very

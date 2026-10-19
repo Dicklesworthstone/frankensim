@@ -163,10 +163,10 @@ pub struct Description {
 /// The soundboard shipped with the live engine, generated NATIVELY by
 /// `examples/gen_board.rs` with the reference's own `steinway_d` +
 /// `board_geometry::prepare_reduced` (the offline binary's `--board-geometry
-/// board-rt16.fsb --board-band-hz 2400 --board-reduction 32,16,200,400,800,1600,2300`):
+/// board-rt16.fsb --board-band-hz 2400 --board-reduction pod,32,16,16,8000`):
 /// the certified FE slice of the 16-division Model D board below 2400 Hz projected onto
-/// 32 coordinates, 16 exact low modes plus 16 bridge-response Ritz vectors,
-/// with its full damping matrix. Surface mode shapes are stored in single
+/// 32 coordinates, 16 exact low modes plus the 16 leading POD directions of every
+/// key's bridge responses up to 8 kHz, with its full damping matrix. Surface mode shapes are stored in single
 /// precision. Solving that 2400 Hz slice inside the browser would take far
 /// too long at start-up; nothing else about the board is precomputed.
 pub const BOARD_BIN: &[u8] = include_bytes!("../data/model-d-board-2400-r32.bin");
@@ -367,10 +367,12 @@ impl Description {
         self
     }
     /// The same board through the reference's explicit bridge-informed
-    /// reduction (`--board-reduction max,keep_low,Hz,...` of the offline
-    /// binary): a certified FE slice below `source_band_hz` is projected onto
-    /// `max` coordinates, `keep_low` exact low modes plus static and harmonic
-    /// bridge responses at the listed frequencies, with its full damping matrix.
+    /// reduction (`--board-reduction max,keep_low,Hz,...` or
+    /// `pod,max,keep_low,count,top_hz` of the offline binary): a certified FE
+    /// slice below `source_band_hz` is projected onto `max` coordinates,
+    /// `keep_low` exact low modes plus static and harmonic bridge responses
+    /// (pivoted at the listed frequencies, or the POD of `count` log-spaced
+    /// ones up to `top_hz`), with its full damping matrix.
     pub fn with_reduction(courses: Vec<Course>, source_band_hz: f64, spec: &str) -> Result<Self, String> {
         Self::with_reduction_on(&steinway_d::build(8)?, courses, source_band_hz, spec)
     }

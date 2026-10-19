@@ -296,6 +296,7 @@ pub(super) fn build(lambda: &[f64], damping: &[f64], ports: &[Vec<f64>], options
             }
             return Ok(RitzBasis {columns,stiffness,damping:physical_damping,
                 max_relative_snapshot_error:snapshot_error,snapshot_count:snapshots.len(),
+                sample_hz:options.sample_hz.clone(),
                 adaptive_response:Some(AdaptiveResponseReport {tolerance,
                     max_relative_driving_point_error:driving_error,
                     max_normalized_transfer_error:error,
@@ -411,7 +412,7 @@ mod tests {
         let ports=vec![vec![1.,0.,1.,0.],vec![strong,weak,strong,weak],
             vec![strong,weak,strong,-weak],vec![0.;4]];
         let mut options=RitzOptions {max_modes:2,keep_low_modes:0,
-            sample_hz:vec![100.*2.5_f64.sqrt()],transfer_tolerance:Some(0.06)};
+            sample_hz:vec![100.*2.5_f64.sqrt()],selection:super::super::Selection::Pivoted,transfer_tolerance:Some(0.06)};
         let mut work=Work(0);
         let responses=Responses::new(&k,&c,&ports,&options.sample_hz,&mut work).unwrap();
         let columns=vec![vec![1.,0.,0.,0.],vec![0.,0.,1.,0.]];
