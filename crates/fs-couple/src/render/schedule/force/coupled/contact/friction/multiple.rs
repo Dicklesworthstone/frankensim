@@ -74,6 +74,9 @@ pub struct MultiFrictionFrame {
     pub obstacle_energy_j: f64,
     /// Nonadhesive loss at the optional compliant obstacles [J].
     pub obstacle_dissipation_j: f64,
+    /// Work supplied by prescribed normal-support translation [J]. This is
+    /// separate from bow/surface work and is not counted as contact loss.
+    pub obstacle_work_j: f64,
     /// Change of ALL storage + all losses - external and surface work [J].
     pub energy_residual_j: f64,
     /// Original network's energy allowance, scaled by absolute surface work.
@@ -211,16 +214,22 @@ impl MultiFrictionModalSystem {
     #[must_use] pub fn acceleration_pressure_weights(&self) -> Option<&[f64]> { self.core.acceleration_pressure_weights() }
     /// Advance every contact and body on the same physical sample.
     pub fn step(&mut self, external: &[f64], drives: &[FrictionDrive]) -> Result<&MultiFrictionFrame, ModalFrictionError> {
-        self.step_inner(external, drives, None)
+        self.step_inner(external, drives, None, None)
     }
     /// Same transaction, with polls during prediction, sweeps and publication.
     pub fn step_under_gate(&mut self, external: &[f64], drives: &[FrictionDrive], gate: &CancelGate)
-        -> Result<&MultiFrictionFrame, ModalFrictionError> { self.step_inner(external, drives, Some(gate)) }
+        -> Result<&MultiFrictionFrame, ModalFrictionError> { self.step_inner(external, drives, None, Some(gate)) }
 
-    fn step_inner(&mut self, external: &[f64], drives: &[FrictionDrive], gate: Option<&CancelGate>)
+    fn step_inner(&mut self, external: &[f64], drives: &[FrictionDrive],
+        obstacle_offsets: Option<&[f64]>, gate: Option<&CancelGate>)
         -> Result<&MultiFrictionFrame, ModalFrictionError>
     {
         poll(gate)?;
+        if let Some(offsets) = obstacle_offsets {
+            let obstacles = self.obstacles.as_ref()
+                .ok_or_else(|| invalid("normal motion requires attached obstacles"))?;
+            obstacles.check_motion(offsets, self.sample_period_s())?;
+        }
         let p = self.points.len();
         if drives.len() != p || drives.iter().any(|d| !d.speed_m_s.is_finite()
             || !d.normal_force_n.is_finite() || d.normal_force_n < 0.0) {
@@ -248,7 +257,7 @@ impl MultiFrictionModalSystem {
         self.core.network.prepare_prediction(external, gate)?;
         self.free_delta.copy_from_slice(&self.core.network.free_delta);
         if let Some(obstacles) = &mut self.obstacles {
-            obstacles.prepare(&self.core.network.old_q, &self.free_delta, gate)?;
+            obstacles.prepare(&self.core.network.old_q, &self.free_delta, obstacle_offsets, gate)?;
         }
         for i in 0..p {
             self.free_slip[i] = finite(finite(drives[i].speed_m_s*self.sample_period_s())?
@@ -299,9 +308,9 @@ impl MultiFrictionModalSystem {
         }
         if let Some(obstacles) = &self.obstacles { obstacles.add_forces(&mut self.core.forces, gate)?; }
         self.core.network.stage_inner(&self.core.forces, gate)?;
-        let (obstacle_energy, obstacle_loss) = match &mut self.obstacles {
+        let (obstacle_energy, obstacle_loss, obstacle_work, absolute_obstacle_work) = match &mut self.obstacles {
             Some(obstacles) => obstacles.stage(&self.core.network.candidates, self.core.network.dt, gate)?,
-            None => (0.0, 0.0),
+            None => (0.0, 0.0, 0.0, 0.0),
         };
         let (mut loss, mut work, mut absolute_work) = (0.0, 0.0, 0.0);
         for i in 0..p {
@@ -326,9 +335,10 @@ impl MultiFrictionModalSystem {
         let network_loss = finite(staged.component_dissipation_j+staged.connection_dissipation_j)?;
         let external_work = dot(external, &self.core.network.free_delta)?;
         let residual = if self.obstacles.is_some() {
-            finite((after-before)+network_loss+loss+obstacle_loss-external_work-work)?
+            finite((after-before)+network_loss+loss+obstacle_loss-external_work-work-obstacle_work)?
         } else { finite((after-before)+network_loss+loss-external_work-work)? };
-        let scale = before.max(after).max(network_loss).max(loss).max(obstacle_loss).max(external_work.abs()).max(absolute_work);
+        let scale = before.max(after).max(network_loss).max(loss).max(obstacle_loss)
+            .max(external_work.abs()).max(absolute_work).max(absolute_obstacle_work);
         if self.obstacles.is_some() {
             limit("total energy including friction obstacles", after, self.core.network.config.maximum_total_energy_j)?;
         }
@@ -347,6 +357,7 @@ impl MultiFrictionModalSystem {
         self.frame.drive_work_j = work; self.frame.network_dissipation_j = network_loss;
         self.frame.friction_dissipation_j = loss; self.frame.energy_residual_j = residual;
         self.frame.obstacle_energy_j = obstacle_energy; self.frame.obstacle_dissipation_j = obstacle_loss;
+        self.frame.obstacle_work_j = obstacle_work;
         self.frame.energy_tolerance_j = tolerance; self.frame.sweeps = sweeps;
         self.frame.ports.copy_from_slice(&self.staged_ports); self.accepted = true;
         Ok(&self.frame)

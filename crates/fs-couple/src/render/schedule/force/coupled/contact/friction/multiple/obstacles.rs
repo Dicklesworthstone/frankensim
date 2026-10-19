@@ -15,6 +15,9 @@ use super::super::super::{
 use fs_dcontact::{ContactStorage, OpeningContactStep};
 use fs_phs::Storage;
 
+/// Prescribed normal support translation with work-conjugate reactions.
+pub mod motion;
+
 /// Admission for optional normal contacts in the existing joint friction solve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrictionObstacleConfig {
@@ -41,6 +44,11 @@ pub struct FrictionObstacleFrame {
     pub constitutive_residual_n: f64,
     /// This contact's absolute-plus-relative residual allowance [N].
     pub force_tolerance_n: f64,
+    /// Accepted support translation from its authored reference [m]. Positive
+    /// opens the gap; the original source law and its clearance are unchanged.
+    pub support_offset_m: f64,
+    /// Work supplied by this translating support, -R * delta_offset [J].
+    pub actuator_work_j: f64,
 }
 
 impl MultiFrictionModalSystem {
@@ -52,7 +60,8 @@ impl MultiFrictionModalSystem {
     ///
     /// A zero right-hand shape denotes a fixed support. A nonzero right-hand
     /// shape receives the reciprocal reaction on its existing body. Supports
-    /// remain at fixed geometry; moving obstacles need explicit actuator work.
+    /// retain their spatial stations. `with_obstacle_motion` additionally admits
+    /// normal support translation and accounts for its actuator work.
     /// Every normal and friction law is checked together before publication.
     /// Bounded coordinate sweeps can refuse; convergence for arbitrary strong
     /// coupling/nonmonotone friction and rigid-contact limits is not promised.
@@ -139,6 +148,7 @@ pub(super) struct ObstacleSet {
     nn: Vec<f64>, nt: Vec<f64>, tn: Vec<f64>,
     reactions: Vec<f64>, friction_ports: usize,
     staged: Vec<FrictionObstacleFrame>, accepted: Vec<FrictionObstacleFrame>,
+    motion: Option<motion::MotionState>,
 }
 impl ObstacleSet {
     fn new(system: &MultiFrictionModalSystem, contacts: Vec<(ModalContact, ModalContactConfig)>,
@@ -178,11 +188,16 @@ impl ObstacleSet {
             for i in 0..q { poll(Some(gate))?; nt[i*p+j] = dot(&points[i].column, &response)?; }
         }
         Ok(Self { points, limits, nn, nt, tn, reactions: vec![0.0; q], friction_ports: p,
-            staged: vec![FrictionObstacleFrame::default(); q], accepted: vec![FrictionObstacleFrame::default(); q] })
+            staged: vec![FrictionObstacleFrame::default(); q], accepted: vec![FrictionObstacleFrame::default(); q],
+            motion: None })
     }
     pub(super) fn energy(&self, models: &[ModalAcousticTimeModel]) -> Result<f64, ModalCouplingError> {
         let mut total = 0.0;
-        for point in &self.points { total = finite(total+point.energy(extension(models, &point.column, 0.0)?)?)?; }
+        for (i, point) in self.points.iter().enumerate() {
+            let mut x = extension(models, &point.column, 0.0)?;
+            if let Some(motion) = &self.motion { x = finite(x-motion.accepted[i])?; }
+            total = finite(total+point.energy(x)?)?;
+        }
         Ok(total)
     }
     // Reuse the original stationary potential and inverse stiffness. Dynamic
@@ -205,14 +220,21 @@ impl ObstacleSet {
         // No dynamic report or sample is fabricated by this initial condition.
         network.initialize_contact_equilibrium(external, &contacts, config, gate)
     }
-    pub(super) fn prepare(&mut self, old_q: &[f64], free_delta: &[f64], gate: Option<&CancelGate>)
+    pub(super) fn prepare(&mut self, old_q: &[f64], free_delta: &[f64], offsets: Option<&[f64]>, gate: Option<&CancelGate>)
         -> Result<(), ModalCouplingError>
     {
         self.reactions.fill(0.0);
-        for point in &mut self.points {
+        if let Some(motion) = &mut self.motion {
+            motion.candidate.copy_from_slice(offsets.unwrap_or(&motion.accepted));
+        }
+        for (i, point) in self.points.iter_mut().enumerate() {
             poll(gate)?;
             point.old = dot(&point.column, old_q)?;
             point.free = finite(point.old+dot(&point.column, free_delta)?)?;
+            if let Some(motion) = &self.motion {
+                point.old = finite(point.old-motion.accepted[i])?;
+                point.free = finite(point.free-motion.candidate[i])?;
+            }
             point.law = OpeningContactStep::new(&point.contact.law, -point.old).map_err(ModalCouplingError::ContactLaw)?;
             point.iterations = 0;
         }
@@ -255,22 +277,34 @@ impl ObstacleSet {
         Ok(())
     }
     pub(super) fn stage(&mut self, models: &[ModalAcousticTimeModel], dt: f64, gate: Option<&CancelGate>)
-        -> Result<(f64, f64), ModalCouplingError>
+        -> Result<(f64, f64, f64, f64), ModalCouplingError>
     {
         let (mut energy, mut loss) = (0.0, 0.0);
+        let (mut work, mut absolute_work) = (0.0, 0.0);
         for (i, point) in self.points.iter().enumerate() {
             poll(gate)?;
-            let x = extension(models, &point.column, 0.0)?;
+            let mut x = extension(models, &point.column, 0.0)?;
+            let (support_offset_m, actuator_work_j) = if let Some(motion) = &self.motion {
+                x = finite(x-motion.candidate[i])?;
+                let distance = finite(motion.candidate[i]-motion.accepted[i])?;
+                (motion.candidate[i], finite(-self.reactions[i]*distance)?)
+            } else { (0.0, 0.0) };
             let penetration_m = point.penetration(x)?;
             let (dissipation_j, constitutive_residual_n, force_tolerance_n) = point.check(self.reactions[i], x, dt)?;
             let stored_energy_j = point.energy(x)?;
             energy = finite(energy+stored_energy_j)?; loss = finite(loss+dissipation_j)?;
+            work = finite(work+actuator_work_j)?;
+            absolute_work = finite(absolute_work+actuator_work_j.abs())?;
             self.staged[i] = FrictionObstacleFrame { normal_force_n: self.reactions[i], stored_energy_j,
-                dissipation_j, penetration_m, constitutive_residual_n, force_tolerance_n };
+                dissipation_j, penetration_m, constitutive_residual_n, force_tolerance_n,
+                support_offset_m, actuator_work_j };
         }
-        Ok((energy, loss))
+        Ok((energy, loss, work, absolute_work))
     }
-    pub(super) fn publish(&mut self) { self.accepted.copy_from_slice(&self.staged); }
+    pub(super) fn publish(&mut self) {
+        self.accepted.copy_from_slice(&self.staged);
+        if let Some(motion) = &mut self.motion { motion.accepted.copy_from_slice(&motion.candidate); }
+    }
 }
 
 #[cfg(test)]
