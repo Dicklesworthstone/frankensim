@@ -10,6 +10,8 @@
 //! mobility need their own models; no velocity or melt motion is inferred here.
 
 /// Stationary species balances on the same acyclic prescribed flow graph.
+// enthalpy.rs loads this file by #[path], so a bare `mod` would resolve beside it.
+#[path = "advection/species.rs"]
 pub mod species;
 
 use std::collections::{BTreeMap, BTreeSet};

@@ -273,4 +273,5 @@ impl<O> Advected<O> {
 }
 
 #[cfg(test)]
+#[path = "species/tests.rs"]
 mod tests;
