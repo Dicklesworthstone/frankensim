@@ -35,7 +35,7 @@ No director smoothing or material defaults are inferred. `ShearShellSection`
 requires independent positive-definite membrane A, bending D and transverse
 shear, an explicit positive shear correction, areal mass, rotary inertia and
 material angle. Its solid constructor requires BOTH transverse shear moduli.
-There is no material B coupling or loss. New material-frame trigonometry uses
+There is no material B coupling or loss in the elastic section. New material-frame trigonometry uses
 `fs_math::det`; `SheetMatrix::rotated` is not used by this path.
 
 Supports declare a component mask and either global axes or a proper local
@@ -96,6 +96,35 @@ falsifier. Roof/cylinder reference-error monotonicity is unchanged. These
 limits are pointwise estimates, not certified continuum-error enclosures.
 
 ## Public types and semantics
+
+`shell::mitc::viscosity::ShearShellViscosity` supplies independent symmetric
+membrane, bending and transverse-shear viscous resultants in physical facet
+coordinates. Each tensor is positive definite or explicitly all zero; missing
+couplings are not inferred. The shared strain kernel evaluates elastic and
+viscous bilinear forms with identical MITC kinematics and quadrature.
+`project_viscosity` uses the ELASTIC bubble transformation for the full
+viscous congruence, followed by projection on caller-supplied expanded physical
+modes. It preserves every modal cross term and adds no drilling loss, modal
+decay fit or second viscosity condensation. This is a fixed condensed trial
+space; dynamic bubble-coordinate elimination is not claimed.
+
+`projection_terms` charges conservative checked condensation and complete
+modal projection work before projection allocation. Existing mesh budgets and
+director/section admission apply. Cancellation is polled per element, quadrature
+point and mode row, with no partial returned matrix. Focused regression sources
+check proportional elastic/viscous material work, full projection including cross
+terms, explicit zero, indefinite tensors, budgets and cancellation; source
+presence alone is not a native pass.
+
+`shell::survey::{validate_midsurface, material_axis_angle}` expose the SAME
+existing manifold/fan and global material-direction owners used by `MeshShell`.
+A new material consumer can validate its actual midsurface without fictitious
+thickness/material fields, and project grain independently of triangle-edge
+ordering. This retains the existing bounds on duplicate vertices/facets,
+connectedness, winding, vertex fans and unresolved tangent projections; it does
+not add a global self-intersection certificate. `ShearShellSection::with_material_angle_rad`
+preserves the physical section while selecting the resulting facet angle.
+
 
 `shell::arching` (IRP M1.2-W6) admits explicit cubic-Hermite section curves or
 a sampled bicubic height grid, with a required unloaded/declared-loaded
@@ -445,8 +474,9 @@ measured piano bridge-mobility or high-band convergence claim.
   alone certifies Model D high-band bridge convergence.
 - Uniform isotropic pre-tension only (scalar T); tensor/nonuniform
   prestress fields join the soundboard-downbearing consumer.
-- No damping: pencils are (K, M); the viscoelastic bead supplies per-mode
-  loss factors downstream.
+- Elastic pencils remain (K, M). The explicit MITC viscosity projection above
+  supplies a full material C on the same condensed physical trial space;
+  time integration and its dissipation ledger remain downstream.
 - Validation is against analytic references (Navier, Leissa 35.992,
   membrane) plus the Olson–Hazell stiffened-panel literature case, whose
   experiment column (holography-measured) is recorded but gated only

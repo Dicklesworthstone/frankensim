@@ -18,6 +18,8 @@ use fs_sparse::{Coo, DirectOrdering, LdltOptions, SymbolicLdlt};
 use std::collections::BTreeMap;
 
 mod element;
+/// Full membrane, bending and transverse-shear material dissipation.
+pub mod viscosity;
 
 /// Explicit displacement/director inertia discretization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +242,14 @@ impl ShearShellSection {
             });
         }
         Ok(())
+    }
+
+    /// Preserve the physical section while expressing its material axes in
+    /// another facet frame. Geometry-owned global-axis projection supplies angle.
+    pub fn with_material_angle_rad(mut self, angle: f64) -> Result<Self, PlateError> {
+        self.material_angle_rad=angle;
+        self.validate()?;
+        Ok(self)
     }
 
     /// Physical areal mass [kg/m²].

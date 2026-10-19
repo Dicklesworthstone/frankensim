@@ -215,10 +215,81 @@ pub(super) fn matrices(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Condensed, Condensed), PlateError> {
     let kin = Kinematics::new(mesh, tri, g, normals);
-    let (constant, twisting) = kin.shear_ties(g);
-    let (a, d, ks) = section.matrices();
-    let mut k: Matrix = [[0.0; N]; N];
+    let mut k = strain_matrix(&kin, g, section.matrices(), cancelled)?;
     let mut m: Matrix = [[0.0; N]; N];
+    if mass == ShellMass::Consistent {
+        for (lambda, weight) in mass_rule() {
+            if cancelled() {
+                return Err(PlateError::Cancelled);
+            }
+            let basis: Vec<_> = (0..N)
+                .map(|c| kin.inertia_basis(lambda[1], lambda[2], c))
+                .collect();
+            for i in 0..N {
+                for j in i..N {
+                    m[i][j] += weight
+                        * g.area_m2
+                        * (section.areal_mass_kg_m2 * dot(basis[i].0, basis[j].0)
+                            + section.rotary_inertia_kg * dot(basis[i].1, basis[j].1));
+                }
+            }
+        }
+    } else {
+        for i in 0..18 {
+            m[i][i] = g.area_m2 / 3.0
+                * if i % 6 < 3 {
+                    section.areal_mass_kg_m2
+                } else {
+                    section.rotary_inertia_kg
+                };
+        }
+    }
+    for i in 0..N {
+        for j in i..N {
+            k[j][i] = k[i][j];
+            m[j][i] = m[i][j];
+        }
+    }
+    let transform = elastic_transform(&k)?;
+    let mut kc = [[0.0; 18]; 18];
+    let mut mc = [[0.0; 18]; 18];
+    let mut mt = [[0.0; 18]; N];
+    for a in 0..N {
+        for j in 0..18 {
+            for b in 0..N {
+                mt[a][j] += m[a][b] * transform[b][j];
+            }
+        }
+    }
+    for i in 0..18 {
+        for j in i..18 {
+            kc[i][j] = k[i][j] + k[i][18] * transform[18][j] + k[i][19] * transform[19][j];
+            for a in 0..N {
+                mc[i][j] += transform[a][i] * mt[a][j];
+            }
+            if !kc[i][j].is_finite() || !mc[i][j].is_finite() {
+                return Err(PlateError::BadSection {
+                    what: "nonfinite condensed MITC pencil",
+                });
+            }
+            kc[j][i] = kc[i][j];
+            mc[j][i] = mc[i][j];
+        }
+    }
+    Ok((kc, mc))
+}
+
+type Transform = [[f64; 18]; N];
+
+// The elastic operator and material dissipation use exactly the same strain
+// kinematics and quadrature. Only their physical constitutive matrices differ.
+fn strain_matrix(
+    kin: &Kinematics, g: &FacetGeometry,
+    (a, d, ks): ([f64; 9], [f64; 9], [[f64; 2]; 2]),
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Matrix, PlateError> {
+    let (constant, twisting) = kin.shear_ties(g);
+    let mut k: Matrix = [[0.0; N]; N];
     for (lambda, weight) in stiffness_rule() {
         if cancelled() {
             return Err(PlateError::Cancelled);
@@ -270,39 +341,13 @@ pub(super) fn matrices(
             }
         }
     }
-    if mass == ShellMass::Consistent {
-        for (lambda, weight) in mass_rule() {
-            if cancelled() {
-                return Err(PlateError::Cancelled);
-            }
-            let basis: Vec<_> = (0..N)
-                .map(|c| kin.inertia_basis(lambda[1], lambda[2], c))
-                .collect();
-            for i in 0..N {
-                for j in i..N {
-                    m[i][j] += weight
-                        * g.area_m2
-                        * (section.areal_mass_kg_m2 * dot(basis[i].0, basis[j].0)
-                            + section.rotary_inertia_kg * dot(basis[i].1, basis[j].1));
-                }
-            }
-        }
-    } else {
-        for i in 0..18 {
-            m[i][i] = g.area_m2 / 3.0
-                * if i % 6 < 3 {
-                    section.areal_mass_kg_m2
-                } else {
-                    section.rotary_inertia_kg
-                };
-        }
-    }
-    for i in 0..N {
-        for j in i..N {
-            k[j][i] = k[i][j];
-            m[j][i] = m[i][j];
-        }
-    }
+    for i in 0..N { for j in i..N { k[j][i] = k[i][j]; } }
+    Ok(k)
+}
+
+// Static enrichment belongs to the elastic trial space. Condensing a viscosity
+// block independently would change that space and lose Kelvin--Voigt cross terms.
+fn elastic_transform(k: &Matrix) -> Result<Transform, PlateError> {
     let c00 = k[18][18];
     let c01 = k[18][19];
     let c11 = k[19][19];
@@ -327,32 +372,32 @@ pub(super) fn matrices(
         transform[18][i] = (-c11 * k[18][i] + c01 * k[19][i]) / determinant;
         transform[19][i] = (c01 * k[18][i] - c00 * k[19][i]) / determinant;
     }
-    let mut kc = [[0.0; 18]; 18];
-    let mut mc = [[0.0; 18]; 18];
-    let mut mt = [[0.0; 18]; N];
-    for a in 0..N {
-        for j in 0..18 {
-            for b in 0..N {
-                mt[a][j] += m[a][b] * transform[b][j];
-            }
+    Ok(transform)
+}
+
+pub(super) fn viscosity_matrix(
+    mesh: &ShellMesh, tri: &[usize; 3], g: &FacetGeometry,
+    normals: [[f64; 3]; 3], section: &ShearShellSection,
+    law: &super::viscosity::ShearShellViscosity,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Condensed, PlateError> {
+    let kin = Kinematics::new(mesh, tri, g, normals);
+    let elastic = strain_matrix(&kin, g, section.matrices(), cancelled)?;
+    let transform = elastic_transform(&elastic)?;
+    let c = strain_matrix(&kin, g, law.matrices(), cancelled)?;
+    let mut ct = [[0.0; 18]; N];
+    for a in 0..N { for j in 0..18 { for b in 0..N {
+        ct[a][j] += c[a][b] * transform[b][j];
+    } } }
+    let mut out = [[0.0; 18]; 18];
+    for i in 0..18 { for j in i..18 {
+        out[i][j] = (0..N).map(|a| transform[a][i] * ct[a][j]).sum();
+        if !out[i][j].is_finite() {
+            return Err(PlateError::BadSection { what: "nonfinite MITC viscosity projection" });
         }
-    }
-    for i in 0..18 {
-        for j in i..18 {
-            kc[i][j] = k[i][j] + k[i][18] * transform[18][j] + k[i][19] * transform[19][j];
-            for a in 0..N {
-                mc[i][j] += transform[a][i] * mt[a][j];
-            }
-            if !kc[i][j].is_finite() || !mc[i][j].is_finite() {
-                return Err(PlateError::BadSection {
-                    what: "nonfinite condensed MITC pencil",
-                });
-            }
-            kc[j][i] = kc[i][j];
-            mc[j][i] = mc[i][j];
-        }
-    }
-    Ok((kc, mc))
+        out[j][i] = out[i][j];
+    } }
+    Ok(out)
 }
 
 #[cfg(test)]

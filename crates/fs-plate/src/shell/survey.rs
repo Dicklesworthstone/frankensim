@@ -44,26 +44,33 @@ impl SurveyMaterial {
         match self {
             Self::Isotropic(m)=>PlateSection::isotropic(m.young_pa,m.poisson,h,m.density_kg_m3),
             Self::Orthotropic{e1_pa,e2_pa,nu12,g12_pa,density_kg_m3,axis1_global}=>{
-                if axis1_global.iter().any(|v|!v.is_finite()) {
-                    return Err(bad("orthotropic shell material axis must be finite"));
-                }
-                let axis_norm=axis1_global.iter().map(|v|v*v).sum::<f64>().sqrt();
-                if !axis_norm.is_finite() || axis_norm<=0.0 {
-                    return Err(bad("orthotropic shell material needs a nonzero global axis"));
-                }
-                let dot=|a:[f64;3],b:[f64;3]|a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
-                let x=dot(axis1_global,facet.frame[0]);
-                let y=dot(axis1_global,facet.frame[1]);
-                let tangent=x.hypot(y);
-                if !tangent.is_finite() || tangent<=1e-10*axis_norm {
-                    return Err(bad("orthotropic shell material axis is unresolved on a facet tangent"));
-                }
-                let angle=y.atan2(x);
+                let angle=material_axis_angle(facet,axis1_global)?;
                 PlateSection::orthotropic_plane_stress_at_angle(
                     e1_pa,e2_pa,nu12,g12_pa,h,density_kg_m3,angle)
             }
         }
     }
+}
+
+/// Project a physical GLOBAL material direction onto an actual facet tangent.
+/// This preserves grain across differently ordered triangle edges. A normal or
+/// unresolved direction refuses; no fallback direction or smoothing is inferred.
+pub fn material_axis_angle(facet: &FacetGeometry, axis1_global: [f64;3]) -> Result<f64,PlateError> {
+    if axis1_global.iter().any(|v|!v.is_finite()) {
+        return Err(bad("orthotropic shell material axis must be finite"));
+    }
+    let axis_norm=axis1_global.iter().map(|v|v*v).sum::<f64>().sqrt();
+    if !axis_norm.is_finite() || axis_norm<=0.0 {
+        return Err(bad("orthotropic shell material needs a nonzero global axis"));
+    }
+    let dot=|a:[f64;3],b:[f64;3]|a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+    let x=dot(axis1_global,facet.frame[0]);
+    let y=dot(axis1_global,facet.frame[1]);
+    let tangent=x.hypot(y);
+    if !tangent.is_finite() || tangent<=1e-10*axis_norm {
+        return Err(bad("orthotropic shell material axis is unresolved on a facet tangent"));
+    }
+    Ok(y.atan2(x))
 }
 
 /// One connected, consistently oriented, manifold triangular shell.
@@ -113,62 +120,23 @@ impl MeshShell {
         if nodal_thickness_m.iter().any(|h| !h.is_finite() || *h <= 0.0)
             || mesh.nodes.iter().flatten().any(|x| !x.is_finite())
         { return Err(bad("shell survey requires finite positions and positive finite thickness")); }
-        let mut positions = BTreeSet::new();
-        for node in &mesh.nodes {
-            // +0/-0 are the same position, not two physical vertices.
-            let key = node.map(|x| if x == 0.0 { 0 } else { x.to_bits() });
-            if !positions.insert(key) { return Err(bad("shell survey contains duplicate positions; explicit welding is required")); }
-        }
-        let mut edges = BTreeMap::<(usize, usize), (usize, usize, usize)>::new();
-        let mut facets = BTreeSet::new();
-        let mut adjacency = vec![Vec::new(); count];
-        let mut links = vec![Vec::<(usize, usize)>::new(); n];
+        validate_midsurface(&mesh, budget)?;
         let mut sections = Vec::with_capacity(count);
         let (mut mass, mut max_edge) = (0.0, 0.0_f64);
         for (e, tri) in mesh.tris.iter().enumerate() {
             let facet = mesh.facet(e)?;
-            let mut key = *tri; key.sort_unstable();
-            if !facets.insert(key) { return Err(bad("shell survey contains duplicate facets")); }
             let h = (nodal_thickness_m[tri[0]]+nodal_thickness_m[tri[1]]+nodal_thickness_m[tri[2]])/3.0;
             let section = materials[e].section(h,&facet)?;
             mass += section.density*section.thickness*facet.area_m2;
             sections.push(section);
             for k in 0..3 {
-                let (a, b, c) = (tri[k], tri[(k+1)%3], tri[(k+2)%3]);
-                links[a].push((b, c));
-                let key = (a.min(b), a.max(b));
-                if let Some(&(first, from, to)) = edges.get(&key) {
-                    if from != b || to != a || first == usize::MAX {
-                        return Err(bad("shell survey has inconsistent winding or a nonmanifold edge"));
-                    }
-                    adjacency[e].push(first); adjacency[first].push(e);
-                    edges.insert(key, (usize::MAX, a, b));
-                } else { edges.insert(key, (e, a, b)); }
+                let (a,b) = (tri[k],tri[(k+1)%3]);
                 let p = mesh.nodes[a]; let q = mesh.nodes[b];
                 max_edge = max_edge.max((p[0]-q[0]).hypot(p[1]-q[1]).hypot(p[2]-q[2]));
             }
         }
         if !mass.is_finite() || mass <= 0.0 || !max_edge.is_finite() {
             return Err(bad("shell survey mass or geometric scale is not representable"));
-        }
-        let mut seen = vec![false; count]; let mut stack = vec![0]; seen[0] = true;
-        while let Some(e) = stack.pop() {
-            for &next in &adjacency[e] { if !seen[next] { seen[next] = true; stack.push(next); } }
-        }
-        if seen.iter().any(|v| !v) { return Err(bad("shell survey must contain one edge-connected physical body")); }
-        for link in links {
-            if link.is_empty() { return Err(bad("shell survey contains an unused vertex")); }
-            let mut graph = BTreeMap::<usize, Vec<usize>>::new();
-            for (a, b) in link { graph.entry(a).or_default().push(b); graph.entry(b).or_default().push(a); }
-            let ends = graph.values().filter(|v| v.len() == 1).count();
-            if graph.values().any(|v| v.len() > 2) || (ends != 0 && ends != 2) {
-                return Err(bad("shell survey vertex is not a manifold fan"));
-            }
-            let mut reached = BTreeSet::new(); let mut pending = vec![*graph.keys().next().unwrap()];
-            while let Some(a) = pending.pop() {
-                if reached.insert(a) { pending.extend(graph[&a].iter().copied()); }
-            }
-            if reached.len() != graph.len() { return Err(bad("shell survey vertex joins disconnected fans")); }
         }
         Ok(Self { mesh, sections, nodal_thickness_m, mass_kg: mass, max_edge_m: max_edge })
     }
@@ -179,6 +147,68 @@ impl MeshShell {
     pub fn assemble(&self, nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
         assemble_shell_sections(&self.mesh, &self.sections, nodes, support)
     }
+}
+
+/// Admit the original survey's connected, oriented manifold midsurface without
+/// requiring fictitious material or thickness fields. Explicit mesh consumers
+/// share these SAME edge/fan checks before constructing their physical sections.
+/// Global self-intersections and near-coincident vertices remain outside scope.
+/// ProfileBudget::max_feature_evaluations is irrelevant to an explicit mesh.
+pub fn validate_midsurface(mesh: &ShellMesh, budget: ProfileBudget) -> Result<(), PlateError> {
+    let n = mesh.nodes.len(); let count = mesh.tris.len();
+    if n < 3 || count == 0 || n > budget.max_nodes || count > budget.max_triangles {
+        return Err(bad("shell survey exceeds explicit mesh budgets"));
+    }
+    if mesh.nodes.iter().flatten().any(|x| !x.is_finite()) {
+        return Err(bad("shell survey requires finite positions"));
+    }
+    let mut positions = BTreeSet::new();
+    for node in &mesh.nodes {
+        // +0/-0 are the same position, not two physical vertices.
+        let key = node.map(|x| if x == 0.0 { 0 } else { x.to_bits() });
+        if !positions.insert(key) { return Err(bad("shell survey contains duplicate positions; explicit welding is required")); }
+    }
+    let mut edges = BTreeMap::<(usize, usize), (usize, usize, usize)>::new();
+    let mut facets = BTreeSet::new();
+    let mut adjacency = vec![Vec::new(); count];
+    let mut links = vec![Vec::<(usize, usize)>::new(); n];
+    for (e, tri) in mesh.tris.iter().enumerate() {
+        mesh.facet(e)?;
+        let mut key = *tri; key.sort_unstable();
+        if !facets.insert(key) { return Err(bad("shell survey contains duplicate facets")); }
+        for k in 0..3 {
+            let (a, b, c) = (tri[k], tri[(k+1)%3], tri[(k+2)%3]);
+            links[a].push((b, c));
+            let key = (a.min(b), a.max(b));
+            if let Some(&(first, from, to)) = edges.get(&key) {
+                if from != b || to != a || first == usize::MAX {
+                    return Err(bad("shell survey has inconsistent winding or a nonmanifold edge"));
+                }
+                adjacency[e].push(first); adjacency[first].push(e);
+                edges.insert(key, (usize::MAX, a, b));
+            } else { edges.insert(key, (e, a, b)); }
+        }
+    }
+    let mut seen = vec![false; count]; let mut stack = vec![0]; seen[0] = true;
+    while let Some(e) = stack.pop() {
+        for &next in &adjacency[e] { if !seen[next] { seen[next] = true; stack.push(next); } }
+    }
+    if seen.iter().any(|v| !v) { return Err(bad("shell survey must contain one edge-connected physical body")); }
+    for link in links {
+        if link.is_empty() { return Err(bad("shell survey contains an unused vertex")); }
+        let mut graph = BTreeMap::<usize, Vec<usize>>::new();
+        for (a, b) in link { graph.entry(a).or_default().push(b); graph.entry(b).or_default().push(a); }
+        let ends = graph.values().filter(|v| v.len() == 1).count();
+        if graph.values().any(|v| v.len() > 2) || (ends != 0 && ends != 2) {
+            return Err(bad("shell survey vertex is not a manifold fan"));
+        }
+        let mut reached = BTreeSet::new(); let mut pending = vec![*graph.keys().next().unwrap()];
+        while let Some(a) = pending.pop() {
+            if reached.insert(a) { pending.extend(graph[&a].iter().copied()); }
+        }
+        if reached.len() != graph.len() { return Err(bad("shell survey vertex joins disconnected fans")); }
+    }
+    Ok(())
 }
 
 impl From<ProfileShell> for MeshShell {
