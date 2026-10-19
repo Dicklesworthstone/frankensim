@@ -107,6 +107,21 @@ homogenization, the P2 milestone.
   frequency- or field-restricted sources require another storage model.
   Invalid geometry, ambiguous sources and unrepresentable coefficients/energy
   refuse. These reductions introduce no circuit solver, hysteresis or loss law.
+- `thermoelectric::ResolvedSeebeckSpan` resolves one source-owned constant
+  `absolute_seebeck_coefficient` [V/K] at both ends of a fixed-context temperature
+  span and at its actual bulk temperature, preserving original receipts and the
+  same selected claim. Joule-heated bulk states cannot escape source support
+  merely because the junctions remain cooler. Its
+  zero-magnetic-field convention is `J = sigma(-grad(V)-S grad(T))`,
+  `q = -k grad(T)+S T J`: the voltage drop is `S(T_b-T_a)` and heat into the
+  junctions is `[-S T_a I, S T_b I]`. These cross terms exchange equal and
+  opposite electrical/thermal work and zero net entropy analytically. The source
+  must declare a validity-wide scalar; relative thermopower and even a flat
+  tabulated curve cannot be silently treated as that model. Temperature-dependent
+  S requires a Thomson-capable extension; `T dS/dT=0` only under this admitted
+  constant-S law. Original conductor, Fourier and caloric owners supply all
+  dissipative transport and storage. This module supplies no independent circuit
+  or thermal integrator and no tensor, magnetic-field or phase-change model.
 - `liquid::resolve_liquid_state` resolves positive density, specific heat,
   conductivity and dynamic viscosity at one caller-supplied source condition.
   It retains the complete four-property bundle and derives kinematic viscosity,
@@ -1533,3 +1548,26 @@ content hash. Liquid/gas sigma remains solely in `ResolvedLiquidSurfaceState`.
 The sparse free-surface consumer assigns this response to one planar domain
 wall. No hysteresis evolution, moving-contact-line regularization, Marangoni
 traction or measured-accuracy claim follows from that assignment.
+
+### Incremental J2 work and physical heat
+
+`plastic::energy` audits the original radial-return stress and history update
+under the explicitly energetic interpretation of linear isotropic hardening:
+elastic energy is `0.5 e:C:e`, hardening storage is `0.5 H alpha^2`, and
+physical dissipation is `sigma_y delta_alpha`. Endpoint stress work also
+contains the backward-Euler loss
+`0.5 delta_e:C:delta_e + 0.5 H (delta_alpha)^2`; that numerical term is
+reported separately and is never a physical heat source.
+
+Callers must retain the same elastic coefficients and H across the increment.
+Changing only the yield offset can release stored energy at fixed total strain.
+The owner checks coefficients, tensor strain bounds, finite deviatoric plastic
+history and its accumulated-strain bound, endpoint yield consistency, and an
+independent absolute work residual. Proposals return immutable native stress,
+history and energy accounts. These gates do not establish a measured heat
+partition for an arbitrary empirical hardening curve or supply creep, phase
+change, thermal expansion, finite-strain work, or parameter-work accounting.
+
+The regression source covers independently derived pure-shear work and storage,
+elastic unloading without physical heat, reversal with accumulated history,
+yield reduction at fixed strain, and invalid-history refusal.

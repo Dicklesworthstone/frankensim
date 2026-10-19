@@ -56,6 +56,8 @@ pub mod sheet;
 pub mod state_point;
 pub mod tensor;
 pub mod thermal;
+/// Source-bound reciprocal Seebeck and Peltier cross-domain transport.
+pub mod thermoelectric;
 /// Shared species thermodynamics, acoustic medium and source-backed gas transport.
 pub mod thermochemical_gas;
 /// Bounded temperature-dependent Maxwell history, thermal strain and work balance.

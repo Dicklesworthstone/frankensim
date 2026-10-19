@@ -6,6 +6,8 @@
 //! The original electrical contact deposition and thermal integration own all
 //! numerical work. This adapter neither solves melt flow nor changes cell mass.
 
+/// Solved material-driven face fluxes on the same conservative heat timeline.
+pub mod advection;
 pub mod transport;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -340,3 +342,4 @@ pub fn advance_joule_enthalpy<'t>(
     let report = source.account.finish(audit,endpoint)?;
     Ok((next,report))
 }
+

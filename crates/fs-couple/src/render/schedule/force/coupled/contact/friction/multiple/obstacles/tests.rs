@@ -6,6 +6,9 @@ use fs_dcontact::Obstacle;
 use fs_math::c64::C64;
 use fs_tribo::FrictionLaw;
 
+#[path = "motion_tests.rs"]
+mod motion;
+
 fn config(pressure: f64) -> ModalCouplingConfig {
     ModalCouplingConfig { max_modes: 8, max_connections: 8, max_setup_terms: 4096,
         nyquist_guard_fraction: 0.9, maximum_total_energy_j: 10.0,
