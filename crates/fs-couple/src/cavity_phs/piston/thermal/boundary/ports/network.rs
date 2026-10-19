@@ -9,6 +9,8 @@ use super::*;
 use crate::circuit_enthalpy::{self, CircuitEnthalpyCandidate, CircuitEnthalpyError,
     CircuitEnthalpyInput, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients};
 use crate::material_circuit::MaterialCircuit;
+use crate::circuit_enthalpy::contacts::{self as electrical_contacts,
+    ContactHeatCells, ContactThermalCoefficients, ContactThermalSample};
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::cell::Cell;
 
@@ -150,6 +152,62 @@ pub fn step_candidate<'m,S,I,E,F>(
         -> Result<ConductanceSample<I>,F>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<NetworkCandidate<'m,S,I>,CircuitEnthalpyError<NetworkError<E,F>>> {
+    step_bound(thermal,target_s,electrical,&[],chambers,contacts,controls,guess_j,
+        |state| resolve(state).map(|bulk| ContactThermalCoefficients {bulk,contacts:Vec::new()}),
+        resolve_port,cancelled)
+}
+
+/// Add source-backed electrical contact drops and two-sided Joule heat to the
+/// SAME multi-chamber solve. Electrical heat routes and gas-wall contacts are
+/// different physical interfaces and need not have the same IDs or geometry.
+///
+/// All electrical contact heat is deposited by the existing circuit/enthalpy
+/// owner, separately from bulk heat and the signed gas-wall transfers. Contact
+/// source continuity uses that owner's existing check. No circuit or chamber
+/// is advanced cumulatively during nonlinear trials. The returned material
+/// payload retains the actual admitted electrical heat destinations in ID order.
+///
+/// Empty electrical contacts/routes reproduce `step_candidate`; empty chambers
+/// reproduce contact-heated circuit/enthalpy evolution. Fixed topology, explicit
+/// heat partition, uniform bodies/gases and independent walls remain required.
+/// This does not infer contact mechanics, arcing, mass flow or shared crank motion.
+#[allow(clippy::too_many_arguments,clippy::type_complexity)]
+pub fn step_with_contacts_candidate<'m,S,I,E,F>(
+    thermal: &DepositionSimulation<'m>, target_s: f64, electrical: CircuitEnthalpyInput<'_>,
+    heat_routes: &[ContactHeatCells], chambers: &[Chamber<'_>], contacts: &[Contact],
+    controls: NetworkSolve, guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<ContactThermalCoefficients<S>,E>,
+    resolve_port: impl Fn(Contact,&DepositionSimulation<'m>,&S,&ResolvedThermochemicalGasState)
+        -> Result<ConductanceSample<I>,F>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<NetworkCandidate<'m,ContactThermalSample<S>,I>,CircuitEnthalpyError<NetworkError<E,F>>> {
+    let cancel=RefCell::new(cancelled);
+    let check=||if (*cancel.borrow_mut())() {Err(DepositionError::Cancelled)} else {Ok(())};
+    check()?;
+    let routes=electrical_contacts::admit_routes(thermal,electrical.circuit,heat_routes,check)?
+        .into_values().collect::<Vec<_>>();
+    step_bound(thermal,target_s,electrical,&routes,chambers,contacts,controls,guess_j,|state| {
+        let resolved=resolve(state)?;
+        let bulk=resolved.bulk;
+        Ok(ContactThermalCoefficients {contacts:resolved.contacts,
+            bulk:CircuitThermalCoefficients {resistors:bulk.resistors,sources_w:bulk.sources_w,
+                conductances_w_k:bulk.conductances_w_k,
+                source:ContactThermalSample {material:bulk.source,destinations:routes.clone()}}})
+    },|contact,state,source,gas|resolve_port(contact,state,&source.material,gas),
+        ||(*cancel.borrow_mut())())
+}
+
+// One chamber/source residual and one final all-owner balance for both routes.
+#[allow(clippy::too_many_arguments,clippy::type_complexity)]
+fn step_bound<'m,S,I,E,F>(
+    thermal: &DepositionSimulation<'m>, target_s: f64, electrical: CircuitEnthalpyInput<'_>,
+    heat_routes: &[ContactHeatCells], chambers: &[Chamber<'_>], contacts: &[Contact],
+    controls: NetworkSolve, guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<ContactThermalCoefficients<S>,E>,
+    resolve_port: impl Fn(Contact,&DepositionSimulation<'m>,&S,&ResolvedThermochemicalGasState)
+        -> Result<ConductanceSample<I>,F>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<NetworkCandidate<'m,S,I>,CircuitEnthalpyError<NetworkError<E,F>>> {
     let cancel = RefCell::new(cancelled);
     let check = || if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
     check()?;
@@ -178,8 +236,11 @@ pub fn step_candidate<'m,S,I,E,F>(
     let mut groups: BTreeMap<u64,Vec<Contact>> = ordered.keys().map(|&id|(id,Vec::new())).collect();
     for &contact in mapped.values() { groups.get_mut(&contact.chamber).expect("admitted chamber").push(contact); }
     let calls=Cell::new(0usize); let heat_trials=Cell::new(0usize); let material_trials=Cell::new(0usize);
-    let candidate = circuit_enthalpy::step_candidate(thermal,target_s,electrical,controls.network,guess_j,|state| {
-        let mut coefficients=resolve(state).map_err(NetworkError::Material)?;
+    let candidate = circuit_enthalpy::driven_with_contacts_candidate(
+        thermal,target_s,electrical,heat_routes,controls.network,guess_j,|state,_remaining| {
+        let (bulk,contacts) = (|| -> Result<_,NetworkError<E,F>> {
+        let resolved=resolve(state).map_err(NetworkError::Material)?;
+        let mut coefficients=resolved.bulk;
         let mut boundaries=Vec::with_capacity(ordered.len());
         let mut cell_heat=BTreeMap::<CellId,f64>::new();
         let mut evaluated_heat=0.0;
@@ -222,8 +283,14 @@ pub fn step_candidate<'m,S,I,E,F>(
         if !deposited.is_finite() || (deposited-evaluated_heat).abs()>controls.total_energy_tolerance_j {
             return Err(NetworkError::Transfer);
         }
-        Ok(CircuitThermalCoefficients {resistors:coefficients.resistors,sources_w:coefficients.sources_w,
-            conductances_w_k:coefficients.conductances_w_k,source:NetworkSources {material:coefficients.source,chambers:boundaries,transferred_heat_j:deposited}})
+        Ok((CircuitThermalCoefficients {resistors:coefficients.resistors,sources_w:coefficients.sources_w,
+            conductances_w_k:coefficients.conductances_w_k,source:NetworkSources {
+                material:coefficients.source,chambers:boundaries,transferred_heat_j:deposited}},resolved.contacts))
+        })().map_err(CircuitEnthalpyError::Source)?;
+        let circuit=electrical_contacts::advance_circuit::<NetworkError<E,F>>(electrical.circuit,bulk.resistors,contacts,
+            electrical.ports,dt,controls.network.circuit,||(*cancel.borrow_mut())())?;
+        Ok(circuit_enthalpy::DrivenCoefficients {circuit,sources_w:bulk.sources_w,
+            conductances_w_k:bulk.conductances_w_k,source:bulk.source,circuit_trials:1})
     },||(*cancel.borrow_mut())());
     let candidate=match candidate {
         Err(CircuitEnthalpyError::Source(NetworkError::Boundary {error:ThermalPistonError::Cancelled,..})) =>
@@ -253,3 +320,7 @@ pub fn step_candidate<'m,S,I,E,F>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "network/electrical_tests.rs"]
+mod electrical_tests;

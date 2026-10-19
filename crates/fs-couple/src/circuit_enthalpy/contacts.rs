@@ -31,7 +31,7 @@ pub struct ContactThermalSample<S> {
     pub destinations: Vec<ContactHeatCells>,
 }
 
-pub(super) fn admit_routes<E>(thermal:&DepositionSimulation<'_>,circuit:&MaterialCircuit,
+pub(crate) fn admit_routes<E>(thermal:&DepositionSimulation<'_>,circuit:&MaterialCircuit,
     routes:&[ContactHeatCells],mut checkpoint:impl FnMut()->Result<(),DepositionError>)
     ->Result<BTreeMap<u64,ContactHeatCells>,CircuitEnthalpyError<E>> {
     if routes.len()>MAX_SERIES_CONTACTS || routes.len()!=circuit.contacts().len() {
@@ -100,24 +100,42 @@ pub fn step_candidate<'m,S,E>(thermal:&DepositionSimulation<'m>,target_s:f64,
     let routes=admit_routes(thermal,input.circuit,routes,check)?.into_values().collect::<Vec<_>>();
     driven_with_contacts_candidate(thermal,target_s,input,&routes,controls,guess_j,|state,_| {
         let coefficients=resolve(state).map_err(CircuitEnthalpyError::Source)?;
-        if coefficients.contacts.len()!=input.circuit.contacts().len() {
-            return Err(CircuitEnthalpyError::Invalid("contact source coverage changed during feedback"));
-        }
-        for contact in &coefficients.contacts {
-            check()?;
-            let old=input.circuit.contacts().iter().find(|c|c.id()==contact.id())
-                .ok_or(CircuitEnthalpyError::Invalid("unbound electrical contact source"))?;
-            let before=old.source().resolved();let after=contact.source().resolved();
-            let claim=|s:&fs_material::state_point::ResolvedInterfaceStatePoint|s.property(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY)
-                .map(|p|p.answer().receipt.selected);
-            if before.card_identity()!=after.card_identity() || claim(before)!=claim(after) {
-                return Err(CircuitEnthalpyError::Invalid("electrical contact source changed during thermal feedback"));
-            }
-        }
         let bulk=coefficients.bulk;
-        let circuit=input.circuit.step_with_contacts_candidate(bulk.resistors,coefficients.contacts,input.ports,
+        let circuit=advance_circuit::<E>(input.circuit,bulk.resistors,coefficients.contacts,input.ports,
             target_s-thermal.time_s(),controls.circuit,||(*cancel.borrow_mut())())?;
         Ok(DrivenCoefficients {circuit,sources_w:bulk.sources_w,conductances_w_k:bulk.conductances_w_k,
             source:ContactThermalSample {material:bulk.source,destinations:routes.clone()},circuit_trials:1})
     },||(*cancel.borrow_mut())())
+}
+
+// Shared by ordinary contact heating and gas/mechanical network composition.
+// This only proposes electrical history: the thermal owner alone deposits loss.
+// Retain one source-continuity check instead of copying it into every coupling.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn advance_circuit<E>(
+    circuit:&MaterialCircuit, resistors:Vec<MaterialResistor>,
+    contacts:Vec<SeriesElectricalContact>, ports:&[f64], dt:f64,
+    controls:MaterialCircuitSolve, mut cancelled:impl FnMut()->bool,
+) -> Result<MaterialCircuitCandidate,CircuitEnthalpyError<E>> {
+    if cancelled() {return Err(CircuitEnthalpyError::Cancelled);}
+    if contacts.len()!=circuit.contacts().len() {
+        return Err(CircuitEnthalpyError::Invalid("contact source coverage changed during feedback"));
+    }
+    for contact in &contacts {
+        if cancelled() {return Err(CircuitEnthalpyError::Cancelled);}
+        let old=circuit.contacts().iter().find(|c|c.id()==contact.id())
+            .ok_or(CircuitEnthalpyError::Invalid("unbound electrical contact source"))?;
+        let before=old.source().resolved();let after=contact.source().resolved();
+        let claim=|s:&fs_material::state_point::ResolvedInterfaceStatePoint|s.property(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY)
+            .map(|p|p.answer().receipt.selected);
+        if before.card_identity()!=after.card_identity() || claim(before)!=claim(after) {
+            return Err(CircuitEnthalpyError::Invalid("electrical contact source changed during thermal feedback"));
+        }
+    }
+    // Keep the contact-free circuit's exact existing arithmetic and entry point.
+    if contacts.is_empty() {
+        Ok(circuit.step_candidate(resistors,ports,dt,controls,cancelled)?)
+    } else {
+        Ok(circuit.step_with_contacts_candidate(resistors,contacts,ports,dt,controls,cancelled)?)
+    }
 }
