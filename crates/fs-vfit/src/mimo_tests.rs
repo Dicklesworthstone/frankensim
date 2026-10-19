@@ -248,3 +248,51 @@ fn delayed_mimo_fit_recovers_known_delays_g1() {
     negative[3] = -1e-4;
     assert!(delayed_mimo_vector_fit(&omega, &data, 3, &negative, &opts, true).is_err());
 }
+
+#[test]
+fn mimo_zoh_step_response_is_exact_at_the_samples_g1() {
+    // A held input makes ZOH exact: x(nT) = (exp(p n T) - 1)/p u.
+    let mut model = passive_model(0.7);
+    model.poles.push(PoleTerm::Real {
+        pole: -450.0,
+        residue: 0.0,
+    });
+    model.residues.push(
+        (0..9)
+            .map(|i| C64::from_re(0.2 + 0.05 * i as f64))
+            .collect(),
+    );
+    let t_s = 1.0 / 48_000.0;
+    let mut zoh = model.zoh(t_s).unwrap();
+    let u = [1.0, 0.5, -0.3];
+    for step in 0..2000usize {
+        let y = zoh.step(&u);
+        let t = step as f64 * t_s;
+        for a in 0..3 {
+            let mut exact = (0..3).map(|b| model.d[a * 3 + b] * u[b]).sum::<f64>();
+            for (term, r) in model.poles.iter().zip(&model.residues) {
+                let (pole, pair) = match *term {
+                    PoleTerm::Real { pole, .. } => (C64::from_re(pole), false),
+                    PoleTerm::Pair { pole, .. } => (pole, true),
+                };
+                let x = pole.scale(t);
+                let (s, c) = det::sin_cos(x.im);
+                let growth = (C64::new(c, s).scale(det::exp(x.re)) - C64::ONE) * pole.recip();
+                let acc = (0..3).fold(C64::ZERO, |acc, b| acc + r[a * 3 + b] * growth.scale(u[b]));
+                exact += if pair { 2.0 * acc.re } else { acc.re };
+            }
+            assert!(
+                (y[a] - exact).abs() <= 1e-9 * (1.0 + exact.abs()),
+                "step {step} port {a}: {} vs {exact}",
+                y[a]
+            );
+        }
+    }
+    assert!(model.zoh(0.0).is_err());
+    let mut unstable = model.clone();
+    unstable.poles[0] = PoleTerm::Pair {
+        pole: C64::new(1.0, 300.0),
+        residue: C64::ZERO,
+    };
+    assert!(unstable.zoh(t_s).is_err());
+}

@@ -1101,6 +1101,99 @@ pub fn check_delayed_mimo_passivity(
     })
 }
 
+/// Exact zero-order-hold stepping of a [`MimoModel`]: one complex (pair) or
+/// real state per pole term per input port, advanced by
+/// `x <- exp(p T) x + (exp(p T) - 1)/p u` (the exponential of the state
+/// matrix, never a bilinear map). Output `y_n = SUM 2 Re(R x_n) (pairs),
+/// R x_n (real) + D u_n + E (u_n - u_(n-1)) / T`. The improper term uses the
+/// same first-order differentiator as the SISO discretization.
+#[derive(Debug, Clone)]
+pub struct MimoZoh {
+    ports: usize,
+    time_step_s: f64,
+    /// Per term: `exp(p T)`, `(exp(p T) - 1)/p`, residue matrix, pair flag.
+    terms: Vec<(C64, C64, Vec<C64>, bool)>,
+    d: Vec<f64>,
+    e: Vec<f64>,
+    state: Vec<C64>,
+    last_input: Vec<f64>,
+}
+
+impl MimoModel {
+    /// Exact ZOH stepping at `time_step_s`.
+    ///
+    /// # Errors
+    /// [`PassivityError::Unstable`] for a pole on or right of the imaginary
+    /// axis or a non-positive, non-finite step.
+    pub fn zoh(&self, time_step_s: f64) -> Result<MimoZoh, PassivityError> {
+        if !self.is_stable() || !(time_step_s.is_finite() && time_step_s > 0.0) {
+            return Err(PassivityError::Unstable);
+        }
+        let terms = self
+            .poles
+            .iter()
+            .zip(&self.residues)
+            .map(|(term, r)| {
+                let (pole, pair) = match *term {
+                    PoleTerm::Real { pole, .. } => (C64::from_re(pole), false),
+                    PoleTerm::Pair { pole, .. } => (pole, true),
+                };
+                let x = pole.scale(time_step_s);
+                let (s, c) = det::sin_cos(x.im);
+                let decay = C64::new(c, s).scale(det::exp(x.re));
+                (decay, (decay - C64::ONE) * pole.recip(), r.clone(), pair)
+            })
+            .collect::<Vec<_>>();
+        let n = self.ports;
+        Ok(MimoZoh {
+            ports: n,
+            time_step_s,
+            state: vec![C64::ZERO; terms.len() * n],
+            terms,
+            d: self.d.clone(),
+            e: self.e.clone(),
+            last_input: vec![0.0; n],
+        })
+    }
+}
+
+impl MimoZoh {
+    /// Advance one sample with the held input `u` (one value per port) and
+    /// return the output at the start of the interval.
+    ///
+    /// # Panics
+    /// If `u.len()` differs from the port count.
+    pub fn step(&mut self, u: &[f64]) -> Vec<f64> {
+        let n = self.ports;
+        assert_eq!(u.len(), n, "one held input per port");
+        let mut y: Vec<f64> = (0..n)
+            .map(|a| {
+                (0..n)
+                    .map(|b| {
+                        self.d[a * n + b] * u[b]
+                            + self.e[a * n + b] * (u[b] - self.last_input[b]) / self.time_step_s
+                    })
+                    .sum()
+            })
+            .collect();
+        for (k, (decay, gain, r, pair)) in self.terms.iter().enumerate() {
+            let x = &mut self.state[k * n..(k + 1) * n];
+            for (a, ya) in y.iter_mut().enumerate() {
+                let mut acc = C64::ZERO;
+                for (b, xb) in x.iter().enumerate() {
+                    acc = acc + r[a * n + b] * *xb;
+                }
+                *ya += if *pair { 2.0 * acc.re } else { acc.re };
+            }
+            for (xb, &ub) in x.iter_mut().zip(u) {
+                *xb = *decay * *xb + gain.scale(ub);
+            }
+        }
+        self.last_input.copy_from_slice(u);
+        y
+    }
+}
+
 #[cfg(test)]
 #[path = "mimo_tests.rs"]
 mod tests;

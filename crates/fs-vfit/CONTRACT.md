@@ -240,6 +240,13 @@ identity. `MimoStateSpace::eval` is the independent parity route.
 - It reports the coordinate perturbation and the in-band matrix-relative
   change.
 
+`MimoModel::zoh(T)` steps the model by exact zero-order hold.
+- Each pole term advances as `exp(p T) x + (exp(p T) - 1)/p u`, per input
+  port. This is the state matrix's exponential, with no bilinear map.
+- The improper `E` term uses the SISO first-order differentiator.
+- With a held input it reproduces the continuous step response at the
+  samples (`mimo_zoh_step_response_is_exact_at_the_samples_g1`).
+
 `delayed_mimo_vector_fit` fits the entries after removing caller-declared
 delays (`Z_ab = exp(-s tau_ab) Zhat_ab`).
 - A delayed entry never carries the improper `s E` term: under a delay that
