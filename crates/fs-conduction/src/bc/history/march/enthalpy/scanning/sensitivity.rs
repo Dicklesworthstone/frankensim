@@ -6,6 +6,9 @@
 //! sweep on a FIXED time grid. No solver iterations, adaptive decisions, event
 //! times, material selections or source-support admission rules are differentiated.
 
+/// Full fixed-grid inverse objectives with authored-schedule gradients.
+pub mod objective;
+
 use super::{ScanningEnthalpyRun, ScanStep, events, natural_only, patches_before, poll};
 use super::super::super::moving::sensitivity::{MovingHeatGradient, MovingHeatLinearization};
 use crate::{ConductionError, ConductionProblem, LinearConfig};
