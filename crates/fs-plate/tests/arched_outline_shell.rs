@@ -346,7 +346,10 @@ fn g1_annular_tensioned_film_matches_bessel_roots() {
     with_cx(|cx| {
         let roots = annular_roots(0.5, 1.0, 2);
         let mut errors = vec![Vec::new(); 2];
-        for h in [0.2, 0.1, 0.05] {
+        // b154: at h = 0.2 the second axisymmetric shape is unresolved (its
+        // best overlap is 0.69, spread over five modes), and mode 0's 2.8e-5
+        // there is a cancellation, not convergence (then 6.4e-3, 1.8e-3).
+        for h in [0.1, 0.05, 0.025] {
             let chord_bound_m = 1.0 - fs_math::det::cos(core::f64::consts::PI / 256.0);
             println!(
                 "{{\"suite\":\"irp-s1\",\"bead\":\"M1.2-W6\",\"stage\":\"annulus-geometry-axis\",\"edges_per_loop\":256,\"fixed_across_h_rungs\":true,\"chord_bound_m\":{chord_bound_m},\"quantization_bound_m\":6.6e-10}}"
@@ -367,10 +370,14 @@ fn g1_annular_tensioned_film_matches_bessel_roots() {
             .unwrap();
             for (mode, &k) in roots.iter().enumerate() {
                 let expected = 2000.0 * k * k; // T/(rho*h)=2000 m²/s².
+                // The search window only bounds the eigensolver; pairing is by
+                // shape and the tolerance below is unchanged. At +-20% an edge
+                // shift factored on an eigenvalue at h = 0.025 (b154 pivot
+                // breakdown); +-7% sits in the gaps measured at h = 0.1, 0.05.
                 let report = slice_window(
                     &model.k,
                     &model.m,
-                    (0.8 * expected, 1.2 * expected),
+                    (0.93 * expected, 1.07 * expected),
                     &SliceOptions {
                         ritz_tol: 1e-12,
                         max_lanczos: 1024,
