@@ -8,6 +8,15 @@ use super::{ClosedGasParcel, GasPiston, PistonError, PistonInput, PistonSolve, P
 use fs_mbd_material::ResolvedBody;
 use super::thermal::{ConductanceSample, HeatExchangeSolve, ThermalPistonError};
 use super::exchange::thermal::NozzleThermalPistonCandidate;
+use super::exchange::network::NozzleNetworkCandidate;
+use super::thermal::boundary::network::{NetworkGasDrive, NetworkGasError, NetworkGasSolve};
+use super::thermal::boundary::network::material::GasConductionGeometry;
+use crate::circuit_enthalpy::CircuitEnthalpyError;
+use crate::circuit_enthalpy::material::{MaterialNetwork, MaterialNetworkError, MaterialNetworkSample};
+use crate::material_circuit::MaterialCircuit;
+use fs_material::conductor::ElectricalPropertyBasis;
+use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_thermal::enthalpy::DepositionSimulation;
 use super::thermal::double_acting::{DoubleHeatExchangeSolve, DoubleThermalPistonStep};
 use super::thermal::layers::{MaterialConductionLayers, LayerConductionError};
 use fs_material::phase::{EquilibriumPhaseState, UniformEnthalpyStep, UniformEnthalpyStepInput};
@@ -118,6 +127,32 @@ impl MaterialGasPiston {
     {
         self.nozzle_thermal_candidate(reservoir, nozzle, input, thermal_body, controls, flow, exchange,
             |gas, thermal| layers.resolve(gas, thermal), cancelled)
+    }
+
+    /// Retain regional material inertia while a finite circuit/thermal network
+    /// exchanges heat with the actual incoming gas mixture and moving wall.
+    /// Electrical and conductive coefficients share the original cell sources;
+    /// source-bound gas caloric/transport laws retain the accepted composition.
+    /// This returns the thermal, electrical, gas/reservoir and mechanical
+    /// endpoints together. The original rigid body's density binding is kept;
+    /// heating a network cell does not silently change the piston material state.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn nozzle_material_network_candidate<'m>(
+        &self, reservoir: &ClosedGasParcel, nozzle: GasNozzle,
+        binding: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
+        circuit: &MaterialCircuit, ports: &[f64],
+        electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        drive: NetworkGasDrive, flow: GasNozzleStepSolve, controls: NetworkGasSolve,
+        geometry: GasConductionGeometry, guess_j: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NozzleNetworkCandidate<'m, MaterialNetworkSample, ResolvedMaterialStatePoint, Self>,
+        CircuitEnthalpyError<NetworkGasError<MaterialNetworkError, MaterialNetworkError>>>
+    {
+        let candidate = self.piston.nozzle_material_network_candidate(reservoir, nozzle, binding,
+            thermal, target_s, circuit, ports, electrical_bases, drive, flow, controls, geometry,
+            guess_j, &mut cancelled)?.map_piston(|piston| Self { body: self.body.clone(), piston });
+        if cancelled() { return Err(CircuitEnthalpyError::Cancelled); }
+        Ok(candidate)
     }
 }
 
@@ -254,3 +289,4 @@ impl MaterialDoubleActingGasPiston {
 
 #[cfg(test)]
 mod tests;
+

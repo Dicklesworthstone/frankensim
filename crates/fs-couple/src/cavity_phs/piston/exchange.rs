@@ -7,6 +7,8 @@
 
 /// Nozzle exchange and reciprocal material-wall heat transfer on one accepted step.
 pub mod thermal;
+/// Species exchange, electrical storage, finite thermal cells and wall motion.
+pub mod network;
 
 use super::{ClosedGasParcel, GasEnergyError, GasPiston, PistonError, PistonInput,
     PistonSolve, PistonStep, invalid, poll, positive};
@@ -192,3 +194,4 @@ impl GasPiston {
 
 #[cfg(test)]
 mod tests;
+

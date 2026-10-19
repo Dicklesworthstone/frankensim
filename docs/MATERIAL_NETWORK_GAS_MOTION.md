@@ -124,3 +124,56 @@ external-source separation, all-owner energy, late cancellation, work exhaustion
 clock mismatch and surface admission. Local native execution was unavailable
 during authoring; independent Python simultaneous-equation checks are not a
 Rust test pass or measured-material qualification.
+
+## Open flow through the same finite network
+
+`GasPiston::nozzle_network_candidate` now composes the original conservative
+nozzle transfer with this existing circuit/enthalpy/heat/motion solve.
+`nozzle_material_network_candidate` supplies the data-only material ingress,
+including an explicit conductivity or resistivity basis for every electrical
+branch. `MaterialGasPiston` exposes the same operation while retaining its
+original regional body, source receipts and material-derived inertia.
+
+The nozzle exchanges species and upstream total enthalpy **once**, at the
+accepted initial pressures. Every subsequent network trial starts from that
+same transferred chamber. The reservoir is never withdrawn again during
+Newton or heat-feedback iteration. Its new mixture therefore reaches the
+actual gas pressure, conductivity, heat capacity and acoustic state used by
+the wall calculation. Resistor and wall conductivity still share the prepared
+network's original material bundle at each actual thermal endpoint.
+
+```rust,ignore
+let candidate = piston.nozzle_material_network_candidate(
+    &reservoir, nozzle, &binding, &thermal, target_s, &circuit, &ports,
+    &electrical_bases, drive, nozzle_controls, network_controls,
+    wall_geometry, &energy_guess_j, || false,
+)?;
+let (next_thermal, next_circuit, next_piston, next_reservoir, report) =
+    candidate.into_parts();
+// Publish all four endpoints together; every internal transfer is already applied.
+```
+
+`report.network` preserves the original circuit, cell, wall and motion accounts
+for the post-transfer stage. The outer report independently checks both gas
+masses and the full energy change in electrical storage, thermal cells,
+reservoir, chamber and piston motion against external electrical work,
+prescribed heat, outside-pressure work and force work. Nozzle enthalpy, Joule
+heat and reciprocal wall heat cancel as internal transfers. A nonzero mass
+flow retains the chamber's explicit missing-stream-port audit boundary; the
+outer paired report provides its complete finite-system balance.
+
+The reservoir is a uniform fixed-volume ideal gas, and the original nozzle
+source, donor-fraction and pressure-crossing bounds remain. This is a
+**first-order transfer-then-network split over one duration**, requiring time
+refinement. The thermal geometry and piston inertia remain fixed. No reaction
+chemistry, jet thrust, moving thermal mesh or simultaneous nozzle/network
+solve is inferred. Failure or late cancellation returns no tentative physical
+endpoint. A shut nozzle reproduces the original closed-network states and
+port history exactly.
+
+The regression sources exercise both flow directions, one withdrawal across
+many nonlinear trials, conductivity-only electrical data, material and incoming
+mixture changes through actual heat/motion, an independent all-store trajectory
+balance, shut-path parity and complete rollback. Native Rust tests could not
+run in the authoring environment; their presence is not a native pass.
+

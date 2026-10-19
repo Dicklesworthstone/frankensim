@@ -2980,3 +2980,28 @@ The film is frozen, incompressible, Newtonian, no-slip and quasistatic. Caller-d
 ### Source-driven thermoelectric transport
 
 `circuit_enthalpy::thermoelectric::step_candidate` composes the existing prepared material network, Kirchhoff descriptor and enthalpy residual. Each constant-absolute-Seebeck solid leg binds an original voltage-source branch in exclusive oriented series with its material resistor; bulk distances and areas must match its two source-derived conductive links. One pinned source claim covers both junctions and the actual Joule-heated bulk. The native midpoint source current drives Kelvin heat `[-S*T_a*I, S*T_b*I]` into the original junction cells while the existing resistor owner deposits Joule heat once in its bulk cell. Shared junctions sum the signed coefficients across materials, yielding thermocouple voltage and Peltier heating without material-name presets. Internal Seebeck work and Peltier heat are removed from external-supply accounting before the total electrical/thermal balance gate. All source, geometry, numerical and cancellation refusals preserve both histories. This bounded zero-field, fixed-geometry, single-phase leg model rejects variable-S/Thomson, tensor/AC and electrical-contact extensions; other thermal cells retain their original phase and boundary behavior. Endpoint coefficient coupling and lumped Joule deposition require time/spatial refinement. Physical convention reference: https://doc.comsol.com/6.4/doc/com.comsol.help.heat/heat_ug_theory.07.087.html .
+
+### Nozzle flow through finite electrical and thermal networks
+
+`cavity_phs::piston::exchange::network` stages one original pressure-driven
+species/enthalpy transfer, then invokes the existing circuit/enthalpy gas-wall
+network solve from that same transferred composition on every nonlinear trial.
+`nozzle_material_network_candidate` retains prepared electrical/conductive source
+claims and the actual gas midpoint; the material-bound piston entry point also
+retains its original regional body and inertia. One candidate returns thermal,
+electrical, piston and finite-reservoir endpoints together. Full-endpoint mass
+and energy checks enclose both gases, electrical storage, cell enthalpy and
+kinetic energy, with external work/heat separated from internal nozzle enthalpy,
+Joule loss and reciprocal wall heat. A shut path preserves the closed-network
+state and port history. Nonzero flow retains the explicit missing-stream audit
+boundary of the chamber's two-port observation; the outer paired balance is
+authoritative for this finite system.
+
+This is a first-order transfer-then-network split at one physical duration,
+with a uniform fixed-volume reservoir, original ideal-gas/species sources,
+fixed thermal geometry and rigid piston. Existing donor, pressure-crossing,
+source-domain, clock, event, work and cancellation checks remain. It does not
+supply combustion, jet thrust, moving-mesh conduction or a simultaneous nozzle
+residual. Regression sources cover material/mixture interventions, both flow
+directions, one withdrawal during repeated trials, full storage balance,
+closed-path parity and complete rollback; native execution remains unverified.
