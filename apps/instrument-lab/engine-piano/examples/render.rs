@@ -10,6 +10,7 @@
 //!        [--rt0425-string-damping] (RT-0425 per-key string losses, as the browser plays)
 //!        [--rt0425-hammer-stiffness] (RT-0425's K_H on each unison string, as the browser plays)
 //!        [--rt0425-hammer-dissipation] (with it, RT-0425's R_H instead of crush and Prony, as the browser plays)
+//!        [--silent-bank HZ] (silent strings' partials to HZ move, as the browser plays at 600)
 //! `--scale` + `--isolated` reproduces the reference binary run with the same
 //! sparse `--scale` (nothing else attached to the bridge, no retirement).
 use fs_live_piano::refmods::geometry;
@@ -57,6 +58,7 @@ fn run() -> Result<(), String> {
             "--reduction" => { reduction = Some(value(i)?.clone()); i += 1; }
             "--trace" => { trace_path = Some(value(i)?.clone()); i += 1; }
             "--board" => { board_path = Some(value(i)?.clone()); i += 1; }
+            "--silent-bank" => { cfg.silent_bank_hz = number(i)?; i += 1; }
             "--isolated" => cfg.static_attachment = false,
             "--rt0425-string-damping" => cfg.rt0425_string_damping = true,
             "--rt0425-hammer-stiffness" => cfg.rt0425_hammer_stiffness = true,

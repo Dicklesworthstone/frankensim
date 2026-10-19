@@ -72,6 +72,9 @@ export interface PianoInfo {
   /** Relative string energy below which a sounding (undamped / damped) string returns to the static image [J]. */
   retireRingingJ: number;
   retireDampedJ: number;
+  /** Silent strings: partials up to this frequency move (0: rigid chords) [Hz], and how many there are now. */
+  silentBankHz?: number;
+  silentBankModes?: number;
 }
 
 /** Soundboard drawing data: FE quadrature points and bare mode shapes. */
@@ -119,6 +122,8 @@ export interface PianoLedger {
   catchLossJ: number;
   /** Relative string energy discarded when strings returned to the static image. */
   retiredJ: number;
+  /** Numerical work of the silent-string bank's explicit exchange with the board (signed). */
+  couplingJ: number;
 }
 
 export interface PianoSnapshot {
@@ -223,7 +228,7 @@ interface Pending {
   reject: (error: Error) => void;
 }
 
-const HEADER = 18; // n_keys, stations, board_modes, sustain, ledger[10], counters[4]
+const HEADER = 19; // n_keys, stations, board_modes, sustain, ledger[10], counters[4], silent-bank exchange
 const KEY_HEADER = 9;
 
 /** Decode the flat Float32Array snapshot posted by the worker. */
@@ -262,6 +267,7 @@ export function parsePianoSnapshot(data: Float32Array, renderedFrames = 0, ahead
       hammerLossJ: at(11),
       catchLossJ: at(12),
       retiredJ: at(13),
+      couplingJ: at(18),
     },
     dynamicModes: at(14),
     dynamicStrings: at(15),

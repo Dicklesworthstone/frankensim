@@ -390,6 +390,9 @@ export class LivePianoSection {
     // the board this device chose at Start (0 before Start: the text then gives the range)
     const board = info ? info.boardCoordinates : 0;
     const exact = info ? info.boardExactLowModes : 0;
+    // the silent strings' partials that move (before Start: what this build plays)
+    const bank = info ? info.silentBankHz ?? 0 : 600;
+    const bankModes = info?.silentBankModes ?? 671;
     const details = el('details', 'evidence');
     details.append(el('summary', undefined, 'What this live model is — and is not'));
     const body = el('div', 'evidence-body lp-evidence');
@@ -406,7 +409,9 @@ export class LivePianoSection {
     lists.append(
       column('In the live model', [
         'All 88 keys of the published scale, 234 speaking strings on the bridge. Only the sounding keys are dynamic: every unison string and duplex segment, up to 200 string modes per key (low trichords keep partials to about 5–7 kHz).',
-        'Every other string stays attached as a quasi-static chord (its mass and tension load the bridge); a key becomes dynamic at its strike and returns to rest when quiet.',
+        bank > 0
+          ? `Every other string is on the bridge too: its partials up to ${bank} Hz (${bankModes.toLocaleString('en-US')} of them) move as the bridge drives them, each with its damper and its string losses, and the rest of it is a quasi-static chord (mass and tension). A struck key takes over its partials as they are and returns them when quiet.`
+          : 'Every other string stays attached as a quasi-static chord (its mass and tension load the bridge); a key becomes dynamic at its strike and returns to rest when quiet.',
         board
           ? `One shared soundboard: ${board} coordinates of the Model D board, on the 16-division mesh of the graded offline renders, with its full damping matrix: ${exact} exact modes, plus the ${board - exact} shapes that best reproduce every key's bridge response from there up to 8 kHz (a proper orthogonal decomposition of the 0–2400 Hz slice). This is the largest board this device computed fast enough when you pressed Start (32 to 128).`
           : 'One shared soundboard: a reduction of the Model D board on the 16-division mesh of the graded offline renders, with its full damping matrix: exact low modes, plus the shapes that best reproduce every key\'s bridge response up to 8 kHz (a proper orthogonal decomposition of the 0–2400 Hz slice). It has 32 to 128 coordinates, the largest this device computes fast enough, chosen when you press Start.',
@@ -421,14 +426,16 @@ export class LivePianoSection {
           : board >= 128
           ? `${board} board coordinates, as many as the offline render: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[128]} dB from the studio render in octave balance.`
           : `${board} board coordinates instead of the offline render's 128: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[board] ?? '—'} dB from the studio render in octave balance (128 coordinates: ${BOARD_ERROR_DB[128]} dB).`,
-        'Strings of silent keys stay on the bridge as rigid chords: their mass and tension load it, but they do not move. Offline, on the same board, they move: their partials near the struck note\'s partials take about 13 % of an A3 mf strike into their dampers, and above each of their partials that partial\'s share of their mass no longer loads the bridge. So the live A3 decays more slowly early on (−7.1 against −14.8 dB/s) and has 2.4 dB less energy above 2 kHz. The strings without dampers make no measurable difference. A key you hold down silently (Press silently) is not reduced: its strings join from rest and ring along with what you play.',
+        bank > 0
+          ? `Strings of silent keys, in part: above ${bank} Hz they stay rigid, each partial feels its damper alone (a pad also couples the partials of its string), and they trade work with the board in one explicit step per sample, whose numerical work the ledger shows. Against the same partials attached as full strings an A3 strike differs by −48 dB with the dampers down and −54 dB under the pedal. With them an A3 mf strike decays early at −14.9 dB/s (offline −14.8, on the same board) and has 0.6 dB more energy above 2 kHz than offline; held as rigid chords it decayed at −7.1 dB/s with 2.4 dB less. A key you hold down silently (Press silently) joins with all its partials.`
+          : 'Strings of silent keys stay on the bridge as rigid chords: their mass and tension load it, but they do not move. Offline, on the same board, they move: their partials near the struck note\'s partials take about 13 % of an A3 mf strike into their dampers, and above each of their partials that partial\'s share of their mass no longer loads the bridge. So the live A3 decays more slowly early on (−7.1 against −14.8 dB/s) and has 2.4 dB less energy above 2 kHz. A key you hold down silently (Press silently) is not reduced: its strings join from rest and ring along with what you play.',
         `A polyphony budget of ${info ? info.maxDynamicModes.toLocaleString('en-US') : '2,400'} string modes and ${info ? info.maxSoundingKeys : 24} keys. Beyond it the quietest key is returned to rest early; this is counted ("Forced out") and its energy appears as retired in the ledger. A load governor may lower the budget for new keys on a slow device, and says so.`,
         'No key or action beyond the shank, no room, lid or case, no air loading of the board. Una corda shifts no felt: the hammer meets the same felt card on fewer strings.',
       ], 'out'),
     );
     body.append(lists);
     body.append(el('h4', undefined, 'Checked against the offline reference'));
-    body.append(el('p', undefined, 'With nothing but one key on the bridge, the live kernel and the reference engine (the same source files) agree on bridge velocity to within 4 × 10⁻¹² relative over one second, for eight keys at three hammer speeds, with the published string, felt and hammer laws this page plays; their energy books agree to about ten digits. The WebAssembly build in this tab reproduces the native build sample for sample on an isolated A3 and C6. Against the full offline render, the first 15 partials of A3 mf sit within 3 cents on every board (0.8 cents on 96 and 128 coordinates) and the fitted inharmonicity is 2.38–2.40 × 10⁻⁴ (offline 2.41 × 10⁻⁴).'));
+    body.append(el('p', undefined, 'With nothing but one key on the bridge, the live kernel and the reference engine (the same source files) agree on bridge velocity to within 4 × 10⁻¹² relative over one second, for eight keys at three hammer speeds, with the published string, felt and hammer laws this page plays; their energy books agree to about ten digits. The WebAssembly build in this tab reproduces the native build sample for sample on an isolated A3 and C6. Against the full offline render, the first 15 partials of A3 mf sit within 3 cents on every board and the fitted inharmonicity is 2.41–2.44 × 10⁻⁴ (offline 2.41 × 10⁻⁴). Against the offline render with the live physics on the 128-coordinate board (no air loading, no string waves) they sit within 0.4 cents on 64 and 128 coordinates and within 2.5 on the others.'));
     const chips = (title: string, cls: string, items: string[]): HTMLElement => {
       const row = el('div', 'lp-chiprow');
       row.append(el('h4', undefined, title));
@@ -440,7 +447,7 @@ export class LivePianoSection {
     body.append(
       chips('Published', 'pub', ['RT-0425 string scale, 84 keys', 'RT-0425 hammer mass, exponent, stiffness, dissipation', 'RT-0425 string losses', 'RT-0425 bridge coupling points', 'Model D dimensions', 'Model D board drawing (Boutillon et al.)', 'Hammer shank geometry (Chabassier & Durufle)']),
       chips('Estimated', 'est', ['4 end keys of the scale', 'Unison detune 0.8 cents', 'Damper pads, 0.4 N s/m', 'Board damping 1.5 %', 'Rib and bridge widths']),
-      chips('Not modelled live', 'not', ['Silent-string resonance', 'Silent-string damper loss', ...(!board ? ['Board beyond what the device affords'] : board < 128 ? [`Board above ${board} coordinates`] : []), 'Action beyond the shank', 'Room, lid, case']),
+      chips('Not modelled live', 'not', [...(bank > 0 ? [`Silent strings above ${bank} Hz`] : ['Silent-string resonance', 'Silent-string damper loss']), ...(!board ? ['Board beyond what the device affords'] : board < 128 ? [`Board above ${board} coordinates`] : []), 'Action beyond the shank', 'Room, lid, case']),
     );
     if (info) {
       const prov = el('p', 'small muted');
@@ -1006,7 +1013,8 @@ export class LivePianoSection {
     set('dissipated', millijoules(l.dissipatedJ));
     set('retired', millijoules(l.retiredJ));
     set('residual', scientific(l.residualJ));
-    set('breakdown', `of which strings ${millijoules(l.stringLossJ)} · board ${millijoules(l.boardLossJ)} · dampers ${millijoules(l.damperLossJ)} · felt and shank ${millijoules(l.hammerLossJ)} · hammer caught ${millijoules(l.catchLossJ)}`);
+    set('breakdown', `of which strings ${millijoules(l.stringLossJ)} · board ${millijoules(l.boardLossJ)} · dampers ${millijoules(l.damperLossJ)} · felt and shank ${millijoules(l.hammerLossJ)} · hammer caught ${millijoules(l.catchLossJ)}`
+      + (l.couplingJ !== 0 ? ` · the silent strings' explicit exchange added ${millijoules(l.couplingJ)} (numerical)` : ''));
   }
 
   /** Keys that sound with no finger on them (pedal or still ringing) get the held outline. */
