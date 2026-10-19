@@ -96,7 +96,9 @@ pub enum AcousticRealizeError {
         /// tolerance. This is a necessary condition, not an admission.
         min_admissible_cells: usize,
         /// Refusing pitch error at `cells` [cents]: the dispersion bound below
-        /// `min_admissible_cells`, otherwise the measured passive error.
+        /// `min_admissible_cells`, otherwise the measured passive error
+        /// (infinite when the ladder has no resonance within ±386 cents of
+        /// the line's).
         pitch_error_cents: f64,
         /// Declared pitch-error tolerance [cents].
         max_pitch_error_cents: f64,
@@ -213,9 +215,9 @@ pub enum BoreRealizationReceipt {
         /// Spatial dispersion model-form pitch error at `cells` [cents].
         dispersion_error_cents: f64,
         /// Measured, signed model-form pitch error against the characteristic
-        /// line [cents]. It is taken from the strongest passive input-impedance
-        /// peak near the quarter-wave fundamental: the ladder's port-Hamiltonian
-        /// `Z(iω)` against the line's own TMM. Positive means the ladder is sharp.
+        /// line [cents]. It is taken from the lowest passive input-impedance
+        /// resonance of each: the ladder's port-Hamiltonian `Z(iω)` against the
+        /// line's own TMM. Positive means the ladder is sharp.
         pitch_error_cents: f64,
         /// Declared pitch-error tolerance [cents].
         max_pitch_error_cents: f64,
@@ -4512,25 +4514,32 @@ impl ChainImpedance {
     }
 }
 
-/// Angular frequency of the largest `|Z|` on `[lo, hi]`: a uniform scan, then
-/// golden-section refinement inside the winning cell.
-fn impedance_peak(
+/// Angular frequency of the lowest passive input-impedance resonance on
+/// `[lo, hi]`: the first interior local maximum of `|Z|` on a `scan`-cell
+/// uniform grid, refined by golden-section search across its two neighbouring
+/// cells. `None` when the grid has no interior maximum: a window edge is never
+/// a resonance.
+fn first_impedance_peak(
     lo: f64,
     hi: f64,
+    scan: usize,
     mut magnitude: impl FnMut(f64) -> Result<f64, AcousticRealizeError>,
-) -> Result<f64, AcousticRealizeError> {
-    const SCAN: usize = 240;
-    let step = (hi - lo) / SCAN as f64;
-    let (mut best, mut best_omega) = (f64::NEG_INFINITY, lo);
-    for i in 0..=SCAN {
-        let omega = lo + step * i as f64;
-        let value = magnitude(omega)?;
-        if value > best {
-            best = value;
-            best_omega = omega;
+) -> Result<Option<f64>, AcousticRealizeError> {
+    let step = (hi - lo) / scan as f64;
+    let (mut before, mut here) = (magnitude(lo)?, magnitude(lo + step)?);
+    let mut peak = None;
+    for i in 2..=scan {
+        let after = magnitude(lo + step * i as f64)?;
+        if here > before && here >= after {
+            peak = Some(lo + step * (i - 1) as f64);
+            break;
         }
+        (before, here) = (here, after);
     }
-    let (mut a, mut b) = ((best_omega - step).max(lo), (best_omega + step).min(hi));
+    let Some(center) = peak else {
+        return Ok(None);
+    };
+    let (mut a, mut b) = (center - step, center + step);
     let ratio = 0.5 * (det::sqrt(5.0) - 1.0);
     let (mut c, mut d) = (b - ratio * (b - a), a + ratio * (b - a));
     let (mut fc, mut fd) = (magnitude(c)?, magnitude(d)?);
@@ -4549,13 +4558,14 @@ fn impedance_peak(
             fd = magnitude(d)?;
         }
     }
-    Ok(f64::midpoint(a, b))
+    Ok(Some(f64::midpoint(a, b)))
 }
 
 /// Signed model-form pitch error [cents] of the lumped ladder against the
 /// characteristic line's own TMM (exact Bessel losses, the same termination
-/// and wall). Both are scanned for their strongest passive input-impedance
-/// peak around the quarter-wave fundamental; positive means the ladder is sharp.
+/// and wall), compared at the line's lowest passive input-impedance resonance
+/// ([`lumped_ladder_resonances`]). Positive means the ladder is sharp; infinite
+/// when the ladder has no resonance within ±386 cents of the line's.
 fn lumped_ladder_pitch_error_cents(
     physics: &Duct,
     sections: &[AcousticSection],
@@ -4564,20 +4574,30 @@ fn lumped_ladder_pitch_error_cents(
     termination: Termination,
     gas: &GasState,
 ) -> Result<f64, AcousticRealizeError> {
+    let (ladder, line) = lumped_ladder_resonances(physics, sections, taps, duct, termination, gas)?;
+    Ok(ladder.map_or(f64::INFINITY, |ladder| {
+        1200.0 * det::ln(ladder / line) / core::f64::consts::LN_2
+    }))
+}
+
+/// Lowest passive input-impedance resonances `(ladder, line)` [rad/s]. The
+/// line is scanned from a quarter of the closed-open quarter-wave frequency to
+/// six times it, so a closed far end (half-wave), a cone or an open tone hole
+/// moves the resonance instead of leaving the scan on a window edge. Each
+/// ladder sample is a dense chain solve, so the ladder is scanned only within
+/// ±386 cents of the line's resonance; `None` when it has none there.
+fn lumped_ladder_resonances(
+    physics: &Duct,
+    sections: &[AcousticSection],
+    taps: &[AcousticTap],
+    duct: &ViscothermalDuct,
+    termination: Termination,
+    gas: &GasState,
+) -> Result<(Option<f64>, f64), AcousticRealizeError> {
     let length: f64 = physics.segments.iter().map(Segment::axial_length).sum();
     let quarter = core::f64::consts::TAU * gas.sound_speed / (4.0 * length);
-    let (lo, hi) = (0.5 * quarter, 1.5 * quarter);
-    let chain = ChainImpedance::new(&ode_bore_chain(
-        sections,
-        duct_mouth(duct.termination),
-        1,
-        taps,
-        gas,
-        duct.wall,
-    )?)?;
-    let ladder = impedance_peak(lo, hi, |omega| chain.magnitude(omega))?;
     let wall = wall_pin(duct.wall);
-    let line = impedance_peak(lo, hi, |omega| {
+    let line = first_impedance_peak(0.25 * quarter, 6.0 * quarter, 920, |omega| {
         fs_duct::input_impedance_wall(
             physics,
             gas,
@@ -4588,8 +4608,22 @@ fn lumped_ladder_pitch_error_cents(
         )
         .map(|response| response.impedance.abs())
         .map_err(AcousticRealizeError::Duct)
+    })?
+    .ok_or(AcousticRealizeError::InvalidDescription {
+        what: "no passive line resonance inside the lumped-ladder scan",
     })?;
-    Ok(1200.0 * det::ln(ladder / line) / core::f64::consts::LN_2)
+    let chain = ChainImpedance::new(&ode_bore_chain(
+        sections,
+        duct_mouth(duct.termination),
+        1,
+        taps,
+        gas,
+        duct.wall,
+    )?)?;
+    let ladder = first_impedance_peak(line / 1.25, line * 1.25, 160, |omega| {
+        chain.magnitude(omega)
+    })?;
+    Ok((ladder, line))
 }
 
 fn viscothermal_pin(gas: &GasState) -> ViscothermalPin {
@@ -5834,6 +5868,141 @@ mod tone_hole_admission_tests {
             assert!(what.contains("tone"), "{what}");
         }
         assert!(physics_duct(&base_duct(None)).is_ok(), "control must pass");
+    }
+}
+
+#[cfg(test)]
+mod lumped_ladder_resonance_tests {
+    use super::*;
+    use fs_scenario::{CylinderSegment, ToneHole};
+
+    fn resonances(duct: &ViscothermalDuct, cells: usize) -> (Option<f64>, f64) {
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        let termination = match duct.termination {
+            WaveguideEnd::Closed => Termination::Closed,
+            WaveguideEnd::UnflangedOpen => Termination::UnflangedOpen,
+            WaveguideEnd::FlangedOpen => Termination::FlangedOpen,
+        };
+        let (sections, taps) = bore_spec_with_cells(duct, cells).unwrap();
+        let physics = physics_duct(duct).unwrap();
+        lumped_ladder_resonances(&physics, &sections, &taps, duct, termination, &gas).unwrap()
+    }
+
+    #[test]
+    fn a_window_edge_is_never_a_resonance() {
+        assert_eq!(
+            first_impedance_peak(1.0, 2.0, 920, |w| Ok(w)).unwrap(),
+            None
+        );
+        assert_eq!(
+            first_impedance_peak(1.0, 2.0, 920, |w| Ok(-w)).unwrap(),
+            None
+        );
+        // A compliance-like edge far stronger than the resonance at 1.7.
+        let peak = first_impedance_peak(1.0, 2.0, 920, |w| {
+            Ok(1.0e5 * det::exp(-50.0 * (w - 1.0)) + 1.0 / ((w - 1.7) * (w - 1.7) + 1.0e-4))
+        })
+        .unwrap()
+        .unwrap();
+        assert!((peak - 1.7).abs() < 1.0e-9, "{peak}");
+    }
+
+    #[test]
+    fn closed_end_cone_and_open_hole_compare_their_lowest_resonance() {
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        let length = 0.5;
+        let quarter = core::f64::consts::TAU * gas.sound_speed / (4.0 * length);
+        let duct = |segments: Vec<CylinderSegment>, holes: Vec<ToneHole>, end| ViscothermalDuct {
+            segments,
+            tone_holes: holes,
+            termination: end,
+            wall: None,
+        };
+        let closed = duct(
+            vec![CylinderSegment::cylinder(0.0075, length)],
+            Vec::new(),
+            WaveguideEnd::Closed,
+        );
+        let cone = duct(
+            vec![CylinderSegment::taper(0.003, 0.02, length)],
+            Vec::new(),
+            WaveguideEnd::UnflangedOpen,
+        );
+        let holed = duct(
+            vec![
+                CylinderSegment::cylinder(0.0075, 0.5 * length),
+                CylinderSegment::cylinder(0.0075, 0.5 * length),
+            ],
+            vec![ToneHole {
+                after_segment: 0,
+                radius_m: 0.004,
+                chimney_m: 0.003,
+                open_fraction: 1.0,
+            }],
+            WaveguideEnd::UnflangedOpen,
+        );
+        // Lossless truncated cone driven at its narrow end, p = 0 one unflanged
+        // end correction past its wide end: k L' + atan(k x1) = pi, x1 the
+        // apex distance of the inlet.
+        let (x1, wide) = (length * 0.003 / (0.02 - 0.003), length + 0.6133 * 0.02);
+        let (mut lo, mut hi) = (1.0, 20.0);
+        for _ in 0..200 {
+            let k = f64::midpoint(lo, hi);
+            if k * wide + det::atan(k * x1) < core::f64::consts::PI {
+                lo = k;
+            } else {
+                hi = k;
+            }
+        }
+        let cone_oracle = f64::midpoint(lo, hi) * gas.sound_speed;
+        // The hole lands in a cell, so coarse ladders misplace it (b151: -114
+        // cents at 6 cells, +185 at 12, -25 at 24, -12 at 48).
+        let rungs: [(&str, ViscothermalDuct, &[usize]); 3] = [
+            ("closed", closed, &[6, 12]),
+            ("cone", cone, &[6, 12]),
+            ("hole", holed, &[24]),
+        ];
+        for (name, duct, cell_counts) in rungs {
+            for &cells in cell_counts {
+                let (ladder, line) = resonances(&duct, cells);
+                let cents = ladder.map(|l| 1200.0 * det::ln(l / line) / core::f64::consts::LN_2);
+                println!(
+                    "{{\"case\":\"{name}\",\"cells\":{cells},\"line_over_quarter\":{},\"ladder_over_quarter\":{:?},\"cents\":{cents:?}}}",
+                    line / quarter,
+                    ladder.map(|l| l / quarter)
+                );
+                // Every case's lowest resonance sits outside the old
+                // [0.5, 1.5] quarter-wave window.
+                assert!(line / quarter > 1.5, "{name}: {}", line / quarter);
+                match name {
+                    "closed" => {
+                        // The half-wave, lowered only by viscothermal dispersion.
+                        assert!((line / (2.0 * quarter) - 1.0).abs() < 2.0e-2);
+                        // The chain realizes this outlet as pressure release
+                        // (frankensim-gs17m), an octave low: no ladder resonance
+                        // lies near the line's, so the admission refuses.
+                        assert_eq!(ladder, None, "{name} {cells}");
+                    }
+                    "cone" => {
+                        assert!(
+                            (line / cone_oracle - 1.0).abs() < 3.0e-2,
+                            "{}",
+                            line / cone_oracle
+                        );
+                        // The psi chain carries a near-field shunt on every
+                        // cell (frankensim-d1j6s) and its resonance runs away
+                        // under refinement (2.6, 3.3 x c/4L at 6, 12 cells):
+                        // refused.
+                        assert_eq!(ladder, None, "{name} {cells}");
+                    }
+                    _ => {
+                        // The open hole at mid-bore shortens the speaking length.
+                        assert!(line / quarter < 2.0, "{}", line / quarter);
+                        assert!(cents.is_some_and(|c| c.abs() < 100.0), "{name} {cells}");
+                    }
+                }
+            }
+        }
     }
 }
 
