@@ -1,6 +1,8 @@
 //! Contact Joule heat enters BOTH finite material bodies on the shared solve.
 //! No guessed 50/50 partition, separate thermal step, or lost contact energy.
 pub mod material;
+/// Compose material radiation and thermal-contact resistance on the same cells.
+pub mod heat;
 use super::*;
 use crate::material_circuit::contacts::{SeriesElectricalContact,ContactHeat,MAX_SERIES_CONTACTS};
 use fs_material::electrical_interface::ELECTRICAL_CONTACT_RESISTANCE_PROPERTY;
