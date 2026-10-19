@@ -68,15 +68,23 @@ impl ObservationInput {
     pub(super) fn build(self, duct: &Duct, gases: &[GasState], reed: BeatingReed,
         termination: Termination, rate: u32, samples: usize)
         -> Result<(ReedBoreVoice, Option<TerminalObservation>), ReedPerformanceError> {
+        let regional = RegionalDuct::new(duct, gases)
+            .map_err(|error| ReedPerformanceError::Model(map_drive(DrivingPointError::Duct(error))))?;
+        self.build_regional(duct, regional, reed, termination, rate, samples)
+    }
+
+    pub(super) fn build_regional(self, duct: &Duct, regional: RegionalDuct, reed: BeatingReed,
+        termination: Termination, rate: u32, samples: usize)
+        -> Result<(ReedBoreVoice, Option<TerminalObservation>), ReedPerformanceError> {
         if let Self::Legacy(distance) = self {
-            let voice = ReedBoreVoice::new_with_segment_gases(duct, gases, reed,
-                termination, PlateBank::default(), distance, rate, samples, None)
-                .map_err(ReedPerformanceError::Model)?;
+            let voice = ReedBoreVoice::with_line(duct, regional.inlet_gas(), reed,
+                PlateBank::default(), distance, rate, |_| {
+                    regional.characteristic_line_realized(termination, rate, samples, None, None)
+                        .map_err(map_drive)
+                }).map_err(ReedPerformanceError::Model)?;
             return Ok((voice, None));
         }
         let Self::Baffled { receiver, exterior } = self else { unreachable!("legacy returned above") };
-        let regional = RegionalDuct::new(duct, gases)
-            .map_err(|error| ReedPerformanceError::Model(map_drive(DrivingPointError::Duct(error))))?;
         let regional = match exterior {
             Some(gas) => regional.with_exterior_gas(gas)
                 .map_err(|error| ReedPerformanceError::Model(map_drive(DrivingPointError::Duct(error))))?,

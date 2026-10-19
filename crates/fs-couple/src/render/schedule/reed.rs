@@ -127,6 +127,7 @@ pub struct ReedPerformance {
     terminal: Option<outlet::TerminalObservation>,
     observation_policy: ObservationPolicy,
     gas_records: Vec<GasRecord>,
+    gas_field: Option<(fs_material::gas_field::AxialGasField, usize)>,
 }
 impl ReedPerformance {
     /// Decode and admit all records before building or advancing the runtime.
@@ -162,6 +163,41 @@ impl ReedPerformance {
         policy: ObservationPolicy,
         sources: Option<&ThermochemicalSources<'_>>,
     ) -> Result<Self, ReedPerformanceError> {
+        Self::from_bytes_with_environment(bytes, max_block, policy, sources, None)
+    }
+
+    /// Bind a source-retaining axial temperature/composition field to the same
+    /// authored reed, geometry, gestures and physical terminal observation.
+    /// This accepts both prescribed fields and converged steady breath fields.
+    /// The exact inlet state drives the reed; the same regional duct drives
+    /// feedback and the optional baffled microphone, including an explicitly
+    /// authored exterior gas. No proxy gain or second acoustic line is added.
+    ///
+    /// The field must cover the complete authored length at the ambient static
+    /// pressure. Explicit per-segment gas records conflict and refuse. The
+    /// field remains frozen during this finite performance; mean-flow
+    /// acoustics and time-dependent thermal transport are not implied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_bytes_with_gas_field(
+        bytes: &[u8],
+        max_block: usize,
+        policy: ObservationPolicy,
+        sources: Option<&ThermochemicalSources<'_>>,
+        field: fs_material::gas_field::AxialGasField,
+        cells_per_segment: usize,
+    ) -> Result<Self, ReedPerformanceError> {
+        Self::from_bytes_with_environment(
+            bytes, max_block, policy, sources, Some((field, cells_per_segment)),
+        )
+    }
+
+    fn from_bytes_with_environment(
+        bytes: &[u8],
+        max_block: usize,
+        policy: ObservationPolicy,
+        sources: Option<&ThermochemicalSources<'_>>,
+        gas_field: Option<(fs_material::gas_field::AxialGasField, usize)>,
+    ) -> Result<Self, ReedPerformanceError> {
         if bytes.len() > MAX_REED_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
             return Err(bad(0, "source exceeds 1 MiB or callback capacity is outside 1..=65536"));
         }
@@ -182,6 +218,9 @@ impl ReedPerformance {
         let mut gas_records = Vec::new();
         let air = row.gas_with_sources(None, sources, &mut gas_records)?;
         row.finish()?;
+        if gas_field.as_ref().is_some_and(|(field, _)| field.static_pressure_pa() != air.pressure) {
+            return Err(bad(r.line, "axial gas field must have the authored ambient static pressure"));
+        }
         let mut row = r.row("reed")?;
         let reed = BeatingReed {
             rest_opening_m: row.positive()?, width_m: row.positive()?, closing_pressure_pa: row.positive()?,
@@ -235,7 +274,12 @@ impl ReedPerformance {
             };
             let gas = match row.words.next() {
                 None => air,
-                Some("gas") => row.gas_with_sources(Some(air.pressure), sources, &mut gas_records)?,
+                Some("gas") => {
+                    if gas_field.is_some() {
+                        return Err(bad(row.line, "explicit segment gas conflicts with the complete axial gas field"));
+                    }
+                    row.gas_with_sources(Some(air.pressure), sources, &mut gas_records)?
+                }
                 Some(_) => return Err(bad(row.line, "expected an optional gas record after geometry")),
             };
             if gas.pressure != air.pressure {
@@ -278,9 +322,20 @@ impl ReedPerformance {
             sample_rate_hz: rate, samples, full_scale_pa, segments: count, tone_holes: holes,
             massive_reed: reed.mass_kg > 0.0, gesture_events: track.events.len(), compiled_controls: controls.len(),
         };
-        let (voice, terminal) = observation.build(
-            &Duct { segments }, &segment_gases, reed, termination, rate, samples as usize,
-        )?;
+        let duct = Duct { segments };
+        let (voice, terminal) = if let Some((field, cells)) = &gas_field {
+            use crate::driving_point::regional::{RegionalDuct, field::GasFieldDuctError};
+            let regional = RegionalDuct::from_gas_field(&duct, field, *cells)
+                .map_err(|error| match error {
+                    GasFieldDuctError::Material(source) => ReedPerformanceError::Gas { line: 0, source },
+                    GasFieldDuctError::Duct(source) => ReedPerformanceError::Model(
+                        AcousticRealizeError::Duct(source)),
+                })?;
+            segment_gases = regional.segment_gases().to_vec();
+            observation.build_regional(&duct, regional, reed, termination, rate, samples as usize)?
+        } else {
+            observation.build(&duct, &segment_gases, reed, termination, rate, samples as usize)?
+        };
         let context = RenderContext::new(vec![RenderVoice::ReedBore(voice)], max_block);
         let renderer = ScheduledRenderer::new(context, controls, max_controls).map_err(ReedPerformanceError::Render)?;
         renderer.validate_sample_rate(rate).map_err(ReedPerformanceError::Render)?;
@@ -293,6 +348,7 @@ impl ReedPerformance {
             terminal,
             observation_policy: policy,
             gas_records,
+            gas_field,
         })
     }
 
@@ -312,12 +368,19 @@ impl ReedPerformance {
     /// explicit segment records may override it. No air-only absorption is added.
     #[must_use]
     pub const fn ambient_gas(&self) -> &GasState { &self.ambient_gas }
-    /// Actual gases in authored segment order, including tone-hole records.
-    /// The first drives reed density/impedance and the compact-jet proxy; the
-    /// last supplies the terminal internal medium. An explicit exterior can
-    /// separately supply radiation loading and observation. All are stationary.
+    /// Actual propagation gases, in authored segment order for regional input
+    /// or resolved midpoint-cell order for an axial field. The field's exact
+    /// inlet state drives reed density/impedance; it can differ from the first
+    /// cell's midpoint. An explicit exterior separately supplies radiation
+    /// loading and observation. All are stationary.
     #[must_use]
     pub fn segment_gases(&self) -> &[GasState] { &self.segment_gases }
+    /// Source-retaining axial field and its explicit cells-per-segment axis.
+    /// None selects the unchanged uniform/piecewise-regional input route.
+    #[must_use]
+    pub fn gas_field(&self) -> Option<(&fs_material::gas_field::AxialGasField, usize)> {
+        self.gas_field.as_ref().map(|(field, cells)| (field, *cells))
+    }
     /// All authored gas records, including their source receipts, in read order.
     #[must_use]
     pub fn gas_records(&self) -> &[GasRecord] {
@@ -433,3 +496,6 @@ mod gas_tests;
 
 #[cfg(test)]
 mod regional_tests;
+
+#[cfg(test)]
+mod field_tests;
