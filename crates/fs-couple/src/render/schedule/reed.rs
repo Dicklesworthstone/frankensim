@@ -2,7 +2,9 @@
 //!
 //! The file supplies primitive SI parameters, a static segmented duct, an explicit
 //! dry/humid-air or named-mixture default, optional segment gases, and one canonical
-//! blowing-pressure track. It does not infer material identity
+//! blowing-pressure track. An optional gas_field block supplies primitive axial
+//! temperatures and mole fractions through explicitly loaded source packs.
+//! It does not infer material identity
 //! or turn a pitch into a medium property. Pressure commands replace the fixture
 //! attack envelope; all retained reed and bore state survives release and resume.
 //! Legacy `listener_m` selects bore pressure plus the compact-jet proxy.
@@ -20,6 +22,7 @@ use fs_scenario::{BeatingReed, gesture::GestureSchedule};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::regional::outlet::{OutletError, OutletReceiverInfo};
 mod outlet;
+mod field_input;
 use crate::pcm_wav::observation::{ObservationError, ObservationPolicy, PressureRenderer};
 use crate::render::{ReedBoreVoice, RenderContext, RenderError, RenderVoice};
 use crate::thin_plate::PlateBank;
@@ -48,7 +51,7 @@ pub enum ReedPerformanceError {
     },
     /// Material admission retains its original cause and source line.
     Gas {
-        /// One-based ambient, segment or exterior record line.
+        /// One-based ambient, segment, field or exterior record line.
         line: usize,
         /// Original species, composition or state refusal.
         source: fs_material::MaterialError,
@@ -164,8 +167,10 @@ impl ReedPerformance {
         Self::from_bytes_with_gas_sources(bytes, max_block, policy, None)
     }
 
-    /// Resolve ambient, segment and exterior declarations against explicit
-    /// caller-loaded sources. Original records remain available for sidecars.
+    /// Resolve ambient, segment, exterior and optional gas_field declarations
+    /// against explicit caller-loaded sources. Original records, including the
+    /// field knots, remain available for sidecars. A file-defined field uses
+    /// ambient static pressure and conflicts with explicit segment gas records.
     pub fn from_bytes_with_gas_sources(
         bytes: &[u8],
         max_block: usize,
@@ -222,7 +227,7 @@ impl ReedPerformance {
         max_block: usize,
         policy: ObservationPolicy,
         sources: Option<&ThermochemicalSources<'_>>,
-        gas_field: Option<(fs_material::gas_field::AxialGasField, GasFieldResolution)>,
+        mut gas_field: Option<(fs_material::gas_field::AxialGasField, GasFieldResolution)>,
     ) -> Result<Self, ReedPerformanceError> {
         if bytes.len() > MAX_REED_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
             return Err(bad(0, "source exceeds 1 MiB or callback capacity is outside 1..=65536"));
@@ -275,6 +280,7 @@ impl ReedPerformance {
         if count == 0 { return Err(bad(r.line, "at least one axial segment is required")); }
         let mut segments = Vec::with_capacity(count);
         let mut segment_gases = Vec::with_capacity(count);
+        let mut explicit_segment_gas = false;
         let mut holes = 0;
         for _ in 0..count {
             let mut row = r.next()?;
@@ -304,6 +310,7 @@ impl ReedPerformance {
                     if gas_field.is_some() {
                         return Err(bad(row.line, "explicit segment gas conflicts with the complete axial gas field"));
                     }
+                    explicit_segment_gas = true;
                     row.gas_with_sources(Some(air.pressure), sources, &mut gas_records)?
                 }
                 Some(_) => return Err(bad(row.line, "expected an optional gas record after geometry")),
@@ -318,6 +325,15 @@ impl ReedPerformance {
         if matches!(segments.first(), Some(Segment::ToneHole { .. }))
             || matches!(segments.last(), Some(Segment::ToneHole { .. }))
         { return Err(bad(r.line, "the inlet and termination must have explicit axial segments")); }
+        if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("gas_field") {
+            if gas_field.is_some() {
+                return Err(bad(r.line + 1, "file gas_field conflicts with the injected axial gas field"));
+            }
+            if explicit_segment_gas {
+                return Err(bad(r.line + 1, "file gas_field conflicts with explicit segment gas records"));
+            }
+            gas_field = Some(field_input::read(&mut r, sources, air.pressure, &mut gas_records)?);
+        }
         let mut row = r.row("compile_limits")?;
         let max_work: u64 = row.parse()?;
         let max_controls = row.count(MAX_CONTROLS)?; row.finish()?;
@@ -421,7 +437,8 @@ impl ReedPerformance {
     pub fn gas_field_resolution(&self) -> Option<GasFieldResolution> {
         self.gas_field.as_ref().map(|(_, resolution)| *resolution)
     }
-    /// All authored gas records, including their source receipts, in read order.
+    /// All authored gas records, including field knots and source receipts, in
+    /// read order. The field model separately retains every declared source ID.
     #[must_use]
     pub fn gas_records(&self) -> &[GasRecord] {
         &self.gas_records

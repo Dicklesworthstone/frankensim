@@ -1,0 +1,25 @@
+frankensim-reed-performance-v1
+audio 48000 12000 2
+ambient 300 100000 0
+reed 0.0004 0.013 6000 0.00001 100 0.35
+baffled_outlet 0 0 0.5 4 16 1000
+termination flanged
+segments 1
+cylinder 0.0015 0.57
+gas_field continuous 16 3 mole 2 N2 CO2
+gas_station 0 300 1 0
+gas_station 0.285 320 0.75 0.25
+gas_station 0.57 310 0.5 0.5
+compile_limits 100000 1024
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	700
+tracks	1
+track	blow	blowing-pressure
+initial	pressure-pa	0e0
+events	5
+event	0e0	1e-2	pressure-pa	2.8e3
+event	5e-3	1e-2	pressure-pa	3.5e3
+event	2e-2	0e0	pressure-pa	0e0
+event	4e-2	5e-3	pressure-pa	2.8e3
+event	6e-2	0e0	pressure-pa	0e0

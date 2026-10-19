@@ -123,7 +123,18 @@ fn gas_state(g: &fs_material::gas::GasState) -> String {
 }
 
 fn reed_field_provenance(p: &fs_couple::render::schedule::reed::ReedPerformance) -> String {
-    let Some((field, cells)) = p.gas_field() else { return String::new(); };
+    let Some((field, _)) = p.gas_field() else { return String::new(); };
+    use fs_couple::render::schedule::reed::GasFieldResolution;
+    let (resolution, scope) = match p.gas_field_resolution().expect("field retains its resolution") {
+        GasFieldResolution::Midpoint(cells) => (
+            format!(",\"propagation\":\"midpoint-constant-v1\",\"cells_per_segment\":{cells},\"resolved_cells\":{}", p.segment_gases().len()),
+            "frozen primitive temperature/composition field; EOS and transport reevaluated per midpoint; exact inlet and outlet states; same regional feedback and microphone; no mean-flow acoustic correction",
+        ),
+        GasFieldResolution::Continuous(steps) => (
+            format!(",\"propagation\":\"continuous-magnus-v1\",\"steps_per_smooth_span\":{},\"cells_per_segment\":null,\"resolved_cells\":null,\"authored_segment_samples\":{}", steps.0, p.segment_gases().len()),
+            "frozen primitive temperature/composition field; EOS and transport reevaluated at local Magnus quadrature points; exact inlet and outlet states; same continuous feedback and microphone; no mean-flow acoustic correction",
+        ),
+    };
     let species: Vec<_> = field.model().thermodynamics().components().iter()
         .map(|component| super::json_string(component.species().as_str())).collect();
     let stations: Vec<_> = field.stations_m().iter().zip(field.primitive_states())
@@ -134,7 +145,7 @@ fn reed_field_provenance(p: &fs_couple::render::schedule::reed::ReedPerformance)
         "{{\"species\":{},\"species_pack\":\"{}\",\"nasa9_pack\":\"{}\",\"transport_pack\":\"{}\"}}",
         super::json_string(receipt.species.as_str()), receipt.species_pack.to_hex(),
         receipt.nasa9_pack.to_hex(), receipt.transport_pack.to_hex())).collect();
-    format!(",\"axial_gas_field\":{{\"static_pressure_pa\":{:e},\"cells_per_segment\":{cells},\"resolved_cells\":{},\"canonical_species\":[{}],\"stations\":[{}],\"source_packs\":[{}],\"scope\":\"frozen primitive temperature/composition field; EOS and transport reevaluated per midpoint; exact inlet and outlet states; same regional feedback and microphone; no mean-flow acoustic correction\"}}",
-        field.static_pressure_pa(), p.segment_gases().len(), species.join(","),
+    format!(",\"axial_gas_field\":{{\"static_pressure_pa\":{:e}{resolution},\"canonical_species\":[{}],\"stations\":[{}],\"source_packs\":[{}],\"scope\":\"{scope}\"}}",
+        field.static_pressure_pa(), species.join(","),
         stations.join(","), packs.join(","))
 }
