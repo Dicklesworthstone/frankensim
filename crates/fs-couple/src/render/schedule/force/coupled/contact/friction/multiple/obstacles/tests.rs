@@ -167,10 +167,11 @@ fn late_pressure_and_cancellation_refusal_publish_neither_contacts_nor_motion() 
 }
 
 #[test]
-fn obstacle_binding_and_linear_preload_cannot_silently_change_contact_physics() {
+fn obstacle_binding_and_preload_cannot_erase_existing_motion() {
     let gate = CancelGate::new_clock_free();
     let contacts = || vec![(obstacle(1.0, 0.0), normal_limits())];
     let mut joint = multi(friction(network(1000.0))).with_obstacles(contacts(), limits(), &gate).unwrap();
+    joint.step(&[0.1], &[released()]).unwrap();
     let before = states(&joint);
     assert!(joint.initialize_released_equilibrium(&[0.1], &gate).is_err()); assert_eq!(states(&joint), before);
     assert!(joint.with_obstacles(contacts(), limits(), &gate).is_err());
@@ -180,4 +181,91 @@ fn obstacle_binding_and_linear_preload_cannot_silently_change_contact_physics() 
     assert!(multi(friction(network(1000.0))).with_obstacles(vec![(malformed, normal_limits())], limits(), &gate).is_err());
     let mut tiny = limits(); tiny.max_setup_terms = 0;
     assert!(multi(friction(network(1000.0))).with_obstacles(contacts(), tiny, &gate).is_err());
+}
+
+#[test]
+fn stopped_preload_solves_static_law_not_dynamic_compliance_or_damping() {
+    let gate = CancelGate::new_clock_free();
+    let gap = 1e-5;
+    let q = (1.0 + 2000.0 * gap) / 12000.0;
+    let expected = 0.5 * 10000.0 * q * q + 0.5 * 2000.0 * (q-gap) * (q-gap);
+    for rate in [24000, 48000, 96000] {
+        for loss in [0.0, 0.4] {
+            let m = ModalAcousticTimeModel::try_new(rate, vec![ModalAcousticMode {
+                angular_frequency_rad_s: 100.0, damping_ratio: 0.02,
+                pressure_per_modal_velocity: C64::ZERO,
+            }], ModalAcousticTimeBudget::audible_reference()).unwrap();
+            let net = CoupledModalSystem::new(vec![m], vec![], config(1000.0), &gate).unwrap();
+            let core = friction(net).with_acceleration_pressure(vec![1.0]).unwrap();
+            let mut contact = obstacle(1.0, gap);
+            contact.law = contact.law.with_internal_loss(loss).unwrap();
+            let mut joint = multi(core).with_obstacles(vec![(contact, normal_limits())], limits(), &gate).unwrap();
+            let energy = joint.initialize_released_equilibrium(&[1.0], &gate).unwrap();
+            assert!((joint.components()[0].states()[0].displacement_m_sqrt_kg-q).abs() < 1e-13);
+            assert!((energy-expected).abs() < 1e-13);
+            assert_eq!(joint.samples_rendered(), 0);
+            assert!(joint.last_frame().is_none() && joint.last_obstacle_frames().is_none());
+            assert!((energy-joint.total_energy_j().unwrap()).abs() < 1e-15);
+            for _ in 0..16 {
+                let frame = joint.step(&[1.0], &[released()]).unwrap();
+                assert!(frame.observer_pressure_pa.abs() < 1e-8, "static load radiates");
+                assert_eq!(frame.drive_work_j, 0.0);
+            }
+            let release = joint.step(&[0.0], &[released()]).unwrap();
+            assert!(release.observer_pressure_pa.abs() > 0.9);
+            assert!(release.network_energy_j + release.obstacle_energy_j > 0.0);
+            assert!(release.energy_residual_j.abs() <= release.energy_tolerance_j);
+        }
+    }
+}
+
+#[test]
+fn nonlinear_receiver_preload_is_the_original_contact_equilibrium() {
+    use crate::render::schedule::force::coupled::contact::multiple::MultiContactConfig;
+    let gate = CancelGate::new_clock_free();
+    let network = || CoupledModalSystem::new(vec![model(100.0, 0.0), model(150.0, 0.0)],
+        vec![ModalConnection { left: attachment(0, 1.0), right: attachment(1, 0.8),
+            stiffness_n_m: 4000.0, damping_n_s_m: 0.1, rest_extension_m: 1e-5 }], config(1000.0), &gate).unwrap();
+    let mut active = obstacle(1.0, 1e-5);
+    active.right = attachment(1, 0.8);
+    active.law = Obstacle::new(vec![-1.0], 1, 1, vec![1e-5], vec![1.0], 2e6, 1.5,
+        "synthetic nonlinear receiver contact".into()).unwrap().with_internal_loss(0.2).unwrap();
+    let contacts = vec![(active, normal_limits()), (obstacle(-1.0, 0.001), normal_limits())];
+    let mut original = network();
+    let expected = original.initialize_contact_equilibrium(&[1.0, -0.2], &contacts,
+        MultiContactConfig { max_contacts: 8, max_sweeps: 128, max_setup_terms: 100000 }, &gate).unwrap();
+    let mut joint = multi(friction(network())).with_obstacles(contacts, limits(), &gate).unwrap();
+    assert_eq!(joint.initialize_released_equilibrium(&[1.0, -0.2], &gate).unwrap(), expected);
+    for (a,b) in original.components().iter().zip(joint.components()) { assert_eq!(a.states(), b.states()); }
+    joint.step(&[1.0, -0.2], &[released()]).unwrap();
+    let contacts = joint.last_obstacle_frames().unwrap();
+    assert!(contacts[0].normal_force_n > 0.0);
+    assert_eq!(contacts[1].normal_force_n, 0.0);
+}
+
+#[test]
+fn refused_preload_keeps_state_sources_and_clock_and_can_be_retried() {
+    let gate = CancelGate::new_clock_free();
+    for kind in 0..3 {
+        let mut contact_limits = normal_limits();
+        let mut net = network(1000.0);
+        match kind {
+            0 => contact_limits.maximum_force_n = 0.001,
+            1 => contact_limits.maximum_penetration_m = 1e-8,
+            _ => net.config.maximum_total_energy_j = 1e-9,
+        }
+        let mut joint = multi(friction(net)).with_obstacles(vec![(obstacle(1.0, 0.0), contact_limits)], limits(), &gate).unwrap();
+        let before = states(&joint);
+        let provenance = joint.obstacle(0).unwrap().law.provenance().to_string();
+        assert!(joint.initialize_released_equilibrium(&[1.0], &gate).is_err());
+        assert_eq!(states(&joint), before); assert_eq!(joint.samples_rendered(), 0);
+        assert!(joint.last_frame().is_none() && joint.last_obstacle_frames().is_none());
+        assert_eq!(joint.obstacle(0).unwrap().law.provenance(), provenance);
+        let stop = CancelGate::new_clock_free(); stop.request();
+        assert!(joint.initialize_released_equilibrium(&[0.0], &stop).is_err());
+        assert_eq!(states(&joint), before);
+        assert_eq!(joint.initialize_released_equilibrium(&[0.0], &gate).unwrap(), 0.0);
+        joint.step(&[0.0], &[released()]).unwrap();
+        assert_eq!(joint.samples_rendered(), 1);
+    }
 }

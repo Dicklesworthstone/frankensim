@@ -58,7 +58,7 @@ impl MultiFrictionModalSystem {
     /// coupling/nonmonotone friction and rigid-contact limits is not promised.
     ///
     /// Empty input is an exact no-op. A nonempty set binds once, at sample zero.
-    /// Linear preload after binding refuses rather than ignoring the contacts.
+    /// Released-friction preload solves these same contacts at equilibrium.
     /// Existing linear bandwidth checks are not a nonlinear anti-aliasing proof.
     pub fn with_obstacles(mut self, contacts: Vec<(ModalContact, ModalContactConfig)>,
         limits: FrictionObstacleConfig, gate: &CancelGate) -> Result<Self, ModalFrictionError>
@@ -134,6 +134,7 @@ impl NormalPoint {
 
 pub(super) struct ObstacleSet {
     points: Vec<NormalPoint>,
+    limits: FrictionObstacleConfig,
     // Both mixed directions are evaluated; do not assume numerical symmetry.
     nn: Vec<f64>, nt: Vec<f64>, tn: Vec<f64>,
     reactions: Vec<f64>, friction_ports: usize,
@@ -176,13 +177,33 @@ impl ObstacleSet {
             let response = network_response(network, &system.points[j].column, gate)?;
             for i in 0..q { poll(Some(gate))?; nt[i*p+j] = dot(&points[i].column, &response)?; }
         }
-        Ok(Self { points, nn, nt, tn, reactions: vec![0.0; q], friction_ports: p,
+        Ok(Self { points, limits, nn, nt, tn, reactions: vec![0.0; q], friction_ports: p,
             staged: vec![FrictionObstacleFrame::default(); q], accepted: vec![FrictionObstacleFrame::default(); q] })
     }
     pub(super) fn energy(&self, models: &[ModalAcousticTimeModel]) -> Result<f64, ModalCouplingError> {
         let mut total = 0.0;
         for point in &self.points { total = finite(total+point.energy(extension(models, &point.column, 0.0)?)?)?; }
         Ok(total)
+    }
+    // Reuse the original stationary potential and inverse stiffness. Dynamic
+    // secants/compliances are not static constitutive laws. No new root solver,
+    // artificial settling interval or discarded startup vibration is introduced.
+    pub(super) fn initialize_equilibrium(&self,
+        network: &mut super::super::super::super::CoupledModalSystem,
+        external: &[f64], max_sweeps: usize, gate: &CancelGate,
+    ) -> Result<f64, ModalCouplingError> {
+        poll(Some(gate))?;
+        let contacts: Vec<_> = self.points.iter()
+            .map(|point| (point.contact.clone(), point.config)).collect();
+        let config = super::super::super::multiple::MultiContactConfig {
+            max_contacts: self.limits.max_contacts, max_sweeps,
+            max_setup_terms: self.limits.max_setup_terms,
+        };
+        // The original owner publishes only after checking all contacts, total
+        // stored energy and actual force balance. Dynamic prepare() reconstructs
+        // its disposable secants from the newly accepted state on the next step.
+        // No dynamic report or sample is fabricated by this initial condition.
+        network.initialize_contact_equilibrium(external, &contacts, config, gate)
     }
     pub(super) fn prepare(&mut self, old_q: &[f64], free_delta: &[f64], gate: Option<&CancelGate>)
         -> Result<(), ModalCouplingError>

@@ -187,16 +187,21 @@ impl MultiFrictionModalSystem {
             None => Ok(network),
         }
     }
-    /// Original full-network static preload with EVERY contact released before
-    /// the performance window. Neither the contact law nor its fixed compliance
-    /// changes. Refuses after any sample or nonzero initial vibration; keeps all
-    /// interface sources, body/cavity connections and pressure observations.
-    /// Returns initial stored energy, not a reconstructed history of input work.
+    /// Settle the complete network with every driven friction port released.
+    /// Independent normal obstacles remain present: their activity and reactions
+    /// are solved by the original contact-equilibrium owner, not the dynamic
+    /// compliance matrix. Original per-obstacle limits, joint sweep count and
+    /// obstacle setup budget apply. Dashpots carry no static load.
+    ///
+    /// Refuses after any sample or nonzero initial vibration; all sources,
+    /// observers and clocks survive. No fallible work follows state publication.
+    /// Returns initial storage INCLUDING obstacles, not prior actuator work.
     pub fn initialize_released_equilibrium(&mut self, external: &[f64], gate: &CancelGate)
         -> Result<f64, ModalFrictionError>
     {
-        if self.obstacles.is_some() {
-            return Err(invalid("linear preload cannot ignore nonlinear obstacles; preload before binding them or drive the contact dynamically").into());
+        if let Some(obstacles) = &self.obstacles {
+            return obstacles.initialize_equilibrium(&mut self.core.network, external,
+                self.config.max_sweeps, gate).map_err(Into::into);
         }
         self.core.initialize_released_equilibrium(external, gate)
     }

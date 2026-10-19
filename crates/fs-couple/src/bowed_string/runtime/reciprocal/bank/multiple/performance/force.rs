@@ -44,7 +44,7 @@ pub struct StringForceProgram {
     pub events: Vec<ModalForceEvent>,
     /// Retain motion (a real load-on transient) or settle the entire initially
     /// unexcited instrument BEFORE sample zero. A sample-zero event may release
-    /// the latter. Preload does not solve a finger/contact/tissue constitutive law.
+    /// the latter. Preload includes attached stop laws; it does not infer tissue.
     pub initialization: ForceInitialization,
     /// Existing force compiler's rate, callback, authored-event, emitted-control
     /// and projection-work limits. Rate/callback must match this performance.
@@ -123,7 +123,7 @@ impl MultiBowPerformance {
     /// before one joint step. No mode, body, cavity or interface is reconstructed.
     ///
     /// A static pluck uses the original full-network equilibrium solver, including
-    /// bridge/body/cavity reactions, with all bows released before the window.
+    /// bridge/body/cavity and attached stop reactions, with all bows released before the window.
     /// It never initializes each component independently. `RetainState` instead
     /// preserves any existing vibration and applies a load-on transient.
     ///

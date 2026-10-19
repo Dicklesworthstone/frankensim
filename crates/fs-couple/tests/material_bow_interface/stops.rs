@@ -134,7 +134,7 @@ fn stopped_material_bows_and_physical_force_history_share_direct_and_scheduled_p
 }
 
 #[test]
-fn unsupported_stop_geometry_and_linear_equilibrium_never_become_silent_fallbacks() {
+fn unsupported_stop_geometry_refuses_and_contact_equilibrium_is_retained() {
     with_cx(|cx, gate| {
         for which in 0..4 {
             let mut stop = stop();
@@ -149,6 +149,46 @@ fn unsupported_stop_geometry_and_linear_equilibrium_never_become_silent_fallback
         assert!(stopped(cx, gate).with_string_stops(vec![stop()], limits(), gate).is_err());
         let performance = stopped(cx, gate).into_scheduled(schedule(), vec!["first".into(), "second".into()],
             MultiBowPerformanceConfig { samples: 96, max_block: 64, max_work: 10000, max_events: 64 }).unwrap();
-        assert!(performance.with_string_forces(program(ForceInitialization::StaticPreload), gate).is_err());
+        let performance = performance.with_string_forces(program(ForceInitialization::StaticPreload), gate).unwrap();
+        assert!(performance.preload_energy_j().unwrap() > 0.0);
+        assert_eq!(performance.samples_rendered(), 0);
+        assert_eq!(performance.bank().source().stops().len(), 1);
+    });
+}
+
+#[test]
+fn stopped_static_pluck_holds_silently_then_releases_through_the_same_performer() {
+    with_cx(|cx, gate| {
+        let tracks = ["first", "second"].into_iter().zip([0.2, 0.31]).map(|(id, station)| GestureTrack {
+            id: id.into(), target: GestureTarget::BowStroke { string: 0 },
+            initial: GestureValue::Bow { velocity_m_per_s: 0.0, normal_force_n: 0.0, station },
+            events: vec![],
+        }).collect();
+        let schedule = GestureSchedule::try_new(1000, tracks).unwrap();
+        let bank = stopped(cx, gate);
+        let load = forced(&bank, gate);
+        let (_, mut direct) = bank.into_parts();
+        let energy = direct.initialize_released_equilibrium(&load, gate).unwrap();
+        assert!(direct.components()[1].states().iter().any(|s| s.displacement_m_sqrt_kg != 0.0));
+        assert!(direct.components()[0].states()[4..].iter().all(|s| s.displacement_m_sqrt_kg == 0.0),
+            "radial preload must not invent torsional torque");
+        let zero = vec![0.0; load.len()];
+        let expected: Vec<_> = (0..192).map(|i| direct.step(if i < 64 { &load } else { &zero }, &released())
+            .unwrap().observer_pressure_pa).collect();
+        assert!(expected[..64].iter().all(|p| p.abs() < 1e-7), "settled string radiates before release");
+        assert!(expected[64..].iter().any(|p| p.abs() > 1e-12), "release never reaches the body");
+        for partition in [1, 37, 64] {
+            let mut performance = stopped(cx, gate).into_scheduled(schedule.clone(), vec!["first".into(), "second".into()],
+                MultiBowPerformanceConfig { samples: 192, max_block: 64, max_work: 10000, max_events: 64 }).unwrap()
+                .with_string_forces(program(ForceInitialization::StaticPreload), gate).unwrap();
+            assert_eq!(performance.preload_energy_j(), Some(energy));
+            assert!(performance.bank().system().last_frame().is_none());
+            for i in 0..2 { assert_eq!(performance.bank().bow_interface(i), Some(&interface(0.4, 10.0))); }
+            let mut actual = vec![0.0; 192];
+            for block in actual.chunks_mut(partition) { performance.block(block).unwrap(); }
+            assert_eq!(actual.iter().map(|p| p.to_bits()).collect::<Vec<_>>(),
+                expected.iter().map(|p| p.to_bits()).collect::<Vec<_>>());
+            assert!(performance.bank().system().total_energy_j().unwrap() > 0.0);
+        }
     });
 }

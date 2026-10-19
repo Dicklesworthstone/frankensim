@@ -62,8 +62,8 @@ impl MultiBowStringBank {
     ///
     /// Stops bind once before any sample, retaining initial motion/potential.
     /// Drive indentation and load-release with the existing physical-force
-    /// performer. Its linear static-preload shortcut refuses once stops exist;
-    /// it cannot falsely claim equilibrium while ignoring nonlinear contacts.
+    /// performer. Static preload includes the original normal contact potentials
+    /// in the full-network equilibrium, with every bow released before the window.
     /// A vibrating string may leave and re-enter a stop without a state reset.
     ///
     /// This is fixed-geometry contact along the source's centreline/bow axis.
