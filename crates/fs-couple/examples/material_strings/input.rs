@@ -3,7 +3,7 @@ use super::*;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_material::gas_species::input::read_gas_state;
 use fs_scenario::gesture::GestureValue;
-use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::TransverseDirections;
+use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{TransverseDirection, TransverseDirections};
 
 pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
@@ -212,7 +212,14 @@ impl Spec {
             let coupling = match row.word()? {
                 "centreline" => StringForceCoupling::Centreline,
                 "surface" => StringForceCoupling::Surface,
-                _ => return Err("force coupling must be centreline or surface".into()),
+                "along" => {
+                    let direction = TransverseDirection::try_new([row.scalar()?, row.scalar()?])?;
+                    if strings[string].polarizations.is_none() && direction.components()[1] != 0.0 {
+                        return Err("second-plane force requires polarizations two".into());
+                    }
+                    StringForceCoupling::CentrelineAlong(direction)
+                },
+                _ => return Err("force coupling must be centreline, surface or along DX DY".into()),
             };
             if !(0.0 < station_fraction && station_fraction < 1.0) { return Err("load station must be interior".into()); }
             locations.push(StringForcePort { location: StringBowLocation { string, station_fraction }, coupling });

@@ -10,6 +10,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::{
 use fs_couple::render::schedule::force::coupled::contact::ModalContactConfig;
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::obstacles::FrictionObstacleConfig;
 use fs_dcontact::Obstacle;
+use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::TransverseDirection;
 
 pub const MAX_BYTES: usize = 16_384;
 const MAX_STOPS: usize = 32;
@@ -48,7 +49,7 @@ impl Profile {
         for line in lines {
             if entries.len() == MAX_STOPS { return Err("stop profile exceeds 32 contacts".into()); }
             let fields: Vec<_> = line.split_ascii_whitespace().collect();
-            if fields.len() != 12 || fields[0] != "stop" {
+            if fields.len() < 5 || fields[0] != "stop" {
                 return Err("expected stop ID STRING STATION SIDE RECEIVER GAP K ALPHA LOSS MAX_FORCE MAX_PENETRATION".into());
             }
             let name = fields[1];
@@ -57,20 +58,22 @@ impl Profile {
                 return Err("stop identities must be unique short ASCII tokens".into());
             }
             let location = StringBowLocation { string: fields[2].parse()?, station_fraction: scalar(fields[3])? };
-            let side = match fields[4] {
-                "positive" => StringStopSide::Positive,
-                "negative" => StringStopSide::Negative,
-                _ => return Err("stop side must be positive or negative".into()),
+            let (side, values) = match fields[4] {
+                "positive" if fields.len() == 12 => (StringStopSide::Positive, &fields[5..]),
+                "negative" if fields.len() == 12 => (StringStopSide::Negative, &fields[5..]),
+                "normal" if fields.len() == 14 => (StringStopSide::Along(
+                    TransverseDirection::try_new([scalar(fields[5])?, scalar(fields[6])?])?), &fields[7..]),
+                _ => return Err("stop side must be positive, negative or normal NX NY with a complete record".into()),
             };
-            let receiver_bridge = if fields[5] == "fixed" { None } else {
-                Some(fields[5].strip_prefix("bridge:").ok_or("receiver must be fixed or bridge:STRING")?.parse::<usize>()?)
+            let receiver_bridge = if values[0] == "fixed" { None } else {
+                Some(values[0].strip_prefix("bridge:").ok_or("receiver must be fixed or bridge:STRING")?.parse::<usize>()?)
             };
-            let gap = scalar(fields[6])?;
-            let stiffness = scalar(fields[7])?;
-            let alpha = scalar(fields[8])?;
-            let loss = scalar(fields[9])?;
-            let max_force = scalar(fields[10])?;
-            let max_penetration = scalar(fields[11])?;
+            let gap = scalar(values[1])?;
+            let stiffness = scalar(values[2])?;
+            let alpha = scalar(values[3])?;
+            let loss = scalar(values[4])?;
+            let max_force = scalar(values[5])?;
+            let max_penetration = scalar(values[6])?;
             if !(0.0 < location.station_fraction && location.station_fraction < 1.0)
                 || stiffness <= 0.0 || alpha < 1.0 || loss < 0.0 || max_force <= 0.0 || max_penetration <= 0.0 {
                 return Err("stop geometry, law and physical limits are invalid".into());
@@ -108,7 +111,25 @@ impl Profile {
             let body = entry.receiver_bridge.map(|i| -> Result<_> {
                 let links = &strings[i].connections;
                 if links.len() != 1 { return Err("receiver bridge must have exactly one actual body footprint".into()); }
-                Ok(links[0].body.clone())
+                let mut body = links[0].body.clone();
+                if let StringStopSide::Along(normal) = entry.side {
+                    // A scalar bridge footprint measures only its declared
+                    // axis. Do not pretend that it measures another direction.
+                    // This file format uses a common transverse frame; rotated
+                    // receiver frames need explicit geometry outside this adapter.
+                    let axis = match &strings[i].source {
+                        MaterialStringSource::WithPolarizations(p) => p.directions().bridge(),
+                        _ => [1.0, 0.0],
+                    };
+                    let n = normal.components();
+                    let cross = n[0]*axis[1] - n[1]*axis[0];
+                    let dot = n[0]*axis[0] + n[1]*axis[1];
+                    if cross.abs() > 1e-12 || (dot.abs()-1.0).abs() > 1e-12 {
+                        return Err("explicit stop normal must align with the selected receiver bridge axis".into());
+                    }
+                    for value in &mut body.shapes { *value *= dot.signum(); }
+                }
+                Ok(body)
             }).transpose()?;
             stops.push(MaterialStringStop { location: entry.location, side: entry.side, body,
                 law: entry.law.clone(), limits: entry.limits });

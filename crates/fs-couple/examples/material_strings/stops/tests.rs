@@ -133,3 +133,68 @@ fn stopped_layered_two_plane_plucks_keep_the_current_physical_basis() {
         assert_eq!(pressure(&mut make(), 37), expected);
     });
 }
+
+const DIRECTED: &str = include_str!("../directional-pluck.material-strings");
+const NORMAL: &str = include_str!("../directional-fingerboard.stops");
+
+#[test]
+fn independent_force_and_stop_directions_round_trip_to_pressure_and_pcm() {
+    scoped(|cx, gate| {
+        let make = |profile: &str| input::Spec::parse(DIRECTED.replace("48000 4096", "48000 128").as_bytes())
+            .unwrap().compile_with_profiles(cx, gate, None, Some(Profile::parse(profile.as_bytes()).unwrap()),
+                |name| Ok(pack(name, 7800.0, 200_000.0, None))).unwrap();
+        let mut a = make(NORMAL);
+        let n = a.spec.strings[0].bending_modes;
+        let bank = a.performance.bank();
+        let normal = &bank.system().obstacle(0).unwrap().left.shapes;
+        let bow = &bank.system().port(0).unwrap().left.shapes;
+        assert!(normal[..n].iter().all(|x| *x == 0.0));
+        assert!(normal[n..2*n].iter().any(|x| *x != 0.0));
+        assert!(normal[2*n..].iter().all(|x| *x == 0.0));
+        assert!(bow[n..2*n].iter().all(|x| *x == 0.0));
+        assert!(bow[2*n..].iter().any(|x| *x != 0.0));
+        assert_eq!(a.stop_profile.as_ref().unwrap().bytes, NORMAL.as_bytes());
+        let expected = pressure(&mut a, 37);
+        assert!(expected.iter().any(|p| p.abs() > 1e-12));
+        let mut b = make(NORMAL);
+        let (bytes, _) = b.write(Cursor::new(Vec::new()), gate).unwrap();
+        let (reference, _) = fs_couple::pcm_wav::encode_pcm16_wav(&expected, b.spec.rate, b.spec.full_scale).unwrap();
+        assert_eq!(bytes.into_inner(), reference);
+        assert_eq!(pressure(&mut make(NORMAL), 1), expected);
+        // Geometry-only intervention: no material modes or observer gains changed.
+        let other = pressure(&mut make(&NORMAL.replace("normal 0 1", "normal 1 0")), 37);
+        assert!(expected.iter().zip(other).any(|(a,b)| (a-b).abs() > 1e-12));
+    });
+}
+
+#[test]
+fn malformed_or_unrepresented_directions_do_not_become_projected_forces() {
+    for replacement in ["along 0 0", "along 2 0", "along NaN 1", "along 0", "along 0 1 7"] {
+        assert!(input::Spec::parse(DIRECTED.replace("along 0 1", replacement).as_bytes()).is_err());
+    }
+    let one_plane = DIRECTED.replace("polarizations two 1 0 0.6 0.8", "polarizations single");
+    assert!(input::Spec::parse(one_plane.as_bytes()).is_err());
+    assert!(input::Spec::parse(one_plane.replace("along 0 1", "along -1 0").as_bytes()).is_ok());
+    for replacement in ["normal 0 0", "normal 2 0", "normal 0 NaN", "normal 0", "normal 0 1 7"] {
+        assert!(Profile::parse(NORMAL.replace("normal 0 1", replacement).as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn explicit_receiver_normals_require_a_real_collinear_bridge_footprint() {
+    scoped(|cx, gate| {
+        let input = DIRECTED.replace("48000 4096", "48000 128");
+        let construct = |input: &str, normal: &str| input::Spec::parse(input.as_bytes()).unwrap()
+            .compile_with_profiles(cx, gate, None, Some(Profile::parse(normal.as_bytes()).unwrap()),
+                |name| Ok(pack(name, 7800.0, 200_000.0, None)));
+        let profile = NORMAL.replace("fixed", "bridge:0");
+        assert!(construct(&input, &profile).is_err(), "oblique scalar receiver was silently repurposed");
+        let aligned = input.replace("polarizations two 1 0 0.6 0.8", "polarizations two 1 0 0 1");
+        let a = construct(&aligned, &profile).unwrap();
+        let bridge = &a.performance.bank().source().bank().strings()[0].connections[0].body.shapes;
+        assert_eq!(&a.performance.bank().system().obstacle(0).unwrap().right.shapes, bridge);
+        let b = construct(&aligned, &profile.replace("normal 0 1", "normal 0 -1")).unwrap();
+        let receiver = &b.performance.bank().system().obstacle(0).unwrap().right.shapes;
+        for (x,y) in receiver.iter().zip(bridge) { assert_eq!(*x, -*y); }
+    });
+}
