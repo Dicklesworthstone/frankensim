@@ -290,6 +290,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
 
   // ----------------------------------------------------------------- loading
   async function loadStandard(s: Standard, tile: HTMLElement, autoplay: boolean): Promise<void> {
+    if (phase === "playing") pause();
     const my = ++token;
     setPhase("loading");
     say(`Fetching the ${s.title} roll…`);
@@ -311,8 +312,10 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
   }
 
   async function loadFile(f: File, autoplay: boolean): Promise<void> {
-    const my = ++token;
+    // A rejected file must not cancel a valid load or engine startup already in flight.
     if (f.size > MAX_MIDI_BYTES) { say(`${f.name} is ${(f.size / 1048576).toFixed(1)} MiB; files of up to 4 MiB are accepted.`, "bad"); return; }
+    if (phase === "playing") pause();
+    const my = ++token;
     setPhase("loading");
     say(`Reading ${f.name}…`);
     try {
@@ -335,7 +338,6 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
 
   /** Decode, salvage and arrange: the roll is punched. */
   function punch(bytes: Uint8Array, name: string): boolean {
-    if (phase === "playing") pause();
     const decoded = decodeMidi(bytes);
     if (!decoded.ok) {
       setPhase(arr ? "ready" : "empty");
@@ -582,6 +584,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     const my = token;
     position = from;
     setPhase("warming");
+    requestDraw(); // pause/finish stop the loop; every new start must wake it
     // This start was cancelled: another player started (it set a short idle timer), or another roll began to
     // load. Unless that roll is starting now, the engines that did start go after the usual idle time.
     const cancelled = (): void => {
