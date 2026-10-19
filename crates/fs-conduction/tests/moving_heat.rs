@@ -1,6 +1,7 @@
 //! Moving-source power and actual P1-load regressions.
 mod support;
 use fs_conduction::bc::history::march::moving::{MovingHeatBudget, MovingHeatSource};
+use fs_conduction::bc::history::march::moving::motion::ScanMotionLimit;
 use fs_conduction::{ConductionError, ConductionMesh, ScalarField, COMPONENT_POWER_DIMS};
 use fs_conduction::fixtures::box_grid;
 use fs_qty::{Dims, QtyAny};
@@ -34,6 +35,47 @@ fn integrated_load(mesh: &ConductionMesh, field: &ScalarField) -> f64 {
         }
     }
     assembled.iter().sum()
+}
+
+#[test]
+fn g1_motion_limits_follow_anisotropic_footprints_and_clamped_path_segments() {
+    let ramp = |end| TimeSignal::Ramp { t_start: 0.0, t_end: 1.0,
+        from: QtyAny::new(0.0, LENGTH), to: QtyAny::new(end, LENGTH) };
+    let moving = MovingHeatSource::new([ramp(2.0), ramp(3.0), constant(0.0, LENGTH)],
+        [0.4, 0.6, 1.0], constant(1.0, COMPONENT_POWER_DIMS), 0.0, budget()).unwrap();
+    let policy = ScanMotionLimit { max_normalized_travel: 0.2, max_chebyshev_coefficients: 0 };
+    with_cx(|cx| {
+        let end = moving.motion_limited_endpoint(cx, 0.0, 1.0, policy).unwrap();
+        assert!((end-0.02).abs() < 1e-14);
+        assert!(2.0*end/0.4 + 3.0*end/0.6 <= 0.2);
+        assert_eq!(moving.motion_limited_endpoint(cx, -1.0, 2.0, policy).unwrap(), 0.0);
+        assert_eq!(moving.motion_limited_endpoint(cx, 1.0, 2.0, policy).unwrap(), 2.0);
+    });
+    with_cancelled_cx(|cx| assert!(moving.motion_limited_endpoint(cx, 0.0, 1.0, policy).is_err()));
+}
+
+#[test]
+fn g0_motion_limits_distinguish_held_jumps_and_refuse_unrepresentable_steps() {
+    let path = |interp| TimeSignal::Table { times: vec![0.0, 0.125, 0.25],
+        values: vec![0.0, 10.0, 0.0], dims: LENGTH, interp };
+    let moving = |interp| MovingHeatSource::new([path(interp), constant(0.0, LENGTH), constant(0.0, LENGTH)],
+        [0.5; 3], constant(0.0, COMPONENT_POWER_DIMS), 0.0, budget()).unwrap();
+    let policy = ScanMotionLimit { max_normalized_travel: 0.25, max_chebyshev_coefficients: 0 };
+    with_cx(|cx| {
+        let linear = moving(Interp::Linear);
+        let end = linear.motion_limited_endpoint(cx, 0.0, 1.0, policy).unwrap();
+        assert!((end-0.0015625).abs() < 1e-15);
+        let held = moving(Interp::Hold);
+        assert_eq!(held.motion_limited_endpoint(cx, 0.0, 1.0, policy).unwrap(), 0.125);
+        assert_eq!(held.motion_limited_endpoint(cx, 0.125, 1.0, policy).unwrap(), 0.25);
+        assert_eq!(held.motion_limited_endpoint(cx, 0.25, 1.0, policy).unwrap(), 1.0);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, 1.01] {
+            assert!(linear.motion_limited_endpoint(cx, 0.0, 1.0,
+                ScanMotionLimit { max_normalized_travel: bad, ..policy }).is_err());
+        }
+        assert!(linear.motion_limited_endpoint(cx, 0.01, 0.1,
+            ScanMotionLimit { max_normalized_travel: f64::MIN_POSITIVE, ..policy }).is_err());
+    });
 }
 
 #[test]

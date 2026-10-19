@@ -9,6 +9,9 @@
 //! over elements incident to active nodes. No melt-pool or resolution claim is
 //! inferred from power conservation or a minimum active-node count.
 
+/// Footprint-relative motion limits for scan timestep selection.
+pub mod motion;
+
 use super::{events, invalid, poll};
 use crate::{ConductionError, ConductionMesh, ScalarField, COMPONENT_POWER_DIMS};
 use fs_exec::Cx;
