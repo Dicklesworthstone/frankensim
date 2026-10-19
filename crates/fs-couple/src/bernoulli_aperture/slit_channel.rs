@@ -75,6 +75,29 @@ pub struct SlitChannelStep {
     pub energy_residual_j: f64,
 }
 
+/// Exact affine pressure/flow boundary of a fixed channel's next discrete step.
+/// Positive volume flow and pressure drop point along the supplied channel.
+/// The history term contains the retained velocity field; it is not a pressure
+/// source supplied by the caller. It must remain inside the channel energy audit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SlitChannelLoad {
+    /// Positive coefficient Z in dp = Z Q - history [Pa s/m³].
+    pub impedance_pa_s_m3: f64,
+    /// Retained inertial history pressure [Pa], signed with the previous flow.
+    pub history_pressure_pa: f64,
+}
+impl SlitChannelLoad {
+    /// Pressure drop producing the requested flow in the same implicit step.
+    pub fn pressure_drop_pa(self, flow_m3_s: f64) -> Result<f64, AcousticRealizeError> {
+        let pressure = self.impedance_pa_s_m3 * flow_m3_s - self.history_pressure_pa;
+        if !self.impedance_pa_s_m3.is_finite() || self.impedance_pa_s_m3 <= 0.0
+            || !self.history_pressure_pa.is_finite() || !flow_m3_s.is_finite() || !pressure.is_finite() {
+            return Err(invalid("unsteady slit requested flow gives nonfinite pressure"));
+        }
+        Ok(pressure)
+    }
+}
+
 /// Stateful transverse momentum field with an allocation-free implicit step.
 #[derive(Debug, Clone)]
 pub struct SlitChannel {
@@ -176,6 +199,47 @@ impl SlitChannel {
     /// Last accepted exchange, all zero before the first step.
     #[must_use]
     pub const fn last_step(&self) -> SlitChannelStep { self.last }
+
+    /// Exact next-step affine load of this fixed, no-slip channel.
+    ///
+    /// Only StaticPressure has a linear pressure port. A kinetic-head terminal
+    /// is nonlinear and refuses this condensation instead of being dropped.
+    /// The read-only evaluation allocates one transverse work vector. It changes
+    /// no accepted fluid state, and uses the SAME factored diffusion operator as
+    /// step(). The positive impedance is constant at fixed geometry/gas/clock;
+    /// the history pressure must be recomputed from every accepted field.
+    pub fn pressure_load(&self) -> Result<SlitChannelLoad, AcousticRealizeError> {
+        if self.spec.exit != SlitExit::StaticPressure {
+            return Err(invalid("affine channel condensation requires the actual static-pressure terminal"));
+        }
+        let mut free = self.velocity_m_s.clone();
+        solve(&self.inverse_diagonal, &self.upper_ratio, &mut free);
+        let bulk = free.iter().sum::<f64>() / free.len() as f64;
+        let load = SlitChannelLoad {
+            impedance_pa_s_m3: 1.0 / (self.area_m2 * self.mean_pressure_response),
+            history_pressure_pa: bulk / self.mean_pressure_response,
+        };
+        if !load.impedance_pa_s_m3.is_finite() || load.impedance_pa_s_m3 <= 0.0
+            || !load.history_pressure_pa.is_finite() {
+            return Err(invalid("unsteady slit affine pressure boundary cannot be represented"));
+        }
+        Ok(load)
+    }
+
+    /// Prepare the next channel state at a requested signed volume flow.
+    ///
+    /// The original state stays unchanged. A coupled owner can publish the
+    /// returned channel only after its other participants and complete energy
+    /// account pass. The returned last_step() reports the actual floating-point
+    /// flow and physical/numerical work from the original stepper; a coupled
+    /// owner must include its flow residual in the common admission tolerance.
+    /// This preview allocates a complete trial field; no real-time claim follows.
+    pub fn preview_at_flow(&self, flow_m3_s: f64) -> Result<Self, AcousticRealizeError> {
+        let pressure = self.pressure_load()?.pressure_drop_pa(flow_m3_s)?;
+        let mut trial = self.clone();
+        trial.step(pressure)?;
+        Ok(trial)
+    }
 
     /// Exact steady bulk response of THIS spatial discretization [m/s].
     /// It is useful for cold admission, but never replaces the live field.

@@ -47,6 +47,44 @@ impl TwoSidedPressure {
         max_block: usize,
         gate: &CancelGate,
     ) -> Result<(Self, Vec<BaffledOutletBinding>), RenderError> {
+        Self::build_baffled_environment(valve, sources, walls, limits, policies,
+            radiation, max_block, gate, None)
+    }
+
+    /// Original material reed, both material ducts, a fixed no-slip supply
+    /// passage and one shared exterior reaction/microphone declaration.
+    /// Construct the valve load with combined_inlet_state_with_supply. Its
+    /// single/independent/modal source and all original material histories remain
+    /// in the same mechanics. The passage is additional supplied geometry, with
+    /// the StaticPressure law and the identical inlet gas and physical clock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_baffled_environment_with_supply(
+        valve: LoadedAperture,
+        sources: [ApertureDuctSpec; 2],
+        walls: [Option<MaterialWallInput>; 2],
+        channel: crate::bernoulli_aperture::slit_channel::SlitChannel,
+        limits: TwoSidedLimits,
+        policies: Option<[FractionalTubePolicy; 2]>,
+        radiation: DuctRadiationSpec,
+        max_block: usize,
+        gate: &CancelGate,
+    ) -> Result<(Self, Vec<BaffledOutletBinding>), RenderError> {
+        Self::build_baffled_environment(valve, sources, walls, limits, policies,
+            radiation, max_block, gate, Some(channel))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_baffled_environment(
+        valve: LoadedAperture,
+        sources: [ApertureDuctSpec; 2],
+        walls: [Option<MaterialWallInput>; 2],
+        limits: TwoSidedLimits,
+        policies: Option<[FractionalTubePolicy; 2]>,
+        radiation: DuctRadiationSpec,
+        max_block: usize,
+        gate: &CancelGate,
+        supply: Option<crate::bernoulli_aperture::slit_channel::SlitChannel>,
+    ) -> Result<(Self, Vec<BaffledOutletBinding>), RenderError> {
         poll(gate).map_err(RenderError::Voice)?;
         let rate = radiation.reconstruction.mechanics_rate_hz();
         if rate == 0 || max_block == 0 || valve.accepted_steps() != 0
@@ -64,8 +102,12 @@ impl TwoSidedPressure {
         let [up_graph, down_graph] = graphs;
         let sources = [ApertureDuctSpec { graph: up_graph, ..up },
             ApertureDuctSpec { graph: down_graph, ..down }];
-        let system = TwoSidedAperture::with_material_walls(
-            valve, sources, walls, limits, policies, gate).map_err(RenderError::Voice)?;
+        let system = match supply {
+            Some(channel) => TwoSidedAperture::with_material_walls_and_supply_channel(
+                valve, sources, walls, channel, limits, policies, gate),
+            None => TwoSidedAperture::with_material_walls(
+                valve, sources, walls, limits, policies, gate),
+        }.map_err(RenderError::Voice)?;
         let (radiation, bindings) = environment.into_parts();
         let performer = Self::with_observation_policy(
             system,

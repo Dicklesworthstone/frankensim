@@ -152,3 +152,6 @@ mod forcing;
 
 #[path = "plate_aperture/two_sided_forces.rs"]
 mod two_sided_forces;
+
+// Shared no-slip source inertia on the original material valve/network owners.
+mod supply;

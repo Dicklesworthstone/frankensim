@@ -47,11 +47,24 @@ impl TwoSidedAperture {
     /// construction publishes no partially coupled system.
     pub fn with_material_walls(
         valve: LoadedAperture,
+        sources: [ApertureDuctSpec; 2],
+        walls: [Option<MaterialWallInput>; 2],
+        limits: TwoSidedLimits,
+        policies: Option<[FractionalTubePolicy; 2]>,
+        gate: &CancelGate,
+    ) -> Result<Self, AcousticRealizeError> {
+        Self::build_material_walls(valve, sources, walls, limits, policies, gate, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn build_material_walls(
+        valve: LoadedAperture,
         mut sources: [ApertureDuctSpec; 2],
         walls: [Option<MaterialWallInput>; 2],
         limits: TwoSidedLimits,
         policies: Option<[FractionalTubePolicy; 2]>,
         gate: &CancelGate,
+        supply_channel: Option<crate::bernoulli_aperture::slit_channel::SlitChannel>,
     ) -> Result<Self, AcousticRealizeError> {
         poll(gate)?;
         let dt = valve.time_step_s();
@@ -81,7 +94,7 @@ impl TwoSidedAperture {
             original_graphs[i] = Some(core::mem::replace(&mut sources[i].graph, graph));
             retained[i] = Some(MaterialDuctWalls { input, walls: bound });
         }
-        let mut model = Self::build(valve, sources, limits, gate, policies)?;
+        let mut model = Self::build(valve, sources, limits, gate, policies, supply_channel)?;
         for (side, original) in model.sides.iter_mut().zip(original_graphs) {
             if let Some(original) = original { side.source.graph = original; }
         }

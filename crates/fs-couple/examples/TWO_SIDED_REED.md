@@ -80,6 +80,67 @@ lung model, compressible mean-flow simulation, live gas-mixing law, time-varying
 tract geometry or empirical instrument-fidelity certificate. Component model,
 resolution, contact and material applicability limits remain unchanged.
 
+## Fixed no-slip supply passage
+
+The same single, independent-pair and modal valve hosts can now retain a separate
+rectangular supply passage with unsteady gas momentum. This is additional fixed
+geometry upstream of the reed face. It must not duplicate an already represented
+duct segment, and it is not the reed's moving clearance.
+
+The existing example exposes its geometry and transverse refinement as data:
+
+```sh
+cargo run --release -p fs-couple --example two_sided_reed -- supply.wav 0.12 900 --supply-slit 0.015 0.010 0.001 32
+cargo run --release -p fs-couple --example two_sided_reed -- finer-supply.wav 0.12 900 --supply-slit 0.015 0.010 0.001 64
+```
+
+The four trailing values are length, width and height in metres, followed by
+transverse finite-volume cells. The source clock supplies the time step.
+Omitting the option keeps the original two-sided realization. Both selections
+still use the same material plate reductions, pressure gesture, physically
+loaded baffled outlet, retarded microphone and fixed output scale.
+
+For library use, construct a `SlitChannel` from the retained inlet `GasState`
+and a `SlitChannelSpec` with `SlitExit::StaticPressure`. Use
+`two_sided::supply::combined_inlet_state_with_supply` to get the load for the
+original `DynamicAperture`, `PairedAperture` or `ModalAperture`, then use
+`TwoSidedAperture::with_supply_channel`. The corresponding
+`with_material_walls_and_supply_channel` keeps regional solid walls, their
+Maxwell memories, fractional travel and viscothermal selections.
+`TwoSidedPressure::from_baffled_environment_with_supply` additionally binds
+mechanical radiation reaction and the microphone to one exterior declaration.
+Existing pressure schedulers accept the resulting source directly.
+
+The shared no-slip channel operator gives an exact **discrete** affine boundary
+for its backward-Euler step:
+
+\[
+\Delta p_c=Z_c Q-p_h,\qquad
+\Delta p_{reed}=P_s+2(a_{up}-a_{down})+p_h
+ -(Z_{up}+Z_{down}+Z_c)Q.
+\]
+
+Here `p_h` is computed from the retained transverse velocity profile. It is
+internal fluid history, never an additional authored pressure supply. The
+existing reed solve uses the combined impedance; a channel trial then uses
+that same accepted through-flow. The reed, channel and both networks publish
+only after their flow and whole-system energy checks pass. No pressure lag or
+second nonlinear reed solver is introduced.
+
+`TwoSidedFrame::supply` reports channel pressure drop, flow, kinetic storage,
+wall-friction heat and backward-Euler numerical dissipation. Both loss terms
+enter the full numerical work balance, but numerical dissipation is separately
+identified and is not material heat. Supplied initial channel momentum is
+retained; releasing source pressure does not reset it. Flow reversal and work
+returned by stored fluid inertia remain possible.
+
+The shared channel is planar, fully developed, incompressible, Newtonian and
+fixed in geometry and material state. Its mesh must **not** be resized to follow
+a closing reed: moving-wall transport, squeeze flow and fluid remapping need
+their own coupled work terms. The existing moving uniform/P1 slit and spatial
+contact laws continue to describe that separate reed opening. This addition
+does not establish measured clarinet/oboe accuracy.
+
 ## Focused native checks
 
 ```sh
@@ -87,6 +148,8 @@ cargo test -p fs-vfit --test waveguide_pair
 cargo test -p fs-couple --test two_sided_aperture
 cargo test -p fs-couple --test two_sided_pressure
 cargo check -p fs-couple --example two_sided_reed
+cargo test -p fs-couple --test slit_channel affine_flow_condensation
+cargo test -p fs-couple --test plate_aperture supply::
 ```
 
 These 14 authored tests cover network publication, original single/paired
@@ -98,3 +161,11 @@ has begun but dependency bootstrap failed; no native pass is inferred from a
 pending downstream test step. Independent Python/SciPy references passed 360
 simultaneous-equation cases and 2304 complete two-network steps; these are
 equation checks, not Rust execution, DKT validation or measured timbre.
+
+The supply regressions add checks for source-bound single/independent material
+reeds, the channel's exact discrete pressure/flow condensation, retained initial
+fluid momentum, complete energy/flow closure, viscosity changes at unchanged gas
+density, the actual physical microphone, callback identity and rollback of every
+participant. These additional Rust tests and the supply-enabled WAV were not run
+during implementation because the executor was offline. Their source checks are
+not a native pass or an experimental validation claim.

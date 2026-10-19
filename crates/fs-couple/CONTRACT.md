@@ -2884,3 +2884,36 @@ source review and independent numerical oracles are not a Rust test pass.
 `ReedPerformance::from_bytes_with_gas_field` accepts the same source-retaining `AxialGasField` for authored geometry and gestures. Its exact inlet state drives reed density and impedance; the resolved midpoint cells supply one existing regional TMM for both feedback and terminal pressure. The exact outlet field state supplies the default exterior, and an explicit exterior record replaces that single binding for both flanged loading and baffled observation. The field remains frozen during rendering. Common pressure, full length, geometry/refinement and conflicting per-segment source declarations refuse through the existing owners. Standalone and ensemble sidecars can inspect the original primitive stations and source-pack identities.
 
 The flue performance file accepts optional `walls COUNT FMIN_HZ FMAX_HZ` plus addressed `wall NODE isotropic PACK T_K OMEGA_RAD_S THICKNESS_M stress-free|strain-fixed elastic|kelvin-voigt` records after the original duct geometry, followed by `radiation prescribed|compact-baffled`. The CLI loads caller-relative NormalizedMaterialCardPack artifacts (8 MiB each, 64 MiB aggregate), while the library resolves original cards at independent solid T/omega states with SingleClaimOnly property selection and retained source/usage receipts. Shared artifact paths load once; geometry, branches, regional gases, existing losses and outlet addresses remain with their original owners. Each material wall occupies the existing degree-two node's physical dual strip; unselected and endpoint half-strips stay rigid, and actual area/coverage is reported. Compact radiation binds every declared observed outlet through FlueVoice::from_baffled_environment, then validates each installed binding against the lowered graph and the same exterior/receiver declaration. Material substitutions reach wall storage, jet-returning bore pressure and the common physical microphone; exterior substitutions affect both reaction and propagation when selected. This remains the existing frozen small-motion isotropic local-ring image plus independent low-ka baffled loads: no full shell coupling/exterior wall radiation, full-band unbaffled or mutual reaction, resolved turbulence or measured Boehm claim. The composition remains EstimateOnly and these additions do not close full M0.5 or M2.5-W3c/W4b qualification beads.
+
+### Fixed supply-passage momentum in material reed instruments
+
+The shared `bernoulli_aperture::slit_channel` exposes its retained no-slip
+profile as the exact next-step discrete affine boundary `dp = Z*Q - history`
+for a fixed `StaticPressure` passage. Its source gas, dimensions and clock
+supply the impedance; history is fluid momentum, not a second authored pressure
+source. `TwoSidedAperture::with_supply_channel` adds this impedance and history
+to the existing single, independent-pair or modal reed load. The same accepted
+through-flow drives the channel and both acoustic ducts; physical blade-face
+pressure subtracts the actual channel pressure drop. All participant trials
+and the complete flow/energy account pass before channel, reed and paired
+waveguide states are published.
+
+The supply profile retains initial kinetic energy, release and signed reverse
+flow. `TwoSidedFrame::supply` separately exposes storage, pressure work, wall
+heat and backward-Euler numerical dissipation; both losses enter the numerical
+account once. The material-wall and shared baffled-environment constructors
+compose the same supply with original regional wall sources, Maxwell histories,
+fractional/viscothermal propagation, radiation reaction and the physical
+microphone. Existing schedules consume the resulting source directly. The
+`two_sided_reed` example selects explicit passage geometry and mesh with
+`--supply-slit LENGTH_M WIDTH_M HEIGHT_M TRANSVERSE_CELLS`.
+
+The passage is additional fixed, planar, fully developed incompressible
+Newtonian geometry, distinct from an existing duct segment or the moving reed
+clearance. Closing-wall remapping, squeeze work, compressibility, axial flow
+and evolving atmosphere remain outside it. A kinetic-head terminal refuses
+affine condensation. Source/clock/load mismatches and complete-step failures
+leave accepted state unchanged. Added regression sources cover pressure/flow
+condensation, material single/paired reeds, initial fluid momentum, viscosity
+interventions, physical microphone output and transactional refusals; native
+execution and measured clarinet/oboe validation remain separate requirements.

@@ -175,3 +175,35 @@ fn invalid_geometry_or_pressure_cannot_mutate_accepted_channel_state() {
     let mut inconsistent = g; inconsistent.density *= 1.1;
     assert!(SlitChannel::from_gas(&inconsistent, *c.spec()).is_err());
 }
+
+#[test]
+fn affine_flow_condensation_retains_the_same_profile_pressure_and_energy() {
+    let g = gas(1.0, 101_325.0);
+    let mut c = channel(g, 32, 1.0 / 48_000.0, SlitExit::StaticPressure);
+    let initial_impedance = c.pressure_load().unwrap().impedance_pa_s_m3;
+    assert!(initial_impedance > 0.0);
+    assert_eq!(c.pressure_load().unwrap().history_pressure_pa, 0.0);
+    for pressure in [100.0, 200.0, 0.0, -75.0, 50.0] {
+        let old_profile = c.velocities_m_s().to_vec();
+        let old_frame = c.last_step();
+        let load = c.pressure_load().unwrap();
+        assert_eq!(load.impedance_pa_s_m3, initial_impedance);
+        let mut driven = c.clone();
+        let expected = driven.step(pressure).unwrap();
+        assert!((load.pressure_drop_pa(expected.flow_m3_s).unwrap() - pressure).abs() < 1e-10);
+        let candidate = c.preview_at_flow(expected.flow_m3_s).unwrap();
+        check_energy(candidate.last_step());
+        assert!((candidate.last_step().flow_m3_s - expected.flow_m3_s).abs() < 1e-16);
+        for (&a, &b) in candidate.velocities_m_s().iter().zip(driven.velocities_m_s()) {
+            assert!((a-b).abs() < 1e-12);
+        }
+        assert_eq!(c.velocities_m_s(), old_profile.as_slice());
+        assert_eq!(c.last_step(), old_frame);
+        assert!(c.preview_at_flow(f64::NAN).is_err());
+        assert_eq!(c.last_step(), old_frame);
+        c = candidate;
+    }
+    let nonlinear = channel(g, 32, 1.0 / 48_000.0, SlitExit::UniformKineticHead);
+    assert!(nonlinear.pressure_load().is_err());
+    assert!(nonlinear.preview_at_flow(1e-5).is_err());
+}
