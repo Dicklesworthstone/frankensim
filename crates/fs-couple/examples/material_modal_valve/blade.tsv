@@ -1,0 +1,38 @@
+frankensim.matdb-source.v1
+observation	synthetic	Synthetic flat valve wall	Manufactured positive-definite viscous tensor and elastic coefficients	Not measurements; no wet-cane, clarinet, oboe or natural-material authority
+scalar	density	synthetic	density	900	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	100000	rad/s
+scalar	young_modulus	synthetic	young_modulus	4000000000	Pa	constant
+uncertainty	young_modulus	unstated	-	-	-	-
+validity	young_modulus	T	280	320	K
+validity	young_modulus	omega	0	100000	rad/s
+scalar	poisson_ratio	synthetic	poisson_ratio	0.3	1	constant
+uncertainty	poisson_ratio	unstated	-	-	-	-
+validity	poisson_ratio	T	280	320	K
+validity	poisson_ratio	omega	0	100000	rad/s
+scalar	eta11	synthetic	eta11	22000	Pa*s	constant
+uncertainty	eta11	unstated	-	-	-	-
+validity	eta11	T	280	320	K
+validity	eta11	omega	0	100000	rad/s
+scalar	eta22	synthetic	eta22	35000	Pa*s	constant
+uncertainty	eta22	unstated	-	-	-	-
+validity	eta22	T	280	320	K
+validity	eta22	omega	0	100000	rad/s
+scalar	eta66	synthetic	eta66	11000	Pa*s	constant
+uncertainty	eta66	unstated	-	-	-	-
+validity	eta66	T	280	320	K
+validity	eta66	omega	0	100000	rad/s
+scalar	eta12	synthetic	eta12	4500	Pa*s	constant
+uncertainty	eta12	unstated	-	-	-	-
+validity	eta12	T	280	320	K
+validity	eta12	omega	0	100000	rad/s
+scalar	eta16	synthetic	eta16	1000	Pa*s	constant
+uncertainty	eta16	unstated	-	-	-	-
+validity	eta16	T	280	320	K
+validity	eta16	omega	0	100000	rad/s
+scalar	eta26	synthetic	eta26	-1500	Pa*s	constant
+uncertainty	eta26	unstated	-	-	-	-
+validity	eta26	T	280	320	K
+validity	eta26	omega	0	100000	rad/s

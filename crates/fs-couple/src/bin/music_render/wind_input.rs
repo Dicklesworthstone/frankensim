@@ -189,7 +189,7 @@ fn load_with_gas_sources(
     sources: Option<&ThermochemicalSources<'_>>,
 ) -> Result<Loaded, String> {
     load_with_sources(bytes, block, policy, sources,
-        |_| Err("wall material-card packs require an explicit source loader".into()))
+        |_| Err("material-card packs require an explicit source loader".into()))
 }
 fn load_with_sources(
     bytes: &[u8],
@@ -198,6 +198,49 @@ fn load_with_sources(
     sources: Option<&ThermochemicalSources<'_>>,
     load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
 ) -> Result<Loaded, String> {
+    if bytes.starts_with(b"frankensim-material-modal-valve-v1\n") {
+        if policy == ObservationPolicy::Acceptance {
+            return Err("material-modal files retain flat DKT walls and an effective uniform slit; matched baffled observation is not a measured instrument qualification".into());
+        }
+        let p = fs_couple::bernoulli_aperture::performance::file::material_modal::MaterialModalValvePerformance::from_bytes_with_sources(
+            bytes, block, &CancelGate::new(), sources, load_material).map_err(|e| e.to_string())?;
+        let i = p.info();
+        if i.output_rate_hz != RATE {
+            return Err("material-modal wind output must declare 48000 Hz; mechanical refinement belongs to its separate source clock".into());
+        }
+        let valve = match p.renderer().source().system().valve() {
+            fs_couple::bernoulli_aperture::two_sided::LoadedAperture::Modal(a) => a,
+            _ => unreachable!("material-modal file owns the requested modal valve"),
+        };
+        let materials = p.material_records().iter().map(|record| {
+            let source = valve.material_plates()[record.blade()].source();
+            let region = &source.regions()[record.section()];
+            let material = &region.input.material;
+            format!("{{\"blade\":{},\"section\":{},\"path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"state_hash\":\"{}\",\"specimen_hash\":\"{}\",\"mass_kg\":{:e},\"thickness_m\":{:e},\"material_angle_rad\":{:e}}}",
+                record.blade(), record.section(), json_string(record.path()),
+                record.pack().content_hash().to_hex(), material.card_identity().to_hex(),
+                material.identity().to_hex(), source.specimen_identity().to_hex(),
+                region.mass_kg, region.section.thickness, region.input.material_angle_rad)
+        }).collect::<Vec<_>>().join(",");
+        let gas_sources = super::thermochemical::provenance(p.gas_records());
+        let system = p.renderer().source().system();
+        let supply = system.supply_channel().map_or_else(|| "null".into(), |channel| {
+            let spec = channel.spec();
+            format!("{{\"length_m\":{:e},\"width_m\":{:e},\"height_m\":{:e},\"transverse_cells\":{},\"density_kg_m3\":{:e},\"viscosity_pa_s\":{:e}}}",
+                spec.length_m, spec.width_m, spec.height_m, spec.transverse_cells,
+                channel.gas().density, channel.gas().dynamic_viscosity)
+        });
+        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; compact independent baffled reaction and shared exterior pressure; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}}}",
+            i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
+            p.renderer().pending_controls().len(), valve.viscosity_matrix_n_s_m().is_some(),
+            p.radiation_bindings().len());
+        let ratio = i.mechanics_rate_hz / i.output_rate_hz;
+        let observation_json = format!("{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"output_sample_rate_hz\":{},\"ratio\":{ratio},\"filter\":\"shared multirate differentiating Rayleigh receiver with bandlimited propagation\",\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
+            i.mechanics_rate_hz, i.samples * u64::from(ratio), i.output_rate_hz);
+        return Ok(Loaded { source: Box::new(p.into_renderer()), rate: i.output_rate_hz,
+            samples: i.samples, full_scale_pa: i.full_scale_pa, hash: i.input_hash,
+            fixture: "material-modal-valve-input", source_json, observation_json: Some(observation_json) });
+    }
     // Exact versioned source header selects the existing owner; filenames and
     // instrument labels never choose geometry or material constants.
     if bytes.starts_with(b"frankensim-flue-performance-v1\n") {
@@ -327,18 +370,18 @@ pub(super) fn run_with_gas_sources(
     let parent = Path::new(input).parent().unwrap_or(Path::new("."));
     let loaded = load_with_sources(&bytes, block, policy, sources, |name| {
         let file = std::fs::File::open(parent.join(name))
-            .map_err(|e| format!("wall material-card pack {name:?} open failed: {e}"))?;
+            .map_err(|e| format!("material-card pack {name:?} open failed: {e}"))?;
         let mut pack_bytes = Vec::new();
         file.take((MAX_FLUE_WALL_PACK_BYTES + 1) as u64).read_to_end(&mut pack_bytes)
-            .map_err(|e| format!("wall material-card pack {name:?} read failed: {e}"))?;
+            .map_err(|e| format!("material-card pack {name:?} read failed: {e}"))?;
         if pack_bytes.len() > MAX_FLUE_WALL_PACK_BYTES {
-            return Err("wall material-card pack exceeds 8 MiB".into());
+            return Err("material-card pack exceeds 8 MiB".into());
         }
         NormalizedMaterialCardPack::from_bytes(&pack_bytes)
-            .map_err(|e| format!("wall material-card pack {name:?}: {e}"))
+            .map_err(|e| format!("material-card pack {name:?}: {e}"))
     })?;
     if decimate && loaded.observation_json.is_some() {
-        return Err("flue files already declare mechanical and output clocks; omit --decimate to avoid a second observer".into());
+        return Err("this source already declares mechanical and output clocks; omit --decimate to avoid a second observer".into());
     }
     if !decimate && loaded.rate != RATE {
         return Err("non-48000-Hz mechanics require explicit --decimate; no implicit resampling".into());

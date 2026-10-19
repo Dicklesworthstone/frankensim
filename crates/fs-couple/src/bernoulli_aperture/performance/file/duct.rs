@@ -37,6 +37,38 @@ pub(super) struct PreparedDuct {
 }
 
 impl DuctInput {
+    // Preserve original geometry and section addresses for the two-sided owner.
+    // It must lower viscosity/fractional travel itself, once, after boundary
+    // selection. Numeric loads, cavities and wall patches use this same parser.
+    pub(super) fn into_two_sided(mut self, air: &GasState, dt: f64, gate: &CancelGate)
+        -> Result<crate::bernoulli_aperture::two_sided::ApertureDuctSpec, PlateValveInputError>
+    {
+        let assignments = match &mut self {
+            Self::Tube { loss, .. } => vec![loss.take()],
+            Self::Graph { losses, .. } => core::mem::take(losses),
+        };
+        let prepared = self.prepare(air, dt, ApertureObservation::Inlet, gate)?;
+        if !prepared.radiation.is_empty() {
+            return Err(bad(0, "material-modal valve radiation is declared by openings; use a numeric cold terminal there, not baffled-low-ka"));
+        }
+        let graph = match (prepared.tube, prepared.graph) {
+            (Some(tube), None) => TubeNetworkSpec {
+                nodes: vec![NetworkNode::Inlet,
+                    NetworkNode::Termination { reflection: tube.terminal_reflection }],
+                sections: vec![TubeSection { nodes: [0, 1], length_m: tube.length_m,
+                    radius_m: tube.radius_m, max_length_error_m: tube.max_length_error_m }],
+                sound_speed_m_s: tube.sound_speed_m_s,
+                max_wave_memory_bytes: tube.max_wave_memory_bytes,
+            },
+            (None, Some(graph)) => graph,
+            _ => unreachable!("exactly one original duct owner"),
+        };
+        let gases = prepared.gases.unwrap_or_else(|| vec![*air; graph.sections.len()]);
+        let viscothermal = assignments.into_iter().enumerate().filter_map(|(section, selected)|
+            selected.map(|spec| ViscothermalSectionSpec { section, ..spec })).collect();
+        Ok(crate::bernoulli_aperture::two_sided::ApertureDuctSpec { graph, gases, viscothermal })
+    }
+
     pub fn read(
         r: &mut Reader<'_>,
         air: &GasState,

@@ -14,6 +14,8 @@
 //! selects spatial viscous channel flow. Its viscosity comes from the actual
 //! inlet gas, including regional composition and temperature declarations.
 mod force;
+/// Material-card multimode valves coupled to both ducts and one physical receiver.
+pub mod material_modal;
 use super::force::ApertureForceProgram;
 use super::{AperturePerformance, AperturePerformanceConfig, ApertureObservation, CoupledAperture};
 use crate::acoustic_realize::AcousticRealizeError;
@@ -62,6 +64,14 @@ pub enum PlateValveInputError {
         /// Original material/phase/composition refusal.
         source: fs_material::MaterialError,
     },
+    /// Caller-supplied normalized material artifact could not be loaded.
+    MaterialSource { /// One-based declaration line.
+        line: usize, /// Original source refusal.
+        source: String },
+    /// Constitutive material-state resolution failed without a fallback.
+    Material { /// One-based declaration line.
+        line: usize, /// Original material owner refusal.
+        source: fs_material::state_point::MaterialStatePointError },
     /// Mesh/section owner refusal.
     Geometry(fs_plate::PlateError),
     /// Reduction, coupled physics or material owner refusal.
@@ -74,6 +84,8 @@ impl core::fmt::Display for PlateValveInputError {
         match self {
             Self::Input { line, what } => write!(f,"plate-valve input line {line}: {what}"),
             Self::Gas { line, source } => write!(f,"plate-valve gas line {line}: {source}"),
+            Self::MaterialSource { line, source } => write!(f,"plate-valve material source line {line}: {source}"),
+            Self::Material { line, source } => write!(f,"plate-valve material line {line}: {source}"),
             Self::Geometry(e) => write!(f,"plate-valve geometry: {e}"),
             Self::Physics(e) => write!(f,"plate-valve physics: {e}"),
             Self::Gesture(e) => write!(f,"plate-valve gesture: {e}"),
@@ -82,7 +94,11 @@ impl core::fmt::Display for PlateValveInputError {
 }
 impl std::error::Error for PlateValveInputError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self { Self::Gas { source, .. } => Some(source), _ => None }
+        match self {
+            Self::Gas { source, .. } => Some(source),
+            Self::Material { source, .. } => Some(source),
+            _ => None,
+        }
     }
 }
 fn bad(line: usize, what: &'static str) -> PlateValveInputError { PlateValveInputError::Input { line, what } }

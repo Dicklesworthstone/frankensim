@@ -1,0 +1,233 @@
+//! Original regional material sources and meshes for the common modal valve.
+use super::{PlateValveInputError, Reader, bad, checkpoint};
+use crate::bernoulli_aperture::modal::material::ModalPlateOptions;
+use crate::bernoulli_aperture::paired::BladeState;
+use crate::thin_plate::{PlateChartRadiation, PlateMaterialModel, PlateRegionMaterial,
+    PlateThicknessConstraint, ResolvedPlateChart, compile_plate_material_chart};
+use crate::plate_viscosity::PlateViscosityLimits;
+use fs_exec::CancelGate;
+use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
+use fs_material::state_point::{MaterialPropertySelection, ScalarAdmissibility as Admit,
+    ScalarPropertyRequirement as Requirement, resolve_material_state_point};
+use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateRegion};
+use fs_qty::{Density, Dims, DynViscosity, Pressure};
+use std::{collections::BTreeMap, sync::Arc};
+
+/// Maximum encoded normalized artifact; the CLI bounds bytes before decoding.
+pub const MAX_MODAL_VALVE_PACK_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TOTAL_PACK_BYTES: usize = 64 * 1024 * 1024;
+
+/// One material assignment on an actual plate, retaining the complete artifact.
+#[derive(Clone, Debug)]
+pub struct ModalValveMaterialRecord {
+    blade: usize,
+    section: usize,
+    path: String,
+    pack: Arc<NormalizedMaterialCardPack>,
+}
+impl ModalValveMaterialRecord {
+    /// Original independent blade address.
+    pub const fn blade(&self) -> usize { self.blade }
+    /// Original section/region address within that blade.
+    pub const fn section(&self) -> usize { self.section }
+    /// Relative artifact name, interpreted only by the caller.
+    pub fn path(&self) -> &str { &self.path }
+    /// Original claims, material state and source provenance.
+    pub fn pack(&self) -> &NormalizedMaterialCardPack { &self.pack }
+}
+
+pub(super) enum LossSelection {
+    Elastic,
+    Tensor { properties: [String; 6], limits: PlateViscosityLimits },
+}
+impl LossSelection {
+    pub fn read(rows: &mut Reader<'_>) -> Result<Self, PlateValveInputError> {
+        let mut row = rows.row("loss")?;
+        let selected = match row.word()? {
+            "elastic" => Self::Elastic,
+            "tensor" => {
+                let mut properties: [String; 6] = core::array::from_fn(|_| String::new());
+                for key in &mut properties {
+                    let value = row.word()?;
+                    if value.len() > 128 { return Err(bad(row.line, "viscosity property name exceeds 128 bytes")); }
+                    *key = value.into();
+                }
+                let reference_resistance_n_s_m = row.scalar()?;
+                let max_projection_terms = row.count(16_777_216)?;
+                Self::Tensor { properties, limits: PlateViscosityLimits {
+                    max_modes: 32, max_projection_terms, reference_resistance_n_s_m,
+                } }
+            }
+            _ => return Err(bad(row.line, "loss must be elastic or tensor V11 V22 V66 V12 V16 V26 RESISTANCE PROJECTION_TERMS")),
+        };
+        row.finish()?;
+        Ok(selected)
+    }
+}
+
+#[derive(Default)]
+pub(super) struct MaterialCache {
+    packs: BTreeMap<String, Arc<NormalizedMaterialCardPack>>,
+    bytes: usize,
+}
+impl MaterialCache {
+    fn load(&mut self, path: &str, line: usize,
+        loader: &mut impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+        gate: &CancelGate) -> Result<Arc<NormalizedMaterialCardPack>, PlateValveInputError>
+    {
+        checkpoint(gate)?;
+        if !self.packs.contains_key(path) {
+            let pack = loader(path).map_err(|source| PlateValveInputError::MaterialSource { line, source })?;
+            checkpoint(gate)?;
+            let size = pack.to_bytes().len();
+            if size > MAX_MODAL_VALVE_PACK_BYTES || size > MAX_TOTAL_PACK_BYTES.saturating_sub(self.bytes) {
+                return Err(bad(line, "material artifacts exceed 8 MiB per pack or 64 MiB combined"));
+            }
+            self.bytes += size;
+            self.packs.insert(path.into(), Arc::new(pack));
+        }
+        Ok(Arc::clone(&self.packs[path]))
+    }
+}
+
+type PlateInput = (ResolvedPlateChart, ModalPlateOptions, Vec<BladeState>, Vec<ModalValveMaterialRecord>);
+
+pub(super) fn read(
+    rows: &mut Reader<'_>, blade: usize, existing_modes: usize, loss: &LossSelection,
+    cache: &mut MaterialCache,
+    loader: &mut impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+    gate: &CancelGate,
+) -> Result<PlateInput, PlateValveInputError> {
+    let mut row = rows.row("blade")?;
+    let n_modes = row.count(32usize.saturating_sub(existing_modes))?;
+    let low = row.scalar()?;
+    let high = row.scalar()?;
+    let maximum_angular_step = row.scalar()?;
+    let maximum_trace_slope = row.scalar()?;
+    let maximum_slit_deviation_m = row.scalar()?;
+    let max_projection_terms = row.count(16_777_216)?;
+    row.finish()?;
+    if n_modes == 0 || low < 0.0 || high <= low
+        || !(core::f64::consts::TAU * high).powi(2).is_finite() {
+        return Err(bad(rows.line, "each blade requires positive explicit modes and an ordered finite frequency window"));
+    }
+    let mut row = rows.row("support")?;
+    let support = match row.word()? {
+        "clamped" => EdgeSupport::Clamped,
+        "simply-supported" => EdgeSupport::SimplySupported,
+        _ => return Err(bad(row.line, "unknown physical plate support")),
+    };
+    let pretension = row.scalar()?;
+    row.finish()?;
+    let section_count = rows.count("sections", 64)?;
+    if section_count == 0 { return Err(bad(rows.line, "every blade needs material sections")); }
+    let mut sections = Vec::with_capacity(section_count);
+    let mut records = Vec::with_capacity(section_count);
+    for section in 0..section_count {
+        let mut row = rows.row("section")?;
+        let path = row.word()?.to_string();
+        if path.len() > 512 || path.contains('\\') || path.contains(':')
+            || path.split('/').any(|p| p.is_empty() || p == "." || p == "..") {
+            return Err(bad(row.line, "material pack path must stay relative to the performance directory"));
+        }
+        let model = match row.word()? {
+            "isotropic" => PlateMaterialModel::Isotropic,
+            "orthotropic12" => PlateMaterialModel::Orthotropic12,
+            "orthotropic21" => PlateMaterialModel::Orthotropic21,
+            _ => return Err(bad(row.line, "material section needs an explicit isotropic or ordered orthotropic plane")),
+        };
+        let temperature = row.scalar()?;
+        let omega = row.scalar()?;
+        let thickness = row.scalar()?;
+        let angle = row.scalar()?;
+        let line = row.line;
+        row.finish()?;
+        if temperature <= 0.0 || omega < 0.0 || thickness <= 0.0 {
+            return Err(bad(line, "material state needs positive kelvin/thickness and nonnegative angular frequency"));
+        }
+        let pack = cache.load(&path, line, loader, gate)?;
+        let point = QueryPoint::new().with("T", temperature).and_then(|p| p.with("omega", omega))
+            .map_err(|e| PlateValveInputError::MaterialSource { line, source: e.to_string() })?;
+        let material = (|| {
+            let mut required = vec![Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?];
+            match model {
+                PlateMaterialModel::Isotropic => {
+                    required.push(Requirement::try_new("young_modulus", Pressure::DIMS, Admit::StrictlyPositive)?);
+                    required.push(Requirement::try_new("poisson_ratio", Dims::NONE,
+                        Admit::OpenInterval { lower: -1.0, upper: 0.5 })?);
+                }
+                _ => {
+                    for key in ["young_modulus_1", "young_modulus_2", "shear_modulus_12"] {
+                        required.push(Requirement::try_new(key, Pressure::DIMS, Admit::StrictlyPositive)?);
+                    }
+                    required.push(Requirement::try_new("poisson_ratio_12", Dims::NONE, Admit::Finite)?);
+                }
+            }
+            if let LossSelection::Tensor { properties, .. } = loss {
+                for key in properties {
+                    required.push(Requirement::try_new(key, DynViscosity::DIMS, Admit::Finite)?);
+                }
+            }
+            resolve_material_state_point(pack.card(), &point, &required, MaterialPropertySelection::SingleClaimOnly)
+        })().map_err(|source| PlateValveInputError::Material { line, source })?;
+        sections.push(PlateRegionMaterial {
+            region: PlateRegion { name: format!("section-{section}"), triangle_indices: Vec::new() },
+            material, model, thickness_constraint: PlateThicknessConstraint::FixedThickness(thickness),
+            material_angle_rad: angle,
+        });
+        records.push(ModalValveMaterialRecord { blade, section, path, pack });
+    }
+    let node_count = rows.count("nodes", 512)?;
+    if node_count < 3 { return Err(bad(rows.line, "blade needs at least three original nodes")); }
+    let mut nodes = Vec::with_capacity(node_count);
+    let mut supports = Vec::new();
+    let mut unit_force_weights = Vec::with_capacity(node_count);
+    for node in 0..node_count {
+        checkpoint(gate)?;
+        let mut row = rows.row("node")?;
+        nodes.push((row.scalar()?, row.scalar()?));
+        if row.flag()? { supports.push(node); }
+        unit_force_weights.push(row.scalar()?);
+        row.finish()?;
+    }
+    let triangle_count = rows.count("triangles", 2048)?;
+    if triangle_count == 0 { return Err(bad(rows.line, "blade needs original triangles")); }
+    let mut triangles = Vec::with_capacity(triangle_count);
+    for element in 0..triangle_count {
+        checkpoint(gate)?;
+        let mut row = rows.row("triangle")?;
+        triangles.push([row.parse()?, row.parse()?, row.parse()?]);
+        let section: usize = row.parse()?;
+        row.finish()?;
+        sections.get_mut(section).ok_or_else(|| bad(rows.line, "triangle references an absent material section"))?
+            .region.triangle_indices.push(element);
+    }
+    let edge_count = rows.count("slit_edges", node_count)?;
+    let mut slit_edges = Vec::with_capacity(edge_count);
+    for _ in 0..edge_count {
+        let mut row = rows.row("edge")?;
+        slit_edges.push([row.parse()?, row.parse()?]);
+        row.finish()?;
+    }
+    let mut initial = Vec::with_capacity(n_modes);
+    if rows.count("initial", 32)? != n_modes {
+        return Err(bad(rows.line, "initial states must cover exactly the requested blade modes"));
+    }
+    for _ in 0..n_modes {
+        let mut row = rows.row("state")?;
+        initial.push(BladeState { displacement_m: row.scalar()?, velocity_m_s: row.scalar()? });
+        row.finish()?;
+    }
+    let mesh = PlateMesh::from_unstructured(nodes, triangles).map_err(PlateValveInputError::Geometry)?;
+    let chart = compile_plate_material_chart(mesh, supports, sections).map_err(PlateValveInputError::Physics)?;
+    let options = ModalPlateOptions {
+        reduction: PlateChartRadiation {
+            assembly: AssemblyOptions { pretension, support },
+            eigenvalue_window: ((core::f64::consts::TAU * low).powi(2), (core::f64::consts::TAU * high).powi(2)),
+            n_modes, damping_ratio: 0.0, unit_force_weights,
+        },
+        slit_edges, maximum_trace_slope, maximum_slit_deviation_m, maximum_angular_step,
+        max_nodes: 512, max_triangles: 2048, max_projection_terms,
+    };
+    Ok((chart, options, initial, records))
+}

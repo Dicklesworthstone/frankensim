@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	synthetic-material-modal-valve
+redistribution	permitted	Manufactured integration fixture; freely redistributable, not measured cane
+citation	Synthetic multimode material valve fixture
+license	CC0-1.0
+source	fixture	blade.tsv	material-tsv-v1
