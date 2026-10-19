@@ -3,6 +3,8 @@
 pub mod exchange;
 /// One conservative reaction stage followed by the shared exchange solve.
 pub mod reactive;
+/// One accepted circuit, thermal and chamber state with atomic advancement.
+pub mod state;
 
 use super::*;
 use crate::circuit_enthalpy::material::{MaterialNetwork,MaterialNetworkError,MaterialNetworkSample};

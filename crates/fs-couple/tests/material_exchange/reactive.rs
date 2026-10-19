@@ -126,3 +126,6 @@ fn reaction_mapping_consumption_and_late_exchange_failure_preserve_all_originals
         assert_eq!(gas,before);assert_eq!(thermal.cells(),&cells);assert_eq!(circuit,electrical);assert_eq!(thermal.time_s(),0.0);
     }));
 }
+
+#[path = "state.rs"]
+mod state_tests;
