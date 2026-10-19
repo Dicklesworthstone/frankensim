@@ -20,6 +20,9 @@ pub mod auglag;
 pub mod conduction_assimilation;
 #[cfg(feature = "conduction-design")]
 pub mod conduction_design;
+/// Positive power-schedule fitting through full native scan history adjoints.
+#[cfg(feature = "conduction-design")]
+pub mod scan_design;
 #[cfg(feature = "equilibrium-design")]
 pub mod equilibrium;
 pub mod interior;

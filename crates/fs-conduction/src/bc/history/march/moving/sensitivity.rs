@@ -9,6 +9,7 @@
 
 /// Chain sampled physical controls into authored scalar schedule values.
 pub mod schedule;
+mod power;
 
 use super::{MovingHeatSample, MovingHeatSource, invalid, poll, zeros};
 use crate::{ConductionError, ConductionMesh, ScalarField, COMPONENT_POWER_DIMS};
