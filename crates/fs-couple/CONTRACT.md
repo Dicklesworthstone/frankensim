@@ -1380,6 +1380,17 @@ clarinet is one filling of those objects.
   with intrinsic material loss plus the explicitly collapsed slow tail, so
   fluid damping is not counted twice.
 
+  All material-string performance versions accept the optional
+  `cylinder-gas-loading X_MIN X_MAX INTERVALS` row immediately before `cavity`,
+  after any section, polarization and rotational-bridge records. The same
+  original geometry/gas supplies the operator; no extra material coefficients
+  are authored. This binding precedes additional bows, stop profiles, static
+  preload and the physical pressure/PCM schedule. File construction counts all
+  mechanical/fluid coordinates and string/body/torque/cavity/tensor-loss ports
+  against the explicit mode, connection and complete setup-work allowances.
+  The source fixtures and regressions compose material/mixture substitutions,
+  regional body loss, both transverse planes, torsion, cavity, stops and release.
+
   These fluid components append after physical bodies. Full tensor body loss,
   cavity connections, pressure observation, dry interface and torque maps
   survive binding, either cold torque/fluid order, and multiple-bow scheduling.

@@ -261,3 +261,6 @@ fn rotational_bridge_geometry_refuses_before_loading_materials() {
 
 #[path="regions.rs"]
 mod regions;
+
+#[path="fluid.rs"]
+mod fluid;

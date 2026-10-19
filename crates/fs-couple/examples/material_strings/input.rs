@@ -47,6 +47,7 @@ pub struct Spec {
     pub bytes: Vec<u8>, pub rate: u32, pub samples: u64, pub full_scale: f64, pub block: usize,
     pub temperature: f64, pub omega: f64, pub gas: GasState, pub body: Body, pub strings: Vec<Wire>,
     pub rotational_bridges: Vec<RotationalBridge>,
+    pub cylinder_gas_loading: Option<CylinderFlowResolution>,
     pub cavity: Option<MaterialBodyCavity>, pub law: FrictionLaw, pub forces: Option<StringForceProgram>,
     pub schedule: GestureSchedule,
 }
@@ -85,7 +86,7 @@ impl Spec {
         row.end()?;
         let mut row = r.row("strings")?; let count = row.count(8)?; row.end()?;
         if count == 0 || body.modes == 0 { return Err("nonempty material strings and body modes required".into()); }
-        let mut strings = Vec::with_capacity(count); let mut modes = body.modes;
+        let mut strings = Vec::with_capacity(count);
         for _ in 0..count {
             let mut row = r.row("string")?;
             let pack = row.path()?; let length = row.positive()?; let radius = row.positive()?;
@@ -120,8 +121,6 @@ impl Spec {
                 || !(wire.bridge.stiffness_n_m > 0.0 || wire.bridge.damping_n_s_m > 0.0) {
                 return Err("string needs transverse modes and a physical interior bridge connection".into());
             }
-            modes += wire.bending_modes * if wire.polarizations.is_some() { 2 } else { 1 }
-                + wire.twist_modes;
             strings.push(wire);
         }
         // Optional in every version. The following cavity row is left
@@ -150,11 +149,22 @@ impl Spec {
                 rotational_bridges.push(joint);
             }
         }
+        let cylinder_gas_loading = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("cylinder-gas-loading") {
+            let mut row = r.row("cylinder-gas-loading")?;
+            let resolution = CylinderFlowResolution {
+                minimum_wavenumber_radius: row.positive()?,
+                maximum_wavenumber_radius: row.positive()?,
+                intervals: row.count(4096)?,
+            };
+            row.end()?;
+            resolution.validate()?;
+            Some(resolution)
+        } else { None };
         let mut row = r.row("cavity")?;
         let cavity = match row.word()? {
             "none" => None,
             "neck" => {
-                modes += 1;
                 // The `neck` record predates DEF-09: a sound hole through the
                 // body's own plate, declared flanged at both ends.
                 let description = HelmholtzCavity { volume_m3: row.positive()?, neck_radius_m: row.positive()?,
@@ -167,7 +177,6 @@ impl Spec {
             _ => return Err("cavity must be none or neck V R L RESISTANCE LISTENER_M".into()),
         };
         row.end()?;
-        if modes > MAX_MODES { return Err("complete instrument exceeds 128 modes".into()); }
         let mut row = r.row("friction")?;
         let law = match row.word()? {
             "coulomb" => FrictionLaw::Coulomb { static_mu: row.scalar()?, kinetic_mu: row.scalar()? },
@@ -243,8 +252,54 @@ impl Spec {
                 }
             }
         }
-        Ok(Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
-            gas, body, strings, rotational_bridges, cavity, law, forces, schedule })
+        let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
+            gas, body, strings, rotational_bridges, cylinder_gas_loading, cavity, law, forces, schedule };
+        spec.network_dimensions(false)?;
+        Ok(spec)
+    }
+
+    /// Complete numerical allocation before source I/O. A tensor body can need
+    /// one damping column per retained body mode; explicit zero viscosity may
+    /// use fewer. The allowance never drops requested modes or fluid branches.
+    pub fn network_dimensions(&self, tensor_body: bool) -> Result<(usize, usize, usize)> {
+        let mut modes = self.body.modes.checked_add(usize::from(self.cavity.is_some()))
+            .ok_or("complete mode count overflow")?;
+        let mut transverse = 0usize;
+        for wire in &self.strings {
+            let planes = if wire.polarizations.is_some() { 2 } else { 1 };
+            let bending = wire.bending_modes.checked_mul(planes)
+                .ok_or("transverse mode count overflow")?;
+            transverse = transverse.checked_add(bending).ok_or("transverse mode count overflow")?;
+            modes = modes.checked_add(bending).and_then(|n| n.checked_add(wire.twist_modes))
+                .ok_or("complete string/body mode count overflow")?;
+        }
+        let cavity_links = self.cavity.as_ref().map_or(0, |c|
+            1 + usize::from(c.cavity.neck_resistance_n_s_m() != 0.0));
+        let mut links = self.strings.len().checked_add(self.rotational_bridges.len())
+            .and_then(|n| n.checked_add(cavity_links))
+            .and_then(|n| n.checked_add(if tensor_body { self.body.modes } else { 0 }))
+            .ok_or("complete connection count overflow")?;
+        if let Some(resolution) = self.cylinder_gas_loading {
+            resolution.validate()?;
+            let memory = transverse.checked_mul(resolution.intervals)
+                .ok_or("fluid memory dimension overflow")?;
+            modes = modes.checked_add(memory).ok_or("complete fluid mode count overflow")?;
+            links = links.checked_add(memory).ok_or("complete fluid connection count overflow")?;
+        }
+        if modes == 0 || modes > MAX_MODES {
+            return Err("complete instrument, including gas memory, exceeds 128 modes".into());
+        }
+        if links > MAX_MODAL_CONNECTIONS {
+            return Err("complete instrument exceeds the shared modal connection ceiling".into());
+        }
+        // The original coupled owner preflights N*(L+1)^2, not merely N*L.
+        let terms = links.checked_add(1).and_then(|l| l.checked_mul(l))
+            .and_then(|square| modes.checked_mul(square))
+            .ok_or("complete network setup work overflow")?;
+        if terms > MAX_WORK as usize {
+            return Err("complete instrument exceeds the explicit network setup work budget".into());
+        }
+        Ok((modes, links, terms))
     }
 }
 

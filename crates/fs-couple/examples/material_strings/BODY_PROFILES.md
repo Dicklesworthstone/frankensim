@@ -218,7 +218,7 @@ report includes each declared angular law and its derived physical separation,
 while the original performance/profile bytes and material sources stay attached
 to the performer.
 
-The optional block works with both v1 and v2 performance files. At most 16 joints
+The optional block works with v1, v2 and v3 performance files. At most 16 joints
 are accepted, within the existing complete-network connection/work limits.
 Omitting it preserves the old construction. Missing profiles, v1 single-footprint
 profiles, absent string indices, coincident or unrepresentable baselines,
@@ -226,3 +226,24 @@ unsourced twist and nonpassive laws refuse before a WAV is created. Native tests
 exercise file admission, version compatibility, geometry refusals before pack
 loading, and actual released-body pressure/PCM from an explicitly preloaded
 rotational spring while retaining the original full material damping.
+
+## Gas memory with a regional body and physical contacts
+
+The performance's optional `cylinder-gas-loading X_MIN X_MAX INTERVALS` record
+also works with these uniform and regional body profiles. Place it after the
+rotational-bridge block, when present, and before `cavity`. The shared string
+owner derives gas loading from each actual outer section and the existing gas.
+Fluid coordinates follow every physical string/body/neck component, so original
+spatial footprints, angular joints, complete material viscosity and pressure
+projections retain their physical indices and sources.
+
+The same construction accepts `--stop-profile` before static preload. The native
+composition regression uses two layered two-plane strings, a regional viscous
+body, one torque joint, a cavity, one receiver-bound stop and six fluid branches
+per transverse mode: 33 complete coordinates. It also changes one region's
+viscosity without changing the fluid law or the other materials.
+
+See [README.md](README.md#causal-gas-loading-of-the-moving-strings) for resolution
+semantics, the runnable source fixture, continuum assumptions and the current
+42-mode connected-island limit. The small regression is a coupling check; body
+mesh, modal, fluid-spectral and time refinement remain independent requirements.

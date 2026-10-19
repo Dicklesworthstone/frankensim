@@ -22,7 +22,8 @@ use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
 use fs_couple::pcm_wav::observation::PressureRenderer;
 use fs_couple::pcm_wav::stream::{Pcm16WavStream,WavStreamSummary,render_pressure_pcm16,ScheduledWavProgress};
 use fs_couple::render::schedule::force::{ForceInitialization,ForceRenderConfig,ModalForceEvent};
-use fs_couple::render::schedule::force::coupled::ModalCouplingConfig;
+use fs_couple::render::schedule::force::coupled::{ModalCouplingConfig,MAX_MODAL_CONNECTIONS};
+use fs_couple::air_path::cylinder::CylinderFlowResolution;
 use fs_couple::render::schedule::force::coupled::contact::friction::ModalFrictionConfig;
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::MultiFrictionConfig;
 use fs_couple::string_specimen::{with_uniform_circular_material_state,
@@ -43,14 +44,15 @@ const SHEAR: &str = "shear_modulus";
 const SHEAR_ETA: &str = "kelvin_voigt_shear_viscosity";
 fn modal_budget() -> ModalAcousticTimeBudget { ModalAcousticTimeBudget::audible_reference() }
 fn poll(gate: &CancelGate) -> Result<()> { if gate.is_requested() { Err("material-string construction cancelled".into()) } else { Ok(()) } }
-fn options(rate:u32,bow:StringBowLocation) -> StringBankOptions {
-    StringBankOptions { sample_rate_hz:rate,bow,string_budget:modal_budget(),
-        network:ModalCouplingConfig { max_modes:input::MAX_MODES,max_connections:64,max_setup_terms:262_144,
+fn options(spec:&input::Spec,bow:StringBowLocation,tensor_body:bool) -> Result<StringBankOptions> {
+    let (max_modes,max_connections,max_setup_terms)=spec.network_dimensions(tensor_body)?;
+    Ok(StringBankOptions { sample_rate_hz:spec.rate,bow,string_budget:modal_budget(),
+        network:ModalCouplingConfig { max_modes,max_connections,max_setup_terms,
             nyquist_guard_fraction:0.9,maximum_total_energy_j:100.0,maximum_abs_pressure_pa:1e6,
             maximum_abs_connection_force_n:1000.0,solve_relative_tolerance:1e-10,
             energy_absolute_tolerance_j:1e-12,energy_relative_tolerance:1e-8 },
         friction:ModalFrictionConfig { max_iterations:96,maximum_force_n:100.0,maximum_slip_speed_m_s:10.0,
-            force_absolute_tolerance_n:1e-10,force_relative_tolerance:1e-9,sticking_tolerance_m:1e-12 } }
+            force_absolute_tolerance_n:1e-10,force_relative_tolerance:1e-9,sticking_tolerance_m:1e-12 } })
 }
 fn template(w:&input::Wire) -> PrestressedString {
     // Extension-derived tension is filled by the original material/support owner.
@@ -109,6 +111,9 @@ impl input::Spec {
         mut loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
         poll(gate)?;
         if let Some(stops)=&stop_profile { stops.validate_members(self.strings.len())?; }
+        // Count every fluid inertia and physical connection before pack I/O.
+        // The exact owner still applies its stricter connected-island bound.
+        self.network_dimensions(profile.is_some())?;
         let mut baselines = Vec::with_capacity(self.rotational_bridges.len());
         for joint in &self.rotational_bridges {
             let body = profile.as_ref().ok_or("rotational bridges require --body-profile with distinct physical bridge footprints")?;
@@ -125,7 +130,7 @@ impl input::Spec {
             let GestureValue::Bow { station,.. }=track.initial else { return Err("non-bow value".into()); };
             contacts.push(StringBowLocation { string:usize::from(string),station_fraction:station });
         }
-        let settings=options(self.rate,contacts[0]);
+        let settings=options(&self,contacts[0],profile.is_some())?;
         let bank=if let Some(body_profile)=&profile {
             body_profile.compile(&self,sources,&mut catalog,&mut loader,settings.clone(),cx,gate)?
         } else {
@@ -160,6 +165,9 @@ impl input::Spec {
             }
             bank.with_rotational_body_connections(joints, gate)?
         };
+        let bank = if let Some(resolution) = self.cylinder_gas_loading {
+            bank.with_cylinder_gas_loading(resolution, gate)?
+        } else { bank };
         let additional=contacts[1..].iter().map(|location|MaterialBowContact { location:*location,
             law:self.law.clone(),friction:settings.friction }).collect();
         let bank=bank.with_additional_bows(additional,MultiFrictionConfig { max_ports:16,max_sweeps:128,
@@ -219,6 +227,11 @@ fn main()->Result<()> {
         profile.bytes.len(),ready.performance.bank().source().stops().len()); }
     for (joint, baseline) in ready.spec.rotational_bridges.iter().zip(&ready.rotational_bridge_baselines_m) {
         eprintln!("rotational_bridge={joint:?}; body_footprint_separation_m={baseline}");
+    }
+    if let Some(loading)=ready.performance.bank().source().bank().cylinder_gas_loading() {
+        let (modes,links,terms)=ready.spec.network_dimensions(ready.body_profile.is_some())?;
+        eprintln!("cylinder_gas_loading={:?}; complete_modes={modes}; connection_allowance={links}; setup_terms_allowance={terms}",
+            loading.resolution());
     }
     eprintln!("input_bytes={}; gas={:?}; preload_J={:?}",ready.spec.bytes.len(),ready.spec.gas,ready.performance.preload_energy_j());
     // Complete source, geometry, frequency, schedule and preload admission is

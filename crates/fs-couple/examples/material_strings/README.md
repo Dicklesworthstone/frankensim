@@ -106,7 +106,7 @@ refuse rather than disappearing or silently rebuilding geometry.
 
 ## Rotational bridges from physical footprints
 
-Both input versions accept an optional block after ALL string/section records
+All three input versions accept an optional block after ALL string/section/polarization records
 and before `cavity`:
 
 ```text
@@ -197,6 +197,92 @@ it affects sound through physical surface/contact coupling and, when explicitly
 selected, reciprocal rotational bridges. None of these fixtures is a measurement
 of gold, silver or a real string.
 
+## Causal gas loading of the moving strings
+
+All three input versions accept one optional numerical-resolution record after
+the complete string/section/polarization records and any rotational-bridge block,
+immediately before `cavity`:
+
+```text
+cylinder-gas-loading 0.001 30 12
+```
+
+The fields are `X_MIN X_MAX INTERVALS`. This selects the shared unsteady-Stokes
+cylinder operator for every transverse mode in every string. The original
+homogeneous or bonded section supplies its **actual outer radius**, and the
+performance's existing gas supplies density and dynamic viscosity. No second
+radius, gas record, material name switch or per-mode air-loss coefficient is
+accepted here. Changing pressure, the species fractions or a layer pack therefore
+rebuilds the mechanical response through those original physical sources.
+
+The operator adds the surrounding gas's potential-flow inertia and a positive
+spectral approximation of its viscous memory. Each memory branch is a real
+inertial coordinate connected to the string by a dashpot. Both transverse planes,
+the string/body reactions, fluid kinetic energy and viscous work participate in
+the existing coupled solve. The old sampled string-air resistance is replaced,
+so it is not counted twice; the original material bending viscosity and sourced
+torsion remain attached. This selection precedes additional bows, optional
+`--stop-profile` contacts, static preload and the canonical schedule. Memory
+positions are unforced static gauges; a released preload accelerates the fluid
+through the actual string coupling.
+
+The dimensionless radial diffusion coordinate is
+`x = radius * sqrt(gas_density * relaxation_rate / gas_viscosity)`.
+`X_MIN` must lie in `(0, 0.5]`, `X_MAX` must be larger and at most `3000`,
+and `INTERVALS` must be in `1..=4096`. The midpoint grid is uniform in
+`log(x)`. The analytically integrated slow tail below `X_MIN` becomes a
+direct resistance; the fast tail above `X_MAX` is truncated. These are three
+independent approximation controls. Refine both cutoffs, interval count, the
+string/body basis and time/control discretization before making accuracy claims.
+A finer memory grid alone does not establish instrument fidelity.
+
+The supplied `cylinder-flow.material-strings` fixture selects a V3 bonded string
+with one bending mode in each of two planes, one twist mode, a two-mode body and
+a cavity neck. Twelve memory branches per transverse mode add 24 coordinates,
+for **30 complete-network coordinates**. Build its independent sleeve pack using
+the earlier copied TSV files, then render it:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/sleeve-manifest.tsv" --out "$demo/sleeve.fsmatpk"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/cylinder-flow.material-strings" "$demo/cylinder-flow.wav"
+```
+
+Use a new sleeve-pack filename if that pack was already built. The fixture
+coefficients and this deliberately modest resolution are synthetic integration
+data. The native tests additionally combine two layered strings, separate regional
+body footprints, full body viscosity, torque transmission, a cavity, and a
+compliant receiver-bound stop in the same source-preserving path.
+
+V3 retains V2's support and section records and requires one additional row after
+each complete section: `polarizations single` or
+`polarizations two BOW_X BOW_Y BRIDGE_X BRIDGE_Y`. The two direction vectors
+must be unit vectors in the string's transverse plane. The fixture's
+`polarizations two 0.6 0.8 1 0` excites both physical planes while its scalar
+bridge footprint receives motion along the first axis. The circular material
+operator supplies the same inertia and dispersion in both planes; their physical
+coupling directions determine which motions reach contacts and the shared body.
+
+The executable counts **all** requested material, body, neck and fluid
+coordinates against its 128-mode bound. It computes a connection allowance for
+every string bridge, angular joint, memory dashpot, body tensor column and cavity
+compression/neck-loss channel. The original setup estimate
+`N * (L + 1)^2` remains bounded by 16,777,216 work units and the shared connection
+ceiling is 4096. A zero body-viscosity tensor may consume fewer columns than the
+declared allowance. The existing dense propagator additionally admits at most
+**42 modes in each connected linear island**; this stricter computational bound
+can refuse a model that fits the file-level counts. No requested mode or memory
+branch is silently removed. The render report includes the declared resolution
+and complete numerical allocation.
+
+The continuum assumes small transverse motion of a long, isolated circular
+cylinder in an unconfined incompressible Newtonian gas, using local two-dimensional
+flow along the string. It does not resolve finite-amplitude wakes, neighboring
+strings, end/axial flow, rotary drag, rarefaction or compressible radiation.
+The atmosphere remains fixed during one realization. Body/neck observation keeps
+its existing compact-radiation approximation.
+
 ## Material profile and physical limits
 
 The input profile queries **bare SI axes `T` and `omega`**, at the explicitly
@@ -228,7 +314,7 @@ approximation. Source-state validity is not measured instrument-fidelity evidenc
 
 Input caps: 1 MiB performance; 8 MiB per distinct material pack and 64 MiB total
 raw packs; 8 strings, at most 16 layers per string, 16 bow contacts, 16 rotational
-bridges, 64 force ports, 128 complete-network modes,
+bridges, 64 force ports, 128 complete-network modes including fluid memory,
 16 plate modes; 16,384 events per input family; 262,144 compiled controls per
 family; 16,777,216 source/projection work units per compiler; at most 192 kHz,
 600 seconds or 28,800,000 samples. Existing numerical owners retain their stricter
@@ -243,6 +329,6 @@ cargo test -p fs-couple --example material_strings -- --test-threads=1
 ```
 
 The tests exercise actual normalized-pack decoding, material-only substitutions,
-shared gas response, joint pluck/double-bow control, callback equivalence, exact
+shared gas response and causal cylinder memory, joint pluck/double-bow control, callback equivalence, exact
 existing PCM output, and source/input refusals. The fixture TSVs use the existing
 `xtask matdb-pack` compiler, not a new importer.

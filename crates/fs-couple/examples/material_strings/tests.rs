@@ -143,3 +143,6 @@ mod polarized;
 
 #[path = "stops/tests.rs"]
 mod stopped;
+
+#[path = "tests/fluid.rs"]
+mod fluid;
