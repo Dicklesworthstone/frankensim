@@ -15,10 +15,14 @@ use fs_live_piano::{Config, Description, LivePiano};
 
 fn main() {
     let all: Vec<String> = std::env::args().collect();
-    let string_damping = all.iter().any(|a| a == "--rt0425-string-damping");
-    let hammer_stiffness = all.iter().any(|a| a == "--rt0425-hammer-stiffness");
-    let hammer_dissipation = all.iter().any(|a| a == "--rt0425-hammer-dissipation");
-    let args: Vec<String> = all.into_iter().filter(|a| !a.starts_with("--rt0425-")).collect();
+    const LAWS: [&str; 3] = ["--rt0425-string-damping", "--rt0425-hammer-stiffness", "--rt0425-hammer-dissipation"];
+    // A mistyped flag would otherwise validate the default law and report it as the published one.
+    if let Some(bad) = all.iter().skip(1).find(|a| a.starts_with("--") && !LAWS.contains(&a.as_str())) {
+        eprintln!("unknown option {bad}");
+        std::process::exit(2);
+    }
+    let [string_damping, hammer_stiffness, hammer_dissipation] = LAWS.map(|f| all.iter().any(|a| a == f));
+    let args: Vec<String> = all.into_iter().filter(|a| !a.starts_with("--")).collect();
     let band: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(800.0);
     let partials: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(64);
     let seconds: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1.0);

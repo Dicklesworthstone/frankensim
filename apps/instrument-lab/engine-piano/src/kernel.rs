@@ -162,9 +162,9 @@ pub struct Description {
 
 /// The soundboard shipped with the live engine, generated NATIVELY by
 /// `examples/gen_board.rs` with the reference's own `steinway_d` +
-/// `board_geometry::prepare_reduced` (the offline binary's
-/// `--board-band-hz 2400 --board-reduction 32,16,200,400,800,1600,2300`):
-/// the certified FE slice of the Model D board below 2400 Hz projected onto
+/// `board_geometry::prepare_reduced` (the offline binary's `--board-geometry
+/// board-rt16.fsb --board-band-hz 2400 --board-reduction 32,16,200,400,800,1600,2300`):
+/// the certified FE slice of the 16-division Model D board below 2400 Hz projected onto
 /// 32 coordinates, 16 exact low modes plus 16 bridge-response Ritz vectors,
 /// with its full damping matrix. Surface mode shapes are stored in single
 /// precision. Solving that 2400 Hz slice inside the browser would take far

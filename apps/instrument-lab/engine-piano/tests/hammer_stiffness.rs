@@ -54,8 +54,9 @@ fn published_dissipation_needs_the_published_stiffness() {
 
 #[test]
 fn published_dissipation_books_its_loss_and_closes_the_ledger() {
-    // R_H replaces the estimated crush and Prony terms: the felt still loses energy on every
-    // stroke, and the ledger explains the input to roundoff, soft and hard.
+    // R_H replaces the estimated crush and Prony terms, and the K_H card is conservative, so
+    // every joule of felt loss is R_H's (measured 3.5 % of the input at 0.5 m/s, 6.5 % at 4.5).
+    // The ledger explains the input to roundoff, soft and hard.
     for velocity in [0.5, 4.5] {
         let mut cfg = Config::live(RATE);
         cfg.rt0425_hammer_stiffness = true;
@@ -67,7 +68,7 @@ fn published_dissipation_books_its_loss_and_closes_the_ledger() {
         }
         let l = p.close_ledger();
         println!("C4 {velocity} m/s with R_H: input {:.4e} J, felt loss {:.4e} J, residual {:.2e} J", l.input_j, l.felt_loss_j, l.residual_j);
-        assert!(l.felt_loss_j > 1.0e-4 * l.input_j, "felt loss {:e} of {:e} J", l.felt_loss_j, l.input_j);
+        assert!(l.felt_loss_j > 1.0e-2 * l.input_j, "felt loss {:e} of {:e} J", l.felt_loss_j, l.input_j);
         assert!(l.residual_j.abs() < 1.0e-9 * l.input_j, "residual {:e} of {:e} J", l.residual_j, l.input_j);
     }
 }
