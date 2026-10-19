@@ -24,9 +24,10 @@ const KEY_OFFSETS: Record<string, number> = {
 };
 /**
  * RMS octave-balance error [dB, 63 Hz-8 kHz] of the live piano part of Strandbar on each board against the
- * studio render (grand_piano, 128 coordinates); public/live/piano/boards.js, README "Larger live soundboards".
+ * studio render (grand_piano, 128 coordinates), with the silent strings' 600 Hz bank;
+ * public/live/piano/boards.js, README "Larger live soundboards".
  */
-const BOARD_ERROR_DB: Record<number, number> = { 32: 2.51, 48: 1.92, 64: 2.06, 96: 1.8, 128: 1.74 };
+const BOARD_ERROR_DB: Record<number, number> = { 32: 1.52, 48: 0.79, 64: 1.17, 96: 0.5, 128: 0.2 };
 const SPEED_MIN = 0.5;
 const SPEED_MAX = 4.5;
 
@@ -435,7 +436,7 @@ export class LivePianoSection {
     );
     body.append(lists);
     body.append(el('h4', undefined, 'Checked against the offline reference'));
-    body.append(el('p', undefined, 'With nothing but one key on the bridge, the live kernel and the reference engine (the same source files) agree on bridge velocity to within 4 × 10⁻¹² relative over one second, for eight keys at three hammer speeds, with the published string, felt and hammer laws this page plays; their energy books agree to about ten digits. The WebAssembly build in this tab reproduces the native build sample for sample on an isolated A3 and C6. Against the full offline render, the first 15 partials of A3 mf sit within 3 cents on every board and the fitted inharmonicity is 2.41–2.44 × 10⁻⁴ (offline 2.41 × 10⁻⁴). Against the offline render with the live physics on the 128-coordinate board (no air loading, no string waves) they sit within 0.4 cents on 64 and 128 coordinates and within 2.5 on the others.'));
+    body.append(el('p', undefined, 'With nothing but one key on the bridge, the live kernel and the reference engine (the same source files) agree on bridge velocity to within 4 × 10⁻¹² relative over one second, for eight keys at three hammer speeds, with the published string, felt and hammer laws this page plays; their energy books agree to about ten digits. The WebAssembly build in this tab reproduces the native build sample for sample on an isolated C6; on A3 one sample in 144,000 differs, by one float32 step (7.5 × 10⁻⁹ of full scale). Against the full offline render, the first 15 partials of A3 mf sit within 3 cents on every board and the fitted inharmonicity is 2.41–2.44 × 10⁻⁴ (offline 2.41 × 10⁻⁴). Against the offline render with the live physics on the 128-coordinate board (no air loading, no string waves) they sit within 0.4 cents on 64 and 128 coordinates and within 2.5 on the others.'));
     const chips = (title: string, cls: string, items: string[]): HTMLElement => {
       const row = el('div', 'lp-chiprow');
       row.append(el('h4', undefined, title));

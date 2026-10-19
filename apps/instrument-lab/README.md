@@ -213,9 +213,12 @@ engine takes about as long.
 
 Measured on the Strandbar piano part against the studio stem (RMS octave-balance error, 63 Hz-8 kHz,
 same 16-division board and 128-coordinate POD reduction, contacts, hammer law and string losses):
-32 coordinates 2.51 dB, 48 1.92, 64 2.06, 96 1.80, 128 1.74; on the pivoted boards it was 5.99, 3.54, 3.03,
-2.77, 1.76. At 128 the rest is mostly silent strings: on the same board an offline A3 has 2.4 dB
-more energy above 2 kHz than the live one, whose budget and single mechanical step move it by 0.1 dB.
+32 coordinates 1.52 dB, 48 0.79, 64 1.17, 96 0.50, 128 0.20. These include the silent strings' bank
+(`Config::silent_bank_hz`, 600 Hz in the browser: every partial of every string up to the band moves,
+driven by the bridge and drained by its damper). Holding the silent strings as rigid chords it was
+2.51, 1.92, 2.06, 1.80, 1.74, with 125-250 Hz 2.5-2.8 dB high on every board; on the pivoted boards
+5.99, 3.54, 3.03, 2.77, 1.76. On an A3 mf strike the bank takes the early decay from -7.1 to -14.9 dB/s
+(offline -14.8) and the 2-8 kHz share from 2.4 dB below the offline render to 0.6 dB above it.
 
 The browser plays RT-0425's published laws (`wasm.rs`): its string losses, its hammer stiffness K_H on
 each unison string and its rate loss R_H in place of the estimated crush and Prony terms

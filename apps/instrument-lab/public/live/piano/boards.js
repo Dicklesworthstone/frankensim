@@ -3,10 +3,10 @@
 // The number of soundboard coordinates is the audible lever of the live piano. Measured against
 // the studio render of the same Strandbar score (grand_piano on the same 16-division board and
 // 128-coordinate reduction, the same RT-0425 contacts, hammer law and string losses), octave balance
-// error (63 Hz-8 kHz) / 2-8 kHz balance relative to the studio part: 32 -> 2.51 dB / -0.8 dB,
-// 48 -> 1.92 / +1.7, 64 -> 2.06 / +2.5, 96 -> 1.80 / +0.0, 128 -> 1.74 / -1.0. At 128 the rest is
-// mostly the silent strings: the studio render moves them (their dampers take about 13 % of an A3
-// strike), the live piano holds them as rigid chords.
+// error (63 Hz-8 kHz) / 2-8 kHz balance relative to the studio part, with the silent strings' 600 Hz
+// bank: 32 -> 1.52 dB / +0.9 dB, 48 -> 0.79 / +1.5, 64 -> 1.17 / +3.0, 96 -> 0.50 / +0.1,
+// 128 -> 0.20 / -0.1. Holding the silent strings as rigid chords it was 2.51 / -0.8, 1.92 / +1.7,
+// 2.06 / +2.5, 1.80 / +0.0, 1.74 / -1.0: on every board 125-250 Hz sat 2.5-2.8 dB high.
 // The 32-coordinate board is embedded in the wasm; larger bridge-informed POD reductions of the same
 // (0, 2400] Hz FE slice (examples/gen_board.rs, spec pod,N,N/2,16,8000) are fetched from ./boards/
 // only when this device can compute them fast enough.
