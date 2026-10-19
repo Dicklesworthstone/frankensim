@@ -43,14 +43,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             TransientConfig3 { maximum_steps:1000, mass_damping_per_s:0.2,
                 maximum_displacement_m:0.01,..Default::default() },&cx)?;
         let stdout = io::stdout(); let mut output = io::BufWriter::new(stdout.lock());
-        writeln!(output,"time_s,tip_z_m,tip_vz_m_s,tip_az_m_s2,quadratic_energy_j,balance_error_j")?;
+        writeln!(output,"time_s,tip_z_m,tip_vz_m_s,tip_az_m_s2,quadratic_energy_j,balance_error_j,element0_sigma_xx_pa,support_z_n,elastic_energy_j,free_force_residual_n")?;
         for index in 0..1000 {
             let report = run.advance_history(&history,1e-4,&cx)?;
             if index % 10 == 0 || index == 999 {
                 let motion = run.nodal_motion(&cx)?;
-                writeln!(output,"{:.8},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e}",
+                let response = run.recover_response(fs_blake3::ContentHash([73;32]),0.01,&cx)?;
+                let support_z: f64 = response.support_reactions_n.iter().map(|r| r[2]).sum();
+                writeln!(output,"{:.8},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e}",
                     report.time_s,motion[0][7][2],motion[1][7][2],motion[2][7][2],
-                    report.quadratic_energy_j,report.balance_error_j)?;
+                    report.quadratic_energy_j,report.balance_error_j,
+                    response.stress.elements()[0].stress_mandel_pa()[0],support_z,
+                    response.stress.elastic_energy_j(),response.free_force_residual_n)?;
             }
         }
         output.flush()?; Ok(())

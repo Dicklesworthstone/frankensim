@@ -22,6 +22,8 @@ use std::sync::Arc;
 
 /// Physical stress, inertia and support reactions at accepted endpoints.
 pub mod response;
+/// Explicit finite load discontinuities without artificial impulses.
+pub mod events;
 
 /// Explicit resource, solve, motion and energy allowances, all in coherent SI.
 #[derive(Debug, Clone, Copy)]
