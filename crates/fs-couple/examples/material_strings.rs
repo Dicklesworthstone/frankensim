@@ -6,6 +6,8 @@ mod input;
 mod construction;
 #[path = "material_strings/body.rs"]
 mod body;
+#[path = "material_strings/stops.rs"]
+mod stops;
 use std::{collections::BTreeMap, error::Error, fs::{File,OpenOptions}, io::{Read,Seek,Write}, path::Path};
 use fs_couple::bowed_string::runtime::reciprocal::bank::{
     MaterialStringSource,ReciprocalStringBank,StringBankOptions,StringBowLocation};
@@ -92,14 +94,21 @@ fn resolve_properties(name:&str, catalog:&mut Catalog,
     Ok(resolve_material_state_point(&catalog[name].card,&query,requirements,Pick::SingleClaimOnly)?)
 }
 struct Ready { spec: input::Spec, catalog: Catalog, performance: MultiBowPerformance,
-    body_profile: Option<body::Profile>, rotational_bridge_baselines_m: Vec<f64> }
+    body_profile: Option<body::Profile>, rotational_bridge_baselines_m: Vec<f64>,
+    stop_profile: Option<stops::Profile> }
 impl input::Spec {
     fn compile(self,cx:&Cx<'_>,gate:&CancelGate,loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
         self.compile_with_body(cx,gate,None,loader)
     }
     fn compile_with_body(self,cx:&Cx<'_>,gate:&CancelGate,profile:Option<body::Profile>,
+        loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
+        self.compile_with_profiles(cx,gate,profile,None,loader)
+    }
+    fn compile_with_profiles(self,cx:&Cx<'_>,gate:&CancelGate,profile:Option<body::Profile>,
+        stop_profile:Option<stops::Profile>,
         mut loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
         poll(gate)?;
+        if let Some(stops)=&stop_profile { stops.validate_members(self.strings.len())?; }
         let mut baselines = Vec::with_capacity(self.rotational_bridges.len());
         for joint in &self.rotational_bridges {
             let body = profile.as_ref().ok_or("rotational bridges require --body-profile with distinct physical bridge footprints")?;
@@ -155,12 +164,13 @@ impl input::Spec {
             law:self.law.clone(),friction:settings.friction }).collect();
         let bank=bank.with_additional_bows(additional,MultiFrictionConfig { max_ports:16,max_sweeps:128,
             max_setup_terms:1_048_576 },gate)?;
+        let bank=match &stop_profile { Some(stops)=>stops.bind(bank,gate)?, None=>bank };
         let names=self.schedule.tracks().iter().map(|t|t.id.clone()).collect();
         let mut performance=bank.into_scheduled(self.schedule.clone(),names,MultiBowPerformanceConfig {
             samples:self.samples,max_block:self.block,max_work:input::MAX_WORK,max_events:input::MAX_CONTROLS })?;
         if let Some(forces)=&self.forces { performance=performance.with_string_forces(forces.clone(),gate)?; }
         performance.validate_sample_rate(self.rate)?;performance.validate_sample_count(self.samples)?;poll(gate)?;
-        Ok(Ready { spec:self,catalog,performance,body_profile:profile,rotational_bridge_baselines_m:baselines })
+        Ok(Ready { spec:self,catalog,performance,body_profile:profile,rotational_bridge_baselines_m:baselines,stop_profile })
     }
 }
 impl Ready {
@@ -181,12 +191,12 @@ fn read_bounded(path:&Path,cap:usize)->Result<Vec<u8>> {
 }
 fn main()->Result<()> {
     let args:Vec<_>=std::env::args_os().collect();
-    if args.len()!=3 && !(args.len()==5 && args[3]=="--body-profile") {
-        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE]".into());
+    if args.len()<3 {
+        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE]".into());
     }
-    let profile=if args.len()==5 {
-        Some(body::Profile::parse(&read_bounded(Path::new(&args[4]),body::MAX_BYTES)?)?)
-    } else { None };
+    let (body_path,stop_path)=stops::profile_paths(&args[3..])?;
+    let profile=body_path.map(|p|body::Profile::parse(&read_bounded(p,body::MAX_BYTES)?)).transpose()?;
+    let stop_profile=stop_path.map(|p|stops::Profile::parse(&read_bounded(p,stops::MAX_BYTES)?)).transpose()?;
     let path=Path::new(&args[1]);let parent=path.parent().unwrap_or(Path::new("."));
     let spec=input::Spec::parse(&read_bounded(path,input::MAX_INPUT_BYTES)?)?;
     let gate=CancelGate::new_clock_free();let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -194,7 +204,7 @@ fn main()->Result<()> {
     let mut ready=pool.scope(|arena| {
         let cx=Cx::new(&gate,arena,fs_exec::StreamKey {seed:0,kernel_id:0,tile:0,iteration:0},
             fs_exec::Budget::INFINITE,fs_exec::ExecMode::Deterministic);
-        spec.compile_with_body(&cx,&gate,profile,|name| {
+        spec.compile_with_profiles(&cx,&gate,profile,stop_profile,|name| {
             let bytes=read_bounded(&parent.join(name),input::MAX_PACK_BYTES.min(remaining))?;
             remaining=remaining.checked_sub(bytes.len()).ok_or("material pack byte budget exceeded")?;
             Ok(NormalizedPack::from_bytes(&bytes)?)
@@ -205,6 +215,8 @@ fn main()->Result<()> {
             source.pack.content_hash(),source.pack.source_artifact());
     }
     if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
+    if let Some(profile)=&ready.stop_profile { eprintln!("stop_profile_bytes={}; stops={}",
+        profile.bytes.len(),ready.performance.bank().source().stops().len()); }
     for (joint, baseline) in ready.spec.rotational_bridges.iter().zip(&ready.rotational_bridge_baselines_m) {
         eprintln!("rotational_bridge={joint:?}; body_footprint_separation_m={baseline}");
     }

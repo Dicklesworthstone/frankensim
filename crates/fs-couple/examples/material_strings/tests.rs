@@ -140,3 +140,6 @@ mod layered;
 
 #[path = "tests/polarized.rs"]
 mod polarized;
+
+#[path = "stops/tests.rs"]
+mod stopped;
