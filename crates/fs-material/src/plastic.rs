@@ -7,6 +7,8 @@
 pub mod source;
 /// Incremental work and physical heat of the energetic-hardening model.
 pub mod energy;
+/// Fixed-energy native thermoplastic heat feedback through shared transport.
+pub mod thermal;
 
 use crate::elastic::IsotropicElastic;
 use crate::tensor::{contract, deviator, trace};

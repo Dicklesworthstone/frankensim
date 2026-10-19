@@ -1571,3 +1571,25 @@ change, thermal expansion, finite-strain work, or parameter-work accounting.
 The regression source covers independently derived pure-shear work and storage,
 elastic unloading without physical heat, reversal with accumulated history,
 yield reduction at fixed strain, and invalid-history refusal.
+
+### Energetic J2 caloric feedback
+
+`plastic::thermal::CaloricPoint` binds a virgin native J2 history to a
+source-resolved, strictly increasing solid caloric chart. Yield stress and heat
+capacity may vary with absolute temperature. Elastic coefficients, the chosen
+hardening datum, density and reference thermal geometry remain fixed; all six
+property roles share one material card and source context, with continuously
+supported claims pinned over the full chart. Mechanically bounded strain,
+stress or rate coefficients cannot be frozen while their histories evolve.
+Renamed temperature coordinates require explicit absolute-temperature semantics.
+
+This reduction declares energetic isotropic hardening: `H alpha^2/2` is stored
+energy. Only `sigma_y(T1) delta_alpha` is supplied as heat to the existing
+`UniformEnthalpyStep` transport owner. Elastic storage, hardening storage,
+boundary heat and backward-Euler numerical loss remain distinct. Every thermal
+proposal starts from the same accepted mechanical/caloric history; the actual
+returned temperature re-evaluates the native J2 increment before separate heat
+and combined-work gates accept the candidate. A rejected or cancelled proposal
+changes neither history nor time. The model includes no thermal eigenstrain,
+variable elastic free energy, phase change or finite-deformation volume work;
+source receipts and residual gates do not establish empirical accuracy.
