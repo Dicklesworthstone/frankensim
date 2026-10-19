@@ -11,7 +11,7 @@ use super::super::MaterialContact;
 use fs_contact::normal_patch::source::SourcePointContact;
 use fs_material::phase::UniformEnthalpyStep;
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionObserver,
-    DepositionSimulation, EnergyAudit, Event, StepConfig};
+    DepositionSimulation, EnergyAudit, Event, HeatTransfer, StepConfig};
 
 /// One reservoir is the SAME finite thermal cell, not another heat destination.
 /// All reservoirs and all active cells must be bound exactly once. Several
@@ -255,6 +255,20 @@ impl<O: DepositionObserver> DepositionObserver for MechanicalHeating<O> {
             return Err(DepositionError::InvalidInput("observer cannot override a source-bound physical contact link").into());
         }
         Ok(values)
+    }
+    fn heat_transfers(&mut self, thermal:&DepositionSimulation<'_>,
+        checkpoint:&mut dyn FnMut()->Result<(),DepositionError>)
+        ->Result<Vec<HeatTransfer>,Self::Error> {
+        // Conservative exchange is internal to the original thermal network.
+        // Do not fold it into mechanical heat or an external source callback.
+        self.observer.heat_transfers(thermal,checkpoint).map_err(NetworkError::Observer)
+    }
+    fn limit_timestep_s(&mut self, thermal:&DepositionSimulation<'_>, proposed_s:f64,
+        checkpoint:&mut dyn FnMut()->Result<(),DepositionError>)
+        ->Result<f64,Self::Error> {
+        // This sees the combined mechanical/observer source and conductive
+        // state, so the original advection owner can compose its actual CFL.
+        self.observer.limit_timestep_s(thermal,proposed_s,checkpoint).map_err(NetworkError::Observer)
     }
     fn step(&mut self,start:f64,dt:f64,old:&BTreeMap<CellId,f64>,thermal:&DepositionSimulation<'_>,
         checkpoint:&mut dyn FnMut()->Result<(),DepositionError>)->Result<(),Self::Error> {

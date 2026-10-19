@@ -37,6 +37,12 @@ existing mechanical-heating proposal and accounting code. The network's
 observer, finite stores, motion, contact sources, film coefficients and liquid
 source receipts all publish together. No film work is redeposited, and work from
 the completed sample is never recomputed using the hotter endpoint viscosity.
+The mechanical-heating wrapper also forwards conservative `heat_transfers` and
+`limit_timestep_s`. An `Advected` observer or live material-flow observer therefore
+keeps its actual internal enthalpy flux, inlet/outlet account and combined CFL
+on the same mechanical/thermal step. These fluxes are not relabelled external
+mechanical heat. A focused flowing-liquid regression exercises heat export and
+an advective timestep shorter than the mechanical sample.
 
 ## Scope and evidence
 
