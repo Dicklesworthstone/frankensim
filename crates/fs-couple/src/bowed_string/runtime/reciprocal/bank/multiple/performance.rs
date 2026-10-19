@@ -104,6 +104,10 @@ impl MultiBowStringBank {
                 max_work: remaining_work, max_events: config.max_events-events.len(),
                 station_fraction: bow.location.station_fraction,
             },path)?;
+            if self.system.contact_normal_load(port).is_some()
+                && compiled.events.iter().any(|e| e.drive.normal_force_n != 0.0) {
+                return Err(source_invalid("contact-loaded bow tracks must not prescribe an additional normal force"));
+            }
             remaining_work -= compiled.required_work;
             events.try_reserve(compiled.events.len())
                 .map_err(|_| source_invalid("cannot reserve complete bow controls"))?;
@@ -216,9 +220,8 @@ impl PressureRenderer for MultiBowPerformance {
                     &loads.candidate
                 } else { &self.forces }
             } else { &self.forces };
-            let mut next_motion = None;
-            let result = if let Some(motion) = self.stop_motion.as_mut() {
-                next_motion = Some(motion.prepare(sample + 1));
+            let next_motion = self.stop_motion.as_mut().map(|motion| motion.prepare(sample+1));
+            let result = if let Some(motion) = &self.stop_motion {
                 self.bank.system.step_with_obstacle_offsets(forces, &self.candidate, &motion.candidate)
             } else { self.bank.system.step(forces, &self.candidate) };
             match result {
@@ -228,9 +231,7 @@ impl PressureRenderer for MultiBowPerformance {
                     if let (Some(loads), Some(cursor)) = (self.string_forces.as_mut(), next_force) {
                         self.forces.copy_from_slice(&loads.candidate); loads.next = cursor;
                     }
-                    if let (Some(motion), Some(cursor)) = (self.stop_motion.as_mut(), next_motion) {
-                        motion.next = cursor;
-                    }
+                    if let (Some(motion), Some(cursor)) = (self.stop_motion.as_mut(), next_motion) { motion.next = cursor; }
                 },
                 Err(error) => { self.poisoned = true; return Err(RenderError::Friction(error)); }
             }
@@ -242,5 +243,5 @@ impl PressureRenderer for MultiBowPerformance {
 /// Physical load-and-release excitation of the same material instrument.
 pub mod force;
 
-/// Prescribed normal support trajectories on the same physical sample clock.
+/// Normal-support trajectories on the same physical sample clock.
 pub mod motion;

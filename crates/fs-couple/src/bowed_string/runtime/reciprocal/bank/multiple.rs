@@ -5,9 +5,9 @@
 //! work, sliding loss and pressure together. This module adds no force law or
 //! time integration. Adding contacts preserves existing vibration and clocks.
 //!
-//! Loads and surface speeds are prescribed independently per contact. A single
-//! bow spanning several strings still needs an external normal-load model;
-//! this adapter does not infer hair compliance or redistribute normal forces.
+//! Loads are prescribed by default. Explicit co-located normal-contact bindings
+//! instead resolve each load from contact mechanics. Surface speeds remain
+//! prescribed; a shared bow-hair structure is not inferred by this adapter.
 //! Every contact station is fixed. The underlying bounded nonlinear solve may
 //! refuse a step; global uniqueness and measured instrument timbre are not claimed.
 
@@ -36,6 +36,7 @@ pub struct MultiBowStringBankSource {
     bows: Vec<MaterialBowContact>,
     joint: MultiFrictionConfig,
     stops: Vec<stops::MaterialStringStop>,
+    bow_contact_loads: Vec<contact_load::BowContactLoad>,
 }
 impl MultiBowStringBankSource {
     /// Original strings, layers, regional/uniform body, cavity, gas and supports.
@@ -106,7 +107,7 @@ impl ReciprocalStringBank {
             .map_err(ReciprocalStringError::Friction)?;
         poll(gate)?;
         Ok(MultiBowStringBank { source: MultiBowStringBankSource {
-            bank: self.source, bows, joint, stops: Vec::new(),
+            bank: self.source, bows, joint, stops: Vec::new(), bow_contact_loads: Vec::new(),
         }, cards: self.cards, system })
     }
 }
@@ -121,7 +122,9 @@ impl MultiBowStringBank {
     #[must_use]
     pub const fn system(&self) -> &MultiFrictionModalSystem { &self.system }
     /// One physical sample for ALL strings, bodies and contacts. The drive slice
-    /// must match `source().bows()` exactly; zero load releases only that bow.
+    /// must match `source().bows()` exactly. A prescribed zero load releases its
+    /// bow; for contact-loaded bows, zero means no additional prescribed load
+    /// and separation of the bound normal contact supplies the actual release.
     pub fn step(&mut self, external: &[f64], drives: &[FrictionDrive])
         -> Result<&MultiFrictionFrame, ModalFrictionError> { self.system.step(external, drives) }
     /// Same atomic physical sample with the original owner's cancellation polls.
@@ -141,3 +144,7 @@ pub mod stops;
 
 /// Source/interface applicability retained through the existing bow performers.
 mod interface;
+
+
+/// Co-located normal and tangential material-string contacts in one solve.
+pub mod contact_load;
