@@ -132,12 +132,12 @@ impl<'a> HeatedImpactSystem<'a> {
         mut transport:impl FnMut(ImpactThermalTrial<'_>)
             -> Result<CoupledThermalStep<R>,ImpactError>,
     ) -> Result<TransportedImpactFrame<R>,ImpactError> {
-        let Self {mechanics,stores,routes,heat,heat_tolerance_j,..}=self;
+        let Self {mechanics,stores,routes,film_routes,heat,heat_tolerance_j,..}=self;
         let mut proposals=Vec::new();
         let mut inventories=Vec::with_capacity(stores.len());
         let (mut deposited,mut change,mut boundary)=(0.0,0.0,0.0);
         let mechanical=mechanics.step_checked(forces,gate,|system,next,velocity,record| {
-            deposited=stage_heat(system,next,velocity,record,routes,heat)?;
+            deposited=stage_heat(system,next,velocity,record,routes,film_routes,heat)?;
             if gate.is_requested() {return Err(ImpactError::Cancelled);}
             let inputs:Vec<_>=stores.iter().enumerate().map(|(i,s)|ReservoirThermalInput {
                 key:&s.key,thermal:UniformEnthalpyStepInput {
@@ -200,3 +200,4 @@ impl<'a> HeatedImpactSystem<'a> {
 fn accumulate(sum:f64,correction:f64,value:f64)->(f64,f64) {
     let y=value-correction;let next=sum+y;(next,(next-sum)-y)
 }
+

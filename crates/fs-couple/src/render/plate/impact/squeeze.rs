@@ -2,12 +2,18 @@
 //! fs-tribo owns the pressure law; fs-phs owns stepping and dissipation receipts.
 //! Contact, film pressure and its state-dependent tangent are evaluated at the
 //! same trial configuration and discrete-gradient effort, never one tick late.
+/// Shared gas/liquid transport data driving the original Reynolds operator.
+pub mod material;
 pub use fs_tribo::resistive_film::{FilmCell, FilmChannel, FilmError, FilmLimits,
     FilmReport, GapPort, ResistiveFilm};
 use super::{ImpactError, ImpactSystem, MAX_IMPACT_MODES, invalid};
 use fs_tribo::resistive_film::MAX_CELLS;
 
 impl ImpactSystem {
+    /// Number of attached, immutable pressure islands. Their insertion indices
+    /// remain stable through prepared execution and finite thermal heat routes.
+    pub fn squeeze_film_count(&self) -> usize { self.squeeze_films.len() }
+
     /// Add one immutable fluid pressure island without replacing contacts,
     /// resetting body/history state, or creating a second time integrator.
     /// Construction is cold. The film's ports must cover every mechanical mode,
@@ -149,3 +155,4 @@ mod tests {
         assert_eq!(s.samples(),0);
     }
 }
+

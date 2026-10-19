@@ -53,7 +53,7 @@ fn original_network_parity_and_three_partner_simultaneous_refinement() {
                 thermal_config(dt),&[0.0;2],&gate,unchanged).unwrap();
             assert_eq!(thermal.cells(),reference.cells());assert_eq!(thermal.time_s(),reference.time_s());
             assert_eq!(frame.network.events,0);assert_eq!(frame.impact.thermal.impact.deposited_heat_j,0.0);
-            near(frame.non_contact_heat_j,0.0,1e-18);
+            near(frame.external_heat_j,0.0,1e-18);
             for binding in bindings() {
                 let reservoir=heated.reservoirs().iter().find(|r|r.key()==binding.reservoir).unwrap();
                 assert_eq!(reservoir.state().specific_enthalpy_j_kg(),thermal.cells()[&binding.cell].specific_h_j_kg);
@@ -105,7 +105,7 @@ fn actual_contact_work_and_other_sources_share_one_network_without_persistent_ge
             thermal_config(5e-7),&[0.0;2],&gate,unchanged).unwrap();
         assert_eq!(plain.state(),s.mechanics().state());
         heat+=frame.impact.thermal.impact.deposited_heat_j;
-        supplied+=frame.non_contact_heat_j;substeps+=frame.network.substeps;
+        supplied+=frame.external_heat_j;substeps+=frame.network.substeps;
         assert!(frame.impact.thermal.impact.combined_energy_residual_j.abs()<1e-9);
         assert!(thermal.cells().values().all(|cell|cell.boundary.source_w==0.0));
         assert!(thermal.links().values().all(|link|link.conductance_w_k==0.01));
@@ -155,3 +155,4 @@ fn stale_chart_geometry_mapping_clock_pending_events_and_cancellation_do_not_pub
 
 #[path="network/contact.rs"]
 mod contact;
+
