@@ -68,6 +68,8 @@ pub mod selector;
 /// Independent characterized sheet bending and inertia on the original DKT owner.
 pub mod sheet_plate;
 pub mod speaker;
+/// Shared enthalpy and material fields driving native three-dimensional solid equilibrium.
+pub mod solid_enthalpy;
 pub mod stribeck_friction;
 pub mod string_specimen;
 pub mod strip_enthalpy;

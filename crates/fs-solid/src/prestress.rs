@@ -70,6 +70,30 @@ impl TetLinearElasticProblem<'_> {
     ) -> Result<PrestressedTetAssembly, TetElasticError> {
         let stress = self.recover_thermal_stress(solution, thermal, mesh_frame,
             maximum_absolute_mandel_strain, cx)?;
+        self.assemble_tangent_from_stress(stress, cx)
+    }
+
+    /// The same initial-stress pencil for equilibrium with explicit dead nodal
+    /// forces, including distributed loads already integrated by loads3.
+    ///
+    /// Recover stress against the exact original force vector before assembling
+    /// the shared correction. A changed force, material, thermal field, mesh or
+    /// support cannot reuse a stale displacement. Dead forces add no follower
+    /// stiffness; the original thermal-only entrypoint retains its input contract.
+    #[allow(clippy::too_many_arguments)]
+    pub fn assemble_thermal_tangent_with_nodal_forces(
+        &self, solution: &TetThermalDisplacementSolution,
+        thermal: TetThermalStrainField<'_>, nodal_forces_n: &[(usize, f64)],
+        mesh_frame: ContentHash, maximum_absolute_mandel_strain: f64, cx: &Cx<'_>,
+    ) -> Result<PrestressedTetAssembly, TetElasticError> {
+        let stress = self.recover_thermal_stress_with_nodal_forces(solution, thermal,
+            nodal_forces_n, mesh_frame, maximum_absolute_mandel_strain, cx)?;
+        self.assemble_tangent_from_stress(stress, cx)
+    }
+
+    fn assemble_tangent_from_stress(
+        &self, stress: TetThermalStressReport, cx: &Cx<'_>,
+    ) -> Result<PrestressedTetAssembly, TetElasticError> {
         let mut pencil = self.assemble(cx)?;
         checkpoint(cx)?;
         let mut reduced = vec![None; self.nodes_m.len().checked_mul(3)
