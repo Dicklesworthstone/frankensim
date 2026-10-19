@@ -13,6 +13,8 @@ pub mod exchange;
 
 /// Shared source-resolved rigid-body inertia coupled to the same gas dynamics.
 pub mod material;
+/// Source-bound reaction progress and finite gas energy driving the same wall.
+pub mod reactive;
 /// Reciprocal finite-body enthalpy/phase exchange on the same gas/momentum step.
 pub mod thermal;
 
@@ -324,3 +326,4 @@ mod tests;
 mod warping;
 
 crate::port_adoption::impl_ported_module!(GasPiston, ports);
+

@@ -79,6 +79,20 @@ impl MaterialGasPiston {
         self.piston.step(input, controls, cancelled)
     }
 
+    /// Preserve the original source-resolved body while a declared reaction
+    /// changes gas composition, temperature and the actual pressure/work load.
+    /// The immutable candidate contains no separately supplied piston mass.
+    pub fn reactive_candidate(
+        &self, reaction: &super::reactive::GasReaction, input: PistonInput,
+        kinetics: super::reactive::GasReactionSolve, controls: PistonSolve,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<super::reactive::ReactivePistonCandidate<Self>, super::reactive::GasReactionError> {
+        let candidate = self.piston.reactive_candidate(reaction, input, kinetics, controls, &mut cancelled)?
+            .map_piston(|piston| Self { body: self.body.clone(), piston });
+        if cancelled() { return Err(super::reactive::GasReactionError::Cancelled); }
+        Ok(candidate)
+    }
+
     /// Use the same conservative finite-reservoir exchange with the original
     /// source-resolved rigid-body inertia and retained material regions.
     #[allow(clippy::too_many_arguments)]

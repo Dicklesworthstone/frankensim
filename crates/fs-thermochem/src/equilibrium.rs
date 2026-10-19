@@ -5,7 +5,7 @@
 //! reaction Gibbs energy and the dimensionless pressure-activity equilibrium
 //! constant under one exact gas/ideal-gas/reference-pressure convention. It
 //! also supports an explicitly caller-declared stoichiometric mass-action
-//! closure over positive dimensionless ideal-gas activities. It does not
+//! closure over nonnegative dimensionless ideal-gas activities. It does not
 //! establish empirical kinetic orders, integrate kinetics, or prove that a
 //! named reaction is physically meaningful.
 
@@ -25,7 +25,8 @@ pub const REACTION_EQUILIBRIUM_EVALUATOR_VERSION_V1: u32 = 1;
 /// Version of the reverse-progress-rate consistency operation tree.
 pub const REVERSE_RATE_CLOSURE_EVALUATOR_VERSION_V1: u32 = 1;
 /// Version of the declared stoichiometric mass-action operation tree.
-pub const STOICHIOMETRIC_MASS_ACTION_EVALUATOR_VERSION_V1: u32 = 1;
+/// Version 2 admits exact absence separately from exponential underflow.
+pub const STOICHIOMETRIC_MASS_ACTION_EVALUATOR_VERSION_V1: u32 = 2;
 /// Maximum species rows retained or scanned by one reaction model.
 pub const MAX_REACTION_SPECIES_V1: usize = 128;
 /// Maximum reaction columns whose matrix identity may be bound by one model.
@@ -1443,6 +1444,9 @@ pub enum MassActionArithmeticValueV1 {
 pub enum MassActionDirectionalRateStatusV1 {
     /// Activity product and directional progress rate are positive and finite.
     FinitePositive,
+    /// A participating species is absent: product and rate are exactly zero.
+    /// The retained log product is negative infinity, not numerical underflow.
+    ZeroActivity,
     /// The log product is finite but direct exponentiation overflowed.
     LogOnlyActivityProductOverflow,
     /// The log product is finite but direct exponentiation underflowed.
@@ -1462,7 +1466,7 @@ pub enum MassActionDirectionalRateStatusV1 {
 /// mass-action progress.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoichiometricMassActionErrorV1 {
-    /// One activity was zero, negative, or non-finite.
+    /// One activity was negative or non-finite.
     InvalidActivity {
         /// Affected species.
         species: SpeciesId,
@@ -1528,7 +1532,7 @@ impl fmt::Display for StoichiometricMassActionErrorV1 {
         match self {
             Self::InvalidActivity { species, bits } => write!(
                 formatter,
-                "ideal-gas activity for {species} must be positive and finite (bits {bits:#018x})"
+                "ideal-gas activity for {species} must be nonnegative and finite (bits {bits:#018x})"
             ),
             Self::TooManyActivities { offered, limit } => write!(
                 formatter,
@@ -1583,7 +1587,7 @@ impl core::error::Error for StoichiometricMassActionErrorV1 {
     }
 }
 
-/// One positive finite dimensionless ideal-gas activity `p_i / p0`.
+/// One nonnegative finite dimensionless ideal-gas activity `p_i / p0`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IdealGasSpeciesActivityV1 {
     species: SpeciesId,
@@ -1591,16 +1595,16 @@ pub struct IdealGasSpeciesActivityV1 {
 }
 
 impl IdealGasSpeciesActivityV1 {
-    /// Admit one positive finite dimensionless activity.
+    /// Admit one nonnegative finite dimensionless activity, including absence.
     ///
     /// # Errors
-    /// Refuses zero, negative, NaN, or infinite values.
+    /// Refuses negative, NaN, or infinite values.
     pub fn new(
         species: SpeciesId,
         activity: Dimensionless,
     ) -> Result<Self, StoichiometricMassActionErrorV1> {
         let value = activity.value();
-        if !value.is_finite() || value <= 0.0 {
+        if !value.is_finite() || value < 0.0 {
             return Err(StoichiometricMassActionErrorV1::InvalidActivity {
                 species,
                 bits: value.to_bits(),
@@ -1615,7 +1619,7 @@ impl IdealGasSpeciesActivityV1 {
         &self.species
     }
 
-    /// Positive finite dimensionless activity.
+    /// Nonnegative finite dimensionless activity.
     #[must_use]
     pub const fn activity(&self) -> Dimensionless {
         self.activity
@@ -1628,7 +1632,8 @@ impl IdealGasSpeciesActivityV1 {
     }
 }
 
-/// Finite logarithm of one directional dimensionless activity product.
+/// Logarithm of one directional dimensionless activity product. Negative
+/// infinity denotes exact zero activity; all positive-state logs are finite.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct LogMassActionActivityProductV1(Dimensionless);
 
@@ -1650,7 +1655,7 @@ impl LogMassActionActivityProductV1 {
     }
 }
 
-/// Positive finite direct directional activity product, when representable.
+/// Nonnegative finite direct directional activity product, when representable.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct MassActionActivityProductV1(Dimensionless);
 
@@ -1659,7 +1664,7 @@ impl MassActionActivityProductV1 {
         Self(Dimensionless::new(value))
     }
 
-    /// Raw positive finite dimensionless product.
+    /// Raw nonnegative finite dimensionless product.
     #[must_use]
     pub const fn value(self) -> f64 {
         self.0.value()
@@ -1672,7 +1677,7 @@ impl MassActionActivityProductV1 {
     }
 }
 
-/// Positive finite forward or reverse reaction-progress rate.
+/// Nonnegative finite forward or reverse reaction-progress rate.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct DirectionalReactionProgressRateV1(ReactionProgressRateQuantityV1);
 
@@ -1760,8 +1765,10 @@ impl DeclaredStoichiometricMassActionV1 {
     /// Activities are canonicalized by `SpeciesId` and must cover all and only
     /// the selected reaction's active terms. Version 1 evaluates directional
     /// products in log space using the exact coefficient magnitudes, retains
-    /// finite log products across direct range loss, and publishes a signed
+    /// finite positive-state log products across direct range loss, and publishes a signed
     /// net rate only when both directional rates are directly representable.
+    /// An exactly absent participant gives its direction a zero rate with a
+    /// `ZeroActivity` status and negative-infinite log. No trace gas is invented.
     ///
     /// # Errors
     /// Refuses activity count/identity drift, bounded receipt allocation,
@@ -1823,9 +1830,13 @@ impl DeclaredStoichiometricMassActionV1 {
         })?;
         let mut log_forward_activity_product = 0.0f64;
         let mut log_reverse_activity_product = 0.0f64;
+        let mut zero_forward = false;
+        let mut zero_reverse = false;
         for (term, activity) in terms.iter().zip(&activities) {
-            let log_activity = fs_math::det::ln(activity.value());
-            if !log_activity.is_finite() {
+            let absent = activity.value() == 0.0;
+            let log_activity = if absent { f64::NEG_INFINITY }
+                else { fs_math::det::ln(activity.value()) };
+            if !absent && !log_activity.is_finite() {
                 return Err(
                     StoichiometricMassActionErrorV1::UnrepresentableArithmeticValue {
                         species: Some(activity.species().clone()),
@@ -1842,7 +1853,7 @@ impl DeclaredStoichiometricMassActionV1 {
             } else {
                 MassActionDirectionV1::Reverse
             };
-            if !contribution.is_finite() {
+            if !absent && !contribution.is_finite() {
                 return Err(
                     StoichiometricMassActionErrorV1::UnrepresentableArithmeticValue {
                         species: Some(activity.species().clone()),
@@ -1857,7 +1868,12 @@ impl DeclaredStoichiometricMassActionV1 {
             } else {
                 &mut log_reverse_activity_product
             };
-            *directional_sum += contribution;
+            if absent {
+                if direction == MassActionDirectionV1::Forward { zero_forward = true; }
+                else { zero_reverse = true; }
+            } else {
+                *directional_sum += contribution;
+            }
             if !directional_sum.is_finite() {
                 return Err(
                     StoichiometricMassActionErrorV1::UnrepresentableArithmeticValue {
@@ -1877,6 +1893,8 @@ impl DeclaredStoichiometricMassActionV1 {
                 log_contribution_bits: contribution.to_bits(),
             });
         }
+        if zero_forward { log_forward_activity_product = f64::NEG_INFINITY; }
+        if zero_reverse { log_reverse_activity_product = f64::NEG_INFINITY; }
 
         let reverse_rate = self
             .reverse_rate_closure
@@ -1962,6 +1980,13 @@ fn evaluate_mass_action_direction(
     ),
     StoichiometricMassActionErrorV1,
 > {
+    if log_activity_product == f64::NEG_INFINITY {
+        return Ok((
+            MassActionDirectionalRateStatusV1::ZeroActivity,
+            Some(MassActionActivityProductV1::new(0.0)),
+            Some(DirectionalReactionProgressRateV1::new(0.0)),
+        ));
+    }
     let raw_product = fs_math::det::exp(log_activity_product);
     if raw_product.is_infinite() {
         return Ok((
@@ -2051,7 +2076,7 @@ impl StoichiometricMassActionTermReceiptV1 {
         self.coefficient
     }
 
-    /// Exact positive dimensionless activity bits.
+    /// Exact nonnegative dimensionless activity bits.
     #[must_use]
     pub const fn activity_bits(&self) -> u64 {
         self.activity_bits
@@ -2134,13 +2159,13 @@ impl DeclaredStoichiometricMassActionReceiptV1 {
         &self.term_receipts
     }
 
-    /// Exact finite forward log-product bits.
+    /// Exact forward log-product bits; negative infinity denotes exact absence.
     #[must_use]
     pub const fn log_forward_activity_product_bits(&self) -> u64 {
         self.log_forward_activity_product_bits
     }
 
-    /// Exact finite reverse log-product bits.
+    /// Exact reverse log-product bits; negative infinity denotes exact absence.
     #[must_use]
     pub const fn log_reverse_activity_product_bits(&self) -> u64 {
         self.log_reverse_activity_product_bits
@@ -2212,37 +2237,37 @@ impl DeclaredStoichiometricMassActionEvaluationV1 {
         &self.reverse_rate
     }
 
-    /// Always-retained finite forward log activity product.
+    /// Forward log activity product; negative infinity denotes exact absence.
     #[must_use]
     pub const fn log_forward_activity_product(&self) -> LogMassActionActivityProductV1 {
         self.log_forward_activity_product
     }
 
-    /// Always-retained finite reverse log activity product.
+    /// Reverse log activity product; negative infinity denotes exact absence.
     #[must_use]
     pub const fn log_reverse_activity_product(&self) -> LogMassActionActivityProductV1 {
         self.log_reverse_activity_product
     }
 
-    /// Direct positive finite forward activity product, when representable.
+    /// Direct nonnegative finite forward activity product, when representable.
     #[must_use]
     pub const fn forward_activity_product(&self) -> Option<MassActionActivityProductV1> {
         self.forward_activity_product
     }
 
-    /// Direct positive finite reverse activity product, when representable.
+    /// Direct nonnegative finite reverse activity product, when representable.
     #[must_use]
     pub const fn reverse_activity_product(&self) -> Option<MassActionActivityProductV1> {
         self.reverse_activity_product
     }
 
-    /// Direct positive finite forward progress rate, when representable.
+    /// Direct nonnegative finite forward progress rate, when representable.
     #[must_use]
     pub const fn forward_progress_rate(&self) -> Option<DirectionalReactionProgressRateV1> {
         self.forward_progress_rate
     }
 
-    /// Direct positive finite reverse progress rate, when representable.
+    /// Direct nonnegative finite reverse progress rate, when representable.
     #[must_use]
     pub const fn reverse_progress_rate(&self) -> Option<DirectionalReactionProgressRateV1> {
         self.reverse_progress_rate
@@ -2423,7 +2448,7 @@ mod tests {
 
     fn activity(species_id: &str, value: f64) -> IdealGasSpeciesActivityV1 {
         IdealGasSpeciesActivityV1::new(species(species_id), Dimensionless::new(value))
-            .expect("positive finite activity")
+            .expect("nonnegative finite activity")
     }
 
     fn water_mass_action(scale: f64) -> DeclaredStoichiometricMassActionV1 {
@@ -2916,7 +2941,7 @@ mod tests {
 
     #[test]
     fn g3_reverse_rate_refuses_invalid_forward_scale_and_nested_temperature() {
-        for value in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+        for value in [-1.0, f64::INFINITY, f64::NAN] {
             assert!(matches!(
                 ReactionProgressRateScaleV1::new(ReactionProgressRateQuantityV1::new(value)),
                 Err(ReverseRateClosureErrorV1::InvalidForwardProgressRateScale { bits })
@@ -3064,6 +3089,31 @@ mod tests {
             .expect("permuted mass-action evaluation");
         assert_eq!(first, replay);
         assert_eq!(first.receipt(), replay.receipt());
+    }
+
+    #[test]
+    fn g0_absent_species_gives_physical_zero_distinct_from_range_loss() {
+        let model = water_mass_action(2.0);
+        let forward = model.evaluate(Temperature::new(1_000.0), vec![
+            activity("H2", 0.75), activity("O2", 1.25), activity("H2O", 0.0),
+        ]).unwrap();
+        assert_eq!(forward.reverse_status(), MassActionDirectionalRateStatusV1::ZeroActivity);
+        assert_eq!(forward.reverse_activity_product().unwrap().value(), 0.0);
+        assert_eq!(forward.reverse_progress_rate().unwrap().value(), 0.0);
+        assert_eq!(forward.log_reverse_activity_product().value(), f64::NEG_INFINITY);
+        assert_eq!(forward.net_progress_rate().unwrap().value(), forward.forward_progress_rate().unwrap().value());
+        let reverse = model.evaluate(Temperature::new(1_000.0), vec![
+            activity("H2", 0.0), activity("O2", 1.25), activity("H2O", 0.5),
+        ]).unwrap();
+        assert_eq!(reverse.forward_status(), MassActionDirectionalRateStatusV1::ZeroActivity);
+        assert!(reverse.net_progress_rate().unwrap().value() < 0.0);
+        let neither = model.evaluate(Temperature::new(1_000.0), vec![
+            activity("H2", 0.0), activity("O2", 1.25), activity("H2O", 0.0),
+        ]).unwrap();
+        assert_eq!(neither.net_progress_rate().unwrap().value(), 0.0);
+        let range = evaluate_mass_action_direction(-1000.0, Some(progress_rate_scale(2.0)), MassActionDirectionV1::Forward).unwrap();
+        assert_eq!(range.0, MassActionDirectionalRateStatusV1::LogOnlyActivityProductUnderflow);
+        assert!(range.2.is_none());
     }
 
     #[test]
@@ -3252,3 +3302,4 @@ mod tests {
         assert!(reverse_scale_unavailable.net_progress_rate().is_none());
     }
 }
+

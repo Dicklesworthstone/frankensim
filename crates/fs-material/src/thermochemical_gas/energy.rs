@@ -36,7 +36,9 @@ pub struct GasEnergySolve {
     pub maximum_iterations: usize,
 }
 impl GasEnergySolve {
-    fn validate(self) -> Result<(), GasEnergyError> {
+    /// Check the shared source-independent temperature and iteration controls.
+    /// Actual material coverage is checked by each original energy solve.
+    pub fn validate(self) -> Result<(), GasEnergyError> {
         if !self.minimum_temperature_k.is_finite() || !self.maximum_temperature_k.is_finite()
             || self.minimum_temperature_k < 50.0 || self.maximum_temperature_k > 2000.0
             || self.minimum_temperature_k >= self.maximum_temperature_k
@@ -253,3 +255,4 @@ impl IsochoricGasParcel {
 #[cfg(test)]
 #[path = "energy_tests.rs"]
 mod tests;
+

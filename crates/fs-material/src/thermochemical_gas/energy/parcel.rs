@@ -71,6 +71,11 @@ impl ClosedGasParcel {
     /// Updated T/p and all retained external material conditions.
     #[must_use]
     pub const fn point(&self) -> &QueryPoint { self.parcel.point() }
+    /// Original active species, caloric/transport sources and composition.
+    /// Immutable access lets reaction/flow consumers validate common laws
+    /// without introducing a second gas state or changing accepted storage.
+    #[must_use]
+    pub const fn model(&self) -> &ThermochemicalGasModel { &self.parcel.model }
     /// Prescribed signed heat at the CURRENT held volume. The existing energy
     /// closure, source-domain checks and atomic publication are unchanged.
     pub fn add_heat(&mut self, heat_j: f64, controls: GasEnergySolve, cancelled: impl FnMut() -> bool)
@@ -151,3 +156,4 @@ impl ClosedGasParcel {
 
 #[cfg(test)]
 mod tests;
+

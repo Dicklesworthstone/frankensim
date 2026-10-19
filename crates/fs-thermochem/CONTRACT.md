@@ -136,13 +136,17 @@ behavior.
 - `DeclaredStoichiometricMassActionV1` binds that reverse-rate closure to the
   explicit
   `MassActionKineticOrderConventionV1::CallerDeclaredStoichiometricCoefficients`
-  choice. Its input activities are positive finite dimensionless `p_i / p0`
+  choice. Its input activities are nonnegative finite dimensionless `p_i / p0`
   ratios covering all and only the active reaction species. Its evaluation
   retains canonical forward/reverse log activity products, optional direct
   activity products and directional progress rates, an optional signed net
   progress rate, per-direction range statuses, and the complete nested
   thermodynamic receipt. The type records a caller's law declaration; it does
   not infer or certify elementary-reaction kinetics.
+  Operation-tree version 2 admits exact absence: an absent participant gives
+  its direction a `ZeroActivity` status, exact zero product/rate and a retained
+  negative-infinite log. This is distinct from underflow of a positive product,
+  which still supplies no direct rate. Products need no artificial trace seed.
 
 ## NASA-9 operation tree
 
@@ -307,8 +311,8 @@ it does not itself select kinetic orders.
 ## Declared stoichiometric mass-action operation tree
 
 After the caller explicitly selects stoichiometric coefficients as kinetic
-orders and supplies all positive dimensionless activities `a_i = p_i / p0`,
-version 1 evaluates one reaction in canonical species order:
+orders and supplies all nonnegative dimensionless activities `a_i = p_i / p0`,
+operation-tree version 2 preserves the positive-state operation order:
 
 ```text
 ell_i       = deterministic_ln(a_i)
@@ -321,10 +325,12 @@ q_reverse   = k_reverse * A_reverse when positive finite
 q_net       = q_forward - q_reverse when both directions are direct
 ```
 
-Finite `ell_f` and `ell_r` remain authoritative if a direct product or
-directional multiplication leaves binary64 range. Every missing direct value
-has a per-direction status; zero and infinity are never published as physical
-products or directional rates. `q_net` is absent unless both directional
+An exact zero activity sets its direction's log product to negative infinity
+and publishes a `ZeroActivity` product/rate of exactly zero. No logarithm of
+zero enters the finite positive-state reduction. Finite `ell_f` and `ell_r`
+remain authoritative if a positive direct product or directional multiplication
+leaves binary64 range. Every missing direct value has a per-direction status;
+numerical underflow is never published as physical absence. `q_net` is absent unless both directional
 rates are representable. This bounded tree is a declared algebraic closure,
 not evidence that stoichiometric coefficients are physically valid kinetic
 orders for the named reaction.
@@ -404,14 +410,18 @@ orders for the named reaction.
   the caller-declared stoichiometric-order convention in the model and every
   receipt. Exact conservation bookkeeping is never treated as kinetic-law
   evidence.
-- EXACT ACTIVITY COVERAGE: positive finite dimensionless activities cover all
+- EXACT ACTIVITY COVERAGE: nonnegative finite dimensionless activities cover all
   and only the active reaction terms. Input order is irrelevant; duplicates,
   omissions, and inactive species refuse before thermodynamic evaluation.
 - MASS-ACTION RANGE LOSS IS EXPLICIT: finite canonical forward and reverse
-  log products survive direct-product and rate multiplication range loss.
+  positive-state log products survive direct-product and rate multiplication range loss.
   Per-direction statuses distinguish product overflow/underflow, unavailable
   reverse scale, and final rate overflow/underflow. Net progress appears only
   when both directional rates are direct and finite.
+  Exact zero is a separate admitted physical state with a negative-infinite
+  log sentinel; it is never used to hide positive-state underflow. The existing
+  equilibrium owner still evaluates every bound reaction species at the actual
+  temperature, including species with zero activity.
 
 ## Error model
 
@@ -635,6 +645,8 @@ Inline tests in `src/equilibrium.rs` add:
 - G0 canonical declared stoichiometric activity exponents, forward/reverse
   products and typed directional/net progress, plus complete nested receipt
   binding;
+- G0 exact absence gives zero directional progress, permits reverse reaction
+  and remains distinct from numerical underflow of a positive activity product;
 - G3 invalid activities, count/duplicate/missing/inactive coverage drift,
   nested thermodynamic refusal, log-only reverse-scale unavailability,
   activity-product overflow/underflow, and final progress-rate
@@ -686,3 +698,4 @@ This slice does **not** claim:
 Those capabilities require separate typed laws, contracts, tests, budgets, and
 proof-bearing beads. These initial evaluators must not be used as evidence that
 the broader `fs-thermochem` roadmap is complete.
+
