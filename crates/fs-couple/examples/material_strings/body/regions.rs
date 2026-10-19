@@ -119,7 +119,9 @@ fn regional_coverage_thickness_paths_and_performer_binding_cannot_be_silently_in
 
 #[test]
 fn regional_node_and_cell_maps_are_the_original_rectangle_geometry() {
-    let p=Profile::parse(regional().as_bytes()).unwrap();
+    let BodyModel::Plate(p)=Profile::parse(regional().as_bytes()).unwrap().model else {
+        panic!("expected regional plate profile");
+    };
     let mesh=PlateMesh::rectangle(0.4,0.3,p.nx,p.ny);
     for r in p.region_inputs() {
         for e in p.triangles(&r) {

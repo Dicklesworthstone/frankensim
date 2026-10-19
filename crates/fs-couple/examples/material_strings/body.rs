@@ -1,6 +1,6 @@
 //! Source/data adapter for directional body elasticity and full viscous coupling.
 //! Every physical operator, tensor rotation, mode, bridge and pressure projection
-//! remains in the existing plate/material/reciprocal owners.
+//! remains in the existing plate/shell/material/reciprocal owners.
 use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::chart::{SharedMaterialPlateChartBody, PlateBridgeFootprints};
 use fs_couple::plate_viscosity::{PlateViscosity, PlateViscosityLimits};
@@ -11,11 +11,57 @@ use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateRegion};
 pub const MAX_BYTES: usize = 65_536;
 const MAX_GRID: usize = 12;
 
+#[path = "body/shell.rs"]
+mod shell;
+
 /// An optional complete body-model selection; the performance still owns its
 /// material pack, physical dimensions, thickness, mode count and listener.
 #[derive(Clone, Debug)]
 pub struct Profile {
     pub bytes: Vec<u8>,
+    model: BodyModel,
+}
+#[derive(Clone, Debug)]
+enum BodyModel {
+    Plate(PlateProfile),
+    Shell(shell::Spec),
+}
+impl Profile {
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > MAX_BYTES { return Err("body profile exceeds 64 KiB".into()); }
+        let text = std::str::from_utf8(bytes)?;
+        let version = text.lines().next().and_then(|s| s.split_ascii_whitespace().next())
+            .ok_or("missing body profile version")?;
+        let model = match version {
+            "frankensim-string-body-v1" | "frankensim-string-body-v2" =>
+                BodyModel::Plate(PlateProfile::parse(bytes)?),
+            "frankensim-string-body-v3" => BodyModel::Shell(shell::Spec::parse(bytes)?),
+            _ => return Err("unsupported body profile version".into()),
+        };
+        Ok(Self { bytes: bytes.to_vec(), model })
+    }
+    pub fn preflight(&self, spec: &input::Spec) -> Result<()> {
+        if let BodyModel::Shell(shell) = &self.model { shell.preflight(spec)?; }
+        Ok(())
+    }
+    pub fn bridge_separation_m(&self, spec: &input::Spec, positive: usize, negative: usize) -> Result<f64> {
+        match &self.model {
+            BodyModel::Plate(plate) => plate.bridge_separation_m(spec, positive, negative),
+            BodyModel::Shell(shell) => shell.bridge_separation_m(spec, positive, negative),
+        }
+    }
+    pub fn compile(&self, spec:&input::Spec, sources:Vec<MaterialStringSource>,
+        catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<NormalizedPack>,
+        settings:StringBankOptions, cx:&Cx<'_>, gate:&CancelGate) -> Result<ReciprocalStringBank>
+    {
+        match &self.model {
+            BodyModel::Plate(plate) => plate.compile(spec, sources, catalog, loader, settings, cx, gate),
+            BodyModel::Shell(shell) => shell.compile(spec, sources, catalog, loader, settings, cx, gate),
+        }
+    }
+}
+#[derive(Clone, Debug)]
+struct PlateProfile {
     nx: usize, ny: usize,
     layout: Layout,
     support: EdgeSupport,
@@ -33,8 +79,8 @@ struct Region {
     // Half-open structured CELL ranges, never independent meshes or glued parts.
     x:(usize,usize), y:(usize,usize),
 }
-impl Profile {
-    pub fn parse(bytes: &[u8]) -> Result<Self> {
+impl PlateProfile {
+    fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() > MAX_BYTES { return Err("body profile exceeds 64 KiB".into()); }
         let mut input = Records { lines: std::str::from_utf8(bytes)?.lines(), line: 0 };
         let mut version=input.lines.next().ok_or("missing body profile version")?.split_ascii_whitespace();
@@ -67,7 +113,7 @@ impl Profile {
             Layout::Uniform { model,grain_rad,bridge:read_bridge(&mut input,nx,ny)? }
         } else { read_regions(&mut input,nx,ny)? };
         if input.lines.next().is_some() { return Err("unconsumed body profile record".into()); }
-        Ok(Self { bytes:bytes.to_vec(),nx,ny,layout,support,pretension_n_m,window })
+        Ok(Self { nx,ny,layout,support,pretension_n_m,window })
     }
 
     /// Actual length of the ordered point-footprint chord [m]. Its order sets

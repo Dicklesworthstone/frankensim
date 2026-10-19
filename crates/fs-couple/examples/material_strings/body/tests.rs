@@ -6,13 +6,22 @@ use fs_matdb::{ClaimSet,ObservationDataset,PropertyClaim,PropertyKey,PropertyVal
     Provenance,InterpolationPolicy,UncertaintyModel};
 
 fn pack(name:&str, viscosity:f64, omit:Option<&str>) -> NormalizedPack {
+    pack_with_shear(name, viscosity, 1.0, omit)
+}
+fn pack_with_shear(name:&str, viscosity:f64, shear_scale:f64, omit:Option<&str>) -> NormalizedPack {
     let body=name=="body.fsmatpk";
     let mut values=vec![("density",Density::DIMS,if body {600.0}else{7800.0}),
         ("young_modulus",Pressure::DIMS,if body {8e9}else{200e9}),
         ("poisson_ratio",Dims::NONE,0.2),(ETA,DynViscosity::DIMS,10.0),
         (SHEAR,Pressure::DIMS,80e9),(SHEAR_ETA,DynViscosity::DIMS,1000.0),
         ("young_modulus_1",Pressure::DIMS,8e9),("young_modulus_2",Pressure::DIMS,2e9),
-        ("poisson_ratio_12",Dims::NONE,0.2),("shear_modulus_12",Pressure::DIMS,0.6e9)];
+        ("poisson_ratio_12",Dims::NONE,0.2),("shear_modulus_12",Pressure::DIMS,0.6e9),
+        ("shear_modulus_13",Pressure::DIMS,0.5e9*shear_scale),
+        ("shear_modulus_23",Pressure::DIMS,0.25e9*shear_scale)];
+    for (key,value) in fs_couple::shear_shell::TRANSVERSE_SHEAR_VISCOSITY_PROPERTIES
+        .into_iter().zip([9000.0,7000.0,0.0]) {
+        values.push((key,DynViscosity::DIMS,value*viscosity));
+    }
     for (key,value) in VISCOSITY.into_iter().zip([3e5,6e4,4e4,1e4,4e3,-3e3]) {
         values.push((key,DynViscosity::DIMS,value*viscosity));
     }
@@ -107,7 +116,9 @@ fn absent_tensor_coefficients_refuse_even_with_legacy_bending_loss_present() {
         for key in VISCOSITY {
             assert!(spec().compile_with_body(cx,gate,Some(profile()),|n|Ok(pack(n,1.0,Some(key)))).is_err());
         }
-        let mut p=profile();p.window=(1e12,2e12);
+        let mut p=profile();
+        let BodyModel::Plate(plate) = &mut p.model else { panic!("expected plate profile"); };
+        plate.window=(1e12,2e12);
         assert!(spec().compile_with_body(cx,gate,Some(p),|n|Ok(pack(n,1.0,None))).is_err());
         let stopped=CancelGate::new_clock_free();stopped.request();let mut calls=0;
         assert!(spec().compile_with_body(cx,&stopped,Some(profile()),|n| {calls+=1;Ok(pack(n,1.0,None))}).is_err());
@@ -264,3 +275,6 @@ mod regions;
 
 #[path="fluid.rs"]
 mod fluid;
+
+#[path = "shell/tests.rs"]
+mod shell_input;

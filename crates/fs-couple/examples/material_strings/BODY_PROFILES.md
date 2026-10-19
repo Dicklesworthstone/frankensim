@@ -1,14 +1,15 @@
-# Directional body materials in the shared string performer
+# Material plate and curved shell bodies in the shared string performer
 
 `material_strings PERFORMANCE NEW_OUTPUT.wav --body-profile PROFILE` selects
-an explicit rectangular material chart instead of the legacy isotropic body
-image. Omitting the flag retains the original construction and material profile.
+an explicit rectangular material chart (v1/v2) or a curved shear-deformable
+shell (v3). Omitting the flag retains the original construction and material profile.
 The performance's `body` record still supplies its pack, dimensions, thickness,
 mode count and observer distance. String layers, support prescriptions, torsion,
 loads, plucks, bow tracks, shared gas and optional cavity are unchanged.
 
-This is the existing `from_viscous_material_plate_chart` path, not a new solver.
-The material tensor is projected on the SAME eigenbasis as bridge displacement,
+The rectangular profiles use `from_viscous_material_plate_chart`; the curved
+profile uses `from_material_shear_shell` and the shared MITC3+ shell owner.
+Both project material tensors on the SAME eigenbasis as bridge displacement,
 force and radiation. Full modal viscous cross terms participate in the shared
 string/body/friction solve; the body is not a bank of independent decay filters.
 No extra scalar body damping or an elastic-modulus-derived viscosity is added.
@@ -82,9 +83,11 @@ the projected damping matrix nor material coefficients. The exact profile bytes,
 original packs, regional material states, tensors and projected damping remain
 attached to the performer. No live source-state mutation is implied.
 
-The current model is a fixed-state, flat, linear rectangular DKT plate, not a
-carved shell, soundpost, bass bar, glue interface or empirical instrument model. Pressure remains the inherited compact baffled
-body/neck observation, not full exterior radiation or radiation back-loading.
+The v1/v2 model is a fixed-state, flat, linear rectangular DKT plate. It does
+not resolve arching, a soundpost, bass bar or glue interface. Pressure uses the
+inherited compact baffled body/neck observation; it does not include full
+exterior radiation or radiation back-loading. The v3 shell model below resolves
+an explicitly authored curved midsurface.
 
 Native regression target:
 
@@ -182,16 +185,22 @@ This selects string 0 at station 0.8, the ordered pair of body bridge footprints
 belonging to strings 0 and 1, angular stiffness 0.001 N m/rad, damping
 1e-7 N m s/rad, and stress-free relative angle zero. The selected string must
 declare positive twist-mode count and supply its original shear material data.
-The profile must be v2 with distinct physical nodes for the chosen pair.
+The body profile must be v2 or v3 with distinct physical nodes for the chosen
+pair. V3 additionally requires identical authored translation directions at the
+two nodes and derives its rotational lever from their three-dimensional chord.
 
-If the retained nodal displacements are `w_positive` and `w_negative`, body
-rotation is `(w_positive - w_negative) / separation_m`. The separation is the
-Euclidean distance of those SAME nodes in the performance's declared body
-length and width; it is recalculated when geometry changes. Swapping the ordered
-pair reverses this scalar coordinate. Its sign and direction declare the
-rocking axis assumed by the string joint; no 3D string/body orientation is
-inferred or certified. This chord rotation is exact for rigid rocking and a
-secant approximation for a deforming plate, not a resolved local slope claim.
+If the retained displacements along the common force direction are
+`w_positive` and `w_negative`, body rotation is their difference divided by
+the physical rotational lever. For the flat v2 plate this is the Euclidean
+node separation. V3 uses `|chord × force_direction|`, with the full physical
+3D chord; dividing by the full chord length would mis-scale an oblique
+attachment. Parallel chords refuse because they measure extension rather than
+rotation. The lever is recalculated when geometry changes. Swapping the
+ordered pair reverses the scalar coordinate; its axis follows the chord/force
+cross product. The string joint still declares the matching scalar orientation,
+without an inferred complete 3D string pose. This coordinate is exact for rigid
+rocking and a secant approximation for a deforming body, not a resolved local
+slope claim.
 
 The body angular row is derived from its original spatial bridge projections.
 The string angular row uses its sourced polar inertia and its actual outer
@@ -247,3 +256,108 @@ See [README.md](README.md#causal-gas-loading-of-the-moving-strings) for resoluti
 semantics, the runnable source fixture, continuum assumptions and the current
 42-mode connected-island limit. The small regression is a coupling check; body
 mesh, modal, fluid-spectral and time refinement remain independent requirements.
+
+## Curved bodies with material transverse shear
+
+A `frankensim-string-body-v3` profile retains an explicit 3D midsurface,
+unit nodal directors, homogeneous supports, material regions and one physical
+force direction per string. This connects the shared six-DOF MITC3+ shell to
+the same reciprocal string/body/cavity solve. Curvature, membrane stiffness,
+bending stiffness, transverse shear, rotary inertia and full material viscosity
+are derived from that geometry and its original material packs.
+
+The complete input is [arched.body](arched.body). Its fixed-order record layout
+is shown below; the repeated node, triangle, support and bridge records are
+abbreviated here:
+
+```text
+frankensim-string-body-v3
+director-min-dot 0.9
+mass consistent
+drilling 0.001
+window 1 100000000
+projection-work 67108864
+regions 1
+region body @body orthotropic12 1 0.17 0.8333333333333334 1 0 0
+nodes 25
+node X_FRACTION Y_FRACTION Z_M DIRECTOR_X DIRECTOR_Y DIRECTOR_Z
+triangles 32
+triangle NODE_I NODE_J NODE_K REGION_NAME
+supports 16
+support NODE 111111
+bridges 1
+bridge NODE DIRECTION_X DIRECTION_Y DIRECTION_Z
+```
+
+Each region has nine fields after `region`:
+`NAME PACK MODEL THICKNESS_RATIO GRAIN_RAD SHEAR_CORRECTION AXIS_X AXIS_Y AXIS_Z`.
+Pack paths follow the v2 rules, including retaining at least one `@body`
+region. Every triangle belongs to exactly one nonempty named region.
+Thickness ratio multiplies the performance's body thickness.
+
+The explicit unit global grain axis is projected onto each physical facet;
+the additional grain angle rotates within that plane. Grain therefore does not
+follow arbitrary triangle-edge numbering. A near-normal grain projection refuses.
+The axis names the first selected section axis: material axis 1 for
+`orthotropic12`, material axis 2 for `orthotropic21`. The original ordered
+material interpretation is retained. Orthotropic packs additionally supply `shear_modulus_13` and
+`shear_modulus_23` in Pa. The isotropic model derives its elastic shear from
+the same Young's modulus and Poisson ratio.
+
+In addition to all six plane-stress viscosity entries, every selected pack
+supplies `transverse_shear_viscosity_13`, `transverse_shear_viscosity_23` and
+`transverse_shear_viscosity_13_23` in Pa s. Zero cross coupling must be explicit.
+The shared owner validates both viscous tensors, rotates them with their original
+material axes, and projects them using the SAME elastic bubble condensation and
+physical eigenvectors as stiffness, force and volume response. It retains the
+full modal damping matrix. Missing shear or viscosity data never means borrowing
+another material's coefficients.
+
+Node x/y fractions lie in `[0,1]` and scale with the performance's body length
+and width; z is in metres. Directors and force directions must already be unit
+vectors; the parser does not normalize or smooth them. The shared midsurface and
+director owners check actual geometry, topology and facet alignment. Support
+masks use six global DOFs `(u,v,w,rx,ry,rz)`, with 1 fixed and 0 free.
+Each bridge is a nodal translation along its authored direction and must retain
+an unconstrained translational component. The bridge count equals the actual
+string count, including unplayed strings. Source bytes, geometry, packs,
+physical eigenvectors and force maps remain attached to the performer.
+
+The file admits at most 128 nodes, 256 triangles, 16 regions, eight string
+attachments and 16 retained shell modes, within 64 KiB. `mass` explicitly selects
+`consistent` or `lumped` inertia. `drilling` supplies positive numerical
+drilling stabilization; `director-min-dot` declares the incident-facet alignment
+floor in `(0,1]`. The spectral window contains squared angular frequencies.
+`projection-work` declares a separate cold shell-projection budget, at most
+268,435,456 terms. It does not enlarge the existing complete-network limits.
+These discretization choices require mesh, mode, stabilization and time-step
+refinement for the intended specimen.
+
+The synthetic arched fixture uses the same directional body pack and a layered,
+two-plane, torsion-bearing string with a cavity and causal gas loading:
+
+```bash
+demo="$(mktemp -d)"
+cp crates/fs-couple/examples/material_strings/*.tsv "$demo/"
+cp crates/fs-couple/examples/material_strings/cylinder-flow.material-strings "$demo/"
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/wire-manifest.tsv" --out "$demo/wire.fsmatpk"
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/sleeve-manifest.tsv" --out "$demo/sleeve.fsmatpk"
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/directional-body-manifest.tsv" --out "$demo/body.fsmatpk"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/cylinder-flow.material-strings" "$demo/arched.wav" \
+  --body-profile crates/fs-couple/examples/material_strings/arched.body
+```
+
+The body can be bowed, plucked, preloaded, connected through rotational bridge
+chords and used with the existing stop and gas profiles. Its observer integrates
+normal velocity over the actual shell facets before the shared compact baffled
+pressure projection.
+
+This model is an unloaded, fixed-state, linear midsurface. It does not yet
+provide a complete assembled violin/cello/bass corpus, prestressed shell
+equilibrium, separately connected ribs, soundpost and bass bar, glue compliance,
+or full exterior acoustic back-loading. The fixture's coefficients are synthetic;
+it establishes the data-to-pressure path, not measured whole-instrument fidelity.

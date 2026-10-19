@@ -110,6 +110,7 @@ impl input::Spec {
         stop_profile:Option<stops::Profile>,
         mut loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
         poll(gate)?;
+        if let Some(body)=&profile { body.preflight(&self)?; }
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
         // Count every fluid inertia and physical connection before pack I/O.
         // The exact owner still applies its stricter connected-island bound.
