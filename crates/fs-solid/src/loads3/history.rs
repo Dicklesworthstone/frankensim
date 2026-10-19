@@ -182,3 +182,6 @@ impl TetLoadHistory3<'_> {
 
 /// Explicit absolute support-motion histories sharing the load endpoint time.
 pub mod supports;
+
+/// Scheduled physical loads driving sparse inertial trajectories.
+pub mod dynamics;
