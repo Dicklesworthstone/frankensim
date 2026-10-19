@@ -123,7 +123,11 @@ fn main() -> Result<(), String> {
         match args[i].as_str() {
             "--mesh" => { mesh = value(i)?; i += 1; }
             "--band" => { band = value(i)?.parse().map_err(|_| "invalid --band")?; i += 1; }
-            "--keys" => { keys = value(i)?.split(',').map(|k| k.parse().map_err(|_| "invalid key")).collect::<Result<_, _>>()?; i += 1; }
+            "--keys" => {
+                keys = value(i)?.split(',').map(|k| k.parse().ok().filter(|m| (21..=108).contains(m))
+                    .ok_or("a key is a MIDI note 21-108")).collect::<Result<_, _>>()?;
+                i += 1;
+            }
             "--mics" => {
                 mics = value(i)?.split(';').map(|m| {
                     let v: Vec<f64> = m.split(',').map(|x| x.parse().map_err(|_| "invalid microphone")).collect::<Result<_, _>>()?;
@@ -159,7 +163,8 @@ fn main() -> Result<(), String> {
     }).collect::<Result<_, String>>()?;
     let header: Vec<String> = OCTAVES_HZ.iter().map(|f| format!("{:>6}", if *f < 1000.0 { format!("{f:.0}") } else { format!("{:.0}k", f / 1000.0) })).collect();
     println!("dB against the source slice; G = driving-point conductance, P = microphone pressure; mass = sum b^2");
-    println!("key  #/N     | G {} | P {} | mass  P 2-8k/0.2-2k", header.join(""), header.join(""));
+    // Tilt: pressure in the 2k-8k octaves over the 250-1k octaves (about 1.4-11 kHz over 0.18-1.4 kHz).
+    println!("key  #/N     | G {} | P {} | mass  P 2k-8k/250-1k", header.join(""), header.join(""));
     let index: Vec<usize> = keys.iter().map(|&m| usize::from(m - 21)).collect();
     let source_bands = bands(&reference, &index, &hz);
     let reduced_bands: Vec<_> = reduced.iter().map(|(_, board)| bands(board, &index, &hz)).collect();
