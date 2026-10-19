@@ -3,6 +3,9 @@
 //! — the exact derivative of the discrete stress update, not the
 //! continuum tangent, so Newton converges quadratically.
 
+/// Source-resolved coefficients for the same native J2 law.
+pub mod source;
+
 use crate::elastic::IsotropicElastic;
 use crate::tensor::{contract, deviator, trace};
 use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voigt};
@@ -204,7 +207,11 @@ impl SmallStrainLaw for J2Plasticity {
                 "linear isotropic hardening".to_string(),
                 "rate independence".to_string(),
             ],
-            ValidityDomain::unconstrained().with("strain-magnitude", 0.0, 0.05),
+            ValidityDomain::unconstrained().with(
+                "strain-magnitude",
+                0.0,
+                self.elastic.strain_limit.min(0.05),
+            ),
             vec![
                 "no Bauschinger effect (isotropic hardening only)".to_string(),
                 "no damage/softening".to_string(),
