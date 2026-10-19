@@ -93,10 +93,17 @@ fn closed_duct(temperature_k: f64) -> AcousticAssembly {
 }
 
 /// Mean period from interpolated falling zero crossings, in samples.
+/// Mean period between downward crossings of the late-record mean. A rigid
+/// outlet traps the blown volume, so the inlet pressure rings about a static
+/// offset (the closed pipe's 0 Hz compliance mode); behind an open outlet that
+/// mean is ~0.
 fn zero_cross_period(x: &[f64]) -> f64 {
-    let mut prev = x[0];
+    let late = &x[x.len() / 2..];
+    let mean = late.iter().sum::<f64>() / late.len() as f64;
+    let mut prev = x[0] - mean;
     let mut times = Vec::new();
     for (i, &s) in x.iter().enumerate().skip(1) {
+        let s = s - mean;
         if prev > 0.0 && s <= 0.0 {
             let frac = prev / (prev - s);
             times.push(i as f64 - 1.0 + frac);
@@ -1002,8 +1009,59 @@ fn stepped_bore_shifts_the_ode_period() {
     );
 }
 
+/// frankensim-gs17m: a `Closed` (rigid) outlet rings at the half-wave under
+/// the flow-driven inlet, 2 L / c, while the same bore with an unflanged open
+/// outlet is the quarter-wave class. Before the fix the chain built `Closed`
+/// as a pressure-release end, the quarter-wave.
+#[test]
+fn closed_outlet_rings_at_the_half_wave() {
+    let (length, radius) = (0.34, 0.012);
+    let mut closed = empty_base();
+    closed.duration_s = 0.08;
+    closed.blow = Some(VolumeVelocityPulse {
+        peak_m3_s: 2.0e-5,
+        duration_s: 0.002,
+    });
+    closed.duct = Some(ViscothermalDuct {
+        segments: vec![CylinderSegment::cylinder(radius, length)],
+        tone_holes: vec![],
+        termination: WaveguideEnd::Closed,
+        wall: None,
+    });
+    let mut open = closed.clone();
+    if let Some(duct) = open.duct.as_mut() {
+        duct.termination = WaveguideEnd::UnflangedOpen;
+    }
+    let c = 343.2;
+    let fs = f64::from(closed.sample_rate_hz);
+    let t_closed = zero_cross_period(&realize_assembly(&closed).expect("closed").pressure_pa);
+    let t_open = zero_cross_period(&realize_assembly(&open).expect("open").pressure_pa);
+    let half_wave = 2.0 * length / c * fs;
+    let quarter_wave = 4.0 * (length + 0.6133 * radius) / c * fs;
+    println!(
+        "{{\"suite\":\"fs-couple\",\"case\":\"closed-outlet-half-wave\",\"closed_period_samples\":{t_closed:.3},\"half_wave_samples\":{half_wave:.3},\"open_period_samples\":{t_open:.3},\"quarter_wave_samples\":{quarter_wave:.3}}}"
+    );
+    assert!(
+        (t_closed / half_wave - 1.0).abs() < 0.05,
+        "rigid outlet: {t_closed} samples vs the half-wave {half_wave}"
+    );
+    // The open bore is the quarter-wave class: about twice the closed period.
+    // Its own accuracy is the coarse ODE chain's, not this test's claim.
+    assert!(
+        (1.8..2.4).contains(&(t_open / t_closed)),
+        "open {t_open} vs rigid {t_closed} samples (quarter-wave {quarter_wave})"
+    );
+}
+
 #[test]
 fn linear_taper_shifts_the_ode_period() {
+    // Open outlet: the open cylinder is the quarter-wave (~249 Hz) and the
+    // open 8 -> 12 mm cone from x1 = 0.68 m solves k L' + atan(k x1) = pi
+    // (~290 Hz). An open 20 mm mouth is refused at this 8 kHz rate
+    // (ka = 1.48 at Nyquist). This test ran with a pressure-release `Closed`
+    // before frankensim-gs17m. With rigid ends the 8-cell ODE frustum cone's
+    // first-order error (-11 % at 8 cells) cancels most of the true
+    // closed-closed shift, so that pair does not resolve the flare.
     let mut uniform = empty_base();
     uniform.duration_s = 0.08;
     uniform.blow = Some(VolumeVelocityPulse {
@@ -1013,12 +1071,12 @@ fn linear_taper_shifts_the_ode_period() {
     uniform.duct = Some(ViscothermalDuct {
         segments: vec![CylinderSegment::cylinder(0.008, 0.34)],
         tone_holes: vec![],
-        termination: WaveguideEnd::Closed,
+        termination: WaveguideEnd::UnflangedOpen,
         wall: None,
     });
     let mut flare = uniform.clone();
     if let Some(duct) = flare.duct.as_mut() {
-        duct.segments = vec![CylinderSegment::taper(0.008, 0.020, 0.34)];
+        duct.segments = vec![CylinderSegment::taper(0.008, 0.012, 0.34)];
     }
     let a = realize_assembly(&uniform).expect("cylinder");
     let b = realize_assembly(&flare).expect("taper");
@@ -1053,10 +1111,16 @@ fn narrow_bore_decays_faster_from_the_viscothermal_pin() {
     };
     let wide = realize_assembly(&make(0.016)).expect("wide");
     let narrow = realize_assembly(&make(0.004)).expect("narrow");
+    // The decay of the ringing about the trapped static pressure of the rigid
+    // outlet (see zero_cross_period), from 10 ms, after the 2 ms blow.
     let decay = |p: &[f64]| {
-        let peak = p.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
         let tail = &p[p.len() * 3 / 4..];
-        let rms = (tail.iter().map(|x| x * x).sum::<f64>() / tail.len() as f64).sqrt();
+        let mean = tail.iter().sum::<f64>() / tail.len() as f64;
+        let peak = p[p.len() / 8..]
+            .iter()
+            .fold(0.0_f64, |m, x| m.max((x - mean).abs()));
+        let rms =
+            (tail.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / tail.len() as f64).sqrt();
         rms / peak.max(1.0e-18)
     };
     let d_wide = decay(&wide.pressure_pa);

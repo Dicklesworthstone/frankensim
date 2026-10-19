@@ -38,9 +38,9 @@ use fs_nlmodal::{
     prestressed_beam_omega,
 };
 use fs_phs::{
-    AcousticSection, AcousticTap, MouthFlange, ViscothermalPin, WallPin, acoustic_chain_mouth_wall,
-    bernoulli_volume_flow, join_port, mass_spring_damper, modal_bank, modal_bank_ports,
-    quasistatic_aperture_opening, step, step_descriptor, transformer,
+    AcousticSection, AcousticTap, ChainOutlet, MouthFlange, ViscothermalPin, WallPin,
+    acoustic_chain_outlet_wall, bernoulli_volume_flow, join_port, mass_spring_damper, modal_bank,
+    modal_bank_ports, quasistatic_aperture_opening, step, step_descriptor, transformer,
 };
 use fs_scenario::{
     AcousticAssembly, AmbientGas, BeatingReed, BowStroke, ContactTexture, HelmholtzCavity,
@@ -581,7 +581,7 @@ fn realize_coupled_ode(
     let inlets = if has_plate && need_drive { 2 } else { 1 };
     let chain = ode_bore_chain(
         &sections,
-        duct_mouth(duct.termination),
+        duct_outlet(duct.termination),
         inlets,
         &taps,
         gas,
@@ -1709,7 +1709,7 @@ fn realize_dirac_join(
             let inlets = if drive_inlet { 2 } else { 1 };
             let chain = ode_bore_chain(
                 &sections,
-                duct_mouth(line.termination),
+                duct_outlet(line.termination),
                 inlets,
                 &taps,
                 gas,
@@ -1759,7 +1759,7 @@ fn realize_dirac_join(
             let inlets = if drive_inlet { 2 } else { 1 };
             let chain = ode_bore_chain(
                 &sections,
-                duct_mouth(line.termination),
+                duct_outlet(line.termination),
                 inlets,
                 &taps,
                 gas,
@@ -4395,7 +4395,7 @@ fn realize_reed_on_duct(
             }
             let samples = realize_reed_ode(
                 &sections,
-                duct_mouth(duct.termination),
+                duct_outlet(duct.termination),
                 &taps,
                 reed,
                 plates,
@@ -4614,7 +4614,7 @@ fn lumped_ladder_resonances(
     })?;
     let chain = ChainImpedance::new(&ode_bore_chain(
         sections,
-        duct_mouth(duct.termination),
+        duct_outlet(duct.termination),
         1,
         taps,
         gas,
@@ -4645,18 +4645,18 @@ fn wall_pin(wall: Option<LocallyReactingWall>) -> Option<WallPin> {
 
 fn ode_bore_chain(
     sections: &[AcousticSection],
-    mouth: Option<MouthFlange>,
+    outlet: ChainOutlet,
     inlets: usize,
     taps: &[AcousticTap],
     gas: &GasState,
     wall: Option<LocallyReactingWall>,
 ) -> Result<fs_phs::PortHamiltonian, AcousticRealizeError> {
     let wall = wall_pin(wall);
-    acoustic_chain_mouth_wall(
+    acoustic_chain_outlet_wall(
         sections,
         gas.density,
         gas.sound_speed,
-        mouth,
+        outlet,
         inlets,
         taps,
         Some(&viscothermal_pin(gas)),
@@ -4725,14 +4725,16 @@ fn bore_spec_inner(
     }
     let budget = total_cells as f64;
     // The half-cell alignment offsets the LC chain's (N + 1/2) dx effective
-    // length. fs-phs realizes a lone widening taper as a psi line instead,
-    // which has no such offset (lossless -1.3% at 8 cells against -6% for a
-    // cylinder), so it is not shortened.
+    // length behind an open outlet. fs-phs realizes a lone widening taper as
+    // a psi line instead, which has no such offset (lossless -1.3% at 8 cells
+    // against -6% for a cylinder). A rigid outlet cuts the last flux, and N
+    // charges with N - 1 fluxes span exactly N dx. Neither is shortened.
     let psi_cone = matches!(
         duct.segments.as_slice(),
         [s] if s.is_taper() && s.outlet_radius_m > s.radius_m
-    );
-    let length_scale = if staggered_half_cell_align && !psi_cone {
+    ) && duct.termination != WaveguideEnd::Closed;
+    let exact_length = psi_cone || duct.termination == WaveguideEnd::Closed;
+    let length_scale = if staggered_half_cell_align && !exact_length {
         budget / (budget + 0.5)
     } else {
         1.0
@@ -5051,7 +5053,7 @@ fn dense_matmul(a: &[f64], b: &[f64], out: &mut [f64], dim: usize) {
 #[allow(clippy::too_many_arguments)]
 fn realize_blown_ode(
     sections: &[AcousticSection],
-    mouth: Option<MouthFlange>,
+    outlet: ChainOutlet,
     taps: &[AcousticTap],
     blow: VolumeVelocityPulse,
     plates: &mut PlateBank,
@@ -5064,7 +5066,7 @@ fn realize_blown_ode(
     let radius = sections.first().map_or(0.0, |s| s.radius);
     let area = core::f64::consts::PI * radius * radius;
     let inlets = if plates.linear.is_empty() { 1 } else { 2 };
-    let line = ode_bore_chain(sections, mouth, inlets, taps, gas, wall)?;
+    let line = ode_bore_chain(sections, outlet, inlets, taps, gas, wall)?;
     let dt = 1.0 / f64::from(sample_rate_hz);
     if plates.linear.is_empty() {
         let linear = prepare_render_linear(&line)?;
@@ -5119,7 +5121,7 @@ fn realize_blown_ode(
 #[allow(clippy::too_many_lines)] // one coherent realization
 fn realize_reed_ode(
     sections: &[AcousticSection],
-    mouth: Option<MouthFlange>,
+    outlet: ChainOutlet,
     taps: &[AcousticTap],
     reed: BeatingReed,
     plates: &mut PlateBank,
@@ -5142,7 +5144,7 @@ fn realize_reed_ode(
     let area = core::f64::consts::PI * radius * radius;
     let zc = gas.density * gas.sound_speed / area;
     let inlets = if plates.linear.is_empty() { 1 } else { 2 };
-    let line = ode_bore_chain(sections, mouth, inlets, taps, gas, wall)?;
+    let line = ode_bore_chain(sections, outlet, inlets, taps, gas, wall)?;
     let bore_sys = if plates.linear.is_empty() {
         line
     } else {
@@ -5320,7 +5322,7 @@ fn realize_blown_duct(
     {
         return realize_blown_ode(
             &sections,
-            duct_mouth(duct.termination),
+            duct_outlet(duct.termination),
             &taps,
             blow,
             plates,
@@ -5468,11 +5470,13 @@ fn hole_state(sigma: f64) -> HoleState {
     }
 }
 
-fn duct_mouth(end: WaveguideEnd) -> Option<MouthFlange> {
+/// Chain outlet of a scenario termination. `Closed` is a rigid closure
+/// (`U = 0`), never the chain's pressure-release end (frankensim-gs17m).
+fn duct_outlet(end: WaveguideEnd) -> ChainOutlet {
     match end {
-        WaveguideEnd::Closed => None,
-        WaveguideEnd::UnflangedOpen => Some(MouthFlange::Unflanged),
-        WaveguideEnd::FlangedOpen => Some(MouthFlange::Flanged),
+        WaveguideEnd::Closed => ChainOutlet::Rigid,
+        WaveguideEnd::UnflangedOpen => ChainOutlet::Radiating(MouthFlange::Unflanged),
+        WaveguideEnd::FlangedOpen => ChainOutlet::Radiating(MouthFlange::Flanged),
     }
 }
 
@@ -5655,7 +5659,7 @@ mod string_observer_tests {
             let dt = 1.0 / f64::from(rate);
             let out = realize_blown_ode(
                 &sections,
-                None,
+                ChainOutlet::PressureRelease,
                 &[],
                 VolumeVelocityPulse {
                     peak_m3_s: 1e-4,
@@ -5669,7 +5673,7 @@ mod string_observer_tests {
                 None,
             )
             .unwrap();
-            let line = ode_bore_chain(&sections, None, 1, &[], &gas, None).unwrap();
+            let line = ode_bore_chain(&sections, ChainOutlet::PressureRelease, 1, &[], &gas, None).unwrap();
             let split = prepare_render_linear(&line).unwrap();
             let expected = fs_phs::linear_exact::step_split(
                 &line,
@@ -5711,7 +5715,7 @@ mod string_observer_tests {
                 };
                 let out = realize_reed_ode(
                     &sections,
-                    None,
+                    ChainOutlet::PressureRelease,
                     &[],
                     reed,
                     &mut PlateBank::default(),
@@ -5733,7 +5737,7 @@ mod string_observer_tests {
                     reed.rest_opening_m
                 };
                 let flow = bernoulli_volume_flow(reed.width_m, opening, pressure, gas.density);
-                let line = ode_bore_chain(&sections, None, 1, &[], &gas, None).unwrap();
+                let line = ode_bore_chain(&sections, ChainOutlet::PressureRelease, 1, &[], &gas, None).unwrap();
                 let split = prepare_render_linear(&line).unwrap();
                 let expected = fs_phs::linear_exact::step_split(
                     &line,
@@ -5986,10 +5990,10 @@ mod lumped_ladder_resonance_tests {
                     "closed" => {
                         // The half-wave, lowered only by viscothermal dispersion.
                         assert!((line / (2.0 * quarter) - 1.0).abs() < 2.0e-2);
-                        // The chain realizes this outlet as pressure release
-                        // (frankensim-gs17m), an octave low: no ladder resonance
-                        // lies near the line's, so the admission refuses.
-                        assert_eq!(ladder, None, "{name} {cells}");
+                        // The rigid chain outlet (frankensim-gs17m) is admitted
+                        // and measured; as pressure release it sat an octave low
+                        // (0.987 x c/4L) and was refused.
+                        assert!(cents.is_some_and(|c| c.abs() < 100.0), "{name} {cells}");
                     }
                     "cone" => {
                         assert!(

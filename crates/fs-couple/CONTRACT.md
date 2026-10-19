@@ -1792,7 +1792,11 @@ clarinet is one filling of those objects.
   (`ψ = x p` plus the one inlet Euler near-field shunt).
   Any other taper, alone or in a multi-section chain, is
   frustum LC cells (exact frustum inertance and volume),
-  frankensim-d1j6s.
+  frankensim-d1j6s. A `Closed` termination is the chain's
+  rigid outlet (`ChainOutlet::Rigid`, `U = 0`), matching
+  the characteristic line's `Termination::Closed`; before
+  frankensim-gs17m it was the pressure-release end, an
+  octave away.
   Open tone holes are `AcousticTap` side branches on
   the ODE path: a compact neck is one inductor; a long
   neck (`kℓ > 0.2` or `ℓ > 4b`) is the same 2-cell LC

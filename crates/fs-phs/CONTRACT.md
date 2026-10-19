@@ -160,6 +160,14 @@ inventoried and measured in fs-couple `tests/integrator_warping_audit.rs`.
   `acoustic_chain` / `AcousticSection` (concatenated LC runs
   with an area jump at each interface — a muffler, a
   constriction, a cone sliced into cylinders),
+  `ChainOutlet` / `acoustic_chain_outlet_wall` (the far end:
+  `PressureRelease` is `p = 0` behind the last flux, the
+  quarter-wave stop family that `mouth: None` has always
+  built; `Rigid` cuts the last flux, so `U = 0` and a
+  flow-driven inlet sees the half-wave family; `Radiating`
+  is the compact mouth load. G1
+  `rigid_outlet_converges_to_the_closed_closed_resonance`,
+  frankensim-gs17m),
   `WallPin` / `acoustic_chain_mouth_wall` (locally reacting
   wall: per-cell shunt `L = σ/A_w`, `C = A_w/K`,
   `R = r/A_w` on `A_w = 2π a dx` — `×√(1+s²)` on a

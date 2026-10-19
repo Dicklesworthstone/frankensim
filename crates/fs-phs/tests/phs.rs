@@ -7,18 +7,19 @@
 
 use fs_math::c64::C64;
 use fs_phs::{
-    AcousticSection, AcousticTap, MouthFlange, NeckEnds, PhsError, PortHamiltonian,
+    AcousticSection, AcousticTap, ChainOutlet, MouthFlange, NeckEnds, PhsError, PortHamiltonian,
     QuadraticStorage, Storage, ViscothermalPin, WallPin, acoustic_chain, acoustic_chain_mouth,
-    acoustic_chain_mouth_wall, acoustic_cylinder, acoustic_waveguide, baffled_piston_impedance,
-    common_effort_capacitor, common_effort_dirac, common_effort_star, common_flow_dirac,
-    compact_radiation_impedance, discrete_gradient, duffing_oscillator, foster_sqrt_omega_terms,
-    helmholtz_natural_frequency, helmholtz_resonator, helmholtz_resonator_flow,
-    helmholtz_resonator_radiating, interconnect, join_port, kirchhoff_parallel_step, lc_ladder,
-    lc_ladder_terminated, mass_spring_damper, modal_bank, modal_bank_ports, moving_end_waveguide,
-    neck_end_correction, reduce_galerkin, regularized_coulomb, series_impedance_ports,
-    side_hole_inner_length, side_hole_mutual_length, side_hole_neck_length,
-    side_hole_series_length, slice_linear_taper, spherical_cone, step, step_descriptor,
-    transformer, wall_admittance_per_metre, wall_specific_impedance, zwikker_kosten_f,
+    acoustic_chain_mouth_wall, acoustic_chain_outlet_wall, acoustic_cylinder, acoustic_waveguide,
+    baffled_piston_impedance, common_effort_capacitor, common_effort_dirac, common_effort_star,
+    common_flow_dirac, compact_radiation_impedance, discrete_gradient, duffing_oscillator,
+    foster_sqrt_omega_terms, helmholtz_natural_frequency, helmholtz_resonator,
+    helmholtz_resonator_flow, helmholtz_resonator_radiating, interconnect, join_port,
+    kirchhoff_parallel_step, lc_ladder, lc_ladder_terminated, mass_spring_damper, modal_bank,
+    modal_bank_ports, moving_end_waveguide, neck_end_correction, reduce_galerkin,
+    regularized_coulomb, series_impedance_ports, side_hole_inner_length, side_hole_mutual_length,
+    side_hole_neck_length, side_hole_series_length, slice_linear_taper, spherical_cone, step,
+    step_descriptor, transformer, wall_admittance_per_metre, wall_specific_impedance,
+    zwikker_kosten_f,
 };
 
 /// A bottle-like neck: flush into the cavity wall, free outside.
@@ -2629,7 +2630,8 @@ fn first_resonance(sys: &PortHamiltonian, lo: f64, hi: f64) -> f64 {
 /// spherical-wave resonance with p = 0 at the outlet. Oracles:
 /// a truncated cone from x1 = L r1/(r2 - r1) has k L + atan(k x1) = pi;
 /// a cylinder L1 feeding that cone (x1 = L2 a0/(a2 - a0)) has
-/// sin(k L2 + t) cos(k L1) = sin(k L2) sin(t) sin(k L1), t = atan(k x1).
+/// sin(k L2 + t) cos(k L1) = sin(k L2) sin(t) sin(k L1), t = atan(k x1);
+/// a broken-line horn's root zeroes its 4 x 4 inlet/joint/outlet determinant.
 /// The psi chain that carried a near-field shunt on every cell drifted
 /// AWAY from these (+60 / +110 / +174 % at 8 / 16 / 32 cells for the cone).
 #[test]
@@ -2661,6 +2663,54 @@ fn tapered_chains_converge_to_the_spherical_wave_resonance() {
         let t = (k * xh).atan();
         (k * l2 + t).sin() * (k * l1).cos() - (k * l2).sin() * t.sin() * (k * l1).sin()
     });
+    // A broken-line horn, 3 -> 8 -> 20 mm over two 0.25 m cones. In each cone
+    // psi = a sin(k x) + b cos(k x) from its own apex, and U ∝ alpha (x psi' -
+    // psi). A resonance is a nontrivial (a1, b1, a2, b2) with U = 0 at the
+    // inlet, p and U continuous at the joint and p = 0 at the outlet.
+    let (h1, h2) = ((0.25, 0.003, 0.008), (0.25, 0.008, 0.02));
+    let slope = |(len, a, b): (f64, f64, f64)| (b - a) / len;
+    let (s1, s2) = (slope(h1), slope(h2));
+    let (x1a, x1b, x2a, x2b) = (h1.1 / s1, h1.2 / s1, h2.1 / s2, h2.2 / s2);
+    let (al1, al2) = (s1 * s1, s2 * s2);
+    let horn_k = root(&|k: f64| {
+        let flow = |x: f64| {
+            [
+                k * x * (k * x).cos() - (k * x).sin(),
+                -k * x * (k * x).sin() - (k * x).cos(),
+            ]
+        };
+        let (f1a, f1b, f2a) = (flow(x1a), flow(x1b), flow(x2a));
+        let mut m = [
+            [f1a[0], f1a[1], 0.0, 0.0],
+            [
+                (k * x1b).sin() / x1b,
+                (k * x1b).cos() / x1b,
+                -(k * x2a).sin() / x2a,
+                -(k * x2a).cos() / x2a,
+            ],
+            [al1 * f1b[0], al1 * f1b[1], -al2 * f2a[0], -al2 * f2a[1]],
+            [0.0, 0.0, (k * x2b).sin(), (k * x2b).cos()],
+        ];
+        // Determinant by Gaussian elimination with partial pivoting.
+        let mut det = 1.0;
+        for col in 0..4 {
+            let pivot = (col..4)
+                .max_by(|&a, &b| m[a][col].abs().total_cmp(&m[b][col].abs()))
+                .unwrap();
+            if pivot != col {
+                m.swap(pivot, col);
+                det = -det;
+            }
+            det *= m[col][col];
+            for row in col + 1..4 {
+                let factor = m[row][col] / m[col][col];
+                for c2 in col..4 {
+                    m[row][c2] -= factor * m[col][c2];
+                }
+            }
+        }
+        det
+    });
     let section = |length, radius, outlet_radius, cells| AcousticSection {
         length,
         radius,
@@ -2668,10 +2718,11 @@ fn tapered_chains_converge_to_the_spherical_wave_resonance() {
         cells,
     };
     // (case, exact k, finest-rung band of about 4x the measured error).
-    let cases: [(&str, f64, f64); 3] = [
+    let cases: [(&str, f64, f64); 4] = [
         ("cylinder", core::f64::consts::FRAC_PI_2 / 0.5, 0.06),
         ("cone", cone_k, 0.012),
         ("cylinder+cone", hybrid_k, 0.1),
+        ("broken-line horn", horn_k, 0.15),
     ];
     for (name, k, band) in cases {
         let mut errors = Vec::new();
@@ -2679,9 +2730,13 @@ fn tapered_chains_converge_to_the_spherical_wave_resonance() {
             let sections = match name {
                 "cylinder" => vec![section(0.5, 0.0075, 0.0075, cells)],
                 "cone" => vec![section(l, r1, r2, cells)],
-                _ => vec![
+                "cylinder+cone" => vec![
                     section(l1, a0, a0, cells / 2),
                     section(l2, a0, a2, cells / 2),
+                ],
+                _ => vec![
+                    section(h1.0, h1.1, h1.2, cells / 2),
+                    section(h2.0, h2.1, h2.2, cells / 2),
                 ],
             };
             let sys = acoustic_chain_mouth(&sections, 1.2, c, None, 1, &[], None).unwrap();
@@ -2697,4 +2752,79 @@ fn tapered_chains_converge_to_the_spherical_wave_resonance() {
         );
         assert!(errors[2].abs() < band, "{name}: {errors:?}");
     }
+}
+
+/// G1 (frankensim-gs17m): a rigid outlet (U = 0) gives the half-wave
+/// family under the flow-driven inlet, converging under refinement, where
+/// the pressure-release end gives the quarter-wave. Oracles (lossless):
+/// a cylinder has k L = pi; a truncated cone closed at both ends has
+/// psi' = psi / x at x1 and x2, i.e. k L - atan(k x2) + atan(k x1) = pi.
+#[test]
+fn rigid_outlet_converges_to_the_closed_closed_resonance() {
+    let c = 343.0;
+    let (r1, r2, l) = (0.003, 0.02, 0.5);
+    let (x1, x2) = (l * r1 / (r2 - r1), l * r2 / (r2 - r1));
+    let f = |k: f64| k * l - (k * x2).atan() + (k * x1).atan() - core::f64::consts::PI;
+    let (mut lo, mut hi) = (1.0, 20.0);
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if f(mid) < 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let cone_k = 0.5 * (lo + hi);
+    // (case, inlet radius, exact k, finest-rung band of about 4-5x the
+    // measured error: -4.0e-4 for the cylinder, whose N charges and N - 1
+    // fluxes give the second-order sin(x)/x dispersion, and -2.5e-2 for the
+    // first-order frustum cone, at 32 cells).
+    let cases: [(&str, f64, f64, f64); 2] = [
+        ("cylinder", 0.0075, core::f64::consts::PI / l, 2.0e-3),
+        ("cone", r1, cone_k, 0.1),
+    ];
+    for (name, inlet, k, band) in cases {
+        let outlet = if name == "cone" { r2 } else { inlet };
+        let mut errors = Vec::new();
+        for cells in [8, 16, 32] {
+            let sections = [AcousticSection {
+                length: l,
+                radius: inlet,
+                outlet_radius: outlet,
+                cells,
+            }];
+            let rigid = acoustic_chain_outlet_wall(
+                &sections,
+                1.2,
+                c,
+                ChainOutlet::Rigid,
+                1,
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
+            let w = first_resonance(&rigid, 0.6 * k * c, 1.2 * k * c);
+            errors.push(w / (k * c) - 1.0);
+        }
+        println!(
+            "{{\"suite\":\"fs-phs\",\"case\":\"rigid-outlet-resonance\",\"geometry\":\"{name}\",\"k_exact\":{k},\"cells\":[8,16,32],\"relative_error\":{errors:?},\"finest_band\":{band}}}"
+        );
+        assert!(
+            errors.windows(2).all(|e| e[0].abs() >= 1.8 * e[1].abs()),
+            "{name}: the rigid chain must converge to the closed-closed resonance: {errors:?}"
+        );
+        assert!(errors[2].abs() < band, "{name}: {errors:?}");
+    }
+    // The pressure-release end of the same cylinder is the quarter-wave.
+    let sections = [AcousticSection {
+        length: l,
+        radius: 0.0075,
+        outlet_radius: 0.0075,
+        cells: 32,
+    }];
+    let release = acoustic_chain_mouth(&sections, 1.2, c, None, 1, &[], None).unwrap();
+    let k = core::f64::consts::FRAC_PI_2 / l;
+    let w = first_resonance(&release, 0.6 * k * c, 1.2 * k * c);
+    assert!((w / (k * c) - 1.0).abs() < 0.03, "{w}");
 }

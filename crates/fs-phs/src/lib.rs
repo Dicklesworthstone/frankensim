@@ -3419,7 +3419,6 @@ pub fn acoustic_chain_mouth(
 /// # Errors
 /// As [`acoustic_chain`], plus a bad wall pin.
 #[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
-#[allow(clippy::too_many_lines)]// one coherent physics stage
 pub fn acoustic_chain_mouth_wall(
     sections: &[AcousticSection],
     density: f64,
@@ -3430,11 +3429,61 @@ pub fn acoustic_chain_mouth_wall(
     viscothermal: Option<&ViscothermalPin>,
     wall: Option<&WallPin>,
 ) -> Result<PortHamiltonian, PhsError> {
+    acoustic_chain_outlet_wall(
+        sections,
+        density,
+        sound_speed,
+        mouth.map_or(ChainOutlet::PressureRelease, ChainOutlet::Radiating),
+        inlets,
+        taps,
+        viscothermal,
+        wall,
+    )
+}
+
+/// Far end of an acoustic chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainOutlet {
+    /// `p = 0` behind the last flux, without radiation: the quarter-wave
+    /// stop family under a flow-driven inlet.
+    PressureRelease,
+    /// Rigid closure, `U = 0`. The last flux is cut from the last charge, so
+    /// the line is `N` charges and `N - 1` fluxes, and a flow-driven inlet
+    /// sees the half-wave family. The cut flux stays in the state (at rest
+    /// it stays at rest) so that tap and Foster offsets are unchanged.
+    Rigid,
+    /// Open mouth with the compact radiation load of this flange.
+    Radiating(MouthFlange),
+}
+
+/// [`acoustic_chain_mouth_wall`] with an explicit [`ChainOutlet`], the only
+/// form that can impose a rigid closure (frankensim-gs17m).
+///
+/// # Errors
+/// As [`acoustic_chain`], plus a bad wall pin.
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
+#[allow(clippy::too_many_lines)] // one coherent physics stage
+pub fn acoustic_chain_outlet_wall(
+    sections: &[AcousticSection],
+    density: f64,
+    sound_speed: f64,
+    outlet: ChainOutlet,
+    inlets: usize,
+    taps: &[AcousticTap],
+    viscothermal: Option<&ViscothermalPin>,
+    wall: Option<&WallPin>,
+) -> Result<PortHamiltonian, PhsError> {
+    let mouth = match outlet {
+        ChainOutlet::Radiating(flange) => Some(flange),
+        ChainOutlet::PressureRelease | ChainOutlet::Rigid => None,
+    };
     // A lone widening taper is the psi-line cone, about ten times more
     // accurate per cell than frustum cells (b159b: -1.3e-2 vs -1.3e-1 at 8
-    // cells). Narrowing tapers and multi-run chains with a taper are frustum
-    // cells.
+    // cells). Narrowing tapers, multi-run chains with a taper and rigid
+    // outlets are frustum cells: in psi variables U = 0 at the outlet needs a
+    // negative near-field inertance, which no passive storage can hold.
     if let [s] = sections
+        && outlet != ChainOutlet::Rigid
         && s.outlet() - s.radius > 1.0e-15 * (1.0 + s.radius)
     {
         return spherical_cone_wall(
@@ -3557,6 +3606,11 @@ pub fn acoustic_chain_mouth_wall(
             j[pi * n + qn] = -1.0;
             j[qn * n + pi] = 1.0;
         }
+    }
+    if outlet == ChainOutlet::Rigid {
+        let (q_last, p_last) = (n_line - 2, n_line - 1);
+        j[p_last * n + q_last] = 0.0;
+        j[q_last * n + p_last] = 0.0;
     }
     if let Some(pin) = viscothermal {
         for cell in 0..n_cells {
