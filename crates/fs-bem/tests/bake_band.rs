@@ -1,9 +1,10 @@
 //! G0/G1/G2/G5 declared-band bake qualification. Native execution is required.
+use fs_bem::helmholtz::iterative::IterativeOptions;
 use fs_bem::helmholtz::{MAX_DENSE_PANELS, Medium};
 use fs_bem::panel3d::SpherePanels;
 use fs_bem::radiation_bake::declared::{
     BakeDeclaration, BakeError, BakeMesh, BakeStatus, ModeContent, PanelLadder, PanelSource,
-    ReferencePlane, bake_declared,
+    ReferencePlane, bake_declared, bake_declared_routed,
 };
 use fs_blake3::{ContentHash, hash_domain};
 use fs_math::c64::C64;
@@ -132,6 +133,52 @@ fn bake_pulsating_sphere_band() {
             row.z_specific.re,
             row.z_specific.im,
             if error <= 1e-3 { "pass" } else { "fail" }
+        );
+        assert!(error <= 1e-3, "ka={ka}, analytic relative error {error}");
+    }
+}
+
+/// G2 (M2.5-W5 route): the same pulsating-sphere oracle on a Burton-Miller
+/// band (mouth ka >= 0.5) whose ladder needs the 20480-panel rung, past the
+/// dense cap. The iterative owner solves that rung. Plain-CBIE rows (mouth
+/// ka < 0.5, the low end of bake_pulsating_sphere_band) have no iterative
+/// quadrature and refuse there.
+///
+/// The declared operator tolerance is 5e-3, and the closed-form check below
+/// stays at 1e-3. At 1e-3 the three-rung rule cannot complete on this ladder.
+/// trj b181 measured successive changes at ka = 0.5 of 1.1e-2, 2.5e-3 and
+/// 4.1e-4 (SH 1.2e-2, 3.1e-3, 7.5e-4) over 320, 1280, 5120 and 20480 panels.
+/// Completing at 1e-3 needs icosphere-6 (81920 panels) at an FMM order whose
+/// M2L work exceeds MAX_TRANSLATION_WORK. That remains the strict
+/// qualification's blocker (bake_pulsating_sphere_band).
+#[test]
+fn bake_routes_burton_miller_rows_past_the_dense_cap() {
+    let source = Sphere { radius: 1.0 };
+    let declaration = declare(&source, &[0.5, 1.0], 5e-3);
+    let ladder = PanelLadder::new(&source, vec![2, 3, 4, 5]).unwrap();
+    let iterative = IterativeOptions {
+        tol: 1e-9,
+        fmm_order: 6,
+        max_iters: 900,
+        ..IterativeOptions::default()
+    };
+    let bake = bake_declared_routed(&declaration, &ladder, Some(&iterative), || false).unwrap();
+    print_rows(&bake);
+    assert_eq!(bake.status(), BakeStatus::Complete);
+    assert!(
+        bake.refinement()
+            .iter()
+            .any(|r| r.route == "iterative" && r.panels > MAX_DENSE_PANELS),
+        "the qualification must exercise the iterative route"
+    );
+    for row in bake.rows() {
+        let ka = row.k * source.radius;
+        let oracle = C64::new(ka * ka, -ka).scale(
+            declaration.medium().density * declaration.medium().sound_speed / (1.0 + ka * ka),
+        );
+        let error = (row.z_specific - oracle).abs() / oracle.abs();
+        println!(
+            "{{\"case\":\"bake_routes_burton_miller_rows_past_the_dense_cap\",\"inputs\":\"analytic pulsating sphere a=1m; e^-iwt\",\"axis\":\"ka\",\"rung\":{ka:e},\"err\":{error:e},\"tol\":1e-3}}"
         );
         assert!(error <= 1e-3, "ka={ka}, analytic relative error {error}");
     }

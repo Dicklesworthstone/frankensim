@@ -4,7 +4,8 @@
 //! tolerance at EVERY declared frequency, after at least three solved rungs.
 //! It is finite-grid discretization evidence, not a uniform-in-frequency error
 //! enclosure, a validated instrument, or a passive rational realization.
-use super::{RadiationLoadRow, bake_radiation_load};
+use super::{RadiationLoadRow, bake_radiation_load, bake_radiation_load_iterative};
+use crate::helmholtz::iterative::{IterativeError, IterativeOptions};
 use crate::helmholtz::{
     HelmholtzError, MAX_DENSE_PANELS, MAX_SH_DEGREE, MIN_PANELS_PER_WAVELENGTH, Medium,
 };
@@ -59,6 +60,11 @@ pub enum BakeError {
     OutOfBand {
         at_hz: f64,
         proven_hz: Option<(f64, f64)>,
+    },
+    /// A refusal of the M2.5-W5 iterative route, with its diagnostic.
+    IterativeRoute {
+        at_hz: f64,
+        what: String,
     },
     Cancelled,
 }
@@ -303,6 +309,8 @@ pub struct RefinementRow {
     pub z_rel_change: Option<f64>,
     pub sh_rel_change: Option<f64>,
     pub status: &'static str,
+    /// `"dense"` LU, or `"iterative"` (M2.5-W5) above [`MAX_DENSE_PANELS`].
+    pub route: &'static str,
     pub elapsed_s: f64,
 }
 
@@ -378,11 +386,11 @@ impl DeclaredBake {
     pub fn receipt_lines(&self, host: &str, command: &str) -> Vec<String> {
         let hash = self.declaration.hash.to_hex();
         self.refinement.iter().map(|r|format!(
-            "{{\"case\":\"bake-band-refinement\",\"inputs\":\"{}\",\"declaration_hash\":\"{hash}\",\"axis\":\"panels\",\"rung\":{},\"at_hz\":{:e},\"panels\":{},\"surface_area_m2\":{:e},\"minimum_panels\":{},\"ppw\":{},\"z_rel_change\":{},\"sh_rel_change\":{},\"observed\":{},\"err\":{},\"tol\":{:e},\"status\":\"{}\",\"verdict\":\"{}\",\"host\":{},\"command\":{},\"elapsed_s\":{:e}}}",
+            "{{\"case\":\"bake-band-refinement\",\"inputs\":\"{}\",\"declaration_hash\":\"{hash}\",\"axis\":\"panels\",\"rung\":{},\"at_hz\":{:e},\"panels\":{},\"surface_area_m2\":{:e},\"minimum_panels\":{},\"ppw\":{},\"z_rel_change\":{},\"sh_rel_change\":{},\"observed\":{},\"err\":{},\"tol\":{:e},\"status\":\"{}\",\"route\":\"{}\",\"verdict\":\"{}\",\"host\":{},\"command\":{},\"elapsed_s\":{:e}}}",
             self.declaration.geometry_hash.to_hex(),r.rung,r.frequency_hz,r.panels,r.source_area_m2,
             json_number(Some(r.minimum_panel_estimate)),json_number(r.panels_per_wavelength),json_number(r.z_rel_change),
             json_number(r.sh_rel_change),json_number(r.z_rel_change),json_number(r.z_rel_change.zip(r.sh_rel_change).map(|(z,sh)|z.max(sh))),
-            self.declaration.operator_tol,r.status,if r.status=="converged" {"pass"} else if r.z_rel_change.is_some() {"fail"} else {"refused"},
+            self.declaration.operator_tol,r.status,r.route,if r.status=="converged" {"pass"} else if r.z_rel_change.is_some() {"fail"} else {"refused"},
             json_string(host),json_string(command),r.elapsed_s)).collect()
     }
 }
@@ -500,9 +508,26 @@ fn admit_reference_plane(mesh: &BakeMesh, plane: ReferencePlane) -> Result<(), B
 /// Execute the predeclared frequency grid, regenerating every rung from source.
 /// The unchanged owner selects CBIE/Burton–Miller and computes all SH coefficients.
 /// Polls cancellation between bounded existing solves; no mid-LU latency claim.
+/// Dense only: a rung above [`MAX_DENSE_PANELS`] is `Blocked` and routed to
+/// M2.5-W5 ([`bake_declared_routed`]).
 pub fn bake_declared(
     declaration: &BakeDeclaration,
     ladder: &PanelLadder<'_>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<DeclaredBake, BakeError> {
+    bake_declared_routed(declaration, ladder, None, cancelled)
+}
+
+/// [`bake_declared`] with the M2.5-W5 route. With `iterative`, a rung above
+/// [`MAX_DENSE_PANELS`] is solved by the matrix-free iterative owner under
+/// those explicit tolerance, FMM-order and storage budgets instead of being
+/// `Blocked`. Rungs within the dense cap stay dense. The same ladder,
+/// operator tolerance and three-rung rule decide completeness, and every
+/// refinement row records its route.
+pub fn bake_declared_routed(
+    declaration: &BakeDeclaration,
+    ladder: &PanelLadder<'_>,
+    iterative: Option<&IterativeOptions>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<DeclaredBake, BakeError> {
     if declaration.geometry_hash != ladder.source.geometry_hash()
@@ -528,7 +553,9 @@ pub fn bake_declared(
     let preflight_start = Instant::now();
     for (rung, &resolution) in ladder.resolutions.iter().take(3).enumerate() {
         let panels = ladder.source.panel_count(resolution)?;
-        if let Some(status) = dense_status(declaration.band_hz.0, panels) {
+        if iterative.is_none()
+            && let Some(status) = dense_status(declaration.band_hz.0, panels)
+        {
             let frequency = declaration.band_hz.0;
             let area = ladder.source.surface_area_m2();
             let h = declaration.medium.sound_speed / (frequency * MIN_PANELS_PER_WAVELENGTH);
@@ -543,6 +570,7 @@ pub fn bake_declared(
                 z_rel_change: None,
                 sh_rel_change: None,
                 status: "blocked",
+                route: "dense",
                 elapsed_s: preflight_start.elapsed().as_secs_f64(),
             });
             return Ok(bake);
@@ -564,6 +592,7 @@ pub fn bake_declared(
             }
             let start = Instant::now();
             let panels = ladder.source.panel_count(resolution)?;
+            let routed = iterative.filter(|_| panels > MAX_DENSE_PANELS);
             let mut record = RefinementRow {
                 frequency_hz: frequency,
                 rung,
@@ -574,9 +603,16 @@ pub fn bake_declared(
                 z_rel_change: None,
                 sh_rel_change: None,
                 status: "refining",
+                route: if routed.is_some() {
+                    "iterative"
+                } else {
+                    "dense"
+                },
                 elapsed_s: 0.0,
             };
-            if let Some(status) = dense_status(frequency, panels) {
+            if iterative.is_none()
+                && let Some(status) = dense_status(frequency, panels)
+            {
                 record.status = "blocked";
                 record.elapsed_s = start.elapsed().as_secs_f64();
                 bake.refinement.push(record);
@@ -590,26 +626,48 @@ pub fn bake_declared(
                 ));
             }
             admit_reference_plane(&mesh, declaration.reference_plane)?;
-            let result = bake_radiation_load(
-                &mesh.surface,
-                &mesh.driven,
-                &[std::f64::consts::TAU * frequency],
-                declaration.medium,
-                declaration.sh_degree,
-                &declaration.hash.to_hex(),
-            );
+            let omega = [std::f64::consts::TAU * frequency];
+            let source_id = declaration.hash.to_hex();
+            let (medium, degree) = (declaration.medium, declaration.sh_degree);
+            let result = match routed {
+                Some(options) => bake_radiation_load_iterative(
+                    &mesh.surface,
+                    &mesh.driven,
+                    &omega,
+                    medium,
+                    degree,
+                    &source_id,
+                    options,
+                )
+                .map_err(|e| match e {
+                    IterativeError::Helmholtz(e) => BakeError::Solver(e),
+                    other => BakeError::IterativeRoute {
+                        at_hz: frequency,
+                        what: other.to_string(),
+                    },
+                }),
+                None => bake_radiation_load(
+                    &mesh.surface,
+                    &mesh.driven,
+                    &omega,
+                    medium,
+                    degree,
+                    &source_id,
+                )
+                .map_err(BakeError::Solver),
+            };
             let mut row = match result {
                 Ok(value) => value.rows,
-                Err(HelmholtzError::TooCoarse {
+                Err(BakeError::Solver(HelmholtzError::TooCoarse {
                     panels_per_wavelength,
-                }) => {
+                })) => {
                     record.status = "under-resolved";
                     record.panels_per_wavelength = Some(panels_per_wavelength);
                     record.elapsed_s = start.elapsed().as_secs_f64();
                     bake.refinement.push(record);
                     continue;
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e),
             };
             let row = row.remove(0);
             if !row.z_acoustic.re.is_finite()

@@ -600,6 +600,15 @@ a bound on omitted SH degrees. It is finite-frequency-grid refinement evidence,
 not a uniform-in-frequency interpolation error enclosure or physical validation.
 Negative resistance beyond the same relative tolerance refuses. No panel
 arithmetic, formulation threshold or legacy bake result changes here.
+`bake_declared` stays dense: a rung past `MAX_DENSE_PANELS` is
+`Blocked { route: "M2.5-W5" }`. `bake_declared_routed(.., Some(&options), ..)`
+is that route: such a rung is solved by `bake_radiation_load_iterative`
+(the matrix-free FMM + GMRES owner, under the caller's explicit tolerance,
+FMM order and storage budgets), while rungs within the cap stay dense. Each
+`RefinementRow` and receipt line records `route` ("dense" or "iterative").
+An iterative refusal is `BakeError::IterativeRoute { at_hz, what }`, and an
+unconverged solve is never a row. The same ladder, tolerance and three-rung
+rule decide completeness.
 
 The exact next source panel count is checked before allocating its surface or
 dense matrix. More than 8192 panels returns `Blocked` with frequency, needed

@@ -21,16 +21,19 @@
 
 use fs_math::c64::C64;
 
+use crate::helmholtz::iterative::{IterativeError, IterativeOptions, solve_radiation_iterative};
 use crate::helmholtz::{
-    DirectivityTable, Formulation, HelmholtzError, Medium, directivity_sh_table, solve_radiation,
+    DirectivityTable, Formulation, HelmholtzError, Medium, RadiationSolution, directivity_sh_table,
+    solve_radiation,
 };
 use crate::panel3d::SpherePanels;
+use fs_exec::CancelGate;
 
 /// Declaration-bound refinement over this same radiation-bake owner.
 pub mod declared;
 pub use declared::{
     BakeDeclaration, BakeError, BakeMesh, BakeStatus, DeclaredBake, ModeContent, PanelLadder,
-    PanelSource, PartialBand, ReferencePlane, bake_declared,
+    PanelSource, PartialBand, ReferencePlane, bake_declared, bake_declared_routed,
 };
 
 /// One frequency row of a radiation-load bake.
@@ -158,23 +161,78 @@ pub fn bake_radiation_load(
     l_max: usize,
     source_id: &str,
 ) -> Result<RadiationLoadBake, HelmholtzError> {
+    bake_radiation_load_with(
+        surface,
+        driven,
+        omegas,
+        medium,
+        l_max,
+        source_id,
+        |k, formulation, velocity| solve_radiation(surface, k, medium, velocity, formulation),
+    )
+}
+
+/// [`bake_radiation_load`] whose rows are solved by the matrix-free iterative
+/// owner (M2.5-W5: FMM matvecs and preconditioned GMRES) with the caller's
+/// explicit `options`, the route past the dense panel cap. Every row is the
+/// same post-processing of a converged surface solution; an unconverged
+/// solve refuses.
+///
+/// # Errors
+/// As [`bake_radiation_load`], plus every [`IterativeError`] refusal.
+pub fn bake_radiation_load_iterative(
+    surface: &SpherePanels,
+    driven: &[bool],
+    omegas: &[f64],
+    medium: Medium,
+    l_max: usize,
+    source_id: &str,
+    options: &IterativeOptions,
+) -> Result<RadiationLoadBake, IterativeError> {
+    let gate = CancelGate::new_clock_free();
+    bake_radiation_load_with(
+        surface,
+        driven,
+        omegas,
+        medium,
+        l_max,
+        source_id,
+        |k, formulation, velocity| {
+            solve_radiation_iterative(surface, k, medium, velocity, formulation, options, &gate)
+                .map(|(solution, _, _)| solution)
+        },
+    )
+}
+
+fn bake_radiation_load_with<E: From<HelmholtzError>>(
+    surface: &SpherePanels,
+    driven: &[bool],
+    omegas: &[f64],
+    medium: Medium,
+    l_max: usize,
+    source_id: &str,
+    mut solve: impl FnMut(f64, Formulation, &[C64]) -> Result<RadiationSolution, E>,
+) -> Result<RadiationLoadBake, E> {
     let n = surface.areas().len();
     if driven.len() != n {
         return Err(HelmholtzError::ShapeMismatch {
             what: "driven mask length must equal the panel count",
-        });
+        }
+        .into());
     }
     if omegas.is_empty() {
         return Err(HelmholtzError::BadParameter {
             what: "at least one bake frequency",
-        });
+        }
+        .into());
     }
     if !omegas.windows(2).all(|w| w[0].is_finite() && w[1] > w[0])
         || !(omegas[0].is_finite() && omegas[0] > 0.0)
     {
         return Err(HelmholtzError::BadParameter {
             what: "bake frequencies must be finite, positive, strictly increasing",
-        });
+        }
+        .into());
     }
     let mouth_area: f64 = surface
         .areas()
@@ -187,7 +245,8 @@ pub fn bake_radiation_load(
     if driven_count == 0 {
         return Err(HelmholtzError::BadParameter {
             what: "at least one driven mouth panel",
-        });
+        }
+        .into());
     }
     let mouth_radius = (mouth_area / core::f64::consts::PI).sqrt();
     let velocity: Vec<C64> = driven
@@ -204,7 +263,7 @@ pub fn bake_radiation_load(
         } else {
             Formulation::BurtonMiller
         };
-        let solution = solve_radiation(surface, k, medium, &velocity, formulation)?;
+        let solution = solve(k, formulation, &velocity)?;
         fingerprint = solution.surface_fingerprint;
         // Area-averaged p over the driven panels (v = 1 there): the same
         // arbiter the pulsating-sphere oracle uses.
