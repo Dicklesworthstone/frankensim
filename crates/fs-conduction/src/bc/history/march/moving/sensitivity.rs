@@ -12,6 +12,8 @@ pub mod schedule;
 mod power;
 /// Authored path and footprint edits for joint physical inverse design.
 pub mod geometry;
+/// Integrated absorbed joules and authored power-value derivatives.
+pub mod energy;
 
 use super::{MovingHeatSample, MovingHeatSource, invalid, poll, zeros};
 use crate::{ConductionError, ConductionMesh, ScalarField, COMPONENT_POWER_DIMS};
