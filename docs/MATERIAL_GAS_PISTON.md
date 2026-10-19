@@ -120,3 +120,53 @@ paired report supplies the complete energy/mass account for this composition.
 A closed nozzle retains the ordinary closed-step audit and arithmetic. Failed
 transfer, failed subsequent motion and late cancellation preserve both parcels,
 the wall state and the prior accepted port account.
+
+## Nozzle exchange with a finite material wall
+
+`GasPiston::nozzle_thermal_candidate` joins the same nozzle transfer to the
+existing reciprocal thermal/piston solver. It accepts an immutable reservoir,
+the ordinary nozzle and piston controls, a `UniformEnthalpyStepInput` for the
+finite wall or lining, `HeatExchangeSolve`, and the existing conductance callback.
+The returned `NozzleThermalPistonCandidate` contains the piston, reservoir and
+finite thermal endpoint. Publish all three returned endpoints together.
+
+The nozzle stage runs once from the accepted initial pressures. Every trial of
+the subsequent coupled heat/momentum solve starts from that same transferred
+chamber. Incoming species therefore affect the gas midpoint's caloric, transport,
+pressure and acoustic properties used by the wall-heating and motion equations.
+Thermal iteration cannot withdraw or deposit nozzle enthalpy a second time.
+
+`nozzle_thermal_layers_candidate` supplies the existing
+`MaterialConductionLayers` callback directly. The wall's conductivity comes from
+the same source card as its enthalpy/phase chart; gas conductivity comes from the
+actual transferred mixture at its solved energy midpoint. Changing supported
+conductivity or caloric data, inlet composition or the layer geometry changes
+heat exchange, finite-wall temperature/phase, piston motion and the resulting
+gas state through those original owners. `MaterialGasPiston` exposes both methods
+and retains its original source-resolved rigid-body inertia in the candidate.
+
+The full accepted balance is
+
+`delta_U_chamber + delta_U_reservoir + delta_H_wall + delta_K + exterior_work - force_work - Q_gas_external - Q_wall_internal`.
+
+Both nozzle enthalpy and reciprocal wall heat cancel inside this boundary.
+`HeatExchangeSolve::energy_tolerance_j` admits this complete balance as well as
+the original thermal stage. The report retains original nozzle/species and
+thermal/momentum results plus independently measured endpoint storage and mass.
+Nonzero flow keeps the same explicit missing-stream port-audit boundary described
+above; it never emits a falsely complete closed-chamber window.
+
+The transfer-then-coupled-heat/motion composition is first order over one physical
+interval and requires timestep refinement. Its finite thermal store uses the
+existing fixed-volume, negligible-pV-work enthalpy model and can retain latent
+heat. That store may be a lining separate from the rigid moving specimen; its
+temperature or phase does not silently update rigid-body shape or mass. Missing
+material support, a failed thermal trial, failed energy admission or late
+cancellation returns none of the tentative endpoints. A closed nozzle recovers
+the original thermal solve, and an insulated wall recovers the original nozzle
+and piston step.
+
+The focused regression module is
+`cavity_phs::piston::exchange::thermal::tests`. It exercises conductivity and inlet
+composition changes, both limiting cases, finite latent storage with independent
+whole-trajectory energy, post-transfer refusal/cancellation/retry and refinement.

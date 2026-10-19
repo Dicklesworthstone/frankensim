@@ -6,11 +6,13 @@
 
 use super::{ClosedGasParcel, GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_mbd_material::ResolvedBody;
-use super::thermal::{ConductanceSample, ThermalPistonError};
+use super::thermal::{ConductanceSample, HeatExchangeSolve, ThermalPistonError};
+use super::exchange::thermal::NozzleThermalPistonCandidate;
 use super::thermal::double_acting::{DoubleHeatExchangeSolve, DoubleThermalPistonStep};
 use super::thermal::layers::{MaterialConductionLayers, LayerConductionError};
 use fs_material::phase::{EquilibriumPhaseState, UniformEnthalpyStep, UniformEnthalpyStepInput};
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
+use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::{GasNozzle, GasNozzleStepSolve};
 use super::double_acting::{
     DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve, DoublePistonStep,
 };
@@ -81,6 +83,41 @@ impl MaterialGasPiston {
     ) -> Result<super::exchange::PistonNozzleStep, PistonError> {
         self.piston.step_with_nozzle(reservoir, nozzle, input, exchange, controls,
             total_energy_tolerance_j, cancelled)
+    }
+
+    /// Retain the canonical solid inertia while exchanging nozzle species and
+    /// enthalpy and solving wall heat, phase and gas/piston motion together.
+    /// The thermal store may be separate from this rigid inertial specimen;
+    /// heating it does not silently deform or re-resolve the mechanical body.
+    #[allow(clippy::too_many_arguments)]
+    pub fn nozzle_thermal_candidate<S, E>(
+        &self, reservoir: &ClosedGasParcel, nozzle: GasNozzle,
+        input: PistonInput, thermal_body: UniformEnthalpyStepInput<'_>,
+        controls: PistonSolve, flow: GasNozzleStepSolve, exchange: HeatExchangeSolve,
+        resolve: impl FnMut(&ResolvedThermochemicalGasState, EquilibriumPhaseState)
+            -> Result<ConductanceSample<S>, E>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NozzleThermalPistonCandidate<S, Self>, ThermalPistonError<E>> {
+        let candidate = self.piston.nozzle_thermal_candidate(reservoir, nozzle, input, thermal_body,
+            controls, flow, exchange, resolve, &mut cancelled)?
+            .map_piston(|piston| Self { body: self.body.clone(), piston });
+        if cancelled() { return Err(ThermalPistonError::Cancelled); }
+        Ok(candidate)
+    }
+
+    /// Resolve wall conductivity from the same material card as its enthalpy
+    /// chart, and gas conductivity from the actual post-exchange gas midpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn nozzle_thermal_layers_candidate(
+        &self, reservoir: &ClosedGasParcel, nozzle: GasNozzle,
+        input: PistonInput, thermal_body: UniformEnthalpyStepInput<'_>,
+        controls: PistonSolve, flow: GasNozzleStepSolve, exchange: HeatExchangeSolve,
+        layers: MaterialConductionLayers<'_>, cancelled: impl FnMut() -> bool,
+    ) -> Result<NozzleThermalPistonCandidate<fs_material::state_point::ResolvedMaterialStatePoint, Self>,
+        ThermalPistonError<LayerConductionError>>
+    {
+        self.nozzle_thermal_candidate(reservoir, nozzle, input, thermal_body, controls, flow, exchange,
+            |gas, thermal| layers.resolve(gas, thermal), cancelled)
     }
 }
 
