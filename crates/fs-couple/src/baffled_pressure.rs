@@ -140,6 +140,9 @@ pub struct BaffledPressure {
     decimator: antialias::Decimator,
     /// Cold choice: the prepared filter consumes velocity, not finite differences.
     differentiate_velocity: bool,
+    /// `differentiate_pressure`: the bandlimited derivative on the summed pressure (one
+    /// channel) while `decimator` passes velocity through.
+    pressure_derivative: Option<antialias::Decimator>,
     /// Fixed delay introduced only by the optional bandlimited kernel.
     interpolation_delay: usize,
     head: usize,
@@ -161,6 +164,7 @@ impl Clone for BaffledPressure {
             packed_weights:self.packed_weights.clone(),tap_offsets:self.tap_offsets.clone(),tap_history:0,
             previous_velocity:self.previous_velocity.clone(),acceleration:self.acceleration.clone(),
             decimator:self.decimator.clone(),differentiate_velocity:self.differentiate_velocity,
+            pressure_derivative:self.pressure_derivative.clone(),
             interpolation_delay:self.interpolation_delay,head:self.head,modes:self.modes,rate:self.rate,
             position_m:self.position_m,delay_samples:self.delay_samples };
         if transposed {copy.tap_history=copy.history.as_ptr() as usize;}
@@ -291,7 +295,25 @@ impl BaffledPressure {
     }
     /// Anti-alias, derivative and interpolation latency, excluding physical travel.
     pub fn filter_delay_samples(&self) -> f64 {
-        self.decimator.delay_output_frames() + self.interpolation_delay as f64
+        self.decimator.delay_output_frames()
+            + self.pressure_derivative.as_ref().map_or(0.0, antialias::Decimator::delay_output_frames)
+            + self.interpolation_delay as f64
+    }
+    /// Cold, before stepping: a differentiating receiver at one mechanics frame per output
+    /// frame takes the bandlimited derivative of the summed pressure instead of every input's
+    /// velocity. The derivative and the Rayleigh kernels are both linear and time-invariant, and
+    /// both start from rest: D(sum_k w_k . v(t-d_k)) = sum_k w_k . D(v)(t-d_k). The same filter
+    /// then runs on one channel instead of `inputs` (the live piano's r32 board: 32 x 48 tap
+    /// pairs per sample). Only the rounding changes. `mode_pressures` is refused afterwards: the
+    /// history then holds velocities. Returns false, changing nothing, for other receivers:
+    /// their derivative is convolved into a decimation stage, which does not commute.
+    pub fn differentiate_pressure(&mut self) -> Result<bool, String> {
+        if !self.differentiate_velocity || self.decimator.input_frames() != 1 {return Ok(false);}
+        let derivative = antialias::Decimator::new_differentiating(1, 1, self.rate as u32)?;
+        debug_assert_eq!(derivative.delay_output_frames(), self.decimator.delay_output_frames());
+        self.decimator = antialias::Decimator::new(1, self.modes)?;
+        self.pressure_derivative = Some(derivative);
+        Ok(true)
     }
     fn from_loaded(surface: &[SurfaceSample], modes: usize, rate: u32,
         position_m: [f64; 3], medium: RayleighMedium) -> Result<Self,String> {
@@ -329,7 +351,7 @@ impl BaffledPressure {
         let mut receiver = Self { kernels: bins.into_iter().collect(), history: vec![0.0;samples],history_frames,
             taps:Vec::new(),packed_weights:Vec::new(),tap_offsets:Vec::new(),tap_history:0,
             previous_velocity:vec![0.0;modes],acceleration:vec![0.0;modes],head:0,modes,rate:f64::from(rate),
-            decimator:antialias::Decimator::new(1,modes)?,differentiate_velocity:false,interpolation_delay:0,
+            decimator:antialias::Decimator::new(1,modes)?,differentiate_velocity:false,pressure_derivative:None,interpolation_delay:0,
             position_m,delay_samples:(first,last) };
         receiver.prepare_taps();
         Ok(receiver)
@@ -356,6 +378,7 @@ impl BaffledPressure {
     }
     pub fn multiply_adds_per_sample(&self)->usize {
         self.kernels.len()*self.modes + self.decimator.multiplies_per_output_frame()
+            + self.pressure_derivative.as_ref().map_or(0, antialias::Decimator::multiplies_per_output_frame)
     }
 
     /// Pressure contribution of each input mode at the most recently emitted
@@ -365,6 +388,9 @@ impl BaffledPressure {
     pub fn mode_pressures(&self, output: &mut [f64]) -> Result<(), String> {
         if output.len() != self.modes {
             return Err("modal pressure output must have one entry per input mode".into());
+        }
+        if self.pressure_derivative.is_some() {
+            return Err("modal pressures need the per-input derivative; differentiate_pressure is on".into());
         }
         output.fill(0.0);
         let emitted_head = if self.head == 0 {self.history_frames - 1} else {self.head - 1};
@@ -423,6 +449,10 @@ impl BaffledPressure {
             }
         }
         if !pressure.is_finite() {return Err("radiated pressure overflow".into());}
+        let pressure=match &mut self.pressure_derivative {
+            Some(derivative)=>derivative.preview(&[pressure])?[0],
+            None=>pressure,
+        };
         let offset=self.head*self.modes;
         self.history[offset..offset+self.modes].copy_from_slice(filtered);
         if transposed {
@@ -434,6 +464,7 @@ impl BaffledPressure {
         }
         self.previous_velocity.copy_from_slice(&velocity[(ratio-1)*self.modes..]);
         self.decimator.commit();
+        if let Some(derivative)=&mut self.pressure_derivative {derivative.commit();}
         self.head+=1;if self.head==self.history_frames{self.head=0;}
         Ok(pressure)
     }
@@ -479,6 +510,46 @@ mod tests {
             heard |= components.iter().any(|x| x.abs() > 0.0);
         }
         assert!(heard);
+    }
+    /// The bandlimited derivative of the summed pressure is the same filter as the derivative
+    /// of every input (both linear, time-invariant and from rest): same delay, fewer
+    /// multiplies, the same pressure up to rounding. Modal pressures are refused, and a
+    /// multirate receiver (derivative inside a decimation stage) is left as it was.
+    #[test]
+    fn the_summed_pressure_derivative_equals_the_per_input_derivative() {
+        let surface = [SurfaceSample {position_m:[0.0,0.0,0.0],area_m2:0.1,
+            mode_shape:vec![1.0,-0.5,0.25]},
+            SurfaceSample {position_m:[0.25,0.1,0.0],area_m2:0.1,
+            mode_shape:vec![-0.25,1.0,0.5]}];
+        let make=||BaffledPressure::new_multirate_differentiating(&surface,3,48_000,48_000,
+            [0.1,0.0,1.0],medium()).unwrap();
+        let (mut each,mut summed)=(make(),make());
+        assert!(summed.differentiate_pressure().unwrap());
+        assert_eq!(summed.filter_delay_samples(),each.filter_delay_samples());
+        assert!(summed.multiply_adds_per_sample()<each.multiply_adds_per_sample());
+        assert!(summed.mode_pressures(&mut [0.0;3]).is_err());
+        let (mut error,mut signal)=(0.0_f64,0.0_f64);
+        for n in 0..4000 {
+            let t=n as f64/48_000.0;
+            let velocity=[(t*2.0*std::f64::consts::PI*220.0).sin()*(-t*3.0).exp(),
+                if n<300 {0.0} else {(t*2.0*std::f64::consts::PI*1730.0).cos()*0.2},
+                (n%97) as f64*1e-3];
+            let (a,b)=(each.step_trace(&velocity).unwrap(),summed.step_trace(&velocity).unwrap());
+            error+=(a-b).powi(2);
+            signal+=a*a;
+        }
+        assert!(signal>0.0 && error<=1e-24*signal,"{error} {signal}");
+        // A copy keeps stepping the summed form bit for bit.
+        let mut copy=summed.clone();
+        for n in 0..100 {
+            let velocity=[n as f64*1e-4,0.0,-1e-3];
+            assert_eq!(copy.step_trace(&velocity).unwrap().to_bits(),summed.step_trace(&velocity).unwrap().to_bits());
+        }
+        let mut multirate=BaffledPressure::new_multirate_differentiating(&surface,3,96_000,48_000,
+            [0.1,0.0,1.0],medium()).unwrap();
+        let multiplies=multirate.multiply_adds_per_sample();
+        assert!(!multirate.differentiate_pressure().unwrap());
+        assert_eq!(multirate.multiply_adds_per_sample(),multiplies);
     }
     #[test]
     fn known_acceleration_arrives_after_propagation_with_physical_pressure_units() {

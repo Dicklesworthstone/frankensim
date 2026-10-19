@@ -2068,8 +2068,11 @@ impl LivePiano {
                 mode_shape: (0..r).map(|j| (0..r).map(|i| p.mode_shape[i] * phi_s[i * r + j]).sum()).collect(),
             })
             .collect();
-        let mic = BaffledPressure::new_multirate_differentiating(&surface, r, rate, rate, cfg.microphone_m,
+        let mut mic = BaffledPressure::new_multirate_differentiating(&surface, r, rate, rate, cfg.microphone_m,
             RayleighMedium { density: gas.density, sound_speed: gas.sound_speed })?;
+        // The same bandlimited derivative on the summed pressure instead of all r board
+        // coordinates (frankensim-mhrzg): ~3,000 fewer multiply-adds per sample at r32.
+        mic.differentiate_pressure()?;
         let surface_xy = desc.surface.iter().flat_map(|p| [p.position_m[0] as f32, p.position_m[1] as f32]).collect();
         let surface_shapes: Vec<f32> = desc.surface.iter().flat_map(|p| p.mode_shape.iter().map(|x| *x as f32)).collect();
         let n_courses = courses.len();
