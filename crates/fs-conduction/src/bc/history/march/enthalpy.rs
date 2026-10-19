@@ -17,6 +17,9 @@ pub mod radiation;
 /// Local time-error control in temperature, enthalpy and liquid fraction.
 pub mod adaptive;
 
+/// Material-backed thermal contact feedback retained through scheduled evolution.
+pub mod contact;
+
 use super::{ThermalHistoryProblem, poll};
 use super::events;
 use crate::{ConductionError, ConductionProblem, ScalarField, ThermalBc, ThermalBoundary};
