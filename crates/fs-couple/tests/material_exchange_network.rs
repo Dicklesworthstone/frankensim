@@ -222,3 +222,6 @@ fn mismatched_surface_conditions_duplicates_area_and_cancellation_publish_nothin
         assert_eq!(thermal.cells(),&before_cells);assert_eq!(thermal.time_s(),0.0);assert_eq!(circuit,before_circuit);
     }));
 }
+
+#[path = "material_exchange/reactive.rs"]
+mod reactive_tests;

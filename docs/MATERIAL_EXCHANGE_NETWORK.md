@@ -100,3 +100,51 @@ feedback; and source/area/cancellation refusal without changing accepted states.
 The fixtures reuse the original radiation and thermal-contact test sources.
 Native compilation and execution were unavailable during authoring. The separate
 Python/SciPy reference is an equation check, not execution of these Rust tests.
+
+## Conservative reaction stages
+
+`material::reactive::ChamberReaction` optionally associates one existing
+`GasReaction` and its `GasReactionSolve` controls with each chamber ID. Use
+`prepared.reactive_step_candidate` with that list immediately after `chambers`:
+
+```rust,ignore
+let reacting = [ChamberReaction {
+    chamber: cylinder_id,
+    reaction: &source_bound_reaction,
+    controls: chemical_controls,
+}];
+let proposal = prepared.reactive_step_candidate(
+    &cx, &thermal, target_s, &circuit, &source_ports,
+    &chambers, &reacting, &gas_patches, controls, &energy_guess_j,
+)?;
+let (next_thermal, next_circuit, report, combined) = proposal.into_parts();
+// report.source.chambers contains each final GasPiston and its original
+// gas-surface records. report.source.reactions retains each kinetic evaluation,
+// species inventory, extent, entropy and whole-interval gas energy change.
+```
+
+This uses the existing first-order reaction-then-motion split: reaction rates
+are evaluated at the accepted gas state ONCE. Each reaction stage conserves
+mass, volume and total internal energy through the existing species/caloric
+owner, including formation energies. The complete exchange/motion solve then
+starts from the staged gas. Repeated radiation/electrical/thermal Newton trials
+never consume more reactant. Wall heating can change the next step's rate; this
+is not a monolithic kinetic/thermal solve within the same interval.
+
+Chemical formation energy is **not** credited again as prescribed heat. The
+joint balance includes measured chemical-stage roundoff. Native gas port
+history records one whole-interval tick, not an extra chemical time advance.
+The boundary report retains its post-reaction reference, while each reaction
+report records gas energy from the original accepted state through the final
+motion. Inactive reaction entries are not guessed; unlisted chambers are inert.
+Duplicate IDs, aliased original gas owners, unsupported species sources,
+consumption-limit violations and later exchange failures return no endpoint.
+
+Use the original reaction consumption limits and timestep refinement. This is
+one homogeneous caller-declared mass-action law per reacting chamber, not an
+inferred Arrhenius mechanism, ignition model, resolved flame, shock, mass
+exchange or measured engine model. Gas participation in radiation remains
+excluded by the existing enclosure approximation. The three additional Rust
+regressions exercise native isolated-reactor reduction, no-reaction reduction,
+rate-data-only feedback through walls/circuit/motion, exact single-stage extent,
+and rejection/cancellation with unchanged accepted histories.

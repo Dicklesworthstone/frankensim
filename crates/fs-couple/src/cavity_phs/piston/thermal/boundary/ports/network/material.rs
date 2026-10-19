@@ -1,6 +1,8 @@
 //! Data-only several-chamber coupling with shared source and surface admission.
 /// Compose electrical heating, thermal contacts and radiation on the shared gas network.
 pub mod exchange;
+/// One conservative reaction stage followed by the shared exchange solve.
+pub mod reactive;
 
 use super::*;
 use crate::circuit_enthalpy::material::{MaterialNetwork,MaterialNetworkError,MaterialNetworkSample};
