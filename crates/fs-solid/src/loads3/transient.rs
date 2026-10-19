@@ -1,0 +1,375 @@
+//! Sparse average-acceleration Newmark dynamics on the existing P1 operators.
+//!
+//! M a + (eta M + zeta K) v + K u = f_external(t) + f_thermal.
+//! Materials, topology, thermal eigenstrain and zero-valued component supports
+//! are fixed for the run. Free bodies are admitted: mass, not artificial clamps,
+//! makes the acceleration solve nonsingular. Forces retain their original mesh.
+//!
+//! This is the sparse acceleration-form backend of the average-acceleration
+//! scheme also used by `shell_time`: beta=1/4, gamma=1/2. No dense matrix or
+//! effective-matrix assembly is needed. Element operators and PCG stay in their
+//! existing owners. Every candidate passes a fresh linear residual and a discrete
+//! work/energy check before replacing the accepted state. The latter is a
+//! numerical identity, NOT a temporal, spatial or continuum error certificate.
+
+use super::*;
+use crate::linear3::TetElasticAssembly;
+use crate::shell_time::DynamicState;
+use fs_solver::krylov::CgState;
+use fs_solver::op::LinearOp;
+use fs_sparse::{Csr, precond::Precond};
+use std::sync::Arc;
+
+/// Explicit resource, solve, motion and energy allowances, all in coherent SI.
+#[derive(Debug, Clone, Copy)]
+pub struct TransientConfig3 {
+    pub maximum_steps: usize,
+    pub maximum_free_dofs: usize,
+    /// Preflight bound on 144 scalar element entries per tetrahedron, per matrix.
+    pub maximum_element_entries: usize,
+    pub solve: TetStaticSolveConfig,
+    pub absolute_force_tolerance_n: f64,
+    pub absolute_energy_tolerance_j: f64,
+    pub relative_energy_tolerance: f64,
+    pub maximum_displacement_m: f64,
+    /// eta >= 0 in C = eta M + zeta K, units s^-1.
+    pub mass_damping_per_s: f64,
+    /// zeta >= 0 in C = eta M + zeta K, units s.
+    pub stiffness_damping_s: f64,
+}
+impl Default for TransientConfig3 {
+    fn default() -> Self {
+        Self {
+            maximum_steps: 10_000, maximum_free_dofs: 50_000,
+            maximum_element_entries: 14_400_000,
+            solve: TetStaticSolveConfig::default(), absolute_force_tolerance_n: 1e-12,
+            absolute_energy_tolerance_j: 1e-12, relative_energy_tolerance: 1e-8,
+            maximum_displacement_m: 0.01, mass_damping_per_s: 0.0,
+            stiffness_damping_s: 0.0,
+        }
+    }
+}
+impl TransientConfig3 {
+    fn validate(self) -> Result<(), TransientError3> {
+        let positive = [self.absolute_force_tolerance_n, self.absolute_energy_tolerance_j,
+            self.relative_energy_tolerance, self.maximum_displacement_m,
+            self.solve.relative_residual_tolerance];
+        if positive.iter().any(|v| !v.is_finite() || *v <= 0.0)
+            || self.solve.relative_residual_tolerance >= 1.0
+            || self.relative_energy_tolerance >= 1.0
+            || self.maximum_steps == 0 || self.maximum_free_dofs == 0
+            || self.maximum_element_entries == 0 || self.solve.maximum_iterations == 0
+            || [self.mass_damping_per_s, self.stiffness_damping_s].iter()
+                .any(|v| !v.is_finite() || *v < 0.0)
+        { return Err(TransientError3::Invalid("invalid transient resource/solve/energy/damping allowance")); }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TransientError3 {
+    Invalid(&'static str),
+    Loads(LoadError3),
+    Budget,
+    Solve { iterations: usize, residual_n: f64, allowance_n: f64 },
+    Energy { defect_j: f64, allowance_j: f64 },
+    Cancelled,
+}
+impl std::fmt::Display for TransientError3 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "tetrahedral transient refused: {self:?}")
+    }
+}
+impl std::error::Error for TransientError3 {}
+impl From<LoadError3> for TransientError3 {
+    fn from(e: LoadError3) -> Self {
+        if e == LoadError3::Cancelled { Self::Cancelled } else { Self::Loads(e) }
+    }
+}
+impl From<TetElasticError> for TransientError3 {
+    fn from(e: TetElasticError) -> Self { LoadError3::from(e).into() }
+}
+fn check(cx: &Cx<'_>) -> Result<(), TransientError3> {
+    cx.checkpoint().map_err(|_| TransientError3::Cancelled)
+}
+fn number(v: f64) -> Result<f64, TransientError3> {
+    if v.is_finite() { Ok(v) } else { Err(TransientError3::Invalid("nonfinite transient arithmetic")) }
+}
+fn inner(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).fold(0.0, |sum, (a, b)| a.mul_add(*b, sum))
+}
+fn length(a: &[f64]) -> f64 { a.iter().fold(0.0, |n, x| n.hypot(*x)) }
+
+/// A linear combination applied without constructing another sparse matrix.
+struct Operator<'a, 'cx> { m: &'a Csr, k: &'a Csr, cm: f64, ck: f64, cx: &'a Cx<'cx> }
+impl LinearOp for Operator<'_, '_> {
+    fn n(&self) -> usize { self.m.nrows() }
+    fn apply(&self, x: &[f64], y: &mut [f64]) {
+        let mut work = 0usize;
+        for i in 0..self.n() {
+            let mut value = 0.0;
+            for (matrix, coefficient) in [(self.m, self.cm), (self.k, self.ck)] {
+                if coefficient == 0.0 { continue; }
+                let (columns, values) = matrix.row(i);
+                let mut applied = 0.0;
+                for (&column, &entry) in columns.iter().zip(values) {
+                    if work % 256 == 0 && self.cx.checkpoint().is_err() {
+                        // LinearOp has no error return. Poison this private
+                        // candidate; the owner polls again before publication.
+                        y.fill(f64::NAN); return;
+                    }
+                    applied = entry.mul_add(x[column], applied);
+                    work += 1;
+                }
+                value = coefficient.mul_add(applied, value);
+            }
+            y[i] = value;
+        }
+    }
+}
+struct Diagonal(Vec<f64>);
+impl Precond for Diagonal {
+    fn apply(&self, r: &[f64], z: &mut [f64]) {
+        for ((z, r), inv) in z.iter_mut().zip(r).zip(&self.0) { *z = r * inv; }
+    }
+}
+fn solve(op: &Operator<'_, '_>, rhs: &[f64], config: TransientConfig3)
+    -> Result<(Vec<f64>, usize, f64), TransientError3> {
+    check(op.cx)?;
+    let rhs_norm = number(length(rhs))?;
+    let allowance = number(config.absolute_force_tolerance_n
+        + config.solve.relative_residual_tolerance * rhs_norm)?;
+    if rhs_norm == 0.0 { return Ok((vec![0.0; rhs.len()], 0, 0.0)); }
+    let mut inverse = Vec::with_capacity(rhs.len());
+    for i in 0..rhs.len() {
+        if i % 256 == 0 { check(op.cx)?; }
+        let d = number(op.cm * op.m.get(i, i) + op.ck * op.k.get(i, i))?;
+        if d <= 0.0 { return Err(TransientError3::Invalid("effective mass diagonal is not positive")); }
+        inverse.push(number(d.recip())?);
+    }
+    let diagonal = Diagonal(inverse);
+    let mut state = CgState::new(op, &diagonal, rhs);
+    // Solve more tightly than the acceptance gate, avoiding recursive-residual
+    // drift at the boundary. Absolute allowance still handles physical zero.
+    let target = (0.1 * allowance / rhs_norm).min(0.1);
+    while state.iters < config.solve.maximum_iterations && state.rel_residual() > target {
+        check(op.cx)?;
+        let before = state.iters;
+        let remaining = config.solve.maximum_iterations - before;
+        let _ = state.run(op, &diagonal, target, remaining.min(32));
+        if state.iters == before { break; }
+    }
+    check(op.cx)?;
+    let mut applied = vec![0.0; rhs.len()]; op.apply(&state.x, &mut applied);
+    check(op.cx)?;
+    let residual = rhs.iter().zip(&applied).fold(0.0_f64, |n, (f, a)| n.hypot(f-a));
+    if !residual.is_finite() || residual > allowance || state.x.iter().any(|v| !v.is_finite()) {
+        return Err(TransientError3::Solve { iterations: state.iters, residual_n: residual, allowance_n: allowance });
+    }
+    Ok((state.x, state.iters, residual))
+}
+
+/// Mechanical source work includes the constant equivalent thermal load.
+/// The reported energy is 1/2 v'Mv + 1/2 u'Ku, not the shifted thermodynamic
+/// elastic energy of (strain - thermal_strain). That distinction is explicit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransientStep3 {
+    pub time_s: f64,
+    pub step_size_s: f64,
+    pub iterations: usize,
+    pub force_residual_n: f64,
+    pub mechanical_work_j: f64,
+    pub thermal_equivalent_work_j: f64,
+    pub damping_loss_j: f64,
+    pub quadratic_energy_j: f64,
+    pub balance_error_j: f64,
+}
+
+/// Immutable operators plus the last accepted state. Clone is a same-process
+/// checkpoint/fork; matrices are shared through Arc, state vectors are copied.
+/// No history grows with step count. Failed/cancelled steps change nothing.
+#[derive(Clone)]
+pub struct TetTransientRun3<'g, 'm, 'p, 's> {
+    pub(super) geometry: &'g TetLoadGeometry3<'m>,
+    pub(super) problem: &'p TetLinearElasticProblem<'s>,
+    operators: Arc<TetElasticAssembly>,
+    state: DynamicState,
+    thermal: Vec<f64>,
+    force: Vec<f64>,
+    config: TransientConfig3,
+}
+impl<'g, 'm> TetLoadCase3<'g, 'm> {
+    /// Assemble K and consistent M ONCE and solve M a0=f0-C v0-K u0.
+    /// Initial displacement/velocity are full node-major xyz SI vectors; fixed
+    /// components must be exactly zero. Thermal strain is optional and frozen.
+    /// Materials remain borrowed for density-aware history evaluation.
+    pub fn begin_transient<'p, 's>(&self, problem: &'p TetLinearElasticProblem<'s>,
+        thermal: Option<TetThermalStrainField<'_>>, time_s: f64,
+        displacement_m: &[[f64; 3]], velocity_m_s: &[[f64; 3]], config: TransientConfig3,
+        cx: &Cx<'_>) -> Result<TetTransientRun3<'g, 'm, 'p, 's>, TransientError3> {
+        check(cx)?; config.validate()?; number(time_s)?;
+        if problem.nodes_m != self.geometry.nodes || problem.tetrahedra != self.geometry.tets {
+            return Err(TransientError3::Invalid("initial load belongs to a different reference mesh"));
+        }
+        let full = problem.nodes_m.len().checked_mul(3).ok_or(TransientError3::Budget)?;
+        if full.saturating_sub(problem.fixed_dofs.len()) > config.maximum_free_dofs
+            || problem.tetrahedra.len().checked_mul(144)
+                .is_none_or(|n| n > config.maximum_element_entries) { return Err(TransientError3::Budget); }
+        if displacement_m.len() != problem.nodes_m.len() || velocity_m_s.len() != problem.nodes_m.len() {
+            return Err(TransientError3::Invalid("initial motion needs one xyz vector per node"));
+        }
+        for (u, v) in displacement_m.iter().zip(velocity_m_s) {
+            check(cx)?;
+            if !u.iter().chain(v).all(|x| x.is_finite()) || norm(*u) > config.maximum_displacement_m {
+                return Err(TransientError3::Invalid("nonfinite or excessive initial motion"));
+            }
+        }
+        let mut request = TetLinearElasticProblem { nodes_m: problem.nodes_m,
+            tetrahedra: problem.tetrahedra, materials: problem.materials,
+            fixed_dofs: problem.fixed_dofs, budget: problem.budget };
+        request.budget.maximum_free_dofs = request.budget.maximum_free_dofs.min(config.maximum_free_dofs);
+        let operators = Arc::new(request.assemble(cx)?);
+        for &d in problem.fixed_dofs {
+            check(cx)?;
+            if displacement_m[d/3][d%3] != 0.0 || velocity_m_s[d/3][d%3] != 0.0 {
+                return Err(TransientError3::Invalid("transient component supports must be stationary and zero"));
+            }
+        }
+        for matrix in [&operators.mass, &operators.stiffness] {
+            for row in 0..matrix.nrows() {
+                check(cx)?;
+                if matrix.row(row).1.iter().any(|v| !v.is_finite()) {
+                    return Err(TransientError3::Invalid("nonfinite assembled mass or stiffness"));
+                }
+            }
+        }
+        let n = operators.free_dofs.len();
+        let thermal = match thermal {
+            Some(field) => request.assemble_thermal_load(field, cx)?.reduced_force_n,
+            None => vec![0.0; n],
+        };
+        let q: Vec<_> = operators.free_dofs.iter().map(|&d| displacement_m[d/3][d%3]).collect();
+        let v: Vec<_> = operators.free_dofs.iter().map(|&d| velocity_m_s[d/3][d%3]).collect();
+        let mut run = TetTransientRun3 { geometry: self.geometry, problem, operators,
+            state: DynamicState { time_s, step: 0, displacement: q, velocity: v,
+                acceleration: vec![0.0; n], kinetic_energy_j: 0.0, strain_energy_j: 0.0,
+                total_energy_j: 0.0 }, thermal, force: vec![0.0; n], config };
+        run.force = run.reduce_force(self, cx)?;
+        let ku = run.apply(0.0, 1.0, &run.state.displacement, cx)?;
+        let cv = run.apply(config.mass_damping_per_s, config.stiffness_damping_s, &run.state.velocity, cx)?;
+        let rhs: Vec<_> = (0..n).map(|i| run.force[i] + run.thermal[i] - ku[i] - cv[i]).collect();
+        let op = run.operator(1.0, 0.0, cx);
+        run.state.acceleration = solve(&op, &rhs, config)?.0;
+        let (kinetic, strain) = run.energy(&run.state.displacement, &run.state.velocity, cx)?;
+        run.state.kinetic_energy_j = kinetic; run.state.strain_energy_j = strain;
+        run.state.total_energy_j = number(kinetic + strain)?;
+        check(cx)?; Ok(run)
+    }
+}
+impl TetTransientRun3<'_, '_, '_, '_> {
+    /// Reduced state, ordered by `free_dofs`; no mutable checkpoint escape.
+    pub fn state(&self) -> &DynamicState { &self.state }
+    pub fn free_dofs(&self) -> &[usize] { &self.operators.free_dofs }
+    /// Expand one accepted state to full node-major xyz displacement/velocity/acceleration.
+    pub fn nodal_motion(&self, cx: &Cx<'_>) -> Result<[Vec<[f64; 3]>; 3], TransientError3> {
+        check(cx)?;
+        let mut out = std::array::from_fn(|_| vec![[0.0; 3]; self.geometry.nodes.len()]);
+        for (i, &d) in self.free_dofs().iter().enumerate() {
+            if i % 256 == 0 { check(cx)?; }
+            out[0][d/3][d%3] = self.state.displacement[i];
+            out[1][d/3][d%3] = self.state.velocity[i];
+            out[2][d/3][d%3] = self.state.acceleration[i];
+        }
+        check(cx)?; Ok(out)
+    }
+    fn operator<'a, 'cx>(&'a self, cm: f64, ck: f64, cx: &'a Cx<'cx>) -> Operator<'a, 'cx> {
+        Operator { m: &self.operators.mass, k: &self.operators.stiffness, cm, ck, cx }
+    }
+    fn apply(&self, cm: f64, ck: f64, x: &[f64], cx: &Cx<'_>) -> Result<Vec<f64>, TransientError3> {
+        let mut out = vec![0.0; x.len()]; self.operator(cm, ck, cx).apply(x, &mut out); check(cx)?;
+        if out.iter().any(|v| !v.is_finite()) { return Err(TransientError3::Invalid("nonfinite operator application")); }
+        Ok(out)
+    }
+    fn energy(&self, q: &[f64], v: &[f64], cx: &Cx<'_>) -> Result<(f64, f64), TransientError3> {
+        Ok((number(0.5 * inner(v, &self.apply(1.0, 0.0, v, cx)?))?,
+            number(0.5 * inner(q, &self.apply(0.0, 1.0, q, cx)?))?))
+    }
+    fn reduce_force(&self, load: &TetLoadCase3<'_, '_>, cx: &Cx<'_>) -> Result<Vec<f64>, TransientError3> {
+        if load.geometry.nodes != self.geometry.nodes || load.geometry.tets != self.geometry.tets {
+            return Err(TransientError3::Invalid("transient load belongs to another reference mesh"));
+        }
+        let mut out = vec![0.0; self.free_dofs().len()];
+        for &(d, f) in load.nodal_forces_n() {
+            check(cx)?;
+            if let Ok(i) = self.free_dofs().binary_search(&d) { out[i] = f; }
+        }
+        Ok(out)
+    }
+    /// Advance one absolute force endpoint. M,C,K stay frozen; loads are sampled
+    /// at t+h, NOT at an alpha stage or a wrapped/clamped frame clock. Newmark
+    /// integrates the piecewise-linear endpoint force; callers must resolve
+    /// discontinuities and short pulses explicitly. No hidden event detection.
+    pub fn advance(&mut self, load_next: &TetLoadCase3<'_, '_>, h_s: f64, cx: &Cx<'_>)
+        -> Result<TransientStep3, TransientError3> {
+        check(cx)?;
+        if self.state.step >= self.config.maximum_steps { return Err(TransientError3::Budget); }
+        let next_time = self.state.time_s + h_s;
+        if !h_s.is_finite() || h_s <= 0.0 || !next_time.is_finite() || next_time <= self.state.time_s {
+            return Err(TransientError3::Invalid("step must reach a distinct finite later time"));
+        }
+        let b = number(0.25 * h_s * h_s)?;
+        if b == 0.0 { return Err(TransientError3::Invalid("squared time step underflows")); }
+        let force = self.reduce_force(load_next, cx)?;
+        let n = force.len();
+        let mut qp = Vec::with_capacity(n); let mut vp = Vec::with_capacity(n);
+        for i in 0..n {
+            if i % 256 == 0 { check(cx)?; }
+            qp.push(number(self.state.displacement[i] + h_s*self.state.velocity[i] + b*self.state.acceleration[i])?);
+            vp.push(number(self.state.velocity[i] + 0.5*h_s*self.state.acceleration[i])?);
+        }
+        let eta = self.config.mass_damping_per_s; let zeta = self.config.stiffness_damping_s;
+        let ku = self.apply(0.0, 1.0, &qp, cx)?; let cv = self.apply(eta, zeta, &vp, cx)?;
+        let rhs: Vec<_> = (0..n).map(|i| force[i]+self.thermal[i]-ku[i]-cv[i]).collect();
+        let op = self.operator(number(1.0+0.5*h_s*eta)?, number(b+0.5*h_s*zeta)?, cx);
+        let (a, iterations, force_residual_n) = solve(&op, &rhs, self.config)?;
+        let mut q = Vec::with_capacity(n); let mut v = Vec::with_capacity(n);
+        let mut dq = Vec::with_capacity(n); let mut average_v = Vec::with_capacity(n);
+        for i in 0..n {
+            if i % 256 == 0 { check(cx)?; }
+            q.push(number(qp[i]+b*a[i])?); v.push(number(vp[i]+0.5*h_s*a[i])?);
+            dq.push(number(q[i]-self.state.displacement[i])?);
+            average_v.push(0.5*v[i]+0.5*self.state.velocity[i]);
+        }
+        // A nodal bound applies to the vector norm, not individual components.
+        let mut node = usize::MAX; let mut magnitude = 0.0_f64;
+        for (&d, &u) in self.free_dofs().iter().zip(&q) {
+            if d/3 != node { node = d/3; magnitude = 0.0; }
+            magnitude = magnitude.hypot(u);
+            if magnitude > self.config.maximum_displacement_m {
+                return Err(TransientError3::Invalid("candidate exceeds displacement allowance"));
+            }
+        }
+        let (kinetic, strain) = self.energy(&q, &v, cx)?;
+        let quadratic_energy_j = number(kinetic+strain)?;
+        let average_force: Vec<_> = force.iter().zip(&self.force).map(|(a,b)| 0.5*a+0.5*b).collect();
+        let mechanical_work_j = number(inner(&average_force, &dq))?;
+        let thermal_equivalent_work_j = number(inner(&self.thermal, &dq))?;
+        let damping_loss_j = number(h_s*inner(&average_v, &self.apply(eta,zeta,&average_v,cx)?))?;
+        let balance_error_j = number(quadratic_energy_j - self.state.total_energy_j
+            + damping_loss_j - mechanical_work_j - thermal_equivalent_work_j)?;
+        let scale = self.state.total_energy_j.abs().max(quadratic_energy_j.abs())
+            .max(mechanical_work_j.abs()).max(thermal_equivalent_work_j.abs()).max(damping_loss_j.abs());
+        let allowance = number(self.config.absolute_energy_tolerance_j + self.config.relative_energy_tolerance*scale)?;
+        if balance_error_j.abs() > allowance || kinetic < -allowance || strain < -allowance || damping_loss_j < -allowance {
+            return Err(TransientError3::Energy { defect_j: balance_error_j, allowance_j: allowance });
+        }
+        let report = TransientStep3 { time_s: next_time, step_size_s: h_s, iterations, force_residual_n,
+            mechanical_work_j, thermal_equivalent_work_j, damping_loss_j, quadratic_energy_j, balance_error_j };
+        check(cx)?;
+        self.state = DynamicState { time_s: next_time, step: self.state.step.checked_add(1).ok_or(TransientError3::Budget)?,
+            displacement: q, velocity: v, acceleration: a, kinetic_energy_j: kinetic,
+            strain_energy_j: strain, total_energy_j: quadratic_energy_j };
+        self.force = force;
+        Ok(report)
+    }
+}

@@ -22,6 +22,8 @@ use std::collections::BTreeMap;
 pub mod history;
 /// Spatially varying P1 pressure, traction and volume fields.
 pub mod fields;
+/// Sparse inertial trajectories on the same reference mesh and load operators.
+pub mod transient;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LoadError3 {
