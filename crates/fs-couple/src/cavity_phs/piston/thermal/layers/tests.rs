@@ -149,3 +149,5 @@ fn identity_domains_quantity_and_missing_data_do_not_become_insulation() {
     let state=caloric.curve().state_at_specific_enthalpy(150000.0).unwrap();
     assert_eq!(layers(&zero,&key,&context).resolve(gas.state(),state).unwrap().conductance_w_k,0.0);
 }
+
+mod snapshot;

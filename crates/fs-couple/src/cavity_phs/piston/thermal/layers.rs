@@ -56,6 +56,24 @@ fn semantic(kind: QuantityKind) -> QuantitySpec {
 }
 
 impl MaterialConductionLayers<'_> {
+    fn binding(&self) -> ThermalMaterialPoint<'_> {
+        ThermalMaterialPoint { material: self.material, context: self.context,
+            temperature_axis: self.temperature_axis, liquid_fraction_axis: self.liquid_fraction_axis }
+    }
+
+    fn validate_geometry_and_key(&self) -> Result<(), LayerConductionError> {
+        if !self.area_m2.is_finite() || self.area_m2 < 0.0
+            || !positive(self.gas_distance_m) || !positive(self.body_distance_m) {
+            return Err(LayerConductionError::Invalid("finite nonnegative area and positive layer distances required"));
+        }
+        let q = self.conductivity.quantity();
+        if q != QuantitySpec::dimensional(THERMAL_CONDUCTIVITY_DIMS)
+            && q != semantic(QuantityKind::ThermalConductivity) {
+            return Err(LayerConductionError::Invalid("scalar static thermal conductivity quantity required"));
+        }
+        Ok(())
+    }
+
     /// Resolve the exact source at the actual midpoint T and, when declared,
     /// liquid fraction. Preserve all other axes, quantity descriptors and source
     /// receipts. In particular a latent plateau can change conductivity via its
@@ -68,28 +86,54 @@ impl MaterialConductionLayers<'_> {
     pub fn resolve(
         &self, gas: &ResolvedThermochemicalGasState, body: EquilibriumPhaseState,
     ) -> Result<ConductanceSample<ResolvedMaterialStatePoint>, LayerConductionError> {
-        let invalid = LayerConductionError::Invalid;
-        let binding = ThermalMaterialPoint { material: self.material, context: self.context,
-            temperature_axis: self.temperature_axis, liquid_fraction_axis: self.liquid_fraction_axis };
-        let point = binding.at(body)?;
-        if !self.area_m2.is_finite() || self.area_m2 < 0.0
-            || !positive(self.gas_distance_m) || !positive(self.body_distance_m) {
-            return Err(invalid("finite nonnegative area and positive layer distances required"));
-        }
-        let q = self.conductivity.quantity();
-        if q != QuantitySpec::dimensional(THERMAL_CONDUCTIVITY_DIMS)
-            && q != semantic(QuantityKind::ThermalConductivity) {
-            return Err(invalid("scalar static thermal conductivity quantity required"));
-        }
+        let point = self.binding().at(body)?;
+        self.validate_geometry_and_key()?;
         let requirement = ScalarPropertyRequirement::try_with_key(self.conductivity, ScalarAdmissibility::NonNegative)
             .map_err(LayerConductionError::Material)?;
         let source = resolve_material_state_point(self.material, &point, &[requirement], self.selection.clone())
             .map_err(LayerConductionError::Material)?;
-        let property = source.property(self.conductivity.name())
-            .ok_or(invalid("resolved conductivity is absent"))?;
+        self.resolve_from_material(gas, body, source)
+    }
+
+    /// Consume an existing complete material snapshot without querying a second
+    /// property bundle. Electrical/thermal network consumers retain the SAME
+    /// source identity and receipts, including auxiliary electrical properties.
+    ///
+    /// The card, every coordinate and its quantity convention must match the
+    /// actual body phase state and this binding's external conditions. The exact
+    /// conductivity key, static-law admission, nonnegative value and any explicit
+    /// conductivity pin are checked even at zero area. A pre-resolved snapshot
+    /// owns its policy selection; policies are not run again against another
+    /// set of requirements. This does not refresh a stale material state.
+    pub fn resolve_from_material(
+        &self, gas: &ResolvedThermochemicalGasState, body: EquilibriumPhaseState,
+        source: ResolvedMaterialStatePoint,
+    ) -> Result<ConductanceSample<ResolvedMaterialStatePoint>, LayerConductionError> {
+        let invalid = LayerConductionError::Invalid;
+        let binding = self.binding();
+        let point = binding.at(body)?;
+        self.validate_geometry_and_key()?;
+        if source.card_identity() != self.material.content_hash()
+            || source.axis_quantities() != point.axis_quantities()
+            || source.query_point().len() != point.axes().len()
+            || source.query_point().iter().zip(point.axes()).any(|((a, x), (b, y))|
+                a != b || x.to_bits() != y.to_bits()) {
+            return Err(invalid("layer snapshot must retain the exact material and physical condition point"));
+        }
+        let property = source.property_by_key(self.conductivity)
+            .ok_or(invalid("resolved conductivity key or quantity is absent"))?;
+        if let MaterialPropertySelection::PinnedByProperty(pins) = &self.selection {
+            if pins.len() != 1 || pins[0].0 != self.conductivity.name()
+                || pins[0].1 != property.answer().receipt.selected {
+                return Err(invalid("layer snapshot does not retain the explicit conductivity pin"));
+            }
+        }
         binding.admit_static(property)?;
         let kb = property.value_si();
         let kg = gas.state().thermal_conductivity;
+        if !kb.is_finite() || kb < 0.0 {
+            return Err(invalid("body conductivity is not nonnegative and finite"));
+        }
         if !positive(kg) { return Err(invalid("gas midpoint conductivity is not positive and finite")); }
         let conductance = if self.area_m2 == 0.0 || kb == 0.0 { 0.0 } else {
             let gas_r = self.gas_distance_m/kg;
