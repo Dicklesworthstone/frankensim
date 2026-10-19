@@ -6,21 +6,28 @@
 
 use super::*;
 use super::performance::force::{StringForceCoupling, StringForcePort};
+use crate::bowed_string::runtime::reciprocal::bank::polarization::TransverseDirection;
 use crate::render::RenderError;
 use crate::render::schedule::force::coupled::contact::{ModalContact, ModalContactConfig};
 use crate::render::schedule::force::coupled::contact::friction::multiple::obstacles::FrictionObstacleConfig;
 use fs_dcontact::Obstacle;
 
-/// Side of the source's centreline/bow axis on which the stop is situated.
+/// Normal closure direction, either relative to the bow axis or independently declared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StringStopSide {
     /// Positive relative transverse motion closes the contact.
     Positive,
     /// Negative relative transverse motion closes the contact.
     Negative,
+    /// Independent unit closure normal in the string's transverse frame. The
+    /// receiver shape, if any, must measure displacement along this SAME normal;
+    /// its supplied signs are retained. No receiver orientation is inferred.
+    Along(TransverseDirection),
 }
 impl StringStopSide {
-    fn sign(self) -> f64 { match self { Self::Positive => 1.0, Self::Negative => -1.0 } }
+    fn sign(self) -> f64 {
+        match self { Self::Positive | Self::Along(_) => 1.0, Self::Negative => -1.0 }
+    }
 }
 
 /// A fixed normal contact; its compliance is a physical law, not a pitch knob.
@@ -28,7 +35,8 @@ impl StringStopSide {
 pub struct MaterialStringStop {
     /// Actual string and interior station along its full supported span.
     pub location: StringBowLocation,
-    /// Closure direction. The same sign acts on string and optional receiver.
+    /// Closure direction. Positive/Negative apply the same sign to both sides;
+    /// Along requires the receiver's original map along that declared normal.
     pub side: StringStopSide,
     /// Optional receiver displacement map in its ORIGINAL supplied-body basis.
     /// Component zero means the first body AFTER all strings. Shapes must come
@@ -66,9 +74,9 @@ impl MultiBowStringBank {
     /// in the full-network equilibrium, with every bow released before the window.
     /// A vibrating string may leave and re-enter a stop without a state reset.
     ///
-    /// This is fixed-geometry contact along the source's centreline/bow axis.
-    /// A two-plane source projects that same physical direction into both planes;
-    /// no independent stop-normal direction is inferred. It does not solve
+    /// A declared normal can differ from the bow tangent or plucking direction.
+    /// The same source basis projects it into both selected transverse planes;
+    /// a missing plane refuses, rather than silently dropping force. This does not solve
     /// finger motion, changing contact area, contact friction, geometric
     /// tension, a moving fret, rigid constraints or contact-induced adaptivity.
     /// Material source domains and spatial/time refinement remain necessary.
@@ -83,7 +91,11 @@ impl MultiBowStringBank {
             return Err(error("string stops require one bounded binding before the first physical sample"));
         }
         let ports: Vec<_> = stops.iter().map(|stop| StringForcePort {
-            location: stop.location, coupling: StringForceCoupling::Centreline,
+            location: stop.location,
+            coupling: match stop.side {
+                StringStopSide::Along(direction) => StringForceCoupling::CentrelineAlong(direction),
+                _ => StringForceCoupling::Centreline,
+            },
         }).collect();
         let columns = self.string_force_columns(&ports, limits.max_setup_terms, gate)?;
         let string_count = self.cards.len();

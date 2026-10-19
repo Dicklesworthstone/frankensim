@@ -6,6 +6,7 @@
 
 use super::{MultiBowPerformance, MultiBowStringBank, render_invalid};
 use crate::bowed_string::runtime::reciprocal::{ReciprocalStringError, bank::StringBowLocation};
+use crate::bowed_string::runtime::reciprocal::bank::polarization::TransverseDirection;
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::render::schedule::force::{ForceInitialization, ForceRenderConfig, ModalForceEvent};
@@ -19,6 +20,10 @@ pub enum StringForceCoupling {
     /// Transverse centreline force along the source's bow direction in both
     /// selected planes, with zero applied torque.
     Centreline,
+    /// Centreline force along its own unit direction in the source's transverse
+    /// frame, independent of bow/bridge directions. It applies no torque.
+    /// A nonzero second component requires the original two-plane source.
+    CentrelineAlong(TransverseDirection),
     /// Force at the same signed outer surface used by bow contact. Includes
     /// radius times angular velocity/torque when the source has torsional modes.
     Surface,
@@ -104,6 +109,8 @@ impl MultiBowStringBank {
             let local = match port.coupling {
                 StringForceCoupling::Surface => source.source.surface_shape(card, station).map_err(source_error)?,
                 StringForceCoupling::Centreline => source.source.transverse_shape(card, station).map_err(source_error)?,
+                StringForceCoupling::CentrelineAlong(direction) => source.source
+                    .transverse_shape_along(card, station, direction).map_err(source_error)?,
             };
             if local.len() != count || local.iter().any(|x| !x.is_finite()) {
                 return Err(render_invalid("string force map differs from its actual finite basis"));

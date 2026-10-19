@@ -23,6 +23,41 @@
 use super::*;
 use fs_material::state_point::MaterialStatePointError;
 
+/// A physical unit direction in the string's orthonormal transverse frame.
+/// The first component addresses plane one and the second addresses plane two;
+/// it is not a modal gain. Admission retains the supplied numbers verbatim.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TransverseDirection([f64; 2]);
+
+// Construction excludes NaN, so equality is reflexive for every admitted value.
+impl Eq for TransverseDirection {}
+
+impl TransverseDirection {
+    /// Direction along the first retained transverse plane.
+    pub const X: Self = Self([1.0, 0.0]);
+    /// Direction along the second retained transverse plane.
+    pub const Y: Self = Self([0.0, 1.0]);
+
+    /// Admit finite components with unit squared norm within 1e-12, without
+    /// normalizing or discarding a component. A one-plane source subsequently
+    /// refuses any nonzero second component instead of silently projecting it.
+    pub fn try_new(direction: [f64; 2]) -> Result<Self, MaterialStatePointError> {
+        let norm2 = direction[0] * direction[0] + direction[1] * direction[1];
+        if direction.iter().any(|x| !x.is_finite())
+            || !norm2.is_finite() || (norm2 - 1.0).abs() > 1e-12
+        {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "transverse direction must be a finite unit vector",
+            });
+        }
+        Ok(Self(direction))
+    }
+
+    /// Original dimensionless components in the declared transverse frame.
+    #[must_use]
+    pub const fn components(self) -> [f64; 2] { self.0 }
+}
+
 /// Physical directions expressed in one common orthonormal transverse frame.
 /// No modal weights, gains, frequency offsets or implicit normalization.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,19 +71,11 @@ impl TransverseDirections {
     /// only floating-point direction admission; supplied vectors are retained.
     pub fn try_new(bow: [f64; 2], bridge: [f64; 2]) -> Result<Self, MaterialStatePointError> {
         for direction in [bow, bridge] {
-            let norm2 = direction[0] * direction[0] + direction[1] * direction[1];
-            if direction.iter().any(|x| !x.is_finite())
-                || !norm2.is_finite()
-                || (norm2 - 1.0).abs() > 1e-12
-            {
-                return Err(MaterialStatePointError::InvalidDerived {
-                    quantity: "transverse bow and bridge directions must be finite unit vectors",
-                });
-            }
+            TransverseDirection::try_new(direction)?;
         }
         Ok(Self { bow, bridge })
     }
-    /// Bow tangent; centreline load ports use this same direction without torque.
+    /// Bow tangent; default centreline loads use it, explicitly directed loads do not.
     #[must_use]
     pub const fn bow(&self) -> [f64; 2] {
         self.bow
@@ -188,19 +215,42 @@ impl MaterialStringSource {
         station: f64,
         bridge: bool,
     ) -> Result<Vec<f64>, ReciprocalStringError> {
+        let direction = match self {
+            Self::WithPolarizations(p) => {
+                if bridge { p.directions.bridge } else { p.directions.bow }
+            },
+            _ => [1.0, 0.0],
+        };
+        // Both sources of these components were admitted above. The shared
+        // projector keeps existing default-port arithmetic and coordinate order.
+        self.transverse_shape_along(card, station, TransverseDirection(direction))
+    }
+
+    /// Conjugate centreline displacement/force row for an independent physical
+    /// direction. Twist entries are exactly zero: radial normal force has no
+    /// first-order torque about a circular string's axis.
+    pub(super) fn transverse_shape_along(
+        &self,
+        card: &BowedStringCard,
+        station: f64,
+        direction: TransverseDirection,
+    ) -> Result<Vec<f64>, ReciprocalStringError> {
+        if !interior(station) {
+            return Err(invalid("directed string port requires an interior station"));
+        }
+        let direction = direction.components();
+        let polarized = matches!(self, Self::WithPolarizations(_));
+        if !polarized && direction[1] != 0.0 {
+            return Err(invalid("a second-plane load requires a two-plane material string"));
+        }
         let mut row = shape(card, station);
-        if let Self::WithPolarizations(p) = self {
-            let direction = if bridge {
-                p.directions.bridge
-            } else {
-                p.directions.bow
-            };
+        if polarized {
             for k in 0..card.mode_count {
                 row.push(direction[1] * row[k]);
             }
-            for value in &mut row[..card.mode_count] {
-                *value *= direction[0];
-            }
+        }
+        for value in &mut row[..card.mode_count] {
+            *value *= direction[0];
         }
         row.resize(self.modes(), 0.0);
         if row.iter().any(|x| !x.is_finite()) || row.iter().all(|x| *x == 0.0) {

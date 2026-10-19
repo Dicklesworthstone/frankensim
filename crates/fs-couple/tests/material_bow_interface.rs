@@ -147,3 +147,6 @@ mod forces;
 
 #[path = "material_bow_interface/stops.rs"]
 mod stops;
+
+#[path = "material_bow_interface/directions.rs"]
+mod directions;
