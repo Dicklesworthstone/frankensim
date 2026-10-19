@@ -3275,10 +3275,13 @@ impl LivePiano {
         let mut relaunch: Vec<(usize, f64)> = Vec::new();
         for &ci in &busy {
             let slot = self.keys[ci].slot;
-            // String-side contact positions after the accepted step.
+            // String-side contact positions after the accepted step. Only a
+            // flying hammer reads them (and the forces). A caught one stays
+            // busy while its felt memory relaxes under zero force, for several
+            // times as long as its flight.
             let mut positions = [0.0_f64; 3];
             let mut forces = [0.0_f64; 3];
-            if let Some(slot) = slot {
+            if let Some(slot) = slot.filter(|_| self.keys[ci].active) {
                 let ac = &self.active[slot];
                 let b = dot(&ac.gl, &self.bq);
                 for s in ac.segs.iter().filter(|s| !s.duplex) {
