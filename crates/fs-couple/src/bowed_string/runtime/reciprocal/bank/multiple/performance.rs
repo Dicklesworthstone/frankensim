@@ -114,7 +114,8 @@ impl MultiBowStringBank {
         let forces = vec![0.0; self.system.mode_count()];
         Ok(MultiBowPerformance { bank: self, schedule, tracks, config, events, next: 0,
             base_sample, forces, drives: vec![FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };count],
-            candidate: vec![FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };count], poisoned: false, string_forces: None })
+            candidate: vec![FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };count], poisoned: false,
+            string_forces: None, stop_motion: None })
     }
 }
 
@@ -157,6 +158,7 @@ pub struct MultiBowPerformance {
     candidate: Vec<FrictionDrive>,
     poisoned: bool,
     string_forces: Option<force::BoundStringForces>,
+    stop_motion: Option<motion::BoundStopMotion>,
 }
 impl MultiBowPerformance {
     /// Original material bank, actual contact maps and accepted joint physics.
@@ -214,12 +216,20 @@ impl PressureRenderer for MultiBowPerformance {
                     &loads.candidate
                 } else { &self.forces }
             } else { &self.forces };
-            match self.bank.system.step(forces, &self.candidate) {
+            let mut next_motion = None;
+            let result = if let Some(motion) = self.stop_motion.as_mut() {
+                next_motion = Some(motion.prepare(sample + 1));
+                self.bank.system.step_with_obstacle_offsets(forces, &self.candidate, &motion.candidate)
+            } else { self.bank.system.step(forces, &self.candidate) };
+            match result {
                 Ok(frame) => {
                     *slot = frame.observer_pressure_pa;
                     self.drives.copy_from_slice(&self.candidate); self.next = next;
                     if let (Some(loads), Some(cursor)) = (self.string_forces.as_mut(), next_force) {
                         self.forces.copy_from_slice(&loads.candidate); loads.next = cursor;
+                    }
+                    if let (Some(motion), Some(cursor)) = (self.stop_motion.as_mut(), next_motion) {
+                        motion.next = cursor;
                     }
                 },
                 Err(error) => { self.poisoned = true; return Err(RenderError::Friction(error)); }
@@ -231,3 +241,6 @@ impl PressureRenderer for MultiBowPerformance {
 
 /// Physical load-and-release excitation of the same material instrument.
 pub mod force;
+
+/// Prescribed normal support trajectories on the same physical sample clock.
+pub mod motion;

@@ -12,6 +12,9 @@ use fs_couple::render::schedule::force::coupled::contact::ModalContactConfig;
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::obstacles::FrictionObstacleConfig;
 use fs_dcontact::Obstacle;
 
+#[path = "stop_motion.rs"]
+mod motion;
+
 fn limits() -> FrictionObstacleConfig { FrictionObstacleConfig { max_contacts: 8, max_setup_terms: 100_000 } }
 fn port() -> StringForcePort { StringForcePort {
     location: StringBowLocation { string: 0, station_fraction: 0.43 }, coupling: StringForceCoupling::Centreline,
