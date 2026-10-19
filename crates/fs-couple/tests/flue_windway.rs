@@ -149,3 +149,85 @@ fn cold_attachment_validates_length_and_already_held_pressure() {
     too_slow.apply(FlueControl::SetBlowingPressure(1.0)).unwrap();
     assert!(too_slow.with_viscous_windway(LENGTH).is_err());
 }
+
+#[test]
+fn resolved_windway_changes_real_receiver_and_preserves_callback_independence() {
+    let build = |g| voice(g, 0.3).with_unsteady_windway(LENGTH, 32, 96).unwrap()
+        .with_mouth_contraction(ContractionSpec { area_ratio: 0.6,
+            maximum_contracted_mach: 0.2, provenance: "authored unsteady-channel fixture".into() }).unwrap();
+    let (one, a) = render(build(gas(1.0)), 513);
+    let (many, b) = render(build(gas(1.0)), 37);
+    assert_eq!(a, b);
+    let first = one.voice().unsteady_windway().unwrap();
+    let second = many.voice().unsteady_windway().unwrap();
+    assert_eq!(first.channel().velocities_m_s(), second.channel().velocities_m_s());
+    assert_eq!(first.channel().last_step(), second.channel().last_step());
+    assert_eq!(first.channel().gas(), one.voice().gas());
+    assert_eq!(first.channel().spec().transverse_cells, 32);
+    assert_eq!(first.channel().spec().length_m, LENGTH);
+    assert_eq!(first.convection_cells(), 96);
+    assert_eq!(one.voice().network().unwrap().last_frame(),
+        many.voice().network().unwrap().last_frame());
+    let (_, high_viscosity) = render(build(gas(2.0)), 37);
+    let (_, quasisteady) = render(voice(gas(1.0), 0.3).with_viscous_windway(LENGTH).unwrap(), 513);
+    assert!(a.iter().any(|p| p.abs() > 1e-12));
+    assert_ne!(a, quasisteady, "source momentum must reach physical outlet pressure");
+    assert_ne!(a, high_viscosity, "material transport must reach physical outlet pressure");
+    let d = one.voice().diagnostics().last().unwrap();
+    assert!(d.windway_work_j > 0.0 && d.windway_stored_delta_j > 0.0);
+    assert!(d.windway_viscous_loss_j > 0.0 && d.windway_exit_work_j > 0.0);
+    assert!(d.windway_numerical_dissipation_j > 0.0);
+    assert!(d.windway_ledger_defect_j.abs() < 1e-12 * d.windway_work_j);
+    assert!(d.ledger_defect_j.abs() < 1e-12, "the mouth still owns its separate ledger");
+    assert!(d.reynolds_range.0 < d.reynolds_range.1, "diagnostics must retain the whole attack");
+}
+
+#[test]
+fn pressure_release_preserves_and_dissipates_the_actual_source_gas() {
+    let mut v = voice(gas(1.0), 0.3).with_unsteady_windway(LENGTH, 32, 96).unwrap();
+    v.apply(FlueControl::SetBlowingPressure(300.0)).unwrap();
+    assert_eq!(v.jet_speed_m_s(), 0.0, "applying force cannot teleport stationary gas");
+    v.step_block(&mut [0.0]).unwrap();
+    assert!(v.jet_speed_m_s() > 0.0 && v.jet_speed_m_s() < 1.0,
+        "startup below the former history-speed floor must be physically admitted");
+    v.step_block(&mut [0.0; 512]).unwrap();
+    let before = v.unsteady_windway().unwrap().channel().last_step();
+    let speed = v.jet_speed_m_s();
+    v.apply(FlueControl::SetBlowingPressure(0.0)).unwrap();
+    assert_eq!(v.jet_speed_m_s(), speed);
+    v.step_block(&mut [0.0]).unwrap();
+    let after = v.unsteady_windway().unwrap().channel().last_step();
+    assert!(after.bulk_speed_m_s > 0.0 && after.bulk_speed_m_s < speed);
+    assert!(after.kinetic_energy_j < before.kinetic_energy_j);
+    assert_eq!(after.pressure_work_j, 0.0);
+    assert!(after.viscous_dissipation_j > 0.0 && after.exit_work_j > 0.0);
+    // A slow release may last longer than the old allocated time-history ring.
+    // Spatial transport carries the existing field without a clamped delay.
+    v.step_block(&mut [0.0; 8192]).unwrap();
+    assert!(v.jet_speed_m_s() < 1e-4);
+    assert!(v.diagnostics().last().unwrap().windway_stored_delta_j < 0.0);
+}
+
+#[test]
+fn unsteady_admission_retains_mach_cap_and_refuses_ambiguous_or_late_attachments() {
+    let mut v = voice(gas(1.0), 0.05).with_unsteady_windway(LENGTH, 32, 64).unwrap();
+    v.validate_blowing_pressure(200.0).unwrap();
+    v.validate_blowing_pressure(1.0).unwrap();
+    assert!(v.validate_blowing_pressure(300.0).is_err());
+    v.apply(FlueControl::SetBlowingPressure(200.0)).unwrap();
+    let before = v.unsteady_windway().unwrap().channel().last_step();
+    assert!(v.apply(FlueControl::SetBlowingPressure(300.0)).is_err());
+    assert_eq!(v.unsteady_windway().unwrap().channel().last_step(), before);
+    for cells in [0, 1, 4097] {
+        assert!(voice(gas(1.0), 0.3).with_unsteady_windway(LENGTH, cells, 64).is_err());
+        assert!(voice(gas(1.0), 0.3).with_unsteady_windway(LENGTH, 32, cells).is_err());
+    }
+    assert!(voice(gas(1.0), 0.3).with_viscous_windway(LENGTH).unwrap()
+        .with_unsteady_windway(LENGTH, 32, 64).is_err());
+    assert!(voice(gas(1.0), 0.3).with_unsteady_windway(LENGTH, 32, 64).unwrap()
+        .with_viscous_windway(LENGTH).is_err());
+    assert!(voice(gas(1.0), 0.3).with_unsteady_windway(LENGTH, 32, 64).unwrap()
+        .with_unsteady_windway(LENGTH, 32, 64).is_err());
+    v.step_block(&mut [0.0]).unwrap();
+    assert!(v.with_unsteady_windway(LENGTH, 32, 64).is_err());
+}

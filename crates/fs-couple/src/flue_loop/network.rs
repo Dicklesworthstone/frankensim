@@ -349,7 +349,9 @@ impl FlueVoice {
             return Err(invalid("blowing pressure must be finite and non-negative"));
         }
         let speed = self.speed_at_pressure(pressure_pa)?;
-        self.line.validate_jet_speed(speed, pressure_pa > 0.0)?;
+        // The unsteady source transports feedback on a spatial mesh, so cold
+        // targets and transient release may be below the old time-history floor.
+        self.line.validate_jet_speed(speed, pressure_pa > 0.0 && self.unsteady_windway.is_none())?;
         Ok(speed)
     }
 }

@@ -124,3 +124,60 @@ Independent reference equations checked 567 manufactured affine boundaries,
 steps. These are not execution of the Rust implementation. Local Cargo/rustc
 were unavailable during implementation; native workflow results must be checked
 separately rather than inferred from numerical reference agreement.
+
+## Unsteady no-slip windway and jet convection
+
+`FlueVoice::with_unsteady_windway(length_m, transverse_cells, convection_cells)`
+replaces the steady channel option with a resolved, time-dependent transverse
+velocity profile. The generic `bernoulli_aperture::slit_channel` owner solves
+
+\[
+\rho\,\partial_t v = \Delta p_{channel}/L + \mu\,\partial_{yy}v,
+\qquad v(0,t)=v(h,t)=0.
+\]
+
+The same retained inlet gas supplies density and viscosity. A pressure control
+applies a force to the fluid; it does not instantly replace its velocity. The
+fluid starts at rest, develops viscous wall layers, and continues moving while
+losing kinetic energy after blowing pressure is released. The fixed-channel
+solver also accepts signed pressure and flow for non-jet consumers.
+
+The flue adapter couples the field to an explicit uniform kinetic-head exit,
+then uses its accepted bulk speed for source volume, Reynolds coverage and the
+existing card's growth band. A separate spatial convection field transports
+feedback across the actual mouth cut-up. That field can represent startup,
+slow release and a stopped jet without clamping a growing time delay to a
+fixed history-buffer length. It retains the original card's convection ratio
+and does not turn the card into a resolved jet model.
+
+File-driven sources select the same API with:
+
+```text
+windway unsteady 0.015 32 64
+```
+
+The values are channel length in metres, transverse cells and convection cells.
+Both cell counts are explicit numerical refinement axes in 2..=4096. The
+mechanical sample rate supplies a separate time-resolution axis. This record
+replaces `windway none` or `windway slit LENGTH`; the choices cannot be combined.
+It works with either the single-pipe or regional-gas branched source described
+in `FLUE_NETWORK_PERFORMANCES.md`. The jet always uses the actual inlet gas.
+
+The channel reports kinetic storage/change, pressure work, viscous wall heat,
+exit work and backward-Euler numerical dissipation separately. The acoustic
+mouth keeps its own existing work balance. These ledgers must not be added as
+if the same exit energy were independently supplied twice. Numerical damping
+is not relabeled as material heat.
+
+`slit_channel` regressions compare the evolving velocity and flow with
+independent Poiseuille and transient sine-series solutions while refining
+space and time. Other regressions exercise release, reversal, gas-density and
+viscosity changes, source/receiver coupling, and callback-independent pressure.
+These tests do not establish experimental instrument accuracy.
+
+The continuum is fixed-state, incompressible, Newtonian, fully developed and
+planar. Side-wall drag, entrance and axial profile development, compressibility,
+thermal transport, moving walls and turbulent flow remain outside it. The
+flue exit uses a uniform bulk kinetic-head approximation even though the
+internal velocity profile is resolved. Refine the declared axes and compare
+against a fuller flow model before making a claim affected by those omissions.

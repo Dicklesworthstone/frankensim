@@ -29,7 +29,10 @@
 //! - the default jet speed is Bernoulli from blowing pressure and the medium,
 //!   `U = sqrt(2 p_blow / rho)`. An explicitly supplied rectangular windway
 //!   adds the shared material-gas viscous slit pressure drop before computing
-//!   the bulk jet speed, injected flow and convection; the card is SHAPE/SCALING authority
+//!   the bulk jet speed, injected flow and convection. The unsteady windway
+//!   option resolves its no-slip momentum profile and convects feedback on an
+//!   explicit spatial mesh; source fluid inertia survives pressure release.
+//!   The card remains SHAPE/SCALING authority
 //!   only (the lab works in lattice units), so every dimensional number
 //!   comes from the geometry chart and the medium;
 //! - the transverse acoustic velocity at the mouth, `v = q / S_m`,
@@ -84,6 +87,9 @@ use network::FlueResonator;
 
 /// Optional geometry/gas-bound separation loss in the same-sample mouth solve.
 pub mod mouth_loss;
+
+/// Refinable unsteady no-slip source channel and spatial jet feedback transport.
+pub mod windway;
 
 /// Philox kernel id of the flue onset seed stream (logical identity;
 /// never a scheduling artifact).
@@ -395,6 +401,9 @@ pub struct FlueBlockDiag {
     pub jet_speed_m_s: f64,
     /// Jet Reynolds number `U * 2b / nu`.
     pub reynolds: f64,
+    /// Lowest and highest accepted sample Reynolds numbers in this block.
+    /// Transient attacks/releases cannot be hidden by the endpoint value.
+    pub reynolds_range: (f64, f64),
     /// Whether this block ran inside the card's Reynolds band.
     pub inside_card_validity: bool,
     /// Jet transit delay [s].
@@ -426,6 +435,18 @@ pub struct FlueBlockDiag {
     /// Ledger closure `source - (stored + numerical + radiation + pipe + separation)`
     /// [J]; roundoff by construction.
     pub ledger_defect_j: f64,
+    /// Total source work into the optional resolved windway [J].
+    pub windway_work_j: f64,
+    /// Change of the windway fluid's resolved kinetic energy [J].
+    pub windway_stored_delta_j: f64,
+    /// Windway wall heat [J], separate from the acoustic mouth losses.
+    pub windway_viscous_loss_j: f64,
+    /// Work through the windway's explicit ideal kinetic exit [J].
+    pub windway_exit_work_j: f64,
+    /// Windway time-discretization loss [J], not physical wall heat.
+    pub windway_numerical_dissipation_j: f64,
+    /// Independent windway pressure/storage/loss closure [J].
+    pub windway_ledger_defect_j: f64,
 }
 
 /// One flue voice: the island, its mouth loop, and its wind line.
@@ -436,6 +457,7 @@ pub struct FlueVoice {
     gas: GasState,
     mouth_contraction: Option<crate::bernoulli_aperture::contraction::ContractionLoss>,
     viscous_windway: Option<crate::bernoulli_aperture::viscous::ViscousSlit>,
+    unsteady_windway: Option<windway::UnsteadyWindway>,
     rho: f64,
     nu: f64,
     zc: f64,
@@ -557,6 +579,7 @@ impl FlueVoice {
             gas: *gas,
             mouth_contraction: None,
             viscous_windway: None,
+            unsteady_windway: None,
             rho,
             nu,
             zc,
@@ -620,7 +643,8 @@ impl FlueVoice {
             FlueControl::SetBlowingPressure(p) => {
                 let speed = self.validated_jet_speed(p)?;
                 self.blow_pa = p;
-                self.jet_speed_m_s = speed;
+                // A pressure control supplies force; it never overwrites moving gas.
+                if self.unsteady_windway.is_none() { self.jet_speed_m_s = speed; }
             }
             FlueControl::Fingering {
                 index,
@@ -630,8 +654,8 @@ impl FlueVoice {
         Ok(())
     }
 
-    /// Jet speed for the current blowing pressure. With a viscous windway this
-    /// is the bulk speed driving the existing fixed-profile jet-card model.
+    /// Accepted jet bulk speed. An unsteady windway retains its velocity field
+    /// across pressure controls, including a release to zero blowing pressure.
     #[must_use]
     pub fn jet_speed_m_s(&self) -> f64 {
         self.jet_speed_m_s
@@ -655,7 +679,8 @@ impl FlueVoice {
     /// Invalid/unrepresentable geometry, repeated/late attachment, a poisoned
     /// voice, or a held pressure outside the ACTUAL jet-speed/history domain.
     pub fn with_viscous_windway(mut self, length_m: f64) -> Result<Self, FlueError> {
-        if self.poisoned || self.samples != 0 || self.viscous_windway.is_some() {
+        if self.poisoned || self.samples != 0 || self.viscous_windway.is_some()
+            || self.unsteady_windway.is_some() {
             return Err(FlueError::Invalid { what: "viscous windway requires one cold attachment" });
         }
         self.viscous_windway = Some(crate::bernoulli_aperture::viscous::ViscousSlit::from_gas(
@@ -672,7 +697,48 @@ impl FlueVoice {
         self.viscous_windway.as_ref()
     }
 
+    /// Attach a material-gas windway with resolved unsteady no-slip momentum.
+    ///
+    /// The supplied length and transverse mesh determine the evolving velocity
+    /// profile. The existing card's feedback is convected across its physical
+    /// cut-up on a separate, explicitly refinable spatial mesh. Actual accepted
+    /// bulk speed drives source flow, amplification, Reynolds validity and this
+    /// transport EACH sample, independently of host callback partitioning.
+    ///
+    /// The windway starts at rest even when a pressure is already held. A pressure
+    /// release leaves the fluid moving; wall friction and the explicit exit remove
+    /// its kinetic energy. Zero-speed transport retains the physical field.
+    /// This resolves fully developed transverse laminar flow only, with an ideal
+    /// uniform kinetic-head terminal. The surrounding jet card, geometry and
+    /// observer keep their existing scope; no resolved jet or flute claim follows.
+    ///
+    /// # Errors
+    /// Nonpositive/nonfinite length, either mesh outside 2..=4096, repeated/late
+    /// attachment, poisoned voice, or a held pressure above the admitted jet Mach.
+    pub fn with_unsteady_windway(mut self, length_m: f64, transverse_cells: usize,
+        convection_cells: usize) -> Result<Self, FlueError>
+    {
+        if self.poisoned || self.samples != 0 || self.viscous_windway.is_some()
+            || self.unsteady_windway.is_some() {
+            return Err(FlueError::Invalid { what: "unsteady windway requires one cold source-channel attachment" });
+        }
+        self.unsteady_windway = Some(windway::UnsteadyWindway::new(&self.gas, &self.geometry,
+            length_m, transverse_cells, convection_cells, self.dt, self.island.convection_ratio)?);
+        self.validated_jet_speed(self.blow_pa)?;
+        self.jet_speed_m_s = 0.0;
+        Ok(self)
+    }
+
+    /// Actual source field, material state, energy and both supplied resolutions.
+    #[must_use]
+    pub const fn unsteady_windway(&self) -> Option<&windway::UnsteadyWindway> {
+        self.unsteady_windway.as_ref()
+    }
+
     fn speed_at_pressure(&self, pressure_pa: f64) -> Result<f64, FlueError> {
+        if let Some(channel) = &self.unsteady_windway {
+            return channel.steady_speed(pressure_pa);
+        }
         match self.viscous_windway {
             Some(law) => {
                 let flow = law.evaluate(self.geometry.flue_width_m, self.geometry.flue_height_m,
@@ -744,46 +810,9 @@ impl FlueVoice {
         mut observe: impl FnMut(&FlueResonator) -> Result<(), FlueError>,
     ) -> Result<(), FlueError> {
         let dt = self.dt;
-        let u = self.jet_speed_m_s();
         let b = 0.5 * self.geometry.flue_height_m;
-        let q_max = u * self.geometry.flue_height_m * self.geometry.flue_width_m;
         let s_m = self.geometry.mouth_area_m2();
         let y0 = self.geometry.effective_offset_m();
-        let transit = if u > 0.0 {
-            self.transit_s()
-        } else {
-            f64::INFINITY
-        };
-        let delay_samples = if transit.is_finite() {
-            transit / dt
-        } else {
-            0.0
-        };
-        let seed_scale = self.island.seed_amplitude_rel * u;
-        // Amplification band of the sinuous jet mode: the tanh shear
-        // layer is spatially amplified only below its neutral frequency
-        // omega_c = U / (4 theta) (Michalke: neutral wavenumber
-        // alpha theta = 1/2 convecting at U/2), so the deflection path is
-        // band-limited by two first-order sections at omega_c. The
-        // cutoff rises with the jet speed: that, with the shrinking
-        // transit, is the overblowing mechanism.
-        let omega_c = if u > 0.0 {
-            u / (4.0 * self.momentum_thickness_m)
-        } else {
-            0.0
-        };
-        let band_alpha = omega_c * dt / (1.0 + omega_c * dt);
-        // Low edge of the band: the growth rate vanishes linearly below
-        // the most amplified Strouhal (about half the neutral one), so a
-        // first-order high-pass at omega_c / 2 carries that slope. Without
-        // it the integral receptivity has its largest gain at the lowest
-        // frequencies, where the open pipe offers no impedance, and the
-        // loop falls into a slow relaxation cycle instead of a note
-        // (executed: 6 Hz at every blowing pressure).
-        let omega_h = 0.5 * omega_c;
-        let hp_alpha = 1.0 / (1.0 + omega_h * dt);
-        // Displacement leak two decades below the amplification band.
-        let leak_rate = omega_c / 100.0;
         let (l, r, zc) = (self.inertance, self.resistance, self.zc);
         // The mouth and wave boundary are solved together below. A TMM FIR
         // can reflect instantaneously; a delayed tube graph has r0 exactly zero.
@@ -796,10 +825,47 @@ impl FlueVoice {
         let mut numerical = 0.0;
         let mut pipe_side = 0usize;
         let mut eta_sq = 0.0;
+        let mut reynolds_min = f64::INFINITY;
+        let mut reynolds_max = 0.0f64;
+        let mut windway_work = 0.0;
+        let mut windway_stored_delta = 0.0;
+        let mut windway_viscous = 0.0;
+        let mut windway_exit = 0.0;
+        let mut windway_numerical = 0.0;
+        let mut windway_defect = 0.0;
         for slot in out.iter_mut() {
+            let convected = if let Some(windway) = &mut self.unsteady_windway {
+                let (frame, velocity) = windway.advance(self.blow_pa, self.q_prev / s_m)?;
+                // Spatial transport admits arbitrarily slow transient motion;
+                // the actual source Mach cap remains enforced every sample.
+                self.line.validate_jet_speed(frame.bulk_speed_m_s, false)?;
+                self.jet_speed_m_s = frame.bulk_speed_m_s;
+                windway_work += frame.pressure_work_j;
+                windway_stored_delta += frame.stored_delta_j;
+                windway_viscous += frame.viscous_dissipation_j;
+                windway_exit += frame.exit_work_j;
+                windway_numerical += frame.numerical_dissipation_j;
+                windway_defect += frame.energy_residual_j;
+                Some(velocity)
+            } else { None };
+            let u = self.jet_speed_m_s();
+            let q_max = u * self.geometry.flue_height_m * self.geometry.flue_width_m;
+            let transit = if u > 0.0 { self.transit_s() } else { f64::INFINITY };
+            let delay_samples = if transit.is_finite() { transit / dt } else { 0.0 };
+            let seed_scale = self.island.seed_amplitude_rel * u;
+            let reynolds = self.reynolds();
+            reynolds_min = reynolds_min.min(reynolds);
+            reynolds_max = reynolds_max.max(reynolds);
+            // The existing card's growth band follows THIS sample's actual speed.
+            // This retains its approximation; the channel does not mint a new card.
+            let omega_c = if u > 0.0 { u / (4.0 * self.momentum_thickness_m) } else { 0.0 };
+            let band_alpha = omega_c * dt / (1.0 + omega_c * dt);
+            let omega_h = 0.5 * omega_c;
+            let hp_alpha = 1.0 / (1.0 + omega_h * dt);
+            let leak_rate = omega_c / 100.0;
             // Jet deflection at the labium from the delayed mouth velocity
             // plus the voice-keyed onset seed.
-            let v_raw = self.delayed_velocity(delay_samples);
+            let v_raw = convected.unwrap_or_else(|| self.delayed_velocity(delay_samples));
             self.band_state[0] += band_alpha * (v_raw - self.band_state[0]);
             self.band_state[1] += band_alpha * (self.band_state[0] - self.band_state[1]);
             let hp_in = self.band_state[1];
@@ -865,6 +931,10 @@ impl FlueVoice {
             self.samples += 1;
             observe(&self.line)?;
         }
+        if ![windway_work, windway_stored_delta, windway_viscous, windway_exit,
+            windway_numerical, windway_defect].iter().all(|v| v.is_finite()) {
+            return Err(FlueError::Invalid { what: "unsteady windway block energy overflow" });
+        }
         let n = out.len() as f64;
         let mean = out.iter().sum::<f64>() / n;
         let mut crossings = 0usize;
@@ -883,10 +953,11 @@ impl FlueVoice {
         self.diags.push(FlueBlockDiag {
             block: self.block_index,
             blow_pa: self.blow_pa,
-            jet_speed_m_s: u,
+            jet_speed_m_s: self.jet_speed_m_s(),
             reynolds,
-            inside_card_validity: reynolds >= lo && reynolds <= hi,
-            transit_s: transit,
+            reynolds_range: (reynolds_min, reynolds_max),
+            inside_card_validity: reynolds_min >= lo && reynolds_max <= hi,
+            transit_s: self.transit_s(),
             lock_hz: crossings as f64 / (n * dt),
             p_rms_pa: (sq / n).sqrt(),
             duty_pipe_side: pipe_side as f64 / n,
@@ -899,6 +970,12 @@ impl FlueVoice {
             stored_delta_j: stored_delta,
             numerical_dissipation_j: numerical,
             ledger_defect_j: source_work - (stored_delta + numerical + radiation + pipe_work) - separation,
+            windway_work_j: windway_work,
+            windway_stored_delta_j: windway_stored_delta,
+            windway_viscous_loss_j: windway_viscous,
+            windway_exit_work_j: windway_exit,
+            windway_numerical_dissipation_j: windway_numerical,
+            windway_ledger_defect_j: windway_defect,
         });
         self.block_index += 1;
         Ok(())
@@ -921,7 +998,7 @@ impl FlueVoice {
             return Ok(());
         }
         let seen = self.diags.iter().fold((f64::INFINITY, 0.0f64), |acc, d| {
-            (acc.0.min(d.reynolds), acc.1.max(d.reynolds))
+            (acc.0.min(d.reynolds_range.0), acc.1.max(d.reynolds_range.1))
         });
         Err(FlueError::OutsideCardValidity {
             blocks: outside,

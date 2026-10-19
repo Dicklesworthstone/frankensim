@@ -94,3 +94,41 @@ fn incompatible_graph_gas_and_receiver_inputs_refuse_before_any_cli_output() {
         assert!(!output.with_extension("provenance.json").exists());
     }
 }
+
+#[test]
+fn unsteady_windway_data_reaches_regional_source_and_physical_cli_output() {
+    let text = source().replace("windway slit 0.015", "windway unsteady 0.015 32 64");
+    let file = FlueFilePerformance::from_bytes(text.as_bytes(),37,&CancelGate::new_clock_free()).unwrap();
+    let voice = file.renderer().voice();
+    let field = voice.unsteady_windway().unwrap();
+    assert_eq!(field.channel().gas(), &voice.network().unwrap().source().gases[1]);
+    assert_eq!(field.channel().spec().length_m, 0.015);
+    assert_eq!(field.channel().spec().transverse_cells, 32);
+    assert_eq!(field.convection_cells(),64);
+    assert_eq!(voice.jet_speed_m_s(),0.0);
+    let expected = physical(&text).0;
+    assert_ne!(expected,physical(&source()).0,"resolved source inertia must reach the receiver");
+    let wav = encode_pcm16_wav(&expected,48000,1.0).unwrap().0;
+    let dir = directory();
+    let input = dir.join("unsteady.performance");
+    std::fs::write(&input,&text).unwrap();
+    for block in [1,137] {
+        let output = dir.join(format!("unsteady-{block}.wav"));
+        success(run(&input,&output,block,false));
+        assert_eq!(std::fs::read(&output).unwrap(),wav);
+        let sidecar = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+        for token in ["\"windway_model\":\"unsteady-no-slip-slit-v1\"",
+            "\"windway_transverse_cells\":32","\"jet_convection_cells\":64",
+            "\"inlet_section\":1"] {
+            assert!(sidecar.contains(token),"{token}: {sidecar}");
+        }
+    }
+    for (i, row) in ["windway unsteady 0.015 1 64","windway unsteady 0.015 32 4097",
+        "windway unsteady 0.015 32","windway unsteady -0.015 32 64"].iter().enumerate() {
+        std::fs::write(&input,text.replace("windway unsteady 0.015 32 64",row)).unwrap();
+        let output = dir.join(format!("refused-unsteady-{i}.wav"));
+        assert!(!run(&input,&output,37,false).status.success());
+        assert!(!output.exists());
+        assert!(!output.with_extension("provenance.json").exists());
+    }
+}

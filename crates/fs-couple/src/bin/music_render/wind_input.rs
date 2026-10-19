@@ -156,9 +156,16 @@ fn load_with_gas_sources(
         let exterior = renderer.radiation_input().expect("file binds exterior explicitly").exterior;
         let geometry = p.geometry();
         let island = renderer.voice().island();
-        let windway_json = match renderer.voice().viscous_windway() {
-            Some(law) => format!(",\"windway_length_m\":{:e},\"windway_dynamic_viscosity_pa_s\":{:e}", law.length_m(), law.dynamic_viscosity_pa_s()),
-            None => ",\"windway_length_m\":null".to_string(),
+        let windway_json = if let Some(flow) = renderer.voice().unsteady_windway() {
+            let channel = flow.channel();
+            let spec = channel.spec();
+            format!(",\"windway_model\":\"unsteady-no-slip-slit-v1\",\"windway_length_m\":{:e},\"windway_dynamic_viscosity_pa_s\":{:e},\"windway_transverse_cells\":{},\"jet_convection_cells\":{}",
+                spec.length_m, channel.gas().dynamic_viscosity, spec.transverse_cells, flow.convection_cells())
+        } else {
+            match renderer.voice().viscous_windway() {
+                Some(law) => format!(",\"windway_model\":\"quasi-steady-slit-v1\",\"windway_length_m\":{:e},\"windway_dynamic_viscosity_pa_s\":{:e}", law.length_m(), law.dynamic_viscosity_pa_s()),
+                None => ",\"windway_model\":\"ideal\",\"windway_length_m\":null".to_string(),
+            }
         };
         let (phase, details) = network.fractional_sections().expect("file selects fractional travel");
         let actual_length: f64 = details.iter().map(|s|s.realized_dc_length_m).sum();

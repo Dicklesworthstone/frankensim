@@ -619,14 +619,44 @@ instrument name selects physical dimensions, material properties or calibration.
 records as other wind sources; `exterior same` shares the supplied bore gas. A
 separate exterior must have the same static pressure. Gas changes enter jet speed,
 Reynolds number, propagation, selected viscothermal loss and physical radiation.
-The optional `windway none` or `windway slit LENGTH_M` record after `flue`
-selects the existing `FlueVoice::with_viscous_windway` before performance setup.
-The supplied rectangular channel uses the same source gas to set viscous
-pressure drop, jet speed, convection and injected flow; its actual length and
-viscosity remain in the output sidecar. Omitted/`none` retains the ideal jet.
+The optional `windway none`, `windway slit LENGTH_M` or
+`windway unsteady LENGTH_M TRANSVERSE_CELLS CONVECTION_CELLS` record after
+`flue` selects the shared ideal, quasi-steady or unsteady source-gas windway
+before performance setup. Actual channel length, model, viscosity and resolved
+cell counts remain in the output sidecar. Omitted/`none` retains the ideal jet.
 A finite channel is explicit physical geometry; no lip-channel length is
-invented for a transverse flute. The quasi-steady parallel-plate law adds no
-entrance-profile development, windway inertia or resolved turbulence.
+invented for a transverse flute.
+
+`bernoulli_aperture::slit_channel` resolves fixed, fully developed planar
+Newtonian momentum from the retained `GasState` density and viscosity. Its
+2..=4096 cell-centred finite volumes share a no-slip wall diffusion operator;
+backward Euler evolves the transverse profile from rest under signed pressure.
+An optional uniform kinetic-head exit is solved with the mean flow in the same
+implicit update. Kinetic storage, pressure work, physical viscous heat, exit
+work and numerical dissipation remain separate. Standalone refusal leaves the
+accepted channel state intact. No fitted relaxation poles or alternate gas
+formulas enter this owner.
+
+`FlueVoice::with_unsteady_windway` connects that accepted flow to jet speed,
+source volume, Reynolds coverage and the original card's growth law. Pressure
+controls accelerate the fluid and release retains its momentum. A separate
+2..=4096 cell semi-Lagrangian convection field transports the existing feedback
+across the actual mouth cut-up at the evolving speed, including stop and
+startup, without a minimum-speed history clamp. The voice's original failure
+poisoning applies to the combined sample. Channel and acoustic mouth work
+ledgers retain their distinct ports; numerical damping is not material heat.
+Single-tube and regional-gas branched file sources use this same builder and
+the same physical receiver. Independent steady Poiseuille and transient
+sine-series regressions exercise space/time refinement, signed release,
+reversal, gas interventions and callback partitioning; native execution is
+required before treating them as passing evidence.
+
+These are explicit numerical axes for a fixed, incompressible, fully developed
+planar channel and the original estimated jet card. Side-wall/entrance/axial
+profile development, compressibility, thermal transport, moving walls and
+turbulence remain outside the channel. The exit uses uniform bulk kinetic
+head despite the resolved internal profile. This does not establish a resolved
+jet, moving-reed channel or experimentally validated instrument claim.
 
 This loader constructs the existing `FlueVoice::from_fractional_network` and
 `FlueOutletPerformance::with_multirate_radiation`. Every mechanical outlet-flow

@@ -99,7 +99,9 @@ impl FlueFilePerformance {
     /// `jet_card tonal-interim` explicitly selects the retained stage-I card;
     /// `jet_card json {CANONICAL_JSON}` supplies a complete one-line card.
     /// An optional `windway none` or `windway slit LENGTH_M` row after `flue`
-    /// selects the existing source-gas viscous windway. Its length is actual
+    /// selects the source-gas viscous windway. `windway unsteady LENGTH_M
+    /// TRANSVERSE_CELLS CONVECTION_CELLS` instead resolves the evolving channel
+    /// profile and jet convection, using explicit refinement counts. Its length is actual
     /// channel geometry, never an inferred lip channel for a transverse flute.
     /// Gains, seed, dimensions, limits, clocks and the pressure phrase are data.
     /// `exterior same` shares the default gas; another gas record changes only
@@ -177,22 +179,19 @@ impl FlueFilePerformance {
             bore_area_m2: core::f64::consts::PI * radius_m * radius_m,
         };
         row.end()?;
-        // Optional in V1 so existing authored sources retain their ideal jet.
-        // A finite channel is geometry supplied by data, not by instrument name.
-        let windway_length_m = if rows.lines.clone().next().is_some_and(|line|
-            line.trim_ascii().split_ascii_whitespace().next() == Some("windway"))
-        {
-            let declaration = rows.record("windway")?;
-            if declaration == "none" { None } else {
-                let mut row = Row { fields: declaration.split_ascii_whitespace(), line: rows.line };
-                if row.fields.next() != Some("slit") {
-                    return Err(bad(rows.line, "windway requires none or slit followed by length in metres"));
-                }
-                let length_m = row.scalar()?;
-                row.end()?;
-                Some(length_m)
-            }
-        } else { None };
+        // Optional in V1: one explicit physical/numerical windway selection.
+        let windway = if rows.next_is("windway") {
+            let mut row = rows.row("windway")?;
+            let choice = match row.fields.next() {
+                Some("none") => WindwayInput::None,
+                Some("slit") => WindwayInput::QuasiSteady { length_m: row.scalar()? },
+                Some("unsteady") => WindwayInput::Unsteady { length_m: row.scalar()?,
+                    transverse_cells: row.number()?, convection_cells: row.number()? },
+                _ => return Err(bad(rows.line, "windway requires none, slit LENGTH, or unsteady LENGTH TRANSVERSE_CELLS CONVECTION_CELLS")),
+            };
+            row.end()?;
+            choice
+        } else { WindwayInput::None };
         let card_source = rows.record("jet_card")?;
         let (card, jet_card_source) = if card_source == "tonal-interim" {
             (mint_tonal_interim_card(), "tonal-interim")
@@ -253,9 +252,14 @@ impl FlueFilePerformance {
         let voice = FlueVoice::from_fractional_network(Some(&card), displacement_gain, seed_amplitude_rel,
             geometry, source, None, policy, mechanics_rate_hz, voice_seed, voice_index, gate)
             .map_err(FlueInputError::Physics)?;
-        let voice = if let Some(length_m) = windway_length_m {
-            voice.with_viscous_windway(length_m).map_err(FlueInputError::Physics)?
-        } else { voice };
+        let voice = match windway {
+            WindwayInput::None => voice,
+            WindwayInput::QuasiSteady { length_m } =>
+                voice.with_viscous_windway(length_m).map_err(FlueInputError::Physics)?,
+            WindwayInput::Unsteady { length_m, transverse_cells, convection_cells } =>
+                voice.with_unsteady_windway(length_m, transverse_cells, convection_cells)
+                    .map_err(FlueInputError::Physics)?,
+        };
         let renderer = FlueOutletPerformance::with_multirate_radiation(voice, schedule,
             FlueOutletConfig { sample_rate_hz, samples, max_block, max_controls, max_compile_work,
                 outlet_node, receiver, maximum_abs_pressure_pa },
@@ -279,6 +283,12 @@ impl FlueFilePerformance {
     #[must_use] pub fn gas_records(&self) -> &[GasRecord] { &self.gas_records }
     /// Move the original physical pressure producer into streaming/PCM output.
     #[must_use] pub fn into_renderer(self) -> FlueOutletPerformance { self.renderer }
+}
+
+enum WindwayInput {
+    None,
+    QuasiSteady { length_m: f64 },
+    Unsteady { length_m: f64, transverse_cells: usize, convection_cells: usize },
 }
 
 struct Rows<'a> { lines: Lines<'a>, line: usize }
