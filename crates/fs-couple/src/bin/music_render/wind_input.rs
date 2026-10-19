@@ -7,7 +7,10 @@ use fs_couple::render::schedule::reed::{ReedPerformance, REED_PERFORMANCE_SCHEMA
 use fs_couple::bernoulli_aperture::performance::{ApertureObservation, AperturePerformance, CoupledAperture};
 use fs_couple::bernoulli_aperture::performance::file::{PlateValvePerformance, MAX_PLATE_VALVE_PERFORMANCE_BYTES, PLATE_VALVE_PERFORMANCE_SCHEMA};
 use fs_couple::bernoulli_aperture::radiation::BaffledRadiationLoad;
-use fs_couple::flue_loop::network::performance::file::{FlueFilePerformance, FLUE_PERFORMANCE_SCHEMA};
+use fs_couple::flue_loop::network::performance::file::{
+    FlueFilePerformance, FLUE_PERFORMANCE_SCHEMA, MAX_FLUE_WALL_PACK_BYTES,
+};
+use fs_matdb::NormalizedMaterialCardPack;
 use fs_exec::CancelGate;
 use fs_material::gas_species::input::ThermochemicalSources;
 use super::{RATE, create_outputs, json_string, stream_output};
@@ -49,12 +52,7 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolic
 // A physical propagation delay is source geometry, not an output/filter latency
 // to be removed by ensemble alignment. Keep it on the mechanical sample clock.
 pub(super) fn outlet_provenance(p: &AperturePerformance, radiation: Option<BaffledRadiationLoad>) -> String {
-    let load_json=if let Some(load)=radiation {
-        let spec=load.load();let term=spec.terms()[0];
-        format!(",\"radiation_load\":{{\"model\":\"compact-baffled-piston-positive-real-v1\",\"maximum_frequency_hz\":{:e},\"resistance_pa_s_m3\":{:e},\"pole_rate_per_s\":{:e},\"checked_max_complex_relative_error\":{:e},\"checked_max_resistance_relative_error\":{:e},\"replaces_memoryless_reflection\":true,\"extra_end_correction_m\":0,\"scope\":\"finite-sample low-ka analogue and bilinear checks, not broadband or measured calibration\"}}",
-            load.maximum_frequency_hz(),term.resistance_pa_s_m3,term.rate_per_s,
-            load.max_complex_relative_error(),load.max_resistance_relative_error())
-    } else {String::new()};
+    let load_json=radiation_provenance(radiation);
     let (c,radius,_density,_speed)=match (p.observation(),p.system()) {
         (ApertureObservation::TubeBaffled(c),CoupledAperture::Tube(t))=>(c,t.spec().radius_m,t.aperture().spec().density_kg_m3,t.spec().sound_speed_m_s),
         (ApertureObservation::NetworkBaffled {node,receiver},CoupledAperture::Network(n))=> {
@@ -80,6 +78,50 @@ pub(super) fn outlet_provenance(p: &AperturePerformance, radiation: Option<Baffl
         c.radial_rings,c.angular_points,c.maximum_frequency_hz,mic.delay_samples.0,mic.delay_samples.1,radiation.is_some())
 }
 
+fn radiation_provenance(radiation: Option<BaffledRadiationLoad>) -> String {
+    if let Some(load)=radiation {
+        let spec=load.load();let term=spec.terms()[0];
+        format!(",\"radiation_load\":{{\"model\":\"compact-baffled-piston-positive-real-v1\",\"maximum_frequency_hz\":{:e},\"resistance_pa_s_m3\":{:e},\"pole_rate_per_s\":{:e},\"checked_max_complex_relative_error\":{:e},\"checked_max_resistance_relative_error\":{:e},\"replaces_memoryless_reflection\":true,\"extra_end_correction_m\":0,\"scope\":\"finite-sample low-ka analogue and bilinear checks, not broadband or measured calibration\"}}",
+            load.maximum_frequency_hz(),term.resistance_pa_s_m3,term.rate_per_s,
+            load.max_complex_relative_error(),load.max_resistance_relative_error())
+    } else {String::new()}
+}
+
+fn flue_wall_provenance(p: &FlueFilePerformance) -> String {
+    use fs_couple::bernoulli_aperture::wall::material::{AxialConstraint, WallMaterialLoss};
+    let walls = p.renderer().voice().network().expect("file admits graph").material_walls();
+    let records = p.wall_records().iter().map(|record| {
+        let wall = walls.iter().find(|wall| wall.source().node == record.node())
+            .expect("retained material source has its original physical wall");
+        let assignment = wall.source();
+        let material = &assignment.material;
+        let state = material.material();
+        let coordinate = |name: &str| material.query_point().iter()
+            .find(|(axis, _)| axis == name).expect("file supplies T and omega").1;
+        let axial = match assignment.axial {
+            AxialConstraint::StressFree => "stress-free",
+            AxialConstraint::StrainFixed => "strain-fixed",
+        };
+        let loss = match &assignment.loss {
+            WallMaterialLoss::Elastic => "elastic",
+            WallMaterialLoss::KelvinVoigt => "kelvin-voigt",
+            WallMaterialLoss::Maxwell(_) => unreachable!("file profile selects elastic or Kelvin-Voigt"),
+        };
+        let patch = wall.patch();
+        format!("{{\"node\":{},\"model\":\"isotropic-local-ring-membrane\",\"pack_path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"resolved_state_hash\":\"{}\",\"source_artifact\":\"{}\",\"material_chemistry\":{},\"material_phase\":{},\"material_process\":{},\"material_revision\":{},\"temperature_k\":{:e},\"angular_frequency_rad_s\":{:e},\"band_hz\":[{:e},{:e}],\"radius_m\":{:e},\"covered_length_m\":{:e},\"area_m2\":{:e},\"thickness_m\":{:e},\"axial_constraint\":\"{axial}\",\"loss\":\"{loss}\",\"surface_density_kg_m2\":{:e},\"stiffness_pa_m\":{:e},\"resistance_pa_s_m\":{:e}}}",
+            record.node(),json_string(record.path()),record.pack().content_hash().to_hex(),
+            material.card_identity().to_hex(),material.identity().to_hex(),record.pack().source_artifact().to_hex(),
+            json_string(&state.chemistry),json_string(&state.phase),json_string(&state.process),state.revision,
+            coordinate("T"),coordinate("omega"),wall.band_hz()[0],wall.band_hz()[1],wall.radius_m(),
+            wall.length_m(),patch.area_m2,assignment.thickness_m,
+            patch.wall.surface_density,patch.wall.stiffness_per_area,patch.wall.resistance)
+    }).collect::<Vec<_>>().join(",");
+    let scope = if walls.is_empty() { "rigid" } else {
+        "original interior dual strips; unselected and endpoint half-strips rigid; fixed-reference small radial motion; no axial or bending shell coupling or exterior wall radiation"
+    };
+    format!(",\"material_walls\":[{records}],\"wall_strips\":{},\"wall_model_scope\":\"{scope}\"",walls.len())
+}
+
 struct Loaded {
     source: Box<dyn PressureRenderer>, rate:u32, samples:u64, full_scale_pa:f64,
     hash:ContentHash, fixture:&'static str, source_json:String,
@@ -95,6 +137,15 @@ fn flue_duct_provenance(p: &fs_couple::flue_loop::network::performance::FlueOutl
         NetworkNode::Inlet => "{\"kind\":\"inlet\"}".to_string(),
         NetworkNode::Junction => "{\"kind\":\"junction\"}".to_string(),
         NetworkNode::Termination { reflection } => format!("{{\"kind\":\"reflection\",\"reflection\":{reflection:e}}}"),
+        NetworkNode::Relaxation { load } => {
+            let base = load.base();
+            let compliance = base.compliance_m3_pa.map_or_else(|| "null".to_string(), |c| format!("{c:e}"));
+            let terms = load.terms().iter().map(|term| format!(
+                "{{\"resistance_pa_s_m3\":{:e},\"rate_per_s\":{:e}}}",
+                term.resistance_pa_s_m3,term.rate_per_s)).collect::<Vec<_>>().join(",");
+            format!("{{\"kind\":\"relaxation\",\"resistance_pa_s_m3\":{:e},\"inertance_pa_s2_m3\":{:e},\"compliance_m3_pa\":{compliance},\"terms\":[{terms}]}}",
+                base.resistance_pa_s_m3,base.inertance_pa_s2_m3)
+        }
         node => {
             let (kind, load) = match node {
                 NetworkNode::Impedance { load } => ("impedance", *load),
@@ -137,14 +188,24 @@ fn load_with_gas_sources(
     policy: ObservationPolicy,
     sources: Option<&ThermochemicalSources<'_>>,
 ) -> Result<Loaded, String> {
+    load_with_sources(bytes, block, policy, sources,
+        |_| Err("wall material-card packs require an explicit source loader".into()))
+}
+fn load_with_sources(
+    bytes: &[u8],
+    block: usize,
+    policy: ObservationPolicy,
+    sources: Option<&ThermochemicalSources<'_>>,
+    load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+) -> Result<Loaded, String> {
     // Exact versioned source header selects the existing owner; filenames and
     // instrument labels never choose geometry or material constants.
     if bytes.starts_with(b"frankensim-flue-performance-v1\n") {
         if policy == ObservationPolicy::Acceptance {
-            return Err("flue files use an explicitly estimated tonal-jet/rigid-pipe image; --acceptance requires an independently qualified physical model".into());
+            return Err("flue files retain an explicitly estimated tonal-jet/cylindrical-graph image; --acceptance requires an independently qualified physical model".into());
         }
-        let p = FlueFilePerformance::from_bytes_with_gas_sources(bytes, block,
-            &CancelGate::new(), sources).map_err(|e| e.to_string())?;
+        let p = FlueFilePerformance::from_bytes_with_sources(bytes, block,
+            &CancelGate::new(), sources, load_material).map_err(|e| e.to_string())?;
         let i = p.info();
         if i.sample_rate_hz != RATE {
             return Err("flue wind output must declare 48000 Hz; its file separately declares the faster mechanical clock".into());
@@ -174,7 +235,17 @@ fn load_with_gas_sources(
         let gas_sources = super::thermochemical::provenance(p.gas_records());
         let receiver = renderer.config().receiver;
         let duct_json = flue_duct_provenance(renderer);
-        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"model_scope\":\"estimated tonal jet and supplied rigid cylindrical graph; one-way infinite-baffle outlet pressure; supplied passive loads, no matched radiation feedback, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{duct_json}}}",
+        let wall_json = flue_wall_provenance(&p);
+        let reaction = !p.radiation_bindings().is_empty();
+        let radiation_json = p.radiation_bindings().iter().map(|binding| format!(
+            "{{\"node\":{},\"original_reflection\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e}{}}}",
+            binding.opening().node,binding.previous_reflection(),binding.load().density_kg_m3(),
+            binding.load().sound_speed_m_s(),radiation_provenance(Some(*binding.load()))
+        )).collect::<Vec<_>>().join(",");
+        let observation_scope = if reaction {
+            "in-loop independent compact baffled terminal reaction and matched-medium outlet pressure"
+        } else { "one-way infinite-baffle outlet pressure; supplied passive loads" };
+        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; wall image separately declared; no full shell dynamics, broadband unbaffled or mutual radiation, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{duct_json}{wall_json}}}",
             i.jet_card_source,i.jet_card_hash,p.card().claim.kind(),p.card().authority.label(),i.compiled_controls,
             geometry.flue_width_m,geometry.flue_height_m,geometry.cut_up_m,geometry.labium_offset_m,
             geometry.jet_angle_rad,geometry.mouth_loss_rel,island.displacement_gain,island.seed_amplitude_rel,
@@ -253,7 +324,19 @@ pub(super) fn run_with_gas_sources(
     let mut bytes = Vec::new();
     file.take((MAX_PLATE_VALVE_PERFORMANCE_BYTES + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("wind input read failed: {e}"))?;
-    let loaded = load_with_gas_sources(&bytes, block, policy, sources)?;
+    let parent = Path::new(input).parent().unwrap_or(Path::new("."));
+    let loaded = load_with_sources(&bytes, block, policy, sources, |name| {
+        let file = std::fs::File::open(parent.join(name))
+            .map_err(|e| format!("wall material-card pack {name:?} open failed: {e}"))?;
+        let mut pack_bytes = Vec::new();
+        file.take((MAX_FLUE_WALL_PACK_BYTES + 1) as u64).read_to_end(&mut pack_bytes)
+            .map_err(|e| format!("wall material-card pack {name:?} read failed: {e}"))?;
+        if pack_bytes.len() > MAX_FLUE_WALL_PACK_BYTES {
+            return Err("wall material-card pack exceeds 8 MiB".into());
+        }
+        NormalizedMaterialCardPack::from_bytes(&pack_bytes)
+            .map_err(|e| format!("wall material-card pack {name:?}: {e}"))
+    })?;
     if decimate && loaded.observation_json.is_some() {
         return Err("flue files already declare mechanical and output clocks; omit --decimate to avoid a second observer".into());
     }

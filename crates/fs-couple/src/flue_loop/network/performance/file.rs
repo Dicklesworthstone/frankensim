@@ -1,27 +1,35 @@
 //! File-driven jet, regional gas, tube graph and physical outlet pressure.
 //!
 //! The versioned source selects existing owners, including fractional travel,
-//! optional gas-derived wide-tube loss, and the multirate Rayleigh receiver.
-//! It supplies no instrument-name defaults. This is a rigid cylindrical graph
-//! with an estimated tonal jet and a prescribed terminal reflection, not a
-//! measured Boehm flute, resolved turbulent jet or matched radiation load.
+//! optional gas-derived wide-tube loss, material wall motion, terminal reaction,
+//! and the multirate Rayleigh receiver. Every physical selection is source data.
+//! The local isotropic wall and compact independent baffled-load images retain
+//! their original limits; this is not a measured Boehm flute, full shell model,
+//! resolved turbulent jet or broadband unbaffled radiation qualification.
 
 use super::{FlueOutletConfig, FlueOutletPerformance, FlueRadiationInput};
 use crate::bernoulli_aperture::fractional::FractionalTubePolicy;
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
 use crate::bernoulli_aperture::viscothermal::ViscothermalSectionSpec;
+use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
 use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice, network::FlueNetworkSpec};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
+use crate::pcm_wav::baffled::openings::duct::{
+    DuctOpening, DuctRadiationSpec, DuctReconstruction,
+};
 use crate::render::schedule::GestureCompileError;
 use fs_aeroac::jetcard::{JetCard, mint_tonal_interim_card};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::CancelGate;
+use fs_matdb::NormalizedMaterialCardPack;
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSources, read_gas_record};
 use fs_scenario::gesture::GestureSchedule;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 
 mod duct;
+mod wall;
+pub use wall::{FlueWallRecord, MAX_FLUE_WALL_PACK_BYTES};
 
 /// Versioned SI source grammar; the suffix is the existing gesture format.
 pub const FLUE_PERFORMANCE_SCHEMA: &str = "frankensim-flue-performance-v1";
@@ -39,6 +47,14 @@ pub enum FlueInputError {
     Gas { /// One-based declaration line.
         line: usize, /// Shared material-owner error.
         source: GasInputError },
+    /// The caller could not load or admit the exact declared material artifact.
+    MaterialSource { /// One-based material declaration line.
+        line: usize, /// Original source-loading message.
+        source: String },
+    /// Original material-state resolution, including missing claims or domains.
+    Material { /// One-based material declaration line.
+        line: usize, /// Original material owner's refusal.
+        source: fs_material::state_point::MaterialStatePointError },
     /// Original jet-card schema or authority refusal.
     Card { /// One-based card line.
         line: usize, /// Shared source-card error.
@@ -53,6 +69,8 @@ impl core::fmt::Display for FlueInputError {
         match self {
             Self::Input { line, what } => write!(f, "flue input line {line}: {what}"),
             Self::Gas { line, source } => write!(f, "flue gas line {line}: {source}"),
+            Self::MaterialSource { line, source } => write!(f, "flue material source line {line}: {source}"),
+            Self::Material { line, source } => write!(f, "flue material line {line}: {source}"),
             Self::Card { line, source } => write!(f, "flue card line {line}: {source}"),
             Self::Physics(source) => write!(f, "flue physics: {source}"),
             Self::Performance(source) => write!(f, "flue performance: {source}"),
@@ -93,6 +111,8 @@ pub struct FlueFilePerformance {
     geometry: FlueGeometry,
     card: JetCard,
     gas_records: Vec<GasRecord>,
+    wall_records: Vec<FlueWallRecord>,
+    radiation_bindings: Vec<BaffledOutletBinding>,
 }
 impl FlueFilePerformance {
     /// Parse the fixed-order source shown in `examples/flue.performance`.
@@ -104,12 +124,25 @@ impl FlueFilePerformance {
     /// profile and jet convection, using explicit refinement counts. Its length is actual
     /// channel geometry, never an inferred lip channel for a transverse flute.
     /// Gains, seed, dimensions, limits, clocks and the pressure phrase are data.
-    /// `exterior same` shares the default gas; another gas record changes only
-    /// the receiver environment at the same static pressure. `network` replaces
+    /// `exterior same` shares the default gas; another gas record selects the
+    /// same pressure-matched exterior for observation and any chosen reaction.
+    /// `network` replaces
     /// `tube` with explicit branches, section gases and passive loads. The jet
     /// always uses the actual inlet section. A network explicitly names its
     /// radiating outlets; each outlet contributes its own accepted volume flow
     /// to the same physical receiver.
+    ///
+    /// After the duct records, optional `walls COUNT FMIN_HZ FMAX_HZ` introduces
+    /// COUNT rows `wall NODE isotropic PACK T_K OMEGA_RAD_S THICKNESS_M AXIAL LOSS`.
+    /// AXIAL is `stress-free` or `strain-fixed`; LOSS is `elastic` or
+    /// `kelvin-voigt`. Each source binds an existing empty degree-two cylindrical
+    /// junction; geometry and gas assignments stay unchanged. The original wall
+    /// owner covers half of each adjacent physical section, leaving unselected
+    /// and endpoint half-strips rigid. `walls none` or no row retains rigid walls.
+    /// An optional `radiation prescribed` or `radiation compact-baffled` row then
+    /// selects whether every observed outlet retains its supplied load or receives
+    /// the existing compact passive load in the same exterior as the receiver.
+    /// Preexisting reactive loads refuse replacement. No mutual reaction is added.
     ///
     /// The original jet card keeps its own narrow lab scope. The complete
     /// authored composition remains EstimateOnly, including outside-card
@@ -128,6 +161,26 @@ impl FlueFilePerformance {
     /// All gas forms use `fs_material::gas_species::input::read_gas_record`.
     pub fn from_bytes_with_gas_sources(bytes: &[u8], max_block: usize, gate: &CancelGate,
         sources: Option<&ThermochemicalSources<'_>>)
+        -> Result<Self, FlueInputError>
+    {
+        Self::from_bytes_with_sources(bytes, max_block, gate, sources,
+            |_| Err("wall material-card packs require an explicit source loader".into()))
+    }
+
+    /// Resolve supplied normalized material cards through the existing material
+    /// state-point owner before constructing the jet, walls, bore and receiver.
+    /// The caller loads declared packs; no filesystem I/O enters this library.
+    /// Sources use explicit bare-SI T and omega queries and SingleClaimOnly
+    /// selection. Missing, ambiguous, dimensionally incompatible or out-of-band
+    /// properties refuse without a material-name fallback. Shared pack paths load
+    /// once; each wall retains its independent solid temperature and query receipt.
+    ///
+    /// Original geometry, regional gases, loads and outlet addresses are preserved.
+    /// Optional compact reaction uses the SAME exterior and band as the receiver.
+    /// The complete file remains an estimated composition of the stated images.
+    pub fn from_bytes_with_sources(bytes: &[u8], max_block: usize, gate: &CancelGate,
+        sources: Option<&ThermochemicalSources<'_>>,
+        mut load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>)
         -> Result<Self, FlueInputError>
     {
         poll(gate)?;
@@ -169,6 +222,14 @@ impl FlueFilePerformance {
             state
         };
         let mut duct = duct::Input::read(&mut rows, gas, sources, &mut gas_records, gate)?;
+        let walls = wall::ParsedWalls::read(&mut rows)?;
+        let radiation_reaction = if rows.next_is("radiation") {
+            match rows.record("radiation")? {
+                "prescribed" => false,
+                "compact-baffled" => true,
+                _ => return Err(bad(rows.line, "radiation requires prescribed or compact-baffled")),
+            }
+        } else { false };
         let inlet = duct.graph.inlet_section_index().map_err(|source|
             FlueInputError::Physics(FlueError::Physics(source)))?;
         let radius_m = duct.graph.sections[inlet].radius_m;
@@ -249,9 +310,39 @@ impl FlueFilePerformance {
         duct.graph.max_wave_memory_bytes = max_wave_memory_bytes;
         let source = FlueNetworkSpec { graph: duct.graph, gases: duct.gases,
             viscothermal, minimum_jet_speed_m_s, maximum_jet_mach, max_jet_history_samples };
-        let voice = FlueVoice::from_fractional_network(Some(&card), displacement_gain, seed_amplitude_rel,
-            geometry, source, None, policy, mechanics_rate_hz, voice_seed, voice_index, gate)
-            .map_err(FlueInputError::Physics)?;
+        let (walls, wall_records) = match walls {
+            Some(walls) => {
+                let (walls, records) = walls.resolve(policy.maximum_frequency_hz, &mut load_material, gate)?;
+                (Some(walls), records)
+            }
+            None => (None, Vec::new()),
+        };
+        poll(gate)?;
+        let (voice, radiation_bindings) = if radiation_reaction {
+            let mut openings = vec![DuctOpening { network: 0, node: outlet_node, center_m: [0.0; 2] }];
+            openings.extend(additional_outlets.iter().map(|outlet| DuctOpening {
+                network: 0, node: outlet.node, center_m: outlet.center_m,
+            }));
+            let radiation = DuctRadiationSpec { openings, exterior: Some(exterior), receiver,
+                reconstruction: DuctReconstruction::Differentiating {
+                    mechanics_rate_hz, output_rate_hz: sample_rate_hz,
+                },
+            };
+            let (voice, environment) = FlueVoice::from_baffled_environment(Some(&card),
+                displacement_gain, seed_amplitude_rel, geometry, source, walls, Some(policy),
+                radiation, voice_seed, voice_index, gate).map_err(FlueInputError::Physics)?;
+            for binding in environment.bindings() {
+                binding.validate_receiver(voice.network().expect("constructed graph").graph(),
+                    environment.radiation(), exterior)
+                    .map_err(|error| FlueInputError::Physics(FlueError::Physics(
+                        crate::acoustic_realize::AcousticRealizeError::Nonlinear(error.to_string()))))?;
+            }
+            (voice, environment.into_parts().1)
+        } else {
+            (FlueVoice::from_fractional_network(Some(&card), displacement_gain, seed_amplitude_rel,
+                geometry, source, walls, policy, mechanics_rate_hz, voice_seed, voice_index, gate)
+                .map_err(FlueInputError::Physics)?, Vec::new())
+        };
         let voice = match windway {
             WindwayInput::None => voice,
             WindwayInput::QuasiSteady { length_m } =>
@@ -269,7 +360,7 @@ impl FlueFilePerformance {
         let info = FluePerformanceInfo { input_hash: hash_domain("org.frankensim.fs-couple.flue-performance.v1",bytes),
             mechanics_rate_hz, sample_rate_hz, samples, full_scale_pa,
             jet_card_hash: card.content_hash(), jet_card_source, compiled_controls: renderer.controls.len() };
-        Ok(Self { info, renderer, geometry, card, gas_records })
+        Ok(Self { info, renderer, geometry, card, gas_records, wall_records, radiation_bindings })
     }
     /// Original identity and finite clocks, separate from the evolving solver.
     #[must_use] pub const fn info(&self) -> FluePerformanceInfo { self.info }
@@ -281,6 +372,10 @@ impl FlueFilePerformance {
     #[must_use] pub const fn card(&self) -> &JetCard { &self.card }
     /// Gas records and thermochemical receipts, in source order.
     #[must_use] pub fn gas_records(&self) -> &[GasRecord] { &self.gas_records }
+    /// Original normalized solid sources, in material-wall assignment order.
+    #[must_use] pub fn wall_records(&self) -> &[FlueWallRecord] { &self.wall_records }
+    /// Exact installed reaction loads, in the observed outlet order.
+    #[must_use] pub fn radiation_bindings(&self) -> &[BaffledOutletBinding] { &self.radiation_bindings }
     /// Move the original physical pressure producer into streaming/PCM output.
     #[must_use] pub fn into_renderer(self) -> FlueOutletPerformance { self.renderer }
 }

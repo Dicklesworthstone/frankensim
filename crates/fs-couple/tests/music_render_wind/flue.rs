@@ -104,3 +104,6 @@ fn declared_windway_reaches_the_source_and_cli_pressure_without_a_second_model()
     assert!(sidecar.contains("\"windway_length_m\":1.5e-2"));
     assert!(sidecar.contains("\"windway_dynamic_viscosity_pa_s\":"));
 }
+
+#[path = "flue/material.rs"]
+mod material;
