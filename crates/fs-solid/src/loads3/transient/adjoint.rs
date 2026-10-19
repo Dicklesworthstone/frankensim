@@ -6,8 +6,8 @@
 //! These are derivatives of the discrete equations at FIXED h, M, C, K and
 //! restraints, not derivatives of PCG iterations, acceptance tests or roundoff.
 //! The load/state map is linear, so its pullback needs no stored primal states.
-//! Model/geometry derivatives, event-time derivatives and direct derivatives of
-//! stress, reactions or energy observations are not supplied by this module.
+//! Material-scale contractions are supplied by `material`. Geometry, event-time
+//! and direct stress/reaction/energy-observation derivatives are not supplied.
 
 use super::*;
 
@@ -260,3 +260,6 @@ impl From<crate::loads3::history::LoadHistoryError3> for TransientAdjointError3 
         else { Self::History(error) }
     }
 }
+
+/// Endpoint stiffness, density and Rayleigh-damping derivatives.
+pub mod material;

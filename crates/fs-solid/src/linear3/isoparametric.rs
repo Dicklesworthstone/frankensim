@@ -160,3 +160,6 @@ mod prescribed;
 
 // Full-row P1 dynamic response reuses the same canonical element kernels.
 mod response;
+
+// Material-scale derivatives reuse the canonical P1 tiles.
+mod material_gradient;
