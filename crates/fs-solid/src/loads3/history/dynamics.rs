@@ -62,3 +62,6 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         Ok(self.advance(&endpoint.case, h_s, cx)?)
     }
 }
+
+/// Finite schedule indexing and exact left/right transient load events.
+pub mod events;
