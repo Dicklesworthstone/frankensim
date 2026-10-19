@@ -135,6 +135,97 @@ fn complex_tree_pair_partition_g0_no_missing_or_duplicate_interactions() {
 }
 
 #[test]
+fn shared_m2l_blocks_match_per_pair_evaluation_g1() {
+    // The same Helmholtz kernel without the invariance opt-in evaluates every
+    // pair's block from its own grids; sharing may change only rounding.
+    struct PerPair(HelmholtzSingle);
+    impl ComplexKernel for PerPair {
+        fn eval(&self, x: [f64; 3], y: [f64; 3]) -> C64 {
+            self.0.eval(x, y)
+        }
+        fn wavenumber(&self) -> Option<f64> {
+            self.0.wavenumber()
+        }
+    }
+    let points: Vec<[f64; 3]> = (0..64)
+        .map(|i| {
+            let j = 0.1 * det::sin(i as f64);
+            [
+                (i % 4) as f64 + j,
+                ((i / 4) % 4) as f64 - j,
+                (i / 16) as f64 + 0.5 * j,
+            ]
+        })
+        .collect();
+    let q: Vec<C64> = (0..64)
+        .map(|i| C64::new(det::cos(i as f64), 0.3 - i as f64 / 64.0))
+        .collect();
+    let offset = |(a, b): (CellKey, CellKey)| {
+        let d = |i: u32, j: u32| i64::from(j) - i64::from(i);
+        (a.0, d(a.1, b.1), d(a.2, b.2), d(a.3, b.3))
+    };
+    let single = HelmholtzSingle { k: 1.3 };
+    let shared = FmmC64::new(&single, points.clone(), 3, 1).unwrap();
+    let per_pair_kernel = PerPair(single);
+    let opted_out = FmmC64::new(&per_pair_kernel, points.clone(), 3, 1).unwrap();
+    assert_eq!(shared.interactions, opted_out.interactions);
+    assert_eq!(opted_out.translations.len(), opted_out.interactions.len());
+    // 64 occupied level-2 cells: 3096 pairs over at most 316 offsets.
+    assert!(shared.translations.len() * 4 < shared.interactions.len());
+    let mut owners = vec![0usize; shared.interactions.len()];
+    for group in &shared.translations {
+        for &index in group {
+            assert_eq!(
+                offset(shared.interactions[index]),
+                offset(shared.interactions[group[0]])
+            );
+            owners[index] += 1;
+        }
+    }
+    assert!(owners.iter().all(|&n| n == 1));
+    // Rounding-level agreement, relative to the largest potential.
+    let agree = |got: Vec<C64>, want: Vec<C64>| {
+        let scale = want.iter().map(|w| w.abs()).fold(0.0, f64::max);
+        for (g, w) in got.into_iter().zip(want) {
+            assert!((g - w).abs() <= 1.0e-12 * scale, "{g:?} vs {w:?}");
+        }
+    };
+    agree(
+        shared.potentials(&q).unwrap(),
+        opted_out.potentials(&q).unwrap(),
+    );
+    // Multi-channel operators index the shared row by channel; compare each
+    // against the same engine forced back to one block per pair.
+    let normals: Vec<[f64; 3]> = points
+        .iter()
+        .map(|p| {
+            let v = [p[0] + 1.0, p[1] + 2.0, p[2] + 3.0];
+            let n = det::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            [v[0] / n, v[1] / n, v[2] / n]
+        })
+        .collect();
+    let build = |layer: usize| {
+        let (p, n) = (points.clone(), normals.clone());
+        match layer {
+            0 => FmmC64::new_double(HelmholtzDouble { k: 1.3 }, p, n, 3, 1),
+            1 => FmmC64::new_adjoint_double(HelmholtzAdjointDouble { k: 1.3 }, p, n, 3, 1),
+            _ => FmmC64::new_hypersingular(HelmholtzHypersingular { k: 1.3 }, p, n, 3, 1),
+        }
+        .unwrap()
+    };
+    for layer in 0..3 {
+        let shared = build(layer);
+        let mut per_pair = build(layer);
+        per_pair.translations = (0..per_pair.interactions.len()).map(|i| vec![i]).collect();
+        assert!(shared.translations.len() * 4 < shared.interactions.len());
+        agree(
+            shared.potentials(&q).unwrap(),
+            per_pair.potentials(&q).unwrap(),
+        );
+    }
+}
+
+#[test]
 fn complex_invalid_requests_and_non_finite_kernels_g0() {
     let points = vec![[0.0; 3], [1.0, 0.0, 0.0]];
     let single = HelmholtzSingle { k: 1.0 };

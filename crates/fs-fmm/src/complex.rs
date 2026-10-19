@@ -131,6 +131,10 @@ pub struct FmmC64<'k> {
     nodes: Vec<f64>,
     barycentric: Vec<f64>,
     interactions: Vec<(CellKey, CellKey)>,
+    /// Interaction indices sharing one M2L kernel block, in first-use order.
+    /// Translation-invariant operators group by (level, cell offset); other
+    /// kernels keep one group per pair.
+    translations: Vec<Vec<usize>>,
     coefficient_slots: usize,
     directional: Option<directional::DirectionalPlan>,
 }
@@ -295,6 +299,30 @@ impl<'k> FmmC64<'k> {
                 }
             }
         }
+        // Same-level grids are translates, so b-a fixes every node displacement.
+        let invariant = match &operator {
+            Operator::Scalar(k) => k.translation_invariant(),
+            _ => true,
+        };
+        let mut translations: Vec<Vec<usize>> = Vec::new();
+        let mut offsets: BTreeMap<(u32, i64, i64, i64), usize> = BTreeMap::new();
+        for (index, &(a, b)) in interactions.iter().enumerate() {
+            let offset = (
+                a.0,
+                i64::from(b.1) - i64::from(a.1),
+                i64::from(b.2) - i64::from(a.2),
+                i64::from(b.3) - i64::from(a.3),
+            );
+            let group = if invariant {
+                *offsets.entry(offset).or_insert(translations.len())
+            } else {
+                translations.len()
+            };
+            if group == translations.len() {
+                translations.push(Vec::new());
+            }
+            translations[group].push(index);
+        }
         let mut nodes = Vec::with_capacity(order);
         let mut barycentric = Vec::with_capacity(order);
         for j in 0..order {
@@ -310,6 +338,7 @@ impl<'k> FmmC64<'k> {
             nodes,
             barycentric,
             interactions,
+            translations,
             coefficient_slots,
             directional: None,
         })
@@ -460,10 +489,16 @@ impl<'k> FmmC64<'k> {
             .keys()
             .map(|&k| (k, vec![C64::ZERO; np * nt]))
             .collect();
-        for &(a, b) in &self.interactions {
-            let (ga, gb) = (self.grid(a), self.grid(b));
-            let m = &multipoles[&b];
-            let local = locals.get_mut(&a).expect("registered target cell");
+        // One target-node row of a group's kernel block is evaluated once and
+        // applied to every pair in the group. The row fits the two scratch
+        // cells already charged to the coefficient-slot budget. It is stored
+        // per target channel in the multipole layout, so each application is
+        // one contiguous dot product.
+        let span = np * ns;
+        let mut row = vec![C64::ZERO; nt * span];
+        for group in &self.translations {
+            let (a0, b0) = self.interactions[group[0]];
+            let (ga, gb) = (self.grid(a0), self.grid(b0));
             for (i, &x) in ga.iter().enumerate() {
                 for (j, &y) in gb.iter().enumerate() {
                     let block = self.operator.block(x, y);
@@ -471,10 +506,17 @@ impl<'k> FmmC64<'k> {
                         return Err(FmmError::NonFiniteOutput { index: i });
                     }
                     for ta in 0..nt {
-                        for sa in 0..ns {
-                            let slot = nt * i + ta;
-                            local[slot] = local[slot] + block[ns * ta + sa] * m[ns * j + sa];
-                        }
+                        row[ta * span + ns * j..ta * span + ns * (j + 1)]
+                            .copy_from_slice(&block[ns * ta..ns * (ta + 1)]);
+                    }
+                }
+                for &index in group {
+                    let (a, b) = self.interactions[index];
+                    let m = &multipoles[&b];
+                    let local = locals.get_mut(&a).expect("registered target cell");
+                    for ta in 0..nt {
+                        let slot = nt * i + ta;
+                        local[slot] = local[slot] + dot(&row[ta * span..(ta + 1) * span], m);
                     }
                 }
             }
@@ -602,9 +644,10 @@ impl<'k> FmmC64<'k> {
             return plan.stats.to_json();
         }
         format!(
-            "{{\"tree\":{},\"m2l_pairs\":{},\"complex_coefficient_slots\":{}}}",
+            "{{\"tree\":{},\"m2l_pairs\":{},\"m2l_kernel_blocks\":{},\"complex_coefficient_slots\":{}}}",
             self.geometry.stats(),
             self.interactions.len(),
+            self.translations.len(),
             self.coefficient_slots
         )
     }
@@ -612,6 +655,31 @@ impl<'k> FmmC64<'k> {
 
 fn finite(z: C64) -> bool {
     z.re.is_finite() && z.im.is_finite()
+}
+
+/// Complex dot product in four fixed interleaved partial sums with unfused
+/// IEEE products. The order is fixed, so the result is bit-identical on every
+/// ISA. The fused `C64` product calls libm `fma` per term when the target
+/// lacks FMA, and that call dominated the M2L pass. The interpolation error
+/// dwarfs the rounding difference.
+fn dot(a: &[C64], b: &[C64]) -> C64 {
+    let (mut re, mut im) = ([0.0f64; 4], [0.0f64; 4]);
+    let (a4, b4) = (a.chunks_exact(4), b.chunks_exact(4));
+    let (ar, br) = (a4.remainder(), b4.remainder());
+    for (x, y) in a4.zip(b4) {
+        for lane in 0..4 {
+            re[lane] += x[lane].re * y[lane].re - x[lane].im * y[lane].im;
+            im[lane] += x[lane].re * y[lane].im + x[lane].im * y[lane].re;
+        }
+    }
+    for (x, y) in ar.iter().zip(br) {
+        re[0] += x.re * y.re - x.im * y.im;
+        im[0] += x.re * y.im + x.im * y.re;
+    }
+    C64::new(
+        (re[0] + re[1]) + (re[2] + re[3]),
+        (im[0] + im[1]) + (im[2] + im[3]),
+    )
 }
 
 fn validate_output(out: Vec<C64>) -> Result<Vec<C64>, FmmError> {

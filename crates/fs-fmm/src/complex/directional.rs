@@ -402,6 +402,7 @@ impl<'k> FmmC64<'k> {
             nodes,
             barycentric,
             interactions: Vec::new(),
+            translations: Vec::new(),
             coefficient_slots: 0,
             directional: None,
         };

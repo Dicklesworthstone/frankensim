@@ -41,8 +41,11 @@ pub const MAX_POINTS: usize = 1_048_576;
 pub const MAX_COEFFICIENT_SLOTS: usize = 16_777_216;
 /// Ceiling on same-level cell-pair admission tests across one pass.
 pub const MAX_CELL_PAIR_SCANS: usize = 33_554_432;
-/// Conservative ceiling on M2L kernel-grid multiply-add work.
-pub const MAX_TRANSLATION_WORK: usize = 4_000_000_000;
+/// Conservative ceiling on M2L kernel-grid multiply-add work per pass. The
+/// passes poll no cancellation, so this also bounds one uncancellable pass.
+/// The v1 ceiling of 4e9 refused the 20480-panel (icosphere-5) sphere at
+/// order 6, whose whole-pass count is 4000005504.
+pub const MAX_TRANSLATION_WORK: usize = 8_000_000_000;
 /// Largest admitted distribution-aware direct near-field pair count.
 pub const MAX_NEAR_FIELD_PAIR_WORK: usize = 268_435_456;
 /// Largest cloud admitted by the quadratic direct oracle.

@@ -160,8 +160,34 @@ and two extra cells for transient coefficient buffers. M2L work counts actual
 interaction pairs times `p^6` times source/target channel counts, with the
 existing `MAX_TRANSLATION_WORK` ceiling. Tree/cell-pair/point/near-field caps
 remain in force. This avoids the real path's overly conservative M2L estimate
-rejecting p=12 even on a small sparse tree; it does not raise any cap.
-Allocation failure and cancellation boundaries remain as described above.
+rejecting p=12 even on a small sparse tree.
+
+`MAX_TRANSLATION_WORK` is 8e9 multiply-adds per pass, double the v1 4e9.
+- The 20480-panel (icosphere-5) sphere at order 6 is the finest rung of both
+  the impedance sphere series and the routed band bake. It counts 4000005504
+  for the whole pass.
+- The coefficient-slot ceiling is unchanged.
+- The directional ladder's slot refusal accumulates retained factors, so it is
+  not a near-miss.
+- Allocation failure and cancellation boundaries remain as described above.
+
+M2L evaluates each kernel block once per same-level cell offset. Same-level
+Chebyshev grids are translates, so a translation-invariant operator has one
+block per `(level, offset)`. Every shipped Helmholtz operator is
+translation-invariant; a custom scalar kernel qualifies only through
+`ComplexKernel::translation_invariant`.
+- Each target-node row of the block is evaluated once and applied to every
+  pair in the group.
+- The application is a contiguous complex dot product: unfused IEEE products,
+  summed in four fixed partial sums. It is bit-identical across ISAs and avoids
+  one libm `fma` call per term on targets without FMA.
+- Work admission still counts every multiply-add.
+- `stats()` reports `m2l_kernel_blocks` beside `m2l_pairs`.
+
+`shared_m2l_blocks_match_per_pair_evaluation_g1` compares sharing against
+per-pair evaluation for the single, double, adjoint and mixed operators. They
+agree within 1e-12 of the largest potential. An opted-out kernel keeps one
+group per pair.
 
 `tests/battery.rs` includes `battery/helmholtz.rs` in the existing test target.
 It emits fs-obs JSONL rows for the single/double order ladders, adjoint/gradient/
