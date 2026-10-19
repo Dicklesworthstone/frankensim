@@ -227,7 +227,7 @@ def have(path: Path) -> bool:
 
 # ---------------------------------------------------------------- piano groups
 PIANO_BAND = {"label": "Soundboard modes retained", "lo_hz": 0, "hi_hz": 2400,
-              "note": "Strings keep partials to 21.6 kHz; the board and its radiation are resolved to 2.4 kHz (128-mode Ritz reduction)."}
+              "note": "Strings keep partials to 21.6 kHz; the board and its radiation are resolved to 2.4 kHz (166 modes, reduced to 128 coordinates)."}
 items = []
 for cid, label in [("hero", "Gymnopédie No. 1 — stereo pair")]:
     sr, pa, t = piano_clip(cid)

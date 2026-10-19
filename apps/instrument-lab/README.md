@@ -108,7 +108,7 @@ carries two-sided air loading and listens at the default point, 1 m above the mi
 
     piano_geometry --divisions 16 --rib-normal-step-m 0.03 --bridge-map rt0425 --output board-rt16.fsb  # 11,772 area samples
     grand_piano --preset steinway-d --board-geometry board-rt16.fsb --board-band-hz 2400 \
-      --board-reduction 128,64,200,400,800,1600,2300 --rayleigh-loading 2,90,2620,213 \
+      --board-reduction pod,128,64,16,8000 --rayleigh-loading 2,90,2620,213 \
       --rt0425-hammer-stiffness --rt0425-hammer-dissipation --rt0425-string-damping ...
 
 The hammers follow RT-0425's published law: its stiffness K_H acts on each unison string (the preset's
@@ -133,10 +133,24 @@ published contacts, the agraffe line the treble strings imply, and the bass agra
 line. The points are estimates, and ours are omnidirectional. The page does not grade there. Real
 microphones at those points sit above the strings and the cast-iron plate, which covers much of the
 board, usually under a lid; the model's receivers look at a bare board in an infinite baffle. Heard
-there, the A3 partial pattern lies 14 dB from the recording on the matching channel, against about
-8 dB at the default point, and averaging both channels' power does not change that. The real
-piano's own two microphones differ by 8.4 dB. `a3-mf-close` keeps those positions as the receiver
-experiment.
+there, the A3 partial envelopes (0.05-1.05 s) lie 11.3 dB (bass side) and 13.3 dB (treble side) from
+the recording on the matching channel, against 10.7 dB at the default point. The real piano's own two
+microphones differ by 8.4 dB. `a3-mf-close` keeps those positions as the receiver experiment.
+
+The graded board is the 128-coordinate POD reduction (`pod,128,64,16,8000`; crates/fs-couple/examples/
+grand_piano/BOARD_REDUCTION.md), the same as the live piano's largest board and the Strandbar studio stem.
+Against its own 166-mode slice it is closer than the former pivoted reduction (`128,64,200,400,800,1600,2300`)
+at A3's partials above 1.46 kHz: driving-point |Y| rms 0.59 against 1.83 dB, and microphone pressure
+0.51 against 1.04 dB. The pivoted board missed partial 8 by +4.8 dB and partial 9 by -7.3 dB. Those
+errors happened to suit the recording: on the pivoted board A3 mf's envelope distance was 7.7 dB, on
+the POD board it is 10.7. A3's 2-8 kHz brightness moves by 0.4-1.3 dB across pp-fff, and the early
+low resonance and the attack rise do not move (frankensim-a8lld).
+
+The page's demonstration clips (Satie, the silent strings, the octaves, A0) are rendered with the same
+board, laws and air. `tools/piano_performances.py OUT_DIR` writes their performances (and the A3/C6
+strokes); its docstring lists each clip's receiver and duration. The board drawing comes from
+`grand_piano --preset steinway-d --dump-obj board.obj --dump-geometry board.fsb --dump-scale scale-et.csv
+--dump-board board-modes-400.csv`.
 
 When the campaign also has the same A3 mf stroke without air on that board (`a3-mf-noair`), the
 low-resonance and ringing cards compare the two. Each render first samples and fits the board's
