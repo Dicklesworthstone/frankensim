@@ -289,6 +289,17 @@ with a left-preconditioned norm. No SPAI, Calderon or transpose-solve claim is
 made. FMM's existing kD<=10, translation, coefficient and near-pair caps remain
 in force, with typed refusals and no dense fallback.
 
+`IterativeOptions::near_field_cache_bytes` caches the double and mixed
+operators' adjacent-leaf pair values once per prepared operator, half the
+budget each. The default is 512 MiB.
+- Without the cache, every matvec re-evaluates those values.
+- The cache changes no bits.
+- An operator whose cache exceeds its half stays uncached, and so does the
+  directional route.
+- `ResourceReceipt::near_cache_bytes` reports what was cached.
+- `bem_near_field_cache_is_bitwise` checks the default against a zero budget
+  and a too-small one.
+
 Checkpoints clone the `GmresState` only at completed restart boundaries.
 Cancellation is polled before each matvec and between its two synchronous FMM
 passes. The current FMM pass drains before cancellation returns; no mid-pass

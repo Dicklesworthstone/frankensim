@@ -226,6 +226,64 @@ fn shared_m2l_blocks_match_per_pair_evaluation_g1() {
 }
 
 #[test]
+fn near_field_cache_is_bitwise_and_budgeted_g0() {
+    let points: Vec<[f64; 3]> = (0..96)
+        .map(|i| {
+            let j = 0.07 * det::cos(i as f64);
+            [
+                (i % 6) as f64 + j,
+                ((i / 6) % 4) as f64 - j,
+                (i / 24) as f64,
+            ]
+        })
+        .collect();
+    let normals: Vec<[f64; 3]> = points
+        .iter()
+        .map(|p| {
+            let v = [p[0] + 1.0, p[1] + 2.0, p[2] + 3.0];
+            let n = det::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            [v[0] / n, v[1] / n, v[2] / n]
+        })
+        .collect();
+    let q: Vec<C64> = (0..96)
+        .map(|i| C64::new(det::sin(i as f64), 0.2 - i as f64 / 96.0))
+        .collect();
+    let build = || {
+        FmmC64::new_hypersingular(
+            HelmholtzHypersingular { k: 0.9 },
+            points.clone(),
+            normals.clone(),
+            3,
+            2,
+        )
+        .unwrap()
+    };
+    let plain = build();
+    let mut cached = build();
+    let bytes = cached.cache_near_field(usize::MAX).unwrap();
+    assert!(bytes > 0 && bytes % core::mem::size_of::<C64>() == 0);
+    let bits = |p: Vec<C64>| -> Vec<(u64, u64)> {
+        p.iter().map(|z| (z.re.to_bits(), z.im.to_bits())).collect()
+    };
+    assert_eq!(
+        bits(plain.potentials(&q).unwrap()),
+        bits(cached.potentials(&q).unwrap())
+    );
+    // The cap is inclusive; one byte less refuses and leaves the engine uncached.
+    assert_eq!(build().cache_near_field(bytes).unwrap(), bytes);
+    let mut short = build();
+    assert!(matches!(
+        short.cache_near_field(bytes - 1),
+        Err(FmmError::WorkEnvelopeExceeded { requested, max, .. }) if requested == bytes && max == bytes - 1
+    ));
+    assert!(short.near.is_none());
+    assert_eq!(
+        bits(short.potentials(&q).unwrap()),
+        bits(plain.potentials(&q).unwrap())
+    );
+}
+
+#[test]
 fn complex_invalid_requests_and_non_finite_kernels_g0() {
     let points = vec![[0.0; 3], [1.0, 0.0, 0.0]];
     let single = HelmholtzSingle { k: 1.0 };

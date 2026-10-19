@@ -135,6 +135,8 @@ pub struct FmmC64<'k> {
     /// Translation-invariant operators group by (level, cell offset); other
     /// kernels keep one group per pair.
     translations: Vec<Vec<usize>>,
+    /// Optional adjacent-leaf pair values in `potentials` order.
+    near: Option<Vec<C64>>,
     coefficient_slots: usize,
     directional: Option<directional::DirectionalPlan>,
 }
@@ -339,6 +341,7 @@ impl<'k> FmmC64<'k> {
             barycentric,
             interactions,
             translations,
+            near: None,
             coefficient_slots,
             directional: None,
         })
@@ -522,6 +525,7 @@ impl<'k> FmmC64<'k> {
             }
         }
         let mut out = vec![C64::ZERO; charges.len()];
+        let mut next = 0;
         for (&key, cell) in &self.geometry.cells {
             if key.0 > 0 {
                 let parent = (key.0 - 1, key.1 >> 1, key.2 >> 1, key.3 >> 1);
@@ -549,33 +553,91 @@ impl<'k> FmmC64<'k> {
                     }
                 }
             }
-            for di in -1i64..=1 {
-                for dj in -1i64..=1 {
-                    for dk in -1i64..=1 {
-                        let n = [
-                            i64::from(key.1) + di,
-                            i64::from(key.2) + dj,
-                            i64::from(key.3) + dk,
-                        ];
-                        if n.iter().any(|&v| v < 0) {
-                            continue;
-                        }
-                        let neighbor = (key.0, n[0] as u32, n[1] as u32, n[2] as u32);
-                        let Some(source) = self.geometry.cells.get(&neighbor) else {
-                            continue;
-                        };
-                        for &t in &cell.points {
-                            for &s in &source.points {
-                                if t != s {
-                                    out[t] = out[t] + self.pair(t, s) * charges[s];
+            for source in self.neighbors(key) {
+                for &t in &cell.points {
+                    for &s in &source.points {
+                        if t != s {
+                            let value = match &self.near {
+                                Some(cache) => {
+                                    next += 1;
+                                    cache[next - 1]
                                 }
-                            }
+                                None => self.pair(t, s),
+                            };
+                            out[t] = out[t] + value * charges[s];
                         }
                     }
                 }
             }
         }
         validate_output(out)
+    }
+
+    /// Same-level neighbour cells of `key`, itself included, in the fixed
+    /// offset order shared by `potentials` and the near-field cache.
+    fn neighbors(&self, key: CellKey) -> impl Iterator<Item = &crate::Cell> + '_ {
+        (0..27i64).filter_map(move |o| {
+            let n = [
+                i64::from(key.1) + o / 9 - 1,
+                i64::from(key.2) + (o / 3) % 3 - 1,
+                i64::from(key.3) + o % 3 - 1,
+            ];
+            if n.iter().any(|&v| v < 0) {
+                return None;
+            }
+            self.geometry
+                .cells
+                .get(&(key.0, n[0] as u32, n[1] as u32, n[2] as u32))
+        })
+    }
+
+    /// Evaluate every adjacent-leaf pair once, in the exact order
+    /// `potentials` consumes them, and reuse the values on every later pass.
+    /// They are the same `pair` evaluations, so potentials are bit-identical
+    /// with and without the cache. Returns the cache size in bytes.
+    ///
+    /// # Errors
+    /// `WorkEnvelopeExceeded` when the cache would exceed `max_bytes` or
+    /// cannot be reserved; the engine then stays uncached. `ComplexRequest`
+    /// on the directional route, which owns a different near partition.
+    pub fn cache_near_field(&mut self, max_bytes: usize) -> Result<usize, FmmError> {
+        if self.directional.is_some() {
+            return Err(FmmError::ComplexRequest {
+                reason: "the near-field cache applies only to the non-directional route",
+            });
+        }
+        let mut count = 0usize;
+        for (&key, cell) in self.geometry.cells.iter().filter(|(_, c)| c.leaf) {
+            for source in self.neighbors(key) {
+                count = count.saturating_add(cell.points.len().saturating_mul(source.points.len()));
+            }
+            // The cell is its own neighbour; its t == s pairs are excluded.
+            count = count.saturating_sub(cell.points.len());
+        }
+        let bytes = count.saturating_mul(core::mem::size_of::<C64>());
+        let refused = FmmError::WorkEnvelopeExceeded {
+            operation: "complex near-field cache bytes",
+            requested: bytes,
+            max: max_bytes,
+        };
+        if bytes > max_bytes {
+            return Err(refused);
+        }
+        let mut values = Vec::new();
+        values.try_reserve_exact(count).map_err(|_| refused)?;
+        for (&key, cell) in self.geometry.cells.iter().filter(|(_, c)| c.leaf) {
+            for source in self.neighbors(key) {
+                for &t in &cell.points {
+                    for &s in &source.points {
+                        if t != s {
+                            values.push(self.pair(t, s));
+                        }
+                    }
+                }
+            }
+        }
+        self.near = Some(values);
+        Ok(bytes)
     }
 
     fn pair(&self, t: usize, s: usize) -> C64 {
@@ -644,11 +706,14 @@ impl<'k> FmmC64<'k> {
             return plan.stats.to_json();
         }
         format!(
-            "{{\"tree\":{},\"m2l_pairs\":{},\"m2l_kernel_blocks\":{},\"complex_coefficient_slots\":{}}}",
+            "{{\"tree\":{},\"m2l_pairs\":{},\"m2l_kernel_blocks\":{},\"complex_coefficient_slots\":{},\"near_cache_bytes\":{}}}",
             self.geometry.stats(),
             self.interactions.len(),
             self.translations.len(),
-            self.coefficient_slots
+            self.coefficient_slots,
+            self.near
+                .as_ref()
+                .map_or(0, |v| v.len() * core::mem::size_of::<C64>())
         )
     }
 }

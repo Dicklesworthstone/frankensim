@@ -54,6 +54,11 @@ pub struct IterativeOptions {
     pub precond: Preconditioner,
     /// Maximum stored complex entries across all inverse-preconditioner blocks.
     pub max_near_entries: usize,
+    /// Byte budget for caching the double and mixed operators' adjacent-leaf
+    /// pair values (half each), which are otherwise re-evaluated every matvec.
+    /// The cache changes no bits. An operator whose cache exceeds its half,
+    /// and the directional route, stay uncached. Zero disables it.
+    pub near_field_cache_bytes: usize,
 }
 
 impl Default for IterativeOptions {
@@ -69,6 +74,7 @@ impl Default for IterativeOptions {
                 max_block_panels: 32,
             },
             max_near_entries: 4_194_304,
+            near_field_cache_bytes: 1 << 29,
         }
     }
 }
@@ -145,6 +151,8 @@ pub struct ResourceReceipt {
     pub iterations: usize,
     pub fmm_order: usize,
     pub near_field_bytes: usize,
+    /// Bytes of cached adjacent-leaf pair values (zero when uncached).
+    pub near_cache_bytes: usize,
     pub fmm_stats: [String; 2],
 }
 
@@ -235,6 +243,7 @@ pub struct IterativeRadiation<'a> {
     diagonal_b: Vec<C64>,
     blocks: Vec<NearBlock>,
     near_entries: usize,
+    near_cache_bytes: usize,
     setup_s: f64,
     stamp: u64,
 }
@@ -352,9 +361,20 @@ impl<'a> IterativeRadiation<'a> {
         }
         let points = || surface.centroids().to_vec();
         let normals = || surface.normals().to_vec();
-        let double = options.normal_fmm(NormalLayer::Double, k, points(), normals())?;
+        let mut double = options.normal_fmm(NormalLayer::Double, k, points(), normals())?;
         poll(gate)?;
-        let mixed = options.normal_fmm(NormalLayer::Mixed, k, points(), normals())?;
+        let mut mixed = options.normal_fmm(NormalLayer::Mixed, k, points(), normals())?;
+        let mut near_cache_bytes = 0;
+        if options.directional.is_none() && options.near_field_cache_bytes > 0 {
+            for op in [&mut double, &mut mixed] {
+                poll(gate)?;
+                match op.cache_near_field(options.near_field_cache_bytes / 2) {
+                    Ok(bytes) => near_cache_bytes += bytes,
+                    Err(FmmError::WorkEnvelopeExceeded { .. }) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
         let weights: Vec<_> = surface.areas().iter().map(|&a| C64::from_re(a)).collect();
         // Both static closures use the same point quadrature and effective
         // order. W5a also shares traversal; the directional zero-k call uses
@@ -482,6 +502,7 @@ impl<'a> IterativeRadiation<'a> {
             diagonal_b,
             blocks,
             near_entries,
+            near_cache_bytes,
             setup_s: started.elapsed().as_secs_f64(),
             stamp,
         })
@@ -762,6 +783,7 @@ impl<'a> IterativeRadiation<'a> {
                     .iter()
                     .map(|b| b.indices.len() * core::mem::size_of::<usize>() * 2)
                     .sum::<usize>(),
+            near_cache_bytes: self.near_cache_bytes,
             fmm_stats: [self.double.stats(), self.mixed.stats()],
         }
     }

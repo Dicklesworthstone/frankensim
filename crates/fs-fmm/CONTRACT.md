@@ -189,6 +189,17 @@ per-pair evaluation for the single, double, adjoint and mixed operators. They
 agree within 1e-12 of the largest potential. An opted-out kernel keeps one
 group per pair.
 
+`FmmC64::cache_near_field(max_bytes)` evaluates every adjacent-leaf pair once,
+in the order `potentials` consumes them, and reuses the values on later
+passes.
+- The values are the same `pair` evaluations, so potentials are bit-identical.
+- A cache over `max_bytes` (an inclusive cap), or one that cannot be reserved,
+  refuses with `WorkEnvelopeExceeded` and leaves the engine uncached.
+- The directional route refuses: it owns a different near partition.
+- `stats()` reports `near_cache_bytes`.
+- `near_field_cache_is_bitwise_and_budgeted_g0` checks bitwise equality and the
+  cap / cap-1 boundary.
+
 `tests/battery.rs` includes `battery/helmholtz.rs` in the existing test target.
 It emits fs-obs JSONL rows for the single/double order ladders, adjoint/gradient/
 mixed checks, `1e-12` translation, high-kD refusal (including an unguarded

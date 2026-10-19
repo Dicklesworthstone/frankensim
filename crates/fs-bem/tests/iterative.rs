@@ -400,6 +400,39 @@ fn bem_gmres_resume_bitwise() {
 }
 
 #[test]
+fn bem_near_field_cache_is_bitwise() {
+    // The default caches both matvec operators' adjacent-leaf pairs; zero and
+    // a budget below the cache disable it. All three solves are bit-identical.
+    let surface = SpherePanels::icosphere(1.0, 2).unwrap();
+    let gate = CancelGate::new_clock_free();
+    let solve = |near_field_cache_bytes| {
+        let o = IterativeOptions {
+            leaf_capacity: 16,
+            near_field_cache_bytes,
+            ..opts()
+        };
+        solve_radiation_iterative(
+            &surface,
+            2.0,
+            Medium::air(),
+            &velocity(&surface),
+            Formulation::BurtonMiller,
+            &o,
+            &gate,
+        )
+        .unwrap()
+    };
+    let (cached, report, receipt) = solve(IterativeOptions::default().near_field_cache_bytes);
+    assert!(receipt.near_cache_bytes > 0);
+    for budget in [0, receipt.near_cache_bytes / 2 - 1] {
+        let (plain, plain_report, plain_receipt) = solve(budget);
+        assert_eq!(plain_receipt.near_cache_bytes, 0);
+        assert_eq!(bits(&cached.pressure), bits(&plain.pressure));
+        assert_eq!(report.iters, plain_report.iters);
+    }
+}
+
+#[test]
 fn bem_iterative_refuses_unconverged() {
     let surface = SpherePanels::icosphere(1.0, 1).unwrap();
     let gate = CancelGate::new_clock_free();
