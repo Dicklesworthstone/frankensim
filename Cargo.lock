@@ -1438,13 +1438,16 @@ name = "fs-duct"
 version = "0.0.1"
 dependencies = [
  "fs-bem",
+ "fs-evidence",
  "fs-la",
+ "fs-matdb",
  "fs-material",
  "fs-math",
  "fs-mms",
  "fs-phs",
  "fs-qty",
  "fs-rand",
+ "fs-thermochem",
  "fs-vvreg",
  "fsci-runtime",
  "fsci-special",

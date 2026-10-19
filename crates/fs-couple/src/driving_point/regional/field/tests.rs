@@ -338,3 +338,72 @@ fn field_subdivision_and_geometry_refuse_before_rendering() {
     };
     assert!(RegionalDuct::from_gas_field(&unsupported, &field, 8).is_err());
 }
+
+#[test]
+fn continuous_field_reaches_smooth_profile_and_exact_physical_ports() {
+    let source = field(275.0);
+    let geometry = Duct {
+        segments: vec![Segment::Profile {
+            profile: std::sync::Arc::new(
+                fs_duct::RadiusProfile::exponential(RADIUS, 0.8, LENGTH).unwrap(),
+            ),
+            steps: fs_duct::RiccatiSteps(64),
+        }],
+    };
+    let regional = RegionalDuct::from_continuous_gas_field(
+        &geometry, &source, fs_duct::RiccatiSteps(32),
+    ).unwrap();
+    let owner = regional.continuous_gas_field().unwrap();
+    assert_eq!(owner.steps_used(), 32);
+    assert_eq!(regional.inlet_gas(), source.state_at(0.0).unwrap().state());
+    assert_eq!(regional.outlet_gas(), source.state_at(LENGTH).unwrap().state());
+    assert_eq!(regional.exterior_gas(), regional.outlet_gas());
+    assert_eq!(regional.inlet_impedance(), owner.inlet_impedance());
+    assert_eq!(regional.one_way_time_s(), owner.one_way_time_s());
+    for termination in [Termination::IdealOpen, Termination::FlangedOpen] {
+        let regional_response = regional.response(TAU * 510.0, LossModel::Bessel, termination, None)
+            .unwrap();
+        let direct = owner.response(TAU * 510.0, LossModel::Bessel, termination, None).unwrap();
+        assert_eq!(regional_response.impedance, direct.impedance);
+        assert_eq!(regional_response.u_mouth_over_u_in, direct.u_mouth_over_u_in);
+        assert_eq!(regional_response.p_mouth_over_u_in, direct.p_mouth_over_u_in);
+    }
+}
+
+#[test]
+fn midpoint_field_is_a_second_order_rung_of_continuous_propagation() {
+    let source = field(270.0);
+    let continuous = RegionalDuct::from_continuous_gas_field(
+        &cylinder(), &source, fs_duct::RiccatiSteps(256),
+    ).unwrap();
+    let omega = TAU * 700.0;
+    for loss in [LossModel::Lossless, LossModel::Bessel] {
+        let reference = continuous.response(omega, loss, Termination::IdealOpen, None)
+            .unwrap().impedance;
+        let errors: Vec<_> = [8, 16, 32, 64].into_iter().map(|n| {
+            let midpoint = RegionalDuct::from_gas_field(&cylinder(), &source, n).unwrap();
+            let got = midpoint.response(omega, loss, Termination::IdealOpen, None)
+                .unwrap().impedance;
+            (got - reference).abs() / reference.abs()
+        }).collect();
+        assert!(errors[0] > 1e-6, "the piecewise material approximation must be live: {errors:?}");
+        for pair in errors.windows(2) {
+            let order = fs_math::det::ln(pair[0] / pair[1]) / fs_math::det::ln(2.0);
+            assert!((order - 2.0).abs() < 0.2, "midpoint material order={order}: {errors:?}");
+        }
+    }
+}
+
+#[test]
+fn continuous_field_rejects_unmodeled_side_holes() {
+    let mut geometry = cylinder();
+    geometry.segments.insert(0, Segment::ToneHole {
+        hole_radius: 0.002,
+        chimney_height: 0.003,
+        bore_radius: RADIUS,
+        state: fs_duct::HoleState::Open,
+    });
+    assert!(RegionalDuct::from_continuous_gas_field(
+        &geometry, &field(280.0), fs_duct::RiccatiSteps(16),
+    ).is_err());
+}

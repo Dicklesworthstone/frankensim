@@ -7,6 +7,9 @@ use crate::{DuctError, LossModel, mul2, segment_wave};
 use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
 
+/// Continuous primitive gas fields on the same plane-wave propagation owner.
+pub mod gas_field;
+
 /// Named admission caps, never silent resolution clamps.
 pub const MAX_RICCATI_STEPS: usize = 65_536;
 /// Largest admitted spherical-slice axis; larger requests refuse.
@@ -301,6 +304,37 @@ fn exp_traceless(d: C64, a: C64, b: C64) -> Result<[C64; 4], DuctError> {
     Err(bad("Magnus exponential exhausted; refine Riccati steps"))
 }
 
+// Shared local constitutive and integration owners for both uniform gas and
+// source-backed fields. The latter changes where the gas is sampled, not the
+// acoustic equation, loss law or Magnus exponential.
+fn local_generator(
+    state: &GasState,
+    radius: f64,
+    omega: f64,
+    loss: LossModel,
+    zref: f64,
+) -> Result<((C64, C64), f64), DuctError> {
+    let wave = segment_wave(state, radius, omega, loss)?;
+    let ik = C64::new(0.0, 1.0) * wave.wavenumber;
+    Ok((
+        (
+            ik * wave.characteristic_impedance.scale(1.0 / zref),
+            ik * wave.characteristic_impedance.recip().scale(zref),
+        ),
+        wave.shear_number,
+    ))
+}
+
+fn magnus_step(
+    (a1, b1): (C64, C64),
+    (a2, b2): (C64, C64),
+    h: f64,
+    root3: f64,
+) -> Result<[C64; 4], DuctError> {
+    let d = (a1 * b2 - a2 * b1).scale(-root3 * h * h / 12.0);
+    exp_traceless(d, (a1 + a2).scale(h / 2.0), (b1 + b2).scale(h / 2.0))
+}
+
 /// Transfer through validated geometry, with material and resolution explicit.
 pub fn profile_matrix(
     profile: &RadiusProfile,
@@ -393,13 +427,9 @@ fn for_each_profile_step<F: FnMut() -> bool>(
     let (c1, c2) = (0.5 - root3 / 6.0, 0.5 + root3 / 6.0);
     let mut min_shear = f64::INFINITY;
     let mut local = |x: f64| -> Result<(C64, C64), DuctError> {
-        let wave = segment_wave(state, profile.radius(x)?, omega, loss)?;
-        min_shear = min_shear.min(wave.shear_number);
-        let ik = C64::new(0.0, 1.0) * wave.wavenumber;
-        Ok((
-            ik * wave.characteristic_impedance.scale(1.0 / zref),
-            ik * wave.characteristic_impedance.recip().scale(zref),
-        ))
+        let (generator, shear) = local_generator(state, profile.radius(x)?, omega, loss, zref)?;
+        min_shear = min_shear.min(shear);
+        Ok(generator)
     };
     for j in 0..steps.0 {
         if cancel() {
@@ -408,8 +438,7 @@ fn for_each_profile_step<F: FnMut() -> bool>(
         let x = profile.length + j as f64 * h;
         let (a1, b1) = local(x + c1 * h)?;
         let (a2, b2) = local(x + c2 * h)?;
-        let d = (a1 * b2 - a2 * b1).scale(-root3 * h * h / 12.0);
-        let e = exp_traceless(d, (a1 + a2).scale(h / 2.0), (b1 + b2).scale(h / 2.0))?;
+        let e = magnus_step((a1, b1), (a2, b2), h, root3)?;
         visit(e, zref)?;
     }
     Ok((min_shear, zref))

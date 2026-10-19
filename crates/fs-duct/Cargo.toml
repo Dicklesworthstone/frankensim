@@ -17,6 +17,9 @@ fs-math = { path = "../fs-math" }
 fs-phs = { path = "../fs-phs" }
 
 [dev-dependencies]
+fs-evidence = { path = "../fs-evidence" }
+fs-matdb = { path = "../fs-matdb" }
+fs-thermochem = { path = "../fs-thermochem" }
 fs-mms = { path = "../fs-mms" }
 fs-rand = { path = "../fs-rand" }
 fsci-special = { path = "../../../frankenscipy/crates/fsci-special", version = "=0.4.0" }

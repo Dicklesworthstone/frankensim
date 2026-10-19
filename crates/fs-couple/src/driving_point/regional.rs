@@ -1,9 +1,11 @@
-//! Prescribed, piecewise-uniform gases connected at TMM pressure/volume-flow ports.
+//! Prescribed gas fields connected at TMM pressure/volume-flow ports.
 //!
 //! Each constant-medium run is evaluated by `fs-duct`, including its cones,
 //! wall law and tone-hole junctions. Its downstream load is the next run's input
 //! impedance. Pressure and volume flow are continuous at interfaces: no averaged
 //! gas, artificial reflection coefficient or additional propagation law is used.
+//! A continuous binding uses fs-duct's shared Magnus field operator through
+//! these same source, outlet and characteristic-line ports.
 //! This is frozen, no-mean-flow acoustics, not thermal/composition transport.
 
 /// Physical outlet observation of the existing regional transfer.
@@ -46,6 +48,7 @@ pub struct RegionalDuct {
     one_way_time_s: f64,
     exterior_gas: Option<GasState>,
     inlet_gas_override: Option<GasState>,
+    continuous: Option<fs_duct::profile::gas_field::GasFieldDuct>,
 }
 
 fn invalid(what: &'static str) -> DuctError { DuctError::BadParameter { what } }
@@ -118,10 +121,12 @@ impl RegionalDuct {
             return Err(invalid("regional travel time must be positive and finite"));
         }
         Ok(Self { regions, gases: gases.to_vec(), one_way_time_s, exterior_gas: None,
-            inlet_gas_override: None })
+            inlet_gas_override: None, continuous: None })
     }
 
     /// Resolved media in authored segment order, including hole records.
+    /// For a continuous field these are exact authored-segment INLET samples;
+    /// propagation uses the field operator's quadrature, not these summaries.
     #[must_use]
     pub fn segment_gases(&self) -> &[GasState] { &self.gases }
 
@@ -132,9 +137,15 @@ impl RegionalDuct {
     /// Actual internal medium at the terminal axial segment. Radiation uses
     /// [`Self::exterior_gas`], which defaults to this state.
     #[must_use]
-    pub fn outlet_gas(&self) -> &GasState { self.gases.last().expect("nonempty binding") }
+    pub fn outlet_gas(&self) -> &GasState {
+        self.continuous.as_ref().map_or_else(
+            || self.gases.last().expect("nonempty binding"),
+            |field| field.outlet_gas(),
+        )
+    }
 
-    /// Sum of each constant-medium axial length divided by its local sound speed.
+    /// Sum of constant-medium travel times, or the continuous operator's
+    /// quadrature integral of local 1/c along its authored geometry.
     /// This excludes side-branch chimney length, as does the uniform line owner.
     #[must_use]
     pub const fn one_way_time_s(&self) -> f64 { self.one_way_time_s }
@@ -148,6 +159,12 @@ impl RegionalDuct {
         wall: Option<&WallPin>) -> Result<DuctResponse, DuctError> {
         if !omega.is_finite() || omega <= 0.0 {
             return Err(invalid("frequency must be positive and finite"));
+        }
+        if let Some(field) = &self.continuous {
+            if wall.is_some() {
+                return Err(invalid("continuous gas-field wall loading needs a resolved wall image"));
+            }
+            return field.response(omega, loss, termination, Some(self.exterior_gas()));
         }
         let mut runs = self.regions.iter().rev();
         let terminal = runs.next().expect("nonempty binding");
@@ -191,7 +208,12 @@ impl RegionalDuct {
         -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
         // Delegate the uniform case verbatim, including the order of travel-time
         // arithmetic at the FFT-size thresholds.
-        if self.regions.len() == 1 && (self.exterior_gas() == self.outlet_gas()
+        if self.continuous.is_some() && wall.is_some() {
+            return Err(DrivingPointError::Duct(invalid(
+                "continuous gas-field wall loading needs a resolved wall image",
+            )));
+        }
+        if self.continuous.is_none() && self.regions.len() == 1 && (self.exterior_gas() == self.outlet_gas()
             || matches!(termination, Termination::Closed | Termination::IdealOpen)) {
             let r = &self.regions[0];
             let length = super::duct_axial_length(&r.duct);
@@ -221,8 +243,8 @@ impl RegionalDuct {
         let geo_delay = 2.0 * self.one_way_time_s / dt;
         let pole_states = vec![bulk_delay_pole_state(geo_delay)];
         let zc = self.inlet_impedance();
-        // Regional interfaces are composed through Z; lossless regional poles
-        // are not represented here (only the uniform route has the R entry).
+        // The continuous operator supplies R directly through its stable local
+        // two-ports. The retained piecewise path still composes through Z.
         characteristic_line_response_with_poles(
             geo_delay,
             termination,
@@ -232,6 +254,10 @@ impl RegionalDuct {
             n_fft_override,
             pole_states,
             |omega| {
+                if let Some(field) = &self.continuous {
+                    return field.reflection(omega, LossModel::Bessel, termination,
+                        Some(self.exterior_gas()))?.referenced_to(zc);
+                }
                 self.response(omega, LossModel::Bessel, termination, wall)
                     .map(|response| impedance_reflectance(&response, zc))
             },

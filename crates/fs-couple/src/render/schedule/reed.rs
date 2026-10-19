@@ -113,6 +113,15 @@ pub struct ReedPerformanceInfo {
     pub compiled_controls: usize,
 }
 
+/// Explicit spatial image of a prescribed material field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GasFieldResolution {
+    /// Existing piecewise-constant midpoint cells per authored segment.
+    Midpoint(usize),
+    /// Shared fourth-order Magnus steps per smooth material/geometry span.
+    Continuous(fs_duct::RiccatiSteps),
+}
+
 /// Finite pressure producer retaining the physical solver and schedule together.
 ///
 /// It implements the common pressure interface directly, so decimation and
@@ -127,7 +136,7 @@ pub struct ReedPerformance {
     terminal: Option<outlet::TerminalObservation>,
     observation_policy: ObservationPolicy,
     gas_records: Vec<GasRecord>,
-    gas_field: Option<(fs_material::gas_field::AxialGasField, usize)>,
+    gas_field: Option<(fs_material::gas_field::AxialGasField, GasFieldResolution)>,
 }
 impl ReedPerformance {
     /// Decode and admit all records before building or advancing the runtime.
@@ -186,8 +195,25 @@ impl ReedPerformance {
         field: fs_material::gas_field::AxialGasField,
         cells_per_segment: usize,
     ) -> Result<Self, ReedPerformanceError> {
+        Self::from_bytes_with_field_resolution(bytes, max_block, policy, sources,
+            field, GasFieldResolution::Midpoint(cells_per_segment))
+    }
+
+    /// Select continuous Magnus or midpoint field propagation while retaining
+    /// the SAME authored mechanics, pressure schedule, terminal load, and
+    /// physical microphone. No observer or acoustic source is rebuilt through
+    /// a separate material path. The field remains frozen during the render.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_bytes_with_field_resolution(
+        bytes: &[u8],
+        max_block: usize,
+        policy: ObservationPolicy,
+        sources: Option<&ThermochemicalSources<'_>>,
+        field: fs_material::gas_field::AxialGasField,
+        resolution: GasFieldResolution,
+    ) -> Result<Self, ReedPerformanceError> {
         Self::from_bytes_with_environment(
-            bytes, max_block, policy, sources, Some((field, cells_per_segment)),
+            bytes, max_block, policy, sources, Some((field, resolution)),
         )
     }
 
@@ -196,7 +222,7 @@ impl ReedPerformance {
         max_block: usize,
         policy: ObservationPolicy,
         sources: Option<&ThermochemicalSources<'_>>,
-        gas_field: Option<(fs_material::gas_field::AxialGasField, usize)>,
+        gas_field: Option<(fs_material::gas_field::AxialGasField, GasFieldResolution)>,
     ) -> Result<Self, ReedPerformanceError> {
         if bytes.len() > MAX_REED_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
             return Err(bad(0, "source exceeds 1 MiB or callback capacity is outside 1..=65536"));
@@ -323,9 +349,13 @@ impl ReedPerformance {
             massive_reed: reed.mass_kg > 0.0, gesture_events: track.events.len(), compiled_controls: controls.len(),
         };
         let duct = Duct { segments };
-        let (voice, terminal) = if let Some((field, cells)) = &gas_field {
+        let (voice, terminal) = if let Some((field, resolution)) = &gas_field {
             use crate::driving_point::regional::{RegionalDuct, field::GasFieldDuctError};
-            let regional = RegionalDuct::from_gas_field(&duct, field, *cells)
+            let regional = match resolution {
+                GasFieldResolution::Midpoint(cells) => RegionalDuct::from_gas_field(&duct, field, *cells),
+                GasFieldResolution::Continuous(steps) =>
+                    RegionalDuct::from_continuous_gas_field(&duct, field, *steps),
+            }
                 .map_err(|error| match error {
                     GasFieldDuctError::Material(source) => ReedPerformanceError::Gas { line: 0, source },
                     GasFieldDuctError::Duct(source) => ReedPerformanceError::Model(
@@ -369,17 +399,27 @@ impl ReedPerformance {
     #[must_use]
     pub const fn ambient_gas(&self) -> &GasState { &self.ambient_gas }
     /// Actual propagation gases, in authored segment order for regional input
-    /// or resolved midpoint-cell order for an axial field. The field's exact
+    /// or resolved midpoint-cell order for a midpoint axial field. Continuous
+    /// fields expose authored-segment inlet samples; their operator evaluates
+    /// propagation at its exact local quadrature points. The field's exact
     /// inlet state drives reed density/impedance; it can differ from the first
     /// cell's midpoint. An explicit exterior separately supplies radiation
     /// loading and observation. All are stationary.
     #[must_use]
     pub fn segment_gases(&self) -> &[GasState] { &self.segment_gases }
-    /// Source-retaining axial field and its explicit cells-per-segment axis.
+    /// Source-retaining axial field and its explicit resolution count.
+    /// See gas_field_resolution for the selected midpoint/continuous meaning.
     /// None selects the unchanged uniform/piecewise-regional input route.
     #[must_use]
     pub fn gas_field(&self) -> Option<(&fs_material::gas_field::AxialGasField, usize)> {
-        self.gas_field.as_ref().map(|(field, cells)| (field, *cells))
+        self.gas_field.as_ref().map(|(field, resolution)| (field, match resolution {
+            GasFieldResolution::Midpoint(cells) => *cells,
+            GasFieldResolution::Continuous(steps) => steps.0,
+        }))
+    }
+    /// The selected field integration image, independent of output block size.
+    pub fn gas_field_resolution(&self) -> Option<GasFieldResolution> {
+        self.gas_field.as_ref().map(|(_, resolution)| *resolution)
     }
     /// All authored gas records, including their source receipts, in read order.
     #[must_use]

@@ -5,47 +5,61 @@
 //! Subdividing geometry does not introduce another loss or acoustic equation.
 //! A uniform field retains the original geometry and operation order exactly.
 
-use fs_material::MaterialError;
 use fs_material::gas_field::AxialGasField;
 
 use super::{Duct, DuctError, MAX_REGIONAL_SEGMENTS, RegionalDuct, Segment, invalid};
 
-/// Preserve the original refusal from either material evaluation or acoustics.
-#[derive(Debug)]
-pub enum GasFieldDuctError {
-    /// Primitive state, composition, source domain or phase refusal.
-    Material(MaterialError),
-    /// Geometry, subdivision budget or existing regional coupling refusal.
-    Duct(DuctError),
-}
-impl core::fmt::Display for GasFieldDuctError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Material(error) => write!(f, "gas field: {error}"),
-            Self::Duct(error) => write!(f, "gas-field duct: {error}"),
-        }
-    }
-}
-impl std::error::Error for GasFieldDuctError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Material(error) => Some(error),
-            Self::Duct(error) => Some(error),
-        }
-    }
-}
-impl From<MaterialError> for GasFieldDuctError {
-    fn from(error: MaterialError) -> Self {
-        Self::Material(error)
-    }
-}
-impl From<DuctError> for GasFieldDuctError {
-    fn from(error: DuctError) -> Self {
-        Self::Duct(error)
-    }
-}
+/// Shared material/propagation refusal from the continuous duct owner.
+pub use fs_duct::profile::gas_field::GasFieldDuctError;
 
 impl RegionalDuct {
+    /// Bind continuous temperature/composition and smooth radius geometry to
+    /// the existing fourth-order Magnus and stable two-port owners.
+    ///
+    /// For a varying field, steps_per_span is the integration resolution per
+    /// authored smooth interval, with the fs-duct total-work cap. No intermediate
+    /// gas coefficients or radii are averaged. Uniform fields retain the exact
+    /// original regional/uniform operation order. The older from_gas_field
+    /// constructor remains the explicitly piecewise-constant midpoint rung.
+    ///
+    /// This freezes the field during rendering. Nonuniform tone holes and wall
+    /// pins need separate resolved physics and refuse instead of being dropped.
+    pub fn from_continuous_gas_field(
+        duct: &Duct,
+        field: &AxialGasField,
+        steps_per_span: fs_duct::RiccatiSteps,
+    ) -> Result<Self, GasFieldDuctError> {
+        if duct.segments.is_empty() {
+            return Err(DuctError::EmptyDuct.into());
+        }
+        if duct.segments.len() > MAX_REGIONAL_SEGMENTS {
+            return Err(invalid("gas-field geometry exceeds MAX_REGIONAL_SEGMENTS").into());
+        }
+        let continuous = fs_duct::profile::gas_field::GasFieldDuct::new(
+            duct, field, steps_per_span,
+        )?;
+        if field.uniform_state().is_some() {
+            return Self::new(duct, &vec![*continuous.inlet_gas(); duct.segments.len()])
+                .map_err(Into::into);
+        }
+        let mut offset = 0.0;
+        let mut gases = Vec::with_capacity(duct.segments.len());
+        for segment in &duct.segments {
+            gases.push(*field.state_at(offset)?.state());
+            offset += segment.axial_length();
+        }
+        let mut regional = Self::new(duct, &gases)?;
+        regional.one_way_time_s = continuous.one_way_time_s();
+        regional.inlet_gas_override = Some(*continuous.inlet_gas());
+        regional.continuous = Some(continuous);
+        Ok(regional)
+    }
+
+    /// The actual continuous acoustic binding, if selected at construction.
+    pub fn continuous_gas_field(&self) -> Option<&fs_duct::profile::gas_field::GasFieldDuct> {
+        self.continuous.as_ref()
+    }
+
     /// Apply a supplied axial T/composition field to a bore without changing
     /// its physics code. Each authored cylinder/cone gets exactly
     /// `cells_per_segment` midpoint cells, with at most 64 total records.
@@ -59,7 +73,7 @@ impl RegionalDuct {
     ///
     /// Uniform fields keep every original segment and the uniform solver's
     /// arithmetic, including existing tone holes and smooth radius profiles.
-    /// Nonuniform fields currently admit cylinders/cones only. Their tone-hole
+    /// Nonuniform midpoint fields admit cylinders/cones only. Their tone-hole
     /// mutual coupling and simultaneous smooth-radius integration require the
     /// continuous-field duct owner and are refused here.
     ///

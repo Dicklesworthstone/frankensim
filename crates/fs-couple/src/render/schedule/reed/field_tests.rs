@@ -106,3 +106,34 @@ fn uniform_field_keeps_original_segment_count_and_refuses_conflicting_authority(
             ObservationPolicy::Diagnostic, None, field(285.0), cells).is_err());
     }
 }
+
+#[test]
+fn continuous_field_uses_the_scheduled_source_and_same_physical_microphone() {
+    let text = source().replace("termination flanged", "exterior 300 101325 0\ntermination flanged");
+    let make = |temperature| ReedPerformance::from_bytes_with_field_resolution(
+        text.as_bytes(), 113, ObservationPolicy::Diagnostic, None, field(temperature),
+        GasFieldResolution::Continuous(fs_duct::RiccatiSteps(16)),
+    ).unwrap();
+    let (mut a, mut b) = (make(300.0), make(280.0));
+    assert_eq!(a.gas_field_resolution(), b.gas_field_resolution());
+    assert_eq!(b.gas_field_resolution(), Some(
+        GasFieldResolution::Continuous(fs_duct::RiccatiSteps(16)),
+    ));
+    assert_eq!(b.segment_gases().len(), 1);
+    assert_eq!(voice(&a).rho, voice(&b).rho);
+    assert_eq!(voice(&a).zc, voice(&b).zc);
+    assert_eq!(a.outlet_receiver().unwrap().gas, b.outlet_receiver().unwrap().gas);
+    let mut pa = vec![0.0; a.info.samples as usize];
+    let mut pb = vec![0.0; b.info.samples as usize];
+    for (a_block, b_block) in pa.chunks_mut(113).zip(pb.chunks_mut(113)) {
+        a.pressure_block(a_block).unwrap();
+        b.pressure_block(b_block).unwrap();
+    }
+    assert_eq!(a.remaining_samples(), 0);
+    assert_eq!(b.remaining_samples(), 0);
+    let norm: f64 = pa.iter().map(|p| p * p).sum();
+    let difference: f64 = pa.iter().zip(&pb).map(|(p, q)| (p - q).powi(2)).sum();
+    assert!(pa.iter().chain(&pb).all(|p| p.is_finite()));
+    assert!(norm > 0.0 && difference > 1e-8 * norm);
+    assert_ne!(voice(&a).reed_y.to_bits(), voice(&b).reed_y.to_bits());
+}

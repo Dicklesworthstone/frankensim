@@ -281,6 +281,43 @@ impl ReedBoreVoice {
         })
     }
 
+    /// Render against a continuous primitive gas field and smooth radius
+    /// geometry using the same Magnus and stable two-port propagation owners.
+    /// The exact inlet medium sets reed flow and the characteristic source
+    /// port; local gas properties set propagation/loss and the exact outlet
+    /// medium sets terminal loading. The supplied integration axis is refinable.
+    ///
+    /// This is the existing reed and compact-source observer with a frozen
+    /// axial field, not a species/thermal transport or complete-player model.
+    /// Nonuniform wall pins and tone holes refuse until their resolved spatial
+    /// material law is available.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_continuous_gas_field(
+        physics: &Duct,
+        field: &fs_material::gas_field::AxialGasField,
+        steps_per_span: fs_duct::RiccatiSteps,
+        reed: BeatingReed,
+        termination: Termination,
+        plates: PlateBank,
+        listener_m: f64,
+        sample_rate_hz: u32,
+        line_samples: usize,
+        wall: Option<&fs_phs::WallPin>,
+    ) -> Result<Self, AcousticRealizeError> {
+        use crate::driving_point::regional::{RegionalDuct, field::GasFieldDuctError};
+        let regional = RegionalDuct::from_continuous_gas_field(physics, field, steps_per_span)
+            .map_err(|error| match error {
+                GasFieldDuctError::Material(error) => AcousticRealizeError::Ambient(error.to_string()),
+                GasFieldDuctError::Duct(error) => AcousticRealizeError::Duct(error),
+            })?;
+        Self::with_line(physics, regional.inlet_gas(), reed, plates, listener_m,
+            sample_rate_hz, |_| {
+                regional.characteristic_line_realized(
+                    termination, sample_rate_hz, line_samples, wall, None,
+                ).map_err(crate::acoustic_realize::map_drive)
+            })
+    }
+
     // One mechanical initial state, lay-contact admission and priming operation
     // for both physical line providers. Neither provider advances the voice.
     fn with_line(

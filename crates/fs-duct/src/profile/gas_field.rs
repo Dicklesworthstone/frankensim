@@ -1,0 +1,400 @@
+//! Continuous, prescribed gas fields on the existing Webster/Magnus owner.
+//!
+//! The material field retains primitive T/composition and source receipts.
+//! A cold binding evaluates that field at the two actual quadrature positions
+//! of every Magnus step. Frequency sweeps then reuse those admitted states;
+//! no density, sound-speed or transport coefficient is interpolated. Local
+//! two-ports compose through the existing stable scattering owner.
+
+use super::{MAX_RICCATI_STEPS, RiccatiSteps, bad, local_generator, magnus_step, positive};
+use crate::compose::{
+    ComposeOptions, CompositionMode, InputReflection, PreparedChain, TwoPort, compose_chain,
+    compose_chain_reflection, duct_chain,
+};
+use crate::{Duct, DuctError, DuctResponse, LossModel, Segment, Termination};
+use fs_material::MaterialError;
+use fs_material::gas::GasState;
+use fs_material::gas_field::AxialGasField;
+use fs_math::{c64::C64, det};
+
+/// Original source or propagation refusal, without a fallback material law.
+#[derive(Debug)]
+pub enum GasFieldDuctError {
+    /// Primitive state, composition, source domain or phase refusal.
+    Material(MaterialError),
+    /// Geometry, integration budget or propagation refusal.
+    Duct(DuctError),
+}
+impl core::fmt::Display for GasFieldDuctError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Material(error) => write!(f, "gas field: {error}"),
+            Self::Duct(error) => write!(f, "gas-field duct: {error}"),
+        }
+    }
+}
+impl std::error::Error for GasFieldDuctError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Material(error) => Some(error),
+            Self::Duct(error) => Some(error),
+        }
+    }
+}
+impl From<MaterialError> for GasFieldDuctError {
+    fn from(error: MaterialError) -> Self {
+        Self::Material(error)
+    }
+}
+impl From<DuctError> for GasFieldDuctError {
+    fn from(error: DuctError) -> Self {
+        Self::Duct(error)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct QuadratureStep {
+    /// Negative because the physical ABCD map propagates outlet to inlet.
+    h: f64,
+    radii: [f64; 2],
+    gases: [GasState; 2],
+}
+
+/// Acoustic binding of existing geometry to the one shared material field.
+///
+/// This is a frozen, rigid-wall, no-mean-flow plane-wave operator. Temperature
+/// and species transport, condensation and transverse acoustic modes remain
+/// with their respective owners. A uniform field delegates the original duct
+/// verbatim, including its existing profile/cone axes and operation order.
+#[derive(Clone, Debug)]
+pub struct GasFieldDuct {
+    duct: Duct,
+    field: AxialGasField,
+    quadrature: Vec<QuadratureStep>,
+    inlet: GasState,
+    outlet: GasState,
+    one_way_time_s: f64,
+}
+
+impl GasFieldDuct {
+    /// Bind the complete field to a cylinder/cone/smooth-profile chain.
+    ///
+    /// For a nonuniform field, steps_per_span controls the shared Magnus
+    /// integration on EACH smooth interval. Authored geometry boundaries,
+    /// primitive field stations, and spline knots are exact step boundaries;
+    /// derivative jumps are never hidden inside a fourth-order step. The total
+    /// work is bounded by MAX_RICCATI_STEPS, and steps_used exposes it.
+    /// This explicit field axis replaces the uniform profile's step axis when
+    /// the field varies; a uniform field needs no field discretization.
+    ///
+    /// All local material states are admitted before this binding is returned.
+    /// Nonuniform fields with tone holes refuse: their chimney and mutual-hole
+    /// laws need a spatial material binding that this axial operator cannot infer.
+    pub fn new(
+        duct: &Duct,
+        field: &AxialGasField,
+        steps_per_span: RiccatiSteps,
+    ) -> Result<Self, GasFieldDuctError> {
+        Self::new_controlled(duct, field, steps_per_span, &mut || false)
+    }
+
+    /// As new, with cancellation before each pair of source evaluations.
+    /// A refused or cancelled construction publishes no partial binding.
+    pub fn new_controlled(
+        duct: &Duct,
+        field: &AxialGasField,
+        steps_per_span: RiccatiSteps,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, GasFieldDuctError> {
+        steps_per_span.validate()?;
+        if duct.segments.is_empty() {
+            return Err(DuctError::EmptyDuct.into());
+        }
+        if duct.segments.len() > MAX_RICCATI_STEPS {
+            return Err(bad("gas-field geometry exceeds the integration work cap").into());
+        }
+        for segment in &duct.segments {
+            segment.validate()?;
+        }
+        let length: f64 = duct.segments.iter().map(Segment::axial_length).sum();
+        if !positive(length) || length != field.length_m() {
+            return Err(bad("gas field must cover the exact complete duct length").into());
+        }
+        if cancelled() {
+            return Err(DuctError::Cancelled { completed_steps: 0 }.into());
+        }
+        let inlet = *field.state_at(0.0)?.state();
+        let outlet = *field.state_at(length)?.state();
+        let mut result = Self {
+            duct: duct.clone(),
+            field: field.clone(),
+            quadrature: Vec::new(),
+            inlet,
+            outlet,
+            one_way_time_s: length / inlet.sound_speed,
+        };
+        if field.uniform_state().is_some() {
+            return Ok(result);
+        }
+        if duct
+            .segments
+            .iter()
+            .any(|segment| matches!(segment, Segment::ToneHole { .. }))
+        {
+            return Err(bad("continuous gas fields need an axial duct without tone holes").into());
+        }
+        let root3 = det::sqrt(3.0);
+        let (c1, c2) = (0.5 - root3 / 6.0, 0.5 + root3 / 6.0);
+        let mut offset = 0.0;
+        let mut travel = 0.0;
+        for segment in &duct.segments {
+            let length = segment.axial_length();
+            let end = offset + length;
+            let mut boundaries = vec![0.0, length];
+            boundaries.extend(
+                field
+                    .stations_m()
+                    .iter()
+                    .filter_map(|&x| (x > offset && x < end).then_some(x - offset)),
+            );
+            if let Segment::Profile { profile, .. } = segment {
+                if let Some(stations) = profile.stations() {
+                    let origin = stations[0].0;
+                    boundaries.extend(
+                        stations[1..stations.len() - 1]
+                            .iter()
+                            .map(|&(x, _)| x - origin),
+                    );
+                }
+            }
+            boundaries.sort_by(f64::total_cmp);
+            boundaries.dedup();
+            let count = (boundaries.len() - 1)
+                .checked_mul(steps_per_span.0)
+                .and_then(|count| result.quadrature.len().checked_add(count))
+                .filter(|&count| count <= MAX_RICCATI_STEPS)
+                .ok_or_else(|| bad("gas-field integration exceeds MAX_RICCATI_STEPS"))?;
+            result.quadrature.reserve(count - result.quadrature.len());
+            let radius = |x: f64| -> Result<f64, DuctError> {
+                match segment {
+                    Segment::Cylinder { radius, .. } => Ok(*radius),
+                    Segment::Cone {
+                        inlet_radius,
+                        outlet_radius,
+                        ..
+                    } => Ok(*inlet_radius + (*outlet_radius - *inlet_radius) * (x / length)),
+                    Segment::Profile { profile, .. } => profile.radius(x),
+                    Segment::ToneHole { .. } => unreachable!("axial geometry admitted"),
+                }
+            };
+            for span in boundaries.windows(2) {
+                for index in 0..steps_per_span.0 {
+                    if cancelled() {
+                        return Err(DuctError::Cancelled {
+                            completed_steps: result.quadrature.len(),
+                        }
+                        .into());
+                    }
+                    let left =
+                        span[0] + (span[1] - span[0]) * (index as f64 / steps_per_span.0 as f64);
+                    let right = if index + 1 == steps_per_span.0 {
+                        span[1]
+                    } else {
+                        span[0]
+                            + (span[1] - span[0]) * ((index + 1) as f64 / steps_per_span.0 as f64)
+                    };
+                    let h = left - right;
+                    if !positive(-h) {
+                        return Err(bad(
+                            "gas-field integration interval is numerically unresolved",
+                        )
+                        .into());
+                    }
+                    let positions = [right + c1 * h, right + c2 * h];
+                    let gases = [
+                        *field.state_at(offset + positions[0])?.state(),
+                        *field.state_at(offset + positions[1])?.state(),
+                    ];
+                    let radii = [radius(positions[0])?, radius(positions[1])?];
+                    travel += -0.5 * h * (1.0 / gases[0].sound_speed + 1.0 / gases[1].sound_speed);
+                    result.quadrature.push(QuadratureStep { h, radii, gases });
+                }
+            }
+            offset = end;
+        }
+        if !positive(travel) {
+            return Err(bad("gas-field travel time must be positive and finite").into());
+        }
+        result.one_way_time_s = travel;
+        Ok(result)
+    }
+
+    /// Original source-backed primitive field, retained without resampling.
+    pub const fn field(&self) -> &AxialGasField {
+        &self.field
+    }
+    /// Original geometry, including authored profile knots.
+    pub const fn duct(&self) -> &Duct {
+        &self.duct
+    }
+    /// Exact source state at the inlet, also used by the characteristic port.
+    pub const fn inlet_gas(&self) -> &GasState {
+        &self.inlet
+    }
+    /// Exact source state at the outlet, the default exterior radiation gas.
+    pub const fn outlet_gas(&self) -> &GasState {
+        &self.outlet
+    }
+    /// Integral of 1/c using the same field quadrature as propagation.
+    pub const fn one_way_time_s(&self) -> f64 {
+        self.one_way_time_s
+    }
+    /// Actual field integration work; zero for the original uniform path.
+    pub fn steps_used(&self) -> usize {
+        self.quadrature.len()
+    }
+    /// Exact inlet rho*c/area, with no independently supplied medium knob.
+    pub fn inlet_impedance(&self) -> f64 {
+        let radius = self.duct.segments[0].inlet_radius();
+        self.inlet.density * self.inlet.sound_speed / (core::f64::consts::PI * radius * radius)
+    }
+
+    /// Resolve local two-ports in inlet-to-outlet order. Every finite step
+    /// shares the existing Magnus and exact-ZK owners; composition never forms
+    /// a global growing ABCD matrix. Callers may refine the field step axis if
+    /// an individual exponential is unresolved.
+    pub fn chain_controlled(
+        &self,
+        omega: f64,
+        loss: LossModel,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedChain, DuctError> {
+        if self.field.uniform_state().is_some() {
+            return duct_chain(
+                &self.duct,
+                &self.inlet,
+                omega,
+                loss,
+                None,
+                ComposeOptions::default(),
+                true,
+                cancelled,
+            );
+        }
+        if !positive(omega) {
+            return Err(bad("gas-field frequency must be positive and finite"));
+        }
+        let reference = self.inlet_impedance();
+        if !positive(reference) {
+            return Err(bad(
+                "gas-field reference impedance must be positive and finite",
+            ));
+        }
+        let root3 = det::sqrt(3.0);
+        let mut blocks = Vec::with_capacity(self.quadrature.len());
+        let mut min_shear = f64::INFINITY;
+        for (index, step) in self.quadrature.iter().enumerate() {
+            if cancelled() {
+                return Err(DuctError::Cancelled {
+                    completed_steps: index,
+                });
+            }
+            let (a, shear_a) =
+                local_generator(&step.gases[0], step.radii[0], omega, loss, reference)?;
+            let (b, shear_b) =
+                local_generator(&step.gases[1], step.radii[1], omega, loss, reference)?;
+            let mut matrix = magnus_step(a, b, step.h, root3)?;
+            matrix[1] = matrix[1].scale(reference);
+            matrix[2] = matrix[2].scale(1.0 / reference);
+            blocks.push(TwoPort::from_abcd(matrix, reference)?);
+            min_shear = min_shear.min(shear_a).min(shear_b);
+        }
+        Ok(PreparedChain {
+            blocks,
+            reference_impedance: reference,
+            min_shear_number: min_shear,
+        })
+    }
+
+    fn exterior<'a>(&'a self, gas: Option<&'a GasState>) -> Result<&'a GasState, DuctError> {
+        let gas = gas.unwrap_or(&self.outlet);
+        gas.validate_coherence()
+            .map_err(|_| bad("gas-field exterior must be a coherent material state"))?;
+        if gas.pressure != self.inlet.pressure {
+            return Err(bad("gas field and exterior need a common static pressure"));
+        }
+        Ok(gas)
+    }
+
+    /// Input impedance and physical outlet transfer with the existing analytic
+    /// termination owner. Exterior replaces the homogeneous exterior only;
+    /// omitted means the exact x=L material, never a guessed air state.
+    pub fn response(
+        &self,
+        omega: f64,
+        loss: LossModel,
+        termination: Termination,
+        exterior: Option<&GasState>,
+    ) -> Result<DuctResponse, DuctError> {
+        let exterior = self.exterior(exterior)?;
+        let radius = self
+            .duct
+            .segments
+            .last()
+            .expect("admitted duct")
+            .outlet_radius();
+        if self.field.uniform_state().is_some() {
+            if *exterior == self.inlet
+                || matches!(termination, Termination::Closed | Termination::IdealOpen)
+            {
+                return crate::input_impedance(&self.duct, &self.inlet, omega, loss, termination);
+            }
+            let load = crate::compact_radiation_impedance(termination, exterior, radius, omega)?;
+            let mut response =
+                crate::input_impedance_load(&self.duct, &self.inlet, omega, loss, load, None)?;
+            response.mouth_ka = omega / exterior.sound_speed * radius;
+            return Ok(response);
+        }
+        let chain = self.chain_controlled(omega, loss, &mut || false)?;
+        let (load, mouth_ka) = crate::termination_impedance(termination, exterior, radius, omega)?;
+        let solved = compose_chain(&chain.blocks, load, ComposeOptions::default())?;
+        Ok(DuctResponse {
+            omega,
+            impedance: solved.z_in,
+            min_shear_number: chain.min_shear_number,
+            mouth_ka,
+            u_mouth_over_u_in: solved.u_out_over_u_in,
+            p_mouth_over_u_in: if load.is_none() {
+                C64::ZERO
+            } else {
+                solved.p_out_over_u_in
+            },
+            condition_estimate: solved.condition_estimate,
+            composition: CompositionMode::ImpedanceRecursion,
+        })
+    }
+
+    /// Direct input reflection for characteristic-line construction. The
+    /// existing stable owner does not divide through an input impedance pole.
+    pub fn reflection(
+        &self,
+        omega: f64,
+        loss: LossModel,
+        termination: Termination,
+        exterior: Option<&GasState>,
+    ) -> Result<InputReflection, DuctError> {
+        let exterior = self.exterior(exterior)?;
+        let chain = self.chain_controlled(omega, loss, &mut || false)?;
+        let radius = self
+            .duct
+            .segments
+            .last()
+            .expect("admitted duct")
+            .outlet_radius();
+        let (load, _) = crate::termination_impedance(termination, exterior, radius, omega)?;
+        compose_chain_reflection(&chain.blocks, load, ComposeOptions::default())
+    }
+}
+
+#[cfg(test)]
+mod tests;

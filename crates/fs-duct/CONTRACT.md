@@ -73,6 +73,60 @@ every midpoint material sample against the shared exact-ZK owner and of the
 resulting64-slice cascade. The4/8/16/32/64 rungs remain, extended through4096
 so the actual finest pair meets1e-8. No acceptance band is widened.
 
+### Continuous material fields on the same profile propagator
+
+`profile::gas_field::GasFieldDuct` binds the existing `Duct` geometry to
+`fs_material::gas_field::AxialGasField`. The latter remains the only primitive
+field/source owner. For a varying field, the acoustic binding evaluates the
+NASA-9/material state at the actual two Gaussian quadrature points of each
+Magnus step, then retains those admitted states for frequency sweeps. Derived
+density, sound speed, viscosity, conductivity, gamma and Prandtl number are
+never interpolated. Both constant-gas profiles and fields call the same local
+generator, exact-ZK law and traceless Magnus exponential.
+
+Cylinders, cones and smooth radius profiles compose in one pressure/volume-flow
+chain. Authored geometry boundaries, primitive field stations and profile
+spline knots split smooth intervals before integration; derivative jumps do
+not pass through an allegedly fourth-order step. `RiccatiSteps(n)` requests n
+steps per such interval in the varying-field image. Its explicit field axis
+replaces the original uniform-profile integration axis, and the actual total
+is available as `steps_used()`, capped at `MAX_RICCATI_STEPS` without clamping.
+A uniform field performs no field discretization and delegates the original
+duct and its original profile/cone axes bit-for-bit.
+
+Each resolved step becomes a `compose::TwoPort`; the existing stable chain
+owner produces impedance, outlet flow/pressure transfer, and direct input
+reflection. A frequency sweep never needs a global growing ABCD product.
+The exact inlet state supplies the port impedance; the default radiation
+medium is the exact outlet state. An explicit exterior must be coherent and
+at the same static pressure. All loads retain their existing validity checks.
+Travel delay integrates local 1/c with the same quadrature. Cancellation during
+material binding or block construction returns the completed-step count and
+publishes no partial result.
+
+The `fs-couple::RegionalDuct::from_continuous_gas_field` adapter sends this
+operator into its existing characteristic-line and baffled-outlet paths;
+`ReedBoreVoice::new_with_continuous_gas_field` drives the original reed loop
+with it. The older midpoint `from_gas_field` route remains an explicit
+piecewise-constant comparison rung. Scheduled `ReedPerformance` selects
+`GasFieldResolution::Continuous(RiccatiSteps(n))` through
+`from_bytes_with_field_resolution`; its existing schedule, massive reed,
+terminal loading and baffled microphone share that binding. The existing
+midpoint constructor and input records retain their behavior.
+Nonuniform fields with tone holes or
+deformable-wall pins refuse: no spatial chimney/mutual-hole/wall law is inferred.
+
+Verification covers exact uniform bits, independent analytic linear-temperature
+cylinder transfer and closed/open impedance (a convergent Frobenius form of
+the J0/Y0 solution), fourth-order joint temperature/composition/radius
+refinement with Bessel losses, local primitive-state evaluation, pressure and
+mixture changes reaching physical transfer, and real rendered-pressure changes
+above their step-refinement discrepancy. Source coefficients in these tests
+are declared analytic fixtures, not experimental material validation. The
+operator remains a frozen, rigid-wall, no-mean-flow, plane-wave model; it does
+not generate breath fields, advect species, evolve wall temperature, model
+condensation or qualify a complete instrument.
+
 ### Segment chains and terminations
 
 `levine_schwinger::{LsQuadrature,LsSolution,levine_schwinger,
