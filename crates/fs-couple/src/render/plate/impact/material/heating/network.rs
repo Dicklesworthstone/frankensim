@@ -1,4 +1,4 @@
-//! Actual contact work enters the existing multi-cell enthalpy network once.
+//! Selected mechanical work enters the existing multi-cell enthalpy network once.
 //! The original network owns conduction, boundary losses, phase and subcycling.
 //! Its observer and the contact-source refresh publish with mechanics, or not at all.
 /// Source-bound thermal links driven by the mechanical contact footprint.
@@ -15,7 +15,7 @@ use fs_thermal::enthalpy::{CellId, DepositionError, DepositionObserver,
 
 /// One reservoir is the SAME finite thermal cell, not another heat destination.
 /// All reservoirs and all active cells must be bound exactly once. Several
-/// mechanical contacts may already deliver their work to that one reservoir.
+/// contacts and pressure islands may deliver their work to that one reservoir.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReservoirCell {
     pub reservoir: String,
@@ -23,24 +23,25 @@ pub struct ReservoirCell {
 }
 
 /// Accepted per-cell transport observations. Net exchange is reconstructed from
-/// the original network's actual enthalpy change minus its integrated contact
+/// the original network's actual enthalpy change minus its integrated mechanical
 /// source, not from a second implementation of its conduction/boundary laws.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NetworkCellHeat {
     pub cell: CellId,
-    pub contact_heat_j: f64,
+    /// Selected contact and incompressible-film dissipation received once [J].
+    pub deposited_heat_j: f64,
     pub net_exchange_heat_j: f64,
 }
 
-/// The original network audit and the existing combined contact/heat account.
+/// The original network audit and the existing combined mechanical/heat account.
 #[derive(Debug)]
 pub struct NetworkImpactFrame {
     pub impact: MaterialFeedbackFrame<NetworkCellHeat>,
-    /// Includes contact heat as a source to the thermal subsystem. It is internal
-    /// to the combined system and is subtracted in `non_contact_heat_j`.
+    /// Includes deposited mechanical heat as a source to the thermal subsystem.
+    /// It is internal to the combined system and subtracted in `external_heat_j`.
     pub network: EnergyAudit,
-    /// Authored/observer source and environment heat, excluding contact work.
-    pub non_contact_heat_j: f64,
+    /// Authored/observer and environment heat, excluding routed mechanical work.
+    pub external_heat_j: f64,
 }
 
 impl<'m> HeatedImpactSystem<'m> {
@@ -51,7 +52,7 @@ impl<'m> HeatedImpactSystem<'m> {
     /// This uses `step_with_material_feedback` and the original network's
     /// `advance_observed`: no pairwise splitting or second heat integrator.
     /// `resolve` is the existing unloaded contact-source callback; return None
-    /// to retain frozen mechanics. Thermal contact work is held as a power over
+    /// to retain frozen contacts. Selected contact/film work is held as a power over
     /// this mechanical sample and integrated on the network's actual CFL grid.
     /// It must not also be supplied by the observer or authored boundary sources.
     ///
@@ -93,7 +94,7 @@ impl<'m> HeatedImpactSystem<'m> {
     where O::Error: core::fmt::Display {
         if config.energy_tolerance_j > self.heat_tolerance_j
             || !config.energy_tolerance_j.is_finite() || config.energy_tolerance_j < 0.0 {
-            return Err(invalid("network transport cannot enlarge the contact heat allowance"));
+            return Err(invalid("network transport cannot enlarge the mechanical heat allowance"));
         }
         let mut staged = None;
         let mut impact = self.step_with_material_feedback(forces, gate, resolve, |trial| {
@@ -109,16 +110,16 @@ impl<'m> HeatedImpactSystem<'m> {
         // Keep the independently accumulated boundary audit authoritative.
         // Per-cell exchange is reconstructed from storage; its roundoff must not
         // be relabelled as physical outside heat in the collection report.
-        let contact_heat_j = impact.thermal.transfers.iter()
-            .map(|transfer| transfer.report.contact_heat_j).sum::<f64>();
-        let non_contact_heat_j = network.external_heat_j - contact_heat_j;
-        impact.thermal.boundary_heat_j = non_contact_heat_j;
+        let deposited_heat_j = impact.thermal.transfers.iter()
+            .map(|transfer| transfer.report.deposited_heat_j).sum::<f64>();
+        let external_heat_j = network.external_heat_j - deposited_heat_j;
+        impact.thermal.boundary_heat_j = external_heat_j;
         impact.thermal.impact.combined_energy_residual_j =
             impact.thermal.impact.mechanical.balance_residual_j + network.residual_j
-            + (contact_heat_j - impact.thermal.impact.deposited_heat_j);
+            + (deposited_heat_j - impact.thermal.impact.deposited_heat_j);
         *thermal = next;
         *observer = next_observer;
-        Ok((NetworkImpactFrame { non_contact_heat_j, impact, network }, report))
+        Ok((NetworkImpactFrame { external_heat_j, impact, network }, report))
     }
 }
 
@@ -162,12 +163,12 @@ where O::Error: core::fmt::Display {
         }
         let power = i.internal_heat_j / duration;
         if !power.is_finite() || (i.internal_heat_j != 0.0 && power == 0.0) {
-            return Err(invalid("contact heat cannot be represented on the thermal sample clock"));
+            return Err(invalid("mechanical heat cannot be represented on the thermal sample clock"));
         }
         powers.insert(id, power);
         ids.push(id);
     }
-    let source = ContactHeating { observer: observer.clone(), powers, protected_links,
+    let source = MechanicalHeating { observer: observer.clone(), powers, protected_links,
         received: ids.iter().map(|&id|(id, (0.0, 0.0))).collect() };
     let checkpoint = || if gate.is_requested() { Err(DepositionError::Cancelled) } else { Ok(()) };
     let (next, source, audit) = thermal.advance_observed(&source, target, config, checkpoint)
@@ -175,24 +176,24 @@ where O::Error: core::fmt::Display {
             NetworkError::Thermal(DepositionError::Cancelled) => ImpactError::Cancelled,
             other => ImpactError::Owner(other.to_string()),
         })?;
-    let mut total_contact = 0.0;
+    let mut total_deposited = 0.0;
     let mut transfers = Vec::with_capacity(inputs.len());
     for (&id, input) in ids.iter().zip(inputs) {
         let i = input.thermal;
         let h = next.cells()[&id].specific_h_j_kg;
         let state = i.curve.state_at_specific_enthalpy(h)
             .map_err(|e|ImpactError::Owner(e.to_string()))?;
-        let contact = source.received[&id].0;
-        let exchange = i.mass_kg * (h - i.initial.specific_enthalpy_j_kg()) - contact;
-        if !exchange.is_finite() || (contact-i.internal_heat_j).abs() > config.energy_tolerance_j {
-            return Err(invalid("thermal substeps did not deliver the original contact work"));
+        let deposited = source.received[&id].0;
+        let exchange = i.mass_kg * (h - i.initial.specific_enthalpy_j_kg()) - deposited;
+        if !exchange.is_finite() || (deposited-i.internal_heat_j).abs() > config.energy_tolerance_j {
+            return Err(invalid("thermal substeps did not deliver the original mechanical work"));
         }
-        total_contact += contact;
+        total_deposited += deposited;
         transfers.push(UniformEnthalpyStep { state, external_heat_j: exchange,
             energy_residual_tolerance_j: config.energy_tolerance_j,
-            report: NetworkCellHeat {cell:id, contact_heat_j:contact, net_exchange_heat_j:exchange} });
+            report: NetworkCellHeat {cell:id, deposited_heat_j:deposited, net_exchange_heat_j:exchange} });
     }
-    let boundary_heat_j = audit.external_heat_j - total_contact;
+    let boundary_heat_j = audit.external_heat_j - total_deposited;
     if !boundary_heat_j.is_finite() || audit.events != 0 || audit.incoming_mass_kg != 0.0 {
         return Err(invalid("network transport changed the coupled material topology"));
     }
@@ -200,7 +201,7 @@ where O::Error: core::fmt::Display {
 }
 
 #[derive(Clone)]
-struct ContactHeating<O> {
+struct MechanicalHeating<O> {
     observer: O,
     powers: BTreeMap<CellId, f64>,
     received: BTreeMap<CellId, (f64, f64)>,
@@ -217,7 +218,7 @@ impl<E: core::fmt::Display> core::fmt::Display for NetworkError<E> {
             Self::Observer(e)=>write!(f,"thermal observer: {e}")}
     }
 }
-impl<O: DepositionObserver> DepositionObserver for ContactHeating<O> {
+impl<O: DepositionObserver> DepositionObserver for MechanicalHeating<O> {
     type Error = NetworkError<O::Error>;
     fn begin(&mut self) -> Result<(),Self::Error> {
         self.observer.begin().map_err(NetworkError::Observer)
@@ -260,3 +261,4 @@ impl<O: DepositionObserver> DepositionObserver for ContactHeating<O> {
         self.observer.step(start,dt,old,thermal,checkpoint).map_err(NetworkError::Observer)
     }
 }
+

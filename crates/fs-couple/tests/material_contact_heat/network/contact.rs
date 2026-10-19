@@ -87,7 +87,7 @@ fn interface_data_alone_changes_network_heat_while_real_footprints_open_and_clos
             else {active+=1;near(na.links()[&report.link_id].conductance_w_k,report.area_m2/1e-4,1e-15);}
         }
         near(na.exposed_area_m2(CellId(9)).unwrap(),0.0006-area,1e-18);
-        assert!(na.links().contains_key(&102));boundary+=fa.network.non_contact_heat_j;
+        assert!(na.links().contains_key(&102));boundary+=fa.network.external_heat_j;
     }
     assert!(active>0 && separated>0);assert!(!na.links().contains_key(&101));
     assert!(na.temperature_k(CellId(9)).unwrap()<nb.temperature_k(CellId(9)).unwrap());
@@ -133,3 +133,4 @@ fn missing_interface_law_reversed_material_roles_and_link_aliases_refuse() {
     assert!(s.step_with_contact_network(&mut n,&mut (),&bindings(),&aliased,thermal_config(5e-7),&[0.0;2],&gate,unchanged).is_err());
     assert_eq!(n.links().len(),1);assert_eq!(s.mechanics().samples(),0);
 }
+

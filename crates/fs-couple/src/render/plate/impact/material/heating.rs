@@ -1,8 +1,10 @@
-//! Contact dissipation -> finite material enthalpy, on one accepted time step.
+//! Selected physical dissipation -> finite material enthalpy on one time step.
 //!
 //! Contact force/storage and stepping remain with fs-dcontact/fs-phs. Thermal
-//! charts remain with fs-material. Only the selected contact losses are routed;
-//! modal damping, felt crush, radiation and fluid losses are NOT relabelled heat.
+//! charts remain with fs-material. Selected contact and incompressible film
+//! losses use their original owners at the actual discrete-gradient effort.
+//! Modal damping, felt crush, radiation and compressible-film free-energy loss
+//! are not relabelled heat. No dissipation is charged to mechanics twice.
 //! The mechanical constitutive state is frozen: this is one-way thermalization,
 //! not temperature-dependent contact, expansion, melting mechanics or flash T.
 /// Existing thermal transport owners applied on the same accepted collision step.
@@ -61,7 +63,7 @@ impl<'a> CaloricReservoir<'a> {
     pub const fn surface_area_m2(&self) -> f64 { self.surface_area_m2 }
     /// Accepted temperature, liquid mass fraction, density and specific enthalpy.
     pub const fn state(&self) -> EquilibriumPhaseState { self.state }
-    /// Cumulative deposited contact heat since attachment [J].
+    /// Cumulative selected mechanical heat since attachment [J].
     pub const fn received_heat_j(&self) -> f64 { self.received_heat_j }
     /// Cumulative signed boundary transfer into this store [J].
     pub const fn boundary_heat_j(&self) -> f64 { self.boundary_heat_j }
@@ -88,6 +90,24 @@ pub struct ContactHeatRoute {
 #[derive(Clone, Copy)]
 struct Route { contact: usize, a: usize, b: usize, fraction: f64 }
 
+/// Explicit partition of one incompressible pressure island's viscous work.
+/// The index is the existing immutable film insertion order. Destinations may
+/// be the lubricant's own caloric store or explicitly modeled thermal sinks;
+/// no wall/fluid heat partition is inferred from geometry or material names.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SqueezeFilmHeatRoute {
+    /// Existing pressure island, in `ImpactSystem::squeeze_film_count` order.
+    pub film: usize,
+    /// First finite destination's stable key.
+    pub to_a: String,
+    /// Second finite destination's stable key; may equal the first.
+    pub to_b: String,
+    /// Fraction delivered to A, in [0,1]; B receives the remainder.
+    pub fraction_to_a: f64,
+}
+#[derive(Clone, Copy)]
+struct FilmRoute { film: usize, a: usize, b: usize, fraction: f64 }
+
 /// Combined accepted mechanics and thermal accounting. Mechanical dissipation
 /// is still reported by its original owner; deposited heat must NOT be counted
 /// as an additional loss from the combined system.
@@ -95,14 +115,14 @@ struct Route { contact: usize, a: usize, b: usize, fraction: f64 }
 pub struct HeatedImpactFrame {
     /// Unmodified accepted mechanical result, including every loss channel.
     pub mechanical: ImpactFrame,
-    /// Selected contact loss deposited into thermal destinations this step [J].
+    /// Selected contact and viscous-film loss deposited this step [J].
     pub deposited_heat_j: f64,
     /// Actual sum of mass times chart enthalpy changes this step [J].
     pub thermal_energy_change_j: f64,
     /// Mechanical losses not routed into these stores [J]. Signed roundoff in
     /// this subtraction is disclosed, not silently labelled physical cooling.
     pub remaining_mechanical_loss_j: f64,
-    /// Mechanical balance plus thermal change minus contact and boundary heat [J].
+    /// Mechanical balance plus thermal change minus deposited and boundary heat [J].
     pub combined_energy_residual_j: f64,
 }
 
@@ -115,6 +135,7 @@ pub struct HeatedImpactSystem<'a> {
     mechanics: PreparedImpactSystem,
     stores: Vec<CaloricReservoir<'a>>,
     routes: Vec<Route>,
+    film_routes: Vec<FilmRoute>,
     candidate: Vec<EquilibriumPhaseState>,
     next_received: Vec<f64>,
     next_correction: Vec<f64>,
@@ -127,9 +148,27 @@ impl<'a> HeatedImpactSystem<'a> {
     /// stores and invalid partitions refuse. Unrouted losses remain external.
     pub fn new(mechanics: PreparedImpactSystem, stores: Vec<CaloricReservoir<'a>>,
         routes: Vec<ContactHeatRoute>, heat_tolerance_j: f64) -> Result<Self, ImpactError> {
-        if stores.is_empty() || stores.len()>64 || routes.is_empty() || routes.len()>32
+        Self::new_with_films(mechanics, stores, routes, Vec::new(), heat_tolerance_j)
+    }
+
+    /// Attach contact and Reynolds-film heat to the SAME material stores and
+    /// thermal network. A film-only system is admitted. Each selected channel
+    /// is routed once, at the pressure solve's midpoint configuration and actual
+    /// work-conjugate velocity, then deposited before mechanical publication.
+    ///
+    /// The incompressible film has no stored energy, so its nonnegative port
+    /// work is physical viscous heat. Compressible-film free-energy dissipation
+    /// is deliberately excluded: it is not automatically finite internal heat.
+    /// Fluid viscosity is frozen over the sample; temperature feedback requires
+    /// an explicit constitutive refresh, not a second thermal or pressure step.
+    pub fn new_with_films(mechanics: PreparedImpactSystem,
+        stores: Vec<CaloricReservoir<'a>>, routes: Vec<ContactHeatRoute>,
+        film_routes: Vec<SqueezeFilmHeatRoute>, heat_tolerance_j: f64,
+    ) -> Result<Self, ImpactError> {
+        if stores.is_empty() || stores.len()>64 || (routes.is_empty() && film_routes.is_empty())
+            || routes.len()>32 || film_routes.len()>4
             || !positive(heat_tolerance_j) {
-            return Err(invalid("contact heating needs 1..64 stores, 1..32 routes and a positive joule allowance"));
+            return Err(invalid("mechanical heating needs 1..64 stores, up to 32 contacts and four films, at least one route and a positive joule allowance"));
         }
         for (i,s) in stores.iter().enumerate() {
             if stores[..i].iter().any(|old|old.key==s.key) {
@@ -150,11 +189,26 @@ impl<'a> HeatedImpactSystem<'a> {
         }
         // Canonical contact order makes input route ordering immaterial.
         compiled.sort_by_key(|r|r.contact);
+        let mut compiled_films: Vec<FilmRoute> = Vec::with_capacity(film_routes.len());
+        for route in film_routes {
+            if route.film >= mechanics.squeeze_film_count()
+                || compiled_films.iter().any(|r| r.film == route.film) {
+                return Err(invalid("film heat must name an existing pressure island exactly once"));
+            }
+            if !route.fraction_to_a.is_finite() || !(0.0..=1.0).contains(&route.fraction_to_a) {
+                return Err(invalid("film heat partition must be finite and in [0,1]"));
+            }
+            let a=stores.iter().position(|s|s.key==route.to_a).ok_or_else(||invalid("unknown first film heat store"))?;
+            let b=stores.iter().position(|s|s.key==route.to_b).ok_or_else(||invalid("unknown second film heat store"))?;
+            compiled_films.push(FilmRoute {film:route.film,a,b,fraction:route.fraction_to_a});
+        }
+        compiled_films.sort_by_key(|r|r.film);
         let candidate=stores.iter().map(|s|s.state).collect();
         let next_received=stores.iter().map(|s|s.received_heat_j).collect();
         let next_correction=stores.iter().map(|s|s.received_correction_j).collect();
         let heat=vec![0.0;stores.len()];
-        Ok(Self {mechanics,stores,routes:compiled,candidate,next_received,next_correction,heat,heat_tolerance_j})
+        Ok(Self {mechanics,stores,routes:compiled,film_routes:compiled_films,
+            candidate,next_received,next_correction,heat,heat_tolerance_j})
     }
     /// Read-only mechanics: callers cannot advance it behind the thermal clock.
     pub const fn mechanics(&self) -> &PreparedImpactSystem { &self.mechanics }
@@ -171,14 +225,14 @@ impl<'a> HeatedImpactSystem<'a> {
         (self.mechanics,self.stores)
     }
     /// Advance motion and thermal storage exactly once, or neither. Heat uses
-    /// the original contact loss at the solver midpoint and its ACTUAL port
+    /// the original contact/film loss at the solver midpoint and its ACTUAL port
     /// velocity (Gonzalez effort), not endpoint power times dt. Thermal limits
     /// and rounding are checked before mechanical history/state publication.
     pub fn step(&mut self, forces: &[f64], gate: &CancelGate) -> Result<HeatedImpactFrame, ImpactError> {
-        let Self {mechanics,stores,routes,candidate,next_received,next_correction,heat,heat_tolerance_j}=self;
+        let Self {mechanics,stores,routes,film_routes,candidate,next_received,next_correction,heat,heat_tolerance_j}=self;
         let mut deposited=0.0; let mut thermal_change=0.0;
         let mechanical=mechanics.step_checked(forces,gate,|system,next,velocity,record| {
-            deposited=stage_heat(system,next,velocity,record,routes,heat)?;
+            deposited=stage_heat(system,next,velocity,record,routes,film_routes,heat)?;
             thermal_change=0.0;
             for (i,store) in stores.iter().enumerate() {
                 if gate.is_requested() {return Err(ImpactError::Cancelled);}
@@ -224,12 +278,13 @@ fn positive(v:f64)->bool {v.is_finite() && v>0.0}
 fn key_valid(key:&str)->bool {!key.trim().is_empty() && key.len()<=128}
 
 fn stage_heat(system:&ImpactSystem, next:&[f64], velocity:&[f64], record:PreparedStepRecord,
-    routes:&[Route], heat:&mut[f64]) -> Result<f64,ImpactError> {
+    routes:&[Route], film_routes:&[FilmRoute], heat:&mut[f64]) -> Result<f64,ImpactError> {
     let n=system.modes;
     let mut midpoint=[0.0;2*MAX_IMPACT_MODES];let mut power=[0.0;32];
     for i in 0..2*n {midpoint[i]=0.5*(system.x[i]+next[i]);}
     let count=system.material_contacts().len();
-    if !system.contact.dissipated_power_by_obstacle_into(&midpoint[..2*n],velocity,&mut power[..count]) {
+    if !routes.is_empty()
+        && !system.contact.dissipated_power_by_obstacle_into(&midpoint[..2*n],velocity,&mut power[..count]) {
         return Err(invalid("original contact owner refused step heat evaluation"));
     }
     heat.fill(0.0);let mut deposited=0.0;
@@ -241,10 +296,27 @@ fn stage_heat(system:&ImpactSystem, next:&[f64], velocity:&[f64], record:Prepare
         }
         heat[r.a]+=a;heat[r.b]+=b;deposited+=q;
     }
+    if !film_routes.is_empty() {
+        let mut configuration=[0.0;MAX_IMPACT_MODES];
+        let mut force=[0.0;MAX_IMPACT_MODES];
+        let mut pressure=[0.0;fs_tribo::resistive_film::MAX_CELLS];
+        for i in 0..n {configuration[i]=midpoint[2*i];}
+        for r in film_routes {
+            let film=&system.squeeze_films[r.film];
+            let report=film.evaluate_into(&configuration[..n],velocity,&mut force[..n],
+                &mut pressure[..film.cell_count()]).map_err(|e|invalid(e.0))?;
+            let q=system.config.dt_s*report.dissipated_power_w;
+            if !q.is_finite() || q<0.0 || (report.dissipated_power_w>0.0 && q==0.0) {
+                return Err(invalid("viscous film heat is unrepresentable"));
+            }
+            let a=q*r.fraction;
+            heat[r.a]+=a;heat[r.b]+=q-a;deposited+=q;
+        }
+    }
     let roundoff=256.0*f64::EPSILON*(record.dissipated.abs()+deposited.abs());
     if heat.iter().any(|q|!q.is_finite() || *q<0.0) || !deposited.is_finite()
         || deposited>record.dissipated+roundoff {
-        return Err(invalid("routed contact heat exceeds the time owner's dissipation"));
+        return Err(invalid("routed physical heat exceeds the time owner's dissipation"));
     }
     Ok(deposited)
 }
