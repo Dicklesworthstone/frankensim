@@ -20,7 +20,9 @@
 //       noteOn(midi, speedMS)   post-escapement hammer velocity in m/s, (0, 8]
 //       noteOff(midi)
 //       sustain(value)          pedal travel 0..1
-//       allNotesOff()
+//       sostenuto(on)           latch the dampers of the keys held now (and all, with sustain fully down)
+//       unaCorda(on)            strikes from now on miss the last string of each course
+//       allNotesOff()           every key and all three pedals up
 //       setQuality({courseModeBudget?, partialBandHz?, maxDynamicModes?})
 //       setTargetMs(ms) | setSnapshotHz(hz) | setGovernor(bool)
 //       partials(midi)          -> {type:'reply', id, name, value: Float64Array}
@@ -231,6 +233,8 @@ function command(message) {
     }
     case 'noteOff': engine.noteOff(Number(args[0])); break;
     case 'sustain': if (!engine.sustain(Number(args[0]))) fail('sustain must lie in [0,1]', { id, command: name, code: 'refused' }); break;
+    case 'sostenuto': if (!engine.sostenuto(Boolean(args[0]))) fail('sostenuto refused', { id, command: name, code: 'refused' }); break;
+    case 'unaCorda': if (!engine.unaCorda(Boolean(args[0]))) fail('una corda refused', { id, command: name, code: 'refused' }); break;
     case 'allNotesOff': engine.allNotesOff(); break;
     case 'setQuality': {
       const q = args[0] || {};

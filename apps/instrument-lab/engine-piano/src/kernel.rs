@@ -1322,12 +1322,18 @@ struct Contact {
     force: f64,
     /// Recoverable felt energy at the committed overlap [J].
     stored_j: f64,
+    /// Whether the hammer meets this string at all (una corda shifts it off the last
+    /// one, engine.rs `arm`). A missed string carries no force and no felt state; its
+    /// overlap is still tracked, as the reference does, for the catch.
+    enabled: bool,
 }
 
 #[derive(Clone)]
 struct Key {
     midi: u8,
     held: bool,
+    /// Caught by the sostenuto rod: its dampers stay lifted until the pedal rises.
+    latched: bool,
     slot: Option<usize>,
     model: shank::Prepared,
     rest: shank::State,
@@ -1443,6 +1449,8 @@ pub struct LivePiano {
     /// Strikes waiting for the next sample: (course, hammer velocity).
     pending_on: Vec<(usize, f64)>,
     sustain: f64,
+    sostenuto: bool,
+    una_corda: bool,
     engagement_cached: f64,
     mic: BaffledPressure,
     pub ledger: Ledger,
@@ -1522,6 +1530,8 @@ impl Clone for LivePiano {
             busy: spare(&self.busy),
             pending_on: spare(&self.pending_on),
             sustain: self.sustain,
+            sostenuto: self.sostenuto,
+            una_corda: self.una_corda,
             engagement_cached: self.engagement_cached,
             mic: self.mic.clone(),
             ledger: self.ledger,
@@ -1795,11 +1805,12 @@ impl LivePiano {
             let rest = model.rest(CATCH_DISTANCE);
             let rest_energy = model.energy(&rest, CATCH_DISTANCE);
             let contacts = (0..c.unison)
-                .map(|_| Contact { state: law.initial_state(), memory: relaxation::Memory::default(), overlap: -CATCH_DISTANCE, force: 0.0, stored_j: 0.0 })
+                .map(|_| Contact { state: law.initial_state(), memory: relaxation::Memory::default(), overlap: -CATCH_DISTANCE, force: 0.0, stored_j: 0.0, enabled: true })
                 .collect();
             keys.push(Key {
                 midi: c.midi,
                 held: false,
+                latched: false,
                 slot: None,
                 model,
                 rest,
@@ -1880,6 +1891,8 @@ impl LivePiano {
             busy: Vec::with_capacity(32),
             pending_on: Vec::with_capacity(32),
             sustain: 0.0,
+            sostenuto: false,
+            una_corda: false,
             engagement_cached: f64::NAN,
             mic,
             ledger: Ledger::default(),
@@ -1954,6 +1967,30 @@ impl LivePiano {
         Ok(())
     }
     pub fn sustain(&self) -> f64 { self.sustain }
+
+    /// Sostenuto pedal (engine.rs `set_sostenuto`). Pressing it latches the dampers of
+    /// every key held down at that moment, and of every key while the sustain pedal is
+    /// fully down (the rod catches dampers raised by either); keys pressed later are not
+    /// caught. Releasing it lets every latched damper fall.
+    pub fn set_sostenuto(&mut self, on: bool) {
+        if on && !self.sostenuto {
+            let raised = self.sustain >= 1.0;
+            for key in &mut self.keys {
+                key.latched = key.held || raised;
+            }
+        }
+        if !on {
+            for key in &mut self.keys {
+                key.latched = false;
+            }
+        }
+        self.sostenuto = on;
+    }
+    pub fn sostenuto(&self) -> bool { self.sostenuto }
+    /// Una corda (engine.rs `set_una_corda`): strikes that START afterwards meet
+    /// max(unison - 1, 1) strings of their course; the rest are missed.
+    pub fn set_una_corda(&mut self, on: bool) { self.una_corda = on; }
+    pub fn una_corda(&self) -> bool { self.una_corda }
 
     /// Partial counts (speaking, duplex) granted to a course by the budget.
     /// Both follow the partial band. When the budget (or the table ceiling)
@@ -2359,7 +2396,7 @@ impl LivePiano {
 
     fn is_damped(&self, ac: &ACourse) -> bool {
         let key = &self.keys[ac.ci];
-        key.has_damper && !key.held && self.sustain < 1.0
+        key.has_damper && !key.held && !key.latched && self.sustain < 1.0
     }
 
     /// Post-escapement hammer velocity [m/s]. Returns false when refused.
@@ -2408,13 +2445,16 @@ impl LivePiano {
         }
         if !activate.is_empty() {
             // Make room first: the quietest key that is not being struck yields
-            // (keys still held down are the last to go). The event is counted.
+            // (keys held down or caught by the sostenuto are the last to go). The event is counted.
             let mut retire: Vec<(usize, usize)> = Vec::new();
             if modes > self.cfg.max_dynamic_modes || keys > self.cfg.max_courses {
                 let mut victims: Vec<(f64, usize, usize)> = self.active.iter().enumerate()
                     .filter(|(_, ac)| !pending.iter().any(|(ci, _)| *ci == ac.ci)
                         && !self.keys[ac.ci].active && self.keys[ac.ci].pending_velocity.is_none())
-                    .map(|(slot, ac)| (self.relative_energy(ac) * if self.keys[ac.ci].held { 1.0e6 } else { 1.0 }, slot, ac.modes))
+                    .map(|(slot, ac)| {
+                        let key = &self.keys[ac.ci];
+                        (self.relative_energy(ac) * if key.held || key.latched { 1.0e6 } else { 1.0 }, slot, ac.modes)
+                    })
                     .collect();
                 victims.sort_by(|a, b| a.0.total_cmp(&b.0));
                 for (_, victim, victim_modes) in victims {
@@ -2485,18 +2525,27 @@ impl LivePiano {
     fn launch(&mut self, ci: usize, velocity: f64) {
         let Some(slot) = self.keys[ci].slot else { return; };
         let ac = &self.active[slot];
-        // engine.rs `arm`: keep 2 mm clearance below the lowest felt face.
+        // engine.rs `arm`: keep 2 mm clearance below the lowest felt face it will meet.
+        // Una corda selects physical strings: the shifted hammer misses the last one.
+        let unison = self.courses[ci].unison;
+        let count = if self.una_corda { unison.saturating_sub(1).max(1) } else { unison };
         let mut launch = -LAUNCH_CLEARANCE;
         let mut positions = [0.0_f64; 3];
         for s in ac.segs.iter().filter(|s| !s.duplex) {
             let x = self.contact_position(ac, s);
             positions[s.member] = x;
+            if s.member >= count {
+                continue;
+            }
             let key = &self.keys[ci];
             let c = &key.contacts[s.member];
             let free = key.law.eps_residual(&c.state) * key.thickness + key.creep.deformation(&c.memory);
             launch = launch.min(x + free - LAUNCH_CLEARANCE);
         }
         let key = &mut self.keys[ci];
+        for (member, c) in key.contacts.iter_mut().enumerate() {
+            c.enabled = member < count;
+        }
         let before = key.model.energy(&key.motion, CATCH_DISTANCE);
         key.motion = key.model.launch(launch, velocity);
         key.active = true;
@@ -2526,6 +2575,8 @@ impl LivePiano {
             key.pending_velocity = None;
         }
         self.sustain = 0.0;
+        self.set_sostenuto(false);
+        self.una_corda = false;
     }
 
     fn refresh_pads(&mut self) {
@@ -2888,6 +2939,9 @@ impl LivePiano {
                 let p_free = dot(&self.m.hs[s.off..s.off + s.n], &self.fq[s.off..s.off + s.n]);
                 let position = p_free + (ac.b0 + b1) * lift_bq + s.hammer_lift * b1;
                 let old = &key.contacts[s.member];
+                if !old.enabled {
+                    continue;
+                }
                 // Felt that starts and ends this step clear of its crushed
                 // face carries exactly zero force: the scalar solve would
                 // return 0 at its first residual. Such sites need no solve.
@@ -3081,16 +3135,18 @@ impl LivePiano {
                 felt_loss += viscous;
                 if key.active {
                     let end = y - positions[member];
-                    let start_elastic = old.overlap - key.creep.deformation(&old.memory);
-                    let end_elastic = end - key.creep.deformation(&memory);
-                    // fs-material commits the crush history; the recoverable
-                    // energy at the committed point is carried from step to step.
-                    let state = key.law.update_state(end_elastic / key.thickness, &old.state);
-                    let stored = key.area * key.thickness
-                        * crate::fastfelt::stored(&key.law, end_elastic / key.thickness, &state);
-                    felt_loss += force * (end_elastic - start_elastic) - (stored - old.stored_j);
-                    old.stored_j = stored;
-                    old.state = state;
+                    if old.enabled {
+                        let start_elastic = old.overlap - key.creep.deformation(&old.memory);
+                        let end_elastic = end - key.creep.deformation(&memory);
+                        // fs-material commits the crush history; the recoverable
+                        // energy at the committed point is carried from step to step.
+                        let state = key.law.update_state(end_elastic / key.thickness, &old.state);
+                        let stored = key.area * key.thickness
+                            * crate::fastfelt::stored(&key.law, end_elastic / key.thickness, &state);
+                        felt_loss += force * (end_elastic - start_elastic) - (stored - old.stored_j);
+                        old.stored_j = stored;
+                        old.state = state;
+                    }
                     old.overlap = end;
                 }
                 old.memory = memory;

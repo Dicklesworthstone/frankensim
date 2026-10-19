@@ -407,6 +407,16 @@ export class LivePianoClient {
     this.send('sustain', Math.max(0, Math.min(1, Number(value))));
   }
 
+  /** Sostenuto pedal: pressing it latches the dampers of the keys held down then. */
+  sostenuto(on: boolean): void {
+    this.send('sostenuto', on);
+  }
+
+  /** Una corda pedal: strikes from now on miss the last string of each course. */
+  unaCorda(on: boolean): void {
+    this.send('unaCorda', on);
+  }
+
   allNotesOff(): void {
     this.send('allNotesOff');
   }

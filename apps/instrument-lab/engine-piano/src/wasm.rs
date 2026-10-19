@@ -51,6 +51,12 @@ impl Playback {
     fn set_sustain(&mut self, value: f64) -> Result<(), String> {
         match self { Self::Single(p) => p.set_sustain(value), Self::Multirate(a) => a.set_sustain(value) }
     }
+    fn set_sostenuto(&mut self, on: bool) -> Result<(), String> {
+        match self { Self::Single(p) => { p.set_sostenuto(on); Ok(()) } Self::Multirate(a) => a.set_sostenuto(on) }
+    }
+    fn set_una_corda(&mut self, on: bool) -> Result<(), String> {
+        match self { Self::Single(p) => { p.set_una_corda(on); Ok(()) } Self::Multirate(a) => a.set_una_corda(on) }
+    }
     fn set_quality(&mut self, modes: usize, band: f64, total: usize) -> Result<(), String> {
         match self { Self::Single(p) => p.set_quality(modes, band, total),
             Self::Multirate(a) => a.set_quality(modes, band, total) }
@@ -194,6 +200,12 @@ impl PianoEngine {
     pub fn note_off(&mut self, midi: u8) { self.piano.note_off(midi); }
     /// Sustain pedal travel in [0,1]; damper drag scales with (1-travel)^2.
     pub fn sustain(&mut self, value: f64) -> bool { self.piano.set_sustain(value).is_ok() }
+    /// Sostenuto pedal: pressing it latches the dampers of the keys held down then
+    /// (and of all keys while the sustain pedal is fully down); releasing it drops them.
+    pub fn sostenuto(&mut self, on: bool) -> bool { self.piano.set_sostenuto(on).is_ok() }
+    /// Una corda pedal: strikes that start afterwards miss the last string of each course.
+    #[wasm_bindgen(js_name = unaCorda)]
+    pub fn una_corda(&mut self, on: bool) -> bool { self.piano.set_una_corda(on).is_ok() }
     #[wasm_bindgen(js_name = allNotesOff)]
     pub fn all_notes_off(&mut self) { self.piano.all_notes_off(); }
     /// Limits for keys that start sounding afterwards, bounded by OUTPUT rate.

@@ -150,6 +150,8 @@ export class LivePianoSection {
   private octave = 4;
   private pedal = 0;
   private pedalBeforeSpace = 0;
+  private sostenuto = false;
+  private unaCorda = false;
   private demoTimers: number[] = [];
   private demoName: string | null = null;
   private lastStats: PianoStats | null = null;
@@ -224,6 +226,13 @@ export class LivePianoSection {
         <div class="lp-row">
           <button type="button" class="btn sm lp-pedal-btn" aria-pressed="false">Pedal</button>
           <input type="range" class="lp-pedal-range" min="0" max="1" step="0.01" value="0" aria-label="Sustain pedal travel, 0 to 1">
+        </div>
+      </div>
+      <div class="field lp-pedals">
+        <span class="label"><span>Other pedals</span></span>
+        <div class="lp-row">
+          <button type="button" class="btn sm lp-sostenuto-btn" aria-pressed="false" title="Holds up the dampers of the keys held down when you press it">Sostenuto</button>
+          <button type="button" class="btn sm lp-una-btn" aria-pressed="false" title="The hammers miss the last string of each key">Una corda</button>
         </div>
       </div>
       <div class="field lp-midi" hidden>
@@ -385,7 +394,7 @@ export class LivePianoSection {
           ? `One shared soundboard: ${board} coordinates of the Model D board, on the 16-division mesh of the graded offline renders, with its full damping matrix: ${exact} exact modes, plus the ${board - exact} shapes that best reproduce every key's bridge response from there up to 8 kHz (a proper orthogonal decomposition of the 0–2400 Hz slice). This is the largest board this device computed fast enough when you pressed Start (32 to 128).`
           : 'One shared soundboard: a reduction of the Model D board on the 16-division mesh of the graded offline renders, with its full damping matrix: exact low modes, plus the shapes that best reproduce every key\'s bridge response up to 8 kHz (a proper orthogonal decomposition of the 0–2400 Hz slice). It has 32 to 128 coordinates, the largest this device computes fast enough, chosen when you press Start.',
         'The published hammer shank (rigid rotation plus bending) and RT-0425\'s published felt law: its stiffness on each string of the unison and its rate loss R_H, contact solved implicitly every step.',
-        'The estimated damper pad on every string up to E6 (four quadrature points), and a continuous sustain pedal.',
+        'The estimated damper pad on every string up to E6 (four quadrature points), a continuous sustain pedal, a sostenuto pedal (it holds up the dampers of the keys down when you press it) and una corda (the hammer misses the last string of each course, as in the offline reference).',
         'Pressure from the time-domain Rayleigh integral at a microphone 1 m above the board, at a fixed 10 Pa full scale. No samples, no normalisation, no EQ, no reverb.',
       ], 'in'),
       column('Reduced or absent', [
@@ -397,7 +406,7 @@ export class LivePianoSection {
           : `${board} board coordinates instead of the offline render's 128: the live piano part of Strandbar on this board is ${BOARD_ERROR_DB[board] ?? '—'} dB from the studio render in octave balance (128 coordinates: ${BOARD_ERROR_DB[128]} dB).`,
         'Strings of silent keys stay on the bridge as rigid chords: their mass and tension load it, but they do not move. Offline, on the same board, they move: their partials near the struck note\'s partials take about 13 % of an A3 mf strike into their dampers, and above each of their partials that partial\'s share of their mass no longer loads the bridge. So the live A3 decays more slowly early on (−7.1 against −14.8 dB/s) and has 2.4 dB less energy above 2 kHz. The strings without dampers make no measurable difference.',
         `A polyphony budget of ${info ? info.maxDynamicModes.toLocaleString('en-US') : '2,400'} string modes and ${info ? info.maxSoundingKeys : 24} keys. Beyond it the quietest key is returned to rest early; this is counted ("Forced out") and its energy appears as retired in the ledger. A load governor may lower the budget for new keys on a slow device, and says so.`,
-        'No una corda or sostenuto, no key or action beyond the shank, no room, lid or case, no air loading of the board.',
+        'No key or action beyond the shank, no room, lid or case, no air loading of the board. Una corda shifts no felt: the hammer meets the same felt card on fewer strings.',
       ], 'out'),
     );
     body.append(lists);
@@ -414,7 +423,7 @@ export class LivePianoSection {
     body.append(
       chips('Published', 'pub', ['RT-0425 string scale, 84 keys', 'RT-0425 hammer mass, exponent, stiffness, dissipation', 'RT-0425 string losses', 'RT-0425 bridge coupling points', 'Model D dimensions', 'Model D board drawing (Boutillon et al.)', 'Hammer shank geometry (Chabassier & Durufle)']),
       chips('Estimated', 'est', ['4 end keys of the scale', 'Unison detune 0.8 cents', 'Damper pads, 0.4 N s/m', 'Board damping 1.5 %', 'Rib and bridge widths']),
-      chips('Not modelled live', 'not', ['Silent-string resonance', 'Silent-string damper loss', ...(!board ? ['Board beyond what the device affords'] : board < 128 ? [`Board above ${board} coordinates`] : []), 'Una corda, sostenuto', 'Action beyond the shank', 'Room, lid, case']),
+      chips('Not modelled live', 'not', ['Silent-string resonance', 'Silent-string damper loss', ...(!board ? ['Board beyond what the device affords'] : board < 128 ? [`Board above ${board} coordinates`] : []), 'Action beyond the shank', 'Room, lid, case']),
     );
     if (info) {
       const prov = el('p', 'small muted');
@@ -468,6 +477,8 @@ export class LivePianoSection {
     const pedalRange = q<HTMLInputElement>(this.root, '.lp-pedal-range');
     pedalRange.addEventListener('input', () => this.setPedal(Number(pedalRange.value), 'ui'));
     q<HTMLButtonElement>(this.root, '.lp-pedal-btn').addEventListener('click', () => this.setPedal(this.pedal > 0 ? 0 : 1, 'ui'));
+    q<HTMLButtonElement>(this.root, '.lp-sostenuto-btn').addEventListener('click', () => this.setSostenuto(!this.sostenuto));
+    q<HTMLButtonElement>(this.root, '.lp-una-btn').addEventListener('click', () => this.setUnaCorda(!this.unaCorda));
     this.paintPedal();
 
     // MIDI
@@ -588,6 +599,9 @@ export class LivePianoSection {
       this.buildHonesty(client.info);
       this.root.classList.add('lp-running');
       this.setPedal(this.pedal, 'ui');
+      this.setUnaCorda(this.unaCorda);
+      // A fresh engine has no key held: a sostenuto left down could catch nothing.
+      this.setSostenuto(false);
       this.announce(`Live piano ready in ${Math.round(client.initMs)} milliseconds. Play the keys, or use the computer keyboard.`);
       this.kick();
     } catch (error) {
@@ -646,7 +660,21 @@ export class LivePianoSection {
     setText(q(this.root, '.lp-pedal-out'), this.pedal === 0 ? 'up' : this.pedal === 1 ? 'down' : `${Math.round(this.pedal * 100)} % travel`);
   }
 
-  /** Every key up, the pedal up, the engine told so (blur, hidden tab). */
+  /** Pressing it latches the dampers of the keys held down at that moment (engine `set_sostenuto`). */
+  setSostenuto(on: boolean): void {
+    this.sostenuto = on;
+    this.client?.sostenuto(on);
+    q<HTMLButtonElement>(this.root, '.lp-sostenuto-btn').setAttribute('aria-pressed', String(on));
+  }
+
+  /** Strikes that start while it is down miss the last string of each course. */
+  setUnaCorda(on: boolean): void {
+    this.unaCorda = on;
+    this.client?.unaCorda(on);
+    q<HTMLButtonElement>(this.root, '.lp-una-btn').setAttribute('aria-pressed', String(on));
+  }
+
+  /** Every key up, the pedals up, the engine told so (blur, hidden tab). */
   private silence(): void {
     this.cancelDemo(false);
     for (const [pointer] of this.pointerKeys) {
@@ -658,7 +686,11 @@ export class LivePianoSection {
     for (const key of this.keyEls.values()) key.classList.remove('on');
     this.pedal = 0;
     this.paintPedal();
-    this.client?.allNotesOff();
+    this.client?.allNotesOff(); // lifts sostenuto and una corda too
+    this.sostenuto = false;
+    this.unaCorda = false;
+    q<HTMLButtonElement>(this.root, '.lp-sostenuto-btn').setAttribute('aria-pressed', 'false');
+    q<HTMLButtonElement>(this.root, '.lp-una-btn').setAttribute('aria-pressed', 'false');
   }
 
   private keyFromPoint(x: number, y: number): number | null {
@@ -783,6 +815,8 @@ export class LivePianoSection {
     if (kind === 0x90 && b > 0) this.press(a, midiVelocityToMS(b), 'midi');
     else if (kind === 0x80 || (kind === 0x90 && b === 0)) this.release(a, 'midi');
     else if (kind === 0xb0 && a === 64) this.setPedal(b / 127, 'midi');
+    else if (kind === 0xb0 && a === 66 && (b >= 64) !== this.sostenuto) this.setSostenuto(b >= 64);
+    else if (kind === 0xb0 && a === 67 && (b >= 64) !== this.unaCorda) this.setUnaCorda(b >= 64);
   }
 
   // ------------------------------------------------------------------ demos

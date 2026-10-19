@@ -120,6 +120,16 @@ impl PianoAudio {
         self.healthy()?;
         self.piano.set_sustain(value)
     }
+    pub fn set_sostenuto(&mut self, on: bool) -> Result<(), String> {
+        self.healthy()?;
+        self.piano.set_sostenuto(on);
+        Ok(())
+    }
+    pub fn set_una_corda(&mut self, on: bool) -> Result<(), String> {
+        self.healthy()?;
+        self.piano.set_una_corda(on);
+        Ok(())
+    }
     pub fn set_quality(&mut self, course_modes: usize, band_hz: f64, total_modes: usize)
         -> Result<(), String> {
         self.healthy()?;
