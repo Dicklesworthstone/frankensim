@@ -2,11 +2,15 @@
 //!
 //! This is an observer of the original enthalpy timeline, not another thermal
 //! integrator. Cell mass, volume and material identity stay fixed. Each flowing
-//! component must use one immutable caloric law and balance mass at every cell,
+//! component must use one immutable caloric law, or explicitly admitted stationary
+//! species/caloric bindings, and balance mass at every cell,
 //! including explicit inlet/outlet reservoirs. Boundary enthalpy is external
 //! energy; interior transfers are internal and never counted as a heat source.
 //! Species mixing, density/volume changes, pressure work and phase-dependent
 //! mobility need their own models; no velocity or melt motion is inferred here.
+
+/// Stationary species balances on the same acyclic prescribed flow graph.
+pub mod species;
 
 use std::collections::{BTreeMap, BTreeSet};
 use super::{CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer, MaterialId};
@@ -22,6 +26,15 @@ pub struct MassFlow {
     pub b: CellId,
     /// Signed mass rate [kg/s], positive from a to b.
     pub kg_s: f64,
+}
+
+impl MassFlow {
+    // One direction convention shared by enthalpy and stationary species.
+    fn directed(self) -> Option<(CellId, CellId, f64)> {
+        if self.kg_s == 0.0 { None }
+        else if self.kg_s > 0.0 { Some((self.a, self.b, self.kg_s)) }
+        else { Some((self.b, self.a, -self.kg_s)) }
+    }
 }
 
 /// External mass connection. Rates are positive magnitudes [kg/s]. Inlet
@@ -116,6 +129,7 @@ pub struct Advected<O> {
     inner: O,
     flows: Vec<MassFlow>,
     boundaries: Vec<MassBoundary>,
+    stationary_species: Option<species::StationarySpecies>,
     boundary_pending: Option<BoundaryPending>,
     pending: Option<Pending>,
     audit: AdvectionAudit,
@@ -139,7 +153,7 @@ impl<O> Advected<O> {
             }
         }
         flows.sort_by_key(|f| f.id);
-        Ok(Self { inner, flows, boundaries: Vec::new(), boundary_pending: None,
+        Ok(Self { inner, flows, boundaries: Vec::new(), stationary_species: None, boundary_pending: None,
             pending: None, audit: AdvectionAudit::default() })
     }
     /// Replace the complete inlet/outlet data at an accepted endpoint. The
@@ -163,6 +177,7 @@ impl<O> Advected<O> {
         }
         boundaries.sort_by_key(|boundary| boundary.identity().0);
         self.boundaries = boundaries;
+        self.stationary_species = None;
         self.boundary_pending = None;
         self.pending = None;
         Ok(self)
@@ -193,6 +208,9 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
         check: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<CellId, f64>, Self::Error> {
         check()?;
+        if let Some(species) = &self.stationary_species {
+            species.validate_laws(thermal, &self.boundaries)?;
+        }
         let mut sources = self.inner.sources(thermal, check)?;
         let mut pending = BoundaryPending { time_s: thermal.time_s(), ..BoundaryPending::default() };
         for (index, boundary) in self.boundaries.iter().enumerate() {
@@ -201,10 +219,14 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
             let cell = thermal.cells().get(&id).ok_or(invalid("inactive mass-flow boundary cell"))?;
             let (power_w, side) = match *boundary {
                 MassBoundary::Inlet { material_id, specific_h_j_kg, .. } => {
-                    if material_id != cell.material_id {
+                    if material_id != cell.material_id && self.stationary_species.is_none() {
                         return Err(invalid("inlet material/datum does not match receiving cell").into());
                     }
-                    let t = thermal.materials[&material_id].temperature_k(specific_h_j_kg)?;
+                    // Stationary mixing validates a common reference, but the
+                    // inlet still carries its OWN species-weighted enthalpy.
+                    let law = thermal.materials.get(&material_id)
+                        .ok_or(invalid("unregistered inlet caloric law"))?;
+                    let t = law.temperature_k(specific_h_j_kg)?;
                     if !t.is_finite() || t <= 0.0 { return Err(DepositionError::MaterialDomain.into()); }
                     pending.inlet_kg_s = finite(pending.inlet_kg_s + kg_s)?;
                     (finite(kg_s * specific_h_j_kg)?, 0)
@@ -250,12 +272,11 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
             if index % 256 == 0 { check()?; }
             let a = thermal.cells().get(&flow.a).ok_or(invalid("inactive advective cell"))?;
             let b = thermal.cells().get(&flow.b).ok_or(invalid("inactive advective cell"))?;
-            if flow.kg_s == 0.0 { continue; }
-            if a.material_id != b.material_id {
+            let Some((up_id, _, rate)) = flow.directed() else { continue; };
+            if a.material_id != b.material_id && self.stationary_species.is_none() {
                 return Err(invalid("advection across different material IDs requires a composition model").into());
             }
-            let (up, down) = if flow.kg_s > 0.0 { (a, b) } else { (b, a) };
-            let rate = flow.kg_s.abs();
+            let (up, down) = if up_id == a.id { (a, b) } else { (b, a) };
             let power_w = finite(rate * up.specific_h_j_kg)?;
             let out = rates.entry(up.id).or_default();
             out[1] = finite(out[1] + rate)?;

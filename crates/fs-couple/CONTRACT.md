@@ -2917,3 +2917,5 @@ leave accepted state unchanged. Added regression sources cover pressure/flow
 condensation, material single/paired reeds, initial fluid momentum, viscosity
 interventions, physical microphone output and transactional refusals; native
 execution and measured clarinet/oboe validation remain separate requirements.
+
+`SteadyAxialGas::solve` in fs-material can feed its source-retaining `AxialGasField` directly to the existing regional duct, reed-bore and scheduled ReedPerformance field constructors. Wall cooling and explicit gas injections therefore change the same EOS/transport medium used for bore propagation, reed inlet loading and physical termination. The shared thermal owner supplies stationary enthalpy/species balances; the emitted field is frozen for acoustics. Its grid, caloric, conservation and low-Mach limits remain explicit and do not imply resolved transient breath evolution or measured clarinet/oboe equivalence.

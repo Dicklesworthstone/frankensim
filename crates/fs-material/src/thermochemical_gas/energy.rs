@@ -8,6 +8,8 @@
 //! No reaction mechanism, piston dynamics or spatial thermal transport is
 //! implied by these local conservative-state closures.
 
+/// Isobaric enthalpy inversion and source-bound stationary-mixture caloric laws.
+pub mod enthalpy;
 /// Density/entropy closure for reversible adiabatic gas-state changes.
 pub mod entropy;
 /// Closed gas storage with heating and reversible adiabatic boundary work.

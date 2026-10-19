@@ -8,6 +8,9 @@
 //! solver. The caller retains the measurements and uncertainty of the supplied
 //! stations. Material and thermochemistry source receipts survive every sample.
 
+/// Conservative stationary heat/species generation using the shared thermal owner.
+pub mod steady;
+
 use fs_matdb::QueryPoint;
 use fs_qty::QuantitySpec;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
@@ -48,6 +51,33 @@ fn invalid(what: impl Into<String>) -> MaterialError {
 }
 fn typed(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
+}
+
+fn resolve_primitive(
+    source: &ThermochemicalGasModel, source_conditions: &QueryPoint,
+    phase: ThermochemicalPhase, state: &PrimitiveGasState,
+) -> Result<ResolvedThermochemicalGasState, MaterialError> {
+    if state.composition.basis() != CompositionBasis::MoleFraction {
+        return Err(invalid("gas field stations require explicit mole fractions"));
+    }
+    let model = source.with_composition(state.composition.clone())?;
+    let point = source_conditions.clone()
+        .with_quantity("temperature", typed(QuantityKind::AbsoluteTemperature), state.temperature_k)
+        .map_err(|error| invalid(format!("gas field temperature: {error}")))?;
+    match phase {
+        ThermochemicalPhase::FrozenGas => model.evaluate(&point),
+        ThermochemicalPhase::LiquidWaterLimit => {
+            if source.water_species().is_none() {
+                return Err(invalid("liquid-water field admission needs an explicit source water species"));
+            }
+            if model.water_species().is_some() {
+                model.evaluate_with_liquid_water_limit(&point)
+            } else {
+                // Explicit zero water preserves the source identity and is unsaturated.
+                model.evaluate(&point)
+            }
+        }
+    }
 }
 
 impl AxialGasField {
@@ -153,41 +183,9 @@ impl AxialGasField {
     }
 
     fn evaluate_primitive(
-        &self,
-        state: &PrimitiveGasState,
+        &self, state: &PrimitiveGasState,
     ) -> Result<ResolvedThermochemicalGasState, MaterialError> {
-        if state.composition.basis() != CompositionBasis::MoleFraction {
-            return Err(invalid(
-                "gas field stations require explicit mole fractions",
-            ));
-        }
-        let model = self.model.with_composition(state.composition.clone())?;
-        let point = self
-            .source_conditions
-            .clone()
-            .with_quantity(
-                "temperature",
-                typed(QuantityKind::AbsoluteTemperature),
-                state.temperature_k,
-            )
-            .map_err(|error| invalid(format!("gas field temperature: {error}")))?;
-        match self.phase {
-            ThermochemicalPhase::FrozenGas => model.evaluate(&point),
-            ThermochemicalPhase::LiquidWaterLimit => {
-                if self.model.water_species().is_none() {
-                    return Err(invalid(
-                        "liquid-water field admission needs an explicit source water species",
-                    ));
-                }
-                if model.water_species().is_some() {
-                    model.evaluate_with_liquid_water_limit(&point)
-                } else {
-                    // Explicit zero water is unsaturated, not an absent source
-                    // or permission to infer another species as water.
-                    model.evaluate(&point)
-                }
-            }
-        }
+        resolve_primitive(&self.model, &self.source_conditions, self.phase, state)
     }
 
     /// Reevaluate the physical medium at one position, preserving exact supplied

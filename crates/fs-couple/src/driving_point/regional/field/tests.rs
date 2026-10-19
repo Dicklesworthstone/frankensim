@@ -407,3 +407,5 @@ fn continuous_field_rejects_unmodeled_side_holes() {
         &geometry, &field(280.0), fs_duct::RiccatiSteps(16),
     ).is_err());
 }
+
+mod steady;

@@ -1,6 +1,18 @@
 //! Transactional substep/event observation of the existing explicit thermal lane.
 use super::*;
 
+/// Instantaneous thermal balance from the same source/flux owner used to step.
+/// No state is advanced and no boundary energy is counted twice.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PowerBalance {
+    /// Actual caloric-law temperatures at this accepted state [K].
+    pub temperatures_k: BTreeMap<CellId, f64>,
+    /// Net inward watts for every active cell; a steady solution makes these zero.
+    pub net_power_w: BTreeMap<CellId, f64>,
+    /// Sum of authored and observed external sources/boundaries [W].
+    pub external_power_w: f64,
+}
+
 /// History coupling on the actual thermal grid, without storing whole fields.
 /// `Clone` must deeply copy mutable physical state. Shared immutable laws are
 /// fine; external effects or shared mutable state cannot be rolled back here.
@@ -155,6 +167,31 @@ impl<'a> DepositionSimulation<'a> {
         }
         // Deliberately do not modify rates.external_w.
         checkpoint()
+    }
+
+    /// Evaluate the actual instantaneous heat balance without advancing time.
+    /// Uses the same observer source/conductance/transfer hooks and heat-rate
+    /// owner as advance_observed. All mutable preparation is confined to clones.
+    /// This is a residual for steady solving, not a finite-difference estimate
+    /// from two advances or a second implementation of the transport equations.
+    pub fn power_balance_observed<O: DepositionObserver>(
+        &self, observer: &O,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<PowerBalance, O::Error> {
+        checkpoint()?;
+        let mut candidate = self.clone();
+        let mut observer = observer.clone();
+        observer.begin()?;
+        let sources = observer.sources(&candidate, &mut checkpoint)?;
+        let conductances = observer.conductances(&candidate, &mut checkpoint)?;
+        let transfers = observer.heat_transfers(&candidate, &mut checkpoint)?;
+        candidate.set_step_conductances(&conductances, &mut checkpoint)?;
+        candidate.add_step_sources(&sources, &mut checkpoint)?;
+        let mut rates = candidate.heat_rates(f64::MAX, &mut checkpoint)?;
+        candidate.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
+        checkpoint()?;
+        Ok(PowerBalance { temperatures_k: rates.temperatures, net_power_w: rates.watts,
+            external_power_w: rates.external_w })
     }
 
     /// Advance thermal state and a deeply cloned observer as one candidate.

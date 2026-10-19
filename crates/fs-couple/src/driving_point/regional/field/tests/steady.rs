@@ -1,0 +1,52 @@
+//! A generated heat/species field drives the real regional duct response.
+use super::*;
+use fs_material::gas_field::steady::{AxialGasCell, SteadyAxialGas, SteadyGasSolve};
+use fs_material::thermochemical_gas::energy::GasEnergySolve;
+
+#[test]
+fn played_wall_cooling_changes_bore_registers_and_physical_termination() {
+    let count = 16;
+    let dx = LENGTH / count as f64;
+    let problem = SteadyAxialGas {
+        source: gas_model(), source_conditions: QueryPoint::new(),
+        static_pressure_pa: 101325.0, phase: ThermochemicalPhase::FrozenGas,
+        inlet: PrimitiveGasState { temperature_k: 300.0,
+            composition: Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap() },
+        inlet_mass_flow_kg_s: 0.00005,
+        cells: (0..count).map(|index| AxialGasCell {
+            end_m: LENGTH * (index + 1) as f64 / count as f64,
+            volume_m3: core::f64::consts::PI * RADIUS.powi(2) * dx,
+            wall_area_m2: TAU * RADIUS * dx,
+            wall_conductance_w_k: 0.05 / count as f64,
+            wall_temperature_k: 299.0, initial_temperature_k: 299.0,
+        }).collect(), injections: vec![],
+    };
+    let controls = SteadyGasSolve {
+        caloric: GasEnergySolve { minimum_temperature_k: 290.0,
+            maximum_temperature_k: 310.0, energy_tolerance_j_kg: 1e-8, maximum_iterations: 64 },
+        maximum_dt_s: 0.05, maximum_relaxations: 2000, maximum_substeps: 100000,
+        steady_power_tolerance_w: 1e-9, energy_tolerance_j: 1e-8, maximum_mean_mach: 0.05,
+    };
+    let solution = problem.solve(controls, || false).unwrap();
+    let duct = RegionalDuct::from_gas_field(&cylinder(), solution.field(), 64).unwrap();
+    let uniform = RegionalDuct::from_gas_field(&cylinder(), &field(300.0), 64).unwrap();
+    assert_eq!(duct.inlet_gas(), solution.field().state_at(0.0).unwrap().state());
+    assert_eq!(duct.exterior_gas(), solution.field().state_at(LENGTH).unwrap().state());
+    assert!(duct.exterior_gas().temperature < 299.5);
+    let f1 = resonance(&duct, 1);
+    let f3 = resonance(&duct, 3);
+    assert!(f1 < resonance(&uniform, 1));
+    let register_change_cents = 1200.0 * (f3 / (3.0 * f1)).log2();
+    assert!(register_change_cents > 0.01 && register_change_cents < 1.0,
+        "register shift {register_change_cents}");
+    for frequency in [150.0, 350.0, 900.0] {
+        let actual = duct.response(TAU * frequency, LossModel::Bessel,
+            Termination::UnflangedOpen, None).unwrap();
+        let original = uniform.response(TAU * frequency, LossModel::Bessel,
+            Termination::UnflangedOpen, None).unwrap();
+        assert!(actual.impedance.re.is_finite() && actual.impedance.re >= 0.0);
+        assert!(actual.impedance.im.is_finite());
+        assert_ne!(actual.impedance, original.impedance);
+        assert_ne!(actual.p_mouth_over_u_in, original.p_mouth_over_u_in);
+    }
+}

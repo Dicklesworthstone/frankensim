@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 // Keep the std-only kernel testable as a standalone crate as well as a module.
 #[path = "deposition/observe.rs"]
 mod observe;
-pub use observe::{ContactUpdate, DepositionObserver};
+pub use observe::{ContactUpdate, DepositionObserver, PowerBalance};
 #[path = "deposition/coverage.rs"]
 mod coverage;
 pub use coverage::{ContactPatch, ContactPatchUpdate};
@@ -53,6 +53,9 @@ pub trait ThermalLaw {
     /// Global upper bound on dT/dh [kg K/J] over the admitted enthalpy domain.
     /// Must be finite and nonnegative; an underestimated bound invalidates CFL.
     fn maximum_temperature_slope(&self) -> f64;
+    /// Optional frozen mixture/reference binding for stationary species advection.
+    /// The original single-material path does not require or infer this data.
+    fn advected_composition(&self) -> Option<advection::species::CaloricComposition<'_>> { None }
 }
 
 /// Declared reservoir contact, independent of mechanical adhesion or strength.
