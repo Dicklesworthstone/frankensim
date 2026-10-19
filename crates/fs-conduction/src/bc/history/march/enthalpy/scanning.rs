@@ -6,6 +6,9 @@
 //! heat equation, phase update or implicit reset of history. A source is a
 //! discretely normalized deposition profile, not an optical or melt-flow model.
 
+/// Implicit endpoint derivatives with respect to moving-source controls.
+pub mod sensitivity;
+
 use super::{EnthalpyHistoryRun, EnthalpyStepConfig, EnthalpyStepSolution,
     HeterogeneousEnthalpyError, conduction, invalid, natural_only, poll};
 use super::adaptive::{PhaseErrorTolerance, phase_error};
