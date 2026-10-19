@@ -1,4 +1,7 @@
 //! Data-only several-chamber coupling with shared source and surface admission.
+/// Compose electrical heating, thermal contacts and radiation on the shared gas network.
+pub mod exchange;
+
 use super::*;
 use crate::circuit_enthalpy::material::{MaterialNetwork,MaterialNetworkError,MaterialNetworkSample};
 use crate::circuit_enthalpy::contacts::material::{ElectricalContactNetwork,ElectricalContactNetworkError};
