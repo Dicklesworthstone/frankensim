@@ -4,7 +4,7 @@ use super::*;
 fn bundle(card: &MaterialCard, key: &PropertyKey, query: &QueryPoint) -> ResolvedMaterialStatePoint {
     resolve_material_state_point(card, query, &[
         ScalarPropertyRequirement::try_with_key(key, ScalarAdmissibility::Finite).unwrap(),
-        ScalarPropertyRequirement::try_new("density", Density::DIMS, ScalarAdmissibility::Positive).unwrap(),
+        ScalarPropertyRequirement::try_new("density", Density::DIMS, ScalarAdmissibility::StrictlyPositive).unwrap(),
     ], MaterialPropertySelection::SingleClaimOnly).unwrap()
 }
 
@@ -67,7 +67,7 @@ fn snapshot_cannot_launder_missing_or_negative_conductivity_as_insulation() {
         let mut layers = layers(&card, &key, &context);
         layers.area_m2 = 0.0;
         let missing = resolve_material_state_point(&card, &query, &[
-            ScalarPropertyRequirement::try_new("density", Density::DIMS, ScalarAdmissibility::Positive).unwrap(),
+            ScalarPropertyRequirement::try_new("density", Density::DIMS, ScalarAdmissibility::StrictlyPositive).unwrap(),
         ], MaterialPropertySelection::SingleClaimOnly).unwrap();
         assert!(layers.resolve_from_material(gas.state(), body, missing).is_err());
         let result = layers.resolve_from_material(gas.state(), body, bundle(&card, &key, &query));
