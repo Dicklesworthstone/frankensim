@@ -119,8 +119,8 @@ conductance. The pivoted rows use seeds `200,400,800,1600,2300`; the POD rows us
 | 128 | 0.01 / 0.00 | 1.14 / 0.36 | 0.00 / 0.00 | 0.25 / 0.00 | 1.0 (2.0) / 0.4 (0.9) |
 
 Brightness is the mean dB error at and above 2 kHz minus that below, per key. The POD
-errors fall with N in every column. They change by about 0.5 dB or less for 8 to 24
-frequencies, or for a ceiling of 4.8 to 16 kHz instead of 8 kHz. Neither change helps
+errors fall with N in every column. They change by at most 0.7 dB, mostly under 0.5, for 8 to
+24 frequencies, or for a ceiling of 4.8 to 16 kHz instead of 8 kHz. Neither change helps
 alone: POD on the pivoted form's five seeds, and pivots over POD's sixteen, both keep
 most of the error above 2 kHz. These figures compare the reduction with its source
 slice only. They say nothing about the slice's own band limit, about the mesh, or
