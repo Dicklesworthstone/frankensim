@@ -487,6 +487,40 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         self.tangent(&elements, states, displacement_m, cx)
     }
 
+    /// Reference displacement gradients from the same P1 shape gradients as
+    /// the mechanical weak form. Coupled owners can bound small rotations as
+    /// well as symmetric strain, without reconstructing a second FE geometry.
+    pub fn displacement_gradients(
+        &self,
+        displacement_m: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<[[f64; 3]; 3]>, SmallStrainTetError> {
+        checkpoint(cx)?;
+        let elements = self.validate()?;
+        if displacement_m.len() != 3 * self.nodes_m.len()
+            || displacement_m.iter().any(|v| !v.is_finite())
+        {
+            return Err(SmallStrainTetError::InvalidInput {
+                what: "invalid displacement field for element kinematics".into(),
+            });
+        }
+        let mut gradients = Vec::with_capacity(elements.len());
+        for element in &elements {
+            checkpoint(cx)?;
+            let mut gradient = [[0.0; 3]; 3];
+            for (a, &node) in element.nodes.iter().enumerate() {
+                for i in 0..3 {
+                    for j in 0..3 {
+                        gradient[i][j] = displacement_m[3 * node + i]
+                            .mul_add(element.gradients[a][j], gradient[i][j]);
+                    }
+                }
+            }
+            gradients.push(gradient);
+        }
+        Ok(gradients)
+    }
+
     fn check(&self, u: &[f64], states: &[L::State]) -> Result<(), SmallStrainTetError> {
         if u.len() != 3 * self.nodes_m.len()
             || states.len() != self.tetrahedra.len()
@@ -503,12 +537,42 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
     ///
     /// # Errors
     /// See [`SmallStrainTetError`].
-    #[allow(clippy::too_many_lines)] // one increment / Newton / backtracking loop
     pub fn solve(
         &self,
         cx: &Cx<'_>,
     ) -> Result<SmallStrainTetSolution<L::State>, SmallStrainTetError> {
+        self.solve_candidate(None, cx)
+    }
+
+    /// Continue the same native Newton solve from accepted displacement and
+    /// element history. Load factors still specify absolute targets, not
+    /// increments added to the accepted displacement. All proposals borrow the
+    /// same old history until their load increment converges; refusal publishes
+    /// none of the candidate state.
+    ///
+    /// This is the ingress for thermal/material recoupling between increments.
+    /// The constitutive owner must admit the retained history, coefficient
+    /// changes and energy transfer before accepting the resulting solution.
+    pub fn solve_from(
+        &self,
+        displacement_m: &[f64],
+        element_states: &[L::State],
+        cx: &Cx<'_>,
+    ) -> Result<SmallStrainTetSolution<L::State>, SmallStrainTetError> {
+        self.solve_candidate(Some((displacement_m, element_states)), cx)
+    }
+
+    #[allow(clippy::too_many_lines)] // one shared increment / Newton / backtracking loop
+    fn solve_candidate(
+        &self,
+        initial: Option<(&[f64], &[L::State])>,
+        cx: &Cx<'_>,
+    ) -> Result<SmallStrainTetSolution<L::State>, SmallStrainTetError> {
+        checkpoint(cx)?;
         let elements = self.validate()?;
+        if let Some((displacement, states)) = initial {
+            self.check(displacement, states)?;
+        }
         let dofs = 3 * self.nodes_m.len();
         let mut is_prescribed = vec![false; dofs];
         for &(dof, _) in self.prescribed_m {
@@ -519,10 +583,15 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         for (row, &dof) in free.iter().enumerate() {
             row_of[dof] = row;
         }
-        let mut states: Vec<L::State> = (0..elements.len())
-            .map(|index| self.laws.at(index).initial_state())
-            .collect();
-        let mut u = vec![0.0f64; dofs];
+        let (mut u, mut states) = match initial {
+            Some((displacement, states)) => (displacement.to_vec(), states.to_vec()),
+            None => (
+                vec![0.0; dofs],
+                (0..elements.len())
+                    .map(|index| self.laws.at(index).initial_state())
+                    .collect(),
+            ),
+        };
         let mut increments = Vec::with_capacity(self.load_path.len());
         for (increment, &load) in self.load_path.iter().enumerate() {
             let mut f_ext = vec![0.0f64; dofs];
@@ -633,6 +702,7 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
             .enumerate()
             .map(|(index, (eps, state))| self.laws.at(index).stress(eps, state))
             .collect();
+        checkpoint(cx)?;
         Ok(SmallStrainTetSolution {
             displacement_m: u.as_chunks::<3>().0.to_vec(),
             element_strain,

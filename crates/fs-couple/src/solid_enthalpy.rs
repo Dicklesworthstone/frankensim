@@ -10,8 +10,13 @@
 //! infer reciprocal thermoelastic heat, plastic flow, phase-support laws, or
 //! deformation-dependent thermal conductances. Those require their own closures.
 //! Partial melt and excessive displacement/strain refuse the whole candidate.
+//! The sibling [`plastic`] path couples actual loaded J2 tetrahedra and spatial
+//! physical-heat feedback under its separately stated energetic assumptions.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Loaded J2 tetrahedra exchange physical plastic heat with spatial enthalpy.
+pub mod plastic;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -390,3 +395,4 @@ pub struct SolidEnthalpyCandidate<'m, 't> {
     pub state: SolidEnthalpyState<'m>,
     pub equilibrium: SolidEquilibrium,
 }
+
