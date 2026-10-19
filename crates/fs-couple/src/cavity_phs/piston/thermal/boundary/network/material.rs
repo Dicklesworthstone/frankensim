@@ -73,9 +73,11 @@ pub(crate) fn resolve_contact(
         temperature_axis:material.point.temperature_axis,liquid_fraction_axis:material.point.liquid_fraction_axis,
         conductivity:key,selection:selection.clone(),area_m2:geometry.area_m2,
         gas_distance_m:geometry.gas_distance_m,body_distance_m:geometry.cell_distance_m};
-    let resolved=layers.resolve(gas,sample.phase).map_err(MaterialNetworkError::Material)?;
-    if sample.conductivity.as_ref()!=Some(&resolved.source) {
-        return Err(invalid("gas contact and network did not resolve the same conductivity source"));
-    }
-    Ok(resolved)
+    // Reuse the complete endpoint bundle, including electrical properties.
+    // Re-querying just k creates a different bundle and rejects valid coupled
+    // states. The layer owner still checks card, coordinates, key and source pin.
+    let snapshot=sample.conductivity.as_ref()
+        .ok_or(invalid("gas contact lacks resolved endpoint conductivity"))?;
+    layers.resolve_from_material(gas,sample.phase,snapshot.clone())
+        .map_err(MaterialNetworkError::Material)
 }

@@ -1,8 +1,7 @@
 //! Data-only gas surface bindings on the existing material/circuit network.
 use super::*;
 use crate::circuit_enthalpy::material::{MaterialNetwork, MaterialNetworkError, MaterialNetworkSample};
-use crate::cavity_phs::piston::thermal::layers::MaterialConductionLayers;
-use crate::cavity_phs::piston::thermal::boundary::network::material::GasConductionGeometry;
+use crate::cavity_phs::piston::thermal::boundary::network::material::{GasConductionGeometry, resolve_contact};
 use fs_material::state_point::ResolvedMaterialStatePoint;
 
 /// One non-overlapping patch of a material-bound thermal cell.
@@ -75,25 +74,8 @@ impl GasPiston {
             CircuitEnthalpyInput { circuit, ports: electrical_ports, destinations: &destinations },
             NetworkSurfacesDrive { ports: &ports, input: drive.input, piston: drive.piston, exchange: drive.exchange },
             controls, guess_j, |state| binding.resolve(state, || (*cancel.borrow_mut())()),
-            |port, _, source, gas| {
-                let invalid = MaterialNetworkError::Invalid;
-                let geometry = surfaces[&port.id].geometry;
-                let material = binding.cells.iter().find(|c| c.cell == port.cell)
-                    .ok_or(invalid("gas-contact cell lacks original material binding"))?;
-                let index = source.cells.binary_search_by_key(&port.cell, |c| c.cell)
-                    .map_err(|_| invalid("gas-contact cell lacks actual endpoint phase"))?;
-                let sample = &source.cells[index];
-                let (key, selection) = material.conductivity.as_ref()
-                    .ok_or(invalid("every gas-contact cell needs explicit conductivity"))?;
-                let layers = MaterialConductionLayers { material: material.point.material, context: material.point.context,
-                    temperature_axis: material.point.temperature_axis, liquid_fraction_axis: material.point.liquid_fraction_axis,
-                    conductivity: key, selection: selection.clone(), area_m2: geometry.area_m2,
-                    gas_distance_m: geometry.gas_distance_m, body_distance_m: geometry.cell_distance_m };
-                let resolved = layers.resolve(gas, sample.phase).map_err(MaterialNetworkError::Material)?;
-                if sample.conductivity.as_ref() != Some(&resolved.source) {
-                    return Err(invalid("surface and thermal network conductivity sources differ"));
-                }
-                Ok(resolved)
+            |port, state, source, gas| {
+                resolve_contact(binding, port.cell, state, source, gas, surfaces[&port.id].geometry)
             }, || (*cancel.borrow_mut())());
         match result {
             Err(CircuitEnthalpyError::Source(NetworkGasError::Material(MaterialNetworkError::Thermal(DepositionError::Cancelled)))) =>
