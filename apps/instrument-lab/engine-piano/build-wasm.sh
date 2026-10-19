@@ -10,7 +10,11 @@ TARGET=${FSIM_LIVE_PIANO_TARGET:-/var/folders/vt/n2xyn_s51b97_j3yh2qbqcnc0000gn/
 OUT=$HERE/../public/live/piano
 cd $HERE
 # simd128 (wasm SIMD: Chrome 91, Firefox 89, Safari 16.4): the kernel's mode loops are written as f64x2.
-SIMD="-C target-feature=+simd128"
+# Panic messages embed source paths: map the checkout's parent (the repository and its path siblings) and
+# Cargo's home to fixed prefixes, so the published wasm names no local directory. Two exports of one commit
+# in different directories still differ in data layout (Cargo hashes path dependencies' locations into
+# symbol names), so compare rendered samples across exports, not bytes.
+SIMD="-C target-feature=+simd128 --remap-path-prefix=${HERE:h:h:h:h}=/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
 run() { env RCH_SHIM_LOCAL_IDE=1 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-8} CARGO_TARGET_DIR=$TARGET CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS=$SIMD cargo "$@"; }
 STAGE=$TARGET/bindgen-stage
 mkdir -p $STAGE $OUT
