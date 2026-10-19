@@ -24,6 +24,9 @@ pub use capacity::ThermalHistoryCapacity;
 /// Event-aligned steps that do not skip scheduled loads or backdate their jumps.
 pub mod events;
 
+/// Moving power-normalized source fields for the existing thermal steppers.
+pub mod moving;
+
 use super::{ThermalBoundaryHistory, poll};
 use crate::{ConductionError, ConductionProblem, ConductivityModel, ElementMaterials,
     ScalarField, ThermalBoundary, ThermalInterfaces, VOLUMETRIC_SOURCE_DIMS};
