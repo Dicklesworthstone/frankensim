@@ -7,10 +7,12 @@
 //! ghost are explicit scenario data. No thermal, moving-wall, gas-flow, wetting
 //! calibration or conservative surface-energy evolution is introduced here.
 
-use fs_material::liquid::surface::ResolvedLiquidSurfaceState;
+use fs_exec::CancelGate;
+use fs_material::liquid::surface::{ResolvedLiquidSurfaceState, ResolvedLiquidWettingState};
+use fs_material::state_point::MaterialStatePointError;
 
 use super::{MaterialLbmError, finite, plan_momentum_scaling, positive};
-use crate::d3q19::freesurface3::{Cell3, ContactModel3, FreeSurface3};
+use crate::d3q19::freesurface3::{Cell3, ContactModel3, FreeSurface3, PlanarWall3};
 use crate::d3q19::sparse::MORTON_COORD_BITS;
 use crate::d3q19::{Q3, TILE};
 use crate::{CS2, ScalingPlan};
@@ -30,6 +32,7 @@ pub struct MaterialFreeSurfaceScaling<'a> {
     pressure_unit_pa: f64,
     mass_unit_kg: f64,
     surface_tension_lattice: f64,
+    planar_wetting: Option<(PlanarWall3, &'a ResolvedLiquidWettingState)>,
 }
 
 /// Stationary voxel domain and explicitly chosen numerical wall model.
@@ -122,6 +125,7 @@ pub fn plan_free_surface_from_material(
     Ok(MaterialFreeSurfaceScaling {
         material, flow, cell_size_m, timestep_s, velocity_scale,
         pressure_unit_pa, mass_unit_kg, surface_tension_lattice,
+        planar_wetting: None,
     })
 }
 
@@ -178,6 +182,34 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             "free-surface pressure perturbation is unrepresentable")
     }
 
+    /// Assign the sourced equilibrium angle to one planar domain wall before
+    /// constructing any flow state. The angle is measured through the liquid;
+    /// other domain walls and internal solid tiles retain the neutral ghost.
+    ///
+    /// The caller assigns the substrate and named environment to this geometry.
+    /// The retained interface does not validate an ambient gas EOS or claim a
+    /// calibrated moving contact line. Sigma remains owned by this SAME liquid
+    /// surface source; the wetting interface contributes only the angle.
+    ///
+    /// # Errors
+    /// Refuses a different liquid phase/process/revision, complete query point
+    /// or quantity descriptors before evaluating geometry or allocating flow.
+    pub fn with_planar_wetting(
+        mut self,
+        wall: PlanarWall3,
+        wetting: &'a ResolvedLiquidWettingState,
+    ) -> Result<Self, MaterialStatePointError> {
+        wetting.require_liquid_state(self.material)?;
+        self.planar_wetting = Some((wall, wetting));
+        Ok(self)
+    }
+
+    /// Explicit geometry assignment and source-bearing equilibrium-angle owner.
+    #[must_use]
+    pub const fn planar_wetting(&self) -> Option<(PlanarWall3, &'a ResolvedLiquidWettingState)> {
+        self.planar_wetting
+    }
+
     /// Construct the existing sparse solver after admitting the complete domain.
     ///
     /// The classifier is a fixed predicate on global cell coordinates, as for
@@ -186,22 +218,31 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
     ///
     /// # Errors
     /// Refuses invalid/oversized dimensions, out-of-domain or contradictory solid
-    /// tiles, invalid force conversion and native free-surface construction.
+    /// tiles, a legacy Wetting ghost combined with a sourced planar angle,
+    /// invalid force conversion and native free-surface construction.
     pub fn free_surface3(
         self,
         domain: MaterialFreeSurfaceDomain3<'_>,
         fluid: impl Fn(usize, usize, usize) -> bool,
     ) -> Result<MaterialFreeSurface3<'a>, MaterialLbmError> {
+        if self.planar_wetting.is_some() && domain.contact != ContactModel3::Neutral {
+            return Err(MaterialLbmError::Invalid(
+                "a sourced planar angle requires Neutral on all other walls",
+            ));
+        }
         admit_domain(&domain, &fluid)?;
         let mut gravity = [0.0; 3];
         for (component, physical) in gravity.iter_mut().zip(domain.gravity_m_s2) {
             *component = self.gravity_lattice(physical)?;
         }
         let [nx, ny, nz] = domain.cells;
-        let lattice = FreeSurface3::with_solid_tiles(
+        let mut lattice = FreeSurface3::with_solid_tiles(
             nx, ny, nz, self.flow.tau, gravity, self.surface_tension_lattice,
             domain.contact, domain.solid_tiles, fluid,
         )?;
+        if let Some((wall, wetting)) = self.planar_wetting {
+            lattice.set_planar_contact_angle(wall, wetting.contact_angle_radians())?;
+        }
         Ok(MaterialFreeSurface3 { lattice, scaling: self })
     }
 }
@@ -219,6 +260,14 @@ impl<'a> MaterialFreeSurface3<'a> {
     /// transactional guarantees beyond those of the native step.
     pub fn step(&mut self) -> Result<(), MaterialLbmError> {
         self.lattice.step()?;
+        Ok(())
+    }
+
+    /// Advance with the native cancellation polls before physical publication.
+    /// An observed cancellation preserves populations, mass and conversions;
+    /// the derived fill cache is refreshed on a retry.
+    pub fn step_with_gate(&mut self, gate: &CancelGate) -> Result<(), MaterialLbmError> {
+        self.lattice.step_with_gate(gate)?;
         Ok(())
     }
 

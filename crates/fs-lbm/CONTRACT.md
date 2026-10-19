@@ -267,15 +267,17 @@ changes on a latent plateau, equivalent electrical source bases and rollback.
   `worst_step_violation()` (per-step ledger violation, logged not
   assumed), `retire_gas_tiles()` (ledger-neutral memory maintenance).
 - `FreeSurfaceError3` typed refusals: `Grid`, `Collision` (Morton key +
-  lane + source), `NoFluid`.
+  lane + source), `NoFluid`, `InvalidContactAngle`, `Cancelled`.
 - Goldens: `fs-lbm:d3q19-pour` frozen four-quadrant (see
   golden-couplings.json). Batteries: G0 ledger algebra, G2 Martin-Moyce
   envelope (reference data in `data/reference/martin-moyce-1952.jsonl`,
   report-only curve comparison), G5 bitwise replay.
-- No-claims: conservation and determinism only — no throughput claim
-  (712t), no turbulence or contact-angle physics beyond the 2-D
-  neutral/wetting ghost, quantitative Martin-Moyce central band is
-  fine-lattice scope, solid geometry is tile-granular.
+- No-claims: no throughput (712t), turbulence, calibrated sessile-drop or
+  dynamic contact-line accuracy, thermocapillary traction, phase evolution,
+  moving substrates or closed surface-energy balance. The original curvature
+  clipping and smoothed-fill discretization remain. Quantitative capillary
+  oscillation/spurious-current validation and Martin-Moyce central-band
+  agreement require further resolution studies. Internal solids are tile-granular.
 
 ## Invariants
 
@@ -839,9 +841,10 @@ physics. Historical D3Q19 arithmetic and semantic/golden versions are unchanged.
   wave decay rate — honesty-labeled in lbm-108; the post-collision
   (Filippova–Hänel-style) second-order transfer, general octree topologies,
   and dwr-adaptivity-driven refinement signals are recorded successors.
-- Contact-line physics is MODEL-BRACKETED (neutral vs wetting fill ghosts,
-  lbm-107 reports the sensitivity band), never pretended-certain — the
-  §15.3 caveat is a design decision here, not an omission.
+- Dense contact-line fixtures remain MODEL-BRACKETED (neutral vs wetting
+  fill ghosts; lbm-107 reports the sensitivity band). The opt-in sparse 3-D
+  planar equilibrium-angle closure retains its separate, bounded convention
+  and does not claim calibrated dynamic wetting.
 - ADJOINT HONESTY (plan §8.7 [M]): free-surface LBM adjoints are NOT
   promised — cell-conversion events make the map non-differentiable;
   gradients for free-surface objectives go through surrogate or
@@ -1663,3 +1666,39 @@ moving-wall law is inferred. Lattice sound speed is not physical liquid/gas soun
 speed. `tests/material_free_surface.rs` covers dimensional Young-Laplace
 bookkeeping, material similitude, separate viscosity/capillary substitutions in
 real native evolution, mass accounting, Guo samples and domain refusals.
+
+### Sourced equilibrium angle at one planar domain wall
+
+`MaterialFreeSurfaceScaling::with_planar_wetting` binds a
+`ResolvedLiquidWettingState` to `PlanarWall3` before constructing flow.
+It requires the same liquid phase/process/revision, complete query and quantity
+descriptors as the existing surface bundle; only the angle comes from this
+ordered substrate/liquid interface. The original source/scaling owner continues
+to supply rho, viscosity and sigma. The caller assigns substrate and named
+environment to the receiving geometry; this does not resolve a gas EOS.
+
+`FreeSurface3::set_planar_contact_angle` imposes the equilibrium angle through
+liquid at that one domain face. With wall normal pointing into fluid, its
+smoothed-fill ghost satisfies `dphi/dn_wall = -|grad_t(phi)| cot(theta)`.
+The ghost changes the existing curvature and actual gas-side pressure
+reconstruction; it never edits tracked liquid mass. Exactly pi/2 takes the
+existing Neutral path bit for bit. All other walls remain neutral, including
+internal tile solids; arbitrary staircase normals are not inferred.
+Combining the sourced planar angle with the legacy Wetting ghost refuses before
+geometry or allocation; the remaining walls must be explicitly Neutral.
+Unrepresentable near-endpoint stencil magnitudes refuse before assignment.
+
+`step_with_gate` reuses the native step with tile-level cancellation checks
+and a final check before population publication. Observed cancellation preserves
+populations, mass, carry and conversion counters. After publication begins the
+original conversion cascade completes. The derived fill cache refreshes on retry.
+The original no-argument `step`, sampling and mass APIs remain available.
+
+G1 manufactured checks cover all six wall-normal conventions, zero planar
+curvature and spherical Laplace-curvature refinement. The focused integration
+tests in `tests/material_free_surface3.rs` exercise source-angle trajectory
+changes, exact 90-degree neutrality, omitted-capillarity equivalence, mass
+conservation, source/state/unit/dynamic-support refusal, cancellation and retry.
+These tests establish coupling and operator geometry; they do not establish
+calibrated sessile-drop dynamics, hysteresis, thermocapillary stress, capillary
+oscillation/spurious-current convergence or a closed surface-energy account.

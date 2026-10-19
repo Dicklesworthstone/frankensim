@@ -6,7 +6,7 @@
 //! Surface tension remains conditional on that source's interface environment;
 //! this adapter supplies no gas, purity, surfactant or contact-angle defaults.
 
-use fs_matdb::{MaterialCard, QueryPoint};
+use fs_matdb::{InterfaceSystemCard, MaterialCard, QueryPoint, SurfaceSpec, SystemContext};
 use fs_qty::{Density, Dims, Frequency, QuantitySpec};
 use fs_qty::semantic::QuantityKind;
 
@@ -17,7 +17,8 @@ use super::{
 use crate::liquid_temperature::LiquidViscosityBasis;
 use crate::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, MaterialStatePointError,
-    ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
+    ResolvedInterfaceStatePoint, ResolvedMaterialStatePoint, ResolvedScalarProperty,
+    ScalarAdmissibility, ScalarPropertyRequirement, resolve_interface_state_point,
     resolve_material_state_point,
 };
 
@@ -181,16 +182,33 @@ fn coefficient(
 ) -> Result<f64, MaterialStatePointError> {
     let property = material.property(name)
         .ok_or(MaterialStatePointError::InvalidDerived { quantity: name })?;
+    require_frozen_coefficient(property, name, dims)?;
+    let value = property.value_si();
+    if !value.is_finite() || value <= 0.0 {
+        return Err(MaterialStatePointError::OutsideConsumerDomain {
+            property: name.to_owned(), value, admissibility: ScalarAdmissibility::StrictlyPositive,
+        });
+    }
+    Ok(value)
+}
+
+// Momentum, capillarity and equilibrium wetting share the same rule for a
+// frozen instantaneous coefficient; a valid dynamic sample is insufficient.
+fn require_frozen_coefficient(
+    property: &ResolvedScalarProperty,
+    name: &'static str,
+    dims: Dims,
+) -> Result<(), MaterialStatePointError> {
     if property.requirement().quantity() != QuantitySpec::dimensional(dims)
         || !property.is_constant_at_fixed_temperature()
     {
         return Err(MaterialStatePointError::InvalidRequirement {
             property: name.to_owned(),
-            reason: "isothermal liquid needs its exact scalar quantity and a constant or absolute-temperature-only source",
+            reason: "frozen liquid coefficient needs its exact scalar quantity and a constant or absolute-temperature-only source",
         });
     }
     // A positive sample within a shear/frequency/strain band does not certify
-    // an instantaneous Newtonian coefficient outside that band during flow.
+    // an instantaneous coefficient outside that band during flow.
     for (axis, _) in &property.answer().receipt.query_point {
         if property.answer().evidence.model.validity.bound(axis).is_none() { continue; }
         let quantity = property.answer().receipt.axis_quantities.get(axis).copied();
@@ -199,23 +217,124 @@ fn coefficient(
             QuantityKind::Frequency(_) | QuantityKind::AngularVelocity(_)
                 | QuantityKind::Strain { .. } | QuantityKind::Stress
         ));
-        let rate_dimension = quantity.is_some_and(|q| q.dims() == Frequency::DIMS);
+        let dynamic_dimension = quantity.is_some_and(|q| {
+            q.dims() == Frequency::DIMS || q.dims() == Dims([1, 0, -1, 0, 0, 0])
+        });
         let legacy_dynamic_axis = kind.is_none() && [
             "omega", "frequency", "strain", "epsilon", "eps", "shear_strain",
             "strain_rate", "shear_rate", "plastic_strain", "equivalent_plastic_strain", "stress",
+            "contact_line_speed", "velocity", "capillary_number",
         ].contains(&axis.as_str());
-        if dynamic_kind || rate_dimension || legacy_dynamic_axis {
+        if dynamic_kind || dynamic_dimension || legacy_dynamic_axis {
             return Err(MaterialStatePointError::InvalidRequirement {
                 property: name.to_owned(),
-                reason: "frequency, rate, strain or stress bounded liquid data needs an evolving constitutive owner",
+                reason: "frequency, rate, strain, stress or flow bounded surface data needs an evolving constitutive owner",
             });
         }
     }
-    let value = property.value_si();
-    if !value.is_finite() || value <= 0.0 {
-        return Err(MaterialStatePointError::OutsideConsumerDomain {
-            property: name.to_owned(), value, admissibility: ScalarAdmissibility::StrictlyPositive,
-        });
+    Ok(())
+}
+
+/// Canonical equilibrium contact angle through the liquid, in radians.
+pub const EQUILIBRIUM_CONTACT_ANGLE_PROPERTY: &str = "equilibrium-contact-angle";
+
+/// One sourced equilibrium substrate/liquid response in its declared context.
+///
+/// Surface A is the substrate; surface B is the liquid. The caller assigns the
+/// named environment to the physical scene: retaining that context does not
+/// resolve gas composition or establish equivalence with a separate gas EOS.
+/// This response supplies ONLY the angle. Liquid/gas tension remains in the
+/// receiving `ResolvedLiquidSurfaceState`, including its source conditions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedLiquidWettingState {
+    resolved: ResolvedInterfaceStatePoint,
+    surfaces: [SurfaceSpec; 2],
+    context: SystemContext,
+    contact_angle_radians: f64,
+}
+
+impl ResolvedLiquidWettingState {
+    /// The original selected interface claim and its complete usage receipt.
+    #[must_use]
+    pub const fn resolved(&self) -> &ResolvedInterfaceStatePoint {
+        &self.resolved
     }
-    Ok(value)
+
+    /// Ordered substrate/liquid identities, including their preparation frames.
+    #[must_use]
+    pub const fn surfaces(&self) -> &[SurfaceSpec; 2] {
+        &self.surfaces
+    }
+
+    /// Source-reported environment, medium, third body and history.
+    #[must_use]
+    pub const fn context(&self) -> &SystemContext {
+        &self.context
+    }
+
+    /// Equilibrium angle measured through liquid, strictly between zero and pi.
+    #[must_use]
+    pub const fn contact_angle_radians(&self) -> f64 {
+        self.contact_angle_radians
+    }
+
+    /// Require the declared liquid identity and SAME complete source point.
+    ///
+    /// This checks the surface's phase/process/revision identity and all query
+    /// values/descriptors. SurfaceSpec contains no bulk-card content hash; this
+    /// check does not claim stronger binding than that shared identity contract.
+    pub fn require_liquid_state(
+        &self,
+        liquid: &ResolvedLiquidSurfaceState,
+    ) -> Result<(), MaterialStatePointError> {
+        let bulk = liquid.material();
+        if &self.surfaces[1].material != bulk.material()
+            || self.resolved.query_point() != bulk.query_point()
+            || self.resolved.axis_quantities() != bulk.axis_quantities()
+        {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "wetting interface and liquid material/state assignment mismatch",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Resolve only the equilibrium angle needed by a geometric wall closure.
+///
+/// Missing equilibrium data never falls back to advancing/receding endpoints
+/// or a neutral wall. Constants or absolute-temperature-only sources may be
+/// frozen at this point; dynamic rate/strain/frequency support is not silently
+/// broadened into a static response. Complete interface identity and context
+/// remain accessible. This supplies no hysteresis, moving-contact-line law,
+/// thermocapillary traction or experimental accuracy claim.
+///
+/// # Errors
+/// Refuses source/selection/unit/domain failures, angles outside (0, pi), and
+/// source dependence requiring an evolving constitutive owner.
+pub fn resolve_liquid_wetting_state(
+    card: &InterfaceSystemCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+) -> Result<ResolvedLiquidWettingState, MaterialStatePointError> {
+    let requirement = ScalarPropertyRequirement::try_new(
+        EQUILIBRIUM_CONTACT_ANGLE_PROPERTY,
+        Dims([0; 6]),
+        ScalarAdmissibility::OpenInterval {
+            lower: 0.0,
+            upper: core::f64::consts::PI,
+        },
+    )?;
+    let resolved = resolve_interface_state_point(card, point, &[requirement], selection)?;
+    let angle = resolved
+        .property(EQUILIBRIUM_CONTACT_ANGLE_PROPERTY)
+        .expect("required equilibrium angle was resolved");
+    require_frozen_coefficient(angle, EQUILIBRIUM_CONTACT_ANGLE_PROPERTY, Dims([0; 6]))?;
+    let contact_angle_radians = angle.value_si();
+    Ok(ResolvedLiquidWettingState {
+        resolved,
+        surfaces: [card.surface_a().clone(), card.surface_b().clone()],
+        context: card.context().clone(),
+        contact_angle_radians,
+    })
 }

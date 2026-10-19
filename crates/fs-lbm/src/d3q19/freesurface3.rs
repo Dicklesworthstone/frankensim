@@ -7,9 +7,10 @@
 //! mass exchange, the same gas-side population reconstruction, the same
 //! conversion cascade with a conservation carry, and the same
 //! surface-tension reference-density port (smoothed-fill curvature with the
-//! contact-model wall ghost). No new physics is introduced here by design
-//! (the bead's own rule); every formula is the 2-D crate's, generalized to
-//! three dimensions and Morton/lane canonical order.
+//! contact-model wall ghost). The original path remains the 2-D model in
+//! three dimensions and Morton/lane order. An opt-in planar equilibrium
+//! contact-angle boundary supplies a geometric wall ghost to that same
+//! curvature and pressure-reconstruction operator.
 //!
 //! Sparse specifics owned by this layer:
 //! - Inactive tiles and out-of-domain space are WALL (exactly the sparse
@@ -29,11 +30,14 @@
 //!
 //! No-claims: this layer claims mass-ledger conservation (tracked per step,
 //! worst violation exposed) and deterministic replay — not throughput, not
-//! turbulence physics, not contact-angle physics beyond the 2-D crate's
-//! neutral/wetting ghost, and no interface-reconstruction geometry beyond
-//! the smoothed-fill normal the 2-D crate uses.
+//! turbulence physics, no calibrated contact-line dynamics, and no interface
+//! geometry beyond the smoothed-fill normal. The imposed equilibrium-angle
+//! closure is limited to one planar domain wall; it supplies no hysteresis,
+//! thermocapillary stress, moving substrate or surface-energy balance.
 
 use std::collections::BTreeMap;
+
+use fs_exec::CancelGate;
 
 use super::sparse::{SparseError3, SparseGrid3, demorton3, morton3};
 use super::{CollisionError3, E3, OPP3, Q3, TILE, equilibrium3};
@@ -70,6 +74,46 @@ pub enum ContactModel3 {
     Wetting,
 }
 
+/// One planar domain wall carrying an imposed equilibrium contact angle.
+/// Internal solid tiles and the other five domain walls retain their existing
+/// neutral ghost; this does not infer normals for a staircase substrate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanarWall3 {
+    /// Minimum x face, inward wall normal +x.
+    XMin,
+    /// Maximum x face, inward wall normal -x.
+    XMax,
+    /// Minimum y face, inward wall normal +y.
+    YMin,
+    /// Maximum y face, inward wall normal -y.
+    YMax,
+    /// Minimum z face, inward wall normal +z.
+    ZMin,
+    /// Maximum z face, inward wall normal -z.
+    ZMax,
+}
+
+impl PlanarWall3 {
+    fn axis(self) -> usize {
+        match self {
+            Self::XMin | Self::XMax => 0,
+            Self::YMin | Self::YMax => 1,
+            Self::ZMin | Self::ZMax => 2,
+        }
+    }
+
+    fn upper(self) -> bool {
+        matches!(self, Self::XMax | Self::YMax | Self::ZMax)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PlanarContactAngle3 {
+    wall: PlanarWall3,
+    angle_radians: f64,
+    cotangent: f64,
+}
+
 /// Cumulative conversion ledger (port of the 2-D `ConversionStats`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ConversionStats3 {
@@ -102,6 +146,10 @@ pub enum FreeSurfaceError3 {
     /// Construction found no fluid cell (an all-gas free surface is a
     /// degenerate fixture, refused rather than silently simulated).
     NoFluid,
+    /// The imposed angle or its finite-difference ghost slope is inadmissible.
+    InvalidContactAngle,
+    /// Cancellation was observed before physical state publication.
+    Cancelled,
 }
 
 impl core::fmt::Display for FreeSurfaceError3 {
@@ -117,6 +165,12 @@ impl core::fmt::Display for FreeSurfaceError3 {
                 "free-surface collision refused at tile key {tile_key:#x} lane {lane}: {source}"
             ),
             FreeSurfaceError3::NoFluid => f.write_str("free-surface fixture contains no fluid"),
+            FreeSurfaceError3::InvalidContactAngle => f.write_str(
+                "contact angle must lie in (0, pi) radians with a representable wall slope",
+            ),
+            FreeSurfaceError3::Cancelled => {
+                f.write_str("free-surface step cancelled before publication")
+            }
         }
     }
 }
@@ -172,6 +226,7 @@ pub struct FreeSurface3 {
     /// Surface tension coefficient (0 = off), 2-D port.
     sigma: f64,
     contact: ContactModel3,
+    planar_contact: Option<PlanarContactAngle3>,
     /// Conversion-conservation carry (mass awaiting redistribution).
     carry: f64,
     conversions: ConversionStats3,
@@ -188,6 +243,7 @@ impl core::fmt::Debug for FreeSurface3 {
             .field("active_tiles", &self.tiles.len())
             .field("sigma", &self.sigma)
             .field("contact", &self.contact)
+            .field("planar_contact", &self.planar_contact)
             .field("carry", &self.carry)
             .field("conversions", &self.conversions)
             .field("worst_step_violation", &self.worst_step_violation)
@@ -363,6 +419,7 @@ impl FreeSurface3 {
             solid,
             sigma,
             contact,
+            planar_contact: None,
             carry: 0.0,
             conversions: ConversionStats3::default(),
             worst_step_violation: 0.0,
@@ -522,6 +579,49 @@ impl FreeSurface3 {
         &self.grid
     }
 
+    /// Impose a homogeneous equilibrium angle through the liquid at one planar
+    /// domain face. Other walls use the neutral closure. The angle is not a
+    /// dynamic contact-line law or a claim of calibrated sessile-drop accuracy.
+    /// Exactly pi/2 preserves the existing neutral trajectory bit for bit.
+    ///
+    /// # Errors
+    /// Refuses invalid angles before changing the boundary condition.
+    pub fn set_planar_contact_angle(
+        &mut self,
+        wall: PlanarWall3,
+        angle_radians: f64,
+    ) -> Result<(), FreeSurfaceError3> {
+        if !angle_radians.is_finite()
+            || angle_radians <= 0.0
+            || angle_radians >= core::f64::consts::PI
+        {
+            return Err(FreeSurfaceError3::InvalidContactAngle);
+        }
+        let cotangent = if angle_radians == core::f64::consts::FRAC_PI_2 {
+            0.0
+        } else {
+            let (sin, cos) = fs_math::det::sin_cos(angle_radians);
+            cos / sin
+        };
+        let stencil_bound = 4.0 * cotangent;
+        if !stencil_bound.is_finite() || !(stencil_bound * stencil_bound).is_finite() {
+            return Err(FreeSurfaceError3::InvalidContactAngle);
+        }
+        self.planar_contact = Some(PlanarContactAngle3 {
+            wall,
+            angle_radians,
+            cotangent,
+        });
+        self.contact = ContactModel3::Neutral;
+        Ok(())
+    }
+
+    /// The explicitly assigned domain wall and equilibrium angle [rad].
+    #[must_use]
+    pub fn planar_contact_angle(&self) -> Option<(PlanarWall3, f64)> {
+        self.planar_contact.map(|c| (c.wall, c.angle_radians))
+    }
+
     /// Highest global z coordinate carrying fluid or interface — the 3-D
     /// front-position probe for Martin-Moyce style fixtures reads an axis
     /// extreme; callers pick the axis by fixture orientation.
@@ -603,10 +703,12 @@ impl FreeSurface3 {
     /// `phi_at` port): `from` is the querying cell.
     fn phi_or_ghost(&self, gx: i64, gy: i64, gz: i64, from: (u64, usize)) -> f64 {
         match self.grid.resolve_source(gx, gy, gz) {
-            None => match self.contact {
-                ContactModel3::Neutral => self.fill(from.0, from.1),
-                ContactModel3::Wetting => 1.0,
-            },
+            None => self.planar_angle_ghost([gx, gy, gz]).unwrap_or_else(|| {
+                match self.contact {
+                    ContactModel3::Neutral => self.fill(from.0, from.1),
+                    ContactModel3::Wetting => 1.0,
+                }
+            }),
             Some((slot, lane)) => {
                 let key = self.grid.active_keys()[slot];
                 self.fill_smooth[&key][lane]
@@ -614,22 +716,67 @@ impl FreeSurface3 {
         }
     }
 
+    // Geometric equilibrium closure: with n_w pointing from wall into fluid,
+    // outward liquid normal n = -grad(phi)/|grad(phi)| must satisfy
+    // n.n_w = cos(theta). Thus d(phi)/d(n_w) = -|grad_t(phi)| cot(theta).
+    // Extend the smoothed fill into the wall without clipping its derivative.
+    // This supplies the normal in the existing sigma*curvature pressure
+    // reconstruction; tracked liquid mass is never edited here.
+    fn planar_angle_ghost(&self, position: [i64; 3]) -> Option<f64> {
+        let contact = self.planar_contact?;
+        if contact.cotangent == 0.0 {
+            return None;
+        }
+        let axis = contact.wall.axis();
+        let dims = self.grid.tile_dims();
+        let extents = [dims.0 * TILE, dims.1 * TILE, dims.2 * TILE];
+        let edge = if contact.wall.upper() { extents[axis] as i64 - 1 } else { 0 };
+        let distance = if contact.wall.upper() {
+            position[axis] - edge
+        } else {
+            -position[axis]
+        };
+        if distance <= 0 {
+            return None;
+        }
+        let mut base = position;
+        base[axis] = edge;
+        let sample = |p: [i64; 3]| -> Option<f64> {
+            let (slot, lane) = self.grid.resolve_source(p[0], p[1], p[2])?;
+            Some(self.fill_smooth[&self.grid.active_keys()[slot]][lane])
+        };
+        let value = sample(base)?;
+        let mut tangent_squared = 0.0;
+        for tangent in 0..3 {
+            if tangent == axis {
+                continue;
+            }
+            let mut plus = base;
+            let mut minus = base;
+            plus[tangent] += 1;
+            minus[tangent] -= 1;
+            let derivative = match (sample(plus), sample(minus)) {
+                (Some(p), Some(m)) => (p - m) / 2.0,
+                (Some(p), None) => p - value,
+                (None, Some(m)) => value - m,
+                (None, None) => 0.0,
+            };
+            tangent_squared += derivative * derivative;
+        }
+        Some(value + distance as f64 * tangent_squared.sqrt() * contact.cotangent)
+    }
+
     /// Refresh the smoothed fill field (average over self + non-wall
     /// neighbors, 2-D port with the 18-neighbor stencil).
-    fn refresh_fill(&mut self) {
-        let raw: BTreeMap<u64, [f64; TILE_CELLS]> = self
-            .tiles
-            .keys()
-            .map(|&key| {
-                let mut vals = [0.0; TILE_CELLS];
-                for (lane, v) in vals.iter_mut().enumerate() {
-                    *v = self.fill(key, lane);
-                }
-                (key, vals)
-            })
-            .collect();
+    fn refresh_fill(&mut self, gate: &CancelGate) -> Result<(), FreeSurfaceError3> {
+        let mut raw: BTreeMap<u64, [f64; TILE_CELLS]> = BTreeMap::new();
+        for &key in self.tiles.keys() {
+            check_cancel(gate)?;
+            raw.insert(key, core::array::from_fn(|lane| self.fill(key, lane)));
+        }
         let mut smooth = BTreeMap::new();
         for &key in self.tiles.keys() {
+            check_cancel(gate)?;
             let mut vals = [0.0; TILE_CELLS];
             for (lane, out) in vals.iter_mut().enumerate() {
                 let mut acc = raw[&key][lane];
@@ -646,6 +793,7 @@ impl FreeSurface3 {
             smooth.insert(key, vals);
         }
         self.fill_smooth = smooth;
+        Ok(())
     }
 
     /// Reference density for gas reconstruction: `1 + σκ/cs²` (2-D port;
@@ -688,8 +836,17 @@ impl FreeSurface3 {
     /// [`FreeSurfaceError3::Collision`] fail-closed on the first refusing
     /// wet cell in canonical order (state unchanged in that case).
     pub fn step(&mut self) -> Result<(), FreeSurfaceError3> {
+        self.step_with_gate(&CancelGate::new_clock_free())
+    }
+
+    /// The same step with cancellation polls between active tiles and before
+    /// publication. Cancellation preserves populations, tracked mass and all
+    /// conversion counters. Once publication begins its conversion cascade
+    /// finishes; a later cancellation request is observed by the next step.
+    pub fn step_with_gate(&mut self, gate: &CancelGate) -> Result<(), FreeSurfaceError3> {
+        check_cancel(gate)?;
         let ledger_before = self.ledger_mass();
-        self.refresh_fill();
+        self.refresh_fill(gate)?;
         let (model, force) = self.grid.collision();
 
         // Collide wet lanes into a post map (canonical order). Gas lanes
@@ -697,6 +854,7 @@ impl FreeSurface3 {
         let keys: Vec<u64> = self.tiles.keys().copied().collect();
         let mut post: BTreeMap<u64, Vec<[f64; Q3]>> = BTreeMap::new();
         for &key in &keys {
+            check_cancel(gate)?;
             let slot = self.grid.slot_of(key).expect("active");
             let mut tile_post = vec![[0.0; Q3]; TILE_CELLS];
             for (lane, out) in tile_post.iter_mut().enumerate() {
@@ -733,6 +891,7 @@ impl FreeSurface3 {
         let mut new_populations: Vec<(u64, usize, [f64; Q3])> = Vec::new();
         let mut mass_delta: Vec<(u64, usize, f64)> = Vec::new();
         for &key in &keys {
+            check_cancel(gate)?;
             let slot = self.grid.slot_of(key).expect("active");
             for lane in 0..TILE_CELLS {
                 let flag = self.tiles[&key].cells[lane];
@@ -808,6 +967,7 @@ impl FreeSurface3 {
                 new_populations.push((key, lane, new_f));
             }
         }
+        check_cancel(gate)?;
         for (key, lane, f) in new_populations {
             let slot = self.grid.slot_of(key).expect("active");
             self.grid.set_populations(slot, lane, f);
@@ -1051,10 +1211,110 @@ impl FreeSurface3 {
     }
 }
 
+fn check_cancel(gate: &CancelGate) -> Result<(), FreeSurfaceError3> {
+    if gate.is_requested() {
+        Err(FreeSurfaceError3::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
 /// Neighbor resolution outcome.
 enum Neighbor {
     /// Out-of-domain or inactive-tile space: wall by sparse convention.
     Wall,
     /// A cell in an active tile.
     Active(u64, usize, Cell3),
+}
+
+
+#[cfg(test)]
+mod capillary_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn g1_planar_wall_ghost_has_the_prescribed_angle_and_zero_planar_curvature() {
+        for wall in [
+            PlanarWall3::XMin, PlanarWall3::XMax,
+            PlanarWall3::YMin, PlanarWall3::YMax,
+            PlanarWall3::ZMin, PlanarWall3::ZMax,
+        ] {
+            for angle in [core::f64::consts::PI / 3.0, 2.0 * core::f64::consts::PI / 3.0] {
+                let mut surface = FreeSurface3::new(
+                    8, 8, 8, 0.8, [0.0; 3], 0.001, ContactModel3::Neutral, |_, _, _| true,
+                ).unwrap();
+                surface.set_planar_contact_angle(wall, angle).unwrap();
+                let axis = wall.axis();
+                let tangent = (axis + 1) % 3;
+                // Independent analytical plane: its normal makes angle theta
+                // with the inward wall normal. No liquid-motion solver is
+                // involved in assigning this manufactured smoothed fill.
+                for &key in surface.grid.active_keys() {
+                    let values = core::array::from_fn(|lane| {
+                        let (x, y, z) = FreeSurface3::global_of(key, lane);
+                        let p = [x, y, z];
+                        let inward = if wall.upper() { 7 - p[axis] } else { p[axis] };
+                        0.5 - 0.03 * p[tangent] as f64
+                            - 0.03 * (angle.cos() / angle.sin()) * inward as f64
+                    });
+                    surface.fill_smooth.insert(key, values);
+                }
+                let mut p = [3i64; 3];
+                p[axis] = if wall.upper() { 7 } else { 0 };
+                let (slot, lane) = surface.grid.resolve_source(p[0], p[1], p[2]).unwrap();
+                let key = surface.grid.active_keys()[slot];
+                let mut gradient = [0.0; 3];
+                for component in 0..3 {
+                    let mut plus = p;
+                    let mut minus = p;
+                    plus[component] += 1;
+                    minus[component] -= 1;
+                    gradient[component] = (
+                        surface.phi_or_ghost(plus[0], plus[1], plus[2], (key, lane))
+                        - surface.phi_or_ghost(minus[0], minus[1], minus[2], (key, lane))
+                    ) / 2.0;
+                }
+                let magnitude = gradient.iter().map(|x| x * x).sum::<f64>().sqrt();
+                let inward_sign = if wall.upper() { -1.0 } else { 1.0 };
+                let normal_dot_wall = -gradient[axis] * inward_sign / magnitude;
+                assert!((normal_dot_wall - angle.cos()).abs() < 2e-12,
+                    "{wall:?}, angle {angle}: normal dot wall {normal_dot_wall}");
+                assert!(surface.curvature(key, lane).abs() < 2e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn g1_spherical_laplace_pressure_refines_with_the_existing_curvature_operator() {
+        let relative_error = |radius: usize| {
+            let cells = 4 * radius;
+            let center = (2 * radius) as f64;
+            let mut surface = FreeSurface3::new(
+                cells, cells, cells, 0.8, [0.0; 3], 0.001,
+                ContactModel3::Neutral, |_, _, _| true,
+            ).unwrap();
+            for &key in surface.grid.active_keys() {
+                let values = core::array::from_fn(|lane| {
+                    let (x, y, z) = FreeSurface3::global_of(key, lane);
+                    let d = [x as f64 - center, y as f64 - center, z as f64 - center];
+                    let r = d.iter().map(|x| x * x).sum::<f64>().sqrt();
+                    0.5 + 0.01 * (radius as f64 - r)
+                });
+                surface.fill_smooth.insert(key, values);
+            }
+            let (slot, lane) = surface.grid.resolve_source(
+                (3 * radius) as i64, (2 * radius) as i64, (2 * radius) as i64,
+            ).unwrap();
+            let key = surface.grid.active_keys()[slot];
+            let curvature = surface.curvature(key, lane);
+            let density = surface.reference_density(key, lane);
+            assert!(((density - 1.0) * CS2_3 - 0.001 * curvature).abs() < 1e-16);
+            (curvature * radius as f64 / 2.0 - 1.0).abs()
+        };
+        let coarse = relative_error(4);
+        let fine = relative_error(8);
+        assert!(coarse < 0.06);
+        assert!(fine < 0.016 && fine < coarse / 3.0,
+            "sphere curvature errors coarse={coarse}, fine={fine}");
+    }
 }

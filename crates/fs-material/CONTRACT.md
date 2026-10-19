@@ -1516,3 +1516,20 @@ surface-energy account. Scalar constants and supported temperature coefficients
 do not authorize frequency- or rate-dependent Newtonian flow.
 
 `gas_field::steady::SteadyAxialGas::solve` generates the existing `AxialGasField` from explicit source packs, common pressure, axial volumes, prescribed positive mass flow, gas injections, and wall temperatures/conductances. The existing fs-thermal `Advected` observer owns both donor-cell enthalpy and its stationary acyclic species extension; the original thermal timeline owns wall heat, combined CFL and energy updates. `GasEnthalpyLaw` derives h(T), T(h,p), and a conservative thermal slope bound from the existing NASA-9 source and safeguarded energy root. Caloric laws may differ by stationary composition only after exact full species/fraction and common enthalpy-reference checks. Inlet enthalpy belongs to its own source mixture. Fixed initial EOS cell masses serve only as pseudo-time relaxation weights; only a converged common-pressure EOS field is published. The final power gate includes absolute caloric closure-flux errors so loose inverse tolerances cannot hide an incorrect supplied inlet energy. Reported balances, work, flow and low-Mach admission are retained. Downstream faces carry first-order mixed-cell states; primitive field interpolation and acoustic sampling require independent spatial refinement. The scope excludes transient variable-density breath flow, inferred heat-transfer coefficients, pressure drop, diffusion, reaction and condensation; phase/source/domain failures refuse without publishing a field. This addition does not close the complete M0.1-W3 qualification.
+
+### Equilibrium substrate wetting on the liquid surface owner
+
+`liquid::surface::resolve_liquid_wetting_state` resolves only
+`equilibrium-contact-angle` [radians through liquid] from an ordered
+(substrate, liquid) interface. The original interface identity, preparation
+frames, source receipt, history and named environment survive. The caller
+assigns that environment; this response does not resolve an ambient gas EOS.
+The angle lies strictly inside (0, pi), and the same frozen-coefficient rules
+as the momentum/surface bundle refuse dynamically supported data.
+Missing equilibrium data never falls back to advancing/receding endpoints.
+`require_liquid_state` checks the declared liquid phase/process/revision and
+complete query/quantity descriptors; SurfaceSpec does not carry a bulk-card
+content hash. Liquid/gas sigma remains solely in `ResolvedLiquidSurfaceState`.
+The sparse free-surface consumer assigns this response to one planar domain
+wall. No hysteresis evolution, moving-contact-line regularization, Marangoni
+traction or measured-accuracy claim follows from that assignment.
