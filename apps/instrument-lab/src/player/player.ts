@@ -410,9 +410,25 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
       });
     }
     const m = mix;
-    let warm = !!piano;
+    const usesPiano = a.notes.length > 0;
+    if (!usesPiano) {
+      piano?.dispose();
+      piano = null;
+      pianoReady = null;
+      snaps.length = 0;
+      delete health["piano"];
+      stringsCanvas.hidden = true;
+      pulseLevel = 0;
+      board.paint(new Float32Array());
+      hudNums.replaceChildren(el("span", {}, "The piano is not used by this MIDI file."));
+      hudLedger.replaceChildren();
+      const scaleTag = boardView.querySelector(".pp-board-scale");
+      if (scaleTag) scaleTag.textContent = "—";
+    }
+    let warm = !usesPiano || !!piano;
     const started: Promise<unknown>[] = [];
-    if (!piano) {
+    if (usesPiano && !piano) {
+      hudNums.replaceChildren();
       const lane = new PianoLane(m, { aheadFrames: AHEAD, chunk: CHUNK, gain: PIANO_GAIN, snapshotHz: 30, minRealtime: 1.3 });
       piano = lane;
       lane.onStats = (s) => { const h = health["piano"]; if (h) { h.rt = s.realtime; h.stats = s; } };
@@ -439,20 +455,26 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
         if (piano === lane) { lane.dispose(); piano = null; delete health["piano"]; }
         throw e;
       }));
+    } else if (usesPiano && piano && !pianoReady) {
+      warm = false;
+      started.push(piano.ready);
     }
     for (const [p, k] of kits) if (!a.pieces.includes(p)) { k.lane.dispose(); kits.delete(p); delete health[p]; }
-    let fresh = 0; // the pieces started now; those still running from the last roll are not counted
     for (const p of a.pieces) {
-      if (kits.has(p)) continue;
+      const existing = kits.get(p);
+      if (existing) {
+        // A sibling's failed startup can leave this lane still initializing.
+        if (!existing.ready) { warm = false; started.push(existing.lane.ready); }
+        continue;
+      }
       warm = false;
-      fresh++;
       started.push(startPiece(m, p, GRID[p].scales));
     }
     if (started.length) {
       const total = started.length;
       let done = 0;
-      const n = fresh;
-      const what = [!pianoReady ? "the piano" : "", n ? `${n} drum piece${n > 1 ? "s" : ""}` : ""].filter(Boolean).join(" and ");
+      const n = a.pieces.filter((p) => !kits.get(p)?.ready).length;
+      const what = [usesPiano && !pianoReady ? "the piano" : "", n ? `${n} drum piece${n > 1 ? "s" : ""}` : ""].filter(Boolean).join(" and ");
       say(`Starting ${what}, ${total > 1 ? "each " : ""}in its own Worker, and measuring this device…`);
       started.forEach((p) => void p.then(() => { done++; if (phase === "warming") say(`Starting the engines… ${done} of ${total} ready`); }, () => {}));
       await Promise.all(started);
@@ -569,6 +591,13 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     try {
       const warm = await ensureEngines(arr);
       if (my !== token || !arr) { cancelled(); return; }
+      // A ready lane can fail while a sibling is still starting. Its ready
+      // promise stays fulfilled, so check the live owners before cueing music.
+      const missing = [
+        ...(arr.notes.length && (!piano || !pianoReady) ? ["the piano"] : []),
+        ...arr.pieces.filter((p) => !kits.get(p)?.ready).map((p) => PIECE_NAMES[p]),
+      ];
+      if (missing.length) throw new Error(`${missing.join(", ")} stopped while the other engines were starting. Press Play to retry.`);
       // from `position`, not `from`: the slider or the paper may have been moved while the engines started
       cue(position >= arr.durationS - 0.05 ? 0 : position, warm ? LEAD_WARM_S : LEAD_COLD_S);
       setPhase("playing");
@@ -790,7 +819,7 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
   // ------------------------------------------------------------------ lanes
   function paintLanes(): void {
     const rows: HTMLElement[] = [];
-    const ids = ["piano", ...(arr?.pieces ?? [])];
+    const ids = [...(arr?.notes.length ? ["piano"] : []), ...(arr?.pieces ?? [])];
     for (const id of ids) {
       const h = health[id];
       const name = id === "piano" ? "Piano" : PIECE_NAMES[id as PieceId];
