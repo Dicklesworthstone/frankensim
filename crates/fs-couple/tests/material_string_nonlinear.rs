@@ -1,4 +1,8 @@
 //! Source-to-nonlinear dynamics tests, not measured instrument validation.
+#[path = "material_string_nonlinear/polarization.rs"]
+mod polarization;
+#[path = "material_string_nonlinear/pressure.rs"]
+mod pressure;
 #[path = "material_string_nonlinear/support.rs"]
 mod support;
 use support::*;

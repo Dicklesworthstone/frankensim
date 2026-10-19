@@ -6,7 +6,8 @@
 //! glide, contact force waveform, alternative integrator or sound gain is added.
 //!
 //! A frozen, moderate-slope Kirchhoff--Carrier model: axial strain equilibrates
-//! instantaneously along the full fixed-end span. The existing optional torsion
+//! instantaneously along the full fixed-end span. Both transverse planes of a
+//! polarized source contribute to one shared elongation and tension. Optional torsion
 //! remains a separate quadratic storage in that SAME joint mechanical solve.
 //! No axial wave inertia, evolving temperature, plasticity, winding slip,
 //! changing topology or automatic transfer from a running bow bank is implied.
@@ -48,7 +49,9 @@ impl MaterialStringSource {
     /// Nonlinear harmonics need temporal/modal refinement beyond a linear-mode
     /// Nyquist check. The material is a frozen linear-elastic constitutive image.
     ///
-    /// `initial` contains every original bending coordinate, then optional twist.
+    /// `initial` contains every first-plane bending coordinate, then the complete
+    /// second plane when selected, then optional twist. Both planes share EA,
+    /// geometric elongation and one quartic storage; they are not separate strings.
     /// It specifies actual stored energy; no equilibrium or pluck is fabricated.
     /// Geometry is the full supported span, including afterlength. Interior
     /// fingers, frets, picks and bridges must be physical contacts/attachments.
@@ -68,12 +71,18 @@ impl MaterialStringSource {
                 || !s.velocity_m_sqrt_kg_per_s.is_finite()) {
             return Err(invalid("nonlinear material string needs bounded complete finite initial coordinates"));
         }
-        let bending = match &self { Self::WithTorsion(t) => t.bending(), _ => &self };
+        let (original, planes) = match &self {
+            Self::WithPolarizations(p) => (p.source(), 2),
+            other => (other, 1),
+        };
+        let bending = match original {
+            Self::WithTorsion(t) => t.bending(), other => other,
+        };
         let axial_rigidity_n = match bending {
             Self::Homogeneous(s) => s.string().axial_stiffness_n,
             Self::Concentric { section, .. } => section.elastic().axial_stiffness_n(),
             Self::WithTorsion(_) => return Err(invalid("nested torsion is not a physical string source")),
-            Self::WithPolarizations(_) => return Err(invalid("nonlinear stretching currently requires one transverse plane; two-plane shared tension is not implemented")),
+            Self::WithPolarizations(_) => return Err(invalid("nested polarizations are not a physical string source")),
         };
         if !axial_rigidity_n.is_finite() || axial_rigidity_n <= 0.0 {
             return Err(invalid("material string stretching requires its positive source-derived EA"));
@@ -90,9 +99,19 @@ impl MaterialStringSource {
         };
         // The original storage owns the quartic channel, its tangent, the exact
         // tension diagnostic and continuous-span slope admission at each step.
-        let body = wire.stretching_body(initial[..card.mode_count].to_vec(), stretching)?;
+        let transverse_modes = card.mode_count.checked_mul(planes)
+            .ok_or_else(|| invalid("nonlinear transverse coordinate count overflow"))?;
+        if transverse_modes > count {
+            return Err(invalid("nonlinear source has an inconsistent transverse prefix"));
+        }
+        let transverse = initial[..transverse_modes].to_vec();
+        let body = if planes == 2 {
+            wire.stretching_body_two_planes(transverse, stretching)?
+        } else {
+            wire.stretching_body(transverse, stretching)?
+        };
         let mut bodies = vec![body];
-        if let Self::WithTorsion(twist) = &self {
+        if let Some(twist) = self.torsion_source() {
             let mut modes: Vec<ModalAcousticMode> = Vec::with_capacity(twist.mode_count());
             twist.append_modes(&card, &mut modes, gate).map_err(|e| ImpactError::Owner(e.to_string()))?;
             // Reuse actual torsional source-band and modal-clock admission. No
@@ -101,7 +120,7 @@ impl MaterialStringSource {
                 .map_err(|e| ImpactError::Owner(format!("torsional modal admission: {e:?}")))?;
             bodies.push(ImpactBody {
                 potential: BodyPotential::Linear(modes.iter().map(|m| m.angular_frequency_rad_s).collect()),
-                initial: initial[card.mode_count..].to_vec(),
+                initial: initial[transverse_modes..].to_vec(),
                 damping_per_s: modes.iter().map(|m| 2.0 * m.damping_ratio * m.angular_frequency_rad_s).collect(),
             });
         }
@@ -127,6 +146,8 @@ impl NonlinearMaterialString {
     #[must_use] pub fn bodies(&self) -> &[ImpactBody] { &self.bodies }
     /// Flattened coordinate count, including all selected torsional coordinates.
     #[must_use] pub fn mode_count(&self) -> usize { self.source.modes() }
+    /// Complete transverse prefix; both planes belong to body zero.
+    #[must_use] pub fn transverse_mode_count(&self) -> usize { self.bodies[0].initial.len() }
 
     /// Actual interior transverse displacement/force map [1/sqrt(kg)].
     /// Torsion has zero normal displacement to first order; it is not silently
@@ -135,12 +156,32 @@ impl NonlinearMaterialString {
         if !super::interior(station_fraction) {
             return Err(invalid("a fixed string endpoint is not a moving point contact"));
         }
-        let mut row = super::shape(&self.card, station_fraction);
-        row.resize(self.mode_count(), 0.0);
-        if row.iter().any(|x| !x.is_finite()) || row.iter().all(|x| *x == 0.0) {
-            return Err(invalid("string point map is not representable"));
+        self.source.transverse_shape(&self.card, station_fraction)
+            .map_err(|e| ImpactError::Owner(e.to_string()))
+    }
+
+    /// Centreline displacement/force along the original bridge direction.
+    /// The same row and its transpose observe motion and apply reaction, across
+    /// both transverse planes. Torsion has no centreline translation.
+    pub fn bridge_shape(&self, station_fraction: f64) -> Result<Vec<f64>, ImpactError> {
+        if !super::interior(station_fraction) {
+            return Err(invalid("a fixed string endpoint is not a moving bridge port"));
         }
-        Ok(row)
+        self.source.bridge_shape(&self.card, station_fraction)
+            .map_err(|e| ImpactError::Owner(e.to_string()))
+    }
+
+    /// Original material angular displacement/torque map, with a zero transverse
+    /// prefix. Torque in N*m is work-conjugate to this angle in radians; no
+    /// surface radius is inserted into an independently supplied torque.
+    pub fn angular_shape(&self, station_fraction: f64) -> Result<Vec<f64>, ImpactError> {
+        if !super::interior(station_fraction) {
+            return Err(invalid("a fixed string endpoint is not a moving angular port"));
+        }
+        let twist = self.source.torsion_source()
+            .ok_or_else(|| invalid("an angular port requires the original material torsion source"))?;
+        twist.angular_shape(&self.card, station_fraction, self.transverse_mode_count())
+            .map_err(|e| ImpactError::Owner(e.to_string()))
     }
 
     /// Actual tangential surface map, including r*theta for requested torsion.
@@ -154,6 +195,9 @@ impl NonlinearMaterialString {
             .map_err(|e| ImpactError::Owner(e.to_string()))
     }
 }
+
+/// Source-retaining preparation for the original shared mechanics and pressure path.
+pub mod runtime;
 
 /// Source-bound strings on the original inertially coupled translating support.
 pub mod supported;

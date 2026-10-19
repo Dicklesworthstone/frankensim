@@ -36,7 +36,8 @@ impl StringStretching {
 /// Read-only physical diagnostics. Stretching storage is ALREADY in total H.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct StringObservation {
-    /// Continuous-span bound sum_n |Q_n|*n*pi/L, not a sampled maximum.
+    /// Continuous-span bound sum_n ||Q_n||*n*pi/L, not a sampled maximum.
+    /// Q_n is a scalar for one plane or the two-component transverse amplitude.
     pub slope_bound: f64,
     /// Averaged geometric extension / reference length (dimensionless).
     pub additional_strain: f64,
@@ -51,6 +52,9 @@ pub struct StringPotential {
     storage: Rc<SosModalStorage>,
     stretching: StringStretching,
     rest_tension_n: f64,
+    // One physical span, with one or two mass-normalized sine-coordinate blocks.
+    // Both transverse components contribute to the SAME stress channel.
+    transverse_planes: usize,
     // Private potential-only lift coordinate in metres, never a new unit-mass
     // oscillator. SupportedStrings applies its physical kinetic transformation.
     affine_endpoint: bool,
@@ -91,11 +95,62 @@ impl WireSpan {
             return Err(invalid("derived string stretching channel is unrepresentable"));
         }
         let potential = StringPotential { storage: Rc::new(storage), stretching,
-            rest_tension_n: self.tension_n, affine_endpoint: false };
+            rest_tension_n: self.tension_n, transverse_planes: 1, affine_endpoint: false };
         let mut q = [0.0; MAX_IMPACT_MODES];
         for (i, s) in body.initial.iter().enumerate() { q[i] = s.displacement_m_sqrt_kg; }
         potential.observe(&q[..n])?;
         body.potential = BodyPotential::String(potential);
+        Ok(body)
+    }
+
+    /// Two transverse components of the SAME isotropic span, ordered as the
+    /// complete first sine block followed by the complete second sine block.
+    ///
+    /// The existing fs-nlmodal channel is lifted from E to diag(E,E), leaving
+    /// ONE coefficient and ONE squared geometric extension. Its cross term
+    /// transfers stretching work between the planes; two independent scalar
+    /// stretching bodies would omit that term. The original mass, EI, tension
+    /// and damping apply in both directions without detuning or rescaling.
+    pub fn stretching_body_two_planes(
+        &self, initial: Vec<ModalAcousticState>, stretching: StringStretching,
+    ) -> Result<ImpactBody, ImpactError> {
+        let n = self.damping_per_s.len();
+        let total = n.checked_mul(2)
+            .ok_or_else(|| invalid("two-plane string coordinate count overflow"))?;
+        if n == 0 || total > MAX_IMPACT_MODES || initial.len() != total
+            || initial.iter().any(|s| !s.displacement_m_sqrt_kg.is_finite()
+                || !s.velocity_m_sqrt_kg_per_s.is_finite()) {
+            return Err(invalid("two-plane stretching needs two complete finite transverse blocks within the mode budget"));
+        }
+        let mut body = self.stretching_body(initial[..n].to_vec(), stretching)?;
+        let BodyPotential::String(original) = body.potential else {
+            return Err(invalid("stretching wire changed its expected nonlinear preparation"));
+        };
+        let mut storage = SosModalStorage {
+            omegas: original.storage.omegas.clone(),
+            channels: original.storage.channels.clone(),
+        };
+        let mut coupling = vec![0.0; total * total];
+        for plane in 0..2 {
+            for i in 0..n {
+                let start = (plane * n + i) * total + plane * n;
+                coupling[start..start+n]
+                    .copy_from_slice(&storage.channels[0].coupling[i*n..(i+1)*n]);
+            }
+        }
+        storage.channels[0].coupling = coupling;
+        storage.omegas.extend_from_within(..);
+        let potential = StringPotential {
+            storage: Rc::new(storage), transverse_planes: 2, ..original
+        };
+        let mut q = [0.0; MAX_IMPACT_MODES];
+        for (i, state) in initial.iter().enumerate() {
+            q[i] = state.displacement_m_sqrt_kg;
+        }
+        potential.observe(&q[..total])?;
+        body.potential = BodyPotential::String(potential);
+        body.initial = initial;
+        body.damping_per_s.extend_from_within(..);
         Ok(body)
     }
 }
@@ -103,6 +158,8 @@ impl StringPotential {
     pub fn mode_count(&self) -> usize { self.storage.omegas.len() }
     pub fn omegas(&self) -> &[f64] { &self.storage.omegas }
     pub fn slope_limit(&self) -> f64 { self.stretching.maximum_slope }
+    /// Transverse components sharing this one physical elongation and tension.
+    pub const fn transverse_planes(&self) -> usize { self.transverse_planes }
 
     /// Extend the SAME stress channel by the affine lift w(s)=s*X/L+u(s)
     /// (or (1-s/L)*X+u). Since u vanishes at both ends, integral(u')=0:
@@ -113,6 +170,9 @@ impl StringPotential {
         let n = self.mode_count();
         let stiffness = self.rest_tension_n / length_m;
         let strain_weight = 2.0 / length_m / length_m;
+        if self.transverse_planes != 1 {
+            return Err(invalid("the translating support requires one transverse plane; a vector endpoint lift is not implemented"));
+        }
         if self.affine_endpoint || n >= MAX_IMPACT_MODES
             || !length_m.is_finite() || length_m <= 0.0
             || !stiffness.is_finite() || stiffness <= 0.0
@@ -175,10 +235,22 @@ impl StringPotential {
         let mut s = 0.0; let mut slope_bound = 0.0;
         for i in 0..n {
             let e = ch.coupling[i*n+i]; s += e*q[i]*q[i];
-            // Sine modes have mean-square slope = peak^2/2; a linear lift
-            // has constant slope. Do not give its bound an artificial sqrt(2).
-            let weight = if self.affine_endpoint && i + 1 == n { 0.5 * e } else { e };
-            slope_bound += det::sqrt(weight)*q[i].abs();
+            if self.transverse_planes == 1 {
+                // Sine modes have mean-square slope = peak^2/2; a linear lift
+                // has constant slope. Do not give its bound an artificial sqrt(2).
+                let weight = if self.affine_endpoint && i + 1 == n { 0.5 * e } else { e };
+                slope_bound += det::sqrt(weight)*q[i].abs();
+            }
+        }
+        if self.transverse_planes == 2 {
+            // Triangle inequality for the continuous vector slope. Pair modes
+            // before taking their norm so rotating the transverse basis changes
+            // neither the validity envelope nor the physical strain.
+            let per_plane = n / 2;
+            for i in 0..per_plane {
+                slope_bound += det::sqrt(ch.coupling[i*n+i])
+                    * det::hypot(q[i], q[per_plane+i]);
+            }
         }
         let additional_strain = 0.25*s;
         let tension_n = self.rest_tension_n + self.stretching.axial_rigidity_n*additional_strain;

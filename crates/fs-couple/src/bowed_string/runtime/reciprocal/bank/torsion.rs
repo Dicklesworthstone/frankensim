@@ -318,7 +318,7 @@ impl TorsionalStringSource {
     pub const fn mode_count(&self) -> usize { self.mode_count }
     pub(super) const fn total_modes(&self) -> usize { self.total_modes }
 
-    fn angular_shape(&self, card: &BowedStringCard, station: f64, transverse_modes: usize)
+    pub(super) fn angular_shape(&self, card: &BowedStringCard, station: f64, transverse_modes: usize)
         -> Result<Vec<f64>, ReciprocalStringError>
     {
         let inertia = self.section.rotary_inertia_kg_m();

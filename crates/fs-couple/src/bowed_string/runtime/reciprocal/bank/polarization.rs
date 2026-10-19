@@ -14,9 +14,11 @@
 //! The section is circular and frozen-state, with identical flexural laws in
 //! both planes. Translational bridge ports follow their supplied direction;
 //! optional torque/rotation connections use the original material torsion in
-//! the same joint solve. This is not a six-DOF termination, nonlinear shared
-//! tension, or a resolved bow-normal contact law. Optional twist carries no
-//! fictitious direct acoustic output.
+//! the same joint solve. The explicit `MaterialStringSource::into_nonlinear`
+//! path retains both planes in one Kirchhoff--Carrier elongation/tension channel;
+//! the linear bank continues to use its original quadratic storage. A six-DOF
+//! termination and a resolved bow-normal contact law remain outside this image.
+//! Optional twist carries no fictitious direct acoustic output.
 
 use super::*;
 use fs_material::state_point::MaterialStatePointError;

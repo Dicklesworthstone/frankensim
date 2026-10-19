@@ -311,7 +311,7 @@ fn torsion_and_polarization_construction_order_is_identical_and_invalid_geometry
                     vec![fs_couple::modal_acoustic_time::ModalAcousticState::default(); 8],
                     gate
                 )
-                .is_err()
+                .is_ok()
         );
     });
 }

@@ -141,6 +141,9 @@ impl SupportedMaterialStrings {
             let BodyPotential::String(potential) = &bending.potential else {
                 return Err(invalid("supported source must retain its original nonlinear string law"));
             };
+            if potential.transverse_planes() != 1 {
+                return Err(invalid("the translating support requires one transverse plane; a vector endpoint lift is not implemented"));
+            }
             if tail.len() > 1 || bending.initial.len() != source.card().mode_count {
                 return Err(invalid("supported source has an incompatible bending/torsion layout"));
             }
