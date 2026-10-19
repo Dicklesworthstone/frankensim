@@ -245,3 +245,6 @@ fn detached_members_wrong_geometry_budgets_gas_and_cancellation_refuse() {
 
 #[path = "material_string_bank/plate.rs"]
 mod plate;
+
+#[path = "material_string_bank/shell.rs"]
+mod shell;

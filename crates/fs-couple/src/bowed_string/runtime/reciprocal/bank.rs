@@ -122,6 +122,8 @@ pub struct MaterialStringBankSource {
     material_chart: Option<chart::SharedMaterialPlateChartBody>,
     material_chart_viscosity: Option<crate::plate_viscosity::ViscousPlateImage>,
     material_chart_bridges: Option<chart::PlateBridgeFootprints>,
+    material_shell: Option<shell::SharedMaterialShellBody>,
+    material_shell_image: Option<crate::shear_shell::MaterialShellImage>,
     material_cavity: Option<super::plate::MaterialBodyCavity>,
 }
 impl MaterialStringBankSource {
@@ -158,6 +160,16 @@ impl MaterialStringBankSource {
     #[must_use]
     pub const fn material_chart_viscosity(&self) -> Option<&crate::plate_viscosity::ViscousPlateImage> {
         self.material_chart_viscosity.as_ref()
+    }
+    /// Complete material-derived curved shear shell and physical bridge geometry.
+    #[must_use]
+    pub const fn material_shell(&self) -> Option<&shell::SharedMaterialShellBody> {
+        self.material_shell.as_ref()
+    }
+    /// One common shell basis for every force, full-loss and volume projection.
+    #[must_use]
+    pub const fn material_shell_image(&self) -> Option<&crate::shear_shell::MaterialShellImage> {
+        self.material_shell_image.as_ref()
     }
     /// Original body-air law, geometry, gas and observer, when supplied.
     #[must_use]
@@ -219,7 +231,7 @@ impl ReciprocalStringBank {
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, rotational_body_connections: Vec::new(), fluid_loading: None, prepared_linear: None, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_cavity: None }, cards, system })
+        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, rotational_body_connections: Vec::new(), fluid_loading: None, prepared_linear: None, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_cavity: None }, cards, system })
     }
 
     /// Select bounded cold exact propagation before playback or before adding
@@ -486,6 +498,8 @@ pub mod plate;
 
 /// Regional material geometry in the same reciprocal string/body network.
 pub mod chart;
+/// Curved shear-deformable material body in the shared reciprocal mechanics.
+pub mod shell;
 
 /// Several source-bound bow contacts without resetting the shared mechanics.
 pub mod multiple;

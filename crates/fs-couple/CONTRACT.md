@@ -3005,3 +3005,39 @@ supply combustion, jet thrust, moving-mesh conduction or a simultaneous nozzle
 residual. Regression sources cover material/mixture interventions, both flow
 directions, one withdrawal during repeated trials, full storage balance,
 closed-path parity and complete rollback; native execution remains unverified.
+
+### Curved material shell bodies in the reciprocal string network
+
+`shear_shell::compile_material_shear_shell` binds original
+`ShellRegionMaterial` selections to one admitted 3D midsurface. Each selection
+retains its material state, ordered plane-stress model, thickness constraint,
+global grain axis and shear correction. The grain axis is projected onto each
+physical facet before the additional in-plane angle is applied. Orthotropic
+transverse shear uses the source's `shear_modulus_13` and
+`shear_modulus_23`; isotropic shear comes from the same source E/nu.
+Missing transverse elasticity or any of the six in-plane and three transverse
+viscosity entries refuses. Signed cross terms remain explicit and validated.
+
+The material image uses the existing MITC3+ stiffness, support transforms,
+mass choice, eigenvalue owner and physical mode expansion. Viscous membrane,
+bending and shear energies use the same elastic bubble condensation; numerical
+drilling stabilization receives no invented material loss. Full modal damping
+is factored by the existing passive dashpot owner and retained in the common
+mechanical solve. Original six-DOF force/moment rows and actual facet-normal
+volume integrals are projected on those same mass-normalized modes. Independent
+assembly, projection, modal and complete-network budgets remain explicit.
+
+`SharedMaterialShellBody` and
+`ReciprocalStringBank::from_material_shear_shell` connect that image to every
+original material string, its own physical bridge map, shared gas and optional
+body cavity. Shell source and image accessors retain geometry, region packs,
+physical modes, force maps, volume shapes, eigenvalue intervals and damping.
+Existing torsion joints, two-plane strings, gas-memory inertias, additional bows,
+stops, preload, scheduled performance and pressure continue through the same
+reciprocal owner.
+
+The model is an unloaded, frozen, linear midsurface with homogeneous supports
+and explicit numerical drilling stabilization. Its compact baffled observer
+does not imply full exterior radiation feedback or an assembled, prestressed
+violin/cello/bass corpus. Mesh/mode/stabilization/time refinement and measured
+instrument qualification remain separate from source-level composition tests.

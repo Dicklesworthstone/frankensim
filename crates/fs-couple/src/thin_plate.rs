@@ -53,6 +53,21 @@ pub struct CompactBody {
 }
 
 impl CompactBody {
+    // Shared geometric reducers already use M-orthonormal physical vectors.
+    // Unit modal mass preserves their signed volume and force projections;
+    // the face area remains independent of modal cancellation/normalization.
+    pub(crate) fn from_mass_normalized_projection(
+        omega: f64, area: f64, drive: f64, face_area: f64,
+    ) -> Result<Self, AcousticRealizeError> {
+        if !omega.is_finite() || omega <= 0.0 || !area.is_finite() || !drive.is_finite()
+            || !face_area.is_finite() || face_area <= 0.0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "geometric radiator requires finite physical mode projections",
+            });
+        }
+        Ok(Self { area_m2:area, mass_kg:1.0, drive_participation:drive,
+            omega, zeta:0.0, y:0.0, v:0.0, piston_area_m2:face_area, rad:None })
+    }
     /// From a caller-supplied compact monopole.
     ///
     /// # Errors
@@ -1609,7 +1624,7 @@ fn bind_plate_elasticity(
     Ok(())
 }
 
-fn plate_elasticity(
+pub(crate) fn plate_elasticity(
     state: &ResolvedMaterialStatePoint,
     model: PlateMaterialModel,
 ) -> Result<(f64, f64, f64, f64), AcousticRealizeError> {
@@ -1651,7 +1666,7 @@ fn plate_elasticity(
     Ok((e1, e2, nu12, g12))
 }
 
-fn plate_property(
+pub(crate) fn plate_property(
     state: &ResolvedMaterialStatePoint,
     key: &str,
     dims: Dims,

@@ -1,0 +1,172 @@
+//! One elastic eigenbasis for shell force, volume and full material loss.
+//! Discretization uses the original MITC3+ owner and fs-modal spectral slice.
+//! No off-diagonal damping coefficient is discarded; pressure and cavity motion
+//! observe the same physical displacement vectors as every reciprocal bridge.
+
+use super::{invalid, owner, poll, ResolvedShearShell};
+use crate::acoustic_realize::AcousticRealizeError;
+use crate::plate_viscosity::ModalPlateViscosity;
+use crate::thin_plate::CompactBody;
+use fs_exec::CancelGate;
+use fs_plate::shell::{modes_shell, mitc::{assemble_mitc3p, MitcBudget, NodalDirectors,
+    ShellConstraint, ShellMass, viscosity::{project_viscosity, projection_terms}}};
+
+/// Explicit cold projection resources and passive-channel coordinate scaling.
+#[derive(Clone, Copy, Debug)]
+pub struct ShellProjectionBudget {
+    /// Complete requested mode count must fit (1..=64).
+    pub max_modes: usize,
+    /// Condensation, all mode/force/volume projections and cubic factor work.
+    pub max_projection_terms: usize,
+    /// Positive dashpot resistance scale [N s/m]; C is unchanged by this scale.
+    pub reference_resistance_n_s_m: f64,
+}
+/// Geometry-independent controls for the existing shell assembly and eigenowner.
+#[derive(Clone, Debug)]
+pub struct ShellReductionOptions {
+    /// Actual homogeneous support constraints in physical or local axes.
+    pub constraints: Vec<ShellConstraint>,
+    /// Explicit translational and rotary mass discretization.
+    pub mass: ShellMass,
+    /// Positive drilling stabilization; contributes no fictitious material loss.
+    pub drilling_alpha: f64,
+    /// Angular-frequency-squared interval (low,high] [rad²/s²].
+    pub eigenvalue_window: (f64,f64),
+    /// Retain the lowest n modes inside the declared window, with no refit.
+    pub n_modes: usize,
+    /// Explicit assembly extent.
+    pub assembly_budget: MitcBudget,
+    /// Complete cold force/loss/volume projection allowance.
+    pub projection_budget: ShellProjectionBudget,
+}
+/// Immutable common elastic basis and every work-conjugate projection.
+#[derive(Clone, Debug)]
+pub struct MaterialShellImage {
+    source: ResolvedShearShell,
+    physical_modes: Vec<Vec<f64>>,
+    force_ports: Vec<Vec<f64>>,
+    volume_shapes: Vec<f64>,
+    intervals: Vec<(f64,f64)>,
+    radiators: Vec<CompactBody>,
+    damping: ModalPlateViscosity,
+}
+impl MaterialShellImage {
+    /// Exact original material, section and midsurface sources.
+    pub const fn source(&self) -> &ResolvedShearShell { &self.source }
+    /// Mode-major GLOBAL displacements/rotations, six entries per physical node.
+    /// Vectors retain the original fs-modal mass normalization and mode signs.
+    pub fn physical_modes(&self) -> &[Vec<f64>] { &self.physical_modes }
+    /// Work-conjugate modal force/displacement rows in original caller order.
+    pub fn force_ports(&self) -> &[Vec<f64>] { &self.force_ports }
+    /// Integral n dot phi dA, [m²/sqrt(kg)] in the same normalized basis.
+    /// Zero monopole volume does not establish silence under other radiation.
+    pub fn volume_shapes_m2_per_sqrt_kg(&self) -> &[f64] { &self.volume_shapes }
+    /// Original eigenvalue residual intervals, not continuum error bounds.
+    pub fn eigenvalue_intervals(&self) -> &[(f64,f64)] { &self.intervals }
+    /// Complete symmetric modal C and passive connection realization.
+    pub const fn damping(&self) -> &ModalPlateViscosity { &self.damping }
+    /// Compact monopole images; these have zero scalar loss, use C once.
+    pub(crate) fn radiators(&self) -> &[CompactBody] { &self.radiators }
+}
+impl ResolvedShearShell {
+    /// Compile one physical basis for arbitrary global force/moment footprints,
+    /// signed volume change and every material-loss cross term. A force port's
+    /// first three nodal values are force fractions; last three are moment/N
+    /// lever arms [m], so the port remains displacement/force conjugate.
+    ///
+    /// Physical mode vectors are expanded by the ORIGINAL support-frame owner.
+    /// Phi^T C Phi uses the elastic bubble transformation, not a second damped
+    /// eigensolve. Retained modes and source bands are checked individually.
+    /// No prestress or fluid loading is inferred. fs-modal's eigen call is
+    /// synchronous; cancellation is checked immediately before and after it.
+    pub fn reduce(&self, directors: &NodalDirectors, options: &ShellReductionOptions,
+        force_ports: &[Vec<f64>], gate: &CancelGate) -> Result<MaterialShellImage, AcousticRealizeError>
+    {
+        poll(gate)?;
+        let n=options.n_modes;
+        let budget=options.projection_budget;
+        let nodes=self.mesh.nodes.len(); let elements=self.mesh.tris.len();
+        if n==0 || n>budget.max_modes || !(1..=64).contains(&budget.max_modes)
+            || !budget.reference_resistance_n_s_m.is_finite() || budget.reference_resistance_n_s_m<=0.0
+            || !options.eigenvalue_window.0.is_finite() || !options.eigenvalue_window.1.is_finite()
+            || options.eigenvalue_window.0<0.0 || options.eigenvalue_window.1<=options.eigenvalue_window.0
+            || force_ports.is_empty() || force_ports.len()>4096
+            || force_ports.iter().any(|p| p.len()!=6*nodes || p.iter().any(|v| !v.is_finite())
+                || !p.iter().any(|v| *v!=0.0)) {
+            return Err(invalid("shell reduction requires bounded modes, physical ports, window and resistance"));
+        }
+        let work=projection_terms(nodes,elements,n)
+            .and_then(|w|6usize.checked_mul(nodes)?.checked_mul(n)?.checked_mul(force_ports.len())?.checked_add(w))
+            .and_then(|w|w.checked_add(4*n*n*n))
+            .and_then(|w|w.checked_add(12*elements*n));
+        if work.is_none_or(|w|w>budget.max_projection_terms) {
+            return Err(invalid("complete shell condensation and physical projections exceed their declared allowance"));
+        }
+        let model=assemble_mitc3p(&self.mesh,directors,&self.sections,&options.constraints,
+            options.mass,options.assembly_budget,options.drilling_alpha,||gate.is_requested()).map_err(owner)?;
+        // This is the shared spectral owner, not a private shell eigenalgorithm.
+        let spectral=fs_modal::SliceOptions { mass_diagonal_equilibration:true, ..Default::default() };
+        poll(gate)?;
+        let report=modes_shell(model.pencil(),options.eigenvalue_window,&spectral).map_err(owner)?;
+        poll(gate)?;
+        if report.modes.len()<n {
+            return Err(invalid("shell eigenvalue window contains fewer modes than requested"));
+        }
+        let modes=&report.modes[..n];
+        let mut physical_modes=Vec::with_capacity(n);
+        let mut intervals=Vec::with_capacity(n);
+        let mut omega=Vec::with_capacity(n);
+        for mode in modes {
+            poll(gate)?;
+            let w=fs_math::det::sqrt(mode.lambda);
+            if !w.is_finite() || w<=0.0
+                || self.regions.iter().any(|r|w<r.omega_band.0 || w>r.omega_band.1) {
+                return Err(invalid("actual retained shell mode lies outside original material support"));
+            }
+            physical_modes.push(model.expand(&mode.phi).map_err(owner)?);
+            omega.push(w); intervals.push(mode.interval);
+        }
+        let mut projected=vec![vec![0.0;n];force_ports.len()];
+        for (row,input) in projected.iter_mut().zip(force_ports) {
+            poll(gate)?;
+            // Independent work check in reduced support coordinates catches
+            // accidental loss or double rotation of oblique constrained axes.
+            let reduced=model.project_load(input).map_err(owner)?;
+            for (j,physical) in physical_modes.iter().enumerate() {
+                let value:f64=input.iter().zip(physical).map(|(a,b)|a*b).sum();
+                let expected:f64=reduced.iter().zip(&modes[j].phi).map(|(a,b)|a*b).sum();
+                let scale:f64=input.iter().zip(physical).map(|(a,b)|(a*b).abs()).sum();
+                if !value.is_finite() || !scale.is_finite()
+                    || (value-expected).abs()>1e-11*scale.max(1.0) {
+                    return Err(invalid("shell physical force projection lost work conjugacy"));
+                }
+                row[j]=value;
+            }
+            if row.iter().all(|v|*v==0.0) {
+                return Err(invalid("shell force footprint is detached from every retained mode"));
+            }
+        }
+        let mut volume_shapes=vec![0.0;n];
+        let mut area=0.0;
+        for (e,tri) in self.mesh.tris.iter().enumerate() {
+            poll(gate)?;
+            let g=self.mesh.facet(e).map_err(owner)?;
+            area+=g.area_m2;
+            for (j,p) in physical_modes.iter().enumerate() {
+                for &node in tri {
+                    volume_shapes[j]+=g.area_m2/3.0*(0..3)
+                        .map(|c|g.frame[2][c]*p[6*node+c]).sum::<f64>();
+                }
+            }
+        }
+        let matrix=project_viscosity(&self.mesh,directors,&self.sections,&self.viscosity,
+            &physical_modes,options.assembly_budget,budget.max_projection_terms,||gate.is_requested()).map_err(owner)?;
+        let damping=ModalPlateViscosity::factor(matrix,n,budget.reference_resistance_n_s_m,gate)?;
+        let radiators=omega.iter().enumerate().map(|(i,&w)|
+            CompactBody::from_mass_normalized_projection(w,volume_shapes[i],projected[0][i],area))
+            .collect::<Result<Vec<_>,_>>()?;
+        poll(gate)?;
+        Ok(MaterialShellImage { source:self.clone(),physical_modes,force_ports:projected,
+            volume_shapes,intervals,radiators,damping })
+    }
+}

@@ -202,7 +202,7 @@ pub struct ModalPlateViscosity {
     matrix:Vec<f64>, columns:Vec<Vec<f64>>, resistance:f64, modes:usize,
 }
 impl ModalPlateViscosity {
-    fn factor(matrix:Vec<f64>,n:usize,resistance:f64,gate:&CancelGate)->Result<Self,AcousticRealizeError> {
+    pub(crate) fn factor(matrix:Vec<f64>,n:usize,resistance:f64,gate:&CancelGate)->Result<Self,AcousticRealizeError> {
         if matrix.iter().any(|v|!v.is_finite()) { return Err(invalid("projected material damping is not finite")); }
         if matrix.iter().all(|v|*v == 0.0) {
             return Ok(Self {matrix,columns:Vec::new(),resistance,modes:n});
