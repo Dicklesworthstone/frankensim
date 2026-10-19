@@ -1,0 +1,19 @@
+[package]
+name = "scan-power-fit"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone executable consumer: no changes to the production workspace graph.
+[workspace]
+
+[dependencies]
+fs-ascent = { path = "../../crates/fs-ascent", features = ["conduction-design"] }
+fs-conduction = { path = "../../crates/fs-conduction" }
+fs-material = { path = "../../crates/fs-material" }
+fs-scenario = { path = "../../crates/fs-scenario" }
+fs-qty = { path = "../../crates/fs-qty" }
+fs-blake3 = { path = "../../crates/fs-blake3" }
+fs-alloc = { path = "../../crates/fs-alloc" }
+fs-exec = { path = "../../crates/fs-exec" }
+fs-solver = { path = "../../crates/fs-solver" }

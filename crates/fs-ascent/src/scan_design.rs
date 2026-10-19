@@ -115,6 +115,33 @@ impl<F> ScanPowerStudy<F> {
         point.iter().zip(&self.controls).map(|(&x,c)| positive_power(x,c.reference_w)).collect()
     }
 
+    /// Export reusable physical source declarations at an optimizer point.
+    /// No trajectory is solved and no physical-evaluation slot is consumed.
+    /// Positions, widths, signal knots, interpolation and unselected power
+    /// values are preserved by the same builder used for optimizer probes.
+    pub fn sources_at(&self, cx: &Cx<'_>, point: &[f64])
+        -> Result<Vec<MovingHeatSource>, ScanSensitivityError>
+    {
+        poll(cx)?;
+        self.rebuild_sources(cx, &self.powers_at(point)?)
+    }
+
+    fn rebuild_sources(&self, cx: &Cx<'_>, powers: &[f64])
+        -> Result<Vec<MovingHeatSource>, ScanSensitivityError>
+    {
+        let limit = self.objective.budget.max_schedule_controls;
+        let mut values = Vec::with_capacity(self.sources.len());
+        for source in &self.sources { poll(cx)?; values.push(source.absorbed_power_values(limit)?); }
+        for (control, &power) in self.controls.iter().zip(powers) { values[control.source][control.value] = power; }
+        let mut sources = Vec::with_capacity(self.sources.len());
+        for (source, values) in self.sources.iter().zip(&values) {
+            poll(cx)?;
+            sources.push(source.with_absorbed_power_values(values, self.objective.source_reference_time_s, limit)?);
+        }
+        poll(cx)?;
+        Ok(sources)
+    }
+
     /// Evaluate actual physics and the full history adjoint once. Failed probes
     /// consume a reserved evaluation slot; they do not change an accepted
     /// optimizer point. The factory must not vary non-source model data.
@@ -126,15 +153,7 @@ impl<F> ScanPowerStudy<F> {
         let powers_w = self.powers_at(point)?;
         if self.evaluations >= self.evaluation_limit { return Err(invalid("scan inverse evaluation budget exhausted")); }
         self.evaluations += 1;
-        let limit = self.objective.budget.max_schedule_controls;
-        let mut values = Vec::with_capacity(self.sources.len());
-        for source in &self.sources { poll(cx)?; values.push(source.absorbed_power_values(limit)?); }
-        for (control,&power) in self.controls.iter().zip(&powers_w) { values[control.source][control.value] = power; }
-        let mut sources = Vec::with_capacity(self.sources.len());
-        for (source,values) in self.sources.iter().zip(&values) {
-            poll(cx)?;
-            sources.push(source.with_absorbed_power_values(values,self.objective.source_reference_time_s,limit)?);
-        }
+        let sources = self.rebuild_sources(cx, &powers_w)?;
         let run = (self.factory)(cx,sources.clone())?;
         if run.conduction().accepted_steps() != 0 {
             return Err(invalid("scan factory must return an unadvanced physical run"));
