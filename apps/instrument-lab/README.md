@@ -218,7 +218,12 @@ same 16-division board and 128-coordinate POD reduction, contacts, hammer law an
 driven by the bridge and drained by its damper). Holding the silent strings as rigid chords it was
 2.51, 1.92, 2.06, 1.80, 1.74, with 125-250 Hz 2.5-2.8 dB high on every board; on the pivoted boards
 5.99, 3.54, 3.03, 2.77, 1.76. On an A3 mf strike the bank takes the early decay from -7.1 to -14.9 dB/s
-(offline -14.8) and the 2-8 kHz share from 2.4 dB below the offline render to 0.6 dB above it.
+(offline -14.8) and the 2-8 kHz share from 2.4 dB below the offline render to 0.6 dB above it. C6, all
+of whose partials lie above the band, keeps 1.8 dB less energy at 2-8 kHz and a 1.4 dB/s slower early
+decay than with every silent partial to 2.4 kHz moving; a 1200 Hz band (1,473 modes) brings it within
+1.0 dB and 0 dB/s, but costs up to 25 % more per sample (V8, Strandbar; 14 % on 128 coordinates), and it moves the 128-coordinate error
+only from 0.20 to 0.15 dB. In V8 the 600 Hz bank costs 1.31-1.36x per sample on the sustained probe on
+every board (its gather and kick per course are board-length); `boards.js`'s cost model includes it.
 
 The browser plays RT-0425's published laws (`wasm.rs`): its string losses, its hammer stiffness K_H on
 each unison string and its rate loss R_H in place of the estimated crush and Prony terms
