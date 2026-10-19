@@ -115,6 +115,7 @@ pub struct MaterialStringBankSource {
     options: StringBankOptions,
     body_connections: Vec<ModalConnection>,
     rotational_body_connections: Vec<torsion::StringBodyRotationConnection>,
+    fluid_loading: Option<fluid::StringBankFluidLoading>,
     material_plate: Option<plate::SharedMaterialPlateBody>,
     material_chart: Option<chart::SharedMaterialPlateChartBody>,
     material_chart_viscosity: Option<crate::plate_viscosity::ViscousPlateImage>,
@@ -158,7 +159,7 @@ impl MaterialStringBankSource {
 }
 
 /// All string/body vibration persists in ONE mechanical/friction state.
-/// Components are ordered as all strings, followed by all supplied bodies.
+/// Components are strings, supplied physical bodies, then optional fluid memory.
 pub struct ReciprocalStringBank {
     source: MaterialStringBankSource,
     cards: Vec<BowedStringCard>,
@@ -208,17 +209,19 @@ impl ReciprocalStringBank {
         }
         let connections: Vec<&[InteriorStringConnection]> = strings.iter()
             .map(|member| member.connections.as_slice()).collect();
-        let system = assemble_sources(&cards, Some(&strings), bodies, &connections, &body_connections, &[], law, &options, gate)?;
+        let system = assemble_sources(&cards, Some(&strings), bodies, &connections, &body_connections, &[], None, law, &options, gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, rotational_body_connections: Vec::new(), material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_cavity: None }, cards, system })
+        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, rotational_body_connections: Vec::new(), fluid_loading: None, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_cavity: None }, cards, system })
     }
 
     /// Complete source assignments survive rendering and sympathetic vibration.
     #[must_use]
     pub const fn source(&self) -> &MaterialStringBankSource { &self.source }
-    /// Derived TRANSVERSE coefficients; optional torsion and receipts remain in `source()`.
+    /// Derived TRANSVERSE coefficients, including instantaneous added gas inertia
+    /// when selected. Original solid cards and fluid coefficients remain in
+    /// `source().cylinder_gas_loading()`; torsion retains its solid polar inertia.
     #[must_use]
     pub fn cards(&self) -> &[BowedStringCard] { &self.cards }
     /// Accepted mechanics and work/loss diagnostics, without mutable source drift.
@@ -351,7 +354,7 @@ pub(super) fn assemble(
     connections: &[&[InteriorStringConnection]], body_connections: &[ModalConnection],
     law: FrictionLaw, options: &StringBankOptions, gate: &CancelGate,
 ) -> Result<FrictionModalSystem, ReciprocalStringError> {
-    assemble_sources(cards, None, bodies, connections, body_connections, &[], law, options, gate)
+    assemble_sources(cards, None, bodies, connections, body_connections, &[], None, law, options, gate)
 }
 
 // Keep the original one-string API in the same assembler. Its absent source
@@ -361,7 +364,8 @@ fn assemble_sources(
     cards: &[BowedStringCard], sources: Option<&[MaterialStringMember]>,
     bodies: Vec<ModalAcousticTimeModel>, connections: &[&[InteriorStringConnection]],
     body_connections: &[ModalConnection],
-    rotational_body_connections: &[torsion::StringBodyRotationConnection], law: FrictionLaw,
+    rotational_body_connections: &[torsion::StringBodyRotationConnection],
+    fluid_loading: Option<&fluid::StringBankFluidLoading>, law: FrictionLaw,
     options: &StringBankOptions, gate: &CancelGate,
 ) -> Result<FrictionModalSystem, ReciprocalStringError> {
     poll(gate)?;
@@ -428,6 +432,10 @@ fn assemble_sources(
         links.push(link);
     }
     components.extend(bodies);
+    if let Some(loading) = fluid_loading {
+        let sources = sources.ok_or_else(|| invalid("cylinder loading requires original material string sources"))?;
+        loading.append_components(cards, sources, &mut components, &mut links, options, gate)?;
+    }
     let network = CoupledModalSystem::new(components, links, options.network, gate)
         .map_err(ReciprocalStringError::Network)?;
     let bow_card = &cards[options.bow.string];
@@ -458,6 +466,9 @@ pub mod polarization;
 
 /// Material-derived surface twisting in the same reciprocal contact solve.
 pub mod torsion;
+
+/// Material-gas inertia and causal viscous memory in the same reciprocal solve.
+pub mod fluid;
 
 /// The same material sources in the existing nonlinear impact/contact owner.
 pub mod nonlinear;

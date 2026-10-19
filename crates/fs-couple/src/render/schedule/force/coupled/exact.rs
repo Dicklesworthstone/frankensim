@@ -722,6 +722,76 @@ mod tests {
     }
 
     #[test]
+    fn many_physical_dashpots_keep_exact_motion_work_and_caller_budgets() {
+        // Seventy-two distinct no-slip/contact patches are physical ports,
+        // even though all their displacements project onto one retained mode.
+        // Their known aggregate gives an independent scalar ODE reference.
+        let count = 72;
+        let omega: f64 = 200.0;
+        let q0: f64 = 0.001;
+        let v0: f64 = 0.3;
+        let damping_per_patch: f64 = 0.5;
+        let mut model = ModalAcousticTimeModel::try_new(48_000,
+            vec![ModalAcousticMode { angular_frequency_rad_s: omega,
+                damping_ratio: 0.0, pressure_per_modal_velocity: C64::ZERO }],
+            ModalAcousticTimeBudget::audible_reference()).unwrap();
+        model.restore_states(&[ModalAcousticState { displacement_m_sqrt_kg: q0,
+            velocity_m_sqrt_kg_per_s: v0 }]).unwrap();
+        let links: Vec<_> = (0..count).map(|_| ModalConnection {
+            left: ModalAttachment { component: 0, shapes: vec![1.0] },
+            right: ModalAttachment { component: 0, shapes: vec![0.0] },
+            stiffness_n_m: 0.0, damping_n_s_m: damping_per_patch,
+            rest_extension_m: 0.0,
+        }).collect();
+        let needed = (count + 1) * (count + 1);
+        let config = ModalCouplingConfig {
+            max_modes: 1, max_connections: count, max_setup_terms: needed,
+            nyquist_guard_fraction: 0.9, maximum_total_energy_j: 1.0,
+            maximum_abs_pressure_pa: 1e6, maximum_abs_connection_force_n: 100.0,
+            solve_relative_tolerance: 1e-11, energy_absolute_tolerance_j: 1e-12,
+            energy_relative_tolerance: 1e-10,
+        };
+        let gate = CancelGate::new_clock_free();
+        // The cap generalization does not authorize extra caller work or ports.
+        assert!(CoupledModalSystem::new(vec![model.clone()], links.clone(),
+            ModalCouplingConfig { max_connections: count - 1, ..config }, &gate).is_err());
+        assert!(CoupledModalSystem::new(vec![model.clone()], links.clone(),
+            ModalCouplingConfig { max_setup_terms: needed - 1, ..config }, &gate).is_err());
+        assert!(CoupledModalSystem::new(vec![model.clone()], links.clone(),
+            ModalCouplingConfig { max_connections: MAX_MODAL_CONNECTIONS + 1, ..config }, &gate).is_err());
+        let mut system = CoupledModalSystem::new(vec![model], links, config, &gate).unwrap();
+        let gamma = 0.5 * count as f64 * damping_per_patch;
+        let wd = (omega * omega - gamma * gamma).sqrt();
+        let mut loss = 0.0;
+        for step in 1..=8 {
+            let frame = system.step(&[0.0]).unwrap().clone();
+            let time = f64::from(step) / 48_000.0;
+            let envelope = (-gamma * time).exp();
+            let phase = wd * time;
+            let q = envelope * (q0 * phase.cos() + (v0 + gamma * q0) / wd * phase.sin());
+            let v = envelope * (v0 * phase.cos()
+                - (gamma * v0 + omega * omega * q0) / wd * phase.sin());
+            let state = system.components()[0].states()[0];
+            assert!((state.displacement_m_sqrt_kg - q).abs() < 1e-12 * q.abs());
+            assert!((state.velocity_m_sqrt_kg_per_s - v).abs() < 1e-12 * v.abs());
+            assert_eq!(frame.connection_forces_n.len(), count);
+            for &reaction in &frame.connection_forces_n {
+                assert!((reaction + damping_per_patch * v).abs() < 1e-12 * v.abs());
+            }
+            let transfers = system.last_window_transfers().unwrap();
+            assert_eq!(transfers.len(), count);
+            let port_loss: f64 = transfers.iter().map(|t| -t.energy_into().value()).sum();
+            assert!((port_loss - frame.connection_dissipation_j).abs()
+                < 1e-11 * frame.connection_dissipation_j);
+            assert!(frame.connection_dissipation_j > 0.0);
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            loss += frame.connection_dissipation_j;
+        }
+        let initial = 0.5 * (omega * omega * q0 * q0 + v0 * v0);
+        assert!((system.total_energy_j().unwrap() + loss - initial).abs() < 1e-11 * initial);
+    }
+
+    #[test]
     fn g0_disconnected_port_work_is_zero_on_the_accepted_factorized_step() {
         let seed = network(48_000, 1000.0);
         let mut network = CoupledModalSystem::new_with_columns(

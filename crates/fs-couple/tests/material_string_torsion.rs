@@ -541,3 +541,6 @@ fn g0_rotation_geometry_refusals_and_stress_free_angle_have_physical_units() {
 
 #[path = "material_string_torsion/polarization.rs"]
 mod polarization;
+
+#[path = "material_string_torsion/fluid.rs"]
+mod fluid;

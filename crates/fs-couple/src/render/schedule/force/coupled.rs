@@ -69,12 +69,17 @@ struct ConnectionLaw {
     rest_extension_m: f64,
 }
 
+/// Capacity for distinct physical spring/dashpot ports, independent of mode count.
+/// Actual caller connection and setup-work limits still apply before allocation;
+/// each complete connected exponential island keeps its own smaller dense cap.
+pub const MAX_MODAL_CONNECTIONS: usize = 4096;
+
 /// Explicit numerical and work admission for a fixed coupled configuration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModalCouplingConfig {
     /// Maximum total component modes (hard ceiling 4096).
     pub max_modes: usize,
-    /// Maximum connections (hard ceiling 64).
+    /// Maximum physical connections, bounded by MAX_MODAL_CONNECTIONS (4096).
     pub max_connections: usize,
     /// Budget for n_modes * (n_connections+1)^2 setup terms.
     pub max_setup_terms: usize,
@@ -476,14 +481,15 @@ fn connection_layout(
         if count > config.max_modes { return Err(invalid("total modal count exceeds max_modes")); }
         offsets.push(count);
     }
-    let terms = count.checked_mul(links + 1).and_then(|n| n.checked_mul(links + 1))
+    let extent = links.checked_add(1).ok_or_else(|| invalid("connection setup extent overflow"))?;
+    let terms = count.checked_mul(extent).and_then(|n| n.checked_mul(extent))
         .ok_or_else(|| invalid("connection setup work overflow"))?;
     if terms > config.max_setup_terms { return Err(invalid("connection setup work exceeds max_setup_terms")); }
     Ok((offsets, count, dt))
 }
 
 fn validate_config(c: ModalCouplingConfig) -> Result<(), ModalCouplingError> {
-    if c.max_modes == 0 || c.max_modes > 4096 || c.max_connections > 64
+    if c.max_modes == 0 || c.max_modes > 4096 || c.max_connections > MAX_MODAL_CONNECTIONS
         || !c.nyquist_guard_fraction.is_finite() || c.nyquist_guard_fraction <= 0.0 || c.nyquist_guard_fraction >= 1.0
         || [c.maximum_total_energy_j, c.maximum_abs_pressure_pa, c.maximum_abs_connection_force_n,
             c.solve_relative_tolerance].iter().any(|x| !x.is_finite() || *x <= 0.0)

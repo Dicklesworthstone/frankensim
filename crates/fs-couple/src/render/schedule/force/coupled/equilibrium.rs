@@ -13,9 +13,11 @@ impl CoupledModalSystem {
     /// window; returned storage is not a measured work history. This offline
     /// initialization allocates, uses the same setup-size cap as construction,
     /// and publishes no states on a cancellation, residual or budget refusal.
-    /// Explicit free coordinates are legal only when the declared bilateral
-    /// springs constrain all of them. No artificial tether or pose is supplied.
-    /// The additional bounded support solve uses at most max_connections rows.
+    /// Explicit free coordinates require declared bilateral spring support,
+    /// except exactly zero-stiffness rows with exactly zero applied force:
+    /// their already-zero initial displacements are retained as position gauges.
+    /// These coordinates remain dynamically free; no tether or general singular
+    /// solve is introduced. The support solve uses at most max_connections rows.
     pub fn initialize_static_equilibrium(&mut self, external: &[f64], gate: &CancelGate)
         -> Result<f64, ModalCouplingError>
     {
@@ -42,8 +44,9 @@ impl CoupledModalSystem {
     /// accepted network unchanged. This method does not attach the contacts:
     /// pass these same descriptions to ContactModalSystem/MultiContactModalSystem
     /// to continue their dynamics, and retain the held forces until release.
-    /// Free coordinates require an independently supported bilateral network;
-    /// a mass supported ONLY by unilateral contacts remains outside this solve.
+    /// Every contact-loaded free coordinate requires independent bilateral
+    /// support; unloaded position gauges may remain at zero. A mass supported
+    /// ONLY by unilateral contacts remains outside this solve.
     pub fn initialize_contact_equilibrium(
         &mut self,
         external: &[f64],
@@ -126,20 +129,31 @@ struct StaticResponse {
     matrix: Vec<f64>,
     factor: Cholesky,
     free: Option<FreeResponse>,
+    gauges: Vec<usize>,
 }
 impl StaticResponse {
     fn new(network: &CoupledModalSystem, gate: &CancelGate) -> Result<Self, ModalCouplingError> {
         let free_count = network.models.iter().flat_map(|m| m.modes())
             .filter(|m| m.angular_frequency_rad_s == 0.0).count();
-        FreeResponse::admit(network, free_count)?;
         let mut indices = Vec::with_capacity(free_count);
+        let mut gauges = Vec::new();
         let mut compliance = Vec::with_capacity(network.mode_count());
         for model in &network.models {
             poll(Some(gate))?;
             for mode in model.modes() {
                 if mode.angular_frequency_rad_s == 0.0 {
-                    indices.push(compliance.len());
-                    compliance.push(0.0); // placeholder; free positions come from the support solve
+                    let index = compliance.len();
+                    // With nonnegative spring stiffness, a stiffness row is
+                    // exactly zero iff it has no participation in ANY positive
+                    // spring. A dashpot contributes no static force. Do not
+                    // classify small or linearly dependent support as a gauge.
+                    if network.columns.iter().zip(&network.connections)
+                        .any(|(column, link)| link.stiffness_n_m > 0.0 && column[index] != 0.0) {
+                        indices.push(index);
+                    } else {
+                        gauges.push(index);
+                    }
+                    compliance.push(0.0); // supported free positions come from the support solve
                 } else {
                     let d = finite((mode.angular_frequency_rad_s * mode.angular_frequency_rad_s).recip())?;
                     if d <= 0.0 { return Err(invalid("positive static modal compliance is not representable")); }
@@ -147,18 +161,27 @@ impl StaticResponse {
                 }
             }
         }
+        FreeResponse::admit(network, indices.len())?;
         let roots: Vec<f64> = network.connections.iter().map(|c| c.stiffness_n_m.sqrt()).collect();
         let matrix = connection_matrix(&network.columns, &compliance, &roots, Some(gate))?;
         let factor = cholesky(&matrix, roots.len()).map_err(ModalCouplingError::Factor)?;
         let free = if indices.is_empty() { None } else {
             Some(FreeResponse::new(network, indices, &roots, &matrix, &factor, gate)?)
         };
-        Ok(Self { compliance, roots, matrix, factor, free })
+        Ok(Self { compliance, roots, matrix, factor, free, gauges })
     }
 
     fn solve(&self, network: &CoupledModalSystem, external: &[f64], include_rest: bool,
         enforce_limits: bool, gate: &CancelGate) -> Result<Vec<f64>, ModalCouplingError>
     {
+        for &index in &self.gauges {
+            poll(Some(gate))?;
+            // Also applies to contact/tangent compliance queries: an unsupported
+            // force cannot acquire a finite compliance by selecting a position.
+            if external[index] != 0.0 {
+                return Err(invalid("a zero-stiffness position gauge cannot balance an applied static force"));
+            }
+        }
         let free: Vec<f64> = self.compliance.iter().zip(external).map(|(d,g)| finite(d*g)).collect::<Result<_,_>>()?;
         let mut rhs = Vec::with_capacity(self.roots.len());
         for ((column, link), root) in network.columns.iter().zip(&network.connections).zip(&self.roots) {

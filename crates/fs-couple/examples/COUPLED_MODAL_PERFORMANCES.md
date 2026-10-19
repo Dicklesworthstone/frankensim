@@ -48,7 +48,9 @@ before the named sample. Releasing one actuator does not remove its connections.
 `MAX_TOTAL_ENERGY` is joules including the springs, `MAX_PRESSURE` is summed
 observer pascals, and `MAX_REACTION_FORCE` is newtons per connection. The setup
 work screen is `total_modes * (connections + 1)^2`. File input caps connections
-at 64 and setup terms at 16777216. The coupled Nyquist screen uses the algebraic
+at the shared 4096-port owner ceiling and setup terms at 16777216. The caller's
+smaller connection limit is still binding. Large numbers of physical dissipation
+ports do not raise the separate dense capacity of a connected modal island. The coupled Nyquist screen uses the algebraic
 upper bound `max(omega^2) + sum(k * ||B||^2)`: it is conservative and is not an
 interval eigenvalue certificate. Energy admission uses the supplied absolute
 joule tolerance plus the supplied relative tolerance times the step's energy

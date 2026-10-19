@@ -1357,14 +1357,62 @@ clarinet is one filling of those objects.
   This circular, frozen-state linear model does not supply arbitrary
   six-degree-of-freedom bridge motion, independent stop-normal geometry, shared
   nonlinear two-plane tension, helical winding/slip, or a measured-instrument timbre
-  guarantee. Nonlinear string conversion explicitly refuses a two-plane source
-  until its shared stretching law exists.
+  guarantee. Nonlinear material source conversion uses the existing shared
+  two-plane Kirchhoff–Carrier stretching law.
 
   Seven focused physical tests cover material-mode identity, rotational
   covariance, directional sound changes, force work conjugacy, constructor
   ordering/refusals, combined rotational-bridge response and two-plane unilateral
   contact. Three example tests cover source input, material/angle swaps,
   PCM/callback identity and admission. Native verification is recorded separately.
+  `ReciprocalStringBank::with_cylinder_gas_loading` selects a causal gas
+  operator for the same circular material strings. The shared
+  `air_path::cylinder` owner derives the unsteady incompressible Stokes impedance
+  `Z(s)=pi*rho*a^2*s+4*pi*mu*z*K1(z)/K0(z)`, `z=a*sqrt(rho*s/mu)`, from
+  actual outer radius and the retained complete gas. The continuum follows
+  [NASA/CR-2007-215050, equation (7)](https://ntrs.nasa.gov/api/citations/20080006726/downloads/20080006726.pdf).
+  Its positive spectrum per log relaxation rate,
+  `8*mu/[pi*(J0^2+Y0^2)]`, supplies physical free inertias joined by passive
+  dashpots in the original exact reciprocal system. Both transverse planes
+  carry instantaneous added gas mass and viscous memory; original solid
+  density, bending, installed tension, material viscosity and torsional inertia
+  remain distinct. The active transverse card replaces sampled gas resistance
+  with intrinsic material loss plus the explicitly collapsed slow tail, so
+  fluid damping is not counted twice.
+
+  These fluid components append after physical bodies. Full tensor body loss,
+  cavity connections, pressure observation, dry interface and torque maps
+  survive binding, either cold torque/fluid order, and multiple-bow scheduling.
+  Pressure and force maps follow the changed transverse mass normalization;
+  fluid coordinates receive no fictitious direct acoustic pressure weights.
+  Added kinetic storage, reciprocal reactions and viscous heat enter the same
+  complete work balance. Static initialization admits exactly zero-stiffness
+  positions only when their applied static force is exactly zero. Their
+  already-zero positions remain gauges while their velocities remain physical
+  free inertias; no artificial spring or general singular preload solve enters.
+
+  `CylinderFlowResolution` declares independent slow/fast dimensionless
+  wavenumber cutoffs and log-grid intervals: `0<X_MIN<=0.5`,
+  `X_MIN<X_MAX<=3000`, and `1..=4096` intervals. The exact integrated slow
+  tail is collapsed to resistance with dynamic error bounded by
+  `R_low*lambda_min/omega` at positive frequency; the fast tail is truncated.
+  Refine all three axes and the actual coupled response. Every branch adds one
+  coordinate and one connection per transverse mode. The shared mechanical
+  connection ceiling is 4096, with caller mode/connection/setup budgets still
+  enforced before allocation; the existing exact connected-island limit is
+  not raised by that port capacity. Repeated/live bindings and loaded elastic
+  modes outside their original material bands refuse.
+
+  Operator regressions compare complex force with an independent modified
+  Bessel reference and exercise every cutoff/grid axis. Material-bank tests
+  exercise pressure-dependent inertia, viscosity-only changes in actual body
+  pressure, both transverse planes, unchanged torsion, fluid kinetic energy,
+  torque binding order and preload/release. Source review is not native test
+  execution. This local long-cylinder, small-motion Newtonian incompressible
+  model supplies no finite-amplitude convection/wakes, axial/end/confinement
+  or neighbouring-string interaction, rotary drag, rarefaction, compressible
+  radiation, evolving atmosphere or measured violin/cello/bass fidelity claim.
+
 - Reed path: quasistatic or massive Bernoulli valve. Reeds with explicit
   positive stiffness derive their effective pressure area from the
   declared closing relation `A = k H / Pc`. Characteristic-line motion and

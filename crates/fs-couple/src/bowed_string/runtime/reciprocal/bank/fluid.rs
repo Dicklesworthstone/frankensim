@@ -1,0 +1,247 @@
+//! Source-bound unsteady gas loading in the SAME string/body/friction network.
+//!
+//! Every transverse mode gets the cylinder continuum's potential-flow inertia
+//! and positive viscous memory branches. The branches are real free coordinates
+//! coupled through dashpots in the existing exact linear owner; their kinetic
+//! energy, reactions and dissipation enter the original work ledger. Nothing is
+//! applied to the acoustic samples. Both physical polarizations share one gas
+//! and cross-section, while original shear/torsion remains unchanged.
+//!
+//! Local two-dimensional flow is a slender-cylinder approximation along a
+//! vibrating string. Spectral cutoffs, quadrature and string modes must be
+//! refined. No nonlinear wake, confinement, rotary loading or radiation claim.
+
+use super::*;
+use crate::air_path::cylinder::{CylinderFlow, CylinderFlowResolution};
+use fs_math::det;
+
+/// One original solid realization and its separately retained fluid continuum.
+#[derive(Clone, Debug)]
+pub struct StringCylinderLoading {
+    solid_card: BowedStringCard,
+    flow: CylinderFlow,
+}
+impl StringCylinderLoading {
+    /// Original solid mass, bending, tension and old sampled loss realization.
+    /// The old card is provenance only; its sampled gas resistance is replaced.
+    #[must_use]
+    pub const fn solid_card(&self) -> &BowedStringCard { &self.solid_card }
+    /// Source-derived added inertia, memory masses, resistance and resolution.
+    #[must_use]
+    pub const fn flow(&self) -> &CylinderFlow { &self.flow }
+}
+
+/// Frozen fluid and structural provenance retained through every performance.
+#[derive(Clone, Debug)]
+pub struct StringBankFluidLoading {
+    resolution: CylinderFlowResolution,
+    strings: Vec<StringCylinderLoading>,
+    pub(super) body_components: usize,
+}
+impl StringBankFluidLoading {
+    #[must_use]
+    pub const fn resolution(&self) -> CylinderFlowResolution { self.resolution }
+    /// Same original material-string order. Fluid is never merged into a solid
+    /// density property or hidden inside per-mode authored damping.
+    #[must_use]
+    pub fn strings(&self) -> &[StringCylinderLoading] { &self.strings }
+
+    pub(super) fn append_components(
+        &self,
+        cards: &[BowedStringCard],
+        sources: &[MaterialStringMember],
+        components: &mut Vec<ModalAcousticTimeModel>,
+        links: &mut Vec<ModalConnection>,
+        options: &StringBankOptions,
+        gate: &CancelGate,
+    ) -> Result<(), ReciprocalStringError> {
+        if self.strings.len() != cards.len() || sources.len() != cards.len()
+            || components.len() != cards.len() + self.body_components {
+            return Err(invalid("cylinder memory must retain original strings and physical body layout"));
+        }
+        let fluid_start = components.len();
+        for (index, (card, loading)) in cards.iter().zip(&self.strings).enumerate() {
+            poll(gate)?;
+            let transverse_modes = transverse_count(&sources[index].source, card);
+            let fluid_modes = transverse_modes.checked_mul(loading.flow.branches().len())
+                .ok_or_else(|| invalid("cylinder memory dimension overflow"))?;
+            let mut modes = Vec::with_capacity(fluid_modes);
+            let solid_shape = det::sqrt(2.0 / card.linear_density_kg_m / card.length_m);
+            for k in 0..transverse_modes {
+                for (branch_index, branch) in loading.flow.branches().iter().enumerate() {
+                    poll(gate)?;
+                    let branch_shape = det::sqrt(2.0 / branch.mass_per_length_kg_m / card.length_m);
+                    let resistance = branch.resistance_per_length_n_s_m2 * (0.5 * card.length_m);
+                    if [solid_shape, branch_shape, resistance].iter()
+                        .any(|v| !v.is_finite() || *v <= 0.0) {
+                        return Err(invalid("fluid/string work-conjugate port is unrepresentable"));
+                    }
+                    let mut left = vec![0.0; sources[index].source.modes()];
+                    let mut right = vec![0.0; fluid_modes];
+                    left[k] = solid_shape;
+                    right[k * loading.flow.branches().len() + branch_index] = branch_shape;
+                    links.push(ModalConnection {
+                        left: ModalAttachment { component: index, shapes: left },
+                        right: ModalAttachment { component: fluid_start + index, shapes: right },
+                        stiffness_n_m: 0.0,
+                        damping_n_s_m: resistance,
+                        rest_extension_m: 0.0,
+                    });
+                    modes.push(ModalAcousticMode {
+                        angular_frequency_rad_s: 0.0,
+                        damping_ratio: 0.0,
+                        pressure_per_modal_velocity: fs_math::c64::C64::ZERO,
+                    });
+                }
+            }
+            components.push(ModalAcousticTimeModel::try_new_with_free_coordinates(
+                options.sample_rate_hz, modes, options.string_budget,
+            ).map_err(|source| ReciprocalStringError::Network(
+                ModalCouplingError::Component { component: fluid_start + index, source },
+            ))?);
+        }
+        Ok(())
+    }
+}
+
+impl MaterialStringBankSource {
+    /// The actual causal gas law and original solid mass survive scheduling.
+    /// Absent loading retains the existing sampled-resistance model.
+    #[must_use]
+    pub const fn cylinder_gas_loading(&self) -> Option<&StringBankFluidLoading> {
+        self.fluid_loading.as_ref()
+    }
+}
+
+fn transverse_count(source: &MaterialStringSource, card: &BowedStringCard) -> usize {
+    card.mode_count * if matches!(source, MaterialStringSource::WithPolarizations(_)) { 2 } else { 1 }
+}
+
+fn geometry_and_band(source: &MaterialStringSource)
+    -> Result<(f64, (f64, f64)), ReciprocalStringError>
+{
+    match source {
+        MaterialStringSource::WithPolarizations(p) => geometry_and_band(p.source()),
+        MaterialStringSource::WithTorsion(t) => geometry_and_band(t.bending()),
+        MaterialStringSource::Homogeneous(s) => {
+            let law = s.string().kelvin_voigt_bending
+                .ok_or_else(|| invalid("cylinder loading needs the original material bending-loss law"))?;
+            Ok((s.radius_m(), law.omega_band_rad_s))
+        }
+        MaterialStringSource::Concentric { section, .. } =>
+            Ok((section.elastic().outer_radius_m(), section.omega_band_rad_s())),
+    }
+}
+
+impl ReciprocalStringBank {
+    /// Replace sampled air damping with a causal unsteady-cylinder continuum.
+    ///
+    /// Source solid density is untouched. The returned cards carry the actual
+    /// transverse inertia (solid plus instantaneous fluid added mass); their
+    /// damping contains ONLY material Kelvin-Voigt loss and the collapsed slow
+    /// fluid tail. Every remaining viscous contribution is a coupled fluid mass,
+    /// so it cannot be double-counted as old per-mode gas resistance.
+    ///
+    /// Gas density and viscosity come from source().gas(), radius from each
+    /// original circular section. Additional free components follow all physical
+    /// bodies, preserving every existing component index and body observation.
+    /// One binding is allowed before any string motion/playback. Body initial
+    /// states, complete tensor damping, cavity connections, torque bridges and
+    /// source interface are retained. Subsequent torque attachment retains fluid.
+    ///
+    /// The explicit resolution is numerical data, not an accuracy guarantee.
+    /// Refine both cutoffs, branch count, string modes and coupled response.
+    /// The underlying continuum is small-motion, incompressible, local, circular
+    /// and unconfined; it is not the general finite-amplitude atmosphere solver.
+    pub fn with_cylinder_gas_loading(
+        mut self,
+        resolution: CylinderFlowResolution,
+        gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        poll(gate)?;
+        resolution.validate().map_err(ReciprocalStringError::Material)?;
+        if self.source.fluid_loading.is_some() || self.system.samples_rendered() != 0
+            || self.system.components()[..self.cards.len()].iter().flat_map(|c| c.states())
+                .any(|s| s.displacement_m_sqrt_kg != 0.0 || s.velocity_m_sqrt_kg_per_s != 0.0) {
+            return Err(invalid("cylinder loading requires one cold binding before string motion or playback"));
+        }
+        // Bound complete dimensions BEFORE allocating quadrature or port arrays.
+        let transverse_modes = self.source.strings.iter().zip(&self.cards)
+            .try_fold(0usize, |n, (source, card)| n.checked_add(transverse_count(&source.source, card)))
+            .ok_or_else(|| invalid("complete transverse mode count overflow"))?;
+        let added_modes = transverse_modes.checked_mul(resolution.intervals)
+            .ok_or_else(|| invalid("complete fluid memory dimension overflow"))?;
+        let total_modes = self.system.mode_count().checked_add(added_modes)
+            .ok_or_else(|| invalid("complete fluid/string/body dimension overflow"))?;
+        let old_links = self.source.strings.iter().try_fold(
+            self.source.body_connections.len() + self.source.rotational_body_connections.len(),
+            |n, s| n.checked_add(s.connections.len()),
+        ).ok_or_else(|| invalid("fluid/string/body connection count overflow"))?;
+        if total_modes > self.source.options.network.max_modes
+            || old_links.checked_add(added_modes)
+                .is_none_or(|n| n > self.source.options.network.max_connections) {
+            return Err(invalid("cylinder memory exceeds the declared COMPLETE network mode or connection budget"));
+        }
+        let mut cards = Vec::with_capacity(self.cards.len());
+        let mut loading = Vec::with_capacity(self.cards.len());
+        for (solid, member) in self.cards.iter().zip(&self.source.strings) {
+            poll(gate)?;
+            let (radius, (lo, hi)) = geometry_and_band(&member.source)?;
+            let flow = CylinderFlow::from_gas(radius, self.source.gas, resolution, gate)
+                .map_err(ReciprocalStringError::Material)?;
+            let mut card = solid.clone();
+            card.linear_density_kg_m = solid.linear_density_kg_m + flow.added_mass_per_length_kg_m();
+            if !card.linear_density_kg_m.is_finite()
+                || card.linear_density_kg_m <= solid.linear_density_kg_m {
+                return Err(invalid("added gas inertia is not representable beside the actual solid line mass"));
+            }
+            for k in 0..card.mode_count {
+                let wave_number = (k + 1) as f64 * core::f64::consts::PI / card.length_m;
+                let omega = card.mode_omega_rad_s(k + 1);
+                // Re-derive intrinsic loss from its source; subtracting two close
+                // sampled damping values could silently discard real viscosity.
+                let resistance = card.viscous_bending_n_m2_s * wave_number.powi(4)
+                    + flow.low_tail_resistance_per_length_n_s_m2();
+                let zeta = 0.5 * resistance / card.linear_density_kg_m / omega;
+                if !omega.is_finite() || omega <= 0.0 || omega < lo || omega > hi
+                    || !zeta.is_finite() || zeta <= 0.0 {
+                    return Err(invalid("fluid-loaded string mode exceeds its original material band or representability"));
+                }
+                card.zetas[k] = zeta;
+            }
+            card.validate().map_err(|_| invalid("fluid-loaded physical string card is not admissible"))?;
+            cards.push(card);
+            loading.push(StringCylinderLoading { solid_card: solid.clone(), flow });
+        }
+        let bodies = self.system.components()[self.cards.len()..].to_vec();
+        let fluid = StringBankFluidLoading { resolution, strings: loading,
+            body_components: bodies.len() };
+        let bridges: Vec<_> = self.source.strings.iter().map(|s| s.connections.as_slice()).collect();
+        let mut system = assemble_sources(
+            &cards, Some(&self.source.strings), bodies, &bridges,
+            &self.source.body_connections, &self.source.rotational_body_connections,
+            Some(&fluid), self.system.port().law.clone(), &self.source.options, gate,
+        )?;
+        if let Some(original) = self.system.acceleration_pressure_weights() {
+            let mut weights = original.to_vec();
+            let mut offset = 0;
+            for (i, member) in self.source.strings.iter().enumerate() {
+                let scale = det::sqrt(self.cards[i].linear_density_kg_m / cards[i].linear_density_kg_m);
+                for weight in &mut weights[offset..offset + transverse_count(&member.source, &cards[i])] {
+                    *weight *= scale;
+                }
+                offset += member.source.modes();
+            }
+            weights.resize(system.mode_count(), 0.0);
+            system = system.with_acceleration_pressure(weights).map_err(ReciprocalStringError::Friction)?;
+        }
+        if let Some(binding) = self.system.interface() {
+            system = system.with_interface(binding.clone()).map_err(ReciprocalStringError::Friction)?;
+        }
+        poll(gate)?;
+        self.cards = cards;
+        self.source.fluid_loading = Some(fluid);
+        self.system = system;
+        Ok(self)
+    }
+}

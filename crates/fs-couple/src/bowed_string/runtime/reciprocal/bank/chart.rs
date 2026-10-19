@@ -136,7 +136,8 @@ impl ReciprocalStringBank {
             let channels = if viscosity.is_zero() { 0 } else { r.n_modes };
             let links = sources.len() + channels + cavity.as_ref().map_or(0, |c|
                 1 + usize::from(c.cavity.neck_resistance_n_s_m() != 0.0));
-            if links > options.network.max_connections || links > 64 {
+            if links > options.network.max_connections
+                || links > crate::render::schedule::force::coupled::MAX_MODAL_CONNECTIONS {
                 return Err(invalid("complete material damping, bridge and cavity channels exceed the original connection budget"));
             }
         }

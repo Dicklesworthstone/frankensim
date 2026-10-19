@@ -334,7 +334,7 @@ impl ParsedPerformance {
         // not reinterpret any formerly accepted independent performance.
         let coupled = if schema != MODAL_PERFORMANCE_SCHEMA {
             let mut row = reader.row("coupling_limits")?;
-            let max_connections = row.count(64)?;
+            let max_connections = row.count(super::coupled::MAX_MODAL_CONNECTIONS)?;
             let max_setup_terms = row.count(MAX_PROJECTION_TERMS)?;
             let coupling = ModalCouplingConfig {
                 max_modes: MAX_MODES, max_connections, max_setup_terms,

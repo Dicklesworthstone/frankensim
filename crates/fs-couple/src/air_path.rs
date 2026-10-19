@@ -4,6 +4,9 @@
 //! air-specific ISO 9613 law requires an explicit choice; temperature and
 //! pressure alone do not establish that an arbitrary mixture is air.
 
+/// Refinable causal gas inertia and viscous memory for circular transverse motion.
+pub mod cylinder;
+
 use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
 use fs_material::iso9613::iso9613_absorption;

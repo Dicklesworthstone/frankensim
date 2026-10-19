@@ -130,8 +130,8 @@ fn free_support_is_independent_of_mass_damping_and_sample_clock_when_loads_are_p
 }
 
 #[test]
-fn missing_dependent_or_dashpot_only_supports_do_not_choose_a_pose() {
-    for links in [vec![],vec![spring(0,5.0,1,5.0,1000.0,0.0)],
+fn dependent_or_forced_free_supports_continue_to_refuse() {
+    for links in [vec![spring(0,5.0,1,5.0,1000.0,0.0)],
         vec![spring(0,5.0,1,5.0,1000.0,0.0),spring(0,5.0,1,5.0,2000.0,0.0)]] {
         let mut s=CoupledModalSystem::new(vec![mass(48000,0.04),mass(48000,0.04)],links,budget(),&CancelGate::new()).unwrap();
         let initial=states(&s);
@@ -175,4 +175,52 @@ fn work_force_energy_and_cancel_refusals_leave_supported_preload_retryable() {
     }
     s.initialize_static_equilibrium(&[50.0],&CancelGate::new()).unwrap();s.step(&[50.0]).unwrap();
     let before=states(&s);assert!(s.initialize_static_equilibrium(&[50.0],&CancelGate::new()).is_err());assert_eq!(states(&s),before);
+}
+
+#[test]
+fn unloaded_position_gauges_stay_free_and_every_nonzero_static_force_refuses() {
+    let mut s=CoupledModalSystem::new(vec![mass(48000,0.04)],vec![],budget(),&CancelGate::new()).unwrap();
+    let initial=states(&s);
+    for force in [1.0,-1.0,f64::MIN_POSITIVE,f64::from_bits(1)] {
+        assert!(s.initialize_static_equilibrium(&[force],&CancelGate::new()).is_err());
+        assert_eq!(states(&s),initial);assert_eq!(s.samples_rendered(),0);
+        assert!(s.last_frame().is_none());
+    }
+    assert_eq!(s.initialize_static_equilibrium(&[0.0],&CancelGate::new()).unwrap(),0.0);
+    assert_eq!(states(&s),initial);
+    // Keeping the original zero position adds no tether: a subsequent force
+    // still accelerates this physical inertia by the exact free-mass law.
+    s.step(&[5.0]).unwrap(); // 1 N / sqrt(0.04 kg)
+    close(s.components()[0].states()[0].velocity_m_sqrt_kg_per_s,5.0/48000.0,1e-18);
+}
+
+#[test]
+fn dashpot_memory_positions_do_not_block_preload_or_receive_an_artificial_spring() {
+    let mut link=spring(0,1.0,1,5.0,0.0,0.003);
+    link.damping_n_s_m=2.0;
+    let make=||CoupledModalSystem::new(vec![resonator(48000),mass(48000,0.04)],
+        vec![link.clone()],budget(),&CancelGate::new()).unwrap();
+    let mut s=make();
+    let initial=states(&s);
+    assert!(s.initialize_static_equilibrium(&[1.0,1.0],&CancelGate::new()).is_err());
+    assert_eq!(states(&s),initial);
+    let energy=s.initialize_static_equilibrium(&[1.0,0.0],&CancelGate::new()).unwrap();
+    close(s.components()[0].states()[0].displacement_m_sqrt_kg,1.0/800.0_f64.powi(2),1e-20);
+    assert_eq!(s.components()[1].states()[0].displacement_m_sqrt_kg,0.0);
+    close(energy,0.5/800.0_f64.powi(2),1e-20);
+    for _ in 0..32 {
+        s.step(&[1.0,0.0]).unwrap();
+        assert!(s.components()[0].states()[0].velocity_m_sqrt_kg_per_s.abs()<1e-12);
+        assert!(s.components()[1].states()[0].velocity_m_sqrt_kg_per_s.abs()<1e-12);
+    }
+    // On release the SAME dashpot exchanges momentum with the free inertia.
+    // Its displacement is not a spring coordinate and is allowed to evolve.
+    let mut moving=false;
+    for _ in 0..256 {
+        s.step(&[0.0,0.0]).unwrap();
+        moving|=s.components()[1].states()[0].velocity_m_sqrt_kg_per_s.abs()>1e-10;
+        assert!(s.total_energy_j().unwrap()<=energy+1e-12);
+    }
+    assert!(moving);
+    assert!(s.total_energy_j().unwrap()<energy);
 }

@@ -217,13 +217,17 @@ impl ReciprocalStringBank {
                 .any(|s| s.displacement_m_sqrt_kg != 0.0 || s.velocity_m_sqrt_kg_per_s != 0.0) {
             return Err(invalid("rotational bridges require one complete binding before string motion or playback"));
         }
-        let bodies = self.system.components()[self.cards.len()..].to_vec();
+        let body_end = self.source.fluid_loading.as_ref().map_or(
+            self.system.components().len(), |fluid| self.cards.len() + fluid.body_components,
+        );
+        let bodies = self.system.components()[self.cards.len()..body_end].to_vec();
         let link_count = self.source.body_connections.len().checked_add(connections.len())
             .ok_or_else(|| invalid("rotational bridge connection count overflow"))?;
         preflight(&self.source.strings, &bodies, &self.source.options, link_count)?;
         let bridges: Vec<_> = self.source.strings.iter().map(|s| s.connections.as_slice()).collect();
         let mut system = assemble_sources(&self.cards, Some(&self.source.strings), bodies,
-            &bridges, &self.source.body_connections, &connections, self.system.port().law.clone(),
+            &bridges, &self.source.body_connections, &connections, self.source.fluid_loading.as_ref(),
+            self.system.port().law.clone(),
             &self.source.options, gate)?;
         if let Some(weights) = self.system.acceleration_pressure_weights() {
             system = system.with_acceleration_pressure(weights.to_vec())
