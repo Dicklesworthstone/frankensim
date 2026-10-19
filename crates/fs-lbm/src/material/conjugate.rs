@@ -56,6 +56,23 @@ impl<'a, F: FluidTransport + ?Sized> MaterialChtFluid<'a, F> {
     #[must_use]
     pub const fn properties(&self) -> &FluidProperties { &self.properties }
 
+    /// Solve momentum with the retained material snapshot and keep its actual
+    /// conservative face fluxes together with their domain and source owner.
+    /// The result can drive the shared enthalpy timeline through
+    /// `MaterialChtFlow::advect_enthalpy` when `enthalpy-coupling` is enabled.
+    /// No constant-Cp energy solve is required to obtain the flow.
+    pub fn solve_flow(
+        &self,
+        domain: &'a VoxelDomain,
+        config: &SimpleConfig,
+        gate: &CancelGate,
+    ) -> Result<MaterialChtFlow<'a, F>, ChtError> {
+        let flow = simple_flow(domain, &self.properties, config, gate)?;
+        Ok(MaterialChtFlow {
+            material: self.material, transport: self.transport, domain, flow,
+        })
+    }
+
     /// Run existing SIMPLEC flow, then the conservative conjugate energy solve.
     ///
     /// The solved volume flux is converted to heat-capacity flux using this
@@ -106,6 +123,31 @@ impl<'a, F: FluidTransport + ?Sized> MaterialChtFluid<'a, F> {
     }
 }
 
+/// A material-driven momentum solve, with the original domain and volume flux.
+/// Molecular viscosity and density are the same snapshot later used to turn
+/// volume flux into advected mass. Caloric storage remains a separate law.
+pub struct MaterialChtFlow<'a, F: FluidTransport + ?Sized> {
+    material: &'a F,
+    transport: FluidTransportState,
+    domain: &'a VoxelDomain,
+    flow: FvFlow,
+}
+
+impl<'a, F: FluidTransport + ?Sized> MaterialChtFlow<'a, F> {
+    /// Original material evaluation, including its source receipts.
+    #[must_use]
+    pub const fn material(&self) -> &'a F { self.material }
+    /// Exact snapshot used by the momentum solve.
+    #[must_use]
+    pub const fn transport(&self) -> &FluidTransportState { &self.transport }
+    /// Original geometry, immutably borrowed for this solution's lifetime.
+    #[must_use]
+    pub const fn domain(&self) -> &'a VoxelDomain { self.domain }
+    /// Existing SIMPLEC result, including its conservative volume face fluxes.
+    #[must_use]
+    pub const fn flow(&self) -> &FvFlow { &self.flow }
+}
+
 impl<'a, F: FluidTransport + ?Sized> MaterialScaling<'a, F> {
     /// Use the lattice plan's EXACT material snapshot for the CHT solver too.
     /// This never re-evaluates an interior-mutable material owner.
@@ -138,3 +180,4 @@ impl<'a, F: FluidTransport + ?Sized> MaterialChtSolution<'a, F> {
     #[must_use]
     pub const fn energy(&self) -> &EnergySolution { &self.energy }
 }
+

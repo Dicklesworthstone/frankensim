@@ -14,6 +14,36 @@ dimension checks, `fs-exec` for cancel gates and pooled sweeps, and
 `fs-sparse` (COO/CSR assembly and ILU(0)) for the conjugate energy and
 projection solves. Pure, deterministic (fixed tile/cell/link order).
 
+### Solved material flow on the shared enthalpy timeline
+
+With `enthalpy-coupling`, `MaterialChtFluid::solve_flow` retains the actual
+SIMPLEC face fluxes, immutable voxel domain and original material snapshot.
+`MaterialChtFlow::advect_enthalpy` converts those same volume fluxes to mass
+fluxes with the density that drove momentum. It reuses `fs-thermal::Advected`
+for upwind enthalpy, boundary accounting and the combined transport CFL.
+No cell-velocity reconstruction, replacement Cp law or second heat integrator
+is introduced. The returned observer composes with existing current, material
+interface and source histories on their common accepted thermal substeps.
+
+Every fluid voxel maps one-to-one to an active thermal cell with the same
+volume/centre, `mass = rho * volume` and actual borrowed caloric law. Inflow,
+including outlet backflow, requires explicitly supplied supported enthalpy;
+outflow carries the current local h. Internal advective watts never enter the
+external-heat audit. The shared roundoff mass-balance admission is checked
+before an observer is returned; a larger momentum divergence refuses without
+repairing the flux or creating an artificial mass source. Geometry/storage
+bindings are checked again at source epochs, steps and events. Refusal or
+cancellation keeps the accepted thermal and source histories unchanged.
+
+This is stationary, constant-density, frozen-momentum enthalpy transport.
+A latent plateau remains caloric storage, not permission to infer the flow
+mobility of a partly solid material. No phase-volume change, skeleton support,
+free-surface motion, pressure work, viscous heat or eddy heat conductivity is
+inferred. Those require their existing or explicitly admitted separate owners.
+`tests/flow_enthalpy.rs` exercises actual solved flow, viscosity-data changes,
+enthalpy/source balances and rollback; the module tests cover graded geometry,
+all three flow directions, closed circulation and admission failures.
+
 ### Material-bound enthalpy transport
 
 With `enthalpy-coupling`, `conjugate::enthalpy::transport::material::MaterialCell`
@@ -1702,3 +1732,4 @@ conservation, source/state/unit/dynamic-support refusal, cancellation and retry.
 These tests establish coupling and operator geometry; they do not establish
 calibrated sessile-drop dynamics, hysteresis, thermocapillary stress, capillary
 oscillation/spurious-current convergence or a closed surface-energy account.
+
