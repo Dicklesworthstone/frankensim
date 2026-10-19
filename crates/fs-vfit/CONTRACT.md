@@ -264,12 +264,41 @@ The tests check the following:
 
 fs-bem `mimo_rational_order_ladder` realizes a real aperture matrix.
 
+## Causality of sampled data (IRP M2.5-W3b)
+
+`causality::check_causality(omega, data, opts)` tests one response sampled on
+a uniform grid that starts at 0 (with a real DC sample) or at half a step.
+- It reconstructs every sample below `0.9 W` from the generalized dispersion
+  relation with `opts.subtractions` subtraction points (Triverio &
+  Grivet-Talocia). The band is extended by Hermitian symmetry, and the
+  integrand's poles are integrated analytically.
+- A miss larger than the sum of three declared terms refuses with
+  `NonCausal`, naming the worst frequency. The terms are: the out-of-band
+  tail under `|H| <= tail_bound_ratio max |H|`; twice the trapezoid
+  second-difference estimate; and `relative_data_tolerance` propagated by the
+  triangle inequality.
+- `check_mimo_causality` tests each entry after its declared delay is
+  removed. A delay beyond the first arrival leaves an advanced remainder and
+  refuses with that entry.
+
+Tests (`causality::tests`): causal rational and delayed responses pass on both
+grids; 0.5 ms and 0.2 ms advances and conjugated (`exp(-i w t)`) data refuse; a
+pulsating sphere's radiation impedance passes while its conjugate refuses; an
+over-extracted matrix delay names its entry; and out-of-range grids, data and
+options refuse. A pass is consistency with causality under the declared
+assumptions, not a proof.
+
+Resolution: an anti-causal part enters the error as twice its miss from the
+subtraction interpolant. Non-causality is resolved only on the band's own
+time scale, about `1/f_max`. On the 5 kHz test band a 50 us advance passes
+(yto c1, worst ratio 0.17). A delay over-extracted by less than that, such as
+the centre distance instead of the gap for finite pistons, is not caught.
+
 ## No-claim boundaries
 
-- MIMO covers vector fitting, realization and passivity only. MIMO Loewner
-  pencil identification, a causality (dispersion-relation) test of the data,
-  and the closed-loop audit of an in-loop MIMO load are follow-ups (M2.5-W3b
-  remains open on them).
+- MIMO covers vector fitting, realization, passivity and the causality test
+  of its data. MIMO Loewner pencil identification and the closed-loop audit
+  of an in-loop MIMO load are follow-ups (M2.5-W3b remains open on them).
 - Scattering-form fitting (`|S| <= 1` enforcement for waveguide
   reflection filters) is a recorded follow-up; the impedance form is
   the v1 passivity law.
