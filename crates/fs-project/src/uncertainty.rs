@@ -3,8 +3,9 @@
 //! geometry, material identities, solver policy and requirements stay intact.
 //!
 //! Uniform inputs require explicit independence or a declared Gaussian copula.
-//! Version 1 admits fixed-count propagation with Monte Carlo
-//! or explicitly replicated randomized Sobol quadrature. The opt-in
+//! Version 1 admits fixed-count propagation with Monte Carlo,
+//! explicitly replicated randomized Sobol quadrature, or independent replicated
+//! Latin-hypercube sampling. The opt-in
 //! `sobol-sensitivity` method instead uses a fixed pick-freeze design to
 //! estimate global main and total effects under independent inputs. Its sample
 //! cap counts EVERY base and hybrid solve, not just complete rows. Version 2 requires
@@ -25,6 +26,8 @@ use crate::{ConsequenceClass, DecisionGate, ProjectError, ProjectSpec,
     RequirementDirection, ThermalBoundaryCondition};
 
 mod contact_inputs;
+mod lhs;
+pub use lhs::LhsLayout;
 pub mod mean_control;
 pub use mean_control::MeanControlPolicy;
 
@@ -185,6 +188,7 @@ pub struct UncertaintyStudy {
     latent_correlation: Option<Vec<Vec<f64>>>,
     compliance: Option<CompliancePolicy>,
     qmc: Option<QmcLayout>,
+    lhs: Option<LhsLayout>,
     sobol_sensitivity: bool,
     mean_control: Option<MeanControlPolicy>,
 }
@@ -321,7 +325,7 @@ impl UncertaintyStudy {
         let nodes = list(&root)?;
         symbol(nodes.first().ok_or_else(|| error("empty study"))?, "fsim-uncertainty-study")?;
         let f = fields_with_optional(&nodes[1..], &["version", "project", "samples", "seed", "wall-time",
-            "method", "correlation", "qoi", "geometry", "materials", "interfaces", "parameters"], &["compliance", "qmc", "mean-control"])?;
+            "method", "correlation", "qoi", "geometry", "materials", "interfaces", "parameters"], &["compliance", "qmc", "lhs", "mean-control"])?;
         let version = integer(f["version"])?;
         if !(1..=u64::from(VERSION)).contains(&version) { return Err(error("unsupported study version")); }
         if (version == 2) != f.contains_key("compliance") {
@@ -330,17 +334,24 @@ impl UncertaintyStudy {
         if (version == 3) != f.contains_key("mean-control") {
             return Err(error("only version 3 requires and admits a mean-control policy"));
         }
-        let (randomized_qmc, sobol_sensitivity) = match &f["method"].kind {
-            NodeKind::Symbol(method) if method == "monte-carlo" => (false, false),
-            NodeKind::Symbol(method) if method == "quasi-monte-carlo" => (true, false),
-            NodeKind::Symbol(method) if method == "sobol-sensitivity" => (false, true),
-            _ => return Err(error("method must be monte-carlo, quasi-monte-carlo or sobol-sensitivity")),
+        let (randomized_qmc, sobol_sensitivity, latin_hypercube) = match &f["method"].kind {
+            NodeKind::Symbol(method) if method == "monte-carlo" => (false, false, false),
+            NodeKind::Symbol(method) if method == "quasi-monte-carlo" => (true, false, false),
+            NodeKind::Symbol(method) if method == "sobol-sensitivity" => (false, true, false),
+            NodeKind::Symbol(method) if method == "latin-hypercube" => (false, false, true),
+            _ => return Err(error("method must be monte-carlo, quasi-monte-carlo, latin-hypercube or sobol-sensitivity")),
         };
         if sobol_sensitivity && version != 1 {
             return Err(error("Sobol sensitivity requires a version 1 fixed design; mean controls and sequential compliance do not apply to pick-freeze rows"));
         }
+        if latin_hypercube && version != 1 {
+            return Err(error("Latin-hypercube sampling requires version 1 fixed-count studies; sequential Bernoulli compliance and mean controls are not supported"));
+        }
+        if latin_hypercube != f.contains_key("lhs") {
+            return Err(error("latin-hypercube requires an explicit :lhs layout; other methods forbid it"));
+        }
         if randomized_qmc != f.contains_key("qmc") {
-            return Err(error("quasi-monte-carlo requires an explicit :qmc layout; monte-carlo forbids it"));
+            return Err(error("quasi-monte-carlo requires an explicit :qmc layout; other methods forbid it"));
         }
         if randomized_qmc && version == 2 {
             return Err(error("dependent QMC points cannot use the version 2 Bernoulli-iid compliance policy"));
@@ -349,6 +360,7 @@ impl UncertaintyStudy {
         if !(2..=samples).contains(&samples) || samples > MAX_SAMPLES { return Err(error("samples must be in 2..=256")); }
         let compliance = f.get("compliance").map(|node| compliance_policy(node, samples)).transpose()?;
         let qmc = f.get("qmc").map(|node| qmc_layout(node, samples)).transpose()?;
+        let lhs = f.get("lhs").map(|node| lhs::parse(node, samples)).transpose()?;
         let wall_seconds = quantity(f["wall-time"], crate::spec::dims::TIME)?;
         if !(wall_seconds > 0.0 && wall_seconds <= 86_400.0) { return Err(error("wall-time must be in (0, 86400] seconds")); }
         let geometry_nodes = list(f["geometry"])?;
@@ -371,6 +383,9 @@ impl UncertaintyStudy {
             return Err(error("replicated Sobol QMC supports at most 10 parameters; no Monte Carlo tail fallback"));
         }
         let latent_correlation = latent_correlation(f["correlation"], parameter_nodes.len())?;
+        if lhs.is_some() && latent_correlation.is_some() {
+            return Err(error("Latin-hypercube sampling requires explicitly independent marginals; Gaussian copulas are not supported"));
+        }
         let mut parameters = Vec::new();
         let mut names = BTreeSet::new();
         let mut targets = BTreeSet::new();
@@ -429,7 +444,7 @@ impl UncertaintyStudy {
         Ok(Self { canonical: fs_ir::sexpr::print(&root).map_err(|e| error(e.to_string()))?,
             project: text(f["project"])?, samples, seed: integer(f["seed"])?, wall_seconds, qoi,
             geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters,
-            latent_correlation, compliance, qmc, sobol_sensitivity, mean_control })
+            latent_correlation, compliance, qmc, lhs, sobol_sensitivity, mean_control })
     }
     /// Canonical source, including all explicit path and parameter declarations.
     #[must_use] pub fn canonical(&self) -> &str { &self.canonical }
@@ -455,8 +470,10 @@ impl UncertaintyStudy {
     }
     /// Predeclared Bernoulli stopping policy; absent for fixed-count studies.
     #[must_use] pub fn compliance(&self) -> Option<&CompliancePolicy> { self.compliance.as_ref() }
-    /// Explicit randomized Sobol layout; absent for the Monte Carlo method.
+    /// Explicit randomized Sobol layout; absent for other methods.
     #[must_use] pub const fn qmc(&self) -> Option<QmcLayout> { self.qmc }
+    /// Explicit replicated Latin-hypercube layout; absent for other methods.
+    #[must_use] pub const fn lhs(&self) -> Option<LhsLayout> { self.lhs }
     /// Whether the study requests global independent-input Sobol effects, not
     /// Sobol quadrature, a nominal derivative, or a compliance probability.
     #[must_use] pub const fn sobol_sensitivity(&self) -> bool { self.sobol_sensitivity }

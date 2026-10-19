@@ -1,10 +1,11 @@
 //! Dispatch only: the statistical owners retain sampler, checkpoint and
-//! failure semantics. Both paths evaluate the same native child-run callback.
+//! failure semantics. Every path evaluates the same native child-run callback.
 
 use std::fmt::Display;
 
 use fs_blake3::ContentHash;
 use fs_uq::{GaussianCopulaExecution, GaussianCopulaQmcExecution,
+    LhsExecution, LhsPlan, LhsReport,
     QmcConfig, QmcExecution, QmcReport, SobolExecution, SobolReport, UqExecution, UqStatus};
 
 use super::{Model, Result, compliance, fail, plan};
@@ -13,6 +14,7 @@ pub(super) enum Execution {
     SobolSensitivity(SobolExecution),
     MonteCarlo(UqExecution),
     QuasiMonteCarlo(QmcExecution),
+    LatinHypercube(LhsExecution),
     CopulaMonteCarlo(GaussianCopulaExecution),
     CopulaQuasiMonteCarlo(GaussianCopulaQmcExecution),
 }
@@ -21,6 +23,21 @@ fn layout(model: &Model) -> Option<QmcConfig> {
     model.bound.study().qmc().map(|layout| QmcConfig {
         replicates: layout.replicates,
         samples_per_replicate: layout.samples_per_replicate,
+    })
+}
+
+fn lhs_plan(model: &Model) -> Option<LhsPlan> {
+    let layout = model.bound.study().lhs()?;
+    // Reuse native marginal/threshold lowering, not MC execution.
+    let physical = plan(model);
+    Some(LhsPlan {
+        target_qoi: physical.target_qoi,
+        compliance_threshold: physical.compliance_threshold,
+        parameters: physical.parameters,
+        correlation: physical.correlation,
+        replicates: layout.replicates,
+        samples_per_replicate: layout.samples_per_replicate,
+        seed: physical.seed,
     })
 }
 
@@ -39,6 +56,10 @@ fn admit_contact_inputs(model: &Model) -> Result<()> {
 impl Execution {
     pub(super) fn new(model: &Model) -> Result<Self> {
         admit_contact_inputs(model)?;
+        if let Some(plan) = lhs_plan(model) {
+            return LhsExecution::new(&plan).map(Self::LatinHypercube)
+                .map_err(|error| fail("cli-uncertainty-plan", error));
+        }
         let plan = plan(model);
         if model.bound.study().sobol_sensitivity() {
             return SobolExecution::new(&plan).map(Self::SobolSensitivity)
@@ -56,6 +77,10 @@ impl Execution {
 
     pub(super) fn restore(model: &Model, bytes: &[u8]) -> Result<Self> {
         admit_contact_inputs(model)?;
+        if let Some(plan) = lhs_plan(model) {
+            return LhsExecution::restore(&plan, model.identity(), bytes).map(Self::LatinHypercube)
+                .map_err(|error| fail("cli-uncertainty-resume", error.to_string()));
+        }
         let plan = plan(model);
         if model.bound.study().sobol_sensitivity() {
             return SobolExecution::restore(&plan, model.identity(), bytes).map(Self::SobolSensitivity)
@@ -77,6 +102,7 @@ impl Execution {
             Self::SobolSensitivity(execution) => execution.checkpoint(identity),
             Self::MonteCarlo(execution) => execution.checkpoint(identity),
             Self::QuasiMonteCarlo(execution) => execution.checkpoint(identity),
+            Self::LatinHypercube(execution) => execution.checkpoint(identity),
             Self::CopulaMonteCarlo(execution) => execution.checkpoint(identity),
             Self::CopulaQuasiMonteCarlo(execution) => execution.checkpoint(identity),
         };
@@ -88,6 +114,7 @@ impl Execution {
             Self::SobolSensitivity(execution) => execution.observations(),
             Self::MonteCarlo(execution) => execution.observations(),
             Self::QuasiMonteCarlo(execution) => execution.observations(),
+            Self::LatinHypercube(execution) => execution.observations(),
             Self::CopulaMonteCarlo(execution) => execution.monte_carlo().observations(),
             Self::CopulaQuasiMonteCarlo(execution) => execution.observations(),
         }
@@ -98,6 +125,7 @@ impl Execution {
             Self::SobolSensitivity(execution) => execution.report().evaluations_attempted,
             Self::MonteCarlo(execution) => execution.evaluations_attempted(),
             Self::QuasiMonteCarlo(execution) => execution.evaluations_attempted(),
+            Self::LatinHypercube(execution) => execution.evaluations_attempted(),
             Self::CopulaMonteCarlo(execution) => execution.monte_carlo().evaluations_attempted(),
             Self::CopulaQuasiMonteCarlo(execution) => execution.evaluations_attempted(),
         }
@@ -108,6 +136,7 @@ impl Execution {
             Self::SobolSensitivity(execution) => execution.report().status,
             Self::MonteCarlo(execution) => execution.report().status,
             Self::QuasiMonteCarlo(execution) => execution.report().status,
+            Self::LatinHypercube(execution) => execution.report().status,
             Self::CopulaMonteCarlo(execution) => execution.report().status,
             Self::CopulaQuasiMonteCarlo(execution) => execution.report().status,
         }
@@ -118,6 +147,7 @@ impl Execution {
             Self::SobolSensitivity(execution) => execution.report().rejection_reason,
             Self::MonteCarlo(execution) => execution.report().rejection_reason,
             Self::QuasiMonteCarlo(execution) => execution.report().rejection_reason,
+            Self::LatinHypercube(execution) => execution.report().rejection_reason,
             Self::CopulaMonteCarlo(execution) => execution.report().rejection_reason,
             Self::CopulaQuasiMonteCarlo(execution) => execution.report().rejection_reason,
         }
@@ -129,15 +159,24 @@ impl Execution {
             // Its observations/threshold are physical QoIs. Only its input
             // plan is latent; never use the inner sampler or checkpoint here.
             Self::CopulaMonteCarlo(execution) => Some(execution.monte_carlo()),
-            Self::QuasiMonteCarlo(_) | Self::CopulaQuasiMonteCarlo(_) | Self::SobolSensitivity(_) => None,
+            Self::QuasiMonteCarlo(_) | Self::CopulaQuasiMonteCarlo(_)
+            | Self::SobolSensitivity(_) | Self::LatinHypercube(_) => None,
         }
     }
 
     pub(super) fn qmc_report(&self) -> Option<QmcReport> {
         match self {
-            Self::MonteCarlo(_) | Self::CopulaMonteCarlo(_) | Self::SobolSensitivity(_) => None,
+            Self::MonteCarlo(_) | Self::CopulaMonteCarlo(_)
+            | Self::SobolSensitivity(_) | Self::LatinHypercube(_) => None,
             Self::QuasiMonteCarlo(execution) => Some(execution.report()),
             Self::CopulaQuasiMonteCarlo(execution) => Some(execution.report()),
+        }
+    }
+
+    pub(super) fn lhs_report(&self) -> Option<LhsReport> {
+        match self {
+            Self::LatinHypercube(execution) => Some(execution.report()),
+            _ => None,
         }
     }
 
@@ -154,7 +193,8 @@ impl Execution {
             // Dependence is within each vector; Monte Carlo vectors remain
             // iid, so raw physical pass indicators retain Bernoulli semantics.
             Self::CopulaMonteCarlo(execution) => compliance::assess(model, execution.monte_carlo()),
-            Self::QuasiMonteCarlo(_) | Self::CopulaQuasiMonteCarlo(_) | Self::SobolSensitivity(_) => Ok(None),
+            Self::QuasiMonteCarlo(_) | Self::CopulaQuasiMonteCarlo(_)
+            | Self::SobolSensitivity(_) | Self::LatinHypercube(_) => Ok(None),
         }
     }
 
@@ -175,6 +215,9 @@ impl Execution {
                 execution.advance_interruptible(allowance, cancelled, evaluate);
             }
             Self::QuasiMonteCarlo(execution) => {
+                execution.advance_interruptible(allowance, cancelled, evaluate);
+            }
+            Self::LatinHypercube(execution) => {
                 execution.advance_interruptible(allowance, cancelled, evaluate);
             }
             Self::CopulaMonteCarlo(execution) => {

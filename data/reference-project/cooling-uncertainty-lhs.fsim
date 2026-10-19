@@ -1,0 +1,18 @@
+; Replicated independent stratification of the ordinary native cooling model.
+; Each sample imports the retained geometry and runs the native solver.
+(fsim-uncertainty-study
+  :version 1
+  :project "cooling-reference.fsim"
+  :samples 30
+  :seed 29
+  :wall-time 120s
+  :method latin-hypercube
+  :lhs (replicated-latin-hypercube :replicates 3 :samples-per-replicate 10)
+  :correlation independent
+  :qoi "temperature-max"
+  :geometry ((mesh :role "enclosure" :path "plate.stl" :unit "m" :max-hole-edges 0))
+  :materials ("aa6061.fsmcdpk")
+  :interfaces ()
+  :parameters (
+    (uniform :name "power" :target power :entity "air" :low 4W :high 6W)
+    (uniform :name "ambient" :target convection-temperature :entity "air" :low 294K :high 300K)))
