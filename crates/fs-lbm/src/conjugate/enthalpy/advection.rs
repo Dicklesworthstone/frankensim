@@ -8,6 +8,9 @@
 /// Source-pinned liquid admission on the existing native advection owner.
 pub mod liquid;
 
+/// Local material feedback through the existing momentum and enthalpy owners.
+pub mod feedback;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use fs_conduction::transient::deposition::{

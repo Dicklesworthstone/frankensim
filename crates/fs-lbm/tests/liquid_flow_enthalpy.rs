@@ -32,6 +32,9 @@ use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
 const MAT: MaterialId = MaterialId(3);
 
+#[path = "liquid_flow_enthalpy/feedback.rs"]
+mod feedback;
+
 fn absolute() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature, ValueForm::Static,
@@ -510,3 +513,4 @@ fn frozen_liquid_flow_refuses_rate_bounded_thermal_sources() {
         );
     }
 }
+

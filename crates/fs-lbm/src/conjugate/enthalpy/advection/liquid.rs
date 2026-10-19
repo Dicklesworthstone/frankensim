@@ -1,24 +1,25 @@
 //! Pinned liquid/caloric sources on the original solved-flow enthalpy owner.
 //!
 //! The native face graph, upwind transport, CFL and energy audit remain in
-//! `super`. This extension only admits a fully liquid, constant-density,
-//! constant-viscosity source model and checks its support on the actual thermal
-//! timeline. The borrowed sourced caloric curve remains authoritative H(T).
+//! `super`. Both paths admit a fully liquid, constant-density source model.
+//! Frozen advection additionally fixes viscosity; `LiquidFlowEnthalpyInput::feedback`
+//! re-solves momentum from the evolving local viscosity on each thermal substep.
+//! The borrowed sourced caloric curve remains authoritative H(T).
 
 use core::fmt;
 use std::collections::BTreeMap;
 
 use fs_conduction::transient::deposition::{
-    CellId, DepositionError, DepositionObserver, DepositionSimulation, Event,
+    CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation, Event,
     HeatTransfer, MaterialId,
 };
 use fs_exec::CancelGate;
 use fs_matdb::EvaluationDecision;
-use fs_material::liquid::{
-    DYNAMIC_VISCOSITY_PROPERTY, KINEMATIC_VISCOSITY_PROPERTY, ResolvedLiquidState,
-};
 use fs_material::liquid::surface::{
     LiquidCapillarity, ResolvedLiquidSurfaceState, require_frozen_coefficient_support,
+};
+use fs_material::liquid::{
+    DYNAMIC_VISCOSITY_PROPERTY, KINEMATIC_VISCOSITY_PROPERTY, ResolvedLiquidState,
 };
 use fs_material::liquid_temperature::{LiquidTemperatureLaw, LiquidViscosityBasis};
 use fs_material::phase::{
@@ -29,6 +30,10 @@ use fs_material::state_point::{
     THERMAL_CONDUCTIVITY_PROPERTY,
 };
 use fs_qty::Temperature;
+
+use super::feedback::{MaterialFlowError, MaterialFlowFeedback};
+use crate::conjugate::{SimpleConfig, VoxelDomain};
+use fs_material::MaterialError;
 
 use super::{FlowEnthalpyInput, MaterialFlowAdvection, same_positive};
 use crate::material::conjugate::MaterialChtFlow;
@@ -56,11 +61,78 @@ pub struct LiquidFlowEnthalpyInput<'a> {
 impl<'a> LiquidFlowEnthalpyInput<'a> {
     fn native(self) -> FlowEnthalpyInput<'a> {
         FlowEnthalpyInput {
-            cell_ids: self.cell_ids, material_id: self.material_id,
+            cell_ids: self.cell_ids,
+            material_id: self.material_id,
             caloric: self.caloric.curve(),
             inlet_specific_h_j_kg: self.inlet_specific_h_j_kg,
-            max_cells: self.max_cells, max_connections: self.max_connections,
+            max_cells: self.max_cells,
+            max_connections: self.max_connections,
         }
+    }
+
+    /// Continue sourced liquid heating with local viscosity feedback into the
+    /// original full-stress momentum solve and its conservative h advection.
+    ///
+    /// The exact Cp/rho claim pins, pressure/composition coordinates, caloric
+    /// law and fully-liquid support use the same admission as the frozen path.
+    /// Density remains a validity-wide constant; viscosity may now vary along
+    /// the original pinned temperature law. No new property table, name-based
+    /// selection, phase mobility or second caloric law is introduced.
+    ///
+    /// Each actual thermal source epoch resolves its own h-derived T, so its
+    /// returned `ResolvedLiquidState` drives the local momentum viscosity.
+    /// The source's k remains available on the same samples; conduction is
+    /// owned by the wrapped thermal observer. `max_solves` bounds steady
+    /// momentum solves per advance. This is quasisteady one-step explicit
+    /// thermal feedback, with the limits documented on `MaterialFlowFeedback`.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn feedback<O: DepositionObserver>(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        domain: &'a VoxelDomain,
+        config: &'a SimpleConfig,
+        inner: O,
+        gate: &'a CancelGate,
+        max_solves: usize,
+    ) -> Result<
+        MaterialFlowFeedback<
+            'a,
+            ResolvedLiquidState,
+            impl Clone + FnMut(usize, &DepositedCell, f64) -> Result<ResolvedLiquidState, MaterialError>,
+            O,
+        >,
+        LiquidEnthalpyObserverError<MaterialFlowError<O::Error>>,
+    > {
+        admit_law_mode(self, false).map_err(LiquidEnthalpyObserverError::Binding)?;
+        for h in self.inlet_specific_h_j_kg.into_iter().flatten() {
+            state_at_mode(self, h, false).map_err(LiquidEnthalpyObserverError::Binding)?;
+        }
+        let resolve = move |_: usize, cell: &DepositedCell, temperature: f64| {
+            let (phase, liquid) =
+                state_at_mode(self, cell.specific_h_j_kg, false).map_err(|error| {
+                    MaterialError::State {
+                        what: error.to_string(),
+                    }
+                })?;
+            if phase.temperature_k().to_bits() != temperature.to_bits() {
+                return Err(MaterialError::State {
+                    what: "liquid feedback temperature differs from its original caloric owner"
+                        .into(),
+                });
+            }
+            Ok(liquid)
+        };
+        MaterialFlowFeedback::try_new(
+            thermal,
+            domain,
+            self.native(),
+            config,
+            inner,
+            gate,
+            max_solves,
+            resolve,
+        )
+        .map_err(LiquidEnthalpyObserverError::Observer)
     }
 }
 
@@ -82,17 +154,25 @@ pub enum LiquidEnthalpyError {
     Thermal(DepositionError),
 }
 impl fmt::Display for LiquidEnthalpyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{self:?}") }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
 }
 impl std::error::Error for LiquidEnthalpyError {}
 impl From<MaterialStatePointError> for LiquidEnthalpyError {
-    fn from(error: MaterialStatePointError) -> Self { Self::Material(error) }
+    fn from(error: MaterialStatePointError) -> Self {
+        Self::Material(error)
+    }
 }
 impl From<PhaseStateError> for LiquidEnthalpyError {
-    fn from(error: PhaseStateError) -> Self { Self::Phase(error) }
+    fn from(error: PhaseStateError) -> Self {
+        Self::Phase(error)
+    }
 }
 impl From<DepositionError> for LiquidEnthalpyError {
-    fn from(error: DepositionError) -> Self { Self::Thermal(error) }
+    fn from(error: DepositionError) -> Self {
+        Self::Thermal(error)
+    }
 }
 
 /// The user's physical-history error is preserved without type erasure.
@@ -102,11 +182,15 @@ pub enum LiquidEnthalpyObserverError<E> {
     Observer(E),
 }
 impl<E: fmt::Debug> fmt::Display for LiquidEnthalpyObserverError<E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{self:?}") }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
 }
 impl<E: fmt::Debug> std::error::Error for LiquidEnthalpyObserverError<E> {}
 impl<E> From<DepositionError> for LiquidEnthalpyObserverError<E> {
-    fn from(error: DepositionError) -> Self { Self::Binding(error.into()) }
+    fn from(error: DepositionError) -> Self {
+        Self::Binding(error.into())
+    }
 }
 
 /// Source checks and the caller's history INSIDE the native Advected observer.
@@ -121,36 +205,58 @@ pub struct LiquidEnthalpyObserver<'a, O> {
 
 impl<'a, O> LiquidEnthalpyObserver<'a, O> {
     #[must_use]
-    pub const fn inner(&self) -> &O { &self.inner }
+    pub const fn inner(&self) -> &O {
+        &self.inner
+    }
     /// Most recent successful step/event samples in this advance. Empty before
     /// its first endpoint; construction separately admits the initial state.
     #[must_use]
-    pub fn samples(&self) -> &[LiquidFlowSample] { &self.samples }
+    pub fn samples(&self) -> &[LiquidFlowSample] {
+        &self.samples
+    }
     #[must_use]
-    pub const fn material_law(&self) -> &'a LiquidTemperatureLaw<'a> { self.input.liquid }
+    pub const fn material_law(&self) -> &'a LiquidTemperatureLaw<'a> {
+        self.input.liquid
+    }
     #[must_use]
-    pub const fn caloric_source(&self) -> &'a ResolvedHeatCapacityCurve { self.input.caloric }
+    pub const fn caloric_source(&self) -> &'a ResolvedHeatCapacityCurve {
+        self.input.caloric
+    }
 
     fn samples_at(
-        &self, thermal: &DepositionSimulation<'_>,
+        &self,
+        thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Vec<LiquidFlowSample>, LiquidEnthalpyError> {
         check()?;
         if !thermal.uses_material_law(self.input.material_id, self.input.caloric.curve()) {
-            return Err(LiquidEnthalpyError::Invalid("the original sourced caloric law changed"));
+            return Err(LiquidEnthalpyError::Invalid(
+                "the original sourced caloric law changed",
+            ));
         }
         let mut samples = Vec::new();
         for (voxel, id) in self.input.cell_ids.iter().enumerate() {
-            if voxel % 256 == 0 { check()?; }
-            let Some(id) = id else { continue; };
+            if voxel % 256 == 0 {
+                check()?;
+            }
+            let Some(id) = id else {
+                continue;
+            };
             let cell = thermal.cells().get(id).ok_or(LiquidEnthalpyError::Invalid(
                 "source-bound flowing cell is inactive",
             ))?;
             if cell.material_id != self.input.material_id {
-                return Err(LiquidEnthalpyError::Invalid("flowing cell caloric assignment changed"));
+                return Err(LiquidEnthalpyError::Invalid(
+                    "flowing cell caloric assignment changed",
+                ));
             }
             let (phase, liquid) = state_at(self.input, cell.specific_h_j_kg)?;
-            samples.push(LiquidFlowSample { voxel, cell: *id, phase, liquid });
+            samples.push(LiquidFlowSample {
+                voxel,
+                cell: *id,
+                phase,
+                liquid,
+            });
         }
         check()?;
         Ok(samples)
@@ -176,14 +282,21 @@ impl MaterialChtFlow<'_, ResolvedLiquidState> {
     /// density-change volume flux, turbulent heat transport or surface motion.
     /// Thermal conduction and other physical histories remain with `inner`.
     pub fn advect_liquid_enthalpy<'s, O>(
-        &'s self, thermal: &DepositionSimulation<'_>, input: LiquidFlowEnthalpyInput<'s>,
-        inner: O, gate: &CancelGate,
+        &'s self,
+        thermal: &DepositionSimulation<'_>,
+        input: LiquidFlowEnthalpyInput<'s>,
+        inner: O,
+        gate: &CancelGate,
     ) -> Result<
         MaterialFlowAdvection<'s, ResolvedLiquidState, LiquidEnthalpyObserver<'s, O>>,
         LiquidEnthalpyError,
     > {
         let mut check = || {
-            if gate.is_requested() { Err(DepositionError::Cancelled) } else { Ok(()) }
+            if gate.is_requested() {
+                Err(DepositionError::Cancelled)
+            } else {
+                Ok(())
+            }
         };
         check()?;
         if self.material() != input.liquid.reference_state() {
@@ -192,20 +305,32 @@ impl MaterialChtFlow<'_, ResolvedLiquidState> {
             ));
         }
         let flow = self.flow();
-        if [&flow.eddy_viscosity_m2_s, &flow.heat_eddy_viscosity_m2_s].iter()
-            .any(|values| values.len() != self.domain().cell_count()
-                || values.iter().any(|&value| value != 0.0))
+        if [&flow.eddy_viscosity_m2_s, &flow.heat_eddy_viscosity_m2_s]
+            .iter()
+            .any(|values| {
+                values.len() != self.domain().cell_count()
+                    || values.iter().any(|&value| value != 0.0)
+            })
         {
             return Err(LiquidEnthalpyError::Invalid(
                 "source-bound liquid enthalpy requires zero momentum and thermal eddy viscosity",
             ));
         }
         admit_law(input)?;
-        for h in input.inlet_specific_h_j_kg.into_iter().flatten() { state_at(input, h)?; }
-        let observer = LiquidEnthalpyObserver { input, inner, samples: Vec::new() };
+        for h in input.inlet_specific_h_j_kg.into_iter().flatten() {
+            state_at(input, h)?;
+        }
+        let observer = LiquidEnthalpyObserver {
+            input,
+            inner,
+            samples: Vec::new(),
+        };
         // Native admission bounds the map before the source-sample allocation.
         let coupled = self.advect_enthalpy(thermal, input.native(), observer, gate)?;
-        coupled.advection().inner().samples_at(thermal, &mut check)?;
+        coupled
+            .advection()
+            .inner()
+            .samples_at(thermal, &mut check)?;
         Ok(coupled)
     }
 }
@@ -214,57 +339,84 @@ impl<O: DepositionObserver> DepositionObserver for LiquidEnthalpyObserver<'_, O>
     type Error = LiquidEnthalpyObserverError<O::Error>;
 
     fn begin(&mut self) -> Result<(), Self::Error> {
-        self.inner.begin().map_err(LiquidEnthalpyObserverError::Observer)?;
+        self.inner
+            .begin()
+            .map_err(LiquidEnthalpyObserverError::Observer)?;
         self.samples.clear();
         Ok(())
     }
 
-    fn sources(&mut self, thermal: &DepositionSimulation<'_>,
-        check: &mut dyn FnMut() -> Result<(), DepositionError>)
-        -> Result<BTreeMap<CellId, f64>, Self::Error>
-    {
-        self.samples_at(thermal, check).map_err(LiquidEnthalpyObserverError::Binding)?;
-        self.inner.sources(thermal, check).map_err(LiquidEnthalpyObserverError::Observer)
-    }
-
-    fn conductances(&mut self, thermal: &DepositionSimulation<'_>,
-        check: &mut dyn FnMut() -> Result<(), DepositionError>)
-        -> Result<BTreeMap<u64, f64>, Self::Error>
-    {
-        self.inner.conductances(thermal, check).map_err(LiquidEnthalpyObserverError::Observer)
-    }
-
-    fn heat_transfers(&mut self, thermal: &DepositionSimulation<'_>,
-        check: &mut dyn FnMut() -> Result<(), DepositionError>)
-        -> Result<Vec<HeatTransfer>, Self::Error>
-    {
-        self.inner.heat_transfers(thermal, check).map_err(LiquidEnthalpyObserverError::Observer)
-    }
-
-    fn limit_timestep_s(&mut self, thermal: &DepositionSimulation<'_>, proposed_s: f64,
-        check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<f64, Self::Error>
-    {
-        self.inner.limit_timestep_s(thermal, proposed_s, check)
+    fn sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.samples_at(thermal, check)
+            .map_err(LiquidEnthalpyObserverError::Binding)?;
+        self.inner
+            .sources(thermal, check)
             .map_err(LiquidEnthalpyObserverError::Observer)
     }
 
-    fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>)
-        -> Result<(), Self::Error>
-    {
-        let samples = self.samples_at(thermal, &mut || Ok(()))
+    fn conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<u64, f64>, Self::Error> {
+        self.inner
+            .conductances(thermal, check)
+            .map_err(LiquidEnthalpyObserverError::Observer)
+    }
+
+    fn heat_transfers(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Vec<HeatTransfer>, Self::Error> {
+        self.inner
+            .heat_transfers(thermal, check)
+            .map_err(LiquidEnthalpyObserverError::Observer)
+    }
+
+    fn limit_timestep_s(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        proposed_s: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<f64, Self::Error> {
+        self.inner
+            .limit_timestep_s(thermal, proposed_s, check)
+            .map_err(LiquidEnthalpyObserverError::Observer)
+    }
+
+    fn event(
+        &mut self,
+        event: &Event,
+        thermal: &DepositionSimulation<'_>,
+    ) -> Result<(), Self::Error> {
+        let samples = self
+            .samples_at(thermal, &mut || Ok(()))
             .map_err(LiquidEnthalpyObserverError::Binding)?;
-        self.inner.event(event, thermal).map_err(LiquidEnthalpyObserverError::Observer)?;
+        self.inner
+            .event(event, thermal)
+            .map_err(LiquidEnthalpyObserverError::Observer)?;
         self.samples = samples;
         Ok(())
     }
 
-    fn step(&mut self, start_s: f64, duration_s: f64,
-        old_temperatures_k: &BTreeMap<CellId, f64>, thermal: &DepositionSimulation<'_>,
-        check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<(), Self::Error>
-    {
-        let samples = self.samples_at(thermal, check)
+    fn step(
+        &mut self,
+        start_s: f64,
+        duration_s: f64,
+        old_temperatures_k: &BTreeMap<CellId, f64>,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        let samples = self
+            .samples_at(thermal, check)
             .map_err(LiquidEnthalpyObserverError::Binding)?;
-        self.inner.step(start_s, duration_s, old_temperatures_k, thermal, check)
+        self.inner
+            .step(start_s, duration_s, old_temperatures_k, thermal, check)
             .map_err(LiquidEnthalpyObserverError::Observer)?;
         self.samples = samples;
         Ok(())
@@ -272,21 +424,39 @@ impl<O: DepositionObserver> DepositionObserver for LiquidEnthalpyObserver<'_, O>
 }
 
 fn admit_law(input: LiquidFlowEnthalpyInput<'_>) -> Result<(), LiquidEnthalpyError> {
+    admit_law_mode(input, true)
+}
+
+fn admit_law_mode(
+    input: LiquidFlowEnthalpyInput<'_>,
+    frozen_viscosity: bool,
+) -> Result<(), LiquidEnthalpyError> {
     let law = input.liquid;
     let reference = law.reference_state();
     let curve = input.caloric.curve();
     if reference.material().card_identity() != curve.material_card_identity() {
-        return Err(LiquidEnthalpyError::Invalid("liquid and caloric material cards differ"));
+        return Err(LiquidEnthalpyError::Invalid(
+            "liquid and caloric material cards differ",
+        ));
     }
     // Reuse instantaneous Newtonian admission, including rate/frequency domains.
     ResolvedLiquidSurfaceState::try_from_material(
-        reference.material().clone(), law.viscosity_basis(), LiquidCapillarity::Neglected,
+        reference.material().clone(),
+        law.viscosity_basis(),
+        LiquidCapillarity::Neglected,
     )?;
     // The momentum admission above checks rho/mu, not the retained thermal
     // roles. Cp and k must also be instantaneous temperature-only coefficients.
-    for name in [SPECIFIC_HEAT_CAPACITY_PROPERTY, THERMAL_CONDUCTIVITY_PROPERTY] {
-        let property = reference.material().property(name)
-            .ok_or(LiquidEnthalpyError::Invalid("missing liquid thermal source property"))?;
+    for name in [
+        SPECIFIC_HEAT_CAPACITY_PROPERTY,
+        THERMAL_CONDUCTIVITY_PROPERTY,
+    ] {
+        let property = reference
+            .material()
+            .property(name)
+            .ok_or(LiquidEnthalpyError::Invalid(
+                "missing liquid thermal source property",
+            ))?;
         require_frozen_coefficient_support(property)?;
     }
     let viscosity = match law.viscosity_basis() {
@@ -294,17 +464,24 @@ fn admit_law(input: LiquidFlowEnthalpyInput<'_>) -> Result<(), LiquidEnthalpyErr
         LiquidViscosityBasis::Kinematic => KINEMATIC_VISCOSITY_PROPERTY,
     };
     for name in [DENSITY_PROPERTY, viscosity] {
-        let property = reference.material().property(name)
-            .ok_or(LiquidEnthalpyError::Invalid("missing liquid source property"))?;
-        if property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity {
+        let property = reference
+            .material()
+            .property(name)
+            .ok_or(LiquidEnthalpyError::Invalid(
+                "missing liquid source property",
+            ))?;
+        if (name == DENSITY_PROPERTY || frozen_viscosity)
+            && property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity
+        {
             return Err(LiquidEnthalpyError::Invalid(
                 "fixed flow requires validity-wide scalar density and viscosity sources",
             ));
         }
     }
-    if curve.knots().iter().any(|knot| knot.liquid_mass_fraction != 1.0
-        || !same_positive(knot.bulk_density_kg_m3, reference.density_kg_m3()))
-    {
+    if curve.knots().iter().any(|knot| {
+        knot.liquid_mass_fraction != 1.0
+            || !same_positive(knot.bulk_density_kg_m3, reference.density_kg_m3())
+    }) {
         return Err(LiquidEnthalpyError::Invalid(
             "the complete caloric span must be fully liquid at the fixed source density",
         ));
@@ -313,18 +490,26 @@ fn admit_law(input: LiquidFlowEnthalpyInput<'_>) -> Result<(), LiquidEnthalpyErr
     for (index, receipt) in input.caloric.receipts().iter().enumerate() {
         // This immutable producer records Cp then rho at every source knot.
         let name = [SPECIFIC_HEAT_CAPACITY_PROPERTY, DENSITY_PROPERTY][index % 2];
-        let property = reference.material().property(name)
-            .ok_or(LiquidEnthalpyError::Invalid("missing liquid caloric source"))?;
+        let property = reference
+            .material()
+            .property(name)
+            .ok_or(LiquidEnthalpyError::Invalid(
+                "missing liquid caloric source",
+            ))?;
         if receipt.property != name || receipt.selected != property.answer().receipt.selected {
             return Err(LiquidEnthalpyError::Invalid(
                 "caloric Cp/density source pins differ from the liquid law",
             ));
         }
         if receipt.axis_quantities != *point.axis_quantities()
-            || !receipt.query_point.iter()
+            || !receipt
+                .query_point
+                .iter()
                 .filter(|(axis, _)| axis.as_str() != law.temperature_axis())
                 .map(|(axis, value)| (axis.as_str(), value.to_bits()))
-                .eq(point.axes().iter()
+                .eq(point
+                    .axes()
+                    .iter()
                     .filter(|(axis, _)| axis.as_str() != law.temperature_axis())
                     .map(|(axis, value)| (axis.as_str(), value.to_bits())))
         {
@@ -336,23 +521,39 @@ fn admit_law(input: LiquidFlowEnthalpyInput<'_>) -> Result<(), LiquidEnthalpyErr
     Ok(())
 }
 
-fn state_at(input: LiquidFlowEnthalpyInput<'_>, h: f64)
-    -> Result<(EquilibriumPhaseState, ResolvedLiquidState), LiquidEnthalpyError>
-{
+fn state_at(
+    input: LiquidFlowEnthalpyInput<'_>,
+    h: f64,
+) -> Result<(EquilibriumPhaseState, ResolvedLiquidState), LiquidEnthalpyError> {
+    state_at_mode(input, h, true)
+}
+
+fn state_at_mode(
+    input: LiquidFlowEnthalpyInput<'_>,
+    h: f64,
+    frozen_viscosity: bool,
+) -> Result<(EquilibriumPhaseState, ResolvedLiquidState), LiquidEnthalpyError> {
     let phase = input.caloric.curve().state_at_specific_enthalpy(h)?;
     let reference = input.liquid.reference_state();
-    if phase.phase() != SolidLiquidPhase::Liquid || phase.liquid_mass_fraction() != 1.0
+    if phase.phase() != SolidLiquidPhase::Liquid
+        || phase.liquid_mass_fraction() != 1.0
         || !same_positive(phase.bulk_density_kg_m3(), reference.density_kg_m3())
     {
         return Err(LiquidEnthalpyError::Invalid(
             "flowing enthalpy state must remain fully liquid at the fixed density",
         ));
     }
-    let liquid = input.liquid.at_temperature(Temperature::new(phase.temperature_k()))?;
+    let liquid = input
+        .liquid
+        .at_temperature(Temperature::new(phase.temperature_k()))?;
     if liquid.density_kg_m3().to_bits() != reference.density_kg_m3().to_bits()
-        || liquid.dynamic_viscosity_pa_s().to_bits() != reference.dynamic_viscosity_pa_s().to_bits()
+        || (frozen_viscosity
+            && liquid.dynamic_viscosity_pa_s().to_bits()
+                != reference.dynamic_viscosity_pa_s().to_bits())
     {
-        return Err(LiquidEnthalpyError::Invalid("the solved liquid momentum coefficients changed"));
+        return Err(LiquidEnthalpyError::Invalid(
+            "the solved liquid momentum coefficients changed",
+        ));
     }
     Ok((phase, liquid))
 }
