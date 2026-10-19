@@ -1533,3 +1533,26 @@ content hash. Liquid/gas sigma remains solely in `ResolvedLiquidSurfaceState`.
 The sparse free-surface consumer assigns this response to one planar domain
 wall. No hysteresis evolution, moving-contact-line regularization, Marangoni
 traction or measured-accuracy claim follows from that assignment.
+
+### Incremental J2 work and physical heat
+
+`plastic::energy` audits the original radial-return stress and history update
+under the explicitly energetic interpretation of linear isotropic hardening:
+elastic energy is `0.5 e:C:e`, hardening storage is `0.5 H alpha^2`, and
+physical dissipation is `sigma_y delta_alpha`. Endpoint stress work also
+contains the backward-Euler loss
+`0.5 delta_e:C:delta_e + 0.5 H (delta_alpha)^2`; that numerical term is
+reported separately and is never a physical heat source.
+
+Callers must retain the same elastic coefficients and H across the increment.
+Changing only the yield offset can release stored energy at fixed total strain.
+The owner checks coefficients, tensor strain bounds, finite deviatoric plastic
+history and its accumulated-strain bound, endpoint yield consistency, and an
+independent absolute work residual. Proposals return immutable native stress,
+history and energy accounts. These gates do not establish a measured heat
+partition for an arbitrary empirical hardening curve or supply creep, phase
+change, thermal expansion, finite-strain work, or parameter-work accounting.
+
+The regression source covers independently derived pure-shear work and storage,
+elastic unloading without physical heat, reversal with accumulated history,
+yield reduction at fixed strain, and invalid-history refusal.

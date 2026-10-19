@@ -5,6 +5,8 @@
 
 /// Source-resolved coefficients for the same native J2 law.
 pub mod source;
+/// Incremental work and physical heat of the energetic-hardening model.
+pub mod energy;
 
 use crate::elastic::IsotropicElastic;
 use crate::tensor::{contract, deviator, trace};
