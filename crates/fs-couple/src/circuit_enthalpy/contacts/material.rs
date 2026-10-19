@@ -1,10 +1,12 @@
 //! Same ordered interface card and thermal-link geometry for contact current/heat.
+mod prepared;
+pub use prepared::PreparedElectricalContactNetwork;
 use super::*;
 use crate::circuit_enthalpy::material::{MaterialNetwork,MaterialNetworkError,MaterialNetworkSample};
 use fs_material::conductor::ElectricalPropertyBasis;
 use fs_material::thermal::interface::ThermalInterfacePoint;
 use fs_material::thermal::source::ThermalMaterialError;
-use fs_material::state_point::{MaterialPropertySelection,MaterialStatePointError,ResolvedMaterialStatePoint};
+use fs_material::state_point::{MaterialPropertySelection,MaterialStatePointError};
 use fs_material::electrical_interface::resolve_electrical_interface_state;
 use fs_matdb::PropertyValue;
 
@@ -64,6 +66,12 @@ impl ElectricalContactNetwork<'_> {
         }
         Ok(routes.into_values().collect())
     }
+    /// Complete explicit electrical heat destinations in stable contact-ID order.
+    /// No partition is inferred; each original thermal link supplies its A/B cells.
+    pub fn heat_destinations(&self,thermal:&DepositionSimulation<'_>)
+        ->Result<Vec<ContactHeatCells>,ElectricalContactNetworkError> {
+        self.routes(thermal)
+    }
     /// Fresh same-trial bulk and interface resolution. The thermal link owns
     /// contact area and source A/B order; missing area never becomes a short.
     /// All phase/card identities are checked by the original state resolver.
@@ -73,6 +81,16 @@ impl ElectricalContactNetwork<'_> {
         if cancelled() {return Err(Error::Thermal(DepositionError::Cancelled));}
         self.routes(thermal)?;
         let bulk=self.bulk.resolve_with_bases(thermal,self.electrical_bases,&mut cancelled).map_err(Error::Bulk)?;
+        self.resolve_contacts(thermal,bulk,None,cancelled)
+    }
+
+    // Both fresh-policy and prepared callers use this same interface evaluator.
+    fn resolve_contacts(&self,thermal:&DepositionSimulation<'_>,bulk:CircuitThermalCoefficients<MaterialNetworkSample>,
+        pins:Option<&BTreeMap<u64,MaterialPropertySelection>>,mut cancelled:impl FnMut()->bool)
+        ->Result<ContactThermalCoefficients<MaterialNetworkSample>,ElectricalContactNetworkError> {
+        use ElectricalContactNetworkError as Error;
+        if cancelled() {return Err(Error::Thermal(DepositionError::Cancelled));}
+        self.routes(thermal)?;
         let mut contacts=Vec::with_capacity(self.contacts.len());
         for binding in self.contacts {
             if cancelled() {return Err(Error::Thermal(DepositionError::Cancelled));}
@@ -84,7 +102,11 @@ impl ElectricalContactNetwork<'_> {
             let phases=[link.a,link.b].map(|id|bulk.source.cells.iter().find(|c|c.cell==id).map(|c|c.phase));
             let [Some(a),Some(b)]=phases else {return Err(Error::Invalid("missing contact-side material state"));};
             let point=binding.point.at([a,b]).map_err(Error::State)?;
-            let resolved=resolve_electrical_interface_state(binding.point.interface,&point,binding.selection.clone()).map_err(Error::Electrical)?;
+            let selection=match pins {
+                Some(pins)=>pins.get(&binding.link).ok_or(Error::Invalid("prepared contact claim is absent"))?.clone(),
+                None=>binding.selection.clone(),
+            };
+            let resolved=resolve_electrical_interface_state(binding.point.interface,&point,selection).map_err(Error::Electrical)?;
             let property=resolved.resolved().property(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY)
                 .ok_or(Error::Invalid("contact source property absent"))?;
             let claim=binding.point.interface.claims().claim(property.answer().receipt.selected)
@@ -116,7 +138,7 @@ impl ElectricalContactNetwork<'_> {
         let cancel=RefCell::new(cancelled);
         if (*cancel.borrow_mut())() {return Err(CircuitEnthalpyError::Cancelled);}
         let routes=self.routes(thermal).map_err(CircuitEnthalpyError::Source)?;
-        let initial=match self.resolve(thermal,||(*cancel.borrow_mut())()) {
+        let prepared=match self.prepare(thermal,||(*cancel.borrow_mut())()) {
             Err(ElectricalContactNetworkError::Thermal(DepositionError::Cancelled))
             |Err(ElectricalContactNetworkError::Bulk(MaterialNetworkError::Thermal(DepositionError::Cancelled)))
                 =>return Err(CircuitEnthalpyError::Cancelled),
@@ -124,13 +146,8 @@ impl ElectricalContactNetwork<'_> {
         };
         let destinations=self.bulk.resistors.iter().map(|r|r.destination).collect::<Vec<_>>();
         let result=super::step_candidate(thermal,target_s,CircuitEnthalpyInput {circuit,ports,destinations:&destinations},
-            &routes,controls,guess_j,|state| {
-                let next=self.resolve(state,||(*cancel.borrow_mut())())?;
-                if !same_bulk_sources(&initial.bulk,&next.bulk) {
-                    return Err(ElectricalContactNetworkError::Invalid("bulk source selection changed during contact feedback"));
-                }
-                Ok(next)
-            },||(*cancel.borrow_mut())());
+            &routes,controls,guess_j,|state|prepared.resolve(state,||(*cancel.borrow_mut())()),
+            ||(*cancel.borrow_mut())());
         match result {
             Err(CircuitEnthalpyError::Source(ElectricalContactNetworkError::Thermal(DepositionError::Cancelled)))
             |Err(CircuitEnthalpyError::Source(ElectricalContactNetworkError::Bulk(MaterialNetworkError::Thermal(DepositionError::Cancelled))))
@@ -138,16 +155,4 @@ impl ElectricalContactNetwork<'_> {
             other=>other,
         }
     }
-}
-fn same_material(a:&ResolvedMaterialStatePoint,b:&ResolvedMaterialStatePoint)->bool {
-    a.card_identity()==b.card_identity() && a.properties().len()==b.properties().len()
-        && a.properties().iter().zip(b.properties()).all(|(a,b)|a.requirement().name()==b.requirement().name()
-            && a.answer().receipt.selected==b.answer().receipt.selected)
-}
-fn same_bulk_sources(a:&CircuitThermalCoefficients<MaterialNetworkSample>,b:&CircuitThermalCoefficients<MaterialNetworkSample>)->bool {
-    a.resistors.len()==b.resistors.len() && a.source.cells.len()==b.source.cells.len()
-        && a.resistors.iter().zip(&b.resistors).all(|(a,b)|a.branch==b.branch && same_material(a.conductor.material(),b.conductor.material()))
-        && a.source.cells.iter().zip(&b.source.cells).all(|(a,b)|a.cell==b.cell && match (&a.conductivity,&b.conductivity) {
-            (Some(a),Some(b))=>same_material(a,b),(None,None)=>true,_=>false,
-        })
 }

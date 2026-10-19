@@ -46,6 +46,45 @@ contact bindings use the original contact-free circuit entry point. No gas
 chambers reduces to the original electrical-contact/enthalpy evolution; isolated
 gases retain their own original pressure/momentum evolution.
 
+## Data-only material wiring
+
+`network::material::step_with_electrical_contacts_candidate` accepts the existing
+`ElectricalContactNetwork`, the thermal/circuit histories, all `Chamber`s and
+all gas `MaterialContact` patches. No handwritten property callback is needed:
+
+```rust,ignore
+let proposal = network::material::step_with_electrical_contacts_candidate(
+    &electrical_contact_network, &thermal, target_s, &circuit, &source_ports,
+    &chambers, &gas_patches, controls, &energy_guess_j, || cancelled(),
+)?;
+```
+
+Electrical heat destinations come from the original contact binding. All gas
+patch areas are summed across chambers against each cell's remaining exposed
+surface, using the same admission as the ordinary material path. Electrical
+conductivity/resistivity choices remain explicit per branch. The ordinary
+multi-chamber entry point now also uses prepared transport sources; its new
+`step_candidate_with_bases` variant exposes the same explicit basis choices.
+Legacy `step_candidate` remains resistivity-only.
+
+`ElectricalContactNetwork::prepare` returns a borrowed
+`PreparedElectricalContactNetwork`. It composes the existing bulk preparation
+with pinned interface claims, never cached temperatures or coefficients. The
+ordinary contact-only thermal step and the new chamber adapter both use it.
+Fresh trial values still come from the same bulk/interface evaluators, including
+phase coordinates and complete source conditions. A competing claim appearing
+later does not make the retained, valid pin ambiguous; leaving the pinned
+source's supported domain refuses rather than substituting the competing law.
+Preparing at a new starting state explicitly permits new policy selections.
+The actual contact source must still agree with the accepted circuit; contact
+reconfiguration is not hidden in this preparation.
+
+For custom radiation or thermal-contact composition, prepare once, call
+`prepared.resolve(trial_thermal, cancelled)` in the existing callback, and retain
+all source payloads. `heat_destinations` exposes the original contact/cell routes
+without inferring their partition. Neither preparation nor evaluation advances
+physical history.
+
 ## Physical scope and checks
 
 The model has fixed circuit/thermal geometry and capacitance/inductance,
@@ -67,3 +106,8 @@ New regressions use real source cards and the existing physical solvers for
 contact-only material changes reaching both bodies and both gas motions,
 isolation and contact-free reductions, and cancellation/refusal without partial
 history. They are synthetic numerical fixtures, not measured-material data.
+
+Further regressions compare the data-only path to the same prepared callbacks,
+check aggregate area and cancellation, and distinguish overlapping competing
+claims from an unsupported pinned source. The contact-only material-change
+trajectory now runs through the data-only multi-chamber entry point.

@@ -129,7 +129,7 @@ fn interface_data_changes_both_material_bodies_and_both_gas_motions() {
     let run=|r|fixture(r,|network,mut thermal,mut circuit| {
         let mut gases=pistons();let old=gases.clone();let energy0=thermal.energy_j()+50.0;let mut work=0.0;
         for _ in 0..80 {
-            let result=candidate(network,&thermal,&circuit,&gases,&patches(),||false).unwrap();
+            let result=data_candidate(network,&thermal,&circuit,&gases,||false).unwrap();
             assert!(result.step().total_energy_residual_j.abs()<=solve().total_energy_tolerance_j);
             assert!(result.step().external_network_heat_j.abs()<1e-7);
             for c in result.chambers() {for p in c.boundary.source() {
@@ -198,5 +198,78 @@ fn contact_free_entry_point_and_empty_contact_route_are_identical() {
             assert_eq!(a.boundary.piston(),b.boundary.piston());
             assert_eq!(a.boundary.source(),b.boundary.source());
         }
+    });
+}
+
+
+fn data_candidate<'m>(network:&ElectricalContactNetwork<'_>,thermal:&DepositionSimulation<'m>,circuit:&MaterialCircuit,
+    gases:&[GasPiston;2],cancelled:impl FnMut()->bool)->Result<Candidate<'m>,Error> {
+    let target=thermal.time_s()+0.00005;let dt=target-thermal.time_s();
+    let chambers=[chamber(10,&gases[0],dt),chamber(20,&gases[1],dt)];
+    let patches=patches().map(|contact|super::material::MaterialContact {contact,geometry:geometry()});
+    super::material::step_with_electrical_contacts_candidate(network,thermal,target,circuit,&[],&chambers,
+        &patches,solve(),&[0.0;2],cancelled)
+}
+
+#[test]
+fn data_binding_matches_prepared_callbacks_and_checks_total_gas_surface_area() {
+    fixture(0.2,|network,thermal,circuit| {
+        let gases=pistons();let chambers=[chamber(10,&gases[0],0.00005),chamber(20,&gases[1],0.00005)];
+        let prepared=network.prepare(&thermal,||false).unwrap();
+        let destinations=network.bulk.resistors.iter().map(|r|r.destination).collect::<Vec<_>>();
+        let manual=step_with_contacts_candidate(&thermal,0.00005,
+            CircuitEnthalpyInput {circuit:&circuit,ports:&[],destinations:&destinations},&routes(),&chambers,&patches(),solve(),&[0.0;2],
+            |t|prepared.resolve(t,||false),|p,t,s,g|resolve_contact(network.bulk,p.cell,t,s,g,geometry()),||false).unwrap();
+        let data=data_candidate(network,&thermal,&circuit,&gases,||false).unwrap();
+        assert_eq!(data.thermal().cells(),manual.thermal().cells());assert_eq!(data.circuit(),manual.circuit());
+        for (a,b) in data.chambers().iter().zip(manual.chambers()) {
+            assert_eq!(a.boundary.piston(),b.boundary.piston());assert_eq!(a.boundary.source(),b.boundary.source());
+        }
+        // Each 0.02 m2 patch fits alone, but their sum exceeds this cell's 0.038 m2 exposed area.
+        let patches=patches().map(|p|super::material::MaterialContact {
+            contact:Contact {cell:CellId(30),..p},geometry:GasConductionGeometry {area_m2:0.02,..geometry()}});
+        assert!(matches!(super::material::step_with_electrical_contacts_candidate(network,&thermal,0.00005,
+            &circuit,&[],&chambers,&patches,solve(),&[0.0;2],||false),Err(CircuitEnthalpyError::Invalid(_))));
+        assert!(matches!(data_candidate(network,&thermal,&circuit,&gases,||true),Err(CircuitEnthalpyError::Cancelled)));
+        let mut polls=0;data_candidate(network,&thermal,&circuit,&gases,||{polls+=1;false}).unwrap();let mut n=0;
+        assert!(matches!(data_candidate(network,&thermal,&circuit,&gases,||{n+=1;n==polls}),Err(CircuitEnthalpyError::Cancelled)));
+        assert_eq!(thermal.time_s(),0.0);assert_eq!(circuit.charges_c(),&[1.0]);
+    });
+}
+
+#[test]
+fn prepared_interface_queries_keep_claims_live_without_switching_or_false_ambiguity() {
+    fixture(0.2,|network,thermal,circuit| {
+        let next=data_candidate(network,&thermal,&circuit,&pistons(),||false).unwrap();
+        let mean=0.5*(next.thermal().temperature_k(CellId(30)).unwrap()+next.thermal().temperature_k(CellId(10)).unwrap());
+        assert!(mean>400.0001);
+        let base=&network.contacts[0];let original=base.point.interface;
+        for upper in [800.0,400.0001] {
+            let mut first=(*original.claims_for(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY)[0].1).clone();
+            first.validity=first.validity.with("mean",200.0,upper);
+            let mut second=first.clone();second.validity=second.validity.with("mean",400.0001,800.0);
+            second.provenance.source="competing synthetic contact claim".into();
+            let mut claims=ClaimSet::new();let pin=claims.insert_claim(first).unwrap();claims.insert_claim(second).unwrap();
+            let card=InterfaceSystemCard::assemble(original.surface_a().clone(),original.surface_b().clone(),
+                original.context().clone(),claims,vec![]).unwrap();
+            let contacts=[MaterialElectricalContact {link:base.link,branch:base.branch,
+                point:ThermalInterfacePoint {interface:&card,..base.point},selection:MaterialPropertySelection::SingleClaimOnly,
+                heat_fraction_to_first:base.heat_fraction_to_first}];
+            let binding=ElectricalContactNetwork {bulk:network.bulk,contacts:&contacts,electrical_bases:network.electrical_bases};
+            let prepared=binding.prepare(&thermal,||false).unwrap();
+            let fresh=prepared.resolve(next.thermal(),||false);
+            if upper==800.0 {
+                // A second valid claim must not invalidate an already selected, still-supported law.
+                assert!(binding.resolve(next.thermal(),||false).is_err());
+                let fresh=fresh.unwrap();
+                assert_eq!(fresh.contacts[0].source().resolved().property(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY).unwrap().answer().receipt.selected,pin);
+                assert!(fresh.contacts[0].source().resistance_ohm_m2()>prepared.resolve(&thermal,||false).unwrap().contacts[0].source().resistance_ohm_m2());
+            } else {
+                // Conversely a replacement claim may not hide the selected law leaving its support.
+                assert!(binding.resolve(next.thermal(),||false).is_ok());assert!(fresh.is_err());
+            }
+            assert!(matches!(binding.prepare(&thermal,||true),Err(ElectricalContactNetworkError::Thermal(DepositionError::Cancelled))));
+        }
+        assert_eq!(thermal.time_s(),0.0);assert_eq!(circuit.charges_c(),&[1.0]);
     });
 }
