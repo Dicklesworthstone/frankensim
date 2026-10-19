@@ -11,6 +11,8 @@
 pub mod material;
 /// Two-sided deposition of source-backed electrical contact heat.
 pub mod contacts;
+/// Reciprocal material Seebeck voltage and Peltier heat on the same network.
+pub mod thermoelectric;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -329,3 +331,4 @@ pub(crate) fn driven_with_contacts_candidate<'m, S, E>(
             maximum_cell_residual_j, circuit_trials: trials.get(), deposited_joule_j,
             non_electrical_heat_j, total_energy_residual_j: total } })
 }
+
