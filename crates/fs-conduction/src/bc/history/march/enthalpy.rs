@@ -20,6 +20,9 @@ pub mod adaptive;
 /// Material-backed thermal contact feedback retained through scheduled evolution.
 pub mod contact;
 
+/// Moving absorbed-power footprints with persistent phase and optional radiation.
+pub mod scanning;
+
 use super::{ThermalHistoryProblem, poll};
 use super::events;
 use crate::{ConductionError, ConductionProblem, ScalarField, ThermalBc, ThermalBoundary};
