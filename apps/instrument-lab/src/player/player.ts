@@ -386,18 +386,24 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
   // first, so two calls never build two mixes or two pianos.
   let starting: Promise<unknown> = Promise.resolve();
   function ensureEngines(a: Arrangement): Promise<boolean> {
-    const run = starting.then(() => startEngines(a));
+    const my = token;
+    const run = starting.then(() => startEngines(a, my));
     starting = run.catch(() => {});
     return run;
   }
-  async function startEngines(a: Arrangement): Promise<boolean> {
+  async function startEngines(a: Arrangement, my: number): Promise<boolean> {
+    if (my !== token) return false;
     ctx ??= createLiveAudioContext();
     await ctx.resume();
+    if (my !== token) return false;
     const c = ctx;
     if (!mix) {
       const g = c.createGain();
       g.gain.value = 0;
       const mx = await createLiveMix(c, g);
+      // A slow module load may outlive another player's claim and its idle cleanup.
+      // Do not resurrect the mixer or construct Workers for the cancelled start.
+      if (my !== token) { mx.dispose(); return false; }
       g.connect(c.destination);
       // both assigned together, after the await: an idle disposal meanwhile cannot leave one without the other
       master = g;
