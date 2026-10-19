@@ -1,6 +1,7 @@
 //! Recover two absorbed-power levels using the native thermal history adjoint.
 //! All geometry and materials are synthetic, not experimental calibration.
 mod geometry;
+mod limits;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_ascent::{LbfgsReport, StopReason, StopRule};
 use fs_ascent::scan_design::{ScanPowerControl, ScanPowerObjective, ScanPowerStudy};
@@ -136,7 +137,11 @@ fn with_context<T>(f: impl FnOnce(&Cx<'_>) -> T) -> T {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|arg|arg == "--geometry") { return geometry::run_cli(&args[1..]); }
-    if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") { println!("{USAGE}"); return Ok(()); }
+    if args.first().is_some_and(|arg|arg == "--limits") { return limits::run_cli(&args[1..]); }
+    if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
+        println!("{USAGE}\nConstrained fitting: --limits [maximum_power_W maximum_absorbed_energy_J]");
+        return Ok(());
+    }
     let input = FitInput::parse(&args)?;
     let result = with_context(|cx| fit(cx, input, false))?;
     println!("# status={:?} objective={:.12e} gradient_norm={:.12e} evaluations={}",

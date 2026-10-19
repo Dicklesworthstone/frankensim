@@ -19,6 +19,8 @@ use std::collections::BTreeSet;
 
 mod geometry;
 pub use geometry::ScanGeometryControl;
+/// Physical bounds and absorbed-energy constraints through the existing SQP engine.
+pub mod constraints;
 
 /// One selected authored power value; unselected values (including off states)
 /// remain exactly as declared. Coordinates obey P = reference_w * exp(x).
