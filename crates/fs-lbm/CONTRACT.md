@@ -1733,3 +1733,37 @@ These tests establish coupling and operator geometry; they do not establish
 calibrated sessile-drop dynamics, hysteresis, thermocapillary stress, capillary
 oscillation/spurious-current convergence or a closed surface-energy account.
 
+### Original liquid sources on solved-flow enthalpy transport
+
+`conjugate::enthalpy::advection::liquid` adds
+`MaterialChtFlow<ResolvedLiquidState>::advect_liquid_enthalpy` to the existing
+native flow-to-enthalpy owner. The same solved face fluxes, fixed control-volume
+map, donor-cell transport, combined CFL, energy audit and thermal timeline own
+the evolution. The adapter retains the exact resolved reference state used by
+momentum and the original borrowed caloric chart used by thermal storage.
+
+Admission requires common material-card identity, identical selected Cp/density
+claims, and all non-temperature coordinates and quantity descriptors. Density
+and viscosity must be validity-wide scalar sources under the existing
+instantaneous Newtonian admission. Cp and conductivity use the same shared
+support guard as the existing surface/momentum coefficients: non-temperature
+response curves and unevolved dynamic source bounds refuse. Every knot in the
+complete caloric chart
+must remain fully liquid at the fixed source density. Momentum and thermal eddy
+viscosities must be zero. A matching card identity or equal endpoint densities
+alone do not establish a compatible material binding.
+
+The original pinned liquid law is re-evaluated at actual thermal source epochs,
+endpoints and events. Each accepted endpoint retains its source receipts and
+caloric state. Leaving source support or refusing an inner physical-history step
+discards the complete thermal/advection/history candidate. Conduction and other
+physical histories remain with the composed inner observer. This is passive
+sensible-enthalpy transport on frozen laminar momentum; it supplies no phase
+mobility, variable-density volume flux, viscous or pressure work, buoyancy,
+turbulent heat closure or free-surface motion. The native strict local mass
+balance gate remains unchanged and can require further momentum refinement.
+
+The seven regression sources exercise the actual native duct and internal-fan
+solves, independent upwind energy accounting, a viscosity-only material swap,
+original-claim support loss, candidate rollback, and context/selection/object
+identity, complete-chart and dynamic thermal-source refusals.

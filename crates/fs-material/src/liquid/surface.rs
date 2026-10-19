@@ -199,16 +199,39 @@ fn require_frozen_coefficient(
     name: &'static str,
     dims: Dims,
 ) -> Result<(), MaterialStatePointError> {
-    if property.requirement().quantity() != QuantitySpec::dimensional(dims)
-        || !property.is_constant_at_fixed_temperature()
-    {
+    if property.requirement().quantity() != QuantitySpec::dimensional(dims) {
         return Err(MaterialStatePointError::InvalidRequirement {
             property: name.to_owned(),
             reason: "frozen liquid coefficient needs its exact scalar quantity and a constant or absolute-temperature-only source",
         });
     }
-    // A positive sample within a shear/frequency/strain band does not certify
-    // an instantaneous coefficient outside that band during flow.
+    require_frozen_coefficient_support(property)
+}
+
+/// Admit support for an instantaneous coefficient evaluated at fixed temperature.
+///
+/// Constants and absolute-temperature-only curves are allowed. Source bounds in
+/// frequency, strain, stress, rate or flow coordinates need a constitutive owner
+/// that actually evolves those coordinates; they cannot be silently frozen.
+/// Pressure, composition and other fixed external conditions remain context.
+///
+/// This checks SUPPORT ONLY. The caller must separately require the exact
+/// quantity, value range and material/state assignment. In particular, semantic
+/// thermal-conductivity quantities are retained without conversion to a merely
+/// dimensional key. This does not establish source accuracy or full-span cover.
+///
+/// # Errors
+/// Refuses a non-temperature response curve or an unevolved dynamic source bound.
+pub fn require_frozen_coefficient_support(
+    property: &ResolvedScalarProperty,
+) -> Result<(), MaterialStatePointError> {
+    let name = property.requirement().name();
+    if !property.is_constant_at_fixed_temperature() {
+        return Err(MaterialStatePointError::InvalidRequirement {
+            property: name.to_owned(),
+            reason: "instantaneous coefficient needs a scalar constant or absolute-temperature-only source",
+        });
+    }
     for (axis, _) in &property.answer().receipt.query_point {
         if property.answer().evidence.model.validity.bound(axis).is_none() { continue; }
         let quantity = property.answer().receipt.axis_quantities.get(axis).copied();
@@ -228,7 +251,7 @@ fn require_frozen_coefficient(
         if dynamic_kind || dynamic_dimension || legacy_dynamic_axis {
             return Err(MaterialStatePointError::InvalidRequirement {
                 property: name.to_owned(),
-                reason: "frequency, rate, strain, stress or flow bounded surface data needs an evolving constitutive owner",
+                reason: "frequency, rate, strain, stress or flow bounded data needs an evolving constitutive owner",
             });
         }
     }

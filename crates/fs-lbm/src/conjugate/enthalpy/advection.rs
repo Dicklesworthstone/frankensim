@@ -5,6 +5,9 @@
 //! only maps their shared control volumes and converts volume flux to mass.
 //! No cell-centred velocity is interpolated into a second, different flux.
 
+/// Source-pinned liquid admission on the existing native advection owner.
+pub mod liquid;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use fs_conduction::transient::deposition::{
