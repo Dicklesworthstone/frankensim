@@ -7473,6 +7473,113 @@ fn assert_decision_compiler(output: &Output, expected: &str) {
 }
 
 #[test]
+fn g3_cli_explicit_material_state_preserves_claims_and_binds_the_card_identity() {
+    use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+
+    let run_named = |manifest: &Path, output: &Path, state: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .arg("matdb-pack")
+            .arg("--manifest")
+            .arg(manifest)
+            .arg("--out")
+            .arg(output)
+            .arg("--material-state")
+            .args(state)
+            .env("CARGO_WORKSPACE_DIR", workspace_path(""))
+            .output()
+            .expect("run named material-card compiler")
+    };
+    let (directory, manifest) = write_fixture(SOURCE);
+    let plain_path = directory.join("plain.fsmatpk");
+    let plain_output = run_compiler(&manifest, &plain_path);
+    assert!(
+        plain_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&plain_output.stderr)
+    );
+    let plain_bytes = fs::read(plain_path).expect("read unwrapped claims");
+    assert_eq!(plain_bytes.len(), PACK_BYTES_GOLDEN);
+    let plain = NormalizedPack::from_bytes(&plain_bytes).expect("default remains a claims pack");
+    assert_eq!(plain.content_hash().to_string(), PACK_HASH_GOLDEN);
+
+    let state = ["alloy-X", "solid", "solution-treated", "0"];
+    let mut first_bytes = None;
+    let mut first_decisions = None;
+    for name in ["first.matpack", "second.matpack"] {
+        let path = directory.join(name);
+        let output = run_named(&manifest, &path, &state);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = fs::read(path).expect("read named card");
+        let card = NormalizedMaterialCardPack::from_bytes(&bytes).expect("renderable card envelope");
+        assert_eq!(card.claims_pack().to_bytes(), plain_bytes);
+        assert_eq!(
+            card.card().id(),
+            &MaterialStateId {
+                chemistry: state[0].to_string(),
+                phase: state[1].to_string(),
+                process: state[2].to_string(),
+                revision: 0,
+            }
+        );
+        assert_eq!(card.source_artifact(), plain.source_artifact());
+        NormalizedMaterialCardPack::from_bytes_verified(card.content_hash(), &bytes)
+            .expect("externally pinned named card re-admits");
+        let decisions = String::from_utf8(output.stdout).expect("UTF-8 decisions");
+        assert!(decisions.contains("\"reason_code\":\"explicit_material_state\""));
+        let reported_hash = format!("\"pack_hash\":\"{}\"", card.content_hash());
+        assert!(decisions.lines().all(|row| row.contains(&reported_hash)));
+        if let Some(first) = &first_bytes {
+            assert_eq!(&bytes, first);
+            assert_eq!(Some(&decisions), first_decisions.as_ref());
+        } else {
+            first_bytes = Some(bytes);
+            first_decisions = Some(decisions);
+        }
+    }
+
+    let changed_path = directory.join("changed-state.matpack");
+    let changed = run_named(
+        &manifest, &changed_path, &["alloy-X", "solid", "cold-worked", "0"],
+    );
+    assert!(changed.status.success(), "{}", String::from_utf8_lossy(&changed.stderr));
+    let changed_bytes = fs::read(changed_path).expect("read changed identity");
+    let changed_card =
+        NormalizedMaterialCardPack::from_bytes(&changed_bytes).expect("changed identity re-admits");
+    assert_eq!(changed_card.claims_pack().to_bytes(), plain_bytes);
+    assert_ne!(Some(changed_bytes), first_bytes);
+
+    for (index, invalid) in [
+        vec!["alloy-X", "solid", "solution-treated"],
+        vec!["alloy-X", "solid", "solution-treated", "1"],
+        vec!["alloy-X", "", "solution-treated", "0"],
+        vec!["alloy-X", "solid", "solution-treated", "0",
+             "--material-state", "alloy-X", "solid", "solution-treated", "0"],
+    ].iter().enumerate() {
+        let path = directory.join(format!("invalid-{index}.matpack"));
+        let refused = run_named(&manifest, &path, invalid);
+        assert!(!refused.status.success(), "invalid state was published");
+        assert!(!path.exists(), "invalid state created an output");
+    }
+    for (index, (_, nonmaterial)) in [
+        write_species_fixture(SPECIES_SOURCE),
+        write_nasa9_fixture(),
+    ].into_iter().enumerate() {
+        let path = directory.join(format!("nonmaterial-{index}.matpack"));
+        let refused = run_named(&nonmaterial, &path, &state);
+        assert!(!refused.status.success(), "non-material artifact was wrapped");
+        assert!(
+            String::from_utf8_lossy(&refused.stdout)
+                .contains("\"reason_code\":\"material_state_requires_material\"")
+        );
+        assert!(!path.exists(), "refused profile created an output");
+    }
+}
+
+#[test]
 fn g3_cli_compiles_two_identical_pinned_packs() {
     let (directory, manifest) = write_fixture(SOURCE);
     let first_path = directory.join("first.fsmatpk");

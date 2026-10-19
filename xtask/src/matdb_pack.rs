@@ -54,7 +54,8 @@ use fs_matdb::{
     ClaimId, ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterpolationPolicy,
     JointStatistics, LawId, LawParameter, MATDB_PACK_TARGET_BASIS, MODEL_PACK_TARGET_BASIS,
     MaterialStateId, ModelNormalizationReceipt, ModelNormalizationTarget, NormalizationReceipt,
-    NormalizationTarget, NormalizedInterfacePack, NormalizedModelPack, NormalizedPack,
+    NormalizationTarget, NormalizedInterfacePack, NormalizedMaterialCardPack, NormalizedModelPack,
+    NormalizedPack,
     NormalizedSpeciesPack, ObservationDataset, ObservationId, PropertyClaim, PropertyKey,
     PropertyValue, Provenance, SPECIES_MOLAR_MASS_DIMS, SPECIES_PACK_TARGET_BASIS,
     SPECIES_REFERENCE_PRESSURE_DIMS, SpeciesAssociation, SpeciesNormalizationReceipt,
@@ -291,6 +292,7 @@ struct CompileOutput {
 #[derive(Debug)]
 enum CompiledPack {
     Material(NormalizedPack),
+    MaterialCard(NormalizedMaterialCardPack),
     Interface(NormalizedInterfacePack),
     Model(NormalizedModelPack),
     Species(NormalizedSpeciesPack),
@@ -300,6 +302,7 @@ impl CompiledPack {
     fn compiler_id(&self) -> &str {
         match self {
             Self::Material(pack) => pack.compiler(),
+            Self::MaterialCard(pack) => pack.compiler(),
             Self::Interface(pack) => pack.compiler(),
             Self::Model(pack) => pack.compiler(),
             Self::Species(pack) => pack.compiler(),
@@ -309,6 +312,7 @@ impl CompiledPack {
     fn source_artifact(&self) -> ContentHash {
         match self {
             Self::Material(pack) => pack.source_artifact(),
+            Self::MaterialCard(pack) => pack.source_artifact(),
             Self::Interface(pack) => pack.source_artifact(),
             Self::Model(pack) => pack.source_artifact(),
             Self::Species(pack) => pack.source_artifact(),
@@ -318,6 +322,7 @@ impl CompiledPack {
     fn content_hash(&self) -> ContentHash {
         match self {
             Self::Material(pack) => pack.content_hash(),
+            Self::MaterialCard(pack) => pack.content_hash(),
             Self::Interface(pack) => pack.content_hash(),
             Self::Model(pack) => pack.content_hash(),
             Self::Species(pack) => pack.content_hash(),
@@ -327,6 +332,7 @@ impl CompiledPack {
     fn to_bytes(&self) -> Vec<u8> {
         match self {
             Self::Material(pack) => pack.to_bytes(),
+            Self::MaterialCard(pack) => pack.to_bytes(),
             Self::Interface(pack) => pack.to_bytes(),
             Self::Model(pack) => pack.to_bytes(),
             Self::Species(pack) => pack.to_bytes(),
@@ -336,6 +342,9 @@ impl CompiledPack {
     fn verify_bytes(&self, expected: ContentHash, bytes: &[u8]) -> Result<(), String> {
         match self {
             Self::Material(_) => NormalizedPack::from_bytes_verified(expected, bytes)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            Self::MaterialCard(_) => NormalizedMaterialCardPack::from_bytes_verified(expected, bytes)
                 .map(|_| ())
                 .map_err(|error| error.to_string()),
             Self::Interface(_) => NormalizedInterfacePack::from_bytes_verified(expected, bytes)
@@ -676,21 +685,25 @@ struct ComponentMeta {
 
 /// Compile a strict source manifest twice and publish one verified new artifact.
 pub(super) fn cmd_matdb_pack(root: &Path, args: &[String]) -> Result<(), String> {
-    let (manifest_path, output_path) = match parse_cli(root, args) {
+    let (manifest_path, output_path, material_state) = match parse_cli(root, args) {
         Ok(paths) => paths,
         Err(error) => {
             print_refusal_decisions(&error, Some(cli_input_hash(args)));
             return Err(error.to_string());
         }
     };
-    let mut first = match compile_manifest(&manifest_path) {
+    let mut first = match compile_manifest(&manifest_path)
+        .and_then(|output| bind_material_state(output, material_state.as_ref()))
+    {
         Ok(output) => output,
         Err(error) => {
             print_refusal_decisions(&error, error.input_hash);
             return Err(error.to_string());
         }
     };
-    let second = match compile_manifest(&manifest_path) {
+    let second = match compile_manifest(&manifest_path)
+        .and_then(|output| bind_material_state(output, material_state.as_ref()))
+    {
         Ok(output) => output,
         Err(error) => {
             print_refusal_decisions(&error, error.input_hash);
@@ -776,12 +789,118 @@ pub(super) fn cmd_matdb_pack(root: &Path, args: &[String]) -> Result<(), String>
     Ok(())
 }
 
-fn parse_cli(root: &Path, args: &[String]) -> Result<(PathBuf, PathBuf), CompileError> {
+/// Opt-in transport envelope; the source compiler and its claims stay unchanged.
+fn bind_material_state(
+    output: CompileOutput,
+    state: Option<&MaterialStateId>,
+) -> Result<CompileOutput, CompileError> {
+    let Some(state) = state else {
+        return Ok(output);
+    };
+    let compiler_id = output.pack.compiler_id().to_string();
+    let source_hash = output.pack.source_artifact();
+    let CompileOutput {
+        pack,
+        mut decisions,
+        ..
+    } = output;
+    let refuse = |code, detail: String| {
+        CompileError::new(code, "material-state", detail)
+            .with_compiler_id(compiler_id.clone())
+            .with_input_hash(source_hash)
+            .with_prior_decisions(decisions.clone())
+    };
+    let CompiledPack::Material(claims) = pack else {
+        return Err(refuse(
+            "material_state_requires_material",
+            "--material-state accepts material property packs; interface, model and species artifacts require their original envelopes".to_string(),
+        ));
+    };
+    let card = NormalizedMaterialCardPack::new(state.clone(), claims)
+        .map_err(|error| refuse("invalid_material_state", error.to_string()))?;
+    let pack = CompiledPack::MaterialCard(card);
+    let bytes = pack.to_bytes();
+    let pack_hash = pack.content_hash();
+    pack.verify_bytes(pack_hash, &bytes)
+        .map_err(|error| refuse("material_card_readmission_failed", error))?;
+    decisions.push(Decision::admit(
+        "material-state",
+        "explicit_material_state",
+        format!(
+            "bound chemistry {:?}, phase {:?}, process {:?}, revision {} to the unchanged normalized claims",
+            state.chemistry, state.phase, state.process, state.revision,
+        ),
+        Some(source_hash),
+    ));
+    for decision in &mut decisions {
+        decision.pack_hash = Some(pack_hash);
+    }
+    sort_decisions(&mut decisions);
+    Ok(CompileOutput {
+        pack,
+        bytes,
+        decisions,
+    })
+}
+
+fn parse_cli(
+    root: &Path,
+    args: &[String],
+) -> Result<(PathBuf, PathBuf, Option<MaterialStateId>), CompileError> {
     let mut manifest = None;
     let mut output = None;
+    let mut material_state = None;
     let mut index = 0;
     while index < args.len() {
         let option = &args[index];
+        if option == "--material-state" {
+            if material_state.is_some() {
+                return Err(CompileError::new(
+                    "invalid_cli",
+                    "arguments",
+                    "--material-state was supplied more than once",
+                ));
+            }
+            let fields = args.get(index + 1..index + 5).ok_or_else(|| {
+                CompileError::new(
+                    "invalid_cli",
+                    "arguments",
+                    "--material-state requires CHEMISTRY PHASE PROCESS REVISION",
+                )
+            })?;
+            if fields[..3]
+                .iter()
+                .any(|field| field.trim().is_empty() || field.starts_with("--"))
+            {
+                return Err(CompileError::new(
+                    "invalid_cli",
+                    "arguments",
+                    "--material-state requires three nonempty identity fields before REVISION",
+                ));
+            }
+            let revision = fields[3].parse::<u32>().map_err(|_| {
+                CompileError::new(
+                    "invalid_cli",
+                    "arguments",
+                    "--material-state REVISION must be an unsigned integer",
+                )
+            })?;
+            if revision != 0 {
+                return Err(CompileError::new(
+                    "invalid_material_state",
+                    "material-state",
+                    "named material-card packs require revision 0; later revisions need an explicit predecessor lineage",
+                ));
+            }
+            material_state = Some(MaterialStateId {
+                chemistry: fields[0].clone(),
+                phase: fields[1].clone(),
+                process: fields[2].clone(),
+                revision,
+            });
+            index += 5;
+            continue;
+        }
         let value = args.get(index + 1).ok_or_else(|| {
             CompileError::new(
                 "invalid_cli",
@@ -796,7 +915,7 @@ fn parse_cli(root: &Path, args: &[String]) -> Result<(PathBuf, PathBuf), Compile
                 return Err(CompileError::new(
                     "invalid_cli",
                     "arguments",
-                    format!("unknown option {option:?}; expected --manifest and --out"),
+                    format!("unknown option {option:?}; expected --manifest, --out, or --material-state"),
                 ));
             }
         };
@@ -826,7 +945,7 @@ fn parse_cli(root: &Path, args: &[String]) -> Result<(PathBuf, PathBuf), Compile
             "manifest and output paths must differ",
         ));
     }
-    Ok((manifest, output))
+    Ok((manifest, output, material_state))
 }
 
 fn resolve_cli_path(root: &Path, raw: &str) -> PathBuf {
