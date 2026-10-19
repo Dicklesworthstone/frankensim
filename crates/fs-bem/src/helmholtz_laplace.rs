@@ -116,7 +116,8 @@ pub fn solve_radiation_laplace_batch(
         k,
         phase_origin_m: 0.0,
     };
-    let alpha = C64::new(0.0, -1.0) * k.recip();
+    // Same Burton-Miller coupling sign as the real-frequency owner (`alpha_for`).
+    let alpha = C64::new(0.0, 1.0) * k.recip();
     let (a, b) = assemble_dense_with_static(surface, wave, alpha, None);
     if a.iter().chain(&b).any(|&v| !finite(v)) {
         return Err(bad("nonfinite damped BEM matrix"));

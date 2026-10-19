@@ -8,13 +8,14 @@
 //! as `e^{-i omega t}`, so the outgoing free-space kernel is
 //! `G(r) = e^{+ikr} / (4 pi r)` and the momentum equation gives
 //! `grad p = i omega rho v`, i.e. `q = dp/dn = i omega rho v_n`. With
-//! the HBIE row written below as `N p - D' q - q/2 = 0`, the coupling
-//! that restores unique solvability under this convention is
-//! `alpha = -i/k` (equivalently the textbook `+i/k` applied to the
-//! NEGATED HBIE row — coupling sign and row sign only mean anything
-//! together). The sign is pinned by the interior-resonance contrast
-//! test rather than trusted from a convention label: the flipped sign
-//! measurably degrades the resonance error instead of fixing it.
+//! the HBIE row written below as `N p - D' q - q/2 = 0`, the production
+//! coupling is `alpha = +i/k`. Any `alpha` with a nonzero imaginary part
+//! restores unique solvability; the sign sets the conditioning and how the
+//! hypersingular discretization error enters. It is pinned by measurement,
+//! not by a convention label: on the pulsating sphere with the exact static
+//! rows (`N_0[1] = 0`, `(D_0 + I/2)1 = 0`), `+i/k` converges at the plain
+//! CBIE rate away from interior resonances and is 3-5x more accurate than
+//! `-i/k` for `ka >= 2`, while both rescue the resonances CBIE loses.
 //!
 //! FORMULATION — exterior Green representation with outward normals,
 //! collocation at panel centroids, piecewise-constant elements:
@@ -240,14 +241,14 @@ pub enum Formulation {
     /// Plain CBIE — breaks down at interior resonances (kept as the
     /// documented near-miss arm of the fictitious-frequency contrast).
     PlainCbie,
-    /// Burton–Miller CBIE + alpha HBIE with `alpha = -i/k` for this
+    /// Burton–Miller CBIE + alpha HBIE with `alpha = +i/k` for this
     /// module's row-sign convention — the production arm.
     BurtonMiller,
-    /// The alpha-sign MUTATION arm (`alpha = +i/k` on this module's
-    /// row convention): kept public and
-    /// documented so the conformance battery can prove the wrong sign
-    /// fails loudly at interior resonances instead of silently
-    /// degrading. Never use for production solves.
+    /// The alpha-sign MUTATION arm (`alpha = -i/k` on this module's
+    /// row convention): kept public and documented so the conformance
+    /// battery can prove the wrong sign measurably degrades accuracy and
+    /// convergence instead of passing silently. Never use for production
+    /// solves.
     BurtonMillerWrongAlphaSign,
 }
 
@@ -1303,8 +1304,8 @@ fn condition_lower_bound(matrix: &[C64], n: usize, lu: &fs_la::eigen_complex::Lu
 fn alpha_for(formulation: Formulation, k: f64) -> C64 {
     match formulation {
         Formulation::PlainCbie => C64::ZERO,
-        Formulation::BurtonMiller => C64::new(0.0, -1.0 / k),
-        Formulation::BurtonMillerWrongAlphaSign => C64::new(0.0, 1.0 / k),
+        Formulation::BurtonMiller => C64::new(0.0, 1.0 / k),
+        Formulation::BurtonMillerWrongAlphaSign => C64::new(0.0, -1.0 / k),
     }
 }
 
@@ -1378,7 +1379,7 @@ fn assemble_dense_with_static<K: WaveNumber>(
                 // The SAME static quadrature must also satisfy (D_0+I/2)1=0.
                 // Otherwise its weighted adjoint D'_0 has a spurious net flux:
                 // A^T(D'_0+I/2) != 0, while A^T N_0 = 0. Multiplication by
-                // alpha=-i/k then amplifies this incompatible RHS at low k,
+                // alpha (|alpha| = 1/k) then amplifies this incompatible RHS at low k,
                 // creating an O(panel-size) real pressure at k -> 0.
                 // This geometric Gauss correction closes the static identity,
                 // just as the N_0 row correction does. It uses no computed
@@ -2583,7 +2584,7 @@ mod tests {
         // PlainCbie is the non-resonant arm (fictitious frequencies start
         // at ka = pi). BurtonMiller must also remain accurate and passive
         // below ka=0.5, where inconsistent static D/D' self coefficients
-        // previously produced a negative resistance amplified by alpha=-i/k.
+        // previously produced a negative resistance amplified by |alpha| = 1/k.
         let coarse = SpherePanels::icosphere(1.0, 2).expect("icosphere-2");
         let fine = SpherePanels::icosphere(1.0, 3).expect("icosphere-3");
         let mut rows = String::new();
@@ -2705,11 +2706,11 @@ mod tests {
 
     #[test]
     fn alpha_sign_mutation_degrades_at_interior_resonance() {
-        // MUTATION: alpha = +i/k (the wrong sign under e^{-i omega t}
-        // for this module's HBIE row sign).
-        // It must NOT rescue the interior resonance: the correct BM
-        // error stays small while the flipped-sign arm degrades like
-        // (or worse than) plain CBIE at ka = pi.
+        // MUTATION: alpha = -i/k (the wrong sign under e^{-i omega t}
+        // for this module's HBIE row sign). Any nonzero Im(alpha) keeps
+        // the system uniquely solvable, so the mutation still beats plain
+        // CBIE here; what it loses is accuracy: its ka = pi error must
+        // exceed twice the production arm's.
         let surface = SpherePanels::icosphere(1.0, 2).expect("icosphere");
         let n = surface.centroids().len();
         let ka = core::f64::consts::PI;
@@ -2735,6 +2736,56 @@ mod tests {
         );
         println!(
             "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"alpha-sign-mutation\",\"bm_rel\":{bm:.4},\"flipped_rel\":{flipped:.4},\"verdict\":\"caught\"}}"
+        );
+    }
+
+    #[test]
+    fn burton_miller_sign_tracks_cbie_accuracy_off_resonance() {
+        // G2 + G3: away from interior resonances plain CBIE is exact in the
+        // continuum, so a consistent coupling must not add discretization
+        // error. Measured on the pulsating sphere (icosphere-2, 320 panels):
+        // production/CBIE 0.58, 0.60, 0.78 and mutation/production 2.8, 3.2,
+        // 2.7 at ka = 2, 2.5, 4. Under refinement to icosphere-3 at ka = 2.5
+        // the production error falls 6.9x (CBIE 3.8x, mutation 2.7x).
+        let err = |surface: &SpherePanels, ka: f64, formulation: Formulation| -> f64 {
+            let n = surface.centroids().len();
+            let sol = solve_radiation(
+                surface,
+                ka,
+                Medium::air(),
+                &uniform_velocity(n),
+                formulation,
+            )
+            .expect("solve");
+            let z_ref = pulsating_sphere_impedance(ka, 1.0);
+            (mean_impedance(&sol, surface) - z_ref).abs() / z_ref.abs()
+        };
+        let coarse = SpherePanels::icosphere(1.0, 2).expect("icosphere-2");
+        for ka in [2.0, 2.5, 4.0] {
+            let bm = err(&coarse, ka, Formulation::BurtonMiller);
+            let cbie = err(&coarse, ka, Formulation::PlainCbie);
+            let mutated = err(&coarse, ka, Formulation::BurtonMillerWrongAlphaSign);
+            assert!(
+                bm < cbie,
+                "ka={ka}: production {bm:.3e} must beat plain CBIE {cbie:.3e}"
+            );
+            assert!(
+                mutated > 2.0 * bm,
+                "ka={ka}: mutation {mutated:.3e} must exceed twice production {bm:.3e}"
+            );
+            println!(
+                "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"alpha-sign-off-resonance\",\"ka\":{ka},\"bm_rel\":{bm:.4e},\"cbie_rel\":{cbie:.4e},\"mutation_rel\":{mutated:.4e}}}"
+            );
+        }
+        let fine = SpherePanels::icosphere(1.0, 3).expect("icosphere-3");
+        let ratio = err(&coarse, 2.5, Formulation::BurtonMiller)
+            / err(&fine, 2.5, Formulation::BurtonMiller);
+        assert!(
+            ratio > 3.0,
+            "production must converge at least at the CBIE rate: {ratio:.2}x"
+        );
+        println!(
+            "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"alpha-sign-refinement\",\"ka\":2.5,\"error_ratio_ico2_over_ico3\":{ratio:.3}}}"
         );
     }
 

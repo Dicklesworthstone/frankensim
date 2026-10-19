@@ -142,8 +142,11 @@ everywhere: this is screening, not a viscous truth source.
   Neumann radiation on a closed panel surface: complex surface pressure,
   radiated power, panels-per-wavelength diagnostic. Time convention
   `e^{-i omega t}`, `G = e^{ikr}/(4 pi r)`; with the module's HBIE row
-  sign, the Burton-Miller coupling is `alpha = -i/k` (pinned by the
-  interior-resonance contrast, not by convention label).
+  sign, the Burton-Miller coupling is `alpha = +i/k`. It is pinned by
+  measurement, not by convention label: with the exact static rows it tracks
+  plain-CBIE accuracy and convergence away from interior resonances, while
+  `-i/k` is 3-5x less accurate for `ka >= 2`
+  (`burton_miller_sign_tracks_cbie_accuracy_off_resonance`).
 - `solve_radiation_batch(surface, k, medium, velocity_fields, formulation)` —
   the same solve semantics for a nonempty, bounded batch (at most 256 fields)
   at one frequency, preserving input order while sharing one validated dense
@@ -474,7 +477,7 @@ NASA marks it as U.S. Government work with public use permitted.
    to retain the area-weighted adjoint. Consequently `A^T(D'_0+I/2)=0`
    for the panel-area vector `A`, compatible with `A^T N_0=0`.
    Leaving the double-layer self zero while closing only `N_0` violates this
-   compatibility and introduces a net static flux amplified by `alpha=-i/k`.
+   compatibility and introduces a net static flux amplified by `|alpha| = 1/k`.
    No pressure, resistance, spectral clipping or empirical parameter enters
    the correction. G0 checks the actual assembled static blocks on a sphere
    and an ellipsoid; the pulsating-sphere test now asserts the same 8%/positive
