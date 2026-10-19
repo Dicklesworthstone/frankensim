@@ -90,12 +90,12 @@ mod buoyant;
 mod domain;
 mod electric;
 mod energy;
-mod flow;
-mod krylov;
-pub mod material_coupling;
 /// Ohmic sources on conservative enthalpy timelines, including latent plateaus.
 #[cfg(feature = "enthalpy-coupling")]
 pub mod enthalpy;
+mod flow;
+mod krylov;
+pub mod material_coupling;
 mod natural;
 mod radiation;
 mod simple;
@@ -128,6 +128,7 @@ pub use radiation::{
 pub use simple::{
     AMG_REBUILD_SWEEPS, FacePatch, FanCurve, FanInlet, FlowResistance, FvBoundary, FvFlow,
     InternalFan, PressureSolver, SimpleConfig, SimpleReport, TimeScheme, Turbulence, simple_flow,
+    simple_flow_with_viscosity,
 };
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 pub use unsteady::{

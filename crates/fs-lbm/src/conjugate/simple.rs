@@ -513,6 +513,9 @@ pub(super) struct Solver<'a> {
     n: [usize; 3],
     rho: f64,
     mu: f64,
+    /// Admitted laminar molecular viscosity per cell. Nonempty selects the
+    /// complete symmetric Newtonian stress, including cross-component shear.
+    molecular_viscosity: Vec<f64>,
     comps: [Component; 3],
     /// Face velocities per component, m/s.
     vel: [Vec<f64>; 3],
@@ -763,6 +766,7 @@ impl<'a> Solver<'a> {
             n,
             rho: fluid.density_kg_m3,
             mu: fluid.density_kg_m3 * fluid.kinematic_viscosity_m2_s,
+            molecular_viscosity: Vec::new(),
             comps,
             vel,
             pressure: vec![0.0; domain.cell_count()],
@@ -836,6 +840,9 @@ impl<'a> Solver<'a> {
 
     /// Effective dynamic viscosity of `cell` (molecular plus eddy).
     fn mu_eff(&self, cell: [usize; 3]) -> f64 {
+        if !self.molecular_viscosity.is_empty() {
+            return self.molecular_viscosity[cell_of(self.n, cell)];
+        }
         if self.eddy_viscosity.is_empty() {
             self.mu
         } else {
@@ -847,6 +854,15 @@ impl<'a> Solver<'a> {
     /// Wall viscosity of the half cell between `minus`/`plus` and a wall:
     /// the law-of-the-wall secant (molecular when laminar).
     fn wall_mu(&self, minus: [usize; 3], plus: [usize; 3]) -> f64 {
+        if !self.molecular_viscosity.is_empty() {
+            let Some(a) = (0..3).find(|&a| minus[a] != plus[a]) else {
+                return self.mu_eff(minus);
+            };
+            let wm = self.domain.width(a, minus[a]);
+            let wp = self.domain.width(a, plus[a]);
+            // Parallel half-cell wall patches, weighted by their actual areas.
+            return (wm / (wm + wp)) * self.mu_eff(minus) + (wp / (wm + wp)) * self.mu_eff(plus);
+        }
         if self.wall_ratio.is_empty() {
             return self.mu;
         }
@@ -859,7 +875,49 @@ impl<'a> Solver<'a> {
     /// `plus` across direction `d` (`up`: toward +d): the fluid cells among
     /// the two and their neighbours across the edge.
     fn edge_mu(&self, minus: [usize; 3], plus: [usize; 3], d: usize, up: bool) -> f64 {
-        if self.eddy_viscosity.is_empty() {
+        if !self.molecular_viscosity.is_empty() {
+            // A single positive harmonic coefficient at the MAC shear edge,
+            // shared by tau_ad and tau_da. Area weights handle graded cells;
+            // a row-wise viscosity jump uses the two half-cell resistances.
+            let a = (0..3).find(|&a| minus[a] != plus[a]).unwrap_or((d + 1) % 3);
+            let mut weights = [(0usize, 0.0, 1.0); 4];
+            let mut count = 0;
+            for c in [minus, plus] {
+                weights[count] = (
+                    cell_of(self.n, c),
+                    self.domain.width(a, c[a]) * self.domain.width(d, c[d]),
+                    self.mu_eff(c),
+                );
+                count += 1;
+                let mut g = c;
+                let exists = if up { c[d] + 1 < self.n[d] } else { c[d] > 0 };
+                if exists {
+                    g[d] = if up { c[d] + 1 } else { c[d] - 1 };
+                    if self.domain.is_fluid(cell_of(self.n, g)) {
+                        weights[count] = (
+                            cell_of(self.n, g),
+                            self.domain.width(a, g[a]) * self.domain.width(d, g[d]),
+                            self.mu_eff(g),
+                        );
+                        count += 1;
+                    }
+                }
+            }
+            // Opposite CV sides and reciprocal components must visit the
+            // same four source cells in the same order, including roundoff.
+            weights[..count].sort_unstable_by_key(|(cell, _, _)| *cell);
+            let area: f64 = weights[..count].iter().map(|(_, w, _)| w).sum();
+            let minimum = weights[..count]
+                .iter()
+                .map(|(_, _, mu)| *mu)
+                .fold(f64::INFINITY, f64::min);
+            let inverse: f64 = weights[..count]
+                .iter()
+                .map(|(_, w, mu)| (w / area) * (minimum / mu))
+                .sum();
+            return minimum / inverse;
+        }
+        if self.eddy_viscosity.is_empty() && self.molecular_viscosity.is_empty() {
             return self.mu;
         }
         let (mut sum, mut count) = (self.mu_eff(minus) + self.mu_eff(plus), 2.0);
@@ -1243,7 +1301,17 @@ impl<'a> Solver<'a> {
                         net_out += flux;
                         // Diffusion across the cell between the two faces.
                         let side_cell = if plus { plus_cell } else { minus_cell };
-                        let diff = self.mu_eff(side_cell) * face_area / width(a, side_cell[a]);
+                        // A variable molecular viscosity requires the FULL
+                        // Newtonian stress: normal stress is 2 mu du_a/dx_a.
+                        // The legacy constant-viscosity Laplacian keeps its
+                        // arithmetic; div(grad(u)^T)=0 for incompressible flow.
+                        let normal = if self.molecular_viscosity.is_empty() {
+                            1.0
+                        } else {
+                            2.0
+                        };
+                        let diff =
+                            normal * self.mu_eff(side_cell) * face_area / width(a, side_cell[a]);
                         let coef = diff.mul_add(self.weight(flux / diff), (-flux).max(0.0));
                         match comp.kind[nf] {
                             Kind::Unknown(col) | Kind::Outlet(col) => {
@@ -1279,7 +1347,20 @@ impl<'a> Solver<'a> {
                         let next = if plus { f[d] + 1 } else { f[d] - 1 };
                         0.5 * (row_width + width(d, next))
                     };
-                    let diff = self.edge_mu(minus_cell, plus_cell, d, plus) * side_area / distance;
+                    let edge_mu = self.edge_mu(minus_cell, plus_cell, d, plus);
+                    let diff = edge_mu * side_area / distance;
+                    // Reciprocal shear mu du_d/dx_a on this SAME staggered
+                    // control-volume side. Keeping only mu du_a/dx_d would
+                    // give a scalar diffusion model for a variable-mu fluid.
+                    // This term is iterated with the original coupled velocity
+                    // solve; it is not an externally supplied body force.
+                    let cross_shear = if self.molecular_viscosity.is_empty() {
+                        0.0
+                    } else {
+                        let vm = self.vel[d][self.cell_face(d, minus_cell, plus)];
+                        let vp = self.vel[d][self.cell_face(d, plus_cell, plus)];
+                        s * edge_mu * w3 * (vp - vm)
+                    };
                     let wall_conductance = side_area / row_width;
                     if outside {
                         match self.faces[2 * d + usize::from(plus)] {
@@ -1298,6 +1379,7 @@ impl<'a> Solver<'a> {
                                 rhs = coef.mul_add(velocity[a], rhs);
                             }
                             FvBoundary::Outlet => {
+                                rhs += cross_shear;
                                 net_out += edge_flux;
                                 if edge_flux < 0.0 {
                                     // Backflow carries zero tangential momentum.
@@ -1316,6 +1398,7 @@ impl<'a> Solver<'a> {
                     let nf = comp.index(g);
                     match comp.kind[nf] {
                         Kind::Unknown(col) | Kind::Outlet(col) => {
+                            rhs += cross_shear;
                             net_out += edge_flux;
                             let coef =
                                 diff.mul_add(self.weight(edge_flux / diff), (-edge_flux).max(0.0));
@@ -1787,7 +1870,11 @@ impl Solver<'_> {
             let speed = fs_math::det::sqrt(slot.iter().map(|v| v * v).sum::<f64>());
             max_cell_reynolds = max_cell_reynolds.max(
                 speed * domain.widths(c).iter().fold(0.0f64, |m, w| m.max(*w))
-                    / fluid.kinematic_viscosity_m2_s,
+                    / if self.molecular_viscosity.is_empty() {
+                        fluid.kinematic_viscosity_m2_s
+                    } else {
+                        self.molecular_viscosity[c] / self.rho
+                    },
             );
         }
         let (mut inflow, mut outflow) = (0.0f64, 0.0f64);
@@ -1866,7 +1953,70 @@ pub fn simple_flow(
     gate: &CancelGate,
 ) -> Result<FvFlow, ChtError> {
     admit(domain, fluid, config)?;
+    solve_steady(Solver::new(domain, fluid, config), fluid, config, gate)
+}
+
+/// Solve constant-density laminar flow with local dynamic viscosity [Pa s].
+///
+/// The existing MAC momentum owner assembles the full symmetric Newtonian
+/// stress `div(mu * (grad(u) + grad(u)^T))`. Normal and reciprocal shear terms
+/// share the same local coefficients. Merely substituting a field into the
+/// constant-mu Laplacian would omit a physical force when viscosity varies.
+/// The original pressure correction, convection, fans, porous resistance,
+/// boundaries and convergence/refusal owners remain in charge.
+///
+/// One positive value is required for every voxel, including unused solids.
+/// Density and geometry remain fixed. No variable-density continuity, phase
+/// mobility, non-Newtonian rheology, viscous heating or turbulent closure is
+/// inferred. Source identity and the temperature epoch belong to the calling
+/// material owner. This is a steady solve; it retains no transient momentum.
+///
+/// # Errors
+/// Refuses a malformed/nonpositive field or LVEL, and propagates the original
+/// numerical and cancellation refusals without publishing a partial field.
+pub fn simple_flow_with_viscosity(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    dynamic_viscosity_pa_s: &[f64],
+    config: &SimpleConfig,
+    gate: &CancelGate,
+) -> Result<FvFlow, ChtError> {
+    poll(gate)?;
+    admit(domain, fluid, config)?;
+    if dynamic_viscosity_pa_s.len() != domain.cell_count()
+        || config.turbulence != Turbulence::Laminar
+    {
+        return Err(ChtError::InvalidInput {
+            field: "simple.dynamic_viscosity_pa_s",
+            reason: "one molecular viscosity per voxel and the laminar closure are required".into(),
+        });
+    }
+    for (c, &mu) in dynamic_viscosity_pa_s.iter().enumerate() {
+        if c % 256 == 0 {
+            poll(gate)?;
+        }
+        finite_positive("simple.dynamic_viscosity_pa_s", mu)?;
+        finite_positive("simple.kinematic_viscosity_m2_s", mu / fluid.density_kg_m3)?;
+    }
     let mut solver = Solver::new(domain, fluid, config);
+    // Existing Darcy coefficients are linear in molecular viscosity. Keep
+    // their geometric/permeability owner and update only that coefficient.
+    for (c, axes) in solver.porous.iter_mut().enumerate() {
+        for (viscous, _) in axes {
+            *viscous = (*viscous / solver.mu) * dynamic_viscosity_pa_s[c];
+            finite("simple.material_darcy_resistance", *viscous)?;
+        }
+    }
+    solver.molecular_viscosity = dynamic_viscosity_pa_s.to_vec();
+    solve_steady(solver, fluid, config, gate)
+}
+
+fn solve_steady(
+    mut solver: Solver<'_>,
+    fluid: &FluidProperties,
+    config: &SimpleConfig,
+    gate: &CancelGate,
+) -> Result<FvFlow, ChtError> {
     let mut iterations = 0usize;
     let mut residuals = (f64::INFINITY, f64::INFINITY);
     while iterations < config.max_iterations {
@@ -1889,3 +2039,7 @@ pub fn simple_flow(
     }
     solver.finish(fluid, iterations, residuals, gate)
 }
+
+#[cfg(test)]
+#[path = "simple/material_viscosity_tests.rs"]
+mod material_viscosity_tests;
