@@ -87,14 +87,22 @@ impl Stage {
 
     // Negative indices address committed history; nonnegative ones address
     // this candidate input block. Preview never writes the delay line.
+    // Callers reach back 1..=2*half frames and head < 2*half, so one
+    // conditional wrap replaces the integer division (two per tap pair).
+    fn history_frame(&self, back: usize) -> usize {
+        if self.head >= back { self.head - back } else { self.head + 2 * self.half - back }
+    }
     fn frame<'a>(&'a self, input: &'a [f64], index: isize) -> &'a [f64] {
         let (data, frame) = if index >= 0 { (input, index as usize) } else {
-            let frames = 2 * self.half;
-            (&self.history[..], (self.head + frames - index.unsigned_abs()) % frames)
+            (&self.history[..], self.history_frame(index.unsigned_abs()))
         };
         &data[frame * self.channels..(frame + 1) * self.channels]
     }
     fn preview(&self, input: &[f64], output: &mut [f64]) {
+        if self.channels == 1 {
+            self.preview_one(input, output);
+            return;
+        }
         for (frame, out) in output.chunks_exact_mut(self.channels).enumerate() {
             let end = ((frame + 1) * self.ratio - 1) as isize;
             let center = self.frame(input, end - self.half as isize);
@@ -116,6 +124,27 @@ impl Stage {
                     }
                 }
             }
+        }
+    }
+    /// One channel (a summed-pressure derivative): the terms of `preview` in
+    /// the same order, read as scalars instead of one-element slices, which
+    /// cost more than the arithmetic. Bit-identical.
+    fn preview_one(&self, input: &[f64], output: &mut [f64]) {
+        let at = |index: isize| if index >= 0 { input[index as usize] }
+            else { self.history[self.history_frame(index.unsigned_abs())] };
+        for (frame, out) in output.iter_mut().enumerate() {
+            let end = ((frame + 1) * self.ratio - 1) as isize;
+            let mut value = self.center * at(end - self.half as isize);
+            if self.antisymmetric {
+                for &(lag, weight) in &self.pairs {
+                    value += weight * (at(end - lag as isize) - at(end - (2 * self.half - lag) as isize));
+                }
+            } else {
+                for &(lag, weight) in &self.pairs {
+                    value += weight * (at(end - lag as isize) + at(end - (2 * self.half - lag) as isize));
+                }
+            }
+            *out = value;
         }
     }
     fn commit(&mut self, input: &[f64]) {
@@ -249,6 +278,25 @@ mod tests {
                     assert!((a-b).abs()<2e-14, "ratio {ratio}: {a} vs {b}");
                 }
                 d.commit();
+            }
+        }
+    }
+    #[test]
+    fn one_channel_preview_matches_the_multichannel_path_bit_for_bit() {
+        for ratio in 1..=16 {
+            for differentiating in [false, true] {
+                let make = |channels| if differentiating {
+                    Decimator::new_differentiating(ratio, channels, 48_000)
+                } else { Decimator::new(ratio, channels) };
+                let (mut one, mut two) = (make(1).unwrap(), make(2).unwrap());
+                for frame in 0..400 {
+                    let x: Vec<f64> = (0..ratio).map(|s| ((frame * ratio + s) as f64 * 0.137).sin()).collect();
+                    let pair: Vec<f64> = x.iter().flat_map(|&v| [v, -v]).collect();
+                    let (a, b) = (one.preview(&x).unwrap()[0], two.preview(&pair).unwrap()[0]);
+                    assert_eq!(a.to_bits(), b.to_bits(), "ratio {ratio}, differentiating {differentiating}, frame {frame}");
+                    one.commit();
+                    two.commit();
+                }
             }
         }
     }
