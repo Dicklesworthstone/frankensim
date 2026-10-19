@@ -323,14 +323,19 @@ impl Bank {
         for (i, b) in board.iter().enumerate() { bare_k[i*r+i] = (TAU*b.frequency_hz).powi(2); }
         let mut endpoint_k = bare_k;
         let mut loaded_add = vec![0.0; r*r];
-        // Authored viscoelastic bending spectrum, not measured music wire.
-        // Its loss is weighted by the actual bending/tension energy fraction.
+        // Explicit demonstration fallback for courses without a material loss
+        // binding. Source-bound Kelvin-Voigt sections replace this spectrum;
+        // their bending loss is never added to it or to RT-0425 source rates.
         let bending = GeneralizedMaxwell::new(200e9, vec![(8e9, 0.0004), (2e9, 0.02)])
             .map_err(|e| e.to_string())?;
         let mut omitted_duplex_modes = 0;
         let mut capped_string_segments = 0;
         for (ci, c) in courses.iter().enumerate() {
             c.validate()?;
+            if rt0425_string_damping && c.bonded_section.is_some() {
+                return Err("RT-0425 string damping is not identified for a substituted material section".into());
+            }
+            let material_loss = c.bonded_section.and_then(|section| section.bending_loss());
             for polarization in 0..planes {
             let group_start = strings.len();
             for member in 0..c.unison {
@@ -364,7 +369,12 @@ impl Bank {
                         let damper_shape = det::sin(n as f64*PI*0.35)/det::sqrt(card.modal_mass_kg());
                         let k = n as f64*PI/card.length_m;
                         let bend_fraction = card.flexural_rigidity_nm2*k*k/(tension + card.flexural_rigidity_nm2*k*k);
-                        let strain_rate = if !damping {0.0} else if rt0425_string_damping {
+                        let strain_rate = if !damping {0.0} else if let Some(loss) = material_loss {
+                            // Check the actual member tension and segment length,
+                            // including duplexes and both transverse polarizations.
+                            loss.strain_rate(omega, k, card.linear_density_kg_m)
+                                .map_err(|e| format!("key {}: {e}", c.midi))?
+                        } else if rt0425_string_damping {
                             strain_time*omega*omega
                         } else {omega*bending.loss_factor(omega)*bend_fraction};
                         string_losses.push(string_damping::ModeLoss {mass_rate,strain_rate});

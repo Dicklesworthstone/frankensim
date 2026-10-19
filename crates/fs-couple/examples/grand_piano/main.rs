@@ -109,8 +109,12 @@ The preset shank and the scale's hammer mass/patch geometry remain unchanged.
 See HAMMERS.md for the SI format; importing values does not certify measurements.
 --string-sections overrides the inertial, bending and axial coefficients of every
 selected speaking course using immutable fs-material source-claim layers.
-The v1 input is a strictly ordered, complete solid concentric section per key,
-NOT a surrogate for a helically wound bass string. Tension remains unchanged
+Both input versions require an ordered, complete solid concentric section per key.
+V2 also supplies each layer's solid bending viscosity and explicit rad/s support.
+The section integral replaces the demonstration bending-loss spectrum on every
+retained speaking/duplex mode and both transverse directions. The separately
+authored common velocity drag remains; v1 retains the demonstration bending law.
+Neither format is a surrogate for a helically wound bass string. Tension remains unchanged
 unless explicit tuning is requested. The resulting scale is passed unchanged
 to modal mechanics, hammer/bridge coupling and observation, with no timbre knob.
 With --string-stretching, use section in place of numeric EA so extension and
@@ -1245,6 +1249,12 @@ fn run_with(args: &[String]) -> Result<(), String> {
     }
     if options.preset.is_some() {
         println!("Published shank geometry -> rigid rotation + bending; reciprocal jack port and 1.5 mm let-off. Linearized action fragment; damping/backcheck estimated.");
+    }
+    let material_loss_courses = scale.iter().filter(|course|
+        course.bonded_section.and_then(|section| section.bending_loss()).is_some()).count();
+    if material_loss_courses > 0 {
+        println!("String damping: material Kelvin-Voigt bending on {material_loss_courses}/{} courses, checked at every retained modal frequency; separately authored common velocity drag. Other courses retain the demonstration bending spectrum.", scale.len());
+    } else {
         println!("String damping: {}.", if options.rt0425_string_damping {
             "RT-0425 per-key R_u and eta_u projected onto scalar stiff-string modes; four end keys extrapolated"
         } else { "estimated common rate and authored Maxwell bending spectrum" });

@@ -69,9 +69,42 @@ pub struct BondedSection {
     linear_density_kg_m: f64,
     flexural_rigidity_nm2: f64,
     axial_rigidity_n: f64,
+    bending_loss: Option<BondedBendingLoss>,
 }
 impl BondedSection {
     pub const fn axial_rigidity_n(self) -> f64 { self.axial_rigidity_n }
+    pub const fn bending_loss(self) -> Option<BondedBendingLoss> { self.bending_loss }
+}
+
+/// Frozen Kelvin-Voigt integral from the SAME bonded section, with the
+/// intersection of its source-supported angular-frequency intervals.
+/// Private fields prevent a detached loss coefficient or support override.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BondedBendingLoss {
+    viscous_rigidity_nm2s: f64,
+    omega_band_rad_s: (f64, f64),
+}
+impl BondedBendingLoss {
+    pub const fn viscous_rigidity_nm2s(self) -> f64 { self.viscous_rigidity_nm2s }
+    pub const fn omega_band_rad_s(self) -> (f64, f64) { self.omega_band_rad_s }
+
+    /// Rate multiplying relative modal velocity, C_b k^4 / mu [1/s].
+    /// This is bending strain-rate loss; an uncurved moving chord adds none.
+    pub fn strain_rate(self, omega: f64, k: f64, mu: f64) -> Result<f64, String> {
+        let (lo, hi) = self.omega_band_rad_s;
+        if !omega.is_finite() || omega <= 0.0 || omega < lo || omega > hi {
+            return Err(format!("string mode {omega} rad/s outside material bending-loss support [{lo}, {hi}]"));
+        }
+        if !k.is_finite() || k <= 0.0 || !mu.is_finite() || mu <= 0.0 {
+            return Err("invalid material bending-loss wavenumber or line density".into());
+        }
+        let rate = (self.viscous_rigidity_nm2s / mu) * k.powi(4);
+        if !rate.is_finite() || rate < 0.0
+            || (self.viscous_rigidity_nm2s > 0.0 && rate == 0.0) {
+            return Err("material bending-loss rate is unrepresentable".into());
+        }
+        Ok(rate)
+    }
 }
 
 impl Course {
@@ -103,7 +136,25 @@ impl Course {
             linear_density_kg_m: section.line_density_kg_m(),
             flexural_rigidity_nm2: section.bending_stiffness_n_m2(),
             axial_rigidity_n: section.axial_stiffness_n(),
+            bending_loss: None,
         });
+        changed.validate()?;
+        Ok(changed)
+    }
+
+    /// Bind elastic and dissipative section integrals together. The loss
+    /// replaces the demonstration bending law in every retained span/plane.
+    /// A later elastic-only substitution clears this loss binding.
+    pub fn with_bonded_kelvin_voigt_section(
+        &self,
+        section: &fs_material::section::ConcentricKelvinVoigtSection,
+    ) -> Result<Self, String> {
+        let mut changed = self.with_bonded_material_section(section.elastic())?;
+        changed.bonded_section.as_mut().expect("bound elastic section").bending_loss =
+            Some(BondedBendingLoss {
+                viscous_rigidity_nm2s: section.viscous_stiffness_n_m2_s(),
+                omega_band_rad_s: section.omega_band_rad_s(),
+            });
         changed.validate()?;
         Ok(changed)
     }
@@ -114,6 +165,13 @@ impl Course {
                 || self.flexural_rigidity_nm2 != section.flexural_rigidity_nm2
                 || !section.axial_rigidity_n.is_finite() || section.axial_rigidity_n <= 0.0 {
                 return Err("bound string mass, EI and EA must come from the same material section".into());
+            }
+            if let Some(loss) = section.bending_loss {
+                let (lo, hi) = loss.omega_band_rad_s;
+                if !loss.viscous_rigidity_nm2s.is_finite() || loss.viscous_rigidity_nm2s < 0.0
+                    || !lo.is_finite() || !hi.is_finite() || lo < 0.0 || hi < lo {
+                    return Err("invalid bound material bending-loss integral or frequency support".into());
+                }
             }
         }
         if !(21..=108).contains(&self.midi) || !(1..=3).contains(&self.unison) {

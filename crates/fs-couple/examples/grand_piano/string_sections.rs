@@ -2,6 +2,8 @@
 //!
 //! One or more layer records per course, ordered from centre outward:
 //! `layer,key,outer_radius_m,density_kg_m3,young_pa,source,license`.
+//! Version 2 also supplies solid bending viscosity and its frequency support;
+//! the shared section owner integrates the resulting Kelvin-Voigt bending law.
 //! The source and license are explicit input claims, NOT measurements verified
 //! by this parser. No preset or representative metal is silently selected.
 //! Helically wound strings must use their own geometry/slip model instead.
@@ -13,15 +15,26 @@ use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
 use fs_material::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY,
     MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
     resolve_material_state_point};
-use fs_qty::{Density, Pressure};
+use fs_qty::{Density, DynViscosity, Pressure};
 
 use super::geometry::Course;
 
 pub const HEADER: &str = "frankensim-string-sections-v1";
 pub const ROW: &str = "layer,key,outer_radius_m,density_kg_m3,young_pa,source,license";
+pub const LOSS_HEADER: &str = "frankensim-string-sections-v2";
+pub const LOSS_ROW: &str = "layer,key,outer_radius_m,density_kg_m3,young_pa,bending_viscosity_pa_s,omega_min_rad_s,omega_max_rad_s,source,license";
+const BENDING_VISCOSITY_PROPERTY: &str = "solid_bending_viscosity";
 
+#[derive(Clone, Copy)]
+struct BendingData {
+    viscosity_pa_s: f64,
+    omega_band_rad_s: (f64, f64),
+}
+
+#[allow(clippy::too_many_arguments)]
 fn layer(key: u8, ordinal: usize, radius: f64, density: f64, young: f64,
-    source: &str, license: &str) -> Result<ConcentricMaterialLayer, String> {
+    bending: Option<BendingData>, source: &str, license: &str)
+    -> Result<ConcentricMaterialLayer, String> {
     if source.is_empty() || license.is_empty() || source.contains(',')
         || license.contains(',') || !density.is_finite() || density <= 0.0
         || !young.is_finite() || young <= 0.0 {
@@ -44,22 +57,49 @@ fn layer(key: u8, ordinal: usize, radius: f64, density: f64, young: f64,
             },
         }).map_err(|e| format!("invalid property claim: {e}"))?;
     }
-    let card = MaterialCard::assemble(MaterialStateId {
-        chemistry: format!("declared-string-{key}-layer-{ordinal}"),
-        phase: "solid".into(), process: "authored-source-claim".into(), revision: 0,
-    }, claims, vec![]).map_err(|e| format!("invalid material card: {e}"))?;
-    let material = resolve_material_state_point(&card, &QueryPoint::new(), &[
+    let mut query = QueryPoint::new();
+    let mut requirements = vec![
         ScalarPropertyRequirement::try_new(DENSITY_PROPERTY, Density::DIMS,
             ScalarAdmissibility::StrictlyPositive).map_err(|e| e.to_string())?,
         ScalarPropertyRequirement::try_new(YOUNG_MODULUS_PROPERTY, Pressure::DIMS,
             ScalarAdmissibility::StrictlyPositive).map_err(|e| e.to_string())?,
-    ], MaterialPropertySelection::SingleClaimOnly).map_err(|e| e.to_string())?;
+    ];
+    if let Some(loss) = bending {
+        let (lo, hi) = loss.omega_band_rad_s;
+        if !loss.viscosity_pa_s.is_finite() || loss.viscosity_pa_s < 0.0
+            || !lo.is_finite() || !hi.is_finite() || lo < 0.0 || hi < lo {
+            return Err("bending viscosity needs finite nonnegative eta and ordered nonnegative rad/s support".into());
+        }
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(BENDING_VISCOSITY_PROPERTY, DynViscosity::DIMS),
+            value: PropertyValue::Scalar { value: loss.viscosity_pa_s, dims: DynViscosity::DIMS },
+            validity: ValidityDomain::unconstrained().with("omega", lo, hi),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![],
+            provenance: Provenance {
+                source: source.into(), license: license.into(), artifact: None,
+            },
+        }).map_err(|e| format!("invalid bending claim: {e}"))?;
+        requirements.push(ScalarPropertyRequirement::try_new(
+            BENDING_VISCOSITY_PROPERTY, DynViscosity::DIMS, ScalarAdmissibility::Finite,
+        ).map_err(|e| e.to_string())?);
+        query = query.with("omega", lo + 0.5 * (hi - lo)).map_err(|e| e.to_string())?;
+    }
+    let card = MaterialCard::assemble(MaterialStateId {
+        chemistry: format!("declared-string-{key}-layer-{ordinal}"),
+        phase: "solid".into(), process: "authored-source-claim".into(), revision: 0,
+    }, claims, vec![]).map_err(|e| format!("invalid material card: {e}"))?;
+    let material = resolve_material_state_point(&card, &query, &requirements,
+        MaterialPropertySelection::SingleClaimOnly).map_err(|e| e.to_string())?;
     Ok(ConcentricMaterialLayer { outer_radius_m: radius, material })
 }
 
 /// Replace mass, bending and axial coefficients for every key, all-or-nothing.
 /// Does not change tension or the equations in the string/bridge/contact solver.
 /// The retained section binding also supplies the stretching file's `section` EA.
+/// V2 additionally binds C_b and the intersection of all layer frequency bands;
+/// its material loss replaces the authored demonstration bending spectrum.
 /// The source model is perfectly bonded concentric layers; winding is NOT bonded.
 ///
 /// # Errors
@@ -72,27 +112,48 @@ pub fn apply(text: &str, courses: &[Course]) -> Result<Vec<Course>, String> {
     let mut rows: BTreeMap<u8, Vec<ConcentricMaterialLayer>> = BTreeMap::new();
     let mut header_seen = false;
     let mut column_seen = false;
+    let mut with_loss = false;
     for (index, raw) in text.lines().enumerate() {
         let row = raw.split('#').next().unwrap_or("").trim();
         if row.is_empty() { continue; }
         let error = |why: &str| format!("string sections line {}: {why}", index + 1);
         if !header_seen {
-            if row != HEADER { return Err(error("expected string-sections header")); }
+            with_loss = match row {
+                HEADER => false,
+                LOSS_HEADER => true,
+                _ => return Err(error("expected string-sections v1 or v2 header")),
+            };
             header_seen = true;
             continue;
         }
         if !column_seen {
-            if row != ROW { return Err(error("expected explicit SI column header")); }
+            let expected = if with_loss { LOSS_ROW } else { ROW };
+            if row != expected {
+                return Err(error("expected explicit SI column header for the declared version"));
+            }
             column_seen = true;
             continue;
         }
         let fields: Vec<_> = row.split(',').map(str::trim).collect();
-        if fields.len() != 7 || fields[0] != "layer" { return Err(error("expected seven layer fields")); }
+        let expected_fields = if with_loss { 10 } else { 7 };
+        if fields.len() != expected_fields || fields[0] != "layer" {
+            return Err(error("wrong layer field count for the declared version"));
+        }
         let key: u8 = fields[1].parse().map_err(|_| error("invalid key"))?;
         if !keys.contains(&key) { return Err(error("key absent from the selected scale")); }
         let radius: f64 = fields[2].parse().map_err(|_| error("invalid outer radius"))?;
         let rho: f64 = fields[3].parse().map_err(|_| error("invalid density"))?;
         let young: f64 = fields[4].parse().map_err(|_| error("invalid Young modulus"))?;
+        let bending = if with_loss {
+            Some(BendingData {
+                viscosity_pa_s: fields[5].parse().map_err(|_| error("invalid solid bending viscosity"))?,
+                omega_band_rad_s: (
+                    fields[6].parse().map_err(|_| error("invalid angular-frequency lower bound"))?,
+                    fields[7].parse().map_err(|_| error("invalid angular-frequency upper bound"))?,
+                ),
+            })
+        } else { None };
+        let source_index = if with_loss { 8 } else { 5 };
         let layers = rows.entry(key).or_default();
         if layers.len() >= fs_material::section::MAX_CONCENTRIC_LAYERS {
             return Err(error("too many layers"));
@@ -101,8 +162,8 @@ pub fn apply(text: &str, courses: &[Course]) -> Result<Vec<Course>, String> {
             layers.last().is_some_and(|last| radius <= last.outer_radius_m) {
             return Err(error("solid concentric layers need strictly increasing positive radii"));
         }
-        layers.push(layer(key, layers.len(), radius, rho, young, fields[5], fields[6])
-            .map_err(|e| error(&e))?);
+        layers.push(layer(key, layers.len(), radius, rho, young, bending,
+            fields[source_index], fields[source_index + 1]).map_err(|e| error(&e))?);
     }
     if !header_seen || !column_seen { return Err("missing string section header or columns".into()); }
     courses.iter().map(|course| {
@@ -110,8 +171,12 @@ pub fn apply(text: &str, courses: &[Course]) -> Result<Vec<Course>, String> {
             .ok_or_else(|| format!("missing bonded section for key {}; no fallback", course.midi))?;
         let section = ConcentricElasticSection::try_new(0.0, layers)
             .map_err(|e| format!("key {}: {e}", course.midi))?;
-        course.with_bonded_material_section(&section)
-            .map_err(|e| format!("key {}: {e}", course.midi))
+        let changed = if with_loss {
+            let law = section.with_kelvin_voigt_bending(BENDING_VISCOSITY_PROPERTY)
+                .map_err(|e| format!("key {}: {e}", course.midi))?;
+            course.with_bonded_kelvin_voigt_section(&law)
+        } else { course.with_bonded_material_section(&section) };
+        changed.map_err(|e| format!("key {}: {e}", course.midi))
     }).collect()
 }
 
@@ -256,3 +321,7 @@ mod tests {
             row(7800.0, 200e9)), &source).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "string_section_loss_tests.rs"]
+mod loss_tests;
