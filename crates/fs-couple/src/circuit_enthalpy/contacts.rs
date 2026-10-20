@@ -119,11 +119,24 @@ pub(crate) fn advance_circuit<E>(
     contacts:Vec<SeriesElectricalContact>, ports:&[f64], dt:f64,
     controls:MaterialCircuitSolve, mut cancelled:impl FnMut()->bool,
 ) -> Result<MaterialCircuitCandidate,CircuitEnthalpyError<E>> {
+    admit_sources(circuit,&contacts,&mut cancelled)?;
+    // Keep the contact-free circuit's exact existing arithmetic and entry point.
+    if contacts.is_empty() {
+        Ok(circuit.step_candidate(resistors,ports,dt,controls,cancelled)?)
+    } else {
+        Ok(circuit.step_with_contacts_candidate(resistors,contacts,ports,dt,controls,cancelled)?)
+    }
+}
+
+// The original contact-source continuity law also applies when the circuit
+// owns a moving field gap. Neither driver may change a source during feedback.
+pub(crate) fn admit_sources<E>(circuit:&MaterialCircuit,contacts:&[SeriesElectricalContact],
+    mut cancelled:impl FnMut()->bool) -> Result<(),CircuitEnthalpyError<E>> {
     if cancelled() {return Err(CircuitEnthalpyError::Cancelled);}
     if contacts.len()!=circuit.contacts().len() {
         return Err(CircuitEnthalpyError::Invalid("contact source coverage changed during feedback"));
     }
-    for contact in &contacts {
+    for contact in contacts {
         if cancelled() {return Err(CircuitEnthalpyError::Cancelled);}
         let old=circuit.contacts().iter().find(|c|c.id()==contact.id())
             .ok_or(CircuitEnthalpyError::Invalid("unbound electrical contact source"))?;
@@ -134,10 +147,5 @@ pub(crate) fn advance_circuit<E>(
             return Err(CircuitEnthalpyError::Invalid("electrical contact source changed during thermal feedback"));
         }
     }
-    // Keep the contact-free circuit's exact existing arithmetic and entry point.
-    if contacts.is_empty() {
-        Ok(circuit.step_candidate(resistors,ports,dt,controls,cancelled)?)
-    } else {
-        Ok(circuit.step_with_contacts_candidate(resistors,contacts,ports,dt,controls,cancelled)?)
-    }
+    Ok(())
 }

@@ -155,4 +155,36 @@ impl ElectricalContactNetwork<'_> {
             other=>other,
         }
     }
+
+    /// Drive an electric or magnetic gap from this SAME bulk/contact/thermal
+    /// material network. Actual endpoint winding/interface temperatures alter
+    /// resistance, current, force and motion while all heat is deposited once.
+    /// Field material and inertia retain the actuator's admitted fixed snapshots.
+    #[allow(clippy::too_many_arguments)]
+    pub fn field_motion_candidate<'m>(&self,thermal:&DepositionSimulation<'m>,target_s:f64,
+        motion:&crate::material_circuit::motion::MaterialFieldMotion,ports:&[f64],external_force_n:f64,
+        controls:CircuitEnthalpySolve,guess_j:&[f64],cancelled:impl FnMut()->bool)
+        ->Result<crate::circuit_enthalpy::motion::FieldMotionEnthalpyCandidate<'m,ContactThermalSample<MaterialNetworkSample>>,
+            CircuitEnthalpyError<ElectricalContactNetworkError>> {
+        let cancel=RefCell::new(cancelled);
+        if (*cancel.borrow_mut())() {return Err(CircuitEnthalpyError::Cancelled);}
+        let routes=self.routes(thermal).map_err(CircuitEnthalpyError::Source)?;
+        let prepared=match self.prepare(thermal,||(*cancel.borrow_mut())()) {
+            Err(ElectricalContactNetworkError::Thermal(DepositionError::Cancelled))
+            |Err(ElectricalContactNetworkError::Bulk(MaterialNetworkError::Thermal(DepositionError::Cancelled)))
+                =>return Err(CircuitEnthalpyError::Cancelled),
+            other=>other.map_err(CircuitEnthalpyError::Source)?,
+        };
+        let destinations=self.bulk.resistors.iter().map(|r|r.destination).collect::<Vec<_>>();
+        let result=crate::circuit_enthalpy::motion::step_with_contacts_candidate(thermal,target_s,
+            crate::circuit_enthalpy::motion::FieldMotionEnthalpyInput {motion,ports,external_force_n,destinations:&destinations},
+            &routes,controls,guess_j,|state|prepared.resolve(state,||(*cancel.borrow_mut())()),
+            ||(*cancel.borrow_mut())());
+        match result {
+            Err(CircuitEnthalpyError::Source(ElectricalContactNetworkError::Thermal(DepositionError::Cancelled)))
+            |Err(CircuitEnthalpyError::Source(ElectricalContactNetworkError::Bulk(MaterialNetworkError::Thermal(DepositionError::Cancelled))))
+                =>Err(CircuitEnthalpyError::Cancelled),
+            other=>other,
+        }
+    }
 }

@@ -306,4 +306,31 @@ impl MaterialNetwork<'_> {
             other=>other,
         }
     }
+
+    /// Data-only Joule heating and reciprocal field-gap motion. Conductivity or
+    /// resistivity and thermal transport are resolved from these SAME caloric
+    /// cells at every proposed endpoint; gap/current/momentum come from the
+    /// original actuator. One electrical basis is explicit for each resistor.
+    /// Initial source choices stay pinned through the whole nonlinear interval.
+    #[allow(clippy::too_many_arguments)]
+    pub fn field_motion_candidate<'m>(&self, thermal:&DepositionSimulation<'m>, target_s:f64,
+        motion:&crate::material_circuit::motion::MaterialFieldMotion, ports:&[f64], external_force_n:f64,
+        electrical_bases:&[(usize,ElectricalPropertyBasis)], controls:CircuitEnthalpySolve,
+        guess_j:&[f64], cancelled:impl FnMut()->bool)
+        -> Result<super::motion::FieldMotionEnthalpyCandidate<'m,MaterialNetworkSample>,CircuitEnthalpyError<MaterialNetworkError>> {
+        let cancel=RefCell::new(cancelled);
+        if (*cancel.borrow_mut())() {return Err(CircuitEnthalpyError::Cancelled);}
+        let prepared=match self.prepare_with_bases(thermal,electrical_bases,||(*cancel.borrow_mut())()) {
+            Err(MaterialNetworkError::Thermal(DepositionError::Cancelled)) => return Err(CircuitEnthalpyError::Cancelled),
+            other=>other.map_err(CircuitEnthalpyError::Source)?,
+        };
+        let destinations=self.resistors.iter().map(|r|r.destination).collect::<Vec<_>>();
+        let result=super::motion::step_candidate(thermal,target_s,super::motion::FieldMotionEnthalpyInput {
+            motion,ports,external_force_n,destinations:&destinations},controls,guess_j,
+            |state|prepared.resolve(state,||(*cancel.borrow_mut())()),||(*cancel.borrow_mut())());
+        match result {
+            Err(CircuitEnthalpyError::Source(MaterialNetworkError::Thermal(DepositionError::Cancelled))) => Err(CircuitEnthalpyError::Cancelled),
+            other=>other,
+        }
+    }
 }

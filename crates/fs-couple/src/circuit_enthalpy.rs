@@ -13,6 +13,8 @@ pub mod material;
 pub mod contacts;
 /// Reciprocal material Seebeck voltage and Peltier heat on the same network.
 pub mod thermoelectric;
+/// Joint material electric/magnetic gap motion and finite-body Joule heating.
+pub mod motion;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -129,9 +131,10 @@ fn finite(value: f64) -> Result<f64, DepositionError> {
 }
 
 /// Independently admitted physical work and the exact endpoint source evaluation.
-pub struct CircuitEnthalpyReport<S> {
-    /// Original circuit step: finite storage, branch heat and external port work.
-    pub electrical: MaterialCircuitStep,
+pub struct CircuitEnthalpyReport<S, D = MaterialCircuitStep> {
+    /// Original circuit or reciprocal field-motion step. Its physical storage,
+    /// external work and branch heat enter the same thermal account.
+    pub electrical: D,
     /// Original thermal account; its external heat INCLUDES deposited Joule heat.
     pub thermal: EnergyAudit,
     /// Original thermal/material interface payload at the accepted endpoint.
@@ -146,7 +149,8 @@ pub struct CircuitEnthalpyReport<S> {
     pub deposited_joule_j: f64,
     /// Authored and callback source/boundary heat, EXCLUDING internal Joule heat.
     pub non_electrical_heat_j: f64,
-    /// Circuit storage + thermal storage - port work - non-electrical heat [J].
+    /// Driver storage + thermal storage - driver work - other external heat [J].
+    /// A field-motion driver includes body kinetic energy and mechanical work.
     pub total_energy_residual_j: f64,
 }
 /// Both endpoints belong to ONE physical interval; neither input is mutated.
@@ -209,12 +213,42 @@ pub fn step_candidate<'m, S, E>(
 // Keep branch heat deposition, cell residuals and the Newton/acceptance path
 // identical to the ordinary circuit path. This is crate-private: callers cannot
 // substitute a forged electrical endpoint or turn a trial into live history.
-pub(crate) struct DrivenCoefficients<S> {
-    pub circuit: MaterialCircuitCandidate,
+pub(crate) struct DrivenCoefficients<S, D = MaterialCircuitCandidate> {
+    pub circuit: D,
     pub sources_w: BTreeMap<CellId, f64>,
     pub conductances_w_k: BTreeMap<u64, f64>,
     pub source: S,
     pub circuit_trials: usize,
+}
+
+// Both drivers expose their ORIGINAL accepted candidate and loss records. This
+// private boundary only shares deposition/Newton/accounting; it cannot author
+// another circuit integrator, change material laws or publish partial history.
+pub(crate) struct DriverAccount<'a> {
+    pub resistors: &'a [crate::material_circuit::ResistorHeat],
+    pub contacts: &'a [crate::material_circuit::contacts::ContactHeat],
+    pub heat_j: f64,
+    pub stored_change_j: f64,
+    pub supplied_j: f64,
+}
+pub(crate) trait ThermalDriver {
+    type Model;
+    type Step;
+    fn account(&self) -> DriverAccount<'_>;
+    fn into_parts(self) -> (Self::Model, Self::Step);
+}
+impl ThermalDriver for MaterialCircuitCandidate {
+    type Model = MaterialCircuit;
+    type Step = MaterialCircuitStep;
+    fn account(&self) -> DriverAccount<'_> {
+        let step = self.step();
+        DriverAccount { resistors: &step.resistors, contacts: &step.contacts,
+            heat_j: step.heat_j, stored_change_j: step.stored_after_j-step.stored_before_j,
+            supplied_j: step.native.supplied }
+    }
+    fn into_parts(self) -> (Self::Model, Self::Step) {
+        MaterialCircuitCandidate::into_parts(self)
+    }
 }
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn driven_candidate<'m, S, E>(
@@ -237,6 +271,22 @@ pub(crate) fn driven_with_contacts_candidate<'m, S, E>(
     resolve: impl Fn(&DepositionSimulation<'m>, usize) -> Result<DrivenCoefficients<S>, CircuitEnthalpyError<E>>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<CircuitEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
+    let (thermal, circuit, report) = coupled_driver_candidate(thermal, target_s,
+        input, contact_cells, controls, initial_energy_increments_j, resolve, cancelled)?;
+    Ok(CircuitEnthalpyCandidate { thermal, circuit, report })
+}
+
+// The same residual and fresh acceptance for a fixed circuit or a circuit with
+// its own reciprocally coupled body. Existing public circuit paths retain the
+// exact loss deposition, controls, source callbacks and arithmetic below.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn coupled_driver_candidate<'m, S, E, D: ThermalDriver>(
+    thermal: &DepositionSimulation<'m>, target_s: f64,
+    input: CircuitEnthalpyInput<'_>, contact_cells: &[contacts::ContactHeatCells],
+    controls: CircuitEnthalpySolve, initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>, usize) -> Result<DrivenCoefficients<S, D>, CircuitEnthalpyError<E>>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(DepositionSimulation<'m>, D::Model, CircuitEnthalpyReport<S, D::Step>), CircuitEnthalpyError<E>> {
     let cancel = RefCell::new(cancelled);
     let checkpoint = || if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
     checkpoint()?;
@@ -273,8 +323,9 @@ pub(crate) fn driven_with_contacts_candidate<'m, S, E>(
         }
         trials.set(trials.get()+coefficients.circuit_trials);
         let circuit = coefficients.circuit;
+        let account = circuit.account();
         let mut powers = BTreeMap::new();
-        for branch in &circuit.step().resistors {
+        for branch in account.resistors {
             checkpoint()?;
             let cell = *destinations.get(&branch.material.branch)
                 .ok_or(CircuitEnthalpyError::Invalid("circuit returned heat without a destination"))?;
@@ -285,9 +336,9 @@ pub(crate) fn driven_with_contacts_candidate<'m, S, E>(
             let sum = powers.entry(cell).or_insert(0.0);
             *sum = finite(*sum + power)?;
         }
-        contacts::deposit(&circuit.step().contacts, &contact_routes, dt, &mut powers, checkpoint)?;
+        contacts::deposit(account.contacts, &contact_routes, dt, &mut powers, checkpoint)?;
         let deposited = finite(dt * powers.values().try_fold(0.0, |s, &p| finite(s+p))?)?;
-        if (deposited-circuit.step().heat_j).abs() > controls.total_energy_tolerance_j {
+        if (deposited-account.heat_j).abs() > controls.total_energy_tolerance_j {
             return Err(CircuitEnthalpyError::Invalid("branch heat and receiving-cell power disagree"));
         }
         if coefficients.sources_w.len() > state.cells().len() {
@@ -318,17 +369,17 @@ pub(crate) fn driven_with_contacts_candidate<'m, S, E>(
     let maximum_cell_residual_j = trial.maximum_cell_residual_j();
     let (next, (candidate, source, deposited_joule_j), audit) = trial.accept(
         controls.cell_energy_tolerance_j, controls.thermal_energy_tolerance_j, checkpoint)?;
-    let (circuit, electrical) = candidate.into_parts();
     let non_electrical_heat_j = finite(audit.external_heat_j - deposited_joule_j)?;
-    let total = finite((electrical.stored_after_j-electrical.stored_before_j)
-        + audit.stored_energy_change_j-electrical.native.supplied-non_electrical_heat_j)?;
+    let account = candidate.account();
+    let total = finite(account.stored_change_j
+        + audit.stored_energy_change_j-account.supplied_j-non_electrical_heat_j)?;
     if total.abs() > controls.total_energy_tolerance_j {
         return Err(CircuitEnthalpyError::Invalid("circuit and thermal storage do not close the supplied energy"));
     }
     checkpoint()?;
-    Ok(CircuitEnthalpyCandidate { thermal: next, circuit,
-        report: CircuitEnthalpyReport { electrical, thermal: audit, source, nonlinear: result.report,
+    let (circuit, electrical) = candidate.into_parts();
+    Ok((next, circuit, CircuitEnthalpyReport { electrical, thermal: audit, source, nonlinear: result.report,
             maximum_cell_residual_j, circuit_trials: trials.get(), deposited_joule_j,
-            non_electrical_heat_j, total_energy_residual_j: total } })
+            non_electrical_heat_j, total_energy_residual_j: total }))
 }
 
