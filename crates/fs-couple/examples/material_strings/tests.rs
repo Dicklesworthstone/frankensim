@@ -165,5 +165,8 @@ mod bow_interfaces;
 #[path = "tests/thermochemical.rs"]
 mod thermochemical_gas;
 
+#[path = "tests/cavity.rs"]
+mod physical_cavity;
+
 #[path = "stops/station_tests.rs"]
 mod migrating_stops;

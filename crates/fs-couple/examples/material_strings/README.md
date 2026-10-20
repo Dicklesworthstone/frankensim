@@ -91,10 +91,52 @@ or incomplete source data refuse before rendering; a species name never supplies
 missing thermal or transport properties. The atmosphere remains frozen during a
 performance, with the same resolved state reaching all of the consumers above.
 
+For a cavity whose neck loss follows the actual atmosphere, use:
+
+```text
+cavity physical-neck VOLUME_M3 RADIUS_M LENGTH_M INNER_END OUTER_END LISTENER_M
+```
+
+Each end is explicitly `flanged` or `unflanged`. The inner end opens into the
+cavity; the outer end opens into the exterior. For example:
+
+```text
+cavity physical-neck 0.003 0.01 0.02 flanged unflanged 1
+```
+
+This selects the existing `CavityNeckLoss::RadiationAtResonance` owner. The
+shared gas sets neck inertia and cavity compressibility, Bessel viscothermal
+neck resistance, and compact radiation resistance at the declared outer end.
+The two declared ends also supply their existing inertial end corrections,
+counted once. Changing gas composition, temperature, pressure, or source-backed
+thermal/transport data therefore changes the physical cavity load carried by
+the same string/body mechanics. It does not require a new damping coefficient.
+The selection works with the uniform plate, regional plate, curved shell and
+assembled material-body profiles; their original signed volume maps remain
+the common pressure coupling.
+
+The resistance is evaluated at the **isolated Helmholtz frequency** and held
+through the performance. This remains a uniform-pressure, circular compact-neck
+approximation, not a broadband neck impedance, distributed cavity, f-hole model,
+or exterior radiation solution. The original compact-radiation `ka <= 1`
+admission applies. Pressure output retains the existing compact baffled,
+zero-retardation body/neck observer; selecting an unflanged load does not add a
+new spatial microphone/directivity model.
+
+`physical-cavity.material-strings` uses this load with the original pluck-and-bow
+gesture and synthetic string/body packs. After the pack commands above:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/physical-cavity.material-strings" "$demo/physical-cavity.wav"
+```
+
 `cavity neck VOLUME_M3 RADIUS_M LENGTH_M RESISTANCE_PA_S_M3 LISTENER_M` selects the
 existing Helmholtz model with an explicitly specified neck resistance. It replaces
 `cavity none`. Compression, neck motion, body motion and bridge reactions remain
-in the same mechanical solve.
+in the same mechanical solve. This legacy research-fixture form keeps its
+original two flanged ends and constant authored resistance; gas changes do not
+recompute that supplied resistance. Existing files keep their original behavior.
 
 `friction stribeck MU_STATIC MU_KINETIC CHARACTERISTIC_SPEED_M_S VISCOUS_PER_SPEED`
 is also accepted. These coefficients retain **caller authority**. Bulk material
@@ -623,6 +665,7 @@ cargo test -p fs-couple --example material_strings -- --test-threads=1
 ```
 
 The tests exercise actual normalized-pack decoding, material-only substitutions,
-shared gas response and causal cylinder memory, joint pluck/double-bow control, callback equivalence, exact
+shared gas response, source-derived cavity-neck inertia/loss and end conditions,
+causal cylinder memory, joint pluck/double-bow control, callback equivalence, exact
 existing PCM output, and source/input refusals. The fixture TSVs use the existing
 `xtask matdb-pack` compiler, not a new importer.

@@ -95,28 +95,30 @@ impl ReciprocalStringBank {
             .try_fold(0usize, usize::checked_add)
             .ok_or_else(|| invalid("shell assembly interface connection extent overflow"))?;
         let cavity_connections = cavity.as_ref().map_or(0, |c|
-            1 + usize::from(c.cavity.resistance_pa_s_m3() != 0.0));
+            1 + usize::from(c.cavity.neck_resistance_n_s_m() != 0.0));
         let connections = sources.len().checked_add(if has_loss { body.reduction.n_modes } else { 0 })
             .and_then(|n| n.checked_add(interfaces))
             .and_then(|n| n.checked_add(cavity_connections))
             .ok_or_else(|| invalid("shell assembly connection extent overflow"))?;
-        if connections > options.network.max_connections || connections > MAX_MODAL_CONNECTIONS {
+        if connections > options.network.max_connections
+            || connections > crate::render::schedule::force::coupled::MAX_MODAL_CONNECTIONS {
             return Err(invalid("shell assembly loss, bridges and cavity exceed connection allowance"));
         }
-        validate_body_medium(&gas, options.sample_rate_hz, body.modal_budget,
-            body.listener_m, cavity.as_ref())?;
+        validate_body_medium(&gas, options.sample_rate_hz, body.listener_m,
+            cavity.as_ref(), gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
-        let projected = body.specimen.reduce(&body.reduction, &body.force_ports, gate)?;
+        let projected = body.specimen.reduce(&body.reduction, &body.force_ports, gate)
+            .map_err(ReciprocalStringError::Material)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         let mut image = reduce_radiating_body(projected.radiators(), &gas,
             options.sample_rate_hz, body.modal_budget, body.listener_m, cavity.as_ref(),
             Some(projected.cavity_volume_shapes_m2_per_sqrt_kg()), gate)?;
-        image.connections.extend(projected.damping().connections(0));
-        image.connections.extend(projected.interface_damping_connections(0));
+        image.body_connections.extend(projected.damping().connections(0));
+        image.body_connections.extend(projected.interface_damping_connections(0));
         let mut bank = finish_material_body_with_ports(cx, sources, &body.bridges,
-            Some(projected.force_ports()), string_modes, gas, image, law, options, gate)?;
+            string_modes, gas, image, Some(projected.force_ports()), law, options, gate)?;
         bank.source.material_shell_assembly = Some(body);
         bank.source.material_shell_assembly_image = Some(projected);
         bank.source.material_cavity = cavity;

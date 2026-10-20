@@ -211,7 +211,30 @@ impl Spec {
                 Some(MaterialBodyCavity { cavity: HelmholtzModalCavity::new(description, gas,
                     CavityNeckLoss::Resistance(resistance))?, modal_budget: modal_budget(), listener_m })
             },
-            _ => return Err("cavity must be none or neck V R L RESISTANCE LISTENER_M".into()),
+            "physical-neck" => {
+                let volume_m3 = row.positive()?;
+                let neck_radius_m = row.positive()?;
+                let neck_length_m = row.positive()?;
+                let mut end = || -> Result<fs_scenario::NeckEnd> {
+                    match row.word()? {
+                        "flanged" => Ok(fs_scenario::NeckEnd::Flanged),
+                        "unflanged" => Ok(fs_scenario::NeckEnd::Unflanged),
+                        _ => Err("physical neck ends must be flanged or unflanged".into()),
+                    }
+                };
+                let inner_end = end()?;
+                let outer_end = end()?;
+                let listener_m = row.positive()?;
+                let description = HelmholtzCavity {
+                    volume_m3, neck_radius_m, neck_length_m, inner_end, outer_end,
+                };
+                // One coherent gas supplies inertia, compression, Bessel neck
+                // loss and the declared exterior end's radiation resistance.
+                // The original owner counts each end correction exactly once.
+                Some(MaterialBodyCavity { cavity: HelmholtzModalCavity::new(description, gas,
+                    CavityNeckLoss::RadiationAtResonance)?, modal_budget: modal_budget(), listener_m })
+            },
+            _ => return Err("cavity must be none, neck V R L RESISTANCE LISTENER_M, or physical-neck V R L INNER_END OUTER_END LISTENER_M".into()),
         };
         row.end()?;
         let mut row = r.row("friction")?;
