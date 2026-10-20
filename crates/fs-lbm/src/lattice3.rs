@@ -8,6 +8,9 @@ use core::{fmt, marker::PhantomData, ops::ControlFlow};
 use fs_exec::{CancelGate, Cancelled, Cx, KernelRunner, Reduce, TileKernel, TilePlan};
 use std::sync::Mutex;
 
+/// Spatial and time-dependent force fields on the same native step owner.
+pub mod sources;
+
 /// A fixed population lattice and its caller-selected collision law.
 pub trait Lattice3<const Q: usize>: Send + Sync + 'static {
     type Collision: Copy + Send + Sync;
@@ -278,6 +281,7 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
             collision: self.collision,
             collisions,
             force: self.force,
+            forces: None,
             budget: self.budget,
             marker: PhantomData,
         };
@@ -354,6 +358,7 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
             collision: self.collision,
             collisions,
             force: self.force,
+            forces: None,
             budget: self.budget,
             marker: PhantomData,
         };
@@ -507,6 +512,7 @@ struct StepData<'a, L: Lattice3<Q>, const Q: usize> {
     collision: L::Collision,
     collisions: Option<&'a [L::Collision]>,
     force: [f64; 3],
+    forces: Option<&'a [[f64; 3]]>,
     budget: GridBudget3,
     marker: PhantomData<L>,
 }
@@ -524,11 +530,12 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
                 *output = src[cell];
                 continue;
             }
+            let force = self.forces.map_or(self.force, |field| field[cell]);
             if !stream {
                 let collision = self.collisions.map_or(self.collision, |field| field[cell]);
-                *output = L::collide(src[cell], collision, self.force)
+                *output = L::collide(src[cell], collision, force)
                     .map_err(|source| GridError3::Collision { cell, source })?;
-                macro_cell::<L, Q>(output, self.force, cell, self.budget.maximum_mach)?;
+                macro_cell::<L, Q>(output, force, cell, self.budget.maximum_mach)?;
             } else {
                 let p = coordinates(cell, self.dims);
                 for q in 0..Q {
@@ -553,7 +560,7 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
                         src[source][q]
                     };
                 }
-                macro_cell::<L, Q>(output, self.force, cell, self.budget.maximum_mach)?;
+                macro_cell::<L, Q>(output, force, cell, self.budget.maximum_mach)?;
             }
         }
         Ok(())
