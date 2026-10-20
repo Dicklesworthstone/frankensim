@@ -34,6 +34,7 @@
       <a href="#piano">Grand piano</a>
       <a class="is-live" href="#player">Player piano</a>
       <a href="#real">Real vs ours</a>
+      <a href="#instruments">Instruments</a>
       <a href="#method">Method</a>
     </nav>
   </header>
@@ -256,6 +257,19 @@
       </div>
     </section>
 
+    <!-- ============================================================ INSTRUMENTS -->
+    <section id="instruments">
+      <div class="wrap">
+        <header>
+          <div class="rule"></div>
+          <p class="eyebrow"><span class="tag offline">Offline reference</span> <span class="tag plain">Real recording</span></p>
+          <h2>Every instrument family: listen, compare, say what you hear.</h2>
+          <p class="lede">Each card sets a render beside the real recording of the same note from the University of Iowa's instrument library: a spectrogram and a wavelet scalogram of each and of their difference, the strongest partials followed through the note, and a list of measures set against how much real recordings differ from one another. It also lists the physics the render runs and the physics it lacks. A family with no render says so. A badge only reports where the measured gaps fall; none of them is a claim that the sound is real.</p>
+        </header>
+        <div id="instruments-root" class="ir-root" style="min-height: 420px"></div>
+      </div>
+    </section>
+
     <!-- ============================================================ METHOD -->
     <section id="method">
       <div class="wrap">
@@ -308,5 +322,6 @@
     </div>
   </footer>
   <script type="module" src="/src/main.ts"></script>
+  <script type="module" src="/src/instruments.ts"></script>
 </body>
 </html>

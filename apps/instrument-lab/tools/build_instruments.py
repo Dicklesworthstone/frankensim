@@ -418,8 +418,8 @@ def judge(status: dict | None, pairs: list[dict]) -> dict:
     return {"badge": badge, "label": BADGE_LABEL[badge], "line": line, "counts": counts}
 
 
-def load_status(family: str) -> dict | None:
-    path = DESCRIPTIONS / family / "status.json"
+def load_status(family: str, root: Path = DESCRIPTIONS) -> dict | None:
+    path = root / family / "status.json"
     if not path.is_file():
         return None
     s = json.loads(path.read_text())
@@ -450,6 +450,7 @@ def main() -> int:
     ap.add_argument("--analysis", type=Path, default=DEFAULT_ANALYSIS, help=f"P2's analysis tree (default {DEFAULT_ANALYSIS})")
     ap.add_argument("--pull", action="store_true", help=f"rsync {TRJ_ANALYSIS} into --analysis first")
     ap.add_argument("--out", type=Path, default=OUT)
+    ap.add_argument("--descriptions", type=Path, default=DESCRIPTIONS, help="where <family>/status.json live")
     args = ap.parse_args()
 
     if args.pull:
@@ -462,14 +463,14 @@ def main() -> int:
     licence = refs["licences"][0]["text"]
 
     known = {fid for fid, _, _ in FAMILIES}
-    extra = sorted(p.parent.name for p in DESCRIPTIONS.glob("*/status.json") if p.parent.name not in known) if DESCRIPTIONS.is_dir() else []
-    families = list(FAMILIES) + [(fid, (load_status(fid) or {}).get("title", fid), (load_status(fid) or {}).get("reference_instrument")) for fid in extra]
+    extra = sorted(p.parent.name for p in args.descriptions.glob("*/status.json") if p.parent.name not in known) if args.descriptions.is_dir() else []
+    families = list(FAMILIES) + [(fid, (load_status(fid, args.descriptions) or {}).get("title", fid), (load_status(fid, args.descriptions) or {}).get("reference_instrument")) for fid in extra]
 
     refused_total = 0
     index = []
     args.out.mkdir(parents=True, exist_ok=True)
     for fid, title, ref_instrument in families:
-        status = load_status(fid)
+        status = load_status(fid, args.descriptions)
         pairs, refused = [], []
         fam_dir = args.analysis / fid
         for pj_path in sorted(fam_dir.glob("*/pair.json")) if fam_dir.is_dir() else []:
