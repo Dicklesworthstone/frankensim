@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	synthetic-shell-holding-interface
+redistribution	permitted	Synthetic integration coefficients; not measured holding or glue data
+citation	Manufactured compliant shell holding fixture
+license	CC0-1.0
+source	fixture	holding.tsv	interface-tsv-v1

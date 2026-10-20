@@ -358,6 +358,104 @@ pressure projection.
 
 This model is an unloaded, fixed-state, linear midsurface. It does not yet
 provide a complete assembled violin/cello/bass corpus, prestressed shell
-equilibrium, separately connected ribs, soundpost and bass bar, glue compliance,
-or full exterior acoustic back-loading. The fixture's coefficients are synthetic;
+equilibrium, separately connected ribs, resolved soundpost and bass-bar solids,
+distributed glue mortars or full exterior acoustic back-loading. The fixture's coefficients are synthetic;
 it establishes the data-to-pressure path, not measured whole-instrument fidelity.
+
+## Compliant holding and bonded interface footprints
+
+A v3 body can now include an optional material interface block after its last
+support and before its bridges. [held-arched.body](held-arched.body) adds an
+explicit holding footprint to the same curved body, layered string, gas and
+cavity example above:
+
+```text
+interfaces 1 2 1048576
+interface holding holding.fsintpk 293.15 1 normal_stiffness_per_area normal_viscosity_per_area 0.0001 0 0 1
+side region body 2
+point 11 0.5 0.01 0 0
+point 12 0.5 0.01 0 0
+side fixed
+bridges 1
+bridge 12 0 0 1
+```
+
+The header is `interfaces COUNT MAX_TERMS MAX_WORK`. Each interface record is:
+
+```text
+interface NAME PACK TEMPERATURE_K OMEGA_RAD_S STIFFNESS_PROPERTY VISCOSITY_PROPERTY AREA_M2 DX DY DZ
+```
+
+It is followed by exactly two ordered sides. A moving side is
+`side region NAME POINT_COUNT` followed by `point NODE WEIGHT OX OY OZ` rows.
+A fixed side is `side fixed`; it explicitly sets zero counterpart motion and
+retains that ordered surface's material identity from the interface card. At
+least one side must move. Reversing the surface roles requires corresponding
+source data, not an automatically reordered card.
+
+Each footprint is a weighted physical application point. Weights are positive,
+sum to one and name distinct nodes belonging to that source region. Offsets
+are global metres from the midsurface nodes. Translation and rotation both
+participate: at a point with offset r, displacement is u + theta cross r.
+The signed difference of the two weighted displacements along the authored
+unit global direction is the interface extension. The same row returns the
+equal-and-opposite forces and moments. Two moving sides must represent the
+same physical application point, so common rigid motion does not strain a
+bond. Independent component meshes and continuum mortar interpolation are
+not inferred from region names.
+
+The original normalized interface pack supplies stiffness per area in N/m3
+(`Pa/m`) and viscous resistance per area in N s/m3 (`Pa*s/m`) under the
+property names in the record. Multiplying by area produces one N/m spring
+and one N s/m dashpot. Both coefficients must be explicitly sourced, finite
+and nonnegative; at least one is positive. A pure dashpot with sourced zero
+stiffness is supported. These are fixed-state constant coefficients with an
+explicit frequency validity interval; all retained shell modes must fit the
+intersection of the original bulk and interface source bands.
+
+The shared MITC owner adds the complete spring outer product before the body
+eigensolve. The existing reciprocal solver applies interface damping on that
+same physical eigenbasis alongside full bulk material viscosity, bridge
+reactions and cavity coupling. Spring stiffness is not added again at runtime.
+The interface's stored energy and dissipated work participate in the shared
+mechanical accounting. Changing only the interface pack's stiffness therefore
+changes the body modes; changing only its viscosity changes loss and pressure
+without retuning the conservative body. No output-stage effect is involved.
+
+Using the temporary directory and three bulk packs from the arched example:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/holding-manifest.tsv" --out "$demo/holding.fsintpk"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/cylinder-flow.material-strings" "$demo/held-arched.wav" \
+  --body-profile crates/fs-couple/examples/material_strings/held-arched.body
+```
+
+The original wildcard copy of the TSV files includes
+[holding-manifest.tsv](holding-manifest.tsv) and [holding.tsv](holding.tsv).
+The source explicitly names the directional body pack's current material state:
+`source-pack:synthetic-directional-string-body`, phase
+`declared solid model`, process `frozen source-pack realization`, revision 0.
+A replacement body with another source identity requires its corresponding
+ordered interface source identity as data. The second surface is the explicitly
+immobile synthetic support. These manufactured coefficients demonstrate the
+complete source-to-pressure path; they are not measured hand, glue or corpus data.
+
+Up to 64 interfaces and 4096 total nodal footprint points are admitted.
+`MAX_TERMS` counts points across both sides of every interface, not scalar
+degrees of freedom. `MAX_WORK` bounds each shared cold binding, assembly and
+projection operation and may not exceed 268,435,456. Every declared interface
+reserves a possible damping channel under the existing complete-network limits
+before pack I/O. Interface and bulk artifacts share the original 8 MiB per-pack
+and 64 MiB total limits; repeated interface paths load once. Exact profile
+bytes, original normalized packs, ordered interface states and projected rows
+remain attached to the performer.
+
+`supports 0` is accepted when explicit interfaces are present. The shared
+solver still requires an admissible eigenproblem; a single scalar support
+cannot restrain every rigid mode of a free three-dimensional body. The supplied
+fixture retains its original outer supports. These bilateral linear resultants
+resolve compliant holding or a finite bonded footprint at the reference state.
+They do not supply unilateral separation, frictional slip, a resolved soundpost
+solid, prestressed corpus equilibrium or a distributed glue mortar.

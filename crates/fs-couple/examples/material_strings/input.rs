@@ -282,6 +282,15 @@ impl Spec {
     /// one damping column per retained body mode; explicit zero viscosity may
     /// use fewer. The allowance never drops requested modes or fluid branches.
     pub fn network_dimensions(&self, tensor_body: bool) -> Result<(usize, usize, usize)> {
+        self.network_dimensions_with_body_connections(tensor_body, 0)
+    }
+
+    /// Additional source-declared shell interfaces share the original complete
+    /// connection/work ceilings. Reserve every declaration before pack I/O;
+    /// explicit zero viscosity can reduce the exact admitted runtime count.
+    pub fn network_dimensions_with_body_connections(&self, tensor_body: bool,
+        additional_body_connections: usize) -> Result<(usize, usize, usize)>
+    {
         let mut modes = self.body.modes.checked_add(usize::from(self.cavity.is_some()))
             .ok_or("complete mode count overflow")?;
         let mut transverse = 0usize;
@@ -298,6 +307,7 @@ impl Spec {
         let mut links = self.strings.len().checked_add(self.rotational_bridges.len())
             .and_then(|n| n.checked_add(cavity_links))
             .and_then(|n| n.checked_add(if tensor_body { self.body.modes } else { 0 }))
+            .and_then(|n| n.checked_add(additional_body_connections))
             .ok_or("complete connection count overflow")?;
         if let Some(resolution) = self.cylinder_gas_loading {
             resolution.validate()?;

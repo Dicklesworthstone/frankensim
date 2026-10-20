@@ -14,6 +14,9 @@ use fs_plate::shell::mitc::{
 use fs_plate::shell::profile::ProfileBudget;
 use fs_plate::shell::survey::validate_midsurface;
 
+#[path = "shell/interfaces.rs"]
+mod interfaces;
+
 const MAX_NODES: usize = 128;
 const MAX_TRIANGLES: usize = 256;
 const MAX_MODES: usize = 16;
@@ -47,6 +50,7 @@ pub(super) struct Spec {
     triangles: Vec<[usize; 3]>,
     regions: Vec<RegionInput>,
     supports: Vec<ShellConstraint>,
+    interfaces: interfaces::Inputs,
     bridges: Vec<Bridge>,
     minimum_facet_dot: f64,
     mass: ShellMass,
@@ -130,7 +134,7 @@ impl Spec {
         if regions.iter().any(|x| x.triangles.is_empty()) {
             return Err("every declared shell material region must own a triangle".into());
         }
-        let n = count(r.row("supports", 1)?[0], 1, nodes.len())?;
+        let n = count(r.row("supports", 1)?[0], 0, nodes.len())?;
         let mut supports = Vec::<ShellConstraint>::with_capacity(n);
         for _ in 0..n {
             let v = r.row("support", 2)?;
@@ -142,6 +146,10 @@ impl Spec {
             }
             let mask = core::array::from_fn(|i| bytes[i] == b'1');
             supports.push(ShellConstraint { node, mask, frame: ConstraintFrame::Global });
+        }
+        let interfaces = interfaces::Inputs::parse(&mut r, &nodes, &triangles, &regions)?;
+        if supports.is_empty() && interfaces.connection_count() == 0 {
+            return Err("shell body requires explicit supports or material interfaces".into());
         }
         let n = count(r.row("bridges", 1)?[0], 1, 8)?;
         let mut bridges = Vec::with_capacity(n);
@@ -159,7 +167,7 @@ impl Spec {
         if r.lines.next().is_some() {
             return Err("unconsumed shell body profile record".into());
         }
-        Ok(Self { nodes, triangles, regions, supports, bridges, minimum_facet_dot,
+        Ok(Self { nodes, triangles, regions, supports, interfaces, bridges, minimum_facet_dot,
             mass, drilling_alpha, window, projection_work })
     }
 
@@ -171,7 +179,22 @@ impl Spec {
             return Err("shell body profile admits 1..=16 retained body modes".into());
         }
         self.geometry(spec)?;
+        self.interfaces.preflight(self, spec)?;
         Ok(())
+    }
+
+    pub(super) fn additional_body_connections(&self) -> usize {
+        self.interfaces.connection_count()
+    }
+
+    pub(super) fn load_interfaces(&mut self, gate: &CancelGate,
+        loader: &mut impl FnMut(&str) -> Result<fs_matdb::NormalizedInterfacePack>) -> Result<()>
+    {
+        self.interfaces.load(gate, loader)
+    }
+
+    pub(super) fn interface_pack_bytes(&self) -> Result<usize> {
+        self.interfaces.loaded_pack_bytes()
     }
 
     fn position(&self, node: usize, spec: &input::Spec) -> [f64; 3] {
@@ -257,6 +280,7 @@ impl Spec {
             });
         }
         let specimen = compile_material_shear_shell(mesh, regions, assembly_budget, gate)?;
+        let specimen = self.interfaces.bind(specimen, gate)?;
         let force_ports = self.bridges.iter().map(|bridge| {
             let mut port = vec![0.0; 6 * self.nodes.len()];
             port[6 * bridge.node..6 * bridge.node + 3].copy_from_slice(&bridge.direction);

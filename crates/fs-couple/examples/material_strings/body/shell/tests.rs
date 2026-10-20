@@ -148,3 +148,6 @@ fn shell_rotational_chord_uses_actual_3d_nodes_and_common_force_direction() {
     let coincident = Profile::parse(text.replace("bridge 11", "bridge 12").as_bytes()).unwrap();
     assert!(coincident.bridge_separation_m(&spec, 0, 1).is_err());
 }
+
+#[path = "interface_tests.rs"]
+mod interfaces;
