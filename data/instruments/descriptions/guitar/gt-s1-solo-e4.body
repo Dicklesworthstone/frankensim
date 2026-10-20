@@ -1,0 +1,9 @@
+frankensim-string-body-v2
+mesh 12 12
+support simply-supported
+pretension 0
+window 10000 1600000000
+regions 1
+region top @body orthotropic12 1 0 0 12 0 12
+bridges 1
+bridge 3 7
