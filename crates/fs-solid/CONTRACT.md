@@ -946,3 +946,25 @@ preload, modal Rayleigh damping and an 8 s synthetic record (energy balance <
   authored card field, and the "lip-shaped" fixture is an authored
   tapered slab. The lab claims reduction correctness, never tissue
   truth; claim-side promotion happens in the per-track gates beads.
+
+### Continuation of accepted 3D inelastic history
+
+`SmallStrainTetProblem::solve_from` starts the original native increment/Newton
+loop from supplied accepted nodal displacements and element histories.
+`solve` supplies virgin history to that same implementation. Every nonlinear
+trial uses the previous converged element history, and the method returns a
+complete immutable candidate only after the requested load path converges.
+Wrong array sizes and non-finite displacements refuse before history copying;
+cancellation or a later failed increment leaves the supplied state reusable.
+
+The new problem's load factors are absolute multipliers of its own prescribed
+displacements and dead forces. A continuation may release constraints, change
+loads or rebind per-element coefficients. The caller owns mesh/material lineage
+and law-specific history and parameter-work admission: this generic numerical
+entry point neither transfers constitutive families nor certifies a thermal
+coefficient change. It retains the existing small-strain and P1 limitations.
+
+Focused G1/G3 regression sources cover split-path equivalence through reversal
+and reloading, closed-form permanent strain after releasing the driven end,
+elementwise yield reduction at fixed displacement, and retry after a later
+increment refusal without consuming the accepted history.

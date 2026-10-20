@@ -9,6 +9,7 @@
 
 use super::{FlueOutletConfig, FlueOutletPerformance, FlueRadiationInput};
 use crate::bernoulli_aperture::fractional::FractionalTubePolicy;
+use crate::bernoulli_aperture::contraction::ContractionSpec;
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
 use crate::bernoulli_aperture::viscothermal::ViscothermalSectionSpec;
 use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
@@ -100,7 +101,7 @@ pub struct FluePerformanceInfo {
     pub jet_card_hash: u64,
     /// Exact explicit selector, or an inline canonical card.
     pub jet_card_source: &'static str,
-    /// Blowing-pressure assignments on the mechanical clock.
+    /// Pressure and optional jet-angle assignments on the mechanical clock.
     pub compiled_controls: usize,
 }
 
@@ -123,7 +124,13 @@ impl FlueFilePerformance {
     /// TRANSVERSE_CELLS CONVECTION_CELLS` instead resolves the evolving channel
     /// profile and jet convection, using explicit refinement counts. Its length is actual
     /// channel geometry, never an inferred lip channel for a transverse flute.
+    /// Optional `mouth_loss contraction AREA_RATIO MAXIMUM_MACH SOURCE_TOKEN`
+    /// after the windway row binds the existing separated-flow law to the actual
+    /// mouth window and inlet gas. Omission or `mouth_loss none` retains the
+    /// original linear mouth. The closure's source and Mach limit stay explicit.
     /// Gains, seed, dimensions, limits, clocks and the pressure phrase are data.
+    /// The gesture suffix may also contain one typed `jet-angle` track in radians:
+    /// it changes the existing geometric jet split at fixed cut-up and mouth area.
     /// `exterior same` shares the default gas; another gas record selects the
     /// same pressure-matched exterior for observation and any chosen reaction.
     /// `network` replaces
@@ -253,6 +260,20 @@ impl FlueFilePerformance {
             row.end()?;
             choice
         } else { WindwayInput::None };
+        let mouth_loss = if rows.next_is("mouth_loss") {
+            let mut row = rows.row("mouth_loss")?;
+            let spec = match row.fields.next() {
+                Some("none") => None,
+                Some("contraction") => Some(ContractionSpec {
+                    area_ratio: row.scalar()?, maximum_contracted_mach: row.scalar()?,
+                    provenance: row.fields.next().ok_or_else(||
+                        bad(rows.line, "mouth contraction needs an explicit source token"))?.to_string(),
+                }),
+                _ => return Err(bad(rows.line, "mouth_loss requires none or contraction AREA_RATIO MAXIMUM_MACH SOURCE_TOKEN")),
+            };
+            row.end()?;
+            spec
+        } else { None };
         let card_source = rows.record("jet_card")?;
         let (card, jet_card_source) = if card_source == "tonal-interim" {
             (mint_tonal_interim_card(), "tonal-interim")
@@ -302,7 +323,7 @@ impl FlueFilePerformance {
             }
         }
         let schedule = GestureSchedule::from_canonical_bytes(gestures.as_bytes())
-            .map_err(|_| bad(rows.line+1, "invalid canonical blowing-pressure gesture suffix"))?;
+            .map_err(|_| bad(rows.line+1, "invalid canonical pressure/jet-angle gesture suffix"))?;
         if schedule.to_canonical_bytes() != gestures.as_bytes() {
             return Err(bad(rows.line+1,"gesture suffix must be canonical without ignored trailing data"));
         }
@@ -342,6 +363,10 @@ impl FlueFilePerformance {
             (FlueVoice::from_fractional_network(Some(&card), displacement_gain, seed_amplitude_rel,
                 geometry, source, walls, policy, mechanics_rate_hz, voice_seed, voice_index, gate)
                 .map_err(FlueInputError::Physics)?, Vec::new())
+        };
+        let voice = match mouth_loss {
+            Some(spec) => voice.with_mouth_contraction(spec).map_err(FlueInputError::Physics)?,
+            None => voice,
         };
         let voice = match windway {
             WindwayInput::None => voice,

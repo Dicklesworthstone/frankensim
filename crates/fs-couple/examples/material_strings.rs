@@ -31,7 +31,7 @@ use fs_couple::string_specimen::{with_uniform_circular_material_state,
     KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY as ETA};
 use fs_couple::thin_plate::{with_uniform_plate_material_state,PlateMaterialModel,PlateThicknessConstraint};
 use fs_exec::{CancelGate,Cx};
-use fs_matdb::{NormalizedPack,MaterialCard,MaterialStateId,QueryPoint};
+use fs_matdb::{NormalizedPack,NormalizedInterfacePack,MaterialCard,MaterialStateId,QueryPoint};
 use fs_material::gas::GasState;
 use fs_material::state_point::{ResolvedMaterialStatePoint,ScalarPropertyRequirement as Requirement,
     ScalarAdmissibility as Admit,MaterialPropertySelection as Pick,resolve_material_state_point};
@@ -44,8 +44,10 @@ const SHEAR: &str = "shear_modulus";
 const SHEAR_ETA: &str = "kelvin_voigt_shear_viscosity";
 fn modal_budget() -> ModalAcousticTimeBudget { ModalAcousticTimeBudget::audible_reference() }
 fn poll(gate: &CancelGate) -> Result<()> { if gate.is_requested() { Err("material-string construction cancelled".into()) } else { Ok(()) } }
-fn options(spec:&input::Spec,bow:StringBowLocation,tensor_body:bool) -> Result<StringBankOptions> {
-    let (max_modes,max_connections,max_setup_terms)=spec.network_dimensions(tensor_body)?;
+fn options(spec:&input::Spec,bow:StringBowLocation,tensor_body:bool,
+    additional_body_connections:usize) -> Result<StringBankOptions> {
+    let (max_modes,max_connections,max_setup_terms)=spec
+        .network_dimensions_with_body_connections(tensor_body,additional_body_connections)?;
     Ok(StringBankOptions { sample_rate_hz:spec.rate,bow,string_budget:modal_budget(),
         network:ModalCouplingConfig { max_modes,max_connections,max_setup_terms,
             nyquist_guard_fraction:0.9,maximum_total_energy_j:100.0,maximum_abs_pressure_pa:1e6,
@@ -114,12 +116,31 @@ impl input::Spec {
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
         // Count every fluid inertia and physical connection before pack I/O.
         // The exact owner still applies its stricter connected-island bound.
-        self.network_dimensions(profile.is_some())?;
+        let additional_body_connections = profile.as_ref()
+            .map_or(0, body::Profile::additional_body_connections);
+        self.network_dimensions_with_body_connections(profile.is_some(), additional_body_connections)?;
         let mut baselines = Vec::with_capacity(self.rotational_bridges.len());
         for joint in &self.rotational_bridges {
             let body = profile.as_ref().ok_or("rotational bridges require --body-profile with distinct physical bridge footprints")?;
             baselines.push(body.bridge_separation_m(&self, joint.positive_bridge_string, joint.negative_bridge_string)?);
         }
+        let interface_bytes = profile.as_ref().map(body::Profile::interface_pack_bytes)
+            .transpose()?.unwrap_or(0);
+        let mut remaining = input::MAX_TOTAL_PACK_BYTES.checked_sub(interface_bytes)
+            .ok_or("combined material and interface pack byte budget exceeded")?;
+        // Keep the legacy bulk callback, with one combined cold source budget.
+        // Catalog caching invokes it once per original bulk path.
+        let mut loader = |name: &str| -> Result<NormalizedPack> {
+            poll(gate)?;
+            let pack = loader(name)?;
+            poll(gate)?;
+            let size = pack.to_bytes().len();
+            if size > input::MAX_PACK_BYTES || size > remaining {
+                return Err("combined material and interface pack byte budget exceeded".into());
+            }
+            remaining -= size;
+            Ok(pack)
+        };
         let mut catalog=Catalog::new(); let mut sources=Vec::with_capacity(self.strings.len());
         for wire in &self.strings {
             poll(gate)?;
@@ -131,7 +152,7 @@ impl input::Spec {
             let GestureValue::Bow { station,.. }=track.initial else { return Err("non-bow value".into()); };
             contacts.push(StringBowLocation { string:usize::from(string),station_fraction:station });
         }
-        let settings=options(&self,contacts[0],profile.is_some())?;
+        let settings=options(&self,contacts[0],profile.is_some(),additional_body_connections)?;
         let bank=if let Some(body_profile)=&profile {
             body_profile.compile(&self,sources,&mut catalog,&mut loader,settings.clone(),cx,gate)?
         } else {
@@ -210,12 +231,20 @@ fn main()->Result<()> {
         return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE]".into());
     }
     let (body_path,stop_path)=stops::profile_paths(&args[3..])?;
-    let profile=body_path.map(|p|body::Profile::parse(&read_bounded(p,body::MAX_BYTES)?)).transpose()?;
+    let mut profile=body_path.map(|p|body::Profile::parse(&read_bounded(p,body::MAX_BYTES)?)).transpose()?;
     let stop_profile=stop_path.map(|p|stops::Profile::parse(&read_bounded(p,stops::MAX_BYTES)?)).transpose()?;
     let path=Path::new(&args[1]);let parent=path.parent().unwrap_or(Path::new("."));
     let spec=input::Spec::parse(&read_bounded(path,input::MAX_INPUT_BYTES)?)?;
     let gate=CancelGate::new_clock_free();let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let mut remaining=input::MAX_TOTAL_PACK_BYTES;
+    if let Some(stops) = &stop_profile { stops.validate_performance(&spec,&gate)?; }
+    if let Some(body) = &mut profile {
+        body.load_interfaces(&spec,&gate,|name| {
+            let bytes=read_bounded(&parent.join(name),input::MAX_PACK_BYTES.min(remaining))?;
+            remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
+            Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
+        })?;
+    }
     let mut ready=pool.scope(|arena| {
         let cx=Cx::new(&gate,arena,fs_exec::StreamKey {seed:0,kernel_id:0,tile:0,iteration:0},
             fs_exec::Budget::INFINITE,fs_exec::ExecMode::Deterministic);
@@ -239,7 +268,10 @@ fn main()->Result<()> {
         eprintln!("prepared_linear={budget:?}");
     }
     if let Some(loading)=ready.performance.bank().source().bank().cylinder_gas_loading() {
-        let (modes,links,terms)=ready.spec.network_dimensions(ready.body_profile.is_some())?;
+        let additional = ready.body_profile.as_ref()
+            .map_or(0, body::Profile::additional_body_connections);
+        let (modes,links,terms)=ready.spec
+            .network_dimensions_with_body_connections(ready.body_profile.is_some(),additional)?;
         eprintln!("cylinder_gas_loading={:?}; complete_modes={modes}; connection_allowance={links}; setup_terms_allowance={terms}",
             loading.resolution());
     }

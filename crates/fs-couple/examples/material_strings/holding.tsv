@@ -1,0 +1,13 @@
+frankensim.matdb-source.v1
+surface_a	source-pack:synthetic-directional-string-body	declared solid model	frozen source-pack realization	0	authored global shell footprint
+surface_b	synthetic support	solid	immobile fixture	0	authored fixed counterpart
+context	manufactured bilateral layer	-	fixed source-state fixture	stress-free reference
+observation	synthetic	Synthetic shell holding footprint	Manufactured bilateral linear interface	Not measured holding, glue or instrument data
+scalar	stiffness	synthetic	normal_stiffness_per_area	100000000	Pa/m	constant
+uncertainty	stiffness	unstated	-	-	-	-
+validity	stiffness	T	280	320	K
+validity	stiffness	omega	0	200000	rad/s
+scalar	viscosity	synthetic	normal_viscosity_per_area	20000	Pa*s/m	constant
+uncertainty	viscosity	unstated	-	-	-	-
+validity	viscosity	T	280	320	K
+validity	viscosity	omega	0	200000	rad/s

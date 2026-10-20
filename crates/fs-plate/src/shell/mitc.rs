@@ -20,6 +20,8 @@ use std::collections::BTreeMap;
 mod element;
 /// Full membrane, bending and transverse-shear material dissipation.
 pub mod viscosity;
+/// Work-conjugate bilateral physical attachments in the shared shell pencil.
+pub mod connections;
 
 /// Explicit displacement/director inertia discretization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

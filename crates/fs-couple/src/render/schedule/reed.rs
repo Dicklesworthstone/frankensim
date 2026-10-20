@@ -4,6 +4,8 @@
 //! dry/humid-air or named-mixture default, optional segment gases, and one canonical
 //! blowing-pressure track. An optional gas_field block supplies primitive axial
 //! temperatures and mole fractions through explicitly loaded source packs.
+//! An alternative gas_steady block generates that same field from the existing
+//! conservative thermal/species owner, using the authored bore geometry.
 //! It does not infer material identity
 //! or turn a pitch into a medium property. Pressure commands replace the fixture
 //! attack envelope; all retained reed and bore state survives release and resume.
@@ -11,7 +13,8 @@
 //! `baffled_outlet` selects the existing terminal-only Rayleigh observation.
 //! Neither is measured calibration; the underlying reed mechanics are shared.
 
-use std::str::{FromStr, Lines, SplitAsciiWhitespace};
+use crate::acoustic_realize::AcousticRealizeError;
+use crate::driving_point::regional::outlet::{OutletError, OutletReceiverInfo};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_duct::{Duct, HoleState, Segment, Termination};
 use fs_material::gas::GasState;
@@ -19,14 +22,16 @@ use fs_material::gas_species::input::{
     GasInputError, GasRecord, ThermochemicalSources, read_gas_record,
 };
 use fs_scenario::{BeatingReed, gesture::GestureSchedule};
-use crate::acoustic_realize::AcousticRealizeError;
-use crate::driving_point::regional::outlet::{OutletError, OutletReceiverInfo};
-mod outlet;
+use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 mod field_input;
+mod outlet;
+use super::{
+    GestureCompileError, PressureGestureBinding, ScheduledRenderer, compile_pressure_gestures,
+};
 use crate::pcm_wav::observation::{ObservationError, ObservationPolicy, PressureRenderer};
 use crate::render::{ReedBoreVoice, RenderContext, RenderError, RenderVoice};
 use crate::thin_plate::PlateBank;
-use super::{GestureCompileError, PressureGestureBinding, ScheduledRenderer, compile_pressure_gestures};
+pub use field_input::steady::SteadyGasPerformance;
 
 /// Versioned header; the schedule retains the shared canonical wire format.
 pub const REED_PERFORMANCE_SCHEMA: &str = "frankensim-reed-performance-v1";
@@ -56,6 +61,13 @@ pub enum ReedPerformanceError {
         /// Original species, composition or state refusal.
         source: fs_material::MaterialError,
     },
+    /// The source-bound stationary heat/species owner refused publication.
+    SteadyGas {
+        /// One-based gas_steady header line.
+        line: usize,
+        /// Original thermal, caloric, phase, balance, work or mean-flow refusal.
+        source: fs_material::gas_field::steady::SteadyGasError,
+    },
     /// The original terminal transfer or physical receiver refused.
     Outlet(OutletError),
     /// The existing reed, TMM or gas realization refused.
@@ -71,6 +83,7 @@ impl core::fmt::Display for ReedPerformanceError {
             Self::Observation(e) => write!(f, "reed observation: {e}"),
             Self::Input { line, what } => write!(f, "reed input line {line}: {what}"),
             Self::Gas { line, source } => write!(f, "reed gas line {line}: {source}"),
+            Self::SteadyGas { line, source } => write!(f, "reed steady gas line {line}: {source}"),
             Self::Model(e) => write!(f, "reed model: {e}"),
             Self::Outlet(e) => write!(f, "reed outlet: {e}"),
             Self::Schedule(e) => write!(f, "reed input: {e}"),
@@ -83,6 +96,7 @@ impl std::error::Error for ReedPerformanceError {
         match self {
             Self::Observation(source) => Some(source),
             Self::Gas { source, .. } => Some(source),
+            Self::SteadyGas { source, .. } => Some(source),
             Self::Model(source) => Some(source),
             Self::Outlet(source) => Some(source),
             _ => None,
@@ -140,6 +154,7 @@ pub struct ReedPerformance {
     observation_policy: ObservationPolicy,
     gas_records: Vec<GasRecord>,
     gas_field: Option<(fs_material::gas_field::AxialGasField, GasFieldResolution)>,
+    steady_gas: Option<SteadyGasPerformance>,
 }
 impl ReedPerformance {
     /// Decode and admit all records before building or advancing the runtime.
@@ -200,8 +215,14 @@ impl ReedPerformance {
         field: fs_material::gas_field::AxialGasField,
         cells_per_segment: usize,
     ) -> Result<Self, ReedPerformanceError> {
-        Self::from_bytes_with_field_resolution(bytes, max_block, policy, sources,
-            field, GasFieldResolution::Midpoint(cells_per_segment))
+        Self::from_bytes_with_field_resolution(
+            bytes,
+            max_block,
+            policy,
+            sources,
+            field,
+            GasFieldResolution::Midpoint(cells_per_segment),
+        )
     }
 
     /// Select continuous Magnus or midpoint field propagation while retaining
@@ -218,7 +239,11 @@ impl ReedPerformance {
         resolution: GasFieldResolution,
     ) -> Result<Self, ReedPerformanceError> {
         Self::from_bytes_with_environment(
-            bytes, max_block, policy, sources, Some((field, resolution)),
+            bytes,
+            max_block,
+            policy,
+            sources,
+            Some((field, resolution)),
         )
     }
 
@@ -230,37 +255,68 @@ impl ReedPerformance {
         mut gas_field: Option<(fs_material::gas_field::AxialGasField, GasFieldResolution)>,
     ) -> Result<Self, ReedPerformanceError> {
         if bytes.len() > MAX_REED_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
-            return Err(bad(0, "source exceeds 1 MiB or callback capacity is outside 1..=65536"));
+            return Err(bad(
+                0,
+                "source exceeds 1 MiB or callback capacity is outside 1..=65536",
+            ));
         }
         let text = std::str::from_utf8(bytes).map_err(|_| bad(0, "source must be UTF-8"))?;
-        let (header, schedule_text) = text.split_once("\nschedule\n")
-            .ok_or_else(|| bad(0, "expected an LF-delimited schedule record and canonical gesture bytes"))?;
-        let mut r = Reader { lines: header.lines(), line: 0 };
+        let (header, schedule_text) = text.split_once("\nschedule\n").ok_or_else(|| {
+            bad(
+                0,
+                "expected an LF-delimited schedule record and canonical gesture bytes",
+            )
+        })?;
+        let mut r = Reader {
+            lines: header.lines(),
+            line: 0,
+        };
         r.row(REED_PERFORMANCE_SCHEMA)?.finish()?;
         let mut row = r.row("audio")?;
         let rate: u32 = row.parse()?;
         let samples: u64 = row.parse()?;
         let full_scale_pa = row.positive()?;
         row.finish()?;
-        if !(1..=192_000).contains(&rate) || samples == 0 || samples > 28_800_000
+        if !(1..=192_000).contains(&rate)
+            || samples == 0
+            || samples > 28_800_000
             || samples > u64::from(rate) * 600
-        { return Err(bad(r.line, "audio requires a rate in 1..=192000 and at most 600 seconds/28800000 positive samples")); }
+        {
+            return Err(bad(
+                r.line,
+                "audio requires a rate in 1..=192000 and at most 600 seconds/28800000 positive samples",
+            ));
+        }
         let mut row = r.row("ambient")?;
         let mut gas_records = Vec::new();
         let air = row.gas_with_sources(None, sources, &mut gas_records)?;
         row.finish()?;
-        if gas_field.as_ref().is_some_and(|(field, _)| field.static_pressure_pa() != air.pressure) {
-            return Err(bad(r.line, "axial gas field must have the authored ambient static pressure"));
+        if gas_field
+            .as_ref()
+            .is_some_and(|(field, _)| field.static_pressure_pa() != air.pressure)
+        {
+            return Err(bad(
+                r.line,
+                "axial gas field must have the authored ambient static pressure",
+            ));
         }
         let mut row = r.row("reed")?;
         let reed = BeatingReed {
-            rest_opening_m: row.positive()?, width_m: row.positive()?, closing_pressure_pa: row.positive()?,
-            mass_kg: row.scalar()?, stiffness_n_m: row.scalar()?, damping_ratio: row.scalar()?,
-            blowing_pressure_pa: 0.0, attack_s: 0.0,
+            rest_opening_m: row.positive()?,
+            width_m: row.positive()?,
+            closing_pressure_pa: row.positive()?,
+            mass_kg: row.scalar()?,
+            stiffness_n_m: row.scalar()?,
+            damping_ratio: row.scalar()?,
+            blowing_pressure_pa: 0.0,
+            attack_s: 0.0,
         };
         row.finish()?;
         if !crate::reed_bore::reed_parameters_valid(reed) {
-            return Err(bad(r.line, "reed mass, stiffness and damping must be finite and nonnegative"));
+            return Err(bad(
+                r.line,
+                "reed mass, stiffness and damping must be finite and nonnegative",
+            ));
         }
         let observation =
             outlet::ObservationInput::read_with_gas_sources(&mut r, sources, &mut gas_records)?;
@@ -276,8 +332,11 @@ impl ReedPerformance {
         row.finish()?;
         observation.validate_termination(termination, r.line)?;
         let mut row = r.row("segments")?;
-        let count = row.count(MAX_SEGMENTS)?; row.finish()?;
-        if count == 0 { return Err(bad(r.line, "at least one axial segment is required")); }
+        let count = row.count(MAX_SEGMENTS)?;
+        row.finish()?;
+        if count == 0 {
+            return Err(bad(r.line, "at least one axial segment is required"));
+        }
         let mut segments = Vec::with_capacity(count);
         let mut segment_gases = Vec::with_capacity(count);
         let mut explicit_segment_gas = false;
@@ -285,9 +344,14 @@ impl ReedPerformance {
         for _ in 0..count {
             let mut row = r.next()?;
             let segment = match row.word()? {
-                "cylinder" => Segment::Cylinder { radius: row.positive()?, length: row.positive()? },
+                "cylinder" => Segment::Cylinder {
+                    radius: row.positive()?,
+                    length: row.positive()?,
+                },
                 "cone" => Segment::Cone {
-                    inlet_radius: row.positive()?, outlet_radius: row.positive()?, length: row.positive()?,
+                    inlet_radius: row.positive()?,
+                    outlet_radius: row.positive()?,
+                    length: row.positive()?,
                 },
                 "hole" => {
                     let hole_radius = row.positive()?;
@@ -295,12 +359,25 @@ impl ReedPerformance {
                     let bore_radius = row.positive()?;
                     let sigma = row.scalar()?;
                     if hole_radius >= bore_radius || !(0.0..=1.0).contains(&sigma) {
-                        return Err(bad(r.line, "hole radius must be below bore radius and opening must be in [0,1]"));
+                        return Err(bad(
+                            r.line,
+                            "hole radius must be below bore radius and opening must be in [0,1]",
+                        ));
                     }
                     holes += 1;
-                    let state = if sigma == 0.0 { HoleState::Closed }
-                        else if sigma == 1.0 { HoleState::Open } else { HoleState::Vent(sigma) };
-                    Segment::ToneHole { hole_radius, chimney_height, bore_radius, state }
+                    let state = if sigma == 0.0 {
+                        HoleState::Closed
+                    } else if sigma == 1.0 {
+                        HoleState::Open
+                    } else {
+                        HoleState::Vent(sigma)
+                    };
+                    Segment::ToneHole {
+                        hole_radius,
+                        chimney_height,
+                        bore_radius,
+                        state,
+                    }
                 }
                 _ => return Err(bad(r.line, "expected cylinder, cone or hole geometry")),
             };
@@ -308,15 +385,26 @@ impl ReedPerformance {
                 None => air,
                 Some("gas") => {
                     if gas_field.is_some() {
-                        return Err(bad(row.line, "explicit segment gas conflicts with the complete axial gas field"));
+                        return Err(bad(
+                            row.line,
+                            "explicit segment gas conflicts with the complete axial gas field",
+                        ));
                     }
                     explicit_segment_gas = true;
                     row.gas_with_sources(Some(air.pressure), sources, &mut gas_records)?
                 }
-                Some(_) => return Err(bad(row.line, "expected an optional gas record after geometry")),
+                Some(_) => {
+                    return Err(bad(
+                        row.line,
+                        "expected an optional gas record after geometry",
+                    ));
+                }
             };
             if gas.pressure != air.pressure {
-                return Err(bad(row.line, "regional duct gas must have the ambient static pressure; mean flow is not modeled"));
+                return Err(bad(
+                    row.line,
+                    "regional duct gas must have the ambient static pressure; mean flow is not modeled",
+                ));
             }
             row.finish()?;
             segments.push(segment);
@@ -324,68 +412,164 @@ impl ReedPerformance {
         }
         if matches!(segments.first(), Some(Segment::ToneHole { .. }))
             || matches!(segments.last(), Some(Segment::ToneHole { .. }))
-        { return Err(bad(r.line, "the inlet and termination must have explicit axial segments")); }
-        if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("gas_field") {
+        {
+            return Err(bad(
+                r.line,
+                "the inlet and termination must have explicit axial segments",
+            ));
+        }
+        let mut steady_gas = None;
+        let field_kind = r
+            .lines
+            .clone()
+            .next()
+            .and_then(|line| line.split_ascii_whitespace().next());
+        if matches!(field_kind, Some("gas_field" | "gas_steady")) {
             if gas_field.is_some() {
-                return Err(bad(r.line + 1, "file gas_field conflicts with the injected axial gas field"));
+                return Err(bad(
+                    r.line + 1,
+                    "file gas field conflicts with the injected axial gas field",
+                ));
             }
             if explicit_segment_gas {
-                return Err(bad(r.line + 1, "file gas_field conflicts with explicit segment gas records"));
+                return Err(bad(
+                    r.line + 1,
+                    "file gas field conflicts with explicit segment gas records",
+                ));
             }
-            gas_field = Some(field_input::read(&mut r, sources, air.pressure, &mut gas_records)?);
+            if field_kind == Some("gas_steady") {
+                let (generated, resolution) = field_input::steady::read(
+                    &mut r,
+                    sources,
+                    air.pressure,
+                    &segments,
+                    &mut gas_records,
+                )?;
+                gas_field = Some((generated.solution().field().clone(), resolution));
+                steady_gas = Some(generated);
+            } else {
+                gas_field = Some(field_input::read(
+                    &mut r,
+                    sources,
+                    air.pressure,
+                    &mut gas_records,
+                )?);
+            }
         }
         let mut row = r.row("compile_limits")?;
         let max_work: u64 = row.parse()?;
-        let max_controls = row.count(MAX_CONTROLS)?; row.finish()?;
-        if max_work > MAX_WORK { return Err(bad(r.line, "compilation exceeds 16777216 source visits")); }
-        if r.lines.next().is_some() { return Err(bad(r.line + 1, "unexpected trailing header record")); }
+        let max_controls = row.count(MAX_CONTROLS)?;
+        row.finish()?;
+        if max_work > MAX_WORK {
+            return Err(bad(r.line, "compilation exceeds 16777216 source visits"));
+        }
+        if r.lines.next().is_some() {
+            return Err(bad(r.line + 1, "unexpected trailing header record"));
+        }
         let schedule = decode_schedule(schedule_text)?;
-        let [track] = schedule.tracks() else { return Err(bad(0, "exactly one pressure track is required")); };
-        if fs_scenario::gesture::path::legacy_member(&track.target,"blowing_pressure")!=Some(0) || schedule.control_rate_hz == 0
-            || schedule.control_rate_hz > rate {
-            return Err(bad(0, "only blowing pressure is supported, at a control rate no greater than mechanics"));
+        let [track] = schedule.tracks() else {
+            return Err(bad(0, "exactly one pressure track is required"));
+        };
+        if fs_scenario::gesture::path::legacy_member(&track.target, "blowing_pressure") != Some(0)
+            || schedule.control_rate_hz == 0
+            || schedule.control_rate_hz > rate
+        {
+            return Err(bad(
+                0,
+                "only blowing pressure is supported, at a control rate no greater than mechanics",
+            ));
         }
         let last_tick = (samples - 1) * u64::from(schedule.control_rate_hz) / u64::from(rate);
         // One track emits at most one control per tick. Bound the compiler
         // before it can allocate, including long constant-valued schedules.
         if last_tick >= MAX_CONTROLS as u64 {
-            return Err(bad(0, "pressure compilation exceeds the 262144 control-tick budget"));
+            return Err(bad(
+                0,
+                "pressure compilation exceeds the 262144 control-tick budget",
+            ));
         }
         let last_time = last_tick as f64 / f64::from(schedule.control_rate_hz);
         if track.events.iter().any(|event| event.time_s > last_time) {
-            return Err(bad(0, "an authored pressure command starts after the last observed control tick"));
+            return Err(bad(
+                0,
+                "an authored pressure command starts after the last observed control tick",
+            ));
         }
-        let controls = compile_pressure_gestures(&schedule, &[PressureGestureBinding {
-            track: track.id.clone(), voice: 0,
-        }], rate, samples, max_work).map_err(ReedPerformanceError::Schedule)?;
-        if controls.len() > max_controls { return Err(bad(0, "compiled pressure controls exceed the declared storage budget")); }
+        let controls = compile_pressure_gestures(
+            &schedule,
+            &[PressureGestureBinding {
+                track: track.id.clone(),
+                voice: 0,
+            }],
+            rate,
+            samples,
+            max_work,
+        )
+        .map_err(ReedPerformanceError::Schedule)?;
+        if controls.len() > max_controls {
+            return Err(bad(
+                0,
+                "compiled pressure controls exceed the declared storage budget",
+            ));
+        }
         let info = ReedPerformanceInfo {
             input_hash: hash_domain("org.frankensim.fs-couple.reed-performance.v1", bytes),
-            sample_rate_hz: rate, samples, full_scale_pa, segments: count, tone_holes: holes,
-            massive_reed: reed.mass_kg > 0.0, gesture_events: track.events.len(), compiled_controls: controls.len(),
+            sample_rate_hz: rate,
+            samples,
+            full_scale_pa,
+            segments: count,
+            tone_holes: holes,
+            massive_reed: reed.mass_kg > 0.0,
+            gesture_events: track.events.len(),
+            compiled_controls: controls.len(),
         };
         let duct = Duct { segments };
         let (voice, terminal) = if let Some((field, resolution)) = &gas_field {
             use crate::driving_point::regional::{RegionalDuct, field::GasFieldDuctError};
             let regional = match resolution {
-                GasFieldResolution::Midpoint(cells) => RegionalDuct::from_gas_field(&duct, field, *cells),
-                GasFieldResolution::Continuous(steps) =>
-                    RegionalDuct::from_continuous_gas_field(&duct, field, *steps),
+                GasFieldResolution::Midpoint(cells) => {
+                    RegionalDuct::from_gas_field(&duct, field, *cells)
+                }
+                GasFieldResolution::Continuous(steps) => {
+                    RegionalDuct::from_continuous_gas_field(&duct, field, *steps)
+                }
             }
-                .map_err(|error| match error {
-                    GasFieldDuctError::Material(source) => ReedPerformanceError::Gas { line: 0, source },
-                    GasFieldDuctError::Duct(source) => ReedPerformanceError::Model(
-                        AcousticRealizeError::Duct(source)),
-                })?;
+            .map_err(|error| match error {
+                GasFieldDuctError::Material(source) => {
+                    ReedPerformanceError::Gas { line: 0, source }
+                }
+                GasFieldDuctError::Duct(source) => {
+                    ReedPerformanceError::Model(AcousticRealizeError::Duct(source))
+                }
+            })?;
             segment_gases = regional.segment_gases().to_vec();
-            observation.build_regional(&duct, regional, reed, termination, rate, samples as usize)?
+            observation.build_regional(
+                &duct,
+                regional,
+                reed,
+                termination,
+                rate,
+                samples as usize,
+            )?
         } else {
-            observation.build(&duct, &segment_gases, reed, termination, rate, samples as usize)?
+            observation.build(
+                &duct,
+                &segment_gases,
+                reed,
+                termination,
+                rate,
+                samples as usize,
+            )?
         };
         let context = RenderContext::new(vec![RenderVoice::ReedBore(voice)], max_block);
-        let renderer = ScheduledRenderer::new(context, controls, max_controls).map_err(ReedPerformanceError::Render)?;
-        renderer.validate_sample_rate(rate).map_err(ReedPerformanceError::Render)?;
-        renderer.validate_sample_count(samples).map_err(ReedPerformanceError::Render)?;
+        let renderer = ScheduledRenderer::new(context, controls, max_controls)
+            .map_err(ReedPerformanceError::Render)?;
+        renderer
+            .validate_sample_rate(rate)
+            .map_err(ReedPerformanceError::Render)?;
+        renderer
+            .validate_sample_count(samples)
+            .map_err(ReedPerformanceError::Render)?;
         Ok(Self {
             info,
             renderer,
@@ -395,6 +579,7 @@ impl ReedPerformance {
             observation_policy: policy,
             gas_records,
             gas_field,
+            steady_gas,
         })
     }
 
@@ -409,11 +594,15 @@ impl ReedPerformance {
     }
     /// Read-only access to sample-addressed controls and retained state clocks.
     #[must_use]
-    pub const fn renderer(&self) -> &ScheduledRenderer { &self.renderer }
+    pub const fn renderer(&self) -> &ScheduledRenderer {
+        &self.renderer
+    }
     /// The immutable default medium. Segments without `gas` inherit this state;
     /// explicit segment records may override it. No air-only absorption is added.
     #[must_use]
-    pub const fn ambient_gas(&self) -> &GasState { &self.ambient_gas }
+    pub const fn ambient_gas(&self) -> &GasState {
+        &self.ambient_gas
+    }
     /// Actual propagation gases, in authored segment order for regional input
     /// or resolved midpoint-cell order for a midpoint axial field. Continuous
     /// fields expose authored-segment inlet samples; their operator evaluates
@@ -422,20 +611,33 @@ impl ReedPerformance {
     /// cell's midpoint. An explicit exterior separately supplies radiation
     /// loading and observation. All are stationary.
     #[must_use]
-    pub fn segment_gases(&self) -> &[GasState] { &self.segment_gases }
+    pub fn segment_gases(&self) -> &[GasState] {
+        &self.segment_gases
+    }
     /// Source-retaining axial field and its explicit resolution count.
     /// See gas_field_resolution for the selected midpoint/continuous meaning.
     /// None selects the unchanged uniform/piecewise-regional input route.
     #[must_use]
     pub fn gas_field(&self) -> Option<(&fs_material::gas_field::AxialGasField, usize)> {
-        self.gas_field.as_ref().map(|(field, resolution)| (field, match resolution {
-            GasFieldResolution::Midpoint(cells) => *cells,
-            GasFieldResolution::Continuous(steps) => steps.0,
-        }))
+        self.gas_field.as_ref().map(|(field, resolution)| {
+            (
+                field,
+                match resolution {
+                    GasFieldResolution::Midpoint(cells) => *cells,
+                    GasFieldResolution::Continuous(steps) => steps.0,
+                },
+            )
+        })
     }
     /// The selected field integration image, independent of output block size.
     pub fn gas_field_resolution(&self) -> Option<GasFieldResolution> {
         self.gas_field.as_ref().map(|(_, resolution)| *resolution)
+    }
+    /// The admitted stationary heat/species problem and its actual convergence
+    /// evidence, when gas_steady generated the field used by this renderer.
+    /// Prescribed fields and legacy regional input return None.
+    pub fn steady_gas(&self) -> Option<&SteadyGasPerformance> {
+        self.steady_gas.as_ref()
     }
     /// All authored gas records, including field knots and source receipts, in
     /// read order. The field model separately retains every declared source ID.
@@ -445,17 +647,29 @@ impl ReedPerformance {
     }
     /// Remaining samples on the mechanical clock.
     #[must_use]
-    pub fn remaining_samples(&self) -> u64 { self.info.samples - self.renderer.samples_rendered() }
+    pub fn remaining_samples(&self) -> u64 {
+        self.info.samples - self.renderer.samples_rendered()
+    }
 }
 impl PressureRenderer for ReedPerformance {
-    fn samples_rendered(&self) -> u64 { self.renderer.samples_rendered() }
-    fn max_block_len(&self) -> usize { self.renderer.context().max_block_len() }
-    fn validate_sample_rate(&self, rate: u32) -> Result<(), RenderError> { self.renderer.validate_sample_rate(rate) }
+    fn samples_rendered(&self) -> u64 {
+        self.renderer.samples_rendered()
+    }
+    fn max_block_len(&self) -> usize {
+        self.renderer.context().max_block_len()
+    }
+    fn validate_sample_rate(&self, rate: u32) -> Result<(), RenderError> {
+        self.renderer.validate_sample_rate(rate)
+    }
     fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {
-        if self.last_outlet_error().is_some() { return Err(RenderError::Poisoned); }
+        if self.last_outlet_error().is_some() {
+            return Err(RenderError::Poisoned);
+        }
         self.renderer.validate_sample_count(samples)?;
         if samples > self.remaining_samples() {
-            return Err(RenderError::Sizing { what: "requested pressure window exceeds the reed performance horizon" });
+            return Err(RenderError::Sizing {
+                what: "requested pressure window exceeds the reed performance horizon",
+            });
         }
         Ok(())
     }
@@ -475,31 +689,55 @@ fn decode_schedule(text: &str) -> Result<GestureSchedule, ReedPerformanceError> 
     let lines = text.lines().count();
     for line in text.lines() {
         if let Some(value) = line.strip_prefix("tracks\t") {
-            if value.parse::<usize>().ok() != Some(1) { return Err(bad(0, "exactly one canonical pressure track is required")); }
+            if value.parse::<usize>().ok() != Some(1) {
+                return Err(bad(0, "exactly one canonical pressure track is required"));
+            }
         }
         if let Some(value) = line.strip_prefix("events\t") {
-            let count = value.parse::<usize>().map_err(|_| bad(0, "invalid gesture event count"))?;
-            if count > MAX_EVENTS || count > lines { return Err(bad(0, "gesture count exceeds source/16384-event budget")); }
+            let count = value
+                .parse::<usize>()
+                .map_err(|_| bad(0, "invalid gesture event count"))?;
+            if count > MAX_EVENTS || count > lines {
+                return Err(bad(0, "gesture count exceeds source/16384-event budget"));
+            }
         }
     }
     let schedule = GestureSchedule::from_canonical_bytes(text.as_bytes())
         .map_err(|e| ReedPerformanceError::Schedule(GestureCompileError::Gesture(e)))?;
     if schedule.to_canonical_bytes() != text.as_bytes() {
-        return Err(bad(0, "gesture bytes must be canonical without ignored fields or trailing records"));
+        return Err(bad(
+            0,
+            "gesture bytes must be canonical without ignored fields or trailing records",
+        ));
     }
     Ok(schedule)
 }
-struct Reader<'a> { lines: Lines<'a>, line: usize }
-struct Row<'a> { words: SplitAsciiWhitespace<'a>, line: usize }
+struct Reader<'a> {
+    lines: Lines<'a>,
+    line: usize,
+}
+struct Row<'a> {
+    words: SplitAsciiWhitespace<'a>,
+    line: usize,
+}
 impl<'a> Reader<'a> {
     fn next(&mut self) -> Result<Row<'a>, ReedPerformanceError> {
         self.line += 1;
-        let words = self.lines.next().ok_or_else(|| bad(self.line, "missing header record"))?.split_ascii_whitespace();
-        Ok(Row { words, line: self.line })
+        let words = self
+            .lines
+            .next()
+            .ok_or_else(|| bad(self.line, "missing header record"))?
+            .split_ascii_whitespace();
+        Ok(Row {
+            words,
+            line: self.line,
+        })
     }
     fn row(&mut self, key: &str) -> Result<Row<'a>, ReedPerformanceError> {
         let mut row = self.next()?;
-        if row.word()? != key { return Err(bad(self.line, "unexpected header record")); }
+        if row.word()? != key {
+            return Err(bad(self.line, "unexpected header record"));
+        }
         Ok(row)
     }
 }
@@ -513,37 +751,53 @@ impl<'a> Row<'a> {
         sources: Option<&ThermochemicalSources<'_>>,
         records: &mut Vec<GasRecord>,
     ) -> Result<GasState, ReedPerformanceError> {
-        let record = read_gas_record(&mut self.words, pressure, sources).map_err(|error| match error {
-            GasInputError::Input(what) => bad(self.line, what),
-            GasInputError::Material(source) => ReedPerformanceError::Gas { line: self.line, source },
-        })?;
+        let record =
+            read_gas_record(&mut self.words, pressure, sources).map_err(|error| match error {
+                GasInputError::Input(what) => bad(self.line, what),
+                GasInputError::Material(source) => ReedPerformanceError::Gas {
+                    line: self.line,
+                    source,
+                },
+            })?;
         let gas = *record.state();
         records.push(record);
         Ok(gas)
     }
     fn word(&mut self) -> Result<&'a str, ReedPerformanceError> {
-        self.words.next().ok_or_else(|| bad(self.line, "missing field"))
+        self.words
+            .next()
+            .ok_or_else(|| bad(self.line, "missing field"))
     }
     fn parse<T: FromStr>(&mut self) -> Result<T, ReedPerformanceError> {
-        self.word()?.parse().map_err(|_| bad(self.line, "malformed field"))
+        self.word()?
+            .parse()
+            .map_err(|_| bad(self.line, "malformed field"))
     }
     fn scalar(&mut self) -> Result<f64, ReedPerformanceError> {
         let x: f64 = self.parse()?;
-        if !x.is_finite() { return Err(bad(self.line, "physical scalars must be finite")); }
+        if !x.is_finite() {
+            return Err(bad(self.line, "physical scalars must be finite"));
+        }
         Ok(x)
     }
     fn positive(&mut self) -> Result<f64, ReedPerformanceError> {
         let x = self.scalar()?;
-        if x <= 0.0 { return Err(bad(self.line, "physical dimension/scale must be positive")); }
+        if x <= 0.0 {
+            return Err(bad(self.line, "physical dimension/scale must be positive"));
+        }
         Ok(x)
     }
     fn count(&mut self, cap: usize) -> Result<usize, ReedPerformanceError> {
         let n = self.parse()?;
-        if n > cap { return Err(bad(self.line, "count exceeds the input budget")); }
+        if n > cap {
+            return Err(bad(self.line, "count exceeds the input budget"));
+        }
         Ok(n)
     }
     fn finish(mut self) -> Result<(), ReedPerformanceError> {
-        if self.words.next().is_some() { return Err(bad(self.line, "unexpected extra field")); }
+        if self.words.next().is_some() {
+            return Err(bad(self.line, "unexpected extra field"));
+        }
         Ok(())
     }
 }

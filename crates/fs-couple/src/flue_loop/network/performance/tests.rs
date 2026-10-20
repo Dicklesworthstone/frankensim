@@ -130,3 +130,5 @@ fn zero_pressure_silence_and_failures_do_not_become_fake_audio() {
     assert!(limited.samples_rendered() > 0);
     assert!(matches!(limited.block(&mut [0.0]), Err(RenderError::Poisoned)));
 }
+
+mod embouchure;

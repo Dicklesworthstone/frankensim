@@ -376,63 +376,9 @@ impl<'a> ThermoplasticSource<'a> {
                     ));
                 }
             }
-            // These six roles are coefficients, not response curves in the
-            // mechanical coordinates that this specimen itself evolves.
-            for (axis, _) in &receipt.query_point {
-                if property
-                    .answer()
-                    .evidence
-                    .model
-                    .validity
-                    .bound(axis)
-                    .is_none()
-                {
-                    continue;
-                }
-                let quantity = receipt.axis_quantities.get(axis).copied();
-                let kind = quantity
-                    .and_then(QuantitySpec::semantic_type)
-                    .map(|ty| ty.kind());
-                let dynamic_kind = matches!(
-                    kind,
-                    Some(
-                        QuantityKind::Frequency(_)
-                            | QuantityKind::AngularVelocity(_)
-                            | QuantityKind::Strain { .. }
-                            | QuantityKind::Stress
-                    )
-                );
-                let rate_dimension = quantity.is_some_and(|q| q.dims() == Frequency::DIMS);
-                let legacy_dynamic_axis = kind.is_none()
-                    && [
-                        "omega",
-                        "frequency",
-                        "strain",
-                        "epsilon",
-                        "eps",
-                        "shear_strain",
-                        "strain_rate",
-                        "shear_rate",
-                        "plastic_strain",
-                        "equivalent_plastic_strain",
-                        "stress",
-                    ]
-                    .contains(&axis.as_str());
-                if dynamic_kind || rate_dimension || legacy_dynamic_axis {
-                    return Err(FeedbackError::Invalid(
-                        "mechanically bounded coefficients require their evolving strain, stress or rate coordinate",
-                    ));
-                }
-            }
-            if property
-                .angular_frequency_band_rad_s()
-                .map_err(|e| FeedbackError::Source(e.into()))?
-                .is_some()
-            {
-                return Err(FeedbackError::Invalid(
-                    "frequency-bounded data cannot define these rate-independent caloric coefficients",
-                ));
-            }
+            // Mechanics, caloric data and linked transport use the same
+            // rate-independent source admission.
+            admit_rate_independent_property(property)?;
             let support = query
                 .card
                 .claims()
@@ -489,6 +435,52 @@ impl<'a> ThermoplasticSource<'a> {
     #[must_use]
     pub const fn density_kg_m3(&self) -> f64 {
         self.density_kg_m3
+    }
+
+    /// Transport binding with the same immutable card and complete reference
+    /// context used by mechanics and the caloric chart. Only temperature evolves
+    /// in this fully solid, fixed-density reduction.
+    #[must_use]
+    pub fn thermal_material_point(&self) -> crate::thermal::source::ThermalMaterialPoint<'_> {
+        crate::thermal::source::ThermalMaterialPoint {
+            material: self.card,
+            context: &self.context,
+            temperature_axis: &self.temperature_axis,
+            liquid_fraction_axis: None,
+        }
+    }
+
+    /// Select one nonnegative static transport coefficient at this source's
+    /// actual caloric state, retaining its claim identity for later heat steps.
+    /// Temperature dependence is allowed. Mechanical-coordinate or frequency
+    /// bounds need an evolving constitutive response and are refused here.
+    /// The consuming transport owner still checks the exact property quantity.
+    pub fn pin_thermal_transport(
+        &self,
+        specific_enthalpy_j_kg: f64,
+        key: &fs_matdb::PropertyKey,
+        selection: MaterialPropertySelection,
+    ) -> Result<MaterialPropertySelection, FeedbackError> {
+        let (state, _) = self.resolve_enthalpy(specific_enthalpy_j_kg)?;
+        let thermal = self.thermal_material_point();
+        let support_error =
+            |e: crate::thermal::source::ThermalMaterialError| FeedbackError::Support {
+                property: key.name().to_owned(),
+                reason: e.to_string(),
+            };
+        let point = thermal.at(state).map_err(support_error)?;
+        let requirement =
+            ScalarPropertyRequirement::try_with_key(key, ScalarAdmissibility::NonNegative)
+                .map_err(|e| FeedbackError::Source(e.into()))?;
+        let material = resolve_material_state_point(self.card, &point, &[requirement], selection)
+            .map_err(|e| FeedbackError::Source(e.into()))?;
+        let property = &material.properties()[0];
+        thermal.admit_static(property).map_err(support_error)?;
+        admit_rate_independent_property(property)?;
+        Ok(MaterialPropertySelection::PinnedByProperty(vec![(
+            key.name().to_owned(),
+            property.answer().receipt.selected,
+        )]))
     }
 
     /// Refresh all six pinned roles at the actual caloric state. This does not
@@ -778,6 +770,68 @@ impl<'a> CaloricPoint<'a> {
             .map_err(FeedbackError::Mechanical)?;
         Ok((source, mechanical))
     }
+}
+
+fn admit_rate_independent_property<E>(
+    property: &crate::state_point::ResolvedScalarProperty,
+) -> Result<(), FeedbackError<E>> {
+    let receipt = &property.answer().receipt;
+    for (axis, _) in &receipt.query_point {
+        if property
+            .answer()
+            .evidence
+            .model
+            .validity
+            .bound(axis)
+            .is_none()
+        {
+            continue;
+        }
+        let quantity = receipt.axis_quantities.get(axis).copied();
+        let kind = quantity
+            .and_then(QuantitySpec::semantic_type)
+            .map(|ty| ty.kind());
+        let dynamic_kind = matches!(
+            kind,
+            Some(
+                QuantityKind::Frequency(_)
+                    | QuantityKind::AngularVelocity(_)
+                    | QuantityKind::Strain { .. }
+                    | QuantityKind::Stress
+            )
+        );
+        let rate_dimension = quantity.is_some_and(|q| q.dims() == Frequency::DIMS);
+        let legacy_dynamic_axis = kind.is_none()
+            && [
+                "omega",
+                "frequency",
+                "strain",
+                "epsilon",
+                "eps",
+                "shear_strain",
+                "strain_rate",
+                "shear_rate",
+                "plastic_strain",
+                "equivalent_plastic_strain",
+                "stress",
+            ]
+            .contains(&axis.as_str());
+        if dynamic_kind || rate_dimension || legacy_dynamic_axis {
+            return Err(FeedbackError::Invalid(
+                "mechanically bounded coefficients require their evolving strain, stress or rate coordinate",
+            ));
+        }
+    }
+    if property
+        .angular_frequency_band_rad_s()
+        .map_err(|e| FeedbackError::Source(e.into()))?
+        .is_some()
+    {
+        return Err(FeedbackError::Invalid(
+            "frequency-bounded data cannot define rate-independent thermoplastic coefficients",
+        ));
+    }
+    Ok(())
 }
 
 fn same_context(a: &[(String, f64)], b: &[(String, f64)], axis: &str) -> bool {

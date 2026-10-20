@@ -18,6 +18,8 @@ use fs_plate::shell::{ShellMesh, mitc::{MitcBudget, ShearShellSection,
     viscosity::ShearShellViscosity}};
 use fs_qty::{Density, DynViscosity, Pressure};
 
+/// Ordered material-interface compliance on physical shell attachments.
+pub mod connections;
 mod reduction;
 pub use reduction::{MaterialShellImage, ShellProjectionBudget, ShellReductionOptions};
 
@@ -93,6 +95,8 @@ pub struct ResolvedShearShell {
     viscosity: Vec<ShearShellViscosity>,
     budget: MitcBudget,
     mass_kg: f64,
+    interfaces: Vec<connections::ResolvedShellConnection>,
+    interface_budget: fs_plate::shell::mitc::connections::ShellConnectionBudget,
 }
 impl ResolvedShearShell {
     /// Original finite, oriented physical midsurface.
@@ -116,7 +120,9 @@ impl ResolvedShearShell {
             .ok_or_else(|| invalid("unknown shell material region"))?;
         let mut inputs: Vec<_> = self.regions.iter().map(|r| r.input.clone()).collect();
         inputs[index].region.material = material.clone();
-        compile_material_shear_shell(self.mesh.clone(), inputs, self.budget, gate)
+        let rebuilt = compile_material_shear_shell(self.mesh.clone(), inputs, self.budget, gate)?;
+        rebuilt.with_interfaces(self.interfaces.iter().map(|i| i.input().clone()).collect(),
+            self.interface_budget, gate)
     }
 }
 fn restrict_band(source: &ResolvedMaterialStatePoint, key: &str,
@@ -241,7 +247,10 @@ pub fn compile_material_shear_shell(mesh: ShellMesh, inputs: Vec<ShellRegionMate
     }
     let mass_kg:f64=sections.iter().zip(element_areas).map(|(s,a)|s.areal_mass_kg_m2()*a).sum();
     if !mass_kg.is_finite() || mass_kg<=0.0 { return Err(invalid("total shell mass is unrepresentable")); }
-    Ok(ResolvedShearShell { mesh,regions,element_regions:assigned,sections,viscosity,budget,mass_kg })
+    Ok(ResolvedShearShell { mesh,regions,element_regions:assigned,sections,viscosity,budget,mass_kg,
+        interfaces:Vec::new(), interface_budget:fs_plate::shell::mitc::connections::ShellConnectionBudget {
+            max_connections:0, max_terms:0, max_work:0,
+        } })
 }
 
 fn viscosity_in_frame(law: &PlaneStressViscosity, shear: [f64;3],

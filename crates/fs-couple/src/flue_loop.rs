@@ -381,6 +381,10 @@ impl FlueGeometry {
 pub enum FlueControl {
     /// Steady blowing pressure [Pa].
     SetBlowingPressure(f64),
+    /// Prescribed jet direction [rad] at fixed exit, cut-up and mouth area.
+    /// The existing geometric cut law changes the injected flow; all acoustic,
+    /// convection and fluid-momentum histories remain live.
+    SetJetAngle(f64),
     /// Switch fingering on the char image with a crossfade.
     Fingering {
         /// Fingering index in the chart.
@@ -635,8 +639,8 @@ impl FlueVoice {
     /// Apply a control-rate input.
     ///
     /// # Errors
-    /// [`FlueError`] on a non-finite or negative pressure, or an unknown
-    /// fingering.
+    /// [`FlueError`] on a non-finite or negative pressure, an inadmissible
+    /// jet direction, or an unknown fingering. Refusal leaves held inputs intact.
     pub fn apply(&mut self, control: FlueControl) -> Result<(), FlueError> {
         if self.poisoned { return Err(FlueError::Invalid { what: "flue voice is poisoned by a previous failed sample" }); }
         match control {
@@ -646,6 +650,10 @@ impl FlueVoice {
                 // A pressure control supplies force; it never overwrites moving gas.
                 if self.unsteady_windway.is_none() { self.jet_speed_m_s = speed; }
             }
+            FlueControl::SetJetAngle(angle) => {
+                self.validate_jet_angle(angle)?;
+                self.geometry.jet_angle_rad = angle;
+            }
             FlueControl::Fingering {
                 index,
                 fade_samples,
@@ -653,6 +661,29 @@ impl FlueVoice {
         }
         Ok(())
     }
+
+    /// Validate a direction against the original fixed-window jet geometry.
+    /// This is the existing tilted-cut image, not motion of the labium, lip
+    /// coverage, a changing mouth area or resolved jet turning. No stored mass,
+    /// stiffness or inertance is replaced. Its changed injection enters the
+    /// same source-pressure derivative and mouth-work balance when stepping.
+    ///
+    /// # Errors
+    /// Nonfinite direction, an angle outside (-pi/2, pi/2), or a geometric
+    /// offset that cannot be represented in the jet's transverse coordinate.
+    pub fn validate_jet_angle(&self, angle_rad: f64) -> Result<(), FlueError> {
+        let mut geometry = self.geometry;
+        geometry.jet_angle_rad = angle_rad;
+        geometry.validate()?;
+        if !(geometry.effective_offset_m() / (0.5 * geometry.flue_height_m)).is_finite() {
+            return Err(FlueError::Invalid { what: "jet angle exceeds the finite transverse geometry" });
+        }
+        Ok(())
+    }
+
+    /// Current prescribed direction [rad], including accepted angle controls.
+    #[must_use]
+    pub const fn jet_angle_rad(&self) -> f64 { self.geometry.jet_angle_rad }
 
     /// Accepted jet bulk speed. An unsteady windway retains its velocity field
     /// across pressure controls, including a release to zero blowing pressure.

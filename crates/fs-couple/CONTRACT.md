@@ -3041,3 +3041,93 @@ and explicit numerical drilling stabilization. Its compact baffled observer
 does not imply full exterior radiation feedback or an assembled, prestressed
 violin/cello/bass corpus. Mesh/mode/stabilization/time refinement and measured
 instrument qualification remain separate from source-level composition tests.
+
+### Prepared material conduction on the shared thermal timeline
+
+`PreparedMaterialNetwork::observe` composes the original pinned transport
+resolver with another observer on the existing enthalpy substeps. Networks
+with resistor branches refuse; circuit storage and Joule heating retain their
+circuit owner. The shared observer pair owns heat-source addition,
+competing-link refusal, timestep composition and atomic history acceptance.
+Material snapshots are refreshed at actual thermal endpoints and events,
+while authored link coefficients remain unchanged. Conduction remains the
+declared uniform-cell, fixed-geometry reduction; temperature-dependent source
+coefficients do not by themselves establish time or spatial convergence.
+
+### Material interface compliance in the shared string shell
+
+`shear_shell::connections` retains complete ordered interface states and claim
+identities, exact surface material roles, property names, actual contact area
+and weighted footprints with explicit global offsets. Source stiffness per area
+[N/m³] and viscous resistance per area [N s/m³] require finite nonnegative
+fixed-state laws with intersecting frequency applicability. Every retained mode
+must lie in that band.
+
+Regional membership, positive normalized weights, physical moment arms and
+coincident application points for two moving sides are checked. Interface
+stiffness enters the monolithic shell pencil before the shared eigensolve.
+Interface viscosity remains its original passive connection channel, supporting
+semidefinite interface-only loss alongside the separately owned full bulk
+material viscosity. Elastic stiffness is never duplicated as a runtime spring.
+
+The reciprocal string bank budgets these additional channels and retains their
+sources through existing extensions. Bulk material rebinds recheck the ordered
+interface surface roles. Fixed counterparts have zero motion and no modeled
+mass. Regressions cover changed material support stiffness and viscosity reaching
+actual microphone pressure, exact projected moment arms, source rebinding,
+interface-only loss and source/geometry/frequency/resource refusals.
+
+This finite bilateral model does not establish continuum mortar, glue coverage,
+opening contact, complete assembled instrument anatomy, thermal/history
+evolution, a prestressed equilibrium or measured timbre.
+
+### Flue jet-direction controls and gas-bound mouth separation
+
+`FlueControl::SetJetAngle` changes only the prescribed direction in the
+existing fixed-window tilted-cut image. Its effective offset is the original
+`labium_offset + cut_up * tan(angle)`; the resulting injected-flow change
+enters the same source-pressure derivative and mouth-work balance. Finite
+direction and transverse-coordinate admission precede held-input mutation.
+Acoustic, convection, windway, material-wall and radiation histories persist.
+
+`FlueOutletPerformance` accepts one blowing-pressure track and an optional
+typed jet-angle track. The original pressure compiler and `GestureSchedule`
+sampler share exact ceiling-rounded mechanical timestamps; both controls apply
+before that sample. Whole-phrase admission bounds every track/tick assignment
+and source-sampling work before stepping. The existing multirate observer
+retains partial frames across controls and callbacks.
+
+The file's optional `mouth_loss contraction CC MACH SOURCE` row binds the
+existing `ContractionSpec` to the actual mouth window and actual inlet gas.
+Its separation loss enters the same implicit acoustic-mouth solve, remains
+distinct from radiation/viscous loss, and checks the solved contracted Mach.
+Omission and `mouth_loss none` select the original linear mouth.
+
+Focused G0/G3 regressions compare static geometry against angle controls,
+manually sampled pressure/direction against the actual shared microphone,
+retained moving-gas histories, callback partition invariance, data-only gas
+changes and file/CLI construction. These tests do not establish measured
+instrument fidelity. The direction remains an instantaneous geometric
+approximation, not resolved transient jet turning, moving lips, coverage,
+time-varying mouth area/cut-up, or a material-state evolution law. The
+separation closure does not resolve vortex memory or turbulence.
+
+### Shared structural and conductive material assignments
+
+`solid_enthalpy::plastic::ThermoplasticSolid::thermal_material_cells` lowers
+the existing per-tetrahedron bindings into the original material transport
+network. It retains cell/material identity, the original caloric object and
+fixed pressure/composition context, selects conductivity at accepted enthalpy,
+and pins the admitted claim. The existing prepared observer evaluates that
+claim at actual heat states. Source support loss refuses the complete coupled
+interval; mechanically or frequency-bounded conductivity requires an evolving
+response. Additional thermal cells need their own complete network bindings.
+The original source solid remains the immutable borrowed context anchor while
+accepted candidate histories evolve.
+
+G1/G3 regressions compare two-tet mixed-shear equilibrium and conservative heat
+exchange under data-only conductivity/Cp changes. They exercise a free
+mechanical displacement, local plastic history through unloading, source
+identity and context continuity, physical versus numerical heat, and G4 atomic
+source-domain refusal. These synthetic numerical fixtures do not extend the
+existing small-strain, fixed-density, fixed-geometry, single-solid model.

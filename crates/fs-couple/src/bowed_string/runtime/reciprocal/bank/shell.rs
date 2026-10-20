@@ -58,7 +58,7 @@ impl ReciprocalStringBank {
     /// and multi-bow scheduling through the original bank's immutable source.
     ///
     /// Starts a cold unloaded realization. Finite strain, prestress, laminate
-    /// B coupling, joints between separate parts and shell radiation loading
+    /// B coupling, continuum ties between parts and shell radiation loading
     /// require their own physical owners; they are not inferred by this adapter.
     /// # Errors
     /// Incomplete/detached ports, material/geometry/cavity mismatch, bandwidth,
@@ -77,6 +77,8 @@ impl ReciprocalStringBank {
         }
         let has_loss=body.specimen.regions().iter().any(|r|!r.viscosity().is_zero());
         let links=sources.len().checked_add(if has_loss {body.n_modes} else {0})
+            .and_then(|n|n.checked_add(body.specimen.interfaces().iter()
+                .filter(|i|i.law().damping_n_s_m!=0.0).count()))
             .and_then(|n|n.checked_add(cavity.as_ref().map_or(0,|c|
                 1+usize::from(c.cavity.neck_resistance_n_s_m()!=0.0))))
             .ok_or_else(||invalid("shell material damping/bridge/cavity count overflow"))?;
@@ -99,6 +101,7 @@ impl ReciprocalStringBank {
         let mut image=reduce_radiating_body(projected.radiators(),&gas,options.sample_rate_hz,
             body.modal_budget,body.listener_m,cavity.as_ref(),gate)?;
         image.body_connections.extend(projected.damping().connections(0));
+        image.body_connections.extend(projected.interface_damping_connections(0));
         let mut bank=finish_material_body_with_ports(cx,sources,&body.bridges,string_modes,
             gas,image,Some(projected.force_ports()),law,options,gate)?;
         bank.source.material_shell=Some(body);

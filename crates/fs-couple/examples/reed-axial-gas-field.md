@@ -1,4 +1,9 @@
-# Authored gas composition and temperature along a reed bore
+# Gas composition and temperature along a reed bore
+
+The same performance loader accepts prescribed `gas_field` stations or generates
+them from a conservative `gas_steady` heat/species problem. Both feed the original
+reed, duct, exterior load and microphone. The steady example and grammar are
+described below; they use the same source packs as the prescribed example.
 
 [reed-axial-gas-field.performance](reed-axial-gas-field.performance) drives the
 existing massive reed, regional duct and baffled pressure receiver from one
@@ -146,3 +151,75 @@ The resulting model retains the existing regional transfer fit, compact reed
 law and infinite-baffle receiver assumptions. It adds authored access to the
 shared gas field, without claiming complete fluid motion or measured instrument
 accuracy.
+
+## Generate a steady field from flow, wall heat and species injection
+
+[reed-steady-gas.performance](reed-steady-gas.performance) supplies nitrogen at
+330 K, wall cooling, and a downstream carbon-dioxide injection. The existing
+`SteadyAxialGas` owner solves stationary mass/species transport and source-bound
+NASA-9 enthalpy balance, then publishes the same `AxialGasField` consumed above.
+Changing the source species, inlet fractions, flow or wall conditions changes
+the generated thermodynamic and transport states and the actual reed feedback.
+
+Replace the prescribed block with:
+
+```text
+gas_steady continuous STEPS_PER_SPAN CELLS INJECTIONS mole SPECIES_COUNT ID...
+gas_inlet MASS_FLOW_KG_S T_K FRACTION...
+gas_cell END_M WALL_CONDUCTANCE_W_K WALL_T_K INITIAL_T_K
+gas_injection CELL MASS_FLOW_KG_S T_K FRACTION...
+gas_solve MIN_T_K MAX_T_K H_TOL_J_KG MAX_ITER DT_S MAX_RELAX MAX_SUBSTEPS P_TOL_W E_TOL_J MAX_MACH
+```
+
+`midpoint CELLS_PER_SEGMENT` is also available in the first record. Supply one
+`gas_cell` row per thermal cell and then one `gas_injection` row per injection;
+zero injections requires no injection rows. Injection indices start at zero.
+Fractions on every inlet follow the declared species-column order. They are
+canonicalized with the source IDs once, retaining exact zero components and the
+original species, NASA-9 and transport pack identities.
+
+Cell ends must increase from zero to the exact complete bore length. The loader
+integrates each cell's volume and lateral wall area from the original cylinder
+and cone records, including cells that cross geometry boundaries. The format
+does not duplicate bore radii or volumes. `WALL_CONDUCTANCE_W_K` is the explicitly
+supplied total wall-to-gas conductance of that cell; it is not a guessed heat
+transfer coefficient. `WALL_T_K` is a prescribed wall temperature and
+`INITIAL_T_K` only seeds the bounded steady relaxation. The wall's own thermal
+storage is not advanced by this stationary problem.
+
+The inlet mass flow is a prescribed stationary throughflow, independent of the
+oscillatory reed flow. It sets enthalpy/species transport and the admitted mean
+Mach number; this does not solve a steady pressure drop from the blowing
+gesture. Acoustic propagation uses the generated frozen field at the ambient
+static pressure. This route requires an unbranched cylinder/cone bore: its
+stationary mass balance does not infer leakage through tone holes or their
+chimneys. A separately solved branch field can still use the prescribed route
+where admitted by the original duct owner.
+
+The caloric bracket must lie inside the loaded source domains. The enthalpy
+residual tolerance is absolute J/kg, cell power tolerance is W, and the accepted
+step energy tolerance is J. `MAX_ITER` is at most 128, thermal cells and
+injections are each at most 64, and relaxation/substep limits are each at most
+1,000,000. The parser also bounds retained state/species products. `MAX_MACH`
+must be positive and no greater than 0.1. Nonconvergence, unresolved geometry,
+unsupported source or phase, excess mean flow and conflicting segment/field
+declarations refuse before a renderer is returned.
+
+Build the packs using the commands above, then render the steady example by
+changing the performance and output paths in that same `music_render wind`
+command to `crates/fs-couple/examples/reed-steady-gas.performance` and
+`target/reed-steady-gas.wav`. The same loader also serves reed ensemble parts.
+No extra physics flags or compiled gas names are required.
+
+`ReedPerformance::steady_gas()` retains the original problem, declared solver
+controls and accepted `SteadyGasSolution`. The wind/ensemble sidecar includes
+the generated field plus cell geometry, inlet/injection compositions, mass
+flows, actual power and energy residuals, work used and maximum mean Mach.
+The same solution field is used by the acoustic operator and receiver; the
+sidecar does not reconstruct it from the rendered audio.
+
+This is a stationary donor-cell heat/species model with primitive interpolation
+between its emitted faces. The existing thermal tests establish first-order
+spatial convergence. Diffusion, reaction, condensation, transient atmosphere,
+mean-flow acoustic correction and measured instrument qualification require
+their own existing-owner extensions and validation.

@@ -230,7 +230,13 @@ fn load_with_sources(
                 spec.length_m, spec.width_m, spec.height_m, spec.transverse_cells,
                 channel.gas().density, channel.gas().dynamic_viscosity)
         });
-        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; compact independent baffled reaction and shared exterior pressure; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}}}",
+        let (propagator, linear_scope) = match i.propagator {
+            fs_couple::bernoulli_aperture::paired::BladePropagator::Midpoint =>
+                ("midpoint", "original material structure with loaded one-cent midpoint admission"),
+            fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh =>
+                ("exact-zoh", "original M/K/full C; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"),
+        };
+        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; compact independent baffled reaction and shared exterior pressure; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}}}",
             i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
             p.renderer().pending_controls().len(), valve.viscosity_matrix_n_s_m().is_some(),
             p.radiation_bindings().len());
@@ -271,6 +277,13 @@ fn load_with_sources(
                 None => ",\"windway_model\":\"ideal\",\"windway_length_m\":null".to_string(),
             }
         };
+        let mouth_loss_json = match renderer.voice().mouth_contraction() {
+            Some(loss) => format!(",\"mouth_contraction\":{{\"area_ratio\":{:e},\"maximum_contracted_mach\":{:e},\"source\":{},\"effective_area_m2\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e}}}",
+                loss.spec().area_ratio, loss.spec().maximum_contracted_mach,
+                json_string(&loss.spec().provenance), loss.effective_area_m2(),
+                loss.gas().density, loss.gas().sound_speed),
+            None => ",\"mouth_contraction\":null".to_string(),
+        };
         let (phase, details) = network.fractional_sections().expect("file selects fractional travel");
         let actual_length: f64 = details.iter().map(|s|s.realized_dc_length_m).sum();
         let phase_error: f64 = details.iter().map(|s|s.phase_error_bound_rad).sum();
@@ -288,7 +301,7 @@ fn load_with_sources(
         let observation_scope = if reaction {
             "in-loop independent compact baffled terminal reaction and matched-medium outlet pressure"
         } else { "one-way infinite-baffle outlet pressure; supplied passive loads" };
-        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; wall image separately declared; no full shell dynamics, broadband unbaffled or mutual radiation, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{duct_json}{wall_json}}}",
+        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; wall image separately declared; no full shell dynamics, broadband unbaffled or mutual radiation, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{duct_json}{wall_json}}}",
             i.jet_card_source,i.jet_card_hash,p.card().claim.kind(),p.card().authority.label(),i.compiled_controls,
             geometry.flue_width_m,geometry.flue_height_m,geometry.cut_up_m,geometry.labium_offset_m,
             geometry.jet_angle_rad,geometry.mouth_loss_rel,island.displacement_gain,island.seed_amplitude_rel,

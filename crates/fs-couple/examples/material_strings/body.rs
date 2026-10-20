@@ -44,6 +44,31 @@ impl Profile {
         if let BodyModel::Shell(shell) = &self.model { shell.preflight(spec)?; }
         Ok(())
     }
+    /// Conservative source-declared viscous channel allowance before pack I/O.
+    pub fn additional_body_connections(&self) -> usize {
+        match &self.model {
+            BodyModel::Plate(_) => 0,
+            BodyModel::Shell(shell) => shell.additional_body_connections(),
+        }
+    }
+    /// Load original ordered interface packs before the ordinary bulk loader.
+    /// Geometry and complete-network admission precede the first source read.
+    pub fn load_interfaces(&mut self, spec: &input::Spec, gate: &CancelGate,
+        mut loader: impl FnMut(&str) -> Result<fs_matdb::NormalizedInterfacePack>) -> Result<()>
+    {
+        poll(gate)?;
+        self.preflight(spec)?;
+        if let BodyModel::Shell(shell) = &mut self.model {
+            shell.load_interfaces(gate, &mut loader)?;
+        }
+        Ok(())
+    }
+    pub fn interface_pack_bytes(&self) -> Result<usize> {
+        match &self.model {
+            BodyModel::Plate(_) => Ok(0),
+            BodyModel::Shell(shell) => shell.interface_pack_bytes(),
+        }
+    }
     pub fn bridge_separation_m(&self, spec: &input::Spec, positive: usize, negative: usize) -> Result<f64> {
         match &self.model {
             BodyModel::Plate(plate) => plate.bridge_separation_m(spec, positive, negative),

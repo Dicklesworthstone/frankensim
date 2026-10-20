@@ -130,8 +130,9 @@ pub struct Config {
 
 /// One partial of a silent string in the bank: the completed-square coordinate z of
 /// mode `k` (unit mass; the same table entry the dynamic set uses when its key
-/// sounds), its velocity, its intrinsic loss rate and its pad's drag, and the exact
-/// damped transition of (z - beta b, v) over one step with the bridge held.
+/// sounds), its velocity, its intrinsic loss rate and its pad's drag, and, for the
+/// pad engagement its course last held, the exact damped transition of (z - beta b, v)
+/// over one step with the bridge held and the pad's share of its loss.
 #[derive(Clone, Debug)]
 struct BankMode {
     k: usize,
@@ -142,6 +143,7 @@ struct BankMode {
     z: f64,
     v: f64,
     p: [f64; 4],
+    share: f64,
 }
 
 /// The bank partials of one string segment, `bank[start..end]`, lowest first. While the
@@ -156,15 +158,13 @@ struct BankSeg {
 }
 
 /// The bank partials of one course: its segments, the pad engagement its transitions
-/// hold (`NAN` = none yet), and the bridge displacement and force of its last step
-/// (for the coupling books).
+/// hold (`NAN` = none yet), and the bridge displacement at its last step.
 #[derive(Clone, Debug)]
 struct BankCourse {
     ci: usize,
     segs: Vec<BankSeg>,
     damping: f64,
     b: f64,
-    force: f64,
 }
 
 /// Exact transition of y'' + c y' + w2 y = 0 over `dt` for (y, y'), underdamped.
@@ -1812,14 +1812,14 @@ impl LivePiano {
                         if c_int + c_pad >= 1.9 * m.omega[k] {
                             return Err("a silent-bank partial would be overdamped".into());
                         }
-                        bank_modes.push(BankMode { k, w2: m.w2[k], beta: m.beta[k], c_int, c_pad, z: 0.0, v: 0.0, p: [1.0, 0.0, 0.0, 1.0] });
+                        bank_modes.push(BankMode { k, w2: m.w2[k], beta: m.beta[k], c_int, c_pad, z: 0.0, v: 0.0, p: [1.0, 0.0, 0.0, 1.0], share: 0.0 });
                     }
                     if bank_modes.len() > first {
                         course_segs.push(BankSeg { seg: si, start: first, end: bank_modes.len(), taken: 0 });
                     }
                 }
                 if !course_segs.is_empty() {
-                    bank_courses.push(BankCourse { ci, segs: course_segs, damping: f64::NAN, b: 0.0, force: 0.0 });
+                    bank_courses.push(BankCourse { ci, segs: course_segs, damping: f64::NAN, b: 0.0 });
                 }
             }
         }
@@ -3467,7 +3467,11 @@ impl LivePiano {
     /// the board is explicit: z did not move while the board did, and the board feels z
     /// only from the next step. Every change of the bank's energy that is not its loss,
     /// with the kicks' kinetic energy, is that exchange's work, booked in
-    /// `Ledger::coupling_j`. Returns (string loss, damper loss) [J].
+    /// `Ledger::coupling_j`. Per partial that change is
+    ///   (v1^2 + w^2 u1^2)/2 - (v0^2 + w^2 u0^2)/2 + loss - w^2 beta^2 (b^2 - b0^2)/2
+    ///   = beta rate (du1 - du0) - w^2 beta^2 (b^2 - b0^2)/2,
+    /// since v = du + beta rate on both sides of the step; the loop sums that form.
+    /// Returns (string loss, damper loss) [J].
     fn step_bank(&mut self) -> (f64, f64) {
         let r = self.r;
         let dt = self.dt;
@@ -3481,34 +3485,36 @@ impl LivePiano {
             let course = &mut self.bank_courses[i];
             let (b0, rate) = (course.b, (b - course.b) / dt);
             course.b = b;
-            let refresh = course.damping != damping;
-            course.damping = damping;
-            let mut force = 0.0;
+            if course.damping != damping {
+                course.damping = damping;
+                for seg in &course.segs {
+                    for m in &mut self.bank[seg.start + seg.taken..seg.end] {
+                        let pad = damping * m.c_pad;
+                        m.p = damped_transition(m.w2, m.c_int + pad, dt);
+                        m.share = if pad == 0.0 { 0.0 } else { pad / (m.c_int + pad) };
+                    }
+                }
+            }
+            let (mut force, mut loss, mut pad_loss, mut drive, mut stiffness) = (0.0, 0.0, 0.0, 0.0, 0.0);
             for seg in &course.segs {
                 for m in &mut self.bank[seg.start + seg.taken..seg.end] {
-                    let pad = damping * m.c_pad;
-                    if refresh {
-                        m.p = damped_transition(m.w2, m.c_int + pad, dt);
-                    }
-                    // The bank's energy before, booked against the bridge where the last step left it.
-                    let before = 0.5 * (m.v * m.v + m.w2 * (m.z - m.beta * b0).powi(2));
                     let (u, du) = (m.z - m.beta * b0, m.v - m.beta * rate);
                     let u1 = m.p[0] * u + m.p[1] * du;
                     let du1 = m.p[2] * u + m.p[3] * du;
-                    let loss = 0.5 * (du * du - du1 * du1 + m.w2 * (u * u - u1 * u1));
-                    let share = if pad == 0.0 { 0.0 } else { pad / (m.c_int + pad) };
-                    damper_loss += share * loss;
-                    string_loss += (1.0 - share) * loss;
+                    let lost = 0.5 * (du * du - du1 * du1 + m.w2 * (u * u - u1 * u1));
+                    loss += lost;
+                    pad_loss += m.share * lost;
                     m.z = m.beta * b + u1;
                     m.v = du1 + m.beta * rate;
-                    // Its energy now, against the bridge now; less the part of w^2 beta^2 b^2 / 2
-                    // that the loaded pencil already carried through the step.
-                    let after = 0.5 * (m.v * m.v + m.w2 * u1 * u1);
-                    exchange += after - before + loss - 0.5 * m.w2 * m.beta * m.beta * (b * b - b0 * b0);
-                    force += m.w2 * m.beta * m.z;
+                    let wb = m.w2 * m.beta;
+                    drive += m.beta * (du1 - du);
+                    stiffness += wb * m.beta;
+                    force += wb * m.z;
                 }
             }
-            course.force = force;
+            damper_loss += pad_loss;
+            string_loss += loss - pad_loss;
+            exchange += rate * drive - 0.5 * stiffness * (b * b - b0 * b0);
             if force != 0.0 {
                 let kick = dt * force;
                 for (x, g) in self.bvel.iter_mut().zip(gl) {

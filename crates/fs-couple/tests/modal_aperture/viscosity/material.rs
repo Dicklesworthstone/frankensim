@@ -28,6 +28,133 @@ type Input = (
     PlateViscosity,
     PlateViscosityLimits,
 );
+
+#[test]
+fn exact_material_tensor_reaches_both_ducts_and_microphone_at_the_declared_audio_clock() {
+    use fs_couple::bernoulli_aperture::paired::BladePropagator;
+    use fs_couple::bernoulli_aperture::two_sided::observer::TwoSidedPressure;
+    use fs_couple::bernoulli_aperture::two_sided::{
+        LoadedAperture, TwoSidedAperture, TwoSidedDrive, TwoSidedLimits, combined_inlet_state,
+    };
+    use fs_couple::pcm_wav::baffled::openings::duct::{
+        DuctOpening, DuctRadiationSpec, DuctReconstruction,
+    };
+    use fs_couple::pcm_wav::{baffled::CircularOutletReceiver, observation::PressureRenderer};
+    let render = |loss: f64, block_size| {
+        let ducts = sides();
+        let (g, z) = combined_inlet_state(&ducts).unwrap();
+        let mut inputs = vec![input(loss, 900.0), input(0.0, 1200.0)];
+        for p in &mut inputs {
+            p.1.maximum_angular_step = 2.0;
+        }
+        let identities: Vec<_> = inputs.iter().map(|p| p.0.specimen_identity()).collect();
+        let valve = ModalAperture::from_viscous_material_plates_with_propagator(
+            inputs,
+            4e-4,
+            g,
+            z,
+            1.0 / 48_000.0,
+            512,
+            limits(),
+            vec![BladeState::default(); 6],
+            contact(),
+            BladePropagator::ExactZoh,
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+        assert_eq!(valve.blade_propagator(), BladePropagator::ExactZoh);
+        for (plate, identity) in valve.material_plates().iter().zip(identities) {
+            assert_eq!(plate.source().specimen_identity(), identity);
+            assert_eq!(plate.viscosity().unwrap().chart_identity(), identity);
+        }
+        assert!(valve.spec().modes.iter().all(|m| m.damping_n_s_m == 0.0));
+        let c = valve.viscosity_matrix_n_s_m().unwrap();
+        assert!((0..3).any(|i| (0..3).any(|j| i != j && c[6 * i + j] != 0.0)));
+        assert!((3..6).all(|i| (0..6).all(|j| c[6 * i + j] == 0.0 && c[6 * j + i] == 0.0)));
+        // Exact selection admits these unchanged material modes at 48 kHz;
+        // reconstructing the same mechanics through midpoint still refuses.
+        assert!(
+            ModalAperture::new(
+                valve.spec().clone(),
+                vec![BladeState::default(); 6],
+                contact()
+            )
+            .is_err()
+        );
+        let system = TwoSidedAperture::new(
+            valve.into(),
+            ducts,
+            TwoSidedLimits {
+                maximum_energy_j: 1.0,
+                energy_absolute_tolerance_j: 1e-16,
+                energy_relative_tolerance: 1e-7,
+                flow_absolute_tolerance_m3_s: 1e-16,
+                flow_relative_tolerance: 1e-8,
+            },
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+        let mut pressure = TwoSidedPressure::with_radiation(
+            system,
+            DuctRadiationSpec {
+                openings: vec![DuctOpening {
+                    network: 1,
+                    node: 1,
+                    center_m: [0.0; 2],
+                }],
+                exterior: None,
+                receiver: CircularOutletReceiver {
+                    position_m: [0.0, 0.0, 0.25],
+                    radial_rings: 4,
+                    angular_points: 16,
+                    maximum_frequency_hz: 1000.0,
+                },
+                reconstruction: DuctReconstruction::FiniteDifference {
+                    sample_rate_hz: 48_000,
+                },
+            },
+            64,
+        )
+        .unwrap();
+        pressure
+            .set_drive(TwoSidedDrive {
+                source_pressure_pa: 5.0,
+                blade_forces_n: [0.0; 2],
+            })
+            .unwrap();
+        let mut out = vec![0.0; 512];
+        for block in out[..256].chunks_mut(block_size) {
+            pressure.block(block).unwrap();
+        }
+        let first = pressure.last_frame().unwrap();
+        assert!(first.upstream.incoming_pressure_pa != 0.0);
+        assert!(first.downstream.incoming_pressure_pa != 0.0);
+        pressure.set_drive(TwoSidedDrive::default()).unwrap();
+        for block in out[256..].chunks_mut(block_size) {
+            pressure.block(block).unwrap();
+        }
+        assert!(out.iter().all(|p| p.is_finite()));
+        assert!(out.iter().any(|p| p.abs() > 1e-12));
+        assert!(pressure.last_frame().unwrap().balance_residual_j().abs() < 1e-12);
+        let LoadedAperture::Modal(valve) = pressure.system().valve() else {
+            panic!("original modal source");
+        };
+        assert_eq!(valve.accepted_steps(), 512);
+        assert_eq!(valve.material_plates().len(), 2);
+        assert!(valve.stored_energy_j() > 0.0);
+        out
+    };
+    let baseline = render(1.0, 1);
+    assert_eq!(baseline, render(1.0, 37));
+    let different_material = render(4.0, 37);
+    assert!(
+        baseline
+            .iter()
+            .zip(different_material)
+            .any(|(a, b)| (a - b).abs() > 1e-12)
+    );
+}
+
 fn source(rho: f64, scale: f64) -> ResolvedMaterialStatePoint {
     let mut values = vec![
         ("density", rho, Density::DIMS),

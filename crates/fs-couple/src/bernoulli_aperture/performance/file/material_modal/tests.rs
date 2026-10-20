@@ -71,9 +71,8 @@ fn render(p: MaterialModalValvePerformance) -> (Vec<f64>, ScheduledTwoSidedPress
 #[test]
 fn g0_original_material_modes_gases_loss_sections_and_radiation_are_retained() {
     let mut loads = 0;
-    // Manufactured very short passage: the original full loaded-clock gate
-    // must still admit its inertance; ordinary long supplies may require a
-    // different coupled discretization and are never silently weakened here.
+    // The exact structural image still retains the original passage inertance
+    // and its separate no-slip flow state; selecting a clock never edits geometry.
     let supplied = input().replace("supply none", "supply slit 0.00002 0.01 0.001 16");
     let p = MaterialModalValvePerformance::from_bytes_with_sources(supplied.as_bytes(), 37,
         &CancelGate::new_clock_free(), None, |path| {
@@ -82,9 +81,11 @@ fn g0_original_material_modes_gases_loss_sections_and_radiation_are_retained() {
             Ok(pack(900.0, false))
         }).unwrap();
     assert_eq!(loads, 1); // both blades and every region share one original artifact
+    assert_eq!(p.info().propagator, BladePropagator::ExactZoh);
     assert_eq!((p.info().blades, p.info().modes, p.info().nodes, p.info().triangles), (2, 6, 42, 48));
     assert_eq!(p.material_records().len(), 4);
     let a = valve(&p);
+    assert_eq!(a.blade_propagator(), BladePropagator::ExactZoh);
     assert_eq!(a.material_plates()[0].mode_range(), 0..3);
     assert_eq!(a.material_plates()[1].mode_range(), 3..6);
     assert_eq!(a.viscosity_matrix_n_s_m().unwrap().len(), 36);
@@ -136,6 +137,74 @@ fn g3_data_only_material_and_pressure_changes_reach_the_actual_microphone() {
     assert_eq!(pressure, partitioned);
     assert_eq!(encode_pcm16_wav(&pressure, 48000, 0.005).unwrap(),
         encode_pcm16_wav(&partitioned, 48000, 0.005).unwrap());
+}
+
+#[test]
+fn g3_omitted_and_explicit_midpoint_keep_identical_original_physics() {
+    let legacy = input().replace("propagator exact-zoh\n", "");
+    let explicit = legacy.replacen("ambient ", "propagator midpoint\nambient ", 1);
+    let a = build(&legacy, 37);
+    let b = build(&explicit, 1);
+    assert_eq!(a.info().propagator, BladePropagator::Midpoint);
+    assert_eq!(b.info().propagator, BladePropagator::Midpoint);
+    assert_eq!(valve(&a).spec(), valve(&b).spec());
+    assert_eq!(valve(&a).viscosity_matrix_n_s_m(), valve(&b).viscosity_matrix_n_s_m());
+    let (pa, a) = render(a);
+    let (pb, b) = render(b);
+    assert_eq!(pa, pb);
+    let states = |source: &ScheduledTwoSidedPressure| match source.source().system().valve() {
+        LoadedAperture::Modal(a) => a.modal_states().to_vec(),
+        _ => panic!("original modal source"),
+    };
+    assert_eq!(states(&a), states(&b));
+}
+
+#[test]
+fn g3_file_selected_exact_structure_admits_high_modes_and_materials_reach_the_microphone() {
+    // A deliberately coarser numerical rung exercises the selector. This is
+    // not a claim that nonlinear contact/channel time error converged at 96 kHz.
+    let text = input().replace("audio 768000 48000", "audio 96000 48000")
+        .replace("blade 3 0.2 3000 0.04", "blade 3 0.2 3000 0.25");
+    let midpoint = text.replace("propagator exact-zoh", "propagator midpoint");
+    let refused = MaterialModalValvePerformance::from_bytes_with_sources(midpoint.as_bytes(), 37,
+        &CancelGate::new_clock_free(), None, |_| Ok(pack(900.0, false))).err().unwrap();
+    assert!(matches!(refused, PlateValveInputError::Physics(
+        crate::acoustic_realize::AcousticRealizeError::TimeResolution(_))));
+    let source = build(&text, 37);
+    assert_eq!(source.info().mechanics_rate_hz, 96000);
+    assert_eq!(source.info().propagator, BladePropagator::ExactZoh);
+    assert_eq!(valve(&source).modal_states().len(), 6);
+    assert_eq!(valve(&source).viscosity_matrix_n_s_m().unwrap().len(), 36);
+    let (pressure, rendered) = render(source);
+    assert!(pressure.iter().any(|p| p.abs() > 1e-15));
+    assert_eq!(rendered.source().mechanical_samples_rendered(), 512 * 2);
+    let (partitioned, _) = render(build(&text, 1));
+    assert_eq!(pressure, partitioned);
+    let changed = text.replacen("section blade.matpack", "section altered.matpack", 1);
+    let (material, _) = render(build(&changed, 37));
+    assert!(pressure.iter().zip(material).any(|(a,b)| (a-b).abs() > 1e-15));
+    let elastic = text.replace("loss tensor eta11 eta22 eta66 eta12 eta16 eta26 1 1000000", "loss elastic");
+    let elastic = build(&elastic, 37);
+    assert_eq!(valve(&elastic).blade_propagator(), BladePropagator::ExactZoh);
+    assert!(valve(&elastic).viscosity_matrix_n_s_m().is_none());
+}
+
+#[test]
+fn g0_invalid_structural_selector_refuses_before_loading_materials() {
+    for token in ["unknown", "frequency-matched", "exact-zoh extra", ""] {
+        let text = input().replace("propagator exact-zoh", &format!("propagator {token}"));
+        let mut loads = 0;
+        let error = MaterialModalValvePerformance::from_bytes_with_sources(text.as_bytes(), 37,
+            &CancelGate::new_clock_free(), None, |_| { loads += 1; Ok(pack(900.0, false)) })
+            .err().unwrap();
+        assert!(matches!(error, PlateValveInputError::Input { line: 3, .. }));
+        assert_eq!(loads, 0);
+    }
+    let duplicated = input().replace("propagator exact-zoh\n",
+        "propagator exact-zoh\npropagator midpoint\n");
+    assert!(MaterialModalValvePerformance::from_bytes_with_sources(duplicated.as_bytes(), 37,
+        &CancelGate::new_clock_free(), None, |_| panic!("duplicate selector must refuse before sources"))
+        .is_err());
 }
 
 #[test]
