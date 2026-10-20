@@ -13,6 +13,7 @@
 mod plate;
 mod boundaries;
 mod radiation;
+mod wall;
 
 use super::{PlateValveInputError, Reader, bad, checkpoint, gas,
     read_receiver, MAX_PLATE_VALVE_PERFORMANCE_BYTES, MAX_CONTROLS};
@@ -40,6 +41,7 @@ use fs_material::gas_species::input::{GasRecord, ThermochemicalSources};
 use plate::{MaterialCache, LossSelection};
 
 pub use plate::{ModalValveMaterialRecord, MAX_MODAL_VALVE_PACK_BYTES};
+pub use wall::ModalValveWallRecord;
 
 /// Exact grammar selector. Filenames and instrument names never select physics.
 pub const MATERIAL_MODAL_VALVE_SCHEMA: &str = "frankensim-material-modal-valve-v1";
@@ -74,6 +76,7 @@ pub struct MaterialModalValvePerformance {
     info: MaterialModalValveInfo,
     renderer: ScheduledTwoSidedPressure,
     materials: Vec<ModalValveMaterialRecord>,
+    walls: Vec<ModalValveWallRecord>,
     boundaries: Vec<(ValveSide, crate::bernoulli_aperture::material_boundary::MaterialBoundaryRecord)>,
     gases: Vec<GasRecord>,
     ambient: GasState,
@@ -228,6 +231,11 @@ impl MaterialModalValvePerformance {
                 mechanics_rate_hz: mechanics, output_rate_hz: output,
             } };
         let radiation_selection = radiation::Selection::read(&mut rows, &radiation_spec)?;
+        let mut cache = MaterialCache::default();
+        let wall_band = policies.as_ref().map_or(receiver.maximum_frequency_hz,
+            |p| p.iter().map(|p| p.maximum_frequency_hz).fold(receiver.maximum_frequency_hz, f64::max));
+        let (walls, wall_records) = wall::read(&mut rows, wall_band, &mut cache,
+            &mut load_material, gate)?;
         let mut row = rows.row("valve")?;
         let rest_opening = row.scalar()?;
         row.finish()?;
@@ -263,7 +271,6 @@ impl MaterialModalValvePerformance {
         let loss = LossSelection::read(&mut rows)?;
         let blades = rows.count("blades", 2)?;
         if blades == 0 { return Err(bad(rows.line, "one or two independently supplied blades are required")); }
-        let mut cache = MaterialCache::default();
         let mut plates = Vec::with_capacity(blades);
         let mut states = Vec::<BladeState>::new();
         let mut materials = Vec::new();
@@ -311,7 +318,7 @@ impl MaterialModalValvePerformance {
             valve.set_material_viscous_slit(length).map_err(PlateValveInputError::Physics)?;
         }
         let mut prepared = radiation::prepare(
-            radiation_selection, valve.into(), sides, channel, coupling, policies,
+            radiation_selection, valve.into(), sides, walls, channel, coupling, policies,
             radiation_spec, &exterior_record, max_block, gas_sources, &mut load_radiation, gate)?;
         let (system, programs, boundaries) = boundaries.bind(
             prepared.system, &mut cache, &mut load_material, gate)?;
@@ -325,7 +332,7 @@ impl MaterialModalValvePerformance {
             input_hash: hash_domain("org.frankensim.fs-couple.material-modal-valve.v1", bytes),
             mechanics_rate_hz: mechanics, propagator, output_rate_hz: output, samples, full_scale_pa,
             blades, modes, nodes, triangles,
-        }, renderer, materials, boundaries, gases, ambient, radiation, mimo_radiation, computed_radiation })
+        }, renderer, materials, walls: wall_records, boundaries, gases, ambient, radiation, mimo_radiation, computed_radiation })
     }
 
     /// Immutable original source dimensions, coordinates, clocks and PCM scale.
@@ -338,6 +345,8 @@ impl MaterialModalValvePerformance {
     pub fn boundary_records(&self) -> &[(ValveSide, crate::bernoulli_aperture::material_boundary::MaterialBoundaryRecord)] {
         &self.boundaries
     }
+    /// Original solid sources bound to tract/bore walls, distinct from valve plates.
+    pub fn wall_records(&self) -> &[ModalValveWallRecord] { &self.walls }
     /// Original ambient, regional and exterior gas declarations.
     pub fn gas_records(&self) -> &[GasRecord] { &self.gases }
     /// Default interior state; actual inlet/remote states stay in the two ducts.

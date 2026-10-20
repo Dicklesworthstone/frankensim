@@ -59,6 +59,22 @@ valve before the same exterior microphone emits pressure. The supplied matrix
 is synthetic integration data, not a measured or geometry-validated radiation
 bake. The original `paired.performance` keeps compact baffled reaction.
 
+`paired-walls.performance` adds independently declared material walls in both
+the upstream tract and downstream bore. Normalize its additional source and
+render it through the same ordinary entry point:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest "$modal_demo_dir/wall-manifest.tsv" --out "$modal_demo_dir/wall.matpack" \
+  --material-state synthetic solid manufactured-membrane 0
+cargo run --release -p fs-couple --bin music_render -- wind \
+  "$modal_demo_dir/paired-walls.performance" "$modal_demo_dir/paired-walls.wav" --block 37
+```
+
+This is a manufactured compliant-cylinder demonstration, not acquired player
+anatomy. Changing its wall pack changes actual wall motion and returning duct
+pressure in the existing valve solve, and therefore the emitted sound.
+
 To change one blade or region, normalize another material source and change its
 `section` pack path. Original geometry and numerical choices remain explicit.
 No pitch normalization or output equalizer compensates for that substitution.
@@ -91,6 +107,8 @@ openings COUNT
 opening upstream|downstream NODE X Y
 radiation mimo GROUP_COUNT
 radiation_group upstream|downstream ARTIFACT MAX_STATES MAX_MEMORY_BYTES PASSIVITY_POINTS
+walls COUNT MIN_HZ MAX_HZ
+wall upstream|downstream NODE isotropic PACK SOLID_T_K SOURCE_OMEGA_RAD_S THICKNESS_M stress-free|strain-fixed elastic|kelvin-voigt
 valve TOTAL_REST_OPENING_M
 limits MAX_DISPLACEMENT_M MAX_VELOCITY_M_S MAX_ENERGY_J EVALUATIONS VELOCITY_TOLERANCE_M_S RELATIVE_TOLERANCE
 coupling MAX_ENERGY_J ABS_ENERGY_J REL_ENERGY ABS_FLOW_M3_S REL_FLOW
@@ -134,6 +152,29 @@ The [shared source guide](../MIMO_RADIATION_ARTIFACTS.md) documents the fields,
 finite-band approximation, three-order admission and separate memory budgets.
 Both routes attach through the same original terminal host and preserve the
 material reed, source-force projections, supply and complete duct histories.
+
+The `walls` block is optional and follows any radiation records. Omission or
+`walls none` preserves the original duct loads and arithmetic. Each wall binds
+an unused degree-two junction between equal-radius cylindrical sections. Its
+physical strip covers half of each adjacent section; unselected strips remain
+rigid. Walls never replace terminal radiation, cavities, preexisting wall loads
+or branching junctions. There are at most 64 selected wall nodes on either side.
+
+Every wall resolves density, Young modulus and Poisson ratio from its declared
+pack at the explicit solid temperature and angular frequency. `kelvin-voigt`
+also requires the dimensioned `kelvin_voigt_young_viscosity` property; `elastic`
+explicitly chooses zero internal loss. Source claims must be constant at that
+solid temperature and valid across the whole wall band. That band must cover
+the declared propagation and microphone bands. Unsupported material data,
+thickness/radius above 0.05, missing coefficients or invalid graph sites refuse.
+
+The wall shares the plate source cache and total material-byte budget, while
+keeping its independent state query. The original regional gas stays in each
+duct section; neither solid temperature nor its material name selects a new
+gas. The same material-wall owner participates in pressure/flow work and storage
+with compact or MIMO terminal radiation, and with or without a supply channel.
+It is a fixed-state local isotropic membrane approximation: no full shell,
+orthotropic tissue, axial wall coupling or exterior shell radiation is implied.
 
 `propagation integer` selects the original integer delay image.
 The separate `propagator` row is optional and appears immediately after `audio`.

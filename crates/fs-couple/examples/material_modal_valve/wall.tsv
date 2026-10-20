@@ -1,0 +1,18 @@
+frankensim.matdb-source.v1
+observation	synthetic	Synthetic compliant cylindrical wall	Manufactured isotropic Kelvin-Voigt membrane coefficients	Not measurements; no airway-tissue, wood, clarinet or oboe authority
+scalar	density	synthetic	density	1000	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	100000	rad/s
+scalar	young_modulus	synthetic	young_modulus	1000000	Pa	constant
+uncertainty	young_modulus	unstated	-	-	-	-
+validity	young_modulus	T	280	320	K
+validity	young_modulus	omega	0	100000	rad/s
+scalar	poisson_ratio	synthetic	poisson_ratio	0.3	1	constant
+uncertainty	poisson_ratio	unstated	-	-	-	-
+validity	poisson_ratio	T	280	320	K
+validity	poisson_ratio	omega	0	100000	rad/s
+scalar	kelvin_voigt_young_viscosity	synthetic	kelvin_voigt_young_viscosity	2	Pa*s	constant
+uncertainty	kelvin_voigt_young_viscosity	unstated	-	-	-	-
+validity	kelvin_voigt_young_viscosity	T	280	320	K
+validity	kelvin_voigt_young_viscosity	omega	0	100000	rad/s

@@ -6,6 +6,7 @@ use crate::bernoulli_aperture::radiation::environment::multiport::source::{
     ComputedBaffledInput, MimoSourceInput, MimoSourceRecord,
 };
 use crate::bernoulli_aperture::two_sided::{ApertureDuctSpec, LoadedAperture, TwoSidedAperture};
+use crate::bernoulli_aperture::wall::material::MaterialWallInput;
 use crate::bernoulli_aperture::radiation::environment::bind_baffled_environment;
 use crate::pcm_wav::observation::ObservationPolicy;
 
@@ -94,6 +95,7 @@ pub(super) fn prepare(
     selection: Selection,
     valve: LoadedAperture,
     sides: [ApertureDuctSpec; 2],
+    walls: [Option<MaterialWallInput>; 2],
     channel: Option<SlitChannel>,
     coupling: TwoSidedLimits,
     policies: Option<[FractionalTubePolicy; 2]>,
@@ -131,9 +133,9 @@ pub(super) fn prepare(
     };
     let mut system = match channel {
         Some(channel) => TwoSidedAperture::with_material_walls_and_supply_channel(
-            valve, sides, [None, None], channel, coupling, policies, gate),
+            valve, sides, walls, channel, coupling, policies, gate),
         None => TwoSidedAperture::with_material_walls(
-            valve, sides, [None, None], coupling, policies, gate),
+            valve, sides, walls, coupling, policies, gate),
     }.map_err(PlateValveInputError::Physics)?;
     let mut records = Vec::with_capacity(groups.len());
     let mut computed = Vec::with_capacity(groups.len());

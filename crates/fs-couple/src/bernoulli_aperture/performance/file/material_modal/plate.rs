@@ -90,6 +90,14 @@ impl MaterialCache {
     }
 }
 
+pub(super) fn relative_path(path: &str, line: usize) -> Result<(), PlateValveInputError> {
+    if path.len() > 512 || path.contains('\\') || path.contains(':')
+        || path.split('/').any(|p| p.is_empty() || p == "." || p == "..") {
+        return Err(bad(line, "material pack path must stay relative to the performance directory"));
+    }
+    Ok(())
+}
+
 type PlateInput = (ResolvedPlateChart, ModalPlateOptions, Vec<BladeState>, Vec<ModalValveMaterialRecord>);
 
 pub(super) fn read(
@@ -126,10 +134,7 @@ pub(super) fn read(
     for section in 0..section_count {
         let mut row = rows.row("section")?;
         let path = row.word()?.to_string();
-        if path.len() > 512 || path.contains('\\') || path.contains(':')
-            || path.split('/').any(|p| p.is_empty() || p == "." || p == "..") {
-            return Err(bad(row.line, "material pack path must stay relative to the performance directory"));
-        }
+        relative_path(&path, row.line)?;
         let model = match row.word()? {
             "isotropic" => PlateMaterialModel::Isotropic,
             "orthotropic12" => PlateMaterialModel::Orthotropic12,

@@ -12,6 +12,7 @@ const INPUT: &str = include_str!("../../../../../examples/material_modal_valve/p
 mod mimo;
 mod boundaries;
 mod keyed;
+mod walls;
 
 fn pack(rho: f64, missing: bool) -> NormalizedMaterialCardPack {
     let mut claims = ClaimSet::new();

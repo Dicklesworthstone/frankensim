@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	synthetic-material-modal-duct-wall
+redistribution	permitted	Manufactured integration fixture; freely redistributable, not measured tissue or bore material
+citation	Synthetic compliant duct-wall fixture
+license	CC0-1.0
+source	fixture	wall.tsv	material-tsv-v1

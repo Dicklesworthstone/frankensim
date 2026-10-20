@@ -299,6 +299,20 @@ fn load_with_all_sources(
         }).collect::<Vec<_>>().join(",");
         let gas_sources = super::thermochemical::provenance(p.gas_records());
         let system = p.renderer().source().system();
+        let walls = p.wall_records().iter().map(|record| {
+            let side = match record.side() {
+                fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream => "upstream",
+                fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream => "downstream",
+            };
+            let wall = system.material_walls(record.side()).iter()
+                .find(|wall| wall.source().node == record.node()).expect("source-bound duct wall");
+            let material = &wall.source().material;
+            format!("{{\"side\":\"{side}\",\"node\":{},\"path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"state_hash\":\"{}\",\"thickness_m\":{:e},\"radius_m\":{:e},\"length_m\":{:e},\"band_hz\":[{:e},{:e}]}}",
+                record.node(), json_string(record.path()), record.pack().content_hash().to_hex(),
+                material.card_identity().to_hex(), material.identity().to_hex(),
+                wall.source().thickness_m, wall.radius_m(), wall.length_m(), wall.band_hz()[0], wall.band_hz()[1])
+        }).collect::<Vec<_>>().join(",");
+        let wall_json = format!(",\"material_duct_walls\":[{walls}],\"duct_wall_scope\":\"fixed-state local isotropic membrane; original regional duct gas; no full shell or exterior wall radiation\"");
         let supply = system.supply_channel().map_or_else(|| "null".into(), |channel| {
             let spec = channel.spec();
             format!("{{\"length_m\":{:e},\"width_m\":{:e},\"height_m\":{:e},\"transverse_cells\":{},\"density_kg_m3\":{:e},\"viscosity_pa_s\":{:e}}}",
@@ -339,7 +353,7 @@ fn load_with_all_sources(
             + [fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream,
                fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream].into_iter()
                 .map(|side| p.renderer().pending_boundary_controls(side).len()).sum::<usize>();
-        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}}}",
+        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}}}",
             i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
             compiled_controls, valve.viscosity_matrix_n_s_m().is_some(),
             terminals);

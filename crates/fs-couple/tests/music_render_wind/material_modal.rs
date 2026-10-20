@@ -88,7 +88,10 @@ mod keyed;
 #[test]
 fn native_material_mimo_cli_matches_original_performer_and_preserves_source_authority() {
     let dir = directory();
-    let text = INPUT.replace("audio 768000 48000 2400 0.005", "audio 768000 48000 512 0.005");
+    let text = INPUT.replace("audio 768000 48000 2400 0.005", "audio 768000 48000 512 0.005")
+        .replace("network 2 1 1048576\nduct_node reflection 0.7\nduct_node inlet\nduct_section 1 0 0.12 0.007 0.002",
+            "network 3 2 1048576\nduct_node reflection 0.7\nduct_node inlet\nduct_node junction\nduct_section 1 2 0.06 0.007 0.002\nduct_section 2 0 0.06 0.007 0.002")
+        .replace("valve 0.0004\n", "walls 1 20 1000\nwall upstream 2 isotropic blade.matpack 293.15 100 0.0002 stress-free elastic\nvalve 0.0004\n");
     let input = dir.join("source.performance");
     let material = pack();
     std::fs::write(&input, &text).unwrap();
@@ -98,6 +101,8 @@ fn native_material_mimo_cli_matches_original_performer_and_preserves_source_auth
         &CancelGate::new_clock_free(), None, |_| Ok(material.clone()),
         |_| Ok(ARTIFACT.as_bytes().to_vec())).unwrap();
     let hash = loaded.mimo_radiation_records()[0].1.artifact_hash().to_hex();
+    assert_eq!(loaded.wall_records().len(), 1);
+    assert_eq!(loaded.wall_records()[0].pack(), &material);
     let mut source = loaded.into_renderer();
     let mut pressure = vec![0.0; 512];
     for block in pressure.chunks_mut(37) { source.block(block).unwrap(); }
@@ -111,6 +116,7 @@ fn native_material_mimo_cli_matches_original_performer_and_preserves_source_auth
         for token in ["\"retained_modes\":6", "\"full_tensor_viscosity\":true",
             "\"radiation_terminals\":2", "\"mimo_radiation_groups\":[",
             "\"side\":\"downstream\"", "\"path\":\"mutual.radiation\"",
+            "\"material_duct_walls\":[{\"side\":\"upstream\",\"node\":2", "fixed-state local isotropic membrane",
             "\"ordered_apertures\":[", "signed terminal exchange", "no cross-side exterior coupling"] {
             assert!(metadata.contains(token), "{token}: {metadata}");
         }
