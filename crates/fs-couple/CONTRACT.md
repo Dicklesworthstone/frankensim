@@ -3250,6 +3250,27 @@ approximation, not resolved transient jet turning, moving lips, coverage,
 time-varying mouth area/cut-up, or a material-state evolution law. The
 separation closure does not resolve vortex memory or turbulence.
 
+### Sourced thermal expansion in the native thermoplastic solid
+
+`ThermoplasticSolid` accepts the optional same-card constant isotropic expansion
+binding through `SourceQuery`. Each native element receives its own actual
+temperature and stress-free strain, while the original P1/J2 equilibrium solve
+owns compatible displacement, support reactions and plastic history. The
+shared material energy owner supplies physical yield heat plus signed reversible
+exchange to the existing enthalpy graph. Reports retain elastic/hardening free
+energy, `T alpha tr(sigma)` internal-energy contribution, plastic heat,
+reversible exchange and numerical loss as distinct accounts. Combined energy
+and actual nodal-work gates must both pass before accepting the candidate.
+
+The constant coefficient is source-pinned across the entire fully solid caloric
+chart, which also requires positive isochoric capacity. Total and mechanically
+offset strains must stay in the same small-strain regime. Reference mass and
+geometry are fixed; finite deformation, temperature-dependent expansion and
+melting remain outside this model. The focused native-mesh G1/G3 regressions
+exercise free versus constrained heating, data-only expansion swaps, thermal
+stress-induced plasticity and continued thermal history. Native execution of
+these new regressions is pending in the configured build environment.
+
 ### Shared structural and conductive material assignments
 
 `solid_enthalpy::plastic::ThermoplasticSolid::thermal_material_cells` lowers

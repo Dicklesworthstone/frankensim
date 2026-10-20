@@ -1,17 +1,22 @@
 //! Source-bound uniform thermoplastic heat feedback using native J2 and transport.
 //!
 //! The declared reduction has energetic linear isotropic hardening, fixed
-//! reference geometry/density, temperature-independent elastic/hardening energy,
-//! zero thermal eigenstrain, and a strictly increasing single-solid caloric
+//! reference geometry/density, temperature-independent elastic/hardening coefficients,
+//! optional constant sourced isotropic expansion, and a strictly increasing single-solid caloric
 //! chart. Yield stress and Cp may depend on temperature. Under these fixed
-//! pressure/density assumptions, caloric enthalpy changes equal caloric internal
-//! energy changes. Variable free energy, expansion, phase/volume work and finite
+//! reference-density assumptions, the stress-free caloric enthalpy is the caloric
+//! internal-energy chart. Expansion includes reversible stress/temperature energy.
+//! Variable elastic free energy, phase/volume work and finite
 //! deformation require additional terms and are outside this reduction.
 //!
-//! Physical yield dissipation alone is passed to the existing thermal owner.
+//! Physical yield dissipation and signed reversible thermoelastic exchange are
+//! passed separately to the existing thermal owner.
 //! Hardening storage and backward-Euler numerical loss are never heated. Every
 //! trial retains the same old strain, plastic history, enthalpy and clock. A
 //! candidate is published only after source, heat and combined work gates pass.
+
+mod expansion;
+pub use expansion::{ThermalJ2, ThermoplasticIncrement};
 
 use super::J2State;
 use super::energy::{EnergyError, EnergyIncrement, EnergyTolerances};
@@ -38,7 +43,8 @@ pub const MAX_FEEDBACK_ITERATIONS: usize = 256;
 
 /// Fixed external source context. The initial temperature must agree with h0.
 /// Selection applies to the four mechanical roles; Cp and density retain the
-/// exact claims already admitted by the supplied caloric owner.
+/// exact claims already admitted by the supplied caloric owner. Optional
+/// expansion has its own explicit source selection and retains that claim.
 #[derive(Clone, Debug)]
 pub struct SourceQuery<'a> {
     /// One immutable card owning the mechanical and caloric claims.
@@ -53,6 +59,10 @@ pub struct SourceQuery<'a> {
     pub selection: MaterialPropertySelection,
     /// Independent H or uniaxial Et source convention.
     pub hardening_basis: HardeningPropertyBasis,
+    /// None explicitly selects the zero-expansion reduction. Some selects the
+    /// canonical instantaneous linear expansion coefficient from this same card.
+    /// It must be a constant over the complete caloric span; no missing-data fallback.
+    pub thermal_expansion: Option<MaterialPropertySelection>,
     /// Positive tensor strain-norm ceiling, at most 0.05.
     pub strain_limit: f64,
 }
@@ -123,7 +133,8 @@ impl<E: std::error::Error + 'static> std::error::Error for FeedbackError<E> {}
 /// Source admission shared by material points and spatial solid elements.
 /// This owns no mechanical history, thermal inventory, geometry or integrator.
 /// The complete caloric interval has the same constant elastic/hardening energy
-/// and density assumptions as [`CaloricPoint`]. Only yield stress and Cp vary.
+/// and density assumptions as [`CaloricPoint`]. Only yield stress and Cp vary;
+/// optional constant expansion contributes reversible thermoelastic energy.
 #[derive(Clone, Debug)]
 pub struct ThermoplasticSource<'a> {
     card: &'a MaterialCard,
@@ -134,6 +145,8 @@ pub struct ThermoplasticSource<'a> {
     selection: MaterialPropertySelection,
     source: ResolvedJ2Plasticity,
     density_kg_m3: f64,
+    expansion_per_k: f64,
+    reference_temperature_k: f64,
 }
 
 /// One initially uniform specimen with immutable accepted native history.
@@ -160,6 +173,7 @@ pub struct FeedbackStep<'a, R> {
     /// Immutable specimen candidate, including the accepted native history.
     pub next: CaloricPoint<'a>,
     /// Native mechanical proposal evaluated at the actual thermal endpoint.
+    /// Its strain argument is total strain minus thermal strain.
     pub mechanical: EnergyIncrement,
     /// Original thermal proposal and its concrete report.
     pub transport: UniformEnthalpyStep<R>,
@@ -169,24 +183,28 @@ pub struct FeedbackStep<'a, R> {
     pub mechanical_work_j: f64,
     /// Final-temperature physical dissipation [J].
     pub physical_heat_j: f64,
-    /// Heat passed to the retained thermal proposal [J].
+    /// Signed reversible thermoelastic exchange into the caloric chart [J].
+    pub reversible_heat_j: f64,
+    /// Change in T alpha tr(sigma) over the reference volume [J].
+    pub thermoelastic_storage_change_j: f64,
+    /// Plastic heat plus reversible exchange passed to the thermal proposal [J].
     pub applied_heat_j: f64,
-    /// Absolute difference between applied and final physical heat [J].
+    /// Absolute difference between applied and final net caloric heat [J].
     pub heat_defect_j: f64,
     /// Absolute temperature fixed-point defect [K].
     pub temperature_defect_k: f64,
-    /// m delta_h - final physical dissipation - boundary heat [J].
+    /// m delta_h - physical dissipation - reversible exchange - boundary heat [J].
     pub thermal_residual_j: f64,
-    /// delta_elastic + delta_hardening + m delta_h + numerical_loss
+    /// delta_elastic + delta_hardening + delta(T alpha tr(sigma)) + m delta_h + numerical_loss
     /// - endpoint mechanical work - boundary heat [J].
     pub combined_residual_j: f64,
 }
 
 impl<'a> ThermoplasticSource<'a> {
     /// Bind one source at its initial enthalpy, without creating a material point.
-    /// The six source roles share one card, context and temperature. Every
+    /// The six source roles and optional expansion share one card, context and temperature. Every
     /// selected claim must continuously cover the complete caloric chart.
-    /// E, nu, H (or Et) and density must be validity-wide scalar constants;
+    /// E, nu, H (or Et), density and expansion must be validity-wide scalar constants;
     /// equal endpoint samples of a varying energetic coefficient do not suffice.
     pub fn try_new(
         query: SourceQuery<'a>,
@@ -285,6 +303,29 @@ impl<'a> ThermoplasticSource<'a> {
             );
             pins.push((claim.key.name().to_owned(), receipt.selected));
         }
+        if let Some(selection) = query.thermal_expansion {
+            use crate::state_point::{
+                INVERSE_TEMPERATURE_DIMS, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+            };
+            let requirement = ScalarPropertyRequirement::try_new(
+                LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+                INVERSE_TEMPERATURE_DIMS,
+                ScalarAdmissibility::Finite,
+            )
+            .map_err(|e| FeedbackError::Source(e.into()))?;
+            let expansion = resolve_material_state_point(
+                query.card,
+                &query.context,
+                std::slice::from_ref(&requirement),
+                selection,
+            )
+            .map_err(|e| FeedbackError::Source(e.into()))?;
+            pins.push((
+                requirement.name().to_owned(),
+                expansion.properties()[0].answer().receipt.selected,
+            ));
+            requirements.push(requirement);
+        }
         let selection = MaterialPropertySelection::PinnedByProperty(pins);
         let bundle = resolve_material_state_point(
             query.card,
@@ -344,7 +385,8 @@ impl<'a> ThermoplasticSource<'a> {
             let fixed = name == YOUNG_MODULUS_PROPERTY
                 || name == POISSON_RATIO_PROPERTY
                 || name == query.hardening_basis.property_name()
-                || name == density_name;
+                || name == density_name
+                || name == crate::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY;
             match &claim.value {
                 PropertyValue::Scalar { .. }
                     if receipt.decision == EvaluationDecision::ConstantWithinValidity =>
@@ -372,7 +414,7 @@ impl<'a> ThermoplasticSource<'a> {
                 }
                 _ => {
                     return Err(FeedbackError::Invalid(
-                        "fixed energetic coefficients/density require scalar constants; only yield and Cp may be temperature curves",
+                        "elasticity, hardening, density and expansion require scalar constants; only yield and Cp may be temperature curves",
                     ));
                 }
             }
@@ -407,7 +449,11 @@ impl<'a> ThermoplasticSource<'a> {
             query.strain_limit,
         )
         .map_err(FeedbackError::Source)?;
-        Ok(Self {
+        let expansion_per_k = source
+            .material()
+            .property(crate::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY)
+            .map_or(0.0, |p| p.value_si());
+        let result = Self {
             card: query.card,
             caloric: query.caloric,
             context: query.context,
@@ -416,7 +462,11 @@ impl<'a> ThermoplasticSource<'a> {
             selection,
             source,
             density_kg_m3: density,
-        })
+            expansion_per_k,
+            reference_temperature_k: state.temperature_k(),
+        };
+        result.admit_thermoelastic_capacity()?;
+        Ok(result)
     }
 
     /// Source bundle at the admitted reference temperature.
@@ -483,7 +533,7 @@ impl<'a> ThermoplasticSource<'a> {
         )]))
     }
 
-    /// Refresh all six pinned roles at the actual caloric state. This does not
+    /// Refresh all pinned roles at the actual caloric state. This does not
     /// advance plastic history or supply a second independently authored T.
     pub fn resolve_enthalpy(
         &self,
@@ -559,7 +609,7 @@ impl<'a> CaloricPoint<'a> {
         })
     }
 
-    /// Original six-role source snapshot at the accepted temperature.
+    /// Original complete source snapshot at the accepted temperature.
     #[must_use]
     pub const fn resolved(&self) -> &ResolvedJ2Plasticity {
         &self.source
@@ -645,7 +695,13 @@ impl<'a> CaloricPoint<'a> {
         }
         self.source
             .law()
-            .validate_committed_history(&self.strain, &self.history, config.yield_tolerance_pa)
+            .validate_committed_history(
+                &self
+                    .binding
+                    .mechanical_strain_at(self.state.temperature_k(), &self.strain)?,
+                &self.history,
+                config.yield_tolerance_pa,
+            )
             .map_err(FeedbackError::Mechanical)?;
         let tolerances = EnergyTolerances {
             energy_j_m3: material_tolerance,
@@ -656,7 +712,7 @@ impl<'a> CaloricPoint<'a> {
         for iteration in 1..=config.max_iterations {
             poll(&mut cancelled)?;
             let (_, trial) = self.propose_at(temperature, &strain, tolerances)?;
-            let applied_heat_j = product(self.volume_m3, trial.energy.physical_dissipation_j_m3)?;
+            let applied_heat_j = product(self.volume_m3, trial.caloric_heat_j_m3())?;
             let proposal = transport(UniformEnthalpyStepInput {
                 curve: self.binding.caloric.curve(),
                 initial: self.state,
@@ -696,15 +752,20 @@ impl<'a> CaloricPoint<'a> {
                 ));
             }
             let final_temperature = proposal.state.temperature_k();
-            let (source, mechanical) = self.propose_at(final_temperature, &strain, tolerances)?;
+            let (source, increment) = self.propose_at(final_temperature, &strain, tolerances)?;
+            let reversible_heat_j = product(self.volume_m3, increment.reversible_heat_j_m3)?;
+            let thermoelastic_storage_change_j =
+                product(self.volume_m3, increment.thermoelastic_storage_change_j_m3)?;
+            let mechanical_work_j = product(self.volume_m3, increment.mechanical_work_j_m3)?;
+            let mechanical = increment.mechanical;
             let physical_heat_j =
                 product(self.volume_m3, mechanical.energy.physical_dissipation_j_m3)?;
-            let mechanical_work_j =
-                product(self.volume_m3, mechanical.energy.mechanical_work_j_m3)?;
+            let caloric_heat_j = finite(physical_heat_j + reversible_heat_j)?;
             let thermal_residual =
-                finite(caloric_change - physical_heat_j - proposal.external_heat_j)?;
+                finite(caloric_change - caloric_heat_j - proposal.external_heat_j)?;
             let combined_residual = finite(
                 product(self.volume_m3, mechanical.energy.stored_change_j_m3())?
+                    + thermoelastic_storage_change_j
                     + caloric_change
                     + product(self.volume_m3, mechanical.energy.numerical_dissipation_j_m3)?
                     - mechanical_work_j
@@ -712,7 +773,7 @@ impl<'a> CaloricPoint<'a> {
             )?;
             defects = [
                 (final_temperature - temperature).abs(),
-                (physical_heat_j - applied_heat_j).abs(),
+                (caloric_heat_j - applied_heat_j).abs(),
                 thermal_residual,
                 combined_residual,
             ];
@@ -724,7 +785,7 @@ impl<'a> CaloricPoint<'a> {
                 poll(&mut cancelled)?;
                 let mut next = self.clone();
                 next.source = source;
-                next.strain = mechanical.strain;
+                next.strain = strain;
                 next.stress_pa = mechanical.stress_pa;
                 next.history = mechanical.state.clone();
                 next.state = proposal.state;
@@ -736,6 +797,8 @@ impl<'a> CaloricPoint<'a> {
                     iterations: iteration,
                     mechanical_work_j,
                     physical_heat_j,
+                    reversible_heat_j,
+                    thermoelastic_storage_change_j,
                     applied_heat_j,
                     heat_defect_j: defects[1],
                     temperature_defect_k: defects[0],
@@ -762,13 +825,15 @@ impl<'a> CaloricPoint<'a> {
         temperature_k: f64,
         strain: &Voigt,
         tolerances: EnergyTolerances,
-    ) -> Result<(ResolvedJ2Plasticity, EnergyIncrement), FeedbackError<E>> {
-        let source = self.binding.resolve_temperature(temperature_k)?;
-        let mechanical = source
-            .law()
-            .advance_with_energy(&self.strain, &self.history, strain, tolerances)
-            .map_err(FeedbackError::Mechanical)?;
-        Ok((source, mechanical))
+    ) -> Result<(ResolvedJ2Plasticity, ThermoplasticIncrement), FeedbackError<E>> {
+        self.binding.increment_at_temperature(
+            self.state.temperature_k(),
+            temperature_k,
+            &self.strain,
+            &self.history,
+            strain,
+            tolerances,
+        )
     }
 }
 

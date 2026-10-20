@@ -1591,15 +1591,39 @@ stress or rate coefficients cannot be frozen while their histories evolve.
 Renamed temperature coordinates require explicit absolute-temperature semantics.
 
 This reduction declares energetic isotropic hardening: `H alpha^2/2` is stored
-energy. Only `sigma_y(T1) delta_alpha` is supplied as heat to the existing
-`UniformEnthalpyStep` transport owner. Elastic storage, hardening storage,
+energy. `sigma_y(T1) delta_alpha` is the physical plastic heat supplied to the
+existing `UniformEnthalpyStep` transport owner; selected expansion adds the
+signed reversible exchange below. Elastic storage, hardening storage,
 boundary heat and backward-Euler numerical loss remain distinct. Every thermal
 proposal starts from the same accepted mechanical/caloric history; the actual
 returned temperature re-evaluates the native J2 increment before separate heat
 and combined-work gates accept the candidate. A rejected or cancelled proposal
-changes neither history nor time. The model includes no thermal eigenstrain,
-variable elastic free energy, phase change or finite-deformation volume work;
+changes neither history nor time. Optional sourced constant isotropic thermal
+expansion is supported as described below. The model excludes temperature-varying
+elastic coefficients, phase change and finite-deformation volume work;
 source receipts and residual gates do not establish empirical accuracy.
+
+### Sourced thermoelastic J2 expansion
+
+`SourceQuery::thermal_expansion` explicitly selects either zero eigenstrain or
+the canonical instantaneous linear expansion coefficient on the same card.
+The selected claim must be a finite scalar constant continuously supporting the
+complete caloric chart. A missing or temperature-varying expansion source refuses.
+`ThermalJ2` passes `eps-alpha(T-T_ref)I` to the original native J2 stress,
+consistent tangent and history update. The reference temperature is fixed at
+specimen birth, including across accepted thermal/mechanical continuation.
+
+The energy model retains `psi=e:C:e/2+H p²/2` and the reversible internal-energy
+term `T alpha tr(sigma)`. Backward-Euler caloric exchange is
+`sigma_y delta_p - T_old alpha delta(tr(sigma))`; physical plastic heat,
+signed reversible exchange and numerical loss remain separate. Source Cp and
+the actual piecewise-linear caloric chart must both have positive isochoric
+capacity `Cp-9K alpha² T/rho` throughout the admitted span. Reference geometry
+and mass remain fixed in this small-strain model; this does not establish finite
+volume work or temperature-dependent-alpha thermodynamics. Focused synthetic
+G1/G3 regressions cover adiabatic elastic cooling/unloading, native free versus
+constrained heating, continuation and thermally driven yielding; source refusal
+is exercised by G4 cases. These fixtures are not measured material validation.
 
 ### Structural source bindings for thermal transport
 

@@ -178,6 +178,7 @@ impl Fixture {
                     temperature_axis: "T".into(),
                     selection: MaterialPropertySelection::SingleClaimOnly,
                     hardening_basis: BASIS,
+                    thermal_expansion: None,
                     strain_limit: 0.04,
                 },
             })

@@ -65,9 +65,13 @@ fn scalar(name: &str, dims: Dims, value: f64) -> PropertyClaim {
 struct Fixture {
     card: MaterialCard,
     caloric: ResolvedHeatCapacityCurve,
+    expansion: bool,
 }
 impl Fixture {
     fn new(cp: f64) -> Self {
+        Self::with_expansion(cp, None)
+    }
+    fn with_expansion(cp: f64, alpha: Option<f64>) -> Self {
         let mut claims = ClaimSet::new();
         for p in [
             scalar(YOUNG_MODULUS_PROPERTY, Pressure::DIMS, E),
@@ -77,6 +81,15 @@ impl Fixture {
             scalar(CP, CP_DIMS, cp),
         ] {
             claims.insert_claim(p).unwrap();
+        }
+        if let Some(alpha) = alpha {
+            claims
+                .insert_claim(scalar(
+                    fs_material::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+                    fs_material::state_point::INVERSE_TEMPERATURE_DIMS,
+                    alpha,
+                ))
+                .unwrap();
         }
         let mut yield_claim = scalar(YIELD_STRESS_PROPERTY, Pressure::DIMS, YIELD);
         yield_claim.value = PropertyValue::Curve {
@@ -116,7 +129,11 @@ impl Fixture {
             1e-5,
         )
         .unwrap();
-        Self { card, caloric }
+        Self {
+            card,
+            caloric,
+            expansion: alpha.is_some(),
+        }
     }
     fn query(&self) -> SourceQuery<'_> {
         SourceQuery {
@@ -126,6 +143,9 @@ impl Fixture {
             temperature_axis: "T".into(),
             selection: MaterialPropertySelection::SingleClaimOnly,
             hardening_basis: BASIS,
+            thermal_expansion: self
+                .expansion
+                .then_some(MaterialPropertySelection::SingleClaimOnly),
             strain_limit: 0.04,
         }
     }
@@ -255,6 +275,153 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
         (actual - expected).abs() <= tolerance,
         "{actual} != {expected}"
     );
+}
+
+#[test]
+fn g1_material_expansion_changes_free_shape_and_constrained_heating_on_native_mesh() {
+    context(|cx| {
+        let cp = 500.0;
+        let duration = 0.001;
+        let heat = RHO * V * cp * 5.0;
+        let fixed: Vec<_> = (0..12).map(|i| (i, 0.0)).collect();
+        for alpha in [1e-5, 2e-5] {
+            let fixture = Fixture::with_expansion(cp, Some(alpha));
+            let thermal = initial(&[&fixture], &[], &[heat / duration]);
+            let solid = bind(&thermal, &[&fixture], &NODES, &TETS, cx);
+            let free = solid
+                .advance(
+                    &thermal,
+                    &(),
+                    duration,
+                    &ROLLERS,
+                    &[],
+                    IncrementSettings::default(),
+                    thermal_config(),
+                    config(),
+                    cx,
+                )
+                .unwrap();
+            close(
+                free.thermal().temperature_k(CellId(100)).unwrap(),
+                305.0,
+                1e-8,
+            );
+            for (node, axis) in [(1, 0), (2, 1), (3, 2)] {
+                close(
+                    free.solid().solution().displacement_m[node][axis],
+                    L * alpha * 5.0,
+                    1e-12,
+                );
+            }
+            for stress in free.solid().solution().element_stress[0] {
+                close(stress, 0.0, 1e-3);
+            }
+            close(free.report().reversible_heat_j, 0.0, 1e-9);
+            close(free.report().combined_residual_j, 0.0, 1e-8);
+            assert_eq!(free.thermal().cells()[&CellId(100)].mass_kg, RHO * V);
+
+            let clamped = solid
+                .advance(
+                    &thermal,
+                    &(),
+                    duration,
+                    &fixed,
+                    &[],
+                    IncrementSettings::default(),
+                    thermal_config(),
+                    config(),
+                    cx,
+                )
+                .unwrap();
+            // Fully constrained heating: (rho Cp-9K alpha^2 T0) theta=Q/V.
+            let nine_bulk = 3.0 * E / (1.0 - 0.4);
+            let theta = heat / V / (RHO * cp - nine_bulk * alpha * alpha * 300.0);
+            close(
+                clamped.thermal().temperature_k(CellId(100)).unwrap(),
+                300.0 + theta,
+                2e-8,
+            );
+            for stress in &clamped.solid().solution().element_stress[0][..3] {
+                close(*stress, -nine_bulk / 3.0 * alpha * theta, 2e-3);
+            }
+            assert!(clamped.report().reversible_heat_j > 0.0);
+            assert!(clamped.report().thermoelastic_storage_change_j < 0.0);
+            assert_eq!(clamped.report().physical_heat_j, 0.0);
+            close(clamped.report().combined_residual_j, 0.0, 1e-8);
+            let continued = clamped
+                .solid()
+                .advance(
+                    clamped.thermal(),
+                    &(),
+                    2.0 * duration,
+                    &fixed,
+                    &[],
+                    IncrementSettings::default(),
+                    thermal_config(),
+                    config(),
+                    cx,
+                )
+                .unwrap();
+            let old_t = 300.0 + theta;
+            let next_theta = heat / V / (RHO * cp - nine_bulk * alpha * alpha * old_t);
+            close(
+                continued.thermal().temperature_k(CellId(100)).unwrap(),
+                old_t + next_theta,
+                3e-8,
+            );
+            close(continued.report().combined_residual_j, 0.0, 1e-8);
+            assert_eq!(solid.time_s(), 0.0);
+        }
+    });
+}
+
+#[test]
+fn g3_thermal_expansion_drives_native_constrained_plasticity_without_an_authored_force() {
+    context(|cx| {
+        let cp = 1000.0;
+        let alpha = 5e-4;
+        let duration = 0.001;
+        let fixture = Fixture::with_expansion(cp, Some(alpha));
+        let thermal = initial(&[&fixture], &[], &[RHO * V * cp * 5.0 / duration]);
+        let solid = bind(&thermal, &[&fixture], &NODES, &TETS, cx);
+        let mut axial_clamp = ROLLERS.to_vec();
+        axial_clamp.push((3, 0.0));
+        let candidate = solid
+            .advance(
+                &thermal,
+                &(),
+                duration,
+                &axial_clamp,
+                &[],
+                IncrementSettings::default(),
+                thermal_config(),
+                config(),
+                cx,
+            )
+            .unwrap();
+        let solution = candidate.solid().solution();
+        let state = &solution.element_states[0];
+        let t = candidate.thermal().temperature_k(CellId(100)).unwrap();
+        assert!(state.alpha > 0.0);
+        assert!(state.plastic_strain[0] < 0.0);
+        assert_eq!(solution.displacement_m[1][0], 0.0);
+        close(solution.element_stress[0][1], 0.0, 1e-3);
+        close(solution.element_stress[0][2], 0.0, 1e-3);
+        let yield_pa = YIELD - SOFTENING * (t - 300.0);
+        close(
+            -solution.element_stress[0][0],
+            yield_pa + H * state.alpha,
+            1e-3,
+        );
+        close(
+            candidate.report().physical_heat_j,
+            V * yield_pa * state.alpha,
+            1e-9,
+        );
+        assert!(candidate.report().reversible_heat_j > 0.0);
+        close(candidate.report().mechanical_work_j, 0.0, 1e-10);
+        close(candidate.report().combined_residual_j, 0.0, 1e-8);
+    });
 }
 
 #[test]

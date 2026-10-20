@@ -2,14 +2,14 @@
 //!
 //! Each physical interval is one quasistatic load increment. The native P1/J2
 //! Newton solve uses locally refreshed yield data, retaining the previous
-//! displacement and plastic history. Its physical yield dissipation is supplied
-//! once to the original enthalpy graph as a constant rate over that interval.
+//! displacement and plastic history. Physical yield dissipation and reversible
+//! thermoelastic exchange enter the original enthalpy graph once per interval.
 //! All coupled proposals restart from the same accepted mechanical, thermal and
 //! observer states. Only a converged, balanced pair is returned.
 //!
 //! This uses the energetic-hardening reduction of ThermoplasticSource: constant
-//! E, nu, H and reference density, zero thermal eigenstrain, fully solid caloric
-//! charts, small strain AND rotation. Hardening storage and backward-Euler loss
+//! E, nu, H and reference density, optional sourced constant isotropic expansion,
+//! fully solid caloric charts, small strain AND rotation. Hardening storage and backward-Euler loss
 //! are not heat. Spatial conduction, boundary exchange and existing observers
 //! remain in DepositionSimulation. Refine both physical load intervals and
 //! thermal substeps; a fixed-point gate is not a time-accuracy certificate.
@@ -308,20 +308,22 @@ impl<'a> ThermoplasticSolid<'a> {
         cx: &Cx<'_>,
     ) -> Result<MechanicalProposal, ThermoplasticError<E>> {
         let mut materials = Vec::with_capacity(self.cells.len());
+        let mut laws = Vec::with_capacity(self.cells.len());
         let mut temperatures_k = Vec::with_capacity(self.cells.len());
         for (bound, &h) in self.cells.iter().zip(enthalpies) {
             poll(cx)?;
-            let (state, source) = bound
+            let (state, law) = bound
                 .source
-                .resolve_enthalpy(h)
+                .resolve_expanded_enthalpy(h)
                 .map_err(ThermoplasticError::Material)?;
             temperatures_k.push(state.temperature_k());
-            materials.push(source);
+            materials.push(law.resolved().clone());
+            laws.push(law);
         }
         let problem = SmallStrainTetProblem {
             nodes_m: self.nodes_m,
             tetrahedra: self.tetrahedra,
-            laws: SmallStrainLawField::PerElement(&materials),
+            laws: SmallStrainLawField::PerElement(&laws),
             prescribed_m,
             nodal_forces_n,
             load_path: &[1.0],
@@ -340,6 +342,9 @@ impl<'a> ThermoplasticSolid<'a> {
         let mut stored_change_j = 0.0;
         let mut numerical_loss_j = 0.0;
         let mut internal_work_j = 0.0;
+        let mut physical_heat_j = 0.0;
+        let mut reversible_heat_j = 0.0;
+        let mut thermoelastic_storage_change_j = 0.0;
         for (i, bound) in self.cells.iter().enumerate() {
             poll(cx)?;
             let law = materials[i].law();
@@ -351,8 +356,11 @@ impl<'a> ThermoplasticSolid<'a> {
                     "displacement gradient exceeds the small-strain/rotation bound; finite deformation required",
                 ));
             }
-            let account = law
+            let increment = bound
+                .source
                 .advance_with_energy(
+                    bound.accepted.specific_h_j_kg,
+                    enthalpies[i],
                     &self.solution.element_strain[i],
                     &self.solution.element_states[i],
                     &solution.element_strain[i],
@@ -363,22 +371,30 @@ impl<'a> ThermoplasticSolid<'a> {
                         yield_pa: config.yield_tolerance_pa,
                     },
                 )
-                .map_err(ThermoplasticError::Energy)?;
+                .map_err(ThermoplasticError::Material)?;
+            heat_j.push(finite(bound.volume_m3 * increment.caloric_heat_j_m3())?);
+            reversible_heat_j =
+                finite(reversible_heat_j + bound.volume_m3 * increment.reversible_heat_j_m3)?;
+            thermoelastic_storage_change_j = finite(
+                thermoelastic_storage_change_j
+                    + bound.volume_m3 * increment.thermoelastic_storage_change_j_m3,
+            )?;
+            internal_work_j =
+                finite(internal_work_j + bound.volume_m3 * increment.mechanical_work_j_m3)?;
+            let account = increment.mechanical;
             if account.state != solution.element_states[i] {
                 return Err(ThermoplasticError::Invalid(
                     "native equilibrium and energy update produced different plastic history",
                 ));
             }
-            heat_j.push(finite(
-                bound.volume_m3 * account.energy.physical_dissipation_j_m3,
-            )?);
+            physical_heat_j = finite(
+                physical_heat_j + bound.volume_m3 * account.energy.physical_dissipation_j_m3,
+            )?;
             stored_change_j =
                 finite(stored_change_j + bound.volume_m3 * account.energy.stored_change_j_m3())?;
             numerical_loss_j = finite(
                 numerical_loss_j + bound.volume_m3 * account.energy.numerical_dissipation_j_m3,
             )?;
-            internal_work_j =
-                finite(internal_work_j + bound.volume_m3 * account.energy.mechanical_work_j_m3)?;
             energy.push(account);
         }
         let new_u = solution.displacement_m.as_flattened();
@@ -401,6 +417,9 @@ impl<'a> ThermoplasticSolid<'a> {
             solution,
             energy,
             heat_j,
+            physical_heat_j,
+            reversible_heat_j,
+            thermoelastic_storage_change_j,
             stored_change_j,
             numerical_loss_j,
             external_work_j,
@@ -447,10 +466,21 @@ impl<'a> ThermoplasticSolid<'a> {
         }
         let mut enthalpies = self.enthalpies(thermal, true, cx)?;
         for (i, material) in self.materials.iter().enumerate() {
+            let old_temperature = self.cells[i]
+                .source
+                .caloric_source()
+                .curve()
+                .state_at_specific_enthalpy(self.cells[i].accepted.specific_h_j_kg)
+                .map_err(|e| ThermoplasticError::Material(FeedbackError::Caloric(e)))?
+                .temperature_k();
+            let old_strain = self.cells[i]
+                .source
+                .mechanical_strain(old_temperature, &self.solution.element_strain[i])
+                .map_err(ThermoplasticError::Material)?;
             material
                 .law()
                 .validate_committed_history(
-                    &self.solution.element_strain[i],
+                    &old_strain,
                     &self.solution.element_states[i],
                     config.yield_tolerance_pa,
                 )
@@ -486,16 +516,17 @@ impl<'a> ThermoplasticSolid<'a> {
             let actual =
                 self.mechanics(&final_h, prescribed_m, nodal_forces_n, settings, config, cx)?;
             let applied_heat_j = finite(trial.heat_j.iter().sum())?;
-            let physical_heat_j = finite(actual.heat_j.iter().sum())?;
+            let caloric_heat_j = finite(actual.heat_j.iter().sum())?;
             let external_heat_j = finite(thermal_audit.external_heat_j - applied_heat_j)?;
             let thermal_residual_j = finite(
                 thermal_audit.stored_energy_change_j
                     - thermal_audit.incoming_energy_j
                     - external_heat_j
-                    - physical_heat_j,
+                    - caloric_heat_j,
             )?;
             let combined_residual_j = finite(
                 actual.stored_change_j
+                    + actual.thermoelastic_storage_change_j
                     + thermal_audit.stored_energy_change_j
                     + actual.numerical_loss_j
                     - actual.external_work_j
@@ -535,7 +566,9 @@ impl<'a> ThermoplasticSolid<'a> {
                     iterations: iteration,
                     thermal_audit,
                     element_energy: actual.energy,
-                    physical_heat_j,
+                    physical_heat_j: actual.physical_heat_j,
+                    reversible_heat_j: actual.reversible_heat_j,
+                    thermoelastic_storage_change_j: actual.thermoelastic_storage_change_j,
                     applied_heat_j,
                     external_heat_j,
                     stored_mechanical_change_j: actual.stored_change_j,
@@ -577,22 +610,31 @@ struct MechanicalProposal {
     solution: SmallStrainTetSolution<J2State>,
     energy: Vec<EnergyIncrement>,
     heat_j: Vec<f64>,
+    physical_heat_j: f64,
+    reversible_heat_j: f64,
+    thermoelastic_storage_change_j: f64,
     stored_change_j: f64,
     numerical_loss_j: f64,
     external_work_j: f64,
     mechanical_residual_j: f64,
 }
 
-/// Thermal-only audit includes plastic heat as an input. The coupled fields
-/// separate it from authored/observer external heat and close actual nodal work.
+/// Thermal-only audit includes plastic heat and reversible exchange as inputs.
+/// The coupled fields separate both from external heat and close nodal work.
 #[derive(Clone, Debug)]
 pub struct ThermoplasticReport {
     pub iterations: usize,
     pub thermal_audit: EnergyAudit,
     pub element_energy: Vec<EnergyIncrement>,
     pub physical_heat_j: f64,
+    /// Signed reversible thermoelastic exchange into caloric storage [J].
+    pub reversible_heat_j: f64,
+    /// Change in T alpha tr(sigma), distinct from elastic free energy [J].
+    pub thermoelastic_storage_change_j: f64,
+    /// Net plastic plus reversible caloric source applied to thermal transport.
     pub applied_heat_j: f64,
     pub external_heat_j: f64,
+    /// Elastic and hardening free-energy change, excluding T alpha tr(sigma).
     pub stored_mechanical_change_j: f64,
     pub numerical_loss_j: f64,
     pub mechanical_work_j: f64,
