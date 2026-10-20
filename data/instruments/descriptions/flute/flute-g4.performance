@@ -1,5 +1,5 @@
 frankensim-flue-performance-v1
-clock 96000 48000
+clock 288000 48000
 output 120000 5 1000000
 gas 298.15 101325 0.58
 exterior same
@@ -88,49 +88,31 @@ flue 0.00594 0.00090 0.00708 0 0 0.02
 windway none
 jet_card tonal-interim
 jet 90 1e-6 3 0
-jet_limits 1 0.3 8192
-wave_memory_bytes 16777216
-fractional 12000 0.01
-viscothermal sections 39
-loss_section 0 4 200 12000
-loss_section 1 4 200 12000
-loss_section 2 4 200 12000
-loss_section 3 4 200 12000
-loss_section 4 4 200 12000
-loss_section 5 4 200 12000
-loss_section 6 8 200 12000
-loss_section 7 4 200 12000
-loss_section 8 4 200 12000
-loss_section 9 4 200 12000
-loss_section 10 4 200 12000
-loss_section 11 4 200 12000
-loss_section 12 4 200 12000
-loss_section 13 4 200 12000
-loss_section 14 4 200 12000
-loss_section 15 4 200 12000
-loss_section 16 4 200 12000
-loss_section 17 4 200 12000
-loss_section 18 4 200 12000
-loss_section 19 4 200 12000
-loss_section 20 4 200 12000
-loss_section 21 4 200 12000
-loss_section 22 4 200 12000
-loss_section 23 4 200 12000
-loss_section 24 4 200 12000
-loss_section 25 4 200 12000
-loss_section 26 4 200 12000
-loss_section 27 4 200 12000
-loss_section 28 4 200 12000
-loss_section 29 4 200 12000
-loss_section 30 4 200 12000
-loss_section 31 4 200 12000
-loss_section 32 4 200 12000
-loss_section 33 4 200 12000
-loss_section 34 4 200 12000
-loss_section 35 4 200 12000
-loss_section 36 4 200 12000
-loss_section 37 4 200 12000
-loss_section 38 4 200 12000
+jet_limits 1 0.3 65536
+wave_memory_bytes 67108864
+fractional 3000 0.01
+viscothermal sections 21
+loss_section 1 3 200 3000
+loss_section 2 6 200 3000
+loss_section 3 6 200 3000
+loss_section 4 6 200 3000
+loss_section 5 6 200 3000
+loss_section 6 16 200 3000
+loss_section 10 4 200 3000
+loss_section 12 6 200 3000
+loss_section 14 4 200 3000
+loss_section 16 4 200 3000
+loss_section 18 4 200 3000
+loss_section 20 4 200 3000
+loss_section 22 5 200 3000
+loss_section 24 5 200 3000
+loss_section 26 5 200 3000
+loss_section 28 6 200 3000
+loss_section 30 6 200 3000
+loss_section 32 6 200 3000
+loss_section 34 7 200 3000
+loss_section 36 7 200 3000
+loss_section 38 9 200 3000
 receiver -0.63849 0 1 4 16 2800
 outlets 39 8
 outlet 24 -0.2649051 0
@@ -151,4 +133,4 @@ track	blow	blowing-pressure
 initial	pressure-pa	0e0
 events	2
 event	0e0	5e-2	pressure-pa	3.79e2
-event	2.2e0	1e-1	pressure-pa	0e0
+event	2.2e0	1.05e-2	pressure-pa	0e0

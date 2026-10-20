@@ -7,6 +7,14 @@
 # Each note is mf at 48 kHz mono, 2.5 s, observed as the summed pressure of every open aperture
 # (open holes, open end and the embouchure) at a physical receiver 1 m above the embouchure.
 #
+# Numerical controls forced by the generic route (none is a physical parameter, none was tuned):
+# mechanics clock 288 kHz because a viscothermal loss cell needs four transit samples and under 0.5 rad
+# at its band edge (here 3 kHz); loss only on bore sections of 17 mm or more (the 3.3 mm chimneys and the
+# 5 mm riser are lossless); compact baffled loads for every opening, which hold only for ka <= 0.5 and so
+# cap the receiver band at 2.8 kHz (the computed mutual operator is capped at eight openings and fails
+# its quadrature at this clock); the pressure release lasts 10.5 ms because a release that ends exactly
+# on a control tick can leave a rounding-sized positive pressure that the jet domain check refuses.
+#
 # Geometry: data/instruments/geometry/flute-boehm-silver-bfoot-boehm1871 (Boehm 1871 as recomputed by
 # Miller 1922, Table II, rescaled from A=435 to A=440 by Boehm's published Schema rule; riser of the
 # Pearl PF-661 from Wolfe, Smith and Green 2003). Every geometry number is a dimensions.tsv row.
