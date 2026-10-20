@@ -12,6 +12,8 @@
 //! compact model is intentionally unavailable outside ka<=0.5; no full-band,
 //! unbaffled-pipe or measured-instrument accuracy is implied. Its stored near-field
 //! energy is separate from the positive loss representing escaped acoustic energy.
+//! It is not an M2.5-W3b realization and is excluded from W3b acceptance; that
+//! is fs-vfit's passive multiport model, audited in `tests/closed_loop_radiation.rs`.
 
 /// A shared exterior gas for compact radiation reaction and microphone propagation.
 pub mod environment;
