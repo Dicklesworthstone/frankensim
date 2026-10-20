@@ -7,6 +7,9 @@
 //! Only supplied vertices and endpoints are observed: no continuous-time or
 //! between-node maximum, extrema smoothing, or global safety bound is implied.
 
+/// One-sweep smooth hot-spot envelopes over explicit vertex/time selections.
+pub mod peaks;
+
 use super::{ScanObservable, ScanObjectiveBudget, ScanObjectiveEvaluation, ScanObservation,
     ScanObjectiveSampling, ScanSensitivityError, ScanStepLinearization, ScanningEnthalpyRun,
     MovingHeatScheduleGradient, EnthalpyStepConfig, LinearConfig, add, evaluate_with_tape,
