@@ -10,6 +10,12 @@ mod body;
 mod stops;
 #[path = "material_strings/bow_interfaces.rs"]
 mod bow_interfaces;
+// Native entry points share one bounded source loader and phase policy.
+#[path = "../src/bin/music_render/thermochemical.rs"]
+mod thermochemical;
+#[path = "../src/bin/music_render/json.rs"]
+mod json;
+use json::json_string;
 use std::{collections::BTreeMap, error::Error, fs::{File,OpenOptions}, io::{Read,Seek,Write}, path::Path};
 use fs_couple::bowed_string::runtime::reciprocal::bank::{
     MaterialStringSource,ReciprocalStringBank,StringBankOptions,StringBowLocation};
@@ -116,6 +122,9 @@ impl input::Spec {
         stop_profile:Option<stops::Profile>,
         mut loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
         poll(gate)?;
+        if self.gas != *self.gas_record.state() {
+            return Err("material-string gas coefficients must retain their original source record".into());
+        }
         if let Some(body)=&profile { body.preflight(&self)?; }
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
         // Count every fluid inertia and physical connection before pack I/O.
@@ -261,15 +270,23 @@ fn read_bounded(path:&Path,cap:usize)->Result<Vec<u8>> {
     if bytes.len()>cap {return Err(format!("{} exceeds {cap} bytes",path.display()).into());} Ok(bytes)
 }
 fn main()->Result<()> {
-    let args:Vec<_>=std::env::args_os().collect();
+    let (args, gas_options)=thermochemical::Options::extract_os(
+        &std::env::args_os().collect::<Vec<_>>())?;
     if args.len()<3 {
-        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE]".into());
+        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
+    }
+    if gas_options.record.is_some() {
+        return Err("material-string gas records belong in the performance file".into());
     }
     let (body_path,stop_path)=stops::profile_paths(&args[3..])?;
     let mut profile=body_path.map(|p|body::Profile::parse(&read_bounded(p,body::MAX_BYTES)?)).transpose()?;
     let stop_profile=stop_path.map(|p|stops::Profile::parse(&read_bounded(p,stops::MAX_BYTES)?)).transpose()?;
     let path=Path::new(&args[1]);let parent=path.parent().unwrap_or(Path::new("."));
-    let mut spec=input::Spec::parse(&read_bounded(path,input::MAX_INPUT_BYTES)?)?;
+    let gas_sources=gas_options.load()?;
+    let gas_bindings=gas_sources.bindings();
+    let gas_registry=gas_sources.registry(&gas_bindings);
+    let mut spec=input::Spec::parse_with_gas_sources(
+        &read_bounded(path,input::MAX_INPUT_BYTES)?,gas_registry.as_ref())?;
     let gate=CancelGate::new_clock_free();let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let mut remaining=input::MAX_TOTAL_PACK_BYTES;
     if let Some(stops) = &stop_profile { stops.validate_performance(&spec,&gate)?; }
@@ -318,6 +335,8 @@ fn main()->Result<()> {
             loading.resolution());
     }
     eprintln!("input_bytes={}; gas={:?}; preload_J={:?}",ready.spec.bytes.len(),ready.spec.gas,ready.performance.preload_energy_j());
+    let gas_source_json=thermochemical::provenance(core::slice::from_ref(&ready.spec.gas_record));
+    if !gas_source_json.is_empty() { eprintln!("gas_source={{\"scope\":\"frozen material-string atmosphere\"{gas_source_json}}}"); }
     // Complete source, geometry, frequency, schedule and preload admission is
     // finished before creating output. Never overwrite any existing path.
     let output=OpenOptions::new().write(true).create_new(true).open(&args[2])?;

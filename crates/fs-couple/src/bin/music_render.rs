@@ -111,26 +111,9 @@ const MAX_SCHEDULE_BYTES: usize = 1 << 20;
 const MAX_SCHEDULE_ITEMS: usize = 16_384;
 const MAX_SCHEDULE_WORK: u64 = 1_000_000;
 
-fn json_string(value: &str) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::new();
-    out.push('"');
-    for ch in value.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            ch if ch <= '\u{001f}' => {
-                write!(&mut out, "\\u{:04x}", u32::from(ch)).expect("writing to String");
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
-    out
-}
+#[path = "music_render/json.rs"]
+mod json;
+use json::json_string;
 
 fn fail(what: &str) -> ! {
     // Paths, track ids and nested errors may contain quotes or newlines.

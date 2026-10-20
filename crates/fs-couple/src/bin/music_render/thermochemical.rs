@@ -1,4 +1,5 @@
-//! Explicit file-backed gas sources for the render CLI; no library store access.
+//! Shared explicit gas-source loading for native render entry points.
+//! Physics libraries still receive already-loaded sources and never open stores.
 
 use fs_matdb::{
     MaterialStateId, NormalizedMaterialCardPack, NormalizedModelPack, NormalizedPack,
@@ -11,6 +12,7 @@ use fs_material::{
 };
 use fs_qty::chemistry::SpeciesId;
 use std::{
+    ffi::OsString,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -32,17 +34,25 @@ impl Options {
     /// Each component is SPECIES.pack NASA9.pack TRANSPORT-CLAIMS.pack; the
     /// declaration itself assigns those transport claims to that species.
     pub fn extract(args: &[String]) -> Result<(Vec<String>, Self), String> {
+        let words = args.iter().map(OsString::from).collect::<Vec<_>>();
+        let (remaining, options) = Self::extract_os(&words)?;
+        Ok((remaining.into_iter().map(|word| word.into_string()
+            .expect("remaining arguments came from UTF-8 strings")).collect(), options))
+    }
+
+    /// The same options with native paths, retaining unrelated non-UTF-8 paths.
+    pub fn extract_os(args: &[OsString]) -> Result<(Vec<OsString>, Self), String> {
         let mut result = Self::default();
         let mut remaining = Vec::new();
         let mut words = args.iter();
         while let Some(word) = words.next() {
-            match word.as_str() {
+            match word.to_str().unwrap_or("") {
                 "--gas-component" => {
                     if result.components.len() == MAX_COMPONENTS {
                         return Err("--gas-component exceeds 128 components".into());
                     }
                     let mut path = || {
-                        words.next().filter(|s| !s.starts_with("--"))
+                        words.next().filter(|s| !s.to_string_lossy().starts_with("--"))
                         .map(PathBuf::from).ok_or_else(|| "--gas-component needs species, NASA-9 and pure-transport claim pack paths".to_string())
                     };
                     result.components.push([path()?, path()?, path()?]);
@@ -54,7 +64,7 @@ impl Options {
                     result.record = Some(PathBuf::from(
                         words
                             .next()
-                            .filter(|s| !s.starts_with("--"))
+                            .filter(|s| !s.to_string_lossy().starts_with("--"))
                             .ok_or("--gas-record needs a gas declaration file")?,
                     ));
                 }
@@ -62,7 +72,7 @@ impl Options {
                     if result.water.is_some() {
                         return Err("--gas-water may only be supplied once".into());
                     }
-                    result.water = Some(match words.next().map(String::as_str) {
+                    result.water = Some(match words.next().and_then(|word| word.to_str()) {
                         Some("none") => None,
                         Some(id) => {
                             Some(SpeciesId::new(id).map_err(|e| format!("--gas-water: {e}"))?)
@@ -76,7 +86,7 @@ impl Options {
                     if result.phase.is_some() {
                         return Err("--gas-phase may only be supplied once".into());
                     }
-                    result.phase = Some(match words.next().map(String::as_str) {
+                    result.phase = Some(match words.next().and_then(|word| word.to_str()) {
                         Some("frozen") => ThermochemicalPhase::FrozenGas,
                         Some("liquid-water") => ThermochemicalPhase::LiquidWaterLimit,
                         _ => return Err("--gas-phase needs frozen or liquid-water".into()),

@@ -1,7 +1,7 @@
 //! Bounded geometry/input adapter; material laws and gesture interpolation live elsewhere.
 use super::*;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
-use fs_material::gas_species::input::read_gas_state;
+use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas_record};
 use fs_scenario::gesture::GestureValue;
 use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{TransverseDirection, TransverseDirections};
 
@@ -46,6 +46,8 @@ pub struct Body {
 pub struct Spec {
     pub bytes: Vec<u8>, pub rate: u32, pub samples: u64, pub full_scale: f64, pub block: usize,
     pub temperature: f64, pub omega: f64, pub gas: GasState, pub body: Body, pub strings: Vec<Wire>,
+    /// Retain original thermochemical composition and pack authority with the coefficients.
+    pub gas_record: GasRecord,
     pub rotational_bridges: Vec<RotationalBridge>,
     pub cylinder_gas_loading: Option<CylinderFlowResolution>,
     pub prepared_linear: Option<PreparedModalBudget>,
@@ -56,6 +58,10 @@ pub struct Spec {
 }
 impl Spec {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
+        Self::parse_with_gas_sources(bytes, None)
+    }
+
+    pub fn parse_with_gas_sources(bytes: &[u8], sources: Option<&ThermochemicalSources<'_>>) -> Result<Self> {
         if bytes.len() > MAX_INPUT_BYTES { return Err("material-string input exceeds 1 MiB".into()); }
         let text = std::str::from_utf8(bytes)?;
         let (header, schedule) = text.split_once("\nschedule\n")
@@ -82,7 +88,8 @@ impl Spec {
         let temperature = row.positive()?; let omega = row.scalar()?; row.end()?;
         if omega < 0.0 { return Err("source angular frequency must be nonnegative".into()); }
         let mut row = r.row("gas")?;
-        let gas = read_gas_state(&mut row.words, None)?; row.end()?;
+        let gas_record = read_gas_record(&mut row.words, None, sources)?; row.end()?;
+        let gas = *gas_record.state();
         let mut row = r.row("body")?;
         let body = Body { pack: row.path()?, length: row.positive()?, width: row.positive()?,
             thickness: row.positive()?, modes: row.count(16)?, listener: row.positive()? };
@@ -339,7 +346,7 @@ impl Spec {
         }
         friction.validate_tracks(&schedule)?;
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
-            gas, body, strings, rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, cavity, friction, bow_ribbon, forces, schedule };
+            gas, gas_record, body, strings, rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, cavity, friction, bow_ribbon, forces, schedule };
         spec.network_dimensions(false)?;
         Ok(spec)
     }

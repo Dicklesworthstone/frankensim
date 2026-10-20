@@ -78,6 +78,19 @@ remain binding. That **same** frozen gas supplies all string drag, cavity
 mechanics and compact body/neck pressure observations. Gas changes are a new
 realization, not a live atmosphere mutation or an output equalizer.
 
+For source-defined species and temperature-dependent heat capacity, replace that
+row with `gas thermochemical T P mole COUNT SPECIES FRACTION ...` (or `mass`).
+Supply each species' normalized species, NASA-9 and pure transport claim packs
+through `--gas-component SPECIES.pack NASA9.pack TRANSPORT.pack`; repeat the
+option for every component. These are the same source loader and constitutive
+owners used by `music_render`. Declare `--gas-water none --gas-phase frozen`
+explicitly, or identify the water species and choose the existing `liquid-water`
+admission policy. Source identities, composition, validity and phase admission
+stay attached to the resolved gas and are included in the render log. Unsupported
+or incomplete source data refuse before rendering; a species name never supplies
+missing thermal or transport properties. The atmosphere remains frozen during a
+performance, with the same resolved state reaching all of the consumers above.
+
 `cavity neck VOLUME_M3 RADIUS_M LENGTH_M RESISTANCE_PA_S_M3 LISTENER_M` selects the
 existing Helmholtz model with an explicitly specified neck resistance. It replaces
 `cavity none`. Compression, neck motion, body motion and bridge reactions remain
