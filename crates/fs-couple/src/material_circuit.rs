@@ -10,7 +10,7 @@
 pub mod thermal;
 /// Material/geometry-derived C and L, with explicit work on live reconfiguration.
 pub mod storage;
-/// Reciprocal capacitor-gap motion driven by the same electrical field energy.
+/// Reciprocal electric/magnetic gap motion driven by the same field energy.
 pub mod motion;
 /// Source-bound electrical contacts in series with original bulk branches.
 pub mod contacts;
@@ -81,8 +81,8 @@ impl std::error::Error for MaterialCircuitError {}
 /// One accepted graph and its conserved electrical coordinates. C/L are held
 /// during an ordinary circuit step; source-bound changes between steps use
 /// [explicit parameter work](Self::rebind_storage_candidate). Source-port
-/// mapping and transformer topology stay fixed. [`motion::MaterialCapacitorMotion`]
-/// evolves a source-bound capacitor's geometry jointly with its moving body.
+/// mapping and transformer topology stay fixed. [`motion::MaterialFieldMotion`]
+/// evolves a source-bound capacitor's or inductor's gap with its moving body.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterialCircuit {
     graph: CircuitGraph,

@@ -1,7 +1,7 @@
 //! Data-only material substitutions through reciprocal field/circuit/body motion.
 #[path = "electrical_contacts/source.rs"]
 mod contact_source;
-use fs_couple::material_circuit::motion::{CapacitorMotionInput, MaterialCapacitorMotion};
+use fs_couple::material_circuit::motion::{FieldMotionInput, MaterialFieldMotion};
 use fs_couple::material_circuit::storage::{MaterialStorage, MaterialStorageElement};
 use fs_couple::material_circuit::{MaterialCircuit, MaterialCircuitSolve, MaterialResistor};
 use fs_evidence::ValidityDomain;
@@ -62,11 +62,11 @@ fn controls() -> MaterialCircuitSolve {
 fn near(a: f64, b: f64, tolerance: f64) {
     assert!((a-b).abs() <= tolerance, "{a} != {b}, tolerance {tolerance}");
 }
-fn isolated(epsilon: f64, charge: f64, density: f64, limits: [f64; 2]) -> MaterialCapacitorMotion {
+fn isolated(epsilon: f64, charge: f64, density: f64, limits: [f64; 2]) -> MaterialFieldMotion {
     let circuit = MaterialCircuit::new_with_storage(CircuitGraph { node_count: 2,
         branches: vec![(1, 0, Branch::Capacitor { farads: f64::NAN })], transformers: vec![] },
         vec![], vec![capacitor(0, epsilon, 0.5, 1.0)], vec![], vec![charge], &[]).unwrap();
-    MaterialCapacitorMotion::new(circuit, 0, plate(density), 0.02, limits).unwrap()
+    MaterialFieldMotion::new(circuit, 0, plate(density), 0.02, limits).unwrap()
 }
 
 #[test]
@@ -80,8 +80,8 @@ fn dielectric_and_electrode_material_swaps_change_real_motion_by_the_energy_deri
             let attraction = -q*q/(2.0*epsilon*0.5);
             let acceleration = (external+attraction)/mass;
             near(model.body().inertia().mass(), mass, 1e-14);
-            near(model.electrical_force_n().unwrap(), attraction, 1e-14);
-            let candidate = model.step_candidate(vec![], CapacitorMotionInput {
+            near(model.field_force_n().unwrap(), attraction, 1e-14);
+            let candidate = model.step_candidate(vec![], FieldMotionInput {
                 electrical_ports: &[], external_force_n: external, duration_s: dt,
             }, controls(), || false).unwrap();
             let next = candidate.model();
@@ -93,7 +93,7 @@ fn dielectric_and_electrode_material_swaps_change_real_motion_by_the_energy_deri
             near(next.gap_m(), gap, 2e-11);
             near(next.velocity_m_s(), velocity, 2e-11);
             near(next.circuit().charges_c()[0], q, 1e-13);
-            near(next.capacitor().capacitance_f(), epsilon*0.5/gap, 1e-12);
+            near(next.capacitor().unwrap().capacitance_f(), epsilon*0.5/gap, 1e-12);
             near(step.mechanical_supply_j, external*(gap-1.0), 1e-12);
             near(step.field_work_on_body_j, attraction*(gap-1.0), 1e-12);
             near(step.electrical_energy_j[1], q*q*gap/(2.0*epsilon*0.5), 1e-12);
@@ -102,7 +102,7 @@ fn dielectric_and_electrode_material_swaps_change_real_motion_by_the_energy_deri
             assert_eq!(step.heat_j, 0.0);
             assert_eq!(step.electrical_supply_j, 0.0);
             assert_eq!(next.body(), model.body());
-            assert_eq!(next.capacitor().material(), model.capacitor().material());
+            assert_eq!(next.capacitor().unwrap().material(), model.capacitor().unwrap().material());
             assert_eq!(model, before);
         }
     }
@@ -148,9 +148,9 @@ fn moving_gap_feeds_back_through_the_driven_rlc_network_and_separate_contact_hea
         } else { vec![] };
         let circuit = network().rebind_contacts_candidate(contacts.clone(), &[0.4, 0.05]).unwrap();
         let mut held = circuit.clone();
-        let mut moving = MaterialCapacitorMotion::new(circuit, 3, plate(5000.0), 0.0, [0.5, 1.5]).unwrap();
+        let mut moving = MaterialFieldMotion::new(circuit, 3, plate(5000.0), 0.0, [0.5, 1.5]).unwrap();
         let body = moving.body().clone();
-        let dielectric = moving.capacitor().material().clone();
+        let dielectric = moving.capacitor().unwrap().material().clone();
         let fixed_storage = moving.circuit().storage()[..2].to_vec();
         let initial_total = sourced_electrical_energy(moving.circuit());
         let mut supplied = 0.0;
@@ -158,7 +158,7 @@ fn moving_gap_feeds_back_through_the_driven_rlc_network_and_separate_contact_hea
         for _ in 0..20 {
             let previous_gap = moving.gap_m();
             let candidate = moving.step_with_contacts_candidate(vec![resistor(0, 2.0)], contacts.clone(),
-                CapacitorMotionInput { electrical_ports: &[0.4, 0.05], external_force_n: 0.03,
+                FieldMotionInput { electrical_ports: &[0.4, 0.05], external_force_n: 0.03,
                     duration_s: 0.02 }, controls(), || false).unwrap();
             let (next, step) = candidate.into_parts();
             assert_eq!(step.native.y.len(), 3);
@@ -185,18 +185,18 @@ fn moving_gap_feeds_back_through_the_driven_rlc_network_and_separate_contact_hea
             near(step.field_work_on_body_j, step.electrical_supply_j-step.heat_j
                 -(step.electrical_energy_j[1]-step.electrical_energy_j[0]), 1e-10);
             assert_eq!(next.body(), &body);
-            assert_eq!(next.capacitor().material(), &dielectric);
+            assert_eq!(next.capacitor().unwrap().material(), &dielectric);
             assert_eq!(next.circuit().contacts(), contacts.as_slice());
             assert_eq!(&next.circuit().storage()[..2], fixed_storage.as_slice());
             assert_eq!(next.circuit().graph().branches[3].2,
-                Branch::Capacitor { farads: next.capacitor().capacitance_f() });
+                Branch::Capacitor { farads: next.capacitor().unwrap().capacitance_f() });
             near(next.circuit().charges_c()[0], 0.2, 1e-12);
             held = held.step_with_contacts_candidate(vec![resistor(0, 2.0)], contacts.clone(),
                 &[0.4, 0.05], 0.02, controls(), || false).unwrap().into_parts().0;
             moving = next;
         }
         assert!(moving.gap_m() < 1.0);
-        assert!(moving.capacitor().capacitance_f() > 1.0);
+        assert!(moving.capacitor().unwrap().capacitance_f() > 1.0);
         assert!((moving.circuit().charges_c()[1]-held.charges_c()[1]).abs() > 1e-6,
             "geometry must change actual circuit charge, not just the force report");
         assert!((moving.circuit().fluxes_wb()[0]-held.fluxes_wb()[0]).abs() > 1e-6);
@@ -214,10 +214,10 @@ fn small_si_gap_with_high_voltage_does_not_inherit_the_voltage_probe_scale() {
         vec![], vec![charge], &[voltage]).unwrap();
     // The separate voltage branch keeps the source in the same descriptor but
     // supplies no current. Charge stays isolated, giving an independent oracle.
-    let moving = MaterialCapacitorMotion::new(circuit, 1, plate(1000.0), 0.0, [5e-5, 2e-4]).unwrap();
+    let moving = MaterialFieldMotion::new(circuit, 1, plate(1000.0), 0.0, [5e-5, 2e-4]).unwrap();
     let mass = moving.body().inertia().mass();
     let force = -charge*charge/(2.0*epsilon*area);
-    let candidate = moving.step_candidate(vec![], CapacitorMotionInput {
+    let candidate = moving.step_candidate(vec![], FieldMotionInput {
         electrical_ports: &[voltage], external_force_n: 0.0, duration_s: dt,
     }, MaterialCircuitSolve { energy_tolerance_j: 1e-12, power_tolerance_w: 1e-12 }, || false).unwrap();
     near(candidate.model().gap_m(), gap+0.5*force/mass*dt*dt, 1e-11);
@@ -232,7 +232,7 @@ fn small_si_gap_with_high_voltage_does_not_inherit_the_voltage_probe_scale() {
 fn unsupported_gap_ideal_clamp_or_cancellation_cannot_partially_advance_the_model() {
     let bounded = isolated(1.0, 0.2, 1000.0, [0.99, 1.5]);
     let before = bounded.clone();
-    assert!(bounded.step_candidate(vec![], CapacitorMotionInput {
+    assert!(bounded.step_candidate(vec![], FieldMotionInput {
         electrical_ports: &[], external_force_n: 0.0, duration_s: 1.0,
     }, controls(), || false).is_err());
     assert_eq!(bounded, before);
@@ -242,16 +242,16 @@ fn unsupported_gap_ideal_clamp_or_cancellation_cannot_partially_advance_the_mode
     ], transformers: vec![] };
     let circuit = MaterialCircuit::new_with_storage(graph, vec![], vec![capacitor(0, 1.0, 0.5, 1.0)],
         vec![], vec![0.2], &[0.4]).unwrap();
-    let clamped = MaterialCapacitorMotion::new(circuit, 0, plate(1000.0), 0.0, [0.5, 1.5]).unwrap();
+    let clamped = MaterialFieldMotion::new(circuit, 0, plate(1000.0), 0.0, [0.5, 1.5]).unwrap();
     let before = clamped.clone();
-    assert!(clamped.step_candidate(vec![], CapacitorMotionInput {
+    assert!(clamped.step_candidate(vec![], FieldMotionInput {
         electrical_ports: &[0.4], external_force_n: 0.0, duration_s: 0.1,
     }, controls(), || false).is_err());
     assert_eq!(clamped, before);
 
     let model = isolated(1.0, 0.2, 1000.0, [0.5, 1.5]);
     let before = model.clone();
-    let input = CapacitorMotionInput { electrical_ports: &[], external_force_n: 0.0, duration_s: 0.1 };
+    let input = FieldMotionInput { electrical_ports: &[], external_force_n: 0.0, duration_s: 0.1 };
     let mut polls = 0;
     model.step_candidate(vec![], input, controls(), || { polls += 1; false }).unwrap();
     let mut count = 0;
@@ -278,5 +278,5 @@ fn temperature_dependent_dielectric_cannot_invent_missing_reversible_heat() {
         branches: vec![(1, 0, Branch::Capacitor { farads: f64::NAN })], transformers: vec![] },
         vec![], vec![MaterialStorage { branch: 0, element: MaterialStorageElement::Capacitor(cap) }],
         vec![], vec![0.2], &[]).unwrap();
-    assert!(MaterialCapacitorMotion::new(circuit, 0, plate(1000.0), 0.0, [0.5, 1.5]).is_err());
+    assert!(MaterialFieldMotion::new(circuit, 0, plate(1000.0), 0.0, [0.5, 1.5]).is_err());
 }

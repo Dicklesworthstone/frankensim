@@ -2969,16 +2969,17 @@ duplicate bindings, unrepresentable energy and cancellation refuse atomically.
 C/L remain fixed within an ordinary circuit step. This linear lossless update
 does not supply continuous thermal/mechanical feedback or switching impulses.
 
-## Reciprocal material capacitor motion
+## Reciprocal material electric and magnetic gap motion
 
-`material_circuit::motion::MaterialCapacitorMotion` composes the existing
-source-bound RLC circuit, uniform dielectric capacitor and regional rigid-body
-inertia. The active capacitor's original quadratic term is replaced exactly once
-by q²d/(2 epsilon A); all other C/L storage and original J/R/G topology are retained.
-The same descriptor solve advances charge, flux, gap and momentum. Voltage and
-attractive force are derivatives of the same field energy; mass comes only from
-`ResolvedBody`. Changing supported dielectric or electrode material data changes
-the coupled motion and electrical history without changing a physics law.
+`material_circuit::motion::MaterialFieldMotion` composes the existing source-bound
+RLC circuit, uniform dielectric or magnetic gap and regional rigid-body inertia.
+The moving element's original quadratic term is replaced exactly once by
+q²d/(2 epsilon A) or lambda²d/(2 mu N²A), with lambda the winding flux linkage.
+All other C/L storage and original J/R/G topology are retained. The same descriptor
+solve advances charge, flux linkage, gap and momentum. Terminal effort and
+attractive force come from the same energy; mass comes only from `ResolvedBody`.
+Changing supported gap-medium or moving-body material data changes the coupled
+motion and electrical history without changing a physics law.
 
 Original electrical ports keep their order and an external force port appends.
 Bulk conductor and electrical contact losses reuse the existing native-effort
@@ -2992,15 +2993,22 @@ constraints at the new gap. Incompatible ideal clamps, unsupported source data,
 open gap bounds, unrepresentable values, balance failures and cancellation refuse
 without partial publication or charge projection. Native domain-aware finite
 differences shrink unsupported probes rather than expanding material validity.
-A validity-wide constant dielectric coefficient, fixed area, ideal electrodes
-and a rigid translational guide are required. Thermal dielectric curves require
-field entropy before electrocaloric coupling; fringing, breakdown, impact,
-dielectric loss and electrode deformation are not inferred.
+A validity-wide constant field coefficient, fixed area and rigid translational
+guide are required. Electric geometry assumes ideal electrodes; magnetic geometry
+is one uniform gap with an ideal, negligible-reluctance return path. The resolved
+permeability belongs to the gap medium, not an effective core material. This does
+not model a length-changing solenoid, pole saturation/hysteresis, fringing, leakage,
+impact, breakdown, dielectric loss or deformation. Thermal coefficient curves
+require field entropy before reversible thermal coupling and are refused here.
 
-Focused regressions cover data-only density/permittivity swaps, both charge
-signs and zero-charge motion, nontrivial driven RLC/contact topology, a 100 µm
-gap at 100 V, and atomic constraint/domain refusal. Native execution is pending;
-source review and independent numerical oracles are not a Rust test pass.
+Focused G1/G3 regressions cover data-only density/permittivity/permeability swaps,
+both signs and zero of charge/flux linkage, actual winding count, driven RLC and
+coil-contact loss, a 100 µm electric gap at 100 V, a 1 mm magnetic gap and atomic
+constraint/domain refusal. Fixed-charge/fixed-linkage motion is checked against
+the independently integrated constant Maxwell-pressure force. These are numerical
+model checks, not experimental actuator or ferromagnetic-material validation.
+Native execution is pending; source review and independent numerical oracles
+are not a Rust test pass.
 
 ### Material two-plane nonlinear string composition
 
