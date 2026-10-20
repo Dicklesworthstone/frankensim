@@ -77,8 +77,20 @@ which took ~75 N of the pedal force, so the "closed" hat was barely pressed.
 The shells face each other with opposite bell and bow profiles. The requested opening is the
 undeformed face-to-face rim gap; it is no longer silently capped at 0.14 mm. Contact clearance
 includes the local profiles, thicknesses, and up to 0.15 mm of two-lobe waviness on every grid.
-Clutch stiffness/damping totals and rim traction are preserved under grid refinement. These
-correct geometry and load semantics; acoustic improvement requires a separate comparison.
+Clutch axial stiffness/damping totals, angular stiffness, and rim traction are preserved under
+grid refinement. A weighted affine grip separates translation, two tilts, and non-affine
+deformation. Its condensed spring/dashpot form is positive semidefinite as a whole; individual
+pair coefficients can be signed. It retains the 8 MN/m axial grip while allowing the cymbal
+to rock against finite washer stiffness. The former point-to-rod links silently imposed an
+angular clamp proportional to the squared attachment radius, which grew on coarse grids.
+
+The angular estimate uses two circular bearings at the annulus mid-radius (13.25 mm):
+each contributes `pi K_line r^3`, giving 2.412 N m/rad in total. `K_line = 1.65e5 N/m/m`
+is a measured crash-washer value from [Samejima (2021)](https://doi.org/10.1250/ast.42.314),
+transferred here as an estimate, not a measurement of this hi-hat or an audio fit. Angular
+damping is unmeasured and set to zero. This is a small-slope impedance model, not resolved felt
+contact geometry. The body's existing inertia carries the rocking motion.
+These correct geometry and load semantics; acoustic improvement requires a separate comparison.
 The offline rim law uses Hunt-Crossley `mu` 0.08 s/m.
 
 The rims also rub (`Friction`, dry friction coefficient 0.5). Bending moves a plate's faces sideways by
@@ -148,6 +160,31 @@ not restore the missing wash. The 3.5x crash improves in balance but worsens in 
 These are native diagnostics, not browser qualification or an overall acoustic pass; the kit
 WASM package was held back. The old `rim_geometry` example assumes the pre-correction constant
 gap and 48 kHz clock and remains a historical probe, not a test of the corrected geometry.
+
+The subsequent finite-washer A/B isolates the missing rocking motion: at the true 2 mm
+opening the rigid clutch produces no rim contacts and no bottom-shell energy; disabling rim
+contacts gives identical PCM. The affine mount restores collisions without changing the
+opening, material, axial grip or strike (2.5 m/s at 0.85 radius). Native open-hat diagnostics
+against the same original overhead give:
+
+| Grid spacing | Balance gap, first 250 ms | Energy above 4 kHz | Render duration |
+| --- | --- | --- | --- |
+| 24.75 mm, rigid clutch | 21.31 dB | 0.00552% | 1 s |
+| 24.75 mm, affine mount | 10.40 dB | 0.954% | 1 s |
+| 16.5 mm, affine mount | 13.07 dB | 2.725% | 1 s |
+| 11 mm, affine mount | 11.45 dB | 2.648% | 1 s |
+| 8.25 mm, affine mount | 8.30 dB | 6.790% | 0.6 s |
+| 5.5 mm, affine mount | 5.91 dB | 11.412% | 0.35 s |
+
+The real stroke has 52.693% above 4 kHz; another real stroke differs by 2.12 dB in
+balance. Refinement is not monotone or shown converged, and the short fine-grid renders
+cannot qualify the tail. On the 24.75 mm grid, open attack energy in the first 50 ms is
+36.14% (real 38.54%), but its decay descriptor still fails. Closed-hat balance worsens
+10.86 to 11.30 dB at that grid, while attack/decay improve; at 16.5 mm its balance improves
+14.02 to 12.67 dB. These adverse results are retained. All 27 native tests pass, including
+mount energy/passivity and axial/torque refinement regressions. This is a mechanical fix
+with partial acoustic gains, not an overall fidelity pass or browser timing qualification;
+the production kit remains held back.
 
 ## Graded against a real kit
 

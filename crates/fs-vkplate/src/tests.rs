@@ -1,6 +1,52 @@
 use super::*;
 
 #[test]
+fn g0_affine_mount_energy_and_admission() {
+    let mut body=Body::point("attachment",1.0);
+    body.n=4;
+    let angular=[7.0,2.0,9.0]; let damping=[0.4,0.1,0.8];
+    for scale in [0.01,0.2,1.0] {
+        body.xy=vec![[-scale,-2.0*scale],[scale,-2.0*scale],[-scale,2.0*scale],[scale,2.0*scale]];
+        let nodes=vec![(0,2.0),(1,2.0),(2,2.0),(3,2.0)];
+        let links=Link::affine_mount(0,&body,&nodes,Some((1,0)),[37.0,2.0],angular,damping).unwrap();
+        let form=|w:&[f64],anchor:f64,damp:bool| links.iter().map(|l| {
+            let wb=match l.b {Some((0,j))=>w[j],_=>anchor};
+            (if damp {l.c}else{l.k})*(w[l.a.1]-wb).powi(2)
+        }).sum::<f64>();
+        // Independent orthogonal fields on a rectangle: translation, two tilts,
+        // and the alternating non-affine saddle. The anchor translates too.
+        let (t,tx,ty,q,anchor)=(0.003,0.2,-0.1,0.002,0.07);
+        let w:Vec<_>=body.xy.iter().map(|[x,y]|anchor+t+tx*x+ty*y+q*x*y/(2.0*scale*scale)).collect();
+        for (damp,ax,a) in [(false,37.0,angular),(true,2.0,damping)] {
+            let expected=ax*(t*t+q*q)+a[0]*tx*tx+2.0*a[1]*tx*ty+a[2]*ty*ty;
+            assert!((form(&w,anchor,damp)-expected).abs()<1e-10);
+            for seed in 0..32 {
+                let field:Vec<_>=(0..4).map(|i|((seed*4+i) as f64*1.731).sin()).collect();
+                assert!(form(&field,0.3,damp)>=-1e-10,"assembled mount must be passive");
+            }
+        }
+        let mut uneven=nodes.clone(); uneven[0].1=7.0;
+        let center: [f64;2]=std::array::from_fn(|d| uneven.iter().map(|&(i,w)|w*body.xy[i][d]/13.0).sum());
+        let links=Link::affine_mount(0,&body,&uneven,None,[37.0,2.0],angular,damping).unwrap();
+        let w:Vec<_>=body.xy.iter().map(|[x,y]|t+tx*(x-center[0])+ty*(y-center[1])).collect();
+        let work:f64=links.iter().map(|l| l.k*(w[l.a.1]-l.b.map_or(0.0,|(_,i)|w[i])).powi(2)).sum();
+        assert!((work-(37.0*t*t+angular[0]*tx*tx+2.0*angular[1]*tx*ty+angular[2]*ty*ty)).abs()<1e-10);
+    }
+    let valid=vec![(0,1.0),(1,1.0),(2,1.0),(3,1.0)];
+    for nodes in [vec![],vec![(0,1.0),(0,1.0),(2,1.0)],vec![(0,-1.0),(1,1.0),(2,1.0)],vec![(0,1.0),(1,f64::NAN),(2,1.0)],vec![(0,1.0),(1,1.0),(4,1.0)]] {
+        assert!(Link::affine_mount(0,&body,&nodes,None,[1.0,1.0],angular,damping).is_err());
+    }
+    for bad in [[1.0,2.0,1.0],[-1.0,0.0,1.0],[1.0,f64::NAN,1.0]] {
+        assert!(Link::affine_mount(0,&body,&valid,None,[1.0,1.0],bad,damping).is_err());
+        assert!(Link::affine_mount(0,&body,&valid,None,[1.0,1.0],angular,bad).is_err());
+    }
+    assert!(Link::affine_mount(0,&body,&valid,Some((0,0)),[1.0,1.0],angular,damping).is_err());
+    assert!(Link::affine_mount(0,&body,&valid,None,[-1.0,1.0],angular,damping).is_err());
+    body.xy=vec![[0.0,0.0],[1.0,0.0],[2.0,0.0],[3.0,0.0]];
+    assert!(Link::affine_mount(0,&body,&valid,None,[1.0,1.0],angular,damping).is_err());
+}
+
+#[test]
 fn g3_streaming_filter_matches_offline_phase_and_clones() {
     for factor in [1,2,3,4,6,8] {
         let input:Vec<_>=(0..512*factor).map(|i| (0.31*i as f64).sin()+0.2*(1.13*i as f64).cos()).collect();
@@ -123,6 +169,20 @@ fn g3_hihat_refinement_preserves_joint_load_and_rim_traction() {
         assert!(clutch.len()>=4);
         assert!((clutch.iter().map(|l| l.k*1e-5).sum::<f64>()-80.0).abs()<1e-10);
         assert!((clutch.iter().map(|l| l.c*speed).sum::<f64>()-20.0).abs()<1e-10);
+        // Generalized tilt torque must not grow with the clutch grid radius.
+        let angular_k=2.0*PI*1.65e5*(0.5_f64*(0.0065+0.02)).powi(3);
+        for axis in 0..2 {
+            let mut torque=0.0; let mut net=0.0;
+            for l in ins.links.iter().filter(|l|l.a.0==0) {
+                let xa=ins.bodies[0].xy[l.a.1][axis];
+                let xb=l.b.filter(|&(b,_)|b==0).map_or(0.0,|(_,i)|ins.bodies[0].xy[i][axis]);
+                let f=-l.k*0.01*(xa-xb);
+                net+=f; torque+=f*xa;
+                if l.b.is_some_and(|(b,_)|b==0) {net-=f; torque-=f*xb;}
+            }
+            assert!(net.abs()<1e-8);
+            assert!((torque+angular_k*0.01).abs()<1e-9,"scale {scale}, axis {axis}, torque {torque}");
+        }
         let force: f64=ins.contacts.iter().map(|c| {
             let Law::Power{k,alpha,mu}=c.law;
             k*compression.powf(alpha)*(1.0+mu*speed)

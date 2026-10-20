@@ -1102,6 +1102,80 @@ pub struct Link {
     pub c: f64,
 }
 
+impl Link {
+    /// Assemble a distributed grip with independent axial and angular impedance.
+    ///
+    /// `nodes` supplies positive quadrature weights (normalized here). Angular
+    /// matrices are [xx, xy, yy] for slopes [dw/dx, dw/dy], in N m/rad and
+    /// N m s/rad; axial coefficients are [N/m, N s/m]. The weighted affine fit
+    /// separates translation, tilt and non-affine deformation. Its energy is
+    /// K/2 * (mean(w)-anchor)^2 + K/2 * sum(weight*residual^2)
+    /// + theta' * angular_stiffness * theta/2; damping has the same form.
+    ///
+    /// The returned links are ONE assembled PSD form. Individual pair links can
+    /// have negative coefficients and must not be removed or used separately.
+    /// This cold assembly uses the ordinary Link force/snapshot path unchanged.
+    pub fn affine_mount(
+        body_index: usize, body: &Body, nodes: &[(usize, f64)],
+        anchor: Option<(usize, usize)>, axial: [f64; 2],
+        angular_stiffness: [f64; 3], angular_damping: [f64; 3],
+    ) -> Result<Vec<Link>, String> {
+        let psd = |q: [f64; 3]| {
+            let scale = q.iter().fold(0.0_f64, |s,x| s.max(x.abs()));
+            q.iter().all(|x| x.is_finite()) && q[0] >= 0.0 && q[2] >= 0.0
+                && (scale == 0.0 || (q[0]/scale)*(q[2]/scale) >= (q[1]/scale).powi(2))
+        };
+        if nodes.len() < 3 || !axial.iter().all(|x| x.is_finite() && *x >= 0.0)
+            || !psd(angular_stiffness) || !psd(angular_damping) {
+            return Err("affine mount: need >=3 nodes and finite nonnegative impedances (PSD angular matrices)".into());
+        }
+        let mut sum = 0.0;
+        let mut seen = BTreeMap::new();
+        for &(i,w) in nodes {
+            if i >= body.n || !w.is_finite() || w <= 0.0
+                || !body.xy[i].iter().all(|x| x.is_finite())
+                || anchor == Some((body_index,i)) || seen.insert(i,()).is_some() {
+                return Err("affine mount: invalid/duplicate attachment node, weight or self anchor".into());
+            }
+            sum += w;
+        }
+        if !sum.is_finite() { return Err("affine mount: weight sum overflow".into()); }
+        let center: [f64; 2] = std::array::from_fn(|d| nodes.iter().map(|&(i,w)| (w/sum)*body.xy[i][d]).sum());
+        let points: Vec<_> = nodes.iter().map(|&(i,w)| {
+            (i,w/sum,[body.xy[i][0]-center[0],body.xy[i][1]-center[1]])
+        }).collect();
+        let mut cov = [0.0;3];
+        for &(_,w,[x,y]) in &points {
+            cov[0] += w*x*x; cov[1] += w*x*y; cov[2] += w*y*y;
+        }
+        let det = cov[0]*cov[2]-cov[1]*cov[1];
+        if !det.is_finite() || det <= 1e-12*(cov[0]+cov[2]).powi(2) {
+            return Err("affine mount: attachment points must span a well-conditioned plane".into());
+        }
+        let [a,b,d] = [cov[2]/det,-cov[1]/det,cov[0]/det];
+        // R = covariance^-1. The pair correction is W X (R A R - K R) X' W.
+        let correction = |k: f64, [u,v,w]: [f64;3]| [
+            a*a*u+2.0*a*b*v+b*b*w-k*a,
+            a*b*u+(a*d+b*b)*v+b*d*w-k*b,
+            b*b*u+2.0*b*d*v+d*d*w-k*d,
+        ];
+        let (hk,hc) = (correction(axial[0],angular_stiffness),correction(axial[1],angular_damping));
+        let mut links: Vec<_> = points.iter().map(|&(i,w,_)| Link {
+            a:(body_index,i), b:anchor, k:axial[0]*w, c:axial[1]*w,
+        }).collect();
+        for (j,&(nj,wj,[xj,yj])) in points.iter().enumerate() {
+            for &(ni,wi,[xi,yi]) in &points[..j] {
+                let coefficient = |h: [f64;3]| -wi*wj*(xi*(h[0]*xj+h[1]*yj)+yi*(h[1]*xj+h[2]*yj));
+                links.push(Link { a:(body_index,ni), b:Some((body_index,nj)), k:coefficient(hk), c:coefficient(hc) });
+            }
+        }
+        if links.iter().any(|l| !l.k.is_finite() || !l.c.is_finite()) {
+            return Err("affine mount: assembled coefficient overflow".into());
+        }
+        Ok(links)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Law {
     /// f = K d^alpha (1 + mu d_dot): Hertz with Hunt-Crossley loss.

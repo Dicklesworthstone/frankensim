@@ -432,7 +432,8 @@ pub fn hihat_with(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
 /// Dry friction coefficient between the hi-hat's bronze rims. Unlubricated copper alloys on themselves
 /// span about 0.3-1; with 0.3 and 0.5 the closed hat's octave-band decay grades inside the real-vs-real
 /// ruler (0.40 and 0.32 octaves from the Salamander stroke, two real strokes 0.47; without friction 0.95),
-/// and 0.5 is the closer of the two. The open hat, whose rims seldom touch, barely changes.
+/// and 0.5 was the closer of the two. Those grades predate opposing geometry and
+/// finite washer rocking; they do not qualify the current preset.
 pub const RIM_FRICTION: f64 = 0.5;
 
 /// The same with grid spacing multiplied by `scale`.
@@ -474,10 +475,18 @@ pub fn hihat_grid_mu(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from
         r >= 0.0065 && r <= r1 + 1e-12
     }).collect();
     if clutch.is_empty() { return Err("hi-hat: grid leaves no clutch nodes".into()); }
-    let (kc, cc) = (8.0e6 / clutch.len() as f64, 80.0 / clutch.len() as f64);
-    for &k in &clutch {
-        ins.links.push(Link { a: (ti, k), b: Some((rod, 0)), k: kc, c: cc });
-    }
+    let nodes: Vec<_> = clutch.iter().map(|&i| (i,1.0)).collect();
+    // Two felt bearings at the estimated mid-radius of the physical annulus.
+    // Samejima (2021), doi:10.1250/ast.42.314, measured line stiffness
+    // 1.65e5 N/m/m on a crash washer, NOT on this hi-hat. Its transfer here is
+    // an estimate, not a fit: each ring gives K_theta = integral(K_line*x^2 ds)
+    // = pi*K_line*r^3. Angular damping is unmeasured and remains zero.
+    // Keep the existing axial clutch grip, but do not let coarse grid lever
+    // arms silently turn it into an increasingly rigid rotational clamp.
+    let bearing_radius = 0.5_f64*(0.0065+0.02);
+    let angular_k = 2.0*PI*1.65e5*bearing_radius.powi(3);
+    ins.links.extend(Link::affine_mount(ti,&ins.bodies[ti],&nodes,Some((rod,0)),
+        [8.0e6,80.0],[angular_k,0.0,angular_k],[0.0;3])?);
     // rim contact between the shells: matching nodes in the outer 20 % of the radius, with slight
     // 2-lobe rim waviness (~0.15 mm) so the pedal rests on high spots while adjacent rim arcs sizzle
     let mut pairs = 0;
