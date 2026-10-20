@@ -17,7 +17,7 @@ use fs_math::{c64::C64, det};
 const MAX_SLOPES: usize = 2 * (super::super::MAX_STRING_MODES + 1);
 /// Effective axial-to-transverse bridge coupling at the speaking termination
 /// (~1.8 deg downbearing inclination plus 28 mm bridge-cap rocking lever arm).
-const BRIDGE_AXIAL_PROJECTION: f64 = 0.06;
+pub const BRIDGE_AXIAL_PROJECTION: f64 = 0.06;
 
 pub(super) struct Prepared {
     model: LongitudinalString,

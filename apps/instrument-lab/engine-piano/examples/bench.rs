@@ -1,12 +1,20 @@
 //! Native speed of the live kernel: real-time factor versus sounding keys.
-//! usage: bench [board_band_hz] [course_mode_budget] [seconds]
+//! usage: bench [board_band_hz] [course_mode_budget] [seconds] [--string-waves]
+//! `--string-waves` stretches the plain steel strings with longitudinal waves
+//! (`stretch::plain_steel_waves_spec`, 10 kHz axial band).
 use fs_live_piano::{Config, Description, LivePiano};
 use std::time::Instant;
 
 const KEYS: [u8; 16] = [36, 43, 48, 52, 55, 60, 64, 67, 72, 76, 79, 84, 31, 40, 57, 62];
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let all: Vec<String> = std::env::args().collect();
+    let waves = all.iter().any(|a| a == "--string-waves");
+    if let Some(bad) = all.iter().skip(1).find(|a| a.starts_with("--") && *a != "--string-waves") {
+        eprintln!("unknown option {bad}");
+        std::process::exit(2);
+    }
+    let args: Vec<String> = all.into_iter().filter(|a| !a.starts_with("--")).collect();
     let band: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
     let budget: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
     let seconds: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(2.0);
@@ -20,6 +28,9 @@ fn main() {
     cfg.course_mode_budget = budget;
     cfg.max_courses = 88;
     cfg.max_dynamic_modes = usize::MAX / 4;
+    if waves {
+        cfg.string_stretching = Some(fs_live_piano::stretch::plain_steel_waves_spec(&desc.courses, 10_000.0, 0.01, 0.05));
+    }
     let t = Instant::now();
     let piano = LivePiano::new(&desc, cfg.clone()).expect("piano");
     println!("{}", fs_live_piano::describe(&piano));

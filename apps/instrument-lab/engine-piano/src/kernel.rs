@@ -39,9 +39,10 @@
 use crate::refmods::{
     board_geometry, felt,
     geometry::{self, Course},
-    linear::{Bank, BoardMode},
+    linear::{Bank, BoardMode, string_stretching::{Material, Specification, WaveMaterial}},
     relaxation, shank, steinway_d, steinway_scale,
 };
+use crate::stretch::Stretch;
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
@@ -126,6 +127,11 @@ pub struct Config {
     /// Against attaching the same partials as dynamic strings, an A3 strike differs by
     /// -48 dB with the dampers down and -54 dB under the sustain pedal (embedded board).
     pub silent_bank_hz: f64,
+    /// Geometric string extension: the reference's complete `--string-stretching` file
+    /// (`linear`, `stretch` or `waves` per key of the scale; see `crate::stretch`). It acts
+    /// on sounding strings through one explicit kick per step, booked in `Ledger::coupling_j`.
+    /// `None` keeps the linear strings bit for bit.
+    pub string_stretching: Option<String>,
 }
 
 /// One partial of a silent string in the bank: the completed-square coordinate z of
@@ -168,7 +174,7 @@ struct BankCourse {
 }
 
 /// Exact transition of y'' + c y' + w2 y = 0 over `dt` for (y, y'), underdamped.
-fn damped_transition(w2: f64, c: f64, dt: f64) -> [f64; 4] {
+pub(crate) fn damped_transition(w2: f64, c: f64, dt: f64) -> [f64; 4] {
     let w = det::sqrt(w2);
     let zeta = c / (2.0 * w);
     let wd = w * det::sqrt(1.0 - zeta * zeta);
@@ -198,6 +204,7 @@ impl Config {
             rt0425_hammer_stiffness: false,
             rt0425_hammer_dissipation: false,
             silent_bank_hz: 0.0,
+            string_stretching: None,
         }
     }
 }
@@ -896,6 +903,8 @@ struct Seg {
     endpoint_mass: f64,
     /// Chord stiffness T/L [N/m].
     t_over_l: f64,
+    /// Installed tension T [N] (this member's detune included).
+    tension_n: f64,
     /// Distributed velocity-loss rate 2R [1/s] of this segment's partials.
     mass_rate: f64,
     /// Strain-rate loss time 2 eta_u [s] (RT-0425 law; 0 for the authored one).
@@ -1344,6 +1353,8 @@ struct ASeg {
     /// Held contact force of this step [N] (speaking strings only).
     force: f64,
     src: f64,
+    /// Geometric extension of this string (`Config::string_stretching`).
+    stretch: Option<Box<Stretch>>,
 }
 
 #[derive(Clone)]
@@ -1456,6 +1467,9 @@ pub struct Counters {
     pub contact_failures: u64,
     pub clipped_samples: u64,
     pub peak_pa: f64,
+    /// Steps on which a stretching string left its file's slope or strain domain (the
+    /// reference refuses those; the live kernel counts them).
+    pub stretch_out_of_domain: u64,
 }
 
 /// Modal count and each damper station's (shape, bridge lift, squared norm).
@@ -1546,6 +1560,9 @@ pub struct LivePiano {
     bank: Vec<BankMode>,
     bank_courses: Vec<BankCourse>,
     bank_gl: Vec<f64>,
+    /// Per course, its `Config::string_stretching` material (and waves), if it stretches.
+    stretch_spec: Vec<Option<(Material, Option<WaveMaterial>)>>,
+    stretching: bool,
 }
 
 /// A copy steps bit for bit as the original would from the same point: every
@@ -1627,6 +1644,8 @@ impl Clone for LivePiano {
             bank: self.bank.clone(),
             bank_courses: self.bank_courses.clone(),
             bank_gl: self.bank_gl.clone(),
+            stretch_spec: self.stretch_spec.clone(),
+            stretching: self.stretching,
         }
     }
 }
@@ -1735,6 +1754,7 @@ impl LivePiano {
                 pair: 0,
                 endpoint_mass: c.linear_density_kg_m * length / 3.0,
                 t_over_l: tension / length,
+                tension_n: tension,
                 mass_rate,
                 strain_time,
                 length_m: length,
@@ -1742,6 +1762,25 @@ impl LivePiano {
                 strike_fraction: c.strike_fraction,
             });
             key_segs[s.course].push(si);
+        }
+        // Geometric string extension: the reference's own file format and admission, then every
+        // stretching segment prepared once at its full partial count (a grant retains fewer), so
+        // a later strike cannot be refused for it.
+        let mut stretch_spec: Vec<Option<(Material, Option<WaveMaterial>)>> = vec![None; courses.len()];
+        if let Some(text) = &cfg.string_stretching {
+            let spec = Specification::read(text, &courses)?;
+            for (slot, c) in stretch_spec.iter_mut().zip(&courses) {
+                if let Some(Some(material)) = spec.courses.get(&c.midi) {
+                    *slot = Some((*material, spec.waves.get(&c.midi).copied()));
+                }
+            }
+            for seg in &segs {
+                if let Some((material, waves)) = stretch_spec[seg.course] {
+                    let c = &courses[seg.course];
+                    Stretch::new(material, waves, seg.length_m, c.linear_density_kg_m, seg.tension_n, seg.n_max, rate)
+                        .map_err(|e| format!("key {}: {e}", c.midi))?;
+                }
+            }
         }
         // The silent-string bank: every partial up to `silent_bank_hz` of every string, with
         // the same intrinsic loss rate the dynamic set's flows use and its pad's drag on that
@@ -2010,6 +2049,8 @@ impl LivePiano {
             bank_gl: vec![0.0; bank_courses.len() * r],
             bank: bank_modes,
             bank_courses,
+            stretching: stretch_spec.iter().any(Option::is_some),
+            stretch_spec,
             cfg,
         };
         piano.rebuild(&[], &[])?;
@@ -2167,12 +2208,18 @@ impl LivePiano {
             }
         }
         let (pad_pack, pad_gram) = pack_pads(&pad, n);
+        // Admitted at the full partial count in `new`, so it builds for any grant.
+        let seg = &self.segs[si];
+        let stretch = self.stretch_spec[seg.course].and_then(|(material, waves)| {
+            let density = self.courses[seg.course].linear_density_kg_m;
+            Stretch::new(material, waves, seg.length_m, density, seg.tension_n, n, self.cfg.sample_rate).ok().map(Box::new)
+        });
         ASeg {
             #[cfg(target_arch = "wasm32")]
             pair: self.segs[si].pair,
             seg: si, off, n, duplex: self.segs[si].duplex, member: self.segs[si].member, beta2, mek, w_schur, loss_w, sum_c4,
             endpoint_drag, hammer_lift, lift_total: hammer_lift + lift_bq, cdiag, pad, pad_pack, pad_gram,
-            owed: false, owe: [0.0; 4], dn: [0.0; 4], force: 0.0, src: 0.0,
+            owed: false, owe: [0.0; 4], dn: [0.0; 4], force: 0.0, src: 0.0, stretch,
         }
     }
 
@@ -2282,6 +2329,10 @@ impl LivePiano {
                 for k in range.clone().skip(handed) {
                     let x = self.q[k] - self.m.beta[k] * b;
                     e += 0.5 * self.v[k] * self.v[k] + 0.5 * self.m.w2[k] * x * x;
+                }
+                // Its extension and axial motion leave with it (the bank strings are linear).
+                if let Some(st) = &s.stretch {
+                    e += st.stored(&self.q[range.clone()], &self.m.beta[range.clone()], b);
                 }
                 // Its chord keeps following the bridge: that kinetic energy stays.
                 self.ledger.retired_j += e - 0.5 * (s.beta2 - handed_beta2) * bdot * bdot;
@@ -3066,6 +3117,9 @@ impl LivePiano {
             string_loss += strings;
             damper_loss += pads;
         }
+        if self.stretching {
+            string_loss += self.step_stretch();
+        }
 
         self.ledger.string_loss_j += string_loss;
         self.ledger.board_loss_j += board_loss;
@@ -3497,6 +3551,46 @@ impl LivePiano {
 
     /// Mechanical energy now stored in strings (the silent-string bank's too), board,
     /// hammers and felt [J].
+    /// The extension kick of every stretching sounding string (`crate::stretch`), after the
+    /// step's linear motion; owed damper flows settle first. Returns the axial modal loss;
+    /// the split's numerical work and the board's kinetic change go to `Ledger::coupling_j`.
+    fn step_stretch(&mut self) -> f64 {
+        let dt = self.dt;
+        let mut work = -0.5 * self.bvel.iter().map(|x| x * x).sum::<f64>();
+        let mut loss = 0.0;
+        for ac in &mut self.active {
+            let b = dot(&ac.gl, &self.bq);
+            let mut reaction = 0.0;
+            for s in &mut ac.segs {
+                if s.stretch.is_none() {
+                    continue;
+                }
+                let range = s.off..s.off + s.n;
+                if s.owed {
+                    settle_owed(s, &mut self.v[range.clone()]);
+                    s.owed = false;
+                }
+                if let Some(st) = s.stretch.as_deref_mut() {
+                    let kick = st.step(&self.q[range.clone()], &self.m.beta[range.clone()], b, dt, &mut self.v[range]);
+                    reaction += kick.reaction;
+                    work += kick.work;
+                    loss += kick.loss;
+                    if kick.out_of_domain {
+                        self.counters.stretch_out_of_domain += 1;
+                    }
+                }
+            }
+            if reaction != 0.0 {
+                let push = -dt * reaction;
+                for (x, g) in self.bvel.iter_mut().zip(&ac.gl) {
+                    *x += push * g;
+                }
+            }
+        }
+        self.ledger.coupling_j += work + 0.5 * self.bvel.iter().map(|x| x * x).sum::<f64>();
+        loss
+    }
+
     pub fn stored_energy_j(&self) -> f64 {
         let r = self.r;
         let mut e = 0.5 * self.bvel.iter().map(|x| x * x).sum::<f64>();
@@ -3519,6 +3613,10 @@ impl LivePiano {
                 for (k, v) in (s.off..s.off + s.n).zip(vel.iter()) {
                     let x = self.q[k] - self.m.beta[k] * b;
                     e += 0.5 * v * v + 0.5 * self.m.w2[k] * x * x;
+                }
+                if let Some(st) = &s.stretch {
+                    let range = s.off..s.off + s.n;
+                    e += st.stored(&self.q[range.clone()], &self.m.beta[range], b);
                 }
             }
         }

@@ -14,7 +14,7 @@ use super::{Bank, StringMode, StringPort};
 use super::super::geometry::Course;
 
 #[path = "longitudinal_string.rs"]
-mod longitudinal;
+pub mod longitudinal;
 
 pub const HEADER:&str="frankensim-piano-string-stretching-v1";
 const MAX_BYTES:u64=64*1024;

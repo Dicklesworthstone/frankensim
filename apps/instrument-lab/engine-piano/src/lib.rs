@@ -16,6 +16,7 @@ pub mod fastfelt;
 pub mod kernel;
 pub mod preparation;
 pub mod refmods;
+pub mod stretch;
 // The reference engine's radiation module names the bank as `crate::linear`.
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(unused_imports)]

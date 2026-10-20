@@ -7,21 +7,26 @@
 //!
 //! usage: validate [board_band_hz] [partials] [seconds] [reduction_spec]
 //!        [--rt0425-string-damping] [--rt0425-hammer-stiffness] [--rt0425-hammer-dissipation]
+//!        [--string-waves]
 //! With a reduction spec the board is the reference's bridge-informed
 //! reduction of the (0, band] slice and both models use its full damping matrix.
 //! The flags select the published laws in both models (the browser plays all three).
+//! `--string-waves` stretches plain steel keys with longitudinal waves in both
+//! (`stretch::plain_steel_waves_spec`, 10 kHz axial band): the reference iterates its
+//! implicit discrete gradient, the live kernel kicks once per step, so the two then
+//! agree to the time discretization, not to roundoff.
 use fs_live_piano::refmods::{engine, geometry, steinway_scale};
 use fs_live_piano::{Config, Description, LivePiano};
 
 fn main() {
     let all: Vec<String> = std::env::args().collect();
-    const LAWS: [&str; 3] = ["--rt0425-string-damping", "--rt0425-hammer-stiffness", "--rt0425-hammer-dissipation"];
+    const LAWS: [&str; 4] = ["--rt0425-string-damping", "--rt0425-hammer-stiffness", "--rt0425-hammer-dissipation", "--string-waves"];
     // A mistyped flag would otherwise validate the default law and report it as the published one.
     if let Some(bad) = all.iter().skip(1).find(|a| a.starts_with("--") && !LAWS.contains(&a.as_str())) {
         eprintln!("unknown option {bad}");
         std::process::exit(2);
     }
-    let [string_damping, hammer_stiffness, hammer_dissipation] = LAWS.map(|f| all.iter().any(|a| a == f));
+    let [string_damping, hammer_stiffness, hammer_dissipation, string_waves] = LAWS.map(|f| all.iter().any(|a| a == f));
     let args: Vec<String> = all.into_iter().filter(|a| !a.starts_with("--")).collect();
     let band: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(800.0);
     let partials: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(64);
@@ -59,7 +64,14 @@ fn main() {
             if let Some(c) = &desc.damping {
                 reference.configure_bare_board_damping(c).expect("reference board damping");
             }
+            // Plain steel strings stretch with longitudinal waves in both models (wound ones stay linear).
+            let waves = string_waves.then(|| fs_live_piano::stretch::plain_steel_waves_spec(&[course], 10_000.0, 0.01, 0.05));
+            if let Some(text) = &waves {
+                let spec = fs_live_piano::refmods::linear::string_stretching::Specification::read(text, &[course]).expect("stretching file");
+                reference.configure_string_stretching(&spec).expect("reference stretching");
+            }
             let mut cfg = Config::live(rate);
+            cfg.string_stretching = waves;
             cfg.board_band_hz = band;
             cfg.partial_band_hz = 0.45 * f64::from(rate);
             cfg.max_partials = partials;
