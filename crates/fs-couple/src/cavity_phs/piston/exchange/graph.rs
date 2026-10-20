@@ -11,6 +11,9 @@
 //! Independent walls have independent momentum; a shared crank or opposing
 //! faces require their dedicated mechanics owner, not duplicated pistons.
 
+/// Declared chemistry between shared species transport and original wall motion.
+pub mod reactive;
+
 use std::collections::BTreeMap;
 use super::{ClosedGasParcel, GasEnergyError, GasPiston, PistonError, PistonInput,
     PistonSolve, PistonStep, positive, stored_change};
@@ -45,6 +48,8 @@ pub enum MovingGasError {
     Invalid(&'static str),
     /// Original common-snapshot flow and inventory owner refused the proposal.
     Flow(SnapshotNozzleError),
+    /// Original chemical owner refused a post-transfer gas volume.
+    Reaction { id: u64, error: crate::cavity_phs::piston::reactive::GasReactionError },
     /// Original material/momentum owner refused this moving chamber.
     Piston { id: u64, error: PistonError },
     /// Cancellation before publication of all physical owners.
@@ -133,9 +138,9 @@ impl Sum {
 
 // The existing wall/heat port schema has no stream port. Keep its real transfers
 // visible but never certify the open chamber from its closed two-port audit.
-fn record_open_account(
+fn record_interval_account(
     old: &GasPiston, next: &mut GasPiston, drive: MovingGasDrive,
-    report: &PistonStep, gas_change: f64, tolerance_j: f64,
+    report: &PistonStep, gas_change: f64, tolerance_j: f64, open: bool,
 ) -> Result<(), PistonError> {
     let initial_s = old.gas.state().specific_entropy_j_kg_k().map_err(GasEnergyError::from)?;
     let final_s = next.gas.state().specific_entropy_j_kg_k().map_err(GasEnergyError::from)?;
@@ -149,7 +154,7 @@ fn record_open_account(
         tick: old.ports.next_tick(), duration_s: drive.input.duration_s,
         storage_change_j: Some(storage), loss_j: Some(0.0), included_work_j: 0.0,
         entropy_change_j_k: entropy, tolerance_j: Some(tolerance_j),
-        unavailable: Some("multiport gas exchange needs stream ports; use the enclosing moving-network balance"),
+        unavailable: open.then_some("multiport gas exchange needs stream ports; use the enclosing moving-network balance"),
     }, [crate::port_adoption::PortTransfer::work(
         report.external_force_work_j - report.exterior_pressure_work_j, true),
         crate::port_adoption::PortTransfer::heat(drive.input.heat_j, report.midpoint.state().temperature)]);
@@ -180,8 +185,23 @@ pub fn step_candidate(
     pistons: &BTreeMap<u64, GasPiston>, reservoirs: &BTreeMap<u64, ClosedGasParcel>,
     links: &[SnapshotNozzleLink], duration_s: f64,
     endpoints: &BTreeMap<u64, GasEnergySolve>, drives: &BTreeMap<u64, MovingGasDrive>,
-    controls: MovingGasSolve, mut cancelled: impl FnMut() -> bool,
+    controls: MovingGasSolve, cancelled: impl FnMut() -> bool,
 ) -> Result<MovingGasCandidate, Error> {
+    staged_candidate(pistons, reservoirs, links, duration_s, endpoints, drives,
+        controls, &[], cancelled).map(|(candidate, _)| candidate)
+}
+
+// One physical flow/momentum implementation serves both public entry points.
+// Only the admitted fixed-volume chemical stage is optional. Keep the enclosing
+// storage reference BEFORE flow/chemistry and never count formation energy as heat.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn staged_candidate(
+    pistons: &BTreeMap<u64, GasPiston>, reservoirs: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[SnapshotNozzleLink], duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>, drives: &BTreeMap<u64, MovingGasDrive>,
+    controls: MovingGasSolve, reactions: &[reactive::ChamberReaction<'_>],
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(MovingGasCandidate, BTreeMap<u64, reactive::GasReactionStep>), Error> {
     check(&mut cancelled)?;
     let count = pistons.len().checked_add(reservoirs.len())
         .ok_or(Error::Invalid("gas network size overflow"))?;
@@ -206,11 +226,13 @@ pub fn step_candidate(
         check(&mut cancelled)?;
         initial.insert(id, piston.gas.clone());
     }
+    let bindings = reactive::bindings(&initial, reactions, &mut cancelled)?;
     let candidate = snapshot::step_candidate(&initial, links, duration_s, endpoints,
         controls.exchange, &mut cancelled).map_err(|error| {
             if error == SnapshotNozzleError::Cancelled { Error::Cancelled } else { Error::Flow(error) }
         })?;
     let (mut remaining, flow) = candidate.into_parts();
+    let chemistry = reactive::react(&mut remaining, &bindings, duration_s, &mut cancelled)?;
     let open: std::collections::BTreeSet<_> = flow.exchange.parcels.iter()
         .filter(|p| p.incoming_mass_kg > 0.0 || p.outgoing_mass_kg > 0.0).map(|p| p.id).collect();
     let mut next = BTreeMap::new();
@@ -238,8 +260,10 @@ pub fn step_candidate(
         exterior.add(drive.input.exterior_pressure_pa * dv)?;
         applied.add(drive.input.external_force_n * (dv / old.area_m2))?;
         heat.add(drive.input.heat_j)?;
-        if open.contains(&id) {
-            record_open_account(old, &mut wall, drive, &report, du, controls.total_energy_tolerance_j)
+        let reacted = chemistry.get(&id).is_some_and(|r| r.extent_mol != 0.0);
+        if open.contains(&id) || reacted {
+            record_interval_account(old, &mut wall, drive, &report, du,
+                controls.total_energy_tolerance_j, open.contains(&id))
                 .map_err(|error| piston_error(id, error))?;
         }
         next.insert(id, wall); reports.insert(id, report);
@@ -261,11 +285,11 @@ pub fn step_candidate(
         return Err(Error::Invalid("final gas/wall endpoints do not close total mass and energy"));
     }
     check(&mut cancelled)?;
-    Ok(MovingGasCandidate { pistons: next, reservoirs: remaining,
+    Ok((MovingGasCandidate { pistons: next, reservoirs: remaining,
         step: MovingGasStep { flow, pistons: reports, gas_energy_change_j: gas_energy.value,
             kinetic_energy_change_j: kinetic.value, exterior_pressure_work_j: exterior.value,
             external_force_work_j: applied.value, supplied_heat_j: heat.value,
-            total_mass_residual_kg: mass.value, total_energy_residual_j: balance.value } })
+            total_mass_residual_kg: mass.value, total_energy_residual_j: balance.value } }, chemistry))
 }
 
 #[cfg(test)]
