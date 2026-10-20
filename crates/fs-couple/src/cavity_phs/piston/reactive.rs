@@ -24,6 +24,8 @@
 
 /// Chemical composition coupled to finite material-wall heat and piston motion.
 pub mod thermal;
+/// Chemical composition coupled to the shared circuit and finite thermal network.
+pub mod network;
 
 use super::{GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_material::MaterialError;

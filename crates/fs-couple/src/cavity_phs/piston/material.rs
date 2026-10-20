@@ -129,6 +129,30 @@ impl MaterialGasPiston {
             |gas, thermal| layers.resolve(gas, thermal), cancelled)
     }
 
+    /// Keep the original material-derived inertia while reaction products drive
+    /// the finite circuit/thermal network, reciprocal wall heat and motion.
+    /// The network's thermal material state is explicit; it does not silently
+    /// replace the rigid translating body's frozen density or geometry.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn reactive_material_network_candidate<'m>(
+        &self, reaction: &super::reactive::GasReaction, binding: &MaterialNetwork<'_>,
+        thermal: &DepositionSimulation<'m>, target_s: f64, circuit: &MaterialCircuit,
+        ports: &[f64], electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        drive: NetworkGasDrive, kinetics: super::reactive::GasReactionSolve,
+        controls: NetworkGasSolve, geometry: GasConductionGeometry, guess_j: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<super::reactive::network::ReactiveNetworkCandidate<'m,
+        MaterialNetworkSample, ResolvedMaterialStatePoint, Self>,
+        super::reactive::network::ReactiveNetworkError<MaterialNetworkError, MaterialNetworkError>>
+    {
+        let candidate = self.piston.reactive_material_network_candidate(reaction, binding,
+            thermal, target_s, circuit, ports, electrical_bases, drive, kinetics, controls,
+            geometry, guess_j, &mut cancelled)?
+            .map_piston(|piston| Self { body: self.body.clone(), piston });
+        if cancelled() { return Err(super::reactive::network::ReactiveNetworkError::Cancelled); }
+        Ok(candidate)
+    }
+
     /// Use the same conservative finite-reservoir exchange with the original
     /// source-resolved rigid-body inertia and retained material regions.
     #[allow(clippy::too_many_arguments)]

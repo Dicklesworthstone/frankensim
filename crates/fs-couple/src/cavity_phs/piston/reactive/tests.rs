@@ -1,6 +1,7 @@
 //! Synthetic balanced isomers exercise the real kinetics, caloric and momentum
 //! owners. No empirical combustion-rate or engine validation claim is made.
 mod thermal;
+mod network;
 
 use super::*;
 use crate::cavity_phs::piston::material::MaterialGasPiston;
