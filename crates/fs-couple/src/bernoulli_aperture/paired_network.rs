@@ -10,6 +10,8 @@
 
 use super::dynamic::{ApertureDrive, ApertureProgress, ApertureTerminal};
 use super::network::{ApertureNetworkFrame, NetworkNode, NodeFrame, SectionRealization, TubeNetworkSpec};
+use super::network::boundaries::{BoundaryAperture, BoundaryApertures, BoundaryDrive};
+use super::network::keyed;
 use super::paired::{PairedAperture, PairedApertureFrame};
 use super::tube::TubeDrive;
 use super::viscothermal::{ViscothermalSection, ViscothermalSectionSpec, with_regional_viscothermal_sections};
@@ -38,6 +40,7 @@ pub struct PairedApertureNetwork {
     represented: Vec<SectionRealization>,
     losses: Vec<ViscothermalSection>,
     network: WaveguideNetwork,
+    boundaries: Option<BoundaryApertures>,
 }
 fn invalid(what: &'static str) -> AcousticRealizeError { AcousticRealizeError::InvalidDescription { what } }
 fn wave(e: fs_vfit::waveguide::WaveguideError) -> AcousticRealizeError { AcousticRealizeError::Nonlinear(e.to_string()) }
@@ -79,8 +82,24 @@ impl PairedApertureNetwork {
         let (network,represented)=lowered.realize_waveguide(&actual_gases,a.time_step_s,gate)?;
         poll(Some(gate))?;
         Ok(Self {aperture,source_graph:graph,source_gases:gases,graph:lowered,gases:actual_gases,
-            represented,losses,network})
+            represented,losses,network,boundaries:None})
     }
+    /// Bind the same material/contact key owner used by single reeds and flues.
+    /// Keys use the actual gas and geometry after viscothermal subdivision, with
+    /// original node addresses and the paired source's complete sample horizon.
+    pub fn with_boundary_apertures(mut self,inputs:Vec<BoundaryAperture>,max_apertures:usize)
+        -> Result<Self,AcousticRealizeError>
+    {
+        if self.aperture.accepted_steps()!=0 || self.boundaries.is_some() {
+            return Err(invalid("paired moving keys must bind once before any accepted sample"));
+        }
+        keyed::admit_horizon(&inputs,max_apertures,self.aperture.spec().max_steps)?;
+        self.boundaries=Some(BoundaryApertures::new(&self.graph,&self.gases,&self.network,inputs,max_apertures)?);
+        Ok(self)
+    }
+    /// Original material/contact state at each explicitly bound key.
+    #[must_use]
+    pub const fn boundary_apertures(&self) -> Option<&BoundaryApertures> { self.boundaries.as_ref() }
     /// Original independent solid specimens and accepted blade states.
     #[must_use]
     pub const fn aperture(&self) -> &PairedAperture { &self.aperture }
@@ -107,9 +126,19 @@ impl PairedApertureNetwork {
     pub fn node_frame(&self,node:usize) -> Option<&NodeFrame> { self.network.node_frame(node) }
     /// Actual combined mechanical/contact/wave/reactive-load storage [J].
     #[must_use]
-    pub fn stored_energy_j(&self) -> f64 { self.aperture.stored_energy_j()+self.network.stored_energy_j() }
+    pub fn stored_energy_j(&self) -> f64 {
+        let original=self.aperture.stored_energy_j()+self.network.stored_energy_j();
+        match &self.boundaries {
+            Some(boundaries)=>original+boundaries.stored_energy_j(),
+            None=>original,
+        }
+    }
     /// Increase the complete source horizon without resetting mechanics or waves.
-    pub fn extend_step_budget(&mut self,total:u64) -> Result<(),AcousticRealizeError> { self.aperture.extend_step_budget(total) }
+    pub fn extend_step_budget(&mut self,total:u64) -> Result<(),AcousticRealizeError> {
+        keyed::validate_step_budget(self.boundaries.as_ref(),total)?;
+        self.aperture.extend_step_budget(total)?;
+        keyed::extend_step_budget(self.boundaries.as_mut(),total)
+    }
     /// Change a memoryless passive terminal without erasing in-flight sound.
     /// Reactive loads refuse rather than lose their stored states.
     pub fn set_terminal_reflection(&mut self,node:usize,reflection:f64) -> Result<(),AcousticRealizeError> {
@@ -147,15 +176,23 @@ impl PairedApertureNetwork {
 
     /// Advance the actual reflected-wave feedback with no additional blade forces.
     pub fn step(&mut self,drive:TubeDrive) -> Result<PairedNetworkFrame,AcousticRealizeError> {
-        self.step_inner(drive,[0.0;2],None)
+        self.step_inner(drive,[0.0;2],&[],None)
     }
     /// Pressure plus independently prescribed opening-positive blade forces [N].
     pub fn step_with_forces(&mut self,drive:TubeDrive,forces:[f64;2])
-        -> Result<PairedNetworkFrame,AcousticRealizeError> { self.step_inner(drive,forces,None) }
+        -> Result<PairedNetworkFrame,AcousticRealizeError> { self.step_inner(drive,forces,&[],None) }
     /// Same transaction with cancellation before trials and before publication.
     pub fn step_under_gate(&mut self,drive:TubeDrive,forces:[f64;2],gate:&CancelGate)
-        -> Result<PairedNetworkFrame,AcousticRealizeError> { self.step_inner(drive,forces,Some(gate)) }
-    fn step_inner(&mut self,drive:TubeDrive,forces:[f64;2],gate:Option<&CancelGate>)
+        -> Result<PairedNetworkFrame,AcousticRealizeError> { self.step_inner(drive,forces,&[],Some(gate)) }
+    /// Advance both independent reed blades and all moving keys in one physical
+    /// transaction. Every key requires an explicit ordered reservoir/force drive.
+    pub fn step_with_boundaries(&mut self,drive:TubeDrive,forces:[f64;2],drives:&[BoundaryDrive])
+        -> Result<PairedNetworkFrame,AcousticRealizeError> { self.step_inner(drive,forces,drives,None) }
+    /// The complete keyed transaction with cancellation before publication.
+    pub fn step_with_boundaries_under_gate(&mut self,drive:TubeDrive,forces:[f64;2],
+        drives:&[BoundaryDrive],gate:&CancelGate) -> Result<PairedNetworkFrame,AcousticRealizeError>
+    { self.step_inner(drive,forces,drives,Some(gate)) }
+    fn step_inner(&mut self,drive:TubeDrive,forces:[f64;2],drives:&[BoundaryDrive],gate:Option<&CancelGate>)
         -> Result<PairedNetworkFrame,AcousticRealizeError>
     {
         poll(gate)?;
@@ -167,17 +204,15 @@ impl PairedApertureNetwork {
         let mechanics=trial.frame;
         poll(gate)?;
         let aperture=mechanics.aperture;
-        let network=self.network.preview_step(aperture.outgoing_pressure_pa).map_err(wave)?;
-        let dt=self.aperture.spec().time_step_s;
-        let coupled=ApertureNetworkFrame {
-            aperture,network,stored_energy_j:aperture.stored_energy_j+network.stored_energy_j,
-            storage_change_j:aperture.storage_change_j+network.storage_change_j,
-            dissipated_energy_j:aperture.dissipated_energy_j+network.terminal_loss_j+network.interior_loss_j,
-            upstream_work_j:drive.upstream_pressure_pa*((aperture.bore_flow_m3_s-drive.body_flow_m3_s)*dt),
-            body_work_j:aperture.bore_pressure_pa*(drive.body_flow_m3_s*dt),
-        };
-        let scale=before+coupled.stored_energy_j+coupled.dissipated_energy_j.abs()
+        let network_trial=keyed::preview(aperture,drive,self.aperture.spec().time_step_s,
+            &mut self.network,self.boundaries.as_ref(),drives)?;
+        let coupled=network_trial.frame;
+        let mut scale=before+coupled.stored_energy_j+coupled.dissipated_energy_j.abs()
             +coupled.upstream_work_j.abs()+coupled.body_work_j.abs()+aperture.mechanical_work_j.abs();
+        if let Some(boundaries)=coupled.boundaries {
+            scale+=boundaries.exterior_work_j.abs()+boundaries.mechanical_work_j.abs()
+                +coupled.network.coupled_terminal_work_j.abs();
+        }
         let allowance=256.0*self.aperture.spec().limits.relative_tolerance.max(f64::EPSILON)
             *scale.max(f64::MIN_POSITIVE);
         if ![coupled.stored_energy_j,coupled.storage_change_j,coupled.dissipated_energy_j,
@@ -188,7 +223,7 @@ impl PairedApertureNetwork {
         poll(gate)?;
         // Original wave owner revalidates and commits; all blade checks are
         // already complete. Its failure leaves waves and both blades unchanged.
-        self.network.step(aperture.outgoing_pressure_pa).map_err(wave)?;
+        keyed::accept(&mut self.network,self.boundaries.as_mut(),network_trial)?;
         self.aperture.accept(trial);
         Ok(PairedNetworkFrame {mechanics,coupled})
     }

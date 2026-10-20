@@ -461,12 +461,18 @@ impl DynamicAperture {
     /// # Errors
     /// A non-increase, unrepresentable ordinal or overflowing time horizon.
     pub fn extend_step_budget(&mut self, new_total: u64) -> Result<(), AcousticRealizeError> {
+        self.validate_step_budget(new_total)?;
+        self.spec.max_steps = new_total;
+        Ok(())
+    }
+
+    // Composite owners preflight every participant before extending any clock.
+    pub(super) fn validate_step_budget(&self, new_total: u64) -> Result<(), AcousticRealizeError> {
         if new_total <= self.spec.max_steps || new_total > MAX_EXACT_STEPS
             || !(new_total as f64 * self.spec.time_step_s).is_finite()
         {
             return Err(invalid("dynamic aperture budget extension must increase a finite exact-step horizon"));
         }
-        self.spec.max_steps = new_total;
         Ok(())
     }
 

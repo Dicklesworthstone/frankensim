@@ -4,7 +4,7 @@
 //! chimney pressure opens the boundary; an applied negative opening force closes
 //! it. The original aperture supplies both jet flow and swept volume, and every
 //! endpoint reads old waves before any state is accepted. Closing a gap therefore
-//! retains trapped chimney pressure, all propagation waves, contact and material
+//! retains chimney pressure, all propagation waves, contact and material
 //! histories. This is a moving slit model, not a resolved circular key-pad domain.
 use super::{TubeNetworkSpec, invalid};
 use crate::acoustic_realize::AcousticRealizeError;
@@ -220,6 +220,23 @@ impl BoundaryApertures {
             .iter()
             .map(|b| b.aperture.stored_energy_j())
             .sum()
+    }
+
+    pub(super) fn validate_step_budget(&self, total: u64) -> Result<(), AcousticRealizeError> {
+        for boundary in &self.boundaries {
+            boundary.aperture.validate_step_budget(total)?;
+        }
+        Ok(())
+    }
+
+    // The enclosing source validates this complete set before changing its own
+    // horizon. Accepted physical state and material history remain untouched.
+    pub(super) fn extend_step_budget(&mut self, total: u64) -> Result<(), AcousticRealizeError> {
+        self.validate_step_budget(total)?;
+        for boundary in &mut self.boundaries {
+            boundary.aperture.extend_step_budget(total)?;
+        }
+        Ok(())
     }
 
     /// Solve all apertures against old waves, preview the shared duct graph and

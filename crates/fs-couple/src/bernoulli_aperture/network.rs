@@ -16,6 +16,8 @@ use fs_material::gas::GasState;
 pub mod regional;
 /// Multiple moving boundaries on the original retained network waves.
 pub mod boundaries;
+pub(super) mod keyed;
+use boundaries::{BoundaryAperture, BoundaryApertures, BoundaryDrive, BoundaryNetworkFrame};
 use fs_vfit::waveguide::network::{NetworkFrame, NetworkSegment, WaveguideNetwork};
 pub use fs_vfit::waveguide::network::{NetworkNode, NodeFrame};
 
@@ -123,6 +125,9 @@ pub struct ApertureNetworkFrame {
     pub aperture: ApertureFrame,
     /// Same-step network ports and all-section wave storage.
     pub network: NetworkFrame,
+    /// Moving keys and the same graph, when explicitly attached. This nested
+    /// frame retains key exterior/mechanical work separately from the inlet.
+    pub boundaries: Option<BoundaryNetworkFrame>,
     /// Mechanical/contact plus all traveling-wave energy [J].
     pub stored_energy_j: f64,
     /// Change in independently evaluated total storage [J].
@@ -138,8 +143,12 @@ impl ApertureNetworkFrame {
     /// Total balance diagnostic; neither junction nor solver error is removed.
     #[must_use]
     pub fn balance_residual_j(&self) -> f64 {
-        self.storage_change_j + self.dissipated_energy_j + self.network.coupled_terminal_work_j
-            - self.upstream_work_j - self.body_work_j - self.aperture.mechanical_work_j
+        let residual = self.storage_change_j + self.dissipated_energy_j + self.network.coupled_terminal_work_j
+            - self.upstream_work_j - self.body_work_j - self.aperture.mechanical_work_j;
+        match self.boundaries {
+            Some(boundaries) => residual - boundaries.exterior_work_j - boundaries.mechanical_work_j,
+            None => residual,
+        }
     }
 }
 
@@ -152,6 +161,7 @@ pub struct ApertureNetwork {
     spec: TubeNetworkSpec,
     represented: Vec<SectionRealization>,
     section_gases: Option<Vec<GasState>>,
+    boundaries: Option<BoundaryApertures>,
 }
 
 fn invalid(what: &'static str) -> AcousticRealizeError {
@@ -209,8 +219,36 @@ impl ApertureNetwork {
         }
         let network = WaveguideNetwork::new(&spec.nodes, &segments, a.time_step_s, network_budget)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        Ok(Self { aperture, network, spec, represented, section_gases })
+        Ok(Self { aperture, network, spec, represented, section_gases, boundaries: None })
     }
+
+    /// Attach material/contact keys to every driven chimney before the source
+    /// starts. Regional gas states must remain exactly those used by the bore;
+    /// the legacy uniform path additionally requires matching density and speed.
+    /// Keys share the reed's clock and complete sample horizon. This binds the
+    /// existing slit model, not a resolved circular pad or a new reed solver.
+    pub fn with_boundary_apertures(mut self, gases: &[GasState], inputs: Vec<BoundaryAperture>,
+        max_apertures: usize) -> Result<Self, AcousticRealizeError>
+    {
+        if self.aperture.accepted_steps() != 0 || self.boundaries.is_some() {
+            return Err(invalid("moving reed-network keys must bind once before any accepted sample"));
+        }
+        keyed::admit_horizon(&inputs, max_apertures, self.aperture.spec().max_steps)?;
+        self.spec.validate_section_gases(gases)?;
+        if self.section_gases.as_deref().is_some_and(|original| original != gases)
+            || gases.iter().enumerate().any(|(i, gas)| self.section_medium(i)
+                .is_none_or(|(rho, c)| rho.to_bits() != gas.density.to_bits()
+                    || c.to_bits() != gas.sound_speed.to_bits()))
+        {
+            return Err(invalid("moving keys must use the original complete bore gas states"));
+        }
+        self.boundaries = Some(BoundaryApertures::new(&self.spec, gases, &self.network, inputs, max_apertures)?);
+        Ok(self)
+    }
+
+    /// Accepted material/contact states of the explicitly bound moving keys.
+    #[must_use]
+    pub const fn boundary_apertures(&self) -> Option<&BoundaryApertures> { self.boundaries.as_ref() }
 
     /// Immutable accepted mechanical state, contact law and sample count.
     #[must_use]
@@ -238,7 +276,11 @@ impl ApertureNetwork {
     /// Actual mechanical/contact/wave storage [J].
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
-        self.aperture.stored_energy_j() + self.network.stored_energy_j()
+        let original = self.aperture.stored_energy_j() + self.network.stored_energy_j();
+        match &self.boundaries {
+            Some(boundaries) => original + boundaries.stored_energy_j(),
+            None => original,
+        }
     }
 
     /// Change a passive memoryless endpoint without clearing sound already in
@@ -258,7 +300,9 @@ impl ApertureNetwork {
     /// # Errors
     /// The aperture's finite, increasing-horizon admission.
     pub fn extend_step_budget(&mut self, total: u64) -> Result<(), AcousticRealizeError> {
-        self.aperture.extend_step_budget(total)
+        keyed::validate_step_budget(self.boundaries.as_ref(), total)?;
+        self.aperture.extend_step_budget(total)?;
+        keyed::extend_step_budget(self.boundaries.as_mut(), total)
     }
 
     /// Solve the valve against the retained incoming wave, scatter the graph,
@@ -281,32 +325,25 @@ impl ApertureNetwork {
     pub fn step_with_force(&mut self, drive: TubeDrive, force_n: f64)
         -> Result<ApertureNetworkFrame, AcousticRealizeError>
     {
+        self.step_with_boundaries(drive, force_n, &[])
+    }
+
+    /// Advance the original reed and all attached keys against old waves as one
+    /// transaction. Every bound key requires an ordered explicit drive, including
+    /// zero force. Key closure changes physical contact and flow while preserving
+    /// the chimney and reed histories. Exterior and key actuation work remain
+    /// separate in `frame.boundaries` and enter the full balance exactly once.
+    pub fn step_with_boundaries(&mut self, drive: TubeDrive, force_n: f64,
+        boundary_drives: &[BoundaryDrive]) -> Result<ApertureNetworkFrame, AcousticRealizeError>
+    {
         let trial = self.aperture.preview_step_with_force(ApertureDrive {
             upstream_pressure_pa: drive.upstream_pressure_pa,
             incoming_pressure_pa: self.network.incoming_pressure_pa(),
             body_flow_m3_s: drive.body_flow_m3_s,
         }, force_n)?;
-        let aperture = trial.frame;
-        let network = self.network.preview_step(aperture.outgoing_pressure_pa)
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        let dt = self.aperture.spec().time_step_s;
-        let frame = ApertureNetworkFrame {
-            aperture, network,
-            stored_energy_j: aperture.stored_energy_j + network.stored_energy_j,
-            storage_change_j: aperture.storage_change_j + network.storage_change_j,
-            dissipated_energy_j: aperture.dissipated_energy_j + network.terminal_loss_j + network.interior_loss_j,
-            upstream_work_j: drive.upstream_pressure_pa
-                * ((aperture.bore_flow_m3_s - drive.body_flow_m3_s) * dt),
-            body_work_j: aperture.bore_pressure_pa * (drive.body_flow_m3_s * dt),
-        };
-        if ![frame.stored_energy_j, frame.storage_change_j, frame.dissipated_energy_j,
-            frame.upstream_work_j, frame.body_work_j, frame.balance_residual_j()]
-            .iter().all(|v| v.is_finite())
-        {
-            return Err(invalid("coupled network observation left the finite set"));
-        }
-        self.network.step(aperture.outgoing_pressure_pa)
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        let network_trial = keyed::preview(trial.frame, drive, self.aperture.spec().time_step_s,
+            &mut self.network, self.boundaries.as_ref(), boundary_drives)?;
+        let frame = keyed::accept(&mut self.network, self.boundaries.as_mut(), network_trial)?;
         self.aperture.accept_frame(trial);
         Ok(frame)
     }

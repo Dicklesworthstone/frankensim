@@ -8,6 +8,9 @@ use fs_couple::bernoulli_aperture::tube::{ApertureTube, TubeDrive, UniformTubeSp
 use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
 
+mod keyed;
+mod keyed_paired;
+
 const DT: f64 = 1e-5;
 fn section(a: usize, b: usize, delay: usize, radius: f64) -> TubeSection {
     TubeSection { nodes: [a, b], length_m: delay as f64 * (343.0 * DT), radius_m: radius,

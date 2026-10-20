@@ -3014,6 +3014,37 @@ nonlinear-branch guarantee or measured instrument/trajectory qualification.
 
 The flue performance file accepts optional `walls COUNT FMIN_HZ FMAX_HZ` plus addressed `wall NODE isotropic PACK T_K OMEGA_RAD_S THICKNESS_M stress-free|strain-fixed elastic|kelvin-voigt` records after the original duct geometry, followed by `radiation prescribed|compact-baffled`. The CLI loads caller-relative NormalizedMaterialCardPack artifacts (8 MiB each, 64 MiB aggregate), while the library resolves original cards at independent solid T/omega states with SingleClaimOnly property selection and retained source/usage receipts. Shared artifact paths load once; geometry, branches, regional gases, existing losses and outlet addresses remain with their original owners. Each material wall occupies the existing degree-two node's physical dual strip; unselected and endpoint half-strips stay rigid, and actual area/coverage is reported. Compact radiation binds every declared observed outlet through FlueVoice::from_baffled_environment, then validates each installed binding against the lowered graph and the same exterior/receiver declaration. Material substitutions reach wall storage, jet-returning bore pressure and the common physical microphone; exterior substitutions affect both reaction and propagation when selected. This remains the existing frozen small-motion isotropic local-ring image plus independent low-ka baffled loads: no full shell coupling/exterior wall radiation, full-band unbaffled or mutual reaction, resolved turbulence or measured Boehm claim. The composition remains EstimateOnly and these additions do not close full M0.5 or M2.5-W3c/W4b qualification beads.
 
+### Shared material moving keys on retained wind networks
+
+`bernoulli_aperture::network::boundaries` attaches the original dynamic
+aperture/contact/material owner to every explicit driven chimney endpoint.
+The actual local gas, impedance, clock and integer or fractional transit must
+match; closure retains propagating waves and material memory. Exterior reservoir
+pressure and opening-positive mechanical force supply separately reported work.
+All keys and the original graph, including any coupled radiation operator,
+preview before any accepted physical state changes. This is the existing moving
+slit approximation, with prescribed exterior pressure; it does not resolve a
+circular pad or directly observe moving-slit radiation.
+
+`ApertureNetwork` and `PairedApertureNetwork` bind those same keys before the
+first sample and advance them through `step_with_boundaries`. Single or
+independent double reeds retain their original nonlinear solvers. The nested
+`ApertureNetworkFrame::boundaries` reports key supplies separately, while the
+complete balance includes primary, key and duct storage and each supply exactly
+once. Missing key drives refuse. Every participant shares a sample horizon;
+extension validates all keys before changing any budget. The paired owner keeps
+its original strict whole-system energy gate, including key residuals, and its
+gated keyed step checks cancellation before publication. These APIs establish
+shared physical coupling, not measured clarinet or oboe qualification.
+
+The flue file path resolves cantilever closure mass, stiffness and pressure
+area through the existing material chart and DKT reduction, with elastic or
+sourced Maxwell memory, contact and optional local-gas slit viscosity. Material
+walls and closures share the bounded source cache. Typed pressure, jet-angle
+and `ForceN` closing controls use the shared gesture sampler and reach the
+existing pressure/PCM renderer. Geometry and material source bands still bound
+the admitted approximation; substituting a material does not widen them.
+
 ### Fixed supply-passage momentum in material reed instruments
 
 The shared `bernoulli_aperture::slit_channel` exposes its retained no-slip
