@@ -3041,3 +3041,15 @@ and explicit numerical drilling stabilization. Its compact baffled observer
 does not imply full exterior radiation feedback or an assembled, prestressed
 violin/cello/bass corpus. Mesh/mode/stabilization/time refinement and measured
 instrument qualification remain separate from source-level composition tests.
+
+### Prepared material conduction on the shared thermal timeline
+
+`PreparedMaterialNetwork::observe` composes the original pinned transport
+resolver with another observer on the existing enthalpy substeps. Networks
+with resistor branches refuse; circuit storage and Joule heating retain their
+circuit owner. The shared observer pair owns heat-source addition,
+competing-link refusal, timestep composition and atomic history acceptance.
+Material snapshots are refreshed at actual thermal endpoints and events,
+while authored link coefficients remain unchanged. Conduction remains the
+declared uniform-cell, fixed-geometry reduction; temperature-dependent source
+coefficients do not by themselves establish time or spatial convergence.

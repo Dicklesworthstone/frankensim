@@ -4,7 +4,7 @@
 //! across caller-declared uniform half-cell distances.
 
 mod prepared;
-pub use prepared::PreparedMaterialNetwork;
+pub use prepared::{MaterialTransportObserver, PreparedMaterialNetwork};
 
 use super::*;
 use crate::cavity_phs::piston::thermal::source::{ThermalMaterialError, ThermalMaterialPoint};

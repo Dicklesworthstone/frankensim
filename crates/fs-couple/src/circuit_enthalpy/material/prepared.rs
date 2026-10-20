@@ -78,3 +78,115 @@ impl<'a> MaterialNetwork<'a> {
         Ok(PreparedMaterialNetwork { network: self, bases, pins })
     }
 }
+
+/// Prepared material transport on the original thermal observer timeline.
+/// Source choices remain with the borrowed network. Only the most recent
+/// accepted endpoint sample is retained; no electrical state is advanced.
+#[derive(Clone)]
+pub struct MaterialTransportObserver<'p, 'n, 'a> {
+    prepared: &'p PreparedMaterialNetwork<'n, 'a>,
+    sample: Option<MaterialNetworkSample>,
+}
+
+impl MaterialTransportObserver<'_, '_, '_> {
+    /// Original material snapshots at the most recent accepted step or event.
+    /// None means this observer has not yet observed an accepted thermal state.
+    #[must_use]
+    pub fn sample(&self) -> Option<&MaterialNetworkSample> {
+        self.sample.as_ref()
+    }
+
+    fn resolve_checked(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<CircuitThermalCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
+        // The material evaluator accepts a cancellation predicate. Preserve
+        // any richer thermal checkpoint failure instead of erasing it.
+        let mut failure = None;
+        let result = self.prepared.resolve(thermal, || match check() {
+            Ok(()) => false,
+            Err(error) => {
+                failure = Some(error);
+                true
+            }
+        });
+        if let Some(error) = failure {
+            return Err(error.into());
+        }
+        result
+    }
+}
+
+impl<'n, 'a> PreparedMaterialNetwork<'n, 'a> {
+    /// Drive sourced conduction together with another physical observer.
+    ///
+    /// This adapter is for networks with no resistor branches; use the circuit
+    /// owner when electrical work and Joule heat are present. The original
+    /// resolver evaluates pinned k(T, phase) on every thermal source epoch and
+    /// endpoint. The existing observer pair adds sources and rejects competing
+    /// conductance owners, even when they happen to provide equal coefficients.
+    /// Its first member exposes material samples; its second is the caller's
+    /// physical history. Both are cloned and accepted by the shared timeline.
+    pub fn observe<'p, O>(
+        &'p self,
+        inner: O,
+    ) -> Result<
+        fs_thermal::observers::CoupledObservers<MaterialTransportObserver<'p, 'n, 'a>, O>,
+        MaterialNetworkError,
+    > {
+        if !self.network.resistors.is_empty() {
+            return Err(MaterialNetworkError::Invalid(
+                "thermal-only observation requires no resistor branches; use the circuit owner",
+            ));
+        }
+        Ok(fs_thermal::observers::CoupledObservers::new(
+            MaterialTransportObserver {
+                prepared: self,
+                sample: None,
+            },
+            inner,
+        ))
+    }
+}
+
+impl fs_thermal::enthalpy::DepositionObserver for MaterialTransportObserver<'_, '_, '_> {
+    type Error = MaterialNetworkError;
+
+    fn sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        Ok(self.resolve_checked(thermal, check)?.sources_w)
+    }
+
+    fn conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<u64, f64>, Self::Error> {
+        Ok(self.resolve_checked(thermal, check)?.conductances_w_k)
+    }
+
+    fn event(
+        &mut self,
+        _: &fs_thermal::enthalpy::Event,
+        thermal: &DepositionSimulation<'_>,
+    ) -> Result<(), Self::Error> {
+        self.sample = Some(self.prepared.resolve(thermal, || false)?.source);
+        Ok(())
+    }
+
+    fn step(
+        &mut self,
+        _: f64,
+        _: f64,
+        _: &BTreeMap<CellId, f64>,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.sample = Some(self.resolve_checked(thermal, check)?.source);
+        Ok(())
+    }
+}

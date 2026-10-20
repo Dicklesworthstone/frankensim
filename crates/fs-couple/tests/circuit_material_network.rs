@@ -222,3 +222,156 @@ fn initial_electrical_and_thermal_sources_stay_pinned_through_circuit_trials() {
         assert_eq!(thermal.cells(),&saved);assert_eq!(thermal.time_s(),0.0);assert_eq!(circuit,saved_circuit);
     }
 }
+
+#[test]
+fn prepared_conduction_observer_drives_shared_heat_and_preserves_composed_histories() {
+    use fs_thermal::observers::ObserverCouplingError;
+    use std::collections::BTreeMap;
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct Recorder {
+        steps: usize,
+        elapsed: f64,
+        reject: bool,
+        duplicate: bool,
+    }
+    impl DepositionObserver for Recorder {
+        type Error = DepositionError;
+        fn conductances(
+            &mut self,
+            _: &DepositionSimulation<'_>,
+            _: &mut dyn FnMut() -> Result<(), DepositionError>,
+        ) -> Result<BTreeMap<u64, f64>, Self::Error> {
+            Ok(if self.duplicate {
+                BTreeMap::from([(7, 1.0)])
+            } else {
+                BTreeMap::new()
+            })
+        }
+        fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn step(
+            &mut self,
+            _: f64,
+            dt: f64,
+            _: &BTreeMap<CellId, f64>,
+            _: &DepositionSimulation<'_>,
+            _: &mut dyn FnMut() -> Result<(), DepositionError>,
+        ) -> Result<(), Self::Error> {
+            self.steps += 1;
+            self.elapsed += dt;
+            if self.reject && self.steps == 2 {
+                return Err(DepositionError::InvalidInput("physical history refused"));
+            }
+            Ok(())
+        }
+    }
+
+    let run = |k| {
+        let (a, ca) = material_with_conductivity(1.0, 1.0, 0.0, k);
+        let (b, cb) = material_with_conductivity(3.0, 2.0, 0.0, 2.0);
+        let cards = [a, b];
+        let curves = [ca, cb];
+        let context = point(300.0);
+        let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+        let cells = bound_cells(&cards, &curves, &context, &key);
+        let links = links();
+        let network = MaterialNetwork {
+            cells: &cells,
+            resistors: &[],
+            links: &links,
+        };
+        // The authored conductance is intentionally inconsistent with the
+        // material. A 4 W boundary source starts at t=0 in the first cell.
+        let thermal = initial(&curves, 999.0, Some(0.0));
+        let saved = thermal.cells().clone();
+        let prepared = network.prepare(&thermal, || false).unwrap();
+        let observer = prepared.observe(Recorder::default()).unwrap();
+        let cfg = StepConfig {
+            max_dt_s: 0.125,
+            energy_tolerance_j: 1e-7,
+        };
+        let (heated, history, audit) = thermal
+            .advance_observed(&observer, 1.0, cfg, || Ok(()))
+            .unwrap();
+        let g = 1.0 / (0.5 / k + 0.5 / 2.0);
+        let mut expected = [300.0, 300.0];
+        for _ in 0..8 {
+            // Independent two-body energy recurrence: m=[1,1], Cp=[1,2].
+            let exchange_w = g * (expected[0] - expected[1]);
+            expected[0] += 0.125 * (4.0 - exchange_w);
+            expected[1] += 0.125 * exchange_w / 2.0;
+        }
+        for (index, id) in [CellId(30), CellId(10)].into_iter().enumerate() {
+            near(heated.temperature_k(id).unwrap(), expected[index]);
+        }
+        near(audit.external_heat_j, 4.0);
+        near(audit.stored_energy_change_j, 4.0);
+        assert_eq!(history.second.steps, 8);
+        assert_eq!(history.second.elapsed, 1.0);
+        let sample = history.first.sample().unwrap();
+        near(sample.links[0].conductance_w_k, g);
+        for cell in &sample.cells {
+            near(
+                cell.phase.temperature_k(),
+                heated.temperature_k(cell.cell).unwrap(),
+            );
+            assert!(cell.conductivity.is_some());
+        }
+        assert_eq!(heated.links()[&7].conductance_w_k, 999.0);
+
+        let refusing = prepared
+            .observe(Recorder {
+                reject: true,
+                ..Recorder::default()
+            })
+            .unwrap();
+        assert!(matches!(
+            thermal.advance_observed(&refusing, 1.0, cfg, || Ok(())),
+            Err(ObserverCouplingError::Second(
+                DepositionError::InvalidInput("physical history refused")
+            ))
+        ));
+        assert_eq!(refusing.second.steps, 0);
+        assert!(refusing.first.sample().is_none());
+        let duplicate = prepared
+            .observe(Recorder {
+                duplicate: true,
+                ..Recorder::default()
+            })
+            .unwrap();
+        assert!(matches!(
+            thermal.advance_observed(&duplicate, 1.0, cfg, || Ok(())),
+            Err(ObserverCouplingError::ConflictingConductance(7))
+        ));
+        let mut probe = prepared.observe(()).unwrap();
+        assert!(matches!(
+            probe
+                .first
+                .sources(&thermal, &mut || Err(DepositionError::Budget("checkpoint"))),
+            Err(MaterialNetworkError::Thermal(DepositionError::Budget(
+                "checkpoint"
+            )))
+        ));
+        let resistors = branches();
+        let electrical = MaterialNetwork {
+            cells: &cells,
+            resistors: &resistors,
+            links: &links,
+        };
+        assert!(
+            electrical
+                .prepare(&thermal, || false)
+                .unwrap()
+                .observe(())
+                .is_err()
+        );
+        assert_eq!(thermal.cells(), &saved);
+        assert_eq!(thermal.time_s(), 0.0);
+        expected
+    };
+    let low = run(0.2);
+    let high = run(2.0);
+    assert!(high[0] < low[0] && high[1] > low[1]);
+}
