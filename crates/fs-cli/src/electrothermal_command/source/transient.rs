@@ -237,10 +237,11 @@ pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> 
     let last = &trajectory.last.coupled;
     let record = trajectory.records.last().expect("a completed trajectory has steps");
     if !json {
-        return format!("Electrothermal transient: {} steps, {} s, {} thermal solves\nPeak temperature: {} K; final Joule power: {} W\nLast stored-energy increment: {} J; energy defect: {} J\n{}\n",
+        return format!("Electrothermal transient: {} steps, {} s, {} thermal solves\nPeak temperature: {} K; final Joule power: {} W\nLast stored-energy increment: {} J; energy defect: {} J\nThermal-contact relative defect: {}\n{}\n",
             trajectory.records.len(), record.time_s, trajectory.thermal_solves,
             record.max_temperature_k, last.electric.total_joule_w,
-            record.stored_energy_change_j, record.closure_j, NO_CLAIM);
+            record.stored_energy_change_j, record.closure_j,
+            trajectory.last.thermal_contact_relative_defect, NO_CLAIM);
     }
     let records = trajectory.records.iter().map(|r| format!(
         "{{\"time_s\":{},\"max_temperature_k\":{},\"stored_energy_change_j\":{},\"source_j\":{},\"physical_outflow_j\":{},\"closure_j\":{}}}",
@@ -260,10 +261,14 @@ pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> 
         "{{\"schema\":\"frankensim.electrothermal.transient.result.v1\",\"authority\":\"estimated-numerical\",",
         "\"time_s\":{},\"steps\":{},\"cells\":{:?},\"cell_mass_kg\":{},\"temperature_k\":{},\"potential_v\":{},\"joule_w\":{},",
         "\"total_joule_w\":{},\"electrode_power_w\":{},\"resolved_conductivity_w_m_k\":{},",
-        "\"thermal_solves\":{},\"records\":[{}],\"materials\":[{}],\"source_states\":[{}],\"electrical_interfaces\":{},\"no_claim\":{}}}\n"),
+        "\"thermal_solves\":{},\"records\":[{}],\"materials\":[{}],\"source_states\":[{}],",
+        "\"electrical_interfaces\":{},\"thermal_interfaces\":{},",
+        "\"thermal_contact_relative_defect\":{},\"no_claim\":{}}}\n"),
         record.time_s, trajectory.records.len(), problem.domain.dims(), values(trajectory.masses.iter().copied()),
         values(last.thermal.temperature.iter().copied()), values(last.electric.potential_v.iter().copied()),
         values(last.electric.joule_w.iter().copied()), last.electric.total_joule_w, last.electric.delivered_w,
         values(trajectory.last.sources.iter().map(|s| s.k)), trajectory.thermal_solves, records, materials,
-        source_states, super::super::interfaces::render(problem, &trajectory.last.interfaces), quote(NO_CLAIM))
+        source_states, super::super::interfaces::render(problem, &trajectory.last.interfaces),
+        super::super::interfaces::render_thermal(problem, &trajectory.last),
+        trajectory.last.thermal_contact_relative_defect, quote(NO_CLAIM))
 }

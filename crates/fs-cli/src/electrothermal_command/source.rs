@@ -27,7 +27,7 @@ use fs_material::state_point::{
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{QuantitySpec, Temperature};
 
-use super::interfaces::{self, InterfaceSource};
+use super::interfaces::{self, InterfaceSource, ThermalInterfaceState};
 
 pub(super) struct Source {
     pub pack: NormalizedMaterialCardPack,
@@ -121,6 +121,8 @@ pub(super) struct Problem {
     pub material_indices: Vec<usize>,
     pub materials: Vec<Source>,
     pub electrical_interfaces: Vec<InterfaceSource>,
+    pub thermal_interfaces: Vec<InterfaceSource>,
+    pub thermal_contact_tolerance: f64,
     pub electric: ElectricSetup,
     pub thermal: ThermalSetup,
     pub initial_temperature: Vec<f64>,
@@ -135,6 +137,8 @@ pub(super) struct ResultField {
     pub coupled: MaterialCoupledSolution,
     pub sources: Vec<CellState>,
     pub interfaces: Vec<MaterialContact>,
+    pub thermal_interfaces: Vec<ThermalInterfaceState>,
+    pub thermal_contact_relative_defect: f64,
     pub thermal_solves: usize,
     pub conductivity_relative_defect: f64,
 }
@@ -184,9 +188,11 @@ impl Problem {
             None => (&unused_fluid, quiescent.as_ref().expect("all-solid quiescent field")),
         };
         let mut thermal_solves = 0usize;
-        // Reuse the source-backed contact coupling owner. It resolves joints
-        // at both current cell temperatures, deposits their heat once, and
-        // retains exactly the contacts used by the final electrical solve.
+        let mut thermal_interfaces = Vec::new();
+        let mut thermal_contact_relative_defect = 0.0;
+        // Electrical and thermal laws share physical faces/state coordinates,
+        // but neither response is inferred from the other. Each owner retains
+        // the exact final source data and its own convergence defect.
         let interface_solution = solve_material_interfaces(
             &self.domain, electric, thermal, start, self.coupling,
             |cell, _, temperature| {
@@ -195,8 +201,12 @@ impl Problem {
             },
             |temperature| interfaces::resolve(&self.electrical_interfaces, temperature, gate),
             |heated, temperature| {
-                self.solve_heat(heated, temperature, &solids, fluid, flow,
-                    storage, &mut thermal_solves, gate)
+                let (energy, joints, defect) = self.solve_heat(
+                    heated, temperature, &solids, fluid, flow, storage, &mut thermal_solves, gate,
+                )?;
+                thermal_interfaces = joints;
+                thermal_contact_relative_defect = defect;
+                Ok(energy)
             },
             gate,
         )?;
@@ -208,7 +218,8 @@ impl Problem {
             return Err(invalid("material.conductivity_consistency", "final conductivity differs from the thermal solve beyond tolerance"));
         }
         poll(gate)?;
-        Ok(ResultField { coupled, sources, interfaces, thermal_solves, conductivity_relative_defect })
+        Ok(ResultField { coupled, sources, interfaces, thermal_interfaces,
+            thermal_contact_relative_defect, thermal_solves, conductivity_relative_defect })
     }
 
     #[allow(clippy::too_many_arguments)] // existing physical owners and the accumulated work count
@@ -216,45 +227,53 @@ impl Problem {
         &self, setup: &ThermalSetup, start: &[f64], solids: &[SolidMaterial],
         fluid: &FluidProperties, flow: &FlowField, storage: Option<&transient::Storage<'_>>,
         solves: &mut usize, gate: &CancelGate,
-    ) -> Result<EnergySolution, ChtError> {
+    ) -> Result<(EnergySolution, Vec<ThermalInterfaceState>, f64), ChtError> {
         let mut previous = start.to_vec();
         let mut states = self.states(&previous, gate)?;
+        let mut configured = setup.clone();
         let mut defect = f64::INFINITY;
         for _ in 0..self.max_thermal_passes {
             poll(gate)?;
             let field: Vec<[f64; 3]> = states.iter().map(|state| [state.k; 3]).collect();
+            let joints = interfaces::resolve_thermal(&self.thermal_interfaces, &previous, gate)?;
+            configured.face_contacts.clone_from(&setup.face_contacts);
+            configured.face_contacts.extend(joints.iter().map(ThermalInterfaceState::face));
             let capacity = storage.map(|s| s.capacities(&previous, gate)).transpose()?;
             let solution = match (storage, &capacity) {
                 (Some(s), Some(capacity)) => self.energy.step_with_conductivity(
-                    &self.domain, fluid, solids, flow, setup, &field,
+                    &self.domain, fluid, solids, flow, &configured, &field,
                     capacity, s.previous, s.dt, gate,
                 )?.0,
                 _ => self.energy.solve_with_conductivity(
-                    &self.domain, fluid, solids, flow, setup, &field, gate,
+                    &self.domain, fluid, solids, flow, &configured, &field, gate,
                 )?,
             };
             *solves += 1;
-            // Re-query both transport and storage at the proposed endpoint.
-            // Neither material support nor stored energy is frozen at startup.
+            // Re-query every thermal response at the proposed endpoint. Small
+            // temperature change cannot mask a large change in joint resistance.
             let next = self.states(&solution.temperature, gate)?;
+            let next_joints = interfaces::resolve_thermal(&self.thermal_interfaces, &solution.temperature, gate)?;
+            let contact_defect = interfaces::thermal_defect(&next_joints, &solution)?;
             let storage_consistent = match (storage, &capacity) {
                 (Some(s), Some(capacity)) => s.consistent(&solution.temperature, capacity, gate)?,
                 _ => true,
             };
-            defect = conductivity_defect(&next, &solution.conductivity);
+            let conductivity_defect = conductivity_defect(&next, &solution.conductivity);
+            defect = conductivity_defect.max(contact_defect);
             let change = previous.iter().zip(&solution.temperature)
                 .map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
-            if defect <= self.conductivity_tolerance && change <= self.coupling.temperature_tolerance_k
-                && storage_consistent
+            if conductivity_defect <= self.conductivity_tolerance
+                && contact_defect <= self.thermal_contact_tolerance
+                && change <= self.coupling.temperature_tolerance_k && storage_consistent
             {
-                return Ok(solution);
+                return Ok((solution, next_joints, contact_defect));
             }
             previous = solution.temperature;
             states = next;
         }
         Err(ChtError::SolverNotConverged {
-            system: "source-resolved thermal conductivity/storage", iterations: self.max_thermal_passes,
-            relative_residual: defect, tolerance: self.conductivity_tolerance,
+            system: "source-resolved thermal conductivity/contact/storage", iterations: self.max_thermal_passes,
+            relative_residual: defect, tolerance: self.conductivity_tolerance.min(self.thermal_contact_tolerance),
         })
     }
 }
