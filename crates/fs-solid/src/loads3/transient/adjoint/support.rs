@@ -15,6 +15,8 @@
 
 use super::*;
 
+pub mod trajectory;
+
 /// Full node-major objective cotangents, including constrained components.
 /// Units are objective/m, objective/(m/s), and objective/(m/s²).
 #[derive(Debug, Clone, PartialEq)]

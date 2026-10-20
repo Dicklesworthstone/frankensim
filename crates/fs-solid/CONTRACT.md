@@ -497,6 +497,34 @@ group through three native steps against centered differences with full nodal
 objectives, the fully prescribed kinematic limit, fixed-index ordering and
 malformed-input, budget and cancellation refusals.
 
+`adjoint::support::trajectory` records complete prescribed-support simulations
+through `record_prescribed_controls`. Its owning recorder retains only accepted
+interval times: the frozen linear motion Jacobian needs no full primal tape or
+finite-difference replay. Each successful original coupled step is recorded
+atomically; failed sampling, support admission, solves, cancellation or storage
+admission preserves both the accepted state and schedule. Cloning forks both.
+The typed-history adapter samples one retained force/support endpoint before
+advancing, using the same physical time and frame binding as the original run.
+
+`reverse_with_observations` adds sparse full-nodal objective derivatives at any
+accepted endpoint, including initialization, and reverses the complete schedule
+once. It returns every initial/endpoint force row, every absolute prescribed
+displacement row, independent initial free q/all v/fixed a, and the sum of force
+cotangents for the one frozen thermal equivalent load. Initial fixed q appears
+only in the initial displacement-control row, avoiding duplicate control
+contributions. Sparse observations preserve caller summation order with
+O(steps + observations) indexing. Explicit step, returned-gradient and observation
+caps precede allocation. Refused/cancelled reversals return no partial gradient.
+
+Callers supply actual residual/quadrature weights for their motion objectives
+and chain returned world-component controls through authored waveforms. This
+does not infer derivatives of frame transforms, knot/step times, interpolation,
+geometry, material, direct control costs, reaction/work observations or acceptance.
+`tests/transient_support_trajectory3.rs` supplies a multi-step least-squares
+objective checked against all twelve independent initial/force/support control
+directions, an analytical typed fully-prescribed ramp-amplitude chain rule,
+and bounded recording, cloning, cancellation and refusal/retry checks.
+
 ## Public types and semantics
 
 - `Mesh2` / `Patch`: structured body-fitted meshes — P1 triangles, Q1

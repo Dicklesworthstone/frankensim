@@ -175,3 +175,27 @@ impl crate::loads3::transient::adjoint::trajectory::RecordedTransient3<'_, '_, '
         self.advance(&endpoint.case, h_s, cx)
     }
 }
+
+impl crate::loads3::transient::adjoint::support::trajectory::RecordedPrescribedTransient3<'_, '_, '_, '_> {
+    /// Sample typed forces and prescribed displacements together, then record
+    /// one accepted coupled step. Reverse results address integrated forces and
+    /// world-component support values at these exact physical times. Authored
+    /// interpolation, frame and initial-velocity control derivatives are chained
+    /// by the caller; this adapter does not guess them or discover events.
+    pub fn advance_history_with_supports(
+        &mut self, history: &TetLoadHistory3<'_>, supports: &[SupportMotion3<'_>],
+        h_s: f64, cx: &Cx<'_>,
+    ) -> Result<TransientStep3, crate::loads3::transient::adjoint::TransientAdjointError3> {
+        self.admit_next_step(cx)?;
+        let start = self.run().state().time_s;
+        let time = start + h_s;
+        if !h_s.is_finite() || h_s <= 0.0 || !time.is_finite() || time <= start {
+            return Err(TransientError3::Invalid("recorded support history needs a finite later endpoint").into());
+        }
+        let endpoint = history.at_with_supports(
+            self.run().geometry, self.run().problem, supports, time,
+            self.run().maximum_displacement_m(), cx,
+        )?;
+        self.advance_with_supports(&endpoint.loads.case, endpoint.prescribed_dofs_m(), h_s, cx)
+    }
+}
