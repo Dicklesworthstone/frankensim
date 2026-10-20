@@ -16,6 +16,9 @@
 //! https://www.grc.nasa.gov/www/BGH/isndrv.html
 //! https://www.grc.nasa.gov/www/BGH/mflchk.html
 
+/// Conservative pressure-driven exchange on a graph of existing gas parcels.
+pub mod network;
+
 use super::{ClosedGasParcel, GasEnergyError, GasEnergySolve, GasMassTransferCandidate,
     GasMassTransferSolve, invalid, poll, positive, source_error, updated_point};
 use crate::thermochemical_gas::ResolvedThermochemicalGasState;
