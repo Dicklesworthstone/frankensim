@@ -10,11 +10,21 @@ use fs_matdb::{
     PropertyClaim, PropertyKey, PropertyValue, Provenance, UncertaintyModel,
 };
 use fs_qty::{
-    Density, Dims, Pressure, QuantitySpec,
-    semantic::{QuantityKind, SemanticType, ValueForm},
+    Density, Dims, DynViscosity, Frequency, Pressure, QuantitySpec,
+    semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm},
 };
 
 fn pack(name: &str, rho: f64, young: f64, poisson: Option<f64>) -> NormalizedMaterialCardPack {
+    pack_with_viscosity(name, rho, young, poisson, None)
+}
+
+fn pack_with_viscosity(
+    name: &str,
+    rho: f64,
+    young: f64,
+    poisson: Option<f64>,
+    viscosity: Option<([f64; 6], (f64, f64), bool)>,
+) -> NormalizedMaterialCardPack {
     let temperature = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
@@ -41,6 +51,53 @@ fn pack(name: &str, rho: f64, young: f64, poisson: Option<f64>) -> NormalizedMat
                     observations: vec![],
                     provenance: Provenance {
                         source: format!("manufactured kit test {name}/{key}"),
+                        license: "CC0-1.0".into(),
+                        artifact: None,
+                    },
+                })
+                .unwrap();
+        }
+    }
+    if let Some((values, (lo, hi), frequency_curve)) = viscosity {
+        let frequency = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Frequency(FrequencyConvention::Cyclic),
+            ValueForm::Static,
+        ));
+        for (i, (key, value)) in
+            fs_material::plane_stress_viscosity::PLANE_STRESS_VISCOSITY_PROPERTIES
+                .into_iter()
+                .zip(values)
+                .enumerate()
+        {
+            let curve = frequency_curve && i == 0;
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::new(key, DynViscosity::DIMS),
+                    value: if curve {
+                        PropertyValue::Curve {
+                            abscissa: "frequency".into(),
+                            abscissa_dims: Frequency::DIMS,
+                            knots: vec![(lo, value), (hi, value * 2.0)],
+                            dims: DynViscosity::DIMS,
+                        }
+                    } else {
+                        PropertyValue::Scalar {
+                            value,
+                            dims: DynViscosity::DIMS,
+                        }
+                    },
+                    validity: ValidityDomain::unconstrained()
+                        .with_quantity("T", temperature, 273.15, 323.15)
+                        .with_quantity("frequency", frequency, lo, hi),
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: if curve {
+                        InterpolationPolicy::LinearInside
+                    } else {
+                        InterpolationPolicy::ConstantWithinValidity
+                    },
+                    observations: vec![],
+                    provenance: Provenance {
+                        source: format!("manufactured {name}/{key}"),
                         license: "CC0-1.0".into(),
                         artifact: None,
                     },
@@ -248,5 +305,345 @@ fn g0_material_pack_admission_refuses_incomplete_out_of_domain_and_malformed_sou
     assert!(
         KitMaterials::from_packs_at_temperature(&film, &[], &film, "T", 293.15, 0.0, 0.005, 0.05)
             .is_err()
+    );
+}
+
+fn viscous_binding(source: &NormalizedMaterialCardPack, angle: f64) -> KitMaterials {
+    let striker = pack("viscous-test striker", 800.0, 12e9, Some(0.3)).to_bytes();
+    KitMaterials::from_packs_with_bending_loss(
+        &source.to_bytes(),
+        &[],
+        &striker,
+        "T",
+        293.15,
+        9e-6,
+        0.005,
+        0.05,
+        "frequency",
+        1000.0,
+        [angle, 0.0],
+    )
+    .unwrap()
+}
+
+fn viscous_plate(materials: &KitMaterials, edge: Edge) -> Body {
+    let (law, angle) = materials.primary_bending_loss().unwrap();
+    Body::plate_with_viscosity(
+        "material-loss plate",
+        &PlateSpec {
+            radius: 0.06,
+            hole: 0.0,
+            grid: 0.012,
+            edge,
+            thickness: &|_| 0.001,
+            rest_height: &|_| 0.0,
+            young: materials.primary().young_modulus_pa(),
+            poisson: materials.primary().poisson_ratio(),
+            density: materials.primary().density_kg_m3(),
+            tension: 0.0,
+            bending: true,
+            nonlinear: Nonlinear::None,
+            t60: [(500.0, 0.2), (10000.0, 0.1)],
+            support: None,
+            muffle: None,
+        },
+        law,
+        angle,
+    )
+    .unwrap()
+}
+
+#[test]
+fn g1_bending_viscosity_has_the_sourced_tensor_power_and_physical_orientation() {
+    let source = pack_with_viscosity(
+        "anisotropic reduced viscosity",
+        1390.0,
+        4e9,
+        Some(0.3),
+        Some(([4e4, 7e4, 3e4, 1e4, 5e3, -4e3], (0.0, 1e6), false)),
+    );
+    for angle in [0.0, PI / 2.0] {
+        let materials = viscous_binding(&source, angle);
+        let body = viscous_plate(&materials, Edge::Free);
+        assert_eq!(
+            body.loss(),
+            (0.0, 0.0),
+            "source loss replaces the T60 prescription"
+        );
+        let v: Vec<f64> = body
+            .xy
+            .iter()
+            .map(|[x, y]| 0.2 * x * x - 0.35 * y * y + 0.6 * x * y)
+            .collect();
+        let law = &body.viscosity.as_ref().unwrap().source;
+        let local_curvature = if angle == 0.0 {
+            [0.4, -0.7, 1.2]
+        } else {
+            [-0.7, 0.4, -1.2]
+        };
+        let (_, power_density) = law.stress_and_power(local_curvature).unwrap();
+        let root = &body.viscosity.as_ref().unwrap().root;
+        let points = root.ptr.windows(2).filter(|p| p[0] != p[1]).count() / 3;
+        let expected = power_density * 0.001_f64.powi(3) / 12.0 * points as f64 * body.h.powi(2);
+        let mut rates = vec![0.0; root.n];
+        root.mul_add(&v, 1.0, &mut rates);
+        near(dot(&rates, &rates), expected);
+        near(body.viscosity.as_ref().unwrap().c.quad(&v), expected);
+    }
+}
+
+#[test]
+fn g0_centered_material_dissipation_closes_the_actual_staggered_energy() {
+    let source = pack_with_viscosity(
+        "passive viscosity",
+        1390.0,
+        4e9,
+        Some(0.3),
+        Some(([8e4, 6e4, 3e4, 1e4, 4e3, -3e3], (0.0, 1e6), false)),
+    );
+    let mut body = viscous_plate(&viscous_binding(&source, 0.23), Edge::Clamped);
+    for (i, p) in body.xy.iter().enumerate() {
+        body.w[i] = 1e-5 * (1.0 - (p[0] * p[0] + p[1] * p[1]) / 0.06_f64.powi(2)).powi(2);
+        body.wp[i] = body.w[i];
+    }
+    body.sync();
+    let mut ins = Instrument::new(384000.0);
+    ins.add(body);
+    ins.validate_bending_loss_clock().unwrap();
+    assert!(ins.stability().0 < 0.6);
+    let initial = ins.bodies[0].discrete_energy(ins.k());
+    let mut previous = initial;
+    for _ in 0..512 {
+        ins.step(&mut []);
+        let body = &ins.bodies[0];
+        let energy = body.discrete_energy(ins.k());
+        assert!(body.viscosity.as_ref().unwrap().last_j >= 0.0);
+        assert!(energy <= previous + 2e-12 * initial);
+        assert!((energy + body.bending_loss_dissipated_j() - initial).abs() < 2e-10 * initial);
+        previous = energy;
+    }
+    assert!(ins.bodies[0].bending_loss_dissipated_j() > initial * 0.01);
+    let mut copy = ins.clone();
+    for _ in 0..64 {
+        ins.step(&mut []);
+        copy.step(&mut []);
+    }
+    assert_eq!(ins.bodies[0].w, copy.bodies[0].w);
+    assert_eq!(
+        ins.bodies[0].bending_loss_dissipated_j(),
+        copy.bodies[0].bending_loss_dissipated_j()
+    );
+}
+
+#[test]
+fn g1_kelvin_voigt_bending_converges_to_the_analytic_damped_mode() {
+    let (young, nu, tau) = (4e9, 0.3, 2e-5);
+    let eta = tau * young / (1.0 - nu * nu);
+    let source = pack_with_viscosity(
+        "proportional manufactured viscosity",
+        1390.0,
+        young,
+        Some(nu),
+        Some((
+            [eta, eta, eta * (1.0 - nu) / 2.0, eta * nu, 0.0, 0.0],
+            (0.0, 1e7),
+            false,
+        )),
+    );
+    let body = viscous_plate(&viscous_binding(&source, 0.0), Edge::Clamped);
+    // A reference eigenvector of the actual elastic grid; the independent
+    // time solution is q'' + tau*lambda*q' + lambda*q=0, not another stepper.
+    let mut mode: Vec<f64> = (0..body.n)
+        .map(|i| ((i * 17 % 13) as f64 - 6.0) / 6.0)
+        .collect();
+    for _ in 0..700 {
+        let mut next = vec![0.0; body.n];
+        body.stiff.mul_add(&mode, 1.0, &mut next);
+        for (v, m) in next.iter_mut().zip(&body.mass) {
+            *v /= m;
+        }
+        let norm = dot(&next, &next).sqrt();
+        for v in &mut next {
+            *v /= norm;
+        }
+        mode = next;
+    }
+    let modal_mass = body
+        .mass
+        .iter()
+        .zip(&mode)
+        .map(|(m, v)| m * v * v)
+        .sum::<f64>();
+    let lambda = body.stiff.quad(&mode) / modal_mass;
+    near(
+        body.viscosity.as_ref().unwrap().c.quad(&mode) / modal_mass,
+        tau * lambda,
+    );
+    let gamma = tau * lambda / 2.0;
+    let omega = (lambda - gamma * gamma).sqrt();
+    assert!(omega.is_finite() && omega > 0.0);
+    let exact =
+        |t: f64| (-gamma * t).exp() * ((omega * t).cos() + gamma / omega * (omega * t).sin());
+    let end = PI / (2.0 * lambda.sqrt());
+    let mut errors = Vec::new();
+    for steps in [40, 80, 160] {
+        let k = end / steps as f64;
+        let mut ins = Instrument::new(1.0 / k);
+        let mut b = body.clone();
+        for (i, v) in mode.iter().enumerate() {
+            b.w[i] = *v;
+            b.wp[i] = *v * exact(-k);
+        }
+        b.sync();
+        ins.add(b);
+        ins.validate_bending_loss_clock().unwrap();
+        assert!(ins.stability().0 < 0.6);
+        for _ in 0..steps {
+            ins.step(&mut []);
+        }
+        let amplitude = ins.bodies[0]
+            .w
+            .iter()
+            .zip(&mode)
+            .zip(&body.mass)
+            .map(|((w, v), m)| w * v * m)
+            .sum::<f64>()
+            / modal_mass;
+        errors.push((amplitude - exact(end)).abs());
+    }
+    for pair in errors.windows(2) {
+        let ratio = pair[0] / pair[1];
+        assert!(
+            (1.8..2.2).contains(&ratio),
+            "backward viscous velocity is first-order: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn g3_source_loss_changes_live_pressure_without_preset_decay_or_hidden_fallback() {
+    let values = [1e6, 1e6, 4e5, 2e5, 0.0, 0.0];
+    let source = pack_with_viscosity(
+        "live loss",
+        1390.0,
+        4e9,
+        Some(0.38),
+        Some((values, (0.0, 1e6), false)),
+    );
+    let changed = pack_with_viscosity(
+        "live doubled loss",
+        1390.0,
+        4e9,
+        Some(0.38),
+        Some((values.map(|v| 2.0 * v), (0.0, 1e6), false)),
+    );
+    let make = |source| {
+        live::Live::with_materials_record(
+            "kick",
+            6.0,
+            "293.15 101325 0",
+            viscous_binding(source, 0.0),
+        )
+        .unwrap()
+    };
+    let mut a = make(&source);
+    let mut b = make(&changed);
+    assert_eq!(a.ins.bodies[0].mass, b.ins.bodies[0].mass);
+    assert_eq!(a.ins.bodies[0].stiff.val, b.ins.bodies[0].stiff.val);
+    assert_eq!(a.ins.bodies[0].s1, 0.0);
+    assert_eq!(b.ins.bodies[0].s1, 0.0);
+    for player in [&mut a, &mut b] {
+        player.strike(0.03, 0.01, 1.0);
+    }
+    let mut copy = a.clone();
+    let (mut pa, mut pb, mut pc) = ([0.0; 2048], [0.0; 2048], [0.0; 2048]);
+    a.render(&mut pa, 1.0);
+    b.render(&mut pb, 1.0);
+    copy.render(&mut pc, 1.0);
+    assert!(pa.iter().chain(&pb).all(|x| x.is_finite()));
+    assert!(pa.iter().any(|x| x.abs() > 1e-9));
+    assert_ne!(pa, pb);
+    assert_eq!(pa, pc);
+    assert!(a.ins.bodies[0].bending_loss_dissipated_j() > 0.0);
+    assert_eq!(
+        a.ins.bodies[0].bending_loss_dissipated_j(),
+        copy.ins.bodies[0].bending_loss_dissipated_j()
+    );
+
+    let zero = pack_with_viscosity(
+        "explicit zero loss",
+        1390.0,
+        4e9,
+        Some(0.3),
+        Some(([0.0; 6], (0.0, 1e6), false)),
+    );
+    assert_eq!(
+        viscous_plate(&viscous_binding(&zero, 0.0), Edge::Clamped).loss(),
+        (0.0, 0.0)
+    );
+    for (band, curve) in [
+        ((100.0, 1e6), false),
+        ((0.0, 2000.0), false),
+        ((0.0, 1e6), true),
+    ] {
+        let unsupported = pack_with_viscosity(
+            "unsupported loss domain",
+            1390.0,
+            4e9,
+            Some(0.3),
+            Some((values, band, curve)),
+        );
+        let bytes = unsupported.to_bytes();
+        let result = KitMaterials::from_packs_with_bending_loss(
+            &bytes,
+            &[],
+            &bytes,
+            "T",
+            293.15,
+            9e-6,
+            0.005,
+            0.05,
+            "frequency",
+            1000.0,
+            [0.0; 2],
+        )
+        .and_then(|m| live::Live::with_materials_record("kick", 6.0, "293.15 101325 0", m));
+        assert!(result.is_err());
+    }
+}
+
+#[test]
+fn g0_source_viscosity_participates_in_the_real_kit_clock_admission() {
+    let source = |name, values| {
+        pack_with_viscosity(
+            name,
+            1390.0,
+            4e9,
+            Some(0.3),
+            Some((values, (0.0, 1e7), false)),
+        )
+    };
+    let zero = source("clock zero loss", [0.0; 6]);
+    let too_stiff = source(
+        "clock excessive viscosity",
+        [1e15, 1e15, 4e14, 2e14, 0.0, 0.0],
+    );
+    let mut spec = kit::kick();
+    spec.grid *= 8.0;
+    let admitted =
+        kit::drum_with_materials(&spec, &[], standard_gas(), &viscous_binding(&zero, 0.0)).unwrap();
+    assert_eq!(admitted.oversample, spec.oversample);
+    // Identical inertia, elasticity, geometry and source band. The enormous
+    // viscosity alone exceeds every supported clock; silently retaining the
+    // old T60 or checking elastic CFL alone would incorrectly admit this kit.
+    let result = kit::drum_with_materials(
+        &spec,
+        &[],
+        standard_gas(),
+        &viscous_binding(&too_stiff, 0.0),
+    );
+    assert!(
+        matches!(result, Err(error) if error.contains("material bending viscosity")
+        && error.contains("8x oversampling"))
     );
 }

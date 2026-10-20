@@ -625,6 +625,10 @@ name = "fs-render-gpu"
 version = "0.0.1"
 dependencies = [
  "cudarc",
+ "fs-blake3",
+ "fs-evidence",
+ "fs-matdb",
+ "fs-qty",
  "fs-vkplate",
 ]
 

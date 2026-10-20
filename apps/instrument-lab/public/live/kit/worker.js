@@ -131,11 +131,25 @@ function makePiece(name, scale, gasRecord, materials) {
         || ![temperatureK, strikerVolumeM3, strikerTipRadiusM, impactLossSM].every(Number.isFinite)) {
       throw new Error('Material temperature axis, temperature, striker volume/radius and impact loss must be declared.');
     }
+    const inputs = [name, scale, gasRecord ?? '293.15 101325 0', surfacePack, secondaryPack,
+      strikerPack, temperatureAxis, temperatureK, strikerVolumeM3, strikerTipRadiusM, impactLossSM];
+    if (materials.bendingLoss !== undefined) {
+      const loss = materials.bendingLoss;
+      if (!loss || loss.model !== 'kelvin-voigt-plane-stress'
+          || typeof loss.frequencyAxis !== 'string' || !loss.frequencyAxis.trim()
+          || ![loss.frequencyHz, loss.primaryAngleRad, loss.secondaryAngleRad].every(Number.isFinite)) {
+        throw new Error('Declare the source bending-loss model, frequency coordinate and both material orientations.');
+      }
+      if (typeof KitPiece.withMaterialBendingLoss !== 'function') {
+        throw new Error('This kit engine needs rebuilding with source bending-loss support; the selected viscosity was not applied.');
+      }
+      return KitPiece.withMaterialBendingLoss(...inputs, loss.frequencyAxis, loss.frequencyHz,
+        loss.primaryAngleRad, loss.secondaryAngleRad);
+    }
     if (typeof KitPiece.withMaterials !== 'function') {
       throw new Error('This kit engine needs rebuilding with material-card support; the selected materials were not applied.');
     }
-    return KitPiece.withMaterials(name, scale, gasRecord ?? '293.15 101325 0', surfacePack, secondaryPack,
-      strikerPack, temperatureAxis, temperatureK, strikerVolumeM3, strikerTipRadiusM, impactLossSM);
+    return KitPiece.withMaterials(...inputs);
   }
   if (gasRecord === undefined) return new KitPiece(name, scale);
   if (typeof KitPiece.withGas !== 'function') {

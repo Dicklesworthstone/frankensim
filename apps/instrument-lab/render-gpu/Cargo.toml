@@ -22,6 +22,12 @@ cuda = ["dep:cudarc"]
 [dependencies]
 fs-vkplate = { path = "../../../crates/fs-vkplate" }
 
+[dev-dependencies]
+fs-blake3 = { path = "../../../crates/fs-blake3" }
+fs-evidence = { path = "../../../crates/fs-evidence" }
+fs-matdb = { path = "../../../crates/fs-matdb" }
+fs-qty = { path = "../../../crates/fs-qty" }
+
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-13020"], optional = true }
 

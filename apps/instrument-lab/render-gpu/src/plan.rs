@@ -4,7 +4,7 @@
 //! dense inverse of each plate's Airy operator. Pure data; no device code. A batch of simulations shares
 //! everything here except the state and the strike lists.
 
-use fs_vkplate::{GasState, Instrument, InstrumentImage, Law};
+use fs_vkplate::{GasState, Instrument, InstrumentImage, Law, PlaneStressViscosity};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use fs_vkplate::materials::KitMaterials;
@@ -28,6 +28,7 @@ pub struct Plan {
     // Batches also share solid operators, contact laws and striker inertia.
     // Retain the full source binding, even if two cards resolve equal numbers.
     materials: Option<Arc<KitMaterials>>,
+    viscosity_sources: Vec<Option<(PlaneStressViscosity, f64)>>,
     pub body_off: Vec<usize>,
     // per node
     pub bias: Vec<f64>,
@@ -44,6 +45,14 @@ pub struct Plan {
     pub stf_ptr: Vec<i32>,
     pub stf_col: Vec<i32>,
     pub stf_val: Vec<f64>,
+    pub visc_ptr: Vec<i32>,
+    pub visc_col: Vec<i32>,
+    pub visc_val: Vec<f64>,
+    /// Three curvature-loss square-root rows per global node; columns still
+    /// refer to global displacement nodes, not the three-row numbering.
+    pub vroot_ptr: Vec<i32>,
+    pub vroot_col: Vec<i32>,
+    pub vroot_val: Vec<f64>,
     pub gt_ptr: Vec<i32>,
     pub gt_core: Vec<i32>,
     pub gt_slot: Vec<i32>,
@@ -68,6 +77,7 @@ pub struct Plan {
     pub barea: Vec<f64>,
     pub beh: Vec<f64>,
     pub bvk: Vec<i32>,
+    pub bviscous: Vec<i32>,
     pub bcoff: Vec<i32>,
     pub bnc: Vec<i32>,
     pub bitem0: Vec<i32>,
@@ -175,6 +185,7 @@ pub struct SimState {
     pub psi: Vec<f64>,
     pub rprev: Vec<f64>,
     pub budget: Vec<f64>,
+    pub viscous_dissipated: Vec<f64>,
     pub ct_active: Vec<i32>,
     pub ct_force: Vec<f64>,
     pub ct_dnow: Vec<f64>,
@@ -248,6 +259,10 @@ impl Plan {
         if img.step_index != 0 {
             return Err("export the instrument before its first step (the microphone rings are not exported)".into());
         }
+        if img.rate != ins.rate || img.bodies.len() != ins.bodies.len() {
+            return Err("exported and live instrument clocks or bodies differ".into());
+        }
+        ins.validate_bending_loss_clock()?;
         let k = 1.0 / img.rate;
         if img.gas != *ins.gas() {
             return Err("exported and live instrument gas states differ".into());
@@ -273,12 +288,23 @@ impl Plan {
         let g = |b: usize, i: usize| bo[b] + i;
         // nodes, operators, work items
         let (mut lap_ptr, mut stf_ptr) = (vec![0i32], vec![0i32]);
+        p.visc_ptr.push(0);
+        p.vroot_ptr.push(0);
         let mut coff = 0usize;
         for (bi, b) in img.bodies.iter().enumerate() {
             let o = p.body_off[bi];
             if b.cf.len() != b.n {
                 return Err(format!("{}: no update coefficients", b.name));
             }
+            let source = b.viscosity.as_ref().map(|v| (v, b.viscosity_angle_rad));
+            if source != ins.bodies[bi].bending_viscosity() {
+                return Err(format!("{}: exported and live bending-viscosity sources differ", b.name));
+            }
+            if source.is_some() && (b.viscous.ptr.len() != b.n + 1 || b.viscous_root.ptr.len() != 3*b.n + 1) {
+                return Err(format!("{}: incomplete bending-viscosity operators", b.name));
+            }
+            p.viscosity_sources.push(source.map(|(v, a)| (v.clone(), a)));
+            p.bviscous.push(source.is_some() as i32);
             for i in 0..b.n {
                 p.bias.push(b.bias[i]);
                 let [ia, cw, cwp, cs1] = b.cf[i];
@@ -296,6 +322,22 @@ impl Plan {
                         val.push(csr.val[q]);
                     }
                     ptr.push(i32s(col.len()));
+                }
+                if source.is_some() {
+                    for q in b.viscous.ptr[i]..b.viscous.ptr[i + 1] {
+                        p.visc_col.push(i32s(o + b.viscous.col[q]));
+                        p.visc_val.push(b.viscous.val[q]);
+                    }
+                }
+                p.visc_ptr.push(i32s(p.visc_col.len()));
+                for r in 3*i..3*i+3 {
+                    if source.is_some() {
+                        for q in b.viscous_root.ptr[r]..b.viscous_root.ptr[r + 1] {
+                            p.vroot_col.push(i32s(o + b.viscous_root.col[q]));
+                            p.vroot_val.push(b.viscous_root.val[q]);
+                        }
+                    }
+                    p.vroot_ptr.push(i32s(p.vroot_col.len()));
                 }
             }
             p.z0.extend(b.vk.as_ref().map_or(vec![0.0; b.n], |v| v.z0.clone()));
@@ -631,6 +673,7 @@ impl Plan {
 
     /// The state and strikes of one simulation of this plan's instrument.
     pub fn state(&self, img: &InstrumentImage) -> Result<SimState, String> {
+        if self.rate != img.rate { return Err("a batch member's internal clock differs from the first member's".into()); }
         if self.gas != Some(img.gas) {
             return Err("a batch member's atmosphere differs from the first member's".into());
         }
@@ -639,6 +682,11 @@ impl Plan {
         }
         if img.bodies.len() != self.nb || img.contacts.len() != self.ct_gap.len() || img.mics.len() != self.nm {
             return Err("a batch member is a different instrument (bodies, contacts or microphones differ)".into());
+        }
+        for (body, source) in img.bodies.iter().zip(&self.viscosity_sources) {
+            if body.viscosity.as_ref().map(|v| (v, body.viscosity_angle_rad)) != source.as_ref().map(|(v, a)| (v, *a)) {
+                return Err("a batch member's bending-viscosity source or orientation differs from the first member's".into());
+            }
         }
         // the batch shares every operator: the same bodies, and every contact touching the same nodes with the
         // same weights, gap and law
@@ -666,6 +714,7 @@ impl Plan {
             s.psi.push(b.psi);
             s.rprev.push(b.r_prev);
             s.budget.push(b.budget);
+            s.viscous_dissipated.push(b.viscous_dissipated_j);
         }
         for c in &img.contacts {
             s.ct_active.push(c.active as i32);

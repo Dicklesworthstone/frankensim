@@ -16,21 +16,26 @@
 //! linear part is symmetric and the nonlinear force is the exact gradient of the discrete
 //! von Karman potential. Free edges are the natural boundary condition of that energy.
 //!
-//! Time stepping is leapfrog with a frequency-dependent loss `s0 + s1 beta^2`, set from two
-//! (frequency, T60) points. Contacts (stick, felt beater, snare wires, hi-hat plates) are
+//! Time stepping is leapfrog. Structural loss is either the legacy `s0 + s1 beta^2`
+//! prescription from two (frequency, T60) points or an explicitly selected, source-bound
+//! plane-stress Kelvin--Voigt bending tensor. Its backward-velocity force requires the
+//! damping CFL and its physical loss uses centered velocity; see `Body::discrete_energy`.
+//! Contacts (stick, felt beater, snare wires, hi-hat plates) are
 //! solved IMPLICITLY per contact as monotone scalar equations, so stiff Hertz contacts are
 //! stable at audio rates. The enclosed air of a drum couples its two heads (lumped adiabatic
 //! cavity); each head's volume velocity sees a small-ka monopole radiation resistance. Sound
 //! is the baffled Rayleigh integral of surface acceleration at each microphone.
 //!
-//! Honest scope: square-grid (staircase) boundaries; moderate rotations (von Karman); loss
-//! parameters are declared estimates, not measured; lumped cavity (no cavity modes); baffled
+//! Honest scope: square-grid (staircase) boundaries; moderate rotations (von Karman); preset
+//! loss parameters are declared estimates, while sourced bending loss retains its admitted
+//! fixed-state/band limits; lumped cavity (no cavity modes); baffled
 //! radiation (no diffraction around a cymbal's edge).
 
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
 
 pub use fs_material::gas::GasState;
+pub use fs_material::plane_stress_viscosity::PlaneStressViscosity;
 
 /// Immutable source-bound elastic data and physical striker geometry for kit builders.
 pub mod materials;
@@ -379,6 +384,7 @@ pub struct Body {
     s1: f64,
     lap: Csr,
     stiff: Csr,
+    viscosity: Option<ViscousBending>,
     tension: f64,
     berger: f64,
     vk: Option<VonKarman>,
@@ -412,6 +418,22 @@ pub struct Body {
     pub air_mass: f64,
 }
 
+/// C = G'G is the assembled curvature-rate damping matrix. Retaining G lets
+/// physical dissipation be accumulated as squares, without clipping negative
+/// quadratic roundoff. Three G rows belong to each plate node (empty outside
+/// the curvature integration points), which external steppers also retain.
+#[derive(Clone)]
+struct ViscousBending {
+    source: PlaneStressViscosity,
+    angle: f64,
+    c: Csr,
+    root: Csr,
+    scratch: Vec<f64>,
+    rate_bound: f64,
+    dissipated_j: f64,
+    last_j: f64,
+}
+
 fn sigmas(t60: [(f64, f64); 2], beta2: &dyn Fn(f64) -> f64) -> (f64, f64) {
     let (fa, ta) = t60[0];
     let (fb, tb) = t60[1];
@@ -423,6 +445,21 @@ fn sigmas(t60: [(f64, f64); 2], beta2: &dyn Fn(f64) -> f64) -> (f64, f64) {
 
 impl Body {
     pub fn plate(name: &str, s: &PlateSpec) -> Result<Body, String> {
+        Self::plate_impl(name, s, None)
+    }
+
+    /// Same elastic/geometry operators with a sourced reduced plane-stress
+    /// Kelvin--Voigt bending law. Replaces the T60 prescription completely;
+    /// support and muffle dashpots remain independent. The receiving instrument
+    /// must admit the source band and damping CFL at its actual internal clock.
+    pub fn plate_with_viscosity(name: &str, s: &PlateSpec,
+        source: &PlaneStressViscosity, angle_rad: f64) -> Result<Body, String> {
+        if !s.bending { return Err("bending viscosity requires the plate bending operator".into()); }
+        Self::plate_impl(name, s, Some((source, angle_rad)))
+    }
+
+    fn plate_impl(name: &str, s: &PlateSpec,
+        viscosity: Option<(&PlaneStressViscosity, f64)>) -> Result<Body, String> {
         let h = s.grid;
         let m = (s.radius / h).ceil() as i64 + 3;
         let inside = |i: i64, j: i64| {
@@ -536,6 +573,48 @@ impl Body {
                 }
             }
         }
+        let viscosity = if let Some((source, angle)) = viscosity {
+            let mut roots = vec![BTreeMap::new(); 3 * n];
+            for &(i, j) in &curv_pts {
+                let r = ((i * i + j * j) as f64).sqrt() * h;
+                let d = source.bending_matrix_n_m_s((s.thickness)(r), angle)
+                    .map_err(|e| e.to_string())?;
+                if d.iter().all(|v| *v == 0.0) { continue; }
+                let rows: Vec<BTreeMap<usize, f64>> = (0..3).map(|a|
+                    (0..3).map(|b| (b, d[3*a+b])).collect()).collect();
+                let factor = Band::factor(&rows)?;
+                let b = stencil(i, j);
+                let node = at(i, j).expect("curvature point belongs to the plate");
+                // Engineering curvature is [w_xx,w_yy,2w_xy]. The square
+                // root includes sqrt(area)=h, so G'G has units N s/m.
+                for column in 0..3 {
+                    for a in column..3 {
+                        if a - column > factor.b { continue; }
+                        let l = factor.l[a * (factor.b + 1) + column + factor.b - a];
+                        let scale = h * l * if a == 2 { 2.0 } else { 1.0 };
+                        for &(p, value) in &b[a] {
+                            if let Some(p) = p { add(&mut roots, 3 * node + column, p, scale * value); }
+                        }
+                    }
+                }
+            }
+            let mut rows = vec![BTreeMap::new(); n];
+            for root in &roots {
+                for (&i, &a) in root {
+                    for (&j, &b) in root { add(&mut rows, i, j, a * b); }
+                }
+            }
+            if rows.iter().chain(&roots).flat_map(|r| r.values()).any(|v| !v.is_finite()) {
+                return Err("assembled bending viscosity is not representable".into());
+            }
+            let rate_bound = rows.iter().enumerate().map(|(i, row)| row.iter()
+                .map(|(&j, value)| value.abs() / mass[i].sqrt() / mass[j].sqrt()).sum::<f64>())
+                .fold(0.0_f64, f64::max);
+            if !rate_bound.is_finite() { return Err("bending-viscosity CFL bound is not representable".into()); }
+            Some(ViscousBending { source: source.clone(), angle, c: Csr::from_rows(&rows),
+                root: Csr::from_rows(&roots), scratch: vec![0.0; 3*n], rate_bound,
+                dissipated_j: 0.0, last_j: 0.0 })
+        } else { None };
         // supports and muffling: springs/dashpots to ground per node
         let mut s0_extra = vec![0.0; n];
         for (k, &p) in xy.iter().enumerate() {
@@ -562,7 +641,7 @@ impl Body {
             let om2 = (2.0 * PI * f).powi(2);
             if ddc > 0.0 { (-tt + (tt * tt + 4.0 * ddc * om2).sqrt()) / (2.0 * ddc) } else { om2 / tt }
         };
-        let (s0, s1) = sigmas(s.t60, &beta2);
+        let (s0, s1) = if viscosity.is_some() { (0.0, 0.0) } else { sigmas(s.t60, &beta2) };
         let s0v: Vec<f64> = (0..n).map(|k| s0 + s0_extra[k]).collect();
         let area = PI * (s.radius * s.radius - s.hole * s.hole);
         let t_mean = thick.iter().sum::<f64>() / n as f64;
@@ -630,7 +709,7 @@ impl Body {
             *m_ = m_.max(1e-12);
         }
         Ok(Body {
-            name: name.into(), h, n, xy, rest_z, grid_index, mass, s0: s0v, s1, lap, stiff, tension: s.tension, berger, vk,
+            name: name.into(), h, n, xy, rest_z, grid_index, mass, s0: s0v, s1, lap, stiff, viscosity, tension: s.tension, berger, vk,
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: true, area, air_mass: 0.0,
         })
@@ -649,7 +728,7 @@ impl Body {
         let xy = (0..n).map(|k| [x0 + k as f64 * h, y]).collect();
         Body {
             name: name.into(), h, n, xy, rest_z: vec![0.0; n], grid_index: BTreeMap::new(), mass: vec![mass_per_m * h; n],
-            s0: vec![6.907755 / t60; n], s1: 0.0, lap: Csr::from_rows(&lrows), stiff: Csr::from_rows(&vec![BTreeMap::new(); n]),
+            s0: vec![6.907755 / t60; n], s1: 0.0, lap: Csr::from_rows(&lrows), stiff: Csr::from_rows(&vec![BTreeMap::new(); n]), viscosity: None,
             tension: tension / h, berger: 0.0, vk: None, // tension/h: the chain energy T/2 sum (dw)^2/h
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0,
@@ -660,7 +739,7 @@ impl Body {
     pub fn point(name: &str, mass: f64) -> Body {
         Body {
             name: name.into(), h: 1.0, n: 1, xy: vec![[0.0, 0.0]], rest_z: vec![0.0], grid_index: BTreeMap::new(), mass: vec![mass],
-            s0: vec![0.0], s1: 0.0, lap: Csr::from_rows(&[BTreeMap::new()]), stiff: Csr::from_rows(&[BTreeMap::new()]),
+            s0: vec![0.0], s1: 0.0, lap: Csr::from_rows(&[BTreeMap::new()]), stiff: Csr::from_rows(&[BTreeMap::new()]), viscosity: None,
             tension: 0.0, berger: 0.0, vk: None,
             w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0,
@@ -837,6 +916,13 @@ impl Body {
     fn predict(&mut self, k: f64) {
         self.coefs(k);
         let n = self.n;
+        if let Some(viscous) = &self.viscosity {
+            for i in 0..n { self.tmp[i] = self.w[i] - self.wp[i]; }
+            // Backward velocity preserves the existing diagonal contact and
+            // SAV compliance. Its additional explicit stability bound is
+            // dt² lambda_K + 2 dt lambda_C < 4; see discrete_energy below.
+            viscous.c.mul_add(&self.tmp, -1.0 / k, &mut self.f);
+        }
         if self.s1 > 0.0 {
             // Lap_h (w - wp) = -(L w - L wp) / h^2 from the two stored products
             let ih2 = 1.0 / (self.h * self.h);
@@ -933,6 +1019,18 @@ impl Body {
 
     /// After contacts have adjusted `wn`: advance the auxiliary variable consistently.
     fn finish(&mut self, k: f64) {
+        let mut bending_loss = 0.0;
+        if let Some(viscous) = &mut self.viscosity {
+            for i in 0..self.n { self.tmp[i] = self.wn[i] - self.wp[i]; }
+            viscous.scratch.fill(0.0);
+            viscous.root.mul_add(&self.tmp, 1.0, &mut viscous.scratch);
+            // dt * ||G v_center||², with v_center=(wn-wp)/(2dt).
+            // The squares are nonnegative without clipping or an empirical
+            // decay correction. This is not an additional thermal update.
+            bending_loss = dot(&viscous.scratch, &viscous.scratch) / (4.0 * k);
+            viscous.last_j = bending_loss;
+            viscous.dissipated_j += bending_loss;
+        }
         if self.sav && self.vk.is_some() {
             // energy the loss terms removed over this step (the budget for raising psi next step):
             // s0: sum m s0 (wn - wp)^2 / (2k); s1: s1/(k h^2) sum m (L(w - wp)) . (wn - wp), if positive
@@ -944,7 +1042,7 @@ impl Body {
                 d0 += self.mass[i] * self.s0[i] * dv * dv;
                 d1 += self.mass[i] * (self.lw[i] - self.lwp[i]) * dv;
             }
-            self.budget = d0 / (2.0 * k) + (self.s1 * ih2 / k * d1).max(0.0);
+            self.budget = d0 / (2.0 * k) + (self.s1 * ih2 / k * d1).max(0.0) + bending_loss;
         }
         if self.sav {
             let d: f64 = self.g.iter().zip(&self.wn).zip(&self.wp).map(|((g, a), b)| g * (a - b)).sum();
@@ -1043,8 +1141,34 @@ impl Body {
         (self.psi, (2.0 * v).sqrt())
     }
 
+    /// Legacy s0/s1 prescription (including the minimum support s0), not the
+    /// selected tensor law. Use `bending_viscosity` for sourced bending loss.
     pub fn loss(&self) -> (f64, f64) {
         (self.s0.iter().cloned().fold(f64::INFINITY, f64::min), self.s1)
+    }
+
+    /// Irreversible curvature-rate loss at centered velocity, in joules.
+    /// Supports, contact, air and numerical dissipation are separate accounts.
+    pub fn bending_loss_dissipated_j(&self) -> f64 {
+        self.viscosity.as_ref().map_or(0.0, |v| v.dissipated_j)
+    }
+    pub fn bending_viscosity(&self) -> Option<(&PlaneStressViscosity, f64)> {
+        self.viscosity.as_ref().map(|v| (&v.source, v.angle))
+    }
+
+    /// Staggered structural energy for the explicit curvature-viscosity step.
+    /// For a linear isolated body it satisfies delta E = -dt ||G v_center||².
+    /// The negative dt/4 v'C v correction is numerical stored energy, never
+    /// reported as material heat. Positivity needs the admitted damping CFL.
+    /// Coupling/contact/source work belongs to the complete instrument balance.
+    pub fn discrete_energy(&self, k: f64) -> f64 {
+        let velocity: Vec<f64> = self.w.iter().zip(&self.wp).map(|(w, wp)| (w - wp) / k).collect();
+        let mut kw = vec![0.0; self.n];
+        self.stiff.mul_add(&self.w, 1.0, &mut kw);
+        self.lap.mul_add(&self.w, self.tension, &mut kw);
+        let kinetic = self.mass.iter().zip(&velocity).map(|(m, v)| 0.5*m*v*v).sum::<f64>();
+        let correction = self.viscosity.as_ref().map_or(0.0, |v| k * v.c.quad(&velocity) / 4.0);
+        kinetic + 0.5 * dot(&self.wp, &kw) + 0.5 * self.psi * self.psi - correction
     }
 
     /// Kinetic + linear potential + auxiliary (nonlinear) energy at the half step (diagnostics).
@@ -1725,7 +1849,34 @@ impl Instrument {
             worst.0 += gas_rate2;
             worst.1.push_str(" + gas coupling");
         }
+        let viscous_rate2 = self.viscosity_admission_rate2(self.rate);
+        if viscous_rate2 > 0.0 {
+            worst.0 += viscous_rate2;
+            worst.1.push_str(" + material bending viscosity");
+        }
         worst
+    }
+
+    fn viscosity_admission_rate2(&self, rate: f64) -> f64 {
+        2.0 * rate * self.bodies.iter().filter_map(|b| b.viscosity.as_ref())
+            .map(|v| v.rate_bound).fold(0.0_f64, f64::max)
+    }
+
+    /// Source-domain admission at the actual internal integration clock.
+    /// A prescribed broadband time-domain law must cover DC through Nyquist;
+    /// a source query inside a narrow band is not sufficient.
+    pub fn validate_bending_loss_clock(&self) -> Result<(), String> {
+        let omega = PI * self.rate;
+        for body in &self.bodies {
+            if let Some(viscous) = &body.viscosity {
+                let (lo, hi) = viscous.source.omega_band_rad_s();
+                if !omega.is_finite() || self.rate <= 0.0 || lo > 0.0 || hi < omega {
+                    return Err(format!("{}: bending-viscosity source must cover 0 through internal Nyquist {} Hz; source band [{lo}, {hi}] rad/s", body.name, self.rate / 2.0));
+                }
+            }
+        }
+        if let Some(materials) = self.materials() { materials.validate_bending_loss_clock(self.rate)?; }
+        Ok(())
     }
 
     // Separate the rate-dependent gas bound from the expensive structural
@@ -1761,7 +1912,8 @@ impl Instrument {
         gas_rate2
     }
 
-    /// k^2 lambda_max / 4 including rest curvature; excludes contact and large-deflection changes.
+    /// (k^2 lambda_K + 2 k lambda_C) / 4 including rest curvature and explicit
+    /// gas/material damping; excludes contact and large-deflection changes.
     pub fn stability(&mut self) -> (f64, String) {
         let k = self.k();
         let (lam, who) = self.admission_rate2();
@@ -2024,6 +2176,13 @@ pub struct BodyImage {
     pub cf: Vec<[f64; 4]>,
     pub lap: CsrImage,
     pub stiff: CsrImage,
+    /// Source-retaining curvature-rate law, its C=G'G operator and three G rows
+    /// per node. The separate joule counter is physical centered-velocity loss.
+    pub viscosity: Option<PlaneStressViscosity>,
+    pub viscosity_angle_rad: f64,
+    pub viscous: CsrImage,
+    pub viscous_root: CsrImage,
+    pub viscous_dissipated_j: f64,
     pub tension: f64,
     pub berger: f64,
     pub bias: Vec<f64>,
@@ -2090,6 +2249,11 @@ impl Body {
             cf: self.cf.clone(),
             lap: self.lap.image(),
             stiff: self.stiff.image(),
+            viscosity: self.viscosity.as_ref().map(|v| v.source.clone()),
+            viscosity_angle_rad: self.viscosity.as_ref().map_or(0.0, |v| v.angle),
+            viscous: self.viscosity.as_ref().map_or_else(|| Csr::default().image(), |v| v.c.image()),
+            viscous_root: self.viscosity.as_ref().map_or_else(|| Csr::default().image(), |v| v.root.image()),
+            viscous_dissipated_j: self.bending_loss_dissipated_j(),
             tension: self.tension,
             berger: self.berger,
             bias: self.bias.clone(),

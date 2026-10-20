@@ -199,14 +199,29 @@ export function mountLiveKit(root: HTMLElement): void {
   const strikerVolume = numberInput(9.054, 1e-6, 1e6);
   const tipRadius = numberInput(6, 1e-6, 1000);
   const impactLoss = numberInput(0.05, 0, 1000);
+  const lossMode = el("select", {}, el("option", { value: "preset" }, "Preset decay times"),
+    el("option", { value: "material" }, "Surface material viscosity"));
+  const lossFrequencyAxis = el("input", { type: "text", value: "f", required: "" });
+  const lossFrequency = numberInput(1000, 1e-9, 1e9);
+  const primaryLossAngle = numberInput(0, -180, 180);
+  const secondaryLossAngle = numberInput(0, -180, 180);
+  const lossFields = el("fieldset", { disabled: "", hidden: "" },
+    el("div", { class: "kit-atmosphere-grid" },
+      labelled("Frequency coordinate in cards", lossFrequencyAxis), labelled("Source query frequency · Hz", lossFrequency),
+      labelled("Primary viscosity orientation · °", primaryLossAngle), labelled("Secondary viscosity orientation · °", secondaryLossAngle)),
+    el("p", { class: "small muted" }, "Both surface cards must supply the six plane_stress_viscosity tensor coefficients in Pa·s. The Kelvin–Voigt law replaces preset structural decay. Its source frequency band must cover zero through half the internal simulation sample rate; insufficient source coverage is refused. The orientations rotate each material's viscosity axes within the surface."));
+  lossMode.addEventListener("change", () => {
+    lossFields.hidden = lossFields.disabled = lossMode.value !== "material";
+  });
   const materialFields = el("fieldset", { disabled: "", hidden: "" },
     el("div", { class: "kit-atmosphere-grid" },
       labelled("Primary surface card", surfaceFile), labelled("Secondary surface card · optional", secondaryFile),
       labelled("Striker card", strikerFile), labelled("Solid temperature · K", solidTemperature),
       labelled("Temperature coordinate in cards", temperatureAxis), labelled("Effective striker volume · cm³", strikerVolume),
-      labelled("Spherical tip radius · mm", tipRadius), labelled("Impact loss · s/m", impactLoss)),
+      labelled("Spherical tip radius · mm", tipRadius), labelled("Impact loss · s/m", impactLoss),
+      labelled("Structural decay", lossMode)), lossFields,
     el("p", { class: "small muted" }, "Import FrankenSim material-card pack files. Cards must supply density, Young's modulus and Poisson ratio at the declared solid temperature, with a typed absolute-temperature coordinate in kelvin when that coordinate is constrained. Primary applies to batter heads and upper cymbals; secondary applies to resonant heads and lower hi-hats, and defaults to primary."),
-    el("p", { class: "small muted" }, "The imported striker replaces every preset beater, including the kick. Its material and effective volume set its mass; both contact materials and tip radius set elastic contact stiffness. Decay times, supports, wire contacts and hi-hat rim friction retain their separate preset assumptions."));
+    el("p", { class: "small muted" }, "The imported striker replaces every preset beater, including the kick. Its material and effective volume set its mass; both contact materials and tip radius set elastic contact stiffness. Structural decay uses the selection above. Supports, muffling, wire contacts and hi-hat rim friction retain their separate assumptions."));
   const materialStatus = el("p", { class: "small muted", role: "status" },
     "Material changes rebuild the kit from rest. Geometry and tuning remain the declared presets.");
   const materialForm = el("form", {}, labelled("Solid materials", materialMode), materialFields,
@@ -235,12 +250,21 @@ export function mountLiveKit(root: HTMLElement): void {
     if (!state.temperatureAxis || !Object.values(state).every(value => typeof value === "string" || Number.isFinite(value))) {
       throw new Error("Material state and striker geometry must be finite, with a named temperature coordinate.");
     }
-    return { label: `${primary.name}${secondary ? ` / ${secondary.name}` : ""} · striker ${striker.name} · ${state.temperatureK} K`,
+    const bendingLoss: KitMaterialOptions["bendingLoss"] = lossMode.value === "material" ? {
+      model: "kelvin-voigt-plane-stress", frequencyAxis: lossFrequencyAxis.value.trim(), frequencyHz: lossFrequency.valueAsNumber,
+      primaryAngleRad: primaryLossAngle.valueAsNumber * Math.PI / 180,
+      secondaryAngleRad: secondaryLossAngle.valueAsNumber * Math.PI / 180,
+    } : undefined;
+    if (bendingLoss && (!bendingLoss.frequencyAxis || bendingLoss.frequencyHz <= 0
+      || ![bendingLoss.frequencyHz, bendingLoss.primaryAngleRad, bendingLoss.secondaryAngleRad].every(Number.isFinite))) {
+      throw new Error("Material loss needs a named frequency coordinate, positive finite frequency and finite orientations.");
+    }
+    return { label: `${primary.name}${secondary ? ` / ${secondary.name}` : ""} · striker ${striker.name} · ${state.temperatureK} K · ${bendingLoss ? "sourced bending loss" : "preset decay"}`,
       load: async () => {
         const [surfacePack, secondaryPack, strikerPack] = await Promise.all([
           primary.arrayBuffer(), secondary?.arrayBuffer(), striker.arrayBuffer(),
         ]);
-        return { ...state, surfacePack: new Uint8Array(surfacePack),
+        return { ...state, ...(bendingLoss ? { bendingLoss } : {}), surfacePack: new Uint8Array(surfacePack),
           ...(secondaryPack ? { secondaryPack: new Uint8Array(secondaryPack) } : {}), strikerPack: new Uint8Array(strikerPack) };
       } };
   }
@@ -540,6 +564,9 @@ export function mountLiveKit(root: HTMLElement): void {
         if (my !== session) { lane.dispose(); return; }
         if (r.gasRecord !== environment.record) throw new Error("The kit engine did not retain the requested atmosphere. Reload after rebuilding the live kit.");
         if (materials && !r.info.materials) throw new Error("The kit engine did not retain the imported materials. Rebuild the live kit before applying them.");
+        if (materials?.bendingLoss && r.info.materials?.bendingLoss?.model !== materials.bendingLoss.model) {
+          throw new Error("The kit engine did not retain the selected material bending loss. Rebuild the live kit before applying it.");
+        }
         L.ready = r;
         // map every surface node to a cell of a square image the size of the grid
         const m2 = 2 * Math.ceil(r.radius / r.h) + 3;

@@ -96,15 +96,19 @@ fn instrument(rate: f64, gas: GasState, materials: Option<&KitMaterials>) -> Res
     }
 }
 
-fn head_body(name: &str, r: f64, grid: f64, hd: Head, muffle: Option<(f64, f64, f64, f64)>, elastic: (f64, f64, f64)) -> Result<Body, String> {
+fn head_body(name: &str, r: f64, grid: f64, hd: Head, muffle: Option<(f64, f64, f64, f64)>, elastic: (f64, f64, f64), viscosity: Option<(&PlaneStressViscosity, f64)>) -> Result<Body, String> {
     let t = hd.thickness;
     let th = move |_r: f64| t;
     let z = |_r: f64| 0.0;
-    Body::plate(name, &PlateSpec {
+    let spec = PlateSpec {
         radius: r, hole: 0.0, grid, edge: Edge::Clamped, thickness: &th, rest_height: &z,
         young: elastic.0, poisson: elastic.1, density: elastic.2, tension: hd.tension, bending: true,
         nonlinear: Nonlinear::Berger, t60: hd.t60, support: None, muffle,
-    })
+    };
+    match viscosity {
+        Some((law, angle)) => Body::plate_with_viscosity(name, &spec, law, angle),
+        None => Body::plate(name, &spec),
+    }
 }
 
 /// Lowest (0,1) membrane frequency of a head, ignoring air (for the radiation resistance).
@@ -122,8 +126,9 @@ pub fn drum_with_gas(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState) -> Result
 }
 
 /// Fixed geometry and installed tension, with both head materials and a
-/// spherical striker resolved from source data. Loss/support/wire laws stay
-/// as declared in `s`; the supplied impactor replaces `s.striker` completely.
+/// spherical striker resolved from source data. Selected material bending loss
+/// replaces surface T60; support/wire laws stay as declared in `s`. The supplied
+/// impactor replaces `s.striker` completely.
 pub fn drum_with_materials(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: &KitMaterials) -> Result<Piece, String> {
     build_drum(s, hits, gas, Some(materials))
 }
@@ -134,10 +139,10 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     let primary = materials.map_or(MYLAR, |m| elastic_values(m.primary()));
     let secondary = materials.map_or(MYLAR, |m| elastic_values(m.secondary()));
     let mut notes = vec![];
-    let mut batter = head_body(&format!("{} batter", s.name), s.radius, s.grid, s.batter, s.muffle, primary)?;
+    let mut batter = head_body(&format!("{} batter", s.name), s.radius, s.grid, s.batter, s.muffle, primary, materials.and_then(KitMaterials::primary_bending_loss))?;
     batter.origin = [0.0, 0.0, 0.0];
     batter.facing = 1.0;
-    let mut reso = head_body(&format!("{} resonant", s.name), s.radius, s.grid, s.reso, s.muffle, secondary)?;
+    let mut reso = head_body(&format!("{} resonant", s.name), s.radius, s.grid, s.reso, s.muffle, secondary, materials.and_then(KitMaterials::secondary_bending_loss))?;
     reso.origin = [0.0, 0.0, -s.depth];
     reso.facing = -1.0;
     notes.push(format!("heads: {} nodes each at {:.1} mm; (0,1) in vacuo {:.0} / {:.0} Hz", batter.n, s.grid * 1e3, f01(s.radius, s.batter, primary.2), f01(s.radius, s.reso, secondary.2)));
@@ -206,7 +211,11 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     let mut mic = Mic::new(s.mic);
     mic.floor = s.floor;
     ins.mics.push(mic);
-    Ok(Piece { instrument: ins, oversample: s.oversample, settle, notes })
+    let oversample = if materials.and_then(KitMaterials::primary_bending_loss).is_some() {
+        pick_oversample(&mut ins, 0.6)?
+    } else { s.oversample };
+    ins.validate_bending_loss_clock()?;
+    Ok(Piece { instrument: ins, oversample, settle, notes })
 }
 
 // Sizes and heads follow the reference kit we grade against (Salamander Drumkit, A. Holm, CC BY-SA
@@ -346,8 +355,8 @@ fn ring_nodes(h: f64, r0: f64, r1: f64) -> (f64, usize) {
     }
 }
 
-fn cymbal_body(name: &str, c: &CymbalSpec, elastic: (f64, f64, f64)) -> Result<Body, String> {
-    cymbal_shell(name, c, true, elastic)
+fn cymbal_body(name: &str, c: &CymbalSpec, elastic: (f64, f64, f64), viscosity: Option<(&PlaneStressViscosity, f64)>) -> Result<Body, String> {
+    cymbal_shell(name, c, true, elastic, viscosity)
 }
 
 /// A cymbal's thickness at radius `x` outside the bell (the bow law of `cymbal_shell`).
@@ -357,7 +366,7 @@ fn bow_thickness(c: &CymbalSpec, x: f64) -> f64 {
 
 /// A cymbal shell; `felt` puts it on a stand's felt washers (a hi-hat's top shell hangs from the
 /// clutch on the pull rod instead, so all the pedal force reaches the rims).
-fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool, elastic: (f64, f64, f64)) -> Result<Body, String> {
+fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool, elastic: (f64, f64, f64), viscosity: Option<(&PlaneStressViscosity, f64)>) -> Result<Body, String> {
     let (rb, tb, tw, r) = (c.bell_radius, c.bell_thickness, c.bow_thickness, c.radius);
     // thickness: bell, a blend over 2 cm, then the bow thinning slightly toward the rim
     let th = move |x: f64| {
@@ -381,13 +390,17 @@ fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool, elastic: (f64, f64, f64)
     } else {
         (9.0e7 * mount_scale, 2.7e3 * mount_scale)
     };
-    Body::plate(name, &PlateSpec {
+    let spec = PlateSpec {
         radius: r, hole: 0.0065, grid: c.grid, edge: Edge::Free, thickness: &th, rest_height: &z,
         young: elastic.0, poisson: elastic.1, density: elastic.2, tension: 0.0, bending: true,
         nonlinear: Nonlinear::VonKarman, t60: c.t60,
         // felt washers: ~1e5 N/m and ~3 N s/m in all, spread over the clamped annulus
         support: if felt { Some((0.0065, r1, ks, cs)) } else { None }, muffle: None,
-    })
+    };
+    match viscosity {
+        Some((law, angle)) => Body::plate_with_viscosity(name, &spec, law, angle),
+        None => Body::plate(name, &spec),
+    }
 }
 
 pub fn splash() -> CymbalSpec {
@@ -404,15 +417,17 @@ pub fn ride() -> CymbalSpec {
 
 fn pick_oversample(ins: &mut Instrument, max_ratio: f64) -> Result<usize, String> {
     let (lam, who) = ins.admission_rate2();
-    let structural = (lam - ins.gas_admission_rate2(ins.rate)).max(0.0);
+    let structural = (lam - ins.gas_admission_rate2(ins.rate) - ins.viscosity_admission_rate2(ins.rate)).max(0.0);
     for os in [1usize, 2, 3, 4, 6, 8] {
         let rate = OUT_RATE * os as f64;
+        if rate < ins.rate { continue; }
         let k = 1.0 / rate;
         // Explicit radiation's contribution is 2 D / dt, so it must use
         // this candidate's clock rather than the instrument's original rate.
-        let candidate = structural + ins.gas_admission_rate2(rate);
+        let candidate = structural + ins.gas_admission_rate2(rate) + ins.viscosity_admission_rate2(rate);
         if k * k * candidate / 4.0 <= max_ratio {
             ins.rate = rate;
+            ins.validate_bending_loss_clock()?;
             return Ok(os);
         }
     }
@@ -439,7 +454,7 @@ pub fn cymbal_with_materials(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas:
 fn build_cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, materials: Option<&KitMaterials>) -> Result<Piece, String> {
     let mut ins = instrument(OUT_RATE, gas, materials)?;
     let elastic = materials.map_or(BRONZE, |m| elastic_values(m.primary()));
-    let mut body = cymbal_body(c.name, c, elastic)?;
+    let mut body = cymbal_body(c.name, c, elastic, materials.and_then(KitMaterials::primary_bending_loss))?;
     body.origin = [0.0, 0.0, 0.0];
     let n = body.n;
     let ci = ins.add(body);
@@ -459,8 +474,13 @@ fn build_cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, ma
     mic.unbaffled = Some(c.radius);
     ins.mics.push(mic);
     let os = pick_oversample(&mut ins, 0.6)?;
-    let (s0, s1) = ins.bodies[ci].loss();
-    notes.push(format!("internal rate {} kHz; loss s0 {s0:.3}/s s1 {s1:.3e} m^2/s", OUT_RATE * os as f64 / 1000.0));
+    if let Some((loss, angle)) = ins.bodies[ci].bending_viscosity() {
+        notes.push(format!("internal rate {} kHz; sourced Kelvin-Voigt bending loss {}, orientation {angle} rad; independent supports retained",
+            OUT_RATE * os as f64 / 1000.0, loss.source().identity()));
+    } else {
+        let (s0, s1) = ins.bodies[ci].loss();
+        notes.push(format!("internal rate {} kHz; loss s0 {s0:.3}/s s1 {s1:.3e} m^2/s", OUT_RATE * os as f64 / 1000.0));
+    }
     Ok(Piece { instrument: ins, oversample: os, settle: 0.0, notes })
 }
 
@@ -510,8 +530,9 @@ pub fn hihat_grid_mu_with_gas(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: 
     build_hihat(gap, pedal_n, hits, rim, from, scale, friction, gas, None)
 }
 
-/// Material-resolved opposed shells and impactor. The rim contact, rim
-/// friction, support and T60 laws remain explicitly separate input data.
+/// Material-resolved opposed shells and impactor. Selected material bending
+/// loss replaces surface T60; rim contact, rim friction and support remain
+/// explicitly separate input data.
 pub fn hihat_grid_mu_with_materials(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64, gas: GasState, materials: &KitMaterials) -> Result<Piece, String> {
     build_hihat(gap, pedal_n, hits, rim, from, scale, friction, gas, Some(materials))
 }
@@ -531,9 +552,9 @@ fn build_hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64,
     let mut ins = instrument(OUT_RATE, gas, materials)?;
     let primary = materials.map_or(BRONZE, |m| elastic_values(m.primary()));
     let secondary = materials.map_or(BRONZE, |m| elastic_values(m.secondary()));
-    let mut top = cymbal_shell(ts.name, &ts, false, primary)?;
+    let mut top = cymbal_shell(ts.name, &ts, false, primary, materials.and_then(KitMaterials::primary_bending_loss))?;
     top.origin = [0.0, 0.0, 0.0];
-    let mut bot = cymbal_shell(bs.name, &bs, false, secondary)?;
+    let mut bot = cymbal_shell(bs.name, &bs, false, secondary, materials.and_then(KitMaterials::secondary_bending_loss))?;
     // Profiles describe midplanes, while the requested opening is between their faces.
     let rim_half_thickness = 0.5 * (bow_thickness(&ts, ts.radius) + bow_thickness(&bs, bs.radius));
     bot.origin = [0.0, 0.0, -rim_half_thickness - gap];

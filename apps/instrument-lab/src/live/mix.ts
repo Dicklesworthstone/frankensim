@@ -173,6 +173,14 @@ export interface KitMaterialOptions {
   strikerTipRadiusM: number;
   /** Independently declared Hunt-Crossley impact loss [s/m]. */
   impactLossSM: number;
+  /** Selected source viscosity replaces the surfaces' preset structural decay. */
+  bendingLoss?: {
+    model: 'kelvin-voigt-plane-stress';
+    frequencyAxis: string;
+    frequencyHz: number;
+    primaryAngleRad: number;
+    secondaryAngleRad: number;
+  };
 }
 export interface KitMaterialInfo {
   primary: { stateIdentity: string; cardIdentity: string; densityKgM3: number; youngPa: number; poisson: number };
@@ -183,6 +191,11 @@ export interface KitMaterialInfo {
   strikerTipRadiusM: number;
   impactLossSM: number;
   importedPacks: number;
+  bendingLoss?: null | {
+    model: 'kelvin-voigt-plane-stress';
+    primary: { stateIdentity: string; matrixPaS: number[]; omegaBandRadS: [number, number]; angleRad: number };
+    secondary: { stateIdentity: string; matrixPaS: number[]; omegaBandRadS: [number, number]; angleRad: number };
+  };
 }
 export interface KitReady {
   info: { piece: string; gridScale: number; radius: number; surfaceNodes: number; h: number; bodies: { name: string; nodes: number }[];

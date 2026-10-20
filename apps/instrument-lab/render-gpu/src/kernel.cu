@@ -9,7 +9,7 @@
 //   P2  (plates only) every warp: F = A^-1 q, the dense inverse read once for up to GB simulations
 //   P3  nodes: links, cavity pressure, radiation damping, drives (each block computes the scalars it needs;
 //       one item advances each cavity port), nonlinear gradient g gathered from F;  core: sum F q
-//   P4  nodes: the SAV auxiliary variable, explicit update wn, Woodbury sums
+//   P4  nodes: source curvature-rate viscosity, SAV auxiliary variable, explicit update wn, Woodbury sums
 //   P5  nodes away from contacts: Woodbury correction;  one block per simulation: the same correction on
 //       contact nodes and strikes; then contacts in node-disjoint groups and frictions in coloured groups,
 //       each group over the whole GPU when it is large (a barrier before it), else on its simulation's block
@@ -522,7 +522,18 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
         const bool nl = __ldg(&p.bber[b]) > 0.0 || __ldg(&p.bvk[b]);
         double g = 0.0;
         if (nl) { g = pr.scale ? p.G[o] * pr.ir : 0.0; p.G[o] = g; }
-        double rhs = __ldg(&p.cw[i]) * W[o] - __ldg(&p.cwp[i]) * Wp[o] + p.F[o] + pr.extra;
+        double force = p.F[o];
+        if (__ldg(&p.bviscous[b])) {
+          double cv = 0.0;
+          const ll base = (ll)s * NT;
+          for (int q = __ldg(&p.visc_ptr[i]); q < __ldg(&p.visc_ptr[i + 1]); q++) {
+            const int j = __ldg(&p.visc_col[q]);
+            cv = cv + __ldg(&p.visc_val[q]) * (W[base + j] - Wp[base + j]);
+          }
+          force = force + (-1.0 / k) * cv;
+          p.F[o] = force;
+        }
+        double rhs = __ldg(&p.cw[i]) * W[o] - __ldg(&p.cwp[i]) * Wp[o] + force + pr.extra;
         if (__ldg(&p.bs1[b]) > 0.0) rhs = rhs + __ldg(&p.cs1[i]) * p.TMP[o];
         if (pr.scale) rhs = rhs - g * pr.sc;
         const double ia = __ldg(&p.ia[i]);
@@ -642,17 +653,33 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
       const int s = (int)(wi / NI), item = (int)(wi % NI);
       const int b = __ldg(&p.item_body[item]);
       const int i = __ldg(&p.item_start[item]) + tid;
-      double v[3] = {0.0, 0.0, 0.0};
+      double v[4] = {0.0, 0.0, 0.0, 0.0};
       const bool sav = p.savf[(ll)s * p.NB + b] > 0.0;
-      if (sav && tid < __ldg(&p.item_len[item])) {
+      const bool viscous = __ldg(&p.bviscous[b]) != 0;
+      if ((sav || viscous) && tid < __ldg(&p.item_len[item])) {
         const ll o = (ll)s * NT + i;
         const double dv = Wn[o] - Wp[o];
-        if (__ldg(&p.bvk[b])) { v[0] = __ldg(&p.ms0[i]) * dv * dv; v[1] = __ldg(&p.mass[i]) * (LW[o] - LWP[o]) * dv; }
-        v[2] = p.G[o] * dv;
+        if (sav) {
+          if (__ldg(&p.bvk[b])) { v[0] = __ldg(&p.ms0[i]) * dv * dv; v[1] = __ldg(&p.mass[i]) * (LW[o] - LWP[o]) * dv; }
+          v[2] = p.G[o] * dv;
+        }
+        if (viscous) {
+          const ll base = (ll)s * NT;
+          // Same three curvature-root rows as the native solver: squares of
+          // G(wn-wp), not a clipped signed matrix quadratic or preset T60.
+          for (int r = 3 * i; r < 3 * i + 3; r++) {
+            double strain = 0.0;
+            for (int q = __ldg(&p.vroot_ptr[r]); q < __ldg(&p.vroot_ptr[r + 1]); q++) {
+              const int j = __ldg(&p.vroot_col[q]);
+              strain = strain + __ldg(&p.vroot_val[q]) * (Wn[base + j] - Wp[base + j]);
+            }
+            v[3] = v[3] + strain * strain;
+          }
+        }
       }
-      if (sav) {
-        block_sum<3>(v, sh);
-        if (tid == 0) for (int kk = 0; kk < 3; kk++) p.p7[((ll)s * NI + item) * 3 + kk] = v[kk];
+      if (sav || viscous) {
+        block_sum<4>(v, sh);
+        if (tid == 0) for (int kk = 0; kk < 4; kk++) p.p7[((ll)s * NI + item) * 4 + kk] = v[kk];
       }
     }
     // microphone taps: one warp per (simulation, segment of at most 64 taps of one delay)
@@ -676,14 +703,17 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
         const int s = sb / (int)p.NB, b = sb % (int)p.NB;
         const ll ob = (ll)s * p.NB + b;
         const bool sav = p.savf[ob] > 0.0;
-        double d[3] = {0.0, 0.0, 0.0};
-        if (sav) wsums<3>(d, p.p7, 3, 0, __ldg(&p.bitem0[b]), __ldg(&p.bitem1[b]), s, NI);
+        const bool viscous = __ldg(&p.bviscous[b]) != 0;
+        double d[4] = {0.0, 0.0, 0.0, 0.0};
+        if (sav || viscous) wsums<4>(d, p.p7, 4, 0, __ldg(&p.bitem0[b]), __ldg(&p.bitem1[b]), s, NI);
         if (lane == 0) {
+          const double bending_loss = d[3] / (4.0 * k);
+          if (viscous) p.viscous_dissipated[ob] = p.viscous_dissipated[ob] + bending_loss;
           double psi = p.psi1[ob];
           if (sav) {
             if (__ldg(&p.bvk[b])) {
               const double ih2 = 1.0 / (__ldg(&p.bh[b]) * __ldg(&p.bh[b]));
-              p.budgetA[ob] = d[0] / (2.0 * k) + fmax(__ldg(&p.bs1[b]) * ih2 / k * d[1], 0.0);
+              p.budgetA[ob] = d[0] / (2.0 * k) + fmax(__ldg(&p.bs1[b]) * ih2 / k * d[1], 0.0) + bending_loss;
             }
             psi = psi + 0.5 * d[2];
           }

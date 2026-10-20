@@ -24,7 +24,8 @@ on a 7 mm grid carries 3356 nodes and resolves the whole audio band.
   through the Airy stress function with a rest shape `z0(r)`:
   `Lap^2 F = -E t [l(w + z0) - l(z0)]`, `l(u) = u_xx u_yy - u_xy^2`, `F = dF/dn = 0` at the rim.
   The nonlinear force is the exact gradient of the discrete potential.
-- **Loss**: `s0 + s1 beta^2` per mode, fixed by two (frequency, T60) points.
+- **Loss**: either `s0 + s1 beta^2` per mode, fixed by two (frequency, T60) points,
+  or an explicitly selected source-bound plane-stress Kelvin–Voigt bending tensor.
 - **Contacts** (stick, felt beater, snare wires, hi-hat rims): one-sided power laws with
   Hunt-Crossley loss, `f = K d^alpha (1 + mu d_dot)`, each solved implicitly as a monotone scalar
   equation, so a hickory tip on bronze is stable at audio rates. A zero-radius tip uses bilinear
@@ -105,8 +106,9 @@ Missing, conflicting or out-of-domain properties refuse; imported files are
 bounded to 16 MiB in aggregate. These are new trajectories from rest, not an
 energy-conserving replacement of a ringing specimen.
 
-Loss and contact scope remains explicit. Installed T60 decay points, supports,
-snare-wire material/contact and hi-hat rim/friction laws remain separately
+Loss and contact scope remains explicit. Without a selected material bending-loss
+law, installed T60 decay points remain the declared surface-loss prescription.
+Supports, snare-wire material/contact and hi-hat rim/friction laws remain separately
 declared presets. The striker's Hunt-Crossley loss is an independent input, not
 inferred from elastic modulus. The head radiation-resistance estimate retains
 its tension-only membrane-frequency approximation, using the new density; full
@@ -115,6 +117,74 @@ No measured broadband loss or stiff-head radiation qualification is inferred
 from bulk elastic data. Imported materials bypass the original Mylar/bronze
 grid-gain correction, so material comparisons keep the declared pressure-to-PCM
 gain instead of being equalized to the original kit.
+
+### Source-bound bending loss
+
+`KitMaterials::with_bending_viscosity` accepts the existing canonical
+`fs_material::plane_stress_viscosity::PlaneStressViscosity` for each surface and
+its orientation relative to the plate grid. Each retained law must come from
+the same material card and exact typed state point as the corresponding elastic
+properties. `KitMaterials::from_packs_with_bending_loss` resolves those laws from
+the same imported cards. The six required Pa·s properties are:
+
+```text
+plane_stress_viscosity_11   plane_stress_viscosity_22
+plane_stress_viscosity_66   plane_stress_viscosity_12
+plane_stress_viscosity_16   plane_stress_viscosity_26
+```
+
+They describe the symmetric reduced tensor acting on engineering strain rate
+`[epsilon_dot_11, epsilon_dot_22, gamma_dot_12]`. Every entry, including zero,
+must be declared. The canonical law admits a positive-definite tensor or an
+explicit all-zero tensor; unsupported degeneracy refuses. Elastic Poisson ratio
+does not supply a missing viscous tensor entry. At each curvature point the
+solver uses the admitted rotation, actual local thickness cubed over twelve,
+and engineering curvature rate `[w_xxt, w_yyt, 2 w_xyt]`. The sparse damping
+matrix is assembled as `C = G^T G` from the same curvature stencils and area
+quadrature as bending elasticity. Changing only loss data therefore changes
+the actual motion and pressure while preserving structural mass and stiffness.
+
+The browser's **Surface material viscosity** selection calls the
+distinct `KitPiece.withMaterialBendingLoss` constructor. It declares a typed Hz
+source coordinate and the two material orientations. An older WASM binary
+without this constructor refuses the selection. Grid trials, fallbacks, clones
+and exported GPU plans retain the complete law; GPU batches must match both
+source identities and orientations. The ready material metadata reports the
+two tensors, orientations, source-state identities and admitted angular-frequency
+bands. Selecting this law removes the preset surface `s0` and `s1` entirely;
+explicit zero viscosity does not restore the old T60 decay.
+
+This is a fixed-temperature, broadband Kelvin–Voigt model. Coefficients must be
+constant or temperature-only source curves at that declared temperature, and
+the intersection of elastic and viscous source bands must cover DC through the
+**internal integration Nyquist frequency**, including any oversampling. Merely
+placing the query frequency inside a narrow source band does not admit a
+broadband time step. Frequency-dependent sampled coefficients, narrower bands,
+and clocks exceeding the supported stability margin refuse. No broadband
+measurement claim is inferred from the six inputs.
+
+The force uses backward velocity, `-C (w_n - w_{n-1}) / dt`, so this damping
+discretization is first order in time while preserving the existing contact and
+SAV compliance. The positive-energy condition is
+`dt^2 lambda_K + 2 dt lambda_C < 4`; the material term uses a mass-normalized
+absolute-row-sum bound. Kit clock selection evaluates that term at each candidate
+internal rate. The structural part remains the existing rest-state eigenvalue
+estimate, not a contact or large-deflection convergence certificate.
+
+`Body::discrete_energy` includes the staggered correction
+`-dt/4 v_half^T C v_half`. For an isolated linear body without other losses,
+its step change is exactly `-dt ||G v_center||^2`, where
+`v_center = (w_{n+1} - w_{n-1}) / (2 dt)`. Native and CUDA steppers accumulate
+that material-loss contribution as a sum of squares, with no negative-loss
+clipping. It is exposed by `Body::bending_loss_dissipated_j`, browser
+`KitPiece.bendingLossJ`, and CUDA `Run::bending_loss_j`. The existing shell SAV
+drift correction may spend the previous step's loss budget to restore its
+auxiliary energy, so this counter is a constitutive dissipation contribution,
+not a complete coupled energy audit. Support, contact, friction, snare and gas
+losses are independently declared and are excluded from this counter. The
+negative staggered correction is numerical stored energy; it is never reported
+as heat. This route does not yet update temperature, add nonlinear membrane
+viscosity, or implement a hereditary viscoelastic model.
 
 ## Numerics
 

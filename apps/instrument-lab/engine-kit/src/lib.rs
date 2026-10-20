@@ -46,6 +46,22 @@ mod wasm {
                 .map(|live| KitPiece { live, scale: grid_scale })
                 .map_err(|e| JsError::new(&e))
         }
+        /// Explicit source-curvature-loss route. Its distinct export prevents
+        /// an older WASM binary from silently ignoring the loss selection.
+        #[wasm_bindgen(js_name = withMaterialBendingLoss)]
+        pub fn with_material_bending_loss(piece: &str, grid_scale: f64, gas_record: &str,
+            surface_pack: &[u8], secondary_pack: &[u8], striker_pack: &[u8],
+            temperature_axis: &str, temperature_k: f64, striker_volume_m3: f64,
+            striker_tip_radius_m: f64, impact_loss_s_m: f64, frequency_axis: &str,
+            frequency_hz: f64, primary_angle_rad: f64, secondary_angle_rad: f64) -> Result<KitPiece, JsError> {
+            let materials = KitMaterials::from_packs_with_bending_loss(surface_pack, secondary_pack, striker_pack,
+                temperature_axis, temperature_k, striker_volume_m3, striker_tip_radius_m, impact_loss_s_m,
+                frequency_axis, frequency_hz, [primary_angle_rad, secondary_angle_rad])
+                .map_err(|e| JsError::new(&e))?;
+            Live::with_materials_record(piece, grid_scale, gas_record, materials)
+                .map(|live| KitPiece { live, scale: grid_scale })
+                .map_err(|e| JsError::new(&e))
+        }
         /// A second piece in exactly this one's state: it renders the same samples as this one would.
         /// Building a snare or a hi-hat is almost all its settle, so a copy is far cheaper than `new`.
         pub fn copy(&self) -> KitPiece {
@@ -63,6 +79,11 @@ mod wasm {
         }
         pub fn asleep(&self) -> bool {
             self.live.asleep()
+        }
+        /// Material bending loss only; contact/support/gas terms are separate.
+        #[wasm_bindgen(js_name = bendingLossJ)]
+        pub fn bending_loss_j(&self) -> f64 {
+            self.live.ins.bodies.iter().map(|b| b.bending_loss_dissipated_j()).sum()
         }
         pub fn radius(&self) -> f64 {
             self.live.radius

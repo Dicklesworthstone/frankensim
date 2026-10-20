@@ -29,6 +29,7 @@ params! {
     gas_density: "double", gas_bulk_modulus: "double",
     bias: "double*", ia: "double*", cw: "double*", cwp: "double*", cs1: "double*", ms0: "double*", mass: "double*", z0: "double*",
     lapE_col: "int*", lapE_val: "double*", stfE_col: "int*", stfE_val: "double*", gtE_core: "int*", gtE_slot: "int*",
+    visc_ptr: "int*", visc_col: "int*", visc_val: "double*", vroot_ptr: "int*", vroot_col: "int*", vroot_val: "double*", bviscous: "int*",
     bstiff: "int*",
     bh: "double*", bih2: "double*", bs1: "double*", bten: "double*", bber: "double*", bairm: "double*", barea: "double*", beh: "double*",
     bvk: "int*", bcoff: "int*", bnc: "int*", bitem0: "int*", bitem1: "int*", bcitem0: "int*", bcitem1: "int*", bcav: "int*", brad: "int*",
@@ -37,6 +38,7 @@ params! {
     W0: "double*", W1: "double*", W2: "double*", LW0: "double*", LW1: "double*", F: "double*", G: "double*", TMP: "double*",
     Q: "double*", QF: "float*", CXX: "double*", CYY: "double*", CXY: "double*", AF: "double*",
     psiA: "double*", rprevA: "double*", budgetA: "double*", psi1: "double*", rprev1: "double*", savf: "double*",
+    viscous_dissipated: "double*",
     p1: "double*", p3: "double*", pc3: "double*", p4: "double*", p7: "double*",
     cav_hptr: "int*", cav_head: "int*", cav_vol: "double*", cav_port: "int*", port_area: "double*", port_len: "double*",
     port_res: "double*", port_x: "double*", port_u: "double*", port_du: "double*",
@@ -208,6 +210,9 @@ pub struct Run {
     pub compile_ms: f64,
     /// Seconds spent stepping (the launches and their output copies), setup excluded.
     pub step_s: f64,
+    /// Accumulated material curvature-rate loss [J], laid out [sim][body].
+    /// Includes each input state's retained counter; other losses are separate.
+    pub bending_loss_j: Vec<f64>,
 }
 
 /// Step every simulation of the batch `total` times; `on_block(first_step, samples)` receives the
@@ -252,6 +257,9 @@ pub fn run(
     p.cs1 = m.f64(&plan.cs1)?; p.ms0 = m.f64(&plan.ms0)?; p.mass = m.f64(&plan.mass)?; p.z0 = m.f64(&plan.z0)?;
     p.lapE_col = m.i32(&plan.lap_ecol)?; p.lapE_val = m.f64(&plan.lap_eval)?;
     p.stfE_col = m.i32(&plan.stf_ecol)?; p.stfE_val = m.f64(&plan.stf_eval)?;
+    p.visc_ptr = m.i32(&plan.visc_ptr)?; p.visc_col = m.i32(&plan.visc_col)?; p.visc_val = m.f64(&plan.visc_val)?;
+    p.vroot_ptr = m.i32(&plan.vroot_ptr)?; p.vroot_col = m.i32(&plan.vroot_col)?; p.vroot_val = m.f64(&plan.vroot_val)?;
+    p.bviscous = m.i32(&plan.bviscous)?;
     p.gtE_core = m.i32(&plan.gt_ecore)?; p.gtE_slot = m.i32(&plan.gt_eslot)?; p.bstiff = m.i32(&plan.bstiff)?;
     p.NROWS = plan.bnc.iter().map(|&n| n as u64).sum();
     (p.KL, p.KS, p.KG) = (plan.kl as u64, plan.ks as u64, plan.kg as u64);
@@ -281,8 +289,10 @@ pub fn run(
     p.Q = m.zeros(bp * nc)?; p.QF = m.f32(&vec![0.0f32; (bp * nc).max(1)])?;
     p.CXX = m.zeros(b * nc)?; p.CYY = m.zeros(b * nc)?; p.CXY = m.zeros(b * nc)?; p.AF = m.zeros(bp * nc)?;
     p.psiA = m.f64(&cat(&|s| &s.psi))?; p.rprevA = m.f64(&cat(&|s| &s.rprev))?; p.budgetA = m.f64(&cat(&|s| &s.budget))?;
+    let viscous_counter_index = m.f64s.len();
+    p.viscous_dissipated = m.f64(&cat(&|s| &s.viscous_dissipated))?;
     p.psi1 = m.zeros(b * nb)?; p.rprev1 = m.zeros(b * nb)?; p.savf = m.zeros(b * nb)?;
-    p.p1 = m.zeros(b * ni * 4)?; p.p3 = m.zeros(b * ni)?; p.pc3 = m.zeros(b * nci)?; p.p4 = m.zeros(b * ni * 5)?; p.p7 = m.zeros(b * ni * 3)?;
+    p.p1 = m.zeros(b * ni * 4)?; p.p3 = m.zeros(b * ni)?; p.pc3 = m.zeros(b * nci)?; p.p4 = m.zeros(b * ni * 5)?; p.p7 = m.zeros(b * ni * 4)?;
     p.cav_hptr = m.i32(&plan.cav_hptr)?; p.cav_head = m.i32(&plan.cav_head)?; p.cav_vol = m.f64(&plan.cav_vol)?;
     p.cav_port = m.i32(&plan.cav_port)?; p.port_area = m.f64(&plan.port_area)?; p.port_len = m.f64(&plan.port_len)?;
     // port state is double-buffered by step parity: [0] holds the state the first step reads
@@ -368,6 +378,8 @@ pub fn run(
         let tot: i64 = pr[..8].iter().sum();
         eprintln!("cycles per step by phase (block 0): {:?} total {}", pr.iter().take(7).map(|c| c / total.max(1) as i64).collect::<Vec<_>>(), tot / total.max(1) as i64);
     }
+    let mut bending_loss_j = stream.clone_dtoh(&m.f64s[viscous_counter_index]).map_err(e)?;
+    bending_loss_j.truncate(b * nb);
     drop(m);
-    Ok(Run { device_name: name, blocks, compile_ms, step_s: t_step.elapsed().as_secs_f64() })
+    Ok(Run { device_name: name, blocks, compile_ms, step_s: t_step.elapsed().as_secs_f64(), bending_loss_j })
 }
