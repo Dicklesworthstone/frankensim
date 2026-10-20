@@ -200,3 +200,6 @@ impl NetworkDrivingPoint {
 
 #[cfg(test)]
 mod tests;
+
+/// Complete exterior opening feedback and coherent microphone fields.
+pub mod radiation;
