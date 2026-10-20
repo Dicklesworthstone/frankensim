@@ -213,3 +213,6 @@ mod material;
 
 #[path = "modal_aperture/viscosity.rs"]
 mod viscosity;
+
+#[path = "modal_aperture/propagator.rs"]
+mod propagator;
