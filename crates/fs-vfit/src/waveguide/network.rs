@@ -26,6 +26,9 @@ pub mod admittance;
 pub mod fractional;
 /// Simultaneous exact-ZOH rational feedback across selected physical outlets.
 pub mod multiport;
+/// Work-conjugate external boundaries sharing the same retained wave state.
+pub mod driven;
+pub use driven::{DrivenBoundary, DrivenWave};
 mod load;
 mod interior;
 use load::{TerminalFrame, TerminalLoad};
@@ -35,6 +38,10 @@ use load::{TerminalFrame, TerminalLoad};
 pub enum NetworkNode {
     /// Exactly one node is the externally driven, degree-one inlet.
     Inlet,
+    /// Additional degree-one physical port. Its outgoing wave must be supplied
+    /// explicitly on every sample, after solving against this endpoint's old
+    /// incoming wave. It cannot be replaced by a reflection control.
+    Driven,
     /// At least two incident sections; no added storage or source.
     Junction,
     /// Degree-one memoryless load; pressure reflectance must lie in [-1, 1].
@@ -116,6 +123,8 @@ pub struct NetworkFrame {
     pub storage_change_j: f64,
     /// Inlet pressure times inlet flow times dt [J].
     pub inlet_work_j: f64,
+    /// Signed pressure/flow work supplied through additional driven endpoints [J].
+    pub driven_work_j: f64,
     /// Sum of resistive terminal dissipations [J], excluding reversible storage.
     pub terminal_loss_j: f64,
     /// Irreversible loss at interior series/shunt elements [J], counted once
@@ -134,7 +143,7 @@ impl NetworkFrame {
     #[must_use]
     pub fn balance_residual_j(&self) -> f64 {
         self.storage_change_j + self.terminal_loss_j + self.interior_loss_j
-            + self.coupled_terminal_work_j - self.inlet_work_j
+            + self.coupled_terminal_work_j - self.inlet_work_j - self.driven_work_j
     }
 }
 
@@ -247,6 +256,7 @@ impl WaveguideNetwork {
             let degree = offsets[n + 1];
             match *kind {
                 NetworkNode::Inlet if degree == 1 && inlet_node.is_none() => inlet_node = Some(n),
+                NetworkNode::Driven if degree == 1 => {},
                 NetworkNode::Junction if degree >= 2 => {},
                 NetworkNode::Impedance { load } if degree == 1 => { load.validate()?; },
                 NetworkNode::Relaxation { .. } if degree == 1 => {},
@@ -418,14 +428,26 @@ impl WaveguideNetwork {
     /// # Errors
     /// Nonfinite input, port quantities, candidate wave storage or work.
     pub fn preview_step(&mut self, outgoing: f64) -> Result<NetworkFrame, WaveguideError> {
+        self.preview_step_with_driven(outgoing, &[])
+    }
+
+    /// Preview all externally solved boundaries against the SAME old wave state.
+    /// Every additional driven endpoint must appear exactly once, in ascending
+    /// node order; no boundary is silently closed, reset or assigned zero flow.
+    pub fn preview_step_with_driven(&mut self, outgoing: f64, driven: &[DrivenWave])
+        -> Result<NetworkFrame, WaveguideError>
+    {
         if !outgoing.is_finite() { return Err(WaveguideError("network input must be finite")); }
         if self.accepted_steps == u64::MAX { return Err(WaveguideError("network step counter exhausted")); }
+        self.validate_driven(driven)?;
         let incoming = self.incoming_pressure_pa();
         let z = self.inlet_impedance_pa_s_m3();
         let mut terminal_loss = 0.0;
         let mut interior_loss = 0.0;
         let mut junction_residual = 0.0;
         let mut load_stored = 0.0;
+        let mut driven_work = 0.0;
+        let mut next_driven = 0usize;
         let coupled_terminal_work = self.preview_mimo()?;
         for n in 0..self.nodes.len() {
             if self.mimo.as_ref().is_some_and(|m| m.index(n).is_some()) { continue; }
@@ -439,9 +461,14 @@ impl WaveguideNetwork {
             }
             let range = self.offsets[n]..self.offsets[n + 1];
             let first = self.ports[range.start];
+            let prescribed = if matches!(self.nodes[n], NetworkNode::Driven) {
+                let pressure = driven[next_driven].outgoing_pressure_pa;
+                next_driven += 1;
+                pressure
+            } else { outgoing };
             let pressure = match self.nodes[n] {
                 NetworkNode::Series { .. } | NetworkNode::Shunt { .. } | NetworkNode::ShuntAdmittance { .. } => unreachable!("interior handled above"),
-                NetworkNode::Inlet => outgoing + self.arriving(first),
+                NetworkNode::Inlet | NetworkNode::Driven => prescribed + self.arriving(first),
                 NetworkNode::Impedance { .. } | NetworkNode::Relaxation { .. } => {
                     let a = self.arriving(first);
                     let trial = self.loads[n].as_ref().expect("admitted reactive terminal").preview_step(a)?;
@@ -468,7 +495,7 @@ impl WaveguideNetwork {
                 let a = self.arriving(port);
                 let b = match self.nodes[n] {
                     NetworkNode::Series { .. } | NetworkNode::Shunt { .. } | NetworkNode::ShuntAdmittance { .. } => unreachable!("interior handled above"),
-                    NetworkNode::Inlet => outgoing,
+                    NetworkNode::Inlet | NetworkNode::Driven => prescribed,
                     NetworkNode::Termination { reflection } => reflection * a,
                     NetworkNode::Impedance { .. } | NetworkNode::Relaxation { .. } => self.load_candidate[n].port().reflected_pressure_pa,
                     NetworkNode::Junction => pressure - a,
@@ -494,6 +521,7 @@ impl WaveguideNetwork {
                         terminal_loss += trial.dissipated_energy_j;
                     },
                     NetworkNode::Junction => junction_residual += line.wave_energy(a) - line.wave_energy(b),
+                    NetworkNode::Driven => driven_work -= pressure * (flow * self.time_step_s),
                     NetworkNode::Inlet => {},
                 }
                 self.departing[port] = b;
@@ -519,9 +547,10 @@ impl WaveguideNetwork {
             inlet_work_j: (outgoing + incoming) * (((outgoing - incoming) / z) * self.time_step_s),
             terminal_loss_j: terminal_loss, interior_loss_j: interior_loss, junction_residual_j: junction_residual,
             coupled_terminal_work_j: coupled_terminal_work,
+            driven_work_j: driven_work,
         };
         if ![frame.inlet_pressure_pa, frame.inlet_flow_m3_s, stored, frame.storage_change_j,
-            frame.inlet_work_j, terminal_loss, interior_loss, junction_residual, frame.balance_residual_j()]
+            frame.inlet_work_j, driven_work, terminal_loss, interior_loss, junction_residual, frame.balance_residual_j()]
             .iter().all(|x| x.is_finite())
         {
             return Err(WaveguideError("network storage or work left the finite set"));

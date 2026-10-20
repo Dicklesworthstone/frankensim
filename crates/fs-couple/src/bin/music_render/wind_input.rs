@@ -135,6 +135,7 @@ fn flue_duct_provenance(p: &fs_couple::flue_loop::network::performance::FlueOutl
     let inlet = source.graph.inlet_section_index().expect("unique inlet");
     let nodes = source.graph.nodes.iter().map(|node| match node {
         NetworkNode::Inlet => "{\"kind\":\"inlet\"}".to_string(),
+        NetworkNode::Driven => "{\"kind\":\"driven\"}".to_string(),
         NetworkNode::Junction => "{\"kind\":\"junction\"}".to_string(),
         NetworkNode::Termination { reflection } => format!("{{\"kind\":\"reflection\",\"reflection\":{reflection:e}}}"),
         NetworkNode::Relaxation { load } => {

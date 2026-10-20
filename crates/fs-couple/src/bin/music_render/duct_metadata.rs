@@ -32,6 +32,7 @@ pub(super) fn provenance(p:&PlateValvePerformance)->String {
     let nodes:Vec<_>=n.spec().nodes.iter().enumerate().map(|(index,node)| {
         let (kind,extra)=match *node {
             NetworkNode::Inlet=>("inlet",String::new()),
+            NetworkNode::Driven=>("driven",String::new()),
             NetworkNode::Junction=>("junction",String::new()),
             NetworkNode::Termination{reflection}=>("reflection",format!(",\"reflection\":{reflection:e}")),
             NetworkNode::Impedance{load}=>("impedance",format!(",{}",impedance(load))),
