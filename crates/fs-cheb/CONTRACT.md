@@ -137,7 +137,7 @@ Structured panics for programmer/modeling errors: non-finite or
 inverted domains, non-finite samples/coefficients, unresolved functions
 at `max_degree`, domain mismatches in algebra, invalid colleague
 policies, an unrepresentable colleague normalization, matrix half-ratio, or
-recurrence-row addition,
+recurrence-row addition, failed or non-finite colleague eigensolves,
 non-positive certification widths, non-identical algebra domains,
 an unrepresentable algebra/transform coefficient or Cheb2 inverse pivot,
 an exact root normalization (scanner or certifier) that would lose coefficient information,
@@ -147,6 +147,9 @@ fallback cannot resolve honestly, a physical
 derivative whose coefficient representation is not finite `f64`, malformed
 public `Cheb2` or `FourierSeries` fields, and non-power-of-two Fourier sample
 counts.
+`colleague_roots_budgeted` uses the same numerical path and returns typed
+`Shape`, `Numerical`, or `NonFinite` refusals for these colleague failures;
+the classic convenience API retains its panicking contract.
 
 ## Determinism class
 Bit-deterministic per ISA by construction. The golden hashes coefficients
@@ -236,7 +239,10 @@ and empty-prefix refusal; typed `Unresolved`/`NonFinite` refusals where
 the classic API panics; same-profile receipt determinism. Cross-ISA G5
 evidence remains pending as stated above. Slice-2/3 cases
 cb-007..cb-009: colleague admission boundaries + bitwise budgeted/
-classic candidate parity + pre-eigen cancellation drain; admission
+classic candidate parity + pre-eigen cancellation drain; additional
+policy/normalization/matrix refusal tests cover invalid tolerances, zero
+or trimmed-constant polynomials, lossy normalization, half-ratio overflow and
+underflow, and absorbed recurrence terms without unwinding; admission
 tables for Cheb2/Fourier/Orr-Sommerfeld incl. typed shape refusals and
 huge requests; budgeted builder twins (Fourier bitwise mirror with
 typed non-finite/shape refusals, Cheb2 and OS admission-gated wrappers
@@ -337,12 +343,12 @@ regressions, not new cross-ISA or multiplicity/completeness-theorem evidence.
   refuse the shape violations the classic constructors panic on), and
   the heaviest paths have Cx-threaded budgeted twins (adaptive build,
   Dirichlet eigensolve, sign-grid root scan, colleague candidates).
-  `colleague_roots_budgeted`, `cheb2_build_budgeted`, and
-  `growth_rates_budgeted` poll at the boundaries AROUND their
-  admission-bounded tiles — each tile is one non-preemptible unit whose
-  classic path runs unchanged inside, numeric-evidence asserts
-  (exponent-span normalization, non-finite samples, zero pivots,
-  fixture-scale eigensolver convergence) retained and documented;
+  `colleague_roots_budgeted` polls around one non-preemptible,
+  admission-bounded eigen tile. It shares the classic candidate arithmetic
+  and returns typed policy, normalization, matrix, and eigensolve failures.
+  `cheb2_build_budgeted` and `growth_rates_budgeted` also poll at their tile
+  boundaries; their classic paths retain numeric-evidence asserts
+  (non-finite samples, zero pivots, fixture-scale eigensolver convergence);
   `fourier_build_budgeted` is a faithful fallible MIRROR (bitwise
   spectrum parity, typed non-finite/shape refusals, 4096-sample polls).
   Algebra and calculus now expose admission-bounded `add_budgeted`,

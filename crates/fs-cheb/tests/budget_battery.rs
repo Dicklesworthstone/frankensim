@@ -471,6 +471,124 @@ fn cb_007_colleague_budgeted() {
     assert!(matches!(refused, ChebError::Cancelled), "{refused}");
 }
 
+#[test]
+fn colleague_budgeted_refuses_invalid_policy_and_degenerate_polynomials() {
+    use fs_cheb::colleague::ColleaguePolicy;
+
+    let default = ColleaguePolicy::default();
+    let polynomial = Cheb1::from_coeffs(-1.0, 1.0, vec![0.0, 1.0]);
+    for (policy, what) in [
+        (
+            ColleaguePolicy {
+                trim_rel: f64::NAN,
+                ..default
+            },
+            "colleague trim tolerance must be finite and non-negative",
+        ),
+        (
+            ColleaguePolicy {
+                im_tol: -1.0,
+                ..default
+            },
+            "colleague imaginary tolerance must be finite and non-negative",
+        ),
+        (
+            ColleaguePolicy {
+                domain_slack: f64::INFINITY,
+                ..default
+            },
+            "colleague domain slack must be finite and non-negative",
+        ),
+        (
+            ColleaguePolicy {
+                cluster_tol: 0.0,
+                ..default
+            },
+            "colleague cluster tolerance must be finite and positive",
+        ),
+    ] {
+        let result = with_cx(false, |cx| {
+            fs_cheb::colleague_roots_budgeted(&polynomial, policy, &ChebBudget::default(), cx)
+        });
+        assert_eq!(result, Err(ChebError::Shape { what }));
+        let cancelled = with_cx(true, |cx| {
+            fs_cheb::colleague_roots_budgeted(&polynomial, policy, &ChebBudget::default(), cx)
+        });
+        assert_eq!(cancelled, Err(ChebError::Cancelled));
+    }
+
+    for (coefficients, error) in [
+        (
+            vec![2.0, 1e-20],
+            ChebError::Shape {
+                what: "constant polynomial has no roots to define after colleague policy trimming",
+            },
+        ),
+        (
+            vec![0.0, 0.0],
+            ChebError::Numerical {
+                what: "finite non-zero polynomial required for colleague matrix",
+            },
+        ),
+    ] {
+        let polynomial = Cheb1::from_coeffs(-1.0, 1.0, coefficients);
+        let result = with_cx(false, |cx| {
+            fs_cheb::colleague_roots_budgeted(&polynomial, default, &ChebBudget::default(), cx)
+        });
+        assert_eq!(result, Err(error));
+    }
+}
+
+#[test]
+fn colleague_budgeted_refuses_unrepresentable_polynomial_matrices() {
+    use fs_cheb::colleague::ColleaguePolicy;
+
+    let min_subnormal = f64::from_bits(1);
+    let amplitude = f64::MAX / 2.0;
+    // Keep every non-zero leading coefficient so these exercise matrix
+    // construction failures, including both half-ratio refusal paths.
+    let policy = ColleaguePolicy {
+        trim_rel: 0.0,
+        ..ColleaguePolicy::default()
+    };
+    for (coefficients, what) in [
+        (
+            vec![2.0 * min_subnormal, 0.75 * amplitude, 0.0, 0.25 * amplitude],
+            "colleague normalization cannot preserve the coefficient exponent span",
+        ),
+        (
+            vec![min_subnormal, 1.0],
+            "colleague normalization cannot represent the unprimed constant coefficient",
+        ),
+        (
+            vec![2.0, min_subnormal],
+            "linear colleague matrix entry is not representable after coefficient normalization",
+        ),
+        (
+            vec![0.0, min_subnormal, 1.0],
+            "colleague matrix half-ratio underflows a non-zero coefficient",
+        ),
+        (
+            vec![0.0, 1.0, min_subnormal],
+            "colleague matrix half-ratio is not representable as finite f64",
+        ),
+        (
+            vec![0.0, fs_math::det::powi(2.0, -100), 0.0, 1.0],
+            "colleague recurrence addition absorbed a non-zero coefficient term",
+        ),
+        (
+            vec![0.0, fs_math::det::powi(2.0, 100), 0.0, 1.0],
+            "colleague recurrence addition absorbed its non-zero half term",
+        ),
+    ] {
+        let polynomial = Cheb1::from_coeffs(-1.0, 1.0, coefficients);
+        let result = with_cx(false, |cx| {
+            fs_cheb::colleague_roots_budgeted(&polynomial, policy, &ChebBudget::default(), cx)
+        });
+        assert_eq!(result, Err(ChebError::Numerical { what }));
+    }
+}
+
 /// cb-008 — slice-2 admission tables for the remaining modules:
 /// Cheb2 grids, Fourier synthesis, and the Orr–Sommerfeld eigensolve
 /// all preflight their worst case with typed refusals (including the

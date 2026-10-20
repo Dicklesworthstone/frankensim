@@ -1461,15 +1461,16 @@ pub fn admit_growth_rates(
 /// preflights the companion eigensolve BEFORE any allocation, and the
 /// run drains at the poll boundaries around the (single,
 /// admission-bounded) eigen tile. Candidate semantics are exactly
-/// [`crate::colleague::colleague_roots`] — the classic path runs
-/// unchanged between the polls, so happy-path results are
-/// bitwise-identical. Its numeric-evidence asserts (exponent-span
-/// normalization, eigensolver convergence at fixture scale) are
-/// retained this slice and documented in the contract.
+/// [`crate::colleague::colleague_roots`] — both call the same numerical
+/// path, so successful finite results are bitwise-identical. Invalid policies,
+/// unrepresentable normalization/matrix entries, recurrence absorption and
+/// failed/non-finite eigensolves return typed refusals without unwinding.
 ///
 /// # Errors
-/// [`ChebError`] — shape/overflow/cap refusals before any work, or
-/// [`ChebError::Cancelled`] at a drain boundary.
+/// [`ChebError`] — admission refusals before numerical work,
+/// [`ChebError::Shape`] for invalid policies or a trimmed constant,
+/// [`ChebError::Numerical`] or [`ChebError::NonFinite`] for an admitted
+/// numerical failure, or [`ChebError::Cancelled`] at a drain boundary.
 pub fn colleague_roots_budgeted(
     p: &Cheb1,
     policy: crate::colleague::ColleaguePolicy,
@@ -1480,7 +1481,7 @@ pub fn colleague_roots_budgeted(
     if cx.checkpoint().is_err() {
         return Err(ChebError::Cancelled);
     }
-    let roots = crate::colleague::colleague_roots(p, policy);
+    let roots = crate::colleague::try_colleague_roots(p, policy)?;
     if cx.checkpoint().is_err() {
         // The eigen tile completed but the caller has drained: refuse
         // publication rather than hand back a result the campaign will
@@ -1494,8 +1495,8 @@ pub fn colleague_roots_budgeted(
 // Slice 3 (bead sj31i.55): budgeted twins for the remaining builders.
 // The Fourier twin is a faithful fallible mirror (public-field type,
 // bitwise-identical sample/transform sequence); the Cheb2 and
-// Orr–Sommerfeld twins follow the colleague precedent — admission gates
-// the tile, polls drain at its boundaries, and the classic path runs
+// Orr–Sommerfeld twins use admission gates around their tiles,
+// polls drain at their boundaries, and the classic path runs
 // unchanged between them with its numeric-evidence asserts retained
 // and documented.
 // ---------------------------------------------------------------------------

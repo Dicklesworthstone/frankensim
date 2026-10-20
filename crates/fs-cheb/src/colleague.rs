@@ -52,40 +52,49 @@ impl Default for ColleaguePolicy {
     }
 }
 
-fn assert_policy(policy: ColleaguePolicy) {
-    assert!(
-        policy.trim_rel.is_finite() && policy.trim_rel >= 0.0,
-        "colleague trim tolerance must be finite and non-negative"
-    );
-    assert!(
-        policy.im_tol.is_finite() && policy.im_tol >= 0.0,
-        "colleague imaginary tolerance must be finite and non-negative"
-    );
-    assert!(
-        policy.domain_slack.is_finite() && policy.domain_slack >= 0.0,
-        "colleague domain slack must be finite and non-negative"
-    );
-    assert!(
-        policy.cluster_tol.is_finite() && policy.cluster_tol > 0.0,
-        "colleague cluster tolerance must be finite and positive"
-    );
+fn check_policy(policy: ColleaguePolicy) -> Result<(), ChebError> {
+    for (value, what) in [
+        (
+            policy.trim_rel,
+            "colleague trim tolerance must be finite and non-negative",
+        ),
+        (
+            policy.im_tol,
+            "colleague imaginary tolerance must be finite and non-negative",
+        ),
+        (
+            policy.domain_slack,
+            "colleague domain slack must be finite and non-negative",
+        ),
+    ] {
+        if !value.is_finite() || value < 0.0 {
+            return Err(ChebError::Shape { what });
+        }
+    }
+    if !policy.cluster_tol.is_finite() || policy.cluster_tol <= 0.0 {
+        return Err(ChebError::Shape {
+            what: "colleague cluster tolerance must be finite and positive",
+        });
+    }
+    Ok(())
 }
 
 /// Evaluate `-numerator / (2*denominator)` without committing to an
 /// overflowing/underflowing doubled denominator or to an overflowing full
 /// ratio whose half is representable. The historical expression remains the
 /// first path so ordinary inputs keep their established bits.
-fn negative_half_ratio(numerator: f64, denominator: f64) -> f64 {
-    assert!(
-        numerator.is_finite() && denominator.is_finite() && denominator != 0.0,
-        "finite numerator and finite non-zero denominator required"
-    );
+fn negative_half_ratio(numerator: f64, denominator: f64) -> Result<f64, ChebError> {
+    if !numerator.is_finite() || !denominator.is_finite() || denominator == 0.0 {
+        return Err(ChebError::Numerical {
+            what: "colleague half-ratio requires a finite numerator and finite non-zero denominator",
+        });
+    }
     let mut finite_zero_fallback = None;
     let doubled_denominator = 2.0 * denominator;
     if doubled_denominator.is_finite() && doubled_denominator != 0.0 {
         let ordinary = -numerator / doubled_denominator;
         if ordinary.is_finite() && (ordinary != 0.0 || numerator == 0.0) {
-            return ordinary;
+            return Ok(ordinary);
         }
         if ordinary.is_finite() {
             finite_zero_fallback = Some(ordinary);
@@ -96,7 +105,7 @@ fn negative_half_ratio(numerator: f64, denominator: f64) -> f64 {
     if full_ratio.is_finite() {
         let ratio_first = -0.5 * full_ratio;
         if ratio_first.is_finite() && (ratio_first != 0.0 || numerator == 0.0) {
-            return ratio_first;
+            return Ok(ratio_first);
         }
         if ratio_first.is_finite() {
             finite_zero_fallback = Some(ratio_first);
@@ -107,16 +116,20 @@ fn negative_half_ratio(numerator: f64, denominator: f64) -> f64 {
     if half_numerator != 0.0 || numerator == 0.0 {
         let numerator_first = -half_numerator / denominator;
         if numerator_first.is_finite() && (numerator_first != 0.0 || numerator == 0.0) {
-            return numerator_first;
+            return Ok(numerator_first);
         }
         if numerator_first.is_finite() {
             finite_zero_fallback = Some(numerator_first);
         }
     }
     if finite_zero_fallback.is_some() {
-        panic!("colleague matrix half-ratio underflows a non-zero coefficient");
+        return Err(ChebError::Numerical {
+            what: "colleague matrix half-ratio underflows a non-zero coefficient",
+        });
     }
-    panic!("colleague matrix half-ratio is not representable as finite f64")
+    Err(ChebError::Numerical {
+        what: "colleague matrix half-ratio is not representable as finite f64",
+    })
 }
 
 /// Greatest finite power of two no larger than `value`.
@@ -148,10 +161,20 @@ fn power_of_two_scale(value: f64) -> f64 {
 /// If the trimmed polynomial is constant (no roots to define), if an exact
 /// power-of-two normalization or matrix half-ratio cannot preserve every
 /// non-zero coefficient in finite `f64`, or if the eigensolver fails to
-/// converge (typed failure surfaced as a panic at fixture scale).
+/// converge or produces non-finite eigenvalues. Budgeted callers receive these
+/// failures as [`ChebError`]s through [`crate::colleague_roots_budgeted`].
 #[must_use]
 pub fn colleague_roots(p: &Cheb1, policy: ColleaguePolicy) -> Vec<f64> {
-    assert_policy(policy);
+    try_colleague_roots(p, policy).unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Shared numerical path. The budgeted caller admits its matrix and work
+/// before entry; the convenience caller preserves its panicking contract.
+pub(crate) fn try_colleague_roots(
+    p: &Cheb1,
+    policy: ColleaguePolicy,
+) -> Result<Vec<f64>, ChebError> {
+    check_policy(policy)?;
     // Normalize the stored coefficients before halving c₀. Halving a
     // subnormal stored c₀ first can round it to zero and change the roots.
     // The normalization scale MUST be a power of two and every non-zero
@@ -168,47 +191,63 @@ pub fn colleague_roots(p: &Cheb1, policy: ColleaguePolicy) -> Vec<f64> {
     let cmax = coeffs.iter().enumerate().fold(0.0f64, |m, (index, &c)| {
         m.max(if index == 0 { 0.5 * c.abs() } else { c.abs() })
     });
-    assert!(
-        cmax.is_finite() && cmax > 0.0,
-        "finite non-zero polynomial required for colleague matrix"
-    );
+    if !cmax.is_finite() || cmax <= 0.0 {
+        return Err(ChebError::Numerical {
+            what: "finite non-zero polynomial required for colleague matrix",
+        });
+    }
     let scale = power_of_two_scale(cmax);
     for coefficient in &mut coeffs {
         let original = *coefficient;
         let scaled = original / scale;
-        assert!(
-            scaled.is_finite() && (original == 0.0 || scaled != 0.0) && scaled * scale == original,
-            "colleague normalization cannot preserve the coefficient exponent span"
-        );
+        if !scaled.is_finite() || (original != 0.0 && scaled == 0.0) || scaled * scale != original {
+            return Err(ChebError::Numerical {
+                what: "colleague normalization cannot preserve the coefficient exponent span",
+            });
+        }
         *coefficient = scaled;
     }
     let normalized_cmax = cmax / scale;
     let stored_c0 = coeffs[0];
     coeffs[0] *= 0.5;
-    assert!(
-        stored_c0 == 0.0 || coeffs[0] != 0.0,
-        "colleague normalization cannot represent the unprimed constant coefficient"
-    );
+    if stored_c0 != 0.0 && coeffs[0] == 0.0 {
+        return Err(ChebError::Numerical {
+            what: "colleague normalization cannot represent the unprimed constant coefficient",
+        });
+    }
     let mut n = coeffs.len() - 1;
     while n > 0 && coeffs[n].abs() / normalized_cmax <= policy.trim_rel {
         n -= 1;
     }
-    assert!(n >= 1, "constant polynomial has no roots to define");
+    if n == 0 {
+        return Err(ChebError::Shape {
+            what: "constant polynomial has no roots to define after colleague policy trimming",
+        });
+    }
     // Colleague matrix (n×n) for Σ_{k=0}^{n} a_k T_k:
     // row 0:      x T_0 = T_1                → [0, 1, 0, ...]
     // row k:      x T_k = (T_{k−1}+T_{k+1})/2 → [.., ½, 0, ½, ..]
     // row n−1:    coefficient-loaded: −a_j/(2 a_n) + ½·δ_{j,n−2}.
-    let mut m = vec![C64::ZERO; n * n];
+    let matrix_len = n.checked_mul(n).ok_or(ChebError::Overflow {
+        what: "colleague matrix element count",
+    })?;
+    let mut m = Vec::new();
+    m.try_reserve_exact(matrix_len)
+        .map_err(|_| ChebError::Numerical {
+            what: "colleague matrix allocation was refused",
+        })?;
+    m.resize(matrix_len, C64::ZERO);
     let set = |m: &mut Vec<C64>, r: usize, c: usize, v: f64| {
         m[r * n + c] = C64::new(v, 0.0);
     };
     if n == 1 {
         // a_0 + a_1 T_1 = 0 → x = −a_0/a_1.
         let entry = -coeffs[0] / coeffs[1];
-        assert!(
-            entry.is_finite(),
-            "linear colleague matrix entry is not representable after coefficient normalization"
-        );
+        if !entry.is_finite() {
+            return Err(ChebError::Numerical {
+                what: "linear colleague matrix entry is not representable after coefficient normalization",
+            });
+        }
         set(&mut m, 0, 0, entry);
     } else {
         set(&mut m, 0, 1, 1.0);
@@ -218,27 +257,40 @@ pub fn colleague_roots(p: &Cheb1, policy: ColleaguePolicy) -> Vec<f64> {
         }
         let an = coeffs[n];
         for (j, &coeff) in coeffs.iter().enumerate().take(n) {
-            let mut v = negative_half_ratio(coeff, an);
+            let mut v = negative_half_ratio(coeff, an)?;
             if j == n - 2 {
                 let combined = v + 0.5;
-                assert!(
-                    v == 0.0 || combined != 0.5,
-                    "colleague recurrence addition absorbed a non-zero coefficient term"
-                );
-                assert!(
-                    combined != v,
-                    "colleague recurrence addition absorbed its non-zero half term"
-                );
+                if v != 0.0 && combined == 0.5 {
+                    return Err(ChebError::Numerical {
+                        what: "colleague recurrence addition absorbed a non-zero coefficient term",
+                    });
+                }
+                if combined == v {
+                    return Err(ChebError::Numerical {
+                        what: "colleague recurrence addition absorbed its non-zero half term",
+                    });
+                }
                 v = combined;
             }
-            assert!(
-                v.is_finite(),
-                "colleague matrix entry is not representable after coefficient normalization"
-            );
+            if !v.is_finite() {
+                return Err(ChebError::Numerical {
+                    what: "colleague matrix entry is not representable after coefficient normalization",
+                });
+            }
             set(&mut m, n - 1, j, v);
         }
     }
-    let eigs = eig(&m, n).expect("colleague eigensolve converges");
+    let eigs = eig(&m, n).map_err(|_| ChebError::Numerical {
+        what: "colleague eigensolve did not converge",
+    })?;
+    if eigs
+        .iter()
+        .any(|value| !value.re.is_finite() || !value.im.is_finite())
+    {
+        return Err(ChebError::NonFinite {
+            what: "colleague eigensolve produced non-finite eigenvalues",
+        });
+    }
     let mut roots: Vec<f64> = eigs
         .into_iter()
         .filter(|l| l.im.abs() <= policy.im_tol)
@@ -256,9 +308,10 @@ pub fn colleague_roots(p: &Cheb1, policy: ColleaguePolicy) -> Vec<f64> {
     }
     // Map reference → domain.
     let (a, b) = p.domain();
-    out.iter()
+    Ok(out
+        .iter()
         .map(|&t| affine_from_reference(t, a, b))
-        .collect()
+        .collect())
 }
 
 /// Clenshaw evaluation of a Chebyshev series in INTERVAL arithmetic —
@@ -706,7 +759,7 @@ mod affine_certificate_tests {
     fn colleague_half_ratio_avoids_representable_intermediate_overflow() {
         let denominator = f64::MIN_POSITIVE / 7.0;
         assert!((1.0 / denominator).is_infinite());
-        let ratio = negative_half_ratio(1.0, denominator);
+        let ratio = negative_half_ratio(1.0, denominator).expect("finite half-ratio");
         assert!(ratio.is_finite() && ratio < 0.0);
         assert!((ratio.abs() * denominator - 0.5).abs() <= f64::EPSILON);
 
@@ -715,16 +768,18 @@ mod affine_certificate_tests {
         assert_eq!((tiny_numerator / f64::MAX).to_bits(), 1);
         assert_eq!((-0.5 * (tiny_numerator / f64::MAX)).to_bits(), 1_u64 << 63);
         assert_eq!(
-            negative_half_ratio(tiny_numerator, f64::MAX).to_bits(),
+            negative_half_ratio(tiny_numerator, f64::MAX)
+                .expect("representable subnormal half-ratio")
+                .to_bits(),
             (1_u64 << 63) | 1,
             "numerator-first ordering must retain a representable negative min-subnormal"
         );
 
-        let unrepresentable = std::panic::catch_unwind(|| {
-            negative_half_ratio(f64::from_bits(1), 1.0);
-        });
-        assert!(
-            unrepresentable.is_err(),
+        assert_eq!(
+            negative_half_ratio(f64::from_bits(1), 1.0),
+            Err(ChebError::Numerical {
+                what: "colleague matrix half-ratio underflows a non-zero coefficient",
+            }),
             "a non-zero matrix coefficient must never be silently rounded to zero"
         );
     }
