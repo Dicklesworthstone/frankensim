@@ -142,6 +142,11 @@ def r(v, d=3):
     return None if v is None else round(float(v), d)
 
 
+def sig(v, digits=6):
+    """Round to significant digits, never to a fixed decimal place: an inharmonicity ruler of 3e-6 must not become 0."""
+    return None if v is None else float(f"{float(v):.{digits}g}")
+
+
 def finite(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
@@ -308,7 +313,7 @@ def check_audio(base: Path, pj: dict) -> list[str]:
 # ------------------------------------------------------------------ card pieces
 def metric_view(m: dict, has_ours: bool) -> dict:
     gap = num_or_none(m.get("gap")) if has_ours else None
-    ruler = [{"label": e["label"], "value": r(e["value"], 4)} for e in m["ruler"]]
+    ruler = [{"label": e["label"], "value": sig(e["value"])} for e in m["ruler"]]
     top = max((e["value"] for e in ruler), default=None)
     verdict = "no-gap" if gap is None else "no-ruler" if top is None else "within" if gap <= top else "outside"
     ratio = None if gap is None or not top else gap / top
@@ -316,8 +321,8 @@ def metric_view(m: dict, has_ours: bool) -> dict:
     return {
         "id": m["id"], "label": m["label"], "unit": m.get("unit", ""), "gap_unit": m.get("gap_unit", m.get("unit", "")),
         "real": shown(m.get("real")), "ours": shown(m.get("ours")) if has_ours else None,
-        "gap": r(gap, 4), "ruler": ruler, "ruler_max": r(top, 4), "ruler_min": r(min((e["value"] for e in ruler), default=None), 4),
-        "verdict": verdict, "ratio": r(ratio, 3), "note": m.get("note", ""),
+        "gap": sig(gap), "ruler": ruler, "ruler_max": sig(top), "ruler_min": sig(min((e["value"] for e in ruler), default=None)),
+        "verdict": verdict, "ratio": sig(ratio, 4), "note": m.get("note", ""),
     }
 
 

@@ -129,7 +129,7 @@ function sourceLines(p: Pair): HTMLElement {
   return el("div", { class: "small muted ir-source" },
     el("p", {}, "Recording: ", el("a", { href: r.url, rel: "noopener" }, r.file), `${seg}. ${mic}${r.format ? `; ${r.format}` : ""}.`),
     p.ours ? el("p", {}, `Render: commit ${p.ours.git_sha.slice(0, 12)}, observed at ${p.ours.observer}, ${fmt(p.ours.sample_rate / 1000)} kHz; recipe ${p.ours.recipe}.`) : el("p", {}, "Render: none for this note."),
-    el("p", {}, `${p.level_match.charAt(0).toUpperCase()}${p.level_match.slice(1)}.${a ? ` Both signals high-passed at ${num(a.highpass_hz, "Hz")}; onsets ${num(a.onset_real_s, "s")} (recording)${a.onset_ours_s !== null ? ` and ${num(a.onset_ours_s, "s")} (render)` : ""} aligned.` : ""}`));
+    el("p", {}, `${p.level_match.charAt(0).toUpperCase()}${p.level_match.slice(1)}.${a ? ` ${p.ours ? "Both signals are" : "The recording is"} high-passed at ${num(a.highpass_hz, "Hz")}; onsets ${num(a.onset_real_s, "s")} (recording)${a.onset_ours_s !== null ? ` and ${num(a.onset_ours_s, "s")} (render)` : ""} aligned.` : ""}`));
 }
 
 function buildCard(c: Card, notes: Record<string, string>): HTMLElement {

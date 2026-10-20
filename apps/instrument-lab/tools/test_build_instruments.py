@@ -80,6 +80,12 @@ class Verdicts(unittest.TestCase):
         self.assertEqual((m["verdict"], m["ruler_max"], m["ratio"]), ("within", 3.0, 1.0))
         self.assertEqual(B.metric_view(metric("x", 3.01, [1.0, 3.0]), True)["verdict"], "outside")
 
+    def test_tiny_values_keep_their_digits(self):
+        # Real clarinet inharmonicity rulers are about 3e-6 to 9e-6: rounding to 4 decimals published them as 0.
+        m = B.metric_view(metric("B", 4.0e-6, [9.2181e-06, 3.1258e-06]), True)
+        self.assertEqual((m["ruler_min"], m["ruler_max"], m["gap"]), (3.1258e-06, 9.2181e-06, 4.0e-06))
+        self.assertEqual(m["verdict"], "within")
+
     def test_no_ruler_makes_no_claim(self):
         self.assertEqual(B.metric_view(metric("x", 9.0, []), True)["verdict"], "no-ruler")
 
