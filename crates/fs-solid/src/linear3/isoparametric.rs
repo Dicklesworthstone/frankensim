@@ -137,7 +137,7 @@ pub(super) fn assemble<const N: usize, const D: usize, R: Copy>(
         element_volumes_m3,
     })
 }
-fn mandel_b<const N: usize, const D: usize>(gradients: [[f64; 3]; N]) -> [[f64; D]; 6] {
+pub(super) fn mandel_b<const N: usize, const D: usize>(gradients: [[f64; 3]; N]) -> [[f64; D]; 6] {
     let mut b = [[0.0; D]; 6];
     for (a, g) in gradients.iter().enumerate() {
         let c = 3 * a;

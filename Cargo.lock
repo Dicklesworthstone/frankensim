@@ -2656,6 +2656,7 @@ dependencies = [
  "fs-modal",
  "fs-phs",
  "fs-qty",
+ "fs-rand",
  "fs-scenario",
  "fs-solver",
  "fs-sparse",

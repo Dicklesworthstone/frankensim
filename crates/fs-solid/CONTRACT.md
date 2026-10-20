@@ -24,6 +24,59 @@ operator level, but material-card resolution of engineering/crystal constants
 and texture/orientation fields remains a separate evidence-bearing admission
 step; absence of that data is not permission to assume isotropy.
 
+`linear3::visco` (IRP M1.3-W2a, in progress) prepares P1 or TET10 elements
+with caller-supplied, mesh-frame `fs-material::TensorProny` laws and density.
+It reuses the existing elastic mesh admission, equilibrium stiffness and
+consistent mass, and the shared Mandel B operator. Complex stiffness retains
+the full storage and loss tensors, including off-diagonal couplings. Every
+frequency query must lie in every element's declared law band. Empty branches
+reproduce the canonical elastic stiffness bitwise. Positive quadrature weights
+propagate pointwise relative quadratic-form bounds to the assembled forms;
+this alone is not a frequency-dependent modal-eigenvalue certificate.
+
+The required `ViscoStateBudget` counts six internal strain scalars per branch
+and stiffness quadrature point, before history allocation. A history borrows
+its immutable prepared mesh/laws and starts relaxed at zero displacement.
+Prescribed full nodal displacement ramps advance the constitutive owner's
+exact exponential update; B-transpose returns complete force rows, including
+support reactions, and reduced forces use the canonical free-DOF ordering.
+Stored energy, exact ramp work and dashpot heat are integrated in joules.
+Work is the material owner's time-integrated work, not endpoint force times
+displacement. Candidate histories commit only after all points and assembled
+forces/energies succeed; cancellation and invalid/nonfinite inputs preserve
+the previous state. Cx is checked per element/point, including state copying.
+No damping clipping, diagonal loss approximation or secondary constitutive
+law is introduced. Determinism is same-host at fixed element/point order.
+
+`tests/visco_elements.rs` names G0 uniform-strain tensor/element energy,
+elastic parity, 4096 counter-stream multiaxial steps, one-branch Zener response,
+band/state-cap/invalid-history refusals; G1 harmonic endpoint force on three
+time rungs (observed order 2 +/- 0.2); G3 rotation invariance; and a G4
+cancellation-preserves-state check. These fixtures are synthetic software
+checks and require native execution.
+
+`ViscoElements::modes` solves the storage-dispersive ordered eigenproblem
+`lambda(K'(omega), M) = omega^2` using the existing dense fs-modal eigensolver
+and an explicit frequency bracket, iteration/tolerance budget, and a dense
+reference dimension cap (at most 256 free DOFs). For positive equilibrium and
+PSD Prony branches, `K'(omega)/omega^2` decreases in Loewner order, so ordered
+positive-mode roots can be bisected without assuming fixed-point contraction.
+Endpoints must bracket the selected mode inside the common material band;
+missing roots, unresolved eigen residuals, and exhausted iterations refuse.
+The output retains the mass-normalized shape, full loss-energy quotient,
+numerical frequency interval and nonlinear residual. Numerical bisection is
+not an outward-rounded modal certificate, and the loss quotient does not
+certify a diagonal damping approximation. A one-coordinate P1/TET10 Zener
+fixture compares the self-consistent frequency with an independent analytic
+quadratic (2e-10 relative), and deliberately shifts it by more than a factor
+of two from the equilibrium result.
+
+This module does not yet supply the fractional-target modal-loss ladder,
+certified modal block reduction, valve-card integration, HEX histories,
+displacement time integration, or material/specimen validation. Arbitrary
+time-domain input is not a certification that its spectrum lies in the law's
+band. Intrinsic material heat excludes support, contact and radiation losses.
+
 `linear3::tet10` adds a separate isoparametric quadratic displacement/geometry
 operator (IRP M1.3-W1a). `QuadraticTetProblem` consumes ten-node connectivity,
 the existing uniform/per-element material tensor, fixed DOFs and assembly

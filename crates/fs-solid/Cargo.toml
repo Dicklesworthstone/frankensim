@@ -36,6 +36,7 @@ fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
+fs-rand = { path = "../fs-rand" }
 fs-alloc = { path = "../fs-alloc" }
 fs-evidence = { path = "../fs-evidence" }
 fs-phs = { path = "../fs-phs" }

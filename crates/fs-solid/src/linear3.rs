@@ -53,6 +53,8 @@ pub mod hex;
 mod isoparametric;
 /// Isoparametric quadratic tetrahedra with consistent mass and explicit quadrature.
 pub mod tet10;
+/// Passive tensor-Prony element operators and exact strain-ramp histories.
+pub mod visco;
 
 /// Bounded assembly request. Limits are checked before matrix allocation.
 #[derive(Debug, Clone, Copy, PartialEq)]
