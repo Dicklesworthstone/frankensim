@@ -159,6 +159,28 @@ The bicubic C1 claim above applies only to the bicubic path.
 `fs-scenario::assembly_generators::ag_011_arching_second_order_and_existing_mesh_lift`
 tests the measured outline → existing mesher → shared NURBS → existing lift.
 
+`shell::junction` (IRP M1.2-W2a) couples smooth `ShellComponent` charts along
+1-D edge polylines (`EdgeTie`) or 2-D overlapping patches (`FaceTie`) without
+averaging nodal directors across fold seams. On each 1-D seam, the Wohlmuth
+(2000) biorthogonal linear dual basis `psi_0(xi) = 2 - 3*xi`,
+`psi_1(xi) = 3*xi - 1` produces a diagonal slave mortar mass `D` and local
+transfer operator `C = D^{-1} M` with a minimum-norm local affine consistency
+projection onto the master polyline's affine hull so that
+`sum_j C_{ij} = 1` and `sum_j C_{ij} p_{m,j} = p_{s,i}` hold to machine
+precision on both straight and curved seams. `TieOffset::Midsurface` ties
+midsurfaces directly; `TieOffset::Skin { side }` (`side` in `{-1, +1}`)
+evaluates the rigid attachment arm `d = side * 0.5 * h_master * n_master` from
+explicit component nodal thickness and area-weighted nodal normals, enforcing
+`u_slave = u_master + theta_master x d`. `RotationCoupling::Full` eliminates
+all 6 slave DOFs per node; `RotationCoupling::TranslationsOnly` eliminates only
+translations, leaving slave rotations free. Congruence reduction
+`K_r = T^T K T`, `M_r = T^T M T` preserves exact symmetry, positive-semidefinite
+strain energy, and zero net virtual interface power `P_m + P_s = 0`.
+`TieBudget` enforces explicit caps on `max_segments`, `max_slave_dofs`,
+`gap_tolerance_m`, and `angle_tolerance_rad`, returning an auditable
+`TieReceipt`; cross-point double constraints and `TieKind::Compliant` (reserved
+for `M1.2-W2b`) refuse with `PlateError::BadConstraint`.
+
 `shell::mitc::{MitcShellModel::strain_energy, interpolate_nested_shell, s_norm_error}`
 (IRP M1.2-W1b) evaluate the elastic strain energy `1/2 u^T K u` and the Hiller &
 Bathe (2003) / Lee, Lee & Bathe (2014, Eq. 20) relative s-norm error

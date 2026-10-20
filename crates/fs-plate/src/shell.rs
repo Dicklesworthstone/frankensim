@@ -33,6 +33,9 @@ pub mod mitc;
 /// Declared section/height-map arching and independent graduation fields.
 pub mod arching;
 
+/// Work-conjugate dual-mortar ties and eccentric junctions between shell components.
+pub mod junction;
+
 /// Relative membrane-spin stabilization; numerical, not a material property.
 pub const DRILLING_ALPHA: f64 = 1e-3;
 
@@ -146,6 +149,16 @@ pub fn assemble_shell(mesh: &ShellMesh, section: &PlateSection,
     boundary_nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
     assemble(mesh, core::slice::from_ref(section), true, boundary_nodes, support)
 }
+/// Assemble a homogeneous shell with an explicit relative-spin drilling penalty `drilling_alpha`.
+/// # Errors
+/// Invalid geometry, section, boundary, drilling penalty, mass or unrepresentable assembly.
+pub fn assemble_shell_with_drilling(mesh: &ShellMesh, section: &PlateSection,
+    boundary_nodes: &[usize], support: ShellSupport, drilling_alpha: f64) -> Result<ShellModel, PlateError> {
+    if !drilling_alpha.is_finite() || drilling_alpha <= 0.0 {
+        return Err(PlateError::BadSection { what: "positive finite drilling_alpha required" });
+    }
+    assemble_with_alpha(mesh, core::slice::from_ref(section), true, boundary_nodes, support, drilling_alpha)
+}
 /// Assemble one explicit material/thickness section per facet. D is expressed
 /// in that facet's ex/ey axes; rotate anisotropic data into those axes beforehand.
 /// There is no thickness averaging across facets and no inferred density.
@@ -172,6 +185,10 @@ pub fn assemble_shell_materials(mesh: &ShellMesh, sections: &[ShellSection],
 }
 fn assemble<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bool,
     boundary_nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
+    assemble_with_alpha(mesh, sections, uniform, boundary_nodes, support, DRILLING_ALPHA)
+}
+fn assemble_with_alpha<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bool,
+    boundary_nodes: &[usize], support: ShellSupport, drilling_alpha: f64) -> Result<ShellModel, PlateError> {
     mesh.validate()?;
     let expected = if uniform { 1 } else { mesh.tris.len() };
     if sections.len() != expected {
@@ -193,7 +210,7 @@ fn assemble<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bool,
     for (e,tri) in mesh.tris.iter().enumerate() {
         let section = &sections[if uniform { 0 } else { e }];
         let g = mesh.facet(e)?;
-        let local = local_stiffness(&g,section,e)?;
+        let local = local_stiffness_with_alpha(&g,section,e,drilling_alpha)?;
         // Transform translations and physical axial rotations with the same R.
         for i in 0..18 {
             let Some(ri) = dof_map[6*tri[i/6]+i%6] else { continue; };
@@ -224,7 +241,7 @@ fn assemble<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bool,
     }
     Ok(ShellModel { k:k.assemble(),m:m.assemble(),dof_map,free })
 }
-fn local_stiffness<S: Section>(g:&FacetGeometry, s:&S, element:usize) -> Result<[f64;324],PlateError> {
+fn local_stiffness_with_alpha<S: Section>(g:&FacetGeometry, s:&S, element:usize, drilling_alpha:f64) -> Result<[f64;324],PlateError> {
     let mut k=[0.0;324];
     // Explicit effective A, or the legacy homogeneous solid-section lowering.
     let a=s.membrane()?;
@@ -237,13 +254,17 @@ fn local_stiffness<S: Section>(g:&FacetGeometry, s:&S, element:usize) -> Result<
     for i in 0..18 { for j in 0..18 { for p in 0..3 { for q in 0..3 {
         k[i*18+j]+=g.area_m2*b[p][i]*a[3*p+q]*b[q][j];
     }}}}
-    let bending = local_bending_stiffness(g, s, element)?;
+    let bending = local_bending_stiffness_with_alpha(g, s, element, drilling_alpha)?;
     for (value, extra) in k.iter_mut().zip(bending) { *value += extra; }
     Ok(k)
 }
 // Project this positive remainder separately from membrane energy. Subtracting
 // two nearly equal dense stiffnesses would destroy positive small eigenvalues.
 pub(super) fn local_bending_stiffness<S: Section>(g:&FacetGeometry, s:&S, element:usize)
+    -> Result<[f64;324],PlateError> {
+    local_bending_stiffness_with_alpha(g, s, element, DRILLING_ALPHA)
+}
+fn local_bending_stiffness_with_alpha<S: Section>(g:&FacetGeometry, s:&S, element:usize, drilling_alpha:f64)
     -> Result<[f64;324],PlateError> {
     let mut k=[0.0;324];
     let a=s.membrane()?;
@@ -258,7 +279,7 @@ pub(super) fn local_bending_stiffness<S: Section>(g:&FacetGeometry, s:&S, elemen
         let mut spin=[0.0;18];
         spin[6*node+5]=1.0;
         for i in 0..3 { spin[6*i]=0.5*g.gradient[i][1]; spin[6*i+1]=-0.5*g.gradient[i][0]; }
-        let scale=DRILLING_ALPHA*a[8]*g.area_m2/3.0;
+        let scale=drilling_alpha*a[8]*g.area_m2/3.0;
         for i in 0..18 { for j in 0..18 { k[18*i+j]+=scale*spin[i]*spin[j]; }}
     }
     Ok(k)
