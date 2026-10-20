@@ -15,8 +15,9 @@ eigenmodes (fs-modal), the prepared exact zero-order-hold linear impact image wi
 solved sealed-air volume spring and unilateral tip contact (fs-couple LinearImpactSystem, the offline \
 `drum-modal` image), an energy-consistent Hertz contact potential (fs-dcontact), and a time-domain \
 Rayleigh half-space pressure receiver with the library decimator (fs-couple BaffledPressure). \
-Frequencies come only from the eigen-solve of the declared heads; loudness comes only from the declared \
-stick speed and the declared fixed full-scale pressure.";
+One fs-material gas state supplies the cavity bulk modulus, receiver density and sound speed. \
+Frequencies follow the declared heads and gas spring; pressure follows their driven motion and the \
+declared observation geometry and atmosphere, with fixed full-scale pressure.";
 
 /// What this engine does NOT establish, verbatim.
 pub const NO_CLAIM: &str = "Not the offline reference and not a calibrated instrument. Omitted here: \
@@ -26,7 +27,9 @@ shell flexibility (rigid shell and hoops), internal air modes (uniform-pressure 
 stick flexure and hand mechanics. Head material, tension, damping ratio, stick profile and Hertz tip \
 are editable estimates, not measurements of a specific drum. Only the declared head eigen-window is \
 retained; partials above it are absent, not approximated. No samples, noise, normalization, automatic \
-gain or pitch control is applied anywhere.";
+gain or pitch control is applied anywhere. The atmosphere is a prescribed, uniform, nonreacting \
+ideal gas shared by the cavity and exterior, with the material owner's composition and phase limits; \
+no gas evolution, thermal exchange, gas damping or atmospheric absorption is modeled here.";
 
 /// One built instrument and its running voice.
 pub struct LiveDrumCore {
@@ -46,7 +49,7 @@ impl LiveDrumCore {
     pub fn new(params_json: &str) -> Result<Self, Refusal> {
         let params = DrumParams::default().overlay_json(params_json)?;
         let inst = Instrument::build(params)?;
-        let voice = Voice::new(&inst, params.substeps)?;
+        let voice = Voice::new(&inst, inst.params.substeps)?;
         Ok(Self { inst, voice, batter: Vec::new(), resonant: Vec::new(), refusal: None, builds: 1 })
     }
 
@@ -63,9 +66,9 @@ impl LiveDrumCore {
         let params = self.inst.params.overlay_json(params_json)?;
         params.validate()?;
         if params.same_structure(&self.inst.params) {
-            let previous = self.inst.params;
+            let previous = self.inst.params.clone();
             self.inst.retarget(params);
-            match Voice::new(&self.inst, params.substeps) {
+            match Voice::new(&self.inst, self.inst.params.substeps) {
                 Ok(voice) => {
                     self.voice = voice;
                     self.refusal = None;
@@ -79,7 +82,7 @@ impl LiveDrumCore {
             }
         } else {
             let inst = Instrument::build(params)?;
-            let voice = Voice::new(&inst, params.substeps)?;
+            let voice = Voice::new(&inst, inst.params.substeps)?;
             self.inst = inst;
             self.voice = voice;
             self.refusal = None;
@@ -206,11 +209,13 @@ impl LiveDrumCore {
         };
         let filter = self.voice.filter_delay_frames();
         let travel = self.voice.travel_delay_frames();
+        let gas = p.atmosphere.state();
         format!(
             concat!(
                 "{{\"model\":\"reduced real-time model\",\"engine\":\"fs-live-drum {}\",\"fma\":{},",
                 "\"sample_rate_hz\":{},\"substeps\":{},\"mechanical_rate_hz\":{},",
                 "\"params\":{},",
+                "\"atmosphere\":{{\"temperature_k\":{},\"pressure_pa\":{},\"density_kg_m3\":{},\"sound_speed_m_s\":{},\"gamma\":{}}},",
                 "\"heads\":[{},{}],",
                 "\"coupled_frequencies_hz\":{},",
                 "\"mesh\":{{\"nodes\":{},\"triangles\":{},\"radial_intervals\":{},\"azimuths\":{}}},",
@@ -226,6 +231,7 @@ impl LiveDrumCore {
             env!("CARGO_PKG_VERSION"), json::string(crate::fma_path()),
             OUTPUT_RATE_HZ, self.voice.substeps(), self.voice.mechanical_rate_hz(),
             p.to_json(),
+            gas.temperature, gas.pressure, gas.density, gas.sound_speed, gas.gamma,
             head(0), head(1),
             json::numbers(&inst.coupled_frequencies_hz),
             inst.nodes.len(), inst.tris.len(), p.radial_intervals, p.azimuths,

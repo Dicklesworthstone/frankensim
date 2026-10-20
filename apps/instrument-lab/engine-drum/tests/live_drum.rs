@@ -6,6 +6,44 @@ use fs_live_drum::engine::{StrikeOutcome, compile_system};
 use fs_live_drum::instrument::LAUNCH_GAP_M;
 use fs_live_drum::{DrumParams, Instrument, LiveDrumCore};
 
+/// G3: the same geometry receives a new atmosphere through the actual browser
+/// rebuild path. Cavity mechanics, receiver timing and PCM all follow it.
+#[test]
+fn atmosphere_rebuild_reuses_heads_and_changes_coupling_propagation_and_sound() {
+    let mut drum = LiveDrumCore::new(r#"{"substeps":2,"gas":"293.15 50000 0"}"#).unwrap();
+    let head_frequencies = drum.instrument().heads[0].frequencies_hz();
+    let low_modes = drum.instrument().coupled_frequencies_hz.clone();
+    let low_bulk = drum.instrument().params.bulk_modulus_pa();
+    let low_delay = drum.voice().travel_delay_frames();
+    drum.strike(0.06, 0.01, 2.0).unwrap();
+    let low_pcm = drum.render_f32(1024);
+    assert!(low_pcm.iter().any(|p| p.abs() > 1e-6));
+
+    assert!(!drum.rebuild(r#"{"gas":"293.15 100000 0"}"#).unwrap());
+    assert_eq!(drum.instrument().heads[0].frequencies_hz(), head_frequencies);
+    assert_eq!(drum.instrument().params.bulk_modulus_pa(), 2.0 * low_bulk);
+    assert_eq!(drum.voice().travel_delay_frames(), low_delay);
+    assert!(drum.instrument().coupled_frequencies_hz[0] > low_modes[0]);
+    drum.strike(0.06, 0.01, 2.0).unwrap();
+    let high_pcm = drum.render_f32(1024);
+    assert_ne!(high_pcm, low_pcm);
+    assert!(drum.take_refusal().is_none());
+
+    assert!(!drum.rebuild(r#"{"gas":"mixture 293.15 100000 mole 1 CO2 1"}"#).unwrap());
+    assert_eq!(drum.instrument().heads[0].frequencies_hz(), head_frequencies);
+    assert!(drum.instrument().params.bulk_modulus_pa() < 2.0 * low_bulk);
+    let carbon_delay = drum.voice().travel_delay_frames();
+    assert!(carbon_delay[0].0 > low_delay[0].0 && carbon_delay[1].0 > low_delay[1].0);
+    drum.strike(0.06, 0.01, 2.0).unwrap();
+    let carbon_pcm = drum.render_f32(1024);
+    assert_ne!(carbon_pcm, high_pcm);
+    assert!(carbon_pcm.iter().all(|p| p.is_finite()));
+    assert!(drum.take_refusal().is_none());
+    let snapshot = drum.snapshot();
+    assert!(snapshot.ledger.balance_residual_j.abs() < 1e-6 * snapshot.ledger.supplied_j);
+    assert!(drum.info_json().contains("\"atmosphere\":{\"temperature_k\":293.15,\"pressure_pa\":100000"));
+}
+
 #[test]
 fn head_frequencies_are_the_reference_eigen_solve() {
     // `percussion drum-modal` prints these on stderr for the same cards.
@@ -40,7 +78,7 @@ fn silence_before_the_first_stroke_is_exact_zero() {
 #[test]
 fn the_voice_runs_exactly_the_compiled_reference_image_until_the_catch() {
     let p = DrumParams { substeps: 4, ..DrumParams::default() };
-    let inst = Instrument::build(p).unwrap();
+    let inst = Instrument::build(p.clone()).unwrap();
     let gate = CancelGate::new_clock_free();
     let (n0, n1) = (inst.heads[0].mode_count(), inst.heads[1].mode_count());
     let row = inst.batter_shapes_at([0.06, 0.01]).unwrap();
@@ -149,6 +187,7 @@ fn typed_refusals_leave_the_running_instrument_untouched() {
     assert_eq!(drum.strike(f64::NAN, 0.0, 1.0).unwrap_err().code, "strike_outside_head");
     assert_eq!(drum.rebuild("{\"batter_tension_n_m\":-1}").unwrap_err().code, "bad_parameter");
     assert_eq!(drum.rebuild("{\"pitch\":440}").unwrap_err().code, "unknown_parameter");
+    assert_eq!(drum.rebuild(r#"{"gas":"293.15 -1 0"}"#).unwrap_err().code, "gas_refused");
     assert_eq!(drum.rebuild("{\"band_low_hz\":5,\"band_high_hz\":20}").unwrap_err().code, "empty_band");
     // Far over budget: refused by the Weyl estimate before any eigen-solve.
     assert_eq!(drum.rebuild("{\"band_high_hz\":4000,\"radial_intervals\":16,\"azimuths\":64}").unwrap_err().code, "mode_budget");

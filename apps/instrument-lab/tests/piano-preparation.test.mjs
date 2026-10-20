@@ -12,10 +12,50 @@ function recording() {
     static withOversampling(...args) { calls.push(['rate', ...args]); return { kind: 'rate' }; }
     static withBoardOversampling(...args) { calls.push(['board-rate', ...args]); return { kind: 'board-rate' }; }
     static withPreparation(...args) { calls.push(['prepared', ...args]); return { kind: 'prepared' }; }
+    static withAtmosphere(...args) { calls.push(['atmosphere', ...args]); return { kind: 'atmosphere' }; }
   }
   return { Engine, calls };
 }
 const scale = '# supplied SI scale text is passed to Rust, never interpreted here\n';
+
+test('one atmosphere reaches both board paths, physical preparation and every audio clock', () => {
+  const { Engine, calls } = recording();
+  const gas = 'mixture 293.15 100000 mole 3 N2 0.7 O2 0.2 CO2 0.1';
+  const board = new Uint8Array([4, 5, 6]);
+  for (const substeps of [1, 2, 4]) {
+    for (const bytes of [null, board]) {
+      const options = Object.freeze({ gas, substeps, boardCoordinates: 16, scaleCsv: scale,
+        stretchTuning: { concertAHz: 442 } });
+      assert.equal(createPianoEngine(Engine, 48000, options, bytes).kind, 'atmosphere');
+      assert.deepEqual(calls.at(-1), ['atmosphere', 48000, bytes ?? new Uint8Array(),
+        bytes ? 0 : 16, 0, 0, 0, substeps, scale,
+        new Float64Array([442, 1,0,0,0, 1,0,0,0, 0]), gas]);
+    }
+  }
+  createPianoEngine(Engine, 48000, { gas });
+  assert.equal(calls.at(-1).at(-3), '');
+  assert.deepEqual(calls.at(-1).at(-2), new Float64Array());
+  assert.equal(calls.at(-1).at(-1), gas);
+});
+
+test('requested atmosphere never falls back to room air on old WASM or a physical refusal', () => {
+  const { Engine, calls } = recording();
+  const gas = '293.15 50000 0';
+  Engine.withAtmosphere = undefined;
+  assert.throws(() => createPianoEngine(Engine, 48000, { gas }), /rebuilding.*WASM/);
+  const refusal = new Error('material gas outside its domain');
+  Engine.withAtmosphere = () => { throw refusal; };
+  assert.throws(() => createPianoEngine(Engine, 48000, { gas }), (error) => error === refusal);
+  assert.equal(calls.length, 0);
+});
+
+test('malformed atmosphere input is refused before allocating an engine', () => {
+  const { Engine, calls } = recording();
+  for (const gas of [null, '', ' ', 123, {}, 'é'.repeat(4097)]) {
+    assert.throws(() => createPianoEngine(Engine, 48000, { gas }));
+  }
+  assert.equal(calls.length, 0);
+});
 
 test('import alone forwards exact text and an empty tuning packet', () => {
   const { Engine, calls } = recording();

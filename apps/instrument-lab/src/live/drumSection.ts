@@ -291,6 +291,22 @@ class LiveDrumSection {
       </div>
     </section>
 
+    <section class="panel" aria-labelledby="${id}-atmosphere">
+      <div class="panel-head"><h3 id="${id}-atmosphere">Atmosphere</h3></div>
+      <div class="ld-fields ld-atmosphere">
+        <div class="field"><label for="${id}-gas-temperature">Temperature · °C</label><input id="${id}-gas-temperature" data-gas="temperature" type="number" value="20" step="1"></div>
+        <div class="field"><label for="${id}-gas-pressure">Pressure · kPa</label><input id="${id}-gas-pressure" data-gas="pressure" type="number" value="101.325" min="10" max="200" step="1"></div>
+        <div class="field"><label for="${id}-gas-humidity">Relative humidity in air · %</label><input id="${id}-gas-humidity" data-gas="humidity" type="number" value="0" min="0" max="100" step="5"></div>
+        <div class="field"><label for="${id}-gas-composition">Gas composition</label><input id="${id}-gas-composition" data-gas="composition" type="text" value="air" spellcheck="false"></div>
+        <div class="field"><label for="${id}-gas-basis">Mixture fraction basis</label><select id="${id}-gas-basis" data-gas="basis"><option value="mole">Mole fractions</option><option value="mass">Mass fractions</option></select></div>
+      </div>
+      <p class="small muted">Use <code>air</code> with relative humidity, or a mixture such as <code>N2 0.7 O2 0.2 CO2 0.1</code>.
+        Supported components are N2, O2, Ar, CO2 and H2O; fractions must sum to one. Mixtures are admitted from 0 to 50 °C and 10 to 200 kPa.
+        This one atmosphere changes the cavity spring and microphone propagation together.</p>
+      <button type="button" class="btn sm ld-gas-apply">Apply atmosphere</button>
+      <p class="small muted ld-gas-state" role="status">Changing the atmosphere restarts the drum at rest.</p>
+    </section>
+
     <section class="panel" aria-labelledby="${id}-modes">
       <div class="panel-head"><h3 id="${id}-modes">Modes</h3><span class="small muted ld-modes-count"></span></div>
       <div class="ld-rail" aria-hidden="true"><div class="ld-window"></div><div class="ld-rail-ticks"></div></div>
@@ -340,6 +356,20 @@ class LiveDrumSection {
     make(SPEED, q<HTMLElement>(this.root, '.ld-speed'));
     const fields = q<HTMLElement>(this.root, '.ld-fields');
     for (const spec of DRUM_SLIDERS) make(spec, fields);
+    const gasInput = (key: string): HTMLInputElement => q(this.root, `[data-gas="${key}"]`);
+    gasInput('composition').addEventListener('input', () => {
+      gasInput('humidity').disabled = gasInput('composition').value.trim() !== 'air';
+    });
+    q<HTMLButtonElement>(this.root, '.ld-gas-apply').addEventListener('click', () => {
+      const temperature = gasInput('temperature').valueAsNumber + 273.15;
+      const pressure = gasInput('pressure').valueAsNumber * 1000;
+      const composition = gasInput('composition').value.trim();
+      const components = composition.split(/\s+/);
+      this.pending.gas = composition === 'air'
+        ? `${temperature} ${pressure} ${gasInput('humidity').valueAsNumber / 100}`
+        : `mixture ${temperature} ${pressure} ${q<HTMLSelectElement>(this.root, '[data-gas="basis"]').value} ${components.length / 2} ${components.join(' ')}`;
+      this.scheduleRebuild();
+    });
   }
 
   private sliderValue(key: string): number {
@@ -442,7 +472,7 @@ class LiveDrumSection {
     body.append(
       el('h4', undefined, 'How much the mechanical rate matters'),
       deviation,
-      el('p', 'small muted', 'Relative RMS difference of the batter-side microphone pressure over 0.5 s after a 2 m/s stroke (reference model), measured against the same engine at 768 kHz, the offline reference rate. The browser build is bit-identical to the native build at the same rate, and its mechanics reproduce the offline drum-modal binary byte for byte.'),
+      el('p', 'small muted', 'Relative RMS difference of the batter-side microphone pressure over 0.5 s after a 2 m/s stroke (reference model), measured against the same engine at 768 kHz, the offline reference rate. These measurements use the original reference atmosphere. The live engine now resolves its declared atmosphere through fs-material; changing it also changes the pressure trace.'),
     );
 
     const chips = (title: string, cls: string, items: string[]): HTMLElement => {
@@ -722,6 +752,21 @@ class LiveDrumSection {
     // Controls show the instrument that actually exists.
     for (const spec of DRUM_SLIDERS) {
       if (!(spec.key in this.pending)) this.setSlider(spec.key, paramValue(params, spec.key));
+    }
+    if (info.atmosphere) {
+      const gas = info.atmosphere;
+      setText(q(this.root, '.ld-gas-state'), `${gas.density_kg_m3.toFixed(4)} kg/m³ · ${gas.sound_speed_m_s.toFixed(2)} m/s · cavity bulk modulus ${(info.cavity.bulk_modulus_pa / 1000).toFixed(2)} kPa`);
+      if (!this.pending.gas) {
+        const input = (key: string): HTMLInputElement => q(this.root, `[data-gas="${key}"]`);
+        const fields = params.gas.split(/\s+/);
+        const mixture = fields[0] === 'mixture';
+        input('temperature').value = String(gas.temperature_k - 273.15);
+        input('pressure').value = String(gas.pressure_pa / 1000);
+        input('humidity').disabled = mixture;
+        input('humidity').value = mixture ? '0' : String(Number(fields[2]) * 100);
+        input('composition').value = mixture ? fields.slice(5).join(' ') : 'air';
+        q<HTMLSelectElement>(this.root, '[data-gas="basis"]').value = mixture ? fields[3] ?? 'mole' : 'mole';
+      }
     }
     const preset = presetOf(params);
     for (const button of this.root.querySelectorAll<HTMLElement>('[data-preset]')) {

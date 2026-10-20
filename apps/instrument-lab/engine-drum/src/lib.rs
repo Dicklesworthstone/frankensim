@@ -26,7 +26,7 @@ pub mod params;
 pub use engine::{BenchReport, Ledger, Snapshot, StrikeOutcome, Voice};
 pub use instrument::Instrument;
 pub use live::LiveDrumCore;
-pub use params::{DrumParams, Refusal};
+pub use params::{Atmosphere, DrumParams, Refusal};
 
 /// Which fused multiply-add executes FrankenSim's `f64::mul_add` chains in
 /// this build. Results are bit-identical on every path; only speed differs.

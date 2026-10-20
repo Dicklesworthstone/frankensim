@@ -9,6 +9,19 @@ pub use stretch_tuning::partials::{OctaveReport, OctaveWeights, Profile};
 /// much smaller; this also leaves room for authored source comments.
 pub const MAX_SCALE_BYTES: usize = 256 * 1024;
 
+/// Resolve the same bounded atmosphere declaration used by file-driven physics
+/// and the live drum: `T P RH` or `mixture T P mole|mass N SPECIES FRACTION…`.
+/// This cold ingress delegates every physical coefficient and domain check to
+/// fs-material; unsupported source registries and trailing text refuse.
+pub fn resolve_atmosphere(text: &str) -> Result<fs_material::gas::GasState, String> {
+    if text.len() > 8192 { return Err("gas declaration exceeds 8 KiB".into()); }
+    let mut fields = text.split_ascii_whitespace();
+    let gas = fs_material::gas_species::input::read_gas_state(&mut fields, None)
+        .map_err(|e| e.to_string())?;
+    if fields.next().is_some() { return Err("unexpected fields after the gas declaration".into()); }
+    Ok(gas)
+}
+
 /// One explicit preparation policy. The shared solver changes only tension;
 /// C4..B4 stay anchored and missing octave-neighbour geometry is never invented.
 #[derive(Clone, Copy, Debug)]

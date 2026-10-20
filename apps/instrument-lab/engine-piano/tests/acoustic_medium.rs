@@ -40,4 +40,53 @@ fn independently_mutated_derived_gas_fields_refuse() {
     let mut gas = helium_like();
     gas.prandtl = f64::NAN;
     assert!(LivePiano::new_with_gas(&desc, Config::live(48_000), gas).is_err());
+    // Repairing impedance alone must not bypass the shared ideal-gas closure.
+    let mut gas = helium_like();
+    gas.density *= 1.1;
+    gas.characteristic_impedance = gas.density * gas.sound_speed;
+    assert!(LivePiano::new_with_gas(&desc, Config::live(48_000), gas).is_err());
+}
+
+#[test]
+fn atmosphere_text_reaches_real_pressure_at_both_audio_clocks() {
+    use fs_live_piano::{PianoAudio, preparation::resolve_atmosphere};
+    let mut desc = Description::embedded().unwrap().truncated(4).unwrap();
+    desc.courses.retain(|c| c.midi == 69);
+    let mut cfg = Config::live(48_000);
+    cfg.max_partials = 8;
+    cfg.silent_bank_hz = 0.0;
+    cfg.duplex = false;
+    let low = resolve_atmosphere("293.15 50000 0").unwrap();
+    let high = resolve_atmosphere("293.15 100000 0").unwrap();
+    let carbon = resolve_atmosphere("mixture 293.15 100000 mole 1 CO2 1").unwrap();
+    assert_eq!(low.sound_speed, high.sound_speed);
+    for substeps in [1, 2] {
+        let mut a = PianoAudio::new_with_gas(&desc, cfg.clone(), substeps, low).unwrap();
+        let mut b = PianoAudio::new_with_gas(&desc, cfg.clone(), substeps, high).unwrap();
+        let c = PianoAudio::new_with_gas(&desc, cfg.clone(), substeps, carbon).unwrap();
+        assert_eq!(a.piano().partials_hz(69), b.piano().partials_hz(69));
+        assert_eq!(a.piano().partials_hz(69), c.piano().partials_hz(69));
+        assert!(c.microphone_delay_frames().0 > a.microphone_delay_frames().0);
+        a.note_on(69, 1.0).unwrap(); b.note_on(69, 1.0).unwrap();
+        let mut peak = 0.0_f64;
+        for _ in 0..1024 {
+            let x = a.step_pressure().unwrap();
+            let y = b.step_pressure().unwrap();
+            peak = peak.max(x.abs());
+            assert!((y - 2.0*x).abs() < 1e-12 * y.abs().max(1.0));
+        }
+        assert!(peak > 1e-7, "the comparison must exercise audible source pressure");
+        assert_eq!(format!("{:?}", a.close_ledger()), format!("{:?}", b.close_ledger()));
+        assert!(fs_live_piano::describe_audio(&b).contains("\"pressurePa\":100000"));
+    }
+}
+
+#[test]
+fn browser_atmosphere_admission_refuses_bad_and_incomplete_declarations() {
+    use fs_live_piano::preparation::resolve_atmosphere;
+    for text in ["", "293.15 0 0", "293.15 100000 0 trailing",
+        "mixture 293.15 100000 mole 2 N2 0.8 O2 0.8",
+        "mixture 293.15 100000 mole 1 unobtanium 1"] {
+        assert!(resolve_atmosphere(text).is_err(), "{text}");
+    }
 }

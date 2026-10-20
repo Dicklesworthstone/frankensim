@@ -42,6 +42,8 @@ export interface PianoInfo {
   boardCoordinateHz: [number, number];
   /** Where the board came from and how it was reduced (the reference modules' own statement). */
   boardProvenance: string;
+  /** Exact shared material gas consumed by the Rayleigh receiver. */
+  acousticGas?: { temperatureK: number; pressurePa: number; densityKgM3: number; soundSpeedMS: number; gamma: number };
   /** Hammer felt law (engines built before it was reported omit it). */
   hammerLaw?: string;
   /** String partials above this frequency are not retained [Hz]. */
@@ -208,6 +210,8 @@ export interface LivePianoOptions {
   maxDynamicModes?: number;
   /** Pressure mapped to 1.0 [Pa] (default 10). */
   fullScalePa?: number;
+  /** T[K] P[Pa] RH, or mixture T P mole|mass N SPECIES FRACTION…; resolved in Rust. */
+  gas?: string;
   /** Render-ahead target [ms] (default 18). */
   targetMs?: number;
   /** Snapshot cadence [Hz] (default 30; 0 disables). */

@@ -53,6 +53,7 @@ pub fn describe_audio(audio: &PianoAudio) -> String {
 fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
     (travel, filter): (f64, f64), microphone_work: usize) -> String {
     let c = piano.config();
+    let gas = piano.acoustic_gas();
     let rate = f64::from(output_rate);
     let freqs = piano.board_frequencies_hz();
     let provenance: String = piano.board_provenance().chars()
@@ -64,6 +65,7 @@ fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
             "\"keys\":{},\"speakingStrings\":{},\"tablePartials\":{},",
             "\"boardCoordinates\":{},\"boardExactLowModes\":{},\"boardCoordinateHz\":[{:.3},{:.3}],",
             "\"boardProvenance\":\"{}\",",
+            "\"acousticGas\":{{\"temperatureK\":{},\"pressurePa\":{},\"densityKgM3\":{},\"soundSpeedMS\":{},\"gamma\":{}}},",
             "\"partialBandHz\":{},\"maxPartialsPerString\":{},\"courseModeBudget\":{},",
             "\"maxSoundingKeys\":{},\"maxDynamicModes\":{},\"damperPoints\":{},\"duplex\":{},\"staticAttachment\":{},",
             "\"microphoneM\":[{},{},{}],\"microphoneTravelSamples\":{},\"microphoneFilterDelaySamples\":{},",
@@ -75,6 +77,7 @@ fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
         output_rate, c.sample_rate, substeps, piano.courses().len(), piano.total_strings(), piano.table_modes(),
         piano.board_modes(), piano.board_exact_low_modes(), freqs.first().copied().unwrap_or(0.0), freqs.last().copied().unwrap_or(0.0),
         provenance,
+        gas.temperature, gas.pressure, gas.density, gas.sound_speed, gas.gamma,
         c.partial_band_hz, c.max_partials, c.course_mode_budget,
         c.max_courses, c.max_dynamic_modes, c.damper_points, c.duplex, c.static_attachment,
         c.microphone_m[0], c.microphone_m[1], c.microphone_m[2], travel, filter,

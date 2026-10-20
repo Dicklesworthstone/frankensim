@@ -8,7 +8,7 @@ export function createPianoEngine(Engine, sampleRate, options = {}, bytes = null
   }
   const limits = [Number(options.courseModeBudget) || 0, Number(options.maxDynamicModes) || 0, Number(options.fullScalePa) || 0];
   const coords = Number(options.boardCoordinates) || 0;
-  if (options.scaleCsv !== undefined || options.stretchTuning !== undefined) {
+  if (options.scaleCsv !== undefined || options.stretchTuning !== undefined || options.gas !== undefined) {
     let scale = '';
     if (options.scaleCsv !== undefined) {
       if (typeof options.scaleCsv !== 'string' || !options.scaleCsv.trim()
@@ -18,6 +18,17 @@ export function createPianoEngine(Engine, sampleRate, options = {}, bytes = null
       scale = options.scaleCsv;
     }
     const tuning = tuningValues(options.stretchTuning);
+    if (options.gas !== undefined) {
+      if (typeof options.gas !== 'string' || !options.gas.trim()
+          || new TextEncoder().encode(options.gas).length > 8192) {
+        throw new RangeError('gas must be a nonempty material atmosphere declaration of at most 8 KiB');
+      }
+      if (typeof Engine.withAtmosphere !== 'function') {
+        throw new Error('selected atmosphere requires rebuilding the piano WASM with withAtmosphere support');
+      }
+      return Engine.withAtmosphere(sampleRate, bytes ?? new Uint8Array(),
+        bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning, options.gas);
+    }
     if (typeof Engine.withPreparation !== 'function') {
       throw new Error('selected physical scale preparation requires rebuilding the piano WASM with withPreparation support');
     }

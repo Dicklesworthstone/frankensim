@@ -40,8 +40,8 @@ export interface DrumParams {
   band_high_hz: number;
   /** Mechanical steps per 48 kHz frame: 16 (768 kHz, the offline rate), 8, 4, 2 or 1. */
   substeps: 1 | 2 | 4 | 8 | 16;
-  gas_density_kg_m3: number;
-  gas_sound_speed_m_s: number;
+  /** Shared material declaration: T[K] P[Pa] RH or mixture T P mole|mass N species fraction… */
+  gas: string;
   /** Microphone above the batter head: head-centred x, y and height z >= 0.05 [m]. */
   mic_batter_m: [number, number, number];
   /** Microphone below the resonant head: x, y and distance below it z >= 0.05 [m]. */
@@ -91,6 +91,8 @@ export interface DrumInfo {
   substeps: number;
   mechanical_rate_hz: number;
   params: DrumParams;
+  /** Coefficients resolved by fs-material from params.gas, shared by cavity and receivers. */
+  atmosphere: { temperature_k: number; pressure_pa: number; density_kg_m3: number; sound_speed_m_s: number; gamma: number };
   heads: [DrumHeadInfo, DrumHeadInfo];
   /** Small-signal frequencies of both heads joined by the sealed-air spring [Hz]. */
   coupled_frequencies_hz: number[];

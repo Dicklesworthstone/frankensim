@@ -24,6 +24,7 @@ fs-modal = { path = "../../../crates/fs-modal" }
 fs-dcontact = { path = "../../../crates/fs-dcontact" }
 fs-exec = { path = "../../../crates/fs-exec" }
 fs-la = { path = "../../../crates/fs-la" }
+fs-material = { path = "../../../crates/fs-material" }
 
 # wasm-bindgen only enters the wasm32 build - native builds stay dependency-clean.
 # The version is pinned to the installed wasm-bindgen CLI (0.2.128).

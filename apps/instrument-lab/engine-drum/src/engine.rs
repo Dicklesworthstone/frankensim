@@ -280,7 +280,8 @@ fn microphone(inst: &Instrument, head: usize, rate_hz: u32) -> Result<BaffledPre
         rate_hz,
         OUTPUT_RATE_HZ,
         position,
-        RayleighMedium { density: inst.params.gas_density_kg_m3, sound_speed: inst.params.gas_sound_speed_m_s },
+        RayleighMedium { density: inst.params.atmosphere.state().density,
+            sound_speed: inst.params.atmosphere.state().sound_speed },
     )
     .map_err(|e| Refusal::new("radiation_refused", e))
 }

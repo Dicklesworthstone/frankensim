@@ -5,6 +5,8 @@
 //! eigen-solve of the heads these numbers describe.
 
 use crate::json::{self, Value};
+use fs_material::gas::GasState;
+use fs_material::gas_species::input::read_gas_state;
 use fs_plate::shell::head::TensionVariation;
 use fs_plate::shell::head::tension::TENSION_HARMONIC_COUNT;
 
@@ -34,6 +36,46 @@ impl core::fmt::Display for Refusal {
 }
 impl std::error::Error for Refusal {}
 
+/// One immutable ambient declaration and the shared material owner's result.
+/// Both the sealed cavity and exterior receivers consume this exact state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Atmosphere {
+    declaration: String,
+    state: GasState,
+}
+
+impl Atmosphere {
+    /// Resolve `T P RH` or `mixture T P mole|mass N SPECIES FRACTION ...`.
+    /// Temperatures are kelvin, pressure is pascals and fractions are unitless.
+    /// The existing material parser owns species, composition and phase limits.
+    pub fn from_declaration(text: &str) -> Result<Self, Refusal> {
+        if text.len() > 8192 {
+            return Err(Refusal::new("gas_refused", "gas declaration exceeds 8 KiB"));
+        }
+        let mut fields = text.split_ascii_whitespace();
+        let state = read_gas_state(&mut fields, None)
+            .map_err(|e| Refusal::new("gas_refused", e.to_string()))?;
+        if fields.next().is_some() {
+            return Err(Refusal::new("gas_refused", "unexpected fields after the gas declaration"));
+        }
+        Ok(Self { declaration: text.split_ascii_whitespace().collect::<Vec<_>>().join(" "), state })
+    }
+
+    /// Exact resolved coefficients, without reevaluation or editable overrides.
+    #[must_use]
+    pub const fn state(&self) -> GasState { self.state }
+
+    /// The reproducible input accepted by the shared material parser.
+    #[must_use]
+    pub fn declaration(&self) -> &str { &self.declaration }
+}
+
+impl Default for Atmosphere {
+    fn default() -> Self {
+        Self::from_declaration("293.15 101325 0").expect("declared room air is admissible")
+    }
+}
+
 /// One drumhead film: geometry-independent material, thickness and installation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HeadParams {
@@ -48,7 +90,7 @@ pub struct HeadParams {
 }
 
 /// Complete declared instrument, numerics and observation.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DrumParams {
     /// Clear vibrating head radius [m].
     pub radius_m: f64,
@@ -74,10 +116,8 @@ pub struct DrumParams {
     pub band_high_hz: f64,
     /// Mechanical steps per 48 kHz audio frame (1, 2, 4, 8 or 16).
     pub substeps: usize,
-    /// Gas density [kg/m^3] (cavity spring and exterior radiation).
-    pub gas_density_kg_m3: f64,
-    /// Gas sound speed [m/s].
-    pub gas_sound_speed_m_s: f64,
+    /// Shared material gas for cavity stiffness and exterior radiation.
+    pub atmosphere: Atmosphere,
     /// Microphone above the batter head, head-centred frame, z up from the head plane [m].
     pub mic_batter_m: [f64; 3],
     /// Microphone below the resonant head, same x/y frame, z = distance below that head [m].
@@ -119,8 +159,7 @@ impl Default for DrumParams {
             band_low_hz: 80.0,
             band_high_hz: 500.0,
             substeps: 16,
-            gas_density_kg_m3: 1.2,
-            gas_sound_speed_m_s: 343.0,
+            atmosphere: Atmosphere::default(),
             mic_batter_m: [0.08, 0.05, 0.35],
             mic_resonant_m: [0.08, 0.05, 0.35],
             // Measured with these defaults: a 2 m/s stroke at (0.06, 0.01) m
@@ -193,7 +232,11 @@ impl DrumParams {
     ///
     /// # Errors
     /// `bad_json`, `unknown_parameter` or `bad_parameter`.
-    pub fn overlay_json(mut self, text: &str) -> Result<Self, Refusal> {
+    pub fn overlay_json(&self, text: &str) -> Result<Self, Refusal> {
+        self.clone().apply_json(text)
+    }
+
+    fn apply_json(mut self, text: &str) -> Result<Self, Refusal> {
         let entries = json::parse_flat_object(text).map_err(|e| Refusal::new("bad_json", e))?;
         for (key, value) in &entries {
             let k = key.as_str();
@@ -227,8 +270,10 @@ impl DrumParams {
                 "band_low_hz" => self.band_low_hz = scalar(k, value)?,
                 "band_high_hz" => self.band_high_hz = scalar(k, value)?,
                 "substeps" => self.substeps = count(k, value)?,
-                "gas_density_kg_m3" => self.gas_density_kg_m3 = scalar(k, value)?,
-                "gas_sound_speed_m_s" => self.gas_sound_speed_m_s = scalar(k, value)?,
+                "gas" => match value {
+                    Value::Text(text) => self.atmosphere = Atmosphere::from_declaration(text)?,
+                    _ => return Err(bad("gas must be a material gas declaration string")),
+                },
                 "mic_batter_m" => self.mic_batter_m = vector(k, value)?,
                 "mic_resonant_m" => self.mic_resonant_m = vector(k, value)?,
                 "full_scale_pa" => self.full_scale_pa = scalar(k, value)?,
@@ -289,8 +334,8 @@ impl DrumParams {
         if self.band_high_hz / rate >= 0.45 {
             return Err(Refusal::new("nyquist_guard", "declared head window crosses the mechanical Nyquist guard"));
         }
-        positive("gas_density_kg_m3", self.gas_density_kg_m3)?;
-        positive("gas_sound_speed_m_s", self.gas_sound_speed_m_s)?;
+        self.atmosphere.state().validate_coherence()
+            .map_err(|e| Refusal::new("gas_refused", e.to_string()))?;
         positive("full_scale_pa", self.full_scale_pa)?;
         for (name, mic) in [("mic_batter_m", self.mic_batter_m), ("mic_resonant_m", self.mic_resonant_m)] {
             if mic.iter().any(|v| !v.is_finite()) || mic[2] < 0.05 || mic.iter().any(|v| v.abs() > 20.0) {
@@ -334,7 +379,8 @@ impl DrumParams {
     /// Adiabatic small-signal bulk modulus rho c^2 [Pa].
     #[must_use]
     pub fn bulk_modulus_pa(&self) -> f64 {
-        self.gas_density_kg_m3 * self.gas_sound_speed_m_s * self.gas_sound_speed_m_s
+        let gas = self.atmosphere.state();
+        gas.density * gas.sound_speed * gas.sound_speed
     }
     /// Mechanical rate [Hz].
     #[must_use]
@@ -381,7 +427,7 @@ impl DrumParams {
                 "\"young_pa\":{},\"poisson\":{},\"density_kg_m3\":{},",
                 "\"radial_intervals\":{},\"azimuths\":{},",
                 "\"band_low_hz\":{},\"band_high_hz\":{},\"substeps\":{},",
-                "\"gas_density_kg_m3\":{},\"gas_sound_speed_m_s\":{},",
+                "\"gas\":{},",
                 "\"mic_batter_m\":{},\"mic_resonant_m\":{},\"full_scale_pa\":{},",
                 "\"contact_loss_s_m\":{},\"catch_gap_m\":{}}}"
             ),
@@ -394,7 +440,7 @@ impl DrumParams {
             n(self.young_pa), n(self.poisson), n(self.density_kg_m3),
             self.radial_intervals, self.azimuths,
             n(self.band_low_hz), n(self.band_high_hz), self.substeps,
-            n(self.gas_density_kg_m3), n(self.gas_sound_speed_m_s),
+            json::string(self.atmosphere.declaration()),
             json::numbers(&self.mic_batter_m), json::numbers(&self.mic_resonant_m), n(self.full_scale_pa),
             n(self.contact_loss_s_m), n(self.catch_gap_m),
         )
@@ -484,7 +530,7 @@ mod tests {
         }
         let zeros = json::numbers(&[0.0; 2 * TENSION_HARMONIC_COUNT]);
         for name in ["batter", "resonant"] {
-            let mut expected = initial;
+            let mut expected = initial.clone();
             let head = if name == "batter" { &mut expected.batter } else { &mut expected.resonant };
             head.tension_variation.constant_n_m = [0.0; 3];
             head.tension_variation.gradient_n_m2 = [0.0; 4];
@@ -492,7 +538,7 @@ mod tests {
                 "{{\"{name}_tension_variation\":[0,0,0,0,0,0,0]}}"
             )).unwrap();
             assert_eq!(affine_reset, expected);
-            let mut expected = initial;
+            let mut expected = initial.clone();
             let head = if name == "batter" { &mut expected.batter } else { &mut expected.resonant };
             head.tension_variation.harmonics_n_m = [[0.0; 2]; TENSION_HARMONIC_COUNT];
             let harmonic_reset = initial.overlay_json(&format!(
@@ -518,5 +564,46 @@ mod tests {
         }
         let p = d.overlay_json("{\"substeps\":1,\"band_high_hz\":22000}").unwrap();
         assert_eq!(p.validate().unwrap_err().code, "nyquist_guard");
+    }
+
+    #[test]
+    fn material_gas_round_trip_and_pressure_temperature_composition_laws() {
+        let base = DrumParams::default();
+        let low = base.overlay_json(r#"{"gas":"293.15 50000 0"}"#).unwrap();
+        let high = base.overlay_json(r#"{"gas":"293.15 100000 0"}"#).unwrap();
+        let hot = base.overlay_json(r#"{"gas":"313.15 100000 0"}"#).unwrap();
+        assert_eq!(low.atmosphere.state().sound_speed, high.atmosphere.state().sound_speed);
+        assert_eq!(high.atmosphere.state().density, 2.0 * low.atmosphere.state().density);
+        assert_eq!(high.bulk_modulus_pa(), 2.0 * low.bulk_modulus_pa());
+        assert!(hot.atmosphere.state().sound_speed > high.atmosphere.state().sound_speed);
+        assert!(hot.atmosphere.state().density < high.atmosphere.state().density);
+        // Ideal-gas K = gamma p: heating at fixed pressure does not stiffen the cavity.
+        assert!((hot.bulk_modulus_pa() / high.bulk_modulus_pa() - 1.0).abs() < 1e-14);
+        let mixture = base.overlay_json(
+            r#"{"gas":"mixture 293.15 100000 mole 3 N2 0.5 O2 0.2 CO2 0.3"}"#,
+        ).unwrap();
+        assert!(mixture.atmosphere.state().sound_speed < high.atmosphere.state().sound_speed);
+        assert!(mixture.atmosphere.state().density > high.atmosphere.state().density);
+        assert!(mixture.bulk_modulus_pa() < high.bulk_modulus_pa());
+        for p in [low, high, hot, mixture] {
+            p.validate().unwrap();
+            assert!(p.same_structure(&base));
+            assert_eq!(base.overlay_json(&p.to_json()).unwrap(), p);
+        }
+        assert!(base.overlay_json(r#"{"gas_density_kg_m3":2}"#).is_err());
+        assert!(base.overlay_json(r#"{"gas_sound_speed_m_s":400}"#).is_err());
+    }
+
+    #[test]
+    fn gas_admission_preserves_the_material_owners_refusals() {
+        for gas in [
+            "293.15 0 0", "293.15 101325 2", "293.15 101325 0 trailing",
+            "mixture 293.15 100000 mole 2 N2 0.8 O2 0.8",
+            "mixture 293.15 100000 mole 2 N2 0.9 H2O 0.1",
+            "mixture 293.15 100000 mole 1 invented 1",
+            "thermochemical 293.15 100000 mole 1 N2 1",
+        ] {
+            assert_eq!(Atmosphere::from_declaration(gas).unwrap_err().code, "gas_refused", "{gas}");
+        }
     }
 }

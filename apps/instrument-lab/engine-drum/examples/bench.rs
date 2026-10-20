@@ -28,7 +28,7 @@ fn info(arg: Option<&String>) -> Result<(), Error> {
     let inst = Instrument::build(p)?;
     let build = start.elapsed();
     let start = Instant::now();
-    let voice = Voice::new(&inst, p.substeps)?;
+    let voice = Voice::new(&inst, inst.params.substeps)?;
     let compile = start.elapsed();
     for (i, head) in inst.heads.iter().enumerate() {
         println!("head {i}: modes={} film_mass_kg={} frequencies_hz={:?} max_residual={:e}",
@@ -91,7 +91,7 @@ fn rt(arg: Option<&String>) -> Result<(), Error> {
     println!("modes: batter={} resonant={}", inst.heads[0].mode_count(), inst.heads[1].mode_count());
     println!("substeps,scenario,audio_s,wall_s,realtime_factor,steps_per_s,ns_per_step,stick_step_fraction,contact_step_fraction,peak_pa,balance_residual_j");
     for substeps in [16, 8, 4, 2, 1] {
-        if p.band_high_hz / (48_000.0 * substeps as f64) >= 0.45 { continue; }
+        if inst.params.band_high_hz / (48_000.0 * substeps as f64) >= 0.45 { continue; }
         // one stroke then ring; a 20 Hz roll; a stroke every 5 ms (stick ~always present)
         for (name, frames, interval) in [("single", 48_000, 0), ("roll20hz", 48_000, 2_400), ("dense5ms", 24_000, 240)] {
             let start = Instant::now();
@@ -130,11 +130,11 @@ fn conv(arg: Option<&String>) -> Result<(), Error> {
     let base = params(arg)?;
     let frames = 24_000;
     let strikes = [(0usize, [0.06, 0.01], 2.0)];
-    let reference = render(DrumParams { substeps: 16, ..base }, frames, &strikes)?;
+    let reference = render(DrumParams { substeps: 16, ..base.clone() }, frames, &strikes)?;
     println!("substeps,mechanical_rate_hz,peak_pa_batter,peak_pa_resonant,rms_pa_batter,relative_rms_deviation_vs_16,max_abs_deviation_pa,balance_residual_j");
     for substeps in [16, 8, 4, 2, 1] {
         if base.band_high_hz / (48_000.0 * substeps as f64) >= 0.45 { continue; }
-        let (a, b, ledger) = render(DrumParams { substeps, ..base }, frames, &strikes)?;
+        let (a, b, ledger) = render(DrumParams { substeps, ..base.clone() }, frames, &strikes)?;
         // Decimator latency differs by a few frames between ratios (44..47
         // frames, 0 at ratio 1): align by the declared filter delay before
         // differencing so the number measures mechanics, not a known lag.
@@ -158,7 +158,7 @@ fn rearm(arg: Option<&String>) -> Result<(), Error> {
     let rest = vec![ModalAcousticState::default(); n0 + n1];
     let root = inst.stick.effective_mass_kg.sqrt();
     let tip = ModalAcousticState { displacement_m_sqrt_kg: -LAUNCH_GAP_M * root, velocity_m_sqrt_kg_per_s: 2.0 * root };
-    let rate = p.mechanical_rate_hz();
+    let rate = inst.params.mechanical_rate_hz();
     let n = 2000;
     let start = Instant::now();
     for _ in 0..n { std::hint::black_box(compile_system(&inst, rate, &rest, Some((tip, &row)), &gate)?); }

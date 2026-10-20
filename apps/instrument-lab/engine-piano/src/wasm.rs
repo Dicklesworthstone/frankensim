@@ -156,6 +156,19 @@ impl PianoEngine {
     pub fn with_preparation(sample_rate: u32, board: &[u8], board_coordinates: usize,
         course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
         substeps: usize, scale_csv: &str, tuning: &[f64]) -> Result<PianoEngine, JsError> {
+        Self::with_atmosphere(sample_rate, board, board_coordinates, course_mode_budget,
+            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, "293.15 101325 0")
+    }
+
+    /// The same physical preparation in an explicit material atmosphere.
+    /// Gas density and sound speed reach the shared Rayleigh receiver at both
+    /// single-rate and oversampled clocks. This reduced piano has no gas loading
+    /// or gas damping of its mechanics; material names never select a filter.
+    #[wasm_bindgen(js_name = withAtmosphere)]
+    pub fn with_atmosphere(sample_rate: u32, board: &[u8], board_coordinates: usize,
+        course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
+        substeps: usize, scale_csv: &str, tuning: &[f64], gas_record: &str) -> Result<PianoEngine, JsError> {
+        let gas = preparation::resolve_atmosphere(gas_record).map_err(|e| JsError::new(&e))?;
         let policy = Tuning::from_values(tuning).map_err(|e| JsError::new(&e))?;
         if !board.is_empty() && board_coordinates != 0 {
             return Err(JsError::new("supplied board preparation requires board_coordinates = 0"));
@@ -173,7 +186,11 @@ impl PianoEngine {
         // authored law, as the reference refuses --rt0425-string-damping with a supplied scale;
         // retuning the built-in scale (tension only, same strings) keeps the published losses.
         cfg.rt0425_string_damping = scale_csv.is_empty();
-        let piano = Playback::new(&desc, cfg, substeps).map_err(|e| JsError::new(&e))?;
+        let piano = if substeps == 1 {
+            LivePiano::new_with_gas(&desc, cfg, gas).map(Playback::Single)
+        } else {
+            PianoAudio::new_with_gas(&desc, cfg, substeps, gas).map(Playback::Multirate)
+        }.map_err(|e| JsError::new(&e))?;
         Ok(Self { piano, snap: Vec::with_capacity(4096), preparation: Some(report) })
     }
 

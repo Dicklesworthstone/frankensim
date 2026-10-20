@@ -57,6 +57,8 @@
 
 /* ------------------------------------------------------------- controls */
 .ld-fields { display: grid; gap: 10px 22px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }
+.ld-atmosphere input, .ld-atmosphere select { width: 100%; min-width: 0; border: 1px solid var(--line-strong); border-radius: 5px; padding: 7px 9px; background: var(--ink-1); color: var(--ivory); font: inherit; }
+.ld-atmosphere input:disabled { opacity: 0.5; }
 .ld-status { margin-top: 14px; min-height: 1.5em; color: var(--ivory-3); }
 .ld-refusal { margin-top: 12px; }
 .ld-refusal .btn { margin-top: 10px; }
