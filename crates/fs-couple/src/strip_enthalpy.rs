@@ -18,3 +18,6 @@ pub use solve::step_candidate;
 
 /// Atomic coupled intervals and actual scheduled layer births.
 pub mod growth;
+
+/// Pinned material conductivity in the original self-heating residual.
+pub mod transport;

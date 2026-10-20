@@ -184,6 +184,28 @@ impl ResolvedThermoMaxwell {
     #[must_use]
     pub fn keys(&self) -> &[PropertyKey] { &self.keys }
 
+    /// Admit another resolved property bundle as the same physical material state.
+    /// Only the declared temperature coordinate may change, within this law's
+    /// supported interval. Card identity, other coordinates and their quantity
+    /// conventions remain exact. This does not reselect sources or certify the
+    /// other bundle's constitutive law; its original resolver remains responsible.
+    pub fn admit_state_point(&self, state: &ResolvedMaterialStatePoint) -> Result<(), SourceError> {
+        let reference = &self.samples[0];
+        if state.card_identity() != reference.card_identity()
+            || state.axis_quantities() != reference.axis_quantities()
+            || !same_context(state.query_point(), reference.query_point(), &self.temperature_axis) {
+            return Err(SourceError::Invalid("property bundle and mechanical law must share the same card and fixed context"));
+        }
+        let temperature = state.query_point().iter().find(|(key, _)| key == &self.temperature_axis)
+            .map(|(_, value)| *value).ok_or(SourceError::Invalid("property bundle lacks temperature"))?;
+        let low = self.law.knots[0].temperature_k;
+        let high = self.law.knots[self.law.knots.len()-1].temperature_k;
+        if !temperature.is_finite() || !(low..=high).contains(&temperature) {
+            return Err(SourceError::Invalid("property bundle temperature is outside the mechanical source envelope"));
+        }
+        Ok(())
+    }
+
     fn validate_caloric_source(&self, caloric: &ResolvedHeatCapacityCurve) -> Result<(), SourceError> {
         let reference = &self.samples[0];
         let low = self.law.knots[0].temperature_k;
