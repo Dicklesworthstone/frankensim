@@ -432,12 +432,11 @@ Input admission, full nodal displacement limits, element limits, sparse solve
 limits, per-node/element cancellation checkpoints and the energy/residual
 gates precede atomic publication. A clone retains the prescribed kinematics,
 reaction endpoint and immutable full thermal load as well as the free state.
-Force-only advancement, finite force jumps, reduced-only state adjoints and
-existing material pullbacks explicitly refuse this lane; they cannot omit
+Force-only advancement, finite force jumps and reduced-only state adjoints
+explicitly refuse this lane; they cannot omit
 support terms while claiming a valid trajectory or gradient. Displacement
-impulses, changing restraint axes/topology, material-design pullbacks, adaptive
-event discovery, temporal/continuum error certification and measured validation
-are not supplied.
+impulses, changing restraint axes/topology, adaptive event discovery,
+temporal/continuum error certification and measured validation are not supplied.
 Prescribed motion requires a physically resolved time-step ladder.
 
 `loads3::history::dynamics` connects typed `SupportMotion3` displacement
@@ -496,6 +495,35 @@ mass/stiffness/both-Rayleigh transpose, every initial/force/support control
 group through three native steps against centered differences with full nodal
 objectives, the fully prescribed kinematic limit, fixed-index ordering and
 malformed-input, budget and cancellation refusals.
+
+`material_scale_pullback` now accepts prescribed-support runs at their exact
+accepted endpoints, using actual full nodal q/v/a. For the corresponding
+step/initialization free-force cotangent lambda, it contracts
+`-lambda' d(M*a + (eta*M + zeta*K)*v + K*q - fT)` with zero constrained
+equation multipliers. Canonical P1 element matrices and Mandel B are reused;
+the complete `M_fc*a_c`, `C_fc*v_c` and `K_fc*q_c` terms are retained, including
+the explicitly supplied initial support acceleration. Returned independent
+per-element stiffness/density scale derivatives and global Rayleigh eta/zeta
+derivatives compose with the existing full-motion pullback. A common material
+scale sums its element entries; fully prescribed motion has zero implicit
+material sensitivity.
+
+The free thermal strain is frozen, but the stiffness derivative includes its
+equivalent-force dependence. Do not count that stiffness-dependent thermal
+load a second time. Geometry, support axes/authored kinematics and external
+nodal forces are fixed. Parameter-dependent external forces, initial/support
+controls and direct objective terms must be chained separately. This is not a
+tensor-entry, thermal-law, shape, reaction or stress-observation derivative.
+Independent full-DOF and element bounds precede scratch allocation; cancellation
+or refusal returns no partial result and never changes accepted motion. The
+reduced-state-only internal helper continues to refuse driven supports because
+reduced q/v/a cannot recover their physical cross terms.
+
+`tests/transient_support_material3.rs` checks the analytical initial coupled
+mass/stiffness/damping terms, a three-step anisotropic heterogeneous thermal
+trajectory against six independent material/damping finite-difference
+directions at two parameter points, and the fully prescribed zero-gradient,
+budget, cancellation and retry limits.
 
 `adjoint::support::trajectory` records complete prescribed-support simulations
 through `record_prescribed_controls`. Its owning recorder retains only accepted

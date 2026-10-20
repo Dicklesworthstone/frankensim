@@ -3,9 +3,10 @@
 //! Each element has independent multipliers sK and sRho, evaluated at one:
 //! C_e(sK)=sK*C_e and rho_e(sRho)=sRho*rho_e. This retains anisotropy, Poisson
 //! ratio and material axes; it is not a derivative of each tensor entry. Geometry,
-//! restraints, free thermal strain and the external NODAL force remain fixed.
-//! For mass-dependent forcing (including prescribed acceleration), add its
-//! explicit force derivative through the returned force cotangent.
+//! restraints, authored support kinematics, free thermal strain and the external
+//! NODAL force remain fixed. Full prescribed-support inertia and damping are
+//! included. For mass-dependent external forcing, add its explicit force
+//! derivative through the returned force cotangent.
 use super::*;
 
 /// Bounds for full-node scratch and element-gradient output, checked before
@@ -58,9 +59,17 @@ impl TetTransientRun3<'_, '_, '_, '_> {
     /// new equilibrium solve, finite difference or global assembly is performed.
     /// Frozen free thermal strain is retained but its equivalent force changes
     /// with stiffness; both Rayleigh terms change with their respective matrices.
+    /// Support-enabled runs use the actual full q/v/a, including the initial
+    /// prescribed acceleration and all consistent-mass cross terms. Supply the
+    /// force cotangent from the matching prescribed step or initialization.
     /// Direct parameter dependence of an objective must be added by its owner.
     pub fn material_scale_pullback(&self, force_cotangent: &[f64], budget: MaterialGradientBudget3,
         cx: &Cx<'_>) -> Result<MaterialScaleGradient3, TransientAdjointError3> {
+        if self.prescribed.is_some() {
+            self.admit_material_gradient(force_cotangent, budget, cx)?;
+            let motion = self.nodal_motion(cx)?;
+            return self.material_scale_pullback_nodal_at(&motion, force_cotangent, budget, cx);
+        }
         self.material_scale_pullback_at(self.state(), force_cotangent, budget, cx)
     }
 
@@ -70,35 +79,21 @@ impl TetTransientRun3<'_, '_, '_, '_> {
     ) -> Result<MaterialScaleGradient3, TransientAdjointError3> {
         check(cx)?;
         if self.prescribed.is_some() {
-            return Err(TransientAdjointError3::Invalid("prescribed-support material pullbacks are not supplied"));
+            return Err(TransientAdjointError3::Invalid("prescribed material pullbacks require full nodal kinematics"));
         }
         let n = self.free_dofs().len();
-        validate_values(force_cotangent, n, cx)?;
+        self.admit_material_gradient(force_cotangent, budget, cx)?;
         for values in [&state.displacement, &state.velocity, &state.acceleration] {
             validate_values(values, n, cx)?;
         }
         let nodes = self.geometry.nodes.len();
-        let full = nodes.checked_mul(3).ok_or(TransientAdjointError3::Budget)?;
-        if full > budget.maximum_full_dofs || self.geometry.tets.len() > budget.maximum_elements {
-            return Err(TransientAdjointError3::Budget);
-        }
         let mut motion: [Vec<[f64; 3]>; 3] = std::array::from_fn(|_| vec![[0.0; 3]; nodes]);
-        let mut lambda = vec![[0.0; 3]; nodes];
         for (i, &d) in self.free_dofs().iter().enumerate() {
             if i % 256 == 0 { check(cx)?; }
             motion[0][d/3][d%3] = state.displacement[i];
             motion[1][d/3][d%3] = state.velocity[i];
             motion[2][d/3][d%3] = state.acceleration[i];
-            lambda[d/3][d%3] = force_cotangent[i];
         }
-        let thermal = self.thermal_strains.as_ref().map(|field| match field {
-            response::FrozenThermal3::Uniform(v) => TetThermalStrainField::Uniform(v),
-            response::FrozenThermal3::PerElement(v) => TetThermalStrainField::PerElement(v),
-        });
-        let (element_scales, rayleigh) = self.problem.transient_material_contraction(
-            &motion, &lambda, thermal, self.config.mass_damping_per_s,
-            self.config.stiffness_damping_s, cx).map_err(TransientError3::from)?;
-        check(cx)?;
-        Ok(MaterialScaleGradient3 { element_scales, rayleigh })
+        self.material_scale_pullback_nodal_at(&motion, force_cotangent, budget, cx)
     }
 }
