@@ -1,0 +1,7 @@
+frankensim.specimen-parts.v1
+part	material	state	joins	note
+bore	silver tube, 0.28 mm wall (Miller 1922 p.54); loss and wall material cards are not attached	assembled	head-joint;tone-holes	main cylindrical tube of 19 mm inside diameter; wooden Boehm flutes have 3.7 mm walls and are not described
+head-joint	silver (assumed continuous with the tube; not stated per part)	assembled	bore;embouchure;tuning	tapered 17.1 to 19.0 mm over 134 mm; cork not described as a material
+tuning	unstated	assembled	head-joint;bore	slide set at 4 mm for the UNSW measurements; its extra bore volume is not described
+embouchure	unstated (lip plate and riser)	assembled	head-joint	riser dimensions from the Pearl PF-661; Boehm and Mendler mouth-hole opening; lip plate shape and undercut profile are not described
+tone-holes	silver chimneys of 13.2 mm (large) and 6.6 or 7.6 mm (small) diameter, about 3 mm rise	assembled	bore	16 holes; pads, pad cups and key mechanics are not described, closed holes are modelled as hard-closed chimneys

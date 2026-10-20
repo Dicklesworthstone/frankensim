@@ -1,0 +1,7 @@
+frankensim.specimen-frames.v1
+part	origin	axis_x	axis_y	axis_z	note
+bore	cork face on the bore axis (Miller 1922 p.36: distances are measured from the face of the cork)	+x along the bore axis toward the foot	unstated	unstated	axial positions of every part share this origin
+head-joint	cork face on the bore axis	+x along the bore axis toward the foot	unstated	unstated	taper is measured from the cork, 17.1 mm bore at the cork
+tuning	cork face on the bore axis	+x along the bore axis toward the foot	unstated	unstated	slide setting is a shortening of the instrument length, not a position
+embouchure	cork face on the bore axis	+x along the bore axis toward the foot	unstated	unstated	mouth-hole centre is 17 mm from the cork face
+tone-holes	cork face on the bore axis	+x along the bore axis toward the foot	unstated	unstated	azimuthal orientation of the holes is not given by the sources

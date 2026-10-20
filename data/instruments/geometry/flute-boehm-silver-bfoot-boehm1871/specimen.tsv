@@ -1,0 +1,15 @@
+frankensim.specimen.v1
+key	value
+specimen_id	flute-boehm-silver-bfoot-boehm1871
+maker	Theobald Boehm (design); Boehm and Mendler flutes measured by D. C. Miller; riser of a Pearl PF-661 measured by UNSW
+model	Boehm cylinder-bore flute with parabolic head-joint, normal scale of Boehm 1871 as recomputed by Miller 1922, B foot-joint
+serial	unstated
+year	1871 (treatise; design 1847; Miller edition 1922)
+system	Boehm flute, 13 large holes, 3 small holes (D# and D trill, small C#), silver tube, B foot
+holder	none: a published scale assembled from several instruments, not one accessible specimen
+reference_state	assembled
+environment	unstated by Boehm and Miller; the scale is for A=435 and is rescaled to A=440 by Boehm's published Schema rule (derived rows are labelled)
+source_ids	boehm-miller-1922-flute;unsw-wolfe-2001-jsv;unsw-wolfe-2003-wespac-stopper
+target_relation	hybrid published description, not any recorded flute: hole positions, bore, taper, cork and mouth-hole are Boehm and Mendler data from Miller 1922, the riser is the measured Pearl PF-661 riser from UNSW; the maker and model of the University of Iowa flute are unstated (u-uiowa-model-identity)
+hole_index	hole-01 is nearest the cork (D# trill hole) and hole-16 is farthest (C4 hole of a B foot); positions are measured from the cork face along the bore axis
+pitch_standard_a4_hz	435 as published; 440 declared here as the design pitch for the derived axial-position-a440-schema rows (a design choice of the instrument, never read from a recording)

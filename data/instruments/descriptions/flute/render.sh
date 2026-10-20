@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Native renders of the committed published-Boehm flute performances (pexfp.320, lane P4).
+# Run on trj. The performance files must exist in the snapshot of a pushed SHA; the music_render
+# binary may come from an earlier green SHA (BIN_SHA12), it does not read these files at build time:
+#   SHA12=<sha12 containing these files> BIN_SHA12=<sha12 with a release music_render> \
+#     data/instruments/descriptions/flute/render.sh
+# Each note is mf at 48 kHz mono, 2.5 s, observed as the summed pressure of every open aperture
+# (open holes, open end and the embouchure) at a physical receiver 1 m above the embouchure.
+#
+# Geometry: data/instruments/geometry/flute-boehm-silver-bfoot-boehm1871 (Boehm 1871 as recomputed by
+# Miller 1922, Table II, rescaled from A=435 to A=440 by Boehm's published Schema rule; riser of the
+# Pearl PF-661 from Wolfe, Smith and Green 2003). Every geometry number is a dimensions.tsv row.
+# Player: experienced flautist, mf, de la Cuadra, Fabre, Montgermont and Chafe, Acta Acustica 94(5),
+# 2008, pp.740-749. Mean mouth pressure 300 Pa (D4) to 600 Pa (A5), jet length W 8 mm to 4.5 mm
+# (Sec. 5.1); lip-hole area ~6e-6 to ~3.5e-6 m2 (Fig. 4) and height ~0.9 mm (Fig. 6) are read off
+# the plots; values between the two published endpoints are linear in log2(f). Never read from a
+# recording. Labium offset, jet angle, onset ramp (50 ms), mouth loss (0.02), the jet displacement
+# gain (90) and the tonal-interim jet card are UNKNOWN or interim: see unknowns.tsv and status.json.
+#
+# References (grading only, never an input): UIowa MIS Flute.nonvib.mf.B3B4 (D4, G4) and
+# Flute.nonvib.mf.C5B5 (A5), ids uiowa-flute-flute-nonvib-mf-b3b4 / -c5b5 in references.json.
+#
+# SEED=<n> re-renders with another jet seed into $OUT/seed-<n> (seed-independence check).
+set -euo pipefail
+
+SHA12=${SHA12:?set SHA12 to the pushed sha12 whose snapshot holds these files}
+BIN_SHA12=${BIN_SHA12:-$SHA12}
+BIN=${BIN:-/data/tmp/wa-inst/bin/$BIN_SHA12/music_render}
+SNAP=${SNAP:-/data/tmp/wa-inst/snap/$SHA12/frankensim}
+OUT=${OUT:-/data/tmp/wa-inst/renders/flute/$SHA12}
+NOTES=${NOTES:-"d4 g4 a5"}
+DIR=data/instruments/descriptions/flute
+
+cd "$SNAP"
+if [ -n "${SEED:-}" ]; then
+  OUT="$OUT/seed-$SEED"
+fi
+mkdir -p "$OUT"
+for note in $NOTES; do
+  upper=$(printf '%s' "$note" | tr 'a-z' 'A-Z')
+  src="$DIR/flute-$note.performance"
+  if [ -n "${SEED:-}" ]; then
+    src="$OUT/flute-$note.seed.performance"
+    sed -E "s/^jet ([^ ]+) ([^ ]+) [0-9]+ ([0-9]+)\$/jet \\1 \\2 $SEED \\3/" "$DIR/flute-$note.performance" >"$src"
+  fi
+  nohup nice -n 10 "$BIN" wind "$src" "$OUT/Flute.nonvib.mf.$upper.wav" \
+    >"$OUT/Flute.nonvib.mf.$upper.log" 2>&1 &
+done
+wait
+ls -l "$OUT"/*.wav

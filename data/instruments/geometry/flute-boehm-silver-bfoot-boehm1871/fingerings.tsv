@@ -1,0 +1,11 @@
+frankensim.specimen-fingerings.v1
+fingering	written	concert	register	open_holes	source_id	note
+b3	B3	B3	first	-	boehm-miller-1922-flute	all holes closed: the open end of the B foot is the first open aperture (Miller 1922 p.36 B foot end 663.62 mm); lowest note of the B foot
+c4	C4	C4	first	16	boehm-miller-1922-flute	simple fingering: the note's own hole and every hole nearer the foot open (Boehm 1871 scale, hole of C4 at 618.50 mm); principle stated in Wolfe et al. 2001 for C5
+d4	D4	D4	first	14,15,16	boehm-miller-1922-flute	simple fingering: holes of D4, C#4 and C4 open
+g4	G4	G4	first	9,10,11,12,13,14,15,16	unsw-wolfe-2001-jsv	Wolfe et al. 2001 JSV: the standard fingering for G4 and G5 has the eight lowest tone holes open; on a B foot these are holes 9 to 16 (G4 to C4)
+a4	A4	A4	first	7,8,9,10,11,12,13,14,15,16	boehm-miller-1922-flute	simple fingering from the Boehm scale: holes of A4 and every lower note open
+c5	C5	C5	first	4,5,6,7,8,9,10,11,12,13,14,15,16	unsw-wolfe-2001-jsv	Wolfe et al. 2001 JSV: for C5 the modern fingering is simple, every hole downstream of the first open hole is also open; the same fingering plays C6
+g5	G5	G5	second	9,10,11,12,13,14,15,16	unsw-wolfe-2001-jsv	same fingering as g4, second register by jet speed and length (JSV: the same fingering plays G4 and G5)
+a5	A5	A5	second	7,8,9,10,11,12,13,14,15,16	boehm-miller-1922-flute	same fingering as a4, second register
+c6	C6	C6	second	4,5,6,7,8,9,10,11,12,13,14,15,16	unsw-wolfe-2001-jsv	same fingering as c5, second register (JSV: this fingering also plays C6)

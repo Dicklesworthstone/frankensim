@@ -1,0 +1,24 @@
+{
+  "schema": "frankensim.instrument-status.v1",
+  "family": "flute",
+  "title": "Flute",
+  "reference_instrument": "University of Iowa MIS flute (maker and model unstated on the page)",
+  "summary": "A Boehm concert flute assembled from published data: hole positions, bore, head-joint taper, cork and mouth-hole from Boehm's 1871 treatise as recomputed and measured by Miller (1922), the embouchure riser of a measured Pearl PF-661 from UNSW, and the player's mouth pressure and jet length from a published experienced-flautist measurement (de la Cuadra et al. 2008). All sixteen holes are in the model, closed ones as hard-closed chimneys; the three notes use the published simple fingerings. Nothing was fitted to the Iowa recordings. It is a hybrid description, not one real flute, and the jet card is an interim one.",
+  "physics_present": [
+    "fs-couple flue_loop: a jet driven by a blowing-pressure gesture, with the lip geometry, jet length and the mouth contraction law, acting on a connected duct network (fs-couple network performance, one jet drives the whole graph)",
+    "16 tone-hole branches as plane-wave chimney sections on ideal junctions, open or closed per fingering, with the published head-joint taper as stacked cylinders, the cork cavity and the embouchure riser",
+    "fractional-delay propagation and gas-derived viscothermal loss on every section of the network (moist air at the published measurement state)",
+    "compact baffled-piston reaction on every open aperture and a multirate Rayleigh receiver that sums the open holes, the open end and the embouchure, so the graded sound is radiated pressure at a physical receiver rather than internal pressure"
+  ],
+  "physics_missing": [
+    "a tone-hole model beyond a plane-wave chimney on an ideal junction: no matching-volume or end-correction treatment of the junction, no pad cups, no undercut",
+    "mutual radiation between open apertures: the computed baffled operator is limited to eight openings and several notes open more, so every note uses the compact per-aperture load; the holes also sit on a cylinder in the real flute but are placed in a flat baffle plane here",
+    "the true head-joint taper profile (only the two published endpoints are known; it is a stack of cylinders on a straight line between them) and a convergence ladder on that stacking",
+    "a flutist's lip jet: the jet card in use is the interim tonal card from a staging rig, the jet displacement gain is the demonstrator value, and the labium offset, jet angle and onset ramp are not published and are neutral or authored",
+    "breath-warmed bore gas: the bore is at the UNSW measurement state, which sits flat of a played flute",
+    "a same-specimen impedance pair, so the passive chain is checked only against the pooled UNSW statements, not against a measured impedance of this flute",
+    "wall and pad vibration, fork fingerings (F sharp, B flat), vibrato, and the register-hole and trill-hole notes"
+  ],
+  "blocked": null,
+  "beads": ["pexfp.320"]
+}
