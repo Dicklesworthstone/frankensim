@@ -10,7 +10,6 @@
 export const MIDI_MAX_VELOCITY_M_S = 4.5;
 export const midiVelocityToMS = (velocity) => (MIDI_MAX_VELOCITY_M_S * Math.max(0, Math.min(127, velocity))) / 127;
 
-const HEADER = 19; // n_keys, stations, board_modes, sustain, ledger[10], counters[4], silent-bank exchange
 const KEY_HEADER = 9;
 
 /** Decode the flat Float32Array snapshot posted by the worker. */
@@ -18,7 +17,9 @@ export function parseSnapshot(data) {
   const keyCount = data[0];
   const stations = data[1];
   const boardModes = data[2];
-  const boardStart = HEADER;
+  // The bank adds one signed exchange value after the original 18 header values.
+  const boardStart = data.length - boardModes - keyCount * (KEY_HEADER + stations);
+  if (boardStart !== 18 && boardStart !== 19) throw new RangeError('unsupported piano snapshot layout; rebuild the piano WASM and client together');
   const keys = [];
   let offset = boardStart + boardModes;
   for (let k = 0; k < keyCount; k++) {
@@ -50,7 +51,7 @@ export function parseSnapshot(data) {
       hammerLossJ: data[11], // felt (crush + relaxation) and shank
       catchLossJ: data[12],
       retiredJ: data[13], // relative string energy discarded when keys went back to the static image
-      couplingJ: data[18], // numerical work of the silent-string bank's explicit exchange with the board
+      couplingJ: boardStart === 19 ? data[18] : 0, // signed numerical work of the bank's explicit exchange
     },
     dynamicModes: data[14],
     dynamicStrings: data[15],

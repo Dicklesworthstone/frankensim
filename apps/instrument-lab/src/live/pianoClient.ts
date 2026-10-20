@@ -228,7 +228,6 @@ interface Pending {
   reject: (error: Error) => void;
 }
 
-const HEADER = 19; // n_keys, stations, board_modes, sustain, ledger[10], counters[4], silent-bank exchange
 const KEY_HEADER = 9;
 
 /** Decode the flat Float32Array snapshot posted by the worker. */
@@ -236,9 +235,12 @@ export function parsePianoSnapshot(data: Float32Array, renderedFrames = 0, ahead
   const keyCount = data[0] ?? 0;
   const stations = data[1] ?? 0;
   const boardModes = data[2] ?? 0;
+  // The bank adds one signed exchange value after the original 18 header values.
+  const header = data.length - boardModes - keyCount * (KEY_HEADER + stations);
+  if (header !== 18 && header !== 19) throw new RangeError('unsupported piano snapshot layout; rebuild the piano WASM and client together');
   const at = (index: number): number => data[index] ?? 0;
   const keys: PianoKeySnapshot[] = [];
-  let offset = HEADER + boardModes;
+  let offset = header + boardModes;
   for (let k = 0; k < keyCount; k++) {
     keys.push({
       midi: at(offset),
@@ -267,13 +269,13 @@ export function parsePianoSnapshot(data: Float32Array, renderedFrames = 0, ahead
       hammerLossJ: at(11),
       catchLossJ: at(12),
       retiredJ: at(13),
-      couplingJ: at(18),
+      couplingJ: header === 19 ? at(18) : 0,
     },
     dynamicModes: at(14),
     dynamicStrings: at(15),
     peakPa: at(16),
     forcedRetirements: at(17),
-    boardCoordinates: data.subarray(HEADER, HEADER + boardModes),
+    boardCoordinates: data.subarray(header, header + boardModes),
     keys,
     renderedFrames,
     aheadMs,
@@ -307,6 +309,7 @@ export class LivePianoClient {
     this.keyGeometry = ready.keyGeometry;
     this.initMs = ready.initMs;
     worker.onmessage = (event: MessageEvent) => this.receive(event.data);
+    worker.onerror = (event) => this.workerFailed(event);
   }
 
   /**
@@ -319,28 +322,48 @@ export class LivePianoClient {
     const sink = await createLiveSink(audioContext, options.destination ? { baseUrl, destination: options.destination } : { baseUrl });
     const worker = new Worker(`${baseUrl}/piano/worker.js`, { type: 'module', name: 'fs-live-piano' });
     const port = sink.createProducerPort();
-    const first = new Promise<ReadyMessage>((resolve, reject) => {
+    let rejectStartup!: (error: LiveRefusal) => void;
+    const failed = new Promise<never>((_resolve, reject) => { rejectStartup = reject; });
+    const first = new Promise<ReadyMessage>((resolve) => {
       worker.onmessage = (event: MessageEvent) => {
         const message = event.data;
         if (message?.type === 'ready') {
           resolve({ info: message.info, board: message.board, keyGeometry: message.keyGeometry ?? new Float64Array(0), initMs: message.initMs });
         }
-        else if (message?.type === 'error') reject(new LiveRefusal(message.code ?? 'worker_error', message.message, message.command));
+        else if (message?.type === 'error') rejectStartup(new LiveRefusal(message.code ?? 'worker_error', message.message, message.command));
       };
-      worker.onerror = (event) => reject(new LiveRefusal('worker_error', event.message || 'the piano worker failed to load'));
+      worker.onerror = (event) => {
+        event.preventDefault();
+        rejectStartup(new LiveRefusal('worker_error', event.message || 'the piano worker failed to load'));
+      };
     });
     const { baseUrl: _baseUrl, destination: _destination, ...engineOptions } = options;
     worker.postMessage({ type: 'init', sampleRate: audioContext.sampleRate, port, options: engineOptions }, [port]);
     let ready: ReadyMessage;
     try {
-      ready = await first;
+      ready = await Promise.race([first, failed]);
+      // Ready settles before the final device resume; a worker fault must still
+      // abort startup promptly while that second asynchronous step is pending.
+      if (audioContext.state === 'suspended') await Promise.race([audioContext.resume(), failed]);
     } catch (error) {
       worker.terminate();
       sink.dispose();
       throw error;
     }
-    if (audioContext.state === 'suspended') await audioContext.resume();
     return new LivePianoClient(worker, sink, ready);
+  }
+
+  private workerFailed(event: ErrorEvent): void {
+    event.preventDefault();
+    if (this.disposed) return;
+    const refusal = new LiveRefusal('worker_failed', event.message || 'the piano worker stopped');
+    const listeners = [...this.errorListeners];
+    for (const pending of this.pending.values()) pending.reject(refusal);
+    this.pending.clear();
+    this.dispose();
+    // A render fault can recur on every timer turn; stop the failed worker now.
+    this.worker.terminate();
+    for (const listener of listeners) listener(refusal);
   }
 
   private receive(message: { type?: string; [key: string]: unknown }): void {
@@ -494,6 +517,8 @@ export class LivePianoClient {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.worker.onmessage = null;
+    this.worker.onerror = null;
     try {
       this.worker.postMessage({ type: 'cmd', name: 'dispose' });
     } catch {

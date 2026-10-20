@@ -17,6 +17,7 @@
 //        is not an underrun.
 //   in   {type:'connect', port: MessagePort}            adopt another producer.
 //   in   {type:'config', levelEveryQuanta?: number}     level cadence (default 2).
+//   in   {type:'dispose'}   close producer ports and end processing permanently.
 //   out  {type:'level', epoch, queuedFrames, receivedFrames, playedFrames,
 //         underruns, underrunFrames, currentFrame, currentTime, sampleRate}
 //        receivedFrames is cumulative over the node's life; playedFrames,
@@ -40,11 +41,12 @@ class FsLiveSink extends AudioWorkletProcessor {
     this.levelEvery = 2;
     this.quantum = 0;
     this.ports = [this.port];
+    this.alive = true;
     this.port.onmessage = (event) => this.receive(event.data);
   }
 
   receive(message) {
-    if (!message || typeof message !== 'object') return;
+    if (!this.alive || !message || typeof message !== 'object') return;
     switch (message.type) {
       case 'audio': {
         const channels = message.channels;
@@ -80,6 +82,16 @@ class FsLiveSink extends AudioWorkletProcessor {
           this.levelEvery = Math.floor(message.levelEveryQuanta);
         }
         break;
+      case 'dispose':
+        this.alive = false;
+        this.queue.length = 0;
+        this.queuedFrames = 0;
+        for (const port of this.ports) {
+          port.onmessage = null;
+          port.close();
+        }
+        this.ports = [];
+        break;
       default:
         break;
     }
@@ -102,6 +114,7 @@ class FsLiveSink extends AudioWorkletProcessor {
   }
 
   process(_inputs, outputs) {
+    if (!this.alive) return false;
     const output = outputs[0];
     const frames = output[0].length;
     let written = 0;

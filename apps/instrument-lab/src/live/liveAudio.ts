@@ -150,6 +150,7 @@ export async function createLiveSink(context: AudioContext, options: LiveSinkOpt
     },
     dispose(): void {
       listeners.clear();
+      node.port.postMessage({ type: 'dispose' });
       node.port.onmessage = null;
       node.disconnect();
     },
