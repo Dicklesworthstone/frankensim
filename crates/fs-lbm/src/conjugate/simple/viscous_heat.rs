@@ -15,6 +15,12 @@
 
 use super::*;
 
+/// The checked value itself: the shared `finite` gate returns only the verdict.
+fn finite_value(field: &'static str, value: f64) -> Result<f64, ChtError> {
+    finite(field, value)?;
+    Ok(value)
+}
+
 /// Explicit creeping-flow and algebraic work gates, not accuracy certificates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViscousHeatControls {
@@ -122,7 +128,7 @@ pub fn creeping_flow_with_viscous_heat(
             if i % 256 == 0 {
                 poll(gate)?;
             }
-            sampler.vel[a][i] = finite(
+            sampler.vel[a][i] = finite_value(
                 "viscous_heat.velocity",
                 *flux / sampler.comp_face_area(a, i),
             )?;
@@ -145,7 +151,7 @@ impl Solver<'_> {
         let mut wall_power_w = [0.0; 6];
         let mut wall_tangential_force_n = [[0.0; 3]; 6];
         let add = |value: &mut f64, amount: f64| -> Result<(), ChtError> {
-            *value = finite("viscous_heat.power", *value + amount)?;
+            *value = finite_value("viscous_heat.power", *value + amount)?;
             Ok(())
         };
         for (c, cell_heat) in heat.iter_mut().enumerate() {
@@ -258,8 +264,8 @@ impl Solver<'_> {
                 }
             }
         }
-        let heat_w = finite("viscous_heat.total", heat.iter().sum())?;
-        let supplied_wall_power_w = finite("viscous_heat.supply", wall_power_w.iter().sum())?;
+        let heat_w = finite_value("viscous_heat.total", heat.iter().sum())?;
+        let supplied_wall_power_w = finite_value("viscous_heat.supply", wall_power_w.iter().sum())?;
         let mut pressure_constraint_power_w = 0.0;
         for c in 0..domain.cell_count() {
             poll(gate)?;
@@ -269,7 +275,7 @@ impl Solver<'_> {
                 flow.pressure_pa[c] * outward,
             )?;
         }
-        let residual_w = finite(
+        let residual_w = finite_value(
             "viscous_heat.residual",
             supplied_wall_power_w + pressure_constraint_power_w - heat_w,
         )?;
@@ -293,7 +299,7 @@ impl Solver<'_> {
             .iter()
             .copied()
             .fold(f64::INFINITY, f64::min);
-        let reynolds = finite(
+        let reynolds = finite_value(
             "viscous_heat.reynolds",
             self.rho * speed * length / minimum_mu,
         )?;
