@@ -46,6 +46,7 @@ modal_damping_ratio	E5	0.000529101	1	published-measured	schoonderwaldt2008	Table
 retained_string_modes	E5	30	1	numerical	frankensim-baseline-numerics	floor(20000 Hz / f1)	highest retained mode below 20 kHz; mode-count ladder not yet run
 bow_force	E5	0.3766174	N	derived-from-published	schoonderwaldt2008	geometric mid-window between Schelleng F_max and F_min	F_max = 2*Z0*vB/(beta*dmu) = 1.534 N (Schelleng eq. 1, dmu = 0.4); F_min = F_max / 16.6, the measured F_max/F_min at beta=1/11, vB=10 cm/s (Table I); torsion is not in this solver
 audio_rate	all	48000	Hz	numerical	frankensim-baseline-numerics	audio record	48 kHz mono to match the converted reference library
+pcm_full_scale	all	0.01	Pa	numerical	frankensim-baseline-numerics	audio record and render.sh --full-scale-pa	chosen as a round number putting the loudest string of a 1 Pa probe render near half of 16-bit full scale; it scales PCM only and is not an acoustic gain
 render_samples	all	144000	1	numerical	frankensim-baseline-numerics	audio record	3.0 s
 ambient	all	293.15 K, 101325 Pa, 0 % RH	SI	placeholder-unknown	frankensim-baseline-numerics	ambient record	enters only the observer air density; the reference room conditions are UNKNOWN
 listener_distance	all	1	m	placeholder-unknown	frankensim-baseline-numerics	listener_m record	reference microphone distance: UNKNOWN

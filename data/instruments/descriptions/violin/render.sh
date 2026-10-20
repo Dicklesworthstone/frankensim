@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Violin open-string arco notes: 3.0 s, 48 kHz, mono, one WAV per string, bowed at constant
 # speed and force with a constant-acceleration onset (inputs and sources in sources.tsv,
-# citations.tsv; what is missing in unknowns.tsv).
+# citations.tsv; what is missing in unknowns.tsv). A labelled diagnostic baseline: one-string
+# point bow with a one-way one-oscillator body, not the instrument.
+# PCM full scale 0.01 Pa is chosen only to use the 16-bit range (probe peaks were 1e-3 to 5e-2 Pa).
 # usage: render.sh MUSIC_RENDER_BIN OUT_DIR
 # Matching UIowa MIS reference (the first note of each file is the open string):
 #   G3  Violin.arco.mf.sulG.G3B3
@@ -15,5 +17,5 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 mkdir -p "$out"
 for note in G3 D4 A4 E5; do
     "$bin" ensemble "$out/violin-arco-mf-open-$note.wav" \
-        --bow "$here/arco-open-$note.performance" --full-scale-pa 1 --block 4096
+        --bow "$here/arco-open-$note.performance" --full-scale-pa 0.01 --block 4096
 done
