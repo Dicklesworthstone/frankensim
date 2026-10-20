@@ -66,6 +66,35 @@ and fixed once. It exports accepted history, actual per-load ratios, the three
 density fields and separate eroded displacement fields. It prints its retained
 prefix before propagating a late stop. An iteration cap is not convergence.
 
+## Feasible recovery after a bounded run
+
+Accepted inner augmented-Lagrangian steps need not meet the volume cap. A
+short run can therefore improve the objective while its best feasible accepted
+point remains the initial design. This is not evidence that the final iterate
+is feasible, nor that the iteration allowance guarantees convergence.
+
+`recover_feasible()` explicitly restores the current accepted raw controls
+against the actual **dilated** volume map and freshly solves every eroded load.
+It reuses the existing floor-segment restoration, with at most 64 bisections
+and two endpoint filter evaluations before the complete physical evaluation.
+Protected regions and the declared raw floor remain unchanged. The recovered
+volume must meet the strict cap; no feasibility tolerance is increased.
+
+Recovery returns a separate point, not a new accepted AL iterate. It changes
+neither `best_feasible()`, history, multipliers, spectral scheduling nor AL
+callback counts. Its filters and load solves consume the same physical budget.
+Failure leaves the cached optimizer state intact, and an infeasible tested
+floor is not a global infeasibility proof. Recovery need not improve the score;
+compare it with the accepted feasible incumbent before selecting a result.
+
+The worst-load example attempts recovery after an optimizer report, never after
+an optimizer error or cancellation. It exports the lower-envelope feasible
+result with an explicit `exported_source` label. An older feasible incumbent
+wins a tie or a worse recovery. It exports retained fields before propagating
+a recovery failure, and terminal KKT diagnostics still describe the AL iterate,
+not the recovered point. The minimum-material/binary/refinement routes retain
+their separate existing algorithms.
+
 ## Scope and validation
 
 The model requires independent density-invariant dead loads and homogeneous

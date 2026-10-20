@@ -121,6 +121,43 @@ impl<'a, 'callback, O: Sdf3Elasticity> EnvelopeDesignStudy3<'a, 'callback, O> {
     #[must_use] pub fn work(&self) -> SolveWork { self.control.work() }
     #[must_use] pub fn optimizer_work(&self) -> ProjectedAlWork { self.state.work() }
 
+    /// Recover a separately solved, material-feasible candidate from the current
+    /// accepted AL point. A bounded AL run can have improved but infeasible
+    /// iterates and retain only its initial feasible design. This explicit
+    /// postprocessing does NOT change AL multipliers, history, callback counts,
+    /// accepted fields or best_feasible; it is not an optimizer convergence step.
+    ///
+    /// Reuse the robust DILATED-volume restoration toward the declared raw floor
+    /// (at most 64 bisections plus two endpoint filter evaluations), then freshly
+    /// solve every eroded load and its complete envelope derivative. Respect
+    /// physical regions and the strict material cap without increasing tolerance.
+    /// A rejected floor is failure of this path, not global infeasibility.
+    ///
+    /// All recovery work consumes the original physical budget, separately from
+    /// AL callback counts. Errors leave cached optimizer results and nominal
+    /// physics intact. Compare the returned envelope with best_feasible before
+    /// choosing a result: recovery guarantees neither descent nor optimality.
+    pub fn recover_feasible(&mut self) -> Result<EnvelopeDesignPoint3, EvaluationStop> {
+        use crate::sdf3::robust::{RobustDesignOptions3,
+            continuation::controlled_sdf3_robust_feasible_start};
+        self.control.checkpoint("sdf3-envelope-recovery-start")?;
+        let restoration = RobustDesignOptions3 {
+            robustness: self.options.robustness, volume_limit: self.options.volume_limit,
+            density_floor: self.options.density_floor, compliance_scale: 1.0,
+            optimizer: self.options.optimizer,
+        };
+        let rho = controlled_sdf3_robust_feasible_start(self.study, &self.accepted.rho,
+            restoration, self.control)?;
+        let evaluation = self.study.evaluate_robust_envelope(&rho, self.forces,
+            self.options.robustness, &self.policy, self.control)?;
+        let volume = evaluation.physical.dilated_volume_fraction;
+        if !volume.is_finite() || volume > self.options.volume_limit {
+            return Err(EvaluationStop::Breakdown { stage: "sdf3-envelope-recovery-volume" });
+        }
+        self.control.checkpoint("sdf3-envelope-recovery-publish")?;
+        Ok(EnvelopeDesignPoint3 { rho, evaluation })
+    }
+
     /// Up to additional_steps accepted updates, preserving AL state and work.
     /// Zero steps uses cached fields. Rejected trial fields never replace an
     /// incumbent; errors preserve any step already accepted before a late poll.

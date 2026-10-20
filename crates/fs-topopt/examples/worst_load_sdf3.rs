@@ -75,8 +75,19 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
         println!("{},{:.17e},{:.17e},{},{:.17e},{}",row.iteration,row.envelope,row.maximum,
             row.worst_case,row.dilated_volume,row.feasible);
     }
-    let feasible=design.best_feasible().is_some();
-    let point=design.best_feasible().unwrap_or_else(||design.accepted());
+    // AL can reach its update allowance without a better feasible iterate.
+    // Recover only after a returned terminal report, never after cancellation or
+    // a physics error. Keep the accepted incumbent if recovery is worse/fails.
+    let recovery=if outcome.is_ok() {Some(design.recover_feasible())} else {None};
+    let incumbent=design.best_feasible();
+    let recovered=recovery.as_ref().and_then(|result|result.as_ref().ok()).filter(|point|
+        incumbent.is_none_or(|best|point.evaluation.envelope.value<best.evaluation.envelope.value));
+    let feasible=recovered.is_some()||incumbent.is_some();
+    let point=recovered.or(incumbent).unwrap_or_else(||design.accepted());
+    let source=if recovered.is_some() {"recovered-terminal-design"}
+        else if incumbent.is_some() {"accepted-feasible-incumbent"} else {"infeasible-final-iterate"};
+    eprintln!("exported_source={source}; recovery_attempted={}; recovery_solved={}; final_solve_work={:?}; optimizer_work={:?}; recovered_point_is_al_iterate=false",
+        recovery.is_some(), matches!(&recovery,Some(Ok(_))), design.work(), design.optimizer_work());
     let e=&point.evaluation;
     eprintln!("exported_best_feasible={feasible}; reference_values_are_hard_constraints=false; geometry_rebuilt=false; continuum_bound=false; global_optimum=false; durable_resume=false");
     println!("load_case,eroded_compliance,fixed_reference,normalized_compliance");
@@ -95,6 +106,8 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
             p[0],p[1],p[2],uy[3*i],uy[3*i+1],uy[3*i+2],uz[3*i],uz[3*i+1],uz[3*i+2]);
     }
     let terminal=outcome?;
+    // Previously solved fields have been exported before any recovery failure.
+    if let Some(result)=recovery {result?;}
     if !feasible {return Err("no accepted design meets the dilated material cap; exported point is infeasible".into());}
     if !matches!(terminal.stop,ProjectedAlStop::Converged|ProjectedAlStop::IterationLimit) {
         return Err("optimizer stopped before its requested allowance; exported fields retain the best feasible prefix".into());

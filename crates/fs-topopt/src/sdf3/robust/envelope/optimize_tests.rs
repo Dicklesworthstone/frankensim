@@ -27,7 +27,18 @@ fn real_worst_load_design_improves_and_replays_its_retained_physics() {
     let initial = session.accepted().clone();
     let outcome = session.run(30).unwrap();
     assert!(session.history().len()>1);
-    let best = session.best_feasible().unwrap().clone();
+    // Inner AL iterates need not be feasible after 30 updates. Recover an
+    // actually solved endpoint instead of calling that iteration cap convergence.
+    let checkpoint = session.state.checkpoint();
+    let history = session.history().to_vec();
+    let incumbent = session.best_feasible().unwrap().clone();
+    let spent = session.work();
+    let best = session.recover_feasible().unwrap();
+    assert_eq!(session.state.checkpoint(), checkpoint);
+    assert_eq!(session.history(), history);
+    assert_eq!(session.best_feasible().unwrap().rho, incumbent.rho);
+    assert!(session.work().linear_iterations > spent.linear_iterations);
+    assert!(best.evaluation.physical.dilated_volume_fraction <= options().volume_limit);
     assert!(best.evaluation.envelope.value < initial.evaluation.envelope.value);
     assert!(best.evaluation.envelope.maximum < initial.evaluation.envelope.maximum);
     assert_eq!(outcome.objective,session.accepted().evaluation.envelope.value);
@@ -105,3 +116,6 @@ fn exhausted_physics_and_invalid_case_shapes_refuse_without_mutation() {
     assert!(matches!(EnvelopeDesignStudy3::new(&mut study,&forces[..1],&rho,p,options(),&mut control),Err(ProjectedAlError::Invalid(_))));
     assert_eq!(control.work().linear_solves,0);
 }
+
+#[path = "recovery_tests.rs"]
+mod recovery;
