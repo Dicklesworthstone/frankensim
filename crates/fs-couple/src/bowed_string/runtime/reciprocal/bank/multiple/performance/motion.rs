@@ -87,25 +87,41 @@ impl BoundStopMotion {
     // at knots and hold the final one; only the last accepted cursor is reused.
     // No per-sample allocation or control-history expansion.
     pub(super) fn prepare(&mut self, endpoint: u64) -> usize {
-        let mut cursor = self.next;
-        while self.source.knots.get(cursor).is_some_and(|k| k.sample < endpoint) { cursor += 1; }
-        if let Some(right) = self.source.knots.get(cursor) {
-            if endpoint == right.sample {
-                self.candidate.copy_from_slice(&right.offsets_m);
+        prepare_path(&self.source.knots, self.next, endpoint, None, &mut self.candidate)
+    }
+}
+
+// One endpoint sampler for normal translation and longitudinal station paths.
+// Their units/source admission remain distinct; their clock and interpolation
+// arithmetic are shared. None preserves the original implicit zero offsets.
+pub(super) trait GeometryKnot {
+    fn sample(&self) -> u64;
+    fn coordinates(&self) -> &[f64];
+}
+impl GeometryKnot for StopMotionKnot {
+    fn sample(&self) -> u64 { self.sample }
+    fn coordinates(&self) -> &[f64] { &self.offsets_m }
+}
+pub(super) fn prepare_path<K: GeometryKnot>(knots: &[K], mut cursor: usize, endpoint: u64,
+    initial: Option<&[f64]>, candidate: &mut [f64]) -> usize
+{
+        while knots.get(cursor).is_some_and(|k| k.sample() < endpoint) { cursor += 1; }
+        if let Some(right) = knots.get(cursor) {
+            if endpoint == right.sample() {
+                candidate.copy_from_slice(right.coordinates());
             } else {
-                let left = cursor.checked_sub(1).map(|i| &self.source.knots[i]);
-                let start = left.map_or(0, |k| k.sample);
-                let fraction = (endpoint-start) as f64/(right.sample-start) as f64;
-                for (i, value) in self.candidate.iter_mut().enumerate() {
-                    let begin = left.map_or(0.0, |k| k.offsets_m[i]);
-                    *value = begin+(right.offsets_m[i]-begin)*fraction;
+                let left = cursor.checked_sub(1).map(|i| &knots[i]);
+                let start = left.map_or(0, |k| k.sample());
+                let fraction = (endpoint-start) as f64/(right.sample()-start) as f64;
+                for (i, value) in candidate.iter_mut().enumerate() {
+                    let begin = left.map_or_else(|| initial.map_or(0.0, |v| v[i]), |k| k.coordinates()[i]);
+                    *value = begin+(right.coordinates()[i]-begin)*fraction;
                 }
             }
         } else {
-            self.candidate.copy_from_slice(&self.source.knots[self.source.knots.len()-1].offsets_m);
+            candidate.copy_from_slice(knots[knots.len()-1].coordinates());
         }
         cursor
-    }
 }
 
 impl MultiBowStringBank {
@@ -141,8 +157,9 @@ impl MultiBowPerformance {
     /// path. Changing callback sizes changes neither this path nor its clock.
     ///
     /// This supports pressing and withdrawing compliant contacts along their
-    /// fixed normals, not sliding stations, moving-frame geometry, tissue motion,
-    /// patch-area evolution, normal bow load distribution or pitch assignment.
+    /// fixed normals. `with_stop_station_motion` can additionally prescribe
+    /// longitudinal positions on the same clock. Tissue motion, moving frames,
+    /// patch-area evolution and pitch assignment are not inferred.
     /// A later physical/pressure refusal poisons the performance as before,
     /// leaving its bank at the last jointly accepted sample and stop positions.
     pub fn with_stop_motion(mut self, program: StopMotionProgram, gate: &CancelGate) -> Result<Self, RenderError> {

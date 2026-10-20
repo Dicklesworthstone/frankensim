@@ -20,6 +20,9 @@ const MAX_MOTION_COORDINATES: usize = MAX_STOPS * MAX_MOTION_KNOTS;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::motion::{
     StopMotionProgram, StopMotionKnot, ObstacleMotionLimits,
 };
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::stations::{
+    StopStationProgram, StopStationKnot, StopStationMotionLimits,
+};
 
 #[derive(Clone, Debug)]
 struct Entry {
@@ -37,6 +40,7 @@ pub struct Profile {
     pub bytes: Vec<u8>,
     entries: Vec<Entry>,
     motion: Option<StopMotionProgram>,
+    station_motion: Option<StopStationProgram>,
     bow_contacts: Vec<BowContactLoad>,
 }
 
@@ -55,12 +59,22 @@ impl Profile {
         }
         let mut entries: Vec<Entry> = Vec::new();
         let mut motion = None;
+        let mut station_motion = None;
         let mut bow_contacts: Vec<BowContactLoad> = Vec::new();
         while let Some(line) = lines.next() {
             let fields: Vec<_> = line.split_ascii_whitespace().collect();
             if fields.first() == Some(&"motion") {
+                if motion.is_some() { return Err("normal motion can be declared only once".into()); }
                 motion = Some(parse_motion(&fields, &mut lines, entries.len())?);
-                break;
+                continue;
+            }
+            if fields.first() == Some(&"station-motion") {
+                if station_motion.is_some() { return Err("station motion can be declared only once".into()); }
+                station_motion = Some(parse_station_motion(&fields, &mut lines, entries.len())?);
+                continue;
+            }
+            if motion.is_some() || station_motion.is_some() {
+                return Err("stop and bow-contact declarations must precede the geometry motion blocks".into());
             }
             if fields.first() == Some(&"bow-contact") {
                 if fields.len() != 3 { return Err("expected bow-contact BOW_INDEX STOP_ID".into()); }
@@ -114,7 +128,7 @@ impl Profile {
                     force_relative_tolerance: 1e-9 } });
         }
         if entries.is_empty() { return Err("stop profile must declare at least one contact".into()); }
-        Ok(Self { bytes: bytes.to_vec(), entries, motion, bow_contacts })
+        Ok(Self { bytes: bytes.to_vec(), entries, motion, station_motion, bow_contacts })
     }
 
     // Reject unknown member IDs before loading material packs or reducing bodies.
@@ -150,18 +164,33 @@ impl Profile {
         if let Some(motion) = &self.motion {
             motion.validate(self.entries.len(), spec.samples, spec.rate, gate)?;
         }
+        if let Some(motion) = &self.station_motion {
+            let initial: Vec<_> = self.entries.iter().map(|e| e.location.station_fraction).collect();
+            let lengths: Vec<_> = self.entries.iter().map(|e| spec.strings[e.location.string].length).collect();
+            motion.validate(&initial, &lengths, spec.samples, spec.rate, gate)?;
+            for binding in &self.bow_contacts {
+                if motion.knots.iter().any(|k| k.station_fractions[binding.stop].to_bits() != initial[binding.stop].to_bits()) {
+                    return Err("contact-loaded bow normals must retain their original stations".into());
+                }
+            }
+        }
         Ok(())
     }
 
     pub fn motion_program(&self) -> Option<&StopMotionProgram> { self.motion.as_ref() }
+    pub fn station_program(&self) -> Option<&StopStationProgram> { self.station_motion.as_ref() }
     pub fn bow_contacts(&self) -> &[BowContactLoad] { &self.bow_contacts }
 
     /// Bind on the already assembled and optionally preloaded instrument.
     pub fn bind_motion(&self, performance: MultiBowPerformance, gate: &CancelGate) -> Result<MultiBowPerformance> {
-        match &self.motion {
-            Some(motion) => Ok(performance.with_stop_motion(motion.clone(), gate)?),
-            None => Ok(performance),
-        }
+        let performance = match &self.motion {
+            Some(motion) => performance.with_stop_motion(motion.clone(), gate)?,
+            None => performance,
+        };
+        Ok(match &self.station_motion {
+            Some(motion) => performance.with_stop_station_motion(motion.clone(), gate)?,
+            None => performance,
+        })
     }
 
     pub fn bind(&self, bank: MultiBowStringBank, gate: &CancelGate) -> Result<MultiBowStringBank> {
@@ -222,7 +251,7 @@ pub fn profile_paths(args: &[std::ffi::OsString]) -> Result<(Option<&Path>, Opti
     Ok((body, stops))
 }
 
-// A terminal motion block retains the exact authored knots in stop declaration
+// Terminal motion blocks retain the exact authored knots in stop declaration
 // order. The shared runtime validates timing, units and speeds on the real clock.
 // There is no alternate interpolation, contact law or source-gap mutation here.
 fn parse_motion(fields: &[&str], lines: &mut std::str::Lines<'_>, stops: usize) -> Result<StopMotionProgram> {
@@ -247,7 +276,32 @@ fn parse_motion(fields: &[&str], lines: &mut std::str::Lines<'_>, stops: usize) 
         knots.push(StopMotionKnot { sample: row[1].parse()?,
             offsets_m: row[2..].iter().map(|x| scalar(x)).collect::<Result<Vec<_>>>()? });
     }
-    if lines.next().is_some() { return Err("motion block must end the stop profile".into()); }
     Ok(StopMotionProgram { knots, limits, max_knots: MAX_MOTION_KNOTS,
+        max_coordinate_values: MAX_MOTION_COORDINATES })
+}
+
+fn parse_station_motion(fields: &[&str], lines: &mut std::str::Lines<'_>, stops: usize) -> Result<StopStationProgram> {
+    if fields.len() != 5 || stops == 0 {
+        return Err("station-motion requires existing stops and MAX_SPEED_M_S MAX_STEP_M MAX_UPDATE_TERMS KNOT_COUNT".into());
+    }
+    let limits = StopStationMotionLimits { maximum_speed_m_s: scalar(fields[1])?,
+        maximum_step_m: scalar(fields[2])?, max_update_terms: fields[3].parse()? };
+    limits.validate()?;
+    if limits.max_update_terms > 1_048_576 { return Err("station geometry update work exceeds 1048576 terms".into()); }
+    let count: usize = fields[4].parse()?;
+    if count == 0 || count > MAX_MOTION_KNOTS
+        || stops.checked_mul(count).is_none_or(|n| n > MAX_MOTION_COORDINATES) {
+        return Err("station motion exceeds its nonempty knot/coordinate budget".into());
+    }
+    let mut knots = Vec::with_capacity(count);
+    for _ in 0..count {
+        let row: Vec<_> = lines.next().ok_or("missing station knot")?.split_ascii_whitespace().collect();
+        if row.len() != stops + 2 || row[0] != "station-knot" {
+            return Err("expected station-knot ELAPSED_SAMPLE STATION_FRACTION for every declared stop".into());
+        }
+        knots.push(StopStationKnot { sample: row[1].parse()?,
+            station_fractions: row[2..].iter().map(|x| scalar(x)).collect::<Result<Vec<_>>>()? });
+    }
+    Ok(StopStationProgram { knots, limits, max_knots: MAX_MOTION_KNOTS,
         max_coordinate_values: MAX_MOTION_COORDINATES })
 }

@@ -1,0 +1,14 @@
+frankensim-string-stops-v1
+stop bow_surface 0 0.2 normal 0 -1 fixed 0 5000 1 0.2 10 0.001
+stop finger 0 0.43 normal 1 0 fixed 0 5000 1 0.2 10 0.001
+bow-contact 0 bow_surface
+motion 0.001 0.1 5
+knot 480 -0.000003 -0.00001
+knot 1920 -0.000003 -0.00001
+knot 2400 -0.000003 -0.00001
+knot 2880 0.00003 -0.00001
+knot 3360 0.00003 0.00003
+station-motion 1 0.00003 1048576 3
+station-knot 480 0.2 0.43
+station-knot 1920 0.2 0.48
+station-knot 2880 0.2 0.46

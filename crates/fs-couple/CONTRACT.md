@@ -3084,14 +3084,36 @@ combined energy balance and energy budget; contact storage remains separately
 reported from linear-plus-geometric network storage. The energy tolerance uses
 the sum of absolute individual support supplies. Contact-loaded tangential laws
 use the jointly solved current reaction and release on separation. Prescribed
-support motion translates along fixed normals at fixed string stations; contact
-relocation along the span is not admitted. Rejected trials preserve accepted
+support motion translates along fixed normals; optional source-derived station
+motion below admits independent contact relocation. Rejected trials preserve accepted
 contact reports and support offsets as well as the complete mechanical state.
 Cold attachment is explicit; subsequent gas/torque rebuilds and linear static
 preload refuse rather than dropping storage. The static-preload guard precedes
 normal-contact equilibrium because that owner does not include geometric storage.
 This bounded iterated DG composition is not SAV, a full rod model, a unique
 nonlinear-branch guarantee or measured instrument/trajectory qualification.
+
+Independent compliant stops admit prescribed longitudinal migration along the
+original full supported spans, composable with normal support translation.
+Source-derived endpoint maps retain material/gas-loaded mass, declared
+transverse directions and the complete string/body/cavity/torsion/fluid state.
+The original joint normal/friction solver applies held reactions through mean
+endpoint maps; unilateral potential and damping use the complete endpoint
+closure change. Attachment work `R*delta_N^T*mean_q` and normal translation
+work `-R*delta_s` enter the same energy acceptance with geometric stretching.
+Acceleration pressure uses endpoint maps and endpoint geometric force.
+Accepted stations, offsets, mechanics, reports and clock publish atomically;
+constant station paths retain fixed-position arithmetic. Receiver footprints
+and normals remain fixed. A stop supplying a fixed bow's normal load cannot
+migrate until tangential migration/slip is represented. Nonpositive
+endpoint/mean-map compliance, trajectory limits and existing material, force,
+penetration, energy and pressure limits refuse. The native v1 stop profile
+carries bounded station trajectories on the original performance clock, with
+a pressing/migrating/releasing finger example. G0/G1/G3 regressions cover the
+independent work identity, endpoint pressure, refusal/retry/hold, complete
+source-state retention and file/direct PCM identity; native execution remains
+required. This is not a solved finger, evolving contact patch, rigid stopping
+constraint or measured instrument qualification.
 
 `ReedPerformance::from_bytes_with_gas_field` accepts the same source-retaining `AxialGasField` for authored geometry and gestures. Its exact inlet state drives reed density and impedance; the resolved midpoint cells supply one existing regional TMM for both feedback and terminal pressure. The exact outlet field state supplies the default exterior, and an explicit exterior record replaces that single binding for both flanged loading and baffled observation. The field remains frozen during rendering. Common pressure, full length, geometry/refinement and conflicting per-segment source declarations refuse through the existing owners. Standalone and ensemble sidecars can inspect the original primitive stations and source-pack identities.
 

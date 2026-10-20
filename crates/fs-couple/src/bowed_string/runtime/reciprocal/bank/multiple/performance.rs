@@ -148,7 +148,7 @@ impl MultiBowStringBank {
         Ok(MultiBowPerformance { bank: self, schedule, tracks, config, events, next: 0,
             base_sample, forces, drives: vec![FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };count],
             candidate: vec![FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };count], poisoned: false,
-            string_forces: None, stop_motion: None })
+            string_forces: None, stop_motion: None, stop_station_motion: None })
     }
 }
 
@@ -192,6 +192,7 @@ pub struct MultiBowPerformance {
     poisoned: bool,
     string_forces: Option<force::BoundStringForces>,
     stop_motion: Option<motion::BoundStopMotion>,
+    stop_station_motion: Option<stations::BoundStopStations>,
 }
 impl MultiBowPerformance {
     /// Original material bank, actual contact maps and accepted joint physics.
@@ -250,9 +251,14 @@ impl PressureRenderer for MultiBowPerformance {
                 } else { &self.forces }
             } else { &self.forces };
             let next_motion = self.stop_motion.as_mut().map(|motion| motion.prepare(sample+1));
-            let result = if let Some(motion) = &self.stop_motion {
+            let next_stations = self.stop_station_motion.as_mut().map(|motion| motion.prepare(sample+1));
+            let result = if let Some(stations) = &self.stop_station_motion {
+                self.bank.step_with_stop_stations(forces, &self.candidate, &stations.candidate,
+                    self.stop_motion.as_ref().map(|motion| motion.candidate.as_slice()))
+            } else if let Some(motion) = &self.stop_motion {
                 self.bank.system.step_with_obstacle_offsets(forces, &self.candidate, &motion.candidate)
-            } else { self.bank.system.step(forces, &self.candidate) };
+                    .map_err(RenderError::Friction)
+            } else { self.bank.system.step(forces, &self.candidate).map_err(RenderError::Friction) };
             match result {
                 Ok(frame) => {
                     *slot = frame.observer_pressure_pa;
@@ -261,8 +267,9 @@ impl PressureRenderer for MultiBowPerformance {
                         self.forces.copy_from_slice(&loads.candidate); loads.next = cursor;
                     }
                     if let (Some(motion), Some(cursor)) = (self.stop_motion.as_mut(), next_motion) { motion.next = cursor; }
+                    if let (Some(motion), Some(cursor)) = (self.stop_station_motion.as_mut(), next_stations) { motion.next = cursor; }
                 },
-                Err(error) => { self.poisoned = true; return Err(RenderError::Friction(error)); }
+                Err(error) => { self.poisoned = true; return Err(error); }
             }
         }
         Ok(())
@@ -274,3 +281,6 @@ pub mod force;
 
 /// Normal-support trajectories on the same physical sample clock.
 pub mod motion;
+
+/// Longitudinal stop trajectories using source-derived maps on that same clock.
+pub mod stations;

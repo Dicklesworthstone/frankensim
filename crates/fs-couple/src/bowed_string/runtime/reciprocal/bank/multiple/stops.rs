@@ -10,7 +10,11 @@ use crate::bowed_string::runtime::reciprocal::bank::polarization::TransverseDire
 use crate::render::RenderError;
 use crate::render::schedule::force::coupled::contact::{ModalContact, ModalContactConfig};
 use crate::render::schedule::force::coupled::contact::friction::multiple::obstacles::FrictionObstacleConfig;
+use crate::render::schedule::force::coupled::contact::friction::multiple::obstacles::geometry::ObstacleGeometry;
 use fs_dcontact::Obstacle;
+
+/// Prescribed migration along a retained material string, with contact work.
+pub mod stations;
 
 /// Normal closure direction, either relative to the bow axis or independently declared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,7 +34,7 @@ impl StringStopSide {
     }
 }
 
-/// A fixed normal contact; its compliance is a physical law, not a pitch knob.
+/// A source normal contact; its compliance is a physical law, not a pitch knob.
 #[derive(Clone, Debug)]
 pub struct MaterialStringStop {
     /// Actual string and interior station along its full supported span.
@@ -79,9 +83,11 @@ impl MultiBowStringBank {
     /// The same source basis projects it into both selected transverse planes;
     /// a missing plane refuses, rather than silently dropping force. Already
     /// bound geometric stretching stays in the same joint constitutive solve.
-    /// Prescribed support translation follows fixed normals at fixed stations;
-    /// this does not solve finger-body motion, contact relocation along the span,
-    /// changing area, contact friction, rigid constraints or contact-induced adaptivity.
+    /// Prescribed support translation follows the declared fixed normals.
+    /// `with_stop_station_motion` also admits migration along the original span,
+    /// retaining the complete source basis and accounting for attachment work.
+    /// This does not solve finger-body motion, changing area, contact friction,
+    /// rigid constraints or contact-induced adaptivity.
     /// Material source domains and spatial/time refinement remain necessary.
     pub fn with_string_stops(mut self, stops: Vec<MaterialStringStop>,
         limits: FrictionObstacleConfig, gate: &CancelGate) -> Result<Self, RenderError>
@@ -93,14 +99,29 @@ impl MultiBowStringBank {
             || stops.len()+self.system.port_count() > 64 {
             return Err(error("string stops require one bounded binding before the first physical sample"));
         }
-        let ports: Vec<_> = stops.iter().map(|stop| StringForcePort {
-            location: stop.location,
+        let geometry = self.stop_geometry(&stops, None, limits.max_setup_terms, gate)?;
+        let contacts = stops.iter().zip(geometry).map(|(stop, geometry)|
+            (ModalContact { left: geometry.left, right: geometry.right, law: stop.law.clone() }, stop.limits)).collect();
+        self.system = self.system.with_obstacles(contacts, limits, gate).map_err(RenderError::Friction)?;
+        self.source.stops = stops;
+        Ok(self)
+    }
+
+    // One source projection for initial and moving stops. Material/gas-loaded
+    // mass, both transverse planes and the original receiver basis own these
+    // maps; no sine basis, radius/torque or receiving mass is invented here.
+    pub(super) fn stop_geometry(&self, stops: &[MaterialStringStop], stations: Option<&[f64]>,
+        max_terms: usize, gate: &CancelGate) -> Result<Vec<ObstacleGeometry>, RenderError>
+    {
+        let ports: Vec<_> = stops.iter().enumerate().map(|(i, stop)| StringForcePort {
+            location: StringBowLocation { string: stop.location.string,
+                station_fraction: stations.map_or(stop.location.station_fraction, |s| s[i]) },
             coupling: match stop.side {
                 StringStopSide::Along(direction) => StringForceCoupling::CentrelineAlong(direction),
                 _ => StringForceCoupling::Centreline,
             },
         }).collect();
-        let columns = self.string_force_columns(&ports, limits.max_setup_terms, gate)?;
+        let columns = self.string_force_columns(&ports, max_terms, gate)?;
         let string_count = self.cards.len();
         let mut contacts = Vec::with_capacity(stops.len());
         for (stop, column) in stops.iter().zip(columns) {
@@ -125,10 +146,8 @@ impl MultiBowStringBank {
                     ModalAttachment { component, shapes: body.shapes.iter().map(|x| sign*x).collect() }
                 },
             };
-            contacts.push((ModalContact { left, right, law: stop.law.clone() }, stop.limits));
+            contacts.push(ObstacleGeometry { left, right });
         }
-        self.system = self.system.with_obstacles(contacts, limits, gate).map_err(RenderError::Friction)?;
-        self.source.stops = stops;
-        Ok(self)
+        Ok(contacts)
     }
 }

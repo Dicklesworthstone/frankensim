@@ -85,7 +85,7 @@ pub struct MultiFrictionFrame {
     pub obstacle_energy_j: f64,
     /// Nonadhesive loss at the optional compliant obstacles [J].
     pub obstacle_dissipation_j: f64,
-    /// Work supplied by prescribed normal-support translation [J]. This is
+    /// Work supplied by prescribed support translation and attachment motion [J]. This is
     /// separate from bow/surface work and is not counted as contact loss.
     pub obstacle_work_j: f64,
     /// Change of ALL storage + all losses - external and surface work [J].
@@ -236,14 +236,15 @@ impl MultiFrictionModalSystem {
     #[must_use] pub fn acceleration_pressure_weights(&self) -> Option<&[f64]> { self.core.acceleration_pressure_weights() }
     /// Advance every contact and body on the same physical sample.
     pub fn step(&mut self, external: &[f64], drives: &[FrictionDrive]) -> Result<&MultiFrictionFrame, ModalFrictionError> {
-        self.step_inner(external, drives, None, None)
+        self.step_inner(external, drives, None, None, None)
     }
     /// Same transaction, with polls during prediction, sweeps and publication.
     pub fn step_under_gate(&mut self, external: &[f64], drives: &[FrictionDrive], gate: &CancelGate)
-        -> Result<&MultiFrictionFrame, ModalFrictionError> { self.step_inner(external, drives, None, Some(gate)) }
+        -> Result<&MultiFrictionFrame, ModalFrictionError> { self.step_inner(external, drives, None, None, Some(gate)) }
 
     fn step_inner(&mut self, external: &[f64], drives: &[FrictionDrive],
-        obstacle_offsets: Option<&[f64]>, gate: Option<&CancelGate>)
+        obstacle_offsets: Option<&[f64]>, obstacle_geometry: Option<&[obstacles::geometry::ObstacleGeometry]>,
+        gate: Option<&CancelGate>)
         -> Result<&MultiFrictionFrame, ModalFrictionError>
     {
         poll(gate)?;
@@ -258,6 +259,16 @@ impl MultiFrictionModalSystem {
             return Err(invalid("simultaneous friction requires one finite speed and nonnegative load per port").into());
         }
         self.validate_contact_normal_drives(drives)?;
+        if obstacle_geometry.is_some() && self.obstacles.is_none() {
+            return Err(invalid("attachment motion requires attached obstacles").into());
+        }
+        if let Some(obstacles) = &mut self.obstacles {
+            // Geometry is fixed for every inner friction/contact and outer DG
+            // trial of THIS sample. Accepted columns remain unchanged until
+            // the complete mechanical transaction publishes.
+            obstacles.prepare_geometry(&self.core.network, &self.points,
+                &self.contact_loads, obstacle_geometry, gate)?;
+        }
         if p == 1 && self.obstacles.is_none() {
             let f = *self.core.step_inner(external, drives[0], gate)?;
             self.frame.ports[0] = FrictionPortFrame { normal_force_n: drives[0].normal_force_n, traction_n: f.traction_n, slip_distance_m: f.slip_distance_m,
@@ -391,7 +402,11 @@ impl MultiFrictionModalSystem {
                 traction_n: self.tractions[i], slip_distance_m: slip,
                 drive_work_j: supply, dissipation_j: dissipation, constitutive_residual_n: residual, regime: self.regimes[i] };
         }
-        let pressure = self.core.staged_observer_pressure(gate)?;
+        let mut pressure = self.core.staged_observer_pressure(gate)?;
+        if let (Some(obstacles), Some(weights)) = (&self.obstacles, self.core.acceleration_pressure_weights()) {
+            pressure = obstacles.endpoint_pressure(pressure, weights, gate)?;
+            limit("acceleration observer pressure", pressure.abs(), self.core.network.config.maximum_abs_pressure_pa)?;
+        }
         let staged = &self.core.network.staged_frame;
         let network_energy = finite(staged.modal_energy_j+staged.connection_energy_j)?;
         let after = if self.obstacles.is_some() { finite(network_energy+obstacle_energy)? } else { network_energy };

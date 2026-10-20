@@ -333,8 +333,16 @@ pub(super) fn contact_column(network: &CoupledModalSystem, contact: &ModalContac
     -> Result<Vec<f64>, ModalCouplingError>
 {
     validate_contact_law(&contact.law, config)?;
+    contact_attachment_column(network, &contact.left, &contact.right)
+}
+
+// The same physical projection for authored and prescribed endpoint geometry.
+// Changing a map never changes or re-admits the original constitutive law.
+pub(super) fn contact_attachment_column(network: &CoupledModalSystem,
+    left: &ModalAttachment, right: &ModalAttachment) -> Result<Vec<f64>, ModalCouplingError>
+{
     let mut column = vec![0.0; network.mode_count()];
-    for (attachment, sign) in [(&contact.left, 1.0), (&contact.right, -1.0)] {
+    for (attachment, sign) in [(left, 1.0), (right, -1.0)] {
         let model = network.models.get(attachment.component)
             .ok_or_else(|| invalid("contact attachment names an unknown component"))?;
         if attachment.shapes.len() != model.modes().len() || attachment.shapes.iter().any(|x| !x.is_finite()) {

@@ -95,14 +95,14 @@ impl MultiFrictionModalSystem {
     pub fn step_with_obstacle_offsets(&mut self, external: &[f64], drives: &[FrictionDrive],
         end_offsets_m: &[f64]) -> Result<&MultiFrictionFrame, ModalFrictionError>
     {
-        self.step_inner(external, drives, Some(end_offsets_m), None)
+        self.step_inner(external, drives, Some(end_offsets_m), None, None)
     }
 
     /// Same complete physical transaction with cancellation polling.
     pub fn step_with_obstacle_offsets_under_gate(&mut self, external: &[f64], drives: &[FrictionDrive],
         end_offsets_m: &[f64], gate: &CancelGate) -> Result<&MultiFrictionFrame, ModalFrictionError>
     {
-        self.step_inner(external, drives, Some(end_offsets_m), Some(gate))
+        self.step_inner(external, drives, Some(end_offsets_m), None, Some(gate))
     }
 }
 

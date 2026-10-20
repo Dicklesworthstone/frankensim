@@ -13,6 +13,8 @@ use fs_couple::render::schedule::force::coupled::contact::friction::multiple::ob
 };
 use fs_dcontact::Obstacle;
 
+mod stations;
+
 fn joint() -> MultiFrictionConfig {
     MultiFrictionConfig { max_ports: 2, max_sweeps: 96, max_setup_terms: 1_048_576 }
 }

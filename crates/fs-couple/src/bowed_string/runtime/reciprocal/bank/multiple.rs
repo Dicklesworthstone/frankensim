@@ -8,7 +8,8 @@
 //! Loads are prescribed by default. Explicit co-located normal-contact bindings
 //! instead resolve each load from contact mechanics. Surface speeds remain
 //! prescribed; a shared bow-hair structure is not inferred by this adapter.
-//! Every contact station is fixed. The underlying bounded nonlinear solve may
+//! Bow stations are fixed; independently admitted compliant stops can migrate.
+//! The underlying bounded nonlinear solve may
 //! refuse a step; global uniqueness and measured instrument timbre are not claimed.
 
 use super::*;
@@ -57,6 +58,7 @@ pub struct MultiBowStringBank {
     source: MultiBowStringBankSource,
     cards: Vec<BowedStringCard>,
     system: MultiFrictionModalSystem,
+    stop_stations: Option<stops::stations::StationState>,
 }
 impl ReciprocalStringBank {
     /// Add material-derived contacts without reducing or resetting any component.
@@ -110,7 +112,7 @@ impl ReciprocalStringBank {
         Ok(MultiBowStringBank { source: MultiBowStringBankSource {
             bank: self.source, bows, joint, stops: Vec::new(), bow_contact_loads: Vec::new(),
             ribbon: None,
-        }, cards: self.cards, system })
+        }, cards: self.cards, system, stop_stations: None })
     }
 }
 impl MultiBowStringBank {

@@ -485,20 +485,84 @@ cargo run --release -p fs-couple --example material_strings -- \
 Independent compliant stops and contact-loaded bows use the original joint
 normal/tangential solver inside each stretching trial. Both endpoints of contact
 storage, normal-contact loss and signed support work `-reaction * offset_change`
-join the geometric, network and bow work balance before publication. Motion is
-normal translation of supports at fixed stations along the string; it does not
-move a contact station along the span. Existing stop profiles and gesture tracks
-remain the input format.
+join the geometric, network and bow work balance before publication. Normal
+translation uses the existing `motion`/`knot` block. A separate `station-motion`
+block can additionally move independent finger/stop contacts along the original
+string span, as described below. Existing stop profiles and gesture tracks remain
+the input format.
 
 This is the moderate-slope, fixed-end Kirchhoff–Carrier model. Nonlinear
 harmonics and strong coupling require clock/mode refinement; residual closure
 alone does not establish trajectory accuracy. This selection supports multiple
-prescribed or contact-loaded bows, fixed or normally translating supports and
+prescribed or contact-loaded bows, fixed, normally translating or migrating independent supports and
 `forces retain`. Static preload still refuses because it requires a joint
 nonlinear equilibrium solve. Select gas loading and rotational bridges before
 attaching stretching. Axial wave
 inertia, winding slip, evolving temperature and measured instrument qualification
 remain outside this composition.
+
+## Moving finger/stop stations in the same material instrument
+
+`migrating-finger.material-strings` and `migrating-finger.stops` combine a fixed
+contact-loaded bow with an independently pressing, migrating and withdrawing
+compliant finger. The string retains four bending modes in each transverse
+plane, material torsion, its bonded section's axial rigidity, shared material
+body/cavity and causal gas memory. With the existing wire, body and sleeve packs:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/migrating-finger.material-strings" "$demo/migrating-finger.wav" \
+  --stop-profile "$demo/migrating-finger.stops"
+```
+
+After the stop and optional `bow-contact` declarations, a v1 stop profile may
+contain each of the normal and longitudinal motion blocks once, in either order:
+
+```text
+station-motion 1 0.00003 1048576 3
+station-knot 480 0.2 0.43
+station-knot 1920 0.2 0.48
+station-knot 2880 0.2 0.46
+```
+
+The header fields are maximum longitudinal speed [m/s], maximum distance per
+mechanical sample [m], maximum geometry/response work terms per update, and knot
+count. Each knot gives the elapsed **endpoint sample** followed by one interior
+station fraction per stop in declaration order. Sample zero implicitly retains
+each authored station. The original endpoint sampler linearly interpolates
+between knots and holds the final position. The `motion` block still supplies
+independent normal offsets on that same clock. Both paths admit at most 128
+knots and 4096 scalar coordinates; the complete stop profile remains at most
+16 KiB. Native geometry updates admit at most 1,048,576 work terms.
+
+The runtime obtains every new displacement/force map from the existing material
+string source, including its gas-loaded mass and selected transverse directions.
+It retains the full supported span and every string, torsion, body, cavity and
+fluid coordinate. A declared receiver footprint and the contact normal stay
+fixed. No speaking length, tension, modal frequency or observer gain is edited.
+
+For normal closure `x = Nᵀq - s`, the endpoint identity is
+`Δx = mean(N)ᵀΔq + ΔNᵀmean(q) - Δs`. The original contact reaction therefore
+acts through `-mean(N)`, and its prescribed geometry work is
+`reaction * (ΔNᵀmean(q) - Δs)`. The original unilateral potential and damping
+use the complete closure change. Both geometry supplies, the actual normal
+reaction, bow friction and source-derived stretching must close one common
+energy balance before publication. Acceleration pressure uses the endpoint
+attachment map and endpoint geometric force. Reports expose attachment work
+separately from total geometry work; rejected motion changes neither accepted
+station, normal offset, modal state, contact report nor sample clock.
+
+A stop that supplies a bow's normal reaction must retain that bow's station;
+its tangential migration/slip is not part of this model. Other independent
+stops can migrate alongside it. Excessive speed or displacement, endpoints
+outside the span, nonpositive endpoint/mean-map contact compliance and existing
+material, force, penetration, energy or pressure limits refuse. Constant
+station paths preserve the original fixed-stop arithmetic. This is a bounded
+moving compliant contact model, not a solved finger, distributed tissue patch,
+rigid stopping constraint or measured violin/cello qualification. Resolve the
+contact footprint and refine spatial modes and time before treating a resulting
+pitch or timbre as converged; four retained modes per plane are an example
+configuration, not an accuracy claim.
 
 ## Material profile and physical limits
 
