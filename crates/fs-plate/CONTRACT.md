@@ -483,3 +483,19 @@ measured piano bridge-mobility or high-band convergence claim.
   through the 8% theory-column envelope. No measured-INSTRUMENT
   (guitar-top holography) comparison yet — that case joins the
   instrument-matdb bead's consuming demo.
+
+## Physical compliant shell attachments
+
+`shell::mitc::connections` adds finite bilateral attachment resultants to the
+existing MITC pencil before eigensolution. Global translation and physical moment
+rows use `MitcShellModel::project_load`, preserving `k*b*b^T` and
+force/displacement work in the existing support frame. The original mass matrix
+is preserved. Viscous rows project in the same physical basis without diagonal
+fitting, including semidefinite loss and zero retained modal participation.
+
+Explicit connection, footprint and work limits and cancellation apply.
+Detached, cancelling, negative or nonfinite laws refuse transactionally.
+Regressions cover independent static compliance, oblique support coordinates,
+physical moment arms, common rigid motion and viscous work. These additions do
+not implement continuum mortar, exact ties, connection mass, finite strain or a
+prestressed equilibrium.
