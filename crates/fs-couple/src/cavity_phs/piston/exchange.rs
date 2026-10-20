@@ -9,6 +9,8 @@
 pub mod thermal;
 /// Species exchange, electrical storage, finite thermal cells and wall motion.
 pub mod network;
+/// Shared-state multiport flow driving independent moving gas chambers.
+pub mod graph;
 
 use super::{ClosedGasParcel, GasEnergyError, GasPiston, PistonError, PistonInput,
     PistonSolve, PistonStep, invalid, poll, positive};
