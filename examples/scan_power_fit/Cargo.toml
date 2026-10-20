@@ -17,3 +17,5 @@ fs-blake3 = { path = "../../crates/fs-blake3" }
 fs-alloc = { path = "../../crates/fs-alloc" }
 fs-exec = { path = "../../crates/fs-exec" }
 fs-solver = { path = "../../crates/fs-solver" }
+# In-house derivative-free engine; only this standalone example consumer adds it.
+fs-dfo = { path = "../../crates/fs-dfo" }
