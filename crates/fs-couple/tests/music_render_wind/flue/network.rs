@@ -132,3 +132,108 @@ fn unsteady_windway_data_reaches_regional_source_and_physical_cli_output() {
         assert!(!output.with_extension("provenance.json").exists());
     }
 }
+
+
+fn articulated_source() -> String {
+    use fs_scenario::gesture::{GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue};
+    let head = include_str!("../../../examples/flue-embouchure.performance")
+        .split_once("\ngesture\n").unwrap().0.replace("output 24000 5", "output 1024 1");
+    let schedule = GestureSchedule::try_new(700, vec![
+        GestureTrack { id: "blow".into(), target: GestureTarget::BlowingPressure,
+            initial: GestureValue::PressurePa(300.0), events: vec![] },
+        GestureTrack { id: "angle".into(), target: GestureTarget::JetAngle,
+            initial: GestureValue::AngleRad(0.0), events: vec![
+                GestureEvent { time_s: 1.0/700.0, transition_s: 4.0/700.0,
+                    value: GestureValue::AngleRad(0.035) },
+                GestureEvent { time_s: 6.0/700.0, transition_s: 2.0/700.0,
+                    value: GestureValue::AngleRad(-0.015) },
+            ] },
+    ]).unwrap();
+    format!("{head}\ngesture\n{}", String::from_utf8(schedule.to_canonical_bytes()).unwrap())
+}
+
+#[test]
+fn mouth_separation_and_angle_data_share_the_original_fluid_runtime_and_cli() {
+    let text = articulated_source();
+    let gate = CancelGate::new_clock_free();
+    let file = FlueFilePerformance::from_bytes(text.as_bytes(), 37, &gate).unwrap();
+    let p = file.renderer();
+    let v = p.voice();
+    let n = v.network().unwrap();
+    let loss = v.mouth_contraction().unwrap();
+    assert_eq!(loss.gas(), &n.source().gases[1]);
+    assert_eq!(loss.width_m(), file.geometry().flue_width_m);
+    assert_eq!(loss.opening_m(), file.geometry().cut_up_m);
+    assert_eq!(loss.spec().provenance, "authored-fixed-window-demonstrator");
+    assert_eq!(loss.spec().area_ratio, 0.85);
+    assert_eq!(v.unsteady_windway().unwrap().channel().gas(), loss.gas());
+    let island = v.island();
+    let direct = FlueVoice::from_fractional_network(Some(file.card()),
+        island.displacement_gain, island.seed_amplitude_rel, file.geometry(),
+        n.source().clone(), None, n.fractional_sections().unwrap().0,
+        96_000, 3, 0, &gate).unwrap()
+        .with_mouth_contraction(loss.spec().clone()).unwrap()
+        .with_unsteady_windway(0.015, 32, 64).unwrap();
+    let mut direct = FlueOutletPerformance::with_multirate_radiation(direct,
+        p.schedule().clone(), *p.config(), p.radiation_input().unwrap().clone(), 96_000).unwrap();
+    let mut expected = vec![0.0; 1024];
+    for block in expected.chunks_mut(37) { direct.block(block).unwrap(); }
+    assert_eq!(physical(&text).0, expected);
+    assert_eq!(direct.voice().jet_angle_rad(), -0.015);
+    assert_eq!(direct.voice().samples_rendered(), 2048);
+    let separation: f64 = direct.voice().diagnostics().iter().map(|d| d.separation_loss_j).sum();
+    assert!(separation > 0.0, "the declared mouth law must be advanced in the source solve");
+    assert!(direct.voice().unsteady_windway().unwrap().channel().velocities_m_s()
+        .iter().any(|v| *v > 0.0));
+    assert!(direct.voice().network().unwrap().stored_energy_j() > 0.0);
+    let wav = encode_pcm16_wav(&expected, 48_000, 1.0).unwrap().0;
+    let dir = directory();
+    let input = dir.join("embouchure.performance");
+    std::fs::write(&input, &text).unwrap();
+    for block in [1, 137] {
+        let output = dir.join(format!("embouchure-{block}.wav"));
+        success(run(&input, &output, block, false));
+        assert_eq!(std::fs::read(&output).unwrap(), wav);
+        let sidecar = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+        assert!(sidecar.contains("\"mouth_contraction\":{"));
+        assert!(sidecar.contains("\"source\":\"authored-fixed-window-demonstrator\""));
+        assert!(sidecar.contains("\"windway_model\":\"unsteady-no-slip-slit-v1\""));
+    }
+}
+
+#[test]
+fn data_only_angle_separation_and_atmosphere_changes_reach_microphone_pressure() {
+    let text = articulated_source();
+    let baseline = physical(&text).0;
+    for changed in [
+        text.replace("mouth_loss contraction 0.85 0.3 authored-fixed-window-demonstrator", "mouth_loss none"),
+        text.replace("angle-rad\t3.5e-2", "angle-rad\t1e-2"),
+        text.replace("O2 0.2 CO2 0.03", "O2 0.15 CO2 0.08"),
+    ] {
+        let pressure = physical(&changed).0;
+        assert!(pressure.iter().zip(&baseline).any(|(a,b)| (a-b).abs() > 1.0e-15),
+            "authored physical controls and gas must reach the microphone");
+    }
+    let no_loss = text.replace("mouth_loss contraction 0.85 0.3 authored-fixed-window-demonstrator\n", "");
+    assert_eq!(physical(&no_loss).0, physical(&no_loss.replace("jet_card ",
+        "mouth_loss none\njet_card ")).0);
+    for row in [
+        "mouth_loss contraction 0 0.3 source",
+        "mouth_loss contraction 1.01 0.3 source",
+        "mouth_loss contraction 0.85 0.31 source",
+        "mouth_loss contraction 0.85 0.3",
+        "mouth_loss contraction 0.85 0.3 source extra",
+    ] {
+        let bad = text.replace("mouth_loss contraction 0.85 0.3 authored-fixed-window-demonstrator", row);
+        assert!(FlueFilePerformance::from_bytes(bad.as_bytes(), 37, &CancelGate::new_clock_free()).is_err());
+    }
+    let bad_angle = text.replace("angle-rad\t3.5e-2", "angle-rad\t2e0");
+    assert!(FlueFilePerformance::from_bytes(bad_angle.as_bytes(), 37, &CancelGate::new_clock_free()).is_err());
+    let dir = directory();
+    let input = dir.join("bad-angle.performance");
+    let output = dir.join("bad-angle.wav");
+    std::fs::write(&input, bad_angle).unwrap();
+    assert!(!run(&input, &output, 37, false).status.success());
+    assert!(!output.exists());
+    assert!(!output.with_extension("provenance.json").exists());
+}

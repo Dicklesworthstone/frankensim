@@ -3080,3 +3080,34 @@ interface-only loss and source/geometry/frequency/resource refusals.
 This finite bilateral model does not establish continuum mortar, glue coverage,
 opening contact, complete assembled instrument anatomy, thermal/history
 evolution, a prestressed equilibrium or measured timbre.
+
+### Flue jet-direction controls and gas-bound mouth separation
+
+`FlueControl::SetJetAngle` changes only the prescribed direction in the
+existing fixed-window tilted-cut image. Its effective offset is the original
+`labium_offset + cut_up * tan(angle)`; the resulting injected-flow change
+enters the same source-pressure derivative and mouth-work balance. Finite
+direction and transverse-coordinate admission precede held-input mutation.
+Acoustic, convection, windway, material-wall and radiation histories persist.
+
+`FlueOutletPerformance` accepts one blowing-pressure track and an optional
+typed jet-angle track. The original pressure compiler and `GestureSchedule`
+sampler share exact ceiling-rounded mechanical timestamps; both controls apply
+before that sample. Whole-phrase admission bounds every track/tick assignment
+and source-sampling work before stepping. The existing multirate observer
+retains partial frames across controls and callbacks.
+
+The file's optional `mouth_loss contraction CC MACH SOURCE` row binds the
+existing `ContractionSpec` to the actual mouth window and actual inlet gas.
+Its separation loss enters the same implicit acoustic-mouth solve, remains
+distinct from radiation/viscous loss, and checks the solved contracted Mach.
+Omission and `mouth_loss none` select the original linear mouth.
+
+Focused G0/G3 regressions compare static geometry against angle controls,
+manually sampled pressure/direction against the actual shared microphone,
+retained moving-gas histories, callback partition invariance, data-only gas
+changes and file/CLI construction. These tests do not establish measured
+instrument fidelity. The direction remains an instantaneous geometric
+approximation, not resolved transient jet turning, moving lips, coverage,
+time-varying mouth area/cut-up, or a material-state evolution law. The
+separation closure does not resolve vortex memory or turbulence.

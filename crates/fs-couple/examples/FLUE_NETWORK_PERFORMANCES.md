@@ -96,3 +96,69 @@ supplied passive loads with a one-way infinite-baffle receiver. It does not
 provide moving finger pads, branch end corrections, matched mutual radiation,
 a resolved jet or measured flute fidelity. These limitations are unchanged by
 making the existing physical construction accessible from data.
+
+## Pressure and jet direction in one performance
+
+`flue-embouchure.performance` adds a prescribed jet-angle phrase and the
+existing separated-flow mouth loss to the branched, regional-gas example:
+
+```sh
+cargo run --release -p fs-couple --bin music_render -- wind \
+  crates/fs-couple/examples/flue-embouchure.performance flue-embouchure.wav
+```
+
+The source is a manufactured fixed-window demonstration. Its geometry, player
+controls and loss coefficient are authored inputs; none was inferred by
+matching an instrument recording.
+
+The canonical gesture suffix requires one `blowing-pressure` track and accepts
+one additional `jet-angle` track, whose values are `angle-rad`. Track IDs are
+arbitrary and distinct. Both tracks use the original gesture sampler, including
+interrupted ramps. A tick applies at
+`ceil(tick * mechanics_rate / control_rate)`, before that mechanical sample.
+Changing callback size does not alter the physical control clock or discard
+partial microphone frames. The `controls` limit bounds the number of tracks
+times control ticks before held-value coalescing.
+
+The direction enters the existing geometric cut,
+`labium_offset + cut_up * tan(jet_angle)`. It changes the jet volume entering
+the mouth, and the same source-pressure derivative and implicit mouth solve
+propagate that change through every duct and selected outlet. Angles must be
+finite and strictly inside `(-pi/2, pi/2)`, with a representable transverse
+offset. The complete phrase is checked before any source sample.
+
+This is the existing instantaneous tilted-cut approximation at fixed mouth
+area, cut-up, exit width and exit height. It does not resolve transient jet
+turning or lip movement, change lip coverage or remesh convection. The
+windway velocity field, jet feedback history, wave propagation, material-wall
+memory and radiation history persist. A pressure release still leaves stored
+fluid and acoustic motion intact. Dynamic cut-up or mouth-area changes need a
+moving-domain and boundary-work model and are not exposed as simple controls.
+
+## Mouth separation from the actual geometry and gas
+
+After the optional `windway` row and before `jet_card`, select:
+
+```text
+mouth_loss contraction 0.85 0.3 authored-fixed-window-demonstrator
+```
+
+The fields are contracted jet area / physical opening area, maximum contracted
+Mach number, and one explicit source token. The existing `ContractionSpec`
+owner validates them and binds the loss to the physical mouth window
+`flue_width * cut_up` and the **actual inlet section's complete gas state**.
+There is no independently entered density or sound speed. The example's source
+label explicitly identifies a manufactured coefficient, not measured edge data.
+
+The mouth solve includes the signed pressure drop
+`rho * Q * abs(Q) / (2 * (Cc * area)^2)` at the accepted flow, together with
+mouth inertance, the supplied linear mouth resistance and the same acoustic
+port. Its power is recorded as separation loss; it is distinct from radiation
+and windway viscosity. The solved contracted Mach limit remains active during
+rendering. `Cc = 1` still supplies this loss law. Omit the row or use
+`mouth_loss none` for the original linear mouth.
+
+The CLI sidecar includes the supplied coefficient/source, bound effective area
+and actual gas density/sound speed. This remains a quasi-steady separation
+closure with no vortex memory, resolved shedding or measured flute accuracy.
+It does not qualify the full Boehm assembly or the plan's register experiment.

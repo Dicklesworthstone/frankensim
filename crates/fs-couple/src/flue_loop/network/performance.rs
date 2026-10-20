@@ -10,16 +10,17 @@
 
 /// Versioned data-driven flue construction through this same pressure renderer.
 pub mod file;
+mod controls;
 
 use super::{FlueError, FlueResonator, FlueVoice};
 use crate::acoustic_realize::AcousticRealizeError;
+#[cfg(test)]
 use crate::flue_loop::FlueControl;
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver};
 use crate::pcm_wav::observation::PressureRenderer;
-use crate::render::{ControlDelta, RenderError};
-use crate::render::schedule::{
-    GestureCompileError, PressureGestureBinding, ScheduledControl, compile_pressure_gestures,
-};
+use crate::render::RenderError;
+use crate::render::schedule::GestureCompileError;
+use controls::ScheduledFlueControl;
 use fs_scenario::gesture::GestureSchedule;
 use fs_material::gas::GasState;
 #[cfg(test)]
@@ -41,7 +42,7 @@ pub struct FlueOutletConfig {
     /// Largest host callback [OUTPUT samples]. The launched-wave scratch has
     /// this many times the mechanics/output ratio, at most 1,048,576 samples.
     pub max_block: usize,
-    /// Upper bound on control ticks, even if equal inputs are coalesced.
+    /// Upper bound on all track/tick assignments before equal values coalesce.
     pub max_controls: usize,
     /// Existing gesture compiler's source-track/event work allowance.
     pub max_compile_work: u64,
@@ -87,7 +88,7 @@ pub struct FlueOutletPerformance {
     mechanics_rate_hz: u32,
     mechanics_per_output: usize,
     schedule: GestureSchedule,
-    controls: Vec<ScheduledControl>,
+    controls: Vec<ScheduledFlueControl>,
     next: usize,
     launched: Vec<f64>,
     poisoned: bool,
@@ -105,8 +106,9 @@ fn source_error(error: FlueError) -> RenderError {
 }
 
 impl FlueOutletPerformance {
-    /// Bind one canonical blowing-pressure track to a quiescent physical graph.
-    /// Uses the existing pressure compiler's ramp, clock-rounding and event rules.
+    /// Bind a canonical blowing-pressure track and optional jet-angle track to
+    /// a quiescent physical graph. Both use the existing gesture ramp semantics
+    /// and apply on the same mechanical clock before their named sample.
     /// Every emitted input is checked against the actual jet's declared domain
     /// before any source or observer advances. No source track is silently ignored.
     ///
@@ -223,28 +225,8 @@ impl FlueOutletPerformance {
         }], DuctRadiationSpec { openings, exterior: radiation.as_ref().map(|r| r.exterior),
             receiver: config.receiver, reconstruction,
         }).map_err(|e| GestureCompileError::Render(RenderError::Voice(AcousticRealizeError::Nonlinear(e))))?;
-        let [track] = schedule.tracks() else {
-            return Err(invalid("flue performance needs one explicitly typed blowing-pressure track"));
-        };
-        let rate = schedule.control_rate_hz;
-        if rate == 0 || rate > mechanics_rate_hz {
-            return Err(invalid("flue controls must have a positive rate no faster than the source clock"));
-        }
-        let last_tick = u128::from(mechanical_samples - 1) * u128::from(rate) / u128::from(mechanics_rate_hz);
-        if last_tick + 1 > config.max_controls as u128
-            || track.events.iter().any(|e| e.time_s > last_tick as f64 / f64::from(rate)) {
-            return Err(invalid("flue commands exceed the observed window or control-tick budget"));
-        }
-        let controls = compile_pressure_gestures(&schedule, &[PressureGestureBinding {
-            track: track.id.clone(), voice: 0,
-        }], mechanics_rate_hz, mechanical_samples, config.max_compile_work)?;
-        for control in &controls {
-            let ControlDelta::SetBlowingPressure { voice: 0, pressure_pa } = control.delta else {
-                return Err(invalid("flue pressure compiler produced a non-pressure or differently addressed control"));
-            };
-            voice.validate_blowing_pressure(pressure_pa)
-                .map_err(|e| GestureCompileError::Render(source_error(e)))?;
-        }
+        let controls = controls::compile(&voice, &schedule, &config,
+            mechanics_rate_hz, mechanical_samples)?;
         let mut launched = Vec::new();
         launched.try_reserve_exact(scratch_samples)
             .map_err(|_| invalid("flue callback scratch exceeds available allocation"))?;
@@ -291,10 +273,7 @@ impl FlueOutletPerformance {
             let now = self.voice.samples_rendered();
             while let Some(control) = self.controls.get(self.next) {
                 if control.sample != now { break; }
-                let ControlDelta::SetBlowingPressure { pressure_pa, .. } = control.delta else {
-                    unreachable!("pressure-only controls were admitted")
-                };
-                self.voice.apply(FlueControl::SetBlowingPressure(pressure_pa)).map_err(source_error)?;
+                self.voice.apply(control.delta).map_err(source_error)?;
                 self.next += 1;
             }
             let until = self.controls.get(self.next).map_or(end, |c| c.sample.min(end));
