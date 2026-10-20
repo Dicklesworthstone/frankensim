@@ -1,4 +1,4 @@
-//! Least-squares inverse objectives over a complete fixed-grid heating history.
+//! Residual-based inverse objectives over a complete fixed-grid heating history.
 //!
 //! Each endpoint runs the original nonlinear scan producer once. The reverse
 //! sweep propagates the downstream enthalpy seed BEFORE adding the current
@@ -16,6 +16,8 @@ pub mod responses;
 pub mod checkpoint;
 /// Mesh-bound interior probes and finite spatial readouts.
 pub mod spatial;
+/// Explicit quadratic or outlier-resistant losses on physical measurements.
+pub mod loss;
 
 use super::{ScanSensitivityBudget, ScanSensitivityError, ScanStepLinearization};
 use super::super::{ScanStep, ScanningEnthalpyRun};
@@ -95,10 +97,12 @@ pub struct ScanObjectiveBudget {
 /// Complete objective and gradient, returned only after the reverse sweep passes.
 #[derive(Debug)]
 pub struct ScanObjectiveEvaluation {
-    /// Dimensionless 0.5 * sum((prediction-target)/scale)^2.
+    /// Dimensionless sum of each observation's declared residual loss.
+    /// Unwrapped observations retain 0.5 * sum((prediction-target)/scale)^2.
     pub value: f64,
     /// Original observation order, in the selected physical units.
     pub predictions: Vec<f64>,
+    /// Original (prediction-target)/scale, never clipped or robustly transformed.
     pub standardized_residuals: Vec<f64>,
     /// Gradients in each source's original schedule representation and SI units.
     pub sources: Vec<MovingHeatScheduleGradient>,
@@ -163,7 +167,8 @@ fn evaluate_with_tape<R, O: ScanObservationSpec>(
             let observation = &observations[i];
             let prediction = observation.prediction(cx, binding.report())?;
             let residual = finite((prediction-observation.target())/observation.scale())?;
-            value = finite(value + 0.5 * residual * residual)?;
+            let (term, _) = observation.loss().value_derivative(residual)?;
+            value = finite(value + term)?;
             predictions[i] = prediction;
             residuals[i] = residual;
         }
@@ -230,6 +235,7 @@ fn admit_layout<O: ScanObservationSpec>(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'
             || !observation.target().is_finite() || !observation.scale().is_finite() || observation.scale() <= 0.0
         { return Err(invalid("scan observation needs an existing endpoint/vertex, finite target and positive finite physical scale")); }
         observation.validate_readout(run.run.problem.boundary.mesh())?;
+        observation.loss().validate()?;
         if observation.observable() == ScanObservable::LiquidMassFraction
             && !(0.0..=1.0).contains(&observation.target())
         { return Err(invalid("liquid mass fraction targets must be dimensionless values in [0,1], not percentages")); }
@@ -286,7 +292,8 @@ impl ReverseState {
         for &i in indices {
             poll(cx, i)?;
             let observation = &observations[i];
-            let local = finite(residuals[i]/observation.scale())?;
+            let (_, slope) = observation.loss().value_derivative(residuals[i])?;
+            let local = finite(slope/observation.scale())?;
             let target = match observation.observable() {
                 ScanObservable::Temperature => &mut temperature_seed,
                 ScanObservable::SpecificEnthalpy => &mut self.seed,

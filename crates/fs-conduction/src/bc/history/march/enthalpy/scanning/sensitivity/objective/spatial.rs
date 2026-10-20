@@ -190,7 +190,7 @@ pub struct ScanSpatialObservation<'m> {
     pub scale: f64,
 }
 
-mod sealed {
+pub(super) mod sealed {
     pub trait Sealed {}
     impl Sealed for super::ScanObservation {}
     impl Sealed for super::ScanSpatialObservation<'_> {}
@@ -209,6 +209,11 @@ pub trait ScanObservationSpec: sealed::Sealed {
     fn target(&self) -> f64;
     /// Positive physical residual scale.
     fn scale(&self) -> f64;
+    /// Fixed loss of the standardized scalar measurement residual. Spatial
+    /// reduction happens first; this policy does not modify the readout row.
+    fn loss(&self) -> super::loss::ScanResidualLoss {
+        super::loss::ScanResidualLoss::Quadratic
+    }
     /// Check that the readout addresses this exact mesh before solving physics.
     #[doc(hidden)]
     fn validate_readout(&self, mesh: &ConductionMesh) -> Result<(), ScanSensitivityError>;

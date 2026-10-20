@@ -74,7 +74,8 @@ pub(crate) fn evaluate_observations_checkpointed<O: ScanObservationSpec>(
                 let o = &observations[i];
                 let prediction = o.prediction(cx, report)?;
                 let residual = finite((prediction-o.target())/o.scale())?;
-                value = finite(value + 0.5*residual*residual)?;
+                let (term, _) = o.loss().value_derivative(residual)?;
+                value = finite(value + term)?;
                 predictions[i] = prediction; residuals[i] = residual;
             }
             for (i, response) in responses.iter().enumerate() {
