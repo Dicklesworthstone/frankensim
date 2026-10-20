@@ -14,6 +14,7 @@ set -euo pipefail
 SHA12="${1:?usage: render.sh BIN_SHA12 [DATA_SHA12 [OUT_DIR]]}"
 DATA_SHA12="${2:-${SHA12}}"
 BIN="/data/tmp/wa-inst/bin/${SHA12}"
+XTASK="${XTASK:-${BIN}/xtask}"   # packs only need any xtask that predates a pack-format change
 SNAP="/data/tmp/wa-inst/snap/${DATA_SHA12}/frankensim"
 OUT="${3:-/data/tmp/wa-inst/renders/guitar/${DATA_SHA12}-${SHA12}}"
 D="${SNAP}/data/instruments/descriptions/guitar"
@@ -21,7 +22,7 @@ mkdir -p "${OUT}"
 cd "${OUT}"
 for pack in nylon-g3 nylon-b3 nylon-e4 cedar-top; do
   cp "${D}/${pack}.tsv" "${D}/${pack}-manifest.tsv" .
-  (cd "${SNAP}" && "${BIN}/xtask" matdb-pack --manifest "${OUT}/${pack}-manifest.tsv" --out "${OUT}/${pack}.fsmatpk")
+  (cd "${SNAP}" && "${XTASK}" matdb-pack --manifest "${OUT}/${pack}-manifest.tsv" --out "${OUT}/${pack}.fsmatpk")
 done
 cp "${D}"/gt-s1-solo-*.material-strings "${D}"/gt-s1-solo-*.body .
 for note in g3 b3 e4; do
