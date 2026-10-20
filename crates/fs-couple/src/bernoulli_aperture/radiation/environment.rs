@@ -169,3 +169,6 @@ pub fn bind_baffled_environment(
 }
 
 mod instruments;
+
+/// Source-bound mutual reaction through the original exact-ZOH multiport owner.
+pub mod multiport;

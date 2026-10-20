@@ -4,6 +4,8 @@ use crate::bernoulli_aperture::network::{NetworkNode, TubeSection};
 use fs_aeroac::jetcard::mint_tonal_interim_card;
 use fs_material::gas::GasSpec;
 
+mod mimo;
+
 pub(super) fn gas() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap()
 }
