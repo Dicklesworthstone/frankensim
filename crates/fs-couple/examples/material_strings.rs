@@ -60,6 +60,11 @@ fn options(spec:&input::Spec,bow:StringBowLocation,tensor_body:bool,
     additional_body_connections:usize) -> Result<StringBankOptions> {
     let (max_modes,max_connections,max_setup_terms)=spec
         .network_dimensions_with_body_connections(tensor_body,additional_body_connections)?;
+    // The N*(L+1)^2 screen leaves no room for a zero-stiffness coordinate (a cavity neck
+    // plug) in a static preload: its free-block solve costs free*L^2 + free^2*L + free^3
+    // with free <= L, so a full-rank viscous body plus a cavity was refused by construction.
+    let max_setup_terms=max_setup_terms
+        .saturating_add(max_connections.saturating_pow(3).saturating_mul(3));
     Ok(StringBankOptions { sample_rate_hz:spec.rate,bow,string_budget:modal_budget(),
         network:ModalCouplingConfig { max_modes,max_connections,max_setup_terms,
             nyquist_guard_fraction:0.9,maximum_total_energy_j:100.0,maximum_abs_pressure_pa:1e6,
