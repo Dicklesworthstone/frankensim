@@ -6,11 +6,14 @@
 //! lost. All sampled source gradients are contracted into the original authored
 //! constant/ramp/table/Chebyshev values, on the same side of every event.
 //!
-//! This is a bounded full-storage evaluation, not checkpoint recomputation or
-//! differentiation of adaptive grids, event times, geometry or material charts.
+//! The default evaluator retains its full bounded tape; `checkpoint` adds an
+//! explicit segmented replay policy. Neither differentiates adaptive grids,
+//! event times, geometry or material charts.
 
 /// Independent physical response rows sharing the original forward trajectory.
 pub mod responses;
+/// Short-tape reverse sweeps with bounded caloric-state checkpoints.
+pub mod checkpoint;
 
 use super::{ScanSensitivityBudget, ScanSensitivityError, ScanStepLinearization};
 use super::super::{ScanStep, ScanningEnthalpyRun};
@@ -123,6 +126,50 @@ fn evaluate_with_tape<R>(
     responses: impl FnOnce(&ScanningEnthalpyRun<'_, '_, '_>, &[ScanStepLinearization<'_>])
         -> Result<R, ScanSensitivityError>,
 ) -> Result<(ScanObjectiveEvaluation, R), ScanSensitivityError> {
+    let (at_endpoint, per_step) = admit_layout(cx, &run, endpoints, observations,
+        budget, endpoints.len())?;
+    let count = endpoints.len();
+    let vertices = run.conduction().temperature().len();
+    let mut tape: Vec<ScanStepLinearization<'_>> = Vec::new();
+    tape.try_reserve_exact(count).map_err(|_| invalid("scan objective endpoint allocation refused"))?;
+    let mut predictions = zeros(observations.len())?;
+    let mut residuals = zeros(observations.len())?;
+    let mut value = 0.0;
+    for (index, &time) in endpoints.iter().enumerate() {
+        poll(cx, index)?;
+        let binding = advance_binding(cx, &mut run, time, sampling, step, per_step)?;
+        for &i in &at_endpoint[index] {
+            poll(cx, i)?;
+            let observation = observations[i];
+            let prediction = observed(binding.report(), observation.observable, observation.vertex);
+            let residual = finite((prediction-observation.target)/observation.scale)?;
+            value = finite(value + 0.5 * residual * residual)?;
+            predictions[i] = prediction;
+            residuals[i] = residual;
+        }
+        tape.push(binding);
+    }
+    let mut reverse = ReverseState::new(vertices)?;
+    for index in (0..count).rev() {
+        reverse.inject_observations(cx, &tape[index], observations, &at_endpoint[index], &residuals)?;
+        reverse.pull(cx, &run, &tape[index], sampling, transpose, budget.max_schedule_controls)?;
+    }
+    let final_step = tape.last().ok_or_else(|| invalid("missing scan endpoint"))?.report().clone();
+    poll(cx, count)?;
+    let extra = responses(&run, &tape)?;
+    poll(cx, count)?;
+    Ok((ScanObjectiveEvaluation { value, predictions, standardized_residuals: residuals,
+        sources: reverse.sources.ok_or_else(|| invalid("missing scan reverse sweep"))?,
+        initial_specific_enthalpy: reverse.seed, final_step, endpoint_count: count,
+        transpose_iterations: reverse.iterations, max_transpose_relative_residual: reverse.residual }, extra))
+}
+
+// Admission is shared by full-storage and checkpointed objectives. Only the
+// number of simultaneously retained tangents changes; the physical grid does not.
+fn admit_layout(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
+    endpoints: &[f64], observations: &[ScanObservation], budget: ScanObjectiveBudget,
+    retained_steps: usize,
+) -> Result<(Vec<Vec<usize>>, ScanSensitivityBudget), ScanSensitivityError> {
     poll(cx, 0)?;
     let count = endpoints.len();
     let vertices = run.conduction().temperature().len();
@@ -130,7 +177,10 @@ fn evaluate_with_tape<R>(
     if count == 0 || count > budget.max_steps || remaining.is_none_or(|n| count > n)
         || observations.is_empty() || observations.len() > budget.max_observations
     { return Err(invalid("nonempty endpoints/observations must fit the objective and remaining physical-step budgets")); }
-    let retained = count.checked_mul(vertices)
+    if retained_steps == 0 || retained_steps > count {
+        return Err(invalid("scan objective needs a nonempty retained tangent segment"));
+    }
+    let retained = retained_steps.checked_mul(vertices)
         .filter(|&n| n <= budget.max_retained_vertices)
         .ok_or_else(|| invalid("scan objective retained vertex allowance exceeded"))?;
     if retained.checked_mul(run.sources().len()).is_none_or(|n| n > budget.max_retained_source_vertices) {
@@ -162,75 +212,89 @@ fn evaluate_with_tape<R>(
         at_endpoint[observation.endpoint].push(i);
     }
     let per_step = ScanSensitivityBudget {
-        max_source_vertices: budget.max_retained_source_vertices / count,
-        max_radiation_feedback_entries: budget.max_retained_radiation_entries / count,
+        max_source_vertices: budget.max_retained_source_vertices / retained_steps,
+        max_radiation_feedback_entries: budget.max_retained_radiation_entries / retained_steps,
     };
-    let mut tape: Vec<ScanStepLinearization<'_>> = Vec::new();
-    tape.try_reserve_exact(count).map_err(|_| invalid("scan objective endpoint allocation refused"))?;
-    let mut predictions = zeros(observations.len())?;
-    let mut residuals = zeros(observations.len())?;
-    let mut value = 0.0;
-    for (index, &time) in endpoints.iter().enumerate() {
-        poll(cx, index)?;
-        let binding = match sampling {
-            ScanObjectiveSampling::RightEndpoint => run.advance_linearized_to(cx, time, step, per_step)?,
-            ScanObjectiveSampling::EventLeft => run.advance_linearized_event_step(
-                cx, time, time-run.conduction().time_s(), step, per_step)?,
-        };
-        if binding.end_time_s() != time {
-            return Err(invalid("fixed scan objective grid omits a source/boundary event or selected motion stop"));
-        }
-        for &i in &at_endpoint[index] {
-            poll(cx, i)?;
-            let observation = observations[i];
-            let solution = binding.report().solution();
-            let prediction = match observation.observable {
-                ScanObservable::Temperature => solution.temperature[observation.vertex],
-                ScanObservable::SpecificEnthalpy => solution.specific_enthalpy_j_kg[observation.vertex],
-            };
-            let residual = finite((prediction-observation.target)/observation.scale)?;
-            value = finite(value + 0.5 * residual * residual)?;
-            predictions[i] = prediction;
-            residuals[i] = residual;
-        }
-        tape.push(binding);
+    Ok((at_endpoint, per_step))
+}
+
+fn advance_binding<'m>(cx: &Cx<'_>, run: &mut ScanningEnthalpyRun<'_, 'm, '_>,
+    time: f64, sampling: ScanObjectiveSampling, step: EnthalpyStepConfig,
+    per_step: ScanSensitivityBudget,
+) -> Result<ScanStepLinearization<'m>, ScanSensitivityError> {
+    let binding = match sampling {
+        ScanObjectiveSampling::RightEndpoint => run.advance_linearized_to(cx, time, step, per_step)?,
+        ScanObjectiveSampling::EventLeft => run.advance_linearized_event_step(
+            cx, time, time-run.conduction().time_s(), step, per_step)?,
+    };
+    if binding.end_time_s() != time {
+        return Err(invalid("fixed scan objective grid omits a source/boundary event or selected motion stop"));
     }
-    let mut seed = zeros(vertices)?;
-    let mut accumulated: Option<Vec<MovingHeatScheduleGradient>> = None;
-    let mut iterations = 0usize;
-    let mut residual = 0.0_f64;
-    for index in (0..count).rev() {
-        poll(cx, index)?;
-        let binding = &tape[index];
-        let mut temperature_seed = zeros(vertices)?;
-        for &i in &at_endpoint[index] {
+    Ok(binding)
+}
+
+fn observed(report: &ScanStep, observable: ScanObservable, vertex: usize) -> f64 {
+    match observable {
+        ScanObservable::Temperature => report.solution().temperature[vertex],
+        ScanObservable::SpecificEnthalpy => report.solution().specific_enthalpy_j_kg[vertex],
+    }
+}
+
+// Only the original endpoint pullback does numerical differentiation. Reusing
+// this accumulator keeps checkpoint boundaries invisible to summation order.
+struct ReverseState {
+    seed: Vec<f64>,
+    sources: Option<Vec<MovingHeatScheduleGradient>>,
+    iterations: usize,
+    residual: f64,
+}
+impl ReverseState {
+    fn new(vertices: usize) -> Result<Self, ScanSensitivityError> {
+        Ok(Self { seed: zeros(vertices)?, sources: None, iterations: 0, residual: 0.0 })
+    }
+
+    fn inject_observations(&mut self, cx: &Cx<'_>, binding: &ScanStepLinearization<'_>,
+        observations: &[ScanObservation], indices: &[usize], residuals: &[f64],
+    ) -> Result<(), ScanSensitivityError> {
+        let mut temperature_seed = zeros(self.seed.len())?;
+        for &i in indices {
             poll(cx, i)?;
             let observation = observations[i];
             let local = finite(residuals[i]/observation.scale)?;
             let target = match observation.observable {
                 ScanObservable::Temperature => &mut temperature_seed[observation.vertex],
-                ScanObservable::SpecificEnthalpy => &mut seed[observation.vertex],
+                ScanObservable::SpecificEnthalpy => &mut self.seed[observation.vertex],
             };
             *target = finite(*target + local)?;
         }
         let local_h = binding.transport().transport().temperature_pullback(cx, &temperature_seed)?;
-        add(cx, &mut seed, &local_h)?;
-        let gradient = binding.pullback(cx, &seed, transpose)?;
-        iterations = iterations.checked_add(gradient.storage.transport.iterations)
+        add(cx, &mut self.seed, &local_h)
+    }
+
+    fn pull(&mut self, cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
+        binding: &ScanStepLinearization<'_>, sampling: ScanObjectiveSampling,
+        transpose: LinearConfig, max_controls: usize,
+    ) -> Result<(), ScanSensitivityError> {
+        poll(cx, 0)?;
+        let gradient = binding.pullback(cx, &self.seed, transpose)?;
+        self.iterations = self.iterations.checked_add(gradient.storage.transport.iterations)
             .ok_or_else(|| invalid("scan objective transpose work count overflow"))?;
-        residual = residual.max(gradient.storage.transport.relative_residual);
+        self.residual = self.residual.max(gradient.storage.transport.relative_residual);
+        if gradient.sources.len() != run.sources().len() {
+            return Err(invalid("scan source-gradient layout changed"));
+        }
         let mut schedules = Vec::with_capacity(gradient.sources.len());
         for (i, (source, gradient)) in run.sources().iter().zip(gradient.sources).enumerate() {
             poll(cx, i)?;
             schedules.push(match sampling {
                 ScanObjectiveSampling::RightEndpoint => source.pullback_schedule_at(
-                    cx, binding.end_time_s(), gradient, budget.max_schedule_controls)?,
+                    cx, binding.end_time_s(), gradient, max_controls)?,
                 ScanObjectiveSampling::EventLeft => source.pullback_schedule_before(
-                    cx, binding.end_time_s(), gradient, budget.max_schedule_controls)?,
+                    cx, binding.end_time_s(), gradient, max_controls)?,
             });
         }
-        match &mut accumulated {
-            None => accumulated = Some(schedules),
+        match &mut self.sources {
+            None => self.sources = Some(schedules),
             Some(total) => {
                 if total.len() != schedules.len() { return Err(invalid("scan source identity changed during reverse sweep")); }
                 for (a, b) in total.iter_mut().zip(&schedules) {
@@ -240,16 +304,9 @@ fn evaluate_with_tape<R>(
                 }
             }
         }
-        seed = gradient.storage.transport.previous_specific_enthalpy;
+        self.seed = gradient.storage.transport.previous_specific_enthalpy;
+        Ok(())
     }
-    let final_step = tape.last().ok_or_else(|| invalid("missing scan endpoint"))?.report().clone();
-    poll(cx, count)?;
-    let extra = responses(&run, &tape)?;
-    poll(cx, count)?;
-    Ok((ScanObjectiveEvaluation { value, predictions, standardized_residuals: residuals,
-        sources: accumulated.ok_or_else(|| invalid("missing scan reverse sweep"))?,
-        initial_specific_enthalpy: seed, final_step, endpoint_count: count,
-        transpose_iterations: iterations, max_transpose_relative_residual: residual }, extra))
 }
 
 fn add(cx: &Cx<'_>, target: &mut [f64], values: &[f64]) -> Result<(), ScanSensitivityError> {
