@@ -5,9 +5,12 @@ use fs_topopt::sdf3::robust::envelope::limits::{ComplianceCaps3, ComplianceLimit
     controlled_compliance_feasible_start}};
 use fs_topopt::sdf3::robust::envelope::optimize::EnvelopeDesignPoint3;
 
-pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> { run_mode(args, false) }
+pub fn run_binary(args: &[String]) -> Result<(), Box<dyn std::error::Error>> { run_mode(args, true) }
+fn run_mode(args: &[String], binary: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !(2..=4).contains(&args.len()) {
-        return Err("usage: worst_load_sdf3 --minimum-material CAP_Y CAP_Z [ACCEPTED_UPDATES [TOTAL_KRYLOV_ITERATIONS]]".into());
+        let mode = if binary { "--binary-material" } else { "--minimum-material" };
+        return Err(format!("usage: worst_load_sdf3 {mode} CAP_Y CAP_Z [ACCEPTED_UPDATES [TOTAL_KRYLOV_ITERATIONS]]").into());
     }
     // Admit authored requirements before constructing geometry or load fields.
     let caps = ComplianceCaps3::new(vec![args[0].parse()?, args[1].parse()?], 0.03, 2)?;
@@ -67,9 +70,14 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let recheck = design.recheck_best();
     eprintln!("fresh_resolve_passed={}; final_solve_work={:?}; terminal_kkt_is_incumbent_certificate=false",
         matches!(&recheck, Ok(Some(_))), design.work());
-    recheck?.ok_or("no incumbent available for fresh cap verification")?;
+    let checked = recheck?.ok_or("no incumbent available for fresh cap verification")?;
     if !matches!(terminal.stop, ProjectedAlStop::Converged | ProjectedAlStop::IterationLimit) {
         return Err("optimizer stopped before its requested allowance; the exported feasible prefix remains available".into());
+    }
+    if binary {
+        drop(design);
+        return super::binary::finish(&mut study, &forces, &checked.rho, &caps,
+            options, &keys, &nodes, &mut control);
     }
     Ok(())
 }

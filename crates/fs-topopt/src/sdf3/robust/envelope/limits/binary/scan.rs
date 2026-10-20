@@ -1,4 +1,4 @@
-//! Bounded threshold search: gray feasibility is never a fallback endpoint.
+//! Bounded threshold search; a gray feasible design is never a fallback endpoint.
 use super::*;
 
 #[derive(Debug, Clone, Copy)]
@@ -7,7 +7,9 @@ pub struct BinaryComplianceScanOptions3 {
     pub void_stiffness: f64,
     pub max_load_cases: usize,
     pub max_candidates: usize,
+    /// Independent upper limit on BINARY DILATED material volume, in [0,1].
     pub dilated_volume_limit: f64,
+    /// Numerical tolerance of the smooth aggregate only; no physical cap slack.
     pub smooth_tolerance: f64,
 }
 impl Default for BinaryComplianceScanOptions3 {
@@ -34,6 +36,7 @@ pub struct BinaryComplianceCandidate3 {
     pub envelope: f64,
     pub maximum_ratio: f64,
     pub physical_caps_satisfied: bool,
+    /// Direct physical cap checks, smooth constraint and dilated material cap.
     pub feasible: bool,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +45,8 @@ pub enum BinaryComplianceScanStop3 { ScheduleComplete, EvaluationStopped }
 pub struct BinaryComplianceScan3 {
     pub options: BinaryComplianceScanOptions3,
     pub candidates: Vec<BinaryComplianceCandidate3>,
+    /// Least dilated material among COMPLETED, feasible endpoints. Equal-volume
+    /// ties retain the first schedule entry; the threshold order is authored.
     pub best: Option<BinaryComplianceEvaluation3>,
     pub selected_index: Option<usize>,
     pub stop: BinaryComplianceScanStop3,
@@ -49,9 +54,16 @@ pub struct BinaryComplianceScan3 {
     pub work: SolveWork,
 }
 impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
-    /// Filter once, then re-solve each independent load at each actual binary
-    /// eroded stiffness. No monotonicity, gray-field reuse or interpolation.
-    /// Late cancellation retains completed candidates and the best endpoint.
+    /// Threshold one retained three-field projection family. Solve all eroded
+    /// loads independently for EVERY candidate; no feasibility monotonicity,
+    /// interpolation, gray-field reuse, or optimizer restart is assumed.
+    /// Keep only the current candidate and best endpoint's displacement family.
+    ///
+    /// Entire schedule/policy admission precedes the source filter. All solves
+    /// and preparation share control. Late interruption retains the completed
+    /// summaries and best feasible endpoint, with stopped status and spent work.
+    /// No feasible endpoint means exactly None, not the original gray design or
+    /// a proof that all thresholds (or geometries) are infeasible.
     #[allow(clippy::too_many_arguments)]
     pub fn scan_binary_compliance_caps(&mut self, rho: &[f64], forces: &[&[f64]], caps: &ComplianceCaps3,
         thresholds: &[f64], options: BinaryComplianceScanOptions3, control: &mut SolveControl<'_>)
@@ -83,15 +95,17 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                     endpoint.dilated.volume_fraction < best.dilated.volume_fraction) {
                     report.best = Some(endpoint); report.selected_index = Some(index);
                 }
+                // Store paired fields before a late cancellation can escape.
                 control.checkpoint("sdf3-binary-cap-scan-accepted")?;
             }
             Ok(())
         })();
-        if let Err(error) = attempt {
-            report.error = Some(error);
-            report.stop = BinaryComplianceScanStop3::EvaluationStopped;
-        }
+        if let Err(error) = attempt { report.error = Some(error); report.stop = BinaryComplianceScanStop3::EvaluationStopped; }
         report.work = control.work();
         Ok(report)
     }
 }
+
+#[cfg(test)]
+#[path = "scan_tests.rs"]
+mod tests;

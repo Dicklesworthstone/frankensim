@@ -4,6 +4,7 @@
 //! explicit hard eroded-compliance requirements; no cap is baseline-inferred.
 //! --refine-material CAP_Y CAP_Z adds cap-wise enrichment and one selective refit.
 //! --adapt-material CAP_Y CAP_Z MAX_REFITS repeats that process in bounded segments.
+//! --binary-material CAP_Y CAP_Z re-solves and selects binary cap-feasible endpoints.
 use std::ops::ControlFlow;
 use fs_cutfem::{CutSdf3, HeightAxis, HexCell};
 use fs_cutfem::elastic3::{CutElasticity3, ElasticityOptions3};
@@ -22,6 +23,8 @@ mod limits;
 mod refinement;
 #[path = "worst_load_sdf3/campaign.rs"]
 mod campaign;
+#[path = "worst_load_sdf3/binary.rs"]
+mod binary;
 
 struct Slab;
 impl CutSdf3 for Slab {
@@ -38,6 +41,7 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
     if args.first().is_some_and(|arg| arg == "--minimum-material") { return limits::run(&args[1..]); }
     if args.first().is_some_and(|arg| arg == "--refine-material") { return refinement::run(&args[1..]); }
     if args.first().is_some_and(|arg| arg == "--adapt-material") { return campaign::run(&args[1..]); }
+    if args.first().is_some_and(|arg| arg == "--binary-material") { return limits::run_binary(&args[1..]); }
     if args.len()>2 { return Err("usage: worst_load_sdf3 [ACCEPTED_UPDATES [TOTAL_KRYLOV_ITERATIONS]]".into()); }
     let updates=args.first().map_or(Ok(200),|s|s.parse::<usize>())?;
     let iterations=args.get(1).map_or(Ok(250_000),|s|s.parse::<usize>())?;
