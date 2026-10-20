@@ -380,6 +380,8 @@ fn g0_thermal_string_refuses_mismatched_state_slack_and_excess_strain() {
         (0.502, 0.5, 0.001, false), // thermal strain too large
         (0.502, 0.0, 0.01, false),
         (0.502, 0.5, f64::NAN, false),
+        (0.502, 0.5, 1.0, false), // finite-strain limits cannot admit a linear model
+        (0.502, 0.5, 2.0, false),
         (0.502, 0.5, 0.01, true),
     ] {
         assert!(

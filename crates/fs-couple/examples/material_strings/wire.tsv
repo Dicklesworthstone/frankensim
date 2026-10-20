@@ -20,6 +20,10 @@ scalar	shear_modulus	synthetic	shear_modulus	80000000000	Pa	constant
 uncertainty	shear_modulus	unstated	-	-	-	-
 validity	shear_modulus	T	280	320	K
 validity	shear_modulus	omega	0	200000	rad/s
+scalar	linear_thermal_expansion_coefficient	synthetic	linear_thermal_expansion_coefficient	0.00001	K^-1	constant
+uncertainty	linear_thermal_expansion_coefficient	unstated	-	-	-	-
+validity	linear_thermal_expansion_coefficient	T	280	320	K
+validity	linear_thermal_expansion_coefficient	omega	0	200000	rad/s
 scalar	kelvin_voigt_shear_viscosity	synthetic	kelvin_voigt_shear_viscosity	1000	Pa*s	constant
 uncertainty	kelvin_voigt_shear_viscosity	unstated	-	-	-	-
 validity	kelvin_voigt_shear_viscosity	T	280	320	K

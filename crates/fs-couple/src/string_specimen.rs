@@ -685,10 +685,11 @@ fn resolve_prestress(
         } => {
             if !positive(reference_stress_free_length_m)
                 || !positive(linear_strain_limit)
+                || linear_strain_limit >= 1.0
                 || !free_thermal_strain.is_finite()
             {
                 return Err(refuse(
-                    "thermal extension requires positive reference length/limit and finite strain",
+                    "thermal extension requires positive reference length, finite strain and a linear strain limit in (0, 1)",
                 ));
             }
             let total_strain =

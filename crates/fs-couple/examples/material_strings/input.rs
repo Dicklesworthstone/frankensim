@@ -17,6 +17,9 @@ pub const MAX_WORK: u64 = 16_777_216;
 pub struct Wire {
     pub pack: String, pub length: f64, pub radius: f64, pub prestress: StringPrestress,
     pub section: WireSection,
+    /// With fixed extension, L0 is stress-free at this explicit reference T.
+    /// None preserves the original same-temperature mechanical prescription.
+    pub thermal_reference_kelvin: Option<f64>,
     pub bending_modes: usize, pub twist_modes: usize, pub bridge: SharedPlateBridge,
     pub polarizations: Option<TransverseDirections>,
 }
@@ -110,6 +113,7 @@ impl Spec {
                 }
             } else { StringPrestress::FixedTension(row.positive()?) };
             let mut wire = Wire { pack, length, radius, prestress, section: WireSection::Homogeneous,
+                thermal_reference_kelvin: None,
                 polarizations: None,
                 bending_modes: row.count(MAX_MODES)?, twist_modes: row.count(MAX_MODES)?,
                 bridge: SharedPlateBridge { station_fraction: row.scalar()?, stiffness_n_m: row.scalar()?,
@@ -132,6 +136,23 @@ impl Spec {
                 return Err("string needs transverse modes and a physical interior bridge connection".into());
             }
             strings.push(wire);
+        }
+        // Optional source-backed eigenstrain at fixed supports. The original
+        // extension record supplies reference L0 and the linear strain limit.
+        if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("thermal-supports") {
+            let mut row = r.row("thermal-supports")?;
+            let supports = row.count(count)?; row.end()?;
+            for _ in 0..supports {
+                let mut row = r.row("thermal-support")?;
+                let string = row.count(count - 1)?; let reference = row.positive()?; row.end()?;
+                let wire = &mut strings[string];
+                if wire.thermal_reference_kelvin.is_some()
+                    || !matches!(wire.prestress, StringPrestress::FixedExtension { .. })
+                    || !matches!(&wire.section, WireSection::Homogeneous) {
+                    return Err("thermal support requires one declaration per homogeneous fixed-extension string".into());
+                }
+                wire.thermal_reference_kelvin = Some(reference);
+            }
         }
         // Optional in every version. The following cavity row is left
         // untouched when absent; no new default joint or body rotation is inferred.

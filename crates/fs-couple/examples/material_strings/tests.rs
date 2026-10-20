@@ -170,3 +170,6 @@ mod physical_cavity;
 
 #[path = "stops/station_tests.rs"]
 mod migrating_stops;
+
+#[path = "tests/thermal_support.rs"]
+mod thermal_support;

@@ -242,7 +242,7 @@ refuse rather than disappearing or silently rebuilding geometry.
 ## Rotational bridges from physical footprints
 
 All three input versions accept an optional block after ALL string/section/polarization records
-and before `cavity`:
+and optional `thermal-supports`, before `cavity`:
 
 ```text
 rotational-bridges COUNT
@@ -332,10 +332,51 @@ it affects sound through physical surface/contact coupling and, when explicitly
 selected, reciprocal rotational bridges. None of these fixtures is a measurement
 of gold, silver or a real string.
 
+## Material thermal expansion at fixed supports
+
+A homogeneous V2/V3 string with `extension L0 STRAIN_LIMIT` can additionally
+declare the temperature at which `L0` was stress-free. Put this optional block
+after all string/section/polarization records and before other optional records:
+
+```text
+thermal-supports COUNT
+thermal-support STRING_INDEX REFERENCE_T_K
+```
+
+The current solid temperature remains the performance's `state` temperature.
+The compiler integrates the same material card's
+`linear_thermal_expansion_coefficient` [1/K] from the reference temperature to
+that current state, using the existing source owner. Scalar alpha and
+piecewise-linear alpha(T) curves are supported; crossed knots are integrated,
+not replaced by the endpoint coefficient times the temperature change.
+The existing string binder computes `TENSION = EA * ((L-L0)/L0 - integral(alpha dT))`
+with current material stiffness and prescribed current radius. Expansion receipts
+remain attached through torsion, both bending planes, bows, body coupling and
+the existing pressure renderer. There is no frequency normalization.
+
+`thermal-bow.material-strings` uses the supplied synthetic wire expansion data:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/thermal-bow.material-strings" "$demo/thermal-bow.wav"
+```
+
+Change its `state` temperature or only the wire's alpha(T) data to change the
+fixed-support tension and resulting sound. The gas has its independently
+declared temperature. Omitting the block preserves ordinary extension/tension
+semantics and does not query expansion data. Missing or ambiguous alpha,
+out-of-domain temperature paths, slack/compression and excessive strain refuse;
+negative expansion is admitted by the existing material law. Each string may
+be named once, and force-controlled or layered strings refuse this selection.
+These are frozen homogeneous thermoelastic comparisons. They do not solve heat
+transport during playback, support/body expansion, radial contraction, layered
+thermal mismatch, yielding or melting. The fixture is synthetic integration
+data, not a calibrated instrument-temperature prediction.
+
 ## Causal gas loading of the moving strings
 
 All three input versions accept one optional numerical-resolution record after
-the complete string/section/polarization records and any rotational-bridge block,
+the complete string/section/polarization records, optional thermal supports and any rotational-bridge block,
 before an optional `prepared-linear` row and then `cavity`:
 
 ```text
