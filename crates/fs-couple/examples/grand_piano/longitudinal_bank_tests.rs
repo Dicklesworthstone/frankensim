@@ -340,6 +340,29 @@ fn longitudinal_trajectory_converges_to_independent_continuous_axial_transverse_
 }
 
 #[test]
+fn bridge_port_without_retained_axial_modes_stores_the_work_it_does() {
+    // A band below the first axial mode (1581 Hz here) retains none, yet the
+    // channel keeps its quasi-static boundary extension eta*b and books that
+    // port's bridge reaction: the potential must include it, or the force does
+    // work no energy sees (the reference refused every such key at forte).
+    let c = course();
+    let mut bank = Bank::new(&[c], &board(), 96_000, 3000.0, 2, false).unwrap();
+    bank.configure_string_stretching(&[c], &specification(&[c], 1000.0, 2, 0.0))
+        .unwrap();
+    assert_eq!(bank.longitudinal_mode_count(), 0);
+    let board_offset = bank.modes.len();
+    bank.q[0] = 1e-4;
+    bank.q[board_offset] = 1e-5;
+    let initial = bank.energy();
+    assert!(initial > 0.0);
+    for _ in 0..120 {
+        advance(&mut bank, &[0.0]).unwrap();
+        assert!((bank.next_energy() - initial).abs() < 1e-12 * initial);
+        bank.commit();
+    }
+}
+
+#[test]
 fn axial_strain_drives_bridge_at_zero_initial_bridge_displacement_and_closes_work() {
     let c = course();
     let mut bank = Bank::new(&[c], &board(), 96_000, 3000.0, 2, false).unwrap();

@@ -135,10 +135,11 @@ impl Prepared {
         self.model.slope_count() * (1 + self.q.len())
     }
 
+    // A channel retaining no axial mode still has the quasi-static boundary
+    // extension eta*b: `evaluate` books its bridge reaction unconditionally,
+    // so the potential must include it too (otherwise that force does work
+    // the energy does not see).
     fn bridge_axial(&self, q: &[f64], strings: &[StringPort], modes: &[StringMode]) -> f64 {
-        if self.q.is_empty() {
-            return 0.0;
-        }
         let bridge: f64 = strings[self.string]
             .bridge
             .iter()
