@@ -653,7 +653,11 @@ dependencies = [
 name = "fs-vkplate"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
+ "fs-evidence",
+ "fs-matdb",
  "fs-material",
+ "fs-qty",
 ]
 
 [[package]]

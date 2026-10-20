@@ -5,7 +5,7 @@
 import { claimPlayback, registerPlayer } from "../audio";
 import { el } from "../util";
 import { createLiveAudioContext } from "./liveAudio";
-import { createLiveMix, KitLane, type KitBurst, type KitField, type KitReady, type LiveMix } from "./mix";
+import { createLiveMix, KitLane, type KitBurst, type KitField, type KitMaterialOptions, type KitReady, type LiveMix } from "./mix";
 
 /** Slow-motion factor for the replay of each stroke's first milliseconds. */
 const SLOW = 60;
@@ -189,10 +189,65 @@ export function mountLiveKit(root: HTMLElement): void {
     return { record: `mixture ${t} ${p} ${basis.value} ${selected.length} ${fields.join(" ")}`,
       label: `${selected.map(c => `${c.name} ${c.input.value}%`).join(" · ")} (${basis.value}) · ${temperature.value} °C · ${pressure.value} kPa` };
   }
+  const materialMode = el("select", {}, el("option", { value: "preset" }, "Standard kit materials"),
+    el("option", { value: "import" }, "Import material cards"));
+  const surfaceFile = el("input", { type: "file", required: "" });
+  const secondaryFile = el("input", { type: "file" });
+  const strikerFile = el("input", { type: "file", required: "" });
+  const solidTemperature = numberInput(293.15, 0.01, 10000);
+  const temperatureAxis = el("input", { type: "text", value: "T", required: "" });
+  const strikerVolume = numberInput(9.054, 1e-6, 1e6);
+  const tipRadius = numberInput(6, 1e-6, 1000);
+  const impactLoss = numberInput(0.05, 0, 1000);
+  const materialFields = el("fieldset", { disabled: "", hidden: "" },
+    el("div", { class: "kit-atmosphere-grid" },
+      labelled("Primary surface card", surfaceFile), labelled("Secondary surface card · optional", secondaryFile),
+      labelled("Striker card", strikerFile), labelled("Solid temperature · K", solidTemperature),
+      labelled("Temperature coordinate in cards", temperatureAxis), labelled("Effective striker volume · cm³", strikerVolume),
+      labelled("Spherical tip radius · mm", tipRadius), labelled("Impact loss · s/m", impactLoss)),
+    el("p", { class: "small muted" }, "Import FrankenSim material-card pack files. Cards must supply density, Young's modulus and Poisson ratio at the declared solid temperature, with a typed absolute-temperature coordinate in kelvin when that coordinate is constrained. Primary applies to batter heads and upper cymbals; secondary applies to resonant heads and lower hi-hats, and defaults to primary."),
+    el("p", { class: "small muted" }, "The imported striker replaces every preset beater, including the kick. Its material and effective volume set its mass; both contact materials and tip radius set elastic contact stiffness. Decay times, supports, wire contacts and hi-hat rim friction retain their separate preset assumptions."));
+  const materialStatus = el("p", { class: "small muted", role: "status" },
+    "Material changes rebuild the kit from rest. Geometry and tuning remain the declared presets.");
+  const materialForm = el("form", {}, labelled("Solid materials", materialMode), materialFields,
+    el("button", { class: "btn sm", type: "submit" }, "Apply materials"), materialStatus);
+  const materialsPanel = el("details", { class: "kit-atmosphere" }, el("summary", {}, "Solid and striker materials"), materialForm);
+  materialMode.addEventListener("change", () => {
+    materialFields.hidden = materialFields.disabled = materialMode.value !== "import";
+  });
+
+  // Read File objects and physical inputs synchronously. Bytes can load later
+  // without a control edited during startup changing only some of the pieces.
+  function captureMaterials(): { label: string; load: () => Promise<KitMaterialOptions | undefined> } {
+    if (materialMode.value === "preset") return { label: "Standard kit materials", load: async () => undefined };
+    if (!materialForm.reportValidity()) throw new Error("Select primary and striker cards and complete their physical inputs.");
+    const primary = surfaceFile.files?.[0], secondary = secondaryFile.files?.[0], striker = strikerFile.files?.[0];
+    if (!primary || !striker) throw new Error("Both a primary surface card and a striker card are required.");
+    if (primary.size + (secondary?.size ?? 0) + striker.size > 16 * 1024 * 1024) {
+      throw new Error("The material-card files must total at most 16 MiB.");
+    }
+    for (const file of [primary, secondary, striker]) {
+      if (file && file.size === 0) throw new Error("Each material-card file must contain data.");
+    }
+    const state = { temperatureAxis: temperatureAxis.value.trim(), temperatureK: solidTemperature.valueAsNumber,
+      strikerVolumeM3: strikerVolume.valueAsNumber * 1e-6, strikerTipRadiusM: tipRadius.valueAsNumber * 1e-3,
+      impactLossSM: impactLoss.valueAsNumber };
+    if (!state.temperatureAxis || !Object.values(state).every(value => typeof value === "string" || Number.isFinite(value))) {
+      throw new Error("Material state and striker geometry must be finite, with a named temperature coordinate.");
+    }
+    return { label: `${primary.name}${secondary ? ` / ${secondary.name}` : ""} · striker ${striker.name} · ${state.temperatureK} K`,
+      load: async () => {
+        const [surfacePack, secondaryPack, strikerPack] = await Promise.all([
+          primary.arrayBuffer(), secondary?.arrayBuffer(), striker.arrayBuffer(),
+        ]);
+        return { ...state, surfacePack: new Uint8Array(surfacePack),
+          ...(secondaryPack ? { secondaryPack: new Uint8Array(secondaryPack) } : {}), strikerPack: new Uint8Array(strikerPack) };
+      } };
+  }
   const evidence = el("details", { class: "evidence" }, el("summary", {}, "What is computed"),
     el("p", { class: "small" }, "Each piece is the same finite-difference solver as the drum kit above: tensioned Mylar heads with the air between them, von Kármán bronze shells, Hertz stick contacts, a felt beater, snare wires and a pedal-clamped hi-hat whose rims rub with dry friction. Here it runs on a grid several times coarser (picked per piece for this device when you start), so it is cheaper and loses detail above a few kHz. A piece that has gone quiet is not stepped until it is struck again."),
     el("p", { class: "small muted" }, "The colours are the computed transverse velocity of the surface (warm up, cool down), drawn from the solver state about 20 ms ahead of what you hear. Energy is the kinetic energy of the piece; force is the peak stick force of the last stroke. Levels: one gain per piece, matched on one grid to a real kit's recorded balance, except that the cymbals are capped so their very sharp attacks do not clip. A stroke's loudness changes with the grid (the crash is about 5 dB louder on a 3× grid than on 5×), so each piece's gain is rescaled for the grid it runs on, from a table of that stroke measured on every grid; it is raised only while the stroke stays under the same peak cap."));
-  root.replaceChildren(el("div", { class: "panel kit-live" }, stage, el("div", { class: "kit-bar" }, controls, buttons), atmosphere, hud, evidence));
+  root.replaceChildren(el("div", { class: "panel kit-live" }, stage, el("div", { class: "kit-bar" }, controls, buttons), atmosphere, materialsPanel, hud, evidence));
   root.style.minHeight = "0";
 
   const g = canvas.getContext("2d")!;
@@ -438,8 +493,9 @@ export function mountLiveKit(root: HTMLElement): void {
   async function begin(): Promise<void> {
     if (running || start.disabled) return;
     let environment: { record: string; label: string };
-    try { environment = readAtmosphere(); }
-    catch (e) { atmosphereStatus.textContent = (e as Error).message; return; }
+    let selectedMaterials: ReturnType<typeof captureMaterials>;
+    try { environment = readAtmosphere(); selectedMaterials = captureMaterials(); }
+    catch (e) { hud.textContent = (e as Error).message; return; }
     // Every lane, including grids rebuilt after failed probes, receives this
     // same immutable record even if controls are edited while startup awaits.
     claimPlayback(onClaimed);
@@ -447,9 +503,12 @@ export function mountLiveKit(root: HTMLElement): void {
     start.disabled = true;
     start.textContent = "Building the kit…";
     atmosphereStatus.textContent = `Building in ${environment.label}…`;
+    materialStatus.textContent = `Building with ${selectedMaterials.label}…`;
     try {
       ctx ??= createLiveAudioContext();
       await ctx.resume();
+      if (my !== session) return;
+      const materials = await selectedMaterials.load();
       if (my !== session) return;
       const m = await createLiveMix(ctx, ctx.destination);
       if (my !== session) { m.dispose(); return; }
@@ -457,7 +516,7 @@ export function mountLiveKit(root: HTMLElement): void {
       let built = 0;
       await Promise.all(PIECES.map(async (def) => {
         const L = lives.get(def.id)!;
-        const lane = new KitLane(m, def.id, { gain: def.gain, gasRecord: environment.record, aheadFrames: 1024, minRealtime: 1.7, benchMs: def.benchMs, scales: def.scales, fieldHz: 45 });
+        const lane = new KitLane(m, def.id, { gain: def.gain, gasRecord: environment.record, materials, aheadFrames: 1024, minRealtime: 1.7, benchMs: def.benchMs, scales: def.scales, fieldHz: 45 });
         L.lane = lane;
         lane.onField = (f) => {
           L.field = f;
@@ -480,6 +539,7 @@ export function mountLiveKit(root: HTMLElement): void {
         const r = await lane.ready;
         if (my !== session) { lane.dispose(); return; }
         if (r.gasRecord !== environment.record) throw new Error("The kit engine did not retain the requested atmosphere. Reload after rebuilding the live kit.");
+        if (materials && !r.info.materials) throw new Error("The kit engine did not retain the imported materials. Rebuild the live kit before applying them.");
         L.ready = r;
         // map every surface node to a cell of a square image the size of the grid
         const m2 = 2 * Math.ceil(r.radius / r.h) + 3;
@@ -500,6 +560,10 @@ export function mountLiveKit(root: HTMLElement): void {
       const gas = lives.get("kick")?.ready?.info.gas;
       atmosphereStatus.textContent = `${environment.label}. ${gas
         ? `Density ${gas.densityKgM3.toFixed(3)} kg/m³ · sound speed ${gas.soundSpeedMps.toFixed(1)} m/s. ` : ""}All eight pieces use this atmosphere.`;
+      const solid = lives.get("kick")?.ready?.info.materials;
+      materialStatus.textContent = solid
+        ? `${selectedMaterials.label}. Surface density ${solid.primary.densityKgM3.toFixed(1)} kg/m³ · Young's modulus ${(solid.primary.youngPa / 1e9).toPrecision(4)} GPa · striker mass ${(solid.strikerMassKg * 1000).toPrecision(4)} g. All eight pieces use these material cards.`
+        : "Standard kit materials are active.";
       overlay.hidden = true;
       kickDraw();
       paintHud();
@@ -509,6 +573,7 @@ export function mountLiveKit(root: HTMLElement): void {
       stop();
       hud.textContent = `Could not start: ${(e as Error).message}`;
       atmosphereStatus.textContent = `Atmosphere was not applied: ${(e as Error).message}`;
+      materialStatus.textContent = `Materials were not applied: ${(e as Error).message}`;
     }
   }
   start.addEventListener("click", () => void begin());
@@ -516,11 +581,23 @@ export function mountLiveKit(root: HTMLElement): void {
     e.preventDefault();
     try {
       const selected = readAtmosphere();
+      captureMaterials();
       const active = running || start.disabled;
       if (active) stop();
       atmosphereStatus.textContent = `${selected.label}. ${active ? "Restarting from rest…" : "Press Start the kit to apply."}`;
       if (active) void begin();
     } catch (error) { atmosphereStatus.textContent = (error as Error).message; }
+  });
+  materialForm.addEventListener("submit", e => {
+    e.preventDefault();
+    try {
+      const selected = captureMaterials();
+      readAtmosphere();
+      const active = running || start.disabled;
+      if (active) stop();
+      materialStatus.textContent = `${selected.label}. ${active ? "Restarting from rest…" : "Press Start the kit to apply."}`;
+      if (active) void begin();
+    } catch (error) { materialStatus.textContent = (error as Error).message; }
   });
 
   function paintHud(): void {

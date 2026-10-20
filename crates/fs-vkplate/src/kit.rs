@@ -4,6 +4,8 @@
 //! sizes, film and bronze from handbook values), not measurements of a particular specimen.
 
 use crate::*;
+use crate::materials::KitMaterials;
+use fs_material::state_point::IsotropicElasticStatePoint;
 
 pub const OUT_RATE: f64 = 48_000.0;
 
@@ -74,25 +76,40 @@ pub struct DrumSpec {
 
 pub(crate) fn hertz_stick(tip_radius: f64, e_target: f64, nu_target: f64) -> Law {
     // hickory tip on the target: K = 4/3 E* sqrt(R)
-    let (e_w, nu_w) = (12.0e9, 0.3);
-    let es = 1.0 / ((1.0 - nu_w * nu_w) / e_w + (1.0 - nu_target * nu_target) / e_target);
-    Law::Power { k: 4.0 / 3.0 * es * tip_radius.sqrt(), alpha: 1.5, mu: 0.05 }
+    hertz_pair(tip_radius, (12.0e9, 0.3), (e_target, nu_target), 0.05)
 }
 
-fn head_body(name: &str, r: f64, grid: f64, hd: Head, muffle: Option<(f64, f64, f64, f64)>) -> Result<Body, String> {
+/// The existing two-elastic-half-space contact, shared by presets and sources.
+pub(crate) fn hertz_pair(tip_radius: f64, (e_w, nu_w): (f64, f64), (e_target, nu_target): (f64, f64), loss_s_m: f64) -> Law {
+    let es = 1.0 / ((1.0 - nu_w * nu_w) / e_w + (1.0 - nu_target * nu_target) / e_target);
+    Law::Power { k: 4.0 / 3.0 * es * tip_radius.sqrt(), alpha: 1.5, mu: loss_s_m }
+}
+
+fn elastic_values(material: &IsotropicElasticStatePoint) -> (f64, f64, f64) {
+    (material.young_modulus_pa(), material.poisson_ratio(), material.density_kg_m3())
+}
+
+fn instrument(rate: f64, gas: GasState, materials: Option<&KitMaterials>) -> Result<Instrument, String> {
+    match materials {
+        Some(materials) => Instrument::with_materials(rate, gas, materials.clone()),
+        None => Instrument::with_gas(rate, gas),
+    }
+}
+
+fn head_body(name: &str, r: f64, grid: f64, hd: Head, muffle: Option<(f64, f64, f64, f64)>, elastic: (f64, f64, f64)) -> Result<Body, String> {
     let t = hd.thickness;
     let th = move |_r: f64| t;
     let z = |_r: f64| 0.0;
     Body::plate(name, &PlateSpec {
         radius: r, hole: 0.0, grid, edge: Edge::Clamped, thickness: &th, rest_height: &z,
-        young: MYLAR.0, poisson: MYLAR.1, density: MYLAR.2, tension: hd.tension, bending: true,
+        young: elastic.0, poisson: elastic.1, density: elastic.2, tension: hd.tension, bending: true,
         nonlinear: Nonlinear::Berger, t60: hd.t60, support: None, muffle,
     })
 }
 
 /// Lowest (0,1) membrane frequency of a head, ignoring air (for the radiation resistance).
-fn f01(r: f64, hd: Head) -> f64 {
-    2.405 * (hd.tension / (MYLAR.2 * hd.thickness)).sqrt() / (2.0 * PI * r)
+fn f01(r: f64, hd: Head, density: f64) -> f64 {
+    2.405 * (hd.tension / (density * hd.thickness)).sqrt() / (2.0 * PI * r)
 }
 
 pub fn drum(s: &DrumSpec, hits: &[(f64, f64)]) -> Result<Piece, String> {
@@ -101,16 +118,29 @@ pub fn drum(s: &DrumSpec, hits: &[(f64, f64)]) -> Result<Piece, String> {
 
 /// The same structural data in one material-resolved cavity/exterior gas.
 pub fn drum_with_gas(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState) -> Result<Piece, String> {
+    build_drum(s, hits, gas, None)
+}
+
+/// Fixed geometry and installed tension, with both head materials and a
+/// spherical striker resolved from source data. Loss/support/wire laws stay
+/// as declared in `s`; the supplied impactor replaces `s.striker` completely.
+pub fn drum_with_materials(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: &KitMaterials) -> Result<Piece, String> {
+    build_drum(s, hits, gas, Some(materials))
+}
+
+fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Option<&KitMaterials>) -> Result<Piece, String> {
     let rate = OUT_RATE * s.oversample as f64;
-    let mut ins = Instrument::with_gas(rate, gas)?;
+    let mut ins = instrument(rate, gas, materials)?;
+    let primary = materials.map_or(MYLAR, |m| elastic_values(m.primary()));
+    let secondary = materials.map_or(MYLAR, |m| elastic_values(m.secondary()));
     let mut notes = vec![];
-    let mut batter = head_body(&format!("{} batter", s.name), s.radius, s.grid, s.batter, s.muffle)?;
+    let mut batter = head_body(&format!("{} batter", s.name), s.radius, s.grid, s.batter, s.muffle, primary)?;
     batter.origin = [0.0, 0.0, 0.0];
     batter.facing = 1.0;
-    let mut reso = head_body(&format!("{} resonant", s.name), s.radius, s.grid, s.reso, s.muffle)?;
+    let mut reso = head_body(&format!("{} resonant", s.name), s.radius, s.grid, s.reso, s.muffle, secondary)?;
     reso.origin = [0.0, 0.0, -s.depth];
     reso.facing = -1.0;
-    notes.push(format!("heads: {} nodes each at {:.1} mm; (0,1) in vacuo {:.0} / {:.0} Hz", batter.n, s.grid * 1e3, f01(s.radius, s.batter), f01(s.radius, s.reso)));
+    notes.push(format!("heads: {} nodes each at {:.1} mm; (0,1) in vacuo {:.0} / {:.0} Hz", batter.n, s.grid * 1e3, f01(s.radius, s.batter, primary.2), f01(s.radius, s.reso, secondary.2)));
     // outside air on each head's volume motion: a baffled piston's radiation mass, 8 rho a^3 / 3
     batter.air_mass = 8.0 * gas.density * s.radius.powi(3) / 3.0;
     reso.air_mass = batter.air_mass;
@@ -126,7 +156,7 @@ pub fn drum_with_gas(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState) -> Result
         q
     });
     ins.cavities.push(Cavity { heads: vec![bi, ri], volume: PI * s.radius * s.radius * s.depth, port });
-    ins.rads.push(RadDamp::monopole(vec![bi, ri], f01(s.radius, s.batter), &gas));
+    ins.rads.push(RadDamp::monopole(vec![bi, ri], f01(s.radius, s.batter, primary.2), &gas));
     let mut settle = 0.0;
     if let Some(wr) = s.wires {
         let (mass_per_m, tension, preload_per_m, len) = (wr.mass_per_m, wr.tension, wr.preload_per_m, wr.length);
@@ -162,7 +192,7 @@ pub fn drum_with_gas(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState) -> Result
         notes.push(format!("snare: {count} wires of {n} nodes, {:.0} contact points", ins.contacts.len()));
         settle = 0.25;
     }
-    let (m, law, foot) = s.striker;
+    let (m, law, foot) = materials.map_or(s.striker, |m| (m.striker_mass_kg(), m.impact_law(), 0.0));
     let st = ins.add(Body::point("striker", m));
     let fp = ins.bodies[bi].footprint(s.strike_xy.0, s.strike_xy.1, foot);
     notes.push(format!("striker {m} kg over {} nodes", fp.len()));
@@ -316,8 +346,8 @@ fn ring_nodes(h: f64, r0: f64, r1: f64) -> (f64, usize) {
     }
 }
 
-fn cymbal_body(name: &str, c: &CymbalSpec) -> Result<Body, String> {
-    cymbal_shell(name, c, true)
+fn cymbal_body(name: &str, c: &CymbalSpec, elastic: (f64, f64, f64)) -> Result<Body, String> {
+    cymbal_shell(name, c, true, elastic)
 }
 
 /// A cymbal's thickness at radius `x` outside the bell (the bow law of `cymbal_shell`).
@@ -327,7 +357,7 @@ fn bow_thickness(c: &CymbalSpec, x: f64) -> f64 {
 
 /// A cymbal shell; `felt` puts it on a stand's felt washers (a hi-hat's top shell hangs from the
 /// clutch on the pull rod instead, so all the pedal force reaches the rims).
-fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool) -> Result<Body, String> {
+fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool, elastic: (f64, f64, f64)) -> Result<Body, String> {
     let (rb, tb, tw, r) = (c.bell_radius, c.bell_thickness, c.bow_thickness, c.radius);
     // thickness: bell, a blend over 2 cm, then the bow thinning slightly toward the rim
     let th = move |x: f64| {
@@ -353,7 +383,7 @@ fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool) -> Result<Body, String> 
     };
     Body::plate(name, &PlateSpec {
         radius: r, hole: 0.0065, grid: c.grid, edge: Edge::Free, thickness: &th, rest_height: &z,
-        young: BRONZE.0, poisson: BRONZE.1, density: BRONZE.2, tension: 0.0, bending: true,
+        young: elastic.0, poisson: elastic.1, density: elastic.2, tension: 0.0, bending: true,
         nonlinear: Nonlinear::VonKarman, t60: c.t60,
         // felt washers: ~1e5 N/m and ~3 N s/m in all, spread over the clamped annulus
         support: if felt { Some((0.0065, r1, ks, cs)) } else { None }, muffle: None,
@@ -396,17 +426,30 @@ pub fn cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)]) -> Result<Piece, St
 
 /// The same plate and contact mechanics with material-resolved propagation.
 pub fn cymbal_with_gas(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState) -> Result<Piece, String> {
-    let mut ins = Instrument::with_gas(OUT_RATE, gas)?;
-    let mut body = cymbal_body(c.name, c)?;
+    build_cymbal(c, hits, gas, None)
+}
+
+/// Source-bound shell stiffness/mass and spherical-striker mass/contact.
+/// With materials supplied, hit tuple radii remain strike positions; the
+/// material binding's tip radius declares the common physical impactor.
+pub fn cymbal_with_materials(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, materials: &KitMaterials) -> Result<Piece, String> {
+    build_cymbal(c, hits, gas, Some(materials))
+}
+
+fn build_cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, materials: Option<&KitMaterials>) -> Result<Piece, String> {
+    let mut ins = instrument(OUT_RATE, gas, materials)?;
+    let elastic = materials.map_or(BRONZE, |m| elastic_values(m.primary()));
+    let mut body = cymbal_body(c.name, c, elastic)?;
     body.origin = [0.0, 0.0, 0.0];
     let n = body.n;
     let ci = ins.add(body);
-    let st = ins.add(Body::point("stick", STICK_TIP_KG));
+    let st = ins.add(Body::point("stick", materials.map_or(STICK_TIP_KG, KitMaterials::striker_mass_kg)));
     let mut notes = vec![format!("{}: {n} nodes at {:.1} mm", c.name, c.grid * 1e3)];
     for (k, &(t, v, rf, tip)) in hits.iter().enumerate() {
         let fp = ins.bodies[ci].footprint(rf * c.radius, 0.0, 0.0);
         // the stick comes down onto the upper surface: plate on side a
-        let mut con = Contact::new(fp.into_iter().map(|(n_, w)| (ci, n_, w)).collect(), vec![(st, 0, 1.0)], 0.0, hertz_stick(tip, BRONZE.0, BRONZE.1));
+        let law = materials.map_or_else(|| hertz_stick(tip, elastic.0, elastic.1), KitMaterials::impact_law);
+        let mut con = Contact::new(fp.into_iter().map(|(n_, w)| (ci, n_, w)).collect(), vec![(st, 0, 1.0)], 0.0, law);
         con.active = false;
         ins.contacts.push(con);
         ins.strikes.push(Strike { time: t, striker: st, contact: ins.contacts.len() - 1, speed: v, clear: 2e-4, done: false });
@@ -464,6 +507,16 @@ pub fn hihat_grid_mu(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from
 
 /// Opposed plates, their shared contacts and microphones in the same gas state.
 pub fn hihat_grid_mu_with_gas(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64, gas: GasState) -> Result<Piece, String> {
+    build_hihat(gap, pedal_n, hits, rim, from, scale, friction, gas, None)
+}
+
+/// Material-resolved opposed shells and impactor. The rim contact, rim
+/// friction, support and T60 laws remain explicitly separate input data.
+pub fn hihat_grid_mu_with_materials(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64, gas: GasState, materials: &KitMaterials) -> Result<Piece, String> {
+    build_hihat(gap, pedal_n, hits, rim, from, scale, friction, gas, Some(materials))
+}
+
+fn build_hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64, gas: GasState, materials: Option<&KitMaterials>) -> Result<Piece, String> {
     if !gap.is_finite() || gap < 0.0 {
         return Err(format!("hi-hat: rim opening must be finite and nonnegative, got {gap} m"));
     }
@@ -475,10 +528,12 @@ pub fn hihat_grid_mu_with_gas(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: 
     // Displacements remain upward; the bottom's bell and bow face away from the top.
     bs.bow_rise = -bs.bow_rise;
     bs.bell_rise = -bs.bell_rise;
-    let mut ins = Instrument::with_gas(OUT_RATE, gas)?;
-    let mut top = cymbal_shell(ts.name, &ts, false)?;
+    let mut ins = instrument(OUT_RATE, gas, materials)?;
+    let primary = materials.map_or(BRONZE, |m| elastic_values(m.primary()));
+    let secondary = materials.map_or(BRONZE, |m| elastic_values(m.secondary()));
+    let mut top = cymbal_shell(ts.name, &ts, false, primary)?;
     top.origin = [0.0, 0.0, 0.0];
-    let mut bot = cymbal_shell(bs.name, &bs, false)?;
+    let mut bot = cymbal_shell(bs.name, &bs, false, secondary)?;
     // Profiles describe midplanes, while the requested opening is between their faces.
     let rim_half_thickness = 0.5 * (bow_thickness(&ts, ts.radius) + bow_thickness(&bs, bs.radius));
     bot.origin = [0.0, 0.0, -rim_half_thickness - gap];
@@ -544,11 +599,12 @@ pub fn hihat_grid_mu_with_gas(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: 
     if pedal_n != 0.0 {
         ins.drives.push(Drive { body: rod, node: 0, knots: vec![(0.0, 0.0), (0.12, -pedal_n), (1e9, -pedal_n)] });
     }
-    let st = ins.add(Body::point("stick", STICK_TIP_KG));
+    let st = ins.add(Body::point("stick", materials.map_or(STICK_TIP_KG, KitMaterials::striker_mass_kg)));
     for &(t, v) in hits {
         let fp = ins.bodies[ti].footprint(0.85 * ts.radius, 0.0, 0.0);
         let tip = 0.004;
-        let mut con = Contact::new(fp.into_iter().map(|(n_, w)| (ti, n_, w)).collect(), vec![(st, 0, 1.0)], 0.0, hertz_stick(tip, BRONZE.0, BRONZE.1));
+        let law = materials.map_or_else(|| hertz_stick(tip, primary.0, primary.1), KitMaterials::impact_law);
+        let mut con = Contact::new(fp.into_iter().map(|(n_, w)| (ti, n_, w)).collect(), vec![(st, 0, 1.0)], 0.0, law);
         con.active = false;
         ins.contacts.push(con);
         ins.strikes.push(Strike { time: t + settle, striker: st, contact: ins.contacts.len() - 1, speed: v, clear: 2e-4, done: false });

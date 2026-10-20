@@ -6,6 +6,8 @@
 
 use fs_vkplate::{GasState, Instrument, InstrumentImage, Law};
 use std::collections::BTreeSet;
+use std::sync::Arc;
+use fs_vkplate::materials::KitMaterials;
 
 pub const TPB: usize = 256;
 /// Microphone taps per segment (two per lane of a warp).
@@ -23,6 +25,9 @@ pub struct Plan {
     // Every batch member shares gas-dependent operators and microphone taps.
     // Keep the complete admitted state, not just the two kernel coefficients.
     gas: Option<GasState>,
+    // Batches also share solid operators, contact laws and striker inertia.
+    // Retain the full source binding, even if two cards resolve equal numbers.
+    materials: Option<Arc<KitMaterials>>,
     pub body_off: Vec<usize>,
     // per node
     pub bias: Vec<f64>,
@@ -247,11 +252,15 @@ impl Plan {
         if img.gas != *ins.gas() {
             return Err("exported and live instrument gas states differ".into());
         }
+        if img.materials.as_deref() != ins.materials() {
+            return Err("exported and live instrument solid material bindings differ".into());
+        }
         let mut p = Plan {
             rate: img.rate, k, nb: img.bodies.len(),
             gas_density: img.gas.density,
             gas_bulk_modulus: img.gas.density * img.gas.sound_speed.powi(2),
             gas: Some(img.gas),
+            materials: img.materials.clone(),
             ..Default::default()
         };
         let mut off = 0;
@@ -624,6 +633,9 @@ impl Plan {
     pub fn state(&self, img: &InstrumentImage) -> Result<SimState, String> {
         if self.gas != Some(img.gas) {
             return Err("a batch member's atmosphere differs from the first member's".into());
+        }
+        if self.materials.as_deref() != img.materials.as_deref() {
+            return Err("a batch member's solid material bindings differ from the first member's".into());
         }
         if img.bodies.len() != self.nb || img.contacts.len() != self.ct_gap.len() || img.mics.len() != self.nm {
             return Err("a batch member is a different instrument (bodies, contacts or microphones differ)".into());

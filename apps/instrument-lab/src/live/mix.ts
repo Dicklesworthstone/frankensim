@@ -160,9 +160,34 @@ class LaneWorker<R> {
 }
 
 // ------------------------------------------------------------------ kit piece lanes
+/** Canonical material-card pack inputs; physics resolution stays in Rust. */
+export interface KitMaterialOptions {
+  surfacePack: Uint8Array;
+  /** Omitted: explicitly use the primary material on both vibrating surfaces. */
+  secondaryPack?: Uint8Array;
+  strikerPack: Uint8Array;
+  temperatureAxis: string;
+  temperatureK: number;
+  /** Geometric effective volume: mass follows the striker material's density. */
+  strikerVolumeM3: number;
+  strikerTipRadiusM: number;
+  /** Independently declared Hunt-Crossley impact loss [s/m]. */
+  impactLossSM: number;
+}
+export interface KitMaterialInfo {
+  primary: { stateIdentity: string; cardIdentity: string; densityKgM3: number; youngPa: number; poisson: number };
+  secondary: KitMaterialInfo['primary'];
+  striker: KitMaterialInfo['primary'];
+  strikerVolumeM3: number;
+  strikerMassKg: number;
+  strikerTipRadiusM: number;
+  impactLossSM: number;
+  importedPacks: number;
+}
 export interface KitReady {
   info: { piece: string; gridScale: number; radius: number; surfaceNodes: number; h: number; bodies: { name: string; nodes: number }[];
-    gas?: { temperatureK: number; pressurePa: number; densityKgM3: number; soundSpeedMps: number } };
+    gas?: { temperatureK: number; pressurePa: number; densityKgM3: number; soundSpeedMps: number };
+    materials?: KitMaterialInfo | null };
   /** Exact requested atmosphere, retained through every grid trial and rebuild. */
   gasRecord?: string;
   xy: Float32Array;
@@ -230,8 +255,10 @@ export class KitLane {
    * `benchMs`: how much of one stroke each grid is timed over (default 112 ms; see kit/worker.js).
    * `gasRecord`: one canonical gas-state record retained through grid trials and rebuilding; an
    * explicit record requires an engine with material-atmosphere support.
+   * `materials`: source-bound elastic surfaces and a spherical striker. Bulk material data changes
+   * mass, stiffness and Hertz contact; preset T60/support/rim/wire laws remain separate declarations.
    */
-  constructor(mix: LiveMix, piece: string, opts: { gain: number; gasRecord?: string; aheadFrames?: number; chunk?: number; scales?: number[]; minRealtime?: number; benchMs?: number; fieldHz?: number; fieldFrames?: number; bursts?: boolean }) {
+  constructor(mix: LiveMix, piece: string, opts: { gain: number; gasRecord?: string; materials?: KitMaterialOptions; aheadFrames?: number; chunk?: number; scales?: number[]; minRealtime?: number; benchMs?: number; fieldHz?: number; fieldFrames?: number; bursts?: boolean }) {
     this.piece = piece;
     this.lane = new LaneWorker<KitReady>(`${LIVE_BASE_URL}/kit/worker.js`, `kit-${piece}`, `the ${piece} engine`, mix, piece, (m) => {
       if (m.type === "field") this.onField?.(m as unknown as KitField);

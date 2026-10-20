@@ -3,6 +3,7 @@
 //! of playback; the page never post-processes its samples.
 
 pub use fs_vkplate::live::{Live, PIECES};
+pub use fs_vkplate::materials::KitMaterials;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
@@ -27,6 +28,21 @@ mod wasm {
         #[wasm_bindgen(js_name = withGas)]
         pub fn with_gas(piece: &str, grid_scale: f64, gas_record: &str) -> Result<KitPiece, JsError> {
             Live::with_gas_record(piece, grid_scale, gas_record)
+                .map(|live| KitPiece { live, scale: grid_scale })
+                .map_err(|e| JsError::new(&e))
+        }
+        /// Canonical material-card packs for both surfaces and a spherical
+        /// impactor. Mass, elasticity and Hertz stiffness follow the resolved
+        /// data; preset T60/support/rim/wire laws remain independent estimates.
+        #[wasm_bindgen(js_name = withMaterials)]
+        pub fn with_materials(piece: &str, grid_scale: f64, gas_record: &str,
+            surface_pack: &[u8], secondary_pack: &[u8], striker_pack: &[u8],
+            temperature_axis: &str, temperature_k: f64, striker_volume_m3: f64,
+            striker_tip_radius_m: f64, impact_loss_s_m: f64) -> Result<KitPiece, JsError> {
+            let materials = KitMaterials::from_packs_at_temperature(surface_pack, secondary_pack, striker_pack,
+                temperature_axis, temperature_k, striker_volume_m3, striker_tip_radius_m, impact_loss_s_m)
+                .map_err(|e| JsError::new(&e))?;
+            Live::with_materials_record(piece, grid_scale, gas_record, materials)
                 .map(|live| KitPiece { live, scale: grid_scale })
                 .map_err(|e| JsError::new(&e))
         }
@@ -78,10 +94,11 @@ mod wasm {
         pub fn info(&self) -> String {
             let b: Vec<String> = self.live.ins.bodies.iter().map(|b| format!("{{\"name\":\"{}\",\"nodes\":{}}}", b.name, b.n)).collect();
             format!(
-                "{{\"piece\":\"{}\",\"gridScale\":{},\"radius\":{},\"surfaceNodes\":{},\"h\":{},\"rate\":{},\"gas\":{{\"temperatureK\":{},\"pressurePa\":{},\"densityKgM3\":{},\"soundSpeedMps\":{}}},\"bodies\":[{}]}}",
+                "{{\"piece\":\"{}\",\"gridScale\":{},\"radius\":{},\"surfaceNodes\":{},\"h\":{},\"rate\":{},\"gas\":{{\"temperatureK\":{},\"pressurePa\":{},\"densityKgM3\":{},\"soundSpeedMps\":{}}},\"materials\":{},\"bodies\":[{}]}}",
                 self.live.name, self.scale, self.live.radius, self.live.surface_xy().len() / 2, self.live.surface_h(), self.live.ins.rate,
                 self.live.ins.gas().temperature, self.live.ins.gas().pressure,
-                self.live.ins.gas().density, self.live.ins.gas().sound_speed, b.join(",")
+                self.live.ins.gas().density, self.live.ins.gas().sound_speed,
+                self.live.ins.materials().map_or_else(|| "null".into(), KitMaterials::info_json), b.join(",")
             )
         }
     }

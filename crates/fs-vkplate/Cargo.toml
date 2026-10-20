@@ -18,6 +18,12 @@ layer = "L4"
 
 [dependencies]
 fs-material = { path = "../fs-material" }
+fs-matdb = { path = "../fs-matdb" }
+fs-qty = { path = "../fs-qty" }
+
+[dev-dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-evidence = { path = "../fs-evidence" }
 
 [profile.release]
 opt-level = 3

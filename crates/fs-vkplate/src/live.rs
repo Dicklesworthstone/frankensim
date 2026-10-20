@@ -4,6 +4,7 @@
 //! is the same solver as the offline renders.
 
 use crate::kit::{self, CymbalSpec, DrumSpec, Piece, BRONZE, OUT_RATE};
+use crate::materials::KitMaterials;
 use crate::*;
 
 /// Every piece the live kit knows, in the order a drummer names them.
@@ -42,6 +43,16 @@ pub struct Live {
 const QUIET_S: f64 = 0.3;
 const SLEEP_FRAMES: usize = 128;
 
+fn gas_record(record: &str) -> Result<GasState, String> {
+    let mut fields = record.split_ascii_whitespace();
+    let gas = fs_material::gas_species::input::read_gas_state(&mut fields, None)
+        .map_err(|e| e.to_string())?;
+    if fields.next().is_some() {
+        return Err("unexpected fields after the gas record".into());
+    }
+    Ok(gas)
+}
+
 impl Live {
     pub fn new(piece: &str, scale: f64) -> Result<Live, String> {
         Self::with_gas(piece, scale, standard_gas())
@@ -52,18 +63,26 @@ impl Live {
     /// This constructs a new physical trajectory; it does not alter a ringing
     /// instrument or erase its stored energy by changing coefficients in place.
     pub fn with_gas_record(piece: &str, scale: f64, record: &str) -> Result<Live, String> {
-        let mut fields = record.split_ascii_whitespace();
-        let gas = fs_material::gas_species::input::read_gas_state(&mut fields, None)
-            .map_err(|e| e.to_string())?;
-        if fields.next().is_some() {
-            return Err("unexpected fields after the gas record".into());
-        }
-        Self::with_gas(piece, scale, gas)
+        Self::with_gas(piece, scale, gas_record(record)?)
+    }
+
+    /// Material-card data and gas state reach the same live solver before
+    /// settling; cloning or overlapping strokes retain the complete binding.
+    pub fn with_materials_record(piece: &str, scale: f64, record: &str, materials: KitMaterials) -> Result<Live, String> {
+        Self::with_materials(piece, scale, gas_record(record)?, materials)
+    }
+
+    pub fn with_materials(piece: &str, scale: f64, gas: GasState, materials: KitMaterials) -> Result<Live, String> {
+        Self::build(piece, scale, gas, Some(&materials))
     }
 
     /// Build every gas-dependent loading and observation operator from one
     /// coherent immutable snapshot before settling or playing the instrument.
     pub fn with_gas(piece: &str, scale: f64, gas: GasState) -> Result<Live, String> {
+        Self::build(piece, scale, gas, None)
+    }
+
+    fn build(piece: &str, scale: f64, gas: GasState, materials: Option<&KitMaterials>) -> Result<Live, String> {
         gas.validate_coherence().map_err(|e| e.to_string())?;
         if !(scale.is_finite() && (1.0..=12.0).contains(&scale)) {
             return Err(format!("grid scale {scale} outside [1, 12]"));
@@ -71,23 +90,35 @@ impl Live {
         let drum = |mut d: DrumSpec| -> Result<(Piece, f64, f64), String> {
             d.grid *= scale;
             // Keep the physical preset's internal clock; output remains 48 kHz.
-            let foot = d.striker.2;
-            Ok((kit::drum_with_gas(&d, &[], gas)?, d.radius, foot))
+            let foot = if materials.is_some() { 0.0 } else { d.striker.2 };
+            let piece = match materials {
+                Some(m) => kit::drum_with_materials(&d, &[], gas, m)?,
+                None => kit::drum_with_gas(&d, &[], gas)?,
+            };
+            Ok((piece, d.radius, foot))
         };
         let cym = |mut c: CymbalSpec| -> Result<(Piece, f64, f64), String> {
             c.grid *= scale;
-            Ok((kit::cymbal_with_gas(&c, &[], gas)?, c.radius, 0.0))
+            let piece = match materials {
+                Some(m) => kit::cymbal_with_materials(&c, &[], gas, m)?,
+                None => kit::cymbal_with_gas(&c, &[], gas)?,
+            };
+            Ok((piece, c.radius, 0.0))
         };
         let rim = Law::Power { k: 2.0e9, alpha: 1.5, mu: 3.0 };
         let hat = kit::hihat_spec().0.radius;
+        let hihat = |gap, pedal| match materials {
+            Some(m) => kit::hihat_grid_mu_with_materials(gap, pedal, &[], rim, 0.8, scale, kit::RIM_FRICTION, gas, m),
+            None => kit::hihat_grid_mu_with_gas(gap, pedal, &[], rim, 0.8, scale, kit::RIM_FRICTION, gas),
+        };
         let (mut p, radius, foot) = match piece {
             "kick" => drum(kit::kick())?,
             "snare" => drum(kit::snare())?,
             "snare-off" => drum(kit::snare_wires_off())?,
             "tom-12" => drum(kit::tom(12.0))?,
             "tom-14" => drum(kit::tom(14.0))?,
-            "hihat-closed" => (kit::hihat_grid_mu_with_gas(0.0, 80.0, &[], rim, 0.8, scale, kit::RIM_FRICTION, gas)?, hat, 0.0),
-            "hihat-open" => (kit::hihat_grid_mu_with_gas(0.002, 0.0, &[], rim, 0.8, scale, kit::RIM_FRICTION, gas)?, hat, 0.0),
+            "hihat-closed" => (hihat(0.0, 80.0)?, hat, 0.0),
+            "hihat-open" => (hihat(0.002, 0.0)?, hat, 0.0),
             "crash" => cym(kit::crash())?,
             "ride" => cym(kit::ride())?,
             other => return Err(format!("unknown piece {other}")),
@@ -104,7 +135,8 @@ impl Live {
         } else {
             // hi-hats and cymbals: one stick contact, moved to wherever the next stroke lands
             let tip = if piece == "ride" { 0.004 } else if piece == "crash" { 0.008 } else { 0.005 };
-            let mut c = Contact::new(vec![(target, 0, 1.0)], vec![(stick, 0, 1.0)], 0.0, kit::hertz_stick(tip, BRONZE.0, BRONZE.1));
+            let law = materials.map_or_else(|| kit::hertz_stick(tip, BRONZE.0, BRONZE.1), KitMaterials::impact_law);
+            let mut c = Contact::new(vec![(target, 0, 1.0)], vec![(stick, 0, 1.0)], 0.0, law);
             c.active = false;
             ins.contacts.push(c);
             ins.contacts.len() - 1

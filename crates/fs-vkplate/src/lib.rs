@@ -32,6 +32,9 @@ use std::f64::consts::PI;
 
 pub use fs_material::gas::GasState;
 
+/// Immutable source-bound elastic data and physical striker geometry for kit builders.
+pub mod materials;
+
 /// Default environmental datum; all coefficients come from the shared gas law.
 /// Custom atmospheres enter through `Instrument::with_gas`.
 pub fn standard_gas() -> GasState {
@@ -41,6 +44,9 @@ pub fn standard_gas() -> GasState {
 
 #[cfg(test)]
 mod material_gas_tests;
+
+#[cfg(test)]
+mod material_tests;
 
 // ----------------------------------------------------------------------------- sparse
 #[derive(Clone, Debug, Default)]
@@ -1647,6 +1653,7 @@ pub struct Instrument {
     // microphones. Changing it during a trajectory requires physical state and
     // parameter-work transfer, so callers build a new instrument instead.
     gas: GasState,
+    materials: Option<std::sync::Arc<materials::KitMaterials>>,
     prepared: bool,
     cq: ContactQueue,
 }
@@ -1663,8 +1670,15 @@ impl Instrument {
         if !rate.is_finite() || rate <= 0.0 {
             return Err("instrument sample rate must be positive and finite".into());
         }
-        Ok(Instrument { bodies: vec![], cavities: vec![], rads: vec![], links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, prepared: false, cq: ContactQueue::default() })
+        Ok(Instrument { bodies: vec![], cavities: vec![], rads: vec![], links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default() })
     }
+    /// A new trajectory retaining the same elastic sources its kit builder uses.
+    pub(crate) fn with_materials(rate: f64, gas: GasState, materials: materials::KitMaterials) -> Result<Instrument, String> {
+        let mut instrument = Self::with_gas(rate, gas)?;
+        instrument.materials = Some(std::sync::Arc::new(materials));
+        Ok(instrument)
+    }
+    pub fn materials(&self) -> Option<&materials::KitMaterials> { self.materials.as_deref() }
     /// The same material snapshot used by every gas-dependent operator.
     pub const fn gas(&self) -> &GasState {
         &self.gas
@@ -1959,6 +1973,7 @@ impl Instrument {
         InstrumentImage {
             rate: self.rate,
             gas: self.gas,
+            materials: self.materials.clone(),
             step_index: self.step_index,
             bodies,
             cavities: self.cavities.clone(),
@@ -2040,6 +2055,8 @@ pub struct InstrumentImage {
     pub rate: f64,
     /// Retained coherent medium for external steppers and observation filters.
     pub gas: GasState,
+    /// Exact elastic sources used to build the shared operators, when supplied.
+    pub materials: Option<std::sync::Arc<materials::KitMaterials>>,
     pub step_index: u64,
     pub bodies: Vec<BodyImage>,
     pub cavities: Vec<Cavity>,

@@ -68,8 +68,53 @@ This is one prescribed stationary medium. Changing a live atmosphere starts a
 new trajectory; it is not an in-place thermodynamic update of a ringing body.
 The existing lumped-cavity and small-ka radiation approximations still apply.
 Viscosity and conductivity remain in the retained state, but this solver does
-not yet model viscothermal cavity loss or hi-hat squeeze films. Structural and
-contact presets remain separate material-integration work.
+not yet model viscothermal cavity loss or hi-hat squeeze films.
+
+## Shared solid and striker materials
+
+`materials::KitMaterials` binds three canonical
+`fs_material::state_point::IsotropicElasticStatePoint` values: the primary
+surface, secondary surface, and spherical striker. The complete source bundles
+and imported material cards remain attached to the instrument and its exported
+image. Use `kit::drum_with_materials`, `kit::cymbal_with_materials`, or
+`kit::hihat_grid_mu_with_materials` with the same gas and geometry declarations.
+Existing builders retain the standard kit presets.
+
+The material density supplies each surface's actual mass. Young's modulus and
+Poisson ratio supply its bending, Berger and von Karman operators. Striker mass
+is its source density times the declared effective moving volume; the original
+Hertz law uses both contact materials and the declared spherical tip radius.
+Changing cards does not retune installed tension, rescale geometry to preserve
+mass, or substitute a material-name switch in the physics code.
+
+`KitMaterials::from_card_packs` accepts canonical `NormalizedMaterialCardPack`
+bytes and an explicit `QueryPoint`. The live browser accepts those same packs
+through `KitPiece.withMaterials` and the **Solid and striker materials** controls.
+The primary pack applies to batter heads and upper cymbals; an omitted secondary
+pack explicitly reuses it for resonant heads and lower hi-hats. The striker pack
+replaces every preset beater, including the kick, with the declared spherical
+impactor. `Live::with_materials_record` is the native counterpart. All live grid
+trials, fallback rebuilds, overlapping strikes and copies retain the binding.
+GPU plans also require matching solid and gas source bindings for every member.
+
+Browser imports declare one finite positive absolute solid temperature in kelvin
+and the source's temperature-axis name. A source that constrains that coordinate
+must use the canonical typed absolute-temperature/static quantity. Native callers
+can provide a general query point, including additional declared state coordinates.
+Missing, conflicting or out-of-domain properties refuse; imported files are
+bounded to 16 MiB in aggregate. These are new trajectories from rest, not an
+energy-conserving replacement of a ringing specimen.
+
+Loss and contact scope remains explicit. Installed T60 decay points, supports,
+snare-wire material/contact and hi-hat rim/friction laws remain separately
+declared presets. The striker's Hunt-Crossley loss is an independent input, not
+inferred from elastic modulus. The head radiation-resistance estimate retains
+its tension-only membrane-frequency approximation, using the new density; full
+bending elasticity reaches the computed structural motion and Rayleigh pressure.
+No measured broadband loss or stiff-head radiation qualification is inferred
+from bulk elastic data. Imported materials bypass the original Mylar/bronze
+grid-gain correction, so material comparisons keep the declared pressure-to-PCM
+gain instead of being equalized to the original kit.
 
 ## Numerics
 
