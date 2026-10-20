@@ -723,33 +723,67 @@ mod contact_pack_tests {
         }
     }
 
+    /// Every `Cargo.toml` under `dir`: the workspace root, crates, apps and
+    /// nested example or fuzz manifests. Build output and data are skipped.
+    fn manifests(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if path.is_dir() {
+                if !(name.starts_with('.')
+                    || name == "target"
+                    || name == "node_modules"
+                    || name == "data")
+                {
+                    manifests(&path, out);
+                }
+            } else if name == "Cargo.toml" {
+                out.push(path);
+            }
+        }
+    }
+
     #[test]
     fn cp_008_named_fixture_path_is_not_reachable_from_runtime_code() {
-        // "Only tests" made checkable. No manifest may enable fixture-packs
-        // outside [dev-dependencies]; fs-matdb itself may declare it under
-        // [features]. No crate's src/ may name the fixture path.
-        let crates = repo_root().join("crates");
+        // "Only tests" made checkable. No manifest anywhere in the tree may
+        // enable fixture-packs outside a dev-dependencies table; that includes
+        // [workspace.dependencies], through which a member could inherit it.
+        // fs-matdb itself may declare it under [features]. No crate's src/
+        // may name the fixture path.
+        let root = repo_root();
+        let own_manifest = root.join("crates/fs-matdb/Cargo.toml");
+        let mut found = Vec::new();
+        manifests(&root, &mut found);
+        found.sort();
         let mut checked = 0usize;
-        for entry in std::fs::read_dir(&crates).expect("crates").flatten() {
-            let Ok(manifest) = std::fs::read_to_string(entry.path().join("Cargo.toml")) else {
+        for path in &found {
+            let Ok(manifest) = std::fs::read_to_string(path) else {
                 continue;
             };
-            let own = entry.file_name() == "fs-matdb";
+            let own = *path == own_manifest;
             let mut section = String::new();
             for line in manifest.lines().map(str::trim) {
                 if line.starts_with('[') {
                     section = line.to_owned();
                 } else if line.contains("fixture-packs") && !line.starts_with('#') {
+                    let dev = section == "[dev-dependencies]"
+                        || section.starts_with("[dev-dependencies.")
+                        || (section.starts_with("[target.")
+                            && section.contains(".dev-dependencies"));
                     assert!(
-                        section == "[dev-dependencies]" || (own && section == "[features]"),
+                        dev || (own && section == "[features]"),
                         "{} enables fixture-packs under {section}",
-                        entry.path().display()
+                        path.display()
                     );
                 }
             }
             if !own {
                 let mut sources = Vec::new();
-                rust_sources(&entry.path().join("src"), &mut sources);
+                rust_sources(&path.parent().unwrap().join("src"), &mut sources);
                 for source in &sources {
                     let text = std::fs::read_to_string(source).unwrap_or_default();
                     assert!(
@@ -763,8 +797,12 @@ mod contact_pack_tests {
             checked += 1;
         }
         println!(
-            "{{\"suite\":\"fs-matdb\",\"case\":\"cp-008-fixture-path-unreachable\",\"crates_checked\":{checked},\"verdict\":\"pass\"}}"
+            "{{\"suite\":\"fs-matdb\",\"case\":\"cp-008-fixture-path-unreachable\",\"manifests_checked\":{checked},\"verdict\":\"pass\"}}"
         );
         assert!(checked > 100, "the scan must see the workspace ({checked})");
+        assert!(
+            found.contains(&root.join("Cargo.toml")),
+            "the workspace root manifest must be scanned"
+        );
     }
 }
