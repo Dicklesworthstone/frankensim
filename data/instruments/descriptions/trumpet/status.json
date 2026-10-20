@@ -1,0 +1,19 @@
+{
+  "schema": "frankensim.instrument-status.v1",
+  "family": "trumpet",
+  "title": "Trumpet",
+  "reference_instrument": "University of Iowa MIS Bb trumpet (Bach 180S37 Stradivarius, 1987, per MISBbtrumpet.html)",
+  "summary": "Not rendered. The generic lip-valve performer that renders the tenor trombone (music_render lip, fs-couple brass_loop::performance) would drive a trumpet the moment a real bore is supplied, but no numeric bore profile of the Bach 180S37, or of any identified whole Bb trumpet, was found in the open literature this lane could open. Inventing one, or assembling one from unrelated specimens, is not allowed, so the family stays blocked on geometry rather than render something that only looks like a trumpet.",
+  "physics_present": [
+    "the generic lip-valve performer, outlet observer and file format used for the tenor trombone (no instrument-specific code path): it accepts any list of cylinders, cones and Bessel horns, any measured lip, a cup volume and a microphone"
+  ],
+  "physics_missing": [
+    "the bore: leadpipe, tuning slide, valve block with its slides and ports, and bell flare of the Bach 180S37 are all UNKNOWN as numbers; the National Music Museum records for Bach Stradivarius trumpets, which may list bore points, answered every request with an access refusal, so they were not read",
+    "what was found and not used: a published Bach 7C backbore table (Frost 2014, University of Washington thesis; its orientation is inferred, and its cup profile, cup volume and shank taper are not given), a caliper table of one unidentified trumpet (Kipp 2015, whose segment lengths cover only part of the instrument), and figure-only bore plots (Bilbao and Chick 2013; Sharp 1996; Myers 1998)",
+    "valve and slide tubing lengths for the valve combinations: UNKNOWN",
+    "a same-specimen or same-model impedance pair: no published impedance of a Bach 180S37 was found",
+    "everything the trombone lacks that also applies here (breath-warmed gas, wall vibration, nonlinear propagation at forte, a resolved radiation observer across the trumpet band, a human lip)"
+  ],
+  "blocked": "No numeric bore profile of the Bach 180S37 or of any identified whole Bb trumpet found in open literature; needs an owner measurement (plan OD4) or access to museum bore records.",
+  "beads": ["pexfp.254"]
+}

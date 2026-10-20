@@ -1,0 +1,17 @@
+{
+  "schema": "frankensim.instrument-status.v1",
+  "family": "tuba",
+  "title": "Tuba",
+  "reference_instrument": "University of Iowa MIS tuba (Mirafone 1865U CC tuba, performer D. Spies, per MIStuba.html)",
+  "summary": "Not rendered. The generic lip-valve performer is ready, but no numeric bore profile of the Mirafone 1865U, or of any tuba, was found; the one tuba bell profile located is a figure with no numbers. The family stays blocked on geometry, and it is graded from the second harmonic upward until the chamber cutoff is sourced, as the bead states.",
+  "physics_present": [
+    "the generic lip-valve performer, outlet observer and file format used for the tenor trombone, which would take a tuba bore once one is supplied (a tuba bell needs a far lower mechanics clock, since the flanged radiation ceiling scales with bell radius)"
+  ],
+  "physics_missing": [
+    "the bore, valve tubing and mouthpiece of the Mirafone 1865U: UNKNOWN as numbers",
+    "the chamber cutoff of the Iowa recording room below which the tuba's fundamentals are not trustworthy (the pages state absorption down to 60 Hz); the bead already says to grade from the second harmonic",
+    "a same-model impedance pair, and everything the trombone lacks that also applies here"
+  ],
+  "blocked": "No numeric tuba bore found in open literature (the only tuba bell profile located is figure-only).",
+  "beads": ["pexfp.262"]
+}

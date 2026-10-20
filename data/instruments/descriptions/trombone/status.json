@@ -1,0 +1,26 @@
+{
+  "schema": "frankensim.instrument-status.v1",
+  "family": "trombone",
+  "title": "Tenor trombone",
+  "reference_instrument": "University of Iowa MIS tenor trombone (model and player are stated as NA on the page)",
+  "summary": "A tenor trombone with the slide in first position, played by a lip valve whose pitch is never an input: the note is the lock the loop finds between the lip and the bore. The bore is the 14-element template Braden (2006) fitted to a measured Conn 88H large-bore tenor, with the bell as four Bessel horns expanded into cones on their exact curves. The lip is the outward-striking mode of the artificial latex lips Cullen (2000) measured, with the mouthpiece volume of the same rig; the mouth pressure is the published mf range. The graded sound is the radiated pressure of the actual bell disk at a baffled point 1.524 m away, not the mouthpiece pressure. Nothing was fitted to the Iowa recordings, and the lip setting that gives each note is read from the render, not set from a pitch. It is a population stand-in (a different trombone from the recorded one), and the first stretch of the bore, the mouthpiece and leadpipe, is a placeholder because the source does not print its interior.",
+  "physics_present": [
+    "fs-couple brass_loop: a one-degree-of-freedom outward-striking lip island advanced by exact held-force propagation, a Bernoulli aperture solved implicitly with the mouthpiece cup junction, closing on the bore's reflectance",
+    "fs-duct multimodal transfer-matrix bore with exact Bessel viscothermal loss, realized as a passive causal line by a convergence ladder over the line length, terminated in the flanged-piston radiation load",
+    "the bell as Bessel horns r = b (x0 - s)^-flare through the published end radii and flares, expanded into cones lying exactly on the curve (pieces per horn is a refinement axis)",
+    "an outlet observer built from the same duct: the mouth volume flow per incident wave from the same transfer-matrix chain, differentiated and delayed by the Rayleigh integral over the real bell disk to a baffled receiver, so the graded sound is radiated pressure, not mouthpiece pressure",
+    "a lip tension gesture (pre-stress) and a blowing-pressure gesture on the shared canonical schedule format, with the held-note and tension-sweep recipes in render.sh"
+  ],
+  "physics_missing": [
+    "the interior of the mouthpiece and leadpipe: Braden's table lists them as one element with only its end radii and length, so a cylinder at the end radius stands in; the cup, throat and backbore are not a measured profile, and the mouthpiece volume of the lip rig may overlap that element",
+    "the recorded trombone: the Iowa page gives no model, so the Conn 88H template is a population stand-in and the F attachment is absent",
+    "a player's lips: the lip is an artificial latex lip pair on a trombone-size mouthpiece, only its outward-striking mode, with no inward-striking mode; human outward resonances are far lower and more heavily damped, and no human lip mass, width or rest gap is published",
+    "a clock that reaches the bell's radiation ceiling: the flanged radiation load is admitted only to ka 20, so the render runs on a 19.2 kHz clock (not 48 kHz) and everything above the receiver's resolved band is unmodelled",
+    "a radiation observer resolved across the trombone band: the Rayleigh disk quadrature admits only about 3.9 kHz for this bell, and the mouth-flow transfer is the plane-mode image of the duct, not the multimodal one the reflectance line uses",
+    "the microphone: on-axis point source geometry only; the player's bell orientation, the cardioid KM 84 directivity and any room are not modelled",
+    "breath-warmed and humidified bore gas, wall vibration, nonlinear propagation and shock formation at forte (the source of brassiness), mutes, slide positions beyond the first, and the slide's own acoustic leakage",
+    "a same-specimen impedance pair, so the passive chain is checked only against published population data"
+  ],
+  "blocked": null,
+  "beads": ["pexfp.254"]
+}

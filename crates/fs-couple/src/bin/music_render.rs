@@ -37,6 +37,11 @@
 //! renders authored reed primitives, segmented ducts and pressure phrases.
 //! See `examples/REED_PERFORMANCES.md`; the legacy `reed` fixture is unchanged.
 //!
+//! `music_render lip INPUT.performance OUT.wav [--block N]` renders a lip-valve performance
+//! (`fs_couple::brass_loop::performance`): a measured lip, a held bore of cylinders, cones and
+//! Bessel horns, a pressure phrase, and a baffled-disk microphone on the bore's mouth flow. The
+//! file declares its own clock (a large bell bounds it below 48 kHz) and the WAV is written on it.
+//!
 //! `music_render voice INPUT.performance OUT.wav [--block N]` plays a lumped
 //! glottal source into a tract area function and writes the pressure at a
 //! baffled microphone. The file owns every physical input; see
@@ -86,6 +91,8 @@ mod modal_input;
 mod plate_input;
 #[path = "music_render/voice_input.rs"]
 mod voice_input;
+#[path = "music_render/lip_input.rs"]
+mod lip_input;
 #[path = "music_render/stream_output.rs"]
 mod stream_output;
 #[path = "music_render/ensemble_input.rs"]
@@ -357,6 +364,11 @@ fn main() {
     if args.first().is_some_and(|arg| arg == "voice") {
         if gas_registry.is_some() || gas_options.record.is_some() { fail("voice input declares its own ambient gas"); }
         voice_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
+        return;
+    }
+    if args.first().is_some_and(|arg| arg == "lip") {
+        if gas_registry.is_some() || gas_options.record.is_some() { fail("lip input declares its own ambient gas"); }
+        lip_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
         return;
     }
     let mut positional = Vec::new();

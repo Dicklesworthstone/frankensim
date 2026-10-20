@@ -36,6 +36,9 @@ use fs_phs::{PortHamiltonian, mass_spring_damper};
 use crate::mm_line::{CupState, MmLineBank, MmLineConfig, MmLineError, MmLoad, cup_junction};
 use fs_duct::Duct;
 
+/// File-driven lip-valve performances observed at a baffled microphone.
+pub mod performance;
+
 /// The lip island's reduced parameters plus their provenance labels.
 #[derive(Debug, Clone)]
 pub struct LipIsland {
@@ -241,6 +244,19 @@ impl BrassVoice {
         &self.diags
     }
 
+    /// Realization receipts of the bank, one per valve combination.
+    #[must_use]
+    pub fn receipts(&self) -> &[crate::mm_line::MmComboReceipt] {
+        self.bank.receipts()
+    }
+
+    /// Plane-mode characteristic impedance of the bore's input plane
+    /// [Pa s/m^3]: the port impedance the outgoing wave is referenced to.
+    #[must_use]
+    pub fn port_impedance(&self) -> f64 {
+        self.bank.zc0()
+    }
+
     /// Render one block of mouthpiece pressure [Pa]. The loop each
     /// sample: lip island steps under the transmural force, the
     /// Bernoulli aperture meters the flow, the cup junction turns flow
@@ -249,6 +265,34 @@ impl BrassVoice {
     /// # Errors
     /// [`MmLineError`] when any island refuses (non-finite state).
     pub fn step_block(&mut self, out: &mut [f64]) -> Result<(), MmLineError> {
+        self.step_block_traced(out, None)
+    }
+
+    /// [`Self::step_block`] that also records, per sample, the wave `p+` the
+    /// junction sent INTO the bore [Pa]. Together with the port impedance it
+    /// is the bore's incident wave, which every downstream transfer of the
+    /// same duct (mouth flow, radiation) is referenced to.
+    ///
+    /// # Errors
+    /// As [`Self::step_block`]; also when `outgoing` and `out` differ in length.
+    pub fn step_block_outgoing(
+        &mut self,
+        out: &mut [f64],
+        outgoing: &mut [f64],
+    ) -> Result<(), MmLineError> {
+        if outgoing.len() != out.len() {
+            return Err(MmLineError::Invalid {
+                what: "outgoing-wave trace must match the block length",
+            });
+        }
+        self.step_block_traced(out, Some(outgoing))
+    }
+
+    fn step_block_traced(
+        &mut self,
+        out: &mut [f64],
+        mut outgoing: Option<&mut [f64]>,
+    ) -> Result<(), MmLineError> {
         if out.is_empty() {
             return Err(MmLineError::Invalid {
                 what: "empty block",
@@ -262,7 +306,7 @@ impl BrassVoice {
         let mut bore_work = 0.0f64;
         let mut worst_defect = 0.0f64;
         let zc0 = self.bank.zc0();
-        for slot in out.iter_mut() {
+        for (index, slot) in out.iter_mut().enumerate() {
             // 1. Lip island under the transmural force (outward-striking:
             //    mouth overpressure opens the lip).
             let dp_lip = self.blow_pa - self.p_bore_prev;
@@ -317,6 +361,9 @@ impl BrassVoice {
             let (p_plus, p_now) =
                 cup_junction(flow, p_minus, &mut self.cup, self.cup_compliance, zc0, dt);
             let _ = self.bank.push(p_plus)?;
+            if let Some(trace) = outgoing.as_deref_mut() {
+                trace[index] = p_plus;
+            }
             bore_work += (p_plus * p_plus - p_minus * p_minus) / zc0 * dt;
             self.p_bore_prev = p_now;
             *slot = p_now;

@@ -1,0 +1,18 @@
+{
+  "schema": "frankensim.instrument-status.v1",
+  "family": "horn",
+  "title": "Horn",
+  "reference_instrument": "University of Iowa MIS French horn (model unstated; performer J. Wiskus)",
+  "summary": "Not rendered. The generic lip-valve performer is ready, but the horn needs a numeric bore of a horn in the range played and the hand in the bell, and neither was found. The only numbers found are a handful of bore diameters at key points of one museum double horn, far too sparse to describe the bell flare that sets the horn's sound, so the family stays blocked on geometry.",
+  "physics_present": [
+    "the generic lip-valve performer, outlet observer and file format used for the tenor trombone, which would take a horn bore as cylinders, cones and Bessel horns once one is supplied"
+  ],
+  "physics_missing": [
+    "the bore: no whole numeric profile of a single or double horn was found; the Edinburgh museum catalogue lists about seven bore diameters at key points of one double horn, and the horn of Bilbao and Chick (2013) is figure-only",
+    "the hand in the bell, which lowers the cutoff and moves the upper resonances on every note (Dell et al. 2015): the paper was not found, so there is no published hand geometry or impedance",
+    "rotor and branch-slide tubing for the F and B-flat sides, and the horn's mouthpiece (a funnel cup, whose volume and throat are not published for a named piece)",
+    "a lip valve for horn players, and everything the trombone lacks that also applies here"
+  ],
+  "blocked": "No whole numeric horn bore and no hand-in-bell geometry found in open literature.",
+  "beads": ["pexfp.258"]
+}

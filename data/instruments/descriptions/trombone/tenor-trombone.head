@@ -1,0 +1,85 @@
+# Tenor trombone, slide in first position, one held note: bore, lip, cup, microphone.
+# render.sh prepends the schema and audio records and appends the schedule record
+# plus a canonical gesture track, so one description serves every held note.
+#
+# Every number carries its source. UNKNOWN marks what no source opened for this lane
+# gives; none of it is fitted to a recording.
+#
+# --- ambient -------------------------------------------------------------------
+# 293.15 K, 101325 Pa, dry: a standard laboratory state. UNKNOWN: the temperature and
+# humidity of the Iowa anechoic chamber (MIS.html does not state them) and the bore gas
+# temperature while played (breath warms and humidifies the air column).
+full_scale_pa 50
+ambient moist_air 293.15 101325 0
+#
+# --- lip ------------------------------------------------------------------------
+# J. S. Cullen, "A Study of Brass Instrument Acoustics using an Artificial Lip Reed
+# Mechanism, Laser Doppler Anemometry and Other Techniques", PhD thesis, University of
+# Edinburgh, 2000, Table A.2 p.253, embouchure 7 (standard font = measured, not
+# interpolated): H0 = 0.53 mm, b = 12 mm, fL1 = 204.5 Hz, QL1 = 7.0, 1/muL1 = 0.063
+# m^2/kg. The island is the outward-striking mode (L1). These are ARTIFICIAL latex lips
+# on a trombone-size mouthpiece, not a player: human outward resonances are lower and
+# damped harder (Newton 2009 thesis Table 4.2: 32-60 Hz, Q 1.5-2.4, video method) but
+# no human mass, width or rest gap is published. UNKNOWN: the inward-striking mode L2
+# (fL2 244.5 Hz, Q 11.0, 1/muL2 -0.073 m^2/kg in the same row) is not represented by a
+# 1-DOF island. The face area only normalizes force; m = A/(1/mu) and the motion
+# does not depend on it. Table 3.1 of the same thesis gives 1/muL1 = 0.11 for the
+# 'medium' embouchure; Table A.2 is the later, systematically lower set (thesis p.63).
+lip_response 204.5 7.0 0.063 0.012 0.00053 1.0e-4
+lip_source Cullen (2000) PhD Edinburgh Table A.2 p.253 embouchure 7: fL1 204.5 Hz, QL1 7.0, 1/muL1 0.063 m2/kg, b 12 mm, H0 0.53 mm; artificial lips, outward-striking mode only; face area 1e-4 m2 is a normalization that cancels
+#
+# --- mouthpiece cup ---------------------------------------------------------------
+# Cullen (2000) p.41: the artificial-mouth mouthpiece 'when complete, has a total internal
+# volume of 12.7ml, a Helmholtz resonance frequency of 518Hz and a quality factor of
+# 7.1' (the mouthpiece the lip data above were measured with). Lumped here as the cup
+# compliance; the leadpipe and throat of the real instrument are in the bore below.
+# UNKNOWN: whether the printed volume overlaps the first bore element (see LIST).
+cup_volume_m3 1.27e-5
+termination flanged
+modes 3 1
+#
+# --- bore -------------------------------------------------------------------------
+# A. C. P. Braden, "Bore Optimisation and Impedance Modelling of Brass Musical
+# Instruments", PhD thesis, University of Edinburgh, 2006, Table 5.1 p.72 "Templated
+# description of a trombone (units/cm)": a 14-element template that approximates the
+# measured bore of the author's Conn 88H large-bore tenor (p.71 'specific values were
+# chosen to approximate this bore profile'; p.110 'The template in table 5.1 was used to
+# reconstruct the 88H'). Template values, not raw calipers; the thesis states no
+# uncertainty. Radii and lengths are printed in cm, converted to m below. JUMP elements
+# (2, 4, 6, 9) are the radius steps between neighbouring records.
+# Specimen caveat: the UIowa tenor trombone model is 'NA' on MIStenortrombone.html, so
+# this is a population stand-in (QP verdict label: population-flagged), not the
+# recorded instrument. The F attachment is not represented (p.92 only gives '1 m').
+#
+# Element 1 LIST 'Mouthpiece & lead-pipe', length 26.145 cm, radius 1.286 -> 0.664 cm.
+# UNKNOWN: the interior of this list is not printed in the table (the point list is not
+# in the text; Fig 5.3 is a plot). Placeholder, NOT a measurement: a cylinder at the
+# printed END radius over the printed length (36 ml, close to a real cup+backbore+
+# leadpipe volume; a cone between the printed ends would be 81 ml).
+cylinder 0.00664 0.26145
+# Element 3 CYLR 'Main slide' 139.439 cm, r 0.695 cm
+cylinder 0.00695 1.39439
+# Element 5 CYLR 'Neck-pipe' 26.910 cm, r 0.725 cm
+cylinder 0.00725 0.26910
+# Element 7 CONE 'Tuning-slide' 21.990 cm, r 0.755 -> 0.990 cm
+cone 0.00755 0.00990 0.21990
+# Element 8 CYLR 'Sleeve' 6.732 cm, r 0.990 cm
+cylinder 0.00990 0.06732
+# Element 10 CONE 'Bell' 5.336 cm, r 1.053 -> 1.105 cm
+cone 0.01053 0.01105 0.05336
+# Elements 11-14 BESS 'Bell': Bessel horns r = b (x0 - s)^-flare (thesis App. B,
+# eqs B.1-B.3 and Eq. 5.4), end radii and flare as printed; each expanded into 16 cones
+# on the exact curve (refinement axis: the last number).
+bessel 0.01105 0.01507 0.15042 1.260 16
+bessel 0.01507 0.02228 0.15042 0.894 16
+bessel 0.02228 0.04118 0.09685 0.494 16
+bessel 0.04118 0.10860 0.05593 1.110 16
+bore_source Braden (2006) PhD Edinburgh Table 5.1 p.72, 14-element template of the author's Conn 88H large-bore tenor (cm to m); LIST element interior UNKNOWN (cylinder at printed end radius is a placeholder); UIowa trombone model is NA so this is a population stand-in; no F attachment
+#
+# --- microphone -------------------------------------------------------------------
+# UIowa MIS pages: 'Distance 5 feet' = 1.524 m, anechoic chamber, Neumann KM 84
+# cardioid (MIStenortrombone.html). The point is on the bell axis in the baffle frame:
+# UNKNOWN: the player's bell-to-microphone orientation and the KM 84 directivity are
+# not modelled. 128 x 512 is the receiver's maximum quadrature; for the 0.1086 m bell
+# the receiver admits a resolved band of c/(8 cell) = 3.92 kHz, so 3900 Hz is declared.
+microphone 0 0 1.524 128 512 3900
