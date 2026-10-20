@@ -1,4 +1,7 @@
 //! Existing complete assembly fixtures; actual source-backed gas transport.
+#[path = "flow/snapshot.rs"]
+mod snapshot_tests;
+
 use super::*;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::state::flow::*;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{GasMassTransferSolve,

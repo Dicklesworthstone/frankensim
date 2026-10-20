@@ -1,6 +1,9 @@
 //! Gas connectivity on the same live electrical/thermal/reactive assembly.
 //! Stage the original conservative nozzle graph once, then call the original
 //! assembled reaction/exchange advance. All stages use ONE physical interval.
+/// Shared-state nozzle exchange on the same complete physical assembly.
+pub mod snapshot;
+
 use super::*;
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::network::{
     self, GasNetworkError, GasNetworkLink, GasNetworkSolve, GasNetworkStep,
@@ -11,6 +14,7 @@ use std::collections::BTreeSet;
 pub enum MaterialFlowError {
     Invalid(&'static str),
     Flow(GasNetworkError),
+    SnapshotFlow(network::snapshot::SnapshotNozzleError),
     Exchange(ReactiveExchangeError),
     Gas { chamber: u64, error: fs_material::MaterialError },
     Cancelled,
@@ -24,6 +28,14 @@ impl std::error::Error for MaterialFlowError {}
 impl From<GasNetworkError> for MaterialFlowError {
     fn from(error: GasNetworkError) -> Self {
         match error { GasNetworkError::Cancelled => Self::Cancelled, other => Self::Flow(other) }
+    }
+}
+impl From<network::snapshot::SnapshotNozzleError> for MaterialFlowError {
+    fn from(error: network::snapshot::SnapshotNozzleError) -> Self {
+        match error {
+            network::snapshot::SnapshotNozzleError::Cancelled => Self::Cancelled,
+            other => Self::SnapshotFlow(other),
+        }
     }
 }
 impl From<ReactiveExchangeError> for MaterialFlowError {
@@ -41,13 +53,23 @@ pub struct FlowChamberStep {
 }
 /// Stage reports retain their original reference states. The total balance
 /// below encloses ALL live owners from before flow until after exchange/motion.
-pub struct MaterialFlowAdvance {
-    pub flow: GasNetworkStep,
+pub struct MaterialFlowAdvance<F = GasNetworkStep> {
+    /// The actual selected transport owner's report, before reaction/heat/motion.
+    pub flow: F,
     /// This unchanged report starts AFTER the nozzle graph stage.
     pub exchange: MaterialExchangeAdvance,
     pub chambers: Vec<FlowChamberStep>,
     pub total_mass_residual_kg: f64,
     pub total_energy_residual_j: f64,
+}
+
+// Both transport discretizations feed the same whole-interval balance and
+// atomic state publication. No second chemistry, circuit or thermal solve.
+struct FlowStage<F> {
+    parcels: BTreeMap<u64, fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel>,
+    moved: BTreeSet<u64>,
+    report: F,
+    mass_tolerance_kg: f64,
 }
 fn checkpoint(cx: &Cx<'_>) -> Result<(), MaterialFlowError> {
     cx.checkpoint().map_err(|_| MaterialFlowError::Cancelled)
@@ -99,6 +121,22 @@ impl<'m> MaterialExchangeState<'m> {
                 moved.insert(link.donor); moved.insert(link.receiver);
             }
         }
+        self.finish_flow_candidate(prepared, cx, target_s, ports, drives, reactions,
+            gas_patches, controls, guess_j, FlowStage { parcels, moved, report: flow,
+                mass_tolerance_kg: flow_controls.mass_tolerance_kg })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_flow_candidate<F>(
+        &self, prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>, target_s: f64,
+        ports: &[f64], drives: &[ChamberDrive], reactions: &[ChamberReaction<'_>],
+        gas_patches: &[MaterialContact], controls: NetworkSolve, guess_j: &[f64],
+        stage: FlowStage<F>,
+    ) -> Result<(Self, MaterialFlowAdvance<F>), MaterialFlowError> {
+        use MaterialFlowError as Error;
+        checkpoint(cx)?;
+        let dt = target_s - self.time_s();
+        let FlowStage { parcels, moved, report: flow, mass_tolerance_kg } = stage;
         let mut chambers = BTreeMap::new();
         for (id, parcel) in parcels {
             checkpoint(cx)?;
@@ -149,7 +187,7 @@ impl<'m> MaterialExchangeState<'m> {
             }
             accounts.push(FlowChamberStep { chamber: id, mass_change_kg: dm, gas_energy_change_j: du, entropy_change_j_k: ds });
         }
-        if !mass.is_finite() || !total.is_finite() || mass.abs() > flow_controls.mass_tolerance_kg
+        if !mass.is_finite() || !total.is_finite() || mass.abs() > mass_tolerance_kg
             || total.abs() > controls.total_energy_tolerance_j {
             return Err(Error::Invalid("flow, reactions, finite bodies, circuit and motion fail whole-interval conservation"));
         }
