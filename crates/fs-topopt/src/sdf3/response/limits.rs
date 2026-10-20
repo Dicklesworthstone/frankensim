@@ -17,6 +17,7 @@ mod physical;
 pub mod binary;
 pub mod design;
 pub mod refinement;
+pub mod strength;
 
 /// Physical scalar whose value is bounded. Observation laws remain fixed in
 /// the reference configuration and must use the current grid's DOF ordering.
