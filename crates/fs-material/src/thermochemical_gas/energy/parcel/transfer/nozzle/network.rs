@@ -5,6 +5,9 @@
 //! the SAME interval on the result of preceding edges. This is first order,
 //! not a simultaneous pressure solve. Input vector order has no effect, but
 //! changing edge IDs can change finite-step splitting error; refine time.
+/// Unsplit alternative: evaluate all physical links from one accepted material snapshot.
+pub mod snapshot;
+
 use super::{GasNozzle, GasNozzleFlow, GasNozzleStepSolve};
 use super::super::{inventory, stored_change, ClosedGasParcel, GasEnergyError, GasMassTransferStep};
 use std::collections::BTreeMap;
