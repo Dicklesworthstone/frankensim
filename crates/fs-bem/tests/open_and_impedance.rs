@@ -424,6 +424,10 @@ fn iterative_options() -> IterativeOptions {
         // The 82k-panel rung's double and mixed near fields need about 2 GiB;
         // the cache is bitwise-neutral (bem_near_field_cache_is_bitwise).
         near_field_cache_bytes: 1 << 31,
+        // At 81920 panels and order 6 the mixed operator counts about
+        // 68720 pairs * 6^6 * 9 = 2.9e10 M2L multiply-adds per pass, past the
+        // v1 8e9. The budget changes no bit; it admits that rung.
+        max_translation_work: 40_000_000_000,
         ..IterativeOptions::default()
     }
 }
@@ -431,6 +435,11 @@ fn iterative_options() -> IterativeOptions {
 /// The series is ka in {0.1, 1, 5} by beta in {0, 0.5, 1, 2 + 1i}, one test
 /// per case. Each case solves alone, and in sequence the twelve take more
 /// than 12 h, so the harness may run them in parallel.
+///
+/// Choose `--test-threads` for memory. At 81920 panels a low-ka case may hold
+/// up to `near_field_cache_bytes` (2 GiB) of cached near field beyond its FMM.
+/// A ka = 5 case holds its declared directional envelopes. Each row records
+/// the process's peak RSS (VmHWM), which cases run in one process share.
 mod impedance_sphere_series {
     use super::*;
 
@@ -446,9 +455,16 @@ mod impedance_sphere_series {
             .collect();
         // Exact ka=5: use .108's explicit high-kD owner, including root-box
         // padding. Do not perturb the benchmark input to evade the W5a cap.
+        // That plan stops deepening at 5120 panels. There the single layer
+        // counts 2.45e7 C64 slots and 4.4e9 setup products, and the mixed
+        // layer about 10x both (its ratio at 1280 panels), past the v1
+        // ceilings. The declared envelopes leave about 2x over that.
         let options = if ka == 5.0 {
+            let mut directional = fs_fmm::DirectionalOptions::for_tolerance(1e-4).unwrap();
+            directional.max_coefficient_slots = 1 << 29;
+            directional.max_setup_work = 100_000_000_000;
             IterativeOptions {
-                directional: Some(fs_fmm::DirectionalOptions::for_tolerance(1e-4).unwrap()),
+                directional: Some(directional),
                 ..iterative_options()
             }
         } else {
@@ -496,8 +512,17 @@ mod impedance_sphere_series {
                 TOL,
                 start,
                 &format!(
-                    ",\"ka\":{ka},\"beta\":[{},{}],\"panels\":{n},\"iterations\":{},\"rel_residual\":{},\"near_field_bytes\":{}",
-                    beta.re, beta.im, report.iters, report.rel_residual, receipt.near_field_bytes
+                    ",\"ka\":{ka},\"beta\":[{},{}],\"panels\":{n},\"iterations\":{},\"rel_residual\":{},\"near_field_bytes\":{},\"peak_rss_bytes\":{},\"fmm_stats\":[{},{}]",
+                    beta.re,
+                    beta.im,
+                    report.iters,
+                    report.rel_residual,
+                    receipt.near_field_bytes,
+                    receipt
+                        .peak_rss_bytes
+                        .map_or_else(|| "null".to_string(), |b| b.to_string()),
+                    receipt.fmm_stats[0],
+                    receipt.fmm_stats[1]
                 ),
             );
             let (scatter, report, _) = bc::solve_scattering_bc_iterative(
