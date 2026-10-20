@@ -12,15 +12,34 @@ use super::{Grid3, GridError3, Lattice3, StepData, macro_cell, run_pass};
 use fs_exec::{CancelGate, Cx, KernelRunner};
 use core::marker::PhantomData;
 
+/// Source-preserving material viscosity and density-driven buoyancy.
+pub mod material;
+
+/// Native collision capability used before a force-bearing endpoint can be
+/// published. This is separate from coefficient validity: the D3Q19 moment
+/// families currently admit only zero force, while its BGK and all D3Q27
+/// families have their own explicit forcing implementations.
+pub trait ForcedLattice3<const Q: usize>: Lattice3<Q> {
+    fn supports_body_force(collision: Self::Collision) -> bool;
+}
+impl ForcedLattice3<19> for super::D3q19 {
+    fn supports_body_force(collision: Self::Collision) -> bool {
+        collision.supports_body_force()
+    }
+}
+impl ForcedLattice3<27> for crate::d3q27::D3q27 {
+    fn supports_body_force(_collision: Self::Collision) -> bool { true }
+}
+
 /// A force-aware grid. Its inner grid is deliberately private: returning it
 /// alone would erase the force needed to interpret its stored momentum.
 /// Source history and populations are published together after both passes.
-pub struct ForcedGrid3<L: Lattice3<Q>, const Q: usize> {
+pub struct ForcedGrid3<L: ForcedLattice3<Q>, const Q: usize> {
     pub(super) grid: Grid3<L, Q>,
     forces: Vec<[f64; 3]>,
 }
 
-impl<L: Lattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
+impl<L: ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
     /// Attach an explicit initial force field to an UNSTEPPED grid constructed
     /// with zero uniform force. This specifies the INITIAL population frame;
     /// it does not preserve a previously observed unforced velocity. Supply
@@ -37,7 +56,7 @@ impl<L: Lattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         if grid.completed_steps != 0 || grid.force.iter().any(|&v| v != 0.0) {
             return Err(GridError3::Input("spatial forces require an unstepped zero-force grid"));
         }
-        admit_forces(&grid, &forces, &mut poll)?;
+        admit_forces(&grid, &forces, None, &mut poll)?;
         for (cell, pop) in grid.f.iter().enumerate() {
             if cell % 64 == 0 { poll()?; }
             if !grid.solid[cell] {
@@ -106,9 +125,10 @@ impl<L: Lattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
     }
 }
 
-fn admit_forces<L: Lattice3<Q>, const Q: usize>(
+fn admit_forces<L: ForcedLattice3<Q>, const Q: usize>(
     grid: &Grid3<L, Q>,
     forces: &[[f64; 3]],
+    collisions: Option<&[L::Collision]>,
     poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
 ) -> Result<(), GridError3<L::Error>> {
     poll()?;
@@ -123,11 +143,15 @@ fn admit_forces<L: Lattice3<Q>, const Q: usize>(
         if grid.solid[cell] && force.iter().any(|&v| v != 0.0) {
             return Err(GridError3::MaterialField { cell, reason: "body force on solid cell" });
         }
+        let collision = collisions.map_or(grid.collision, |field| field[cell]);
+        if force.iter().any(|&v| v != 0.0) && !L::supports_body_force(collision) {
+            return Err(GridError3::MaterialField { cell, reason: "collision model does not admit body force" });
+        }
     }
     poll()
 }
 
-fn serial<L: Lattice3<Q>, const Q: usize>(
+fn serial<L: ForcedLattice3<Q>, const Q: usize>(
     grid: &mut Grid3<L, Q>,
     start: &[[f64; 3]],
     end: &[[f64; 3]],
@@ -136,7 +160,7 @@ fn serial<L: Lattice3<Q>, const Q: usize>(
 ) -> Result<(), GridError3<L::Error>> {
     let mut poll = || cx.checkpoint().map_err(|_| GridError3::Cancelled);
     grid.admit_collisions(collisions, &mut poll)?;
-    admit_forces(grid, end, &mut poll)?;
+    admit_forces(grid, end, Some(collisions), &mut poll)?;
     let step = grid.completed_steps.checked_add(1).ok_or(GridError3::Input("step count overflow"))?;
     let data = StepData::<L, Q> {
         dims: grid.dims, periodic: grid.periodic, solid: &grid.solid,
@@ -158,7 +182,7 @@ fn serial<L: Lattice3<Q>, const Q: usize>(
     Ok(())
 }
 
-fn pooled<L: Lattice3<Q>, const Q: usize, P: KernelRunner>(
+fn pooled<L: ForcedLattice3<Q>, const Q: usize, P: KernelRunner>(
     grid: &mut Grid3<L, Q>,
     start: &[[f64; 3]],
     end: &[[f64; 3]],
@@ -168,7 +192,7 @@ fn pooled<L: Lattice3<Q>, const Q: usize, P: KernelRunner>(
 ) -> Result<(), GridError3<L::Error>> {
     let mut poll = || if gate.is_requested() { Err(GridError3::Cancelled) } else { Ok(()) };
     grid.admit_collisions(collisions, &mut poll)?;
-    admit_forces(grid, end, &mut poll)?;
+    admit_forces(grid, end, Some(collisions), &mut poll)?;
     let step = grid.completed_steps.checked_add(1).ok_or(GridError3::Input("step count overflow"))?;
     let data = StepData::<L, Q> {
         dims: grid.dims, periodic: grid.periodic, solid: &grid.solid,
@@ -207,14 +231,14 @@ mod tests {
     fn bgk() -> CollisionConfig27 {
         CollisionConfig27 { model: CollisionModel27::Bgk { tau: 0.8, equilibrium: Equilibrium27::Quadratic }, maximum_mach: 0.2 }
     }
-    fn grid<L: Lattice3<Q>, const Q: usize>(collision: L::Collision, force: [f64; 3]) -> Grid3<L, Q> {
+    fn grid<L: ForcedLattice3<Q>, const Q: usize>(collision: L::Collision, force: [f64; 3]) -> Grid3<L, Q> {
         Grid3::try_new([N, 1, 1], collision, force, [true; 3],
             GridBudget3 { maximum_cells: N, maximum_mach: 0.2 }, |_| false, |_| L::W).unwrap()
     }
-    fn bits<L: Lattice3<Q>, const Q: usize>(pop: &[[f64; Q]]) -> Vec<u64> {
+    fn bits<L: ForcedLattice3<Q>, const Q: usize>(pop: &[[f64; Q]]) -> Vec<u64> {
         pop.iter().flatten().map(|v| v.to_bits()).collect()
     }
-    fn constant_parity<L: Lattice3<Q>, const Q: usize>(collision: L::Collision) {
+    fn constant_parity<L: ForcedLattice3<Q>, const Q: usize>(collision: L::Collision) {
         let force = [1e-6, -2e-6, 0.0];
         let mut legacy = grid::<L, Q>(collision, force);
         let mut local = with_cx(|cx| ForcedGrid3::try_new(grid::<L, Q>(collision, [0.0; 3]), cx, vec![force; N]).unwrap());
@@ -345,6 +369,22 @@ mod tests {
             let mut forces = vec![[0.0; 3]; N];
             forces[N-1][0] = 1e-6;
             assert!(matches!(ForcedGrid3::try_new(solid, cx, forces), Err(GridError3::MaterialField { cell, .. }) if cell == N-1));
+        });
+    }
+
+    #[test]
+    fn unforced_d19_moment_model_cannot_publish_a_force_endpoint() {
+        let model = CollisionModel3::CentralMoment { second_order_rate: 1.25, higher_order_rate: 1.0 };
+        with_cx(|cx| {
+            let force = vec![[1e-6, 0.0, 0.0]; N];
+            assert!(ForcedGrid3::try_new(grid::<D3q19, 19>(model, [0.0; 3]), cx, force.clone()).is_err());
+            let mut local = ForcedGrid3::try_new(grid::<D3q19, 19>(model, [0.0; 3]), cx, vec![[0.0; 3]; N]).unwrap();
+            let before = bits::<D3q19, 19>(local.populations());
+            assert!(matches!(local.advance_serial(cx, &vec![model; N], force),
+                Err(GridError3::MaterialField { reason: "collision model does not admit body force", .. })));
+            assert_eq!(bits::<D3q19, 19>(local.populations()), before);
+            assert_eq!(local.forces(), vec![[0.0; 3]; N]);
+            assert_eq!(local.completed_steps(), 0);
         });
     }
 }
