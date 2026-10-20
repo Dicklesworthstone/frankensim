@@ -130,13 +130,28 @@ pub enum SpecimenErrorKind {
     /// Schema line or column line does not match.
     Header,
     /// Wrong number of row fields.
-    ColumnCount { expected: usize, found: usize },
+    ColumnCount {
+        /// Columns the schema declares.
+        expected: usize,
+        /// Columns the row carries.
+        found: usize,
+    },
     /// A field was empty or whitespace-only.
     MissingField(&'static str),
     /// A field exceeded [`SPECIMEN_FIELD_BYTE_CAP`].
-    FieldTooLong { field: &'static str, cap: usize },
+    FieldTooLong {
+        /// Column name.
+        field: &'static str,
+        /// The byte cap.
+        cap: usize,
+    },
     /// Unknown vocabulary, malformed identifier or number.
-    UnknownValue { field: &'static str, value: String },
+    UnknownValue {
+        /// Column name.
+        field: &'static str,
+        /// The rejected text.
+        value: String,
+    },
     /// Repeated key; no first-row-wins fallback.
     Duplicate(String),
     /// A required key, row or value is absent; names it.
