@@ -297,8 +297,9 @@ the centre distance instead of the gap for finite pistons, is not caught.
 ## No-claim boundaries
 
 - MIMO covers vector fitting, realization, passivity and the causality test
-  of its data. MIMO Loewner pencil identification and the closed-loop audit
-  of an in-loop MIMO load are follow-ups (M2.5-W3b remains open on them).
+  of its data. MIMO Loewner pencil identification is a follow-up. The
+  closed-loop audit of an in-loop MIMO load is fs-couple
+  `closed_loop_audit_reed_bore_radiation`.
 - Scattering-form fitting (`|S| <= 1` enforcement for waveguide
   reflection filters) is a recorded follow-up; the impedance form is
   the v1 passivity law.

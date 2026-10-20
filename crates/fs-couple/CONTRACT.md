@@ -2788,6 +2788,41 @@ Tests in `driving_point::ladder_tests`:
 `render::inlet_geometry_tests::reed_voice_on_a_one_edge_network_matches_the_duct_voice`
 renders within 1e-6 of the duct voice.
 
+### Closed-loop radiation audit (IRP M2.5-W3b G3)
+
+`tests/closed_loop_radiation.rs::closed_loop_audit_reed_bore_radiation` closes
+reed, bore and multiport radiation in one loop. Its fixture is declared
+synthetic: a 7.5 mm bore with an open 4 mm chimney, whose bell and chimney
+mouths end flush in one infinite baffle 45 mm apart. There the coplanar
+baffled-piston matrix (fs-bem) is the exact `Z_rad` at every frequency.
+
+The in-loop load is a passive, delay-extracted fs-vfit MIMO model built in
+four steps:
+- the exact bake passes the dispersion-relation causality test with its gap
+  delays removed;
+- it is fitted from 200 Hz to 8 kHz;
+- grid passivity is repaired from 1 Hz, so it holds at every line bin;
+- the repair's change is gated at 1e-4 over the fit band.
+
+The loop runs at 16 kHz. Each check compares the model loop with the exact one:
+- input-impedance peaks: within 1 cent and 0.5 dB;
+- loaded modes and decay rates of the realized line below 0.5 Nyquist: within
+  1 cent and 2 %;
+- the reed's oscillation threshold: within 1 %;
+- the playing frequency: within 1 cent;
+- the harmonic spectrum up to 8 kHz: within 0.5 dB rms.
+
+Measured (yto y11):
+- order-6 fit error 1.07e-7, repair change 1.3e-8;
+- 15 peaks within 1e-5 cent and 1e-5 dB;
+- 7 modes within 0.0025 cent and 7e-5 decay;
+- threshold 2242.7 Pa identical; pitch 298.5 Hz identical; 11 harmonics
+  within 1e-4 dB rms.
+
+No-claim: this is a well-fitted model on one fixture. A failing model would be
+caught at these gates, but no degraded model is planted. Relaxed vector
+fitting collapsed at every order when the band started at 10 Hz.
+
 `tract::network::tests::network_branched_tract_nasal` uses Assaneo's licensed
 /a/ chart plus a DECLARED SYNTHETIC 0.13 m x 4 mm-radius branch after section 2.
 The mouths are explicitly ideal pressure release; this is a pole-zero diagnostic,
