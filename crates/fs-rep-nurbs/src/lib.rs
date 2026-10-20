@@ -3,8 +3,8 @@
 //! so "identical before/after refinement" is provable equality rather than a
 //! tolerance while every intermediate remains representable), trimmed patches with CERTIFIED point
 //! classification (convex-hull winding with exact subdivision), measured
-//! closest-point bracket estimates (f64 branch-and-bound pending an
-//! outward-rounded upgrade), and the
+//! closest-point bracket estimates, a feature-gated outward unsigned-distance
+//! enclosure for admitted untrimmed surfaces, and the
 //! HONEST Boolean position: route through SDF by default, refuse direct
 //! B-rep Booleans without a certificate.
 //!
@@ -15,6 +15,8 @@ pub mod basis;
 pub mod boolean;
 pub mod closest;
 pub mod curve;
+#[cfg(feature = "nurbs-sdf")]
+pub mod distance;
 pub mod rat;
 #[cfg(feature = "nurbs-refit")]
 pub mod refit;
@@ -36,6 +38,11 @@ pub use curve::{
     AdmittedNurbsCurve, CurveAdmissionRun, CurveBezierRun, CurveCloneRun, CurveConstructionRun,
     CurveDerivativesRun, CurveElevationRun, CurveEvaluationRun, CurveHomogeneousEvaluationRun,
     CurveInsertionRun, CurveRemovalRun, CurveSpanBoxesRun, NurbsCurve,
+};
+#[cfg(feature = "nurbs-sdf")]
+pub use distance::{
+    SurfaceDistanceBudget, SurfaceDistanceEnclosure, SurfaceDistanceRun, SurfaceDistanceStop,
+    SurfaceDistanceWork,
 };
 pub use rat::Rat;
 pub use surface::{

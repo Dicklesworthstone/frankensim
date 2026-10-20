@@ -45,3 +45,7 @@ required-features = ["nurbs-refit"]
 [[test]]
 name = "sdf"
 required-features = ["nurbs-sdf"]
+
+[[test]]
+name = "distance"
+required-features = ["nurbs-sdf"]

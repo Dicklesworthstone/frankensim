@@ -2,6 +2,7 @@
 
 Rational B-spline charts (plan §7.2): bounded EXACT spline algebra, trimmed
 patches with certified classification, measured closest-point brackets,
+bounded outward unsigned-distance enclosures for admitted untrimmed surfaces,
 and the HONEST Boolean position.
 
 Ambition tags: exact algebra / trims / closest-point [F per bead label;
@@ -206,6 +207,52 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   source-admission work to the request. `ClosestPointRun` publishes
   either a complete estimate or `Cancelled`; cancellation never publishes
   admitted authority or a partial frontier-derived bracket.
+- `distance` module (behind `nurbs-sdf`; bounded portion of
+  `frankensim-sj31i.57.1`): an independent outward unsigned-distance primitive
+  for one `AdmittedNurbsSurface<f64>` with positive normal weights.
+  `distance_enclosure_with_cx` covers every nonzero original U/V knot-span
+  rectangle using interval tensor de Boor directly on the stored homogeneous
+  controls. Bound-producing coordinate and norm arithmetic uses `fs-ivl`
+  outward bounds. Each
+  de Boor blend intersects the convex hull of its inputs; projection also
+  intersects a separately outward-projected Cartesian control hull. These
+  independent inclusions keep the positive denominator and constrain interval
+  dependency even with large weight ratios. A scaled interval Euclidean norm
+  avoids avoidable square overflow and underflow. Finite outward arithmetic
+  that cannot be retained produces a `NurbsError::Domain` refusal.
+  The target is the real rational spline defined by the **stored binary
+  homogeneous controls and knots** in the source's Cartesian units, with a
+  finite query and positive finite absolute distance-width tolerance.
+  Earlier Cartesian construction roundoff is not erased. Repeated knots and
+  full-multiplicity discontinuities retain all nonzero spans: the distance is
+  an infimum over the entire image, including its limits. An upper bound comes
+  only from an interval point evaluation at an actual in-domain parameter;
+  a left limit at a discontinuity is never published as that witness.
+  A deterministic best-first frontier refines the minimum outward cell lower
+  bound, inherits valid parent bounds, and excludes cells only against a
+  retained witness upper bound. `SurfaceDistanceRun::Complete` meets the
+  requested outward interval width. `Unresolved` retains a valid whole-domain
+  enclosure with `SplitLimit`, `WorkLimit`, `MemoryLimit`, or
+  `ParameterResolution`; even zero splits can return a useful enclosure.
+  Both outcomes carry a `SurfaceDistanceEnclosure` with private fields binding
+  the original immutable source borrow, query, tolerance, interval, witness,
+  and coverage/work accounting. Insufficient resources to cover all original
+  spans produce a refusal instead of a partial enclosure.
+  `SurfaceDistanceBudget` shares one charged work allowance across source and
+  span scans, hull construction, seeding, and refinement (defensive ceiling
+  1,073,741,824 units). Its memory allowance covers simultaneously retained
+  source allocation **capacities**, span indices, frontier, and reusable
+  evaluation scratch, under a 256 MiB ceiling. Allocation is fallible;
+  observed capacities are checked before seeding. Allocator bookkeeping and
+  bounded stack storage are outside this payload metric. Cancellation is
+  checked every 64 inner source/copy/blend steps, at stage boundaries, and
+  after scratch destruction before publication; `Cancelled` carries no
+  enclosure, witness, or resumable frontier. The primitive reuses structural
+  admission and does not consume the `Cx` budget or own executor scope
+  drain/finalization. It supplies no trims, sign, topology, unique minimizer,
+  portable certificate/checker, or scene-field authority. The measured
+  `closest` and `sdf` results retain their existing semantics; the broader
+  bead remains open.
 - `boolean(op, policy)` — THE BOOLEAN POSITION: always a structured
   `BooleanRefusal` in v0. Default policy routes through SDF (convert →
   implicit CSG → re-fit); `DirectCertificateGated` refuses pending a
