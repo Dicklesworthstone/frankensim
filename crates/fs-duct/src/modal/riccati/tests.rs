@@ -8,7 +8,7 @@ use crate::modal::{
 use crate::profile::{MAX_RICCATI_STEPS, profile_impedance};
 use crate::{Duct, Segment};
 use fs_material::gas::GasSpec;
-use fs_mms::{LadderSide, OrderGate, RefinementLadder};
+use fs_mms::{LadderSide, OrderGate, RefinementLadder, fit_order};
 use std::time::Instant;
 
 fn air20() -> GasState {
@@ -535,9 +535,10 @@ fn refined_peak(eval: &dyn Fn(f64) -> f64, guess: f64, half: f64) -> f64 {
 
 #[test]
 fn mm_riccati_mode_ladder() {
-    // G1: N = 1, 2, 4, 8, 16 on the published trombone bell; |dZ00| shrinks
-    // and the tail bound is reported. Liveness: N = 1 vs N = 8 must move an
-    // impedance peak by >= 5 c (the plane image misses mode conversion).
+    // G1: N = 1, 2, 4, 8, 16 on the published trombone bell; |dZ00| shrinks,
+    // and a declared tail bound on Z00(16) is checked at N = 20. Liveness:
+    // N = 1 vs N = 8 must move an impedance peak by >= 5 c (the plane image
+    // misses mode conversion).
     let bell = trombone_bell();
     let r_min = 0.01225;
     let load = MouthLoad::Analytic(Termination::FlangedOpen);
@@ -574,6 +575,52 @@ fn mm_riccati_mode_ladder() {
     assert!(
         deltas.windows(2).all(|w| w[1] < w[0]),
         "mode ladder must shrink monotonically: {deltas:?}"
+    );
+    // Declared tail bound. Model the tail as algebraic, Z00(N) − Z00(∞) ≈ C·N^−p,
+    // with p fitted on the last three increments (N = 2..16). Then
+    // |Z00(16) − Z00(∞)| ≤ TAIL_SAFETY·|ΔZ(8→16)|/(2^p − 1). The bound is
+    // falsified inside the admitted range: N = 20 must move Z00 by no more than
+    // the bound, and by the fitted tail's own prediction within a factor 3.
+    const TAIL_SAFETY: f64 = 2.0;
+    let fit = fit_order(
+        &RefinementLadder::new(vec![0.5, 0.25, 0.125], deltas[1..].to_vec()).expect("ladder"),
+    );
+    let order = fit.observed;
+    let tail_16 = deltas[3] / (fs_math::det::pow(2.0, order) - 1.0);
+    let bound_16 = TAIL_SAFETY * tail_16;
+    let steps_20 = guarded_steps(bell.length(), r_min, 20).max(256);
+    let z20 = mm_profile_impedance(
+        &bell,
+        &air20(),
+        tau_hz(f),
+        LossModel::WideTube,
+        load,
+        ModeCount(20),
+        RiccatiSteps(steps_20),
+    )
+    .unwrap()
+    .plane_impedance;
+    let moved = (z20 - z[4]).abs();
+    let predicted = tail_16 * (1.0 - fs_math::det::pow(16.0 / 20.0, order));
+    println!(
+        "{{\"suite\":\"fs-duct\",\"case\":\"mm-riccati-mode-tail\",\"inputs\":\"Amir 1997 Table I bell\",\
+         \"axis\":\"modes\",\"rungs\":[2,4,8,16,20],\"observed\":{{\"order\":{order:.4},\"rms_residual\":{:.3e},\
+         \"tail_bound_16\":{bound_16:.6e},\"dz00_16_to_20\":{moved:.6e},\"predicted\":{predicted:.6e},\
+         \"ratio\":{:.4}}},\"tolerance\":{{\"safety\":{TAIL_SAFETY},\"prediction_band\":[0.3333,3.0]}}}}",
+        fit.rms_residual,
+        moved / predicted
+    );
+    assert!(
+        order > 0.5,
+        "the mode ladder must converge algebraically: order {order}"
+    );
+    assert!(
+        moved <= bound_16,
+        "declared tail bound {bound_16:e} is falsified by |Z(20) − Z(16)| = {moved:e}"
+    );
+    assert!(
+        (1.0 / 3.0..=3.0).contains(&(moved / predicted)),
+        "N = 20 departs from the fitted algebraic tail: {moved:e} vs {predicted:e}"
     );
     // Liveness: every plane-image peak below 1.5 kHz, refined for N = 1 and
     // N = 8 at one shared step count (so step error cannot pose as physics).
