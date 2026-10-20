@@ -261,7 +261,15 @@ impl TimeSignal {
                         what: "table signal empty or length-mismatched".to_string(),
                     });
                 }
-                let v = match times.binary_search_by(|probe| probe.total_cmp(&t)) {
+                // Physical time identifies -0 and +0. A total-order-only
+                // lookup would select opposite sides of a Hold jump at zero.
+                let v = match times.binary_search_by(|probe| {
+                    if *probe == t {
+                        std::cmp::Ordering::Equal
+                    } else {
+                        probe.total_cmp(&t)
+                    }
+                }) {
                     Ok(i) => values[i],
                     Err(0) => values[0],
                     Err(i) if i >= times.len() => values[values.len() - 1],

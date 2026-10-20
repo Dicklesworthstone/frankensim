@@ -492,12 +492,26 @@ flagships.
    environment value whose SI exponents disagree with the contract table.
 3. **Net-flux compatibility**: if any condition declares `incompressible`,
    either declared mass flows balance to 1e−9 relative at every instant or a
-   pressure outlet exists. This layer certifies the all-time branch only for
-   uniform and `TimeSignal::Constant` total flows. Ramp, Linear/Hold Table, and
-   Chebfun checkpoints remain deterministic falsifiers: one sampled point may
+   pressure outlet exists. Base, base-plus-case, and every factored combination
+   are checked separately; base loads occur once, case factors multiply signed
+   total flows, and a zero factor removes its case (including its outlets).
+   Uniform/constant totals retain their direct proof. Pointwise opposite Ramp,
+   Linear/Hold Table and Chebfun histories are certified using IEEE sign
+   symmetry, finite-intermediate bounds and the sequential-sum roundoff bound.
+   A constant Chebfun reduces to its actual half-c0 value. Other piecewise
+   linear/held sets use their union knot partition, outward-rounded affine
+   endpoint bounds, explicit evaluation roundoff and a gross-flow lower bound.
+   This supports different time grids without promoting uncertain near-zero
+   relative margins. Signals clamp outside their own domains, so the proof
+   covers all finite `f64` times, including both tails. Signed zero denotes one
+   physical time, including at Hold jumps. Arbitrary unmatched Chebfun histories
+   and unresolved margins remain refused. Checkpoints are only falsifiers:
+   one sampled point may
    produce a concrete `flux-imbalance`, but a green finite screen refuses as
    `flux-certification-unavailable` instead of impersonating an all-time
-   floating-point proof. Evaluation failure and non-finite aggregation are
+   floating-point proof. The canonical declaration's knots, values, domains,
+   factors and term order form a replayable witness; validation reruns the
+   arithmetic proof. Evaluation failure and non-finite aggregation are
    explicit violations; neither is silently reinterpreted as zero flow, and a
    pressure outlet cannot mask a malformed inlet declaration.
 4. **Frame chains terminate**: cycles and dangling parents are violations;
@@ -557,7 +571,8 @@ flagships.
     nested traversal; checked plans account for aggregate case BCs, combination
     terms, dynamic signal and typed-payload scalar slots, typed-payload identity
     bytes, raw flux checkpoints, all other exact identity bytes, worst-case
-    finding slots, ordered-index comparisons, checkpoint sorting, and flux
+    finding slots, ordered-index comparisons, checkpoint sorting, all-time
+    pairing/interval proof work, coefficient-expanded combination sets, and flux
     evaluation work. String comparison work is charged per identity role using
     its maximum key width: twice the checkpointed heap-sort envelope plus both
     operands of every subsequent ordered lookup. Combination
@@ -730,7 +745,7 @@ classification, checkpoint counting/materialization, and deduplication likewise
 poll at every provider or checkpoint. Tabulated signal validity and ordering are
 accumulated in one pass while retaining diagnostic order. A request observed at
 any checkpoint publishes no partial findings. Preflight proves a conservative
-finding bound of 12 fixed slots plus 13/frame, 8/BC, 3/case, 2/combination,
+finding bound of 12 fixed slots plus 13/frame, 8/BC, 3/case, 3/combination,
 4/term, 16/ensemble, and 4/contact; `max_findings` admits that heap authority and
 the private result vector fallibly reserves it before the first finding. No loop
 is admitted from an unchecked float-to-size conversion.

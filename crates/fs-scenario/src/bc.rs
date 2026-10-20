@@ -38,7 +38,8 @@ pub enum BcKind {
     Neumann,
     /// Mixed (transfer-coefficient) condition.
     Robin,
-    /// Mass-flow inlet (kg/s across the region).
+    /// Signed total mass flow (kg/s across the region): positive enters the
+    /// domain, negative leaves it. A scalar total is invariant under frames.
     MassFlowInlet,
     /// Pressure outlet.
     PressureOutlet,
@@ -422,7 +423,8 @@ impl BoundaryCondition {
     }
 
     /// Signed mass-flow contribution of this condition at time `t`
-    /// (inlets positive, pressure outlets are flux-free), used by the
+    /// (positive inward, negative outward; pressure outlets prescribe no
+    /// total), used by the
     /// net-flux compatibility check.
     ///
     /// # Errors

@@ -802,7 +802,7 @@ fn sc_002g_relative_flux_interior_cannot_hide_behind_endpoints() {
 }
 
 #[test]
-fn sc_002h_grid_balanced_chebfun_still_requires_continuous_proof() {
+fn sc_002h_constant_chebfun_has_an_all_time_algebraic_proof() {
     let mut scenario = Scenario::new("grid-balanced-smooth-flux", 1, Environment::earth_lab());
     let signals = [
         TimeSignal::Chebfun(ChebProfile {
@@ -822,18 +822,9 @@ fn sc_002h_grid_balanced_chebfun_still_requires_continuous_proof() {
         });
     }
     let findings = scenario.validate();
-    assert_eq!(
-        findings
-            .iter()
-            .filter(|finding| finding.code == "flux-certification-unavailable")
-            .count(),
-        1,
-        "grid equality alone must not certify smooth all-time balance: {findings:#?}"
-    );
     assert!(
-        findings
-            .iter()
-            .all(|finding| finding.code != "flux-imbalance")
+        findings.is_empty(),
+        "the constant Chebfun reduces algebraically to its half-c0 value: {findings:#?}"
     );
     scenario.base_bcs.push(BoundaryCondition {
         region: "pressure-relief".to_string(),
@@ -850,7 +841,7 @@ fn sc_002h_grid_balanced_chebfun_still_requires_continuous_proof() {
     );
     verdict(
         "sc-002h",
-        "grid-balanced Chebfun mass flow refuses without an all-time certificate while a pressure outlet satisfies the explicit alternative",
+        "constant Chebfun totals carry an all-time algebraic proof; a pressure outlet remains an explicit compatibility alternative",
     );
 }
 

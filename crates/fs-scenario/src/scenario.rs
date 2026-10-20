@@ -7,6 +7,7 @@
 
 use crate::bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
 use crate::ensemble::StochasticEnsemble;
+use crate::flux::{FluxTerm, certifies_all_time};
 use crate::frame::{FrameMotion, FrameTree};
 use crate::payload::PayloadValidationStatsError;
 use crate::signal::TimeSignal;
@@ -24,7 +25,7 @@ const FIXED_FINDING_SLOTS: usize = 12;
 const FINDINGS_PER_FRAME: usize = 13;
 const FINDINGS_PER_BC: usize = 8;
 const FINDINGS_PER_CASE: usize = 3;
-const FINDINGS_PER_COMBINATION: usize = 2;
+const FINDINGS_PER_COMBINATION: usize = 3;
 const FINDINGS_PER_COMBINATION_TERM: usize = 4;
 const FINDINGS_PER_ENSEMBLE: usize = 16;
 const FINDINGS_PER_CONTACT: usize = 4;
@@ -55,6 +56,7 @@ impl fmt::Debug for DiagnosticIdentity<'_> {
 enum NetFluxSetLabel<'a> {
     Base,
     Case { row: usize, name: &'a str },
+    Combination { row: usize, name: &'a str },
 }
 
 impl fmt::Display for NetFluxSetLabel<'_> {
@@ -64,6 +66,11 @@ impl fmt::Display for NetFluxSetLabel<'_> {
             Self::Case { row, name } => write!(
                 formatter,
                 "base+case row {row} {:?}",
+                DiagnosticIdentity(name)
+            ),
+            Self::Combination { row, name } => write!(
+                formatter,
+                "base+combination row {row} {:?}",
                 DiagnosticIdentity(name)
             ),
         }
@@ -740,6 +747,24 @@ fn bc_flux_evaluation_work(bc: &BoundaryCondition) -> Result<u128, ValidationErr
     }
 }
 
+fn flux_proof_work(
+    provider_work: u128,
+    providers: usize,
+    knots: usize,
+) -> Result<u128, ValidationError> {
+    let passes = providers
+        .checked_add(knots)
+        .and_then(|n| n.checked_add(1))
+        .ok_or(ValidationError::WorkPlanOverflow {
+            phase: "all-time flux proof passes",
+        })?;
+    checked_work_scale(provider_work, passes, "all-time flux proof work")?
+        .checked_mul(64)
+        .ok_or(ValidationError::WorkPlanOverflow {
+            phase: "all-time flux interval work",
+        })
+}
+
 fn reserve_validation<T>(
     values: &mut Vec<T>,
     requested: usize,
@@ -1097,7 +1122,16 @@ impl Scenario {
             flux_checkpoints,
             "base flux evaluation work",
         )?;
-        let mut flux_set_scan_work = checked_work_product(base_bcs, 3, "base flux set scan work")?;
+        let mut flux_set_scan_work = checked_work_product(base_bcs, 6, "base flux set scan work")?;
+        let mut flux_certificate_work = if base_flux_checkpoint_contribution > 0 {
+            flux_proof_work(base_flux_provider_work, base_bcs, flux_checkpoints)?
+        } else {
+            0
+        };
+        let mut case_flux_footprints = Vec::new();
+        if combinations > 0 {
+            reserve_validation(&mut case_flux_footprints, cases, "case flux footprints")?;
+        }
         for case in &self.cases {
             let mut case_contribution = 0usize;
             let mut case_provider_work = 0u128;
@@ -1135,7 +1169,7 @@ impl Scenario {
                     })?;
             checked_work_add(
                 &mut flux_set_scan_work,
-                checked_work_product(set_bcs, 3, "case flux set scan work")?,
+                checked_work_product(set_bcs, 6, "case flux set scan work")?,
                 "total flux set scan work",
             )?;
             let set_provider_work = base_flux_provider_work
@@ -1152,7 +1186,109 @@ impl Scenario {
                 )?,
                 "total flux evaluation work",
             )?;
+            if base_flux_checkpoint_contribution > 0 || case_contribution > 0 {
+                checked_work_add(
+                    &mut flux_certificate_work,
+                    flux_proof_work(set_provider_work, set_bcs, set_checkpoints)?,
+                    "all-time flux proof work",
+                )?;
+            }
+            if combinations > 0 {
+                case_flux_footprints.push((case_contribution, case_provider_work));
+            }
             checkpoint("preflight case flux sets")?;
+        }
+        if combinations > 0 {
+            let lookup_work = string_index_identity_work(
+                cases,
+                combination_terms,
+                max_case_name_bytes.max(max_term_reference_bytes),
+                ceil_log2(cases.saturating_add(1)),
+                "combination flux reference work",
+            )?;
+            checked_work_add(
+                &mut flux_set_scan_work,
+                lookup_work,
+                "combination flux reference work",
+            )?;
+            if flux_set_scan_work > budget.max_work {
+                return Err(ValidationError::WorkExceeded {
+                    requested: flux_set_scan_work,
+                    limit: budget.max_work,
+                });
+            }
+            let case_index = ValidationIndex::build(
+                self.cases
+                    .iter()
+                    .enumerate()
+                    .map(|(row, case)| (case.name.as_str(), row)),
+                "preflight combination flux index",
+                checkpoint,
+            )?;
+            for combination in &self.combinations {
+                let mut set_checkpoints = base_flux_checkpoint_contribution.checked_add(1).ok_or(
+                    ValidationError::WorkPlanOverflow {
+                        phase: "combination flux checkpoints",
+                    },
+                )?;
+                let mut set_bcs = base_bcs;
+                let mut provider_work = base_flux_provider_work;
+                for (name, factor) in &combination.terms {
+                    checkpoint("preflight combination flux terms")?;
+                    if factor.is_finite()
+                        && *factor != 0.0
+                        && let Some(row) = case_index.first_row(&name.as_str())
+                    {
+                        let (knots, work) = case_flux_footprints[row];
+                        checked_count_add(
+                            &mut set_checkpoints,
+                            knots,
+                            "combination flux checkpoints",
+                        )?;
+                        checked_count_add(
+                            &mut set_bcs,
+                            self.cases[row].bcs.len(),
+                            "combination flux providers",
+                        )?;
+                        checked_work_add(
+                            &mut provider_work,
+                            work,
+                            "combination flux provider work",
+                        )?;
+                    }
+                }
+                checked_count_add(
+                    &mut flux_checkpoints,
+                    set_checkpoints,
+                    "total combination flux checkpoints",
+                )?;
+                checked_work_add(
+                    &mut flux_sort_work,
+                    heap_sort_work(set_checkpoints, "combination flux sort")?,
+                    "total flux sort work",
+                )?;
+                checked_work_add(
+                    &mut flux_set_scan_work,
+                    checked_work_product(set_bcs, 6, "combination flux scans")?,
+                    "total flux scan work",
+                )?;
+                checked_work_add(
+                    &mut flux_evaluation_work,
+                    checked_work_scale(
+                        provider_work,
+                        set_checkpoints,
+                        "combination flux evaluations",
+                    )?,
+                    "total flux evaluation work",
+                )?;
+                if set_checkpoints > 1 {
+                    checked_work_add(
+                        &mut flux_certificate_work,
+                        flux_proof_work(provider_work, set_bcs, set_checkpoints)?,
+                        "all-time flux proof work",
+                    )?;
+                }
+            }
         }
         enforce_limit(
             "flux checkpoints",
@@ -1320,6 +1456,7 @@ impl Scenario {
             (flux_checkpoint_work, "flux checkpoint work"),
             (flux_sort_work, "flux sort work"),
             (flux_evaluation_work, "flux evaluation work"),
+            (flux_certificate_work, "all-time flux proof work"),
         ] {
             checked_work_add(&mut planned_work, amount, phase)?;
         }
@@ -1664,7 +1801,7 @@ impl Scenario {
             }
             checkpoint("contacts")?;
         }
-        self.check_net_flux(&mut out, checkpoint)?;
+        self.check_net_flux(&first_case_by_name, &mut out, checkpoint)?;
         if out.len() > finding_capacity {
             return Err(ValidationError::WorkPlanOverflow {
                 phase: "validation finding capacity invariant",
@@ -1742,45 +1879,91 @@ impl Scenario {
     }
 
     /// Net-flux compatibility (the admission check the bead names): for
-    /// every effective BC set (base alone, and base + each case), if any
+    /// every effective BC set (base, base + each case, and each factored
+    /// combination with base applied once), if any
     /// inlet declares `incompressible`, the declared mass flows must
     /// balance to tolerance over time OR a pressure outlet must exist to absorb
-    /// the imbalance. Deterministic time-signal checkpoints may refute balance,
-    /// but a green finite screen refuses because it is not an all-time floating-
-    /// point certificate. Only uniform and constant totals are certified here.
+    /// the imbalance. Checkpoints refute balance; the separate all-time proof
+    /// certifies opposite histories and enclosed affine/held pieces. A green
+    /// finite screen alone never certifies a time-dependent total.
     fn check_net_flux(
         &self,
+        case_index: &ValidationIndex<&str>,
         out: &mut Vec<Violation>,
         checkpoint: &mut impl FnMut(&'static str) -> Result<(), ValidationError>,
     ) -> Result<(), ValidationError> {
-        self.check_net_flux_set(None, out, checkpoint)?;
+        self.check_net_flux_set(
+            NetFluxSetLabel::Base,
+            &[(&self.base_bcs, 1.0)],
+            out,
+            checkpoint,
+        )?;
         for (case_row, case) in self.cases.iter().enumerate() {
-            self.check_net_flux_set(Some((case_row, case)), out, checkpoint)?;
+            self.check_net_flux_set(
+                NetFluxSetLabel::Case {
+                    row: case_row,
+                    name: &case.name,
+                },
+                &[(&self.base_bcs, 1.0), (&case.bcs, 1.0)],
+                out,
+                checkpoint,
+            )?;
+        }
+        for (row, combination) in self.combinations.iter().enumerate() {
+            let mut slices = Vec::new();
+            let capacity = combination.terms.len().checked_add(1).ok_or(
+                ValidationError::WorkPlanOverflow {
+                    phase: "combination flux slices",
+                },
+            )?;
+            reserve_validation(&mut slices, capacity, "combination flux slices")?;
+            slices.push((self.base_bcs.as_slice(), 1.0));
+            for (name, factor) in &combination.terms {
+                checkpoint("combination flux expansion")?;
+                // Bad references/factors already have structural findings;
+                // never fabricate a provider for them. Zero removes the term,
+                // including any outlet it would otherwise provide.
+                if factor.is_finite()
+                    && *factor != 0.0
+                    && let Some(case) = case_index.first_row(&name.as_str())
+                {
+                    slices.push((self.cases[case].bcs.as_slice(), *factor));
+                }
+            }
+            self.check_net_flux_set(
+                NetFluxSetLabel::Combination {
+                    row,
+                    name: &combination.name,
+                },
+                &slices,
+                out,
+                checkpoint,
+            )?;
         }
         Ok(())
     }
 
     fn check_net_flux_set(
         &self,
-        case: Option<(usize, &LoadCase)>,
+        label: NetFluxSetLabel<'_>,
+        slices: &[(&[BoundaryCondition], f64)],
         out: &mut Vec<Violation>,
         checkpoint: &mut impl FnMut(&'static str) -> Result<(), ValidationError>,
     ) -> Result<(), ValidationError> {
         checkpoint("net-flux set")?;
-        let (label, case_bcs): (NetFluxSetLabel<'_>, &[BoundaryCondition]) = match case {
-            None => (NetFluxSetLabel::Base, &[]),
-            Some((row, case)) => (
-                NetFluxSetLabel::Case {
-                    row,
-                    name: case.name.as_str(),
-                },
-                case.bcs.as_slice(),
-            ),
+        let conditions = || {
+            slices.iter().flat_map(|(bcs, factor)| {
+                bcs.iter().map(move |bc| FluxTerm {
+                    bc,
+                    factor: *factor,
+                })
+            })
         };
         let mut declares_incompressible = false;
         let mut has_pressure_outlet = false;
         let mut has_uncertified_time_dependence = false;
-        for bc in self.base_bcs.iter().chain(case_bcs.iter()) {
+        for term in conditions() {
+            let bc = term.bc;
             checkpoint("net-flux set classification")?;
             declares_incompressible |= bc.compatibility == Some(Compat::Incompressible);
             has_pressure_outlet |=
@@ -1796,7 +1979,8 @@ impl Scenario {
             return Ok(());
         }
         let mut requested_times = 1usize;
-        for bc in self.base_bcs.iter().chain(case_bcs.iter()) {
+        for term in conditions() {
+            let bc = term.bc;
             checkpoint("net-flux checkpoint count")?;
             requested_times = requested_times.checked_add(bc_flux_checkpoints(bc)).ok_or(
                 ValidationError::WorkPlanOverflow {
@@ -1808,7 +1992,8 @@ impl Scenario {
         reserve_validation_times(&mut validation_times, requested_times)?;
         checkpoint("net-flux checkpoint materialization")?;
         validation_times.push(0.0);
-        for bc in self.base_bcs.iter().chain(case_bcs.iter()) {
+        for term in conditions() {
+            let bc = term.bc;
             checkpoint("net-flux provider materialization")?;
             if bc.kind == BcKind::MassFlowInlet
                 && let Some(BcValue::Signal(signal)) = &bc.value
@@ -1828,18 +2013,20 @@ impl Scenario {
 
         let mut first_imbalance = None;
         let mut compatibility_failed = false;
-        for time in validation_times {
+        for &time in &validation_times {
             let mut net = 0.0f64;
             let mut gross = 0.0f64;
             let mut aggregation_finite = true;
             let mut evaluation_failed = false;
-            for bc in self.base_bcs.iter().chain(case_bcs.iter()) {
+            for term in conditions() {
+                let bc = term.bc;
                 checkpoint("net-flux evaluation")?;
                 let evaluated = bc.mass_flow_at_prevalidated_with_checkpoint(time, &mut || {
                     checkpoint("net-flux Chebyshev evaluation")
                 })?;
                 match evaluated {
                     Ok(Some(flux)) => {
+                        let flux = term.factor * flux;
                         net += flux;
                         gross += flux.abs();
                         if !flux.is_finite() || !net.is_finite() || !gross.is_finite() {
@@ -1907,6 +2094,21 @@ impl Scenario {
             // One sampled imbalance is a valid counterexample and takes
             // precedence above. A green finite screen, however, cannot certify
             // every runtime f64 evaluation of a time-varying declaration.
+            let mut terms = Vec::new();
+            let count = conditions()
+                .filter(|term| term.bc.kind == BcKind::MassFlowInlet)
+                .count();
+            reserve_validation(&mut terms, count, "net-flux proof terms")?;
+            for term in conditions() {
+                checkpoint("net-flux proof materialization")?;
+                if term.bc.kind == BcKind::MassFlowInlet {
+                    terms.push(term);
+                }
+            }
+            if certifies_all_time(&terms, &validation_times, FLUX_REL_TOL, checkpoint)? {
+                checkpoint("net-flux all-time proof complete")?;
+                return Ok(());
+            }
             out.push(Violation {
                 code: "flux-certification-unavailable",
                 what: format!(
@@ -1914,8 +2116,8 @@ impl Scenario {
                      time-varying mass-flow history has no certified all-time floating-point \
                      balance proof"
                 ),
-                fix: "add a pressure outlet or replace every time-varying mass-flow history with \
-                      an exactly checkable uniform or constant total"
+                fix: "use pointwise opposite histories, piecewise-affine totals with certified \
+                      relative margin, or add a pressure outlet"
                     .to_string(),
             });
         }

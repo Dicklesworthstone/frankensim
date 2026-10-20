@@ -23,6 +23,7 @@ pub mod design;
 pub mod ensemble;
 pub mod entity;
 pub mod envelope;
+mod flux;
 pub mod frame;
 pub mod gesture;
 pub mod ir;
