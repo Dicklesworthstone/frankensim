@@ -332,8 +332,9 @@ impl ShellReduction {
     /// model or permission to treat an unbaffled cymbal as a monopole.
     #[must_use]
     pub fn volume_port(&self)->Vec<f64> {
-        (0..self.mode_count()).map(|k|self.triangles.iter().zip(&self.area_normals).map(|(tri,&a)| {
-            tri.iter().map(|&node|dot(a,self.translations[k*self.nodes+node])/3.0).sum::<f64>()
-        }).sum()).collect()
+        (0..self.mode_count()).map(|k|super::pressure::integrate_normal_displacement(
+            self.triangles.iter().copied().zip(self.area_normals.iter().copied()),
+            |node|self.translations[k*self.nodes+node],
+        )).collect()
     }
 }

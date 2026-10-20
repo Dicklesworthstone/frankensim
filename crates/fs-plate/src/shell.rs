@@ -20,6 +20,8 @@ pub mod profile;
 pub mod survey;
 /// Nonlinear membrane energy projected from the same shell geometry.
 pub mod reduction;
+/// Original oriented pressure/normal-flow traces on mechanical midsurfaces.
+pub mod pressure;
 /// Circular prestressed films through the existing DKT/membrane assembly.
 pub mod head;
 /// Bonded 3-D beam reinforcement with reciprocal eccentric stiffness and mass.
