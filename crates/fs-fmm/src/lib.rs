@@ -26,9 +26,9 @@ pub use complex::directional::{
     MAX_DIRECTIONAL_DEPTH, MAX_DIRECTIONAL_RANK,
 };
 pub use complex::{
-    ComplexKernel, FmmC64, HelmholtzAdjointDouble, HelmholtzDouble, HelmholtzGradient,
-    HelmholtzHypersingular, HelmholtzSingle, MAX_BB_HELMHOLTZ_KD, MAX_COMPLEX_COEFFICIENT_SLOTS,
-    helmholtz_order_for,
+    ComplexBudget, ComplexKernel, FmmC64, HelmholtzAdjointDouble, HelmholtzDouble,
+    HelmholtzGradient, HelmholtzHypersingular, HelmholtzSingle, MAX_BB_HELMHOLTZ_KD,
+    MAX_COMPLEX_COEFFICIENT_SLOTS, helmholtz_order_for,
 };
 
 /// Lowest supported Chebyshev interpolation order.

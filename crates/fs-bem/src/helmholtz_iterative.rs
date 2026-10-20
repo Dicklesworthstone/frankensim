@@ -15,8 +15,8 @@ use super::{
 use crate::{BemError, panel3d::SpherePanels};
 use fs_exec::CancelGate;
 use fs_fmm::{
-    DirectionalOptions, FmmC64, FmmError, HelmholtzAdjointDouble, HelmholtzDouble,
-    HelmholtzHypersingular, HelmholtzSingle,
+    ComplexBudget, DirectionalOptions, FmmC64, FmmError, HelmholtzAdjointDouble, HelmholtzDouble,
+    HelmholtzHypersingular, HelmholtzSingle, MAX_TRANSLATION_WORK,
 };
 use fs_la::eigen_complex::{LuComplex, lu_complex};
 use fs_math::c64::C64;
@@ -59,6 +59,10 @@ pub struct IterativeOptions {
     /// The cache changes no bits. An operator whose cache exceeds its half,
     /// and the directional route, stay uncached. Zero disables it.
     pub near_field_cache_bytes: usize,
+    /// Counted W5a M2L multiply-adds per operator pass; one pass is not
+    /// cancellable. Defaults to the fs-fmm v1 `MAX_TRANSLATION_WORK`. The
+    /// directional route declares its envelopes in its own options.
+    pub max_translation_work: usize,
 }
 
 impl Default for IterativeOptions {
@@ -75,6 +79,7 @@ impl Default for IterativeOptions {
             },
             max_near_entries: 4_194_304,
             near_field_cache_bytes: 1 << 29,
+            max_translation_work: MAX_TRANSLATION_WORK,
         }
     }
 }
@@ -108,27 +113,35 @@ impl IterativeOptions {
                 normals,
                 o.clone(),
             ),
-            (NormalLayer::Double, None) => FmmC64::new_double(
+            (NormalLayer::Double, None) => FmmC64::new_double_within(
                 HelmholtzDouble { k },
                 points,
                 normals,
                 self.fmm_order,
                 self.leaf_capacity,
+                self.budget(),
             ),
-            (NormalLayer::Adjoint, None) => FmmC64::new_adjoint_double(
+            (NormalLayer::Adjoint, None) => FmmC64::new_adjoint_double_within(
                 HelmholtzAdjointDouble { k },
                 points,
                 normals,
                 self.fmm_order,
                 self.leaf_capacity,
+                self.budget(),
             ),
-            (NormalLayer::Mixed, None) => FmmC64::new_hypersingular(
+            (NormalLayer::Mixed, None) => FmmC64::new_hypersingular_within(
                 HelmholtzHypersingular { k },
                 points,
                 normals,
                 self.fmm_order,
                 self.leaf_capacity,
+                self.budget(),
             ),
+        }
+    }
+    fn budget(&self) -> ComplexBudget {
+        ComplexBudget {
+            max_translation_work: self.max_translation_work,
         }
     }
     fn effective_order(&self) -> usize {
@@ -532,11 +545,12 @@ impl<'a> IterativeRadiation<'a> {
         let kernel = HelmholtzSingle { k: self.k };
         let single = match &self.options.directional {
             Some(o) => FmmC64::new_directional(&kernel, self.surface.centroids(), o.clone())?,
-            None => FmmC64::new(
+            None => FmmC64::new_within(
                 &kernel,
                 self.surface.centroids().to_vec(),
                 self.options.fmm_order,
                 self.options.leaf_capacity,
+                self.options.budget(),
             )?,
         }
         .potentials(&weighted)?;

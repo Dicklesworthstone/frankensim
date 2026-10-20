@@ -4,7 +4,7 @@
 //! doi:10.1016/j.jcp.2011.09.027. The centered basis and interlevel
 //! re-expansion are also described in Borm & Melenk, arXiv:1510.07189,
 //! section 2.2. No panel quadrature lives here.
-use super::{FmmC64, Operator, finite, kernels, validate_output};
+use super::{ComplexBudget, FmmC64, Operator, finite, kernels, validate_output};
 use crate::{
     Cell, CellKey, ComplexKernel, Fmm, FmmError, HelmholtzAdjointDouble, HelmholtzDouble,
     HelmholtzHypersingular, Laplace3d, MAX_BB_HELMHOLTZ_KD, MAX_CELL_PAIR_SCANS,
@@ -367,6 +367,7 @@ impl<'k> FmmC64<'k> {
                 normals,
                 options.order,
                 options.leaf_capacity,
+                ComplexBudget::V1,
             );
         }
         // d_axis G = (x_axis-y_axis) G'(r)/r. Interpolate only the radial

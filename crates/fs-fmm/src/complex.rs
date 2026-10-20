@@ -27,6 +27,21 @@ pub const MAX_BB_HELMHOLTZ_KD: f64 = 10.0;
 pub const MAX_COMPLEX_COEFFICIENT_SLOTS: usize = MAX_COEFFICIENT_SLOTS / 2;
 const DIRECTIONAL_ROUTE: &str = "M2.5-W5b";
 
+/// Caller-declared W5a resource ceilings. The plain constructors use
+/// [`ComplexBudget::V1`]; the `_within` constructors take one explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComplexBudget {
+    /// Counted M2L channel multiply-adds in one pass. Passes poll no
+    /// cancellation, so this also bounds one uncancellable pass.
+    pub max_translation_work: usize,
+}
+impl ComplexBudget {
+    /// The v1 ceiling, [`MAX_TRANSLATION_WORK`].
+    pub const V1: Self = Self {
+        max_translation_work: MAX_TRANSLATION_WORK,
+    };
+}
+
 /// Conservative order recommendation within the battery's kD<=10, tol>=1e-6
 /// domain. It is not a relative-error certificate for arbitrary cancelling
 /// charges. Explicit lower orders are available for convergence measurements.
@@ -150,7 +165,25 @@ impl<'k> FmmC64<'k> {
         order: usize,
         leaf_cap: usize,
     ) -> Result<Self, FmmError> {
-        Self::build(Operator::Scalar(kernel), points, None, order, leaf_cap)
+        Self::new_within(kernel, points, order, leaf_cap, ComplexBudget::V1)
+    }
+
+    /// [`Self::new`] under a caller-declared [`ComplexBudget`].
+    pub fn new_within(
+        kernel: &'k dyn ComplexKernel,
+        points: Vec<[f64; 3]>,
+        order: usize,
+        leaf_cap: usize,
+        budget: ComplexBudget,
+    ) -> Result<Self, FmmError> {
+        Self::build(
+            Operator::Scalar(kernel),
+            points,
+            None,
+            order,
+            leaf_cap,
+            budget,
+        )
     }
 
     /// Source-normal double layer, with normals factored into three P2M fields.
@@ -161,12 +194,25 @@ impl<'k> FmmC64<'k> {
         order: usize,
         leaf_cap: usize,
     ) -> Result<Self, FmmError> {
+        Self::new_double_within(kernel, points, normals, order, leaf_cap, ComplexBudget::V1)
+    }
+
+    /// [`Self::new_double`] under a caller-declared [`ComplexBudget`].
+    pub fn new_double_within(
+        kernel: HelmholtzDouble,
+        points: Vec<[f64; 3]>,
+        normals: Vec<[f64; 3]>,
+        order: usize,
+        leaf_cap: usize,
+        budget: ComplexBudget,
+    ) -> Result<Self, FmmError> {
         Self::build(
             Operator::Double(kernel),
             points,
             Some(normals),
             order,
             leaf_cap,
+            budget,
         )
     }
 
@@ -178,12 +224,25 @@ impl<'k> FmmC64<'k> {
         order: usize,
         leaf_cap: usize,
     ) -> Result<Self, FmmError> {
+        Self::new_adjoint_double_within(kernel, points, normals, order, leaf_cap, ComplexBudget::V1)
+    }
+
+    /// [`Self::new_adjoint_double`] under a caller-declared [`ComplexBudget`].
+    pub fn new_adjoint_double_within(
+        kernel: HelmholtzAdjointDouble,
+        points: Vec<[f64; 3]>,
+        normals: Vec<[f64; 3]>,
+        order: usize,
+        leaf_cap: usize,
+        budget: ComplexBudget,
+    ) -> Result<Self, FmmError> {
         Self::build(
             Operator::Adjoint(kernel),
             points,
             Some(normals),
             order,
             leaf_cap,
+            budget,
         )
     }
 
@@ -196,12 +255,25 @@ impl<'k> FmmC64<'k> {
         order: usize,
         leaf_cap: usize,
     ) -> Result<Self, FmmError> {
+        Self::new_hypersingular_within(kernel, points, normals, order, leaf_cap, ComplexBudget::V1)
+    }
+
+    /// [`Self::new_hypersingular`] under a caller-declared [`ComplexBudget`].
+    pub fn new_hypersingular_within(
+        kernel: HelmholtzHypersingular,
+        points: Vec<[f64; 3]>,
+        normals: Vec<[f64; 3]>,
+        order: usize,
+        leaf_cap: usize,
+        budget: ComplexBudget,
+    ) -> Result<Self, FmmError> {
         Self::build(
             Operator::Mixed(kernel),
             points,
             Some(normals),
             order,
             leaf_cap,
+            budget,
         )
     }
 
@@ -231,7 +303,13 @@ impl<'k> FmmC64<'k> {
         normals: Option<Vec<[f64; 3]>>,
         order: usize,
         leaf_cap: usize,
+        budget: ComplexBudget,
     ) -> Result<Self, FmmError> {
+        if budget.max_translation_work == 0 {
+            return Err(FmmError::ComplexRequest {
+                reason: "the declared M2L work budget must be positive",
+            });
+        }
         if !(MIN_INTERPOLATION_ORDER..=MAX_INTERPOLATION_ORDER).contains(&order) {
             return Err(FmmError::InvalidOrder {
                 order,
@@ -295,11 +373,11 @@ impl<'k> FmmC64<'k> {
                     let pb = (level - 1, b.1 >> 1, b.2 >> 1, b.3 >> 1);
                     if !Fmm::adjacent(a, b) && Fmm::adjacent(pa, pb) {
                         let requested = (interactions.len() + 1).saturating_mul(work_per_pair);
-                        if requested > MAX_TRANSLATION_WORK {
+                        if requested > budget.max_translation_work {
                             return Err(FmmError::WorkEnvelopeExceeded {
                                 operation: "complex M2L channel multiply-add",
                                 requested,
-                                max: MAX_TRANSLATION_WORK,
+                                max: budget.max_translation_work,
                             });
                         }
                         interactions.push((a, b));

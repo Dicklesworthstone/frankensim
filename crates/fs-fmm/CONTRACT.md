@@ -171,6 +171,19 @@ rejecting p=12 even on a small sparse tree.
   not a near-miss.
 - Allocation failure and cancellation boundaries remain as described above.
 
+A caller can declare a different per-pass M2L ceiling with `ComplexBudget`
+and the `new_within`, `new_double_within`, `new_adjoint_double_within` and
+`new_hypersingular_within` constructors.
+- The plain constructors use `ComplexBudget::V1`, which is
+  `MAX_TRANSLATION_WORK`.
+- A larger budget is a longer uncancellable pass, chosen explicitly. The
+  81920-panel (icosphere-6) sphere at order 6 counts roughly four times the
+  icosphere-5 pass.
+- Admission still counts every multiply-add, and the budget changes no bit.
+  `fmm_c64_declared_translation_budget` admits exactly the counted work, with
+  bit-identical potentials, and refuses one less.
+- The directional route's whole-request W5a delegation keeps `V1`.
+
 M2L evaluates each kernel block once per same-level cell offset. Same-level
 Chebyshev grids are translates, so a translation-invariant operator has one
 block per `(level, offset)`. Every shipped Helmholtz operator is

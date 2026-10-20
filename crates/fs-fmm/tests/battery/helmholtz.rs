@@ -1,9 +1,10 @@
 //! G0/G1/G2/G3/G5 complex-kernel checks, within the existing battery target.
 
 use fs_fmm::{
-    ComplexKernel, FmmC64, FmmError, HelmholtzAdjointDouble, HelmholtzDouble, HelmholtzGradient,
-    HelmholtzHypersingular, HelmholtzSingle, MAX_BB_HELMHOLTZ_KD, MAX_COEFFICIENT_SLOTS,
-    MAX_COMPLEX_COEFFICIENT_SLOTS, helmholtz_order_for,
+    ComplexBudget, ComplexKernel, FmmC64, FmmError, HelmholtzAdjointDouble, HelmholtzDouble,
+    HelmholtzGradient, HelmholtzHypersingular, HelmholtzSingle, MAX_BB_HELMHOLTZ_KD,
+    MAX_COEFFICIENT_SLOTS, MAX_COMPLEX_COEFFICIENT_SLOTS, MAX_TRANSLATION_WORK,
+    helmholtz_order_for,
 };
 use fs_math::{c64::C64, det};
 use std::time::Instant;
@@ -338,6 +339,61 @@ fn fmm_c64_caps() {
             MAX_COMPLEX_COEFFICIENT_SLOTS,
             MAX_COMPLEX_COEFFICIENT_SLOTS,
             MAX_COEFFICIENT_SLOTS / 2,
+            start.elapsed().as_secs_f64()
+        ),
+    );
+}
+
+#[test]
+fn fmm_c64_declared_translation_budget() {
+    let start = Instant::now();
+    let (points, charges, normals) = fixture();
+    let kernel = HelmholtzHypersingular { k: 5.0 };
+    let order = 4;
+    let plain =
+        FmmC64::new_hypersingular(kernel, points.clone(), normals.clone(), order, 2).unwrap();
+    let stats = plain.stats();
+    let pairs: usize = stats
+        .split("\"m2l_pairs\":")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap();
+    assert!(pairs > 0, "the fixture must exercise M2L: {stats}");
+    // Admission counts p^6 channel multiply-adds per pair; mixed has 3x3.
+    let work = pairs * order.pow(6) * 9;
+    let within = |max_translation_work| {
+        FmmC64::new_hypersingular_within(
+            kernel,
+            points.clone(),
+            normals.clone(),
+            order,
+            2,
+            ComplexBudget {
+                max_translation_work,
+            },
+        )
+    };
+    // Exactly the counted work is admitted and changes no bit; one less refuses.
+    assert_eq!(
+        bits(&plain.potentials(&charges).unwrap()),
+        bits(&within(work).unwrap().potentials(&charges).unwrap())
+    );
+    assert!(matches!(
+        within(work - 1),
+        Err(FmmError::WorkEnvelopeExceeded {
+            operation: "complex M2L channel multiply-add",
+            requested,
+            max,
+        }) if requested == work && max == work - 1
+    ));
+    assert!(matches!(within(0), Err(FmmError::ComplexRequest { .. })));
+    assert_eq!(ComplexBudget::V1.max_translation_work, MAX_TRANSLATION_WORK);
+    super::measurement(
+        "fmm-hz-caps",
+        "declared_translation_budget",
+        format!(
+            "{{\"case\":\"fmm-hz-caps\",\"inputs\":{{\"provenance\":\"counted M2L pairs * p^6 * channels\"}},\"axis\":\"max_translation_work\",\"rung\":{order},\"observed\":{work},\"oracle\":{work},\"err\":0,\"tol\":0,\"verdict\":\"pass\",\"elapsed_s\":{}}}",
             start.elapsed().as_secs_f64()
         ),
     );
