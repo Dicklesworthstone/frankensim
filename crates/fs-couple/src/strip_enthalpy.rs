@@ -15,3 +15,6 @@ mod solve { include!("layered_feedback_impl.rs"); }
 pub use api::{LayerThermalBinding,ThermalCoefficients,StripEnthalpyConfig};
 pub use state::{StripEnthalpyError,StripEnthalpyReport,StripEnthalpyCandidate};
 pub use solve::step_candidate;
+
+/// Atomic coupled intervals and actual scheduled layer births.
+pub mod growth;

@@ -17,30 +17,16 @@ fn same_positive(a:f64,b:f64)->bool{
         &&(a-b).abs()<=64.0*f64::EPSILON*a.abs().max(b.abs())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn step_candidate<'t, 'm, S, E>(
-    thermal: &DepositionSimulation<'t>, strip: &LayeredStrip<'m>,
-    bindings: &[LayerThermalBinding<'_>], target_s: f64, control: Control,
-    config: StripEnthalpyConfig, initial_energy_increments_j: &[f64],
-    resolve: impl Fn(&DepositionSimulation<'t>) -> Result<ThermalCoefficients<S>, E>,
-    cancelled: impl FnMut() -> bool,
-) -> Result<StripEnthalpyCandidate<'t, 'm, S>, StripEnthalpyError<E>> {
-    let numerical = |e:FiniteDifferenceError<StripEnthalpyError<E>>| match e {
-        FiniteDifferenceError::Source(e)=>e,
-        FiniteDifferenceError::Invalid(s)=>StripEnthalpyError::Invalid(s),
-    };
-    let cancel = RefCell::new(cancelled);
-    let checkpoint = || if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
+/// Shared source/mass/history admission for a coupled interval or a birth batch.
+/// Empty matched states are admitted here so initial events can activate material.
+pub(super) fn admit_bindings<'b, 'm, E>(
+    thermal: &DepositionSimulation<'_>, strip: &LayeredStrip<'_>,
+    bindings: &'b [LayerThermalBinding<'m>],
+    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<BTreeMap<u64, &'b LayerThermalBinding<'m>>, StripEnthalpyError<E>> {
     checkpoint()?;
-    config.newton.validate()?;
-    if strip.time_s() != thermal.time_s() || strip.layers().is_empty()
-        || bindings.len() != strip.layers().len() || config.maximum_cells == 0
-        || thermal.cells().len() > config.maximum_cells
-        || initial_energy_increments_j.len() != thermal.cells().len()
-        || config.maximum_structural_trials == 0 || config.maximum_newton_iterations == 0
-        || [config.cell_energy_tolerance_j, config.thermal_energy_tolerance_j, config.total_energy_tolerance_j]
-            .iter().any(|v| !v.is_finite() || *v < 0.0) {
-        return Err(StripEnthalpyError::Invalid("complete active bindings, common clocks and valid work/energy controls required"));
+    if strip.time_s() != thermal.time_s() || bindings.len() != strip.layers().len() {
+        return Err(StripEnthalpyError::Invalid("complete bindings at a shared physical time required"));
     }
     let mut layers = BTreeMap::new();
     let mut cells = BTreeSet::new();
@@ -70,6 +56,36 @@ pub fn step_candidate<'t, 'm, S, E>(
                 .map_err(StripEnthalpyError::CaloricAdmission)?;
         }
     }
+    checkpoint()?;
+    Ok(layers)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn step_candidate<'t, 'm, S, E>(
+    thermal: &DepositionSimulation<'t>, strip: &LayeredStrip<'m>,
+    bindings: &[LayerThermalBinding<'_>], target_s: f64, control: Control,
+    config: StripEnthalpyConfig, initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'t>) -> Result<ThermalCoefficients<S>, E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<StripEnthalpyCandidate<'t, 'm, S>, StripEnthalpyError<E>> {
+    let numerical = |e:FiniteDifferenceError<StripEnthalpyError<E>>| match e {
+        FiniteDifferenceError::Source(e)=>e,
+        FiniteDifferenceError::Invalid(s)=>StripEnthalpyError::Invalid(s),
+    };
+    let cancel = RefCell::new(cancelled);
+    let checkpoint = || if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
+    checkpoint()?;
+    config.newton.validate()?;
+    if strip.time_s() != thermal.time_s() || strip.layers().is_empty()
+        || bindings.len() != strip.layers().len() || config.maximum_cells == 0
+        || thermal.cells().len() > config.maximum_cells
+        || initial_energy_increments_j.len() != thermal.cells().len()
+        || config.maximum_structural_trials == 0 || config.maximum_newton_iterations == 0
+        || [config.cell_energy_tolerance_j, config.thermal_energy_tolerance_j, config.total_energy_tolerance_j]
+            .iter().any(|v| !v.is_finite() || *v < 0.0) {
+        return Err(StripEnthalpyError::Invalid("complete active bindings, common clocks and valid work/energy controls required"));
+    }
+    let layers = admit_bindings::<E>(thermal, strip, bindings, checkpoint)?;
     let step = BackwardEulerStep::new(thermal, target_s, checkpoint)?;
     let dt = step.duration_s();
     let trials = Cell::new(0usize);
