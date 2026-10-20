@@ -115,9 +115,6 @@ impl input::Spec {
         poll(gate)?;
         if let Some(body)=&profile { body.preflight(&self)?; }
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
-        if self.geometric_stretching.is_some() && stop_profile.is_some() {
-            return Err("geometric stretching with independent stops needs a joint nonlinear normal-contact solve".into());
-        }
         // Count every fluid inertia and physical connection before pack I/O.
         // The exact owner still applies its stricter connected-island bound.
         let additional_body_connections = profile.as_ref()

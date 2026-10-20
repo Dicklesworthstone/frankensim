@@ -3005,8 +3005,19 @@ storage and reaction convergence. The material performance file selects it with
 the optional
 `geometric-stretching SLOPE ITERATIONS MAX_FORCE ABS_TOL REL_TOL` record, so
 material and gas changes propagate through the bow, shared body and PCM writer.
-Cold attachment is explicit; subsequent gas/torque rebuilds, independent stops,
-contact-loaded bows and linear static preload refuse rather than dropping storage.
+Independent compliant stops and contact-derived bow loads use that same original
+joint normal/tangential solve inside each DG trial. Initial and final contact
+potential, original normal loss and signed support work `-R*delta_s` enter the
+combined energy balance and energy budget; contact storage remains separately
+reported from linear-plus-geometric network storage. The energy tolerance uses
+the sum of absolute individual support supplies. Contact-loaded tangential laws
+use the jointly solved current reaction and release on separation. Prescribed
+support motion translates along fixed normals at fixed string stations; contact
+relocation along the span is not admitted. Rejected trials preserve accepted
+contact reports and support offsets as well as the complete mechanical state.
+Cold attachment is explicit; subsequent gas/torque rebuilds and linear static
+preload refuse rather than dropping storage. The static-preload guard precedes
+normal-contact equilibrium because that owner does not include geometric storage.
 This bounded iterated DG composition is not SAV, a full rod model, a unique
 nonlinear-branch guarantee or measured instrument/trajectory qualification.
 

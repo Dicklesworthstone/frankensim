@@ -79,7 +79,7 @@ pub struct NonlinearFrictionFrame {
     pub reaction_tolerance: f64,
 }
 
-/// Constitutive report shared by scalar and simultaneous prescribed friction.
+/// Constitutive report shared by scalar and simultaneous friction.
 /// The additional storage is already included in the accepted network energy.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NonlinearFrictionDiagnostics {
@@ -117,6 +117,18 @@ pub(super) struct NonlinearTrialWork {
     pub absolute_drive_work_j: f64,
     pub network_dissipation_j: f64,
     pub friction_dissipation_j: f64,
+    pub contacts: Option<NonlinearContactWork>,
+}
+/// Already evaluated by the original normal-contact owner at this same trial.
+/// For x=N^T q-s, -R N^T delta_q = -delta_U-loss-R delta_s. Thus normal
+/// actuator work belongs in the complete balance without changing the DG law.
+#[derive(Clone, Copy)]
+pub(super) struct NonlinearContactWork {
+    pub before_energy_j: f64,
+    pub after_energy_j: f64,
+    pub dissipation_j: f64,
+    pub work_j: f64,
+    pub absolute_work_j: f64,
 }
 pub(super) struct NonlinearCorrection {
     pub observer_pressure_pa: f64,
@@ -145,6 +157,7 @@ impl NonlinearTrial for SingleTrial<'_> {
             absolute_drive_work_j: frame.drive_work_j.abs(),
             network_dissipation_j: frame.network_dissipation_j,
             friction_dissipation_j: frame.friction_dissipation_j,
+            contacts: None,
         })
     }
 }
@@ -328,17 +341,31 @@ impl NonlinearFrictionState {
             last_ratio = finite(residual / tolerance)?;
             let after = finite(frame.network_energy_j + after_potential)?;
             let external_work = dot(external, &inner.network.free_delta)?;
-            let balance = finite(
+            // Keep obstacle storage separate in the public frame, but include
+            // BOTH accepted endpoints and its own loss/work in this transaction.
+            let (total_before, total_after) = match frame.contacts {
+                Some(contact) => (finite(before + contact.before_energy_j)?,
+                    finite(after + contact.after_energy_j)?),
+                None => (before, after),
+            };
+            let balance = if let Some(contact) = frame.contacts {
+                finite(total_after - total_before + frame.network_dissipation_j
+                    + frame.friction_dissipation_j + contact.dissipation_j
+                    - external_work - frame.drive_work_j - contact.work_j)?
+            } else { finite(
                 after - before + frame.network_dissipation_j + frame.friction_dissipation_j
                     - external_work
                     - frame.drive_work_j,
-            )?;
-            let energy_scale = before
-                .max(after)
+            )? };
+            let mut energy_scale = total_before
+                .max(total_after)
                 .max(frame.network_dissipation_j)
                 .max(frame.friction_dissipation_j)
                 .max(external_work.abs())
                 .max(frame.absolute_drive_work_j);
+            if let Some(contact) = frame.contacts {
+                energy_scale = energy_scale.max(contact.dissipation_j).max(contact.absolute_work_j);
+            }
             let energy_tolerance = finite(
                 inner.network.config.energy_absolute_tolerance_j
                     + inner.network.config.energy_relative_tolerance * energy_scale,
@@ -346,8 +373,8 @@ impl NonlinearFrictionState {
             last_energy = (balance, energy_tolerance);
             if residual <= tolerance && balance.abs() <= energy_tolerance {
                 limit(
-                    "linear plus nonlinear energy",
-                    after,
+                    "total linear, nonlinear and contact energy",
+                    total_after,
                     inner.network.config.maximum_total_energy_j,
                 )?;
                 // Actual endpoint pressure uses -grad V(q1), not held DG.

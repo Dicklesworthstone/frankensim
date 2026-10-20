@@ -6,6 +6,8 @@ use fs_couple::render::schedule::force::coupled::contact::friction::nonlinear::{
 };
 use fs_phs::Storage;
 
+mod obstacles;
+
 struct Quartic(f64);
 impl Storage for Quartic {
     fn hamiltonian(&self, q: &[f64]) -> f64 { 0.25 * self.0 * (q[0]*q[0] + q[1]*q[1]).powi(2) }

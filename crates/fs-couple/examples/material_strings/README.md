@@ -390,13 +390,33 @@ cargo run --release -p fs-couple --example material_strings -- \
   "$demo/nonlinear-double-bow.material-strings" "$demo/nonlinear-double-bow.wav"
 ```
 
+`nonlinear-contact-bow.material-strings` combines the same source-derived
+stretching, bonded string, two transverse planes, torsion, body, cavity and
+gas memory with the existing normal-contact profile. The profile presses the
+support into the string and withdraws it; the jointly solved normal reaction
+sets the bow's friction load, including automatic release on separation:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/nonlinear-contact-bow.material-strings" "$demo/nonlinear-contact-bow.wav" \
+  --stop-profile "$demo/contact-bow.stops"
+```
+
+Independent compliant stops and contact-loaded bows use the original joint
+normal/tangential solver inside each stretching trial. Both endpoints of contact
+storage, normal-contact loss and signed support work `-reaction * offset_change`
+join the geometric, network and bow work balance before publication. Motion is
+normal translation of supports at fixed stations along the string; it does not
+move a contact station along the span. Existing stop profiles and gesture tracks
+remain the input format.
+
 This is the moderate-slope, fixed-end Kirchhoff–Carrier model. Nonlinear
 harmonics and strong coupling require clock/mode refinement; residual closure
 alone does not establish trajectory accuracy. This selection supports multiple
-prescribed bows and `forces retain`. Independent stops (including moving stops
-and contact-loaded bows) and linear static preload
-refuse because they require a joint nonlinear contact/equilibrium solve. Select
-gas loading and rotational bridges before attaching stretching. Axial wave
+prescribed or contact-loaded bows, fixed or normally translating supports and
+`forces retain`. Static preload still refuses because it requires a joint
+nonlinear equilibrium solve. Select gas loading and rotational bridges before
+attaching stretching. Axial wave
 inertia, winding slip, evolving temperature and measured instrument qualification
 remain outside this composition.
 

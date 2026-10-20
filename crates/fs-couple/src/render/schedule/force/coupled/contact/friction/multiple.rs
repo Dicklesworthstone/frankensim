@@ -6,7 +6,7 @@
 //! ALL laws on the same endpoint before publishing a single mechanical step.
 //! No sequential voice advancement, averaged material law or delayed reaction.
 //! Bound geometric storage wraps these same trials in the shared DG iteration;
-//! prescribed bow loads, material reaction and total work must all agree.
+//! normal and tangential laws, material reaction and total work must all agree.
 //!
 //! Normal loads are prescribed by default. Explicit contact bindings instead
 //! use the simultaneously solved compliant reaction, including automatic release
@@ -18,7 +18,7 @@
 use super::*;
 use super::super::network_response;
 
-/// Compliant obstacles in the same joint solve as prescribed-load friction.
+/// Compliant obstacles in the same joint solve as prescribed or contact-loaded friction.
 pub mod obstacles;
 
 /// One normal-contact reaction driving the corresponding tangential law.
@@ -211,12 +211,19 @@ impl MultiFrictionModalSystem {
     /// compliance matrix. Original per-obstacle limits, joint sweep count and
     /// obstacle setup budget apply. Dashpots carry no static load.
     ///
+    /// Bound nonlinear storage refuses before the contact-equilibrium solve:
+    /// that owner cannot silently omit an additional geometric potential.
     /// Refuses after any sample or nonzero initial vibration; all sources,
     /// observers and clocks survive. No fallible work follows state publication.
     /// Returns initial storage INCLUDING obstacles, not prior actuator work.
     pub fn initialize_released_equilibrium(&mut self, external: &[f64], gate: &CancelGate)
         -> Result<f64, ModalFrictionError>
     {
+        // This must precede the obstacle branch: that original equilibrium
+        // owner has no bound geometric potential and cannot silently omit it.
+        if self.core.has_nonlinear_potentials() {
+            return Err(invalid("static preload requires a joint nonlinear equilibrium solve").into());
+        }
         if let Some(obstacles) = &self.obstacles {
             return obstacles.initialize_equilibrium(&mut self.core.network, external,
                 self.config.max_sweeps, gate).map_err(Into::into);
@@ -266,7 +273,7 @@ impl MultiFrictionModalSystem {
             return Ok(&self.frame);
         }
         let mut accepted = if self.core.has_nonlinear_potentials() {
-            self.stage_with_nonlinear(external, drives, gate)?
+            self.stage_with_nonlinear(external, drives, obstacle_offsets, gate)?
         } else {
             self.stage_multiple(external, drives, obstacle_offsets, gate)?
         };

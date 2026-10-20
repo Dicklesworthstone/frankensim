@@ -73,8 +73,10 @@ impl ReciprocalStringBank {
     /// law once before playback. Existing initial coordinates are preserved;
     /// adding their geometric energy is an explicit initial condition. The
     /// original scheduled renderer executes the combined nonlinear bow equation.
-    /// Additional prescribed bows may then be attached; they share this same
-    /// constitutive iteration and complete network rather than separate voices.
+    /// Additional bows and compliant stops may then be attached. Prescribed or
+    /// contact-derived bow loads and normal support translation at fixed string
+    /// stations share this same constitutive iteration and complete network.
+    /// Nonlinear static preload still requires a separate equilibrium solve.
     ///
     /// Moderate-slope fixed-end Kirchhoff--Carrier mechanics; no axial wave
     /// inertia, dynamic temperature, helical winding slip or full rod. The

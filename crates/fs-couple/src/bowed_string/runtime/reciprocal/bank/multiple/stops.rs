@@ -71,14 +71,17 @@ impl MultiBowStringBank {
     /// Stops bind once before any sample, retaining initial motion/potential.
     /// Drive indentation and load-release with the existing physical-force
     /// performer. Static preload includes the original normal contact potentials
-    /// in the full-network equilibrium, with every bow released before the window.
+    /// in the full-network equilibrium, with every bow released before the window;
+    /// bound geometric storage requires a nonlinear equilibrium owner and refuses.
     /// A vibrating string may leave and re-enter a stop without a state reset.
     ///
     /// A declared normal can differ from the bow tangent or plucking direction.
     /// The same source basis projects it into both selected transverse planes;
-    /// a missing plane refuses, rather than silently dropping force. This does not solve
-    /// finger motion, changing contact area, contact friction, geometric
-    /// tension, a moving fret, rigid constraints or contact-induced adaptivity.
+    /// a missing plane refuses, rather than silently dropping force. Already
+    /// bound geometric stretching stays in the same joint constitutive solve.
+    /// Prescribed support translation follows fixed normals at fixed stations;
+    /// this does not solve finger-body motion, contact relocation along the span,
+    /// changing area, contact friction, rigid constraints or contact-induced adaptivity.
     /// Material source domains and spatial/time refinement remain necessary.
     pub fn with_string_stops(mut self, stops: Vec<MaterialStringStop>,
         limits: FrictionObstacleConfig, gate: &CancelGate) -> Result<Self, RenderError>

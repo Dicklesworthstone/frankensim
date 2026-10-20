@@ -68,16 +68,16 @@ impl MultiFrictionModalSystem {
     /// coupling/nonmonotone friction and rigid-contact limits is not promised.
     ///
     /// Empty input is an exact no-op. A nonempty set binds once, at sample zero.
-    /// Released-friction preload solves these same contacts at equilibrium.
+    /// Bound geometric storage retains these same contact trials, including
+    /// initial/final potential, loss and support work in the joint DG balance.
+    /// Released-friction preload solves these contacts at equilibrium only when
+    /// no additional nonlinear storage is bound.
     /// Existing linear bandwidth checks are not a nonlinear anti-aliasing proof.
     pub fn with_obstacles(mut self, contacts: Vec<(ModalContact, ModalContactConfig)>,
         limits: FrictionObstacleConfig, gate: &CancelGate) -> Result<Self, ModalFrictionError>
     {
         poll(Some(gate))?;
         if contacts.is_empty() { return Ok(self); }
-        if self.core.has_nonlinear_potentials() {
-            return Err(invalid("affine obstacle solve cannot discard bound nonlinear storage").into());
-        }
         if self.samples_rendered() != 0 || self.obstacles.is_some() {
             return Err(invalid("friction obstacles bind once before the first physical sample").into());
         }
@@ -313,6 +313,12 @@ impl ObstacleSet {
     pub(super) fn publish(&mut self) {
         self.accepted.copy_from_slice(&self.staged);
         if let Some(motion) = &mut self.motion { motion.accepted.copy_from_slice(&motion.candidate); }
+    }
+    // Scale from individual physical supplies, not their possibly cancelling
+    // net sum. Read only staged reports from this SAME joint contact solve.
+    pub(super) fn staged_absolute_work_j(&self) -> Result<f64, ModalCouplingError> {
+        self.staged.iter().try_fold(0.0, |sum, contact|
+            finite(sum + contact.actuator_work_j.abs()))
     }
 }
 
