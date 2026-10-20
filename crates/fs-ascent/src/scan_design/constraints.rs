@@ -67,6 +67,9 @@ pub struct ScanPeakBound {
 /// Constraint observations and derivatives at exactly one design point.
 #[derive(Debug,Clone,PartialEq)]
 pub struct ScanConstraintEvaluation {
+    /// Selected physical watts for automatically inserted nonnegative-domain
+    /// rows. Empty under the original logarithmic map. These rows are first.
+    pub nonnegative_power_values_w: Vec<f64>,
     /// One value in watts or metres per declared bound, in declaration order.
     pub bound_values: Vec<f64>,
     /// Joules per declared energy window, including fixed source contributions.
@@ -79,7 +82,7 @@ pub struct ScanConstraintEvaluation {
     pub sampled_peak_values: Vec<f64>,
     /// Added smoothing margins in physical units, not solver-error estimates.
     pub peak_smoothing_gaps: Vec<f64>,
-    /// <= 0 is feasible. Control lower/upper rows, energy rows, then state
+    /// <= 0 is feasible. Nonnegative-domain rows, control lower/upper rows, energy rows, then state
     /// lower/upper rows, then peak upper rows, in original declaration order.
     pub residuals: Vec<f64>,
     /// Row-major derivatives with respect to original optimizer coordinates.
@@ -115,6 +118,10 @@ impl<F> ConstrainedScanStudy<F> {
     /// constraint-infeasible but must be physically evaluable. Equal lower/upper
     /// bounds are refused: keep a fixed coordinate unselected instead.
     /// All energy windows require constant/ramp/held-or-linear power schedules.
+    /// Nonnegative-linear powers automatically add one `-x <= 0` domain row
+    /// per selected power, counted in the KKT cap. No user bounds are needed
+    /// just to admit the off boundary. Other design limits may remain infeasible
+    /// during the search; negative heater inputs never enter a physics solve.
     pub fn new<'h,'m,'c>(cx: &Cx<'_>, study: ScanPowerStudy<F>,
         bounds: Vec<ScanControlBound>, energy: Vec<ScanEnergyCap>, max_kkt_dimension: usize)
         -> Result<Self,SqpError<ScanSensitivityError>>
@@ -245,7 +252,10 @@ impl Limits {
         -> Result<Self,ScanSensitivityError>
     {
         poll(cx)?;
-        let n=study.initial.len();let mut rows=caps.len();let mut seen=BTreeSet::new();
+        let n=study.initial.len();
+        let mut rows=caps.len().checked_add(if study.has_nonnegative_powers() {study.controls.len()} else {0})
+            .ok_or_else(||invalid("scan constraint count overflow"))?;
+        let mut seen=BTreeSet::new();
         if states.len().checked_add(peaks.len()).is_none_or(|n|n>response_budget.max_responses) {
             return Err(invalid("state bounds exceed their response allowance"));
         }
@@ -288,11 +298,15 @@ impl Limits {
                 || bound.lower.zip(bound.upper).is_some_and(|(a,b)|a>=b)
             { return Err(invalid("scan bounds need distinct existing coordinates, finite ordered limits and positive physical scales")); }
             let positive=match bound.coordinate.checked_sub(study.controls.len()) {
-                None=>true,
+                None=>!study.has_nonnegative_powers(),
                 Some(index)=>matches!(study.geometry_controls[index],ScanGeometryControl::HalfWidth {..}),
             };
             if positive && (bound.lower.is_some_and(|v|v<0.0) || bound.upper.is_some_and(|v|v<=0.0)) {
                 return Err(invalid("power/half-width bounds must admit strictly positive physical values"));
+            }
+            if bound.coordinate < study.controls.len() && study.has_nonnegative_powers()
+                && bound.lower.into_iter().chain(bound.upper).any(|v| v < 0.0) {
+                return Err(invalid("nonnegative heater bounds cannot request negative watts"));
             }
             rows=rows.checked_add(usize::from(bound.lower.is_some())+usize::from(bound.upper.is_some()))
                 .ok_or_else(||invalid("scan constraint count overflow"))?;
@@ -333,15 +347,25 @@ impl Limits {
     {
         poll(cx)?;
         let powers=study.powers_at(point)?;let geometry=study.geometry_at(point)?;let n=point.len();
-        let mut out=ScanConstraintEvaluation {bound_values:Vec::with_capacity(self.bounds.len()),
+        let mut out=ScanConstraintEvaluation {nonnegative_power_values_w:Vec::new(),
+            bound_values:Vec::with_capacity(self.bounds.len()),
             absorbed_energy_j:Vec::with_capacity(self.energy.len()),residuals:Vec::with_capacity(self.rows),
             state_values:Vec::with_capacity(self.states.len()),jacobian:vec![0.0;self.rows*n],
             peak_values:Vec::with_capacity(self.peaks.len()),sampled_peak_values:Vec::with_capacity(self.peaks.len()),
             peak_smoothing_gaps:Vec::with_capacity(self.peaks.len()),
             state_transpose_iterations:0,max_state_transpose_relative_residual:0.0};
+        if study.has_nonnegative_powers() {
+            out.nonnegative_power_values_w = powers.clone();
+            for (i, &x) in point[..powers.len()].iter().enumerate() {
+                if i % 256 == 0 { poll(cx)?; }
+                out.jacobian[out.residuals.len()*n+i] = -1.0;
+                out.residuals.push(-x);
+            }
+        }
         for b in &self.bounds {
             poll(cx)?;
-            let (value,chain)=if b.coordinate<powers.len() {(powers[b.coordinate],powers[b.coordinate])}
+            let (value,chain)=if b.coordinate<powers.len() {
+                (powers[b.coordinate],study.power_derivative(b.coordinate,powers[b.coordinate]))}
                 else {let index=b.coordinate-powers.len();let value=geometry[index];
                     (value,match study.geometry_controls[index] {
                         ScanGeometryControl::CenterValue {scale_m,..}=>scale_m,
@@ -360,7 +384,8 @@ impl Limits {
             for (i,(&weight,&power)) in row.power_weights_s.iter().zip(&powers).enumerate() {
                 if i%256==0 {poll(cx)?;}
                 let term=finite(weight*power)?;
-                joules=finite(joules+term)?;out.jacobian[offset+i]=finite(term/row.cap.scale_j)?;
+                joules=finite(joules+term)?;
+                out.jacobian[offset+i]=finite(finite(weight*study.power_derivative(i,power))?/row.cap.scale_j)?;
             }
             out.absorbed_energy_j.push(joules);
             out.residuals.push(finite(finite(joules-row.cap.maximum_j)?/row.cap.scale_j)?);
@@ -373,6 +398,14 @@ impl Limits {
         -> Result<Option<SqpSample>,ScanSensitivityError>
     where F: FnMut(&Cx<'_>,Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>,ScanSensitivityError>
     {
+        poll(cx)?;
+        if !study.power_domain_contains(point)? {
+            // Only this analytic domain refusal becomes an unavailable SQP
+            // trial. Phase, source, arithmetic and solver errors still propagate.
+            // The SQP callback attempt is counted, but no physical reservation
+            // or source reconstruction is spent on negative heater power.
+            return Ok(None);
+        }
         let (physical,constraints)=self.evaluate(cx,study,point)?;
         Ok(Some(SqpSample {f:physical.physical.value,gradient:physical.gradient,
             ce:Vec::new(),je:Vec::new(),ci:constraints.residuals,ji:constraints.jacobian}))

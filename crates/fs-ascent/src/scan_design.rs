@@ -25,11 +25,14 @@ use std::collections::BTreeSet;
 
 mod geometry;
 pub use geometry::ScanGeometryControl;
+mod power;
+pub use power::ScanPowerCoordinates;
 /// Physical bounds and absorbed-energy constraints through the existing SQP engine.
 pub mod constraints;
 
 /// One selected authored power value; unselected values (including off states)
-/// remain exactly as declared. Coordinates obey P = reference_w * exp(x).
+/// remain exactly as declared. `reference_w` is the positive watt scale of
+/// the selected [`ScanPowerCoordinates`] (logarithmic by default).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScanPowerControl {
     pub source: usize,
@@ -53,7 +56,7 @@ pub struct ScanPowerObjective {
 #[derive(Debug)]
 pub struct ScanPowerEvaluation {
     pub physical: ScanObjectiveEvaluation,
-    /// Log-power derivatives followed by geometry derivatives in declaration order.
+    /// Selected power-coordinate derivatives, then geometry derivatives.
     pub gradient: Vec<f64>,
     /// Selected powers in control declaration order, W.
     pub powers_w: Vec<f64>,
@@ -74,6 +77,7 @@ pub struct ScanPowerEvaluation {
 pub struct ScanPowerStudy<F> {
     sources: Vec<MovingHeatSource>,
     controls: Vec<ScanPowerControl>,
+    power_coordinates: ScanPowerCoordinates,
     geometry_controls: Vec<ScanGeometryControl>,
     objective: ScanPowerObjective,
     factory: F,
@@ -104,6 +108,22 @@ impl<F> ScanPowerStudy<F> {
         geometry_controls: Vec<ScanGeometryControl>, objective: ScanPowerObjective,
         factory: F, evaluation_limit: usize) -> Result<Self, ScanSensitivityError>
     {
+        Self::new_joint_with_power_coordinates(cx, sources, controls, geometry_controls,
+            ScanPowerCoordinates::PositiveLog, objective, factory, evaluation_limit)
+    }
+
+    /// Select a power coordinate system once for this study. `NonnegativeLinear`
+    /// admits initial and optimized zero watts with a nonzero power derivative.
+    /// Use it through `ConstrainedScanStudy`, which inserts exact domain rows;
+    /// the unconstrained L-BFGS entry points refuse this coordinate policy.
+    /// Geometry coordinates, physical admission and all unselected inputs stay
+    /// unchanged. A zero-power derivative still requires a resolved footprint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_joint_with_power_coordinates(cx: &Cx<'_>, sources: Vec<MovingHeatSource>,
+        controls: Vec<ScanPowerControl>, geometry_controls: Vec<ScanGeometryControl>,
+        power_coordinates: ScanPowerCoordinates, objective: ScanPowerObjective,
+        factory: F, evaluation_limit: usize) -> Result<Self, ScanSensitivityError>
+    {
         poll(cx)?;
         let count = controls.len().checked_add(geometry_controls.len())
             .filter(|&n| n > 0 && n <= objective.budget.max_schedule_controls)
@@ -128,11 +148,10 @@ impl<F> ScanPowerStudy<F> {
             let source = sources.get(control.source).ok_or_else(|| invalid("power control names an absent source"))?;
             let values = source.absorbed_power_values(objective.budget.max_schedule_controls)?;
             let value = *values.get(control.value).ok_or_else(|| invalid("power control names an absent authored value"))?;
-            if !seen.insert((control.source,control.value)) || !value.is_finite() || value <= 0.0
-                || !control.reference_w.is_finite() || control.reference_w <= 0.0
-            { return Err(invalid("power controls must be distinct with positive initial and reference watts")); }
-            // Separate logarithms avoid overflow/underflow in value/reference.
-            initial.push(finite(fs_math::det::ln(value)-fs_math::det::ln(control.reference_w))?);
+            if !seen.insert((control.source,control.value)) {
+                return Err(invalid("power controls must name distinct authored values"));
+            }
+            initial.push(power_coordinates.initial(value, control.reference_w)?);
         }
         let mut geometry_seen = BTreeSet::new();
         for &control in &geometry_controls {
@@ -143,13 +162,15 @@ impl<F> ScanPowerStudy<F> {
             }
             initial.push(control.initial(source.geometry_value(control.key())?)?);
         }
-        Ok(Self { sources, controls, geometry_controls, objective, factory, initial, evaluations:0,
+        Ok(Self { sources, controls, power_coordinates, geometry_controls, objective, factory, initial, evaluations:0,
             evaluation_limit, checkpointing: None })
     }
 
     pub fn initial_coordinates(&self) -> &[f64] { &self.initial }
     pub const fn evaluations(&self) -> usize { self.evaluations }
     pub const fn evaluation_limit(&self) -> usize { self.evaluation_limit }
+    /// Immutable power map used by objective and every constraint derivative.
+    pub const fn power_coordinates(&self) -> ScanPowerCoordinates { self.power_coordinates }
 
     /// Select short-tape differentiation before the first physical evaluation.
     /// Applies to unconstrained fitting AND point/peak-constrained SQP without
@@ -178,10 +199,30 @@ impl<F> ScanPowerStudy<F> {
         self.evaluation_limit = total;
         Ok(())
     }
-    /// Decode selected positive watts without running or mutating the model.
+    /// Decode selected watts without running or mutating the model. Exact zero
+    /// is admitted only by the explicitly selected nonnegative-linear map.
     pub fn powers_at(&self, point: &[f64]) -> Result<Vec<f64>, ScanSensitivityError> {
         self.check_point(point)?;
-        point.iter().zip(&self.controls).map(|(&x,c)| positive_coordinate(x,c.reference_w)).collect()
+        point.iter().zip(&self.controls)
+            .map(|(&x,c)| self.power_coordinates.decode(x,c.reference_w)).collect()
+    }
+
+    fn has_nonnegative_powers(&self) -> bool {
+        !self.controls.is_empty() && self.power_coordinates == ScanPowerCoordinates::NonnegativeLinear
+    }
+
+    // The analytic nonnegative-domain test is not a catch-all physics failure
+    // classifier. SQP may backtrack only this known unavailable design region.
+    fn power_domain_contains(&self, point: &[f64]) -> Result<bool, ScanSensitivityError> {
+        self.check_point(point)?;
+        Ok(!self.has_nonnegative_powers() || point[..self.controls.len()].iter().all(|&x| x >= 0.0))
+    }
+
+    fn power_derivative(&self, index: usize, power: f64) -> f64 {
+        match self.power_coordinates {
+            ScanPowerCoordinates::PositiveLog => power,
+            ScanPowerCoordinates::NonnegativeLinear => self.controls[index].reference_w,
+        }
     }
 
     /// Decode selected path/width values without a physical solve. The complete
@@ -298,12 +339,12 @@ impl<F> ScanPowerStudy<F> {
         sources: &[MovingHeatScheduleGradient]) -> Result<Vec<f64>, ScanSensitivityError>
     {
         let mut gradient = Vec::with_capacity(self.initial.len());
-        for (control,&power) in self.controls.iter().zip(powers_w) {
+        for (index,(control,&power)) in self.controls.iter().zip(powers_w).enumerate() {
             poll(cx)?;
             let g = sources.get(control.source)
                 .and_then(|s|s.absorbed_power_values_w.get(control.value))
                 .ok_or_else(||invalid("native authored-power gradient changed its control layout"))?;
-            gradient.push(finite(power * *g)?);
+            gradient.push(finite(self.power_derivative(index, power) * *g)?);
         }
         for (&control, &value) in self.geometry_controls.iter().zip(geometry_m) {
             poll(cx)?;
@@ -320,6 +361,10 @@ impl<F> ScanPowerStudy<F> {
         -> Result<LbfgsState,LbfgsError<ScanSensitivityError>>
     where F: FnMut(&Cx<'_>, Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>, ScanSensitivityError>
     {
+        poll(cx).map_err(LbfgsError::Evaluation)?;
+        if self.has_nonnegative_powers() {
+            return Err(LbfgsError::InvalidInput("nonnegative power coordinates require ConstrainedScanStudy SQP"));
+        }
         let initial = self.initial.clone();
         LbfgsState::try_new(&initial,memory,&mut |point| {
             self.evaluate(cx,point).map(|r|(r.physical.value,r.gradient))
@@ -334,6 +379,9 @@ impl<F> ScanPowerStudy<F> {
     where F: FnMut(&Cx<'_>, Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>, ScanSensitivityError>
     {
         poll(cx).map_err(LbfgsError::Evaluation)?;
+        if self.has_nonnegative_powers() {
+            return Err(LbfgsError::InvalidInput("nonnegative power coordinates require ConstrainedScanStudy SQP"));
+        }
         let remaining = self.evaluation_limit.saturating_sub(self.evaluations);
         let ceiling = state.evals.checked_add(remaining)
             .ok_or(LbfgsError::InvalidInput("scan optimizer evaluation ceiling overflow"))?;
