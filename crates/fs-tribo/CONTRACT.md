@@ -224,7 +224,42 @@ None. The crate forbids unsafe code.
 
 ## Feature flags
 
-None.
+`benchmark-laws` (default off) exposes `fs_tribo::benchmark`, the M4.2-W4
+benchmark tangential laws. They are also compiled under `cfg(test)`. Only
+dev-dependencies may enable the feature;
+`tests/benchmark_laws.rs::g0_benchmark_laws_not_reachable_from_render_paths`
+scans every workspace manifest and fails if a `[dependencies]` table enables
+it.
+
+### Benchmark tangential laws (`benchmark-laws`)
+
+These laws exist for named comparisons, such as the X-Bw2 bow-law bakeoff.
+They are never render laws.
+
+`RateState` is Dieterich–Ruina rate-and-state friction.
+- Friction: `mu = mu0 + a ln(V/V0) + b ln(V0 theta/Dc)`.
+- `Evolution::Aging` is `d theta/dt = 1 - V theta/Dc`.
+- `Evolution::Slip` is `d theta/dt = -(V theta/Dc) ln(V theta/Dc)`.
+- Admission: `a > 0`, `b >= 0`, positive `V0`/`Dc`, and a declared `speed_range_mps`. Outside that range a step returns `OutsideApplicability`. A zero-speed step refuses because `ln V` is undefined.
+- Over one held-effort interval, both state laws integrate exactly in closed form using `expm1`.
+- Friction uses the state at the start of the interval. It is then strictly increasing in `V`, so the compliant root is unique.
+- `critical_stiffness_n_per_m(N) = N (b - a)/Dc`.
+
+`LuGre` (Canudas de Wit et al. 1995) is one-dimensional.
+- Bristle law: `dz/dt = v - sigma0 |v| z/g(v)`, where `g(v) = Fc + (Fs - Fc) e^{-(v/vs)^2}`. It is integrated exactly at held `v`.
+- Force: `F = sigma0 z1 + sigma1 (z1 - z0)/dt + sigma2 v`.
+- `sigma0 z^2/2` is reversible storage, and the remainder of the port work is heat.
+- A step whose dissipation would be negative refuses, rather than assuming the `sigma1` passivity condition.
+- A two-dimensional slip increment refuses.
+
+Both laws implement `TangentialLaw`:
+- The compliant branch bisects with the caller's `TangentialSolveConfig` budget.
+- A rate-and-state root that needs a speed outside the admitted range returns `OutsideApplicability`.
+- Parameter caps are checked at `cap` and at the next representable value above it.
+
+The Smith & Woodhouse (2000) lumped thermal model is **not implemented**. Its
+constitutive form and fitted parameters were not accessible, and no form is
+guessed.
 
 ## Conformance tests
 
@@ -255,8 +290,22 @@ Rolling-loss tests cover zero load/rate/factor, force and moment reversal,
 load scaling and SI dimensions, pure roll/spin/mixed motion, passivity with an
 independent work integral, temperature/frequency refusal, work-key overlap,
 source-card/patch replay mutation, and a no-target-field source scan.
+`tests/benchmark_laws.rs` (feature `benchmark-laws`) covers:
+- **G1 rate-and-state steady state:** the `mu_ss = mu0 + (a - b) ln(V/V0)` log law at relative 1e-10, for both evolution laws across 1e-8..1e-2 m/s.
+- **G1 velocity step:** the 1/e transient decays over `Dc` of slip, within 1 % at 12.5/25/50 steps per `Dc`.
+- **G1 Ruina spring-slider:** stiffness sweeps through the compliant `advance` path bracket `k_c = N (b - a)/Dc` between `0.98 k_c` and `1.02 k_c`. They compare oscillation amplitude early against late, over 300 `Dc` of slip.
+- **G1 LuGre:** the steady-state Stribeck curve at relative 1e-10, and presliding stiffness `sigma0` at relative 1e-8.
+- **G0 LuGre bristle map:** passivity over Philox-seeded histories (12,800 intervals).
+- **G1 LuGre drive-spring:** stick-slip exists and is periodic.
+- **G0:** parameter cap and cap+1.
+- **G0 reachability scan.**
 
 ## No-claim boundaries
+
+The benchmark laws carry synthetic parameters. They claim no material
+calibration, no bow or rosin data, no thermal friction model, and no
+equivalence to any render law. A benchmark result names a comparison and does
+not admit a law.
 
 This crate does not mint material admission, calibration, the upstream
 `fs-matdb::InterfaceSystemCard` query receipt, a flash-temperature error bound

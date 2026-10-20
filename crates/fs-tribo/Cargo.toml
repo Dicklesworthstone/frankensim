@@ -12,5 +12,14 @@ layer = "L3"
 fs-math = { path = "../fs-math" }
 fs-rand = { path = "../fs-rand" }
 
+[features]
+# Benchmark tangential laws (M4.2-W4). Only dev-dependencies may enable it;
+# tests/benchmark_laws.rs asserts that no crate does so in [dependencies].
+benchmark-laws = []
+
+[[test]]
+name = "benchmark_laws"
+required-features = ["benchmark-laws"]
+
 [lints]
 workspace = true

@@ -1483,6 +1483,7 @@
     "crates/fs-topopt/tests/stress_sdf3.rs",
     "crates/fs-topopt/tests/surface_sdf3_goal.rs",
     "crates/fs-topopt/tests/topopt_battery.rs",
+    "crates/fs-tribo/tests/benchmark_laws.rs",
     "crates/fs-tribo/tests/dry_baseline.rs",
     "crates/fs-tribo/tests/rolling_loss.rs",
     "crates/fs-tropical/tests/tropical.rs",

@@ -33,7 +33,7 @@ pub struct TangentialSolveConfig {
 }
 
 impl TangentialSolveConfig {
-    fn validate(self) -> Result<(), TriboError> {
+    pub(crate) fn validate(self) -> Result<(), TriboError> {
         if !(1..=128).contains(&self.max_iterations) {
             return Err(TriboError::InvalidInput {
                 field: "max_iterations",
@@ -53,7 +53,7 @@ impl TangentialSolveConfig {
         Ok(())
     }
 
-    fn tolerance(self, applied: f64, expected: f64) -> Result<f64, TriboError> {
+    pub(crate) fn tolerance(self, applied: f64, expected: f64) -> Result<f64, TriboError> {
         finite(
             self.force_absolute_tolerance_n
                 + self.force_relative_tolerance * applied.abs().max(expected.abs()),

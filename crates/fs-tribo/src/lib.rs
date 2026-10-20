@@ -16,6 +16,10 @@ pub mod tangential;
 pub use tangential::{
     DryTangentialState, TangentialLaw, TangentialSolveConfig, TangentialStep, TangentialStepInput,
 };
+/// Benchmark tangential laws (rate-and-state, LuGre) for named comparisons;
+/// test-only or the non-default `benchmark-laws` feature, never render laws.
+#[cfg(any(test, feature = "benchmark-laws"))]
+pub mod benchmark;
 
 use core::fmt;
 use std::collections::BTreeSet;
