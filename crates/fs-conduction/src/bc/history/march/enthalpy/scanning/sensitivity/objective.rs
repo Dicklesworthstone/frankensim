@@ -14,6 +14,8 @@
 pub mod responses;
 /// Short-tape reverse sweeps with bounded caloric-state checkpoints.
 pub mod checkpoint;
+/// Mesh-bound interior probes and finite spatial readouts.
+pub mod spatial;
 
 use super::{ScanSensitivityBudget, ScanSensitivityError, ScanStepLinearization};
 use super::super::{ScanStep, ScanningEnthalpyRun};
