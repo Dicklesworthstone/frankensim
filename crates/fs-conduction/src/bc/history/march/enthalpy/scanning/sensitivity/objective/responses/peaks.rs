@@ -17,6 +17,7 @@ use super::super::{ScanObservable, ScanObjectiveBudget, ScanObjectiveEvaluation,
     MovingHeatScheduleGradient, EnthalpyStepConfig, LinearConfig, add, evaluate_with_tape,
     finite, invalid, poll, zeros};
 use fs_exec::Cx;
+use super::super::spatial::ScanObservationSpec;
 
 /// A maximum over a fixed vertex set and an inclusive range of retained times.
 #[derive(Debug, Clone, PartialEq)]
@@ -86,6 +87,18 @@ pub struct ScanPeakEvaluation {
 pub fn evaluate_scan_objective_with_peaks(
     cx: &Cx<'_>, run: ScanningEnthalpyRun<'_, '_, '_>, endpoints: &[f64],
     observations: &[ScanObservation], sampling: ScanObjectiveSampling,
+    step: EnthalpyStepConfig, transpose: LinearConfig, budget: ScanObjectiveBudget,
+    responses: &[ScanResponse], peaks: &[ScanPeakResponse], response_budget: ScanResponseBudget,
+    max_peak_samples: usize,
+) -> Result<(ScanObjectiveEvaluation, Vec<ScanResponseEvaluation>, Vec<ScanPeakEvaluation>), ScanSensitivityError> {
+    evaluate_observations_with_peaks(cx, run, endpoints, observations, sampling,
+        step, transpose, budget, responses, peaks, response_budget, max_peak_samples)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_observations_with_peaks<O: ScanObservationSpec>(
+    cx: &Cx<'_>, run: ScanningEnthalpyRun<'_, '_, '_>, endpoints: &[f64],
+    observations: &[O], sampling: ScanObjectiveSampling,
     step: EnthalpyStepConfig, transpose: LinearConfig, budget: ScanObjectiveBudget,
     responses: &[ScanResponse], peaks: &[ScanPeakResponse], response_budget: ScanResponseBudget,
     max_peak_samples: usize,

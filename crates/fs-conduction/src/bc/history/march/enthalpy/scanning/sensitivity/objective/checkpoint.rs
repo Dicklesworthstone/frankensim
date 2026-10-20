@@ -16,6 +16,7 @@ use fs_exec::Cx;
 
 mod responses;
 pub use responses::{CheckpointedScanResponses, evaluate_scan_objective_checkpointed_with_peaks};
+pub(crate) use responses::evaluate_observations_checkpointed;
 
 /// Separate checkpoint storage and recomputation allowances.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

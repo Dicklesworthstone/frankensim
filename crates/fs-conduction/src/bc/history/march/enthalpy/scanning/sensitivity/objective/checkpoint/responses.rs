@@ -13,6 +13,7 @@ use super::super::responses::{ScanResponse, ScanResponseBudget, ScanResponseEval
 use super::super::responses::peaks::{ScanPeakResponse, ScanPeakEvaluation,
     PeakSummary, admit_rows, summarize_samples, weight};
 use fs_exec::Cx;
+use super::super::spatial::ScanObservationSpec;
 
 /// Original objective, physical constraint values/gradients and actual replay work.
 #[derive(Debug)]
@@ -44,6 +45,18 @@ pub fn evaluate_scan_objective_checkpointed_with_peaks(
     responses: &[ScanResponse], peaks: &[ScanPeakResponse], response_budget: ScanResponseBudget,
     max_peak_samples: usize, checkpoints: ScanCheckpointBudget,
 ) -> Result<CheckpointedScanResponses, ScanSensitivityError> {
+    evaluate_observations_checkpointed(cx, run, endpoints, observations, sampling,
+        step, transpose, budget, responses, peaks, response_budget, max_peak_samples, checkpoints)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_observations_checkpointed<O: ScanObservationSpec>(
+    cx: &Cx<'_>, run: ScanningEnthalpyRun<'_, '_, '_>, endpoints: &[f64],
+    observations: &[O], sampling: ScanObjectiveSampling,
+    step: EnthalpyStepConfig, transpose: LinearConfig, budget: ScanObjectiveBudget,
+    responses: &[ScanResponse], peaks: &[ScanPeakResponse], response_budget: ScanResponseBudget,
+    max_peak_samples: usize, checkpoints: ScanCheckpointBudget,
+) -> Result<CheckpointedScanResponses, ScanSensitivityError> {
     let segment = admit_checkpoints(cx, &run, endpoints.len(), checkpoints)?;
     let (at_endpoint, per_step) = admit_layout(cx, &run, endpoints, observations, budget, segment)?;
     let sample_counts = admit_rows(cx, &run, endpoints.len(), responses, peaks, response_budget, max_peak_samples)?;
@@ -58,9 +71,9 @@ pub fn evaluate_scan_objective_checkpointed_with_peaks(
         |index, report| {
             for &i in &at_endpoint[index] {
                 poll(cx, i)?;
-                let o = observations[i];
-                let prediction = observed(report, o.observable, o.vertex);
-                let residual = finite((prediction-o.target)/o.scale)?;
+                let o = &observations[i];
+                let prediction = o.prediction(cx, report)?;
+                let residual = finite((prediction-o.target())/o.scale())?;
                 value = finite(value + 0.5*residual*residual)?;
                 predictions[i] = prediction; residuals[i] = residual;
             }
@@ -97,8 +110,8 @@ pub fn evaluate_scan_objective_checkpointed_with_peaks(
             let binding = &tape[local];
             for &i in &at_endpoint[index] {
                 poll(cx, i)?;
-                let o = observations[i];
-                same_scalar(observed(binding.report(), o.observable, o.vertex), predictions[i])?;
+                let o = &observations[i];
+                same_scalar(o.prediction(cx, binding.report())?, predictions[i])?;
             }
             objective.inject_observations(cx, binding, observations, &at_endpoint[index], &residuals)?;
             objective.pull(cx, &replay.run, binding, sampling, transpose, budget.max_schedule_controls)?;

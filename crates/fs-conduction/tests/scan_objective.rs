@@ -193,3 +193,96 @@ fn g0_objective_rejects_bad_grid_observations_storage_limits_and_cancellation() 
         assert!(evaluate(&[0.001],&observations,objective_budget()).is_ok());
     });
 }
+
+use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::spatial::{
+    ScanReadout, ScanSpatialObservation, evaluate_scan_observations};
+use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::checkpoint::ScanCheckpointBudget;
+use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::responses::{ScanResponse,ScanResponseBudget};
+use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::responses::peaks::ScanPeakResponse;
+
+#[test]
+fn g3_spatial_measurements_share_full_and_replayed_physical_gradients() {
+    let m=mesh();let curve=chart();
+    let material=ConductivityModel::isotropic(ConductivityTable::declared_curve(vec![(280.,1.),(380.,3.)]).unwrap());
+    with_cx(|cx| {
+        let hist=history(cx,&m);let times=[0.001,0.002,0.004,0.006];
+        let observations=vec![
+            ScanSpatialObservation {endpoint:0,readout:ScanReadout::in_tetrahedron(cx,&m,0,[1.,2.,3.,4.]).unwrap(),
+                observable:ScanObservable::Temperature,target:311.,scale:2.},
+            ScanSpatialObservation {endpoint:1,readout:ScanReadout::weighted_mean(cx,&m,&[(0,1.),(1,3.),(2,2.),(3,4.)],4).unwrap(),
+                observable:ScanObservable::LiquidMassFraction,target:0.55,scale:0.1},
+            ScanSpatialObservation {endpoint:3,readout:ScanReadout::volume_mean(cx,&m,&[0],1).unwrap(),
+                observable:ScanObservable::SpecificEnthalpy,target:170.,scale:10.}];
+        let responses=[ScanResponse{endpoint:0,vertex:1,observable:ScanObservable::LiquidMassFraction}];
+        let peaks=[ScanPeakResponse{first_endpoint:0,last_endpoint:3,vertices:vec![0,1,2,3],
+            observable:ScanObservable::Temperature,smoothing_scale:0.1}];
+        let allowance=ScanResponseBudget{max_responses:2,max_gradient_entries:256,max_transpose_solves:9};
+        for rad in [false,true] {
+            let evaluate=|old:&[f64],values:[f64;3],checkpoints| evaluate_scan_observations(cx,
+                run(cx,&hist,&material,&curve,old,vec![powers(values,Interp::Hold)],rad),
+                &times,&observations,ScanObjectiveSampling::EventLeft,config(),linear(),objective_budget(),
+                &responses,&peaks,allowance,16,checkpoints).unwrap();
+            let old=[90.,150.,180.,230.];let values=[2.,4.,1.];
+            let (full,rows,peak,_)=evaluate(&old,values,None);
+            let (replay,replay_rows,replay_peak,work)=evaluate(&old,values,Some(ScanCheckpointBudget{
+                segment_steps:2,max_checkpoint_vertices:12,max_forward_solves:8}));
+            assert_eq!(full.value,replay.value);
+            assert_eq!(full.predictions,replay.predictions);
+            assert_eq!(full.sources,replay.sources);
+            assert_eq!(full.initial_specific_enthalpy,replay.initial_specific_enthalpy);
+            assert_eq!(rows[0].sources,replay_rows[0].sources);
+            assert_eq!(peak[0].sources,replay_peak[0].sources);
+            assert_eq!(work.unwrap().recomputed_forward_solves,4);
+            for coordinate in 0..7 {
+                let(mut hp,mut hm,mut pp,mut pm)=(old,old,values,values);let eps=1e-4;
+                let expected=if coordinate<3 {
+                    pp[coordinate]+=eps;pm[coordinate]-=eps;
+                    full.sources[0].absorbed_power_values_w[coordinate]
+                } else {
+                    hp[coordinate-3]+=eps;hm[coordinate-3]-=eps;
+                    full.initial_specific_enthalpy[coordinate-3]
+                };
+                let fd=(evaluate(&hp,pp,None).0.value-evaluate(&hm,pm,None).0.value)/(2.*eps);
+                assert!((expected-fd).abs()<3e-7*(1.+expected.abs()),"{expected:e} != {fd:e}");
+            }
+        }
+    });
+}
+
+#[test]
+fn g1_spatial_vertex_reduction_preserves_the_original_objective_exactly() {
+    let m=mesh();let curve=chart();let material=ConductivityModel::isotropic_declared(2.).unwrap();
+    with_cx(|cx| {
+        let hist=history(cx,&m);let old=[140.,150.,160.,170.];
+        let fresh=||run(cx,&hist,&material,&curve,&old,vec![powers([2.,4.,1.],Interp::Hold)],false);
+        let o=observation(0,1,ScanObservable::SpecificEnthalpy,151.,2.);
+        let original=evaluate_scan_objective(cx,fresh(),&[0.001],&[o],
+            ScanObjectiveSampling::EventLeft,config(),linear(),objective_budget()).unwrap();
+        let spatial=ScanSpatialObservation{endpoint:o.endpoint,readout:ScanReadout::vertex(cx,&m,o.vertex).unwrap(),
+            observable:o.observable,target:o.target,scale:o.scale};
+        let result=evaluate_scan_observations(cx,fresh(),&[0.001],&[spatial],ScanObjectiveSampling::EventLeft,
+            config(),linear(),objective_budget(),&[],&[],ScanResponseBudget{max_responses:0,
+                max_gradient_entries:0,max_transpose_solves:1},0,None).unwrap().0;
+        assert_eq!(original.value,result.value);
+        assert_eq!(original.sources,result.sources);
+        assert_eq!(original.initial_specific_enthalpy,result.initial_specific_enthalpy);
+    });
+}
+
+#[test]
+fn g0_spatial_observation_cannot_be_retargeted_to_an_equal_sized_mesh() {
+    let m=mesh();let other=mesh();let curve=chart();let material=ConductivityModel::isotropic_declared(2.).unwrap();
+    with_cx(|cx| {
+        let hist=history(cx,&m);
+        let foreign=ScanSpatialObservation{endpoint:0,readout:ScanReadout::vertex(cx,&other,0).unwrap(),
+            observable:ScanObservable::Temperature,target:310.,scale:1.};
+        let evaluate=|cx:&Cx<'_>,o|evaluate_scan_observations(cx,
+            run(cx,&hist,&material,&curve,&[150.;4],vec![powers([2.,4.,1.],Interp::Hold)],false),
+            &[0.001],&[o],ScanObjectiveSampling::EventLeft,config(),linear(),objective_budget(),&[],&[],
+            ScanResponseBudget{max_responses:0,max_gradient_entries:0,max_transpose_solves:1},0,None);
+        assert!(evaluate(cx,foreign).is_err());
+        let invalid=ScanSpatialObservation{endpoint:0,readout:ScanReadout::vertex(cx,&m,0).unwrap(),
+            observable:ScanObservable::LiquidMassFraction,target:60.,scale:1.};
+        assert!(evaluate(cx,invalid).is_err());
+    });
+}

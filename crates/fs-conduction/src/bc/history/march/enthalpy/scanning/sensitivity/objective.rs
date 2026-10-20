@@ -23,6 +23,7 @@ use crate::bc::history::march::moving::sensitivity::schedule::MovingHeatSchedule
 use crate::{ConductionError, LinearConfig};
 use crate::transient::enthalpy::EnthalpyStepConfig;
 use fs_exec::Cx;
+use spatial::ScanObservationSpec;
 
 /// Physical quantity measured at a retained mesh vertex.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,9 +139,9 @@ pub fn evaluate_scan_objective(
 // Keep one primal/least-squares owner. Additional response pullbacks borrow its
 // checked endpoint tape before it is dropped; they cannot mutate the trajectory.
 #[allow(clippy::too_many_arguments)]
-fn evaluate_with_tape<R>(
+fn evaluate_with_tape<R, O: ScanObservationSpec>(
     cx: &Cx<'_>, mut run: ScanningEnthalpyRun<'_, '_, '_>, endpoints: &[f64],
-    observations: &[ScanObservation], sampling: ScanObjectiveSampling,
+    observations: &[O], sampling: ScanObjectiveSampling,
     step: EnthalpyStepConfig, transpose: LinearConfig, budget: ScanObjectiveBudget,
     responses: impl FnOnce(&ScanningEnthalpyRun<'_, '_, '_>, &[ScanStepLinearization<'_>])
         -> Result<R, ScanSensitivityError>,
@@ -159,9 +160,9 @@ fn evaluate_with_tape<R>(
         let binding = advance_binding(cx, &mut run, time, sampling, step, per_step)?;
         for &i in &at_endpoint[index] {
             poll(cx, i)?;
-            let observation = observations[i];
-            let prediction = observed(binding.report(), observation.observable, observation.vertex);
-            let residual = finite((prediction-observation.target)/observation.scale)?;
+            let observation = &observations[i];
+            let prediction = observation.prediction(cx, binding.report())?;
+            let residual = finite((prediction-observation.target())/observation.scale())?;
             value = finite(value + 0.5 * residual * residual)?;
             predictions[i] = prediction;
             residuals[i] = residual;
@@ -185,8 +186,8 @@ fn evaluate_with_tape<R>(
 
 // Admission is shared by full-storage and checkpointed objectives. Only the
 // number of simultaneously retained tangents changes; the physical grid does not.
-fn admit_layout(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
-    endpoints: &[f64], observations: &[ScanObservation], budget: ScanObjectiveBudget,
+fn admit_layout<O: ScanObservationSpec>(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
+    endpoints: &[f64], observations: &[O], budget: ScanObjectiveBudget,
     retained_steps: usize,
 ) -> Result<(Vec<Vec<usize>>, ScanSensitivityBudget), ScanSensitivityError> {
     poll(cx, 0)?;
@@ -225,13 +226,14 @@ fn admit_layout(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
     at_endpoint.resize_with(count, Vec::new);
     for (i, observation) in observations.iter().enumerate() {
         poll(cx, i)?;
-        if observation.endpoint >= count || observation.vertex >= vertices
-            || !observation.target.is_finite() || !observation.scale.is_finite() || observation.scale <= 0.0
+        if observation.endpoint() >= count
+            || !observation.target().is_finite() || !observation.scale().is_finite() || observation.scale() <= 0.0
         { return Err(invalid("scan observation needs an existing endpoint/vertex, finite target and positive finite physical scale")); }
-        if observation.observable == ScanObservable::LiquidMassFraction
-            && !(0.0..=1.0).contains(&observation.target)
+        observation.validate_readout(run.run.problem.boundary.mesh())?;
+        if observation.observable() == ScanObservable::LiquidMassFraction
+            && !(0.0..=1.0).contains(&observation.target())
         { return Err(invalid("liquid mass fraction targets must be dimensionless values in [0,1], not percentages")); }
-        at_endpoint[observation.endpoint].push(i);
+        at_endpoint[observation.endpoint()].push(i);
     }
     let per_step = ScanSensitivityBudget {
         max_source_vertices: budget.max_retained_source_vertices / retained_steps,
@@ -276,24 +278,24 @@ impl ReverseState {
         Ok(Self { seed: zeros(vertices)?, sources: None, iterations: 0, residual: 0.0 })
     }
 
-    fn inject_observations(&mut self, cx: &Cx<'_>, binding: &ScanStepLinearization<'_>,
-        observations: &[ScanObservation], indices: &[usize], residuals: &[f64],
+    fn inject_observations<O: ScanObservationSpec>(&mut self, cx: &Cx<'_>, binding: &ScanStepLinearization<'_>,
+        observations: &[O], indices: &[usize], residuals: &[f64],
     ) -> Result<(), ScanSensitivityError> {
         let mut temperature_seed = zeros(self.seed.len())?;
         let mut fraction_seed = None;
         for &i in indices {
             poll(cx, i)?;
-            let observation = observations[i];
-            let local = finite(residuals[i]/observation.scale)?;
-            let target = match observation.observable {
-                ScanObservable::Temperature => &mut temperature_seed[observation.vertex],
-                ScanObservable::SpecificEnthalpy => &mut self.seed[observation.vertex],
+            let observation = &observations[i];
+            let local = finite(residuals[i]/observation.scale())?;
+            let target = match observation.observable() {
+                ScanObservable::Temperature => &mut temperature_seed,
+                ScanObservable::SpecificEnthalpy => &mut self.seed,
                 ScanObservable::LiquidMassFraction => {
                     if fraction_seed.is_none() { fraction_seed = Some(zeros(self.seed.len())?); }
-                    &mut fraction_seed.as_mut().expect("fraction seed allocated")[observation.vertex]
+                    fraction_seed.as_mut().expect("fraction seed allocated")
                 },
             };
-            *target = finite(*target + local)?;
+            observation.add_seed(cx, target, local)?;
         }
         let local_h = binding.transport().transport().temperature_pullback(cx, &temperature_seed)?;
         add(cx, &mut self.seed, &local_h)?;

@@ -8,7 +8,12 @@
 //! not modeled. Volume means of mass fraction are NOT bulk mass fractions:
 //! use reference-mass weights for that quantity.
 
-use super::{ScanSensitivityError, finite, invalid, poll, zeros};
+use super::{ScanSensitivityError, ScanObservable, ScanObservation, ScanStep,
+    ScanObjectiveBudget, ScanObjectiveEvaluation, ScanObjectiveSampling,
+    ScanningEnthalpyRun, EnthalpyStepConfig, LinearConfig, finite, invalid, poll, zeros};
+use super::responses::{ScanResponse, ScanResponseBudget, ScanResponseEvaluation};
+use super::responses::peaks::{ScanPeakResponse, ScanPeakEvaluation};
+use super::checkpoint::{ScanCheckpointBudget, ScanCheckpointWork};
 use crate::ConductionMesh;
 use fs_exec::Cx;
 use std::collections::BTreeMap;
@@ -166,5 +171,135 @@ impl<'m> ScanReadout<'m> {
             out[vertex] = finite(out[vertex] + finite(weight * seed)?)?;
         }
         poll(cx, self.weights.len())
+    }
+}
+
+/// One physical measurement of an interior probe or finite spatial footprint.
+/// Its single residual is formed AFTER the weighted readout, not once per node.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScanSpatialObservation<'m> {
+    /// Zero-based fixed-grid endpoint.
+    pub endpoint: usize,
+    /// Immutable measurement geometry, tied to the original mesh.
+    pub readout: ScanReadout<'m>,
+    /// Quantity sampled at each node before applying the spatial row.
+    pub observable: ScanObservable,
+    /// Target in K, J/kg or dimensionless fraction, according to `observable`.
+    pub target: f64,
+    /// Positive residual scale in the target's physical units.
+    pub scale: f64,
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::ScanObservation {}
+    impl Sealed for super::ScanSpatialObservation<'_> {}
+}
+
+/// The two supported observation layouts share one physical objective engine.
+/// Sealed to preserve the relation between each readout and its exact transpose.
+/// Every stored sparse row has an explicit constructor cap; at most
+/// `max_observations * mesh.vertex_count()` coefficients can be represented.
+pub trait ScanObservationSpec: sealed::Sealed {
+    /// Fixed-grid endpoint.
+    fn endpoint(&self) -> usize;
+    /// Original physical coordinate, before any spatial reduction.
+    fn observable(&self) -> ScanObservable;
+    /// Physical fitting target.
+    fn target(&self) -> f64;
+    /// Positive physical residual scale.
+    fn scale(&self) -> f64;
+    /// Check that the readout addresses this exact mesh before solving physics.
+    #[doc(hidden)]
+    fn validate_readout(&self, mesh: &ConductionMesh) -> Result<(), ScanSensitivityError>;
+    /// Sample the original endpoint without changing it.
+    #[doc(hidden)]
+    fn prediction(&self, cx: &Cx<'_>, report: &ScanStep) -> Result<f64, ScanSensitivityError>;
+    /// Add the spatial transpose to an internal nodal seed. A numerical refusal
+    /// may leave a partial seed; the objective owner discards that entire trial.
+    #[doc(hidden)]
+    fn add_seed(&self, cx: &Cx<'_>, seed: &mut [f64], value: f64) -> Result<(), ScanSensitivityError>;
+}
+
+impl ScanObservationSpec for ScanObservation {
+    fn endpoint(&self) -> usize { self.endpoint }
+    fn observable(&self) -> ScanObservable { self.observable }
+    fn target(&self) -> f64 { self.target }
+    fn scale(&self) -> f64 { self.scale }
+    fn validate_readout(&self, mesh: &ConductionMesh) -> Result<(), ScanSensitivityError> {
+        if self.vertex >= mesh.vertex_count() { return Err(invalid("observation vertex is outside its mesh")); }
+        Ok(())
+    }
+    fn prediction(&self, cx: &Cx<'_>, report: &ScanStep) -> Result<f64, ScanSensitivityError> {
+        poll(cx, 0)?;
+        field(report, self.observable).get(self.vertex).copied()
+            .ok_or_else(|| invalid("observation vertex is outside its field")).and_then(finite)
+    }
+    fn add_seed(&self, cx: &Cx<'_>, seed: &mut [f64], value: f64) -> Result<(), ScanSensitivityError> {
+        poll(cx, 0)?;
+        let target = seed.get_mut(self.vertex).ok_or_else(|| invalid("observation seed has the wrong shape"))?;
+        *target = finite(*target + finite(value)?)?;
+        Ok(())
+    }
+}
+
+impl ScanObservationSpec for ScanSpatialObservation<'_> {
+    fn endpoint(&self) -> usize { self.endpoint }
+    fn observable(&self) -> ScanObservable { self.observable }
+    fn target(&self) -> f64 { self.target }
+    fn scale(&self) -> f64 { self.scale }
+    fn validate_readout(&self, mesh: &ConductionMesh) -> Result<(), ScanSensitivityError> {
+        if !std::ptr::eq(self.readout.mesh, mesh) {
+            return Err(invalid("spatial observation belongs to a different mesh; matching vertex counts are insufficient"));
+        }
+        Ok(())
+    }
+    fn prediction(&self, cx: &Cx<'_>, report: &ScanStep) -> Result<f64, ScanSensitivityError> {
+        self.readout.evaluate(cx, field(report, self.observable))
+    }
+    fn add_seed(&self, cx: &Cx<'_>, seed: &mut [f64], value: f64) -> Result<(), ScanSensitivityError> {
+        poll(cx, 0)?;
+        if seed.len() != self.readout.mesh.vertex_count() { return Err(invalid("spatial observation seed has the wrong shape")); }
+        finite(value)?;
+        self.readout.add_seed(cx, seed, value)
+    }
+}
+
+fn field(report: &ScanStep, observable: ScanObservable) -> &[f64] {
+    match observable {
+        ScanObservable::Temperature => &report.solution().temperature,
+        ScanObservable::SpecificEnthalpy => &report.solution().specific_enthalpy_j_kg,
+        ScanObservable::LiquidMassFraction => &report.solution().liquid_mass_fraction,
+    }
+}
+
+/// Fit spatial or vertex observations with optional original point/peak limits
+/// and checkpointing. The same forward and reverse owners serve both layouts;
+/// constraints do not add forward trajectories, and replay checks the actual
+/// weighted predictions. Readouts are fixed, not differentiated mesh geometry.
+///
+/// Existing numerical/material/phase/energy/cancellation refusals propagate.
+/// This returns the original physical report and optional measured replay work.
+/// Point and peak constraints retain their existing nodal interpretation.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_scan_observations<O: ScanObservationSpec>(
+    cx: &Cx<'_>, run: ScanningEnthalpyRun<'_, '_, '_>, endpoints: &[f64],
+    observations: &[O], sampling: ScanObjectiveSampling, step: EnthalpyStepConfig,
+    transpose: LinearConfig, budget: ScanObjectiveBudget, responses: &[ScanResponse],
+    peaks: &[ScanPeakResponse], response_budget: ScanResponseBudget, max_peak_samples: usize,
+    checkpoints: Option<ScanCheckpointBudget>,
+) -> Result<(ScanObjectiveEvaluation, Vec<ScanResponseEvaluation>, Vec<ScanPeakEvaluation>,
+    Option<ScanCheckpointWork>), ScanSensitivityError>
+{
+    if let Some(checkpoints) = checkpoints {
+        let result = super::checkpoint::evaluate_observations_checkpointed(cx, run, endpoints,
+            observations, sampling, step, transpose, budget, responses, peaks,
+            response_budget, max_peak_samples, checkpoints)?;
+        Ok((result.objective, result.responses, result.peaks, Some(result.work)))
+    } else {
+        let (objective, points, peaks) = super::responses::peaks::evaluate_observations_with_peaks(
+            cx, run, endpoints, observations, sampling, step, transpose, budget, responses,
+            peaks, response_budget, max_peak_samples)?;
+        Ok((objective, points, peaks, None))
     }
 }
