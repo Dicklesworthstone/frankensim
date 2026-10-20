@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
     paths:
+      - 'constellation.lock'
+      - 'tools/bootstrap/**'
       - 'crates/fs-vfit/src/waveguide.rs'
       - 'crates/fs-vfit/src/waveguide/**'
       - 'crates/fs-vfit/tests/fractional*.rs'
@@ -182,7 +184,7 @@ jobs:
           cargo test -p fs-couple --lib thin_plate:: -- --test-threads=1
       - name: Source-bound rotary inertia and torsional shear loss
         if: ${{ !cancelled() }}
-        run: cargo test -p fs-material --test torsional_section -- --test-threads=1
+        run: cargo test -p fs-material --no-fail-fast --test torsional_section --test linear_interface -- --test-threads=1
       - name: Material torsion in surface bow contact and scheduled pressure
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --test material_string_torsion -- --test-threads=1
@@ -213,6 +215,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           cargo test -p fs-couple --test music_render_wind gas_mixture:: -- --test-threads=1
+          cargo test -p fs-couple --test music_render_wind material_modal:: -- --test-threads=1
       - name: Source-bound finite thermal storage gas and piston mechanics
         if: ${{ !cancelled() }}
         run: |
@@ -235,7 +238,9 @@ jobs:
         run: cargo test -p fs-couple --test bowed_material_gas -- --test-threads=1
       - name: Shared-body sympathetic material strings
         if: ${{ !cancelled() }}
-        run: cargo test -p fs-couple --test material_string_bank -- --test-threads=1
+        run: |
+          cargo test -p fs-couple --test material_string_bank -- --test-threads=1
+          cargo test -p fs-couple --lib bowed_string::runtime::reciprocal::bank::interfaces:: -- --test-threads=1
       - name: Retained single-string reciprocal material tests
         if: ${{ !cancelled() }}
         run: |

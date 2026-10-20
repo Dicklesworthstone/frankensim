@@ -1079,6 +1079,72 @@ fn fresh_init_ignores_inherited_object_ref_format_and_backend_defaults() {
 }
 
 #[test]
+fn fresh_checkout_retains_raw_blobs_despite_committed_crlf_attributes() {
+    let mut c = make_constellation("raw-attribute-checkout");
+    let source = c.base.join("upstreams/franken_numpy");
+    let relative = "legacy_numpy_code/numpy/doc/make.bat";
+    let raw = b"@echo off\nexit /b 0\n";
+    std::fs::create_dir_all(source.join("legacy_numpy_code/numpy/doc")).unwrap();
+    std::fs::write(
+        source.join("legacy_numpy_code/numpy/.gitattributes"),
+        b"*.bat text eol=crlf\n",
+    )
+    .unwrap();
+    std::fs::write(source.join(relative), raw).unwrap();
+    git(&source, &["add", "legacy_numpy_code/numpy"]);
+    git(&source, &["commit", "-qm", "pin explicit CRLF attributes"]);
+    let head = git(&source, &["rev-parse", "HEAD"]);
+    git(
+        &c.mirror.join("franken_numpy"),
+        &["fetch", "--quiet", "origin", &head],
+    );
+    let row = c
+        .heads
+        .iter_mut()
+        .find(|(name, _)| name == "franken_numpy")
+        .unwrap();
+    let previous_head = std::mem::replace(&mut row.1, head.clone());
+    let identity = c
+        .heads
+        .iter()
+        .map(|(name, head)| format!("{name}=0.0.0@{head}\n"))
+        .collect::<String>();
+    let hash = format!("{:016x}", fnv1a64(identity.as_bytes()));
+    let lock = std::fs::read_to_string(c.root.join("constellation.lock"))
+        .unwrap()
+        .replace(&previous_head, &head)
+        .replace(&c.lock_hash, &hash);
+    std::fs::write(c.root.join("constellation.lock"), lock).unwrap();
+    c.lock_hash = hash;
+
+    let (ok, text) = run_bootstrap(&c, &["--from", c.mirror.to_str().unwrap()]);
+    assert!(
+        ok,
+        "raw committed checkout must pass unchanged admission:\n{text}"
+    );
+    let target = c.root.parent().unwrap().join("franken_numpy");
+    assert_eq!(std::fs::read(target.join(relative)).unwrap(), raw);
+    assert_eq!(
+        git(&target, &["hash-object", "--no-filters", "--", relative]),
+        git(&target, &["rev-parse", &format!("HEAD:{relative}")]),
+    );
+    let (ok, text) = run_bootstrap(&c, &["--offline"]);
+    assert!(ok, "exact raw materialization must replay:\n{text}");
+
+    // Git's normal content diff normalizes this conversion. The existing raw
+    // admission must still refuse it, without repairing an existing checkout.
+    let changed = b"@echo off\r\nexit /b 0\r\n";
+    std::fs::write(target.join(relative), changed).unwrap();
+    assert_eq!(git(&target, &["diff", "--", relative]), "");
+    let (ok, text) = run_bootstrap(&c, &["--offline"]);
+    assert!(
+        !ok && text.contains("raw-tracked-source-mismatch"),
+        "{text}"
+    );
+    assert_eq!(std::fs::read(target.join(relative)).unwrap(), changed);
+}
+
+#[test]
 fn clean_machine_clone_then_idempotent_replay_from_offline_mirror() {
     let c = make_constellation("replay");
     let mirror = c.mirror.to_str().expect("utf8").to_string();

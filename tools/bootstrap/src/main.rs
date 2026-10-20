@@ -751,9 +751,19 @@ fn bootstrap_one(
             ],
         )?;
     }
+    // The admission contract below compares raw files with their committed
+    // blobs. Explicit attributes such as `*.bat text eol=crlf` otherwise
+    // transform even a fresh checkout despite core.autocrlf=false. Read no
+    // source attributes for this already-admitted materialization, while
+    // retaining the exact source attributes themselves and all later checks.
+    let empty_tree = git_out(&target, &["hash-object", "-w", "-t", "tree", "--stdin"])?;
+    let attribute_source = format!("--attr-source={empty_tree}");
     git_run(
         &target,
         &[
+            "-c",
+            "core.autocrlf=false",
+            &attribute_source,
             "checkout",
             "--no-recurse-submodules",
             "--quiet",
