@@ -30,11 +30,12 @@
 # MICROPHONE: 0.30 m from the mouth at 45 degrees off axis (x = z = 0.30 sin 45 deg), the geometry of the paper's
 #   recordings (AKG CK92 at 30 cm, 45 degrees off axis). Infinite baffle: no head diffraction. 16 rings x 64 points,
 #   8 kHz resolved band (quadrature admission: 2 pi f cell / c <= pi/4).
-# LEVEL: full_scale_pa is a recording-level choice (2 Pa = 100 dB SPL peak at the PCM ceiling); output is never normalized.
+# LEVEL: full_scale_pa 16.0 Pa is a recording-level choice (118 dB SPL peak at the PCM ceiling),
+#   raised from the first 2 Pa trial, which clipped, so that nothing clips; output is never normalized.
 # MECHANICS: 96 kHz physical clock (2 per output sample), read through the bandlimited differentiating receiver.
 frankensim-voice-performance-v1
 audio 48000 144000 2
-full_scale_pa 2.0
+full_scale_pa 16.0
 ambient moist_air 310.15 101325 1.0
 fold two_mass 0.000125 2.5e-05 464.261 46.4261 145.081 0.1 3.57e-4 1.4e-2 2.5e-3
 termination flanged
