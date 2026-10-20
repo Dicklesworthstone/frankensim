@@ -16,8 +16,9 @@ impl PairedAperturePerformance {
     /// blade's material memory, contact energy nor traveling waves are reset.
     ///
     /// Up to 32 ports per blade. max_controls bounds pressure assignments plus
-    /// BOTH raw force programs. max_compile_work independently bounds pressure
-    /// sampling and COMBINED force projection/grouping work across blades.
+    /// BOTH raw force programs and boundary assignments. max_compile_work
+    /// independently bounds pressure sampling and COMBINED auxiliary boundary
+    /// admission and force projection/grouping work across blades.
     /// Already-generalized `with_blade_forces` controls are an alternative input
     /// representation and cannot be combined with source-mesh programs.
     ///
@@ -32,14 +33,9 @@ impl PairedAperturePerformance {
             || self.forces.is_some() || self.plate_forces[blade].is_some() {
             return Err(invalid("plate forces require one attachment per cold blade and no already-generalized force program"));
         }
+        let (events, work) = self.remaining_control_budgets()?;
         let plates=self.system.aperture().plates()
             .ok_or_else(||invalid("physical blade footprints require the original source plates"))?;
-        let mut events=self.config.max_controls.saturating_sub(self.controls.len());
-        let mut work=self.config.max_compile_work;
-        for force in self.plate_forces.iter().flatten() {
-            events=events.saturating_sub(force.events.len());
-            work=work.saturating_sub(force.work);
-        }
         self.plate_forces[blade]=Some(ForceSchedule::compile(&plates[blade],program,
             self.config.samples,events,work)?);
         Ok(self)

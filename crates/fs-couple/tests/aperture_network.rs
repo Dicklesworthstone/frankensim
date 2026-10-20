@@ -10,6 +10,7 @@ use fs_exec::CancelGate;
 
 mod keyed;
 mod keyed_paired;
+mod keyed_render;
 
 const DT: f64 = 1e-5;
 fn section(a: usize, b: usize, delay: usize, radius: f64) -> TubeSection {

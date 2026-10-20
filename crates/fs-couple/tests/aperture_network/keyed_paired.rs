@@ -26,7 +26,7 @@ fn unkeyed(steps: u64) -> PairedApertureNetwork {
     PairedApertureNetwork::new(reed, graph, gases, &CancelGate::new_clock_free()).unwrap()
 }
 
-fn make(plate: &PlateApertureReduction, steps: u64) -> PairedApertureNetwork {
+pub(super) fn make(plate: &PlateApertureReduction, steps: u64) -> PairedApertureNetwork {
     let network = unkeyed(steps);
     let boundary = key(plate, network.section_gases()[2],
         network.represented_sections()[2].impedance_pa_s_m3, steps);

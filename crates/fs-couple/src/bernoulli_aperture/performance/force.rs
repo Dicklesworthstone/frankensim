@@ -105,9 +105,9 @@ impl AperturePerformance {
     /// Complete input admission and stable equal-time grouping occur before any
     /// state changes. The generalized sum enters the existing nonlinear solve.
     ///
-    /// The existing max_controls bounds pressure assignments plus raw force
-    /// assignments. max_compile_work separately bounds force projection/summation
-    /// visits; it also remains the pressure compiler's independent work bound.
+    /// The existing max_controls bounds pressure, raw source-force and boundary
+    /// assignments. max_compile_work bounds combined force projection/summation
+    /// and boundary admission; pressure compilation retains its independent bound.
     /// No physical force magnitude is silently clipped to satisfy a solver.
     ///
     /// # Errors
@@ -119,10 +119,11 @@ impl AperturePerformance {
         if self.poisoned || self.system.aperture().accepted_steps() != 0 || self.forces.is_some() {
             return Err(invalid("mechanical forces must bind once before performance playback"));
         }
+        let (assignments, work) = self.remaining_control_budgets()?;
         let plate = self.system.aperture().plate_reduction()
             .ok_or_else(|| invalid("physical force footprints require a retained plate specimen"))?;
         self.forces = Some(ForceSchedule::compile(plate, program, self.config.samples,
-            self.config.max_controls.saturating_sub(self.controls.len()), self.config.max_compile_work)?);
+            assignments, work)?);
         Ok(self)
     }
     /// Specimen-derived work-conjugate ports; empty for pressure-only playback.

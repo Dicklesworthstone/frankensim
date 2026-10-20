@@ -3048,6 +3048,18 @@ its original strict whole-system energy gate, including key residuals, and its
 gated keyed step checks cancellation before publication. These APIs establish
 shared physical coupling, not measured clarinet or oboe qualification.
 
+`AperturePerformance` and `PairedAperturePerformance` accept the same
+`performance::boundaries::BoundaryProgram`: complete ordered initial key drives
+plus changes addressed by mechanical sample and original node. The existing
+pressure renderer and baffled receiver consume the original coupled step;
+opening-positive key forces and exterior pressure are data inputs. A keyed
+source without its program refuses rendering before changing output. Cold
+admission bounds pressure, source-force and key assignments together regardless
+of attachment order. Preallocated control candidates publish only after the
+physical step and receiver succeed, so callback size cannot shift key timing.
+Key actuator work remains separate from primary reed work. This sample-addressed
+library API adds no second interpolation owner or instrument-specific PCM path.
+
 The flue file path resolves cantilever closure mass, stiffness and pressure
 area through the existing material chart and DKT reduction, with elastic or
 sourced Maxwell memory, contact and optional local-gas slit viscosity. Material

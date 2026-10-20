@@ -73,7 +73,7 @@ fn unkeyed(steps: u64) -> (ApertureNetwork, Vec<GasState>) {
     (ApertureNetwork::with_section_gases(reed, graph, gases.clone()).unwrap(), gases)
 }
 
-fn make(plate: &PlateApertureReduction, steps: u64) -> ApertureNetwork {
+pub(super) fn make(plate: &PlateApertureReduction, steps: u64) -> ApertureNetwork {
     let (network, gases) = unkeyed(steps);
     let z = network.represented_sections()[2].impedance_pa_s_m3;
     network.with_boundary_apertures(&gases, vec![key(plate, gases[2], z, steps)], 1).unwrap()
@@ -151,6 +151,18 @@ fn single_reed_key_closes_and_releases_stored_motion_after_blowing_stops() {
 #[test]
 fn single_reed_refusal_and_budget_resume_preserve_key_memory_and_all_waves() {
     let plate = key_plate();
+    // Equal density/sound speed cannot stand in for the complete transport gas.
+    // A different viscosity must not silently enter a retained chimney's key.
+    let (cold, gases) = unkeyed(64);
+    let mut wrong_transport = gases[2];
+    wrong_transport.dynamic_viscosity *= 2.0;
+    wrong_transport.prandtl *= 2.0;
+    wrong_transport.validate_coherence().unwrap();
+    let mut wrong_key = key(&plate, gases[2], cold.represented_sections()[2].impedance_pa_s_m3, 64);
+    wrong_key.aperture.set_viscous_slit(
+        fs_couple::bernoulli_aperture::viscous::ViscousSlit::from_gas(&wrong_transport, 0.0003).unwrap()
+    ).unwrap();
+    assert!(cold.with_boundary_apertures(&gases, vec![wrong_key], 1).is_err());
     let mut actual = make(&plate, 64);
     let mut reference = make(&plate, 96);
     let (drive, force, keys) = drives(600);

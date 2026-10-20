@@ -12,6 +12,8 @@ use crate::bernoulli_aperture::performance::{
     ApertureObservation, AperturePerformanceConfig, compile_schedule, pressure_candidate,
 };
 use crate::bernoulli_aperture::performance::force::ForceSchedule;
+use crate::bernoulli_aperture::performance::boundaries::{BoundaryControl, BoundaryProgram, BoundarySchedule};
+use crate::bernoulli_aperture::network::boundaries::{BoundaryDrive, BoundaryNetworkFrame};
 
 mod plate_forces;
 use crate::bernoulli_aperture::tube::TubeDrive;
@@ -59,6 +61,7 @@ pub struct PairedAperturePerformance {
     // Source-mesh force programs are an alternative to already-generalized
     // blade forces, never a second hidden supply or duplicated force law.
     plate_forces: [Option<ForceSchedule>; 2],
+    boundaries: Option<BoundarySchedule>,
     next_force: usize,
     held_forces_n: [f64; 2],
     last: Option<PairedNetworkFrame>,
@@ -98,7 +101,7 @@ impl PairedAperturePerformance {
             _ => return Err(invalid("paired observation must name this network's pressure or an admitted outlet receiver")),
         };
         Ok(Self { system, observation, receiver, config, schedule, controls, next: 0,
-            held_pressure_pa: 0.0, forces: None, plate_forces: [None, None],
+            held_pressure_pa: 0.0, forces: None, plate_forces: [None, None], boundaries: None,
             next_force: 0, held_forces_n: [0.0; 2],
             last: None, poisoned: false })
     }
@@ -106,7 +109,8 @@ impl PairedAperturePerformance {
     /// Bind sample-addressed, independently held opening forces before playback.
     /// Strict ordering is (sample, blade); duplicate assignments refuse rather
     /// than silently replacing a load. Forces start at zero. Pressure and force
-    /// assignments together must fit the original control-storage allowance.
+    /// assignments and boundary controls together must fit the original storage
+    /// allowance; all auxiliary admission shares its original work allowance.
     /// This supplies actuator work, not an inferred lip/contact constitutive law.
     /// These are already-generalized forces in each retained opening coordinate.
     /// For physical node/patch loads use `with_plate_forces` instead; the two
@@ -122,9 +126,9 @@ impl PairedAperturePerformance {
             || self.plate_forces.iter().any(Option::is_some) {
             return Err(invalid("paired force program requires one unadvanced attachment"));
         }
-        if self.controls.len().checked_add(controls.len())
-            .is_none_or(|n| n > self.config.max_controls) {
-            return Err(invalid("paired pressure and force controls exceed the combined storage budget"));
+        let (assignments, work) = self.remaining_control_budgets()?;
+        if controls.len() > assignments || controls.len() as u128 > u128::from(work) {
+            return Err(invalid("paired pressure, force and boundary controls exceed the combined storage or auxiliary work budget"));
         }
         let mut previous = None;
         for control in &controls {
@@ -137,6 +141,61 @@ impl PairedAperturePerformance {
         }
         self.forces = Some(controls);
         Ok(self)
+    }
+
+    /// Attach explicit initial and sample-addressed boundary pressures/forces
+    /// before playback. Uses the same bounded compiler as the scalar reed owner;
+    /// the original paired blades, key mechanics and graph share each physical
+    /// solve. No interpolation, inferred zero-key program or state reset is added.
+    ///
+    /// Initial drives and changes share max_controls with pressure and BOTH
+    /// source-blade force programs. Auxiliary admission/projection work shares
+    /// max_compile_work in every attachment order; pressure compilation retains
+    /// its existing independent allowance. A keyed source refuses rendering
+    /// until a complete boundary program has been attached.
+    ///
+    /// # Errors
+    /// Missing keys, late/repeated attachment, incomplete/invalid drives,
+    /// duplicate/out-of-window changes, or exhausted shared work/storage budget.
+    pub fn with_boundary_controls(mut self, program: BoundaryProgram)
+        -> Result<Self, GestureCompileError>
+    {
+        if self.poisoned || self.system.aperture().accepted_steps() != 0 || self.boundaries.is_some() {
+            return Err(invalid("paired boundary controls must bind once before playback"));
+        }
+        let (assignments, work) = self.remaining_control_budgets()?;
+        let boundaries = self.system.boundary_apertures()
+            .ok_or_else(|| invalid("paired boundary controls require attached physical apertures"))?;
+        self.boundaries = Some(BoundarySchedule::compile(boundaries, program,
+            self.config.samples, assignments, work)?);
+        Ok(self)
+    }
+
+    fn remaining_control_budgets(&self) -> Result<(usize, u64), GestureCompileError> {
+        let mut assignments = self.config.max_controls.checked_sub(self.controls.len())
+            .ok_or_else(|| invalid("paired pressure assignments exceed the combined storage budget"))?;
+        let mut work = self.config.max_compile_work;
+        if let Some(forces) = &self.forces {
+            assignments = assignments.checked_sub(forces.len())
+                .ok_or_else(|| invalid("paired source forces exceed the combined storage budget"))?;
+            let force_work = u64::try_from(forces.len())
+                .map_err(|_| invalid("paired source-force admission work overflows"))?;
+            work = work.checked_sub(force_work)
+                .ok_or_else(|| invalid("paired source forces exceed the auxiliary work budget"))?;
+        }
+        for forces in self.plate_forces.iter().flatten() {
+            assignments = assignments.checked_sub(forces.events.len())
+                .ok_or_else(|| invalid("paired plate forces exceed the combined storage budget"))?;
+            work = work.checked_sub(forces.work)
+                .ok_or_else(|| invalid("paired plate forces exceed the auxiliary work budget"))?;
+        }
+        if let Some(boundaries) = &self.boundaries {
+            assignments = assignments.checked_sub(boundaries.assignment_count())
+                .ok_or_else(|| invalid("paired pressure, forces and boundaries exceed the combined storage budget"))?;
+            work = work.checked_sub(boundaries.work)
+                .ok_or_else(|| invalid("paired forces and boundaries exceed the auxiliary work budget"))?;
+        }
+        Ok((assignments, work))
     }
 
     /// Complete read-only mechanics, material sources/histories and acoustic graph.
@@ -174,6 +233,31 @@ impl PairedAperturePerformance {
     pub fn pending_force_controls(&self) -> &[BladeForceControl] {
         &self.forces.as_deref().unwrap_or(&[])[self.next_force..]
     }
+    /// Accepted physical drives, or the explicit initial values before playback.
+    #[must_use]
+    pub fn held_boundary_drives(&self) -> &[BoundaryDrive] {
+        self.boundaries.as_ref().map_or(&[], BoundarySchedule::held)
+    }
+    /// Changes published only with successfully observed physical samples.
+    #[must_use]
+    pub fn applied_boundary_controls(&self) -> &[BoundaryControl] {
+        self.boundaries.as_ref().map_or(&[], BoundarySchedule::applied)
+    }
+    /// Remaining changes in admitted (sample, node) order.
+    #[must_use]
+    pub fn pending_boundary_controls(&self) -> &[BoundaryControl] {
+        self.boundaries.as_ref().map_or(&[], BoundarySchedule::pending)
+    }
+    /// Last completely observed key/graph frame, retaining separate source work.
+    #[must_use]
+    pub fn last_boundary_frame(&self) -> Option<&BoundaryNetworkFrame> {
+        self.last.as_ref().and_then(|frame| frame.coupled.boundaries.as_ref())
+    }
+    /// Key-actuation work [J] only; both primary blades keep their original work.
+    #[must_use]
+    pub fn last_boundary_work_j(&self) -> f64 {
+        self.last_boundary_frame().map_or(0.0, |frame| frame.mechanical_work_j)
+    }
     /// Remaining mechanical samples, unaffected by observation resampling.
     #[must_use]
     pub fn remaining_samples(&self) -> u64 {
@@ -183,9 +267,10 @@ impl PairedAperturePerformance {
     fn step_pressure(&mut self, pressure: f64, forces: [f64; 2])
         -> Result<(f64, PairedNetworkFrame), RenderError>
     {
-        let frame = self.system.step_with_forces(TubeDrive {
+        let boundary_drives = self.boundaries.as_ref().map_or(&[][..], BoundarySchedule::candidate);
+        let frame = self.system.step_with_boundaries(TubeDrive {
             upstream_pressure_pa: pressure, body_flow_m3_s: 0.0,
-        }, forces).map_err(RenderError::Voice)?;
+        }, forces, boundary_drives).map_err(RenderError::Voice)?;
         let pressure = match self.observation {
             ApertureObservation::Inlet => frame.mechanics.aperture.bore_pressure_pa,
             ApertureObservation::NetworkNode(node) => self.system.node_frame(node)
@@ -213,6 +298,9 @@ impl PressureRenderer for PairedAperturePerformance {
     }
     fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {
         if self.poisoned { return Err(RenderError::Poisoned); }
+        if self.system.boundary_apertures().is_some() && self.boundaries.is_none() {
+            return Err(sizing("keyed paired performance requires explicit boundary controls before rendering"));
+        }
         if samples > self.remaining_samples() { return Err(sizing("paired pressure request exceeds the finite source horizon")); }
         Ok(())
     }
@@ -235,6 +323,7 @@ impl PressureRenderer for PairedAperturePerformance {
                 forces=std::array::from_fn(|i|self.plate_forces[i].as_ref()
                     .map_or(0.0,|f|f.candidate(sample)));
             }
+            if let Some(boundaries) = &mut self.boundaries { boundaries.prepare(sample); }
             match self.step_pressure(pressure, forces) {
                 Ok((value, frame)) => {
                     *slot = value; self.last = Some(frame);
@@ -243,6 +332,7 @@ impl PressureRenderer for PairedAperturePerformance {
                     for program in self.plate_forces.iter_mut().flatten() {
                         program.accept(sample);
                     }
+                    if let Some(boundaries) = &mut self.boundaries { boundaries.accept(); }
                 }
                 Err(error) => { self.poisoned = true; return Err(error); }
             }

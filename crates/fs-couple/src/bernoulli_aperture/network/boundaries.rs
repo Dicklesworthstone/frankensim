@@ -164,9 +164,11 @@ impl BoundaryApertures {
                 || realized.impedance_pa_s_m3.to_bits() != boundary.impedance_pa_s_m3.to_bits()
                 || spec.impedance_pa_s_m3.to_bits() != boundary.impedance_pa_s_m3.to_bits()
                 || spec.density_kg_m3.to_bits() != gas.density.to_bits()
+                || input.aperture.viscous_slit().is_some_and(|law|
+                    law.gas().is_some_and(|source| *source != gas))
             {
                 return Err(invalid(
-                    "moving boundary clock, state, density and characteristic load must match its own chimney",
+                    "moving boundary clock, state, gas and characteristic load must match its own chimney",
                 ));
             }
             boundaries.push(BoundAperture {

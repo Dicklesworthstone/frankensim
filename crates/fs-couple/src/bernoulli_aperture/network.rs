@@ -187,8 +187,11 @@ impl ApertureNetwork {
         let a = aperture.spec();
         let z = if let Some(gases) = &section_gases {
             let z = spec.inlet_impedance_with_gases(gases)?;
-            if gases[spec.inlet_section_index()?].density.to_bits() != a.density_kg_m3.to_bits() {
-                return Err(invalid("aperture flow density must equal the inlet section gas density"));
+            let inlet_gas = gases[spec.inlet_section_index()?];
+            if inlet_gas.density.to_bits() != a.density_kg_m3.to_bits()
+                || aperture.viscous_slit().is_some_and(|law|
+                    law.gas().is_some_and(|source| *source != inlet_gas)) {
+                return Err(invalid("aperture flow density and sourced slit law must use the complete inlet gas"));
             }
             z
         } else { spec.inlet_impedance(a.density_kg_m3)? };

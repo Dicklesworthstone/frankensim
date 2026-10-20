@@ -10,11 +10,14 @@
 pub mod file;
 /// Physical force programs on the original plate, independent of blowing pressure.
 pub mod force;
+/// Explicit pressures and forces on the retained moving graph boundaries.
+pub mod boundaries;
 
 use super::dynamic::DynamicAperture;
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
 use super::network::ApertureNetwork;
+use super::network::boundaries::BoundaryNetworkFrame;
 use super::tube::{ApertureTube, TubeDrive};
 use crate::pcm_wav::observation::{ObservationError, ObservationPolicy, PressureRenderer, validate_reaction_medium};
 use super::radiation::BaffledRadiationLoad;
@@ -75,9 +78,11 @@ pub struct AperturePerformanceConfig {
     pub samples: u64,
     /// Largest source callback; independent of control timing.
     pub max_block: usize,
-    /// Worst-case visits in the existing canonical gesture sampler.
+    /// Bounds canonical pressure compilation, and separately the combined cold
+    /// boundary-control admission and source-force projection work.
     pub max_compile_work: u64,
-    /// Bounds sampled control ticks AND stored assignments before compilation.
+    /// Bounds sampled pressure ticks AND all stored pressure, source-force and
+    /// boundary assignments (including explicit initial boundary drives).
     pub max_controls: usize,
 }
 
@@ -103,6 +108,8 @@ pub struct AperturePerformance {
     held_pressure_pa: f64,
     poisoned: bool,
     forces: Option<force::ForceSchedule>,
+    boundaries: Option<boundaries::BoundarySchedule>,
+    boundary_frame: Option<BoundaryNetworkFrame>,
     mechanical_work_j: f64,
     observation_policy: ObservationPolicy,
 }
@@ -282,7 +289,8 @@ impl AperturePerformance {
         };
         let controls = compile_schedule(&schedule, &config)?;
         Ok(Self { system, observation, receiver, exterior_gas, config, schedule, controls, next: 0,
-            held_pressure_pa: 0.0, poisoned: false, forces: None, mechanical_work_j: 0.0,
+            held_pressure_pa: 0.0, poisoned: false, forces: None, boundaries: None,
+            boundary_frame: None, mechanical_work_j: 0.0,
             observation_policy: ObservationPolicy::Diagnostic })
     }
 
@@ -336,8 +344,10 @@ impl AperturePerformance {
     #[must_use]
     pub fn remaining_samples(&self) -> u64 { self.config.samples - self.samples_rendered() }
 
-    fn step_pressure(&mut self, pressure_pa: f64, force_n: f64) -> Result<(f64, f64), RenderError> {
+    fn step_pressure(&mut self, pressure_pa: f64, force_n: f64)
+        -> Result<(f64, f64, Option<BoundaryNetworkFrame>), RenderError> {
         let drive = TubeDrive { upstream_pressure_pa: pressure_pa, body_flow_m3_s: 0.0 };
+        let boundary_drives = self.boundaries.as_ref().map_or(&[][..], |b| b.candidate());
         match &mut self.system {
             CoupledAperture::Tube(m) => {
                 let f = m.step_with_force(drive, force_n).map_err(RenderError::Voice)?;
@@ -349,10 +359,10 @@ impl AperturePerformance {
                         .step(&[f.waveguide.terminal_flow_m3_s]).map_err(receiver_error)?,
                     _ => unreachable!("observer admitted against the exclusively owned system"),
                 };
-                Ok((pressure, f.aperture.mechanical_work_j))
+                Ok((pressure, f.aperture.mechanical_work_j, None))
             }
             CoupledAperture::Network(m) => {
-                let f = m.step_with_force(drive, force_n).map_err(RenderError::Voice)?;
+                let f = m.step_with_boundaries(drive, force_n, boundary_drives).map_err(RenderError::Voice)?;
                 let pressure = match self.observation {
                     ApertureObservation::Inlet => f.aperture.bore_pressure_pa,
                     ApertureObservation::NetworkNode(n) => m.node_frame(n)
@@ -365,7 +375,7 @@ impl AperturePerformance {
                     }
                     _ => unreachable!("observer admitted against the exclusively owned system"),
                 };
-                Ok((pressure, f.aperture.mechanical_work_j))
+                Ok((pressure, f.aperture.mechanical_work_j, f.boundaries))
             }
         }
     }
@@ -380,6 +390,10 @@ impl PressureRenderer for AperturePerformance {
     }
     fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {
         if self.poisoned { return Err(RenderError::Poisoned); }
+        if matches!(&self.system, CoupledAperture::Network(m) if m.boundary_apertures().is_some())
+            && self.boundaries.is_none() {
+            return Err(sizing("keyed aperture performance requires explicit boundary controls before rendering"));
+        }
         if samples > self.remaining_samples() { return Err(sizing("pressure request exceeds the complete aperture performance window")); }
         Ok(())
     }
@@ -391,11 +405,14 @@ impl PressureRenderer for AperturePerformance {
             let sample = self.samples_rendered();
             let (next, pressure) = pressure_candidate(&self.controls, self.next, self.held_pressure_pa, sample);
             let force_n = self.forces.as_ref().map_or(0.0, |f| f.candidate(sample));
+            if let Some(boundaries) = &mut self.boundaries { boundaries.prepare(sample); }
             match self.step_pressure(pressure, force_n) {
-                Ok((value, work)) => {
+                Ok((value, work, boundary_frame)) => {
                     *slot = value; self.next = next; self.held_pressure_pa = pressure;
                     if let Some(forces) = &mut self.forces { forces.accept(sample); }
+                    if let Some(boundaries) = &mut self.boundaries { boundaries.accept(); }
                     self.mechanical_work_j = work;
+                    self.boundary_frame = boundary_frame;
                 }
                 Err(error) => { self.poisoned = true; return Err(error); }
             }
