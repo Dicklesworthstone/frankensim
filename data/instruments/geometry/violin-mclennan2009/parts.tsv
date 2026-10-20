@@ -1,0 +1,9 @@
+frankensim.specimen-parts.v1
+part	material	state	joins	note
+top	European spruce (Picea excelsa), Table 4.1	assembled	rib;bassbar;soundpost;bridge	arched, f-holes cut; thickness history in dimensions.tsv
+back	European maple (Acer platanoides), Table 4.1	assembled	rib;soundpost	arched; graduated
+rib	maple per the thesis' general description is NOT stated for the ribs; blocks and linings are willow	assembled	top;back	1 mm thick, 31 mm high
+bassbar	unstated	assembled	top	heavier bar fitted at the modern conversion; dimensions unstated (u-bassbar)
+soundpost	spruce-like (density 419 kg/m3, E_L 12.8 GPa, Table 4.10)	assembled	top;back	6.4 mm modern, 5.8 mm second set-up
+bridge	sycamore per the thesis	assembled	strings;top	2.21 g, 37 mm high (modern)
+cavity	air	assembled	top;back;rib	about 2 litres; rigid-box A0 measured separately

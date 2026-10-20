@@ -1,0 +1,61 @@
+frankensim.specimen-dimensions.v1
+part	feature	quantity	value_si	unit	sigma_si	route	source_id	note
+rib	height	height	0.031	m	unstated	published-measured	mclennan-2009-thesis	p. 47, sec. 4.3; 'a rib height of 31 mm' after levelling both edges
+rib	side-strip	width-before-levelling	0.030	m	unstated	published-measured	mclennan-2009-thesis	p. 46, sec. 4.3; '30 mm wide sides' on the inside mould
+rib	thickness	thickness	0.001	m	unstated	published-measured	mclennan-2009-thesis	p. 46, sec. 4.3; 'The sides, 1 mm thick'
+top	arching	maximum-arch-height	0.015	m	unstated	published-measured	mclennan-2009-thesis	p. 49, sec. 4.4; top outside long arch 'more like an ellipse'; cross arches full
+back	arching	maximum-arch-height	0.014	m	unstated	published-measured	mclennan-2009-thesis	p. 49, sec. 4.4; 'that of the back was 14 mm'; back long arch 'more like a parabola'
+plates	carving-stage-edge	edge-thickness-centre-bout	0.0045	m	unstated	published-measured	mclennan-2009-thesis	p. 49, sec. 4.4; set when marking the outline, before thicknessing from the inside
+plates	carving-stage-edge	edge-thickness-outer-bouts	0.004	m	unstated	published-measured	mclennan-2009-thesis	p. 49, sec. 4.4; 'the outer bouts at 4 mm'
+plates	carving-stage-edge	edge-thickness-corners	0.005	m	unstated	published-measured	mclennan-2009-thesis	p. 49, sec. 4.4; 'the corners at 5 mm'
+top	graduation-initial	thickness-uniform	0.0035	m	unstated	published-measured	mclennan-2009-thesis	p. 50, sec. 4.4; initial thicknessing, no bass bar
+back	graduation-initial	thickness-centre	0.0044	m	unstated	published-measured	mclennan-2009-thesis	p. 50, sec. 4.4; 'thicker in the centre at 4.4 mm'
+back	graduation-initial	thickness-centre-bout-edges	0.003	m	unstated	published-measured	mclennan-2009-thesis	p. 50, sec. 4.4; 'tapering to 3.0 mm at the centre bout edges'
+back	graduation-initial	thickness-outer-bout-edges	0.0025	m	unstated	published-measured	mclennan-2009-thesis	p. 50, sec. 4.4; 'and 2.5 mm at the outer bout edges'
+top	graduation-final	thickness-after-thinning	0.0033	m	unstated	published-measured	mclennan-2009-thesis	p. 52, sec. 4.4, Fig. 4.7; 'reduced to 3.3 mm and finally the f-holes are cut'
+back	graduation-final	thickness-centre	0.0044	m	unstated	published-measured	mclennan-2009-thesis	p. 52, sec. 4.4; 'brought to 4.4 mm in the central region'
+back	graduation-final	thickness-upper-bout	0.0028	m	unstated	published-measured	mclennan-2009-thesis	p. 53, sec. 4.4; 'reducing the top bout to 2.8 mm' (upper bout)
+back	graduation-final	thickness-lower-bout	0.0023	m	unstated	published-measured	mclennan-2009-thesis	p. 53, sec. 4.4; 'and the lower bout to 2.3 mm'
+top	mass	mass-no-bassbar	0.0756	kg	unstated	published-measured	mclennan-2009-thesis	p. 52, Table 4.5; f-holes cut, first fitted to the violin
+back	mass	mass	0.1165	kg	unstated	published-measured	mclennan-2009-thesis	p. 52, Table 4.5; as first fitted
+top	mass	mass-bassbar-tuned	0.0813	kg	unstated	published-measured	mclennan-2009-thesis	p. 54, Table 4.7; freely suspended with the tuned bass bar
+top	mass	mass-regraduated	0.07224	kg	unstated	published-measured	mclennan-2009-thesis	p. 54, Table 4.8; centre regraduated
+top	mass	mass-regraduated-bassbar-lightened	0.07205	kg	unstated	published-measured	mclennan-2009-thesis	p. 54, Table 4.8; bass bar lightened
+bridge	modern	mass	0.00221	kg	unstated	published-measured	mclennan-2009-thesis	p. 63, sec. 4.8; 'a modern bridge (2.21 g and 37 mm high)'
+bridge	modern	height	0.037	m	unstated	published-measured	mclennan-2009-thesis	p. 63, sec. 4.8; same sentence
+soundpost	modern	mass	0.000701	kg	unstated	published-measured	mclennan-2009-thesis	p. 55, Table 4.10; modern column
+soundpost	modern	length	0.052	m	unstated	published-measured	mclennan-2009-thesis	p. 55, Table 4.10; modern column
+soundpost	modern	diameter	0.0064	m	unstated	published-measured	mclennan-2009-thesis	p. 55, Table 4.10; modern column
+soundpost	modern	density	419	kg/m3	unstated	published-measured	mclennan-2009-thesis	p. 55, Table 4.10; modern column
+soundpost	modern	longitudinal-modulus	12.8e9	Pa	unstated	published-measured	mclennan-2009-thesis	p. 55, Table 4.10; 'EL (= rho c^2)' modern column
+soundpost	modern	axial-stiffness	7.9e6	N/m	unstated	published-measured	mclennan-2009-thesis	p. 55, Table 4.10; 'S (= Ea/l)' modern column
+soundpost	modern-first-set-up	position-from-treble-foot	0.006	m	unstated	published-measured	mclennan-2009-thesis	p. 63, sec. 4.8; notation a/b defined in sec. 4.5: a = distance between nearer surfaces from the treble foot of the bridge, b = distance in from the treble soundhole; first modern set-up 6/18, bridge on the f-hole notches
+soundpost	modern-first-set-up	position-in-from-treble-soundhole	0.018	m	unstated	published-measured	mclennan-2009-thesis	p. 63, sec. 4.8; see the notation note on the previous row
+soundpost	modern-second-set-up	diameter	0.0058	m	unstated	published-measured	mclennan-2009-thesis	p. 64, sec. 4.8; second determination of the B1 modes
+soundpost	modern-second-set-up	position-from-treble-foot	0.005	m	unstated	published-measured	mclennan-2009-thesis	p. 64, sec. 4.8; '5/15 i.e. 5 mm behind the bridge foot and 15 mm in from the treble f-hole'
+soundpost	modern-second-set-up	position-in-from-treble-soundhole	0.015	m	unstated	published-measured	mclennan-2009-thesis	p. 64, sec. 4.8; see previous row
+strings	modern-setup	string-length	0.328	m	unstated	published-measured	mclennan-2009-thesis	p. 59, Table 4.14; table heading 'String length 328 mm, Tuning A440'; the same table's tension/mass columns do not reproduce the tuning and are NOT retained
+cavity	violin	volume-approximate	0.002	m3	unstated	published-measured	mclennan-2009-thesis	p. 29, sec. 3.5; 'volume of about 2 litres' of the violin body
+cavity	rigid-box	volume	0.001987	m3	unstated	published-measured	mclennan-2009-thesis	p. 179, sec. 9.6; rigid 2 litre box with the violin's f-holes cut in a 3.5 mm insert
+cavity	rigid-box	helmholtz-frequency-measured	295	Hz	unstated	published-measured	mclennan-2009-thesis	p. 179, sec. 9.6; 'A0 was measured to be 295 Hz' for that box
+soundholes	both	total-area	0.001375	m2	unstated	published-measured	mclennan-2009-thesis	p. 180, sec. 9.6; 'a value for S of 1375 mm^2 for the two soundholes'; a later passage uses S = 1353 mm^2 (sec. 9.6, Kinsler and Frey stiffness): the two are not reconciled in the source
+soundholes	both	total-area-alternate	0.001353	m2	unstated	published-measured	mclennan-2009-thesis	p. 182, sec. 9.6; second value for the same quantity in the same chapter; see the previous row
+air	gas	sound-speed-used	342	m/s	unstated	published-measured	mclennan-2009-thesis	p. 180, sec. 9.6; as used by the source
+top	wood-spruce	density	414	kg/m3	unstated	published-measured	mclennan-2009-thesis	p. 45, Table 4.1; European spruce (Picea excelsa), air-dried at least 40 years; E by 60 kHz pulse time (Lucchi tester), shear modulus and shear Q by torsion pendulum; Table 4.1 gives no E_T, no G_RT, no Poisson ratios and no loss along or across the grain
+top	wood-spruce	youngs-modulus-longitudinal	12.7e9	Pa	unstated	published-measured	mclennan-2009-thesis	p. 45, Table 4.1; European spruce (Picea excelsa), air-dried at least 40 years; E by 60 kHz pulse time (Lucchi tester), shear modulus and shear Q by torsion pendulum; Table 4.1 gives no E_T, no G_RT, no Poisson ratios and no loss along or across the grain
+top	wood-spruce	youngs-modulus-radial	1.1e9	Pa	unstated	published-measured	mclennan-2009-thesis	p. 45, Table 4.1; European spruce (Picea excelsa), air-dried at least 40 years; E by 60 kHz pulse time (Lucchi tester), shear modulus and shear Q by torsion pendulum; Table 4.1 gives no E_T, no G_RT, no Poisson ratios and no loss along or across the grain
+top	wood-spruce	shear-modulus-LR	0.65e9	Pa	unstated	published-measured	mclennan-2009-thesis	p. 45, Table 4.1; European spruce (Picea excelsa), air-dried at least 40 years; E by 60 kHz pulse time (Lucchi tester), shear modulus and shear Q by torsion pendulum; Table 4.1 gives no E_T, no G_RT, no Poisson ratios and no loss along or across the grain
+top	wood-spruce	shear-modulus-LT	0.5e9	Pa	unstated	published-measured	mclennan-2009-thesis	p. 45, Table 4.1; European spruce (Picea excelsa), air-dried at least 40 years; E by 60 kHz pulse time (Lucchi tester), shear modulus and shear Q by torsion pendulum; Table 4.1 gives no E_T, no G_RT, no Poisson ratios and no loss along or across the grain
+top	wood-spruce	shear-Q-LR	44	1	unstated	published-measured	mclennan-2009-thesis	p. 45, Table 4.1; European spruce (Picea excelsa), air-dried at least 40 years; E by 60 kHz pulse time (Lucchi tester), shear modulus and shear Q by torsion pendulum; Table 4.1 gives no E_T, no G_RT, no Poisson ratios and no loss along or across the grain
+top	wood-spruce	shear-Q-LT	41	1	unstated	published-measured	mclennan-2009-thesis	p. 45, Table 4.1; European spruce (Picea excelsa), air-dried at least 40 years; E by 60 kHz pulse time (Lucchi tester), shear modulus and shear Q by torsion pendulum; Table 4.1 gives no E_T, no G_RT, no Poisson ratios and no loss along or across the grain
+back	wood-maple	density	650	kg/m3	unstated	published-measured	mclennan-2009-thesis	p. 45, Table 4.1; European maple (Acer platanoides), air-dried at least 40 years; E by 60 kHz pulse time (Lucchi tester), shear modulus and shear Q by torsion pendulum; Table 4.1 gives no E_T, no G_RT, no Poisson ratios and no loss along or across the grain
+back	wood-maple	youngs-modulus-longitudinal	9.8e9	Pa	unstated	published-measured	mclennan-2009-thesis	p. 45, Table 4.1; European maple (Acer platanoides), air-dried at least 40 years; E by 60 kHz pulse time (Lucchi tester), shear modulus and shear Q by torsion pendulum; Table 4.1 gives no E_T, no G_RT, no Poisson ratios and no loss along or across the grain
+back	wood-maple	youngs-modulus-radial	0.8e9	Pa	unstated	published-measured	mclennan-2009-thesis	p. 45, Table 4.1; European maple (Acer platanoides), air-dried at least 40 years; E by 60 kHz pulse time (Lucchi tester), shear modulus and shear Q by torsion pendulum; Table 4.1 gives no E_T, no G_RT, no Poisson ratios and no loss along or across the grain
+back	wood-maple	shear-modulus-LR	1.5e9	Pa	unstated	published-measured	mclennan-2009-thesis	p. 45, Table 4.1; European maple (Acer platanoides), air-dried at least 40 years; E by 60 kHz pulse time (Lucchi tester), shear modulus and shear Q by torsion pendulum; Table 4.1 gives no E_T, no G_RT, no Poisson ratios and no loss along or across the grain
+back	wood-maple	shear-modulus-LT	1.2e9	Pa	unstated	published-measured	mclennan-2009-thesis	p. 45, Table 4.1; European maple (Acer platanoides), air-dried at least 40 years; E by 60 kHz pulse time (Lucchi tester), shear modulus and shear Q by torsion pendulum; Table 4.1 gives no E_T, no G_RT, no Poisson ratios and no loss along or across the grain
+back	wood-maple	shear-Q-LR	53	1	unstated	published-measured	mclennan-2009-thesis	p. 45, Table 4.1; European maple (Acer platanoides), air-dried at least 40 years; E by 60 kHz pulse time (Lucchi tester), shear modulus and shear Q by torsion pendulum; Table 4.1 gives no E_T, no G_RT, no Poisson ratios and no loss along or across the grain
+back	wood-maple	shear-Q-LT	50	1	unstated	published-measured	mclennan-2009-thesis	p. 45, Table 4.1; European maple (Acer platanoides), air-dried at least 40 years; E by 60 kHz pulse time (Lucchi tester), shear modulus and shear Q by torsion pendulum; Table 4.1 gives no E_T, no G_RT, no Poisson ratios and no loss along or across the grain
+top	wood-spruce	wave-speed-longitudinal	5540	m/s	unstated	published-measured	mclennan-2009-thesis	p. 45, text under Table 4.1; 'EL 5540 m/s and ER 1630 m/s'
+top	wood-spruce	wave-speed-radial	1630	m/s	unstated	published-measured	mclennan-2009-thesis	p. 45, text under Table 4.1
+back	wood-maple	wave-speed-longitudinal	3880	m/s	unstated	published-measured	mclennan-2009-thesis	p. 45, text under Table 4.1; 'EL 3880 m/s and ER 1110 m/s'
+back	wood-maple	wave-speed-radial	1110	m/s	unstated	published-measured	mclennan-2009-thesis	p. 45, text under Table 4.1

@@ -1,0 +1,13 @@
+frankensim.specimen.v1
+key	value
+specimen_id	violin-mclennan2009
+maker	J. E. McLennan (the thesis author), hand-built for the study
+model	violin with the outline of the 1733 Guarneri del Gesu once played by Fritz Kreisler, taken from a STRAD poster; 'no attempt to make an exact copy' (thesis sec. 4.2)
+serial	unstated
+year	2009 (thesis); construction date unstated
+system	full-size violin built first with a Baroque set-up (string length 315 or 318 mm, gut strings, A415) and later converted to a modern set-up (string length 328 mm, A440): the conversion replaced the neck and fingerboard and added a heavier bass bar and soundpost; total mass rose from 386 g to 440 g (thesis abstract)
+holder	the author; not accessible to FrankenSim
+reference_state	assembled, strung, at about 70 percent relative humidity for the Baroque table 4.2 (thesis states ~70% R.H.)
+environment	partly stated; see unknowns
+source_ids	mclennan-2009-thesis
+target_relation	population-grade stand-in for the UIowa MIS violin: a documented full-size violin with measured wood, plate, soundpost and bridge-foot modal data; it is neither the UIowa instrument nor a same-specimen pair of any UIowa recording (u-reference-specimen)
