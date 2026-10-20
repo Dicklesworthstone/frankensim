@@ -293,12 +293,14 @@ export class LivePianoSection {
         </div>
         <p class="lp-breakdown small num muted" data-k="breakdown"></p>
         <p class="lp-residual"><span class="muted">balance residual</span> <b class="num" data-k="residual">0 J</b>
-          <span class="muted small">supplied − stored − dissipated − retired</span></p>
+          <span class="muted small" data-k="balance">supplied − stored − dissipated − retired</span></p>
       </div>
       <p class="small muted lp-ledger-note">Supplied is the work the hammers bring in. It is either still stored (strings,
         board, hammers, felt), dissipated (string and board losses, dampers, felt and shank, the hammer caught on its
         rest), or retired: relative string energy discarded when a quiet key returns to its resting image, or when the
-        polyphony budget forces the quietest key out. The residual is what the arithmetic fails to close.</p>
+        polyphony budget forces the quietest key out. When the silent-string bank is active, its signed numerical
+        exchange is shown separately and included in the balance. The residual is what the arithmetic fails to close;
+        a small residual does not prove that this numerical exchange is physically negligible.</p>
     </div>
   </div>
   <div class="stack lp-side">
@@ -391,9 +393,9 @@ export class LivePianoSection {
     // the board this device chose at Start (0 before Start: the text then gives the range)
     const board = info ? info.boardCoordinates : 0;
     const exact = info ? info.boardExactLowModes : 0;
-    // the silent strings' partials that move (before Start: what this build plays)
-    const bank = info ? info.silentBankHz ?? 0 : 600;
-    const bankModes = info?.silentBankModes ?? 671;
+    // Capabilities come from the loaded engine, including older engines without a bank.
+    const bank = info?.silentBankHz ?? 0;
+    const bankModes = info?.silentBankModes ?? 0;
     const details = el('details', 'evidence');
     details.append(el('summary', undefined, 'What this live model is — and is not'));
     const body = el('div', 'evidence-body lp-evidence');
@@ -409,15 +411,15 @@ export class LivePianoSection {
     };
     lists.append(
       column('In the live model', [
-        'All 88 keys of the published scale, 234 speaking strings on the bridge. Only the sounding keys are dynamic: every unison string and duplex segment, up to 200 string modes per key (low trichords keep partials to about 5–7 kHz).',
-        bank > 0
+        'All 88 keys of the published scale, 234 speaking strings on the bridge. Struck or silently held keys use every unison string and duplex segment, up to 200 string modes per key (low trichords keep partials to about 5–7 kHz). The reduction for the other keys is described below.',
+        !info ? 'The loaded engine reports its silent-string band when it starts.' : bank > 0
           ? `Every other string is on the bridge too: its partials up to ${bank} Hz (${bankModes.toLocaleString('en-US')} of them) move as the bridge drives them, each with its damper and its string losses, and the rest of it is a quasi-static chord (mass and tension). A struck key takes over its partials as they are and returns them when quiet.`
           : 'Every other string stays attached as a quasi-static chord (its mass and tension load the bridge); a key becomes dynamic at its strike and returns to rest when quiet.',
         board
           ? `One shared soundboard: ${board} coordinates of the Model D board, on the 16-division mesh of the graded offline renders, with its full damping matrix: ${exact} exact modes, plus the ${board - exact} shapes that best reproduce every key's bridge response from there up to 8 kHz (a proper orthogonal decomposition of the 0–2400 Hz slice). This is the largest board this device computed fast enough when you pressed Start (32 to 128).`
           : 'One shared soundboard: a reduction of the Model D board on the 16-division mesh of the graded offline renders, with its full damping matrix: exact low modes, plus the shapes that best reproduce every key\'s bridge response up to 8 kHz (a proper orthogonal decomposition of the 0–2400 Hz slice). It has 32 to 128 coordinates, the largest this device computes fast enough, chosen when you press Start.',
         'The published hammer shank (rigid rotation plus bending) and RT-0425\'s published felt law: its stiffness on each string of the unison and its rate loss R_H, contact solved implicitly every step.',
-        'The estimated damper pad on every string up to E6 (four quadrature points), a continuous sustain pedal, a sostenuto pedal (it holds up the dampers of the keys down when you press it) and una corda (the hammer misses the last string of each course, as in the offline reference).',
+        'The estimated damper pad on every string up to E6 (four quadrature points), continuous sustain, sostenuto (latching the dampers of held keys), and una corda (the hammer misses the last string of each course). Press silently lifts a key\'s dampers without a hammer strike.',
         'Pressure from the time-domain Rayleigh integral at a microphone 1 m above the board, at a fixed 10 Pa full scale. No samples, no normalisation, no EQ, no reverb.',
       ], 'in'),
       column('Reduced or absent', [
@@ -436,6 +438,7 @@ export class LivePianoSection {
     );
     body.append(lists);
     body.append(el('h4', undefined, 'Checked against the offline reference'));
+    body.append(el('p', undefined, 'The comparisons below concern specific isolated-key kernels and labelled offline renders. They are not a real-instrument fidelity score for the device-dependent live engine loaded in this tab. Its soundboard reduction, silent-string bank and rendering budget also affect the result.'));
     body.append(el('p', undefined, 'With nothing but one key on the bridge, the live kernel and the reference engine (the same source files) agree on bridge velocity to within 4 × 10⁻¹² relative over one second, for eight keys at three hammer speeds, with the published string, felt and hammer laws this page plays; their energy books agree to about ten digits. The WebAssembly build in this tab reproduces the native build sample for sample on an isolated C6; on A3 one sample in 144,000 differs, by one float32 step (7.5 × 10⁻⁹ of full scale). Against the full offline render, the first 15 partials of A3 mf sit within 3 cents on every board and the fitted inharmonicity is 2.41–2.44 × 10⁻⁴ (offline 2.41 × 10⁻⁴). Against the offline render with the live physics on the 128-coordinate board (no air loading, no string waves) they sit within 0.4 cents on 64 and 128 coordinates and within 2.5 on the others.'));
     const chips = (title: string, cls: string, items: string[]): HTMLElement => {
       const row = el('div', 'lp-chiprow');
@@ -870,6 +873,10 @@ export class LivePianoSection {
     const demo = DEMOS[name];
     if (!demo || !this.client) return;
     this.cancelDemo(true);
+    // Each timeline assumes unmodified hammers and dampers initially down.
+    this.setPedal(0, 'demo');
+    this.setSostenuto(false);
+    this.setUnaCorda(false);
     this.demoName = name;
     setText(q(this.root, '.lp-demo-text'), demo.text);
     q<HTMLElement>(this.root, '.lp-demo-stop').hidden = false;
@@ -1015,7 +1022,8 @@ export class LivePianoSection {
     set('retired', millijoules(l.retiredJ));
     set('residual', scientific(l.residualJ));
     set('breakdown', `of which strings ${millijoules(l.stringLossJ)} · board ${millijoules(l.boardLossJ)} · dampers ${millijoules(l.damperLossJ)} · felt and shank ${millijoules(l.hammerLossJ)} · hammer caught ${millijoules(l.catchLossJ)}`
-      + (l.couplingJ !== 0 ? ` · the silent strings' explicit exchange added ${millijoules(l.couplingJ)} (numerical)` : ''));
+      + (l.couplingJ !== 0 ? ` · the silent strings' explicit exchange added ${scientific(l.couplingJ)} (numerical)` : ''));
+    set('balance', l.couplingJ !== 0 ? 'supplied + numerical exchange − stored − dissipated − retired' : 'supplied − stored − dissipated − retired');
   }
 
   /** Keys that sound with no finger on them (pedal or still ringing) get the held outline. */
