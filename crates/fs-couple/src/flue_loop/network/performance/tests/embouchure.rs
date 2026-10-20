@@ -147,3 +147,79 @@ fn whole_angle_phrase_and_work_are_admitted_before_motion() {
     let duplicate = GestureSchedule::try_new(700, tracks).unwrap();
     assert!(FlueOutletPerformance::new(voice(source(gas(), -0.9)), duplicate, cfg).is_err());
 }
+
+#[test]
+fn mouth_and_terminal_pressure_superpose_from_signed_physical_flows_without_changing_motion() {
+    use crate::pcm_wav::baffled::{SurfaceSample, RayleighMedium};
+    let g = gas();
+    let spec = source(g, -0.9);
+    let cfg = config(1);
+    let input = FlueMouthRadiation { center_m: [-0.3, 0.0], cells: [4, 4] };
+    let mut original = voice(spec.clone());
+    original.apply(FlueControl::SetBlowingPressure(300.0)).unwrap();
+    let size = [original.geometry.flue_width_m, original.geometry.cut_up_m];
+    let area = size[0] * size[1];
+    let surface: Vec<_> = (0..4).flat_map(|y| (0..4).map(move |x| SurfaceSample {
+        position_m: [input.center_m[0] + (x as f64 + 0.5) * size[0]/4.0 - size[0]/2.0,
+            input.center_m[1] + (y as f64 + 0.5) * size[1]/4.0 - size[1]/2.0, 0.0],
+        area_m2: area/16.0, mode_shape: vec![1.0/area],
+    })).collect();
+    let medium = RayleighMedium::from(&g);
+    let mut mouth = BaffledPressure::new(&surface, 1, 48_000, cfg.receiver.position_m, medium).unwrap();
+    let mut terminal = BaffledPressure::circular_outlet(0.006, 48_000, cfg.receiver, medium).unwrap();
+    let mut expected = vec![0.0; cfg.samples as usize];
+    let mut terminal_only = expected.clone();
+    let mut mouth_only = expected.clone();
+    for ((sum, duct), source_pressure) in expected.iter_mut().zip(&mut terminal_only).zip(&mut mouth_only) {
+        original.step_block(&mut [0.0]).unwrap();
+        let n = original.network().unwrap();
+        let outward = n.node_frame(0).unwrap().net_flow_into_node_m3_s;
+        assert!((outward + original.mouth_flow_m3_s()).abs() < 1e-16,
+            "source-node sign must be outward, opposite to the solved q into the tube");
+        *duct = terminal.step(&[n.node_frame(1).unwrap().net_flow_into_node_m3_s]).unwrap();
+        *source_pressure = mouth.step(&[outward]).unwrap();
+        *sum = *duct + *source_pressure;
+    }
+    assert!(mouth_only.iter().any(|p| p.abs() > 1e-10));
+    assert!(terminal_only.iter().any(|p| p.abs() > 1e-10));
+    assert!(terminal_only.iter().zip(&mouth_only).any(|(a,b)| a*b < 0.0),
+        "signed aperture contributions must permit destructive interference");
+    for partition in [513, 37, 1] {
+        let mut performance = FlueOutletPerformance::new(voice(spec.clone()), schedule(300.0), cfg)
+            .unwrap().with_mouth_radiation(input).unwrap();
+        let mut actual = vec![0.0; cfg.samples as usize];
+        for block in actual.chunks_mut(partition) { performance.block(block).unwrap(); }
+        assert_eq!(actual, expected);
+        assert_eq!(performance.voice().mouth_flow_m3_s(), original.mouth_flow_m3_s());
+        assert_eq!(performance.voice().network().unwrap().stored_energy_j(),
+            original.network().unwrap().stored_energy_j());
+        assert_eq!(performance.mouth_receiver().unwrap().filter_delay_samples(),
+            performance.receiver().filter_delay_samples());
+        assert!(performance.with_mouth_radiation(input).is_err());
+    }
+}
+
+#[test]
+fn mouth_observation_shares_the_exterior_gas_and_rejects_duplicate_geometry() {
+    let cfg = config(1);
+    let input = FlueMouthRadiation { center_m: [-0.3, 0.0], cells: [4, 4] };
+    let build = |exterior| FlueOutletPerformance::with_radiation(voice(source(gas(), -0.9)),
+        schedule(300.0), cfg, FlueRadiationInput { exterior, additional_outlets: vec![] })
+        .unwrap().with_mouth_radiation(input).unwrap();
+    let mut cold = build(gas());
+    let mut hot = build(GasState::try_new(&GasSpec::dry_air_ussa1976(), 330.0, gas().pressure).unwrap());
+    let mut a = [0.0; 513];
+    let mut b = [0.0; 513];
+    cold.block(&mut a).unwrap();
+    hot.block(&mut b).unwrap();
+    assert_ne!(a, b, "one exterior state must affect source and terminal radiation together");
+    assert_eq!(cold.voice().mouth_flow_m3_s(), hot.voice().mouth_flow_m3_s(),
+        "one-way observation must not alter source motion");
+    for refused in [FlueMouthRadiation { center_m: [0.0, 0.0], ..input },
+        FlueMouthRadiation { cells: [0, 4], ..input },
+        FlueMouthRadiation { center_m: [f64::NAN, 0.0], ..input }] {
+        let p = FlueOutletPerformance::new(voice(source(gas(), -0.9)), schedule(300.0), cfg).unwrap();
+        assert!(p.with_mouth_radiation(refused).is_err());
+    }
+    assert!(build(gas()).with_mouth_radiation(input).is_err());
+}

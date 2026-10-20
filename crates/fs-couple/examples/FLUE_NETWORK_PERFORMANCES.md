@@ -149,8 +149,9 @@ constructors and `prescribed`/`compact-baffled` selections retain their behavior
 
 ## Pressure and jet direction in one performance
 
-`flue-embouchure.performance` adds a prescribed jet-angle phrase and the
-existing separated-flow mouth loss to the branched, regional-gas example:
+`flue-embouchure.performance` adds a prescribed jet-angle phrase, the
+existing separated-flow mouth loss, and physical mouth pressure to the
+branched, regional-gas example:
 
 ```sh
 cargo run --release -p fs-couple --bin music_render -- wind \
@@ -184,6 +185,34 @@ windway velocity field, jet feedback history, wave propagation, material-wall
 memory and radiation history persist. A pressure release still leaves stored
 fluid and acoustic motion intact. Dynamic cut-up or mouth-area changes need a
 moving-domain and boundary-work model and are not exposed as simple controls.
+
+## Mouth and outlet sound in the same exterior
+
+An optional record after the outlet records and before optional
+`control_source` and `controls` adds the mouth to the physical microphone:
+
+```text
+mouth_radiation -0.3 0 4 4
+```
+
+The first two numbers place its center in the common baffle plane; the last
+two select quadrature counts along width and cut-up. The rectangle's actual
+dimensions come from `flue`, so changing the source width or cut-up changes
+its acoustic area and directivity automatically. Overlap with an observed
+terminal opening refuses construction.
+
+The receiver consumes the actual signed outward inlet-node volume flow,
+which is the negative of flow into the bore. That rectangular Rayleigh source
+and the terminal sources share one exterior gas and physical clock. Their
+pressures add with signs, travel delays and every accepted mechanical sample
+preserved, allowing cancellation as well as reinforcement. The summed signal
+uses the declared pascal scale; it is never normalized to a target loudness.
+
+This is explicitly a coplanar infinite-baffle description, not a free-field
+flute model. Mouth observation adds no second jet force, turbulent noise,
+mutual radiation or new reaction load. Existing mouth resistance and duct
+termination laws still determine the simulated motion. Omitting the record
+retains the original terminal-only output.
 
 ## Mouth separation from the actual geometry and gas
 

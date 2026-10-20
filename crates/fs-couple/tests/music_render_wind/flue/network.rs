@@ -175,7 +175,8 @@ fn mouth_separation_and_angle_data_share_the_original_fluid_runtime_and_cli() {
         .with_mouth_contraction(loss.spec().clone()).unwrap()
         .with_unsteady_windway(0.015, 32, 64).unwrap();
     let mut direct = FlueOutletPerformance::with_multirate_radiation(direct,
-        p.schedule().clone(), *p.config(), p.radiation_input().unwrap().clone(), 96_000).unwrap();
+        p.schedule().clone(), *p.config(), p.radiation_input().unwrap().clone(), 96_000).unwrap()
+        .with_mouth_radiation(p.mouth_radiation().unwrap()).unwrap();
     let mut expected = vec![0.0; 1024];
     for block in expected.chunks_mut(37) { direct.block(block).unwrap(); }
     assert_eq!(physical(&text).0, expected);
@@ -196,8 +197,27 @@ fn mouth_separation_and_angle_data_share_the_original_fluid_runtime_and_cli() {
         assert_eq!(std::fs::read(&output).unwrap(), wav);
         let sidecar = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
         assert!(sidecar.contains("\"mouth_contraction\":{"));
+        assert!(sidecar.contains("\"mouth_radiation\":{\"shape\":\"rectangle\""));
+        assert!(sidecar.contains("\"source\":\"signed outward inlet volume flow\""));
         assert!(sidecar.contains("\"source\":\"authored-fixed-window-demonstrator\""));
         assert!(sidecar.contains("\"windway_model\":\"unsteady-no-slip-slit-v1\""));
+    }
+}
+
+#[test]
+fn mouth_source_can_be_selected_from_data_without_changing_the_jet_or_terminal_loads() {
+    let text = articulated_source();
+    let without = text.replace("mouth_radiation -0.3 0 4 4\n", "");
+    let with_pressure = physical(&text).0;
+    let without_pressure = physical(&without).0;
+    let difference: f64 = with_pressure.iter().zip(&without_pressure)
+        .map(|(a,b)| (a-b).powi(2)).sum();
+    assert!(difference > 1e-12, "the source mouth must contribute actual pressure");
+    let gate = CancelGate::new_clock_free();
+    for invalid in ["0 0 4 4", "-0.3 0 0 4", "-0.3 0 513 4", "NaN 0 4 4"] {
+        let invalid = text.replace("mouth_radiation -0.3 0 4 4",
+            &format!("mouth_radiation {invalid}"));
+        assert!(FlueFilePerformance::from_bytes(invalid.as_bytes(), 37, &gate).is_err());
     }
 }
 

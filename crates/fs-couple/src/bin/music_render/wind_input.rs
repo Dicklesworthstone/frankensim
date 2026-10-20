@@ -338,6 +338,12 @@ fn load_with_all_sources(
                 loss.gas().density, loss.gas().sound_speed),
             None => ",\"mouth_contraction\":null".to_string(),
         };
+        let mouth_radiation_json = match renderer.mouth_radiation() {
+            Some(mouth) => format!(",\"mouth_radiation\":{{\"shape\":\"rectangle\",\"center_m\":[{:e},{:e}],\"size_m\":[{:e},{:e}],\"cells\":[{},{}],\"source\":\"signed outward inlet volume flow\",\"reaction_added\":false}}",
+                mouth.center_m[0], mouth.center_m[1], geometry.flue_width_m, geometry.cut_up_m,
+                mouth.cells[0], mouth.cells[1]),
+            None => ",\"mouth_radiation\":null".to_string(),
+        };
         let (phase, details) = network.fractional_sections().expect("file selects fractional travel");
         let actual_length: f64 = details.iter().map(|s|s.realized_dc_length_m).sum();
         let phase_error: f64 = details.iter().map(|s|s.phase_error_bound_rad).sum();
@@ -362,7 +368,7 @@ fn load_with_all_sources(
         } else { "one-way infinite-baffle outlet pressure; supplied passive loads" };
         let radiation_exclusion = if p.mimo_radiation_record().is_some() { "broadband unbaffled radiation" }
             else { "broadband unbaffled or mutual radiation" };
-        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; wall image separately declared; no full shell dynamics, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{duct_json}{wall_json}{boundary_json}{mimo_json}}}",
+        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; optional rectangular mouth is observation only; wall image separately declared; no full shell dynamics, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{duct_json}{wall_json}{boundary_json}{mimo_json}}}",
             i.jet_card_source,i.jet_card_hash,p.card().claim.kind(),p.card().authority.label(),i.compiled_controls,
             geometry.flue_width_m,geometry.flue_height_m,geometry.cut_up_m,geometry.labium_offset_m,
             geometry.jet_angle_rad,geometry.mouth_loss_rel,island.displacement_gain,island.seed_amplitude_rel,
@@ -371,9 +377,10 @@ fn load_with_all_sources(
             receiver.position_m[0],receiver.position_m[1],receiver.position_m[2],receiver.maximum_frequency_hz);
         let ratio = renderer.mechanics_per_output();
         let mechanical_samples = i.samples*ratio as u64; // already checked by the performance owner
+        let propagation = renderer.propagation_delay_samples();
         let observation_json = format!("{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{mechanical_samples},\"output_sample_rate_hz\":{RATE},\"ratio\":{ratio},\"filter\":\"shared multirate differentiating Rayleigh receiver with bandlimited propagation\",\"delay_output_samples\":{},\"propagation_fir_support_output_samples\":[{},{}],\"first_output_source_index\":{},\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
-            i.mechanics_rate_hz,renderer.receiver().filter_delay_samples(),renderer.receiver().delay_samples.0,
-            renderer.receiver().delay_samples.1,ratio-1);
+            i.mechanics_rate_hz,renderer.receiver().filter_delay_samples(),propagation.0,
+            propagation.1,ratio-1);
         Ok(Loaded { source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"flue-input",source_json,
             observation_json:Some(observation_json) })

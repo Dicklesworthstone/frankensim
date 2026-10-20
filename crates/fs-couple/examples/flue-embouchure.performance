@@ -24,6 +24,7 @@ loss_section 1 4 300 500
 receiver 0 0 0.5 4 16 1000
 outlets 1 1
 outlet 3 0.08 0
+mouth_radiation -0.3 0 4 4
 controls 4096 100000
 gesture
 frankensim-gesture-schedule-v1

@@ -7,7 +7,7 @@
 //! operators retain their original limits; this is not a measured Boehm flute,
 //! full shell model, resolved turbulent jet or broadband unbaffled qualification.
 
-use super::{FlueOutletConfig, FlueOutletPerformance, FlueRadiationInput};
+use super::{FlueMouthRadiation, FlueOutletConfig, FlueOutletPerformance, FlueRadiationInput};
 use crate::bernoulli_aperture::fractional::FractionalTubePolicy;
 use crate::bernoulli_aperture::contraction::ContractionSpec;
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
@@ -151,6 +151,10 @@ impl FlueFilePerformance {
     /// always uses the actual inlet section. A network explicitly names its
     /// radiating outlets; each outlet contributes its own accepted volume flow
     /// to the same physical receiver.
+    /// Optional `mouth_radiation X_M Y_M WIDTH_CELLS CUT_UP_CELLS` after the
+    /// outlet records also observes the solved outward source-mouth flow. Its
+    /// rectangular size is the actual flue width by cut-up; all apertures share
+    /// the declared exterior and rigid baffle. No extra source load is inferred.
     ///
     /// After the duct records, optional `walls COUNT FMIN_HZ FMAX_HZ` introduces
     /// COUNT rows `wall NODE isotropic PACK T_K OMEGA_RAD_S THICKNESS_M AXIAL LOSS`.
@@ -396,6 +400,13 @@ impl FlueFilePerformance {
             return Err(bad(rows.line, "fractional phase band must cover the receiver's declared band"));
         }
         let (outlet_node, additional_outlets) = duct.read_outlets(&mut rows)?;
+        let mouth_radiation = if rows.next_is("mouth_radiation") {
+            let mut row = rows.row("mouth_radiation")?;
+            let input = FlueMouthRadiation { center_m: [row.scalar()?, row.scalar()?],
+                cells: [row.number()?, row.number()?] };
+            row.end()?;
+            Some(input)
+        } else { None };
         let control_source = boundary::read_control_source(&mut rows)?;
         let mut row = rows.row("controls")?;
         let max_controls: usize = row.number()?;
@@ -485,11 +496,14 @@ impl FlueFilePerformance {
             }
             None => (voice, None),
         };
-        let renderer = FlueOutletPerformance::with_multirate_radiation(voice, schedule,
+        let mut renderer = FlueOutletPerformance::with_multirate_radiation(voice, schedule,
             FlueOutletConfig { sample_rate_hz, samples, max_block, max_controls, max_compile_work,
                 outlet_node, receiver, maximum_abs_pressure_pa },
             FlueRadiationInput { exterior, additional_outlets }, mechanics_rate_hz)
             .map_err(FlueInputError::Performance)?;
+        if let Some(mouth) = mouth_radiation {
+            renderer = renderer.with_mouth_radiation(mouth).map_err(FlueInputError::Performance)?;
+        }
         poll(gate)?;
         let info = FluePerformanceInfo { input_hash: hash_domain("org.frankensim.fs-couple.flue-performance.v1",bytes),
             mechanics_rate_hz, sample_rate_hz, samples, full_scale_pa,

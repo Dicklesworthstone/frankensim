@@ -6,7 +6,9 @@
 //! `with_radiation` binds several coplanar openings and an explicit exterior gas.
 //! Observation is an infinite-baffle image. A separately installed MIMO source
 //! load supplies mutual reaction and retains its medium/port binding here.
-//! No complete free-field flute/mouth/body radiation or room scattering follows.
+//! An explicit rectangular mouth uses its actual signed inlet flow and the SAME
+//! exterior gas, clock and Rayleigh kernel. No complete free-field flute/body
+//! radiation, turbulent jet noise or room scattering follows.
 //! The original tonal/estimated jet remains tonal/estimated, not turbulent CFD.
 
 /// Versioned data-driven flue construction through this same pressure renderer.
@@ -18,6 +20,7 @@ use crate::acoustic_realize::AcousticRealizeError;
 #[cfg(test)]
 use crate::flue_loop::FlueControl;
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver};
+use crate::pcm_wav::baffled::openings::RectangularOutletReceiver;
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::render::schedule::GestureCompileError;
@@ -76,6 +79,45 @@ pub struct FlueRadiationInput {
     pub additional_outlets: Vec<FlueRadiatingOutlet>,
 }
 
+/// Optional physical mouth in the common stationary z=0 baffle.
+/// Its width and height are the source's flue width and cut-up, not independent
+/// acoustic dimensions. Positive outward flow is the negative of flow into the
+/// bore; this is an observation of the solved source, not another jet model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlueMouthRadiation {
+    /// Rectangle center [m] relative to the primary outlet at the origin.
+    pub center_m: [f64; 2],
+    /// Midpoint surface cells along actual flue width and cut-up.
+    pub cells: [usize; 2],
+}
+
+struct MouthPressure {
+    input: FlueMouthRadiation,
+    inlet_node: usize,
+    receiver: BaffledPressure,
+    trace: Vec<f64>,
+    filled: usize,
+}
+impl MouthPressure {
+    fn push(&mut self, network: &super::FlueNetwork) -> Result<Option<f64>, FlueError> {
+        // The network defines flow into a node from its adjacent tube. At the
+        // source node this is (p_minus-p_plus)/Z, hence already outward -q.
+        let flow = network.node_frame(self.inlet_node)
+            .ok_or(FlueError::Invalid { what: "accepted mouth port has no flow" })?
+            .net_flow_into_node_m3_s;
+        if !flow.is_finite() {
+            return Err(FlueError::Invalid { what: "mouth volume flow must be finite" });
+        }
+        self.trace[self.filled] = flow;
+        let pressure = if self.filled + 1 == self.trace.len() {
+            Some(self.receiver.step_trace(&self.trace)
+                .map_err(|e| FlueError::Physics(AcousticRealizeError::Nonlinear(e)))?)
+        } else { None };
+        self.filled = if pressure.is_some() { 0 } else { self.filled + 1 };
+        Ok(pressure)
+    }
+}
+
 /// One owned jet/resonator/observer/schedule with a common integer sample clock.
 /// Internal p+ remains a diagnostic, not the output. Source histories persist
 /// across callbacks; source diagnostics allocate per control segment, not per
@@ -92,6 +134,7 @@ pub struct FlueOutletPerformance {
     controls: Vec<ScheduledFlueControl>,
     next: usize,
     launched: Vec<f64>,
+    mouth: Option<MouthPressure>,
     poisoned: bool,
 }
 
@@ -237,7 +280,56 @@ impl FlueOutletPerformance {
             .map_err(|_| invalid("flue callback scratch exceeds available allocation"))?;
         launched.resize(scratch_samples, 0.0);
         Ok(Self { voice, receiver, config, radiation, outlet_nodes, mechanics_rate_hz,
-            mechanics_per_output, schedule, controls, next: 0, launched, poisoned: false })
+            mechanics_per_output, schedule, controls, next: 0, launched, mouth: None, poisoned: false })
+    }
+
+    /// Include actual mouth volume flow in the same external microphone signal.
+    /// Mouth and terminal pressures superpose with their signs and distinct
+    /// travel times; each retains all mechanical samples and antialias history.
+    /// The mouth's prescribed resistance remains the source's existing load:
+    /// this adds no radiation feedback, pressure normalization or jet-noise term.
+    ///
+    /// This explicitly describes a coplanar baffled assembly. It does not claim
+    /// the free-field geometry of an orchestral flute. Mouth and outlet openings
+    /// must not overlap. Geometry is frozen; the admitted pressure/angle controls
+    /// change excitation without changing either observed surface.
+    pub fn with_mouth_radiation(mut self, input: FlueMouthRadiation)
+        -> Result<Self, GestureCompileError>
+    {
+        if self.poisoned || self.voice.samples_rendered() != 0 || self.mouth.is_some() {
+            return Err(invalid("mouth observation requires a fresh performance and exactly one source mouth"));
+        }
+        let network = self.voice.network().expect("admitted physical flue graph");
+        let size = [self.voice.geometry.flue_width_m, self.voice.geometry.cut_up_m];
+        let exterior = self.receiver.exterior_gas();
+        if self.voice.gas().pressure.to_bits() != exterior.pressure.to_bits() {
+            return Err(invalid("mouth and receiver static pressure differ; mean interface flow is not modeled"));
+        }
+        let inlet_node = network.graph().nodes.iter()
+            .position(|node| matches!(node, fs_vfit::waveguide::network::NetworkNode::Inlet))
+            .ok_or_else(|| invalid("mouth observation requires the original physical inlet"))?;
+        for port in &self.receiver.source().openings {
+            let section = network.graph().sections.iter().find(|s| s.nodes.contains(&port.node))
+                .expect("admitted degree-one terminal");
+            let dx = ((port.center_m[0] - input.center_m[0]).abs() - 0.5 * size[0]).max(0.0);
+            let dy = ((port.center_m[1] - input.center_m[1]).abs() - 0.5 * size[1]).max(0.0);
+            if !dx.is_finite() || !dy.is_finite() || dx.hypot(dy) < section.radius_m {
+                return Err(invalid("mouth rectangle and radiating terminal disks must not overlap"));
+            }
+        }
+        let geometry = RectangularOutletReceiver { center_m: input.center_m,
+            position_m: self.config.receiver.position_m, cells: input.cells,
+            maximum_frequency_hz: self.config.receiver.maximum_frequency_hz };
+        let receiver = match self.receiver.source().reconstruction {
+            DuctReconstruction::FiniteDifference { sample_rate_hz } =>
+                BaffledPressure::rectangular_outlet(size, sample_rate_hz, geometry, exterior.into()),
+            DuctReconstruction::Differentiating { mechanics_rate_hz, output_rate_hz } =>
+                BaffledPressure::rectangular_outlet_multirate_differentiating(size,
+                    mechanics_rate_hz, output_rate_hz, geometry, exterior.into()),
+        }.map_err(|e| GestureCompileError::Render(RenderError::Voice(AcousticRealizeError::Nonlinear(e))))?;
+        self.mouth = Some(MouthPressure { input, inlet_node, receiver,
+            trace: vec![0.0; self.mechanics_per_output], filled: 0 });
+        Ok(self)
     }
 
     /// Source mechanics, material gas mapping and internal diagnostics, read-only.
@@ -249,9 +341,23 @@ impl FlueOutletPerformance {
     /// Admitted physical receiver and finite output limits.
     #[must_use]
     pub const fn config(&self) -> &FlueOutletConfig { &self.config }
-    /// Original shared receiver, including physical and numerical delay metadata.
+    /// Terminal receiver, including physical and numerical delay metadata.
+    /// An attached mouth's separate contribution is exposed by `mouth_receiver`.
     #[must_use]
     pub const fn receiver(&self) -> &BaffledPressure { self.receiver.receiver() }
+    /// Actual rectangular mouth receiver, absent when only terminals are selected.
+    #[must_use]
+    pub fn mouth_receiver(&self) -> Option<&BaffledPressure> { self.mouth.as_ref().map(|m| &m.receiver) }
+    /// Original mouth geometry placement and surface resolution.
+    #[must_use]
+    pub fn mouth_radiation(&self) -> Option<FlueMouthRadiation> { self.mouth.as_ref().map(|m| m.input) }
+    /// Complete propagation FIR support for every selected physical source.
+    #[must_use]
+    pub fn propagation_delay_samples(&self) -> (usize, usize) {
+        let terminal = self.receiver().delay_samples;
+        self.mouth_receiver().map_or(terminal, |m|
+            (terminal.0.min(m.delay_samples.0), terminal.1.max(m.delay_samples.1)))
+    }
     /// Original explicit exterior/environment input, absent for the legacy path.
     #[must_use]
     pub const fn radiation_input(&self) -> Option<&FlueRadiationInput> { self.radiation.as_ref() }
@@ -284,6 +390,7 @@ impl FlueOutletPerformance {
             let until = self.controls.get(self.next).map_or(end, |c| c.sample.min(end));
             let count = (until - now) as usize;
             let receiver = &mut self.receiver;
+            let mouth = &mut self.mouth;
             let ceiling = self.config.maximum_abs_pressure_pa;
             let mut destinations = output[written..].iter_mut();
             self.voice.step_block_observed(&mut self.launched[..count], |line| {
@@ -291,7 +398,18 @@ impl FlueOutletPerformance {
                 let pressure = receiver.push_frame(|_, node| network.node_frame(node)
                     .map(|frame| frame.net_flow_into_node_m3_s))
                     .map_err(|e| FlueError::Physics(AcousticRealizeError::Nonlinear(e)))?;
+                let mouth_pressure = match mouth {
+                    Some(mouth) => {
+                        let contribution = mouth.push(network)?;
+                        if contribution.is_some() != pressure.is_some() {
+                            return Err(FlueError::Invalid { what: "mouth and terminal observation clocks disagree" });
+                        }
+                        contribution
+                    }
+                    None => None,
+                };
                 let Some(pressure) = pressure else { return Ok(()); };
+                let pressure = pressure + mouth_pressure.unwrap_or(0.0);
                 if !pressure.is_finite() || pressure.abs() > ceiling {
                     return Err(FlueError::Invalid { what: "flue microphone pressure exceeds its declared finite ceiling" });
                 }

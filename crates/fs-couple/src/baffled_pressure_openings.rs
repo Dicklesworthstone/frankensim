@@ -1,4 +1,4 @@
-//! Coplanar circular flow ports through the original Rayleigh pressure kernel.
+//! Coplanar circular and rectangular flow ports through the original Rayleigh kernel.
 //! Linear surface superposition retains signed flow, distance and phase, not
 //! a sum of magnitudes or separately normalized audio. All openings face +z.
 //! The geometry is an infinite rigid baffle, not an unbaffled instrument body.
@@ -19,7 +19,153 @@ pub struct CircularOpening {
     pub radius_m: f64,
 }
 
+#[cfg(test)]
+mod rectangular_tests {
+    use super::*;
+
+    fn gain(receiver: &BaffledPressure, frequency_hz: f64) -> f64 {
+        let omega = core::f64::consts::TAU * frequency_hz / receiver.rate;
+        let mut real = 0.0;
+        let mut imag = 0.0;
+        for (delay, weights) in &receiver.kernels {
+            real += weights[0] * (omega * *delay as f64).cos();
+            imag -= weights[0] * (omega * *delay as f64).sin();
+        }
+        real.hypot(imag)
+    }
+
+    #[test]
+    fn rectangular_flow_directivity_converges_to_the_independent_far_field_sinc_product() {
+        // Rayleigh rectangular piston, MIT 2.067 lectures 4–6, p.6:
+        // https://ocw.mit.edu/courses/2-067-advanced-structural-dynamics-and-acoustics-13-811-spring-2004/9b4456251e62368eb020ee03a8b017e2_lect_4_6.pdf
+        // The radiated pressure per dQ/dt is rho/(2*pi*r) times this sinc product.
+        let medium = RayleighMedium { density: 1.2, sound_speed: 343.0 };
+        let size = [0.08, 0.04];
+        let frequency = 3500.0;
+        let radius = 10.0;
+        let sinc = |x: f64| if x == 0.0 { 1.0 } else { x.sin()/x };
+        for (theta, phi) in [(0.3_f64, 0.4_f64), (1.0_f64, 0.2_f64)] {
+            let direction = [theta.sin()*phi.cos(), theta.sin()*phi.sin(), theta.cos()];
+            let wave_number = core::f64::consts::TAU * frequency / medium.sound_speed;
+            let exact = medium.density/(core::f64::consts::TAU*radius)
+                * sinc(0.5*wave_number*size[0]*direction[0])
+                * sinc(0.5*wave_number*size[1]*direction[1]);
+            let mut errors = Vec::new();
+            for cells in [8, 16, 32] {
+                let spec = RectangularOutletReceiver { center_m: [0.0; 2],
+                    position_m: direction.map(|d| radius*d), cells: [cells; 2],
+                    maximum_frequency_hz: frequency };
+                let receiver = BaffledPressure::rectangular_outlet_multirate_differentiating(
+                    size, 192_000, 192_000, spec, medium).unwrap();
+                errors.push((gain(&receiver, frequency)/exact - 1.0).abs());
+            }
+            assert!(errors[1] < errors[0] && errors[2] < errors[1], "{errors:?}");
+            assert!(errors[2] < 5e-4, "{errors:?}");
+        }
+    }
+
+    #[test]
+    fn rectangular_geometry_band_and_physical_density_are_not_hidden_gains() {
+        let medium = RayleighMedium { density: 1.2, sound_speed: 343.0 };
+        let spec = RectangularOutletReceiver { center_m: [-0.3, 0.0],
+            position_m: [0.0, 0.0, 1.0], cells: [4; 2], maximum_frequency_hz: 1000.0 };
+        let a = BaffledPressure::rectangular_outlet([0.01, 0.004], 48_000, spec, medium).unwrap();
+        let b = BaffledPressure::rectangular_outlet([0.01, 0.004], 48_000, spec,
+            RayleighMedium { density: 2.4, ..medium }).unwrap();
+        assert_eq!(gain(&b, 1000.0), 2.0*gain(&a, 1000.0));
+        assert_eq!(a.delay_samples, b.delay_samples);
+        for refused in [RectangularOutletReceiver { cells: [0, 4], ..spec },
+            RectangularOutletReceiver { cells: [512, 512], ..spec },
+            RectangularOutletReceiver { maximum_frequency_hz: 4801.0, ..spec },
+            RectangularOutletReceiver { center_m: [f64::NAN, 0.0], ..spec }] {
+            assert!(BaffledPressure::rectangular_outlet([0.01, 0.004], 48_000, refused, medium).is_err());
+        }
+        assert!(BaffledPressure::rectangular_outlet([0.0, 0.004], 48_000, spec, medium).is_err());
+        assert!(BaffledPressure::rectangular_outlet([1.0, 0.004], 48_000, spec, medium).is_err());
+    }
+}
+
+/// Geometry and numerical resolution for a uniform rectangular flow aperture.
+/// Its edges follow x/y in the same stationary z=0 rigid baffle as disk outlets.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RectangularOutletReceiver {
+    /// Aperture center [m] in the shared baffle plane.
+    pub center_m: [f64; 2],
+    /// Receiver position [m] in that same frame.
+    pub position_m: [f64; 3],
+    /// Positive midpoint quadrature counts along width and height, each <= 512.
+    pub cells: [usize; 2],
+    /// Resolved physical band [Hz], with the same temporal limits as disks.
+    pub maximum_frequency_hz: f64,
+}
+
 impl BaffledPressure {
+    /// Observe total outward volume flow through an actual rectangular aperture.
+    /// Area-normalized velocity shapes retain the rectangle's directivity and
+    /// travel-time differences; no equivalent circular radius or compact gain.
+    /// The source is unchanged and no reaction impedance is added.
+    pub fn rectangular_outlet(size_m: [f64; 2], rate: u32,
+        receiver: RectangularOutletReceiver, medium: RayleighMedium) -> Result<Self, String>
+    {
+        if receiver.maximum_frequency_hz > 0.1 * f64::from(rate) {
+            return Err("rectangular receiver band exceeds its finite-difference clock".into());
+        }
+        let surface = Self::rectangular_surface(size_m, receiver, medium)?;
+        Self::new(&surface, 1, rate, receiver.position_m, medium)
+    }
+
+    /// The same physical rectangle with the shared differentiator, antialias
+    /// stages and causal travel-time kernel. Every mechanics-frame flow enters
+    /// `step_trace`; numerical latency is identical to the disk image's.
+    pub fn rectangular_outlet_multirate_differentiating(size_m: [f64; 2],
+        mechanics_rate: u32, output_rate: u32, receiver: RectangularOutletReceiver,
+        medium: RayleighMedium) -> Result<Self, String>
+    {
+        Self::opening_clock_ratio(mechanics_rate, output_rate)?;
+        if receiver.maximum_frequency_hz > 0.45 * f64::from(output_rate) {
+            return Err("rectangular receiver band exceeds its differentiating output clock".into());
+        }
+        let surface = Self::rectangular_surface(size_m, receiver, medium)?;
+        Self::new_multirate_differentiating(&surface, 1, mechanics_rate,
+            output_rate, receiver.position_m, medium)
+    }
+
+    fn rectangular_surface(size_m: [f64; 2], receiver: RectangularOutletReceiver,
+        medium: RayleighMedium) -> Result<Vec<super::SurfaceSample>, String>
+    {
+        let points = receiver.cells[0].checked_mul(receiver.cells[1]);
+        if size_m.iter().any(|x| !x.is_finite() || *x <= 0.0)
+            || receiver.center_m.iter().any(|x| !x.is_finite())
+            || receiver.cells.iter().any(|n| !(1..=512).contains(n))
+            || points.is_none_or(|n| n > 120_000)
+            || !receiver.maximum_frequency_hz.is_finite() || receiver.maximum_frequency_hz <= 0.0
+            || !medium.sound_speed.is_finite() || medium.sound_speed <= 0.0 {
+            return Err("rectangular receiver requires physical geometry and bounded resolution".into());
+        }
+        let area = size_m[0] * size_m[1];
+        let dx = size_m[0] / receiver.cells[0] as f64;
+        let dy = size_m[1] / receiver.cells[1] as f64;
+        let phase = core::f64::consts::TAU * receiver.maximum_frequency_hz
+            * fs_math::det::sqrt(dx * dx + dy * dy) / medium.sound_speed;
+        if !area.is_finite() || area <= 0.0 || !(1.0 / area).is_finite()
+            || !phase.is_finite() || phase > core::f64::consts::FRAC_PI_4 {
+            return Err("rectangular area is unrepresentable or quadrature underresolves the acoustic band".into());
+        }
+        let points = points.expect("bounded quadrature");
+        let mut surface = Vec::with_capacity(points);
+        for y in 0..receiver.cells[1] {
+            for x in 0..receiver.cells[0] {
+                surface.push(super::SurfaceSample {
+                    position_m: [receiver.center_m[0] + (x as f64 + 0.5) * dx - 0.5 * size_m[0],
+                        receiver.center_m[1] + (y as f64 + 0.5) * dy - 0.5 * size_m[1], 0.0],
+                    area_m2: area / points as f64,
+                    mode_shape: vec![1.0 / area],
+                });
+            }
+        }
+        Ok(surface)
+    }
+
     /// Prepare multiple flow inputs using the EXISTING circular surface rule.
     /// Each disk is translated into its local frame for cold construction, then
     /// its exact delay coefficients become one column of a single shared FIR.
