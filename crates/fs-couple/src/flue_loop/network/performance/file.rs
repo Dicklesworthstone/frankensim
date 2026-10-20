@@ -180,7 +180,11 @@ impl FlueFilePerformance {
     /// boundary_loss maxwell COUNT FMIN_HZ FMAX_HZ MAX_DT_OVER_TAU MAX_ANGULAR_STEP
     /// boundary_term MODULUS_PROPERTY TIME_PROPERTY
     /// ```
-    /// `boundary_loss elastic` instead selects an explicit lossless solid. The
+    /// `boundary_loss elastic` instead selects an explicit lossless solid.
+    /// `boundary_loss kelvin-voigt` selects `kelvin_voigt_bending_viscosity`
+    /// [Pa s] from the same card/query and projects it on the retained plate
+    /// mode. This selection is exclusive with Maxwell memory, and even zero
+    /// viscosity retains its source applicability checks. The
     /// `boundary_slit` row is optional; `none` selects the original separated
     /// Bernoulli flow. A supplied streamwise length adds the existing slit law
     /// using the actual chimney gas's viscosity and density. NX/NY are rectangle
@@ -192,7 +196,7 @@ impl FlueFilePerformance {
     /// The finite exact structural block carries the original material memories.
     /// Every selected solid property must be constant at the declared temperature
     /// and applicable over the Maxwell use band, or the mode search band for an
-    /// elastic solid. A sampled frequency-dependent modulus is not silently frozen.
+    /// elastic or Kelvin-Voigt solid. A sampled frequency-dependent modulus is not silently frozen.
     ///
     /// [`boundary_closing_force_path`] derives the exact part identity and force
     /// dimensions from ASSEMBLY_NAME/PART_NAME. A canonical v2 `Parameter` track

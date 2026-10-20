@@ -91,6 +91,96 @@ fn key(source: &ScheduledTwoSidedPressure) -> &crate::bernoulli_aperture::dynami
         .unwrap()
 }
 
+fn key_loss_pack(eta: f64, upper: f64) -> NormalizedMaterialCardPack {
+    let source = pack(900.0, false);
+    let mut claims = source.card().claims().clone();
+    let observations = claims.claims_for("density")[0].1.observations.clone();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new(
+            crate::string_specimen::KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
+            DynViscosity::DIMS,
+        ),
+        value: PropertyValue::Scalar { value: eta, dims: DynViscosity::DIMS },
+        validity: ValidityDomain::unconstrained()
+            .with("T", 290.0, 300.0).with("omega", 0.0, upper),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::ConstantWithinValidity,
+        provenance: Provenance { source: "manufactured material-key viscosity".into(),
+            license: "CC0-1.0".into(), artifact: None },
+        observations,
+    }).unwrap();
+    let normalized = NormalizedPack::new("synthetic-key", "synthetic-v1",
+        hash_domain("org.frankensim.test.material-key", &eta.to_le_bytes()),
+        "CC0-1.0", claims, vec![], vec![]).unwrap();
+    NormalizedMaterialCardPack::new(source.card().id().clone(), normalized).unwrap()
+}
+
+fn load_key_loss(text: &str, eta: f64, upper: f64)
+    -> Result<MaterialModalValvePerformance, PlateValveInputError>
+{
+    MaterialModalValvePerformance::from_bytes_with_sources(text.as_bytes(), 37,
+        &CancelGate::new_clock_free(), None, |path| Ok(if path == "key.matpack" {
+            key_loss_pack(eta, upper)
+        } else { pack(900.0, false) }))
+}
+
+#[test]
+fn material_key_viscosity_reaches_the_original_plate_and_rendered_pressure() {
+    let text = keyed(true).replace("boundary_loss elastic", "boundary_loss kelvin-voigt");
+    let low = load_key_loss(&text, 2e5, 100000.0).unwrap();
+    let high = load_key_loss(&text, 8e5, 100000.0).unwrap();
+    // Only the key's original material property changes. Reed modes, gas,
+    // geometry and every authored force/pressure sample remain identical.
+    assert_eq!(valve(&low).spec(), valve(&high).spec());
+    assert_eq!(valve(&low).viscosity_matrix_n_s_m(), valve(&high).viscosity_matrix_n_s_m());
+    for (source, eta) in [(&low, 2e5), (&high, 8e5)] {
+        let aperture = key(source.renderer());
+        let plate = aperture.plate_reduction().unwrap();
+        let chart = plate.material_chart().unwrap();
+        let material = &chart.regions()[0].input.material;
+        let law = &chart.bending_viscosity().unwrap()[0];
+        assert_eq!(material.card_identity(), source.boundary_records()[0].1.pack().card().content_hash());
+        assert_eq!(material.query_point(), &[("T".into(), 293.15), ("omega".into(), 1000.0)]);
+        assert_eq!(law.material_state_identity, Some(material.identity()));
+        assert_eq!(law.viscosity_pa_s, eta);
+        assert_eq!(plate.options().damping_ratio, 0.0);
+        assert_eq!(aperture.spec().damping_ratio, plate.damping_ratio());
+        assert!(plate.damping_ratio() > 0.0);
+        assert!(aperture.relaxation().is_none());
+    }
+    let a = key(low.renderer()).plate_reduction().unwrap();
+    let b = key(high.renderer()).plate_reduction().unwrap();
+    assert_eq!((a.mass_kg(), a.stiffness_n_m(), a.pressure_area_m2()),
+        (b.mass_kg(), b.stiffness_n_m(), b.pressure_area_m2()));
+    assert!((b.damping_ratio() / a.damping_ratio() - 4.0).abs() < 1e-12);
+    let (pa, state_a) = render(low);
+    let (pb, state_b) = render(high);
+    assert!(pa.iter().chain(&pb).all(|p| p.is_finite()));
+    assert!(pa.iter().zip(&pb).any(|(a, b)| (a - b).abs() > 1e-15));
+    assert_ne!(key(&state_a).state(), key(&state_b).state());
+    assert_eq!(key(&state_a).accepted_steps(), 512 * 16);
+    assert_eq!(key(&state_b).accepted_steps(), 512 * 16);
+}
+
+#[test]
+fn explicit_key_viscosity_preserves_zero_loss_and_refuses_missing_or_invalid_source() {
+    let elastic = keyed(true);
+    let selected = elastic.replace("boundary_loss elastic", "boundary_loss kelvin-voigt");
+    let zero = load_key_loss(&selected, 0.0, 100000.0).unwrap();
+    assert!(key(zero.renderer()).plate_reduction().unwrap().material_chart().unwrap()
+        .bending_viscosity().is_some());
+    assert_eq!(render(zero).0, render(load_key_loss(&elastic, 0.0, 100000.0).unwrap()).0);
+    let missing = MaterialModalValvePerformance::from_bytes_with_sources(selected.as_bytes(), 37,
+        &CancelGate::new_clock_free(), None, |_| Ok(pack(900.0, false)));
+    assert!(matches!(missing, Err(PlateValveInputError::Material { .. })));
+    assert!(load_key_loss(&selected, -1.0, 100000.0).is_err());
+    // The source query (1000 rad/s) is admitted, but its declared validity
+    // does not cover the original 0..600 Hz mode search band.
+    assert!(load_key_loss(&selected, 0.0, 3000.0).is_err());
+    assert!(load_key_loss(&selected.replace("boundary_loss kelvin-voigt",
+        "boundary_loss kelvin-voigt maxwell"), 2e5, 100000.0).is_err());
+}
+
 #[test]
 fn physical_material_keys_and_subframe_force_events_reach_the_original_modal_microphone() {
     let text = keyed(true);

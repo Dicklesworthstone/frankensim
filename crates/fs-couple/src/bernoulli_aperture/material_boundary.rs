@@ -1,6 +1,6 @@
 //! Material-derived cantilever slits at retained chimney endpoints.
 //! Geometry and source cards enter existing DKT, exact aperture, contact and
-//! Maxwell owners. This adapter neither fits a frequency nor switches a load.
+//! Kelvin-Voigt and Maxwell owners. This adapter neither fits a frequency nor switches a load.
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::dynamic::relaxation::{
     InitialApertureMemory, PlateRelaxationRegion, PlateRelaxationSpec,
@@ -12,6 +12,7 @@ use crate::bernoulli_aperture::network::{
 use crate::bernoulli_aperture::paired::BladePropagator;
 use crate::bernoulli_aperture::plate::{PlateApertureOptions, PlateApertureReduction};
 use crate::bernoulli_aperture::viscous::ViscousSlit;
+use crate::string_specimen::KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY;
 use crate::thin_plate::{
     PlateMaterialModel, PlateRegionMaterial, PlateThicknessConstraint, compile_plate_material_chart,
 };
@@ -25,7 +26,7 @@ use fs_material::state_point::{
 };
 use fs_material::visco::GeneralizedMaxwell;
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateRegion, SliceOptions};
-use fs_qty::{Density, Dims, Pressure};
+use fs_qty::{Density, Dims, DynViscosity, Pressure};
 use fs_scenario::assembly::{ParameterKey, ParameterPath};
 use fs_scenario::entity::EntityDeclaration;
 use std::{
@@ -78,6 +79,11 @@ struct MaxwellInput {
     max_dt_over_tau: f64,
     max_angular_step: f64,
 }
+enum LossInput {
+    Elastic,
+    KelvinVoigt,
+    Maxwell(MaxwellInput),
+}
 struct Input {
     node: usize,
     line: usize,
@@ -100,7 +106,7 @@ struct Input {
     slope: f64,
     contact: (f64, f64, f64),
     slit_length: Option<f64>,
-    maxwell: Option<MaxwellInput>,
+    loss: LossInput,
 }
 pub(crate) struct ParsedBoundaries(Vec<Input>);
 fn word(row: &mut Row<'_>) -> Result<String, MaterialBoundaryError> {
@@ -235,10 +241,14 @@ impl ParsedBoundaries {
                 None
             };
             let mut row = rows.row("boundary_loss")?;
-            let maxwell = match row.fields.next() {
+            let loss = match row.fields.next() {
                 Some("elastic") => {
                     row.end()?;
-                    None
+                    LossInput::Elastic
+                }
+                Some("kelvin-voigt") => {
+                    row.end()?;
+                    LossInput::KelvinVoigt
                 }
                 Some("maxwell") => {
                     let terms: usize = row.number()?;
@@ -255,7 +265,7 @@ impl ParsedBoundaries {
                         properties.push((word(&mut row)?, word(&mut row)?));
                         row.end()?;
                     }
-                    Some(MaxwellInput {
+                    LossInput::Maxwell(MaxwellInput {
                         properties,
                         band,
                         max_dt_over_tau,
@@ -265,7 +275,7 @@ impl ParsedBoundaries {
                 _ => {
                     return Err(bad(
                         rows.line,
-                        "boundary_loss needs elastic or explicit material Maxwell terms",
+                        "boundary_loss needs elastic, kelvin-voigt or explicit material Maxwell terms",
                     ));
                 }
             };
@@ -291,7 +301,7 @@ impl ParsedBoundaries {
                 slope,
                 contact,
                 slit_length,
-                maxwell,
+                loss,
             });
         }
         Ok(Self(inputs))
@@ -365,7 +375,14 @@ impl ParsedBoundaries {
                         },
                     )?,
                 ];
-                if let Some(maxwell) = &input.maxwell {
+                if matches!(&input.loss, LossInput::KelvinVoigt) {
+                    requirements.push(Requirement::try_new(
+                        KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
+                        DynViscosity::DIMS,
+                        Admit::NonNegative,
+                    )?);
+                }
+                if let LossInput::Maxwell(maxwell) = &input.loss {
                     for (modulus, time) in &maxwell.properties {
                         requirements.push(Requirement::try_new(
                             modulus,
@@ -390,10 +407,10 @@ impl ParsedBoundaries {
                 line: input.line,
                 source,
             })?;
-            let use_band = input
-                .maxwell
-                .as_ref()
-                .map_or(input.band, |maxwell| maxwell.band);
+            let use_band = match &input.loss {
+                LossInput::Maxwell(maxwell) => maxwell.band,
+                _ => input.band,
+            };
             if use_band.0 < 0.0 || use_band.1 <= use_band.0 {
                 return Err(bad(
                     input.line,
@@ -430,7 +447,7 @@ impl ParsedBoundaries {
                 })
                 .collect();
             let triangles: Vec<_> = (0..mesh.tris.len()).collect();
-            let relaxation = if let Some(maxwell) = input.maxwell {
+            let relaxation = if let LossInput::Maxwell(maxwell) = &input.loss {
                 let terms = maxwell
                     .properties
                     .iter()
@@ -492,6 +509,11 @@ impl ParsedBoundaries {
                 }],
             )
             .map_err(physical)?;
+            let chart = if matches!(&input.loss, LossInput::KelvinVoigt) {
+                chart.with_kelvin_voigt_bending_loss().map_err(physical)?
+            } else {
+                chart
+            };
             let plate = PlateApertureReduction::from_material_chart(
                 chart,
                 PlateApertureOptions {

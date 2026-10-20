@@ -277,10 +277,17 @@ force in newtons and exterior reservoir pressure in pascals. The plate fields
 are original material pack, solid temperature, source angular frequency,
 length/width/thickness in metres, mesh intervals, rest gap, initial gap and
 opening velocity. The material card supplies density, Young's modulus and
-Poisson ratio. Optional `boundary_loss maxwell COUNT MIN_HZ MAX_HZ
+Poisson ratio. `boundary_loss kelvin-voigt` also selects the card's
+`kelvin_voigt_bending_viscosity` [Pa s] at the same solid temperature and query
+frequency. The existing plate owner projects that loss on the retained mode;
+all selected properties must cover the mode search band. Changing only this
+material property changes key motion and coupled pressure without retuning
+mass, stiffness or authored damping. Zero viscosity remains an explicit
+source-bound loss selection. `boundary_loss maxwell COUNT MIN_HZ MAX_HZ
 MAX_DT_OVER_TAU MAX_ANGULAR_STEP` plus `boundary_term MODULUS_PROPERTY
 TIME_PROPERTY` records select the same material Maxwell histories as flute
-keys. `boundary_slit LENGTH_M` selects the actual chimney gas's viscosity;
+keys. These solid-loss selections are mutually exclusive; `boundary_loss elastic`
+retains lossless bending. `boundary_slit LENGTH_M` selects the actual chimney gas's viscosity;
 `boundary_slit none` or omission keeps inviscid gap flow.
 
 All blades and keys use one cached material loader, with one 64 MiB aggregate

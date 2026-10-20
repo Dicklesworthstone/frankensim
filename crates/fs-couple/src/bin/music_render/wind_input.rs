@@ -140,8 +140,14 @@ fn material_boundary_record(
     drive: &fs_couple::bernoulli_aperture::network::boundaries::BoundaryDrive,
 ) -> String {
         let plate = aperture.plate_reduction().expect("source-bound plate");
-        let material = &plate.material_chart().expect("retained material chart").regions()[0].input.material;
+        let chart = plate.material_chart().expect("retained material chart");
+        let material = &chart.regions()[0].input.material;
         let spec = aperture.spec();
+        let loss = if chart.bending_viscosity().is_some() { "kelvin-voigt" }
+            else if aperture.relaxation().is_some() { "maxwell" } else { "elastic" };
+        let bending_viscosity = chart.bending_viscosity().map_or_else(|| "null".into(), |laws|
+            format!("{{\"viscosity_pa_s\":{:e},\"omega_band_rad_s\":[{:e},{:e}]}}",
+                laws[0].viscosity_pa_s, laws[0].omega_band_rad_s.0, laws[0].omega_band_rad_s.1));
         let terms = aperture.relaxation().map_or_else(String::new, |memory|
             memory.spec().regions[0].material.terms.iter().map(|(modulus, time)|
                 format!("{{\"modulus_pa\":{modulus:e},\"relaxation_time_s\":{time:e}}}"))
@@ -149,12 +155,13 @@ fn material_boundary_record(
         let slit = aperture.viscous_slit().map_or_else(|| "null".into(), |law|
             format!("{{\"length_m\":{:e},\"dynamic_viscosity_pa_s\":{:e},\"source\":\"local-chimney-gas\"}}",
                 law.length_m(), law.dynamic_viscosity_pa_s()));
-        format!("{{\"node\":{},\"model\":\"material-cantilever-slit-v1\",\"propagator\":\"exact-zoh\",\"pack_path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"resolved_state_hash\":\"{}\",\"force_entity\":{},\"force_parameter\":\"closing_force\",\"force_dimensions\":[1,1,-2,0,0,0],\"initial_closing_force_n\":{:e},\"exterior_pressure_pa\":{:e},\"mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"slit_width_m\":{:e},\"rest_gap_m\":{:e},\"local_density_kg_m3\":{:e},\"local_impedance_pa_s_m3\":{:e},\"maxwell_terms\":[{terms}],\"viscous_slit\":{slit}}}",
+        format!("{{\"node\":{},\"model\":\"material-cantilever-slit-v1\",\"propagator\":\"exact-zoh\",\"pack_path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"resolved_state_hash\":\"{}\",\"force_entity\":{},\"force_parameter\":\"closing_force\",\"force_dimensions\":[1,1,-2,0,0,0],\"initial_closing_force_n\":{:e},\"exterior_pressure_pa\":{:e},\"mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"slit_width_m\":{:e},\"rest_gap_m\":{:e},\"local_density_kg_m3\":{:e},\"local_impedance_pa_s_m3\":{:e},\"material_loss\":\"{loss}\",\"damping_ratio\":{:e},\"bending_viscosity\":{bending_viscosity},\"maxwell_terms\":[{terms}],\"viscous_slit\":{slit}}}",
             record.node(), json_string(record.path()), record.pack().content_hash().to_hex(),
             material.card_identity().to_hex(), material.identity().to_hex(),
             json_string(&record.closing_force().entity.token()), -drive.opening_force_n,
             drive.exterior_pressure_pa, spec.mass_kg, spec.stiffness_n_m, plate.pressure_area_m2(),
-            plate.width_m(), spec.aperture.rest_opening_m, spec.density_kg_m3, spec.impedance_pa_s_m3)
+            plate.width_m(), spec.aperture.rest_opening_m, spec.density_kg_m3, spec.impedance_pa_s_m3,
+            spec.damping_ratio)
 }
 
 fn moving_boundary_provenance(records: &str) -> String {
