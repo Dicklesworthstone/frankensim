@@ -79,6 +79,9 @@ Bead frankensim-fsim-vibration-eig-jw6yq.
    reorthogonalization order, `total_cmp` sorts (tested).
 
 ## Error model
+The certified-damping paths refuse with `DampingInput`,
+`DampingNotUnderdamped`, `DampingClusterTooLarge` (naming the cluster) and
+`DampingBlockSpansWindow`; they never fall back to a default budget.
 Structural misuse (wrong slice lengths in the dense/quadratic paths) panics
 with structured messages — programmer errors. Everything else refuses
 through `ModalError`. Window endpoints that graze an eigenvalue make
@@ -134,6 +137,46 @@ nonempty counted windows with all relative half-widths <=1e-8 inside their
 declared payload budget. P1/TET10 fill is separately reported. These native
 scale/timing, 1/2/7-worker identity and wasm gates are batch-pending.
 
+## Certified modal damping (IRP M0.2-W5)
+`certify_modal_damping(omega, C, budget)` takes mass-normalized modes with
+undamped frequencies `omega` [rad/s] and a dense symmetric modal damping
+matrix `C` [1/s]. It decides which modes may keep one energy-quotient decay
+rate (`ModalDampingBlock::Diagonal`, `ζ_i = C_ii/(2ω_i)`) and which must be
+integrated as a full block (`Full`).
+
+The certificate is Rouché's theorem on the Schur complement of
+`Q(λ) = λ²I + λC + Ω²`. The derivation is in `src/damping.rs`.
+- A diagonal radius is second order in the off-diagonal coupling.
+- A block's poles come from a dense solve of its energy-coordinate matrix
+  and are certified against the complement (Gohberg–Sigal).
+- Modes whose radius breaks the budget merge with their strongest coupling
+  partner, union–find style.
+- Certified discs lie in the open upper half-plane and are pairwise
+  disjoint. Their counts therefore sum to n: every pole is enclosed exactly
+  once.
+- `ModalDampingBudget` has no default. Its decay and cents tolerances must be
+  finite and positive, and the cluster cap must lie in
+  `1..=MAX_DAMPING_CLUSTER` (64, the connection ceiling).
+
+`certify_modal_damping_windowed` never forms C.
+- It reads `C_jk` only for `|ω_j − ω_k| < window`.
+- It bounds each row's unread entries with Bessel's inequality from a
+  caller-supplied column-norm bound. For FE callers that bound is
+  `√(xᵀM⁻¹x)`, `x = C_FE φ̂_j`.
+- `FarCouplingBound` reports the bounds used.
+
+Comparisons carry `ROUCHE_SAFETY = 1e-9` relative; this is not interval
+arithmetic.
+- Singleton centres are closed-form roots. Their rounding bound `2εν` enters
+  every disc.
+- Block roots are seeded by fs-la's dense complex QR, which can be ~1e-12
+  relative off. They are refined by inverse iteration and the two-sided
+  Rayleigh functional, and carry 8× their first-order forward-error
+  estimate.
+
+The certifier adds no projection: plates pass
+`ModalPlateViscosity::matrix_per_s()`.
+
 ## Unsafe boundary
 None. `#![deny(unsafe_code)]` via workspace lints; no capsules.
 
@@ -151,6 +194,24 @@ starved-budget `WindowUnresolved` (the count-certificate mutation gate:
 a harvester that misses modes cannot return success); invalid and empty
 windows; matrix-free core vs assembled path; quadratic light-damping roots
 vs exact per-mode formulas; bitwise rerun determinism.
+`tests/certified_modal_damping.rs` (W5) tests the certificate against
+refined dense truth. That truth is `quadratic_eigenvalues`, refined by
+inverse iteration and the two-sided Rayleigh functional; the raw values move
+up to ~1e-12 relative.
+- **G0, 4096 seeded random PSD systems** (n 4..48, ζ 1e-4..5e-2, coupling
+  strength 1e-4..1, 25 % with a planted 1e-4 pair): zero enclosure
+  violations, with the maximum and median enclosure ratios reported.
+- **G0 Rouché order:** radius order 2 ± 0.2 under off-diagonal halving.
+- **G1:** a clustered pair forms a full block within budget, and forcing the
+  diagonal breaks the decay budget (reported).
+- **G0 cap and inputs:** the 64/65 cluster cap, and refusal of every budget,
+  frequency and matrix input.
+- **G0 Bessel:** the far bound dominates the true far norm and falls to its
+  √ε floor on a complete space.
+- **G0 windowed:** windowed certificates enclose dense truth.
+
+The plate's own matrix is tested in
+`fs-couple::thin_plate::material_loss::ports::tensor_tests`.
 `tests/modal_casebook.rs`: a 100,489-DoF grid pencil sliced over two
 windows (one spanning degenerate pairs), counts certified against BOTH
 inertia and the analytic spectrum, JSON-line evidence rows (shift,
@@ -160,6 +221,18 @@ cross-check on the dense strategy (deterministic seeded fixture, 1e-9
 agreement gate).
 
 ## No-claim boundaries
+- Certified damping covers lightly damped (underdamped) modes only. A real
+  pole refuses, and so does a non-PSD diagonal. The radii are floating-point
+  certificates with a stated margin, not interval arithmetic. A block pole's
+  allowance is a first-order a-posteriori estimate, not an enclosure, so an
+  ill-conditioned (near-defective) block can break it.
+- Only material damping is certified. Radiation and thermoelastic losses
+  remain separate owners. Prony/frequency-dependent `C(λ)` branches are not
+  implemented here.
+- The Bessel far bound has an inherent √ε relative floor (a difference of
+  squares), so a "vanishing" far norm is reported as ~1e-7, not 1e-10. The
+  windowed path's per-mode cost is O(n) scans plus local Perron bounds. No
+  wall-time claim is made for 10⁴ modes, which is untested.
 - SPD M is REQUIRED; semidefinite or indefinite mass (free-free with a
   singular lumped mass, constraint-coupled formulations) is refused, not
   approximated. Buckling-style pencils (K, −K_G) are not this API.

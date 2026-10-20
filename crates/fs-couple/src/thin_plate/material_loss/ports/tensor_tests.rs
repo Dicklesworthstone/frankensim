@@ -390,3 +390,202 @@ fn cold_rebind_requires_new_source_tensors_and_never_discards_an_existing_loss()
     b.reduction.damping_ratio=0.0;gate.request();
     assert!(b.specimen.certified_viscous_radiators(&b.reduction,&replacement,limits(),&gate).is_err());
 }
+
+// IRP M0.2-W5: certified modal damping on the plate's own projected matrix.
+// No new projection: `matrix_per_s()` is the reference, and fs-modal decides
+// which modes keep one decay rate and which need a full block.
+
+/// Isotropic state whose six reduced viscosities are `beta` [s] times its own
+/// plane-stress stiffness, so the projected damping is exactly `beta*K`.
+fn isotropic_state(beta: f64) -> ResolvedMaterialStatePoint {
+    let (e, nu) = (8e9, 0.2);
+    let q11 = e / (1.0 - nu * nu);
+    let g = e / (2.0 * (1.0 + nu));
+    let mut values = vec![("density",Density::DIMS,600.0),("young_modulus",Pressure::DIMS,e),
+        ("young_modulus_1",Pressure::DIMS,e),("young_modulus_2",Pressure::DIMS,e),
+        ("poisson_ratio",Dims::NONE,nu),("poisson_ratio_12",Dims::NONE,nu),
+        ("shear_modulus_12",Pressure::DIMS,g),
+        (KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,DynViscosity::DIMS,10.0)];
+    for (key,value) in KEYS.into_iter().zip([q11,q11,g,nu*q11,0.0,0.0]) {
+        values.push((key,DynViscosity::DIMS,beta*value));
+    }
+    let mut claims=ClaimSet::new();let mut requirements=Vec::new();
+    for (key,dims,value) in values {
+        claims.insert_claim(PropertyClaim { key:PropertyKey::new(key,dims),
+            value:PropertyValue::Scalar {value,dims},
+            validity:ValidityDomain::unconstrained().with("T",280.0,310.0).with("omega",0.0,100000.0),
+            uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::ConstantWithinValidity,
+            observations:vec![],provenance:Provenance {source:"synthetic isotropic viscous body; not a measured material".into(),
+                license:"CC0-1.0".into(),artifact:None}}).unwrap();
+        requirements.push(ScalarPropertyRequirement::try_new(key,dims,ScalarAdmissibility::Finite).unwrap());
+    }
+    let card=MaterialCard::assemble(MaterialStateId {chemistry:"synthetic".into(),phase:"solid".into(),
+        process:"certified damping test".into(),revision:0},claims,vec![]).unwrap();
+    resolve_material_state_point(&card,&QueryPoint::new().with("T",293.15).unwrap()
+        .with("omega",1000.0).unwrap(),&requirements,MaterialPropertySelection::SingleClaimOnly).unwrap()
+}
+
+/// A simply supported 0.3 m x 0.3*aspect m plate on a 6x6 right-triangle
+/// mesh, which is mirror-symmetric about y = x when square. The lower-left
+/// quadrant and the rest carry their own viscosity times `beta`. A quadrant,
+/// unlike a left/right split, couples (2,1) with (1,2): their y-shapes are
+/// orthogonal over any region spanning all of y.
+fn two_region_plate(beta_corner: f64, beta_rest: f64, aspect: f64) -> (Vec<f64>, Vec<f64>) {
+    let (nx, ny) = (6, 6);
+    let (a, b) = (0.3, 0.3 * aspect);
+    let mesh = PlateMesh::rectangle(a, b, nx, ny);
+    let regions = [("corner", beta_corner), ("rest", beta_rest)].into_iter().enumerate()
+        .map(|(r, (name, beta))| PlateRegionMaterial {
+            region: PlateRegion { name: name.into(), triangle_indices: mesh.tris.iter().enumerate()
+                .filter_map(|(e, t)| {
+                    let x = t.iter().map(|&i| mesh.nodes[i].0).sum::<f64>() / 3.0;
+                    let y = t.iter().map(|&i| mesh.nodes[i].1).sum::<f64>() / 3.0;
+                    let corner = x < 0.5 * a && y < 0.5 * b;
+                    (corner == (r == 0)).then_some(e)
+                }).collect() },
+            material: isotropic_state(beta), model: PlateMaterialModel::Orthotropic12,
+            thickness_constraint: PlateThicknessConstraint::FixedThickness(0.002),
+            material_angle_rad: 0.0,
+        }).collect();
+    // Node (2,2): off every nodal line of the four lowest modes.
+    let mut force = vec![0.0; mesh.nodes.len()];
+    force[2 * (nx + 1) + 2] = 1.0;
+    let chart = compile_plate_material_chart(mesh, PlateMesh::rectangle_boundary(nx, ny), regions).unwrap();
+    let reduction = PlateChartRadiation {
+        assembly: AssemblyOptions { pretension: 0.0, support: EdgeSupport::SimplySupported },
+        eigenvalue_window: (1.0, 1e8), n_modes: 4, damping_ratio: 0.0, unit_force_weights: force,
+    };
+    let gate = CancelGate::new_clock_free();
+    let viscosity = PlateViscosity::from_chart(&chart, KEYS, &gate).unwrap();
+    let image = chart.certified_viscous_radiators(&reduction, &viscosity, limits(), &gate).unwrap();
+    let omega = image.radiators().iter().map(|r| r.omega).collect();
+    (omega, image.damping().matrix_per_s().to_vec())
+}
+
+/// One pole of `lambda^2 I + lambda C + Omega^2`, refined from a dense seed by
+/// inverse iteration and the root of `x^T Q(lambda) x` (Q is complex
+/// symmetric). Raw `quadratic_eigenvalues` can sit ~1e-8 relative off.
+fn refined_pole(omega: &[f64], c: &[f64], seed: C64) -> C64 {
+    let n = omega.len();
+    let (mut lambda, mut x) = (seed, vec![C64::ONE; n]);
+    for _ in 0..8 {
+        let mut q = vec![C64::ZERO; n * n];
+        for i in 0..n {
+            for j in 0..n { q[n * i + j] = lambda * C64::from_re(c[n * i + j]); }
+            q[n * i + i] = q[n * i + i] + lambda * lambda + C64::from_re(omega[i] * omega[i]);
+        }
+        let Ok(lu) = fs_la::eigen_complex::lu_complex(&q, n) else { break };
+        lu.solve(&mut x);
+        let scale = x.iter().map(|v| v.abs()).fold(0.0, f64::max);
+        for v in &mut x { *v = v.scale(1.0 / scale); }
+        let (mut a2, mut a1, mut a0) = (C64::ZERO, C64::ZERO, C64::ZERO);
+        for i in 0..n {
+            a2 = a2 + x[i] * x[i];
+            a0 = a0 + x[i] * x[i] * C64::from_re(omega[i] * omega[i]);
+            for j in 0..n { a1 = a1 + x[i] * C64::from_re(c[n * i + j]) * x[j]; }
+        }
+        let root = (a1 * a1 - C64::from_re(4.0) * a2 * a0).sqrt();
+        let two = C64::from_re(2.0) * a2;
+        let (r1, r2) = ((C64::ZERO - a1 + root) / two, (C64::ZERO - a1 - root) / two);
+        let next = if (r1 - lambda).abs() <= (r2 - lambda).abs() { r1 } else { r2 };
+        let step = (next - lambda).abs();
+        lambda = next;
+        if !(step > 4.0 * f64::EPSILON * lambda.abs()) { break; }
+    }
+    lambda
+}
+
+fn damping_budget() -> fs_modal::ModalDampingBudget {
+    fs_modal::ModalDampingBudget { max_rel_decay_error: 1e-3, max_freq_error_cents: 0.01,
+        max_cluster_size: fs_modal::MAX_DAMPING_CLUSTER }
+}
+
+#[test]
+fn g1_proportional_plate_is_all_diagonal_and_matches_energy_quotient() {
+    // zeta ~ 5e-3..2e-2: the certified radius cannot fall below the closed
+    // form's own rounding (2*eps*nu), which must sit well under 1e-12*|Re|.
+    let beta = 2e-5;
+    let (omega, c) = two_region_plate(beta, beta, 1.07);
+    let n = omega.len();
+    let result = fs_modal::certify_modal_damping(&omega, &c, &damping_budget()).unwrap();
+    assert_eq!(result.blocks.len(), n, "every mode a singleton");
+    let (mut worst_radius, mut worst_quotient) = (0.0_f64, 0.0_f64);
+    for (i, block) in result.blocks.iter().enumerate() {
+        let fs_modal::ModalDampingBlock::Diagonal { mode, zeta, eigenvalue, radius } = block else {
+            panic!("proportional damping must stay diagonal: {block:?}");
+        };
+        assert_eq!(*mode, i);
+        assert!(*radius <= 1e-12 * eigenvalue.re.abs(), "mode {i}: radius {radius:e}");
+        worst_radius = worst_radius.max(radius / eigenvalue.re.abs());
+        // The energy quotient of the projected matrix, bit for bit.
+        assert_eq!(zeta.to_bits(), (c[n * i + i] / (2.0 * omega[i])).to_bits());
+        // Independent oracle: C_FE = beta*K gives zeta = beta*omega/2.
+        let quotient = (zeta / (0.5 * beta * omega[i]) - 1.0).abs();
+        worst_quotient = worst_quotient.max(quotient);
+        assert!(quotient <= 1e-6, "mode {i}: zeta off beta*omega/2 by {quotient:e}");
+    }
+    println!("{{\"suite\":\"irp-s0\",\"bead\":\"M0.2-W5\",\"test\":\"g1_proportional_plate_is_all_diagonal_and_matches_energy_quotient\",\"tier\":\"G1\",\"inputs\":{{\"fixture\":\"two-region isotropic plate, C_FE = beta*K\",\"n_modes\":{n},\"beta_s\":{beta:e}}},\"provenance\":\"named fixture\",\"observed\":{{\"max_radius_over_decay\":{worst_radius:e},\"max_zeta_vs_beta_omega_half\":{worst_quotient:e}}},\"tolerance\":{{\"radius_over_decay\":1e-12,\"zeta\":1e-6}},\"verdict\":\"pass\"}}");
+}
+
+#[test]
+fn g1_clustered_pair_triggers_full_block_fallback() {
+    // Viscosity 50:1 between the quadrant and the rest; a 0.2 % aspect
+    // detuning splits the (2,1)/(1,2) pair by under 0.5 % (1.004 measured
+    // 0.61 % on this mesh).
+    let beta_rest = 1.3e-7;
+    let (omega, c) = two_region_plate(50.0 * beta_rest, beta_rest, 1.002);
+    let n = omega.len();
+    let split = (omega[2] - omega[1]) / omega[1];
+    assert!(split > 0.0 && split < 5e-3, "pair split {split:e}");
+    let result = fs_modal::certify_modal_damping(&omega, &c, &damping_budget()).unwrap();
+    let mut omega_sq = vec![0.0; n * n];
+    let mut identity = vec![0.0; n * n];
+    for i in 0..n {
+        omega_sq[n * i + i] = omega[i] * omega[i];
+        identity[n * i + i] = 1.0;
+    }
+    let raw: Vec<C64> = fs_modal::quadratic_eigenvalues(&identity, &c, &omega_sq, n).unwrap()
+        .into_iter().filter(|p| p.im > 0.0).collect();
+    let truth: Vec<C64> = raw.iter().map(|&p| refined_pole(&omega, &c, p)).collect();
+    let raw_correction = raw.iter().zip(&truth).map(|(r, t)| (*r - *t).abs() / t.abs()).fold(0.0, f64::max);
+    assert!(raw_correction <= 1e-6, "refinement wandered: {raw_correction:e}");
+    let nearest = |z: C64| truth.iter().copied()
+        .min_by(|a, b| (*a - z).abs().total_cmp(&(*b - z).abs())).unwrap();
+    let mut pair_block = None;
+    let (mut worst_decay, mut worst_cents) = (0.0_f64, 0.0_f64);
+    for block in &result.blocks {
+        if let fs_modal::ModalDampingBlock::Full { modes, eigenvalues, radii, .. } = block {
+            if modes.contains(&1) && modes.contains(&2) { pair_block = Some(modes.clone()); }
+            for (&mu, &r) in eigenvalues.iter().zip(radii) {
+                let t = nearest(mu);
+                assert!((t - mu).abs() <= r + 8.0 * f64::EPSILON * mu.abs(),
+                    "block pole off by {:e}, radius {r:e}", (t - mu).abs());
+                worst_decay = worst_decay.max((t.re - mu.re).abs() / t.re.abs());
+                worst_cents = worst_cents.max(1200.0 / core::f64::consts::LN_2 * ((t.im - mu.im) / t.im).abs());
+            }
+        }
+    }
+    let pair_block = pair_block.expect("the near-degenerate pair must be one full block");
+    assert!(worst_decay <= 1e-3 && worst_cents <= 0.01, "block poles {worst_decay:e} / {worst_cents:e} c");
+    // Forcing the diagonal on the same matrix.
+    let loose = fs_modal::ModalDampingBudget { max_rel_decay_error: 1e9, max_freq_error_cents: 1e9,
+        max_cluster_size: fs_modal::MAX_DAMPING_CLUSTER };
+    let forced = fs_modal::certify_modal_damping(&omega, &c, &loose).unwrap();
+    let (mut forced_decay, mut forced_cents) = (0.0_f64, 0.0_f64);
+    for block in &forced.blocks {
+        if let fs_modal::ModalDampingBlock::Diagonal { mode, eigenvalue, .. } = block
+            && (*mode == 1 || *mode == 2)
+        {
+            let t = nearest(*eigenvalue);
+            forced_decay = forced_decay.max((t.re - eigenvalue.re).abs() / t.re.abs());
+            forced_cents = forced_cents.max(1200.0 / core::f64::consts::LN_2 * ((t.im - eigenvalue.im) / t.im).abs());
+        }
+    }
+    let shape: Vec<String> = result.blocks.iter().map(|b| match b {
+        fs_modal::ModalDampingBlock::Diagonal { mode, .. } => format!("{mode}"),
+        fs_modal::ModalDampingBlock::Full { modes, .. } => format!("{modes:?}"),
+    }).collect();
+    println!("{{\"suite\":\"irp-s0\",\"bead\":\"M0.2-W5\",\"test\":\"g1_clustered_pair_triggers_full_block_fallback\",\"tier\":\"G1\",\"inputs\":{{\"fixture\":\"quadrant/rest isotropic plate, viscosity 50:1, aspect 1.002\",\"n_modes\":{n},\"pair_split\":{split:e}}},\"provenance\":\"named fixture\",\"observed\":{{\"blocks\":\"{}\",\"pair_block\":{pair_block:?},\"block_rel_decay_error\":{worst_decay:e},\"block_freq_error_cents\":{worst_cents:e},\"forced_diagonal_rel_decay_error\":{forced_decay:e},\"forced_diagonal_freq_error_cents\":{forced_cents:e},\"raw_dense_truth_max_rel_correction\":{raw_correction:e}}},\"tolerance\":{{\"decay\":1e-3,\"cents\":0.01}},\"verdict\":\"pass\"}}", shape.join(" "));
+    assert!(forced_decay > 1e-3 || forced_cents > 0.01,
+        "forcing the diagonal must break the budget: {forced_decay:e} / {forced_cents:e} c");
+}

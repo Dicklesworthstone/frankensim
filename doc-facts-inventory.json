@@ -1193,6 +1193,7 @@
     "crates/fs-mesh/tests/volumetric.rs",
     "crates/fs-metamat-e2e/tests/metamat.rs",
     "crates/fs-mms/tests/mms.rs",
+    "crates/fs-modal/tests/certified_modal_damping.rs",
     "crates/fs-modal/tests/cross_isa_golden.rs",
     "crates/fs-modal/tests/modal_casebook.rs",
     "crates/fs-modal/tests/parallel_windows.rs",

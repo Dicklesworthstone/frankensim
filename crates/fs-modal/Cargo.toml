@@ -18,6 +18,8 @@ fs-math = { path = "../fs-math" }
 fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
+fs-mms = { path = "../fs-mms" }
+fs-rand = { path = "../fs-rand" }
 fs-solid = { path = "../fs-solid" }
 # Constellation reference oracle (test-only, dev-deps are layer-exempt):
 # independent dense symmetric eigensolver for the casebook cross-check.

@@ -42,6 +42,12 @@ use fs_sparse::{Coo, Csr, DirectOrdering, LdltError, LdltFactor, LdltOptions, Sy
 mod windows;
 pub use windows::{MultiSliceReport, SliceTimingReceipt, WindowPlan, slice_windows};
 
+mod damping;
+pub use damping::{
+    CertifiedModalDamping, FarCouplingBound, MAX_DAMPING_CLUSTER, ModalDampingBlock,
+    ModalDampingBudget, ROUCHE_SAFETY, certify_modal_damping, certify_modal_damping_windowed,
+};
+
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Arithmetic contract of the certified serial slice, also used by windows.
@@ -123,6 +129,34 @@ pub enum ModalError {
     Executor {
         detail: String,
     },
+    /// Certified modal damping input refused: budget, frequency, shape,
+    /// non-finite, asymmetric or negative entry, window, or column bound.
+    DampingInput {
+        /// What was refused.
+        field: &'static str,
+        /// Mode or row-major entry index.
+        index: usize,
+    },
+    /// A diagonal estimate or a block has real poles; the certificate is
+    /// for lightly damped (underdamped) modes only.
+    DampingNotUnderdamped {
+        /// Offending modes.
+        modes: Vec<usize>,
+    },
+    /// The smallest certified cluster exceeds the budget's cap.
+    DampingClusterTooLarge {
+        /// The cluster.
+        modes: Vec<usize>,
+        /// The cap.
+        cap: usize,
+    },
+    /// A required block needs coupling entries outside the supplied window.
+    DampingBlockSpansWindow {
+        /// The block.
+        modes: Vec<usize>,
+        /// The window [rad/s].
+        window: f64,
+    },
 }
 
 impl core::fmt::Display for ModalError {
@@ -177,6 +211,22 @@ impl core::fmt::Display for ModalError {
                 "FS-MODAL-MEMORY-BUDGET: payload {estimated_bytes} exceeds cap {cap}"
             ),
             ModalError::Executor { detail } => write!(f, "FS-MODAL-EXECUTOR: {detail}"),
+            ModalError::DampingInput { field, index } => {
+                write!(f, "FS-MODAL-DAMPING-INPUT: {field} (index {index})")
+            }
+            ModalError::DampingNotUnderdamped { modes } => write!(
+                f,
+                "FS-MODAL-DAMPING-NOT-UNDERDAMPED: modes {modes:?} have real poles"
+            ),
+            ModalError::DampingClusterTooLarge { modes, cap } => write!(
+                f,
+                "FS-MODAL-DAMPING-CLUSTER: certified cluster of {} modes {modes:?} exceeds cap {cap}",
+                modes.len()
+            ),
+            ModalError::DampingBlockSpansWindow { modes, window } => write!(
+                f,
+                "FS-MODAL-DAMPING-WINDOW: block {modes:?} needs coupling beyond window {window} rad/s"
+            ),
         }
     }
 }

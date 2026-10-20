@@ -2068,6 +2068,8 @@ dependencies = [
  "fs-exec",
  "fs-la",
  "fs-math",
+ "fs-mms",
+ "fs-rand",
  "fs-solid",
  "fs-sparse",
  "fsci-linalg",

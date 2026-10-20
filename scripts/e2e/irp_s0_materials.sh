@@ -30,6 +30,21 @@ readonly -a HYPERELASTIC_TESTS=(
   g1_hgo_fibre_uniaxial_analytic
   g0_reference_state_and_coalescent_stretches
 )
+# M0.2-W5 certified modal damping: fs-modal owner plus the plate's own matrix.
+readonly -a MODAL_DAMPING_TESTS=(
+  g0_certified_radius_encloses_dense_truth
+  g0_rouche_radius_is_second_order
+  g1_clustered_pair_triggers_full_block_fallback
+  g0_cluster_cap_and_cap_plus_one
+  g0_budget_inputs_are_required_and_finite
+  g0_bessel_far_coupling_bound_dominates_true_norm
+  g0_windowed_certificate_encloses_dense_truth
+)
+readonly PLATE_DAMPING_MODULE=thin_plate::material_loss::ports::tensor_tests
+readonly -a PLATE_DAMPING_TESTS=(
+  g1_proportional_plate_is_all_diagonal_and_matches_energy_quotient
+  g1_clustered_pair_triggers_full_block_fallback
+)
 
 list() {
   local test
@@ -41,6 +56,12 @@ list() {
   done
   for test in "${HYPERELASTIC_TESTS[@]}"; do
     printf 'fs-material:hyperelastic_ogden_hgo::%s\n' "$test"
+  done
+  for test in "${MODAL_DAMPING_TESTS[@]}"; do
+    printf 'fs-modal:certified_modal_damping::%s\n' "$test"
+  done
+  for test in "${PLATE_DAMPING_TESTS[@]}"; do
+    printf 'fs-couple:lib:%s::%s\n' "$PLATE_DAMPING_MODULE" "$test"
   done
 }
 
@@ -64,8 +85,21 @@ check() {
       return 1
     }
   done
-  printf 'IRP S0: %s prony_tensor + %s prony_tensor_lowering + %s hyperelastic tests present\n' \
-    "${#PRONY_TENSOR_TESTS[@]}" "${#PRONY_TENSOR_LOWERING_TESTS[@]}" "${#HYPERELASTIC_TESTS[@]}"
+  for test in "${MODAL_DAMPING_TESTS[@]}"; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-modal/tests/certified_modal_damping.rs" || {
+      printf 'missing test: %s\n' "$test" >&2
+      return 1
+    }
+  done
+  for test in "${PLATE_DAMPING_TESTS[@]}"; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-couple/src/thin_plate/material_loss/ports/tensor_tests.rs" || {
+      printf 'missing test: %s\n' "$test" >&2
+      return 1
+    }
+  done
+  printf 'IRP S0: %s prony_tensor + %s prony_tensor_lowering + %s hyperelastic + %s modal damping + %s plate damping tests present\n' \
+    "${#PRONY_TENSOR_TESTS[@]}" "${#PRONY_TENSOR_LOWERING_TESTS[@]}" "${#HYPERELASTIC_TESTS[@]}" \
+    "${#MODAL_DAMPING_TESTS[@]}" "${#PLATE_DAMPING_TESTS[@]}"
 }
 
 run() {
@@ -85,7 +119,11 @@ run() {
   export CARGO_BUILD_JOBS=12
   export CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
 
-  local -a prony_command lowering_command hyperelastic_command
+  local -a prony_command lowering_command hyperelastic_command modal_command plate_command
+  local -a plate_filters=()
+  for test in "${PLATE_DAMPING_TESTS[@]}"; do
+    plate_filters+=("${PLATE_DAMPING_MODULE}::${test}")
+  done
   if [[ -n "${IRP_S0_PRONY_TENSOR_BIN:-}" ]]; then
     prony_command=("$IRP_S0_PRONY_TENSOR_BIN" --exact --test-threads=1 --show-output "${PRONY_TENSOR_TESTS[@]}")
   else
@@ -101,6 +139,16 @@ run() {
   else
     hyperelastic_command=("$cargo_bin" test --locked -j 12 -p fs-material --test hyperelastic_ogden_hgo -- --exact --test-threads=1 --show-output "${HYPERELASTIC_TESTS[@]}")
   fi
+  if [[ -n "${IRP_S0_MODAL_DAMPING_BIN:-}" ]]; then
+    modal_command=("$IRP_S0_MODAL_DAMPING_BIN" --exact --test-threads=1 --show-output "${MODAL_DAMPING_TESTS[@]}")
+  else
+    modal_command=("$cargo_bin" test --locked -j 12 -p fs-modal --test certified_modal_damping -- --exact --test-threads=1 --show-output "${MODAL_DAMPING_TESTS[@]}")
+  fi
+  if [[ -n "${IRP_S0_PLATE_DAMPING_BIN:-}" ]]; then
+    plate_command=("$IRP_S0_PLATE_DAMPING_BIN" --exact --test-threads=1 --show-output "${plate_filters[@]}")
+  else
+    plate_command=("$cargo_bin" test --locked -j 12 -p fs-couple --lib -- --exact --test-threads=1 --show-output "${plate_filters[@]}")
+  fi
 
   {
     printf 'host=%s\ngit_head=%s\nstarted_utc=%s\n' "$host" "$git_head" "$started"
@@ -109,6 +157,10 @@ run() {
     printf '%q ' "${lowering_command[@]}"
     printf '\n'
     printf '%q ' "${hyperelastic_command[@]}"
+    printf '\n'
+    printf '%q ' "${modal_command[@]}"
+    printf '\n'
+    printf '%q ' "${plate_command[@]}"
     printf '\n'
   } >"${output_dir}/command.txt"
 
@@ -122,9 +174,16 @@ run() {
   (cd "$REPO_ROOT" && "${hyperelastic_command[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
   status=$?
   if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
+  (cd "$REPO_ROOT" && "${modal_command[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
+  (cd "$REPO_ROOT" && "${plate_command[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
   set -e
 
-  for test in "${PRONY_TENSOR_TESTS[@]}" "${PRONY_TENSOR_LOWERING_TESTS[@]}" "${HYPERELASTIC_TESTS[@]}"; do
+  for test in "${PRONY_TENSOR_TESTS[@]}" "${PRONY_TENSOR_LOWERING_TESTS[@]}" "${HYPERELASTIC_TESTS[@]}" \
+    "${MODAL_DAMPING_TESTS[@]}" "${plate_filters[@]}"; do
     if ! grep -Fqx "test ${test} ... ok" "${output_dir}/stdout.log" "${output_dir}/stderr.log"; then
       printf 'missing or failed: %s\n' "$test" >&2
       missing=1
