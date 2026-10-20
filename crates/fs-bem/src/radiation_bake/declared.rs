@@ -523,7 +523,8 @@ pub fn bake_declared(
 /// those explicit tolerance, FMM-order and storage budgets instead of being
 /// `Blocked`. Rungs within the dense cap stay dense. The same ladder,
 /// operator tolerance and three-rung rule decide completeness, and every
-/// refinement row records its route.
+/// refinement row records its route. `cancelled` is polled between rungs and
+/// frequencies; one iterative rung runs to completion once started.
 pub fn bake_declared_routed(
     declaration: &BakeDeclaration,
     ladder: &PanelLadder<'_>,
