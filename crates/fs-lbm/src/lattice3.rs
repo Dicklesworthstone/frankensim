@@ -243,11 +243,35 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
     }
     /// Serial reference, same64-cell partition and same arithmetic as pooled.
     pub fn step_serial(&mut self, cx: &Cx<'_>) -> Result<(), GridError3<L::Error>> {
+        self.step_serial_impl(cx, None)
+    }
+    /// Advance with one caller-owned collision law per cell, in x-fastest order.
+    /// The full field (including solid entries) is admitted before any work.
+    /// It applies only to this step; a later `step_serial` uses the constructor's
+    /// uniform law. Material selection, units and coefficient epochs belong to
+    /// the caller. Spatially varying rates do not supply an energy equation.
+    /// Errors/cancellation leave populations and completed_steps unchanged.
+    pub fn step_serial_with_collisions(
+        &mut self,
+        cx: &Cx<'_>,
+        collisions: &[L::Collision],
+    ) -> Result<(), GridError3<L::Error>> {
+        self.admit_collisions(collisions, || {
+            cx.checkpoint().map_err(|_| GridError3::Cancelled)
+        })?;
+        self.step_serial_impl(cx, Some(collisions))
+    }
+    fn step_serial_impl(
+        &mut self,
+        cx: &Cx<'_>,
+        collisions: Option<&[L::Collision]>,
+    ) -> Result<(), GridError3<L::Error>> {
         let data = StepData::<L, Q> {
             dims: self.dims,
             periodic: self.periodic,
             solid: &self.solid,
             collision: self.collision,
+            collisions,
             force: self.force,
             budget: self.budget,
             marker: PhantomData,
@@ -272,11 +296,58 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
         pool: &P,
         gate: &CancelGate,
     ) -> Result<(), GridError3<L::Error>> {
+        self.step_pooled_impl(pool, gate, None)
+    }
+    /// Executor-backed counterpart of `Self::step_serial_with_collisions`.
+    /// The borrowed field is immutable across both passes and all workers;
+    /// partitioning, collision arithmetic and publication use the same owner.
+    pub fn step_pooled_with_collisions<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        collisions: &[L::Collision],
+    ) -> Result<(), GridError3<L::Error>> {
+        self.admit_collisions(collisions, || {
+            if gate.is_requested() {
+                Err(GridError3::Cancelled)
+            } else {
+                Ok(())
+            }
+        })?;
+        self.step_pooled_impl(pool, gate, Some(collisions))
+    }
+    fn admit_collisions(
+        &self,
+        collisions: &[L::Collision],
+        mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<(), GridError3<L::Error>> {
+        checkpoint()?;
+        if collisions.len() != self.f.len() {
+            return Err(GridError3::Input("collision field length"));
+        }
+        for (tile, chunk) in collisions.chunks(64).enumerate() {
+            checkpoint()?;
+            for (offset, &collision) in chunk.iter().enumerate() {
+                L::validate(collision).map_err(|source| GridError3::Collision {
+                    cell: tile * 64 + offset,
+                    source,
+                })?;
+            }
+        }
+        checkpoint()
+    }
+    fn step_pooled_impl<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        collisions: Option<&[L::Collision]>,
+    ) -> Result<(), GridError3<L::Error>> {
         let data = StepData::<L, Q> {
             dims: self.dims,
             periodic: self.periodic,
             solid: &self.solid,
             collision: self.collision,
+            collisions,
             force: self.force,
             budget: self.budget,
             marker: PhantomData,
@@ -301,6 +372,7 @@ struct StepData<'a, L: Lattice3<Q>, const Q: usize> {
     periodic: [bool; 3],
     solid: &'a [bool],
     collision: L::Collision,
+    collisions: Option<&'a [L::Collision]>,
     force: [f64; 3],
     budget: GridBudget3,
     marker: PhantomData<L>,
@@ -320,7 +392,8 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
                 continue;
             }
             if !stream {
-                *output = L::collide(src[cell], self.collision, self.force)
+                let collision = self.collisions.map_or(self.collision, |field| field[cell]);
+                *output = L::collide(src[cell], collision, self.force)
                     .map_err(|source| GridError3::Collision { cell, source })?;
                 macro_cell::<L, Q>(output, self.force, cell, self.budget.maximum_mach)?;
             } else {
@@ -510,5 +583,200 @@ impl AcousticScalingPlan {
             maximum_speed_m_s,
             maximum_mach,
         )
+    }
+}
+
+#[cfg(test)]
+mod collision_field_tests {
+    use super::*;
+    use crate::d3q19::CollisionModel3;
+    use crate::d3q27::{CollisionConfig27, CollisionModel27, D3q27, Equilibrium27, Rates27};
+    use fs_exec::{RunError, RunReport, TilePool};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const DIMS: [usize; 3] = [9, 5, 3];
+    const CELLS: usize = 135; // two complete tiles plus a ragged tile
+    const SEED: u64 = 0xC011_1D3;
+
+    fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
+        let gate = CancelGate::new_clock_free();
+        let arenas = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        arenas.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                fs_exec::StreamKey { seed: SEED, kernel_id: 3, tile: 0, iteration: 0 },
+                fs_exec::Budget::INFINITE,
+                fs_exec::ExecMode::Deterministic,
+            );
+            f(&cx)
+        })
+    }
+    fn make<L: Lattice3<Q>, const Q: usize>(collision: L::Collision) -> Grid3<L, Q> {
+        Grid3::try_new(
+            DIMS,
+            collision,
+            [1e-7, 0.0, 0.0],
+            [true, false, true],
+            GridBudget3 { maximum_cells: CELLS, maximum_mach: 0.2 },
+            |p| p == [4, 2, 1],
+            |p| {
+                let u = 0.001 * (p[1] + 1) as f64;
+                let mut f = core::array::from_fn(|q| {
+                    let eu = f64::from(L::E[q][0]) * u;
+                    L::W[q] * (1.0 + eu / L::CS2
+                        + 0.5 * eu * eu / (L::CS2 * L::CS2) - 0.5 * u * u / L::CS2)
+                });
+                // Non-equilibrium stress makes the very first collision sensitive
+                // to the rate, without changing density or momentum.
+                let stress = 1e-5 * (p[0] + 1) as f64;
+                f[0] -= 2.0 * stress;
+                f[1] += stress;
+                f[2] += stress;
+                f
+            },
+        ).unwrap()
+    }
+    fn bits<L: Lattice3<Q>, const Q: usize>(g: &Grid3<L, Q>) -> Vec<u64> {
+        g.populations().iter().flatten().map(|v| v.to_bits()).collect()
+    }
+    fn bgk27(tau: f64) -> CollisionConfig27 {
+        CollisionConfig27 {
+            model: CollisionModel27::Bgk { tau, equilibrium: Equilibrium27::Quadratic },
+            maximum_mach: 0.2,
+        }
+    }
+    fn constant_parity<L: Lattice3<Q>, const Q: usize>(collision: L::Collision) {
+        let mut uniform = make::<L, Q>(collision);
+        let mut field = make::<L, Q>(collision);
+        let laws = vec![collision; CELLS];
+        with_cx(|cx| {
+            for _ in 0..5 {
+                uniform.step_serial(cx).unwrap();
+                field.step_serial_with_collisions(cx, &laws).unwrap();
+                assert_eq!(bits(&uniform), bits(&field));
+            }
+        });
+        assert_eq!(field.completed_steps(), 5);
+    }
+    #[test]
+    fn constant_fields_preserve_d19_and_all_d27_collision_paths() {
+        constant_parity::<D3q19, 19>(CollisionModel3::Bgk { tau: 0.8 });
+        constant_parity::<D3q27, 27>(bgk27(0.8));
+        let rates = Rates27 { omega: [1.25, 1.0, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5] };
+        for model in [CollisionModel27::CentralMoment { rates }, CollisionModel27::Cumulant { rates }] {
+            constant_parity::<D3q27, 27>(CollisionConfig27 { model, maximum_mach: 0.2 });
+        }
+    }
+    #[test]
+    fn heterogeneous_field_matches_independent_push_stencil_and_does_not_latch() {
+        let mut grid = make::<D3q27, 27>(bgk27(0.8));
+        let laws: Vec<_> = (0..CELLS).map(|i| bgk27(if i % 3 == 0 { 0.7 } else { 1.2 })).collect();
+        let mut expected = grid.f.clone();
+        // Independent PUSH traversal, not StepData's pull/index implementation.
+        for i in 0..CELLS {
+            if grid.solid[i] { continue; }
+            let post = D3q27::collide(grid.f[i], laws[i], grid.force).unwrap();
+            let p = [i % 9, (i / 9) % 5, i / 45];
+            for q in 0..27 {
+                let e = D3q27::E[q];
+                let y = p[1] as i32 + e[1];
+                if !(0..5).contains(&y) {
+                    expected[i][D3q27::OPP[q]] = post[q];
+                    continue;
+                }
+                let x = (p[0] as i32 + e[0]).rem_euclid(9) as usize;
+                let z = (p[2] as i32 + e[2]).rem_euclid(3) as usize;
+                let target = (z * 5 + y as usize) * 9 + x;
+                if grid.solid[target] {
+                    expected[i][D3q27::OPP[q]] = post[q];
+                } else {
+                    expected[target][q] = post[q];
+                }
+            }
+        }
+        let before_mass: f64 = grid.f.iter().flatten().sum();
+        with_cx(|cx| grid.step_serial_with_collisions(cx, &laws).unwrap());
+        let expected_bits: Vec<_> = expected.iter().flatten().map(|v| v.to_bits()).collect();
+        assert_eq!(bits(&grid), expected_bits);
+        let after_mass: f64 = grid.f.iter().flatten().sum();
+        assert!((after_mass - before_mass).abs() < 1e-10);
+        let mut uniform = make::<D3q27, 27>(bgk27(0.8));
+        with_cx(|cx| uniform.step_serial(cx).unwrap());
+        assert_ne!(bits(&grid), bits(&uniform));
+        uniform.f.clone_from(&grid.f);
+        with_cx(|cx| {
+            grid.step_serial(cx).unwrap();
+            uniform.step_serial_with_collisions(cx, &vec![bgk27(0.8); CELLS]).unwrap();
+        });
+        assert_eq!(bits(&grid), bits(&uniform));
+    }
+    #[test]
+    fn malformed_fields_refuse_before_publication_including_solid_entries() {
+        let mut grid = make::<D3q27, 27>(bgk27(0.8));
+        let before = bits(&grid);
+        with_cx(|cx| {
+            for n in [0, CELLS - 1, CELLS + 1] {
+                assert!(matches!(
+                    grid.step_serial_with_collisions(cx, &vec![bgk27(0.8); n]),
+                    Err(GridError3::Input("collision field length"))
+                ));
+            }
+            for bad in [CELLS - 1, 67] { // late fluid entry, then the solid cell
+                let mut laws = vec![bgk27(0.8); CELLS];
+                laws[bad] = bgk27(f64::NAN);
+                assert!(matches!(grid.step_serial_with_collisions(cx, &laws),
+                    Err(GridError3::Collision { cell, .. }) if cell == bad));
+            }
+        });
+        assert_eq!(bits(&grid), before);
+        assert_eq!(grid.completed_steps(), 0);
+    }
+    #[test]
+    fn heterogeneous_pooled_steps_match_serial_for_ragged_tiles() {
+        let laws: Vec<_> = (0..CELLS).map(|i| bgk27(0.7 + 0.05 * (i % 7) as f64)).collect();
+        let mut serial = make::<D3q27, 27>(bgk27(0.8));
+        with_cx(|cx| {
+            for _ in 0..5 { serial.step_serial_with_collisions(cx, &laws).unwrap(); }
+        });
+        for workers in [1, 2, 4] {
+            let pool = TilePool::for_host(workers, SEED);
+            let gate = CancelGate::new_clock_free();
+            let mut parallel = make::<D3q27, 27>(bgk27(0.8));
+            for _ in 0..5 {
+                parallel.step_pooled_with_collisions(&pool, &gate, &laws).unwrap();
+            }
+            assert_eq!(bits(&serial), bits(&parallel), "workers={workers}");
+        }
+    }
+    #[test]
+    fn field_cancellation_between_passes_rolls_back_and_retries() {
+        struct CancelAfterCollision { pool: TilePool, calls: AtomicUsize }
+        impl KernelRunner for CancelAfterCollision {
+            fn workers(&self) -> usize { self.pool.workers() }
+            fn run_with_gate<K: TileKernel>(&self, kernel: &K, gate: &CancelGate)
+                -> (Result<K::Out, RunError>, RunReport) {
+                let result = self.pool.run_with_gate(kernel, gate);
+                if self.calls.fetch_add(1, Ordering::AcqRel) == 0 { gate.request(); }
+                result
+            }
+        }
+        let runner = CancelAfterCollision {
+            pool: TilePool::for_host(2, SEED), calls: AtomicUsize::new(0),
+        };
+        let mut grid = make::<D3q27, 27>(bgk27(0.8));
+        let before = bits(&grid);
+        let laws: Vec<_> = (0..CELLS).map(|i| bgk27(0.7 + 0.1 * (i % 4) as f64)).collect();
+        let cancelled = CancelGate::new_clock_free();
+        assert!(matches!(grid.step_pooled_with_collisions(&runner, &cancelled, &laws),
+            Err(GridError3::Cancelled)));
+        assert_eq!(bits(&grid), before);
+        assert_eq!(grid.completed_steps(), 0);
+        let fresh = CancelGate::new_clock_free();
+        grid.step_pooled_with_collisions(&runner.pool, &fresh, &laws).unwrap();
+        let mut reference = make::<D3q27, 27>(bgk27(0.8));
+        with_cx(|cx| reference.step_serial_with_collisions(cx, &laws).unwrap());
+        assert_eq!(bits(&grid), bits(&reference));
+        assert_eq!(grid.completed_steps(), 1);
     }
 }
