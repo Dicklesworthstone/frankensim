@@ -71,13 +71,40 @@ pub struct RootSearchReport {
     pub width_trajectory: Vec<f64>,
 }
 
+/// Why an interval root search stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootSearchTermination<E> {
+    /// Every subdivision box was excluded, contracted, or classified as a
+    /// terminal candidate after evaluation.
+    /// `Possible` boxes may remain: completion does not establish uniqueness,
+    /// a finite root count, or attainment of the requested target width.
+    Complete,
+    /// The box allowance ended with unexplored subdivision regions.
+    BoxBudgetExhausted,
+    /// The caller's checkpoint refused further work. The first refusal is
+    /// retained, and no numerical callback runs after it.
+    Cancelled(E),
+}
+
+/// A bounded root report and the exact reason computation stopped.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RootSearchOutcome<E> {
+    /// Completed root boxes and conservative coverage of unresolved regions.
+    pub report: RootSearchReport,
+    /// Completion, box-budget exhaustion, or the original checkpoint error.
+    pub termination: RootSearchTermination<E>,
+}
+
 impl RootSearchReport {
     /// Project the retained root boxes through one caller-declared usefulness
     /// criterion.
     ///
     /// `None` means the complete search retained no root candidates. An
     /// incomplete search is always `NoUsefulBound(BudgetExhausted)`, even when
-    /// its current hull happens to be narrow.
+    /// its current hull happens to be narrow. This legacy usefulness projection
+    /// does not distinguish cancellation from a spent box allowance; use
+    /// [`RootSearchOutcome::termination`] for that distinction. An incomplete
+    /// empty report retains a whole-line no-bound rather than implying absence.
     pub fn bound_with_usefulness(
         &self,
         criterion: UsefulnessCriterion,
@@ -85,7 +112,16 @@ impl RootSearchReport {
         suggested_reformulation: ClaimClass,
     ) -> Result<Option<BoundOutcome>, UsefulBoundError> {
         let Some(first) = self.roots.first() else {
-            return Ok(None);
+            return if self.complete {
+                Ok(None)
+            } else {
+                Ok(Some(BoundOutcome::refuse(
+                    BoundInterval::try_new(f64::NEG_INFINITY, f64::INFINITY)?,
+                    criterion,
+                    NoUsefulBoundCause::BudgetExhausted,
+                    suggested_reformulation,
+                )))
+            };
         };
         let (lower, upper) = self.roots.iter().skip(1).fold(
             (first.interval().lo(), first.interval().hi()),
@@ -145,22 +181,32 @@ impl RootBox {
 /// One interval-Newton step: N(X) = m − f(m)/F′(X), intersected with X.
 /// Returns `None` when N(X) ∩ X is empty (NO root in X — a certificate of
 /// absence) and the contraction plus a strict-interior flag otherwise.
-fn newton_step<F, D>(f: &F, fp: &D, x: Interval) -> Option<(Interval, bool)>
+fn newton_step<F, D, E, C>(
+    f: &F,
+    fp: &D,
+    x: Interval,
+    checkpoint: &mut C,
+) -> Result<Option<(Interval, bool)>, E>
 where
     F: Fn(Interval) -> Interval,
     D: Fn(Interval) -> Interval,
+    C: FnMut() -> Result<(), E>,
 {
     let m = x.midpoint();
+    checkpoint()?;
     let fm = f(Interval::point(m));
+    checkpoint()?;
     let d = fp(x);
     if d.contains_zero() {
         // Division yields the whole line: no contraction information.
-        return Some((x, false));
+        return Ok(Some((x, false)));
     }
     let n = Interval::point(m) - fm / d;
-    let contracted = n.intersect(x)?;
+    let Some(contracted) = n.intersect(x) else {
+        return Ok(None);
+    };
     let strict_interior = n.lo() > x.lo() && n.hi() < x.hi();
-    Some((contracted, strict_interior))
+    Ok(Some((contracted, strict_interior)))
 }
 
 fn merge_root_boxes(mut out: Vec<RootBox>) -> Vec<RootBox> {
@@ -195,6 +241,42 @@ where
     F: Fn(Interval) -> Interval,
     D: Fn(Interval) -> Interval,
 {
+    newton_roots_with_checkpoint(f, fp, domain, config, &mut || {
+        Ok::<(), core::convert::Infallible>(())
+    })
+    .map(|outcome| outcome.report)
+}
+
+/// Isolate roots with caller-controlled interruption between numerical calls.
+///
+/// Checkpoints run before every interval/function/derivative evaluation and
+/// once before publication. Each box uses at most 128 Newton steps. An
+/// observed checkpoint error stops numerical work immediately, retains its
+/// original value in [`RootSearchTermination::Cancelled`], and sets
+/// [`RootSearchReport::complete`] to false. The interrupted contracted box and
+/// all unvisited boxes remain [`RootBox::Possible`], so no candidate root is
+/// lost. Already finished boxes retain their status. The examined-box count
+/// and width trajectory count only boxes whose initial interval evaluation
+/// actually ran; Newton contractions are not extra subdivision boxes.
+///
+/// `Complete` means there is no unexplored domain, not that every remaining
+/// box is certified or that all roots are distinct. Publication cancellation
+/// takes precedence over otherwise complete or box-exhausted work. Sorting and
+/// merging retained boxes finish synchronously under the declared box bound;
+/// user callbacks must themselves bound any work inside one evaluation.
+/// Invalid requests are rejected before the checkpoint or numerical callbacks.
+pub fn newton_roots_with_checkpoint<F, D, E, C>(
+    f: &F,
+    fp: &D,
+    domain: Interval,
+    config: RootSearchConfig,
+    checkpoint: &mut C,
+) -> Result<RootSearchOutcome<E>, RootSearchError>
+where
+    F: Fn(Interval) -> Interval,
+    D: Fn(Interval) -> Interval,
+    C: FnMut() -> Result<(), E>,
+{
     if !(domain.lo().is_finite() && domain.hi().is_finite()) {
         return Err(RootSearchError::NonFiniteDomain);
     }
@@ -209,8 +291,14 @@ where
     let mut stack = vec![domain];
     let mut boxes_examined = 0usize;
     let mut width_trajectory = Vec::new();
-    while boxes_examined < config.max_boxes {
+    let mut termination = None;
+    'search: while boxes_examined < config.max_boxes {
         let Some(x) = stack.pop() else { break };
+        if let Err(error) = checkpoint() {
+            stack.push(x);
+            termination = Some(RootSearchTermination::Cancelled(error));
+            break;
+        }
         boxes_examined += 1;
         width_trajectory.push(x.width());
         // Exclusion test first: 0 ∉ F(X) means no root here.
@@ -222,8 +310,13 @@ where
         let mut certified = false;
         let mut absent = false;
         for _ in 0..64 {
-            match newton_step(f, fp, cur) {
-                None => {
+            match newton_step(f, fp, cur, checkpoint) {
+                Err(error) => {
+                    out.push(RootBox::Possible(cur));
+                    termination = Some(RootSearchTermination::Cancelled(error));
+                    break 'search;
+                }
+                Ok(None) => {
                     if certified {
                         // A previously certified box must never be silently
                         // erased by a later contradictory absence step: both
@@ -236,7 +329,7 @@ where
                     absent = true;
                     break;
                 }
-                Some((next, strict)) => {
+                Ok(Some((next, strict))) => {
                     if strict {
                         certified = true;
                     }
@@ -254,8 +347,13 @@ where
         if certified {
             // Polish: iterate to a tight certified box.
             for _ in 0..64 {
-                match newton_step(f, fp, cur) {
-                    Some((next, _)) if next.width() < cur.width() => cur = next,
+                match newton_step(f, fp, cur, checkpoint) {
+                    Err(error) => {
+                        out.push(RootBox::Possible(cur));
+                        termination = Some(RootSearchTermination::Cancelled(error));
+                        break 'search;
+                    }
+                    Ok(Some((next, _))) if next.width() < cur.width() => cur = next,
                     _ => break,
                 }
             }
@@ -274,13 +372,28 @@ where
             }
         }
     }
-    let complete = stack.is_empty();
+    let mut termination = termination.unwrap_or_else(|| {
+        if stack.is_empty() {
+            RootSearchTermination::Complete
+        } else {
+            RootSearchTermination::BoxBudgetExhausted
+        }
+    });
     out.extend(stack.into_iter().map(RootBox::Possible));
-    Ok(RootSearchReport {
-        roots: merge_root_boxes(out),
-        boxes_examined,
-        complete,
-        width_trajectory,
+    let roots = merge_root_boxes(out);
+    if !matches!(&termination, RootSearchTermination::Cancelled(_))
+        && let Err(error) = checkpoint()
+    {
+        termination = RootSearchTermination::Cancelled(error);
+    }
+    Ok(RootSearchOutcome {
+        report: RootSearchReport {
+            roots,
+            boxes_examined,
+            complete: matches!(&termination, RootSearchTermination::Complete),
+            width_trajectory,
+        },
+        termination,
     })
 }
 

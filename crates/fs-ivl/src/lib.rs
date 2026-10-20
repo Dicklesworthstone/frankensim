@@ -39,8 +39,9 @@ pub use multi_taylor::{
     TaylorModel, VariableInfo, binomial, generate_multi_indices, term_count,
 };
 pub use newton::{
-    DEFAULT_MAX_ROOT_BOXES, RootBox, RootSearchConfig, RootSearchError, RootSearchReport,
-    krawczyk_step, lipschitz_bound, newton_roots, newton_roots_bounded,
+    DEFAULT_MAX_ROOT_BOXES, RootBox, RootSearchConfig, RootSearchError, RootSearchOutcome,
+    RootSearchReport, RootSearchTermination, krawczyk_step, lipschitz_bound, newton_roots,
+    newton_roots_bounded, newton_roots_with_checkpoint,
 };
 pub use predicates::{
     Sign, Stage, incircle, incircle_with_stage, insphere, insphere_with_stage, orient2d,

@@ -96,7 +96,8 @@ mechanism and is likewise absent from the production dependency graph.
   `bound_with_usefulness` returns `None` for a complete no-candidate search,
   classifies a complete root hull contextually, and makes an incomplete search
   an absorbing `NoUsefulBound(BudgetExhausted)` even if the current hull is
-  narrow.
+  narrow. An incomplete empty report yields a whole-line no-bound; only a
+  complete empty report means no root candidates.
 - `AffineCtx`/`Affine` — affine forms `c₀ + Σ cᵢ·εᵢ + [−err, +err]`.
   Symbol identity IS correlation (same-context symbols cancel; fresh
   symbols don't). All rounding and the first-order mul residue
@@ -195,6 +196,24 @@ widths, and nonzero box budgets. `newton_roots_bounded` returns structured
 exhaustion, unevaluated regions remain `Possible`; they are never silently
 dropped or promoted to certified. The compatibility `newton_roots` entry point
 uses a fixed 65,536-box ceiling and panics only for invalid parameters.
+
+`newton_roots_with_checkpoint` shares that numerical search and accepts a
+fallible caller checkpoint before each interval/function/derivative evaluation
+and before final publication. `RootSearchOutcome` retains the report and exact
+`RootSearchTermination::{Complete, BoxBudgetExhausted, Cancelled(error)}`.
+Cancellation keeps the first error, stops numerical callbacks, marks the report
+incomplete, and retains the interrupted contracted region and every unvisited
+box as `Possible`; already completed boxes keep their status. Examined counts
+and widths include only subdivision boxes whose initial evaluation ran.
+`Complete` means no unexplored domain, not a finite root count, uniqueness of
+every candidate, or attainment of a target width. Numeric callbacks must bound
+their own work; sorting/merging finishes synchronously under the box bound.
+The legacy useful-bound v1 projection collapses resource interruption to
+`BudgetExhausted`; the outcome's termination preserves the cancellation reason.
+Focused G0/G4 tests interrupt every callback boundary of a two-root search,
+including derivative/polish and publication, check retained root coverage and
+exact work prefixes, and distinguish cancellation from spent box allowance.
+The infallible path is checked against the existing bounded result unchanged.
 
 Taylor construction and arithmetic return `TaylorModelError`. The error
 distinguishes variable order below one, order above 169, non-finite domain,

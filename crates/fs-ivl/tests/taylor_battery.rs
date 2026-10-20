@@ -4,8 +4,9 @@
 //! Lipschitz extraction, and the cross-ISA golden hash.
 
 use fs_ivl::{
-    Interval, MAX_TAYLOR_ORDER, RootBox, RootSearchConfig, RootSearchError, TaylorModel1,
-    TaylorModelError, krawczyk_step, lipschitz_bound, newton_roots, newton_roots_bounded,
+    Interval, MAX_TAYLOR_ORDER, RootBox, RootSearchConfig, RootSearchError, RootSearchTermination,
+    TaylorModel1, TaylorModelError, krawczyk_step, lipschitz_bound, newton_roots,
+    newton_roots_bounded, newton_roots_with_checkpoint,
 };
 use fs_math::dd::Dd;
 
@@ -487,6 +488,176 @@ fn root_search_stops_when_midpoint_cannot_split_adjacent_floats() {
     assert!(report.complete);
     assert_eq!(report.boxes_examined, 1);
     assert_eq!(report.roots, vec![RootBox::Possible(Interval::new(lo, hi))]);
+}
+
+#[test]
+fn cancelled_root_search_preserves_domain_without_running_a_numerical_callback() {
+    let f = |_: Interval| -> Interval { panic!("cancelled interval evaluation") };
+    let domain = Interval::new(-4.0, 7.0);
+    let outcome = newton_roots_with_checkpoint(
+        &f,
+        &f,
+        domain,
+        RootSearchConfig {
+            min_width: 1e-9,
+            max_boxes: 16,
+        },
+        &mut || Err("requested cancellation"),
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.termination,
+        RootSearchTermination::Cancelled("requested cancellation")
+    );
+    assert!(!outcome.report.complete);
+    assert_eq!(outcome.report.boxes_examined, 0);
+    assert!(outcome.report.width_trajectory.is_empty());
+    assert_eq!(outcome.report.roots, vec![RootBox::Possible(domain)]);
+}
+
+#[test]
+fn root_search_interruptions_at_every_boundary_retain_both_real_roots() {
+    use std::cell::Cell;
+
+    let f = |x: Interval| x * x - Interval::point(2.0);
+    let fp = |x: Interval| Interval::point(2.0) * x;
+    let domain = Interval::new(-2.0, 2.0);
+    let config = RootSearchConfig {
+        min_width: 1e-10,
+        max_boxes: 64,
+    };
+    let mut checkpoints = 0;
+    let finished = newton_roots_with_checkpoint(&f, &fp, domain, config, &mut || {
+        checkpoints += 1;
+        Ok::<(), usize>(())
+    })
+    .unwrap();
+    assert_eq!(finished.termination, RootSearchTermination::Complete);
+    assert_eq!(
+        finished.report,
+        newton_roots_bounded(&f, &fp, domain, config).unwrap()
+    );
+
+    for stop_at in 0..checkpoints {
+        let stopped = Cell::new(false);
+        let boxes_evaluated = Cell::new(0);
+        let mut polls = 0;
+        let interval_f = |x: Interval| {
+            assert!(!stopped.get(), "function ran after checkpoint refusal");
+            if x.lo() < x.hi() {
+                boxes_evaluated.set(boxes_evaluated.get() + 1);
+            }
+            f(x)
+        };
+        let derivative = |x: Interval| {
+            assert!(!stopped.get(), "derivative ran after checkpoint refusal");
+            fp(x)
+        };
+        let outcome =
+            newton_roots_with_checkpoint(&interval_f, &derivative, domain, config, &mut || {
+                assert!(!stopped.get(), "polled again after cancellation");
+                let index = polls;
+                polls += 1;
+                if index == stop_at {
+                    stopped.set(true);
+                    Err(index)
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            outcome.termination,
+            RootSearchTermination::Cancelled(stop_at)
+        );
+        assert!(!outcome.report.complete, "checkpoint {stop_at}");
+        assert_eq!(outcome.report.boxes_examined, boxes_evaluated.get());
+        assert_eq!(
+            outcome.report.width_trajectory.len(),
+            outcome.report.boxes_examined
+        );
+        assert_eq!(
+            outcome.report.width_trajectory,
+            finished.report.width_trajectory[..outcome.report.boxes_examined]
+        );
+        for root in [-std::f64::consts::SQRT_2, std::f64::consts::SQRT_2] {
+            assert!(
+                outcome
+                    .report
+                    .roots
+                    .iter()
+                    .any(|box_| box_.interval().contains(root)),
+                "checkpoint {stop_at} dropped root {root}: {:?}",
+                outcome.report
+            );
+        }
+    }
+}
+
+#[test]
+fn cancelled_subdivision_keeps_every_unexamined_interval_possible() {
+    let zero = |_: Interval| Interval::point(0.0);
+    let domain = Interval::new(-2.0, 2.0);
+    let config = RootSearchConfig {
+        min_width: 0.25,
+        max_boxes: 4,
+    };
+    let spent =
+        newton_roots_with_checkpoint(&zero, &zero, domain, config, &mut || Ok::<(), usize>(()))
+            .unwrap();
+    assert_eq!(spent.termination, RootSearchTermination::BoxBudgetExhausted);
+    assert!(!spent.report.complete);
+    assert_eq!(spent.report.boxes_examined, 4);
+    assert_eq!(spent.report.roots, vec![RootBox::Possible(domain)]);
+
+    let mut polls = 0;
+    let interrupted = newton_roots_with_checkpoint(&zero, &zero, domain, config, &mut || {
+        polls += 1;
+        if polls == 8 { Err(polls) } else { Ok(()) }
+    })
+    .unwrap();
+    assert_eq!(interrupted.termination, RootSearchTermination::Cancelled(8));
+    assert!(!interrupted.report.complete);
+    assert_eq!(interrupted.report.boxes_examined, 3);
+    assert_eq!(interrupted.report.roots, vec![RootBox::Possible(domain)]);
+}
+
+#[test]
+fn publication_cancellation_cannot_become_a_complete_no_root_result() {
+    use fs_evidence::{BoundOutcome, ClaimClass, NoUsefulBoundCause, UsefulnessCriterion};
+
+    let nonzero = |_: Interval| Interval::point(1.0);
+    let mut polls = 0;
+    let outcome = newton_roots_with_checkpoint(
+        &nonzero,
+        &nonzero,
+        Interval::new(-1.0, 1.0),
+        RootSearchConfig {
+            min_width: 1e-9,
+            max_boxes: 1,
+        },
+        &mut || {
+            polls += 1;
+            if polls == 2 { Err("publish") } else { Ok(()) }
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.termination,
+        RootSearchTermination::Cancelled("publish")
+    );
+    assert_eq!(outcome.report.boxes_examined, 1);
+    assert!(outcome.report.roots.is_empty());
+    assert!(!outcome.report.complete);
+    let bound = outcome
+        .report
+        .bound_with_usefulness(
+            UsefulnessCriterion::try_new("root localization", "m", 1.0).unwrap(),
+            NoUsefulBoundCause::LipschitzBlowup,
+            ClaimClass::RootOrEventTime,
+        )
+        .unwrap();
+    assert!(matches!(bound, Some(BoundOutcome::NoUsefulBound(_))));
 }
 
 #[test]
