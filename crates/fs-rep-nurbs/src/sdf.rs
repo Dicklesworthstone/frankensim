@@ -10,12 +10,18 @@
 
 use crate::NurbsError;
 use crate::closest::{
-    CLOSEST_MAX_BASE_WORK_UNITS, CLOSEST_MAX_SPLITS, norm3, preflight_surface_subdivision,
-    surface_base_work_units, surface_subdivision_work_per_split,
+    CLOSEST_MAX_BASE_WORK_UNITS, CLOSEST_MAX_SPLITS, closest_point_surface_in_region_with_poll,
+    norm3, preflight_surface_subdivision, surface_base_work_units,
+    surface_subdivision_work_per_split,
 };
 use crate::rat::Rat;
-use crate::surface::{AdmittedNurbsSurface, NurbsSurface};
-use crate::trim::{Classification, TRIM_CLASSIFY_MAX_WORK_UNITS, TrimmedPatch};
+use crate::surface::{
+    AdmittedNurbsSurface, NurbsSurface, SurfaceEvaluationRun, SurfacePartialsRun,
+};
+use crate::trim::{
+    AdmittedTrimmedPatch, Classification, TRIM_CLASSIFY_MAX_WORK_UNITS, TrimClassificationRun,
+    TrimmedPatch,
+};
 use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;
 use fs_geom::{Aabb, BettiBounds, Chart, ChartSample, Differentiability, Point3, Vec3};
@@ -44,11 +50,36 @@ pub struct SdfQuery {
     /// Which shell surface owned the minimum.
     pub surface: usize,
     /// The closest point fell outside the kept trim region (or in the
-    /// boundary band): `upper` is infinite because no kept-surface witness was
-    /// established. `param` and `surface` remain diagnostic only.
+    /// boundary band), and the bounded kept-region search established no
+    /// usable witness. `upper` is infinite; `param` and `surface` are diagnostic.
     pub trim_downgrade: bool,
     /// Branch-and-bound splits spent (throughput evidence).
     pub splits: u32,
+}
+
+/// Work limits for one measured distance query. Splits bound each surface's
+/// Bezier frontier; exact trim work is a single allowance shared across the
+/// whole shell and every cell/witness classification, never reissued per call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SdfDistanceBudget {
+    /// Maximum binary Bezier splits on each surface.
+    pub max_splits_per_surface: u32,
+    /// Maximum exact trim-classification work units over the complete query.
+    pub max_trim_work_units: u128,
+}
+
+/// Transactional result of a cancellation-aware measured distance query.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SdfDistanceRun {
+    /// All admitted surfaces completed their bounded searches. A query with
+    /// `trim_downgrade` still has no usable kept-surface distance witness.
+    Complete {
+        /// Measured distance result; it grants no enclosure or sign authority.
+        query: SdfQuery,
+    },
+    /// Cancellation was observed; no partial witness or query is published.
+    Cancelled,
 }
 
 /// Transactional terminal state of cancellation-aware control-support
@@ -296,6 +327,26 @@ impl ShellSdf {
     }
 
     fn query_work_units(&self, max_splits: u32) -> Result<u128, NurbsError> {
+        self.query_work_units_with_budget(self.default_distance_budget(max_splits)?)
+    }
+
+    fn default_distance_budget(&self, max_splits: u32) -> Result<SdfDistanceBudget, NurbsError> {
+        let per_shell_trim_work = checked_work_product(
+            &[self.trimmed_surface_count, TRIM_CLASSIFY_MAX_WORK_UNITS, 2],
+            "shared trim classification",
+        )?;
+        Ok(SdfDistanceBudget {
+            max_splits_per_surface: max_splits,
+            max_trim_work_units: if self.trimmed_surface_count == 0 {
+                0
+            } else {
+                per_shell_trim_work.max(8 * TRIM_CLASSIFY_MAX_WORK_UNITS)
+            },
+        })
+    }
+
+    fn query_work_units_with_budget(&self, budget: SdfDistanceBudget) -> Result<u128, NurbsError> {
+        let max_splits = budget.max_splits_per_surface;
         if max_splits > CLOSEST_MAX_SPLITS {
             return Err(NurbsError::Domain {
                 what: "NURBS shell split request exceeds the defensive legacy-path ceiling"
@@ -314,12 +365,9 @@ impl ShellSdf {
             .ok_or_else(|| NurbsError::Domain {
                 what: "NURBS shell split-work accounting overflows u128".to_string(),
             })?;
-        // A trimmed query may have to classify both the retained B&B witness
-        // and a distinct optional polished witness. Charge both before work.
-        let trim_work = checked_work_product(
-            &[self.trimmed_surface_count, TRIM_CLASSIFY_MAX_WORK_UNITS, 2],
-            "trim classification",
-        )?;
+        // Exact classification spends this allowance cumulatively; even a
+        // deeply subdivided hole cannot renew the allowance at each cell.
+        let trim_work = budget.max_trim_work_units;
         let requested = self
             .base_work_units
             .checked_add(split_work)
@@ -434,8 +482,9 @@ impl ShellSdf {
         Ok(ControlAabbRun::Complete { aabb: support })
     }
 
-    /// Measured unsigned-distance bracket per surface, Gauss–Newton polish,
-    /// then trim classification of the winning parameter.
+    /// Measured distance to the kept surface region. Trimmed searches exclude
+    /// certified-outside parameter cells and accept only certified-inside
+    /// point witnesses. Unresolved boundary cells remain in the frontier.
     ///
     /// # Errors
     /// Returns a domain refusal for malformed query settings or excessive
@@ -445,14 +494,59 @@ impl ShellSdf {
             .map(|(query, _)| query)
     }
 
+    /// Query a shell under caller-owned split/trim limits and one cancellation
+    /// gate spanning conversion, cell classification, refinement and polish.
+    ///
+    /// This restart-only operation retains no resumable frontier. Cancellation
+    /// publishes no partial query; a completed search without a kept witness
+    /// returns `trim_downgrade` and an infinite upper estimate, never a miss.
+    /// Static memory/work ceilings still apply. The caller owns scope drain
+    /// and finalization; this method does not consume the executor's budget.
+    ///
+    /// # Errors
+    /// Returns request, work/memory, exact trim arithmetic or allocation
+    /// refusals. Trim-work exhaustion is a refusal, not a complete estimate.
+    pub fn distance_with_budget_and_cx(
+        &self,
+        q: [f64; 3],
+        tol: f64,
+        budget: SdfDistanceBudget,
+        cx: &Cx<'_>,
+    ) -> Result<SdfDistanceRun, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        match self.distance_with_poll(q, tol, budget, &mut should_cancel)? {
+            Some((query, _)) => Ok(SdfDistanceRun::Complete { query }),
+            None => Ok(SdfDistanceRun::Cancelled),
+        }
+    }
+
     fn distance_with_admission(
         &self,
         q: [f64; 3],
         tol: f64,
         max_splits: u32,
     ) -> Result<(SdfQuery, AdmittedNurbsSurface<'_, f64>), NurbsError> {
+        self.distance_with_poll(
+            q,
+            tol,
+            self.default_distance_budget(max_splits)?,
+            &mut || false,
+        )?
+        .ok_or_else(|| NurbsError::Domain {
+            what: "non-cancelling shell distance observed cancellation".to_string(),
+        })
+    }
+
+    fn distance_with_poll(
+        &self,
+        q: [f64; 3],
+        tol: f64,
+        budget: SdfDistanceBudget,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<Option<(SdfQuery, AdmittedNurbsSurface<'_, f64>)>, NurbsError> {
         validate_distance_request(q, tol)?;
-        let _ = self.query_work_units(max_splits)?;
+        let _ = self.query_work_units_with_budget(budget)?;
+        let max_splits = budget.max_splits_per_surface;
         let surface_count = u64::try_from(self.surfaces.len()).map_err(|_| NurbsError::Domain {
             what: "NURBS shell surface count cannot be represented as u64".to_string(),
         })?;
@@ -469,9 +563,42 @@ impl ShellSdf {
         let mut best: Option<(SdfQuery, AdmittedNurbsSurface<'_, f64>)> = None;
         let mut global_lower = f64::INFINITY;
         let mut total_splits = 0u32;
+        let mut trim_work_remaining = budget.max_trim_work_units;
         for (idx, s) in self.surfaces.iter().enumerate() {
-            let admitted = s.admit()?;
-            let cd = admitted.closest_point(q, tol, max_splits)?;
+            if should_cancel() {
+                return Ok(None);
+            }
+            // Shell construction validated these immutable private surfaces
+            // and trim snapshots. Reuse that admission throughout the query.
+            let admitted = s.admitted_after_validation();
+            let trim = self.trims[idx]
+                .as_ref()
+                .map(TrimmedPatch::admitted_after_validation);
+            let cd = if let Some(trim) = trim {
+                let mut classify = |min, max, gate: &mut dyn FnMut() -> bool| {
+                    classify_trim_cell(trim, min, max, &mut trim_work_remaining, &mut || gate())
+                };
+                closest_point_surface_in_region_with_poll(
+                    admitted,
+                    q,
+                    tol,
+                    max_splits,
+                    Some(&mut classify),
+                    should_cancel,
+                )?
+            } else {
+                closest_point_surface_in_region_with_poll(
+                    admitted,
+                    q,
+                    tol,
+                    max_splits,
+                    None,
+                    should_cancel,
+                )?
+            };
+            let Some(cd) = cd else {
+                return Ok(None);
+            };
             global_lower = global_lower.min(cd.lower);
             total_splits =
                 total_splits
@@ -479,9 +606,38 @@ impl ShellSdf {
                     .ok_or_else(|| NurbsError::Domain {
                         what: "NURBS shell split accounting exceeds u32".to_string(),
                     })?;
-            let polished = polish_upper(admitted, q, cd.param, cd.upper);
-            let (upper, param, trim_downgrade) = if let Some(trim) = &self.trims[idx] {
-                select_trimmed_witness(trim, (cd.upper, cd.param), polished)?
+            let polished = if cd.upper.is_finite() {
+                let Some(polished) =
+                    polish_upper_with_poll(admitted, q, cd.param, cd.upper, should_cancel)
+                else {
+                    return Ok(None);
+                };
+                polished
+            } else {
+                (cd.upper, cd.param)
+            };
+            let (upper, param, trim_downgrade) = if let Some(trim) = trim {
+                let polished_kept = if polished.0 < cd.upper {
+                    match classify_trim_cell(
+                        trim,
+                        polished.1,
+                        polished.1,
+                        &mut trim_work_remaining,
+                        should_cancel,
+                    )? {
+                        TrimClassificationRun::Complete { classification } => {
+                            classification == Classification::Inside
+                        }
+                        TrimClassificationRun::Cancelled => return Ok(None),
+                    }
+                } else {
+                    false
+                };
+                if polished_kept {
+                    (polished.0, polished.1, false)
+                } else {
+                    (cd.upper, cd.param, !cd.upper.is_finite())
+                }
             } else {
                 (polished.0, polished.1, false)
             };
@@ -511,7 +667,10 @@ impl ShellSdf {
         if out.trim_downgrade {
             out.upper = f64::INFINITY;
         }
-        Ok((out, admitted))
+        if should_cancel() {
+            return Ok(None);
+        }
+        Ok(Some((out, admitted)))
     }
 }
 
@@ -536,56 +695,64 @@ fn trim_parameter_cell(value: f64) -> Option<(Rat, Rat)> {
     Some((Rat::new(lo, TRIM_SCALE), Rat::new(hi, TRIM_SCALE)))
 }
 
-fn trim_witness_is_kept(trim: &TrimmedPatch, parameter: [f64; 2]) -> Result<bool, NurbsError> {
-    match (
-        trim_parameter_cell(parameter[0]),
-        trim_parameter_cell(parameter[1]),
-    ) {
-        (Some((umin, umax)), Some((vmin, vmax))) => {
-            Ok(trim.classify_box([umin, vmin], [umax, vmax])? == Classification::Inside)
-        }
-        // A parameter outside the checked rationalization domain cannot
-        // acquire trim authority from a saturating cast.
-        _ => Ok(false),
+fn classify_trim_cell(
+    trim: AdmittedTrimmedPatch<'_>,
+    min: [f64; 2],
+    max: [f64; 2],
+    work_remaining: &mut u128,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<TrimClassificationRun, NurbsError> {
+    if should_cancel() {
+        return Ok(TrimClassificationRun::Cancelled);
     }
-}
-
-fn select_trimmed_witness(
-    trim: &TrimmedPatch,
-    base: (f64, [f64; 2]),
-    polished: (f64, [f64; 2]),
-) -> Result<(f64, [f64; 2], bool), NurbsError> {
-    let base_kept = trim_witness_is_kept(trim, base.1)?;
-    let polished_kept = if polished.1.map(f64::to_bits) == base.1.map(f64::to_bits) {
-        base_kept
-    } else {
-        trim_witness_is_kept(trim, polished.1)?
-    };
-    Ok(match (base_kept, polished_kept) {
-        (true, true) if polished.0 < base.0 => (polished.0, polished.1, false),
-        (true, _) => (base.0, base.1, false),
-        (false, true) => (polished.0, polished.1, false),
-        (false, false) => (polished.0, polished.1, true),
-    })
+    match (
+        trim_parameter_cell(min[0]),
+        trim_parameter_cell(min[1]),
+        trim_parameter_cell(max[0]),
+        trim_parameter_cell(max[1]),
+    ) {
+        (Some((umin, _)), Some((vmin, _)), Some((_, umax)), Some((_, vmax))) => trim
+            .classify_box_with_depth_budget_and_poll(
+                [umin, vmin],
+                [umax, vmax],
+                // A cell crossing a trim curve cannot become separated by
+                // endlessly refining the curve. Retain its Boundary verdict
+                // promptly and spend the query's effort splitting the cell.
+                if min == max { 4 } else { 2 },
+                work_remaining,
+                should_cancel,
+            ),
+        // Out-of-range rationalization cannot exclude a cell or authorize a
+        // witness. Retain ambiguity instead of saturating a float cast.
+        _ => Ok(TrimClassificationRun::Complete {
+            classification: Classification::Boundary,
+        }),
+    }
 }
 
 /// Damped Gauss–Newton on `min ‖S(u,v) − q‖²`: only an ACCEPTED
 /// improvement (a strictly smaller evaluated distance inside the domain)
 /// updates the answer, so the returned upper estimate comes from a genuinely
 /// evaluated surface point (still ordinary, non-directed f64 arithmetic).
-fn polish_upper(
+fn polish_upper_with_poll(
     s: AdmittedNurbsSurface<'_, f64>,
     q: [f64; 3],
     start: [f64; 2],
     upper0: f64,
-) -> (f64, [f64; 2]) {
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Option<(f64, [f64; 2])> {
     let (ulo, uhi) = s.knots_u().domain();
     let (vlo, vhi) = s.knots_v().domain();
     let mut best = (upper0, start);
     let mut uv = start;
     for _ in 0..POLISH_STEPS {
-        let Ok((pos, du, dv)) = s.partials(uv[0], uv[1]) else {
-            break;
+        if should_cancel() {
+            return None;
+        }
+        let (pos, du, dv) = match s.partials_with_poll(uv[0], uv[1], should_cancel) {
+            Ok(SurfacePartialsRun::Complete { partials }) => partials,
+            Ok(SurfacePartialsRun::Cancelled) => return None,
+            Err(_) => break,
         };
         let r = [pos[0] - q[0], pos[1] - q[1], pos[2] - q[2]];
         // Normal equations of the 2x3 Jacobian.
@@ -599,18 +766,25 @@ fn polish_upper(
         let mut damp = 1.0f64;
         let mut improved = false;
         for _ in 0..4 {
+            if should_cancel() {
+                return None;
+            }
             let cand = [
                 (uv[0] + damp * step[0]).clamp(ulo, uhi),
                 (uv[1] + damp * step[1]).clamp(vlo, vhi),
             ];
-            if let Ok(p) = s.eval(cand[0], cand[1]) {
-                let d = norm3([p[0] - q[0], p[1] - q[1], p[2] - q[2]]);
-                if d < best.0 {
-                    best = (d, cand);
-                    uv = cand;
-                    improved = true;
-                    break;
+            match s.eval_with_poll(cand[0], cand[1], should_cancel) {
+                Ok(SurfaceEvaluationRun::Complete { point: p }) => {
+                    let d = norm3([p[0] - q[0], p[1] - q[1], p[2] - q[2]]);
+                    if d < best.0 {
+                        best = (d, cand);
+                        uv = cand;
+                        improved = true;
+                        break;
+                    }
                 }
+                Ok(SurfaceEvaluationRun::Cancelled) => return None,
+                Err(_) => {}
             }
             damp *= 0.25;
         }
@@ -618,7 +792,7 @@ fn polish_upper(
             break;
         }
     }
-    best
+    if should_cancel() { None } else { Some(best) }
 }
 
 fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -668,11 +842,21 @@ impl ShellSdfChart {
     }
 
     /// Signed-or-unsigned distance estimate for one point.
-    fn sample(&self, x: Point3) -> Result<ChartSample, NurbsError> {
+    fn sample_with_poll(
+        &self,
+        x: Point3,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<ChartSample, NurbsError> {
         let q = [x.x, x.y, x.z];
-        let (query, admitted_surface) =
-            self.shell
-                .distance_with_admission(q, self.tol, self.max_splits)?;
+        let Some((query, admitted_surface)) = self.shell.distance_with_poll(
+            q,
+            self.tol,
+            self.shell.default_distance_budget(self.max_splits)?,
+            should_cancel,
+        )?
+        else {
+            return Ok(unavailable_chart_sample());
+        };
         if query.trim_downgrade {
             // The found point is trimmed away, so it is not a witness on the
             // kept surface. Do not retain its finite value as the chart's
@@ -686,7 +870,9 @@ impl ShellSdfChart {
             });
         }
         let (mut lo, mut hi) = (query.lower, query.upper);
-        let Some((sign, gradient)) = self.sign_and_gradient(q, &query, admitted_surface) else {
+        let Some((sign, gradient)) =
+            self.sign_and_gradient(q, &query, admitted_surface, should_cancel)
+        else {
             // A declared orientation cannot assign sign through a singular or
             // contradictory local chart. Preserve no nominal finite value that
             // a consumer could misread while ignoring the certificate.
@@ -700,6 +886,9 @@ impl ShellSdfChart {
         let signed = sign * query.upper;
         if sign < 0.0 {
             (lo, hi) = (-hi, -lo);
+        }
+        if should_cancel() {
+            return Ok(unavailable_chart_sample());
         }
         Ok(ChartSample {
             signed_distance: signed,
@@ -719,11 +908,18 @@ impl ShellSdfChart {
         q: [f64; 3],
         query: &SdfQuery,
         surface: AdmittedNurbsSurface<'_, f64>,
+        should_cancel: &mut impl FnMut() -> bool,
     ) -> Option<(f64, Option<Vec3>)> {
+        if should_cancel() {
+            return None;
+        }
         match self.shell.orientation {
-            Orientation::Unknown => Some((1.0, unsigned_gradient(surface, q, query.param))),
-            Orientation::Outward => oriented_sign_at(surface, q, query.param)
-                .or_else(|| self.regular_witness_sign(q, query, surface)),
+            Orientation::Unknown => Some((
+                1.0,
+                unsigned_gradient(surface, q, query.param, should_cancel),
+            )),
+            Orientation::Outward => oriented_sign_at(surface, q, query.param, should_cancel)
+                .or_else(|| self.regular_witness_sign(q, query, surface, should_cancel)),
         }
     }
 
@@ -732,7 +928,11 @@ impl ShellSdfChart {
         q: [f64; 3],
         query: &SdfQuery,
         surface: AdmittedNurbsSurface<'_, f64>,
+        should_cancel: &mut impl FnMut() -> bool,
     ) -> Option<(f64, Option<Vec3>)> {
+        if should_cancel() {
+            return None;
+        }
         // A nearby parameter could cross a trim curve. Until the trim path can
         // certify a connected kept neighborhood, do not use it for sign repair.
         if self.shell.trims[query.surface].is_some() {
@@ -779,17 +979,24 @@ impl ShellSdfChart {
                     (query.param[1] - dv).max(vlo),
                 ],
             ] {
+                if should_cancel() {
+                    return None;
+                }
                 if candidate == query.param {
                     continue;
                 }
-                let Ok(position) = surface.eval(candidate[0], candidate[1]) else {
-                    continue;
-                };
+                let position =
+                    match surface.eval_with_poll(candidate[0], candidate[1], should_cancel) {
+                        Ok(SurfaceEvaluationRun::Complete { point }) => point,
+                        Ok(SurfaceEvaluationRun::Cancelled) => return None,
+                        Err(_) => continue,
+                    };
                 let distance = norm3([position[0] - q[0], position[1] - q[1], position[2] - q[2]]);
                 if !distance.is_finite() || distance > admitted_upper {
                     continue;
                 }
-                let Some((sign, gradient)) = oriented_sign_at(surface, q, candidate) else {
+                let Some((sign, gradient)) = oriented_sign_at(surface, q, candidate, should_cancel)
+                else {
                     continue;
                 };
                 if observed_sign.is_some_and(|seen| seen != sign) {
@@ -818,8 +1025,16 @@ fn unsigned_gradient(
     surface: AdmittedNurbsSurface<'_, f64>,
     q: [f64; 3],
     param: [f64; 2],
+    should_cancel: &mut impl FnMut() -> bool,
 ) -> Option<Vec3> {
-    let (position, _, _) = surface.partials(param[0], param[1]).ok()?;
+    let SurfacePartialsRun::Complete {
+        partials: (position, _, _),
+    } = surface
+        .partials_with_poll(param[0], param[1], should_cancel)
+        .ok()?
+    else {
+        return None;
+    };
     let offset = [q[0] - position[0], q[1] - position[1], q[2] - position[2]];
     let norm = norm3(offset);
     if !norm.is_finite() || norm == 0.0 {
@@ -836,8 +1051,16 @@ fn oriented_sign_at(
     surface: AdmittedNurbsSurface<'_, f64>,
     q: [f64; 3],
     param: [f64; 2],
+    should_cancel: &mut impl FnMut() -> bool,
 ) -> Option<(f64, Option<Vec3>)> {
-    let (position, du, dv) = surface.partials(param[0], param[1]).ok()?;
+    let SurfacePartialsRun::Complete {
+        partials: (position, du, dv),
+    } = surface
+        .partials_with_poll(param[0], param[1], should_cancel)
+        .ok()?
+    else {
+        return None;
+    };
     if position
         .iter()
         .chain(du.iter())
@@ -892,13 +1115,13 @@ fn oriented_sign_at(
 }
 
 impl Chart for ShellSdfChart {
-    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
-        self.sample(x).unwrap_or(ChartSample {
-            signed_distance: f64::INFINITY,
-            gradient: None,
-            lipschitz: None,
-            error: NumericalCertificate::no_claim(),
+    fn eval(&self, x: Point3, cx: &Cx<'_>) -> ChartSample {
+        let mut cancelled = false;
+        self.sample_with_poll(x, &mut || {
+            cancelled = cancelled || cx.checkpoint().is_err();
+            cancelled
         })
+        .unwrap_or_else(|_| unavailable_chart_sample())
     }
 
     fn support(&self) -> Aabb {
@@ -923,19 +1146,28 @@ impl Chart for ShellSdfChart {
     }
 }
 
+fn unavailable_chart_sample() -> ChartSample {
+    ChartSample {
+        signed_distance: f64::INFINITY,
+        gradient: None,
+        lipschitz: None,
+        error: NumericalCertificate::no_claim(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ControlAabbRun, Orientation, SDF_CONTROL_AABB_MAX_WORK_UNITS, SDF_CONTROL_AABB_PHASE_WORK,
-        SDF_CONTROL_AABB_WORK_PER_CONTROL, ShellSdf, enforce_control_aabb_work,
-        select_trimmed_witness, store_f32_with_error,
+        SDF_CONTROL_AABB_WORK_PER_CONTROL, SdfDistanceBudget, ShellSdf, classify_trim_cell,
+        enforce_control_aabb_work, store_f32_with_error,
     };
     use crate::NurbsError;
     use crate::basis::KnotVector;
     use crate::curve::NurbsCurve;
     use crate::rat::Rat;
     use crate::surface::NurbsSurface;
-    use crate::trim::{TrimLoop, TrimmedPatch};
+    use crate::trim::{Classification, TrimClassificationRun, TrimLoop, TrimmedPatch};
 
     fn unit_square_trim() -> TrimmedPatch {
         let knots = KnotVector::new(
@@ -1083,19 +1315,79 @@ mod tests {
     }
 
     #[test]
-    fn optional_polish_cannot_erase_a_kept_base_witness() {
+    fn trim_search_reuses_one_allowance_and_keeps_crossing_cells_ambiguous() {
         let trim = unit_square_trim();
-        let selected = select_trimmed_witness(&trim, (2.0, [0.5, 0.5]), (1.0, [2.0, 2.0]))
-            .expect("classification");
-        assert_eq!(selected, (2.0, [0.5, 0.5], false));
+        let admitted = trim.admit().expect("trim admission");
+        let mut remaining = 1_048_576u128;
+        for (min, max, expected) in [
+            ([0.0, 0.0], [1.0, 1.0], Classification::Boundary),
+            ([0.5, 0.5], [0.5, 0.5], Classification::Inside),
+            ([2.0, 2.0], [3.0, 3.0], Classification::Outside),
+        ] {
+            let before = remaining;
+            assert_eq!(
+                classify_trim_cell(admitted, min, max, &mut remaining, &mut || false)
+                    .expect("classification"),
+                TrimClassificationRun::Complete {
+                    classification: expected
+                },
+            );
+            assert!(remaining < before, "each call spends the same allowance");
+        }
+        assert!(classify_trim_cell(admitted, [0.5; 2], [0.5; 2], &mut 0, &mut || false,).is_err());
+    }
 
-        let repaired = select_trimmed_witness(&trim, (2.0, [2.0, 2.0]), (1.0, [0.5, 0.5]))
-            .expect("classification");
-        assert_eq!(repaired, (1.0, [0.5, 0.5], false));
-
-        let absent = select_trimmed_witness(&trim, (2.0, [2.0, 2.0]), (1.0, [3.0, 3.0]))
-            .expect("classification");
-        assert_eq!(absent, (1.0, [3.0, 3.0], true));
+    #[test]
+    fn distance_cancellation_interrupts_search_and_final_publication() {
+        let knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("knots");
+        let surface = NurbsSurface::new(
+            knots.clone(),
+            knots,
+            &[
+                vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                vec![[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+            ],
+            &[vec![1.0; 2], vec![1.0; 2]],
+        )
+        .expect("plane");
+        let shell = ShellSdf::new(
+            vec![surface],
+            vec![Some(unit_square_trim())],
+            Orientation::Unknown,
+        )
+        .expect("trimmed shell");
+        let budget = SdfDistanceBudget {
+            max_splits_per_surface: 16,
+            max_trim_work_units: 1_048_576,
+        };
+        let mut polls = 0usize;
+        let reference = shell
+            .distance_with_poll([0.3, 0.4, 0.5], 1e-3, budget, &mut || {
+                polls += 1;
+                false
+            })
+            .expect("complete reference")
+            .expect("not cancelled")
+            .0;
+        assert!(reference.upper.is_finite());
+        assert!(polls > 10);
+        for boundary in [1, 2, polls / 4, polls / 2, polls - 1, polls] {
+            let mut visited = 0usize;
+            let cancelled = shell
+                .distance_with_poll([0.3, 0.4, 0.5], 1e-3, budget, &mut || {
+                    visited += 1;
+                    visited == boundary
+                })
+                .expect("cancelled query is not a numerical refusal");
+            assert!(
+                cancelled.is_none(),
+                "boundary {boundary} must publish no query"
+            );
+            assert_eq!(
+                visited, boundary,
+                "no work checkpoint follows observed cancellation"
+            );
+        }
     }
 
     #[test]
@@ -1327,7 +1619,9 @@ pub fn generate_tile(
                     tile.values.push(f32::INFINITY);
                     continue;
                 }
-                let Some((sign, _)) = chart.sign_and_gradient(q, &query, admitted_surface) else {
+                let Some((sign, _)) =
+                    chart.sign_and_gradient(q, &query, admitted_surface, &mut || false)
+                else {
                     tile.downgraded += 1;
                     tile.sign_downgraded += 1;
                     if near_cell {

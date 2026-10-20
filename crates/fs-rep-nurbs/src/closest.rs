@@ -18,6 +18,7 @@ use crate::curve::{
 use crate::surface::{
     AdmittedNurbsSurface, NurbsSurface, SurfaceAdmissionRun, SurfaceEvaluationRun,
 };
+use crate::trim::{Classification, TrimClassificationRun};
 use fs_exec::Cx;
 use fs_math::{det, next_down, next_up};
 use std::cmp::Ordering;
@@ -67,6 +68,28 @@ fn closest_poll_due(
 enum ClosestWorkRun<T> {
     Complete(T),
     Cancelled,
+}
+
+/// A closed parameter-cell predicate. Only `Outside` may discard a cell;
+/// `Boundary` must remain searchable and may not authorize a point witness.
+pub(crate) type SurfaceRegionPredicate<'a> = dyn FnMut([f64; 2], [f64; 2], &mut dyn FnMut() -> bool) -> Result<TrimClassificationRun, NurbsError>
+    + 'a;
+
+fn classify_surface_region(
+    region: &mut Option<&mut SurfaceRegionPredicate<'_>>,
+    min: [f64; 2],
+    max: [f64; 2],
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<ClosestWorkRun<Classification>, NurbsError> {
+    match region.as_deref_mut() {
+        None => Ok(ClosestWorkRun::Complete(Classification::Inside)),
+        Some(classify) => match classify(min, max, should_cancel)? {
+            TrimClassificationRun::Complete { classification } => {
+                Ok(ClosestWorkRun::Complete(classification))
+            }
+            TrimClassificationRun::Cancelled => Ok(ClosestWorkRun::Cancelled),
+        },
+    }
 }
 
 /// Deterministic minimum-priority entry. `BinaryHeap` is a max-heap, so the
@@ -2115,6 +2138,7 @@ fn to_bezier_surface_with_poll(
 }
 
 /// Seed the patch queue from a Bézier-form surface.
+#[cfg(test)]
 fn seed_patches_with_poll(
     work: &NurbsSurface<f64>,
     q: [f64; 3],
@@ -2123,6 +2147,66 @@ fn seed_patches_with_poll(
     next_logical_id: &mut u64,
     upper: &mut f64,
     best: &mut [f64; 2],
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<ClosestWorkRun<()>, NurbsError> {
+    seed_patches_in_region_with_poll(
+        work,
+        q,
+        queue,
+        queue_capacity,
+        next_logical_id,
+        upper,
+        best,
+        &mut None,
+        should_cancel,
+    )
+}
+
+fn consider_patch_corners(
+    net: &[Vec<[f64; 4]>],
+    q: [f64; 3],
+    min: [f64; 2],
+    max: [f64; 2],
+    upper: &mut f64,
+    best: &mut [f64; 2],
+    region: &mut Option<&mut SurfaceRegionPredicate<'_>>,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<ClosestWorkRun<()>, NurbsError> {
+    let last_u = net.len() - 1;
+    let last_v = net[0].len() - 1;
+    let corners = [
+        (&net[0][0], min),
+        (&net[last_u][0], [max[0], min[1]]),
+        (&net[0][last_v], [min[0], max[1]]),
+        (&net[last_u][last_v], max),
+    ];
+    // Retain the untrimmed solver's arithmetic and witness order exactly.
+    let count = if region.is_some() { 4 } else { 1 };
+    for (control, param) in corners.into_iter().take(count) {
+        let distance = dist3(cartesian(control), q);
+        if distance < *upper {
+            match classify_surface_region(region, param, param, should_cancel)? {
+                ClosestWorkRun::Complete(Classification::Inside) => {
+                    *upper = distance;
+                    *best = param;
+                }
+                ClosestWorkRun::Complete(_) => {}
+                ClosestWorkRun::Cancelled => return Ok(ClosestWorkRun::Cancelled),
+            }
+        }
+    }
+    Ok(ClosestWorkRun::Complete(()))
+}
+
+fn seed_patches_in_region_with_poll(
+    work: &NurbsSurface<f64>,
+    q: [f64; 3],
+    queue: &mut BinaryHeap<MinEntry<Patch>>,
+    queue_capacity: usize,
+    next_logical_id: &mut u64,
+    upper: &mut f64,
+    best: &mut [f64; 2],
+    region: &mut Option<&mut SurfaceRegionPredicate<'_>>,
     should_cancel: &mut impl FnMut() -> bool,
 ) -> Result<ClosestWorkRun<()>, NurbsError> {
     if should_cancel() {
@@ -2146,6 +2230,11 @@ fn seed_patches_with_poll(
             if v1 <= v0 {
                 continue;
             }
+            match classify_surface_region(region, [u0, v0], [u1, v1], should_cancel)? {
+                ClosestWorkRun::Complete(Classification::Outside) => continue,
+                ClosestWorkRun::Complete(_) => {}
+                ClosestWorkRun::Cancelled => return Ok(ClosestWorkRun::Cancelled),
+            }
             let mut net = match zero_net_with_poll(
                 pu + 1,
                 pv + 1,
@@ -2163,10 +2252,18 @@ fn seed_patches_with_poll(
                     }
                 }
             }
-            let d = dist3(cartesian(&net[0][0]), q);
-            if d < *upper {
-                *upper = d;
-                *best = [u0, v0];
+            match consider_patch_corners(
+                &net,
+                q,
+                [u0, v0],
+                [u1, v1],
+                upper,
+                best,
+                region,
+                should_cancel,
+            )? {
+                ClosestWorkRun::Complete(()) => {}
+                ClosestWorkRun::Cancelled => return Ok(ClosestWorkRun::Cancelled),
             }
             let lb = match patch_lb_with_poll(q, &net, should_cancel) {
                 ClosestWorkRun::Complete(lower) => lower,
@@ -2383,6 +2480,75 @@ where
     C: FnMut() -> Result<ClosestWorkRun<NurbsSurface<f64>>, NurbsError>,
     E: FnMut(f64, f64) -> Result<ClosestWorkRun<[f64; 3]>, NurbsError>,
 {
+    closest_point_surface_after_plan_in_region_with_poll(
+        surface,
+        q,
+        tol,
+        max_splits,
+        execution_plan,
+        kernels,
+        &mut None,
+        should_cancel,
+    )
+}
+
+/// Measured kept-region search used by the shell converter. `None` means
+/// cancellation with no publication. An infinite upper estimate means no
+/// finite kept point was established; it never proves the region empty. The
+/// predicate owns one shared trim-work allowance across all cell/point tests.
+#[cfg(feature = "nurbs-sdf")]
+pub(crate) fn closest_point_surface_in_region_with_poll(
+    surface: AdmittedNurbsSurface<'_, f64>,
+    q: [f64; 3],
+    tol: f64,
+    max_splits: u32,
+    region: Option<&mut SurfaceRegionPredicate<'_>>,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<Option<DistanceBracketEstimate>, NurbsError> {
+    validate_closest_request(q, tol, max_splits)?;
+    let plan = match preflight_surface_closest_with_poll(surface, max_splits, 0, should_cancel)? {
+        ClosestWorkRun::Complete(plan) => plan,
+        ClosestWorkRun::Cancelled => return Ok(None),
+    };
+    // The conversion, evaluation and orchestration callbacks are invoked
+    // sequentially. A checkpoint borrow ends before any nested kernel runs.
+    let gate = std::cell::RefCell::new(should_cancel);
+    let mut kernels = SurfaceClosestKernels {
+        conversion: || to_bezier_surface_with_poll(surface, &mut || (*gate.borrow_mut())()),
+        evaluation: |u, v| match surface.eval_with_poll(u, v, &mut || (*gate.borrow_mut())())? {
+            SurfaceEvaluationRun::Complete { point } => Ok(ClosestWorkRun::Complete(point)),
+            SurfaceEvaluationRun::Cancelled => Ok(ClosestWorkRun::Cancelled),
+        },
+    };
+    match closest_point_surface_after_plan_in_region_with_poll(
+        surface,
+        q,
+        tol,
+        max_splits,
+        plan,
+        &mut kernels,
+        &mut { region },
+        &mut || (*gate.borrow_mut())(),
+    )? {
+        ClosestWorkRun::Complete(estimate) => Ok(Some(estimate)),
+        ClosestWorkRun::Cancelled => Ok(None),
+    }
+}
+
+fn closest_point_surface_after_plan_in_region_with_poll<C, E>(
+    surface: AdmittedNurbsSurface<'_, f64>,
+    q: [f64; 3],
+    tol: f64,
+    max_splits: u32,
+    execution_plan: SurfaceClosestExecutionPlan,
+    kernels: &mut SurfaceClosestKernels<C, E>,
+    region: &mut Option<&mut SurfaceRegionPredicate<'_>>,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<ClosestWorkRun<DistanceBracketEstimate>, NurbsError>
+where
+    C: FnMut() -> Result<ClosestWorkRun<NurbsSurface<f64>>, NurbsError>,
+    E: FnMut(f64, f64) -> Result<ClosestWorkRun<[f64; 3]>, NurbsError>,
+{
     if should_cancel() {
         return Ok(ClosestWorkRun::Cancelled);
     }
@@ -2423,7 +2589,7 @@ where
     let mut next_logical_id = 0u64;
     let mut upper = f64::INFINITY;
     let mut best = [surface.knots_u().domain().0, surface.knots_v().domain().0];
-    match seed_patches_with_poll(
+    match seed_patches_in_region_with_poll(
         &work,
         q,
         &mut queue,
@@ -2431,12 +2597,13 @@ where
         &mut next_logical_id,
         &mut upper,
         &mut best,
+        region,
         should_cancel,
     )? {
         ClosestWorkRun::Complete(()) => {}
         ClosestWorkRun::Cancelled => return Ok(ClosestWorkRun::Cancelled),
     }
-    if queue.len() != plan.seed_leaves {
+    if region.is_none() && queue.len() != plan.seed_leaves {
         return Err(NurbsError::Structure {
             what: format!(
                 "closest-surface conversion produced {} seed leaves after admitting {}",
@@ -2445,7 +2612,7 @@ where
             ),
         });
     }
-    if queue.is_empty() || !upper.is_finite() {
+    if region.is_none() && (queue.is_empty() || !upper.is_finite()) {
         return Err(NurbsError::Domain {
             what: "closest-surface initial distance bounds are not finite".to_string(),
         });
@@ -2560,11 +2727,23 @@ where
             ]
         };
         for (net, u0, u1, v0, v1) in halves {
-            // Corner sample improves the upper bound cheaply.
-            let d = dist3(cartesian(&net[0][0]), q);
-            if d < upper {
-                upper = d;
-                best = [u0, v0];
+            match classify_surface_region(region, [u0, v0], [u1, v1], should_cancel)? {
+                ClosestWorkRun::Complete(Classification::Outside) => continue,
+                ClosestWorkRun::Complete(_) => {}
+                ClosestWorkRun::Cancelled => return Ok(ClosestWorkRun::Cancelled),
+            }
+            match consider_patch_corners(
+                &net,
+                q,
+                [u0, v0],
+                [u1, v1],
+                &mut upper,
+                &mut best,
+                region,
+                should_cancel,
+            )? {
+                ClosestWorkRun::Complete(()) => {}
+                ClosestWorkRun::Cancelled => return Ok(ClosestWorkRun::Cancelled),
             }
             let lb = match patch_lb_with_poll(q, &net, should_cancel) {
                 ClosestWorkRun::Complete(lower) => lower,
@@ -2626,6 +2805,15 @@ where
     if should_cancel() {
         return Ok(ClosestWorkRun::Cancelled);
     }
+    let candidate = if let Some(candidate) = candidate {
+        match classify_surface_region(region, candidate, candidate, should_cancel)? {
+            ClosestWorkRun::Complete(Classification::Inside) => Some(candidate),
+            ClosestWorkRun::Complete(_) => None,
+            ClosestWorkRun::Cancelled => return Ok(ClosestWorkRun::Cancelled),
+        }
+    } else {
+        None
+    };
     if let Some(candidate) = candidate {
         match (kernels.evaluation)(candidate[0], candidate[1]) {
             Ok(ClosestWorkRun::Complete(point)) => {

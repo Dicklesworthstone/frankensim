@@ -217,9 +217,32 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   `nurbs-sdf` feature until its Gauntlet tier is green): the current measured
   NURBS → distance-field approximation. `ShellSdf::distance` uses
   convex-hull branch-and-bound plus damped Gauss–Newton, but its bracket is
-  not outward-rounded. When the found point is trimmed away or in the boundary
-  band, the query carries an infinite upper value and the chart returns
-  `NoClaim`; distance-to-kept-region search remains successor work.
+  not outward-rounded. The search classifies closed parameter cells against
+  the exact trim loops, discards only certified `Outside` cells, retains
+  ambiguous `Boundary` cells, and accepts only certified `Inside` witnesses.
+  It searches the kept region when the untrimmed closest point is removed,
+  including disconnected islands and hole boundaries approached from inside.
+  Optional unconstrained polish cannot replace a kept witness with a point in
+  a hole. If the split budget finds no kept witness, the query carries an
+  infinite upper value and the chart returns `NoClaim`; this is not an empty
+  surface certificate or a proved miss.
+  `SdfDistanceBudget` bounds splits per surface and one exact trim-work
+  allowance shared by all surfaces, cells and witnesses. No classification
+  reissues that allowance. The ordinary query uses at least 8,388,608 shared
+  trim work units for a trimmed shell, subject to the existing aggregate
+  query ceiling; `distance_with_budget_and_cx` admits explicit caller limits.
+  A compound cell pass performs at most two exact trim refinement rounds,
+  and a point pass at most four, never exceeding the source trim policy.
+  Remaining ambiguity drives surface-cell subdivision rather than repeated
+  attempts to separate a cell that actually crosses the boundary. Floating
+  parameters are enclosed in the existing exact 2^-20 grid before trim
+  classification. Very narrow features or unsupported parameter magnitudes
+  may therefore remain unresolved. The surface frontier and exact trim
+  scratch retain their respective 256 MiB and 64 MiB defensive ceilings;
+  these are simultaneously live and are not a caller-owned memory quota.
+  The new Cx path is restart-only: `SdfDistanceRun::Cancelled` publishes no
+  query, frontier or resumable checkpoint. Exact-trim work exhaustion,
+  allocation and arithmetic failures remain typed `NurbsError` refusals.
   `ShellSdfChart` construction validates the configured aggregate query work
   and support padding and returns a structured error if it could only refuse at
   evaluation time. `ShellSdf::control_aabb` likewise rejects malformed padding
@@ -917,8 +940,8 @@ zero. The ordinary-f64 diagnostic excludes both V endpoints and grants no G1
 continuity, pole, topology, geometric-error, or certification authority; it
 does not consume a caller budget, own drain/finalize, or promise wall-time
 preemption. The SDF shell rejects malformed
-point/tolerance input before surface planning, admits each immutable surface
-once per distance query, reuses that admission through closest and Gauss-Newton
+point/tolerance input before surface planning, reuses the immutable surface and
+trim admission established by shell construction through closest and Gauss-Newton
 polish, and carries the winning admission into gradient, orientation, and
 regular-witness sign work.
 It reuses the same split/frontier model, exports worst-case seed and split heap
@@ -926,13 +949,15 @@ coefficients into its aggregate work gate, and additionally charges
 structure-sensitive polishing, sign-repair, and trim coefficients; a shell for
 which even a zero-split query exceeds the ceiling is not constructible. The SDF
 control-support primitive has an effective fixed-stride `Cx` checkpoint and
-final publication gate, but end-to-end SDF query/chart/tile and legacy refit
-paths retain static process ceilings with no effective workflow-wide `Cx`.
-Trim classification now has effective primitive checkpoints but still uses its
-static ceiling rather than a caller-owned affine budget. None of these APIs yet
-owns end-to-end request→drain→finalize semantics, so they are not P7
-cancellation-correct. Successor budgeted interfaces must close those remaining
-orchestration gaps before promotion.
+final publication gate. `distance_with_budget_and_cx` carries one gate through
+conversion, kept-region search, trim classification, polish and publication.
+`ShellSdfChart::eval` now carries the caller's Cx through that query, gradient
+partials and regular-witness sign fallback; cancellation returns only the
+existing non-finite `NoClaim` sample. Nested kernels retain their fixed-stride
+polling; destructors, allocators and wall-time preemption remain outside this
+claim. The legacy tile generator and refit paths still lack a workflow-wide
+Cx. None of these APIs owns executor scope drain/finalize or charges the
+executor's budget, so the complete P4/P7 orchestration gate remains open.
 
 Structural admission proves representation well-formedness only. It does not
 grant enclosure, geometric certification, cancellation, caller-budget,
@@ -997,10 +1022,11 @@ refinement + partials vs central differences.
 - Sign is estimated from the declared local B-rep orientation; the winding-style
   fallback for imperfect shells lands with the quarantine/census beads
   (fs-io owns mesh-side honesty).
-- Trim downgrades widen the estimate; distance-to-kept-region
-  (excluding trimmed area from the B&B itself) is future work — the
-  current f64 lower value has no enclosure authority even for the untrimmed
-  surface.
+- The kept-region B&B does not certify a global closest point, trim-boundary
+  minimizer, sign, topology or a requested error tolerance. Finite witnesses
+  still yield only measured f64 brackets. Insufficient subdivision, ambiguous
+  trim cells or the rationalization grid may leave no kept witness, in which
+  case the converter widens to `NoClaim` rather than using a removed point.
 
 ## No-claim boundaries (refit)
 

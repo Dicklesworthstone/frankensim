@@ -903,6 +903,13 @@ impl TrimmedPatch {
         self.admit_with_budget(&mut work_remaining)
     }
 
+    /// Reuse a sealed trim snapshot already checked by an owning compound
+    /// constructor, such as `ShellSdf::new`.
+    #[cfg(feature = "nurbs-sdf")]
+    pub(crate) const fn admitted_after_validation(&self) -> AdmittedTrimmedPatch<'_> {
+        AdmittedTrimmedPatch { inner: self }
+    }
+
     /// Validate this exact immutable patch with bounded cancellation polling
     /// and publish only a lifetime-bound admitted view.
     ///
@@ -1125,6 +1132,26 @@ impl<'a> AdmittedTrimmedPatch<'a> {
         work_remaining: &mut u128,
         should_cancel: &mut impl FnMut() -> bool,
     ) -> Result<TrimClassificationRun, NurbsError> {
+        self.classify_box_with_depth_budget_and_poll(
+            min,
+            max,
+            self.max_subdivision(),
+            work_remaining,
+            should_cancel,
+        )
+    }
+
+    /// A compound surface search may stop trim refinement earlier and retain
+    /// `Boundary`, then refine the surface cell instead. The cap can only
+    /// weaken classification; it never exceeds the immutable trim policy.
+    pub(crate) fn classify_box_with_depth_budget_and_poll(
+        &self,
+        min: [Rat; 2],
+        max: [Rat; 2],
+        max_depth: u32,
+        work_remaining: &mut u128,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<TrimClassificationRun, NurbsError> {
         let (persistent_source_bytes, witness) = match prepare_trim_classification_with_poll(
             *self,
             min,
@@ -1141,7 +1168,7 @@ impl<'a> AdmittedTrimmedPatch<'a> {
             min,
             max,
             witness,
-            max_depth: self.max_subdivision(),
+            max_depth: self.max_subdivision().min(max_depth),
         };
         for trim_loop in self.admitted_loops() {
             match loop_winding_box_with_poll(

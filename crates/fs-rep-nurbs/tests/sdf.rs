@@ -12,7 +12,10 @@ use asupersync::types::Budget;
 use fs_evidence::NumericalKind;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Chart, Differentiability, Point3};
-use fs_rep_nurbs::sdf::{ControlAabbRun, Orientation, ShellSdf, ShellSdfChart, generate_tile};
+use fs_rep_nurbs::sdf::{
+    ControlAabbRun, Orientation, SdfDistanceBudget, SdfDistanceRun, ShellSdf, ShellSdfChart,
+    generate_tile,
+};
 use fs_rep_nurbs::{KnotVector, NurbsCurve, NurbsSurface, Rat, TrimLoop, TrimmedPatch};
 
 fn verdict(case: &str, detail: &str) {
@@ -360,8 +363,140 @@ fn poly_loop(pts: &[[i64; 2]], scale_den: i64) -> TrimLoop {
     TrimLoop::new(NurbsCurve::new(kv, &points, &weights).expect("loop")).expect("closed")
 }
 
+fn unit_plane() -> NurbsSurface<f64> {
+    let knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("plane knots");
+    NurbsSurface::new(
+        knots.clone(),
+        knots,
+        &[
+            vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+        ],
+        &[vec![1.0; 2], vec![1.0; 2]],
+    )
+    .expect("plane")
+}
+
+fn plane_with_square_hole() -> ShellSdf {
+    let outer = poly_loop(&[[0, 0], [4, 0], [4, 4], [0, 4]], 4);
+    let hole = poly_loop(&[[1, 1], [1, 3], [3, 3], [3, 1]], 4);
+    ShellSdf::new(
+        vec![unit_plane()],
+        vec![Some(TrimmedPatch::new(vec![outer, hole]))],
+        Orientation::Unknown,
+    )
+    .expect("plane with a hole")
+}
+
 #[test]
-fn ns_003_trim_downgrade_is_honest() {
+fn ns_003_hole_search_returns_a_kept_witness_and_never_polishes_into_the_hole() {
+    let shell = plane_with_square_hole();
+    let query = shell
+        .distance([0.5, 0.5, 1.0], 1e-4, 256)
+        .expect("hole search");
+    let expected = (1.0f64 + 0.25f64.powi(2)).sqrt();
+    assert!(!query.trim_downgrade, "the surrounding face is nonempty");
+    assert!(query.lower <= expected + 1e-12, "{query:?}");
+    assert!(
+        query.upper >= expected - 1e-12 && query.upper < expected + 0.005,
+        "{query:?}"
+    );
+    assert!(
+        query.param[0] < 0.25
+            || query.param[0] > 0.75
+            || query.param[1] < 0.25
+            || query.param[1] > 0.75,
+        "optional unconstrained polish must not reinstate the removed point: {query:?}"
+    );
+    let witness = unit_plane()
+        .eval(query.param[0], query.param[1])
+        .expect("witness evaluation");
+    let measured = ((witness[0] - 0.5).powi(2) + (witness[1] - 0.5).powi(2) + 1.0).sqrt();
+    assert!((query.upper - measured).abs() < 1e-12);
+    let again = shell
+        .distance([0.5, 0.5, 1.0], 1e-4, 256)
+        .expect("deterministic repeat");
+    assert_eq!(query, again);
+}
+
+#[test]
+fn ns_003_disconnected_trim_islands_are_searched_without_an_interior_seed() {
+    let trim = TrimmedPatch::new(vec![
+        poly_loop(&[[1, 1], [3, 1], [3, 3], [1, 3]], 16),
+        poly_loop(&[[12, 12], [14, 12], [14, 14], [12, 14]], 16),
+    ]);
+    let shell =
+        ShellSdf::new(vec![unit_plane()], vec![Some(trim)], Orientation::Unknown).expect("islands");
+    let query = shell
+        .distance([0.7, 0.8, 0.2], 1e-4, 256)
+        .expect("island search");
+    let expected = (0.05f64.powi(2) + 0.2f64.powi(2)).sqrt();
+    assert!(!query.trim_downgrade);
+    assert!(query.param[0] > 0.75 && query.param[0] < 0.875, "{query:?}");
+    assert!(query.param[1] > 0.75 && query.param[1] < 0.875, "{query:?}");
+    assert!(
+        query.upper >= expected - 1e-12 && query.upper < expected + 0.01,
+        "{query:?}"
+    );
+}
+
+#[test]
+fn ns_003_no_kept_witness_trim_work_refusal_and_cancellation_stay_distinct() {
+    let shell = plane_with_square_hole();
+    let no_witness = shell
+        .distance([0.5, 0.5, 1.0], 1e-4, 0)
+        .expect("bounded search");
+    assert!(no_witness.trim_downgrade && no_witness.upper.is_infinite());
+    let budget = SdfDistanceBudget {
+        max_splits_per_surface: 256,
+        max_trim_work_units: 0,
+    };
+    with_cx(|cx| {
+        let refusal = shell
+            .distance_with_budget_and_cx([0.5, 0.5, 1.0], 1e-4, budget, cx)
+            .expect_err("trim work cannot renew a zero caller allowance");
+        assert!(refusal.to_string().contains("trim"));
+        let admitted = SdfDistanceBudget {
+            max_trim_work_units: 8_388_608,
+            ..budget
+        };
+        let SdfDistanceRun::Complete { query } = shell
+            .distance_with_budget_and_cx([0.5, 0.5, 1.0], 1e-4, admitted, cx)
+            .expect("budgeted query")
+        else {
+            panic!("active query must complete")
+        };
+        assert!(!query.trim_downgrade);
+    });
+    with_cx_state(true, |cx| {
+        assert_eq!(
+            shell
+                .distance_with_budget_and_cx([0.5, 0.5, 1.0], 1e-4, budget, cx)
+                .expect("pre-cancellation wins before trim work"),
+            SdfDistanceRun::Cancelled,
+        );
+        assert!(
+            shell
+                .distance_with_budget_and_cx([f64::NAN, 0.5, 1.0], 1e-4, budget, cx)
+                .is_err()
+        );
+        let chart = ShellSdfChart::new(plane_with_square_hole(), 1e-4, 256, 0.1)
+            .expect("cancellable chart");
+        let sample = chart.eval(Point3::new(0.5, 0.5, 1.0), cx);
+        assert_eq!(sample.error.kind, NumericalKind::NoClaim);
+        assert!(sample.signed_distance.is_infinite() && sample.gradient.is_none());
+    });
+    with_cx(|cx| {
+        let chart =
+            ShellSdfChart::new(plane_with_square_hole(), 1e-4, 0, 0.1).expect("zero-split chart");
+        let sample = chart.eval(Point3::new(0.5, 0.5, 1.0), cx);
+        assert_eq!(sample.error.kind, NumericalKind::NoClaim);
+        assert!(sample.signed_distance.is_infinite());
+    });
+}
+
+#[test]
+fn ns_003_searches_the_kept_region_when_the_untrimmed_minimum_is_removed() {
     // Keep only the NORTHERN parameter half (v in [1/2, 1] is north because
     // the sphere profile runs south to north): CCW square in (u, v).
     let keep_north = poly_loop(&[[0, 8], [16, 8], [16, 16], [0, 16]], 16);
@@ -380,13 +515,16 @@ fn ns_003_trim_downgrade_is_honest() {
         .distance([0.0, 0.99, -0.99], 1e-6, 4000)
         .expect("query");
     assert!(
-        south.trim_downgrade,
-        "southern closest point is trimmed away"
+        !south.trim_downgrade,
+        "the kept northern surface supplies its own witness"
     );
     assert!(
-        south.upper.is_infinite(),
-        "a trimmed-away point is not a kept-surface upper witness"
+        south.upper.is_finite() && south.param[1] > 0.5,
+        "the witness must lie in the kept half: {south:?}"
     );
+    let expected_south = (0.01f64.powi(2) + 0.99f64.powi(2)).sqrt();
+    assert!(south.upper >= expected_south - 1e-12);
+    assert!((south.upper - expected_south).abs() < 2e-3);
     let alternate = ShellSdf::new(
         vec![sphere(), sphere()],
         vec![
@@ -404,8 +542,9 @@ fn ns_003_trim_downgrade_is_honest() {
         .expect("alternate query");
     assert!(
         !alternate_south.trim_downgrade && alternate_south.upper.is_finite(),
-        "a valid kept-surface witness must outrank a closer trimmed-away diagnostic"
+        "both surfaces are searched for kept witnesses"
     );
+    assert_eq!(alternate_south.surface, 1, "the untrimmed sphere is closer");
     // A point nearest the NORTH pole: kept region, finite measured estimate.
     let north = shell
         .distance([0.0, 0.99, 0.99], 1e-6, 4000)
@@ -417,7 +556,7 @@ fn ns_003_trim_downgrade_is_honest() {
         "{} vs {expect}",
         north.upper
     );
-    // The chart widens the trim-downgraded estimate instead of lying.
+    // The improved search reaches the chart without changing its authority.
     with_cx(|cx| {
         let chart = ShellSdfChart::new(
             ShellSdf::new(
@@ -436,15 +575,16 @@ fn ns_003_trim_downgrade_is_honest() {
         .expect("admissible trimmed chart settings");
         let s = chart.eval(Point3::new(0.0, 0.99, -0.99), cx);
         assert!(
-            s.error.hi.is_infinite(),
-            "downgraded estimate is widened, not asserted: {:?}",
+            s.error.hi.is_finite(),
+            "kept-surface search supplies a measured estimate: {:?}",
             s.error
         );
-        assert_eq!(s.error.kind, NumericalKind::NoClaim);
+        assert_eq!(s.error.kind, NumericalKind::Estimate);
         assert!(
-            s.signed_distance.is_infinite(),
-            "a trimmed-away point must not survive as a finite nominal chart value"
+            s.signed_distance.is_finite(),
+            "the chart samples the retained surface witness"
         );
+        assert!(s.lipschitz.is_none());
         let n = chart.eval(Point3::new(0.0, 0.99, 0.99), cx);
         assert!(
             n.error.hi.is_finite(),
@@ -454,8 +594,8 @@ fn ns_003_trim_downgrade_is_honest() {
     });
     verdict(
         "ns-003",
-        "adversarial trim: closest-point-in-hole widens to an infinite upper estimate; \
-         kept region retains a finite measured value near 0.4",
+        "trim-aware search finds the kept northern hemisphere, selects the closest \
+         shell witness, and keeps chart output at Estimate with no Lipschitz claim",
     );
 }
 
