@@ -6,6 +6,8 @@ use crate::bernoulli_aperture::radiation::environment::multiport::source::{
     ComputedBaffledInput, MimoSourceInput, MimoSourceRecord,
 };
 use crate::bernoulli_aperture::two_sided::{ApertureDuctSpec, LoadedAperture, TwoSidedAperture};
+use crate::bernoulli_aperture::radiation::environment::bind_baffled_environment;
+use crate::pcm_wav::observation::ObservationPolicy;
 
 pub(super) enum Selection {
     Compact,
@@ -64,8 +66,31 @@ impl Selection {
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub(super) fn build(
+/// Cold source construction precedes material-key attachment; the original
+/// receiver is admitted only after every moving boundary is present.
+pub(super) struct Prepared {
+    pub(super) system: TwoSidedAperture,
+    spec: DuctRadiationSpec,
+    policy: ObservationPolicy,
+    bindings: Vec<BaffledOutletBinding>,
+    records: Vec<(ValveSide, MimoRadiationRecord)>,
+    computed: Vec<(ValveSide, ComputedBaffledRecord)>,
+}
+impl Prepared {
+    #[allow(clippy::type_complexity)]
+    pub(super) fn observe(self, max_block: usize) -> Result<(TwoSidedPressure,
+        Vec<BaffledOutletBinding>, Vec<(ValveSide, MimoRadiationRecord)>,
+        Vec<(ValveSide, ComputedBaffledRecord)>), PlateValveInputError>
+    {
+        let source = TwoSidedPressure::with_observation_policy(
+            self.system, self.spec, max_block, self.policy, &self.bindings)
+            .map_err(|e| PlateValveInputError::Gesture(GestureCompileError::Render(e)))?;
+        Ok((source, self.bindings, self.records, self.computed))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare(
     selection: Selection,
     valve: LoadedAperture,
     sides: [ApertureDuctSpec; 2],
@@ -78,15 +103,31 @@ pub(super) fn build(
     gas_sources: Option<&ThermochemicalSources<'_>>,
     load: &mut impl FnMut(&str) -> Result<Vec<u8>, String>,
     gate: &CancelGate,
-) -> Result<(TwoSidedPressure, Vec<BaffledOutletBinding>, Vec<(ValveSide, MimoRadiationRecord)>, Vec<(ValveSide, ComputedBaffledRecord)>), PlateValveInputError> {
-    let Selection::Mimo(groups) = selection else {
-        let (source, bindings) = match channel {
-            Some(channel) => TwoSidedPressure::from_baffled_environment_with_supply(
-                valve, sides, [None, None], channel, coupling, policies, spec, max_block, gate),
-            None => TwoSidedPressure::from_baffled_environment(
-                valve, sides, [None, None], coupling, policies, spec, max_block, gate),
-        }.map_err(|e| PlateValveInputError::Gesture(GestureCompileError::Render(e)))?;
-        return Ok((source, bindings, Vec::new(), Vec::new()));
+) -> Result<Prepared, PlateValveInputError> {
+    checkpoint(gate)?;
+    let rate = spec.reconstruction.mechanics_rate_hz();
+    if rate == 0 || max_block == 0 || valve.accepted_steps() != 0
+        || valve.time_step_s().to_bits() != (1.0 / f64::from(rate)).to_bits() {
+        return Err(bad(0, "radiation needs the original unadvanced valve and matching mechanical clock"));
+    }
+    let (sides, spec, bindings, policy, groups) = match selection {
+        Selection::Compact => {
+            if policies.is_some_and(|ps| ps.iter().any(|p|
+                p.maximum_frequency_hz < spec.receiver.maximum_frequency_hz)) {
+                return Err(bad(0, "fractional propagation must cover the exterior radiation band"));
+            }
+            let [up, down] = sides;
+            let mut graphs = [up.graph, down.graph];
+            let environment = bind_baffled_environment(
+                &mut graphs, &[&up.gases, &down.gases], spec, gate)
+                .map_err(PlateValveInputError::Physics)?;
+            let [up_graph, down_graph] = graphs;
+            let sides = [ApertureDuctSpec { graph: up_graph, ..up },
+                ApertureDuctSpec { graph: down_graph, ..down }];
+            let (spec, bindings) = environment.into_parts();
+            (sides, spec, bindings, ObservationPolicy::Acceptance, Vec::new())
+        }
+        Selection::Mimo(groups) => (sides, spec, Vec::new(), ObservationPolicy::Diagnostic, groups),
     };
     let mut system = match channel {
         Some(channel) => TwoSidedAperture::with_material_walls_and_supply_channel(
@@ -112,7 +153,6 @@ pub(super) fn build(
             MimoSourceRecord::ComputedBaffled(record) => computed.push((side, record)),
         }
     }
-    let source = TwoSidedPressure::with_radiation(system, spec, max_block)
-        .map_err(|e| PlateValveInputError::Gesture(GestureCompileError::Render(e)))?;
-    Ok((source, Vec::new(), records, computed))
+    checkpoint(gate)?;
+    Ok(Prepared { system, spec, policy, bindings, records, computed })
 }

@@ -44,6 +44,13 @@ initial 0.0005 N closing force is explicit data. Replace only `key.matpack` to
 hear the key material change through the retained reed and bore. Typed force
 ramps use the optional control declarations described below.
 
+`paired-keyed-sampled.performance` adds material keys on both sides and explicit
+mechanical-sample force and exterior-pressure assignments. It reuses
+`blade.matpack` for both keys and the original six reed coordinates. The two
+chimneys retain their own gas temperatures; the downstream chimney has
+distributed viscothermal loss. This fixture uses the alternative
+`boundary_groups` declaration described below and needs no additional pack.
+
 `paired-mutual.performance` selects an externally supplied two-port operator
 in `mutual.radiation`. Run it through the same command with a new output path.
 It adds a second explicitly declared downstream branch and uses the shared
@@ -205,6 +212,54 @@ Untracked keys retain their explicit initial drive. Without `control_source`,
 the original one-track pressure suffix remains valid and all keys retain those
 initial drives. Unknown consumers and mixed legacy/typed tracks refuse.
 
+For explicit force and exterior-reservoir assignments at mechanical sample
+indices, replace the optional side blocks and `control_source` with one
+`boundary_groups` block, still **after every blade and before `compile_limits`**:
+
+```text
+boundary_groups 1
+boundary_side downstream
+boundaries 1
+boundary 3 instrument bore-key 0 0
+boundary_plate blade.matpack 293.15 100 0.025 0.01 0.0003 6 2 0.0002 0.0002 0
+boundary_mode 0 600 0 0.25 0.1
+boundary_contact 10000000000 2 0.5
+boundary_slit 0.0003
+boundary_loss elastic
+boundary_controls 2
+boundary_control 321 3 0.003 0.3
+boundary_control 1505 3 0 0
+compile_limits 100000 8192
+```
+
+There may be one or two groups, each naming a different side. Each group uses
+the unchanged shared `boundaries` grammar and must declare at least one key.
+An omitted side must have no driven endpoints. The `boundary_control` fields
+are zero-based mechanical sample, graph node, nonnegative closing force in
+newtons and finite exterior reservoir pressure in pascals. Each row replaces
+both drive fields for that key before the named mechanical step; other keys
+retain their previous drives. Initial drives come from the `boundary` records,
+and every drive remains held until its next assignment. The existing compiler
+sorts assignments by sample and node. Simultaneous changes on different keys
+are allowed; repeated assignments to the same key at one sample and samples
+outside the source horizon refuse. Both sides share control storage with the
+source pressure and source-force assignments. Boundary and source-force
+compilation share the existing auxiliary work allowance; the original pressure
+compiler keeps its independent allowance. Sampled groups retain the original
+one-track pressure gesture suffix. Combining them with `control_source`,
+`upstream_boundaries` or `downstream_boundaries` refuses, so one scheduler owns
+each key's complete force and reservoir drive.
+
+Both declaration routes attach keys to the final lowered acoustic graph before
+the original microphone is admitted. Each key uses that chimney's actual gas,
+represented impedance, mechanics clock and horizon, including distributed-loss
+lowering. Original source cards share the blade cache, and physical key paths
+must be unique across the two sides. Compact, imported MIMO and computed MIMO
+radiation keep their original selected exterior bindings and histories. The
+sidecar preserves the shared material-key source records and adds complete
+sampled drives with their mechanical clock; it does not reinterpret reservoir
+pressure as a static atmosphere or change the gas mixture during a run.
+
 The shared key model is a material-derived one-mode cantilever slit with explicit
 contact, not a resolved circular pad, linkage or tongue. Only declared passive
 outlets feed the existing exterior microphone; direct key/body radiation is not
@@ -273,3 +328,9 @@ bake identities separately, preserve all material/gas/loss/supply owners,
 exercise off-diagonal feedback and PCM partition parity, reject stale
 atmospheres and source mismatches, and compare the actual CLI against the
 original library performer before any WAV/sidecar publication.
+The sampled-key regressions additionally compare both-side subframe drives
+against the original direct physics and receiver, retain Maxwell/supply/loss
+and mutual-radiation memories, and exercise material, local-gas, force and
+reservoir substitutions in the same pressure and PCM path. The CLI regression
+retains the upstream typed-key example and separately renders the sampled
+example; malformed key programs refuse before either output is created.

@@ -83,6 +83,8 @@ fn pack_with_density(density: f64) -> NormalizedMaterialCardPack {
     NormalizedMaterialCardPack::new(card.id().clone(), normalized).unwrap()
 }
 
+mod keyed;
+
 #[test]
 fn native_material_mimo_cli_matches_original_performer_and_preserves_source_authority() {
     let dir = directory();

@@ -93,6 +93,9 @@ impl MaterialModalValvePerformance {
     /// optional retained no-slip supply passage. The single common exterior
     /// declaration installs each compact radiation load exactly once and drives
     /// the pressure observer. Source events execute at mechanical sample times.
+    /// Optional keys share the original plate cache and final chimney gas/load.
+    /// They attach before receiver admission, then use the existing typed force
+    /// gestures or explicitly selected mechanical-sample reservoir/force programs.
     ///
     /// # Errors
     /// Missing/ambiguous/out-of-domain source properties, malformed or oversized
@@ -307,12 +310,16 @@ impl MaterialModalValvePerformance {
         if let Some(length) = slit {
             valve.set_material_viscous_slit(length).map_err(PlateValveInputError::Physics)?;
         }
-        let (source, radiation, mimo_radiation, computed_radiation) = radiation::build(
+        let mut prepared = radiation::prepare(
             radiation_selection, valve.into(), sides, channel, coupling, policies,
             radiation_spec, &exterior_record, max_block, gas_sources, &mut load_radiation, gate)?;
-        let (renderer, boundaries) = boundaries.compile(source, schedule, AperturePerformanceConfig {
+        let (system, programs, boundaries) = boundaries.bind(
+            prepared.system, &mut cache, &mut load_material, gate)?;
+        prepared.system = system;
+        let (source, radiation, mimo_radiation, computed_radiation) = prepared.observe(max_block)?;
+        let renderer = programs.compile(source, schedule, AperturePerformanceConfig {
             sample_rate_hz: output, samples, max_block, max_compile_work, max_controls,
-        }, &mut cache, &mut load_material, gate)?;
+        })?;
         checkpoint(gate)?;
         Ok(Self { info: MaterialModalValveInfo {
             input_hash: hash_domain("org.frankensim.fs-couple.material-modal-valve.v1", bytes),

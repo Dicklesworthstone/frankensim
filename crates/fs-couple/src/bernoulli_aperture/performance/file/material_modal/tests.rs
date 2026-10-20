@@ -11,6 +11,7 @@ const INPUT: &str = include_str!("../../../../../examples/material_modal_valve/p
 
 mod mimo;
 mod boundaries;
+mod keyed;
 
 fn pack(rho: f64, missing: bool) -> NormalizedMaterialCardPack {
     let mut claims = ClaimSet::new();
@@ -32,6 +33,8 @@ fn pack(rho: f64, missing: bool) -> NormalizedMaterialCardPack {
         ("eta12", 4500.0, DynViscosity::DIMS),
         ("eta16", 1000.0, DynViscosity::DIMS),
         ("eta26", -1500.0, DynViscosity::DIMS),
+        ("boundary_modulus", 1e8, Pressure::DIMS),
+        ("boundary_time", 0.001, Dims([0, 0, 1, 0, 0, 0])),
     ] {
         if missing && name == "eta26" { continue; }
         claims.insert_claim(PropertyClaim {

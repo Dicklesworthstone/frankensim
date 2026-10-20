@@ -37,6 +37,7 @@ sections. All dimensions and numerical error allowances are explicit.
 | --- | --- |
 | `duct_node inlet` | The unique port driven by the jet |
 | `duct_node junction` | Common-pressure junction with no added storage |
+| `duct_node driven` | Degree-one chimney with an explicitly declared material moving boundary |
 | `duct_node reflection R` | Explicit memoryless pressure reflection in [-1,1] |
 | `duct_node impedance R L C` | Degree-one series resistance, inertance and compliance |
 | `duct_node series R L C` | Two-section inline pressure-drop load |
@@ -75,6 +76,15 @@ The original section indices survive the shared loss subdivision. No gas is
 averaged across branches. Existing gas, wide-tube, fractional phase, memory and
 frequency-domain admission checks remain in their physics owners. A plain
 single tube retains its existing short viscothermal record.
+
+The material moving-boundary compiler is shared with the
+[two-sided material-modal wind source](material_modal_valve/README.md#material-moving-keys-on-either-acoustic-side).
+The same `boundaries`, `boundary_plate`, contact, optional viscous slit and
+Maxwell records compile one original cantilever from its material pack and
+actual chimney gas/load. The flute keeps its existing typed `closing_force`
+gesture paths and source-clock ramp compiler. The two-sided reed format uses
+that same physical source grammar with typed source/key gestures or explicit
+mechanical-sample force and exterior-reservoir programs on either side.
 
 After `receiver`, an explicit network must select its openings:
 

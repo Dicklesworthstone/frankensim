@@ -2744,6 +2744,24 @@ execution remains required. The approximation remains a material cantilever
 moving slit, not a resolved circular pad, key linkage, moving-opening mutual
 exterior, or full M2.1-W4b qualification.
 
+Native material-modal `boundary_groups` and mechanical-sample
+`boundary_control` records bind these same keys on either or both sides.
+The post-blade declarations use the existing shared `material_boundary`
+compiler and the same bounded immutable cache as the reed plates. Explicit
+held closing-force and exterior-reservoir assignments use the original
+boundary scheduler at mechanical substeps. Existing typed force gestures
+remain available; combining typed and explicit sample ownership refuses.
+Keys derive their complete local gas, impedance, represented chimney, clock
+and horizon from the realized source. Compact, imported-MIMO and
+computed-baffled radiation prepare through their original owners before key
+attachment and final receiver admission. Missing driven-node bindings,
+duplicate physical identities and incomplete programs refuse. The native CLI
+retains source records and controls; `paired-keyed-sampled.performance`
+demonstrates both sides. Focused native/direct/PCM and material-substitution
+regressions are included; their execution remains required. The moving
+cantilever-slit approximation does not add resolved circular pads, linkages
+or radiation from evolving key openings.
+
 `TwoSidedAperture::with_mimo_environment` attaches the same source-bound
 `MimoEnvironment` and original `WaveguideNetwork` terminal host used by the
 flue to single, paired and material-modal valves. Each side admits one ordered

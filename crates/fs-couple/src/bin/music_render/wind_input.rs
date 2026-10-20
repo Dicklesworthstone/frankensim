@@ -174,9 +174,15 @@ fn modal_boundary_provenance(
             .find(|drive| drive.node == record.node()).expect("complete explicit initial key drives");
         let name = match side { ValveSide::Upstream => "upstream", ValveSide::Downstream => "downstream" };
         let source = material_boundary_record(record, aperture, drive);
-        format!("{{\"side\":\"{name}\",\"source\":{source}}}")
+        let controls = renderer.pending_boundary_controls(*side).iter()
+            .filter(|control| control.drive.node == record.node()).map(|control| format!(
+                "{{\"mechanical_sample\":{},\"closing_force_n\":{:e},\"exterior_pressure_pa\":{:e}}}",
+                control.sample, -control.drive.opening_force_n, control.drive.exterior_pressure_pa))
+            .collect::<Vec<_>>().join(",");
+        format!("{{\"side\":\"{name}\",\"source\":{source},\"controls\":[{controls}]}}")
     }).collect::<Vec<_>>().join(",");
-    moving_boundary_provenance(&records)
+    format!("{},\"boundary_control_clock_hz\":{}",
+        moving_boundary_provenance(&records), p.info().mechanics_rate_hz)
 }
 
 struct Loaded {
