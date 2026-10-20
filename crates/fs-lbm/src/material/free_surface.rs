@@ -19,6 +19,8 @@ use crate::{CS2, ScalingPlan};
 
 mod initial;
 pub use initial::MaterialFreeSurfaceInitialCell3;
+/// Geometric, moment-preserving ingress of an already-liquid tetrahedral body.
+pub mod transfer;
 
 /// One frozen source state and its physical-to-lattice conversion.
 ///

@@ -32,6 +32,8 @@ mod exude;
 #[cfg(feature = "frontier-hexmesh")]
 pub mod hexdom;
 mod marked_tet;
+/// Actual tetrahedron/Cartesian-cell intersections and volume moments.
+pub mod overlap;
 mod parallel;
 /// Exact-sign constrained planar outlines, hole carving and quality refinement.
 pub mod planar;

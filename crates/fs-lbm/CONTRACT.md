@@ -1858,3 +1858,33 @@ parameters are declared model data. Tests cover isothermal latent-plateau flow,
 data-only permeability changes, independent series-Darcy/enthalpy balances,
 source retention and transactional support refusal; native execution remains a
 separate verification requirement.
+
+
+### Tetrahedral liquid geometry and momentum enter native VOF
+
+`material::free_surface::transfer` connects the same resolved liquid scaling to
+`fs_mesh::overlap` and the native supplied-state initializer. It intersects each
+source tetrahedron with actual Cartesian cells, integrates its P1 velocity field,
+and uses the existing `fs_la` LU/Cholesky owners to reconstruct momentum.
+Mass-weighted translation and rotation corrections preserve total linear and
+angular momentum at receiving cell centres, subject to explicit error bounds.
+The final checks read actual native fill, density and Guo-corrected velocity.
+
+Source mass, first mass moment, linear/angular momentum and kinetic energy use
+analytic simplex integrals. Signed kinetic and uniform-gravity potential changes
+from projection are separately reported numerical errors, never physical heat.
+Source coverage, target overfill, mass/momentum, centroid displacement, projection
+energy, native speed, work and occupied-cell caps all gate publication. Unsupported
+spin on a rank-deficient receiving grid requires refinement. Original Cx polls
+cover geometry, integration, correction, initialization and final publication.
+
+This is an already-liquid, stress-free, uniform-material isothermal transfer.
+Source tetrahedra must be nonoverlapping; target overfill is not a full mesh
+intersection certificate. Capillarity must be explicitly neglected because a
+surface-energy projection is not represented. There is no enthalpy advection,
+solid-to-liquid history release, initial pressure projection, moving wall, or
+per-fragment lineage/constraint claim. The returned accounting describes ingress,
+not subsequent native momentum/energy conservation. Tests include translating
+and spinning cubes with analytic inertia and grid-refined projection error,
+cut tetrahedra, material density similitude, an actual native step, budget and
+cancellation refusals. Native Cargo execution remains separately required.

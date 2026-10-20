@@ -814,3 +814,22 @@ assertions.
   residual near-coplanar hull sliver class needs WEIGHTED exudation on
   an exact weighted insphere predicate (the recorded fs-ivl no-claim)
   — the honest continuation, demanded-driven.
+
+
+## Tetrahedron/Cartesian-cell overlap moments
+
+`overlap::tetrahedron_box_moments` constructs the actual tetrahedron/box
+intersection and integrates volume, first moments and symmetric second moments
+about an explicit caller origin. Six bounded half-space clips retain shared-edge
+consistency; local normalization avoids world-origin determinant cancellation.
+Both tetrahedron orientations are admitted. Degeneracy, unrepresentable metric
+arithmetic, geometry caps and cancellation refuse before returning a result.
+Cap ordering uses the existing deterministic elementary-function owner.
+
+Predicate signs concern the normalized f64 geometry; intersections and moments
+are measured f64 results, not certified bounds. Consumers must check aggregate
+source coverage and conserved quantities against explicit tolerances.
+Constitutive-history transport, momentum reconstruction, kinetic projection
+accounting and native-fluid initialization remain higher-layer responsibilities.
+The analytic tests cover simplex and clipped moments, cell partitions, translated
+geometry, orientation reversal, invalid input and cancellation.
