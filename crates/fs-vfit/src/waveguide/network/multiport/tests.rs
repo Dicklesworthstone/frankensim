@@ -148,7 +148,7 @@ fn rational_states_match_the_original_zoh_and_the_wave_work_window() {
         let frame = net.step(input).unwrap();
         assert_eq!(frame, preview);
         let ports = net.mimo_port_frames().unwrap();
-        let expected = reference.step(&[ports[0].flow_m3_s, ports[1].flow_m3_s]);
+        let expected = reference.step_mean(&[ports[0].flow_m3_s, ports[1].flow_m3_s]);
         for i in 0..2 {
             near(expected[i], ports[i].pressure_pa);
         }
@@ -186,6 +186,8 @@ fn sampled_response_is_the_actual_start_sample_transfer() {
     let z = C64::new(c, s);
     let decay = fs_math::det::exp(-400.0 * DT);
     let response = discrete.eval_discrete_iw(omega);
+    let mean_response = discrete.eval_mean_discrete_iw(omega);
+    let phi1 = (1.0 - decay) / (400.0 * DT);
     for i in 0..4 {
         let expected = C64::from_re(m.d[i])
             + (z - C64::from_re(decay))
@@ -193,11 +195,15 @@ fn sampled_response_is_the_actual_start_sample_transfer() {
                 .scale(m.residues[0][i].re * (1.0 - decay) / 400.0);
         near(response[i].re, expected.re);
         near(response[i].im, expected.im);
+        let mean_expected = C64::from_re(m.d[i] + m.residues[0][i].re * (1.0 - phi1) / 400.0)
+            + (expected - C64::from_re(m.d[i])).scale(phi1);
+        near(mean_response[i].re, mean_expected.re);
+        near(mean_response[i].im, mean_expected.im);
     }
 }
 
 #[test]
-fn a_continuously_passive_model_can_refuse_the_actual_sampled_gate() {
+fn exact_mean_exchange_admits_a_passive_model_rejected_by_start_sampling() {
     let mut m = model();
     m.d = vec![1.0, 0.0, 0.0, 1.0];
     m.poles = vec![PoleTerm::Real {
@@ -216,10 +222,76 @@ fn a_continuously_passive_model_can_refuse_the_actual_sampled_gate() {
             .passive
     );
     assert!(!m.zoh(DT).unwrap().sampled_passivity(129).passive);
+    assert!(m.zoh(DT).unwrap().mean_sampled_passivity(129).passive);
     let mut net = graph();
-    assert!(net.install_mimo_terminals(spec(m)).is_err());
-    assert!(net.mimo_terminal_spec().is_none());
+    assert!(net.install_mimo_terminals(spec(m)).is_ok());
+    assert!(net.mimo_terminal_spec().is_some());
     assert_eq!(net.stored_energy_j(), 0.0);
+}
+
+#[test]
+fn exact_mean_pressure_closes_analytic_one_pole_work_at_small_and_stiff_steps() {
+    // G1: x'=-a*x+u, p=D*u+R*x. E=R*x^2/2, loss=D*u^2+a*R*x^2.
+    // No fitted energy accumulator supplies any term in this independent audit.
+    let a = 400.0_f64;
+    let r = 500.0_f64;
+    let mut model = MimoModel {
+        ports: 1,
+        poles: vec![PoleTerm::Real {
+            pole: -a,
+            residue: 0.0,
+        }],
+        residues: vec![vec![C64::from_re(r)]],
+        d: vec![0.0],
+        e: vec![0.0],
+        reciprocal: true,
+    };
+    for (dt, direct) in [(1.0e-10, 0.0), (0.002, 0.25), (0.05, 0.0)] {
+        model.d[0] = direct;
+        let mut exact = model.zoh(dt).unwrap();
+        let mut start_output = model.zoh(dt).unwrap();
+        let mut x = 0.0_f64;
+        for u in [1.0, -0.4, 0.0, 0.8, 0.0] {
+            let h = a * dt;
+            let exponential = (-h).exp();
+            let integral_exp = -(-h).exp_m1() / a;
+            let next = exponential * x + u * integral_exp;
+            let equilibrium = u / a;
+            let offset = x - equilibrium;
+            let (mean_x, integral_x2) = if h < 1.0e-5 {
+                // Cancellation-free small-h Taylor mean. Simpson integrates the
+                // analytic trajectory's limiting quadratic x(t)^2; its error
+                // here is O(h^2) relative and below the stated tolerance.
+                let mean = x + (u - a * x) * dt * (0.5 - h / 6.0 + h * h / 24.0);
+                let half = (-0.5 * h).exp() * x - u * (-0.5 * h).exp_m1() / a;
+                (mean, dt * (x * x + 4.0 * half * half + next * next) / 6.0)
+            } else {
+                // Closed-form integral of (equilibrium + offset*exp(-a*t))^2.
+                (
+                    equilibrium + offset * integral_exp / dt,
+                    equilibrium * equilibrium * dt
+                        + 2.0 * equilibrium * offset * integral_exp
+                        + offset * offset * -(-2.0 * h).exp_m1() / (2.0 * a),
+                )
+            };
+            let pressure = exact.step_mean(&[u])[0];
+            near(pressure, direct * u + r * mean_x);
+            near(start_output.step(&[u])[0], direct * u + r * x);
+            assert_eq!(exact.pole_states(), start_output.pole_states());
+            near(exact.pole_states()[0].re, next);
+            let before = 0.5 * r * x * x;
+            let after = 0.5 * r * next * next;
+            let loss = direct * u * u * dt + a * r * integral_x2;
+            let work = pressure * u * dt;
+            let scale = before.abs() + after.abs() + loss.abs() + work.abs() + f64::MIN_POSITIVE;
+            assert!(
+                (after - before + loss - work).abs() <= 5.0e-12 * scale,
+                "dt={dt}, x={x}, u={u}, delta={}, loss={loss}, work={work}",
+                after - before
+            );
+            x = next;
+        }
+    }
 }
 
 #[test]

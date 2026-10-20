@@ -1,7 +1,10 @@
 //! Simultaneous impedance feedback at explicitly selected network terminals.
 //!
-//! At each port, `p = 2a - Zc u = Cx + D u`. One dense solve therefore
+//! At each port, `mean(p) = 2a - Zc u = mean(C)x + mean(D)u`. One dense solve
 //! couples every declared outlet before any line or rational state advances.
+//! Pressure is the exact mean for that held-flow interval, so its product with
+//! flow and duration is the rational model's integrated port work. The wave
+//! interconnection remains sampled and still requires physical clock refinement.
 //! The rational states belong to `MimoZoh`; this module owns only the port
 //! interconnection. Signed work delivered to that model is not relabeled as
 //! dissipation or reconstructed into a fictitious stored-energy coordinate.
@@ -21,7 +24,7 @@ pub struct MimoTerminalSpec {
     pub model: MimoModel,
     /// Declared operator band [rad/s]. It must cover the source Nyquist limit.
     pub band_rad_s: [f64; 2],
-    /// Actual ZOH response check, uniformly from DC through Nyquist; 17..=65537.
+    /// Actual mean-output ZOH check, from DC through Nyquist; 17..=65537.
     /// More samples strengthen a diagnostic, never turn it into a certificate.
     pub sampled_passivity_points: usize,
     /// Maximum real state dimension, bounded by 256 in this dense adapter.
@@ -34,11 +37,12 @@ pub struct MimoTerminalSpec {
 /// Accepted same-sample effort, flow and signed work at one coupled port.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MimoPortFrame {
-    /// Exterior pressure returned to this aperture [Pa].
+    /// Interval-mean exterior pressure returned to this aperture [Pa].
     pub pressure_pa: f64,
     /// Signed volume flow from the network into the exterior [m^3/s].
     pub flow_m3_s: f64,
-    /// `pressure * flow * dt` [J]. May be negative as the model returns energy.
+    /// Exact held-flow interval work `mean(pressure) * flow * dt` [J].
+    /// May be negative as the model returns energy.
     pub work_j: f64,
 }
 
@@ -156,13 +160,13 @@ impl MimoTerminals {
             .model
             .zoh(graph.time_step_s)
             .map_err(|_| invalid("MIMO exact ZOH realization failed"))?;
-        let sampled = runtime.sampled_passivity(source.sampled_passivity_points);
+        let sampled = runtime.mean_sampled_passivity(source.sampled_passivity_points);
         if !sampled.passive {
             return Err(invalid(
                 "actual sampled MIMO impedance has a passivity violation",
             ));
         }
-        let mut system = source.model.d.clone();
+        let mut system = runtime.mean_direct_term().to_vec();
         for (i, &z) in impedance.iter().enumerate() {
             system[i * n + i] += z;
         }
@@ -192,7 +196,7 @@ impl MimoTerminals {
 
     pub(super) fn preview(&mut self, arriving: &[f64], dt: f64) -> Result<f64, WaveguideError> {
         let n = self.source.nodes.len();
-        self.runtime.history_output_into(&mut self.history);
+        self.runtime.mean_history_output_into(&mut self.history);
         for i in 0..n {
             self.rhs[i] = 2.0 * arriving[i] - self.history[i];
         }
@@ -202,7 +206,7 @@ impl MimoTerminals {
         let mut work = 0.0;
         for i in 0..n {
             let pressure = self.history[i]
-                + self.source.model.d[i * n..(i + 1) * n]
+                + self.runtime.mean_direct_term()[i * n..(i + 1) * n]
                     .iter()
                     .zip(&self.flow)
                     .map(|(d, u)| d * u)
@@ -250,8 +254,8 @@ impl WaveguideNetwork {
     /// reactive boundaries, interior loads, geometry and wave buffers are kept.
     /// A second group or any later attachment refuses; no history is discarded.
     ///
-    /// The continuous certificate is retained; actual ZOH response is checked
-    /// independently on the declared full-Nyquist grid. Its `GridOnly` result
+    /// The continuous certificate is retained; actual mean-output ZOH response
+    /// is checked independently on the declared full-Nyquist grid. Its `GridOnly` result
     /// does not establish coupled discrete passivity or rational stored energy.
     /// The network's balance therefore accounts for signed external work at the
     /// MIMO boundary separately from its own storage and irreversible losses.

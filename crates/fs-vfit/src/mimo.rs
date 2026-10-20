@@ -1124,11 +1124,34 @@ pub struct MimoZoh {
     time_step_s: f64,
     /// Per term: `exp(p T)`, `(exp(p T) - 1)/p`, residue matrix, pair flag.
     terms: Vec<(C64, C64, Vec<C64>, bool)>,
+    /// phi1(p T) maps each original pole state to its exact step mean.
+    mean_state_gains: Vec<C64>,
+    /// D + SUM R T phi2(p T), including conjugate pairs.
+    mean_d: Vec<f64>,
     d: Vec<f64>,
     e: Vec<f64>,
     state: Vec<C64>,
     candidate_state: Vec<C64>,
     last_input: Vec<f64>,
+}
+
+// Entire phi functions. Direct subtraction loses the mean input term near zero.
+// The fixed near-zero series retains complex pairs and deterministic traversal.
+fn zoh_mean_phi(z: C64, exponential: C64) -> (C64, C64) {
+    if z.abs() < 0.5 {
+        let (mut first, mut second) = (C64::ONE, C64::from_re(0.5));
+        let (mut first_term, mut second_term) = (first, second);
+        for k in 1..=18 {
+            first_term = (first_term * z).scale(1.0 / f64::from(k + 1));
+            second_term = (second_term * z).scale(1.0 / f64::from(k + 2));
+            first = first + first_term;
+            second = second + second_term;
+        }
+        (first, second)
+    } else {
+        let first = (exponential - C64::ONE) * z.recip();
+        (first, (first - C64::ONE) * z.recip())
+    }
 }
 
 impl MimoModel {
@@ -1141,21 +1164,26 @@ impl MimoModel {
         if !self.is_stable() || !(time_step_s.is_finite() && time_step_s > 0.0) {
             return Err(PassivityError::Unstable);
         }
-        let terms = self
-            .poles
-            .iter()
-            .zip(&self.residues)
-            .map(|(term, r)| {
-                let (pole, pair) = match *term {
-                    PoleTerm::Real { pole, .. } => (C64::from_re(pole), false),
-                    PoleTerm::Pair { pole, .. } => (pole, true),
-                };
-                let x = pole.scale(time_step_s);
-                let (s, c) = det::sin_cos(x.im);
-                let decay = C64::new(c, s).scale(det::exp(x.re));
-                (decay, (decay - C64::ONE) * pole.recip(), r.clone(), pair)
-            })
-            .collect::<Vec<_>>();
+        let mut terms = Vec::with_capacity(self.poles.len());
+        let mut mean_state_gains = Vec::with_capacity(self.poles.len());
+        let mut mean_d = self.d.clone();
+        for (term, r) in self.poles.iter().zip(&self.residues) {
+            let (pole, pair) = match *term {
+                PoleTerm::Real { pole, .. } => (C64::from_re(pole), false),
+                PoleTerm::Pair { pole, .. } => (pole, true),
+            };
+            let x = pole.scale(time_step_s);
+            let (s, c) = det::sin_cos(x.im);
+            let decay = C64::new(c, s).scale(det::exp(x.re));
+            let (phi1, phi2) = zoh_mean_phi(x, decay);
+            let mean_input = phi2.scale(time_step_s);
+            for (d, residue) in mean_d.iter_mut().zip(r) {
+                *d += if pair { 2.0 * (*residue * mean_input).re }
+                    else { residue.re * mean_input.re };
+            }
+            mean_state_gains.push(phi1);
+            terms.push((decay, phi1.scale(time_step_s), r.clone(), pair));
+        }
         let n = self.ports;
         Ok(MimoZoh {
             ports: n,
@@ -1163,6 +1191,8 @@ impl MimoModel {
             state: vec![C64::ZERO; terms.len() * n],
             candidate_state: vec![C64::ZERO; terms.len() * n],
             terms,
+            mean_state_gains,
+            mean_d,
             d: self.d.clone(),
             e: self.e.clone(),
             last_input: vec![0.0; n],
@@ -1176,13 +1206,28 @@ impl MimoZoh {
     /// it is not the continuous rational response relabeled as a digital filter.
     #[must_use]
     pub fn eval_discrete_iw(&self, omega: f64) -> Vec<C64> {
+        self.eval_output_discrete_iw(omega, false)
+    }
+
+    /// Actual sampled transfer for the exact interval-mean proper output.
+    /// The state transition is identical to `eval_discrete_iw`; only the output
+    /// map changes. An improper E term retains the existing differentiated-input
+    /// convention; the physical terminal adapter separately refuses that term.
+    #[must_use]
+    pub fn eval_mean_discrete_iw(&self, omega: f64) -> Vec<C64> {
+        self.eval_output_discrete_iw(omega, true)
+    }
+
+    fn eval_output_discrete_iw(&self, omega: f64, mean: bool) -> Vec<C64> {
         let (s, c) = det::sin_cos(omega * self.time_step_s);
         let z = C64::new(c, s);
-        let mut y: Vec<C64> = self.d.iter().zip(&self.e).map(|(&d, &e)|
+        let direct = if mean { &self.mean_d } else { &self.d };
+        let mut y: Vec<C64> = direct.iter().zip(&self.e).map(|(&d, &e)|
             C64::from_re(d) + (C64::ONE - z.conj()).scale(e / self.time_step_s)).collect();
-        for (decay, gain, r, pair) in &self.terms {
-            let first = *gain * (z - *decay).recip();
-            let second = gain.conj() * (z - decay.conj()).recip();
+        for (k, (decay, gain, r, pair)) in self.terms.iter().enumerate() {
+            let weight = if mean { self.mean_state_gains[k] } else { C64::ONE };
+            let first = weight * *gain * (z - *decay).recip();
+            let second = weight.conj() * gain.conj() * (z - decay.conj()).recip();
             for (y, r) in y.iter_mut().zip(r) {
                 *y = *y + if *pair { *r * first + r.conj() * second }
                     else { first.scale(r.re) };
@@ -1200,12 +1245,27 @@ impl MimoZoh {
     /// Fewer than two grid points.
     #[must_use]
     pub fn sampled_passivity(&self, points: usize) -> MimoPassivityReport {
+        self.output_sampled_passivity(points, false)
+    }
+
+    /// DC-to-Nyquist diagnostic of the exact interval-mean output that exchanges
+    /// work with held input. This is still `GridOnly`; changing output quadrature
+    /// does not manufacture a discrete storage certificate.
+    ///
+    /// # Panics
+    /// Fewer than two grid points.
+    #[must_use]
+    pub fn mean_sampled_passivity(&self, points: usize) -> MimoPassivityReport {
+        self.output_sampled_passivity(points, true)
+    }
+
+    fn output_sampled_passivity(&self, points: usize, mean: bool) -> MimoPassivityReport {
         assert!(points >= 2, "passivity grid needs DC and Nyquist");
         let mut worst = (f64::INFINITY, 0.0);
         let mut violation_freqs = Vec::new();
         for i in 0..points {
             let w = core::f64::consts::PI / self.time_step_s * (i as f64 / (points - 1) as f64);
-            let response = self.eval_discrete_iw(w);
+            let response = self.eval_output_discrete_iw(w, mean);
             let lambda = if response.iter().all(|z| z.re.is_finite() && z.im.is_finite()) {
                 hermitian_part(&response, self.ports).0[0]
             } else { f64::NAN };
@@ -1216,7 +1276,7 @@ impl MimoZoh {
             worst, crossings: Vec::new(), violation_freqs }
     }
 
-    pub(crate) fn history_output_into(&self, y: &mut [f64]) {
+    pub(crate) fn mean_history_output_into(&self, y: &mut [f64]) {
         y.fill(0.0);
         let n = self.ports;
         for (k, (_, _, r, pair)) in self.terms.iter().enumerate() {
@@ -1224,9 +1284,35 @@ impl MimoZoh {
             for (a, ya) in y.iter_mut().enumerate() {
                 let mut acc = C64::ZERO;
                 for (b, xb) in x.iter().enumerate() { acc = acc + r[a * n + b] * *xb; }
+                acc = acc * self.mean_state_gains[k];
                 *ya += if *pair { 2.0 * acc.re } else { acc.re };
             }
         }
+    }
+
+    pub(crate) fn mean_direct_term(&self) -> &[f64] { &self.mean_d }
+
+    /// Advance the same pole states and return the interval-mean output for a
+    /// held input. For proper models, `dot(mean_output, input) * dt` is the exact
+    /// continuous port work, up to floating-point evaluation. This is neither
+    /// a trapezoid of endpoint samples nor a second propagation runtime.
+    /// The improper E term follows `step`'s original differentiated-input rule;
+    /// the coupled terminal owner does not admit improper models.
+    ///
+    /// # Panics
+    /// If `u.len()` differs from the port count.
+    pub fn step_mean(&mut self, u: &[f64]) -> Vec<f64> {
+        assert_eq!(u.len(), self.ports, "one held input per port");
+        let n = self.ports;
+        let mut y = vec![0.0; n];
+        self.mean_history_output_into(&mut y);
+        for (a, ya) in y.iter_mut().enumerate() {
+            *ya += (0..n).map(|b| self.mean_d[a*n+b] * u[b]
+                + self.e[a*n+b] * (u[b] - self.last_input[b]) / self.time_step_s).sum::<f64>();
+        }
+        self.preview_state(u);
+        self.accept_state(u);
+        y
     }
 
     // The network previews the SAME ZOH state update before publishing waves.
