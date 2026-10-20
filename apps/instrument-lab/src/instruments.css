@@ -52,6 +52,9 @@
 
 .ir-table td.ir-gap { min-width: 250px; }
 .ir-table td.ir-gap .num { white-space: normal; }
+.ir-rulers { margin-top: 4px; }
+.ir-rulers summary { cursor: pointer; }
+.ir-rulers[open] summary { margin-bottom: 4px; }
 .ir-verdict { font: 500 12px/1.4 var(--font-mono); color: var(--ivory-3); }
 .ir-verdict.outside { color: var(--ember); }
 .ir-ruler { position: relative; height: 12px; margin: 8px 0 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.045); }

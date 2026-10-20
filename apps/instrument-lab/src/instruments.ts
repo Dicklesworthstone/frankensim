@@ -92,7 +92,8 @@ function metricsTable(p: Pair): HTMLElement {
     const verdict = m.verdict === "within" ? "inside the real spread" : m.verdict === "outside" ? `outside it (${num(m.ratio, "", 2)}× the largest real-vs-real distance)` : "";
     const ruler = m.ruler.length ? m.ruler.map((r) => `${r.label} ${num(r.value, "", 3)}`).join(" · ") : "";
     return el("tr", { class: `ir-row ${m.verdict}` },
-      el("td", { class: "vs-measure" }, el("div", {}, m.label), m.note ? el("div", { class: "small muted" }, m.note) : null, ruler ? el("div", { class: "small muted" }, `ruler: ${ruler}`) : null),
+      el("td", { class: "vs-measure" }, el("div", {}, m.label), m.note ? el("div", { class: "small muted" }, m.note) : null,
+        ruler ? el("details", { class: "small muted ir-rulers" }, el("summary", {}, `ruler: ${m.ruler.length} real-vs-real distance${m.ruler.length === 1 ? "" : "s"}`), el("div", {}, ruler)) : null),
       el("td", { class: "num", "data-label": "Real" }, show(m.real, m.unit)),
       el("td", { class: "num", "data-label": "FrankenSim" }, p.ours ? show(m.ours, m.unit) : "—"),
       el("td", { class: "ir-gap", "data-label": "Gap" },
@@ -252,7 +253,7 @@ function buildCard(c: Card, notes: Record<string, string>): HTMLElement {
       figure("FrankenSim", fig.ours, fig, d, alt("the render"), "No render yet for this note."),
       figure("Difference", fig.diff, fig, d, alt("the difference"), "Needs a render."));
     figLegend.textContent = `${fmt(d)} s from the aligned onset, ${fmt(fig.f_lo_hz)} Hz–${fmt(fig.f_hi_hz)} Hz (log), ${fmt(fig.span_db)} dB colour range` +
-      (pair.ours ? ` shared by the recording and the render. Difference: FrankenSim minus the recording, ±${fmt(fig.diff_range_db)} dB (positive: FrankenSim louder).` : ".");
+      (pair.ours ? ` shared by the recording and the render. Difference: FrankenSim minus the recording, ±${fmt(fig.diff_range_db)} dB (red: FrankenSim louder, blue: quieter, white: the same).` : ".");
     for (const [k, b] of Object.entries(tabButtons)) b.setAttribute("aria-pressed", String(k === view));
   };
   const tabButtons: Record<string, HTMLButtonElement> = {};
