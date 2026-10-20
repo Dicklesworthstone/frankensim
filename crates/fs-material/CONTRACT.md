@@ -338,6 +338,16 @@ homogenization, the P2 milestone.
   preparation/history, complete query point, claim-selection policy, selected
   values, and property-use receipts. Interface properties never migrate onto
   either bulk material merely because the two chemistry names match.
+- `ResolvedLinearInterface` lowers explicit stiffness/viscosity-per-area claims
+  from that same resolved interface into passive bilateral `k` [N/m] and `c`
+  [N s/m] over a declared positive area. It retains the complete ordered source,
+  selected property names and area; exact receiving material states and actual
+  angular frequencies can be checked without replacing receipts. Both claims
+  require explicit intersected frequency support and fixed-temperature constant
+  coefficients. Missing loss, frequency-dependent curves, two zero coefficients,
+  negative values, overflow and disappearing nonzero products refuse. Geometry,
+  work-conjugate force maps, rest displacement and stepping remain the consumer's
+  existing owners; this is shared material lowering, not another joint solver.
 
 - `SmallStrainLaw` trait (Voigt 6-space, TENSOR shear components):
   `stress` / `tangent` / `update_state` / `admissibility` / `card`.

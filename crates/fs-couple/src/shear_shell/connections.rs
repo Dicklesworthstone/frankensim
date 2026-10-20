@@ -10,11 +10,14 @@ use super::{invalid, owner, poll, ResolvedShearShell};
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
-use fs_material::state_point::ResolvedInterfaceStatePoint;
+use fs_material::state_point::{ResolvedInterfaceStatePoint, ResolvedLinearInterface};
 use fs_plate::shell::mitc::connections::{
     ShellConnection, ShellConnectionBudget, ShellConnectionTerm,
 };
-use fs_qty::{Dims, DynViscosity, Length, Pressure};
+pub use fs_material::state_point::{
+    interface_stiffness_per_area_dims as stiffness_per_area_dims,
+    interface_viscosity_per_area_dims as viscosity_per_area_dims,
+};
 
 /// A normalized quadrature weight at an explicit physical offset from a node.
 #[derive(Clone, Debug)]
@@ -80,30 +83,6 @@ impl ResolvedShellConnection {
     pub const fn law(&self) -> &ShellConnection { &self.law }
     /// Intersected original stiffness/viscosity applicability [rad/s].
     pub const fn omega_band_rad_s(&self) -> (f64, f64) { self.band }
-}
-
-/// Dimensions shared by material queries and the physical shell adapter.
-pub fn stiffness_per_area_dims() -> Dims {
-    Pressure::DIMS.checked_minus(Length::DIMS).expect("fixed SI interface exponents")
-}
-/// Dimensions shared by material queries and the physical shell adapter.
-pub fn viscosity_per_area_dims() -> Dims {
-    DynViscosity::DIMS.checked_minus(Length::DIMS).expect("fixed SI interface exponents")
-}
-
-fn coefficient(source: &ResolvedInterfaceStatePoint, key: &str, dims: Dims)
-    -> Result<(f64, (f64, f64)), AcousticRealizeError>
-{
-    let p = source.property(key)
-        .ok_or_else(|| invalid("missing or ambiguous original shell interface coefficient"))?;
-    let value = p.value_si();
-    if p.requirement().dims() != dims || !value.is_finite() || value < 0.0
-        || !p.is_constant_at_fixed_temperature() {
-        return Err(invalid("shell interface requires nonnegative fixed-state stiffness/viscosity in exact SI dimensions"));
-    }
-    let band = p.angular_frequency_band_rad_s().map_err(owner)?
-        .ok_or_else(|| invalid("each shell interface coefficient requires explicit frequency applicability"))?;
-    Ok((value, band))
 }
 
 fn point_count(side: &ShellInterfaceSide) -> usize {
@@ -210,16 +189,11 @@ impl ResolvedShearShell {
                 || (dot(input.direction, input.direction) - 1.0).abs() > 1e-12 {
                 return Err(invalid("shell interface needs a unique name, explicit properties, positive area and unit direction"));
             }
-            let (k, kb) = coefficient(&input.interface, &input.stiffness_property, stiffness_per_area_dims())?;
-            let (c, cb) = coefficient(&input.interface, &input.viscosity_property, viscosity_per_area_dims())?;
-            let band = (kb.0.max(cb.0), kb.1.min(cb.1));
-            let stiffness_n_m = k * input.area_m2;
-            let damping_n_s_m = c * input.area_m2;
-            if !stiffness_n_m.is_finite() || !damping_n_s_m.is_finite()
-                || (stiffness_n_m == 0.0 && damping_n_s_m == 0.0)
-                || !band.0.is_finite() || !band.1.is_finite() || band.0 < 0.0 || band.1 < band.0 {
-                return Err(invalid("shell interface has no finite active law or intersected frequency support"));
-            }
+            let coefficients = ResolvedLinearInterface::new(input.interface.clone(),
+                &input.stiffness_property, &input.viscosity_property, input.area_m2).map_err(owner)?;
+            let stiffness_n_m = coefficients.stiffness_n_m();
+            let damping_n_s_m = coefficients.damping_n_s_m();
+            let band = coefficients.omega_band_rad_s();
             let mut terms = Vec::with_capacity(point_count(&input.left) + point_count(&input.right));
             let a = bind_side(self, &input.left, &input.interface.surface_materials()[0],
                 input.direction, 1.0, &mut terms, gate)?;

@@ -23,6 +23,9 @@ use crate::elastic::OrthotropicElastic;
 mod reference_ratios;
 pub use reference_ratios::*;
 
+mod linear_interface;
+pub use linear_interface::*;
+
 pub use fs_matdb::{
     CorrelationUnknownReason, ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation,
     ElasticTensorOrder, ElasticTensorSymmetry, JointCorrelation, JointUsageReceipt,
