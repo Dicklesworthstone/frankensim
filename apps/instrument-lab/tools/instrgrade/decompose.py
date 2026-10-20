@@ -1,0 +1,867 @@
+#!/usr/bin/env python3
+"""decompose: take a render and a real recording of the same note apart, side by side, and read every gap
+against how far REAL recordings differ from one another.
+
+  refs     reference-only pairs (no render yet): a real note, its spectrogram, scalogram, partial tracks and metrics,
+           each metric with its real-vs-real ruler (other dynamics, other takes, neighbouring notes)
+  pair     one render against the library's recording of the same note: the same, plus ours and the difference
+  batch    pair for each candidate in a CANDIDATES.json (list of the pair arguments)
+
+Output is P8's site contract: <out>/<family>/<note>/pair.json (frankensim.instrument-pair.v1) with the aligned,
+loudness-matched real.wav / ours.wav and bare spectrogram / scalogram maps. See tools/build_instruments.py.
+
+On trj (defaults point at the library built there; numpy + pillow + matplotlib):
+  uv run --with numpy --with pillow --with matplotlib python3 -I decompose.py refs [--family clarinet] [--all] --jobs 16
+  uv run --with numpy --with pillow --with matplotlib python3 -I decompose.py pair --render R.wav --family clarinet \
+      --note D3 --git-sha SHA --observer "baffled_outlet 0 0 0.5" --recipe data/instruments/descriptions/clarinet/render.sh
+The library (--lib) comes from buildlib.py, the 48 kHz mono WAVs (--wav-dir) from convert_refs.py.
+
+Conventions (verisim.py, instrgrade.py): 48 kHz mono, the SAME note-aware high-pass on both signals, onset found
+against the recording's noise floor and checked against a second, noise-independent criterion, loudness matched over
+the same window. A gap is only ever a number computed here; nothing is typed.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import multiprocessing
+import sys
+from collections import OrderedDict
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).parent))
+from descriptors import GraderRefusalError, track_partials  # noqa: E402
+from instrgrade import GRADER_VERSION, SR, describe, distance, highpass, hz_of, load, midi_of, name_of, write_wav  # noqa: E402
+
+DECOMPOSE_VERSION = "decompose-1"
+PREROLL_S = 0.010  # both signals are cut this long before the detected onset
+MAX_S = 3.0
+ALIGN_TOL_MS = 1.5
+HOP = SR // 100  # 10 ms: STFT hop and the grid of every curve
+F_LO, F_HI = 40.0, 16000.0
+SHOW_DB = 60.0  # cells within this many dB of the reference peak count in a spectrogram distance
+N_PARTIALS = 12
+
+
+class OnsetMisaligned(ValueError):
+    """IRPDECOMP_ONSET_MISALIGNED: the two onsets do not coincide after alignment."""
+
+
+# ------------------------------------------------------------------------------------------ alignment
+def env_rms_db(y, win=96, hop=48):
+    """2 ms RMS envelope on a 1 ms grid, in dB re full scale (power)."""
+    c = np.concatenate([[0.0], np.cumsum(y * y)])
+    n = max(0, (len(y) - win) // hop + 1)
+    idx = np.arange(n) * hop
+    ms = (c[idx + win] - c[idx]) / win
+    return 10 * np.log10(ms + 1e-18), (idx + win / 2) / SR
+
+
+def floor_of(y):
+    """Noise floor [dB re FS power]: 5th percentile of the 20 ms RMS over the whole recording."""
+    hop = int(0.02 * SR)
+    n = len(y) // hop
+    if n < 2:
+        return -120.0
+    ms = np.mean(y[: n * hop].reshape(n, hop) ** 2, axis=1)
+    return float(max(-120.0, 10 * np.log10(np.percentile(ms, 5) + 1e-18)))
+
+
+def onset_times(y, floor_db, start_s=0.0):
+    """(noise-relative crossing, peak-relative crossing) in seconds from the start of y.
+
+    A: first 2 ms envelope above floor + 12 dB.  B: first above peak - 40 dB.  Both searched from `start_s`.
+    The recorded onset is the later one: A alone fires on dust in a digital-silence render, B alone on the
+    skirt of a slow bowed attack in a noisy recording.
+    """
+    e, t = env_rms_db(y)
+    s = int(start_s * 1000)
+    e, t = e[s:], t[s:]
+    if not len(e):
+        raise OnsetMisaligned("IRPDECOMP_NO_SIGNAL: empty signal")
+    pk = float(e.max())
+    if pk < floor_db + 20:
+        raise OnsetMisaligned(f"IRPDECOMP_NO_SIGNAL: peak {pk:.1f} dB is under floor {floor_db:.1f} dB + 20")
+    ia = np.flatnonzero(e > floor_db + 12.0)
+    ib = np.flatnonzero(e > pk - 40.0)
+    ta = float(t[ia[0]]) if len(ia) else float(t[ib[0]])
+    tb = float(t[ib[0]])
+    return ta, tb
+
+
+def align(raw, f0_hz, floor_db, search_from_s=0.0):
+    """High-pass with the note's corner, find the onset, cut PREROLL_S before it. Returns (y, info)."""
+    y = highpass(raw, f0_hz)
+    ta, tb = onset_times(y, floor_db, search_from_s)
+    t_on = max(ta, tb)
+    a = a_in = int(round((t_on - PREROLL_S) * SR))
+    if a < 0:
+        y = np.concatenate([np.zeros(-a), y])
+        a = 0
+    cut = y[a:a + int(MAX_S * SR)]
+    # Re-detect on the cut: the two criteria must still sit at the pre-roll, to the millisecond.
+    ra, rb = onset_times(cut, floor_db)
+    got = max(ra, rb)
+    if abs(got - PREROLL_S) * 1000 > ALIGN_TOL_MS:
+        raise OnsetMisaligned(f"IRPDECOMP_ONSET_MISALIGNED: cut onset {got * 1000:.2f} ms, expected {PREROLL_S * 1000:.0f} ms")
+    return cut, dict(onset_s=float(t_on), noise_criterion_s=float(ta), peak_criterion_s=float(tb),
+                     criteria_spread_ms=float(abs(ta - tb) * 1000), floor_db=float(floor_db), cut_onset_s=float(got), cut_start_s=a_in / SR)
+
+
+# ------------------------------------------------------------------------------- time-frequency maps
+def stft_db(y, n):
+    """Hann STFT power [dB re 1; a full-scale sine reads -6 dB], centred frames, 10 ms hop."""
+    w = np.hanning(n)
+    pad = np.concatenate([np.zeros(n // 2), y, np.zeros(n)])
+    cols = min(max(1, (len(pad) - n) // HOP), int(len(y) / HOP) + 1)
+    idx = np.arange(cols)[:, None] * HOP + np.arange(n)[None, :]
+    mag = np.abs(np.fft.rfft(pad[idx] * w, axis=1)) ** 2 / (w.sum() ** 2)
+    return (10 * np.log10(mag.T + 1e-20)).astype(np.float32), np.fft.rfftfreq(n, 1 / SR)
+
+
+def cwt_db(y, per_oct=24, f_lo=60.0, f_hi=F_HI, w0=20.0):
+    """Analytic Morlet scalogram [dB, a full-scale sine reads -6 dB]: 24 scales per octave, Gaussian bandwidth f/20
+    (about a semitone, so the low partials of a pitched note stay resolved), 10 ms frames."""
+    n = len(y)
+    nfft = 1 << int(math.ceil(math.log2(n + SR // 4)))
+    X = np.fft.rfft(y, nfft)
+    f = np.fft.rfftfreq(nfft, 1 / SR)
+    fc = f_lo * 2 ** (np.arange(int(per_oct * math.log2(f_hi / f_lo)) + 1) / per_oct)
+    frames = n // HOP
+    out = np.empty((len(fc), frames), np.float32)
+    for i, c in enumerate(fc):
+        lo, hi = np.searchsorted(f, c * (1 - 6 / w0)), np.searchsorted(f, c * (1 + 6 / w0))
+        Y = np.zeros(nfft, complex)
+        Y[lo:hi] = X[lo:hi] * np.exp(-0.5 * ((f[lo:hi] - c) / (c / w0)) ** 2)
+        z = np.fft.ifft(Y)[:n]
+        out[i] = ((z.real ** 2 + z.imag ** 2)[: frames * HOP].reshape(frames, HOP)).mean(1)
+    return (10 * np.log10(out + 1e-20)).astype(np.float32), fc
+
+
+def cepstral_envelope(P_db, freqs, f0, grid):
+    """Smooth spectral envelope [dB] of the mean sounding spectrum, liftered below 0.6/f0, read on `grid` [Hz]."""
+    n = (len(freqs) - 1) * 2
+    c = np.fft.irfft(P_db, n)
+    mc = max(4, int(0.6 / max(f0, 20.0) * SR))
+    w = np.zeros(n)
+    w[:mc] = 0.5 + 0.5 * np.cos(np.pi * np.arange(mc) / mc)
+    w[n - mc + 1:] = w[1:mc][::-1]
+    env = np.fft.rfft(c * w).real
+    return np.interp(grid, freqs, env)
+
+
+def modal_partials(y, f0, P, f, n_modes=N_PARTIALS):
+    """Strongest spectral peaks of the first 0.6 s, for bars and plates whose modes are not integer multiples."""
+    seg = y[: int(0.6 * SR)]
+    nfft = 1 << 17
+    S = np.abs(np.fft.rfft(seg * np.hanning(len(seg)), nfft)) ** 2
+    fr = np.fft.rfftfreq(nfft, 1 / SR)
+    pk = np.flatnonzero((S[1:-1] > S[:-2]) & (S[1:-1] >= S[2:])) + 1
+    pk = pk[(fr[pk] > 0.5 * f0) & (fr[pk] < F_HI) & (S[pk] > S.max() * 1e-6)]
+    picked = []
+    for i in pk[np.argsort(S[pk])[::-1]]:
+        if all(abs(fr[i] - q) > 0.03 * q for q in picked):
+            picked.append(float(fr[i]))
+        if len(picked) >= n_modes:
+            break
+    return sorted(picked)
+
+
+# ------------------------------------------------------------------------------------------- one note
+class Note:
+    """Everything the decomposition needs from one aligned signal, computed once."""
+
+    def __init__(self, y, f0_hz, kind="sustained", inharmonic=False, label="", info=None, max_cents=50.0):
+        self.y, self.kind, self.inharmonic, self.label, self.info = y, kind, inharmonic, label, info or {}
+        self.f0_hint = f0_hz
+        self.dur = len(y) / SR
+        w0, w1 = (0.0, 0.3) if kind == "decaying" else (0.1, 0.8)
+        seg = y[int(w0 * SR):int(w1 * SR)]
+        self.match_window = [w0, min(w1, self.dur)]
+        self.level_db = float(10 * np.log10(np.mean(seg * seg) + 1e-18)) if len(seg) else float("nan")
+        self.desc = describe(y, kind, f0_hz, inharmonic=inharmonic, _skip_q3_heavy=True)
+        if self.desc is None:
+            raise GraderRefusalError(f"IRPDECOMP_NO_PITCH: {label or 'signal'} has no pitch near {f0_hz:.1f} Hz")
+        self.f0 = float(self.desc["f0"])
+        off_c = 1200 * math.log2(self.f0 / f0_hz)
+        if abs(off_c) > max_cents:
+            raise GraderRefusalError(f"IRPDECOMP_PITCH_MISMATCH: {label or 'signal'} measures {off_c:+.0f} cents from the named note")
+        n = 8192 if self.f0 < 80 else 4096
+        self.S, self.sf = stft_db(y, n)
+        self.C, self.cf = cwt_db(y)
+        # only frames whose whole window lies inside the signal: the zero-padded tail splatters
+        self.frames = min(self.S.shape[1], self.C.shape[1], max(1, (len(y) - n // 2) // HOP))
+        self.S, self.C = self.S[:, : self.frames], self.C[:, : self.frames]
+        self.t = np.arange(self.frames) * HOP / SR
+        self._curves()
+        self._partials()
+        grid = 100 * 2 ** (np.arange(0, int(6 * math.log2(12000 / 100)) + 1) / 6)
+        ok = self.rms_db[: self.S.shape[1]] > self.rms_db.max() - 30
+        mean_db = 10 * np.log10(np.mean(10 ** (self.S[:, : len(ok)][:, ok] / 10), axis=1) + 1e-20) if ok.any() else self.S[:, 0]
+        self.env_grid, self.env_db = grid, cepstral_envelope(mean_db, self.sf, self.f0, grid)
+        self.mean_db = mean_db
+
+    def _partials(self):
+        d = self.desc
+        if self.inharmonic:
+            modes = modal_partials(self.y, self.f0, self.S, self.sf)
+            self.ratios = np.array([m / self.f0 for m in modes])
+            self.pf = np.array(modes)
+            tr = []
+            for m in modes:
+                sel = np.abs(self.sf - m) <= max(0.02 * m, 3 * (self.sf[1] - self.sf[0]))
+                tr.append(10 * np.log10(np.sum(10 ** (self.S[sel][:, : self.frames] / 10), axis=0) + 1e-20))
+            self.pl = np.array(tr).reshape(len(modes), self.frames)
+            self.pk = np.arange(1, len(modes) + 1)
+            tot = 10 * np.log10(np.mean(10 ** (self.rms_db[self.sound] / 10)) + 1e-20)
+            self.pmean = np.array([10 * np.log10(np.mean(10 ** (p[self.sound] / 10)) + 1e-20) for p in self.pl]) - tot
+            self.pdev = np.zeros(len(modes))
+            self.pfreq_t = [np.full(self.frames, m) for m in modes]
+            self.decay = np.array([_decay_db_s(self.t, p) for p in self.pl]) if self.kind == "decaying" else None
+            return
+        t0, t1 = d["windows"]["sustain"]
+        ps = track_partials(self.y, self.f0, kmax=min(40, int(15000 // self.f0)), fit_inharmonicity=True, t_window=(t0, t1))
+        self.pk = np.array([p.k for p in ps], int)
+        self.pf = np.array([p.mean_f_hz for p in ps])
+        self.pmean = np.array([p.mean_level_db for p in ps])
+        self.ratios = self.pf / self.f0
+        self.pl = np.array([np.interp(self.t, p.t_s, p.level_db) for p in ps]).reshape(len(ps), self.frames)
+        self.pdev = 1200 * np.log2(self.pf / (self.pk * self.f0)) if len(ps) else np.array([])
+        self.pfreq_t = [np.interp(self.t, p.t_s, p.f_hz) for p in ps]
+        self.decay = np.array([_decay_db_s(self.t, self.pl[i]) for i in range(len(ps))]) if self.kind == "decaying" else None
+
+    def _curves(self):
+        S = self.S[:, : self.frames].astype(np.float64)
+        band = (self.sf > 80) & (self.sf < 10000)
+        P = 10 ** (S[band] / 10)
+        fb = self.sf[band][:, None]
+        tot = P.sum(axis=0)
+        self.rms_db = 10 * np.log10(np.sum(10 ** (S / 10), axis=0) + 1e-20)
+        sound = self.rms_db > self.rms_db.max() - 40
+        self.sound = sound
+        self.centroid_hz = np.where(sound, (fb * P).sum(axis=0) / (tot + 1e-30), np.nan)
+        m = (self.sf > F_LO) & (self.sf < F_HI)
+        pk = S[m].max()
+        D = np.diff(S[m], axis=1)
+        live = np.maximum(S[m][:, 1:], S[m][:, :-1]) > pk - SHOW_DB
+        pos = np.where(live, np.maximum(D, 0.0), 0.0)
+        self.flux_db = np.concatenate([[0.0], np.sqrt(np.sum(pos ** 2, axis=0) / np.maximum(live.sum(axis=0), 1))])
+
+    def scalars(self):
+        d = self.desc
+        out = dict(f0_hz=self.f0, inharmonicity_B=d["inharmonicity_B"], odd_even_db=d["odd_even_db"], hnr_db=d["hnr_db"],
+                   attack_ms=d["attack_ms"], centroid_rel=d["centroid_rel"], hi_share_db=d["hi_share_db"],
+                   f0_sd_cents=d["f0_sd_cents"], level_db=self.level_db, duration_s=self.dur,
+                   mean_centroid_hz=float(np.nanmean(self.centroid_hz)) if self.sound.any() else None,
+                   mean_flux_db=float(np.mean(self.flux_db[self.sound])) if self.sound.any() else None)
+        for k in ("decay_db_s", "slope1_db_s", "slope2_db_s", "knee_s"):
+            if k in d:
+                out[k] = d[k]
+        dec = [v for v in (self.decay[:6] if self.decay is not None else []) if np.isfinite(v)]
+        out["decay_med_db_s"] = float(np.median(dec)) if dec else None
+        return out
+
+
+def _decay_db_s(t, lvl):
+    i = int(np.argmax(lvl))
+    sel = np.arange(i, len(lvl))
+    sel = sel[lvl[sel] > lvl[i] - 50]
+    return float(np.polyfit(t[sel], lvl[sel], 1)[0]) if len(sel) >= 6 else float("nan")
+
+
+# --------------------------------------------------------------------------------------- the gaps
+ALL_CATS = ("other_dynamic", "other_take", "neighbour")
+B_RESOLUTION = 2e-5  # smaller inharmonicity differences are inside the stiff-string fit's own scatter
+SAME_NOTE = ("other_dynamic", "other_take")  # a neighbouring note is not a spread of THIS note's pitch-absolute measures
+
+
+def _m(label, unit, gap_unit, note, cats=ALL_CATS, value=None):
+    return dict(label=label, unit=unit, gap_unit=gap_unit, note=note, cats=cats, value=value)
+
+
+METRICS = OrderedDict([
+    ("spec_db", _m("Spectral distance (grader)", "dB", "dB", "instrgrade spec_db: the RMS of the third-octave envelope gap and the harmonic-level gap.")),
+    ("env_db", _m("Third-octave band envelope", "dB", "dB", "RMS gap of the mean spectrum in third-octave bands, relative to the total.")),
+    ("harm_db", _m("Harmonic level pattern", "dB", "dB", "RMS gap of the tracked partials' mean levels, relative to the total.")),
+    ("stft_lsd_db", _m("Spectrogram difference", "dB", "dB", "RMS dB difference of the two STFT maps over cells within 60 dB of the reference peak; onsets aligned, loudness matched.", SAME_NOTE)),
+    ("cwt_lsd_db", _m("Scalogram difference", "dB", "dB", "RMS dB difference of the two Morlet scalograms over cells within 60 dB of the reference peak.", SAME_NOTE)),
+    ("cepstral_env_db", _m("Spectral envelope (cepstral)", "dB", "dB", "RMS dB gap of the cepstrally smoothed mean spectra, liftered below 0.6/f0, 100 Hz to 12 kHz.")),
+    ("partial_traj_db", _m("Partial level trajectories", "dB", "dB", "Median over the first eight partials of the RMS difference of their level-versus-time curves with the mean removed.")),
+    ("partial_freq_cents", _m("Partial frequencies", "cents", "cents", "RMS over partials of the difference in frequency deviation from the harmonic series (stretch, inharmonicity).")),
+    ("f0_cents", _m("Fundamental frequency", "Hz", "cents", "Distance in cents between the two fitted fundamentals.", SAME_NOTE, "f0_hz")),
+    ("inharmonicity_B", _m("Inharmonicity B", "B", "B", "Stiff-string law f_k = k f0 sqrt(1 + B k^2) fitted to the tracked partials.", ALL_CATS, "inharmonicity_B")),
+    ("odd_even_db", _m("Odd/even balance", "dB", "dB", "Level of the odd partials (3, 5, 7, 9) against the even ones (2-10).", ALL_CATS, "odd_even_db")),
+    ("hnr_db", _m("Harmonics-to-noise", "dB", "dB", "Energy at the tracked partials against the energy between them, 80 Hz to 10 kHz.", ALL_CATS, "hnr_db")),
+    ("attack_log2", _m("Attack time 10-90%", "ms", "octaves of time", "Time for the 5 ms RMS envelope to rise from 10% to 90% of its steady (or peak) level; the gap is log2 of the ratio.", ALL_CATS, "attack_ms")),
+    ("decay_db_s", _m("Partial decay rate", "dB/s", "dB/s", "Median over the first partials of the level slope after each partial's peak (decaying notes only).", ALL_CATS, "decay_med_db_s")),
+    ("centroid_st", _m("Spectral centroid over time", "Hz", "semitones", "RMS over time of 12 log2(centroid ratio), sounding frames, 80 Hz to 10 kHz.", ALL_CATS, "mean_centroid_hz")),
+    ("flux_db", _m("Spectral flux over time", "dB", "dB", "RMS over time of the difference in positive frame-to-frame spectral change.", ALL_CATS, "mean_flux_db")),
+])
+
+
+def _map_gap(A, B, fa, fb, off):
+    """RMS dB difference over cells that count in either map, plus the signed mean (A - B)."""
+    A, fa, B, fb = _unify(A, fa, B, fb)
+    nf = min(A.shape[1], B.shape[1])
+    A, B = A[:, :nf].astype(np.float64) + off, B[:, :nf].astype(np.float64)
+    m = (fa > F_LO) & (fa < F_HI)
+    A, B = A[m], B[m]
+    live = np.maximum(A, B) > B.max() - SHOW_DB
+    if not live.any():
+        return float("nan"), float("nan")
+    d = np.clip(A - B, -SHOW_DB, SHOW_DB)[live]
+    return float(np.sqrt(np.mean(d * d))), float(np.mean(d))
+
+
+def _halve(M):
+    """Average a spectrogram's bin pairs in power: an 8192-point map onto the 4096-point grid."""
+    n = (M.shape[0] - 1) // 2
+    p = 10 ** (M.astype(np.float64) / 10)
+    return (10 * np.log10(np.concatenate([(p[0:2 * n:2] + p[1:2 * n:2]) / 2, p[-1:]]) + 1e-20)).astype(np.float32)
+
+
+def _unify(ma, fa, mb, fb):
+    """Put two maps on one frequency grid (the coarser), and return them with that grid."""
+    if ma.shape[0] > mb.shape[0]:
+        ma, fa = _halve(ma), fb
+    elif mb.shape[0] > ma.shape[0]:
+        mb, fb = _halve(mb), fa
+    return ma, fa, mb, fb
+
+
+def _partial_match(a, b):
+    """Index pairs (ia, ib) of partials present in both: same integer k, or the nearest mode ratio within 4%."""
+    if a.inharmonic or b.inharmonic:
+        pairs = []
+        for i, r in enumerate(a.ratios):
+            if not len(b.ratios):
+                break
+            j = int(np.argmin(np.abs(b.ratios - r)))
+            if abs(b.ratios[j] / r - 1) < 0.04:
+                pairs.append((i, j))
+        return pairs
+    kb = {int(k): j for j, k in enumerate(b.pk)}
+    return [(i, kb[int(k)]) for i, k in enumerate(a.pk) if int(k) in kb]
+
+
+def compare(a: Note, b: Note):
+    """Gaps between candidate `a` and reference `b` for every metric: {id: (gap >= 0 | None, signed a - b | None)}.
+
+    Loudness: a's absolute levels are moved to b's by the difference of their match-window levels.
+    """
+    off = b.level_db - a.level_db
+    g = {}
+    dist = distance(a.desc, b.desc)
+    for k in ("spec_db", "env_db", "harm_db"):
+        g[k] = (dist[k], None)
+    g["stft_lsd_db"] = _map_gap(a.S, b.S, a.sf, b.sf, off)
+    g["cwt_lsd_db"] = _map_gap(a.C, b.C, a.cf, b.cf, off)
+    de = a.env_db + off - b.env_db
+    g["cepstral_env_db"] = (float(np.sqrt(np.mean(de * de))), float(np.mean(de)))
+    pairs = _partial_match(a, b)
+    nf = min(a.frames, b.frames)
+    traj, cents = [], []
+    for ia, ib in pairs[:N_PARTIALS]:
+        la, lb = a.pl[ia, :nf] + off, b.pl[ib, :nf]
+        live = np.maximum(la, lb) > max(la.max(), lb.max()) - 40
+        if ia < 8 and live.sum() >= 5 and b.pmean[ib] > b.pmean.max() - 50:
+            d = (la[live] - la[live].mean()) - (lb[live] - lb[live].mean())
+            traj.append(float(np.sqrt(np.mean(d * d))))
+        cents.append(1200 * math.log2(a.ratios[ia] / b.ratios[ib]) if (a.inharmonic or b.inharmonic) else float(a.pdev[ia] - b.pdev[ib]))
+    g["partial_traj_db"] = (float(np.median(traj)) if traj else None, None)
+    g["partial_freq_cents"] = (float(np.sqrt(np.mean(np.square(cents)))) if cents else None, float(np.mean(cents)) if cents else None)
+    sc = 1200 * math.log2(a.f0 / b.f0)
+    g["f0_cents"] = (abs(sc), sc)
+    for k in ("inharmonicity_B", "odd_even_db", "hnr_db"):
+        g[k] = (abs(a.desc[k] - b.desc[k]), a.desc[k] - b.desc[k])
+    r = math.log2(max(a.desc["attack_ms"], 0.02) / max(b.desc["attack_ms"], 0.02))
+    g["attack_log2"] = (abs(r), r)
+    dd = ([a.decay[i] - b.decay[j] for i, j in pairs[:6] if np.isfinite(a.decay[i]) and np.isfinite(b.decay[j])]
+          if a.decay is not None and b.decay is not None else [])
+    g["decay_db_s"] = (float(np.median(np.abs(dd))), float(np.median(dd))) if dd else (None, None)
+    both = a.sound[:nf] & b.sound[:nf]
+    if both.sum() >= 5:
+        cs = 12 * np.log2(a.centroid_hz[:nf][both] / b.centroid_hz[:nf][both])
+        fl = a.flux_db[:nf][both] - b.flux_db[:nf][both]
+        g["centroid_st"] = (float(np.sqrt(np.mean(cs * cs))), float(np.mean(cs)))
+        g["flux_db"] = (float(np.sqrt(np.mean(fl * fl))), float(np.mean(fl)))
+    else:
+        g["centroid_st"] = g["flux_db"] = (None, None)
+    return {k: ((v[0] if v[0] is not None and math.isfinite(v[0]) else None), v[1]) for k, v in g.items()}
+
+
+# ------------------------------------------------------------------------------- reference access
+FAMILY = {"clarinet": "clarinet", "altosax": "saxophone", "tenortrombone": "trombone", "doublebass": "double-bass"}
+INST = {v: k for k, v in FAMILY.items()}
+CANON_ART = ("", "novib", "arco")
+
+
+def family_of(inst):
+    return FAMILY.get(inst, inst)
+
+
+def canon_art(arts):
+    for a in CANON_ART:
+        if a in arts:
+            return a
+    return sorted(arts)[0]
+
+
+class Refs:
+    """Library entries and their audio: raw files cached, notes analysed on demand."""
+
+    def __init__(self, lib_path, wav_dir, refs_json=None):
+        self.lib = json.loads(Path(lib_path).read_text())
+        self.wav_dir = Path(wav_dir)
+        self.meta = {}
+        if refs_json:
+            for e in json.loads(Path(refs_json).read_text())["files"]:
+                self.meta[Path(e["path"]).stem.replace(" ", "")] = dict(page=e["page"], chain=e["chain"], id=e["id"], name=Path(e["path"]).name)
+        self._raw, self._floor, self._notes = OrderedDict(), {}, OrderedDict()
+
+    def info_of(self, e):
+        return self.meta.get(Path(e["file"]).stem, {})
+
+    def page(self, e):
+        return self.info_of(e).get("page")
+
+    def raw(self, fname):
+        if fname not in self._raw:
+            self._raw[fname] = load(self.wav_dir / fname)
+            while len(self._raw) > 3:
+                self._raw.popitem(last=False)
+        return self._raw[fname]
+
+    def aligned(self, e):
+        """(aligned samples, alignment info) of library entry `e`, in the file's own time."""
+        f0 = hz_of(e["note"])
+        x = self.raw(e["file"])
+        if e["file"] not in self._floor:
+            self._floor[e["file"]] = floor_of(highpass(x, f0))
+        a = max(0, int((e["start"] - 0.02) * SR) - int(0.1 * SR))
+        b = min(len(x), int(e["end"] * SR) + int(0.1 * SR))
+        y, info = align(x[a:b], f0, self._floor[e["file"]], search_from_s=(e["start"] - 0.02) - a / SR)
+        info = dict(info, source_onset_s=a / SR + info["onset_s"], source_cut_start_s=a / SR + info["cut_start_s"])
+        return y, info
+
+    def note(self, e) -> Note:
+        key = (e["file"], e["start"])
+        if key not in self._notes:
+            y, info = self.aligned(e)
+            self._notes[key] = Note(y, hz_of(e["note"]), e["kind"], e["inst"] in ("xylophone", "marimba"), f'{e["file"]}@{e["name"]}.{e["dyn"]}', info)
+            while len(self._notes) > 48:
+                self._notes.popitem(last=False)
+        return self._notes[key]
+
+    def find(self, inst, midi, dyn=None, art=None):
+        return [e for e in self.lib if e["inst"] == inst and e["note"] == midi and (dyn is None or e["dyn"] == dyn)
+                and (art is None or e["art"] == art)]
+
+    def ruler_set(self, t, max_each=4, max_instruments=8):
+        """Real recordings to measure against target entry `t`, by kind of difference."""
+        same = [e for e in self.lib if e["inst"] == t["inst"] and e["art"] == t["art"] and e is not t]
+
+        def prefer(es):  # the same string and session first
+            return sorted(es, key=lambda e: (e["sul"] != t["sul"], self.page(e) != self.page(t), e["file"] != t["file"], e["file"]))
+        cats = OrderedDict()
+        cats["other_dynamic"] = prefer([e for e in same if e["note"] == t["note"] and e["dyn"] != t["dyn"]])[:max_each]
+        cats["other_take"] = prefer([e for e in same if e["note"] == t["note"] and e["dyn"] == t["dyn"] and e["file"] != t["file"]])[:max_each]
+        cats["neighbour"] = prefer([e for e in same if e["dyn"] == t["dyn"] and abs(e["note"] - t["note"]) in (1, 2)])[:max_each]
+        cats["other_articulation"] = [e for e in self.lib if e["inst"] == t["inst"] and e["art"] != t["art"] and e["kind"] == t["kind"]
+                                      and e["note"] == t["note"] and e["dyn"] == t["dyn"]][:2]
+        best = {}
+        for e in self.lib:
+            if e["inst"] != t["inst"] and e["kind"] == t["kind"] and e["dyn"] == t["dyn"] and abs(e["note"] - t["note"]) <= 1:
+                k = e["inst"] + e["art"]
+                if k not in best or abs(e["note"] - t["note"]) < abs(best[k]["note"] - t["note"]):
+                    best[k] = e
+        cats["other_instrument"] = list(best.values())[:max_instruments]
+        return cats
+
+    @staticmethod
+    def label(cat, e, t):
+        sul = f' ({e["sul"]})' if e["sul"] and e["sul"] != t["sul"] else ""
+        if cat == "other_dynamic":
+            return f'{e["dyn"]} against {t["dyn"]}, same note{sul}'
+        if cat == "other_take":
+            return f'another recording of {t["name"]} {t["dyn"]}{sul or " (" + Path(e["file"]).stem + ")"}'
+        if cat == "neighbour":
+            return f'neighbouring note {e["name"]}, {e["dyn"]}'
+        if cat == "other_articulation":
+            return f'{e["art"] or "plain"} against {t["art"] or "plain"}'
+        return f'{e["inst"]}{" " + e["art"] if e["art"] else ""} {e["name"]}'
+
+    def ruler(self, t):
+        """{category: [{label, with_, gaps: {metric: gap}}]} for target entry `t`: real recordings against real."""
+        tn = self.note(t)
+        out = OrderedDict()
+        for cat, es in self.ruler_set(t).items():
+            rows = []
+            for e in es:
+                try:
+                    gp = compare(self.note(e), tn)
+                except (OnsetMisaligned, GraderRefusalError, ValueError, IndexError, KeyError):
+                    continue
+                rows.append(dict(label=self.label(cat, e, t), with_=f'{e["file"]}@{e["name"]}.{e["dyn"]}', gaps={k: v[0] for k, v in gp.items()}))
+            out[cat] = rows
+        return out
+
+
+# ------------------------------------------------------------------------------------------- images
+def _lut(name):
+    from matplotlib import colormaps
+    return (colormaps[name](np.linspace(0, 1, 256))[:, :3] * 255).astype(np.uint8)
+
+
+def log_rows(M, f, f_lo, f_hi, rows=360):
+    """Resample a (bins x frames) dB map onto `rows` log-spaced frequencies, high frequency at row 0."""
+    fr = f_lo * (f_hi / f_lo) ** (1 - np.arange(rows) / (rows - 1))
+    i = np.clip(np.searchsorted(f, fr) - 1, 0, len(f) - 2)
+    w = np.clip((fr - f[i]) / (f[i + 1] - f[i]), 0, 1)[:, None]
+    return M[i] * (1 - w) + M[i + 1] * w
+
+
+def save_map(rgb, path, width):
+    from PIL import Image
+    im = Image.fromarray(rgb).resize((width, rgb.shape[0]), Image.BILINEAR)
+    im.save(path, "WEBP", quality=86, method=6)
+
+
+def map_images(kind, real: Note, ours: Note | None, off, out: Path, f_lo, f_hi, span_db=80.0, diff_db=30.0):
+    """Bare spectrogram/scalogram images: real, ours, diff (ours minus real). x = time, y = log frequency."""
+    Mr, fr = (real.S, real.sf) if kind == "spectrogram" else (real.C, real.cf)
+    maps = {"real": (Mr, fr)}
+    if ours is not None:
+        maps["ours"] = (ours.S, ours.sf) if kind == "spectrogram" else (ours.C, ours.cf)
+    nf = min(m.shape[1] for m, _ in maps.values())
+    if ours is not None:
+        Mr, fr, Mo, fo = _unify(Mr, fr, maps["ours"][0], maps["ours"][1])
+        maps = {"real": (Mr, fr), "ours": (Mo, fo)}
+    ref_pk = maps["real"][0][:, :nf][(maps["real"][1] > f_lo) & (maps["real"][1] < f_hi)].max()
+    names = {}
+    mag = _lut("magma")
+    stack = {}
+    for side, (M, f) in maps.items():
+        o = off if side == "ours" else 0.0
+        stack[side] = log_rows(M[:, :nf].astype(np.float64) + o - ref_pk, f, f_lo, f_hi)
+        v = np.clip((stack[side] + span_db) / span_db, 0, 1)
+        names[side] = f"{kind}-{side}.webp"
+        save_map(mag[(v * 255).astype(int)], out / names[side], nf * 4)
+    names["ours"] = names.get("ours")
+    names["diff"] = None
+    if ours is not None:
+        D = np.clip(stack["ours"] - stack["real"], -diff_db, diff_db)
+        D[np.maximum(stack["ours"], stack["real"]) <= -span_db] = 0.0
+        names["diff"] = f"{kind}-diff.webp"
+        save_map(_lut("RdBu_r")[((D / diff_db + 1) / 2 * 255).astype(int)], out / names["diff"], nf * 4)
+    return dict(real=names["real"], ours=names["ours"], diff=names["diff"], f_lo_hz=f_lo, f_hi_hz=f_hi, span_db=span_db, diff_range_db=diff_db)
+
+
+# ------------------------------------------------------------------------------------ review figures
+def _plt():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    return plt
+
+
+def save_fig(fig, path):
+    fig.savefig(path, dpi=100)
+    _plt().close(fig)
+
+
+def fig_review(a: Note, b: Note, off, path):
+    """One axes-and-titles sheet for people reading the numbers: maps, partials, envelope, centroid/flux, level."""
+    plt = _plt()
+    fig = plt.figure(figsize=(14, 10))
+    gs = fig.add_gridspec(4, 3, height_ratios=[1.4, 1.4, 1, 1])
+    for row, (M, F) in enumerate((("S", "sf"), ("C", "cf"))):
+        ma, fa, mb, fb = _unify(getattr(a, M), getattr(a, F), getattr(b, M), getattr(b, F))
+        nf = min(ma.shape[1], mb.shape[1])
+        keep = fa >= 0.8 * F_LO
+        ma, mb, fk = ma[keep, :nf].astype(float), mb[keep, :nf].astype(float), fa[keep]
+        pk = mb[(fk > F_LO) & (fk < F_HI)].max()
+        t = np.arange(nf) * HOP / SR
+        for k, (X, ttl) in enumerate(((mb, "real"), (ma + off, "ours"))):
+            ax = fig.add_subplot(gs[row, k])
+            ax.pcolormesh(t, fk, X - pk, vmin=-80, vmax=0, cmap="magma", shading="auto")
+            ax.set_yscale("log"); ax.set_ylim(F_LO, F_HI); ax.set_title(f'{ttl}: {"STFT" if row == 0 else "Morlet scalogram"}', fontsize=9)
+        ax = fig.add_subplot(gs[row, 2])
+        D = np.clip(ma + off - mb, -30, 30)
+        D[np.maximum(ma + off, mb) <= pk - SHOW_DB] = np.nan
+        im = ax.pcolormesh(t, fk, D, vmin=-30, vmax=30, cmap="RdBu_r", shading="auto")
+        ax.set_yscale("log"); ax.set_ylim(F_LO, F_HI); ax.set_title("ours - real (dB)", fontsize=9)
+        fig.colorbar(im, ax=ax, pad=0.01)
+    ax = fig.add_subplot(gs[2, 0])
+    inh = a.inharmonic or b.inharmonic
+    top = b.pmean.max() if len(b.pmean) else 0.0
+    for n_, c_, lab, dx in ((b, "#222", "real", -0.12), (a, "#d55e00", "ours", 0.12)):
+        x = (n_.ratios if inh else n_.pk) + dx
+        ax.vlines(x, -80, n_.pmean - top, color=c_, lw=1.5)
+        ax.plot(x, n_.pmean - top, "o", color=c_, ms=3, label=lab)
+    ax.set_ylim(-70, 6); ax.set_title("partial levels (dB re strongest real partial)", fontsize=9); ax.legend(fontsize=7)
+    ax = fig.add_subplot(gs[2, 1])
+    nf = min(a.frames, b.frames)
+    for n_, ls, o in ((b, "-", 0.0), (a, "--", off)):
+        for rank, (ia, ib) in enumerate(_partial_match(a, b)[:6]):
+            i = ib if n_ is b else ia
+            ax.plot(n_.t[:nf], n_.pl[i, :nf] + o, ls, color=f"C{rank}", lw=1)
+    if len(b.pl):
+        ax.set_ylim(b.pl[:, :nf].max() - 70, b.pl[:, :nf].max() + 3)
+    ax.set_title("partial level trajectories (solid real, dashed ours)", fontsize=9)
+    ax = fig.add_subplot(gs[2, 2])
+    for n_, c_, o in ((b, "#222", 0.0), (a, "#d55e00", off)):
+        ax.semilogx(n_.sf[1:], n_.mean_db[1:] + o, color=c_, alpha=0.25, lw=0.6)
+        ax.semilogx(n_.env_grid, n_.env_db + o, color=c_, lw=1.6)
+    ax.set_xlim(80, 14000); ax.set_ylim(b.env_db.max() - 80, b.env_db.max() + 8); ax.set_title("cepstral envelope over the mean spectrum", fontsize=9)
+    for k, (attr, ttl) in enumerate((("centroid_hz", "spectral centroid (Hz)"), ("flux_db", "spectral flux (dB / 10 ms)"), ("rms_db", "RMS level (dB)"))):
+        ax = fig.add_subplot(gs[3, k])
+        for n_, c_, o in ((b, "#222", 0.0), (a, "#d55e00", off if attr == "rms_db" else 0.0)):
+            ax.plot(n_.t, getattr(n_, attr)[: len(n_.t)] + o, color=c_, lw=1.1)
+        ax.set_title(ttl, fontsize=9)
+    fig.tight_layout()
+    save_fig(fig, path)
+
+
+# ------------------------------------------------------------------------------------------ outputs
+def clean(o):
+    if isinstance(o, dict):
+        return {k: clean(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [clean(v) for v in o]
+    if isinstance(o, np.ndarray):
+        return clean(o.tolist())
+    if isinstance(o, (np.floating, float)):
+        return float(f"{o:.5g}") if math.isfinite(o) else None
+    if isinstance(o, np.integer):
+        return int(o)
+    return o
+
+
+def wav_sample_rate(path):
+    b = Path(path).read_bytes()[:4096]
+    i = b.index(b"fmt ") + 8
+    return int.from_bytes(b[i + 4:i + 8], "little")
+
+
+def tracks(n: Note, nf):
+    return [dict(n=int(n.pk[i]), f_hz=np.round(n.pfreq_t[i][:nf], 3), level_db=np.round(n.pl[i, :nf], 2)) for i in range(min(len(n.pk), N_PARTIALS))]
+
+
+def metric_rows(gaps, real: Note, ours: Note | None, ruler):
+    rs, rv = real.scalars(), (ours.scalars() if ours else {})
+    rows = []
+    for mid, spec in METRICS.items():
+        gp = gaps[mid][0] if gaps else None
+        key = spec["value"]
+        have = [r["gaps"].get(mid) for c in spec["cats"] for r in ruler.get(c, [])]
+        if key is None and not any(v is not None for v in have) and gp is None:
+            continue
+        if mid == "decay_db_s" and rs.get(key) is None:
+            continue
+        ruler_rows = [dict(label=r["label"], value=r["gaps"][mid]) for c in spec["cats"] for r in ruler.get(c, [])
+                      if r["gaps"].get(mid) is not None]
+        context = [dict(label=r["label"], value=r["gaps"][mid]) for c in ("other_articulation", "other_instrument") for r in ruler.get(c, [])
+                   if r["gaps"].get(mid) is not None]
+        note = spec["note"]
+        if mid == "inharmonicity_B" and ruler_rows and max(r["value"] for r in ruler_rows) < B_RESOLUTION:
+            ruler_rows, note = [], note + " Real recordings of this note differ by less than the fit resolves, so no ruler is offered."
+        rows.append(dict(id=mid, label=spec["label"], unit=spec["unit"], gap_unit=spec["gap_unit"], real=rs.get(key) if key else None,
+                         ours=rv.get(key) if key and ours else None, gap=gp if ours else None, signed_gap=gaps[mid][1] if gaps else None,
+                         ruler=ruler_rows, other_instruments_and_articulations=context, note=note))
+    return rows
+
+
+def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand_y=None, cand_info=None, ours_meta=None, review=False):
+    """Write <root>/<family>/<note>/pair.json and the files it names (the P8 site contract)."""
+    f0 = hz_of(ref_e["note"])
+    inh = ref_e["inst"] in ("xylophone", "marimba")
+    n = len(ref_y) if cand_y is None else min(len(ref_y), len(cand_y))
+    real = Note(ref_y[:n], f0, ref_e["kind"], inh, "real", ref_info)
+    ours = Note(cand_y[:n], f0, ref_e["kind"], inh, "ours", cand_info, max_cents=400.0) if cand_y is not None else None
+    if ours is not None:
+        d_on = abs(ours.info["cut_onset_s"] - real.info["cut_onset_s"]) * 1000
+        if d_on > ALIGN_TOL_MS:
+            raise OnsetMisaligned(f"IRPDECOMP_ONSET_MISALIGNED: ours and real onsets are {d_on:.2f} ms apart after alignment")
+    nf = min(real.frames, ours.frames) if ours else real.frames
+    dur = nf * HOP / SR
+    off = real.level_db - ours.level_db if ours else 0.0
+    out = Path(root) / family / note_name
+    out.mkdir(parents=True, exist_ok=True)
+    ns = int(round(dur * SR))
+    yr, yo = ref_y[:ns], (cand_y[:ns] * 10 ** (off / 20) if ours else None)
+    peak = max(np.abs(yr).max(), np.abs(yo).max() if yo is not None else 0.0)
+    g = 0.7 / peak
+    write_wav(out / "real.wav", yr * g)
+    if yo is not None:
+        write_wav(out / "ours.wav", yo * g)
+    gaps = compare(ours, real) if ours else None
+    ruler = refs.ruler(ref_e)
+    lo, hi = (60.0, F_HI)
+    figs = dict(spectrogram=map_images("spectrogram", real, ours, off, out, F_LO, F_HI),
+                scalogram=map_images("scalogram", real, ours, off, out, lo, hi))
+    pm = _partial_match(ours, real) if ours else []
+    parts = None
+    if len(real.pk):
+        ot = [dict(n=int(real.pk[ib]), f_hz=np.round(ours.pfreq_t[ia][:nf], 3), level_db=np.round(ours.pl[ia, :nf] + off, 2)) for ia, ib in pm
+              if ib < N_PARTIALS] if ours else None
+        parts = dict(t_s=np.round(real.t[:nf], 4), f0_hz=dict(real=real.f0, ours=ours.f0 if ours else None), real=tracks(real, nf), ours=ot or None)
+    hp = min(50.0, 0.5 * f0)
+    pj = dict(
+        schema="frankensim.instrument-pair.v1", family=family, note=note_name, dynamic=ref_e["dyn"], duration_s=round(dur, 4),
+        real=dict(reference_id=refs.info_of(ref_e).get("id"), file=refs.info_of(ref_e).get("name"),
+                  segment_s=[round(ref_info["source_cut_start_s"], 4), round(ref_info["source_cut_start_s"] + dur, 4)]),
+        ours=dict(wav=str(ours_meta["wav"]), git_sha=ours_meta["git_sha"], observer=ours_meta["observer"], sample_rate=ours_meta["sample_rate"],
+                  recipe=ours_meta["recipe"]) if ours else None,
+        audio=dict(real="real.wav", ours="ours.wav" if ours else None,
+                   level_match=(f"One shared gain of {20 * math.log10(g):+.1f} dB puts the louder clip at 0.70 of full scale; "
+                                + (f"ours was set {off:+.1f} dB beforehand so its RMS over {real.match_window[0]:.1f}-{real.match_window[1]:.1f} s "
+                                   "equals the real recording's." if ours else "the real recording is otherwise untouched."))),
+        alignment=dict(onset_real_s=ref_info["source_onset_s"], onset_ours_s=cand_info["onset_s"] if cand_info else None, highpass_hz=hp,
+                       level_offset_db=off if ours else None, preroll_ms=PREROLL_S * 1000, tolerance_ms=ALIGN_TOL_MS,
+                       onset_criteria_spread_ms=dict(real=ref_info["criteria_spread_ms"], ours=cand_info["criteria_spread_ms"] if cand_info else None)),
+        figures=figs, partials=parts, metrics=metric_rows(gaps, real, ours, ruler),
+        ruler_with={c: [r["with_"] for r in rs] for c, rs in ruler.items()},
+        decompose=dict(version=DECOMPOSE_VERSION, grader=GRADER_VERSION, library_note=f'{ref_e["file"]}@{ref_e["name"]}.{ref_e["dyn"]}'),
+    )
+    (out / "pair.json").write_text(json.dumps(clean(pj), indent=1, allow_nan=False))
+    if review and ours:
+        fig_review(ours, real, off, out / "review.png")
+    return pj
+
+
+DEFAULTS = dict(lib="/data/tmp/wa-inst/p2-grade/grade/library-v6-light.json", wav_dir="/data/tmp/wa-inst/refs-wav48",
+                refs_json="/data/tmp/wa-inst/snap/a64e0c7b37d1/frankensim/data/instruments/references.json",
+                out="/data/tmp/wa-inst/analysis")
+
+
+def pick_entry(refs, family, note, dyn, art):
+    inst = INST.get(family, family)
+    cands = refs.find(inst, midi_of(note), dyn, art)
+    if art is None:
+        arts = {e["art"] for e in refs.lib if e["inst"] == inst and e["note"] == midi_of(note) and e["dyn"] == dyn}
+        if not arts:
+            raise SystemExit(f"IRPDECOMP_REFERENCE_MISSING: {family} {note} {dyn}")
+        cands = refs.find(inst, midi_of(note), dyn, canon_art(arts))
+    if not cands:
+        raise SystemExit(f"IRPDECOMP_REFERENCE_MISSING: {family} {note} {dyn} {art or ''}")
+    return sorted(cands, key=lambda e: e["file"])[0]
+
+
+def run_pair(refs, c, root):
+    ref_e = c.get("ref_entry") or pick_entry(refs, c["family"], c["note"], c.get("dyn", "mf"), c.get("art"))
+    ref_y, ref_info = refs.aligned(ref_e)
+    cand_y = cand_info = ours_meta = None
+    if c.get("wav"):
+        f0 = hz_of(ref_e["note"])
+        raw = load(Path(c["wav"]))
+        cand_y, cand_info = align(raw, f0, floor_of(highpass(raw, f0)))
+        ours_meta = dict(wav=c["wav"], git_sha=c["git_sha"], observer=c["observer"], recipe=c["recipe"], sample_rate=wav_sample_rate(c["wav"]))
+    return write_pair(root, c["family"], c["note"], ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, c.get("review", False))
+
+
+_REFS = None
+
+
+def _init(lib, wav, refs_json):
+    global _REFS
+    _REFS = Refs(lib, wav, refs_json)
+
+
+def _ref_job(args):
+    c, root = args
+    try:
+        pj = run_pair(_REFS, c, root)
+        return dict(family=c["family"], note=c["note"], ok=True, metrics=len(pj["metrics"]))
+    except (OnsetMisaligned, GraderRefusalError, ValueError, IndexError, KeyError, SystemExit) as e:
+        return dict(family=c["family"], note=c["note"], ok=False, error=str(e))
+
+
+def cmd_refs(a):
+    """Reference-only pairs (ours null): spread notes per family, mf, canonical articulation."""
+    refs = Refs(a.lib, a.wav_dir, a.refs_json)
+    jobs = []
+    for inst in sorted({e["inst"] for e in refs.lib}):
+        fam = family_of(inst)
+        if a.family and fam not in a.family:
+            continue
+        es = [e for e in refs.lib if e["inst"] == inst and e["dyn"] == "mf"]
+        art = canon_art({e["art"] for e in es})
+        notes = sorted({e["note"] for e in es if e["art"] == art})
+        want = sorted({notes[min(len(notes) - 1, int(q * len(notes)))] for q in (0.1, 0.35, 0.6, 0.85)}) if not a.all else notes
+        jobs += [(dict(family=fam, note=name_of(m), dyn="mf", art=art, review=a.review), a.out) for m in want]
+    if a.jobs > 1:
+        with ProcessPoolExecutor(a.jobs, mp_context=multiprocessing.get_context("fork"), initializer=_init, initargs=(a.lib, a.wav_dir, a.refs_json)) as pool:
+            res = list(pool.map(_ref_job, jobs, chunksize=1))
+    else:
+        _init(a.lib, a.wav_dir, a.refs_json)
+        res = [_ref_job(j) for j in jobs]
+    for r in res:
+        print(json.dumps(r))
+    raise SystemExit(1 if any(not r["ok"] for r in res) else 0)
+
+
+def cmd_pair(a):
+    refs = Refs(a.lib, a.wav_dir, a.refs_json)
+    c = dict(family=a.family, note=a.note, dyn=a.dyn, art=a.art, wav=a.render, git_sha=a.git_sha, observer=a.observer, recipe=a.recipe, review=a.review)
+    if not all((a.render, a.git_sha, a.observer, a.recipe)):
+        raise SystemExit("IRPDECOMP_USAGE: a render needs --git-sha, --observer and --recipe (the page shows them)")
+    pj = run_pair(refs, c, a.out)
+    for m in pj["metrics"]:
+        top = max((r["value"] for r in m["ruler"]), default=None)
+        verdict = "no ruler" if top is None else ("inside" if m["gap"] is not None and m["gap"] <= top else "outside")
+        print(f'{m["id"]:20s} gap {m["gap"] if m["gap"] is None else round(m["gap"], 3)!s:>9} {m["gap_unit"]:16s} real-vs-real max {top if top is None else round(top, 3)!s:>9}  {verdict}')
+
+
+def cmd_batch(a):
+    refs = Refs(a.lib, a.wav_dir, a.refs_json)
+    for c in json.loads(Path(a.candidates).read_text()):
+        c.setdefault("dyn", "mf")
+        try:
+            pj = run_pair(refs, c, a.out)
+            print(json.dumps(dict(family=c["family"], note=c["note"], ok=True, metrics=len(pj["metrics"]))))
+        except (SystemExit, OnsetMisaligned, GraderRefusalError) as e:
+            print(json.dumps(dict(family=c["family"], note=c["note"], ok=False, error=str(e))))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def common(p):
+        p.add_argument("--lib", default=DEFAULTS["lib"])
+        p.add_argument("--wav-dir", default=DEFAULTS["wav_dir"])
+        p.add_argument("--refs-json", default=DEFAULTS["refs_json"])
+        p.add_argument("--out", default=DEFAULTS["out"])
+        p.add_argument("--review", action="store_true", help="also write review.png, an annotated sheet of every decomposition")
+    p = sub.add_parser("pair")
+    common(p)
+    p.add_argument("--render", required=True)
+    p.add_argument("--family", required=True)
+    p.add_argument("--note", required=True)
+    p.add_argument("--dyn", default="mf")
+    p.add_argument("--art")
+    p.add_argument("--git-sha")
+    p.add_argument("--observer")
+    p.add_argument("--recipe")
+    p.set_defaults(fn=cmd_pair)
+    p = sub.add_parser("batch")
+    common(p)
+    p.add_argument("candidates")
+    p.set_defaults(fn=cmd_batch)
+    p = sub.add_parser("refs")
+    common(p)
+    p.add_argument("--family", action="append")
+    p.add_argument("--all", action="store_true", help="every mf note, not four spread ones")
+    p.add_argument("--jobs", type=int, default=1)
+    p.set_defaults(fn=cmd_refs)
+    a = ap.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

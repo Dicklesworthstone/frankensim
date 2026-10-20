@@ -759,47 +759,60 @@ def parse_ref_name(stem: str):
     return dict(inst=inst, dyn=dyn, range=rng, art=art, sul=sul, mallet=mallet)
 
 
-def build_library(wav_dir: Path, cache: Path):
+def library_entries(p: Path, heavy: bool = True):
+    """Segment one UIowa file into verified notes and describe each; returns library entries."""
+    p = Path(p)
+    meta = parse_ref_name(p.stem)
+    if not meta["range"] or not meta["dyn"]:
+        return []
+    exp = expected_notes(meta["range"])
+    x = highpass(load(p), hz_of(exp[0]) if exp else None)
+    try:
+        spans = segment_notes(x, exp)
+        labels = exp if len(spans) == len(exp) else None
+    except ReferenceMismatch as refusal:
+        print(f"{p.name}: refused, {refusal}", file=sys.stderr)
+        if refusal.kind != "note-absent":
+            return []
+        labels = [m for m, _ in refusal.verified]
+        spans = [s for _, s in refusal.verified]
+    kind = "decaying" if (meta["art"] == "pizz" or meta["inst"] in ("guitar", "xylophone", "marimba", "piano")) else "sustained"
+    entries = []
+    for k, (a, b) in enumerate(spans):
+        y = x[a:b]
+        o = onset(y)
+        y = y[o:]
+        if len(y) < int(0.35 * SR):
+            continue
+        hint = hz_of(labels[k]) if labels else None
+        d = describe(y, kind, hint, inharmonic=meta["inst"] in ("xylophone", "marimba"), _skip_q3_heavy=not heavy)
+        if d is None:
+            continue
+        midi = int(round(69 + 12 * math.log2(d["f0"] / 440))) if d["f0"] and np.isfinite(d["f0"]) else None
+        if hint is None and midi is not None and exp and not (exp[0] - 1 <= midi <= exp[-1] + 1):
+            continue
+        note = labels[k] if hint is not None else midi
+        if note is None:
+            continue
+        entries.append(dict(file=p.name, start=(a + o) / SR, end=b / SR, note=note, name=name_of(note), kind=kind,
+                            cents_vs_et=cents(d["f0"], hz_of(note)), **meta, desc=d))
+    print(f"{p.name}: {len(spans)} spans, expected {len(exp)}, kept {len(entries)}", file=sys.stderr)
+    return entries
+
+
+def build_library(wav_dir: Path, cache: Path, jobs: int = 1, heavy: bool = True):
+    """Per-file library of described reference notes; `jobs` > 1 fans the files over processes."""
     if cache.exists():
         return json.loads(cache.read_text())
-    lib = []
-    for p in sorted(Path(wav_dir).glob("*.wav")):
-        meta = parse_ref_name(p.stem)
-        if not meta["range"] or not meta["dyn"]:
-            continue
-        exp = expected_notes(meta["range"])
-        x = highpass(load(p), hz_of(exp[0]) if exp else None)
-        try:
-            spans = segment_notes(x, exp)
-            labels = exp if len(spans) == len(exp) else None
-        except ReferenceMismatch as refusal:
-            print(f"{p.name}: refused, {refusal}", file=sys.stderr)
-            if refusal.kind != "note-absent":
-                continue
-            labels = [m for m, _ in refusal.verified]
-            spans = [s for _, s in refusal.verified]
-        kind = "decaying" if (meta["art"] == "pizz" or meta["inst"] in ("guitar", "xylophone", "piano")) else "sustained"
-        assigned = []
-        for k, (a, b) in enumerate(spans):
-            y = x[a:b]
-            o = onset(y)
-            y = y[o:]
-            if len(y) < int(0.35 * SR):
-                continue
-            hint = hz_of(labels[k]) if labels else None
-            d = describe(y, kind, hint, inharmonic=meta["inst"] in ("xylophone", "marimba"))
-            if d is None:
-                continue
-            midi = int(round(69 + 12 * math.log2(d["f0"] / 440))) if d["f0"] and np.isfinite(d["f0"]) else None
-            if hint is None and midi is not None and exp and not (exp[0] - 1 <= midi <= exp[-1] + 1):
-                continue
-            note = labels[k] if hint is not None else midi
-            if note is None:
-                continue
-            lib.append(dict(file=p.name, start=(a + o) / SR, end=b / SR, note=note, name=name_of(note), kind=kind,
-                            cents_vs_et=cents(d["f0"], hz_of(note)), **meta, desc=d))
-            assigned.append(note)
-        print(f"{p.name}: {len(spans)} spans, expected {len(exp)}, kept {len(assigned)}", file=sys.stderr)
+    paths = sorted(Path(wav_dir).glob("*.wav"))
+    if jobs > 1:
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(jobs, mp_context=multiprocessing.get_context("fork")) as pool:
+            parts = list(pool.map(library_entries, paths, [heavy] * len(paths), chunksize=1))
+    else:
+        parts = [library_entries(p, heavy) for p in paths]
+    lib = [e for part in parts for e in part]
     cache.write_text(json.dumps(lib))
     return lib
 
