@@ -8,6 +8,7 @@
 
 /// Full fixed-grid inverse objectives with authored-schedule gradients.
 pub mod objective;
+mod fraction;
 
 use super::{ScanningEnthalpyRun, ScanStep, events, natural_only, patches_before, poll};
 use super::super::super::moving::sensitivity::{MovingHeatGradient, MovingHeatLinearization};
@@ -77,6 +78,9 @@ pub struct ScanStepLinearization<'m> {
     report: ScanStep,
     transport: HeterogeneousEnthalpyStepLinearization<'m>,
     sources: Vec<MovingHeatLinearization<'m>>,
+    // Retain each node's original chart derivative without retaining chart
+    // borrows. A fraction-only corner must not disable temperature objectives.
+    fraction_derivatives: Vec<fraction::FractionDerivative>,
     start_time_s: f64,
     end_time_s: f64,
 }
@@ -118,6 +122,30 @@ impl ScanStepLinearization<'_> {
         -> Result<ScanStepGradient, ScanSensitivityError>
     {
         let enthalpy_seed = self.transport.transport().temperature_pullback(cx, seed)?;
+        self.pullback(cx, &enthalpy_seed, linear)
+    }
+
+    /// Convert a dimensionless liquid-mass-fraction seed to specific-enthalpy
+    /// coordinates using each node's ORIGINAL constitutive chart. No inversion
+    /// of plateau temperature and no common/averaged latent heat is used.
+    /// A nonzero seed at a fraction-only chart corner refuses even when the
+    /// transport and temperature have unique derivatives there. Zero local
+    /// seeds do not require a derivative of an unobserved fraction.
+    pub fn liquid_mass_fraction_pullback(&self, cx: &Cx<'_>, seed: &[f64])
+        -> Result<Vec<f64>, ScanSensitivityError>
+    {
+        fraction::pullback(cx, &self.fraction_derivatives,
+            &self.report.solution().specific_enthalpy_j_kg, seed)
+    }
+
+    /// Differentiate a liquid-fraction objective through the same complete
+    /// thermal/radiative transpose solve and normalized moving-source laws.
+    /// Solid/liquid interiors have zero fraction derivative; a melting plateau
+    /// generally does not. Returned previous-state seeds are in J/kg coordinates.
+    pub fn pullback_liquid_mass_fraction(&self, cx: &Cx<'_>, seed: &[f64], linear: LinearConfig)
+        -> Result<ScanStepGradient, ScanSensitivityError>
+    {
+        let enthalpy_seed = self.liquid_mass_fraction_pullback(cx, seed)?;
         self.pullback(cx, &enthalpy_seed, linear)
     }
 }
@@ -210,7 +238,10 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
                     &patches, accepted, budget.max_radiation_feedback_entries)?
             }
         };
+        let fraction_derivatives = fraction::bind(cx, &self.run.storage,
+            &report.solution().specific_enthalpy_j_kg)?;
         poll(cx, self.sources.len())?;
-        Ok(ScanStepLinearization { report, transport, sources, start_time_s: start, end_time_s: end })
+        Ok(ScanStepLinearization { report, transport, sources, fraction_derivatives,
+            start_time_s: start, end_time_s: end })
     }
 }
