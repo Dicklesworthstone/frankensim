@@ -1407,7 +1407,7 @@ fn matching_temperature_path(
     Ok((reference_temperature_k, current_temperature_k))
 }
 
-fn integrate_piecewise_linear(
+pub(crate) fn integrate_piecewise_linear(
     knots: &[(f64, f64)],
     start: f64,
     end: f64,
@@ -1444,10 +1444,10 @@ fn integrate_piecewise_linear(
     let mut integral = 0.0;
     for pair in cuts.windows(2) {
         let y0 = interpolate(pair[0]).ok_or(MaterialStatePointError::InvalidDerived {
-            quantity: "empty thermal-expansion curve",
+            quantity: "empty piecewise-linear property curve",
         })?;
         let y1 = interpolate(pair[1]).ok_or(MaterialStatePointError::InvalidDerived {
-            quantity: "empty thermal-expansion curve",
+            quantity: "empty piecewise-linear property curve",
         })?;
         integral = (0.5 * (y0 + y1)).mul_add(pair[1] - pair[0], integral);
     }

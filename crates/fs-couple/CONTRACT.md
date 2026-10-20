@@ -3076,7 +3076,33 @@ The film is frozen, incompressible, Newtonian, no-slip and quasistatic. Caller-d
 
 ### Source-driven thermoelectric transport
 
-`circuit_enthalpy::thermoelectric::step_candidate` composes the existing prepared material network, Kirchhoff descriptor and enthalpy residual. Each constant-absolute-Seebeck solid leg binds an original voltage-source branch in exclusive oriented series with its material resistor; bulk distances and areas must match its two source-derived conductive links. One pinned source claim covers both junctions and the actual Joule-heated bulk. The native midpoint source current drives Kelvin heat `[-S*T_a*I, S*T_b*I]` into the original junction cells while the existing resistor owner deposits Joule heat once in its bulk cell. Shared junctions sum the signed coefficients across materials, yielding thermocouple voltage and Peltier heating without material-name presets. Internal Seebeck work and Peltier heat are removed from external-supply accounting before the total electrical/thermal balance gate. All source, geometry, numerical and cancellation refusals preserve both histories. This bounded zero-field, fixed-geometry, single-phase leg model rejects variable-S/Thomson, tensor/AC and electrical-contact extensions; other thermal cells retain their original phase and boundary behavior. Endpoint coefficient coupling and lumped Joule deposition require time/spatial refinement. Physical convention reference: https://doc.comsol.com/6.4/doc/com.comsol.help.heat/heat_ug_theory.07.087.html .
+`circuit_enthalpy::thermoelectric::step_candidate` composes the existing prepared
+material network, Kirchhoff descriptor and enthalpy residual. Each absolute-Seebeck
+solid leg binds an original voltage-source branch in exclusive oriented series
+with its material resistor; bulk distances and areas must match its two
+source-derived conductive links. One pinned scalar or piecewise-linear S(T)
+claim covers both junctions and the actual Joule-heated bulk. Source integrals
+on a-to-bulk and bulk-to-b thermal edges supply their mean coefficients. The
+native midpoint current drives heat `[-I*S_left*T_a,
+I*(S_left-S_right)*T_bulk, I*S_right*T_b]` into those same three caloric stores.
+The existing resistor owner deposits Joule heat once in the bulk. Each thermal
+edge closes electrical/thermal work and reversible entropy transfer; a constant
+S retains zero bulk transfer. For variable S, the bulk receives the interior-node
+Thomson allocation and the terminal edge averages contain the remaining spatial
+allocation. These discrete nodal transfers require spatial refinement; they are
+not exact continuum pointwise Peltier fluxes or a whole-leg Thomson source.
+Shared junctions sum the signed material contributions. Internal Seebeck work
+and ALL reversible heat are removed from external-supply accounting before
+the total electrical/thermal balance gate. All source, geometry, numerical and
+cancellation refusals preserve both histories. The zero-field, fixed-geometry,
+single-phase leg still excludes tensor/AC and electrical-contact extensions;
+other thermal cells retain their original phase and boundary behavior.
+Endpoint coefficient coupling and lumped Joule deposition require time/spatial
+refinement. Focused G1/G3 cases cover integrated affine and piecewise S(T),
+current/gradient reversal, signed cancellation, actual bulk enthalpy feedback
+and out-of-support atomic refusal. These numerical fixtures are not measured
+material validation. Physical convention reference:
+https://doc.comsol.com/6.4/doc/com.comsol.help.heat/heat_ug_theory.07.087.html .
 
 ### Nozzle flow through finite electrical and thermal networks
 

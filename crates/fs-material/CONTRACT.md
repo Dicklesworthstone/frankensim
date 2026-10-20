@@ -107,19 +107,26 @@ homogenization, the P2 milestone.
   frequency- or field-restricted sources require another storage model.
   Invalid geometry, ambiguous sources and unrepresentable coefficients/energy
   refuse. These reductions introduce no circuit solver, hysteresis or loss law.
-- `thermoelectric::ResolvedSeebeckSpan` resolves one source-owned constant
+- `thermoelectric::ResolvedSeebeckSpan` resolves one source-owned scalar or linear-inside curve
   `absolute_seebeck_coefficient` [V/K] at both ends of a fixed-context temperature
   span and at its actual bulk temperature, preserving original receipts and the
   same selected claim. Joule-heated bulk states cannot escape source support
   merely because the junctions remain cooler. Its
   zero-magnetic-field convention is `J = sigma(-grad(V)-S grad(T))`,
-  `q = -k grad(T)+S T J`: the voltage drop is `S(T_b-T_a)` and heat into the
-  junctions is `[-S T_a I, S T_b I]`. These cross terms exchange equal and
-  opposite electrical/thermal work and zero net entropy analytically. The source
-  must declare a validity-wide scalar; relative thermopower and even a flat
-  tabulated curve cannot be silently treated as that model. Temperature-dependent
-  S requires a Thomson-capable extension; `T dS/dT=0` only under this admitted
-  constant-S law. Original conductor, Fourier and caloric owners supply all
+  `q = -k grad(T)+S T J`. Exact piecewise-linear integration supplies `S_left`
+  and `S_right`, the integral means on a-to-bulk and bulk-to-b. The voltage drop
+  is `integral(S dT)`; heat into the three stores is `[-I S_left T_a,
+  I (S_left-S_right) T_bulk, I S_right T_b]`. These cross terms exchange equal
+  and opposite electrical/thermal work and zero net entropy analytically.
+  The bulk term is an interior-node Thomson allocation. Endpoint edge averages
+  contain the remaining spatial allocation, so these are discrete nodal heat
+  transfers, not exact continuum endpoint Peltier fluxes or a whole-leg Thomson
+  source. Spatial refinement is required to resolve that distribution. A
+  constant scalar retains the original zero-bulk-heat Kelvin law. Isothermal
+  edges use the actual sourced S; signed integral cancellation is permitted.
+  Relative thermopower, tabulated-only points, other curve axes and extrapolation
+  refuse. All three temperatures must remain within the SAME selected claim.
+  Original conductor, Fourier and caloric owners supply all
   dissipative transport and storage. This module supplies no independent circuit
   or thermal integrator and no tensor, magnetic-field or phase-change model.
 - `liquid::resolve_liquid_state` resolves positive density, specific heat,

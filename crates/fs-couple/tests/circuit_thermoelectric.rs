@@ -19,15 +19,20 @@ use fs_qty::{Density, QuantitySpec, Temperature};
 use fs_thermal::enthalpy::*;
 
 fn source(s: f64, resistance: f64, k: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
+    source_value(PropertyValue::Scalar { value: s, dims: SEEBECK_DIMS },
+        InterpolationPolicy::ConstantWithinValidity, resistance, k)
+}
+fn source_value(value: PropertyValue, interpolation: InterpolationPolicy,
+    resistance: f64, k: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     let (base, _) = common::material_with_conductivity(resistance, 10.0, 0.0, k);
     let mut claims = base.claims().clone();
     claims.insert_claim(PropertyClaim {
         key: PropertyKey::new(ABSOLUTE_SEEBECK_PROPERTY, SEEBECK_DIMS),
-        value: PropertyValue::Scalar { value: s, dims: SEEBECK_DIMS },
+        value,
         validity: ValidityDomain::unconstrained()
             .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), 200.0, 2000.0)
             .with("lot", 7.0, 7.0),
-        uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::ConstantWithinValidity,
+        uncertainty: UncertaintyModel::Unstated, interpolation,
         observations: vec![], provenance: Provenance { source: "authored thermocouple fixture, not measured alloy data".into(),
             license: "CC0-1.0".into(), artifact: None },
     }).unwrap();
@@ -180,6 +185,79 @@ fn material_substitution_changes_real_generator_current_and_internal_work_stays_
     assert!(run(0.04, 3.0, 1.0).0 > reference.0);
     assert!(run(0.02, 6.0, 1.0).0 < reference.0);
     assert!(run(0.02, 3.0, 3.0).1 < reference.1);
+}
+
+#[test]
+fn temperature_dependent_source_drives_bulk_heat_and_the_same_native_energy_balance() {
+    let run = |slope: f64, current: f64| {
+        let (mut cards, mut curves) = fixture(0.02, -0.01, 3.0, 1.0);
+        (cards[2], curves[2]) = source_value(PropertyValue::Curve {
+            abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
+            knots: vec![(200.0, 0.02 - 150.0*slope), (2000.0, 0.02 + 1650.0*slope)],
+            dims: SEEBECK_DIMS,
+        }, InterpolationPolicy::LinearInside, 2.0, 1.0);
+        let context = point(300.0);
+        let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+        let cells = cells(&cards, &curves, &context, &key);
+        let resistors = resistors(); let links = links();
+        let material = MaterialNetwork { cells: &cells, resistors: &resistors, links: &links };
+        let thermal = initial(&curves, [400.0, 300.0, 350.0, 350.0]);
+        let electrical = circuit(&material, &thermal, true, current);
+        let next = thermoelectric::step_candidate(&material, &thermal, 0.1, &electrical,
+            &[0.0, 0.0, current], &legs(), &BASES, config(), &[0.0; 4], || false).unwrap();
+        let report = next.report();
+        let sample = &report.coupled.source.legs[0];
+        let [a, b] = sample.material.temperature_k();
+        let middle = next.thermal().temperature_k(CellId(2)).unwrap();
+        let q = sample.transfer;
+        // Independent affine-S integrals, including the interior-node transfer.
+        let left = 0.02 + slope * (0.5*(a + middle) - 350.0);
+        let right = 0.02 + slope * (0.5*(middle + b) - 350.0);
+        near(q.voltage_drop_v, (0.02 + slope*(0.5*(a+b)-350.0))*(b-a));
+        near(q.current_a, current);
+        near(q.terminal_heat_w[0], -current*left*a);
+        near(q.terminal_heat_w[1], current*right*b);
+        near(q.bulk_heat_w, 0.5*current*slope*(a-b)*middle);
+        near(q.terminal_heat_w[0]/a + q.bulk_heat_w/middle + q.terminal_heat_w[1]/b, 0.0);
+        // The actual native bulk enthalpy receives conduction, Joule heat once,
+        // and the same signed reversible transfer. No diagnostic-only heat.
+        near(10.0*(middle-350.0), 0.1*(a+b-2.0*middle + 2.0*current*current + q.bulk_heat_w));
+        near(report.coupled.deposited_joule_j, 0.1*5.0*current*current);
+        near(report.total_energy_residual_j, 0.0);
+        near(next.thermal().energy_j()-thermal.energy_j(), report.external_electrical_work_j);
+        near(report.external_heat_j, 0.0);
+        assert_eq!(sample.bulk, CellId(2));
+        assert_eq!(sample.material.bulk_material().card_identity(), cards[2].content_hash());
+        assert_eq!(thermal.time_s(), 0.0);
+        middle
+    };
+    for current in [-0.5, 0.5] {
+        let constant = run(0.0, current);
+        let varying = run(2e-4, current);
+        assert!((varying-constant)*current > 0.005);
+    }
+}
+
+#[test]
+fn seebeck_curve_support_includes_the_actual_bulk_and_refuses_atomically() {
+    let (mut cards, mut curves) = fixture(0.02, -0.01, 3.0, 1.0);
+    (cards[2], curves[2]) = source_value(PropertyValue::Curve {
+        abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
+        knots: vec![(300.0, 0.01), (400.0, 0.03)], dims: SEEBECK_DIMS,
+    }, InterpolationPolicy::LinearInside, 2.0, 1.0);
+    let context = point(300.0);
+    let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+    let cells = cells(&cards, &curves, &context, &key);
+    let resistors = resistors(); let links = links();
+    let material = MaterialNetwork { cells: &cells, resistors: &resistors, links: &links };
+    let thermal = initial(&curves, [400.0, 300.0, 450.0, 350.0]);
+    let electrical = circuit(&material, &thermal, true, 0.5);
+    let saved_cells = thermal.cells().clone(); let saved_circuit = electrical.clone();
+    assert!(matches!(thermoelectric::step_candidate(&material, &thermal, 0.1, &electrical,
+        &[0.0, 0.0, 0.5], &legs(), &BASES, config(), &[0.0; 4], || false),
+        Err(CircuitEnthalpyError::Source(thermoelectric::ThermoelectricNetworkError::Seebeck(_)))));
+    assert_eq!(thermal.cells(), &saved_cells);
+    assert_eq!(electrical, saved_circuit);
 }
 
 #[test]

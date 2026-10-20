@@ -41,6 +41,7 @@ fn signed_absolute_thermopower_drives_reciprocal_energy_and_entropy_transfer() {
             near(transfer.terminal_heat_w[0], -400.0*s*current);
             near(transfer.terminal_heat_w[1], 300.0*s*current);
             near(transfer.electrical_supply_w, 100.0*s*current);
+            near(transfer.bulk_heat_w, 0.0);
             near(transfer.terminal_heat_w.iter().sum::<f64>() + transfer.electrical_supply_w, 0.0);
             near(transfer.terminal_heat_w[0]/400.0 + transfer.terminal_heat_w[1]/300.0, 0.0);
         }
@@ -57,14 +58,73 @@ fn signed_absolute_thermopower_drives_reciprocal_energy_and_entropy_transfer() {
 }
 
 #[test]
-fn variable_or_relative_seebeck_is_not_silently_frozen_into_a_kelvin_leg() {
-    // Even a flat tabulated curve is not the source's validity-wide scalar law.
-    for high in [0.02, 0.04] {
+fn variable_seebeck_uses_integrated_edges_and_original_bulk_temperature() {
+    // S(T)=1e-6*T-200e-6: hand-integrated three-node Kelvin reference.
+    let card = source(ABSOLUTE_SEEBECK_PROPERTY, PropertyValue::Curve {
+        abscissa: "temperature".into(), abscissa_dims: Temperature::DIMS,
+        knots: vec![(250.0, 50e-6), (500.0, 300e-6)], dims: SEEBECK_DIMS,
+    }, InterpolationPolicy::LinearInside);
+    let span = ResolvedSeebeckSpan::resolve(&card, &point().with("temperature", 350.0).unwrap(),
+        "temperature", [300.0, 500.0], MaterialPropertySelection::SingleClaimOnly).unwrap();
+    near(span.edge_seebeck_v_k()[0], 125e-6);
+    near(span.edge_seebeck_v_k()[1], 225e-6);
+    near(span.bulk_temperature_k(), 350.0);
+    for current in [-2.0, 0.0, 2.0] {
+        let q = span.transfer(current).unwrap();
+        near(q.voltage_drop_v, 0.04);
+        near(q.terminal_heat_w[0], -0.0375*current);
+        near(q.bulk_heat_w, -0.035*current);
+        near(q.terminal_heat_w[1], 0.1125*current);
+        near(q.terminal_heat_w.iter().sum::<f64>() + q.bulk_heat_w + q.electrical_supply_w, 0.0);
+        near(q.terminal_heat_w[0]/300.0 + q.bulk_heat_w/350.0 + q.terminal_heat_w[1]/500.0, 0.0);
+    }
+    // Reversing the gradient reverses voltage and bulk exchange. The original
+    // claim is evaluated, including a hot Joule-heated bulk beyond both ends.
+    for bulk in [300.0, 350.0, 500.0] {
+        let p = point().with("temperature", bulk).unwrap();
+        let forward = ResolvedSeebeckSpan::resolve(&card, &p, "temperature", [300.0, 400.0],
+            MaterialPropertySelection::SingleClaimOnly).unwrap();
+        let reverse = ResolvedSeebeckSpan::resolve(&card, &p, "temperature", [400.0, 300.0],
+            MaterialPropertySelection::SingleClaimOnly).unwrap();
+        near(forward.transfer(2.0).unwrap().voltage_drop_v, 0.015);
+        near(reverse.transfer(2.0).unwrap().voltage_drop_v, -0.015);
+        near(forward.transfer(2.0).unwrap().bulk_heat_w, -reverse.transfer(2.0).unwrap().bulk_heat_w);
+        assert_eq!(forward.material()[0].properties()[0].answer().receipt.selected,
+            forward.bulk_material().properties()[0].answer().receipt.selected);
+    }
+}
+
+#[test]
+fn signed_piecewise_curve_integrates_across_knots_without_inventing_net_voltage() {
+    let card = source(ABSOLUTE_SEEBECK_PROPERTY, PropertyValue::Curve {
+        abscissa: "temperature".into(), abscissa_dims: Temperature::DIMS,
+        knots: vec![(250.0, -0.02), (350.0, 0.0), (450.0, 0.02), (500.0, 0.01)], dims: SEEBECK_DIMS,
+    }, InterpolationPolicy::LinearInside);
+    let p = point().with("temperature", 350.0).unwrap();
+    let span = ResolvedSeebeckSpan::resolve(&card, &p, "temperature", [250.0, 450.0],
+        MaterialPropertySelection::SingleClaimOnly).unwrap();
+    let q = span.transfer(2.0).unwrap();
+    near(q.voltage_drop_v, 0.0); // Real cancellation, not numerical underflow.
+    near(q.bulk_heat_w, -14.0);
+    near(q.terminal_heat_w[0] + q.terminal_heat_w[1] + q.bulk_heat_w, 0.0);
+    let same_ends = ResolvedSeebeckSpan::resolve(&card, &p, "temperature", [300.0; 2],
+        MaterialPropertySelection::SingleClaimOnly).unwrap().transfer(1.0).unwrap();
+    near(same_ends.voltage_drop_v, 0.0);
+    near(same_ends.bulk_heat_w, 0.0);
+    let across_kink = ResolvedSeebeckSpan::resolve(&card, &p, "temperature", [350.0, 500.0],
+        MaterialPropertySelection::SingleClaimOnly).unwrap().transfer(1.0).unwrap();
+    near(across_kink.voltage_drop_v, 1.75); // Triangle 1.0 plus trapezoid 0.75.
+}
+
+#[test]
+fn unsupported_interpolation_axis_and_relative_thermopower_refuse() {
+    for (axis, policy) in [("temperature", InterpolationPolicy::TabulatedOnly),
+        ("lot", InterpolationPolicy::LinearInside)] {
         let card = source(ABSOLUTE_SEEBECK_PROPERTY, PropertyValue::Curve {
-            abscissa: "temperature".into(), abscissa_dims: Temperature::DIMS,
-            knots: vec![(250.0, 0.02), (500.0, high)], dims: SEEBECK_DIMS,
-        }, InterpolationPolicy::LinearInside);
-        assert!(ResolvedSeebeckSpan::resolve(&card, &point(), "temperature", [300.0, 400.0],
+            abscissa: axis.into(), abscissa_dims: Temperature::DIMS,
+            knots: vec![(250.0, 0.02), (500.0, 0.04)], dims: SEEBECK_DIMS,
+        }, policy);
+        assert!(ResolvedSeebeckSpan::resolve(&card, &point(), "temperature", [250.0, 500.0],
             MaterialPropertySelection::SingleClaimOnly).is_err());
     }
     let relative = source("relative_seebeck_coefficient", PropertyValue::Scalar { value: 0.02, dims: SEEBECK_DIMS },

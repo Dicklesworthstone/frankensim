@@ -1,4 +1,4 @@
-//! Reciprocal scalar thermoelectric transport for one constant-Seebeck span.
+//! Reciprocal scalar thermoelectric transport on an original material span.
 //!
 //! The convention is J = sigma (-grad(V) - S grad(T)) and
 //! q = -k grad(T) + S T J, at zero magnetic field. S is ABSOLUTE thermopower;
@@ -6,13 +6,13 @@
 //! Electrical resistance, Fourier conduction and caloric storage retain their
 //! existing owners. This module supplies only the reversible cross terms.
 
-use fs_matdb::{EvaluationDecision, MaterialCard, QueryPoint};
+use fs_matdb::{InterpolationPolicy, MaterialCard, PropertyValue, QueryPoint};
 use fs_qty::{Dims, QuantitySpec, Temperature};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
 use crate::state_point::{MaterialPropertySelection, MaterialStatePointError,
     ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
-    resolve_material_state_point};
+    integrate_piecewise_linear, resolve_material_state_point};
 
 /// Absolute scalar Seebeck coefficient under the convention in this module.
 pub const ABSOLUTE_SEEBECK_PROPERTY: &str = "absolute_seebeck_coefficient";
@@ -38,36 +38,47 @@ impl core::fmt::Display for ThermoelectricError {
 impl std::error::Error for ThermoelectricError {}
 
 /// One source claim, admitted throughout the temperature span at fixed context.
-/// Complete endpoint receipts remain available; a source curve is NEVER frozen
-/// to create the constant-S model. Its Thomson coefficient T dS/dT is zero.
+/// Complete endpoint and bulk receipts remain available. Constant scalar or
+/// piecewise-linear temperature claims supply exact integrals on the two
+/// thermal edges a-to-bulk and bulk-to-b. Their integral means define a discrete
+/// Kelvin pair: energy and entropy transfer close for all three thermal stores.
+/// This is a spatial reduction; endpoint Peltier flux and distributed Thomson
+/// heat approach the continuum law as the thermal cells are refined.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedSeebeckSpan {
     material: [ResolvedMaterialStatePoint; 2],
     bulk_material: ResolvedMaterialStatePoint,
     temperature_k: [f64; 2],
-    seebeck_v_k: f64,
+    bulk_temperature_k: f64,
+    edge_seebeck_v_k: [f64; 2],
+    voltage_drop_v: f64,
 }
 
 /// Reversible terminal transfer, excluding Fourier flux and Joule dissipation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThermoelectricTransfer {
-    /// Voltage DROP from terminal a to b, S (T_b - T_a) [V].
+    /// Voltage DROP from terminal a to b, integral(S(T) dT) [V].
     pub voltage_drop_v: f64,
     /// Signed current from a to b [A].
     pub current_a: f64,
-    /// Heat INTO terminal a and b, respectively: [-S T_a I, S T_b I] [W].
+    /// Heat INTO terminal a and b: [-S_left T_a I, S_right T_b I] [W].
     pub terminal_heat_w: [f64; 2],
-    /// Work supplied TO the circuit, -I S (T_b - T_a) [W].
+    /// Heat INTO the original bulk store, I T_bulk (S_left - S_right) [W].
+    /// This signed variable-S exchange is separate from positive Joule loss.
+    pub bulk_heat_w: f64,
+    /// Work supplied TO the circuit, -I integral(S(T) dT) [W].
     pub electrical_supply_w: f64,
 }
 
 impl ResolvedSeebeckSpan {
-    /// Resolve the SAME constant claim at both absolute-temperature endpoints
+    /// Resolve the SAME claim at both absolute-temperature endpoints
     /// AND at the bulk temperature in `context` (which can be hotter through
     /// Joule heating). All three actual material states must remain supported.
     /// Only the named temperature coordinate changes; all external coordinates
     /// and their quantity descriptors are retained. Rectangular source validity
-    /// then covers the full fixed-context interval between these endpoints.
+    /// then covers the full fixed-context path through the bulk. Tabulated-only
+    /// points cannot establish an integral; extrapolation and non-temperature
+    /// curves refuse. No coefficient is sampled and frozen at a nominal state.
     pub fn resolve(
         card: &MaterialCard, context: &QueryPoint, temperature_axis: &str,
         temperature_k: [f64; 2], selection: MaterialPropertySelection,
@@ -100,16 +111,53 @@ impl ResolvedSeebeckSpan {
             std::slice::from_ref(&requirement), selection)?;
         let property = a.property(ABSOLUTE_SEEBECK_PROPERTY)
             .ok_or(invalid("absolute Seebeck source is absent"))?;
-        if property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity {
-            return Err(invalid("constant-Seebeck span requires a validity-wide scalar claim, not a sampled curve"));
+        let selected = property.answer().receipt.selected;
+        let claim = card.claims().claim(selected)
+            .ok_or(invalid("selected absolute Seebeck claim is absent"))?;
+        match (&claim.value, &claim.interpolation) {
+            (PropertyValue::Scalar { .. }, InterpolationPolicy::ConstantWithinValidity) => {}
+            (PropertyValue::Curve { abscissa, abscissa_dims, .. }, InterpolationPolicy::LinearInside)
+                if abscissa == temperature_axis && *abscissa_dims == Temperature::DIMS => {}
+            _ => return Err(invalid("Seebeck span needs a constant scalar or a piecewise-linear absolute-temperature claim")),
         }
-        let seebeck_v_k = property.value_si();
         let pinned = MaterialPropertySelection::PinnedByProperty(vec![
-            (ABSOLUTE_SEEBECK_PROPERTY.to_owned(), property.answer().receipt.selected)]);
+            (ABSOLUTE_SEEBECK_PROPERTY.to_owned(), selected)]);
         let bulk_material = resolve_material_state_point(card, context,
             std::slice::from_ref(&requirement), pinned.clone())?;
         let b = resolve_material_state_point(card, &point(temperature_k[1])?, &[requirement], pinned)?;
-        Ok(Self { material: [a, b], bulk_material, temperature_k, seebeck_v_k })
+        let bulk_temperature_k = context.axes()[temperature_axis];
+        let average = |start: f64, end: f64, at_start: f64| -> Result<f64, ThermoelectricError> {
+            let value = if start == end { at_start } else {
+                match &claim.value {
+                    PropertyValue::Scalar { value, .. } => *value,
+                    PropertyValue::Curve { knots, .. } => {
+                        let integral = integrate_piecewise_linear(knots, start, end)?;
+                        let mean = integral / (end - start);
+                        if integral != 0.0 && mean == 0.0 {
+                            return Err(invalid("Seebeck integral mean is not representable"));
+                        }
+                        mean
+                    }
+                }
+            };
+            if !value.is_finite() || value != 0.0 && start != end && value * (end - start) == 0.0 {
+                return Err(invalid("Seebeck integral mean is not representable"));
+            }
+            Ok(value)
+        };
+        let bulk_s = bulk_material.property(ABSOLUTE_SEEBECK_PROPERTY)
+            .ok_or(invalid("bulk Seebeck source is absent"))?.value_si();
+        let edge_seebeck_v_k = [
+            average(temperature_k[0], bulk_temperature_k, property.value_si())?,
+            average(bulk_temperature_k, temperature_k[1], bulk_s)?,
+        ];
+        let voltage_drop_v = edge_seebeck_v_k[0] * (bulk_temperature_k - temperature_k[0])
+            + edge_seebeck_v_k[1] * (temperature_k[1] - bulk_temperature_k);
+        if !voltage_drop_v.is_finite() {
+            return Err(invalid("integrated Seebeck voltage is not representable"));
+        }
+        Ok(Self { material: [a, b], bulk_material, temperature_k, bulk_temperature_k,
+            edge_seebeck_v_k, voltage_drop_v })
     }
 
     /// Exact original endpoint source bundles and their usage receipts.
@@ -118,25 +166,32 @@ impl ResolvedSeebeckSpan {
     pub const fn bulk_material(&self) -> &ResolvedMaterialStatePoint { &self.bulk_material }
     /// Temperatures in declared a-to-b terminal order.
     pub const fn temperature_k(&self) -> [f64; 2] { self.temperature_k }
-    /// Signed absolute thermopower [V/K], never a material-name preset.
-    pub const fn seebeck_v_k(&self) -> f64 { self.seebeck_v_k }
+    /// Actual temperature of the original bulk caloric store.
+    pub const fn bulk_temperature_k(&self) -> f64 { self.bulk_temperature_k }
+    /// Signed integral-mean thermopower [V/K] on a-to-bulk and bulk-to-b.
+    /// An isothermal edge uses the original source at that temperature.
+    pub const fn edge_seebeck_v_k(&self) -> [f64; 2] { self.edge_seebeck_v_k }
 
     /// Reciprocal Kelvin transfer at a current supplied by the electrical owner.
-    /// Sum(heat) + electrical_supply = 0 and Sum(heat/T) = 0 analytically.
+    /// Sum(heat) + electrical_supply = 0 and Sum(heat/T) = 0 analytically,
+    /// including the bulk store. Freezing a variable S at one point, or omitting
+    /// bulk_heat_w, breaks these relations. Constant S retains zero bulk heat.
     /// The coupled solver must independently admit their numerical balances.
     pub fn transfer(&self, current_a: f64) -> Result<ThermoelectricTransfer, ThermoelectricError> {
         let [a, b] = self.temperature_k;
-        let voltage_drop_v = self.seebeck_v_k * (b - a);
-        let terminal_heat_w = [-self.seebeck_v_k * a * current_a,
-            self.seebeck_v_k * b * current_a];
+        let [left, right] = self.edge_seebeck_v_k;
+        let voltage_drop_v = self.voltage_drop_v;
+        let terminal_heat_w = [-left * a * current_a, right * b * current_a];
+        let bulk_heat_w = (left - right) * self.bulk_temperature_k * current_a;
         let electrical_supply_w = -voltage_drop_v * current_a;
-        if [current_a, voltage_drop_v, terminal_heat_w[0], terminal_heat_w[1], electrical_supply_w]
+        if [current_a, voltage_drop_v, terminal_heat_w[0], terminal_heat_w[1], bulk_heat_w, electrical_supply_w]
             .iter().any(|x| !x.is_finite())
-            || self.seebeck_v_k != 0.0 && a != b && voltage_drop_v == 0.0
-            || self.seebeck_v_k != 0.0 && current_a != 0.0 && terminal_heat_w.contains(&0.0)
+            || current_a != 0.0 && (left != 0.0 && terminal_heat_w[0] == 0.0
+                || right != 0.0 && terminal_heat_w[1] == 0.0
+                || left != right && bulk_heat_w == 0.0)
             || voltage_drop_v != 0.0 && current_a != 0.0 && electrical_supply_w == 0.0 {
             return Err(ThermoelectricError::Invalid("thermoelectric transfer is not representable"));
         }
-        Ok(ThermoelectricTransfer { voltage_drop_v, current_a, terminal_heat_w, electrical_supply_w })
+        Ok(ThermoelectricTransfer { voltage_drop_v, current_a, terminal_heat_w, bulk_heat_w, electrical_supply_w })
     }
 }

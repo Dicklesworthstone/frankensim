@@ -1,8 +1,9 @@
 //! Material thermocouples and Peltier legs on the existing circuit/enthalpy solve.
 //!
 //! A leg is an original material resistor in series with one original voltage
-//! source branch. Its two thermal junctions receive reciprocal Kelvin heat;
-//! the resistor's receiving cell gets Joule heat exactly once. Original thermal
+//! source branch. Its two junctions and original bulk cell receive reciprocal
+//! Kelvin heat from source-integrated thermal edges; the bulk receives the
+//! variable-Seebeck interior transfer as well as Joule heat exactly once. Original thermal
 //! links carry Fourier conduction using the SAME material/geometry bindings.
 //! All material, electrical and thermal candidates use the same proposed state.
 
@@ -31,7 +32,8 @@ pub struct ThermoelectricLeg {
     /// Existing bulk-to-junction thermal links in the SAME a,b order. Their
     /// areas must equal the conductor area and bulk distances must sum to L.
     pub thermal_links: [u64; 2],
-    /// Absolute, constant Seebeck source choice on the resistor's original card.
+    /// Absolute Seebeck source choice on the resistor's original card.
+    /// Constant scalars and supported piecewise-linear S(T) claims are admitted.
     pub selection: MaterialPropertySelection,
 }
 
@@ -61,7 +63,9 @@ pub struct ThermoelectricLegSample {
     pub resistor_branch: usize,
     /// Junction destination order used for signed reversible heat.
     pub terminals: [CellId; 2],
-    /// Both original endpoint source receipts and the constant-S law.
+    /// Original resistor/caloric cell receiving the interior reversible heat.
+    pub bulk: CellId,
+    /// Original endpoint and bulk receipts and integrated thermal-edge law.
     pub material: ResolvedSeebeckSpan,
     /// Transfer at the ACTUAL Kirchhoff midpoint source current.
     pub transfer: ThermoelectricTransfer,
@@ -76,7 +80,7 @@ pub struct ThermoelectricSample {
     pub legs: Vec<ThermoelectricLegSample>,
     /// Internal Seebeck-port work supplied to electrical storage/loss [J].
     pub reversible_electrical_work_j: f64,
-    /// Internal signed Peltier heat deposited in junction cells [J].
+    /// Internal signed reversible heat in junction AND bulk cells [J].
     pub reversible_heat_j: f64,
 }
 
@@ -84,11 +88,11 @@ pub struct ThermoelectricSample {
 /// external supply accounting. Numerical convergence is not a time-error bound.
 pub struct ThermoelectricReport {
     /// Existing circuit and thermal reports; its `non_electrical_heat_j` includes
-    /// Peltier transfer and its native port supply includes Seebeck work.
+    /// reversible junction/bulk transfer and its native port supply includes Seebeck work.
     pub coupled: CircuitEnthalpyReport<ThermoelectricSample>,
     /// Work supplied through the remaining authored electrical ports [J].
     pub external_electrical_work_j: f64,
-    /// Authored thermal boundary/source heat, excluding Joule AND Peltier [J].
+    /// Authored thermal boundary/source heat, excluding Joule AND Kelvin transfer [J].
     pub external_heat_j: f64,
     /// Total electrical + thermal storage minus external supply [J].
     pub total_energy_residual_j: f64,
@@ -204,7 +208,7 @@ fn span(
     if knots.iter().any(|k| k.liquid_mass_fraction != 0.0)
         || temperatures.iter().any(|t| *t < knots[0].temperature_k
             || *t > knots[knots.len() - 1].temperature_k) {
-        return Err(invalid("constant-Seebeck solid leg requires one supported single-phase caloric span"));
+        return Err(invalid("thermoelectric solid leg requires one supported single-phase caloric span"));
     }
     let context = binding.point.at(phase).map_err(|e| network(MaterialNetworkError::Material(e)))?;
     ResolvedSeebeckSpan::resolve(binding.point.material, &context, binding.point.temperature_axis,
@@ -213,11 +217,19 @@ fn span(
 
 /// Advance a thermocouple/Peltier network through the original coupled solver.
 ///
-/// Material cards supply rho_e or sigma, k, caloric storage and ABSOLUTE S.
+/// Material cards supply rho_e or sigma, k, caloric storage and ABSOLUTE S(T).
 /// Transport and Seebeck claim choices are pinned before nonlinear trials.
-/// S must be a validity-wide scalar; variable-S, Thomson heat, magnetic fields,
-/// electrical contact jumps and phase transitions are refused by this bounded
-/// solid-leg model. Internal source ports require zero input placeholders.
+/// S may be a validity-wide scalar or a supported piecewise-linear temperature
+/// curve. Its integrals on junction-to-bulk thermal edges drive the SAME native
+/// circuit current and reversible heat into all three original caloric cells.
+/// Each edge conserves electrical/thermal energy and transfers zero net entropy.
+/// For variable S, the bulk receives an interior Thomson contribution; the edge
+/// averages also include portions in the terminal heat. These are finite-volume
+/// nodal transfers, not exact continuum pointwise Peltier fluxes or a whole-leg
+/// Thomson source lumped into the bulk. Refine the physical thermal network to
+/// resolve that spatial distribution. Magnetic fields, electrical contact jumps
+/// and phase transitions remain outside this solid-leg model.
+/// Internal source ports require zero input placeholders.
 ///
 /// Multiple legs can meet at shared junction cells: their signed Peltier terms
 /// then produce the physical coefficient DIFFERENCE without a junction preset.
@@ -270,24 +282,26 @@ pub fn step_candidate<'m>(
             let mut samples = Vec::with_capacity(legs.len());
             let mut heat_w = 0.0;
             let mut electrical_work_j = 0.0;
-            for ((leg, &(port, _)), source) in legs.iter().zip(&routing).zip(spans) {
+            for ((leg, &(port, cell_index)), source) in legs.iter().zip(&routing).zip(spans) {
                 check()?;
                 // Native y is minus the a-to-b voltage-source branch current.
                 let current_a = -electrical.step().native.y[port];
                 let transfer = source.transfer(current_a).map_err(|e|
                     CircuitEnthalpyError::Source(ThermoelectricNetworkError::Seebeck(e)))?;
                 electrical_work_j = finite(electrical_work_j + dt * inputs[port] * electrical.step().native.y[port])?;
-                for (&cell, &power) in leg.terminals.iter().zip(&transfer.terminal_heat_w) {
+                let bulk = material.cells[cell_index].cell;
+                for (cell, power) in [(leg.terminals[0], transfer.terminal_heat_w[0]),
+                    (bulk, transfer.bulk_heat_w), (leg.terminals[1], transfer.terminal_heat_w[1])] {
                     let total = coefficients.sources_w.entry(cell).or_insert(0.0);
                     *total = finite(*total + power)?;
                     heat_w = finite(heat_w + power)?;
                 }
                 samples.push(ThermoelectricLegSample { source_branch: leg.source_branch,
-                    resistor_branch: leg.resistor_branch, terminals: leg.terminals, material: source, transfer });
+                    resistor_branch: leg.resistor_branch, terminals: leg.terminals, bulk, material: source, transfer });
             }
             let heat_j = finite(dt * heat_w)?;
             if finite(heat_j + electrical_work_j)?.abs() > controls.total_energy_tolerance_j {
-                return Err(invalid("Seebeck port work and reciprocal Peltier heat do not close"));
+                return Err(invalid("Seebeck port work and reciprocal junction/bulk heat do not close"));
             }
             Ok(DrivenCoefficients { circuit: electrical, sources_w: coefficients.sources_w,
                 conductances_w_k: coefficients.conductances_w_k, circuit_trials: 1,
