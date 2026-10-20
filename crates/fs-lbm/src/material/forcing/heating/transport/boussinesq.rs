@@ -28,7 +28,8 @@ pub struct BoussinesqConfig<const D: usize> {
 }
 
 impl<const D: usize> BoussinesqConfig<D> {
-    fn validate(self) -> Result<(), MaterialTransportError> {
+    /// Check the declared approximation bounds without evaluating a source.
+    pub fn validate(self) -> Result<(), MaterialTransportError> {
         if !self.gravity_m_s2.iter().all(|g| g.is_finite())
             || [
                 self.max_relative_density_departure,
@@ -70,6 +71,22 @@ impl<F> BoussinesqMaterial<F> {
     /// Actual numerical transport: reference rho/cp, local viscosity/conductivity.
     pub const fn reference_storage_transport(&self) -> &FluidTransportState {
         &self.transport
+    }
+}
+
+impl<F: FluidTransport> BoussinesqMaterial<F> {
+    /// Resolve one source once, admit its density/Cp departures and retain
+    /// reference storage with this SAME sample's molecular viscosity and k.
+    /// This is shared by the lattice and finite-volume enthalpy owners.
+    pub fn try_new<const D: usize>(
+        material: F,
+        reference: &FluidTransportState,
+        config: BoussinesqConfig<D>,
+    ) -> Result<Self, MaterialError> {
+        config.validate().map_err(|error| MaterialError::State {
+            what: error.to_string(),
+        })?;
+        resolve_bounded(material, reference, config)
     }
 }
 

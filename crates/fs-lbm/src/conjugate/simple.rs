@@ -1981,6 +1981,44 @@ pub fn simple_flow_with_viscosity(
     config: &SimpleConfig,
     gate: &CancelGate,
 ) -> Result<FvFlow, ChtError> {
+    material_flow(domain, fluid, dynamic_viscosity_pa_s, None, config, gate)
+}
+
+/// Solve the same variable-viscosity momentum system with a cell body force.
+///
+/// Forces are physical force densities [N/m³], with one finite vector per
+/// voxel and zero on solids. They enter the existing staggered momentum
+/// volumes together with pressure, fans, porous resistance and full molecular
+/// stress. No separate projection or cell-velocity interpolation is added.
+/// For Boussinesq flow supply `(rho(T)-rho0)*g`, with `fluid` retaining rho0;
+/// pressure is then relative to that removed hydrostatic reference. The caller
+/// owns source selection, the force epoch and any mechanical-energy account.
+pub fn simple_flow_with_viscosity_and_force(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    dynamic_viscosity_pa_s: &[f64],
+    force_density_n_m3: &[[f64; 3]],
+    config: &SimpleConfig,
+    gate: &CancelGate,
+) -> Result<FvFlow, ChtError> {
+    material_flow(
+        domain,
+        fluid,
+        dynamic_viscosity_pa_s,
+        Some(force_density_n_m3),
+        config,
+        gate,
+    )
+}
+
+fn material_flow(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    dynamic_viscosity_pa_s: &[f64],
+    force_density_n_m3: Option<&[[f64; 3]]>,
+    config: &SimpleConfig,
+    gate: &CancelGate,
+) -> Result<FvFlow, ChtError> {
     poll(gate)?;
     admit(domain, fluid, config)?;
     if dynamic_viscosity_pa_s.len() != domain.cell_count()
@@ -1998,6 +2036,28 @@ pub fn simple_flow_with_viscosity(
         finite_positive("simple.dynamic_viscosity_pa_s", mu)?;
         finite_positive("simple.kinematic_viscosity_m2_s", mu / fluid.density_kg_m3)?;
     }
+    if let Some(force) = force_density_n_m3 {
+        if force.len() != domain.cell_count() {
+            return Err(ChtError::InvalidInput {
+                field: "simple.force_density_n_m3",
+                reason: "one body-force vector per voxel is required".into(),
+            });
+        }
+        for (c, components) in force.iter().enumerate() {
+            if c % 256 == 0 {
+                poll(gate)?;
+            }
+            for &value in components {
+                finite("simple.force_density_n_m3", value)?;
+                if !domain.is_fluid(c) && value != 0.0 {
+                    return Err(ChtError::InvalidInput {
+                        field: "simple.force_density_n_m3",
+                        reason: "body force must be zero in solid voxels".into(),
+                    });
+                }
+            }
+        }
+    }
     let mut solver = Solver::new(domain, fluid, config);
     // Existing Darcy coefficients are linear in molecular viscosity. Keep
     // their geometric/permeability owner and update only that coefficient.
@@ -2008,6 +2068,9 @@ pub fn simple_flow_with_viscosity(
         }
     }
     solver.molecular_viscosity = dynamic_viscosity_pa_s.to_vec();
+    if let Some(force) = force_density_n_m3 {
+        solver.set_force(force.to_vec());
+    }
     solve_steady(solver, fluid, config, gate)
 }
 

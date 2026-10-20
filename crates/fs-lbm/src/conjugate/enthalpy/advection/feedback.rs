@@ -3,8 +3,9 @@
 //! Each actual thermal substep resolves material transport at its cells' own
 //! enthalpy-derived temperatures, solves the original steady MAC momentum
 //! system with that viscosity field, and advects h with those exact face fluxes.
-//! This is a quasisteady, constant-density liquid approximation: momentum
-//! equilibrates between thermal substeps. It does not advance stored momentum.
+//! This is quasisteady incompressible flow: momentum equilibrates between
+//! thermal substeps. Optional material-density Boussinesq buoyancy retains
+//! reference mass and inertia. Neither entry advances stored momentum.
 
 use std::collections::BTreeMap;
 
@@ -20,8 +21,9 @@ use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use super::{FlowEnthalpyInput, admit_map, invalid, mass_graph};
 use crate::conjugate::{
     ChtError, FluidProperties, FvFlow, SimpleConfig, Turbulence, VoxelDomain,
-    simple_flow_with_viscosity,
+    simple_flow_with_viscosity, simple_flow_with_viscosity_and_force,
 };
+use crate::material::transport::boussinesq::{BoussinesqConfig, BoussinesqMaterial};
 
 /// A coupled refusal retains the originating material, flow or history error.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +77,9 @@ pub struct MaterialFlowEpoch<F> {
     pub time_s: f64,
     pub samples: Vec<FlowMaterialSample<F>>,
     pub flow: FvFlow,
+    /// Applied `(rho(T)-rho0)*g` [N/m³] in native voxel order, zero on solids.
+    /// None on the original fixed-density path; never an additional heat input.
+    pub buoyancy_force_n_m3: Option<Vec<[f64; 3]>>,
 }
 
 /// Live local viscosity/momentum/enthalpy coupling around any existing observer.
@@ -86,7 +91,8 @@ pub struct MaterialFlowEpoch<F> {
 /// callback owns its material selection, fixed pressure/composition and phase
 /// mobility admission. It must not mutate shared external physical history.
 ///
-/// Density must remain bitwise equal to the initial snapshot. T(h) and mass
+/// Ordinary entry density stays bitwise equal to the initial snapshot; the
+/// Boussinesq entry explicitly projects bounded source density to rho0. T(h) and mass
 /// stay with the actual registered caloric law; source Cp never replaces it.
 /// Conductivity/contact evolution stays with the wrapped observer except for
 /// explicitly assigned full fluid faces (see `Self::with_fluid_conduction`).
@@ -109,6 +115,7 @@ pub struct MaterialFlowFeedback<'a, F, R, O> {
     gate: &'a CancelGate,
     resolve: R,
     reference: FluidTransportState,
+    buoyancy: Option<([f64; 3], fn(&F) -> f64)>,
     fluid_conduction: BTreeMap<(CellId, CellId), FluidConductionFace>,
     advected: Option<Advected<O>>,
     applied: Option<MaterialFlowEpoch<F>>,
@@ -165,6 +172,7 @@ where
             gate,
             resolve,
             reference,
+            buoyancy: None,
             fluid_conduction: BTreeMap::new(),
             advected: Some(advected),
             applied: None,
@@ -173,6 +181,61 @@ where
             solves: 0,
             max_solves,
         })
+    }
+
+    /// Add source-density natural/mixed convection to this same heat timeline.
+    ///
+    /// `reference` is the admitted hydrostatic material state: its rho0 stays
+    /// in native inertia, the fixed cell masses and every advected mass flux.
+    /// Each local source is evaluated once. The existing `BoussinesqMaterial`
+    /// projection bounds rho/Cp departures, retains the original source and
+    /// uses its mu and k. Its unprojected density supplies `(rho(T)-rho0)*g`
+    /// to the SAME full-stress momentum solve. No independent beta load is
+    /// also added. Pressure openings are relative to reference hydrostatics.
+    ///
+    /// The registered caloric object alone owns h/T/storage; its reference
+    /// mass, fixed geometry, phase mobility and datum must be appropriate to
+    /// this incompressible approximation. In particular this entry does not
+    /// make latent-heat cells mobile or infer a melt permeability. Source
+    /// departures are checked again at thermal endpoints before publication.
+    /// The caller must justify the small-density approximation and quasisteady
+    /// flow. Gravity/pressure/viscous work is not added to the thermal audit;
+    /// this is not a closed total mechanical-plus-thermal energy model.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn try_new_boussinesq(
+        thermal: &DepositionSimulation<'_>,
+        domain: &'a VoxelDomain,
+        input: FlowEnthalpyInput<'a>,
+        config: &'a SimpleConfig,
+        inner: O,
+        gate: &'a CancelGate,
+        max_solves: usize,
+        reference: FluidTransportState,
+        buoyancy: BoussinesqConfig<3>,
+        mut resolve: R,
+    ) -> Result<
+        MaterialFlowFeedback<
+            'a,
+            BoussinesqMaterial<F>,
+            impl Clone
+            + FnMut(usize, &DepositedCell, f64) -> Result<BoussinesqMaterial<F>, MaterialError>,
+            O,
+        >,
+        MaterialFlowError<O::Error>,
+    > {
+        buoyancy.validate().map_err(|_| {
+            invalid("invalid Boussinesq gravity or relative material-departure bounds")
+        })?;
+        let bounded = move |voxel, cell: &DepositedCell, temperature| {
+            BoussinesqMaterial::try_new(resolve(voxel, cell, temperature)?, &reference, buoyancy)
+        };
+        let mut coupled = MaterialFlowFeedback::try_new(
+            thermal, domain, input, config, inner, gate, max_solves, bounded,
+        )?;
+        coupled.buoyancy = Some((buoyancy.gravity_m_s2, |material| {
+            material.resolved_transport().density_kg_m3()
+        }));
+        Ok(coupled)
     }
 
     /// Assign existing full voxel-face links to molecular fluid conduction.
@@ -392,8 +455,29 @@ where
             conductivity_w_m_k: self.reference.thermal_conductivity_w_m_k(),
             kinematic_viscosity_m2_s: self.reference.kinematic_viscosity_m2_s(),
         };
-        let flow =
-            simple_flow_with_viscosity(self.domain, &fluid, &viscosities, self.config, self.gate)?;
+        let buoyancy_force_n_m3 = if let Some((gravity, density)) = self.buoyancy {
+            let mut forces = vec![[0.0; 3]; self.domain.cell_count()];
+            for sample in &samples {
+                check_gate(self.gate, check)?;
+                let contrast = density(&sample.material) - self.reference.density_kg_m3();
+                forces[sample.voxel] = gravity.map(|g| contrast * g);
+            }
+            Some(forces)
+        } else {
+            None
+        };
+        let flow = if let Some(forces) = &buoyancy_force_n_m3 {
+            simple_flow_with_viscosity_and_force(
+                self.domain,
+                &fluid,
+                &viscosities,
+                forces,
+                self.config,
+                self.gate,
+            )?
+        } else {
+            simple_flow_with_viscosity(self.domain, &fluid, &viscosities, self.config, self.gate)?
+        };
         check_gate(self.gate, check)?;
         let (flows, boundaries) = mass_graph(
             self.domain,
@@ -418,6 +502,7 @@ where
             time_s: thermal.time_s(),
             samples,
             flow,
+            buoyancy_force_n_m3,
         });
         self.solves += 1;
         Ok(sources)

@@ -128,7 +128,7 @@ pub use radiation::{
 pub use simple::{
     AMG_REBUILD_SWEEPS, FacePatch, FanCurve, FanInlet, FlowResistance, FvBoundary, FvFlow,
     InternalFan, PressureSolver, SimpleConfig, SimpleReport, TimeScheme, Turbulence, simple_flow,
-    simple_flow_with_viscosity,
+    simple_flow_with_viscosity, simple_flow_with_viscosity_and_force,
 };
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 pub use unsteady::{

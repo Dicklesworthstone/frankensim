@@ -1,7 +1,9 @@
 //! Pinned liquid/caloric sources on the original solved-flow enthalpy owner.
 //!
 //! The native face graph, upwind transport, CFL and energy audit remain in
-//! `super`. Both paths admit a fully liquid, constant-density source model.
+//! `super`. These paths admit fully liquid material. The ordinary entries fix
+//! density; `LiquidFlowEnthalpyInput::feedback_boussinesq` admits bounded source
+//! density departures only for buoyancy while preserving reference cell mass.
 //! Frozen advection additionally fixes viscosity; `LiquidFlowEnthalpyInput::feedback`
 //! re-solves momentum from the evolving local viscosity on each thermal substep.
 //! The borrowed sourced caloric curve remains authoritative H(T).
@@ -33,7 +35,9 @@ use fs_qty::Temperature;
 
 use super::feedback::{MaterialFlowError, MaterialFlowFeedback};
 use crate::conjugate::{SimpleConfig, VoxelDomain};
+use crate::material::transport::boussinesq::{BoussinesqConfig, BoussinesqMaterial};
 use fs_material::MaterialError;
+use fs_material::fluid_transport::FluidTransport;
 
 use super::{FlowEnthalpyInput, MaterialFlowAdvection, same_positive};
 use crate::material::conjugate::MaterialChtFlow;
@@ -103,24 +107,12 @@ impl<'a> LiquidFlowEnthalpyInput<'a> {
         >,
         LiquidEnthalpyObserverError<MaterialFlowError<O::Error>>,
     > {
-        admit_law_mode(self, false).map_err(LiquidEnthalpyObserverError::Binding)?;
+        admit_law_mode(self, false, true).map_err(LiquidEnthalpyObserverError::Binding)?;
         for h in self.inlet_specific_h_j_kg.into_iter().flatten() {
-            state_at_mode(self, h, false).map_err(LiquidEnthalpyObserverError::Binding)?;
+            state_at_mode(self, h, false, true).map_err(LiquidEnthalpyObserverError::Binding)?;
         }
         let resolve = move |_: usize, cell: &DepositedCell, temperature: f64| {
-            let (phase, liquid) =
-                state_at_mode(self, cell.specific_h_j_kg, false).map_err(|error| {
-                    MaterialError::State {
-                        what: error.to_string(),
-                    }
-                })?;
-            if phase.temperature_k().to_bits() != temperature.to_bits() {
-                return Err(MaterialError::State {
-                    what: "liquid feedback temperature differs from its original caloric owner"
-                        .into(),
-                });
-            }
-            Ok(liquid)
+            feedback_state(self, cell.specific_h_j_kg, temperature, true)
         };
         MaterialFlowFeedback::try_new(
             thermal,
@@ -134,6 +126,91 @@ impl<'a> LiquidFlowEnthalpyInput<'a> {
         )
         .map_err(LiquidEnthalpyObserverError::Observer)
     }
+
+    /// Natural/mixed convection from this SAME pinned liquid/caloric source.
+    ///
+    /// The liquid's reference density supplies fixed mass and inertia, while
+    /// its actual local density supplies the bounded Boussinesq gravity load.
+    /// Its same-state mu and optional full-face k drive native momentum and
+    /// thermal transport. Original Cp/density claims, non-temperature context,
+    /// fully-liquid support and borrowed caloric identity remain mandatory.
+    /// The caloric curve's density is source metadata in this fixed-volume
+    /// approximation; it cannot change cell mass or create a volume source.
+    /// See `MaterialFlowFeedback::try_new_boussinesq` for the energy boundary.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn feedback_boussinesq<O: DepositionObserver>(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        domain: &'a VoxelDomain,
+        config: &'a SimpleConfig,
+        inner: O,
+        gate: &'a CancelGate,
+        max_solves: usize,
+        buoyancy: BoussinesqConfig<3>,
+    ) -> Result<
+        MaterialFlowFeedback<
+            'a,
+            BoussinesqMaterial<ResolvedLiquidState>,
+            impl Clone
+            + FnMut(
+                usize,
+                &DepositedCell,
+                f64,
+            ) -> Result<BoussinesqMaterial<ResolvedLiquidState>, MaterialError>,
+            O,
+        >,
+        LiquidEnthalpyObserverError<MaterialFlowError<O::Error>>,
+    > {
+        admit_law_mode(self, false, false).map_err(LiquidEnthalpyObserverError::Binding)?;
+        let reference = self
+            .liquid
+            .reference_state()
+            .transport_state()
+            .map_err(|error| {
+                LiquidEnthalpyObserverError::Binding(LiquidEnthalpyError::Transport(error))
+            })?;
+        for h in self.inlet_specific_h_j_kg.into_iter().flatten() {
+            let (_, liquid) = state_at_mode(self, h, false, false)
+                .map_err(LiquidEnthalpyObserverError::Binding)?;
+            BoussinesqMaterial::try_new(liquid, &reference, buoyancy).map_err(|error| {
+                LiquidEnthalpyObserverError::Binding(LiquidEnthalpyError::Transport(error))
+            })?;
+        }
+        let resolve = move |_: usize, cell: &DepositedCell, temperature: f64| {
+            feedback_state(self, cell.specific_h_j_kg, temperature, false)
+        };
+        MaterialFlowFeedback::try_new_boussinesq(
+            thermal,
+            domain,
+            self.native(),
+            config,
+            inner,
+            gate,
+            max_solves,
+            reference,
+            buoyancy,
+            resolve,
+        )
+        .map_err(LiquidEnthalpyObserverError::Observer)
+    }
+}
+
+fn feedback_state(
+    input: LiquidFlowEnthalpyInput<'_>,
+    h: f64,
+    temperature: f64,
+    fixed_density: bool,
+) -> Result<ResolvedLiquidState, MaterialError> {
+    let (phase, liquid) =
+        state_at_mode(input, h, false, fixed_density).map_err(|error| MaterialError::State {
+            what: error.to_string(),
+        })?;
+    if phase.temperature_k().to_bits() != temperature.to_bits() {
+        return Err(MaterialError::State {
+            what: "liquid feedback temperature differs from its original caloric owner".into(),
+        });
+    }
+    Ok(liquid)
 }
 
 /// Original selected liquid state at an accepted thermal endpoint.
@@ -150,6 +227,7 @@ pub struct LiquidFlowSample {
 pub enum LiquidEnthalpyError {
     Invalid(&'static str),
     Material(MaterialStatePointError),
+    Transport(MaterialError),
     Phase(PhaseStateError),
     Thermal(DepositionError),
 }
@@ -424,12 +502,13 @@ impl<O: DepositionObserver> DepositionObserver for LiquidEnthalpyObserver<'_, O>
 }
 
 fn admit_law(input: LiquidFlowEnthalpyInput<'_>) -> Result<(), LiquidEnthalpyError> {
-    admit_law_mode(input, true)
+    admit_law_mode(input, true, true)
 }
 
 fn admit_law_mode(
     input: LiquidFlowEnthalpyInput<'_>,
     frozen_viscosity: bool,
+    fixed_density: bool,
 ) -> Result<(), LiquidEnthalpyError> {
     let law = input.liquid;
     let reference = law.reference_state();
@@ -470,7 +549,7 @@ fn admit_law_mode(
             .ok_or(LiquidEnthalpyError::Invalid(
                 "missing liquid source property",
             ))?;
-        if (name == DENSITY_PROPERTY || frozen_viscosity)
+        if ((name == DENSITY_PROPERTY && fixed_density) || (name == viscosity && frozen_viscosity))
             && property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity
         {
             return Err(LiquidEnthalpyError::Invalid(
@@ -480,7 +559,7 @@ fn admit_law_mode(
     }
     if curve.knots().iter().any(|knot| {
         knot.liquid_mass_fraction != 1.0
-            || !same_positive(knot.bulk_density_kg_m3, reference.density_kg_m3())
+            || (fixed_density && !same_positive(knot.bulk_density_kg_m3, reference.density_kg_m3()))
     }) {
         return Err(LiquidEnthalpyError::Invalid(
             "the complete caloric span must be fully liquid at the fixed source density",
@@ -525,19 +604,20 @@ fn state_at(
     input: LiquidFlowEnthalpyInput<'_>,
     h: f64,
 ) -> Result<(EquilibriumPhaseState, ResolvedLiquidState), LiquidEnthalpyError> {
-    state_at_mode(input, h, true)
+    state_at_mode(input, h, true, true)
 }
 
 fn state_at_mode(
     input: LiquidFlowEnthalpyInput<'_>,
     h: f64,
     frozen_viscosity: bool,
+    fixed_density: bool,
 ) -> Result<(EquilibriumPhaseState, ResolvedLiquidState), LiquidEnthalpyError> {
     let phase = input.caloric.curve().state_at_specific_enthalpy(h)?;
     let reference = input.liquid.reference_state();
     if phase.phase() != SolidLiquidPhase::Liquid
         || phase.liquid_mass_fraction() != 1.0
-        || !same_positive(phase.bulk_density_kg_m3(), reference.density_kg_m3())
+        || (fixed_density && !same_positive(phase.bulk_density_kg_m3(), reference.density_kg_m3()))
     {
         return Err(LiquidEnthalpyError::Invalid(
             "flowing enthalpy state must remain fully liquid at the fixed density",
@@ -546,7 +626,7 @@ fn state_at_mode(
     let liquid = input
         .liquid
         .at_temperature(Temperature::new(phase.temperature_k()))?;
-    if liquid.density_kg_m3().to_bits() != reference.density_kg_m3().to_bits()
+    if (fixed_density && liquid.density_kg_m3().to_bits() != reference.density_kg_m3().to_bits())
         || (frozen_viscosity
             && liquid.dynamic_viscosity_pa_s().to_bits()
                 != reference.dynamic_viscosity_pa_s().to_bits())

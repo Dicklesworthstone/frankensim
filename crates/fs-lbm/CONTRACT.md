@@ -1791,3 +1791,26 @@ momentum, heat propagation, graded-cell resistance, cell mass and boundary
 energy. G0/G4 ownership/source/geometry refusals preserve accepted state.
 This fixed-density, scalar Newtonian bulk-fluid model supplies no additional
 contact resistance, phase mobility, pressure/viscous heat or moving surface.
+
+### Material-density natural convection on the enthalpy timeline
+
+`LiquidFlowEnthalpyInput::feedback_boussinesq` admits the same pinned liquid
+and caloric sources for bounded density variation. It delegates to
+`MaterialFlowFeedback::try_new_boussinesq` and the existing `BoussinesqMaterial`
+projection. One source evaluation supplies actual rho for `(rho-rho0)*g` and
+the same mu/k for native stress/conduction. Reference rho0 stays in inertia,
+fixed cell mass and the original conservative face-mass graph; caloric density
+metadata cannot reassign mass. The original h/T law and its source pins/context
+remain authoritative. Pressure openings use the removed reference hydrostatics.
+No independent expansion coefficient or duplicate buoyancy load participates.
+
+`simple_flow_with_viscosity_and_force` applies finite cell force densities to
+the same staggered momentum operator, requiring zero force on solid voxels.
+Source/endpoint density and Cp departures must satisfy explicit bounds; native
+convergence, energy, CFL and all-or-nothing history owners remain unchanged.
+Applied epochs retain the exact buoyancy field. This is quasisteady Boussinesq
+natural/mixed convection, not variable-density continuity or a total-energy
+model: gravitational/kinetic storage, pressure/viscous heat, phase mobility and
+free surfaces remain outside this path. G1/G3 source-density swap regressions
+exercise a heated porous column without a fan and independent Darcy/heat
+balances. G4 endpoint-bound and binding refusals preserve accepted history.

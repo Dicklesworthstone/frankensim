@@ -2,6 +2,7 @@
 use super::*;
 use fs_lbm::conjugate::FlowResistance;
 use fs_lbm::conjugate::enthalpy::advection::feedback::MaterialFlowError;
+use fs_lbm::material::transport::boussinesq::BoussinesqConfig;
 
 fn feedback_card(scale: f64) -> MaterialCard {
     feedback_card_with_conductivity(
@@ -15,15 +16,25 @@ fn feedback_card(scale: f64) -> MaterialCard {
 }
 
 fn feedback_card_with_conductivity(scale: f64, conductivity: PropertyClaim) -> MaterialCard {
+    feedback_card_with_density(
+        scale,
+        conductivity,
+        scalar(DENSITY_PROPERTY, Density::DIMS, 1.0),
+    )
+}
+
+fn feedback_card_with_density(
+    scale: f64,
+    conductivity: PropertyClaim,
+    density: PropertyClaim,
+) -> MaterialCard {
     let mut claims = ClaimSet::new();
-    for (name, dims, value) in [
-        (DENSITY_PROPERTY, Density::DIMS, 1.0),
-        (
-            SPECIFIC_HEAT_CAPACITY_PROPERTY,
-            SPECIFIC_HEAT_CAPACITY_DIMS,
-            2.0,
-        ),
-    ] {
+    claims.insert_claim(density).unwrap();
+    for (name, dims, value) in [(
+        SPECIFIC_HEAT_CAPACITY_PROPERTY,
+        SPECIFIC_HEAT_CAPACITY_DIMS,
+        2.0,
+    )] {
         claims.insert_claim(scalar(name, dims, value)).unwrap();
     }
     claims.insert_claim(conductivity).unwrap();
@@ -290,6 +301,11 @@ fn live_binding_keeps_original_caloric_context_and_borrowed_law() {
         assert!(
             input(&ids, &liquid, other)
                 .feedback(&old, &domain, &config_flow, (), &gate, 100,)
+                .is_err()
+        );
+        assert!(
+            input(&ids, &liquid, other)
+                .feedback_boussinesq(&old, &domain, &config_flow, (), &gate, 100, buoyancy(0.1))
                 .is_err()
         );
     }
@@ -635,4 +651,201 @@ fn conductive_faces_refuse_partial_parallel_competing_and_stale_ownership() {
     assert_eq!(old.contact_patch(100), Some(patch));
     near(old.time_s(), 0.0);
     near(old.energy_j(), 0.0);
+}
+
+fn buoyant_card(expansion: f64) -> MaterialCard {
+    let mut density = scalar(DENSITY_PROPERTY, Density::DIMS, 1.0);
+    density.value = PropertyValue::Curve {
+        abscissa: "T".into(),
+        abscissa_dims: Temperature::DIMS,
+        knots: vec![(300.0, 1.0), (810.0, 1.0 - 510.0 * expansion)],
+        dims: Density::DIMS,
+    };
+    density.interpolation = InterpolationPolicy::LinearInside;
+    let mut k = scalar(
+        THERMAL_CONDUCTIVITY_PROPERTY,
+        THERMAL_CONDUCTIVITY_DIMS,
+        0.25,
+    );
+    k.value = PropertyValue::Curve {
+        abscissa: "T".into(),
+        abscissa_dims: Temperature::DIMS,
+        knots: vec![(300.0, 0.25), (810.0, 1.525)],
+        dims: THERMAL_CONDUCTIVITY_DIMS,
+    };
+    k.interpolation = InterpolationPolicy::LinearInside;
+    feedback_card_with_density(1.0, k, density)
+}
+
+fn buoyancy(bound: f64) -> BoussinesqConfig<3> {
+    BoussinesqConfig {
+        gravity_m_s2: [-9.81, 0.0, 0.0],
+        max_relative_density_departure: bound,
+        max_relative_specific_heat_departure: 0.0,
+    }
+}
+
+#[test]
+fn source_density_drives_natural_convection_with_same_sample_mu_k_and_fixed_mass() {
+    // G1/G3: a vertical porous column with two pressure openings and NO fan.
+    // Hydrostatic reference rho0=1 is removed. Darcy series resistance gives
+    // q = integral (rho(T)-rho0)*g dx / integral mu(T)/K dx independently.
+    let domain = VoxelDomain::new(4, 1, 1, 1.0).unwrap();
+    let mut flow_config = porous_config();
+    flow_config.internal_fans.clear();
+    let gate = CancelGate::new();
+    let ids: Vec<_> = (0..4).map(|c| Some(CellId(c))).collect();
+    let mut outputs = Vec::new();
+    for expansion in [0.0, 0.001] {
+        let card = buoyant_card(expansion);
+        let liquid = liquid(&card);
+        let caloric = liquid_caloric(&card);
+        let old = conducting_initial(&domain, &caloric, [0.0; 4]);
+        let observer = input(&ids, &liquid, &caloric)
+            .feedback_boussinesq(
+                &old,
+                &domain,
+                &flow_config,
+                Heater::default(),
+                &gate,
+                100,
+                buoyancy(0.1),
+            )
+            .unwrap()
+            .with_fluid_conduction(&old, &[100, 101, 102])
+            .unwrap();
+        let (next, accepted, audit) = old
+            .advance_observed(&observer, 1.0, config(), || Ok(()))
+            .unwrap();
+        let mut h = [0.0; 4];
+        let mut exported = 0.0;
+        let mut last_q = 0.0;
+        for &dt in &accepted.inner().durations {
+            let q = 9.81 * expansion * h.iter().sum::<f64>()
+                / 2.0
+                / h.iter().map(|&h| viscosity(1.0, h)).sum::<f64>();
+            let k = h.map(|h| conductivity(0.25, h));
+            let g = [0, 1, 2].map(|c| 2.0 / (1.0 / k[c] + 1.0 / k[c + 1]));
+            let before = h;
+            exported += dt * q * before[3];
+            for c in 0..4 {
+                let upstream = if c == 0 { 0.0 } else { before[c - 1] };
+                let heat = if c == 1 { 100.0 } else { 0.0 };
+                let left = if c > 0 {
+                    g[c - 1] * (before[c - 1] - before[c]) / 2.0
+                } else {
+                    0.0
+                };
+                let right = if c < 3 {
+                    g[c] * (before[c + 1] - before[c]) / 2.0
+                } else {
+                    0.0
+                };
+                h[c] += dt * (heat + q * (upstream - before[c]) + left + right);
+            }
+            last_q = q;
+        }
+        let applied = accepted.applied().unwrap();
+        near(applied.flow.field.flux_x(2, 0, 0), last_q);
+        let forces = applied.buoyancy_force_n_m3.as_ref().unwrap();
+        for sample in &applied.samples {
+            let original = sample.material.resolved_transport();
+            near(
+                original.density_kg_m3(),
+                1.0 - expansion * (sample.temperature_k - 300.0),
+            );
+            near(sample.transport.density_kg_m3(), 1.0);
+            near(
+                forces[sample.voxel][0],
+                (original.density_kg_m3() - 1.0) * -9.81,
+            );
+            near(
+                sample.transport.dynamic_viscosity_pa_s(),
+                original.dynamic_viscosity_pa_s(),
+            );
+            near(
+                sample.transport.thermal_conductivity_w_m_k(),
+                original.thermal_conductivity_w_m_k(),
+            );
+            for name in [
+                DENSITY_PROPERTY,
+                DYNAMIC_VISCOSITY_PROPERTY,
+                THERMAL_CONDUCTIVITY_PROPERTY,
+            ] {
+                let receipt = &sample
+                    .material
+                    .material()
+                    .material()
+                    .property(name)
+                    .unwrap()
+                    .answer()
+                    .receipt;
+                assert_eq!(
+                    receipt.selected,
+                    liquid
+                        .reference_state()
+                        .material()
+                        .property(name)
+                        .unwrap()
+                        .answer()
+                        .receipt
+                        .selected
+                );
+                assert!(
+                    receipt
+                        .query_point
+                        .contains(&("T".into(), sample.temperature_k))
+                );
+                assert!(receipt.query_point.contains(&("pressure".into(), 100000.0)));
+            }
+        }
+        for (c, expected) in h.iter().enumerate() {
+            near(next.cells()[&CellId(c as u64)].specific_h_j_kg, *expected);
+        }
+        near(accepted.audit().external_enthalpy_j, -exported);
+        near(audit.external_heat_j, 100.0 - exported);
+        near(next.energy_j() - old.energy_j(), audit.external_heat_j);
+        near(next.mass_kg(), old.mass_kg());
+        assert!(observer.applied().is_none());
+        assert_eq!(observer.inner(), &Heater::default());
+        outputs.push((last_q, h[1]));
+    }
+    near(outputs[0].0, 0.0);
+    assert!(outputs[1].0 > 0.0);
+    assert!(outputs[1].1 < outputs[0].1);
+}
+
+#[test]
+fn buoyant_endpoint_density_departure_refuses_without_publishing_heat_or_history() {
+    // G4: the first thermal step heats the material beyond the explicitly
+    // admitted density approximation, although the original source supports T.
+    let card = buoyant_card(0.001);
+    let liquid = liquid(&card);
+    let caloric = liquid_caloric(&card);
+    let domain = VoxelDomain::new(4, 1, 1, 1.0).unwrap();
+    let mut flow_config = porous_config();
+    flow_config.internal_fans.clear();
+    let gate = CancelGate::new();
+    let ids: Vec<_> = (0..4).map(|c| Some(CellId(c))).collect();
+    let old = conducting_initial(&domain, &caloric, [0.0; 4]);
+    let observer = input(&ids, &liquid, &caloric)
+        .feedback_boussinesq(
+            &old,
+            &domain,
+            &flow_config,
+            Heater::default(),
+            &gate,
+            100,
+            buoyancy(0.001),
+        )
+        .unwrap();
+    assert!(matches!(
+        old.advance_observed(&observer, 1.0, config(), || Ok(())),
+        Err(MaterialFlowError::Material { .. })
+    ));
+    assert!(observer.applied().is_none());
+    assert_eq!(observer.inner(), &Heater::default());
+    near(old.time_s(), 0.0);
+    near(old.energy_j(), 0.0);
+    near(old.mass_kg(), 4.0);
 }
