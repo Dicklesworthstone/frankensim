@@ -5,8 +5,7 @@ edition = "2024"
 publish = false
 description = "Live in-browser (WASM) drum kit: each piece is the fs-vkplate solver (membranes, von Karman shells, enclosed air, implicit contacts, Rayleigh microphone) on a coarser grid, struck anywhere, silent pieces not stepped. The reduced real-time model; NOT the offline reference."
 
-# Its own workspace (the engine-drum pattern): fs-vkplate is std only, so this builds from the
-# working tree without the sibling repositories.
+# Standalone browser workspace; fs-vkplate shares the native material gas owner.
 [workspace]
 
 [lib]
@@ -22,6 +21,10 @@ fs-vkplate = { path = "../../../crates/fs-vkplate" }
 # wasm-bindgen only enters the wasm32 build. The version is pinned to the installed CLI (0.2.128).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "=0.2.128"
+# The shared material owner reaches fs-la/fs-exec; use their browser runtime
+# and entropy backend just as the live drum and piano bindings do.
+asupersync = { path = "../../../../asupersync", default-features = false, features = ["wasm-browser-prod"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [profile.release]
 opt-level = 3

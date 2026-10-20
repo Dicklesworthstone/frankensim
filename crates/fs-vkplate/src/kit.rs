@@ -96,8 +96,13 @@ fn f01(r: f64, hd: Head) -> f64 {
 }
 
 pub fn drum(s: &DrumSpec, hits: &[(f64, f64)]) -> Result<Piece, String> {
+    drum_with_gas(s, hits, standard_gas())
+}
+
+/// The same structural data in one material-resolved cavity/exterior gas.
+pub fn drum_with_gas(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState) -> Result<Piece, String> {
     let rate = OUT_RATE * s.oversample as f64;
-    let mut ins = Instrument::new(rate);
+    let mut ins = Instrument::with_gas(rate, gas)?;
     let mut notes = vec![];
     let mut batter = head_body(&format!("{} batter", s.name), s.radius, s.grid, s.batter, s.muffle)?;
     batter.origin = [0.0, 0.0, 0.0];
@@ -107,7 +112,7 @@ pub fn drum(s: &DrumSpec, hits: &[(f64, f64)]) -> Result<Piece, String> {
     reso.facing = -1.0;
     notes.push(format!("heads: {} nodes each at {:.1} mm; (0,1) in vacuo {:.0} / {:.0} Hz", batter.n, s.grid * 1e3, f01(s.radius, s.batter), f01(s.radius, s.reso)));
     // outside air on each head's volume motion: a baffled piston's radiation mass, 8 rho a^3 / 3
-    batter.air_mass = 8.0 * RHO_AIR * s.radius.powi(3) / 3.0;
+    batter.air_mass = 8.0 * gas.density * s.radius.powi(3) / 3.0;
     reso.air_mass = batter.air_mass;
     let bi = ins.add(batter);
     let ri = ins.add(reso);
@@ -115,13 +120,13 @@ pub fn drum(s: &DrumSpec, hits: &[(f64, f64)]) -> Result<Piece, String> {
         let mut q = Port::new(pr, s.reso.thickness, [0.0, -0.6 * s.radius, -s.depth], -1.0);
         // small-ka radiation resistance at the Helmholtz frequency of cavity plus port
         let v = PI * s.radius * s.radius * s.depth;
-        let fh = C_AIR / (2.0 * PI) * (q.area / (v * q.length)).sqrt();
-        q.resistance = RHO_AIR * (2.0 * PI * fh).powi(2) / (2.0 * PI * C_AIR);
+        let fh = gas.sound_speed / (2.0 * PI) * (q.area / (v * q.length)).sqrt();
+        q.resistance = gas.density * (2.0 * PI * fh).powi(2) / (2.0 * PI * gas.sound_speed);
         notes.push(format!("port {:.0} mm: Helmholtz {fh:.0} Hz with the cavity alone", 2e3 * pr));
         q
     });
     ins.cavities.push(Cavity { heads: vec![bi, ri], volume: PI * s.radius * s.radius * s.depth, port });
-    ins.rads.push(RadDamp::monopole(vec![bi, ri], f01(s.radius, s.batter)));
+    ins.rads.push(RadDamp::monopole(vec![bi, ri], f01(s.radius, s.batter), &gas));
     let mut settle = 0.0;
     if let Some(wr) = s.wires {
         let (mass_per_m, tension, preload_per_m, len) = (wr.mass_per_m, wr.tension, wr.preload_per_m, wr.length);
@@ -369,10 +374,15 @@ pub fn ride() -> CymbalSpec {
 
 fn pick_oversample(ins: &mut Instrument, max_ratio: f64) -> Result<usize, String> {
     let (lam, who) = ins.admission_rate2();
+    let structural = (lam - ins.gas_admission_rate2(ins.rate)).max(0.0);
     for os in [1usize, 2, 3, 4, 6, 8] {
-        let k = 1.0 / (OUT_RATE * os as f64);
-        if k * k * lam / 4.0 <= max_ratio {
-            ins.rate = OUT_RATE * os as f64;
+        let rate = OUT_RATE * os as f64;
+        let k = 1.0 / rate;
+        // Explicit radiation's contribution is 2 D / dt, so it must use
+        // this candidate's clock rather than the instrument's original rate.
+        let candidate = structural + ins.gas_admission_rate2(rate);
+        if k * k * candidate / 4.0 <= max_ratio {
+            ins.rate = rate;
             return Ok(os);
         }
     }
@@ -381,7 +391,12 @@ fn pick_oversample(ins: &mut Instrument, max_ratio: f64) -> Result<usize, String
 
 /// A suspended cymbal struck once per hit: (time s, speed m/s, radius fraction, stick tip radius m).
 pub fn cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)]) -> Result<Piece, String> {
-    let mut ins = Instrument::new(OUT_RATE);
+    cymbal_with_gas(c, hits, standard_gas())
+}
+
+/// The same plate and contact mechanics with material-resolved propagation.
+pub fn cymbal_with_gas(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState) -> Result<Piece, String> {
+    let mut ins = Instrument::with_gas(OUT_RATE, gas)?;
     let mut body = cymbal_body(c.name, c)?;
     body.origin = [0.0, 0.0, 0.0];
     let n = body.n;
@@ -444,6 +459,11 @@ pub fn hihat_grid(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
 
 /// The same with an explicit rim friction coefficient (0: the rims press but do not rub).
 pub fn hihat_grid_mu(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64) -> Result<Piece, String> {
+    hihat_grid_mu_with_gas(gap, pedal_n, hits, rim, from, scale, friction, standard_gas())
+}
+
+/// Opposed plates, their shared contacts and microphones in the same gas state.
+pub fn hihat_grid_mu_with_gas(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64, gas: GasState) -> Result<Piece, String> {
     if !gap.is_finite() || gap < 0.0 {
         return Err(format!("hi-hat: rim opening must be finite and nonnegative, got {gap} m"));
     }
@@ -455,7 +475,7 @@ pub fn hihat_grid_mu(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from
     // Displacements remain upward; the bottom's bell and bow face away from the top.
     bs.bow_rise = -bs.bow_rise;
     bs.bell_rise = -bs.bell_rise;
-    let mut ins = Instrument::new(OUT_RATE);
+    let mut ins = Instrument::with_gas(OUT_RATE, gas)?;
     let mut top = cymbal_shell(ts.name, &ts, false)?;
     top.origin = [0.0, 0.0, 0.0];
     let mut bot = cymbal_shell(bs.name, &bs, false)?;

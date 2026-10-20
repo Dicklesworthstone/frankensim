@@ -30,8 +30,6 @@ typedef unsigned int u32;
 #ifndef SPIN_NS
 #define SPIN_NS 32
 #endif
-#define RHO_AIR 1.204
-#define C_AIR 343.0
 
 __device__ __forceinline__ void gsync(u32* bar, u32 nb) {
   __syncthreads();
@@ -150,7 +148,7 @@ __device__ __forceinline__ double cavity_pressure(const P& p, int c, int s, ll N
     dv = dv + sw[0] * __ldg(&p.bh[hb]) * __ldg(&p.bh[hb]);
   }
   const double xport = __ldg(&p.cav_port[c]) ? p.port_x[(par * p.B + s) * p.NCAV + c] : 0.0;
-  return -RHO_AIR * C_AIR * C_AIR / __ldg(&p.cav_vol[c]) * (dv + xport);
+  return -p.gas_bulk_modulus / __ldg(&p.cav_vol[c]) * (dv + xport);
 }
 
 // The radiation-damping force density -R q of group r (by a whole warp).
@@ -447,7 +445,7 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
           // the cavity's first head's first item advances its port (from the pressure at the old opening)
           if (c >= 0 && __ldg(&p.cav_port[c]) && b == __ldg(&p.cav_head[__ldg(&p.cav_hptr[c])]) && item == __ldg(&p.bitem0[b])) {
             const ll o0 = (par * B + s) * p.NCAV + c, o1 = ((1 - par) * B + s) * p.NCAV + c;
-            const double du = k * (cp - __ldg(&p.port_res[c]) * p.port_u[o0]) * __ldg(&p.port_area[c]) / (RHO_AIR * __ldg(&p.port_len[c]));
+            const double du = k * (cp - __ldg(&p.port_res[c]) * p.port_u[o0]) * __ldg(&p.port_area[c]) / (p.gas_density * __ldg(&p.port_len[c]));
             const double u = p.port_u[o0] + du;
             p.port_u[o1] = u;
             p.port_du[o1] = du / k;

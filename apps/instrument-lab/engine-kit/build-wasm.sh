@@ -1,7 +1,8 @@
 #!/bin/zsh
 # Build the live drum kit for the browser and install it under
 # apps/instrument-lab/public/live/kit/ as engine.js + engine_bg.wasm.
-# fs-vkplate is std only, so this builds straight from the working tree.
+# fs-vkplate uses the shared material owner; its path dependencies and sibling
+# constellation checkouts must be available, as for the live drum and piano.
 set -eu
 HERE=${0:A:h}
 TARGET=${FSIM_LIVE_KIT_TARGET:-/var/folders/vt/n2xyn_s51b97_j3yh2qbqcnc0000gn/T/rch_target_frankensim_live_kit}

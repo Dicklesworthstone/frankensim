@@ -771,6 +771,7 @@ dependencies = [
  "fs-exec",
  "fs-la",
  "fs-live-fma",
+ "fs-material",
  "fs-modal",
  "fs-plate",
  "getrandom 0.4.3",

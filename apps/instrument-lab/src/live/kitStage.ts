@@ -138,10 +138,61 @@ export function mountLiveKit(root: HTMLElement): void {
   const controls = el("div", { class: "kit-controls" },
     el("label", { class: "kit-dyn" }, el("span", { class: "small muted" }, "Stroke"), dyn, dynLabel),
     hatMode);
+  const numberInput = (value: number, min: number, max: number): HTMLInputElement =>
+    el("input", { type: "number", value: String(value), min: String(min), max: String(max), step: "any", required: "" });
+  const temperature = numberInput(20, 0, 50);
+  const pressure = numberInput(101.325, 10, 200);
+  const humidity = numberInput(0, 0, 100);
+  const medium = el("select", {}, el("option", { value: "air" }, "Air"),
+    el("option", { value: "mixture" }, "Custom gas mixture"));
+  const basis = el("select", {}, el("option", { value: "mole" }, "Mole percentages"),
+    el("option", { value: "mass" }, "Mass percentages"));
+  const components = ([
+    ["N2", "Nitrogen", 70], ["O2", "Oxygen", 20], ["Ar", "Argon", 0],
+    ["CO2", "Carbon dioxide", 10], ["H2O", "Water vapor", 0],
+  ] as const).map(([symbol, name, value]) => ({ symbol, name, input: numberInput(value, 0, 100) }));
+  const labelled = (name: string, input: HTMLElement): HTMLElement => el("label", {}, el("span", {}, name), input);
+  const mixtureFields = el("div", { class: "kit-atmosphere-grid", hidden: "" },
+    labelled("Composition basis", basis), ...components.map(c => labelled(`${c.name} · %`, c.input)));
+  const atmosphereStatus = el("p", { class: "small muted", role: "status" },
+    "One atmosphere supplies every piece's cavity, air loading and microphone. Applying changes restarts the kit from rest.");
+  const applyAtmosphere = el("button", { class: "btn sm", type: "submit" }, "Apply atmosphere");
+  const atmosphereForm = el("form", {},
+    el("div", { class: "kit-atmosphere-grid" }, labelled("Gas", medium), labelled("Temperature · °C", temperature),
+      labelled("Pressure · kPa", pressure), labelled("Relative humidity in air · %", humidity)),
+    mixtureFields, el("p", { class: "small muted" }, "Mixture percentages must total 100. Water vapor is a mixture component; relative humidity applies to air."),
+    applyAtmosphere, atmosphereStatus);
+  const atmosphere = el("details", { class: "kit-atmosphere" }, el("summary", {}, "Atmosphere"), atmosphereForm);
+  const updateMedium = (): void => {
+    const isMixture = medium.value === "mixture";
+    humidity.disabled = isMixture;
+    mixtureFields.hidden = !isMixture;
+    basis.disabled = !isMixture;
+    for (const component of components) component.input.disabled = !isMixture;
+  };
+  medium.addEventListener("change", updateMedium);
+  updateMedium();
+
+  function readAtmosphere(): { record: string; label: string } {
+    if (!atmosphereForm.reportValidity()) throw new Error("Enter temperature, pressure and composition within the shown ranges.");
+    const t = temperature.valueAsNumber + 273.15, p = pressure.valueAsNumber * 1000;
+    if (!Number.isFinite(t) || !Number.isFinite(p)) throw new Error("Temperature and pressure must be finite.");
+    if (medium.value === "air") {
+      const rh = humidity.valueAsNumber / 100;
+      if (!Number.isFinite(rh)) throw new Error("Relative humidity must be finite.");
+      return { record: `${t} ${p} ${rh}`, label: `Air · ${temperature.value} °C · ${pressure.value} kPa · ${humidity.value}% RH` };
+    }
+    const selected = components.filter(c => c.input.valueAsNumber > 0);
+    const total = components.reduce((sum, c) => sum + c.input.valueAsNumber, 0);
+    if (!Number.isFinite(total) || Math.abs(total - 100) > 1e-6) throw new Error("Gas mixture percentages must total 100.");
+    const fields = selected.flatMap(c => [c.symbol, String(c.input.valueAsNumber / 100)]);
+    return { record: `mixture ${t} ${p} ${basis.value} ${selected.length} ${fields.join(" ")}`,
+      label: `${selected.map(c => `${c.name} ${c.input.value}%`).join(" · ")} (${basis.value}) · ${temperature.value} °C · ${pressure.value} kPa` };
+  }
   const evidence = el("details", { class: "evidence" }, el("summary", {}, "What is computed"),
     el("p", { class: "small" }, "Each piece is the same finite-difference solver as the drum kit above: tensioned Mylar heads with the air between them, von Kármán bronze shells, Hertz stick contacts, a felt beater, snare wires and a pedal-clamped hi-hat whose rims rub with dry friction. Here it runs on a grid several times coarser (picked per piece for this device when you start), so it is cheaper and loses detail above a few kHz. A piece that has gone quiet is not stepped until it is struck again."),
     el("p", { class: "small muted" }, "The colours are the computed transverse velocity of the surface (warm up, cool down), drawn from the solver state about 20 ms ahead of what you hear. Energy is the kinetic energy of the piece; force is the peak stick force of the last stroke. Levels: one gain per piece, matched on one grid to a real kit's recorded balance, except that the cymbals are capped so their very sharp attacks do not clip. A stroke's loudness changes with the grid (the crash is about 5 dB louder on a 3× grid than on 5×), so each piece's gain is rescaled for the grid it runs on, from a table of that stroke measured on every grid; it is raised only while the stroke stays under the same peak cap."));
-  root.replaceChildren(el("div", { class: "panel kit-live" }, stage, el("div", { class: "kit-bar" }, controls, buttons), hud, evidence));
+  root.replaceChildren(el("div", { class: "panel kit-live" }, stage, el("div", { class: "kit-bar" }, controls, buttons), atmosphere, hud, evidence));
   root.style.minHeight = "0";
 
   const g = canvas.getContext("2d")!;
@@ -355,7 +406,7 @@ export function mountLiveKit(root: HTMLElement): void {
     hitAt(hit.id, hit.x, hit.y, def.speed * Number(dyn.value) * pressure);
   });
   window.addEventListener("keydown", (e) => {
-    if (!running || e.metaKey || e.ctrlKey || e.altKey || (e.target as HTMLElement).closest("input, textarea")) return;
+    if (!running || e.metaKey || e.ctrlKey || e.altKey || (e.target as HTMLElement).closest("input, textarea, select")) return;
     const def = PIECES.find((p) => p.key === e.key.toUpperCase());
     if (!def || !root.isConnected) return;
     const r = root.getBoundingClientRect();
@@ -386,10 +437,16 @@ export function mountLiveKit(root: HTMLElement): void {
 
   async function begin(): Promise<void> {
     if (running || start.disabled) return;
+    let environment: { record: string; label: string };
+    try { environment = readAtmosphere(); }
+    catch (e) { atmosphereStatus.textContent = (e as Error).message; return; }
+    // Every lane, including grids rebuilt after failed probes, receives this
+    // same immutable record even if controls are edited while startup awaits.
     claimPlayback(onClaimed);
     const my = ++session;
     start.disabled = true;
     start.textContent = "Building the kit…";
+    atmosphereStatus.textContent = `Building in ${environment.label}…`;
     try {
       ctx ??= createLiveAudioContext();
       await ctx.resume();
@@ -400,7 +457,7 @@ export function mountLiveKit(root: HTMLElement): void {
       let built = 0;
       await Promise.all(PIECES.map(async (def) => {
         const L = lives.get(def.id)!;
-        const lane = new KitLane(m, def.id, { gain: def.gain, aheadFrames: 1024, minRealtime: 1.7, benchMs: def.benchMs, scales: def.scales, fieldHz: 45 });
+        const lane = new KitLane(m, def.id, { gain: def.gain, gasRecord: environment.record, aheadFrames: 1024, minRealtime: 1.7, benchMs: def.benchMs, scales: def.scales, fieldHz: 45 });
         L.lane = lane;
         lane.onField = (f) => {
           L.field = f;
@@ -421,6 +478,8 @@ export function mountLiveKit(root: HTMLElement): void {
           kickDraw();
         };
         const r = await lane.ready;
+        if (my !== session) { lane.dispose(); return; }
+        if (r.gasRecord !== environment.record) throw new Error("The kit engine did not retain the requested atmosphere. Reload after rebuilding the live kit.");
         L.ready = r;
         // map every surface node to a cell of a square image the size of the grid
         const m2 = 2 * Math.ceil(r.radius / r.h) + 3;
@@ -438,6 +497,9 @@ export function mountLiveKit(root: HTMLElement): void {
       }));
       if (my !== session) return;
       running = true;
+      const gas = lives.get("kick")?.ready?.info.gas;
+      atmosphereStatus.textContent = `${environment.label}. ${gas
+        ? `Density ${gas.densityKgM3.toFixed(3)} kg/m³ · sound speed ${gas.soundSpeedMps.toFixed(1)} m/s. ` : ""}All eight pieces use this atmosphere.`;
       overlay.hidden = true;
       kickDraw();
       paintHud();
@@ -446,9 +508,20 @@ export function mountLiveKit(root: HTMLElement): void {
       if (my !== session) return; // stopped while building: its lanes were disposed on purpose
       stop();
       hud.textContent = `Could not start: ${(e as Error).message}`;
+      atmosphereStatus.textContent = `Atmosphere was not applied: ${(e as Error).message}`;
     }
   }
   start.addEventListener("click", () => void begin());
+  atmosphereForm.addEventListener("submit", e => {
+    e.preventDefault();
+    try {
+      const selected = readAtmosphere();
+      const active = running || start.disabled;
+      if (active) stop();
+      atmosphereStatus.textContent = `${selected.label}. ${active ? "Restarting from rest…" : "Press Start the kit to apply."}`;
+      if (active) void begin();
+    } catch (error) { atmosphereStatus.textContent = (error as Error).message; }
+  });
 
   function paintHud(): void {
     hud.replaceChildren(...PIECES.map((p) => {

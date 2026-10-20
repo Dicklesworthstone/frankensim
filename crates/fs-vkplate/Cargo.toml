@@ -5,8 +5,8 @@ edition = "2024"
 publish = false
 description = "Time-domain finite-difference thin plates and membranes: tension, bending, Berger and von Karman (shallow-shell) geometric nonlinearity, frequency-dependent loss, implicit contacts, enclosed-air and radiation coupling, Rayleigh microphones. One solver for every piece of a drum kit."
 
-# Its own workspace (the fs-*-wasm pattern): std only, so offline renders and a
-# browser build never depend on the state of unrelated in-progress crates.
+# Standalone render workspace; physical gas properties share the same material
+# owner as the native continuum rather than a second set of air constants.
 [workspace]
 
 [lib]
@@ -17,6 +17,7 @@ crate-type = ["rlib"]
 layer = "L4"
 
 [dependencies]
+fs-material = { path = "../fs-material" }
 
 [profile.release]
 opt-level = 3

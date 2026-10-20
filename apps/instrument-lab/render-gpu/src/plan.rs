@@ -4,7 +4,7 @@
 //! dense inverse of each plate's Airy operator. Pure data; no device code. A batch of simulations shares
 //! everything here except the state and the strike lists.
 
-use fs_vkplate::{Instrument, InstrumentImage, Law};
+use fs_vkplate::{GasState, Instrument, InstrumentImage, Law};
 use std::collections::BTreeSet;
 
 pub const TPB: usize = 256;
@@ -18,6 +18,11 @@ pub struct Plan {
     pub nc: usize,
     pub rate: f64,
     pub k: f64,
+    pub gas_density: f64,
+    pub gas_bulk_modulus: f64,
+    // Every batch member shares gas-dependent operators and microphone taps.
+    // Keep the complete admitted state, not just the two kernel coefficients.
+    gas: Option<GasState>,
     pub body_off: Vec<usize>,
     // per node
     pub bias: Vec<f64>,
@@ -239,7 +244,16 @@ impl Plan {
             return Err("export the instrument before its first step (the microphone rings are not exported)".into());
         }
         let k = 1.0 / img.rate;
-        let mut p = Plan { rate: img.rate, k, nb: img.bodies.len(), ..Default::default() };
+        if img.gas != *ins.gas() {
+            return Err("exported and live instrument gas states differ".into());
+        }
+        let mut p = Plan {
+            rate: img.rate, k, nb: img.bodies.len(),
+            gas_density: img.gas.density,
+            gas_bulk_modulus: img.gas.density * img.gas.sound_speed.powi(2),
+            gas: Some(img.gas),
+            ..Default::default()
+        };
         let mut off = 0;
         for b in &img.bodies {
             p.body_off.push(off);
@@ -596,7 +610,7 @@ impl Plan {
                 p.pt_hi.push(hi);
             }
             p.pt_ptr.push(i32s(p.pt_cav.len()));
-            p.mic_tau.push(m.unbaffled.map_or(-1.0, |a| 4.0 * a / (3.0 * std::f64::consts::PI * fs_vkplate::C_AIR)));
+            p.mic_tau.push(m.unbaffled.map_or(-1.0, |a| 4.0 * a / (3.0 * std::f64::consts::PI * img.gas.sound_speed)));
         }
         p.ringtot = roff;
         if p.md_seg.is_empty() {
@@ -608,6 +622,9 @@ impl Plan {
 
     /// The state and strikes of one simulation of this plan's instrument.
     pub fn state(&self, img: &InstrumentImage) -> Result<SimState, String> {
+        if self.gas != Some(img.gas) {
+            return Err("a batch member's atmosphere differs from the first member's".into());
+        }
         if img.bodies.len() != self.nb || img.contacts.len() != self.ct_gap.len() || img.mics.len() != self.nm {
             return Err("a batch member is a different instrument (bodies, contacts or microphones differ)".into());
         }

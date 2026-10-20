@@ -3,6 +3,37 @@ import { test } from "bun:test";
 import { loadWorkletModule } from "../src/live/liveAudio";
 import { KitLane, PianoLane } from "../src/live/mix";
 
+test("kit lane startup and replacement forward the caller's full atmosphere record", async () => {
+  const previousWorker = globalThis.Worker;
+  const workers: WorkerBoundary[] = [], ports: MessagePort[] = [];
+  class WorkerBoundary {
+    onmessage: ((event: { data: object }) => void) | null = null;
+    onerror: ((event: ErrorEvent) => void) | null = null;
+    messages: { type: string; gasRecord?: string; port?: MessagePort }[] = [];
+    constructor() { workers.push(this); }
+    postMessage(message: { type: string; gasRecord?: string; port?: MessagePort }) {
+      this.messages.push(message); if (message.port) ports.push(message.port);
+    }
+    terminate() {}
+  }
+  Object.assign(globalThis, { Worker: WorkerBoundary });
+  const mix = { attach(_id: string, port: MessagePort) { ports.push(port); }, dropLane() {} } as unknown as ConstructorParameters<typeof KitLane>[0];
+  const lanes: KitLane[] = [];
+  try {
+    for (const gasRecord of ["293.15 101325 0.6", "mixture 300 80000 mass 2 N2 0.8 CO2 0.2"]) {
+      const lane = new KitLane(mix, "kick", { gain: 0.2, gasRecord }); lanes.push(lane);
+      const worker = workers.at(-1)!;
+      assert.equal(worker.messages[0]!.gasRecord, gasRecord);
+      worker.onmessage!({ data: { type: "ready", gasRecord } });
+      assert.equal((await lane.ready).gasRecord, gasRecord);
+      lane.dispose();
+    }
+  } finally {
+    lanes.forEach(lane => lane.dispose()); ports.forEach(port => port.close());
+    Object.assign(globalThis, { Worker: previousWorker });
+  }
+});
+
 test("failed worklet URLs change on retry; concurrent and successful loads are shared", async () => {
   const urls: string[] = [];
   const context = { audioWorklet: { async addModule(url: string) {

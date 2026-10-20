@@ -40,6 +40,37 @@ on a 7 mm grid carries 3356 nodes and resolves the whole audio band.
   `(4/3pi) ka` times the baffled field, for `ka << 1`), joined to the baffled field for `ka >> 1`
   by a first-order high-pass with `tau = 4a/(3 pi c)`.
 
+## Shared atmosphere
+
+`Instrument::with_gas` and the `kit::*_with_gas` builders take one coherent
+`fs_material::gas::GasState`. Its density and sound speed drive cavity bulk
+modulus, port inertia and radiation resistance, head radiation mass, microphone
+amplitude and travel time, and the unbaffled receiver filter. The exported
+`InstrumentImage` retains that same state for external steppers, including CUDA.
+Clock admission includes cavity stiffness and explicit gas damping, so changing
+the gas cannot silently bypass the existing numerical stability check.
+
+`live::Live::with_gas_record` and browser `KitPiece.withGas` consume the canonical
+material parser's SI records, for example:
+
+```text
+293.15 50000 0
+mixture 293.15 100000 mole 3 N2 0.7 O2 0.2 CO2 0.1
+```
+
+The first record means temperature [K], pressure [Pa], and relative humidity
+[0..1]. Named mixtures also accept `mass` fractions; species and validity limits
+belong to `fs-material`. Existing constructors resolve dry air at 293.15 K and
+101325 Pa through that same owner. At fixed temperature, doubling ideal-gas
+pressure doubles density and bulk modulus while leaving sound speed unchanged.
+
+This is one prescribed stationary medium. Changing a live atmosphere starts a
+new trajectory; it is not an in-place thermodynamic update of a ringing body.
+The existing lumped-cavity and small-ka radiation approximations still apply.
+Viscosity and conductivity remain in the retained state, but this solver does
+not yet model viscothermal cavity loss or hi-hat squeeze films. Structural and
+contact presets remain separate material-integration work.
+
 ## Numerics
 
 Leapfrog in time. The nonlinear potential (Berger or von Karman) enters through a scalar

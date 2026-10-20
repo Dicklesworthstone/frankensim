@@ -26,6 +26,7 @@ params! {
     B: "ll", NT: "ll", NB: "ll", NC: "ll", NI: "ll", NCI: "ll", NMD: "ll", NM: "ll", NCON: "ll", NCB: "ll",
     NFR: "ll", NFB: "ll", NCAV: "ll", NRAD: "ll", NLINK: "ll", NDRV: "ll", NVK: "ll", RINGTOT: "ll",
     NROWS: "ll", NCN: "ll", NSEG: "ll", KL: "ll", KS: "ll", KG: "ll", steps: "ll", n0: "ll", gstep0: "ll", k: "double", rate: "double",
+    gas_density: "double", gas_bulk_modulus: "double",
     bias: "double*", ia: "double*", cw: "double*", cwp: "double*", cs1: "double*", ms0: "double*", mass: "double*", z0: "double*",
     lapE_col: "int*", lapE_val: "double*", stfE_col: "int*", stfE_val: "double*", gtE_core: "int*", gtE_slot: "int*",
     bstiff: "int*",
@@ -243,7 +244,9 @@ pub fn run(
         NFR: plan.fr_mu.len() as u64, NFB: (plan.fb_ptr.len().max(1) - 1) as u64, NCAV: plan.cav_vol.len() as u64,
         NRAD: plan.rad_res.len() as u64, NLINK: plan.lk_k.len() as u64, NDRV: plan.dv_node.len() as u64,
         NVK: plan.vk_body.len() as u64, RINGTOT: plan.ringtot as u64,
-        k: plan.k.to_bits(), rate: plan.rate.to_bits(), ..Default::default()
+        k: plan.k.to_bits(), rate: plan.rate.to_bits(),
+        gas_density: plan.gas_density.to_bits(), gas_bulk_modulus: plan.gas_bulk_modulus.to_bits(),
+        ..Default::default()
     };
     p.bias = m.f64(&plan.bias)?; p.ia = m.f64(&plan.ia)?; p.cw = m.f64(&plan.cw)?; p.cwp = m.f64(&plan.cwp)?;
     p.cs1 = m.f64(&plan.cs1)?; p.ms0 = m.f64(&plan.ms0)?; p.mass = m.f64(&plan.mass)?; p.z0 = m.f64(&plan.z0)?;

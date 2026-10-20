@@ -44,6 +44,27 @@ const SLEEP_FRAMES: usize = 128;
 
 impl Live {
     pub fn new(piece: &str, scale: f64) -> Result<Live, String> {
+        Self::with_gas(piece, scale, standard_gas())
+    }
+
+    /// A declarative temperature/pressure/humidity or species-mixture record,
+    /// using the same parser as native material-driven acoustic scenarios.
+    /// This constructs a new physical trajectory; it does not alter a ringing
+    /// instrument or erase its stored energy by changing coefficients in place.
+    pub fn with_gas_record(piece: &str, scale: f64, record: &str) -> Result<Live, String> {
+        let mut fields = record.split_ascii_whitespace();
+        let gas = fs_material::gas_species::input::read_gas_state(&mut fields, None)
+            .map_err(|e| e.to_string())?;
+        if fields.next().is_some() {
+            return Err("unexpected fields after the gas record".into());
+        }
+        Self::with_gas(piece, scale, gas)
+    }
+
+    /// Build every gas-dependent loading and observation operator from one
+    /// coherent immutable snapshot before settling or playing the instrument.
+    pub fn with_gas(piece: &str, scale: f64, gas: GasState) -> Result<Live, String> {
+        gas.validate_coherence().map_err(|e| e.to_string())?;
         if !(scale.is_finite() && (1.0..=12.0).contains(&scale)) {
             return Err(format!("grid scale {scale} outside [1, 12]"));
         }
@@ -51,11 +72,11 @@ impl Live {
             d.grid *= scale;
             // Keep the physical preset's internal clock; output remains 48 kHz.
             let foot = d.striker.2;
-            Ok((kit::drum(&d, &[])?, d.radius, foot))
+            Ok((kit::drum_with_gas(&d, &[], gas)?, d.radius, foot))
         };
         let cym = |mut c: CymbalSpec| -> Result<(Piece, f64, f64), String> {
             c.grid *= scale;
-            Ok((kit::cymbal(&c, &[])?, c.radius, 0.0))
+            Ok((kit::cymbal_with_gas(&c, &[], gas)?, c.radius, 0.0))
         };
         let rim = Law::Power { k: 2.0e9, alpha: 1.5, mu: 3.0 };
         let hat = kit::hihat_spec().0.radius;
@@ -65,8 +86,8 @@ impl Live {
             "snare-off" => drum(kit::snare_wires_off())?,
             "tom-12" => drum(kit::tom(12.0))?,
             "tom-14" => drum(kit::tom(14.0))?,
-            "hihat-closed" => (kit::hihat_grid(0.0, 80.0, &[], rim, 0.8, scale)?, hat, 0.0),
-            "hihat-open" => (kit::hihat_grid(0.002, 0.0, &[], rim, 0.8, scale)?, hat, 0.0),
+            "hihat-closed" => (kit::hihat_grid_mu_with_gas(0.0, 80.0, &[], rim, 0.8, scale, kit::RIM_FRICTION, gas)?, hat, 0.0),
+            "hihat-open" => (kit::hihat_grid_mu_with_gas(0.002, 0.0, &[], rim, 0.8, scale, kit::RIM_FRICTION, gas)?, hat, 0.0),
             "crash" => cym(kit::crash())?,
             "ride" => cym(kit::ride())?,
             other => return Err(format!("unknown piece {other}")),

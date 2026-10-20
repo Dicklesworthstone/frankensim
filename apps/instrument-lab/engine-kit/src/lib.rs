@@ -22,6 +22,14 @@ mod wasm {
         pub fn new(piece: &str, grid_scale: f64) -> Result<KitPiece, JsError> {
             Live::new(piece, grid_scale).map(|live| KitPiece { live, scale: grid_scale }).map_err(|e| JsError::new(&e))
         }
+        /// Use the shared material gas grammar: `T P RH`, or
+        /// `mixture T P mole|mass COUNT SPECIES FRACTION ...` (SI units).
+        #[wasm_bindgen(js_name = withGas)]
+        pub fn with_gas(piece: &str, grid_scale: f64, gas_record: &str) -> Result<KitPiece, JsError> {
+            Live::with_gas_record(piece, grid_scale, gas_record)
+                .map(|live| KitPiece { live, scale: grid_scale })
+                .map_err(|e| JsError::new(&e))
+        }
         /// A second piece in exactly this one's state: it renders the same samples as this one would.
         /// Building a snare or a hi-hat is almost all its settle, so a copy is far cheaper than `new`.
         pub fn copy(&self) -> KitPiece {
@@ -70,8 +78,10 @@ mod wasm {
         pub fn info(&self) -> String {
             let b: Vec<String> = self.live.ins.bodies.iter().map(|b| format!("{{\"name\":\"{}\",\"nodes\":{}}}", b.name, b.n)).collect();
             format!(
-                "{{\"piece\":\"{}\",\"gridScale\":{},\"radius\":{},\"surfaceNodes\":{},\"h\":{},\"rate\":{},\"bodies\":[{}]}}",
-                self.live.name, self.scale, self.live.radius, self.live.surface_xy().len() / 2, self.live.surface_h(), self.live.ins.rate, b.join(",")
+                "{{\"piece\":\"{}\",\"gridScale\":{},\"radius\":{},\"surfaceNodes\":{},\"h\":{},\"rate\":{},\"gas\":{{\"temperatureK\":{},\"pressurePa\":{},\"densityKgM3\":{},\"soundSpeedMps\":{}}},\"bodies\":[{}]}}",
+                self.live.name, self.scale, self.live.radius, self.live.surface_xy().len() / 2, self.live.surface_h(), self.live.ins.rate,
+                self.live.ins.gas().temperature, self.live.ins.gas().pressure,
+                self.live.ins.gas().density, self.live.ins.gas().sound_speed, b.join(",")
             )
         }
     }

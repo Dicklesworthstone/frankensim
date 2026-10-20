@@ -161,7 +161,10 @@ class LaneWorker<R> {
 
 // ------------------------------------------------------------------ kit piece lanes
 export interface KitReady {
-  info: { piece: string; gridScale: number; radius: number; surfaceNodes: number; h: number; bodies: { name: string; nodes: number }[] };
+  info: { piece: string; gridScale: number; radius: number; surfaceNodes: number; h: number; bodies: { name: string; nodes: number }[];
+    gas?: { temperatureK: number; pressurePa: number; densityKgM3: number; soundSpeedMps: number } };
+  /** Exact requested atmosphere, retained through every grid trial and rebuild. */
+  gasRecord?: string;
   xy: Float32Array;
   h: number;
   radius: number;
@@ -225,8 +228,10 @@ export class KitLane {
   /**
    * `chunk`: most frames per audio message (default 128; a score lane far ahead can send larger ones, see lane.js).
    * `benchMs`: how much of one stroke each grid is timed over (default 112 ms; see kit/worker.js).
+   * `gasRecord`: one canonical gas-state record retained through grid trials and rebuilding; an
+   * explicit record requires an engine with material-atmosphere support.
    */
-  constructor(mix: LiveMix, piece: string, opts: { gain: number; aheadFrames?: number; chunk?: number; scales?: number[]; minRealtime?: number; benchMs?: number; fieldHz?: number; fieldFrames?: number; bursts?: boolean }) {
+  constructor(mix: LiveMix, piece: string, opts: { gain: number; gasRecord?: string; aheadFrames?: number; chunk?: number; scales?: number[]; minRealtime?: number; benchMs?: number; fieldHz?: number; fieldFrames?: number; bursts?: boolean }) {
     this.piece = piece;
     this.lane = new LaneWorker<KitReady>(`${LIVE_BASE_URL}/kit/worker.js`, `kit-${piece}`, `the ${piece} engine`, mix, piece, (m) => {
       if (m.type === "field") this.onField?.(m as unknown as KitField);

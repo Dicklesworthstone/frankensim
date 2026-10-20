@@ -4,7 +4,10 @@
 // 5x (levels.js, engine_levels.json beside the wasm).
 //
 // Main thread -> worker
-//   {type:'init', piece, port, gain?, aheadFrames?, chunk?, scales?, minRealtime?, benchMs?, fieldHz?, fieldFrames?, bursts?}
+//   {type:'init', piece, port, gasRecord?, gain?, aheadFrames?, chunk?, scales?, minRealtime?, benchMs?, fieldHz?, fieldFrames?, bursts?}
+//       gasRecord    shared material record: `T_K P_Pa RH`, or
+//                    `mixture T_K P_Pa mole|mass COUNT SPECIES FRACTION ...`
+//                    Held for every grid trial, clone and fallback construction.
 //       chunk        most frames per audio message (default 128; lane.js)
 //       fieldHz      fields per second of wall time (0: no fields)
 //       fieldFrames  instead: one field every this many AUDIO frames (even spacing however far
@@ -24,7 +27,7 @@
 //   {type:'stop'}                           end the sequence (ringing continues)
 //   {type:'gain', gain}                     a new page gain (scaled by the same levelFix)
 // Worker -> main thread
-//   {type:'ready', info, xy:Float32Array, h, radius, scale, realtime, levelFix, levels}
+//   {type:'ready', info, gasRecord?, xy:Float32Array, h, radius, scale, realtime, levelFix, levels}
 //       levelFix  the factor on the page's gain for this grid (1 on 5x); levels: 'ok', or 'none' when
 //                 engine_levels.json is missing or was measured with another wasm (gain unscaled)
 //   {type:'burst', frame, stepMs, count, v:Float32Array}    the first milliseconds after a stroke: `count`
@@ -105,6 +108,19 @@ function copyOf(p) {
   }
 }
 
+// The material owner admits the record; the browser never substitutes another
+// gas after a refused constructor or when a deployed WASM predates withGas.
+function makePiece(name, scale, gasRecord) {
+  if (gasRecord === undefined) return new KitPiece(name, scale);
+  if (typeof gasRecord !== 'string' || !gasRecord.trim()) {
+    throw new Error('A nonempty atmosphere record is required.');
+  }
+  if (typeof KitPiece.withGas !== 'function') {
+    throw new Error('This kit engine needs rebuilding with atmosphere support; the selected gas was not applied.');
+  }
+  return KitPiece.withGas(name, scale, gasRecord);
+}
+
 // The finest of `scales` (listed finest first) that runs `minRealtime` times faster than real time; if none
 // does, the coarsest. The grids are timed from the coarse end, stepping finer until one falls short. A finer
 // grid has more nodes and never runs faster, so this is the grid a finest-first search picks. But no grid finer
@@ -118,15 +134,15 @@ function copyOf(p) {
 // The first timing in a Worker runs while V8 is still optimizing the engine code, and can read slow. A
 // shortfall there is timed once more, on a new build, before it ends the search.
 let timed = 0;
-function choose(name, scales, minRealtime, benchMs) {
+function choose(name, scales, minRealtime, benchMs, gasRecord) {
   let pick = null;
   for (let i = scales.length - 1; i >= 0; i--) {
     let kept = null, rt;
     try {
-      const built = new KitPiece(name, scales[i]);
+      const built = makePiece(name, scales[i], gasRecord);
       kept = copyOf(built);
       rt = bench(built, benchMs, minRealtime);
-      if (timed++ === 0 && rt < minRealtime) rt = bench(new KitPiece(name, scales[i]), benchMs, minRealtime);
+      if (timed++ === 0 && rt < minRealtime) rt = bench(makePiece(name, scales[i], gasRecord), benchMs, minRealtime);
     } catch {
       kept?.free();
       continue; // refused (the grid needs oversampling at 48 kHz) or failed: skip it, as a finest-first search would
@@ -140,7 +156,7 @@ function choose(name, scales, minRealtime, benchMs) {
     pick = { scale: scales[i], realtime: rt, piece: kept };
   }
   if (pick) return pick;
-  const built = new KitPiece(name, 5);
+  const built = makePiece(name, 5, gasRecord);
   const kept = copyOf(built);
   try {
     return { scale: 5, realtime: bench(built, benchMs, minRealtime), piece: kept };
@@ -162,8 +178,9 @@ self.onmessage = async (event) => {
       if (Number.isFinite(m.fieldHz)) fieldEvery = m.fieldHz > 0 ? 1000 / m.fieldHz : Infinity;
       if (Number(m.fieldFrames) > 0) { fieldFrames = Math.max(128, Math.round(Number(m.fieldFrames))); fieldEvery = Infinity; }
       if (m.bursts === false) bursts = false;
-      const pick = choose(m.piece, m.scales || [2.5, 3, 3.5, 4, 5, 6, 7, 8], m.minRealtime || 1.7, Number(m.benchMs) > 0 ? Number(m.benchMs) : 112);
-      piece = pick.piece || new KitPiece(m.piece, pick.scale);
+      const gasRecord = m.gasRecord;
+      const pick = choose(m.piece, m.scales || [2.5, 3, 3.5, 4, 5, 6, 7, 8], m.minRealtime || 1.7, Number(m.benchMs) > 0 ? Number(m.benchMs) : 112, gasRecord);
+      piece = pick.piece || makePiece(m.piece, pick.scale, gasRecord);
       fix = levelFix(table, m.piece, pick.scale, pageGain);
       gain = pageGain * fix;
       const engine = {
@@ -223,7 +240,7 @@ self.onmessage = async (event) => {
       };
       lane = createLane(m.port, engine, { aheadFrames: m.aheadFrames || 1024, chunk: m.chunk });
       const xy = piece.surfaceXY();
-      post({ type: 'ready', info: JSON.parse(piece.info()), xy, h: piece.surfaceH(), radius: piece.radius(), scale: pick.scale, realtime: pick.realtime, levelFix: fix, levels: table ? 'ok' : 'none' }, [xy.buffer]);
+      post({ type: 'ready', info: JSON.parse(piece.info()), gasRecord, xy, h: piece.surfaceH(), radius: piece.radius(), scale: pick.scale, realtime: pick.realtime, levelFix: fix, levels: table ? 'ok' : 'none' }, [xy.buffer]);
     } else if (!piece || !lane) {
       return;
     } else if (m.type === 'strike') {

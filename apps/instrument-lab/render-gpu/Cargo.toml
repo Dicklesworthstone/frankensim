@@ -5,8 +5,8 @@ edition = "2024"
 publish = false
 description = "Offline drum-kit renders on an NVIDIA GPU when one is present (one persistent CUDA kernel stepping the exported fs-vkplate instrument), on the CPU otherwise. An optional accelerator for the instrument lab, outside the workspace; fs-vkplate's CPU step stays the reference."
 
-# Its own workspace (the engine-kit pattern): fs-vkplate is std only, and nothing in the main workspace
-# builds or links this tool or its GPU bindings.
+# Its own workspace (the engine-kit pattern): fs-vkplate shares the native
+# material owner; the main workspace does not link this tool's GPU bindings.
 [workspace]
 
 [[bin]]

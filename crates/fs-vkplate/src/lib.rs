@@ -30,8 +30,17 @@
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
 
-pub const RHO_AIR: f64 = 1.204;
-pub const C_AIR: f64 = 343.0;
+pub use fs_material::gas::GasState;
+
+/// Default environmental datum; all coefficients come from the shared gas law.
+/// Custom atmospheres enter through `Instrument::with_gas`.
+pub fn standard_gas() -> GasState {
+    GasState::try_new_moist_air(293.15, 101_325.0, 0.0)
+        .expect("the standard dry-air state is in the material model's domain")
+}
+
+#[cfg(test)]
+mod material_gas_tests;
 
 // ----------------------------------------------------------------------------- sparse
 #[derive(Clone, Debug, Default)]
@@ -1088,8 +1097,8 @@ pub struct RadDamp {
 }
 
 impl RadDamp {
-    pub fn monopole(bodies: Vec<usize>, f_ref: f64) -> RadDamp {
-        RadDamp { bodies, resistance: RHO_AIR * (2.0 * PI * f_ref).powi(2) / (4.0 * PI * C_AIR) }
+    pub fn monopole(bodies: Vec<usize>, f_ref: f64, gas: &GasState) -> RadDamp {
+        RadDamp { bodies, resistance: gas.density * (2.0 * PI * f_ref).powi(2) / (4.0 * PI * gas.sound_speed) }
     }
 }
 
@@ -1634,13 +1643,31 @@ pub struct Instrument {
     pub mics: Vec<Mic>,
     pub rate: f64,
     pub step_index: u64,
+    // One admitted stationary medium for cavities, ports, exterior loading and
+    // microphones. Changing it during a trajectory requires physical state and
+    // parameter-work transfer, so callers build a new instrument instead.
+    gas: GasState,
     prepared: bool,
     cq: ContactQueue,
 }
 
 impl Instrument {
     pub fn new(rate: f64) -> Instrument {
-        Instrument { bodies: vec![], cavities: vec![], rads: vec![], links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, prepared: false, cq: ContactQueue::default() }
+        Self::with_gas(rate, standard_gas()).expect("instrument sample rate must be positive and finite")
+    }
+    /// Assemble in a coherent material-resolved, spatially uniform atmosphere.
+    /// Temperature, pressure and composition are evaluated by fs-material;
+    /// independent density/sound-speed edits are refused before assembly.
+    pub fn with_gas(rate: f64, gas: GasState) -> Result<Instrument, String> {
+        gas.validate_coherence().map_err(|e| e.to_string())?;
+        if !rate.is_finite() || rate <= 0.0 {
+            return Err("instrument sample rate must be positive and finite".into());
+        }
+        Ok(Instrument { bodies: vec![], cavities: vec![], rads: vec![], links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, prepared: false, cq: ContactQueue::default() })
+    }
+    /// The same material snapshot used by every gas-dependent operator.
+    pub const fn gas(&self) -> &GasState {
+        &self.gas
     }
     pub fn add(&mut self, b: Body) -> usize {
         self.bodies.push(b);
@@ -1679,7 +1706,45 @@ impl Instrument {
             let lam = if image.vk.is_some() { linear.max(image.max_rate2_with_shell()) } else { linear };
             if lam > worst.0 { worst = (lam, b.name.clone()); }
         }
+        let gas_rate2 = self.gas_admission_rate2(self.rate);
+        if gas_rate2 > 0.0 {
+            worst.0 += gas_rate2;
+            worst.1.push_str(" + gas coupling");
+        }
         worst
+    }
+
+    // Separate the rate-dependent gas bound from the expensive structural
+    // eigensolve so clock selection can evaluate every candidate correctly.
+    fn gas_admission_rate2(&self, rate: f64) -> f64 {
+        // Each cavity is a positive rank-one stiffness in volume displacement.
+        // Its sole mass-normalized eigenvalue is K_V * sum(u_i^2 / m_i),
+        // including the port coordinate's inverse inertance. Adding these
+        // bounds to the structural estimate prevents a light/hot or compressed
+        // gas from silently bypassing the timestep admission. Ignoring added
+        // gas mass is conservative. Explicit radiation adds 2 D / dt to the
+        // leapfrog stability inequality dt^2 K + 2 dt D < 4 M.
+        let inverse_volume_mass = |heads: &[usize]| -> f64 {
+            heads.iter().map(|&index| {
+                let body = &self.bodies[index];
+                body.h.powi(4) * body.mass.iter().map(|m| 1.0 / m).sum::<f64>()
+            }).sum()
+        };
+        let mut gas_rate2 = 0.0;
+        for cavity in &self.cavities {
+            let inverse_port_mass = cavity.port.as_ref()
+                .map_or(0.0, |port| port.area / (self.gas.density * port.length));
+            gas_rate2 += self.gas.density * self.gas.sound_speed.powi(2) / cavity.volume
+                * (inverse_volume_mass(&cavity.heads) + inverse_port_mass);
+            if let Some(port) = &cavity.port {
+                gas_rate2 += 2.0 * rate * port.resistance * inverse_port_mass;
+            }
+        }
+        for radiation in &self.rads {
+            gas_rate2 += 2.0 * rate * radiation.resistance
+                * inverse_volume_mass(&radiation.bodies);
+        }
+        gas_rate2
     }
 
     /// k^2 lambda_max / 4 including rest curvature; excludes contact and large-deflection changes.
@@ -1712,11 +1777,11 @@ impl Instrument {
                             continue; // the other side of this surface faces away from this path
                         }
                         let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                        let delay = r / C_AIR * self.rate;
+                        let delay = r / self.gas.sound_speed * self.rate;
                         let di = delay.floor() as usize;
                         let fr = delay - di as f64;
                         // w is the OUTWARD displacement of the facing side, so no sign flip
-                        let wgt = RHO_AIR * h2 / (2.0 * PI * r) / (k * k);
+                        let wgt = self.gas.density * h2 / (2.0 * PI * r) / (k * k);
                         m.taps.push((bi, i, di, wgt * (1.0 - fr), wgt * fr));
                         dmax = dmax.max(di + 2);
                     }
@@ -1730,10 +1795,10 @@ impl Instrument {
                         continue;
                     }
                     let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                    let delay = r / C_AIR * self.rate;
+                    let delay = r / self.gas.sound_speed * self.rate;
                     let di = delay.floor() as usize;
                     let fr = delay - di as f64;
-                    let wgt = RHO_AIR / (2.0 * PI * r);
+                    let wgt = self.gas.density / (2.0 * PI * r);
                     m.ptaps.push((ci, di, wgt * (1.0 - fr), wgt * fr));
                     dmax = dmax.max(di + 2);
                 }
@@ -1772,7 +1837,7 @@ impl Instrument {
                 let b = &self.bodies[hb];
                 dv += b.w.iter().sum::<f64>() * b.h * b.h;
             }
-            let p = -RHO_AIR * C_AIR * C_AIR / c.volume * (dv + c.port.as_ref().map_or(0.0, |q| q.x));
+            let p = -self.gas.density * self.gas.sound_speed.powi(2) / c.volume * (dv + c.port.as_ref().map_or(0.0, |q| q.x));
             for &hb in &c.heads {
                 let b = &mut self.bodies[hb];
                 let fa = p * b.h * b.h;
@@ -1782,8 +1847,7 @@ impl Instrument {
             }
             if let Some(q) = c.port.as_mut() {
                 // the air plug: rho L / A du/dt = p - R u (symplectic Euler, far below its limit)
-                let p = -RHO_AIR * C_AIR * C_AIR / c.volume * (dv + q.x);
-                let du = k * (p - q.resistance * q.u) * q.area / (RHO_AIR * q.length);
+                let du = k * (p - q.resistance * q.u) * q.area / (self.gas.density * q.length);
                 q.u += du;
                 q.du = du / k;
                 q.x += k * q.u;
@@ -1861,7 +1925,7 @@ impl Instrument {
             let mut y = m.ring[slot];
             if let Some(a) = m.unbaffled {
                 // bilinear first-order high-pass, H(s) = s tau / (1 + s tau)
-                let tau = 4.0 * a / (3.0 * PI * C_AIR);
+                let tau = 4.0 * a / (3.0 * PI * self.gas.sound_speed);
                 let g = 2.0 * tau * self.rate;
                 let (x1, y1) = m.hp;
                 let yn = (g * (y - x1) - (1.0 - g) * y1) / (1.0 + g);
@@ -1894,6 +1958,7 @@ impl Instrument {
             .collect();
         InstrumentImage {
             rate: self.rate,
+            gas: self.gas,
             step_index: self.step_index,
             bodies,
             cavities: self.cavities.clone(),
@@ -1973,6 +2038,8 @@ pub struct MicImage {
 #[derive(Clone)]
 pub struct InstrumentImage {
     pub rate: f64,
+    /// Retained coherent medium for external steppers and observation filters.
+    pub gas: GasState,
     pub step_index: u64,
     pub bodies: Vec<BodyImage>,
     pub cavities: Vec<Cavity>,
