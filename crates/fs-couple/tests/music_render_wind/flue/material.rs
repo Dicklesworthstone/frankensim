@@ -9,6 +9,8 @@ use fs_matdb::{
 };
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
 
+mod boundaries;
+
 fn pack(density: f64, young: f64, omit: Option<&str>, upper_omega: f64)
     -> NormalizedMaterialCardPack
 {
@@ -22,7 +24,9 @@ fn pack(density: f64, young: f64, omit: Option<&str>, upper_omega: f64)
     }).unwrap();
     for (name, dims, value) in [("density", Density::DIMS, density),
         ("young_modulus", Pressure::DIMS, young), ("poisson_ratio", Dims::NONE, 0.3),
-        ("kelvin_voigt_young_viscosity", DynViscosity::DIMS, 2.0)] {
+        ("kelvin_voigt_young_viscosity", DynViscosity::DIMS, 2.0),
+        ("boundary_modulus", Pressure::DIMS, 0.5 * young),
+        ("boundary_time", Dims([0, 0, 1, 0, 0, 0]), 0.001)] {
         if omit == Some(name) { continue; }
         claims.insert_claim(PropertyClaim { key: PropertyKey::new(name, dims),
             value: PropertyValue::Scalar { value, dims },

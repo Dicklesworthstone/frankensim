@@ -178,6 +178,8 @@ pub enum GestureValue {
     Multiplier(f64),
     /// Tension [N].
     TensionN(f64),
+    /// Signed mechanical force [N] for a dimensioned description parameter.
+    ForceN(f64),
     /// Pressure [Pa].
     PressurePa(f64),
     /// Velocity [m/s].
@@ -225,6 +227,7 @@ impl GestureValue {
             | GestureValue::Fraction(v)
             | GestureValue::Multiplier(v)
             | GestureValue::TensionN(v)
+            | GestureValue::ForceN(v)
             | GestureValue::PressurePa(v)
             | GestureValue::VelocityMPerS(v)
             | GestureValue::AngleRad(v) => v.is_finite(),
@@ -282,6 +285,7 @@ impl GestureValue {
             (Self::Fraction(a), Self::Fraction(b)) => Self::Fraction(lerp(*a, *b)),
             (Self::Multiplier(a), Self::Multiplier(b)) => Self::Multiplier(lerp(*a, *b)),
             (Self::TensionN(a), Self::TensionN(b)) => Self::TensionN(lerp(*a, *b)),
+            (Self::ForceN(a), Self::ForceN(b)) => Self::ForceN(lerp(*a, *b)),
             (Self::PressurePa(a), Self::PressurePa(b)) => Self::PressurePa(lerp(*a, *b)),
             (Self::VelocityMPerS(a), Self::VelocityMPerS(b)) => Self::VelocityMPerS(lerp(*a, *b)),
             (Self::AngleRad(a), Self::AngleRad(b)) => Self::AngleRad(lerp(*a, *b)),
@@ -312,6 +316,7 @@ impl GestureValue {
             | GestureValue::Fraction(v)
             | GestureValue::Multiplier(v)
             | GestureValue::TensionN(v)
+            | GestureValue::ForceN(v)
             | GestureValue::PressurePa(v)
             | GestureValue::VelocityMPerS(v)
             | GestureValue::AngleRad(v) => Some(*v),
@@ -940,6 +945,7 @@ fn encode_value(v: &GestureValue) -> String {
         GestureValue::Fraction(x) => format!("fraction\t{x:e}"),
         GestureValue::Multiplier(x) => format!("multiplier\t{x:e}"),
         GestureValue::TensionN(x) => format!("tension-n\t{x:e}"),
+        GestureValue::ForceN(x) => format!("force-n\t{x:e}"),
         GestureValue::PressurePa(x) => format!("pressure-pa\t{x:e}"),
         GestureValue::VelocityMPerS(x) => format!("velocity-m-s\t{x:e}"),
         GestureValue::AngleRad(x) => format!("angle-rad\t{x:e}"),
@@ -975,6 +981,7 @@ fn decode_value(s: &str) -> Option<GestureValue> {
         "fraction" => GestureValue::Fraction(num(&mut cols)?),
         "multiplier" => GestureValue::Multiplier(num(&mut cols)?),
         "tension-n" => GestureValue::TensionN(num(&mut cols)?),
+        "force-n" => GestureValue::ForceN(num(&mut cols)?),
         "pressure-pa" => GestureValue::PressurePa(num(&mut cols)?),
         "velocity-m-s" => GestureValue::VelocityMPerS(num(&mut cols)?),
         "angle-rad" => GestureValue::AngleRad(num(&mut cols)?),

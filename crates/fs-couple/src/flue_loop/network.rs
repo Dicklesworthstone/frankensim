@@ -8,6 +8,9 @@
 use super::{FlueError, FlueGeometry, FlueVoice};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::network::{SectionRealization, TubeNetworkSpec};
+use crate::bernoulli_aperture::network::boundaries::{
+    BoundaryAperture, BoundaryApertures, BoundaryDrive, BoundaryNetworkFrame,
+};
 use crate::bernoulli_aperture::fractional::{FractionalSection, FractionalTubePolicy};
 use crate::bernoulli_aperture::viscothermal::{
     ViscothermalSection, ViscothermalSectionSpec, with_regional_viscothermal_sections,
@@ -24,6 +27,8 @@ use crate::wind_line::WindLineBank;
 use fs_aeroac::jetcard::JetCard;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
+use fs_scenario::assembly::{ParameterKey, ParameterPath};
+use fs_scenario::entity::EntityId;
 use fs_vfit::waveguide::network::{NetworkFrame, NodeFrame, WaveguideNetwork};
 
 /// Original geometry, state and explicit approximation/work choices.
@@ -46,6 +51,39 @@ pub struct FlueNetworkSpec {
     pub max_jet_history_samples: usize,
 }
 
+/// An explicitly actuated physical boundary on the same source gas and graph.
+/// `closing_force` is a dimensioned description path, never a fingering preset.
+pub struct FlueBoundaryAperture {
+    /// Original driven endpoint and existing moving-slit mechanics.
+    pub boundary: BoundaryAperture,
+    /// Entity/parameter address of the nonnegative closing force [N].
+    pub closing_force: ParameterPath,
+    /// Initial externally applied closing force [N].
+    pub initial_closing_force_n: f64,
+    /// External reservoir pressure relative to the common equilibrium [Pa].
+    pub exterior_pressure_pa: f64,
+}
+
+/// Exact typed source controls consumed by the existing pressure/angle owner.
+/// A v2 performance contains only resolved paths; it never mixes legacy targets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlueSourcePaths {
+    /// Source blowing pressure in pascals.
+    pub pressure: ParameterPath,
+    /// Source jet direction in radians.
+    pub jet_angle: ParameterPath,
+}
+impl FlueSourcePaths {
+    /// Bind both physical parameters to an explicitly declared source entity.
+    #[must_use]
+    pub fn for_entity(entity: EntityId) -> Self {
+        Self {
+            pressure: ParameterPath { entity, parameter: ParameterKey::new("blowing_pressure", fs_scenario::gesture::path::PRESSURE) },
+            jet_angle: ParameterPath { entity, parameter: ParameterKey::new("jet_angle", fs_qty::Dims::NONE) },
+        }
+    }
+}
+
 /// The existing wave/load owner and its exact original material/geometry inputs.
 /// The jet card's estimate-only authority is not changed by this construction.
 pub struct FlueNetwork {
@@ -60,6 +98,10 @@ pub struct FlueNetwork {
     last: Option<NetworkFrame>,
     fractional: Option<(FractionalTubePolicy, Vec<FractionalSection>)>,
     mimo_environment: Option<MimoEnvironment>,
+    boundaries: Option<BoundaryApertures>,
+    boundary_paths: Vec<ParameterPath>,
+    boundary_drives: Vec<BoundaryDrive>,
+    source_paths: Option<FlueSourcePaths>,
 }
 
 pub(super) enum FlueResonator {
@@ -119,7 +161,8 @@ impl FlueNetwork {
         };
         poll(gate)?;
         Ok(Self { source, wall_input, walls, graph, gases, represented, losses, physics,
-            last: None, fractional, mimo_environment: None })
+            last: None, fractional, mimo_environment: None, boundaries: None,
+            boundary_paths: Vec::new(), boundary_drives: Vec::new(), source_paths: None })
     }
     /// Original data before any loss-cell subdivision.
     #[must_use]
@@ -179,7 +222,26 @@ impl FlueNetwork {
     pub const fn last_frame(&self) -> Option<&NetworkFrame> { self.last.as_ref() }
     /// Actual wave plus reactive-load storage, not an integrated work estimate.
     #[must_use]
-    pub fn stored_energy_j(&self) -> f64 { self.physics.stored_energy_j() }
+    pub fn stored_energy_j(&self) -> f64 {
+        self.physics.stored_energy_j() + self.boundaries.as_ref().map_or(0.0, BoundaryApertures::stored_energy_j)
+    }
+    /// Original boundary mechanics, contact and retained material histories.
+    pub const fn boundary_apertures(&self) -> Option<&BoundaryApertures> { self.boundaries.as_ref() }
+    /// Explicitly bound pressure/angle consumers for all-typed v2 performances.
+    pub const fn source_control_paths(&self) -> Option<&FlueSourcePaths> { self.source_paths.as_ref() }
+    /// Physical node addressed by an explicitly bound closing-force parameter.
+    pub fn boundary_node(&self, path: &ParameterPath) -> Option<usize> {
+        self.boundary_paths.iter().position(|p| p == path).map(|i| self.boundary_drives[i].node)
+    }
+    /// Current prescribed reservoir pressure and signed mechanical force. A
+    /// control changes this input only; state advances with the shared next step.
+    pub fn boundary_drive(&self, node: usize) -> Option<&BoundaryDrive> {
+        self.boundary_drives.iter().find(|drive| drive.node == node)
+    }
+    /// Last combined network/boundary work, including independent exterior loads.
+    pub fn boundary_frame(&self) -> Option<&BoundaryNetworkFrame> {
+        self.boundaries.as_ref()?.last_frame()
+    }
     /// Source-bound mutual terminal operator actually installed in this network.
     #[must_use]
     pub const fn mimo_environment(&self) -> Option<&MimoEnvironment> { self.mimo_environment.as_ref() }
@@ -203,7 +265,10 @@ impl FlueResonator {
         match self {
             Self::Tmm(line) => line.push(outgoing).map_err(FlueError::Line),
             Self::Network(n) => {
-                let frame = n.physics.step(outgoing).map_err(wave)?;
+                let frame = if let Some(boundaries) = &mut n.boundaries {
+                    boundaries.step(&mut n.physics, outgoing, &n.boundary_drives)
+                        .map_err(physical)?.network
+                } else { n.physics.step(outgoing).map_err(wave)? };
                 n.last = Some(frame);
                 Ok(n.physics.incoming_pressure_pa())
             }
@@ -229,6 +294,84 @@ impl FlueResonator {
 }
 
 impl FlueVoice {
+    /// Attach the actual source's entity paths before rendering. The legacy v1
+    /// targets remain available; every v2 track must resolve an explicit path.
+    pub fn with_source_control_paths(mut self, paths: FlueSourcePaths) -> Result<Self, FlueError> {
+        if self.poisoned || self.samples != 0
+            || paths != FlueSourcePaths::for_entity(paths.pressure.entity) {
+            return Err(invalid("source controls require cold, coherent pressure/angle parameter paths"));
+        }
+        let FlueResonator::Network(network) = &mut self.line else {
+            return Err(invalid("typed source controls require the explicit physical graph"));
+        };
+        if network.source_paths.is_some() { return Err(invalid("source control paths are already bound")); }
+        network.source_paths = Some(paths);
+        Ok(self)
+    }
+
+    /// Attach material/contact boundaries before the first source step. Each
+    /// opening keeps its full original chimney and mechanical histories during
+    /// later force changes. This exposes the existing moving-slit approximation;
+    /// it does not infer circular pads, key levers or their material coefficients.
+    pub fn with_boundary_apertures(mut self, inputs: Vec<FlueBoundaryAperture>,
+        max_apertures: usize, gate: &CancelGate) -> Result<Self, FlueError>
+    {
+        poll(gate)?;
+        if self.poisoned || self.samples != 0 || !(1..=64).contains(&max_apertures)
+            || inputs.is_empty() || inputs.len() > max_apertures {
+            return Err(invalid("moving boundaries require a cold flue and an explicit count allowance"));
+        }
+        let FlueResonator::Network(network) = &mut self.line else {
+            return Err(invalid("moving boundaries require the explicit physical tube graph"));
+        };
+        if network.boundaries.is_some() { return Err(invalid("moving boundaries are already bound")); }
+        let mut paths = Vec::with_capacity(inputs.len());
+        let mut drives = Vec::with_capacity(inputs.len());
+        let mut mechanics = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            poll(gate)?;
+            if input.closing_force.parameter.name != "closing_force"
+                || input.closing_force.parameter.dims != fs_scenario::gesture::path::FORCE
+                || paths.contains(&input.closing_force)
+                || !input.initial_closing_force_n.is_finite() || input.initial_closing_force_n < 0.0
+                || !input.exterior_pressure_pa.is_finite() {
+                return Err(invalid("moving boundaries need distinct force-dimensioned closing_force paths and finite physical drives"));
+            }
+            paths.push(input.closing_force);
+            drives.push(BoundaryDrive { node: input.boundary.node,
+                exterior_pressure_pa: input.exterior_pressure_pa,
+                opening_force_n: -input.initial_closing_force_n });
+            mechanics.push(input.boundary);
+        }
+        let boundaries = BoundaryApertures::new(&network.graph, &network.gases,
+            &network.physics, mechanics, max_apertures).map_err(physical)?;
+        poll(gate)?;
+        network.boundaries = Some(boundaries);
+        network.boundary_paths = paths;
+        network.boundary_drives = drives;
+        Ok(self)
+    }
+
+    /// Admission of a source closing-force assignment without changing state.
+    pub fn validate_boundary_closing_force(&self, node: usize, force_n: f64) -> Result<(), FlueError> {
+        let FlueResonator::Network(network) = &self.line else {
+            return Err(invalid("boundary force requires an explicitly bound physical graph"));
+        };
+        if !force_n.is_finite() || force_n < 0.0
+            || !network.boundary_drives.iter().any(|drive| drive.node == node) {
+            return Err(invalid("boundary closing force must be nonnegative finite newtons at a bound node"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn set_boundary_closing_force(&mut self, node: usize, force_n: f64) -> Result<(), FlueError> {
+        self.validate_boundary_closing_force(node, force_n)?;
+        let FlueResonator::Network(network) = &mut self.line else { unreachable!("admitted graph"); };
+        network.boundary_drives.iter_mut().find(|drive| drive.node == node)
+            .expect("admitted boundary").opening_force_n = -force_n;
+        Ok(())
+    }
+
     /// Attach a source-bound mutual radiation operator to an unadvanced physical
     /// jet/bore, preserving its original walls, gases, losses, windway and seed.
     /// One matrix solve returns pressure to every selected outlet in the SAME

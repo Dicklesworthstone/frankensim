@@ -122,6 +122,32 @@ fn flue_wall_provenance(p: &FlueFilePerformance) -> String {
     format!(",\"material_walls\":[{records}],\"wall_strips\":{},\"wall_model_scope\":\"{scope}\"",walls.len())
 }
 
+fn flue_boundary_provenance(p: &FlueFilePerformance) -> String {
+    let network = p.renderer().voice().network().expect("file admits graph");
+    let records = p.boundary_records().iter().map(|record| {
+        let aperture = network.boundary_apertures().expect("source-bound apertures")
+            .aperture(record.node()).expect("original boundary address");
+        let plate = aperture.plate_reduction().expect("source-bound plate");
+        let material = &plate.material_chart().expect("retained material chart").regions()[0].input.material;
+        let spec = aperture.spec();
+        let drive = network.boundary_drive(record.node()).expect("original prescribed drive");
+        let terms = aperture.relaxation().map_or_else(String::new, |memory|
+            memory.spec().regions[0].material.terms.iter().map(|(modulus, time)|
+                format!("{{\"modulus_pa\":{modulus:e},\"relaxation_time_s\":{time:e}}}"))
+                .collect::<Vec<_>>().join(","));
+        let slit = aperture.viscous_slit().map_or_else(|| "null".into(), |law|
+            format!("{{\"length_m\":{:e},\"dynamic_viscosity_pa_s\":{:e},\"source\":\"local-chimney-gas\"}}",
+                law.length_m(), law.dynamic_viscosity_pa_s()));
+        format!("{{\"node\":{},\"model\":\"material-cantilever-slit-v1\",\"propagator\":\"exact-zoh\",\"pack_path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"resolved_state_hash\":\"{}\",\"force_entity\":{},\"force_parameter\":\"closing_force\",\"force_dimensions\":[1,1,-2,0,0,0],\"initial_closing_force_n\":{:e},\"exterior_pressure_pa\":{:e},\"mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"slit_width_m\":{:e},\"rest_gap_m\":{:e},\"local_density_kg_m3\":{:e},\"local_impedance_pa_s_m3\":{:e},\"maxwell_terms\":[{terms}],\"viscous_slit\":{slit}}}",
+            record.node(), json_string(record.path()), record.pack().content_hash().to_hex(),
+            material.card_identity().to_hex(), material.identity().to_hex(),
+            json_string(&record.closing_force().entity.token()), -drive.opening_force_n,
+            drive.exterior_pressure_pa, spec.mass_kg, spec.stiffness_n_m, plate.pressure_area_m2(),
+            plate.width_m(), spec.aperture.rest_opening_m, spec.density_kg_m3, spec.impedance_pa_s_m3)
+    }).collect::<Vec<_>>().join(",");
+    format!(",\"moving_boundaries\":[{records}],\"boundary_model_scope\":\"one material plate opening mode with contact, swept volume and retained chimney state; prescribed exterior pressure; not a circular pad or resolved key linkage\"")
+}
+
 struct Loaded {
     source: Box<dyn PressureRenderer>, rate:u32, samples:u64, full_scale_pa:f64,
     hash:ContentHash, fixture:&'static str, source_json:String,
@@ -293,6 +319,7 @@ fn load_with_sources(
         let receiver = renderer.config().receiver;
         let duct_json = flue_duct_provenance(renderer);
         let wall_json = flue_wall_provenance(&p);
+        let boundary_json = flue_boundary_provenance(&p);
         let reaction = !p.radiation_bindings().is_empty();
         let radiation_json = p.radiation_bindings().iter().map(|binding| format!(
             "{{\"node\":{},\"original_reflection\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e}{}}}",
@@ -302,7 +329,7 @@ fn load_with_sources(
         let observation_scope = if reaction {
             "in-loop independent compact baffled terminal reaction and matched-medium outlet pressure"
         } else { "one-way infinite-baffle outlet pressure; supplied passive loads" };
-        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; wall image separately declared; no full shell dynamics, broadband unbaffled or mutual radiation, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{duct_json}{wall_json}}}",
+        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; wall image separately declared; no full shell dynamics, broadband unbaffled or mutual radiation, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{duct_json}{wall_json}{boundary_json}}}",
             i.jet_card_source,i.jet_card_hash,p.card().claim.kind(),p.card().authority.label(),i.compiled_controls,
             geometry.flue_width_m,geometry.flue_height_m,geometry.cut_up_m,geometry.labium_offset_m,
             geometry.jet_angle_rad,geometry.mouth_loss_rel,island.displacement_gain,island.seed_amplitude_rel,

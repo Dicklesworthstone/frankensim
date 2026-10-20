@@ -31,6 +31,7 @@ impl Input {
                 let mut row = rows.row("duct_node")?;
                 let node = match row.fields.next() {
                     Some("inlet") => NetworkNode::Inlet,
+                    Some("driven") => NetworkNode::Driven,
                     Some("junction") => NetworkNode::Junction,
                     Some("reflection") => {
                         let reflection = row.scalar()?;

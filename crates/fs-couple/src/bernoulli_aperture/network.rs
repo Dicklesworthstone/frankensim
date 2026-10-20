@@ -14,6 +14,8 @@ use fs_exec::CancelGate;
 use fs_material::gas::GasState;
 /// Prescribed piecewise gas states on the existing acoustic graph.
 pub mod regional;
+/// Multiple moving boundaries on the original retained network waves.
+pub mod boundaries;
 use fs_vfit::waveguide::network::{NetworkFrame, NetworkSegment, WaveguideNetwork};
 pub use fs_vfit::waveguide::network::{NetworkNode, NodeFrame};
 

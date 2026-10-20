@@ -385,6 +385,14 @@ pub enum FlueControl {
     /// The existing geometric cut law changes the injected flow; all acoustic,
     /// convection and fluid-momentum histories remain live.
     SetJetAngle(f64),
+    /// Nonnegative physical closing force at an explicitly bound graph endpoint.
+    /// The existing mechanical/contact state evolves on subsequent samples.
+    SetBoundaryClosingForce {
+        /// Original explicitly driven node address.
+        node: usize,
+        /// Nonnegative closing force [N].
+        force_n: f64,
+    },
     /// Switch fingering on the char image with a crossfade.
     Fingering {
         /// Fingering index in the chart.
@@ -653,6 +661,9 @@ impl FlueVoice {
             FlueControl::SetJetAngle(angle) => {
                 self.validate_jet_angle(angle)?;
                 self.geometry.jet_angle_rad = angle;
+            }
+            FlueControl::SetBoundaryClosingForce { node, force_n } => {
+                self.set_boundary_closing_force(node, force_n)?;
             }
             FlueControl::Fingering {
                 index,

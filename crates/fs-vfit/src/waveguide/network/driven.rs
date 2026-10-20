@@ -8,6 +8,10 @@ pub struct DrivenBoundary {
     pub node: usize,
     /// Original adjacent section index in the network's ordered section input.
     pub section: usize,
+    /// Complete integer transit of that same retained section [samples].
+    pub one_way_samples: usize,
+    /// Original optional sub-sample transit; absent means integer travel.
+    pub fractional_transit: Option<crate::waveguide::fractional::FractionalTransit>,
     /// Wave arriving from this endpoint's own adjacent section [Pa].
     pub incoming_pressure_pa: f64,
     /// That section's positive pressure/volume-flow impedance [Pa s/m³].
@@ -45,8 +49,10 @@ impl WaveguideNetwork {
             return Err(WaveguideError("driven boundary requires an explicitly driven node"));
         }
         let port = self.ports[self.offsets[node]];
+        let line = &self.lines[port / 2];
         Ok(DrivenBoundary { node, section: port / 2, incoming_pressure_pa: self.arriving(port),
-            impedance_pa_s_m3: self.lines[port / 2].spec.impedance_pa_s_m3 })
+            one_way_samples: line.spec.one_way_samples, fractional_transit: line.fractional_transit(),
+            impedance_pa_s_m3: line.spec.impedance_pa_s_m3 })
     }
 
     pub(super) fn validate_driven(&self, waves: &[DrivenWave]) -> Result<(), WaveguideError> {

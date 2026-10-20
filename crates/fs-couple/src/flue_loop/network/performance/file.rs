@@ -30,7 +30,10 @@ use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 
 mod duct;
 mod wall;
+mod material;
+mod boundary;
 pub use wall::{FlueWallRecord, MAX_FLUE_WALL_PACK_BYTES};
+pub use boundary::{FlueBoundaryRecord, boundary_closing_force_path, flue_source_control_paths};
 
 /// Versioned SI source grammar; the suffix is the existing gesture format.
 pub const FLUE_PERFORMANCE_SCHEMA: &str = "frankensim-flue-performance-v1";
@@ -101,7 +104,7 @@ pub struct FluePerformanceInfo {
     pub jet_card_hash: u64,
     /// Exact explicit selector, or an inline canonical card.
     pub jet_card_source: &'static str,
-    /// Pressure and optional jet-angle assignments on the mechanical clock.
+    /// Pressure, optional jet-angle and physical force assignments on one clock.
     pub compiled_controls: usize,
 }
 
@@ -113,6 +116,7 @@ pub struct FlueFilePerformance {
     card: JetCard,
     gas_records: Vec<GasRecord>,
     wall_records: Vec<FlueWallRecord>,
+    boundary_records: Vec<FlueBoundaryRecord>,
     radiation_bindings: Vec<BaffledOutletBinding>,
 }
 impl FlueFilePerformance {
@@ -146,6 +150,47 @@ impl FlueFilePerformance {
     /// junction; geometry and gas assignments stay unchanged. The original wall
     /// owner covers half of each adjacent physical section, leaving unselected
     /// and endpoint half-strips rigid. `walls none` or no row retains rigid walls.
+    ///
+    /// Optional `boundaries COUNT` follows the wall records and binds every
+    /// `duct_node driven` in ascending node order to a material cantilever slit.
+    /// Each boundary has the following records (all numeric quantities are SI):
+    /// ```text
+    /// boundary NODE ASSEMBLY_NAME PART_NAME INITIAL_CLOSING_FORCE_N EXTERIOR_PRESSURE_PA
+    /// boundary_plate PACK T_K OMEGA_RAD_S LENGTH_M WIDTH_M THICKNESS_M NX NY REST_GAP_M INITIAL_GAP_M INITIAL_VELOCITY_M_S
+    /// boundary_mode FMIN_HZ FMAX_HZ MODE_INDEX MAX_SLIT_VARIATION MAX_SLOPE
+    /// boundary_contact STIFFNESS_N_PER_M_ALPHA ALPHA INTERNAL_LOSS_S_PER_M
+    /// boundary_slit LENGTH_M
+    /// boundary_loss maxwell COUNT FMIN_HZ FMAX_HZ MAX_DT_OVER_TAU MAX_ANGULAR_STEP
+    /// boundary_term MODULUS_PROPERTY TIME_PROPERTY
+    /// ```
+    /// `boundary_loss elastic` instead selects an explicit lossless solid. The
+    /// `boundary_slit` row is optional; `none` selects the original separated
+    /// Bernoulli flow. A supplied streamwise length adds the existing slit law
+    /// using the actual chimney gas's viscosity and density. NX/NY are rectangle
+    /// cell counts, with x=0 clamped and x=L the moving slit. Mode selection uses
+    /// the original DKT pencil; no mass, stiffness, pressure area, frequency or
+    /// damping coefficient is fitted from the instrument name. `young_modulus`
+    /// is the equilibrium modulus when Maxwell terms are selected; every term's
+    /// modulus [Pa] and relaxation time [s] is resolved from that same card/state.
+    /// The finite exact structural block carries the original material memories.
+    /// Every selected solid property must be constant at the declared temperature
+    /// and applicable over the Maxwell use band, or the mode search band for an
+    /// elastic solid. A sampled frequency-dependent modulus is not silently frozen.
+    ///
+    /// [`boundary_closing_force_path`] derives the exact part identity and force
+    /// dimensions from ASSEMBLY_NAME/PART_NAME. A canonical v2 `Parameter` track
+    /// with that path and `force-n` values drives nonnegative closing force;
+    /// ramps use the shared gesture owner. Omitting that track retains the declared
+    /// initial force. Before `controls`, `control_source ASSEMBLY_NAME PART_NAME` binds
+    /// the jet source through [`flue_source_control_paths`]. Use its pressure and
+    /// optional angle paths in the same v2 schedule; v2 requires every track to
+    /// be a resolved path and never mixes legacy target labels with force paths.
+    /// Controls preserve all chimney waves, trapped pressure, contact and
+    /// Maxwell history. The source is a uniform moving slit with one plate mode;
+    /// it does not infer a circular pad, key linkage or moving three-dimensional
+    /// opening, and its exterior pressure is prescribed rather than a second
+    /// nonlinear mutual-radiation solve. Other passive outlets retain their loads.
+    ///
     /// An optional `radiation prescribed` or `radiation compact-baffled` row then
     /// selects whether every observed outlet retains its supplied load or receives
     /// the existing compact passive load in the same exterior as the receiver.
@@ -210,7 +255,7 @@ impl FlueFilePerformance {
             return Err(bad(rows.line, "output clock must be 8..192 kHz and mechanics an integer multiple in 1..=16"));
         }
         let mut row = rows.row("output")?;
-        let samples = row.number()?;
+        let samples: u64 = row.number()?;
         let full_scale_pa = row.scalar()?;
         let maximum_abs_pressure_pa = row.scalar()?;
         row.end()?;
@@ -230,6 +275,7 @@ impl FlueFilePerformance {
         };
         let mut duct = duct::Input::read(&mut rows, gas, sources, &mut gas_records, gate)?;
         let walls = wall::ParsedWalls::read(&mut rows)?;
+        let boundaries = boundary::ParsedBoundaries::read(&mut rows)?;
         let radiation_reaction = if rows.next_is("radiation") {
             match rows.record("radiation")? {
                 "prescribed" => false,
@@ -309,6 +355,7 @@ impl FlueFilePerformance {
             return Err(bad(rows.line, "fractional phase band must cover the receiver's declared band"));
         }
         let (outlet_node, additional_outlets) = duct.read_outlets(&mut rows)?;
+        let control_source = boundary::read_control_source(&mut rows)?;
         let mut row = rows.row("controls")?;
         let max_controls: usize = row.number()?;
         let max_compile_work = row.number()?;
@@ -323,7 +370,7 @@ impl FlueFilePerformance {
             }
         }
         let schedule = GestureSchedule::from_canonical_bytes(gestures.as_bytes())
-            .map_err(|_| bad(rows.line+1, "invalid canonical pressure/jet-angle gesture suffix"))?;
+            .map_err(|_| bad(rows.line+1, "invalid canonical pressure/jet-angle/force gesture suffix"))?;
         if schedule.to_canonical_bytes() != gestures.as_bytes() {
             return Err(bad(rows.line+1,"gesture suffix must be canonical without ignored trailing data"));
         }
@@ -331,9 +378,10 @@ impl FlueFilePerformance {
         duct.graph.max_wave_memory_bytes = max_wave_memory_bytes;
         let source = FlueNetworkSpec { graph: duct.graph, gases: duct.gases,
             viscothermal, minimum_jet_speed_m_s, maximum_jet_mach, max_jet_history_samples };
+        let mut material_sources = material::Sources::default();
         let (walls, wall_records) = match walls {
             Some(walls) => {
-                let (walls, records) = walls.resolve(policy.maximum_frequency_hz, &mut load_material, gate)?;
+                let (walls, records) = walls.resolve(policy.maximum_frequency_hz, &mut material_sources, &mut load_material, gate)?;
                 (Some(walls), records)
             }
             None => (None, Vec::new()),
@@ -376,6 +424,14 @@ impl FlueFilePerformance {
                 voice.with_unsteady_windway(length_m, transverse_cells, convection_cells)
                     .map_err(FlueInputError::Physics)?,
         };
+        let mechanical_samples = samples.checked_mul(u64::from(mechanics_rate_hz / sample_rate_hz))
+            .ok_or_else(|| bad(0, "moving boundary step window overflows"))?;
+        let (voice, boundary_records) = boundaries.bind(voice, mechanical_samples,
+            &mut material_sources, &mut load_material, gate)?;
+        let voice = match control_source {
+            Some(paths) => voice.with_source_control_paths(paths).map_err(FlueInputError::Physics)?,
+            None => voice,
+        };
         let renderer = FlueOutletPerformance::with_multirate_radiation(voice, schedule,
             FlueOutletConfig { sample_rate_hz, samples, max_block, max_controls, max_compile_work,
                 outlet_node, receiver, maximum_abs_pressure_pa },
@@ -385,7 +441,7 @@ impl FlueFilePerformance {
         let info = FluePerformanceInfo { input_hash: hash_domain("org.frankensim.fs-couple.flue-performance.v1",bytes),
             mechanics_rate_hz, sample_rate_hz, samples, full_scale_pa,
             jet_card_hash: card.content_hash(), jet_card_source, compiled_controls: renderer.controls.len() };
-        Ok(Self { info, renderer, geometry, card, gas_records, wall_records, radiation_bindings })
+        Ok(Self { info, renderer, geometry, card, gas_records, wall_records, boundary_records, radiation_bindings })
     }
     /// Original identity and finite clocks, separate from the evolving solver.
     #[must_use] pub const fn info(&self) -> FluePerformanceInfo { self.info }
@@ -399,6 +455,8 @@ impl FlueFilePerformance {
     #[must_use] pub fn gas_records(&self) -> &[GasRecord] { &self.gas_records }
     /// Original normalized solid sources, in material-wall assignment order.
     #[must_use] pub fn wall_records(&self) -> &[FlueWallRecord] { &self.wall_records }
+    /// Original material cards and typed force paths of moving chimney boundaries.
+    #[must_use] pub fn boundary_records(&self) -> &[FlueBoundaryRecord] { &self.boundary_records }
     /// Exact installed reaction loads, in the observed outlet order.
     #[must_use] pub fn radiation_bindings(&self) -> &[BaffledOutletBinding] { &self.radiation_bindings }
     /// Move the original physical pressure producer into streaming/PCM output.

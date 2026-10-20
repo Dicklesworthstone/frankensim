@@ -24,7 +24,7 @@ pub fn path_name(path: &ParameterPath) -> String {
 pub fn value_dimensions(value: &GestureValue) -> Dims {
     match value {
         GestureValue::LengthM(_) => LENGTH,
-        GestureValue::TensionN(_) => FORCE,
+        GestureValue::TensionN(_) | GestureValue::ForceN(_) => FORCE,
         GestureValue::PressurePa(_) => PRESSURE,
         GestureValue::VelocityMPerS(_) | GestureValue::StrikeVelocity { .. } => SPEED,
         // Composite commands retain their component units in GestureValue.
@@ -48,6 +48,7 @@ pub(crate) fn accepts(path: &ParameterPath, value: &GestureValue) -> bool {
             matches!(value, GestureValue::Fraction(_))
         }
         "tension" => matches!(value, GestureValue::TensionN(_)),
+        "closing_force" => matches!(value, GestureValue::ForceN(_)),
         "blowing_pressure" => matches!(value, GestureValue::PressurePa(_)),
         "prestress" => matches!(value, GestureValue::Multiplier(_)),
         "jet_speed" => matches!(value, GestureValue::VelocityMPerS(_)),

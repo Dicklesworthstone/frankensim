@@ -438,3 +438,71 @@ fn pf_011_configuration_assignments_and_free_controls_are_explicit() {
         0.75
     );
 }
+
+#[test]
+fn force_quantity_binding_lowers_to_typed_force_and_refuses_wrong_units() {
+    let (desc, mut policy, mut table) = fixture();
+    let force = fs_scenario::gesture::path::FORCE;
+    let path = ParameterPath {
+        entity: desc.input().root,
+        parameter: ParameterKey::new("closing_force", force),
+    };
+    policy.bindings[0] = CommandBinding {
+        path: path.clone(),
+        track_id: "key".into(),
+        target: GestureTarget::Parameter(path.clone()),
+        initial: GestureValue::ForceN(0.0),
+    };
+    table.rows[0].controls[0] = DynamicControl {
+        target: path,
+        domain: (QtyAny::new(0.0, force), QtyAny::new(1.0, force)),
+        choice: ControlChoice::Fixed {
+            value: QtyAny::new(0.5, force),
+            source: hash_bytes(b"declared 0.5 N key actuator"),
+        },
+    };
+    let performance = import_smf(&one(), &desc, &policy, &table, limits()).unwrap();
+    let replay =
+        Performance::from_bytes(&performance.to_bytes(), &desc, &policy, &table, limits()).unwrap();
+    let lowered = lower(&replay, &desc, &policy, &table).unwrap();
+    assert_eq!(lowered.schedule.schema_version(), 2);
+    assert_eq!(
+        lowered.schedule.tracks()[0].target,
+        policy.bindings[0].target
+    );
+    assert_eq!(
+        lowered.schedule.sample_value("key", 0).unwrap(),
+        GestureValue::ForceN(0.5)
+    );
+    assert_eq!(
+        lowered.schedule.sample_value("key", 499).unwrap(),
+        GestureValue::ForceN(0.5)
+    );
+    assert_eq!(
+        lowered.schedule.sample_value("key", 500).unwrap(),
+        GestureValue::ForceN(0.0)
+    );
+
+    let mut wrong_quantity = table.clone();
+    wrong_quantity.rows[0].controls[0].choice = ControlChoice::Fixed {
+        value: QtyAny::new(0.5, PA),
+        source: hash_bytes(b"pressure cannot drive a force binding"),
+    };
+    assert!(matches!(
+        import_smf(&one(), &desc, &policy, &wrong_quantity, limits()),
+        Err(PerformanceError::Invalid {
+            what: "fixed control outside domain"
+        })
+    ));
+    // Even a binding without score events must reject a ForceN template whose
+    // declared source path carries pressure dimensions.
+    policy.bindings[0].path.parameter.dims = PA;
+    policy.bindings[0].target = GestureTarget::Parameter(policy.bindings[0].path.clone());
+    let empty_score = file(0, 480, &[vec![0, 0xff, 0x2f, 0]]);
+    assert!(matches!(
+        import_smf(&empty_score, &desc, &policy, &table, limits()),
+        Err(PerformanceError::Invalid {
+            what: "command units or nonfinite value"
+        })
+    ));
+}

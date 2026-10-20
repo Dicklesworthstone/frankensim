@@ -110,6 +110,93 @@ fn v2_canonical_bytes_round_trip_and_hash_is_stable() {
         matches!(zero_replay.tracks()[0].initial,GestureValue::LengthM(v) if v.to_bits()==(-0.0f64).to_bits())
     );
 }
+
+#[test]
+fn force_v2_round_trip_retains_units_and_interrupted_ramps() {
+    let (_, cases) = fixture::fixture();
+    let mut path = cases[0].1.clone();
+    path.parameter = ParameterKey::new("actuator_force", path::FORCE);
+    let schedule = GestureSchedule::try_new_v2(
+        8,
+        vec![GestureTrack {
+            id: "force".into(),
+            target: GestureTarget::Parameter(path),
+            initial: GestureValue::ForceN(2.0),
+            events: vec![
+                GestureEvent {
+                    time_s: 0.25,
+                    transition_s: 0.5,
+                    value: GestureValue::ForceN(10.0),
+                },
+                GestureEvent {
+                    time_s: 0.5,
+                    transition_s: 0.25,
+                    value: GestureValue::ForceN(-2.0),
+                },
+            ],
+        }],
+    )
+    .unwrap();
+    let bytes = schedule.to_canonical_bytes();
+    let decoded = GestureSchedule::from_canonical_bytes(&bytes).unwrap();
+    assert_eq!(decoded.schema_version(), 2);
+    assert_eq!(decoded.to_canonical_bytes(), bytes);
+    assert_eq!(decoded.content_hash(), schedule.content_hash());
+    // The second ramp starts at 6 N, where it interrupted the first one.
+    // Generic mechanical force is signed; a closing-force consumer applies
+    // its own nonnegative-magnitude constraint after schedule admission.
+    for (tick, expected) in [
+        (0, 2.0),
+        (2, 2.0),
+        (3, 4.0),
+        (4, 6.0),
+        (5, 2.0),
+        (6, -2.0),
+        (8, -2.0),
+    ] {
+        assert_eq!(decoded.sample("force", tick).unwrap(), expected);
+        assert_eq!(
+            decoded.sample_value("force", tick).unwrap(),
+            GestureValue::ForceN(expected)
+        );
+    }
+}
+
+#[test]
+fn closing_force_refuses_wrong_dimensions_and_tension_payloads() {
+    let (_, cases) = fixture::fixture();
+    let mut path = cases[0].1.clone();
+    path.parameter = ParameterKey::new("closing_force", path::FORCE);
+    assert!(
+        GestureSchedule::try_new_v2(
+            8,
+            vec![track(
+                "key",
+                GestureTarget::Parameter(path.clone()),
+                GestureValue::ForceN(0.5)
+            )],
+        )
+        .is_ok()
+    );
+    for value in [GestureValue::PressurePa(0.5), GestureValue::Fraction(0.5)] {
+        assert!(matches!(
+            GestureSchedule::try_new_v2(8, vec![track("key", GestureTarget::Parameter(path.clone()), value)]),
+            Err(GestureError::DimensionMismatch { path, .. }) if path.ends_with("closing_force")
+        ));
+    }
+    // Tension has the same SI dimensions but addresses a different physical
+    // quantity; a key force must not silently become a string-state command.
+    assert!(matches!(
+        GestureSchedule::try_new_v2(8, vec![track("key", GestureTarget::Parameter(path.clone()), GestureValue::TensionN(0.5))]),
+        Err(GestureError::ParameterValueMismatch { path }) if path.ends_with("closing_force")
+    ));
+    path.parameter.dims = path::PRESSURE;
+    assert!(matches!(
+        GestureSchedule::try_new_v2(8, vec![track("key", GestureTarget::Parameter(path), GestureValue::ForceN(0.5))]),
+        Err(GestureError::DimensionMismatch { path, .. }) if path.ends_with("closing_force")
+    ));
+}
+
 #[test]
 fn legacy_targets_resolve_as_aliases() {
     let (d, cases) = fixture::fixture();

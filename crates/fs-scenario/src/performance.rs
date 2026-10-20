@@ -345,6 +345,7 @@ fn value(template: &GestureValue, q: QtyAny) -> Result<GestureValue, Performance
         GestureValue::Fraction(_) => (Dims::NONE, GestureValue::Fraction(q.value)),
         GestureValue::Multiplier(_) => (Dims::NONE, GestureValue::Multiplier(q.value)),
         GestureValue::TensionN(_) => (Dims([1, 1, -2, 0, 0, 0]), GestureValue::TensionN(q.value)),
+        GestureValue::ForceN(_) => (Dims([1, 1, -2, 0, 0, 0]), GestureValue::ForceN(q.value)),
         GestureValue::VelocityMPerS(_) => (
             Dims([1, 0, -1, 0, 0, 0]),
             GestureValue::VelocityMPerS(q.value),

@@ -13,11 +13,11 @@ use fs_material::state_point::{
     ScalarPropertyRequirement as Requirement, resolve_material_state_point,
 };
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
+use super::material::Sources;
 
 /// File-ingress cap for one complete normalized material-card source.
-pub const MAX_FLUE_WALL_PACK_BYTES: usize = 8 * 1024 * 1024;
-const MAX_TOTAL_PACK_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_FLUE_WALL_PACK_BYTES: usize = super::material::MAX_PACK_BYTES;
 const MAX_WALLS: usize = 64;
 
 /// Exact normalized source for one original wall node.
@@ -77,10 +77,7 @@ impl ParsedWalls {
             }
             let path = row.fields.next().ok_or_else(|| bad(row.line, "wall needs a material-card pack path"))?;
             // Relative on every supported host. Only the caller opens the file.
-            if path.len() > 512 || path.contains('\\') || path.contains(':')
-                || path.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
-                return Err(bad(row.line, "wall pack path must remain relative to the performance directory"));
-            }
+            super::material::relative_path(path, row.line)?;
             let temperature_k = row.scalar()?;
             let angular_frequency_rad_s = row.scalar()?;
             let thickness_m = row.scalar()?;
@@ -105,7 +102,7 @@ impl ParsedWalls {
         Ok(Some(Self { line, band_hz, assignments }))
     }
 
-    pub fn resolve(self, maximum_frequency_hz: f64,
+    pub fn resolve(self, maximum_frequency_hz: f64, sources: &mut Sources,
         loader: &mut impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
         gate: &CancelGate)
         -> Result<(MaterialWallInput, Vec<FlueWallRecord>), FlueInputError>
@@ -113,25 +110,11 @@ impl ParsedWalls {
         if self.band_hz[1] < maximum_frequency_hz {
             return Err(bad(self.line, "wall material band must cover the fractional propagation band"));
         }
-        let mut packs = BTreeMap::<String, Arc<NormalizedMaterialCardPack>>::new();
-        let mut total_bytes = 0usize;
         let mut assignments = Vec::with_capacity(self.assignments.len());
         let mut records = Vec::with_capacity(self.assignments.len());
         for wall in self.assignments {
             poll(gate)?;
-            if !packs.contains_key(&wall.path) {
-                let pack = loader(&wall.path)
-                    .map_err(|source| FlueInputError::MaterialSource { line: wall.line, source })?;
-                poll(gate)?;
-                let bytes = pack.to_bytes().len();
-                if bytes > MAX_FLUE_WALL_PACK_BYTES
-                    || bytes > MAX_TOTAL_PACK_BYTES.saturating_sub(total_bytes) {
-                    return Err(bad(wall.line, "wall material sources exceed the 8 MiB per-pack or 64 MiB total limit"));
-                }
-                total_bytes += bytes;
-                packs.insert(wall.path.clone(), Arc::new(pack));
-            }
-            let pack = Arc::clone(&packs[&wall.path]);
+            let pack = sources.load(&wall.path, wall.line, loader, gate)?;
             let point = QueryPoint::new().with("T", wall.temperature_k)
                 .and_then(|point| point.with("omega", wall.angular_frequency_rad_s))
                 .map_err(|source| FlueInputError::MaterialSource { line: wall.line, source: source.to_string() })?;
