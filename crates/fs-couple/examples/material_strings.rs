@@ -8,6 +8,8 @@ mod construction;
 mod body;
 #[path = "material_strings/stops.rs"]
 mod stops;
+#[path = "material_strings/bow_interfaces.rs"]
+mod bow_interfaces;
 use std::{collections::BTreeMap, error::Error, fs::{File,OpenOptions}, io::{Read,Seek,Write}, path::Path};
 use fs_couple::bowed_string::runtime::reciprocal::bank::{
     MaterialStringSource,ReciprocalStringBank,StringBankOptions,StringBowLocation};
@@ -25,6 +27,7 @@ use fs_couple::render::schedule::force::{ForceInitialization,ForceRenderConfig,M
 use fs_couple::render::schedule::force::coupled::{ModalCouplingConfig,MAX_MODAL_CONNECTIONS,PreparedModalBudget};
 use fs_couple::air_path::cylinder::CylinderFlowResolution;
 use fs_couple::render::schedule::force::coupled::contact::friction::ModalFrictionConfig;
+use fs_couple::render::schedule::force::coupled::contact::friction::interface::DryFrictionBinding;
 use fs_couple::render::schedule::force::coupled::contact::friction::nonlinear::NonlinearModalConfig;
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::MultiFrictionConfig;
 use fs_couple::string_specimen::{with_uniform_circular_material_state,
@@ -126,7 +129,8 @@ impl input::Spec {
             baselines.push(body.bridge_separation_m(&self, joint.positive_bridge_string, joint.negative_bridge_string)?);
         }
         let interface_bytes = profile.as_ref().map(body::Profile::interface_pack_bytes)
-            .transpose()?.unwrap_or(0);
+            .transpose()?.unwrap_or(0).checked_add(self.friction.pack_bytes()?)
+            .ok_or("combined interface pack byte count overflow")?;
         let mut remaining = input::MAX_TOTAL_PACK_BYTES.checked_sub(interface_bytes)
             .ok_or("combined material and interface pack byte budget exceeded")?;
         // Keep the legacy bulk callback, with one combined cold source budget.
@@ -147,6 +151,7 @@ impl input::Spec {
             poll(gate)?;
             sources.push(wire.resolve_source(&mut catalog, &mut loader, &self, gate)?);
         }
+        self.friction.validate_surfaces(&self, &catalog)?;
         let mut contacts=Vec::with_capacity(self.schedule.tracks().len());
         for track in self.schedule.tracks() {
             let GestureTarget::BowStroke { string }=track.target else { return Err("non-bow track".into()); };
@@ -168,8 +173,8 @@ impl input::Spec {
             };
             match self.cavity.clone() {
                 Some(cavity)=>ReciprocalStringBank::from_material_plate_with_cavity(cx,sources,self.gas,body,cavity,
-                    self.law.clone(),settings.clone(),gate)?,
-                None=>ReciprocalStringBank::from_material_plate(cx,sources,self.gas,body,self.law.clone(),settings.clone(),gate)?,
+                    self.bow_law(0)?.clone(),settings.clone(),gate)?,
+                None=>ReciprocalStringBank::from_material_plate(cx,sources,self.gas,body,self.bow_law(0)?.clone(),settings.clone(),gate)?,
             }
         };
         // Select the active prepared owner before either attachment can enlarge
@@ -199,14 +204,40 @@ impl input::Spec {
         let bank = if let Some((slope, config)) = self.geometric_stretching {
             bank.with_geometric_stretching(slope, config, gate)?
         } else { bank };
-        let additional=contacts[1..].iter().map(|location|MaterialBowContact { location:*location,
-            law:self.law.clone(),friction:settings.friction }).collect();
-        let bank=bank.with_additional_bows(additional,MultiFrictionConfig { max_ports:16,max_sweeps:128,
-            max_setup_terms:1_048_576 },gate)?;
+        let joint=MultiFrictionConfig { max_ports:self.bow_contact_count(),max_sweeps:128,
+            max_setup_terms:1_048_576 };
+        let mut bank=if let Some((width,cells))=self.bow_ribbon {
+            bank.with_uniform_bow_ribbon(width,cells,joint,gate)?
+        } else {
+            let additional=contacts[1..].iter().enumerate().map(|(index,location)|Ok(MaterialBowContact {
+                location:*location,law:self.bow_law(index+1)?.clone(),friction:settings.friction }))
+                .collect::<Result<Vec<_>>>()?;
+            bank.with_additional_bows(additional,joint,gate)?
+        };
+        if let Some((_,cells))=self.bow_ribbon {
+            if let Some(binding)=self.friction.binding(&self.schedule.tracks()[0].id)? {
+                // The source declaration describes the WHOLE ribbon. Its load
+                // and area share the same quadrature, preserving nominal pressure.
+                let cell=DryFrictionBinding::new(binding.card().clone(),binding.temperature_kelvin(),
+                    binding.nominal_area_m2()/cells as f64)?;
+                for port in 0..cells { bank=bank.with_bow_interface(port,cell.clone())?; }
+            }
+        } else {
+            for (port,track) in self.schedule.tracks().iter().enumerate() {
+                if let Some(binding)=self.friction.binding(&track.id)? {
+                    bank=bank.with_bow_interface(port,binding.clone())?;
+                }
+            }
+        }
         let bank=match &stop_profile { Some(stops)=>stops.bind(bank,gate)?, None=>bank };
-        let names=self.schedule.tracks().iter().map(|t|t.id.clone()).collect();
-        let mut performance=bank.into_scheduled(self.schedule.clone(),names,MultiBowPerformanceConfig {
-            samples:self.samples,max_block:self.block,max_work:input::MAX_WORK,max_events:input::MAX_CONTROLS })?;
+        let performance_config=MultiBowPerformanceConfig { samples:self.samples,max_block:self.block,
+            max_work:input::MAX_WORK,max_events:input::MAX_CONTROLS };
+        let mut performance=if self.bow_ribbon.is_some() {
+            bank.into_scheduled_ribbon(self.schedule.clone(),self.schedule.tracks()[0].id.clone(),performance_config)?
+        } else {
+            let names=self.schedule.tracks().iter().map(|t|t.id.clone()).collect();
+            bank.into_scheduled(self.schedule.clone(),names,performance_config)?
+        };
         if let Some(forces)=&self.forces { performance=performance.with_string_forces(forces.clone(),gate)?; }
         if let Some(stops)=&stop_profile { performance=stops.bind_motion(performance,gate)?; }
         performance.validate_sample_rate(self.rate)?;performance.validate_sample_count(self.samples)?;poll(gate)?;
@@ -238,7 +269,7 @@ fn main()->Result<()> {
     let mut profile=body_path.map(|p|body::Profile::parse(&read_bounded(p,body::MAX_BYTES)?)).transpose()?;
     let stop_profile=stop_path.map(|p|stops::Profile::parse(&read_bounded(p,stops::MAX_BYTES)?)).transpose()?;
     let path=Path::new(&args[1]);let parent=path.parent().unwrap_or(Path::new("."));
-    let spec=input::Spec::parse(&read_bounded(path,input::MAX_INPUT_BYTES)?)?;
+    let mut spec=input::Spec::parse(&read_bounded(path,input::MAX_INPUT_BYTES)?)?;
     let gate=CancelGate::new_clock_free();let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let mut remaining=input::MAX_TOTAL_PACK_BYTES;
     if let Some(stops) = &stop_profile { stops.validate_performance(&spec,&gate)?; }
@@ -249,6 +280,11 @@ fn main()->Result<()> {
             Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
         })?;
     }
+    spec.friction.load(&gate,|name| {
+        let bytes=read_bounded(&parent.join(name),input::MAX_PACK_BYTES.min(remaining))?;
+        remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
+        Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
+    })?;
     let mut ready=pool.scope(|arena| {
         let cx=Cx::new(&gate,arena,fs_exec::StreamKey {seed:0,kernel_id:0,tile:0,iteration:0},
             fs_exec::Budget::INFINITE,fs_exec::ExecMode::Deterministic);
@@ -262,6 +298,8 @@ fn main()->Result<()> {
         eprintln!("source={path:?}; pack={:?}; hash={}; artifact={}",source.pack.pack_id(),
             source.pack.content_hash(),source.pack.source_artifact());
     }
+    eprintln!("bow_friction={:?}",ready.spec.friction);
+    if let Some(ribbon)=ready.performance.bank().source().ribbon() { eprintln!("bow_ribbon={ribbon:?}"); }
     if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
     if let Some(profile)=&ready.stop_profile { eprintln!("stop_profile_bytes={}; stops={}",
         profile.bytes.len(),ready.performance.bank().source().stops().len()); }

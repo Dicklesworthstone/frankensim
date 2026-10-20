@@ -1,0 +1,313 @@
+//! Ordered surface-data input for the existing simultaneous bow solver.
+//! This adapter selects coefficients and their common applicability; it owns
+//! no traction equation. The original packs and query receipts remain retained.
+//! Coefficients must be source-declared constants throughout T/p/v validity.
+//! Temperature, nominal area and interface history are frozen inputs, not a
+//! thermal rosin, wear or bow-hair model. Bare SI axes are named T, p and v.
+use super::*;
+use fs_couple::render::schedule::force::coupled::contact::friction::interface::DryFrictionBinding;
+use fs_material::state_point::{ResolvedInterfaceStatePoint, resolve_interface_state_point};
+use fs_tribo::{
+    ApplicabilityRange, DryFrictionApplicability, DryInterfaceSystemCard, InputAuthority,
+    InterfaceMedium, InterfaceSystemRef,
+};
+
+#[derive(Clone, Copy, Debug)]
+pub enum Model {
+    Coulomb,
+    Stribeck,
+}
+impl Model {
+    pub const fn property_count(self) -> usize {
+        match self {
+            Self::Coulomb => 2,
+            Self::Stribeck => 4,
+        }
+    }
+}
+
+/// Property names are in law order: static mu, kinetic mu, then (Stribeck)
+/// characteristic speed [m/s] and viscous coefficient per speed [s/m].
+#[derive(Clone, Debug)]
+pub struct Declaration {
+    pub track: String,
+    pub pack: String,
+    pub temperature: f64,
+    pub area: f64,
+    pub pressure: f64,
+    pub speed: f64,
+    pub model: Model,
+    pub names: Vec<String>,
+}
+#[derive(Clone)]
+struct Bound {
+    state: ResolvedInterfaceStatePoint,
+    binding: DryFrictionBinding,
+}
+#[derive(Clone)]
+pub struct Inputs {
+    research: Option<FrictionLaw>,
+    declarations: Vec<Declaration>,
+    packs: BTreeMap<String, NormalizedInterfacePack>,
+    bound: BTreeMap<String, Bound>,
+}
+impl core::fmt::Debug for Inputs {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let packs: Vec<_> = self
+            .packs
+            .iter()
+            .map(|(path, pack)| (path, pack.content_hash()))
+            .collect();
+        let states: Vec<_> = self
+            .bound
+            .iter()
+            .map(|(track, b)| (track, b.state.identity()))
+            .collect();
+        f.debug_struct("BowFriction")
+            .field("research_override", &self.research)
+            .field("declarations", &self.declarations)
+            .field("packs", &packs)
+            .field("states", &states)
+            .finish()
+    }
+}
+impl Inputs {
+    pub fn research(law: FrictionLaw) -> Result<Self> {
+        law.regularized_traction_1d(0.0, 0.0, 1.0)?;
+        Ok(Self {
+            research: Some(law),
+            declarations: Vec::new(),
+            packs: BTreeMap::new(),
+            bound: BTreeMap::new(),
+        })
+    }
+    pub fn interfaces(declarations: Vec<Declaration>) -> Result<Self> {
+        for (i, d) in declarations.iter().enumerate() {
+            if d.track.is_empty()
+                || d.track.len() > 128
+                || declarations[..i].iter().any(|p| p.track == d.track)
+                || !d.speed.is_finite()
+                || d.speed < 0.0
+                || d.names.len() != d.model.property_count()
+                || d.names
+                    .iter()
+                    .enumerate()
+                    .any(|(i, n)| n.is_empty() || n.len() > 128 || d.names[..i].contains(n))
+            {
+                return Err("bow interfaces need distinct tracks/properties and nonnegative query slip speed".into());
+            }
+        }
+        Ok(Self {
+            research: None,
+            declarations,
+            packs: BTreeMap::new(),
+            bound: BTreeMap::new(),
+        })
+    }
+    pub fn validate_tracks(&self, schedule: &GestureSchedule) -> Result<()> {
+        if self.research.is_some() {
+            return Ok(());
+        }
+        if self.declarations.len() != schedule.tracks().len()
+            || schedule
+                .tracks()
+                .iter()
+                .any(|t| !self.declarations.iter().any(|d| d.track == t.id))
+        {
+            return Err(
+                "source-bound friction requires exactly one named interface for every bow track"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Cold, all-or-nothing loading; repeated paths decode once. An absent or
+    /// incompatible source cannot silently fall back to research coefficients.
+    pub fn load(
+        &mut self,
+        gate: &CancelGate,
+        mut loader: impl FnMut(&str) -> Result<NormalizedInterfacePack>,
+    ) -> Result<()> {
+        let mut packs = BTreeMap::new();
+        let mut bound = BTreeMap::new();
+        let mut remaining = input::MAX_TOTAL_PACK_BYTES;
+        for d in &self.declarations {
+            poll(gate)?;
+            if !packs.contains_key(&d.pack) {
+                let pack = loader(&d.pack)?;
+                poll(gate)?;
+                let size = pack.to_bytes().len();
+                if size > input::MAX_PACK_BYTES || size > remaining {
+                    return Err("bow interface packs exceed the shared source byte budget".into());
+                }
+                remaining -= size;
+                packs.insert(d.pack.clone(), pack);
+            }
+            let source = resolve(d, &packs[&d.pack])?;
+            bound.insert(d.track.clone(), source);
+        }
+        poll(gate)?;
+        self.packs = packs;
+        self.bound = bound;
+        Ok(())
+    }
+    pub fn pack_bytes(&self) -> Result<usize> {
+        if self
+            .declarations
+            .iter()
+            .any(|d| !self.bound.contains_key(&d.track))
+        {
+            return Err(
+                "load every declared bow interface before constructing material strings".into(),
+            );
+        }
+        self.packs.values().try_fold(0usize, |n, p| {
+            n.checked_add(p.to_bytes().len())
+                .ok_or_else(|| "bow interface byte count overflow".into())
+        })
+    }
+    pub fn binding(&self, track: &str) -> Result<Option<&DryFrictionBinding>> {
+        if self.research.is_some() {
+            return Ok(None);
+        }
+        Ok(Some(
+            &self
+                .bound
+                .get(track)
+                .ok_or("bow interface is missing or not loaded")?
+                .binding,
+        ))
+    }
+    pub fn law(&self, track: &str) -> Result<&FrictionLaw> {
+        if let Some(law) = &self.research {
+            return Ok(law);
+        }
+        Ok(self
+            .binding(track)?
+            .ok_or("missing source-bound bow law")?
+            .card()
+            .friction_law())
+    }
+    pub fn validate_surfaces(&self, spec: &input::Spec, catalog: &Catalog) -> Result<()> {
+        if self.research.is_some() {
+            return Ok(());
+        }
+        for track in spec.schedule.tracks() {
+            let member = fs_scenario::gesture::path::legacy_member(&track.target, "bow")
+                .ok_or("interface binding requires a material-string bow track")?;
+            let wire = spec
+                .strings
+                .get(member)
+                .ok_or("bow interface names an absent string")?;
+            let outer = match &wire.section {
+                input::WireSection::Homogeneous => &wire.pack,
+                input::WireSection::Bonded { sleeves, .. } => {
+                    &sleeves.last().ok_or("bonded surface is absent")?.pack
+                }
+            };
+            let material = catalog
+                .get(outer)
+                .ok_or("outer string material has not been resolved")?
+                .card
+                .id();
+            let source = self
+                .bound
+                .get(&track.id)
+                .ok_or("bow interface is not loaded")?;
+            if &source.state.surface_materials()[0] != material {
+                return Err(format!(
+                    "bow interface {:?} surface A does not match its string's outer material",
+                    track.id
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn resolve(d: &Declaration, pack: &NormalizedInterfacePack) -> Result<Bound> {
+    if pack.card().medium() != "dry" {
+        return Err("the dry bow law requires an explicitly dry ordered interface card".into());
+    }
+    let requirements = d
+        .names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let (dims, admit) = match i {
+                2 => (fs_qty::Velocity::DIMS, Admit::StrictlyPositive),
+                3 => (
+                    Dims::NONE.saturating_minus(fs_qty::Velocity::DIMS),
+                    Admit::NonNegative,
+                ),
+                _ => (Dims::NONE, Admit::NonNegative),
+            };
+            Requirement::try_new(name, dims, admit)
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let point = QueryPoint::new()
+        .with("T", d.temperature)?
+        .with("p", d.pressure)?
+        .with("v", d.speed)?;
+    let state =
+        resolve_interface_state_point(pack.card(), &point, &requirements, Pick::SingleClaimOnly)?;
+    let mut ranges = [(0.0f64, f64::MAX); 3];
+    for property in state.properties() {
+        if property.answer().receipt.decision
+            != fs_matdb::EvaluationDecision::ConstantWithinValidity
+        {
+            return Err(
+                "bow coefficients must be source-declared constants across their applicability"
+                    .into(),
+            );
+        }
+        let validity = &property.answer().evidence.model.validity;
+        for (i, name) in ["T", "p", "v"].iter().enumerate() {
+            let (lo, hi) = validity
+                .bound(name)
+                .ok_or("every bow coefficient needs explicit T/p/v applicability")?;
+            if !lo.is_finite()
+                || !hi.is_finite()
+                || hi < lo
+                || (i == 0 && lo <= 0.0)
+                || (i != 0 && lo < 0.0)
+            {
+                return Err("bow applicability needs positive temperature and nonnegative finite pressure/speed bounds".into());
+            }
+            ranges[i].0 = ranges[i].0.max(lo);
+            ranges[i].1 = ranges[i].1.min(hi);
+        }
+    }
+    let value = |i: usize| {
+        state
+            .property(&d.names[i])
+            .map(|p| p.value_si())
+            .ok_or("missing resolved friction coefficient")
+    };
+    let law = match d.model {
+        Model::Coulomb => FrictionLaw::Coulomb {
+            static_mu: value(0)?,
+            kinetic_mu: value(1)?,
+        },
+        Model::Stribeck => FrictionLaw::Stribeck {
+            static_mu: value(0)?,
+            kinetic_mu: value(1)?,
+            characteristic_speed: value(2)?,
+            viscous_per_speed: value(3)?,
+        },
+    };
+    let range = |i: usize| ApplicabilityRange::new(ranges[i].0, ranges[i].1);
+    let domain = DryFrictionApplicability::new(range(0)?, range(1)?, range(2)?)?;
+    let reference = InterfaceSystemRef::new(
+        format!("{}", pack.card().content_hash()),
+        pack.card().history(),
+        format!("pack:{}; state:{}", pack.content_hash(), state.identity()),
+        InputAuthority::CallerDeclared,
+        InterfaceMedium::Dry,
+    )?;
+    let card = DryInterfaceSystemCard::new(reference, law, domain)?;
+    let binding = DryFrictionBinding::new(card, d.temperature, d.area)?;
+    Ok(Bound { state, binding })
+}

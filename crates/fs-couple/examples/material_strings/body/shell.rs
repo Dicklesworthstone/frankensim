@@ -302,7 +302,7 @@ impl Spec {
             modal_budget: modal_budget(), listener_m: spec.body.listener,
         };
         Ok(ReciprocalStringBank::from_material_shear_shell(cx, sources, spec.gas, body,
-            spec.cavity.clone(), spec.law.clone(), settings, gate)?)
+            spec.cavity.clone(), spec.bow_law(0)?.clone(), settings, gate)?)
     }
 }
 

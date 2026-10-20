@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	synthetic-material-string-bow-interface
+redistribution	permitted	Synthetic integration coefficients; not measured bow or rosin data
+citation	Manufactured ordered string and bow interface fixture
+license	CC0-1.0
+source	fixture	bow.tsv	interface-tsv-v1

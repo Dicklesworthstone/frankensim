@@ -130,6 +130,9 @@ impl Profile {
     pub fn validate_performance(&self, spec: &input::Spec, gate: &CancelGate) -> Result<()> {
         poll(gate)?;
         self.validate_members(spec.strings.len())?;
+        if spec.bow_ribbon.is_some() && !self.bow_contacts.is_empty() {
+            return Err("uniform bow ribbon requires prescribed total load, not a bow-contact normal-load binding".into());
+        }
         for binding in &self.bow_contacts {
             let track = spec.schedule.tracks().get(binding.bow)
                 .ok_or("bow-contact names an absent scheduled bow")?;

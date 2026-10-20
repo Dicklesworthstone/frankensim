@@ -1,0 +1,25 @@
+frankensim.matdb-source.v1
+surface_a	source-pack:synthetic-material-string-wire	declared solid model	frozen source-pack realization	0	synthetic wire contact surface
+surface_b	synthetic bow surface	solid	prescribed moving surface	0	synthetic hair direction
+context	dry	synthetic rosin	declared gas	fixed synthetic history
+observation	synthetic	Synthetic wire against prescribed moving bow surface	Manufactured friction law coefficients	Not measured bow hair, rosin or string interface data
+scalar	static	synthetic	mu_static	0.8	1	constant
+uncertainty	static	unstated	-	-	-	-
+validity	static	T	280	320	K
+validity	static	p	0.1	1000000	Pa
+validity	static	v	0	10	m/s
+scalar	kinetic	synthetic	mu_kinetic	0.4	1	constant
+uncertainty	kinetic	unstated	-	-	-	-
+validity	kinetic	T	280	320	K
+validity	kinetic	p	0.1	1000000	Pa
+validity	kinetic	v	0	10	m/s
+scalar	speed	synthetic	stribeck_speed	0.1	m/s	constant
+uncertainty	speed	unstated	-	-	-	-
+validity	speed	T	280	320	K
+validity	speed	p	0.1	1000000	Pa
+validity	speed	v	0	10	m/s
+scalar	viscous	synthetic	viscous_per_speed	0	s/m	constant
+uncertainty	viscous	unstated	-	-	-	-
+validity	viscous	T	280	320	K
+validity	viscous	p	0.1	1000000	Pa
+validity	viscous	v	0	10	m/s

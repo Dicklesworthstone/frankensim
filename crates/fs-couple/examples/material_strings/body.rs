@@ -213,10 +213,10 @@ impl PlateProfile {
             reference_resistance_n_s_m:1.0 };
         Ok(if let Some(footprints)=spatial {
             ReciprocalStringBank::from_viscous_material_plate_chart_with_force_ports(cx,sources,spec.gas,
-                body,footprints,viscosity,limits,spec.cavity.clone(),spec.law.clone(),settings,gate)?
+                body,footprints,viscosity,limits,spec.cavity.clone(),spec.bow_law(0)?.clone(),settings,gate)?
         } else {
             ReciprocalStringBank::from_viscous_material_plate_chart(cx,sources,spec.gas,body,viscosity,
-                limits,spec.cavity.clone(),spec.law.clone(),settings,gate)?
+                limits,spec.cavity.clone(),spec.bow_law(0)?.clone(),settings,gate)?
         })
     }
     fn footprint(&self,node:(usize,usize))->Vec<f64> {

@@ -50,7 +50,8 @@ pub struct Spec {
     pub cylinder_gas_loading: Option<CylinderFlowResolution>,
     pub prepared_linear: Option<PreparedModalBudget>,
     pub geometric_stretching: Option<(f64, NonlinearModalConfig)>,
-    pub cavity: Option<MaterialBodyCavity>, pub law: FrictionLaw, pub forces: Option<StringForceProgram>,
+    pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
+    pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<StringForceProgram>,
     pub schedule: GestureSchedule,
 }
 impl Spec {
@@ -207,13 +208,48 @@ impl Spec {
         };
         row.end()?;
         let mut row = r.row("friction")?;
-        let law = match row.word()? {
-            "coulomb" => FrictionLaw::Coulomb { static_mu: row.scalar()?, kinetic_mu: row.scalar()? },
-            "stribeck" => FrictionLaw::Stribeck { static_mu: row.scalar()?, kinetic_mu: row.scalar()?,
-                characteristic_speed: row.positive()?, viscous_per_speed: row.scalar()? },
+        let friction = match row.word()? {
+            "coulomb" => {
+                let law=FrictionLaw::Coulomb { static_mu:row.scalar()?,kinetic_mu:row.scalar()? };
+                row.end()?; bow_interfaces::Inputs::research(law)?
+            },
+            "stribeck" => {
+                let law=FrictionLaw::Stribeck { static_mu:row.scalar()?,kinetic_mu:row.scalar()?,
+                    characteristic_speed:row.positive()?,viscous_per_speed:row.scalar()? };
+                row.end()?; bow_interfaces::Inputs::research(law)?
+            },
+            "interfaces" => {
+                let count=row.count(16)?; row.end()?;
+                if count==0 { return Err("source-bound friction requires one interface per bow track".into()); }
+                let mut inputs=Vec::with_capacity(count);
+                for _ in 0..count {
+                    let mut row=r.row("bow-interface")?;
+                    let track=row.word()?.to_string(); let pack=row.path()?;
+                    let temperature=row.positive()?; let area=row.positive()?;
+                    let pressure=row.positive()?; let speed=row.scalar()?;
+                    let model=match row.word()? {
+                        "coulomb"=>bow_interfaces::Model::Coulomb,
+                        "stribeck"=>bow_interfaces::Model::Stribeck,
+                        _=>return Err("bow interface model must be coulomb or stribeck".into()),
+                    };
+                    let names=(0..model.property_count()).map(|_|row.word().map(str::to_string))
+                        .collect::<Result<Vec<_>>>()?;
+                    row.end()?;
+                    inputs.push(bow_interfaces::Declaration {track,pack,temperature,area,pressure,speed,model,names});
+                }
+                bow_interfaces::Inputs::interfaces(inputs)?
+            },
             _ => return Err("unsupported physical friction law".into()),
         };
-        row.end()?; law.regularized_traction_1d(0.0, 0.0, 1.0)?;
+        let bow_ribbon = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("bow_ribbon") {
+            let mut row = r.row("bow_ribbon")?;
+            let width = row.positive()?; let cells = row.count(63)?; row.end()?;
+            if cells == 0 || cells % 2 == 0 {
+                return Err("bow ribbon requires an odd spatial cell count in 1..=63".into());
+            }
+            Some((width, cells))
+        } else { None };
         let mut row = r.row("forces")?;
         let initialization = match row.word()? {
             "retain" => ForceInitialization::RetainState,
@@ -280,10 +316,20 @@ impl Spec {
         }
         let last_tick = (samples-1)*u64::from(schedule.control_rate_hz)/u64::from(rate);
         let last_time = last_tick as f64/f64::from(schedule.control_rate_hz);
+        if bow_ribbon.is_some() && schedule.tracks().len() != 1 {
+            return Err("a uniform bow ribbon requires exactly one original total-load track".into());
+        }
         for track in schedule.tracks() {
             let string = fs_scenario::gesture::path::legacy_member(&track.target,"bow").ok_or("only physical bow tracks are supported")?;
             if string >= strings.len() { return Err("bow track names an absent material string".into()); }
             let GestureValue::Bow { station, .. } = track.initial else { return Err("complete initial bow value required".into()); };
+            if let Some((width, _)) = bow_ribbon {
+                let half = 0.5 * width / strings[string].length;
+                if !(0.0 < station - half && station - half < station
+                    && station < station + half && station + half < 1.0) {
+                    return Err("the complete bow ribbon must lie strictly inside its material string".into());
+                }
+            }
             for event in &track.events {
                 if event.time_s > last_time { return Err("bow command starts after the last observed control tick".into()); }
                 if !matches!(event.value, GestureValue::Bow { station: s, .. } if s.to_bits() == station.to_bits()) {
@@ -291,10 +337,20 @@ impl Spec {
                 }
             }
         }
+        friction.validate_tracks(&schedule)?;
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
-            gas, body, strings, rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, cavity, law, forces, schedule };
+            gas, body, strings, rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, cavity, friction, bow_ribbon, forces, schedule };
         spec.network_dimensions(false)?;
         Ok(spec)
+    }
+
+    pub fn bow_law(&self,port:usize)->Result<&FrictionLaw> {
+        let track=self.schedule.tracks().get(port).ok_or("unknown bow contact")?;
+        self.friction.law(&track.id)
+    }
+
+    pub fn bow_contact_count(&self)->usize {
+        self.bow_ribbon.map_or(self.schedule.tracks().len(), |(_, cells)| cells)
     }
 
     /// Complete numerical allocation before source I/O. A tensor body can need

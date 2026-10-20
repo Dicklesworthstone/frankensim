@@ -85,8 +85,88 @@ in the same mechanical solve.
 
 `friction stribeck MU_STATIC MU_KINETIC CHARACTERISTIC_SPEED_M_S VISCOUS_PER_SPEED`
 is also accepted. These coefficients retain **caller authority**. Bulk material
-data do not certify a rosin/string friction law. This input profile does not yet
-load external dry-interface cards; the existing Rust API supports that binding.
+data do not certify a rosin/string friction law. The render log labels these
+numeric inputs as a research override.
+
+Alternatively, replace the friction row with source-bound ordered interfaces:
+
+```text
+friction interfaces 2
+bow-interface first string-a-bow.fsintpk 293.15 0.0001 2 0 coulomb mu_static mu_kinetic
+bow-interface second string-b-bow.fsintpk 293.15 0.0001 2 0 stribeck mu_static mu_kinetic stribeck_speed viscous_per_speed
+```
+
+The fields after the track and normalized interface-pack path are **interface
+temperature [K], nominal contact area [m²], query contact pressure [Pa], and query
+slip speed [m/s]**. These are followed by the declared law and its property names.
+Coulomb requires static and kinetic dimensionless coefficients; Stribeck also
+requires characteristic speed [m/s] and a viscous coefficient per speed [s/m].
+Each bow track needs exactly one declaration, in any order. Different contacts
+may use different packs and laws; repeated pack paths are decoded once.
+
+The original `NormalizedInterfacePack` must declare `medium = dry`. Its ordered
+surface A must be the selected string's **actual outer material state**, including
+the outermost sleeve for a bonded string. Surface B identifies the prescribed
+bow surface; texture, third body and named history remain part of the original
+source identity. Changing a string's outer material while retaining an interface
+for the old surface refuses instead of reusing its friction coefficients.
+
+The selected claims must provide constant coefficients with explicit finite
+bare-SI validity on `T`, `p` and `v`. The query chooses a supported immutable
+source; its pressure and speed are not imposed on the physical solver. The
+common applicability intersection is checked against the actual normal load
+divided by nominal area and the actual relative surface velocity, including
+torsional motion, at the original solver's initial, step-average and endpoint
+checks. Missing, conflicting, nonconstant or out-of-domain sources refuse. A
+released bow does not require positive-pressure friction data at zero load.
+
+Interface temperature, nominal area and source history are frozen inputs. This
+binding does not infer a Hertz patch, evolving hair compliance, rosin heating or
+wear. The original packs and property-use receipts survive with the performance;
+loading a source does not promote it to experimentally validated instrument data.
+
+An optional record immediately after the complete friction declaration selects
+a finite-width rigid ribbon instead of the default point bow:
+
+```text
+bow_ribbon WIDTH_M ODD_CELLS
+```
+
+The width is an interval along the actual material string, centred at the
+original gesture station; the complete interval must remain strictly inside
+that string. The odd cell count is an explicit spatial resolution from 1 to 63.
+This first file profile accepts exactly one original bow track: its speed acts
+at every cell, while its **total normal load** is divided evenly. Each cell uses
+its own material-derived transverse/torsional surface map and solves its own
+slip and traction in the existing simultaneous string/body/cavity mechanics.
+The original schedule, including ramps and release, survives unchanged.
+
+With source-bound friction, the declared nominal area belongs to the **whole
+ribbon**. Area and normal load are divided by the same cell count, retaining
+the same nominal pressure and original ordered interface card at each cell.
+Runtime applicability uses each cell's actual slip. Numerical setup, control
+storage and compilation work are charged for every cell under the same global
+limits. Independent finger/obstacle stops remain available; a `bow-contact`
+binding that derives normal load from a stop refuses this prescribed uniform
+load profile. This rigid, uniformly loaded limit does not infer compliant bow
+hair or evolving rosin. Refine spatial cells, structural modes and time together.
+
+The included synthetic `source-bow.material-strings` uses the same string, body,
+gas and gesture as `pluck-and-bow.material-strings`, with its friction carried by
+an ordered interface pack and `bow_ribbon 0.01 5`. Removing that optional record
+restores the point contact. After the initial wire/body build above:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/bow-manifest.tsv" --out "$demo/bow.fsintpk"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/source-bow.material-strings" "$demo/source-bow.wav"
+```
+
+Changing `bow.tsv` and compiling a new interface pack changes excitation through
+the retained physical contact; no string/body solver or per-note sound parameter
+needs editing. This fixture is deliberately synthetic and remains unqualified
+as a measured bow/string model.
 
 `forces preload ...` settles the entire initially unexcited instrument before
 the window, with bows released. A force event at sample zero can release this
