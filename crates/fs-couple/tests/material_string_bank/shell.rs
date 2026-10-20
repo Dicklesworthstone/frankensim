@@ -161,3 +161,6 @@ fn g0_shell_budget_detached_force_and_cancellation_refuse_before_playback() {
             gas(101_325.0),body,None,law(),options(0),gate).is_err());
     });
 }
+
+#[path = "shell/connections.rs"]
+mod connections;

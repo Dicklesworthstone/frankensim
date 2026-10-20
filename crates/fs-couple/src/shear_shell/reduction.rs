@@ -49,6 +49,7 @@ pub struct MaterialShellImage {
     intervals: Vec<(f64,f64)>,
     radiators: Vec<CompactBody>,
     damping: ModalPlateViscosity,
+    interface_columns: Vec<Vec<f64>>,
 }
 impl MaterialShellImage {
     /// Exact original material, section and midsurface sources.
@@ -65,6 +66,23 @@ impl MaterialShellImage {
     pub fn eigenvalue_intervals(&self) -> &[(f64,f64)] { &self.intervals }
     /// Complete symmetric modal C and passive connection realization.
     pub const fn damping(&self) -> &ModalPlateViscosity { &self.damping }
+    /// Work-conjugate interface rows in original source order and this mode basis.
+    pub fn interface_columns(&self) -> &[Vec<f64>] { &self.interface_columns }
+    /// Original interface viscosity as separate exact passive channels. Elastic
+    /// stiffness is already in the monolithic pencil and is never applied twice.
+    pub(crate) fn interface_damping_connections(&self, component: usize)
+        -> Vec<crate::render::schedule::force::coupled::ModalConnection>
+    {
+        use crate::render::schedule::force::coupled::{ModalAttachment, ModalConnection};
+        self.source.interfaces.iter().zip(&self.interface_columns)
+            .filter(|(source, _)| source.law().damping_n_s_m != 0.0)
+            .map(|(source, column)| ModalConnection {
+                left:ModalAttachment { component, shapes:column.clone() },
+                right:ModalAttachment { component, shapes:vec![0.0; column.len()] },
+                stiffness_n_m:0.0, damping_n_s_m:source.law().damping_n_s_m,
+                rest_extension_m:0.0,
+            }).collect()
+    }
     /// Compact monopole images; these have zero scalar loss, use C once.
     pub(crate) fn radiators(&self) -> &[CompactBody] { &self.radiators }
 }
@@ -104,6 +122,9 @@ impl ResolvedShearShell {
         }
         let model=assemble_mitc3p(&self.mesh,directors,&self.sections,&options.constraints,
             options.mass,options.assembly_budget,options.drilling_alpha,||gate.is_requested()).map_err(owner)?;
+        let interface_laws: Vec<_> = self.interfaces.iter().map(|i| i.law().clone()).collect();
+        let model = model.with_connections(&interface_laws, self.interface_budget,
+            || gate.is_requested()).map_err(owner)?;
         // This is the shared spectral owner, not a private shell eigenalgorithm.
         let spectral=fs_modal::SliceOptions { mass_diagonal_equilibration:true, ..Default::default() };
         poll(gate)?;
@@ -120,12 +141,17 @@ impl ResolvedShearShell {
             poll(gate)?;
             let w=fs_math::det::sqrt(mode.lambda);
             if !w.is_finite() || w<=0.0
-                || self.regions.iter().any(|r|w<r.omega_band.0 || w>r.omega_band.1) {
+                || self.regions.iter().any(|r|w<r.omega_band.0 || w>r.omega_band.1)
+                || self.interfaces.iter().any(|r| {
+                    let band = r.omega_band_rad_s(); w < band.0 || w > band.1
+                }) {
                 return Err(invalid("actual retained shell mode lies outside original material support"));
             }
             physical_modes.push(model.expand(&mode.phi).map_err(owner)?);
             omega.push(w); intervals.push(mode.interval);
         }
+        let interface_columns = model.project_connections(&interface_laws, &physical_modes,
+            self.interface_budget, || gate.is_requested()).map_err(owner)?;
         let mut projected=vec![vec![0.0;n];force_ports.len()];
         for (row,input) in projected.iter_mut().zip(force_ports) {
             poll(gate)?;
@@ -167,6 +193,6 @@ impl ResolvedShearShell {
             .collect::<Result<Vec<_>,_>>()?;
         poll(gate)?;
         Ok(MaterialShellImage { source:self.clone(),physical_modes,force_ports:projected,
-            volume_shapes,intervals,radiators,damping })
+            volume_shapes,intervals,radiators,damping,interface_columns })
     }
 }

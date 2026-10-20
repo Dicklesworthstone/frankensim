@@ -3053,3 +3053,30 @@ Material snapshots are refreshed at actual thermal endpoints and events,
 while authored link coefficients remain unchanged. Conduction remains the
 declared uniform-cell, fixed-geometry reduction; temperature-dependent source
 coefficients do not by themselves establish time or spatial convergence.
+
+### Material interface compliance in the shared string shell
+
+`shear_shell::connections` retains complete ordered interface states and claim
+identities, exact surface material roles, property names, actual contact area
+and weighted footprints with explicit global offsets. Source stiffness per area
+[N/m³] and viscous resistance per area [N s/m³] require finite nonnegative
+fixed-state laws with intersecting frequency applicability. Every retained mode
+must lie in that band.
+
+Regional membership, positive normalized weights, physical moment arms and
+coincident application points for two moving sides are checked. Interface
+stiffness enters the monolithic shell pencil before the shared eigensolve.
+Interface viscosity remains its original passive connection channel, supporting
+semidefinite interface-only loss alongside the separately owned full bulk
+material viscosity. Elastic stiffness is never duplicated as a runtime spring.
+
+The reciprocal string bank budgets these additional channels and retains their
+sources through existing extensions. Bulk material rebinds recheck the ordered
+interface surface roles. Fixed counterparts have zero motion and no modeled
+mass. Regressions cover changed material support stiffness and viscosity reaching
+actual microphone pressure, exact projected moment arms, source rebinding,
+interface-only loss and source/geometry/frequency/resource refusals.
+
+This finite bilateral model does not establish continuum mortar, glue coverage,
+opening contact, complete assembled instrument anatomy, thermal/history
+evolution, a prestressed equilibrium or measured timbre.
