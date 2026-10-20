@@ -1,5 +1,157 @@
 use super::*;
 
+#[test]
+fn g3_streaming_filter_matches_offline_phase_and_clones() {
+    for factor in [1,2,3,4,6,8] {
+        let input:Vec<_>=(0..512*factor).map(|i| (0.31*i as f64).sin()+0.2*(1.13*i as f64).cos()).collect();
+        let reference=decimate(&input,factor);
+        let mut filter=StreamingDecimator::new(factor);
+        let mut output=vec![];
+        for (i,x) in input.iter().enumerate() {
+            filter.push(*x);
+            if i==73 {
+                let mut copied=filter.clone();
+                copied.push(0.125);
+                let mut control=filter.clone(); control.push(0.125);
+                assert_eq!(copied.value().to_bits(),control.value().to_bits());
+            }
+            if i%factor==0 { output.push(filter.value()); }
+        }
+        let delay=if factor==1 {0}else{16};
+        for (i,x) in output.iter().enumerate().skip(delay) {
+            assert_eq!(x.to_bits(),reference[i-delay].to_bits(),"factor {factor}, frame {i}");
+        }
+    }
+}
+
+#[test]
+fn g3_live_internal_clock_matches_offline_and_arbitrary_output_blocks() {
+    let mut a=crate::live::Live::new("snare-off",8.0).unwrap();
+    assert!(a.ins.rate>=96_000.0);
+    assert_eq!(a.filter_latency_frames(),16);
+    a.strike(0.3*a.radius,0.0,2.0);
+    let mut b=a.clone();
+    let mut raw=a.ins.clone();
+    let factor=(a.ins.rate/kit::OUT_RATE) as usize;
+    let mut source=vec![0.0;512*factor]; let mut sample=[0.0];
+    for x in &mut source { raw.step(&mut sample); *x=sample[0]; }
+    let reference=decimate(&source,factor);
+    let mut x=vec![0.0_f32;512];a.render(&mut x,1.0);
+    assert!(x.iter().any(|x| *x!=0.0));
+    for i in 16..512 { assert_eq!(x[i].to_bits(),(reference[i-16] as f32).to_bits()); }
+    let mut y=vec![0.0_f32;512];
+    b.render(&mut y[..193],1.0);
+    let mut copied=b.clone();
+    b.render(&mut y[193..194],1.0);
+    b.render(&mut y[194..],1.0);
+    let mut tail=vec![0.0;319];copied.render(&mut tail,1.0);
+    assert_eq!(tail,y[193..]);
+    assert_eq!(x,y);
+    assert_eq!(a.ins.step_index,raw.step_index);
+    assert_eq!(a.kinetic.to_bits(),b.kinetic.to_bits());
+    assert_eq!(a.asleep(),b.asleep());
+}
+
+
+#[test]
+fn g3_microphone_source_height_matches_rigid_translation() {
+    for facing in [1.0, -1.0] {
+        let mut ins = Instrument::new(48_000.0);
+        for raised in [false, true] {
+            let mut b = Body::plate("source", &PlateSpec {
+                radius: 0.06, hole: 0.0, grid: 0.015, edge: Edge::Free,
+                thickness: &|_| 1e-3, rest_height: &|_| if raised { 0.02 } else { 0.0 },
+                young: 1e11, poisson: 0.33, density: 8600.0, tension: 0.0,
+                bending: true, nonlinear: Nonlinear::None, t60: NO_LOSS, support: None, muffle: None,
+            }).unwrap();
+            b.facing = facing;
+            if !raised { b.origin[2] = facing * 0.02; }
+            ins.add(b);
+        }
+        let mut mic = Mic::new([0.4, 0.2, 1.1]);
+        mic.floor = Some(-0.5);
+        ins.mics.push(mic);
+        ins.prepare();
+        let taps = &ins.mics[0].taps;
+        let a: Vec<_> = taps.iter().filter(|t| t.0 == 0).map(|t| (t.1,t.2,t.3.to_bits(),t.4.to_bits())).collect();
+        let b: Vec<_> = taps.iter().filter(|t| t.0 == 1).map(|t| (t.1,t.2,t.3.to_bits(),t.4.to_bits())).collect();
+        assert!(!a.is_empty());
+        assert_eq!(a,b,"supplied source height must equal the same physical translation");
+    }
+}
+
+#[test]
+fn g0_hihat_contacts_preserve_opposing_geometry_and_requested_opening() {
+    let law = Law::Power { k: 2e9, alpha: 1.5, mu: 0.08 };
+    for scale in [1.0,4.0] {
+        let closed = kit::hihat_grid_mu(0.0,0.0,&[],law,0.8,scale,0.0).unwrap();
+        let open = kit::hihat_grid_mu(0.002,0.0,&[],law,0.8,scale,0.0).unwrap();
+        let (top,bottom) = (&closed.instrument.bodies[0],&closed.instrument.bodies[1]);
+        assert_eq!(top.xy,bottom.xy);
+        assert!(top.rest_z.iter().any(|z| *z > 0.01));
+        for (a,b) in top.rest_z.iter().zip(&bottom.rest_z) { assert_eq!(*a,-*b); }
+        assert!((top.origin[2]-bottom.origin[2]-0.5*(0.85e-3+1.1e-3)).abs()<1e-15);
+        let mut widest=0.0_f64;
+        for (c,o) in closed.instrument.contacts.iter().zip(&open.instrument.contacts) {
+            let (_,ib,_) = c.a[0]; let (_,it,_) = c.b[0];
+            let [x,y] = top.xy[it];
+            let waviness=7.5e-5*(1.0-(x*x-y*y)/(x*x+y*y));
+            // Independent face clearance from physical mass, area and density.
+            let tt=top.mass[it]/(kit::BRONZE.2*top.h*top.h);
+            let tb=bottom.mass[ib]/(kit::BRONZE.2*bottom.h*bottom.h);
+            let clearance=top.origin[2]+top.rest_z[it]-0.5*tt
+                -(bottom.origin[2]+bottom.rest_z[ib]+0.5*tb);
+            assert!((c.gap-clearance-waviness).abs()<1e-14);
+            assert!((o.gap-c.gap-0.002).abs()<1e-14,"requested opening was capped");
+            assert!(c.gap>=0.0);
+            widest=widest.max(c.gap);
+        }
+        assert!(widest>0.003,"curved bow must not become a constant rim gap");
+    }
+    for gap in [-0.001,f64::NAN,f64::INFINITY] { assert!(kit::hihat(gap,0.0,&[]).is_err()); }
+}
+
+#[test]
+fn g3_hihat_refinement_preserves_joint_load_and_rim_traction() {
+    let law = Law::Power { k: 2e9, alpha: 1.5, mu: 0.08 };
+    let compression=1e-5_f64; let speed=0.25;
+    let pressure=2e9/5.5e-3_f64.powi(2)*compression.powf(1.5)*(1.0+0.08*speed);
+    for scale in [0.9,1.0,1.5,4.0,8.0] {
+        let ins=kit::hihat_grid_mu(0.0,0.0,&[],law,0.8,scale,0.0).unwrap().instrument;
+        let rod=ins.bodies.iter().position(|b| b.name=="rod").unwrap();
+        let clutch:Vec<_>=ins.links.iter().filter(|l| l.a.0==0&&l.b==Some((rod,0))).collect();
+        assert!(clutch.len()>=4);
+        assert!((clutch.iter().map(|l| l.k*1e-5).sum::<f64>()-80.0).abs()<1e-10);
+        assert!((clutch.iter().map(|l| l.c*speed).sum::<f64>()-20.0).abs()<1e-10);
+        let force: f64=ins.contacts.iter().map(|c| {
+            let Law::Power{k,alpha,mu}=c.law;
+            k*compression.powf(alpha)*(1.0+mu*speed)
+        }).sum();
+        let area=ins.contacts.len() as f64*ins.bodies[0].h.powi(2);
+        assert!((force/(pressure*area)-1.0).abs()<1e-12);
+    }
+}
+
+#[test]
+fn g0_shell_admission_includes_curvature_without_changing_live_state() {
+    let mut spec=kit::ride(); spec.grid*=2.6;
+    let mut p=kit::cymbal(&spec,&[]).unwrap();
+    let mut b=p.instrument.bodies[0].clone();
+    let linear=b.max_rate2(); let shell=b.max_rate2_with_shell();
+    assert!(shell>1.1*linear,"fixture must expose unresolved rest curvature");
+    let old_rate=((linear+shell)/(8.0*0.6)).sqrt();
+    assert!(shell/(4.0*p.instrument.rate.powi(2))<=0.6);
+    p.instrument.rate=old_rate;
+    p.instrument.bodies[0].f[0]+=0.5;
+    let before=p.instrument.bodies[0].clone();
+    assert!(p.instrument.stability().0>0.6);
+    assert_eq!(p.instrument.bodies[0].f,before.f);
+    assert_eq!(p.instrument.bodies[0].w,before.w);
+    assert_eq!(p.instrument.bodies[0].wp,before.wp);
+    assert_eq!(p.instrument.bodies[0].lw,before.lw);
+}
+
+
 fn crossings_hz(x: &[f64], rate: f64) -> f64 {
     let mean = x.iter().sum::<f64>() / x.len() as f64;
     let mut idx = vec![];
@@ -282,30 +434,42 @@ fn queued_contact_solves_match_solving_one_at_a_time() {
     // copies leave the fixed-point exit off, so a batch mixes lanes with and without it
     let build = || {
         let mut p = live::Live::new("snare", 7.0).unwrap();
+        p.strike(0.06, 0.02, 4.5);
         let n = p.ins.contacts.len();
         for (at, from, alpha) in [(3, 9, 1.5), (11, 4, 2.0), (n - 1, 20, 1.5), (7, 7, 2.5)] {
             let c = &p.ins.contacts[from];
             let Law::Power { k, mu, .. } = c.law;
             let copy = Contact::new(c.a.clone(), c.b.clone(), c.gap + 1e-7, Law::Power { k, alpha, mu });
             p.ins.contacts.insert(at, copy);
+            // Inserting contacts moves the scheduled impact too. Exercise Instrument directly:
+            // Live owns a private striker-slot index that this fixture must not invalidate.
+            for s in &mut p.ins.strikes { if s.contact >= at { s.contact += 1; } }
         }
-        p.strike(0.06, 0.02, 4.5);
-        p
+        p.ins
     };
     let (mut a, mut b) = (build(), build());
-    let k = a.ins.k();
-    let mut out = [0.0f32; 64];
+    let k = a.k();
+    let mut out = [0.0f64; 1];
     let (mut solved, mut pressed) = (0, 0);
     for round in 0..120 {
-        a.render(&mut out, 1.0);
-        b.render(&mut out, 1.0);
+        for _ in 0..64 { a.step(&mut out); b.step(&mut out); }
         // the same predicted positions in both: free flight plus a small push, some apart, some pressed
-        for (ins, solve) in [(&mut a.ins, true), (&mut b.ins, false)] {
+        for (ins, solve) in [(&mut a, true), (&mut b, false)] {
             for (bi, body) in ins.bodies.iter_mut().enumerate() {
                 for i in 0..body.n {
                     let salt = ((i * 2654435761 + bi * 97 + round * 31) % 1009) as f64 / 1009.0 - 0.45;
-                    body.wn[i] = 2.0 * body.w[i] - body.wp[i] + salt * 4e-7;
+                    // Two rounds use the ringing predictor; two impose known open/loaded
+                    // poses so coverage does not depend on the live preset's internal clock.
+                    body.wn[i] = if round % 4 < 2 { 0.0 } else { 2.0 * body.w[i] - body.wp[i] } + salt * 4e-7;
+                    if body.name.starts_with("wire ") {
+                        body.wn[i] += match round % 4 { 0 => 1e-4, 1 => -1e-4, _ => 0.0 };
+                    }
                 }
+            }
+            if round % 4 < 2 {
+                // These imposed poses start at zero penetration; do not pair a changed pose
+                // with an unrelated Hunt-Crossley penetration history.
+                for contact in &mut ins.contacts { contact.d_now = 0.0; }
             }
             if solve {
                 solve_contacts(&mut ins.bodies, &mut ins.contacts, &mut ins.cq, k);
@@ -313,14 +477,14 @@ fn queued_contact_solves_match_solving_one_at_a_time() {
                 one_at_a_time(&mut ins.bodies, &mut ins.contacts, k);
             }
         }
-        for (ca, cb) in a.ins.contacts.iter().zip(&b.ins.contacts) {
+        for (ca, cb) in a.contacts.iter().zip(&b.contacts) {
             assert_eq!(ca.force.to_bits(), cb.force.to_bits(), "round {round}: force");
             assert_eq!(ca.d_now.to_bits(), cb.d_now.to_bits(), "round {round}: d_now");
             assert_eq!(ca.peak_force.to_bits(), cb.peak_force.to_bits(), "round {round}: peak");
             solved += 1;
             pressed += usize::from(ca.force > 0.0);
         }
-        for (ba, bb) in a.ins.bodies.iter().zip(&b.ins.bodies) {
+        for (ba, bb) in a.bodies.iter().zip(&b.bodies) {
             assert!(ba.wn.iter().zip(&bb.wn).all(|(x, y)| x.to_bits() == y.to_bits()), "round {round}: {} moved differently", ba.name);
         }
     }

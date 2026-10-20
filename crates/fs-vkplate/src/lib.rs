@@ -356,6 +356,8 @@ pub struct Body {
     pub h: f64,
     pub n: usize,
     pub xy: Vec<[f64; 2]>,
+    /// Supplied mid-surface height in the body's outward displacement coordinates [m].
+    pub rest_z: Vec<f64>,
     grid_index: BTreeMap<(i64, i64), usize>,
     pub mass: Vec<f64>,
     s0: Vec<f64>,
@@ -550,11 +552,15 @@ impl Body {
         let area = PI * (s.radius * s.radius - s.hole * s.hole);
         let t_mean = thick.iter().sum::<f64>() / n as f64;
         let berger = if s.nonlinear == Nonlinear::Berger { s.young * t_mean / (2.0 * area * (1.0 - nu)) } else { 0.0 };
+        let rest_z: Vec<f64> = xy.iter().map(|&p| (s.rest_height)(r_of(p))).collect();
+        if rest_z.iter().any(|z| !z.is_finite()) {
+            return Err(format!("{name}: nonfinite rest-surface height"));
+        }
         let vk = if s.nonlinear == Nonlinear::VonKarman {
             if s.edge != Edge::Free {
                 return Err(format!("{name}: von Karman coupling is implemented for free edges (stress-free rim)"));
             }
-            let z0: Vec<f64> = xy.iter().map(|&p| (s.rest_height)(r_of(p))).collect();
+            let z0 = rest_z.clone();
             let mut cidx = BTreeMap::new();
             let mut sorted = core.clone();
             sorted.sort_by_key(|&(i, j)| (j, i));
@@ -609,7 +615,7 @@ impl Body {
             *m_ = m_.max(1e-12);
         }
         Ok(Body {
-            name: name.into(), h, n, xy, grid_index, mass, s0: s0v, s1, lap, stiff, tension: s.tension, berger, vk,
+            name: name.into(), h, n, xy, rest_z, grid_index, mass, s0: s0v, s1, lap, stiff, tension: s.tension, berger, vk,
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: true, area, air_mass: 0.0,
         })
@@ -627,7 +633,7 @@ impl Body {
         }
         let xy = (0..n).map(|k| [x0 + k as f64 * h, y]).collect();
         Body {
-            name: name.into(), h, n, xy, grid_index: BTreeMap::new(), mass: vec![mass_per_m * h; n],
+            name: name.into(), h, n, xy, rest_z: vec![0.0; n], grid_index: BTreeMap::new(), mass: vec![mass_per_m * h; n],
             s0: vec![6.907755 / t60; n], s1: 0.0, lap: Csr::from_rows(&lrows), stiff: Csr::from_rows(&vec![BTreeMap::new(); n]),
             tension: tension / h, berger: 0.0, vk: None, // tension/h: the chain energy T/2 sum (dw)^2/h
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
@@ -638,7 +644,7 @@ impl Body {
     /// A lumped rigid mass (stick, beater, hi-hat rod).
     pub fn point(name: &str, mass: f64) -> Body {
         Body {
-            name: name.into(), h: 1.0, n: 1, xy: vec![[0.0, 0.0]], grid_index: BTreeMap::new(), mass: vec![mass],
+            name: name.into(), h: 1.0, n: 1, xy: vec![[0.0, 0.0]], rest_z: vec![0.0], grid_index: BTreeMap::new(), mass: vec![mass],
             s0: vec![0.0], s1: 0.0, lap: Csr::from_rows(&[BTreeMap::new()]), stiff: Csr::from_rows(&[BTreeMap::new()]),
             tension: 0.0, berger: 0.0, vk: None,
             w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
@@ -1587,10 +1593,25 @@ impl Instrument {
         }
         worst
     }
-    /// k^2 lambda_max / 4 at the current rate (below 1 is stable without loss or contact).
+    /// Rest-state timestep estimate, including shell curvature, without altering live state.
+    /// Power iteration is an estimate; large-deflection/contact convergence is separate.
+    pub fn admission_rate2(&self) -> (f64, String) {
+        let mut worst = (0.0, String::new());
+        for b in &self.bodies {
+            if b.n < 2 { continue; }
+            // The existing diagnostic mutates force caches; use a cold image.
+            let mut image = b.clone();
+            let linear = image.max_rate2();
+            let lam = if image.vk.is_some() { linear.max(image.max_rate2_with_shell()) } else { linear };
+            if lam > worst.0 { worst = (lam, b.name.clone()); }
+        }
+        worst
+    }
+
+    /// k^2 lambda_max / 4 including rest curvature; excludes contact and large-deflection changes.
     pub fn stability(&mut self) -> (f64, String) {
         let k = self.k();
-        let (lam, who) = self.max_rate2();
+        let (lam, who) = self.admission_rate2();
         (k * k * lam / 4.0, who)
     }
 
@@ -1611,7 +1632,7 @@ impl Instrument {
                 }
                 for tp in targets {
                     for i in 0..b.n {
-                        let p = [b.origin[0] + b.xy[i][0], b.origin[1] + b.xy[i][1], b.origin[2]];
+                        let p = [b.origin[0] + b.xy[i][0], b.origin[1] + b.xy[i][1], b.origin[2] + b.facing * b.rest_z[i]];
                         let d = [tp[0] - p[0], tp[1] - p[1], tp[2] - p[2]];
                         if d[2] * b.facing <= 0.0 {
                             continue; // the other side of this surface faces away from this path
@@ -1941,22 +1962,51 @@ impl Body {
 }
 
 // --------------------------------------------------------------------- decimation
-/// Windowed-sinc low-pass then keep every `factor`-th sample.
-pub fn decimate(x: &[f64], factor: usize) -> Vec<f64> {
-    if factor == 1 {
-        return x.to_vec();
-    }
+fn decimation_kernel(factor: usize) -> Vec<f64> {
     let taps = 32 * factor + 1;
     let fc = 0.46 / factor as f64; // cycles per input sample: 0.92 x output Nyquist
     let mid = (taps / 2) as f64;
-    let h: Vec<f64> = (0..taps)
+    (0..taps)
         .map(|i| {
             let t = i as f64 - mid;
             let s = if t == 0.0 { 2.0 * fc } else { (2.0 * PI * fc * t).sin() / (PI * t) };
             let wdw = 0.42 - 0.5 * (2.0 * PI * i as f64 / (taps - 1) as f64).cos() + 0.08 * (4.0 * PI * i as f64 / (taps - 1) as f64).cos();
             s * wdw
         })
-        .collect();
+        .collect()
+}
+
+/// The offline filter in causal streaming form: 16 output frames of delay.
+/// Phase and history survive arbitrary render blocks and cloned instruments.
+#[derive(Clone)]
+pub(crate) struct StreamingDecimator {
+    kernel: Vec<f64>,
+    history: Vec<f64>,
+    next: usize,
+}
+impl StreamingDecimator {
+    fn new(factor: usize) -> Self {
+        let kernel = if factor == 1 { vec![1.0] } else { decimation_kernel(factor) };
+        Self { history: vec![0.0; kernel.len()], kernel, next: 0 }
+    }
+    fn push(&mut self, value: f64) {
+        self.history[self.next] = value;
+        self.next = (self.next + 1) % self.history.len();
+    }
+    fn value(&self) -> f64 {
+        let (a,b) = self.history.split_at(self.next);
+        let mut value = 0.0;
+        for (h,x) in self.kernel.iter().zip(b.iter().chain(a)) { value += h*x; }
+        value
+    }
+    fn clear(&mut self) { self.history.fill(0.0); self.next = 0; }
+}
+
+/// Windowed-sinc low-pass then keep every `factor`-th sample.
+pub fn decimate(x: &[f64], factor: usize) -> Vec<f64> {
+    if factor == 1 { return x.to_vec(); }
+    let h = decimation_kernel(factor);
+    let taps = h.len();
     let half = taps / 2;
     (0..x.len() / factor)
         .map(|o| {

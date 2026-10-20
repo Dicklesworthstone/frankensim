@@ -52,8 +52,9 @@ curvature stiffness in `V`, so that drift scales the shell's stiffness (on a liv
 between 0.5 and 1.5 within 2 s and the 8-16 kHz bands grew back after a second). Each step pulls `psi`
 back to `sqrt(2V)` at the half step: lowering it only removes energy, and raising it spends at most
 the energy the loss terms removed in the step before, so the discrete energy still never grows.
-The linear part's CFL limit is checked by power iteration and the internal rate is the smallest
-multiple of 48 kHz that uses at most 60 % of it. Output is decimated with a windowed sinc.
+Power iteration estimates the larger of the linear and full rest-shell tangent stiffnesses. The
+internal rate is the smallest supported multiple of 48 kHz using at most 60 % of that estimate;
+this is not a contact or large-deflection convergence bound. Output uses a windowed-sinc filter.
 
 The Airy operator is factored once (banded Cholesky, row-major ordering); both triangular sweeps
 stream the one stored factor, which dominates a cymbal's cost on a fine grid. Contacts warm-start
@@ -68,14 +69,17 @@ root rather than 1e-13.
 
 Two shells on one rod. The bottom shell sits on the stand's felt; the top shell hangs from the
 clutch (felt washers gripping the annulus round its hole) on the pull rod, which a return spring
-holds up and the pedal pulls down. With 80 N on the pedal about 62 N reaches the rims (the spring
-keeps the rest). An earlier version also tied the top shell's centre to the ground through felt,
+holds up and the pedal pulls down. Earlier constant-gap measurements sent about 62 N of an
+80 N pedal load to the rims; that load split has not been requalified for the opposing geometry.
+An earlier version also tied the top shell's centre to the ground through felt,
 which took ~75 N of the pedal force, so the "closed" hat was barely pressed.
 
-No rim is flat: the rim contact carries a two-lobe waviness of up to 0.15 mm (offline grid), and
-with no pedal force the shells rest at most 0.14 mm apart there, so a stroke on the open hat sets
-the rims chattering against each other (its sizzle above 4 kHz). The rim contact is lightly damped
-(Hunt-Crossley `mu` 0.08 s/m).
+The shells face each other with opposite bell and bow profiles. The requested opening is the
+undeformed face-to-face rim gap; it is no longer silently capped at 0.14 mm. Contact clearance
+includes the local profiles, thicknesses, and up to 0.15 mm of two-lobe waviness on every grid.
+Clutch stiffness/damping totals and rim traction are preserved under grid refinement. These
+correct geometry and load semantics; acoustic improvement requires a separate comparison.
+The offline rim law uses Hunt-Crossley `mu` 0.08 s/m.
 
 The rims also rub (`Friction`, dry friction coefficient 0.5). Bending moves a plate's faces sideways by
 half its thickness times its slope, so where the rims touch, the bottom shell's upper face and the top
@@ -83,7 +87,8 @@ shell's lower face slip by (t_b/2) grad w_b + (t_t/2) grad w_t, slopes from the 
 differences. Each step, after the contacts, every rim contact's friction is the force that would stop
 that slip (stick) unless it exceeds 0.5 times the contact's normal force (slide at that force); it
 acts through the same per-node compliances as the contacts, so it is implicit and only removes
-energy. Graded against the Salamander closed hat, it brings the closed hat's octave-band decay inside
+energy. The following grades used the earlier geometry, gap and clock, and do not qualify the
+corrected implementation. Graded against the Salamander closed hat, friction brought its octave-band decay inside
 the real-vs-real ruler (0.32 octaves from the real stroke, two real strokes 0.47, 0.95 before) at
 1.4 dB more octave-balance error (10.4 -> 11.8 dB: it is still far too dark, centroid 1.7 kHz against 11 kHz);
 the open hat, whose rims seldom touch, is unchanged (balance 4.8 dB, decay 2.6 octaves).
@@ -93,7 +98,7 @@ the open hat, whose rims seldom touch, is unchanged (balance 4.8 dB, decay 2.6 o
 - clamped membrane: fundamental within 1.5 % of `2.405 c / (2 pi R)`;
 - free disc: lowest elastic mode within 4 % of `lambda^2 = 5.253` (nu = 0.33);
 - crash struck at 8 m/s: bounded, finite output;
-- a hi-hat's second stroke retires the stick's earlier contact (each stroke adds one);
+- overlapping live strikes retain independent strikers; separated, receding slots are reused;
 - a shallow shell's auxiliary variable keeps tracking `sqrt(2V)` (live-grid ride, 2 s);
 - the stencil rows of the sparse products sum bit for bit as their CSR rows (five pieces, signed zeros);
 - the four-lane contact solves match solving one contact at a time, force, penetration and every
@@ -106,15 +111,18 @@ the open hat, whose rims seldom touch, is unchanged (balance 4.8 dB, decay 2.6 o
 
 ## Real time (`live`)
 
-`live::Live` is one piece on a grid `scale` times coarser (5 runs several times faster than real
-time in WebAssembly), struck anywhere on its playing surface, stepped in 48 kHz blocks, and not
-stepped at all once its motion is 70 dB below its peak. On grids too coarse to put four nodes in
+`live::Live` is one piece on a grid with spacing multiplied by `scale`, struck anywhere on its
+playing surface. It retains the preset's internal physics substeps and returns 48 kHz audio.
+Substepped output uses the offline sinc kernel with 16 output frames of causal filter delay;
+filter history and fixed 128-frame sleep windows survive arbitrary caller block sizes and clones.
+It stops stepping once its motion and microphone output have decayed. On grids too coarse to put four nodes in
 the 6.5-20 mm annulus round a cymbal's hole, the felt washers and the hi-hat clutch spread their
 total stiffness and damping over the first ring of nodes instead. The live hi-hats keep the rim
 contact law from before the retuning (Hunt-Crossley `mu` 3.0 s/m, set in `live.rs`) and a 5 mm
 stick tip; the offline hat's lighter rim damping (0.08 s/m) and 4 mm tip were not carried over to
 real-time play. They rub with the same friction as offline. The following measurements predate
-the bilinear point-contact correction and do not qualify its sound: at 4x / 4.5x the closed hat's
+the bilinear point-contact, opposing-geometry and internal-clock corrections and do not
+qualify their sound: at 4x / 4.5x the earlier closed hat's
 500 Hz-1 kHz T60 falls from 1.3-2.8 s to 0.5-0.7 s, and a stroke puts
 87-91 % of its energy in its first 50 ms (65-75 % without; the real closed hat 90-93 %). On grids of
 22-25 mm it still carries little above ~3.5 kHz. A clone of a `Live` steps bit for bit as the original would, so the browser kit
@@ -131,6 +139,15 @@ This saves solver work; it does not fix the timbre or qualify production audio.
 At 4.5x the closed hat still puts only 0.15% of its first 250 ms energy above
 4 kHz, versus 91.65% in the reference, and the 3x grid still takes 719 ms to
 render 600 ms. The four reference spectrogram comparisons remain failures.
+
+The 2026-10-20 native live-grid A/B of the combined geometry/clock corrections is mixed.
+At 4.5x and 2.5 m/s, closed-hat octave-balance distance to the original Salamander overhead
+falls from 17.97 to 10.86 dB, but open-hat distance rises from 11.82 to 21.31 dB (first 250 ms).
+Corrected open grids at 3x and 2.5x still measure 19.07 and 19.42 dB: refinement alone does
+not restore the missing wash. The 3.5x crash improves in balance but worsens in attack/decay.
+These are native diagnostics, not browser qualification or an overall acoustic pass; the kit
+WASM package was held back. The old `rim_geometry` example assumes the pre-correction constant
+gap and 48 kHz clock and remains a historical probe, not a test of the corrected geometry.
 
 ## Graded against a real kit
 

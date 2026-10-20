@@ -368,7 +368,7 @@ pub fn ride() -> CymbalSpec {
 }
 
 fn pick_oversample(ins: &mut Instrument, max_ratio: f64) -> Result<usize, String> {
-    let (lam, who) = ins.max_rate2();
+    let (lam, who) = ins.admission_rate2();
     for os in [1usize, 2, 3, 4, 6, 8] {
         let k = 1.0 / (OUT_RATE * os as f64);
         if k * k * lam / 4.0 <= max_ratio {
@@ -412,8 +412,8 @@ pub fn hihat_spec() -> (CymbalSpec, CymbalSpec) {
     (top, bottom)
 }
 
-/// Hi-hat: two shells on one rod. `gap` is the rim opening (0 = closed under pedal force); with no
-/// pedal force the rims rest at most 0.14 mm apart (a sloshy open hat whose rims chatter).
+/// Hi-hat: opposing shells on one rod. `gap` is the undeformed face-to-face rim opening [m].
+/// Bow clearance follows the supplied profiles; pedal loading deforms them from this geometry.
 pub fn hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)]) -> Result<Piece, String> {
     hihat_scaled(gap, pedal_n, hits, 1.0)
 }
@@ -435,37 +435,46 @@ pub fn hihat_with(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
 /// and 0.5 is the closer of the two. The open hat, whose rims seldom touch, barely changes.
 pub const RIM_FRICTION: f64 = 0.5;
 
-/// The same on a grid `scale` times coarser (real-time play).
+/// The same with grid spacing multiplied by `scale`.
+/// The reference-cell rim force law scales with area to preserve traction under refinement.
 pub fn hihat_grid(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64) -> Result<Piece, String> {
     hihat_grid_mu(gap, pedal_n, hits, rim, from, scale, RIM_FRICTION)
 }
 
 /// The same with an explicit rim friction coefficient (0: the rims press but do not rub).
 pub fn hihat_grid_mu(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64) -> Result<Piece, String> {
+    if !gap.is_finite() || gap < 0.0 {
+        return Err(format!("hi-hat: rim opening must be finite and nonnegative, got {gap} m"));
+    }
     let (mut ts, mut bs) = hihat_spec();
+    let Law::Power { k, alpha, mu } = rim;
+    let rim = Law::Power { k: k * scale * scale, alpha, mu };
     ts.grid *= scale;
     bs.grid *= scale;
+    // Displacements remain upward; the bottom's bell and bow face away from the top.
+    bs.bow_rise = -bs.bow_rise;
+    bs.bell_rise = -bs.bell_rise;
     let mut ins = Instrument::new(OUT_RATE);
     let mut top = cymbal_shell(ts.name, &ts, false)?;
     top.origin = [0.0, 0.0, 0.0];
     let mut bot = cymbal_body(bs.name, &bs)?;
-    // sloshy "open" rock hi-hats rest within ~0.15 mm at the wavy rim so a stick stroke chatters across the gap
-    let eff_gap = if pedal_n == 0.0 { gap.min(1.4e-4) } else { gap };
-    bot.origin = [0.0, 0.0, -0.002 - eff_gap];
+    // Profiles describe midplanes, while the requested opening is between their faces.
+    let rim_half_thickness = 0.5 * (bow_thickness(&ts, ts.radius) + bow_thickness(&bs, bs.radius));
+    bot.origin = [0.0, 0.0, -rim_half_thickness - gap];
     let ti = ins.add(top);
     let bi = ins.add(bot);
     // the top hangs from the clutch on the pull rod; the bottom sits on the stand's felt cup
     let rod = ins.add(Body::point("rod", 0.3));
     ins.links.push(Link { a: (rod, 0), b: None, k: 2000.0, c: 20.0 });
-    // the clutch grips the annulus round the hole: 2e5 N/m and 2 N s/m per node of the 5.5 mm grid
-    // (40 nodes); a coarser grid spreads those totals over its first ring
-    let (r1, n) = ring_nodes(ins.bodies[ti].h, 0.0065, 0.02);
-    let (kc, cc) = if r1 > 0.02 { (8.0e6 / n as f64, 80.0 / n as f64) } else { (2.0e5, 2.0) };
+    // Preserve the physical totals on both coarse and refined discretizations.
+    let (r1, _) = ring_nodes(ins.bodies[ti].h, 0.0065, 0.02);
     let clutch: Vec<usize> = (0..ins.bodies[ti].n).filter(|&k| {
         let p = ins.bodies[ti].xy[k];
         let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
         r >= 0.0065 && r <= r1 + 1e-12
     }).collect();
+    if clutch.is_empty() { return Err("hi-hat: grid leaves no clutch nodes".into()); }
+    let (kc, cc) = (8.0e6 / clutch.len() as f64, 80.0 / clutch.len() as f64);
     for &k in &clutch {
         ins.links.push(Link { a: (ti, k), b: Some((rod, 0)), k: kc, c: cc });
     }
@@ -480,7 +489,10 @@ pub fn hihat_grid_mu(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from
         }
         if let Some(kb) = ins.bodies[bi].node_at(p[0], p[1]) {
             let cos2 = if r > 0.0 { (p[0] * p[0] - p[1] * p[1]) / (r * r) } else { 1.0 };
-            let local_gap = if scale <= 1.0 { eff_gap + 7.5e-5 * (1.0 - cos2) } else { eff_gap };
+            let (tb, tt) = (bow_thickness(&bs, r), bow_thickness(&ts, r));
+            let top_z = ins.bodies[ti].origin[2] + ins.bodies[ti].rest_z[k];
+            let bottom_z = ins.bodies[bi].origin[2] + ins.bodies[bi].rest_z[kb];
+            let local_gap = top_z - bottom_z - 0.5 * (tt + tb) + 7.5e-5 * (1.0 - cos2);
             ins.contacts.push(Contact::new(vec![(bi, kb, 1.0)], vec![(ti, k, 1.0)], local_gap, rim));
             if friction > 0.0 {
                 // the faces the contact presses together rub as the shells bend (see Friction)
@@ -509,7 +521,7 @@ pub fn hihat_grid_mu(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from
     mic.unbaffled = Some(ts.radius);
     ins.mics.push(mic);
     let os = pick_oversample(&mut ins, 0.6)?;
-    let notes = vec![format!("hi-hat: {} + {} nodes, {pairs} rim contact pairs (friction {friction}), gap {:.2} mm, pedal {pedal_n} N, internal {} kHz", ins.bodies[ti].n, ins.bodies[bi].n, eff_gap * 1e3, OUT_RATE * os as f64 / 1000.0)];
+    let notes = vec![format!("hi-hat: {} + {} nodes, {pairs} rim contact pairs (friction {friction}), rim opening {:.2} mm, pedal {pedal_n} N, internal {} kHz", ins.bodies[ti].n, ins.bodies[bi].n, gap * 1e3, OUT_RATE * os as f64 / 1000.0)];
     Ok(Piece { instrument: ins, oversample: os, settle, notes })
 }
 
