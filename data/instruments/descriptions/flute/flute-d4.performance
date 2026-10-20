@@ -83,7 +83,7 @@ duct_section 35 36 0.0032800 0.0066000 1e-10
 duct_section 35 37 0.0371727 0.0095000 1e-10
 duct_section 37 38 0.0032800 0.0066000 1e-10
 duct_section 37 39 0.0446073 0.0095000 1e-10
-radiation compact-baffled
+radiation computed-baffled 120 65 8 16 32 20 0.02 67108864 2 100 1e-8 256 8388608 257
 flue 0.00667 0.00090 0.00800 0 0 0.02
 windway none
 jet_card tonal-interim

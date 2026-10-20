@@ -8,11 +8,11 @@
     "fs-couple flue_loop: a jet driven by a blowing-pressure gesture, with the lip geometry, jet length and the mouth contraction law, acting on a connected duct network (fs-couple network performance, one jet drives the whole graph)",
     "16 tone-hole branches as plane-wave chimney sections on ideal junctions, open or closed per fingering, with the published head-joint taper as stacked cylinders, the cork cavity and the embouchure riser",
     "fractional-delay propagation and gas-derived viscothermal loss on every section of the network (moist air at the published measurement state)",
-    "compact baffled-piston reaction on every open aperture and a multirate Rayleigh receiver that sums the open holes, the open end and the embouchure, so the graded sound is radiated pressure at a physical receiver rather than internal pressure"
+    "radiation reaction and observation from the apertures themselves, so the graded sound is radiated pressure at a physical receiver rather than internal pressure: for a note with at most eight openings (D4) the computed baffled-piston array with mutual coupling, fitted to the mechanical Nyquist band; for the others a compact per-aperture load, with every open hole, the open end and the embouchure summed at the receiver"
   ],
   "physics_missing": [
     "a tone-hole model beyond a plane-wave chimney on an ideal junction: no matching-volume or end-correction treatment of the junction, no pad cups, no undercut",
-    "mutual radiation between open apertures: the computed baffled operator is limited to eight openings and several notes open more, so every note uses the compact per-aperture load; the holes also sit on a cylinder in the real flute but are placed in a flat baffle plane here",
+    "mutual radiation for notes that open more than eight apertures (G4 and A5 here, and most of the upper range): the computed operator is capped at eight openings, so those notes use the compact load, which holds only for ka up to 0.5 and therefore limits the receiver band to about 2.8 kHz, far below the flute's harmonic content; the holes also sit on a cylinder in the real flute but are placed in a flat baffle plane here",
     "the true head-joint taper profile (only the two published endpoints are known; it is a stack of cylinders on a straight line between them) and a convergence ladder on that stacking",
     "a flutist's lip jet: the jet card in use is the interim tonal card from a staging rig, the jet displacement gain is the demonstrator value, and the labium offset, jet angle and onset ramp are not published and are neutral or authored",
     "breath-warmed bore gas: the bore is at the UNSW measurement state, which sits flat of a played flute",

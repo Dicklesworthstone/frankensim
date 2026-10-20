@@ -131,7 +131,7 @@ loss_section 35 4 200 12000
 loss_section 36 4 200 12000
 loss_section 37 4 200 12000
 loss_section 38 4 200 12000
-receiver -0.63849 0 1 4 16 12000
+receiver -0.63849 0 1 4 16 2800
 outlets 39 8
 outlet 24 -0.2649051 0
 outlet 26 -0.2386173 0
