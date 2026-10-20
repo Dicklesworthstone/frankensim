@@ -1,5 +1,8 @@
 //! One live owner for all circuit, thermal and gas histories in an assembly.
 //! Delegate physics to the existing candidate; move every endpoint together.
+/// Conservative nozzle connectivity before the shared reacting/thermal advance.
+pub mod flow;
+
 use super::exchange::{MaterialExchangeSample, PreparedMaterialExchangeNetwork};
 use super::reactive::{ChamberReaction, ChamberReactionStep, ReactiveExchangeError};
 use super::MaterialContact;
@@ -98,11 +101,23 @@ impl<'m> MaterialExchangeState<'m> {
         reactions: &[ChamberReaction<'_>], gas_patches: &[MaterialContact],
         controls: NetworkSolve, guess_j: &[f64],
     ) -> Result<(Self, MaterialExchangeAdvance), ReactiveExchangeError> {
+        self.step_from_chambers(&self.chambers, prepared, cx, target_s, ports, drives,
+            reactions, gas_patches, controls, guess_j)
+    }
+
+    // Reuse the same state assembly with staged gas inventories, without cloning
+    // the accepted thermal timeline or circuit merely to change gas inputs.
+    #[allow(clippy::too_many_arguments)]
+    fn step_from_chambers(&self, chamber_states: &BTreeMap<u64, GasPiston>,
+        prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>, target_s: f64,
+        ports: &[f64], drives: &[ChamberDrive], reactions: &[ChamberReaction<'_>],
+        gas_patches: &[MaterialContact], controls: NetworkSolve, guess_j: &[f64],
+    ) -> Result<(Self, MaterialExchangeAdvance), ReactiveExchangeError> {
         use ReactiveExchangeError as Error;
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
         let dt = target_s - self.time_s();
         if !dt.is_finite() || dt <= 0.0 || self.chambers.len() > controls.maximum_chambers
-            || drives.len() != self.chambers.len() {
+            || drives.len() != self.chambers.len() || !chamber_states.keys().eq(self.chambers.keys()) {
             return Err(Error::Invalid("one forward assembly clock and one drive per live chamber required"));
         }
         let mut ordered = BTreeMap::new();
@@ -114,7 +129,7 @@ impl<'m> MaterialExchangeState<'m> {
             }
         }
         let chambers = ordered.iter().map(|(&id, drive)| Chamber {
-            id, piston: &self.chambers[&id],
+            id, piston: &chamber_states[&id],
             input: PistonInput { duration_s: dt, heat_j: drive.heat_j,
                 exterior_pressure_pa: drive.exterior_pressure_pa, external_force_n: drive.external_force_n },
             piston_solve: drive.piston_solve, exchange: drive.exchange,
