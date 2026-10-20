@@ -21,7 +21,7 @@ reed.damping_ratio	0.35	-	authored-BR-04	UNKNOWN (u-reed); inherited authored co
 ambient.temperature_k	293.15	K	UNKNOWN	u-environment: the source states no measurement temperature; placeholder is the X-Obs1 audit-arm air. Route: a warm humid breath field through the gas_steady owner
 ambient.pressure_pa	101325	Pa	UNKNOWN	u-environment; standard atmosphere placeholder
 ambient.relative_humidity	0	-	UNKNOWN	u-environment; dry-air placeholder, breath humidity is not modelled in this baseline
-observer.record	baffled_outlet 0 0 0.5 16 64 4800	-	authored	X-Obs1 (data/instruments/grades/clarinet/x-obs1-observer-c7e2712a4.json) convention: outlet on axis at 0.5 m, 16 rings, 64 angles, band 4800 Hz (rate/10). Radiation from open tone holes is NOT in this observer (only the terminal radiates)
+observer.record	baffled_outlet 0 0 0.5 32 128 4800	-	authored	X-Obs1 (data/instruments/grades/clarinet/x-obs1-observer-c7e2712a4.json) placement: outlet on axis at 0.5 m, band 4800 Hz (rate/10). Rings and angles are raised from X-Obs1's 16 and 64 to 32 and 128 because the 28 mm bell refuses 16 x 64: the receiver admits a quadrature cell only when 2 pi f_max cell / c <= pi/4 with cell = a/sqrt(rings) + 2 pi a/angles (baffled_pressure.rs circular_surface); 32 x 128 gives about 0.56 rad. Radiation from open tone holes is NOT in this observer (only the terminal radiates)
 observer.termination	flanged	-	authored	required by the baffled_outlet receiver; a clarinet bell is not a flanged pipe
 audio.rate_hz	48000	Hz	authored	-
 audio.full_scale_pa	20	Pa	authored	PCM scale at the microphone, never a gain; clipped_samples must be 0

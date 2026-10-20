@@ -2,7 +2,7 @@ frankensim-reed-performance-v1
 audio 48000 120000 20
 ambient 293.15 101325 0
 reed 0.0004 0.013 6000 0 0 0.35
-baffled_outlet 0 0 0.5 16 64 4800
+baffled_outlet 0 0 0.5 32 128 4800
 termination flanged
 segments 112
 cylinder 0.0052819864 0.0446
