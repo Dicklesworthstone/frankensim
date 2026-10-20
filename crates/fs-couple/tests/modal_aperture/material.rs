@@ -19,6 +19,9 @@ use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateRegion};
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
 
 fn source(rho: f64, eta: f64) -> ResolvedMaterialStatePoint {
+    source_in_band(rho, eta, 100000.)
+}
+fn source_in_band(rho: f64, eta: f64, upper: f64) -> ResolvedMaterialStatePoint {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
     for (name, value, dims) in [
@@ -33,7 +36,7 @@ fn source(rho: f64, eta: f64) -> ResolvedMaterialStatePoint {
                 value: PropertyValue::Scalar { value, dims },
                 validity: ValidityDomain::unconstrained()
                     .with("T", 290., 300.)
-                    .with("omega", 0., 100000.),
+                    .with("omega", 0., upper),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::ConstantWithinValidity,
                 provenance: Provenance {
@@ -365,4 +368,86 @@ fn material_plate_admission_and_summed_motion_fail_without_publishing_state() {
     assert!(a.step(drive(5.), [0.; 2]).is_err());
     assert_eq!(a.modal_states(), before);
     assert_eq!(a.accepted_steps(), 0);
+}
+
+fn one_mode_options(o: &ModalPlateOptions)
+    -> fs_couple::bernoulli_aperture::plate::PlateApertureOptions
+{
+    fs_couple::bernoulli_aperture::plate::PlateApertureOptions {
+        assembly: o.reduction.assembly.clone(),
+        eigenvalue_window: o.reduction.eigenvalue_window,
+        mode_index: 0, eigensolver: fs_plate::SliceOptions::default(),
+        max_nodes: o.max_nodes, max_triangles: o.max_triangles,
+        slit_edges: o.slit_edges.clone(), rest_opening_m: 4e-4,
+        damping_ratio: o.reduction.damping_ratio,
+        max_slit_mode_variation: 0.25, max_slope: o.maximum_trace_slope,
+    }
+}
+
+#[test]
+fn material_loss_reaches_single_symmetric_and_independent_reed_motion() {
+    use fs_couple::bernoulli_aperture::dynamic::{ApertureState, DynamicAperture};
+    use fs_couple::bernoulli_aperture::plate::PlateApertureReduction;
+    let gate = CancelGate::new_clock_free();
+    let (chart, options) = plate(900., 2e4);
+    let changed = chart.with_region_material("blade", &source(900., 8e4)).unwrap();
+    let a = PlateApertureReduction::from_material_chart(chart, one_mode_options(&options), &gate).unwrap();
+    let b = PlateApertureReduction::from_material_chart(changed, one_mode_options(&options), &gate).unwrap();
+    assert_eq!(a.mass_kg(), b.mass_kg());
+    assert_eq!(a.stiffness_n_m(), b.stiffness_n_m());
+    assert_eq!(a.pressure_area_m2(), b.pressure_area_m2());
+    assert_eq!(a.options().damping_ratio, 0.0);
+    let omega = (a.stiffness_n_m() / a.mass_kg()).sqrt();
+    near(a.damping_ratio(), 0.5 * 2e4 / 4e9 * omega, 1e-7);
+    near(b.damping_ratio(), 4.0 * a.damping_ratio(), 1e-12);
+    let symmetric = a.clone().into_symmetric_opposed_pair().unwrap();
+    assert_eq!(symmetric.damping_ratio(), a.damping_ratio());
+    let gas = super::network::gas();
+    let dt = 1.0 / f64::from(MECHANICS_RATE);
+    let initial = ApertureState { opening_m: 4e-4, opening_velocity_m_s: 0.0 };
+    let scalar = |p| DynamicAperture::from_plate(p, gas.density, 1e6, dt, 2048,
+        initial, contact()).unwrap();
+    let mut single = scalar(a.clone());
+    let mut single_changed = scalar(b.clone());
+    let mut symmetric = scalar(symmetric);
+    let pair = |blades| PairedAperture::from_plates(blades, gas, 1e6, dt, 2048,
+        limits(), [BladeState::default(); 2], contact()).unwrap();
+    let mut identical = pair([a.clone(), a.clone()]);
+    let mut unequal = pair([a, b]);
+    near(unequal.spec().blades[1].damping_n_s_m,
+        4.0 * unequal.spec().blades[0].damping_n_s_m, 1e-12);
+    let (mut single_pressure_change, mut pair_pressure_change) = (0.0_f64, 0.0_f64);
+    for n in 0..2048 {
+        let input = drive(if n < 1024 { 5.0 } else { 0.0 });
+        let low = single.step(input).unwrap();
+        let high = single_changed.step(input).unwrap();
+        let equivalent = symmetric.step(input).unwrap();
+        let two = identical.step(input).unwrap();
+        let different = unequal.step(input).unwrap();
+        single_pressure_change = single_pressure_change.max((low.bore_pressure_pa - high.bore_pressure_pa).abs());
+        pair_pressure_change = pair_pressure_change.max((two.aperture.bore_pressure_pa - different.aperture.bore_pressure_pa).abs());
+        assert!((two.aperture.state.opening_m - equivalent.state.opening_m).abs() < 1e-11);
+        assert!((two.aperture.bore_pressure_pa - equivalent.bore_pressure_pa).abs() < 1e-6);
+        assert_eq!(two.blades[0], two.blades[1]);
+        for frame in [low, high, equivalent, two.aperture, different.aperture] {
+            assert!(frame.dissipated_energy_j >= 0.0);
+            assert!(frame.balance_residual_j().abs() < 1e-13);
+        }
+    }
+    assert!(single_pressure_change > 1e-6 && pair_pressure_change > 1e-6);
+    assert_ne!(unequal.blade_states()[0], unequal.blade_states()[1]);
+}
+
+#[test]
+fn selected_reed_material_loss_refuses_authored_damping_and_out_of_band_modes() {
+    use fs_couple::bernoulli_aperture::plate::PlateApertureReduction;
+    let gate = CancelGate::new_clock_free();
+    // Explicit zero viscosity still owns its source band and excludes a second
+    // authored material-loss law, exactly as in the other plate reductions.
+    let (chart, options) = plate(900., 0.0);
+    let mut duplicate = one_mode_options(&options);
+    duplicate.damping_ratio = 0.02;
+    assert!(PlateApertureReduction::from_material_chart(chart.clone(), duplicate, &gate).is_err());
+    let narrow = chart.with_region_material("blade", &source_in_band(900., 0.0, 100.)).unwrap();
+    assert!(PlateApertureReduction::from_material_chart(narrow, one_mode_options(&options), &gate).is_err());
 }

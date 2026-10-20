@@ -15,8 +15,9 @@
 //! quadrature, a uniform rest gap and one generalized contact. It is not a
 //! multimode reed, an asymmetric double reed, fluid-loaded modal reduction or
 //! exact instrument reconstruction. The explicit slit-uniformity and linear-slope
-//! allowances are approximation limits, not experimental validation. Damping
-//! remains an independent physical input; an elastic card does not imply loss.
+//! allowances are approximation limits, not experimental validation. Selected
+//! material bending viscosity uses the same regional curvature projection as
+//! plate bodies. Without that law, damping remains an explicit authored input.
 
 /// Spatial clearances and partially closed slit geometry.
 pub mod closure;
@@ -69,6 +70,7 @@ pub struct PlateApertureOptions {
     /// Positive mean TOTAL rest opening [m], including on the opposed-pair path.
     pub rest_opening_m: f64,
     /// Explicit nonnegative viscous damping ratio; never inferred from elasticity.
+    /// Must be zero when the source chart selects material bending viscosity.
     pub damping_ratio: f64,
     /// Maximum |normalized slit-node gap motion - 1|. One DOF approximates the
     /// slit by its mean total gap; this declares its permitted nonuniformity.
@@ -97,6 +99,7 @@ pub struct PlateApertureReduction {
     symmetry: PlateApertureSymmetry,
     mass_kg: f64,
     stiffness_n_m: f64,
+    damping_ratio: f64,
     area_m2: f64,
     width_m: f64,
     closing_pressure_pa: f64,
@@ -133,6 +136,8 @@ impl PlateApertureReduction {
 
     /// Same reduction with the exact immutable regional material receipts retained.
     /// Material state is the supplied resolved solid state, not ambient gas state.
+    /// Selected Kelvin-Voigt bending is projected on this SAME retained mode;
+    /// every region's frequency band is checked and authored damping must be zero.
     ///
     /// # Errors
     /// Same admission and solve refusals as [`Self::from_chart`].
@@ -157,6 +162,10 @@ impl PlateApertureReduction {
             || options.max_slope <= 0.0 || options.slit_edges.is_empty()
             || options.slit_edges.len() > n
         { return Err(invalid("plate aperture needs bounded geometry, physical gap/loss and explicit modal/slope limits")); }
+        if matches!(&source, PlateSource::Material(c) if c.bending_viscosity().is_some())
+            && options.damping_ratio != 0.0 {
+            return Err(invalid("source-bound plate aperture loss requires zero authored damping"));
+        }
         // Assembly owns mesh/section/support validation; do not inspect unchecked
         // triangle indices first. No duplicate plate element or eigensolver here.
         let model = chart.assemble(&[], &options.assembly).map_err(map_plate)?;
@@ -193,6 +202,13 @@ impl PlateApertureReduction {
         if pair.phi.len() != model.free || pair.phi.iter().any(|x| !x.is_finite()) {
             return Err(invalid("plate aperture mode has invalid coordinates"));
         }
+        let damping_ratio = match &source {
+            PlateSource::Material(c) => c.modal_bending_damping_ratio(
+                &model, &pair.phi, fs_math::det::sqrt(pair.lambda),
+            )?.unwrap_or(options.damping_ratio),
+            PlateSource::Authored(_) => options.damping_ratio,
+        };
+        checkpoint(gate)?;
         let nodal_w = |node: usize| model.dof_map[3*node].map_or(0.0, |i| pair.phi[i]);
         let s: f64 = weights.iter().enumerate().map(|(i, w)| w * nodal_w(i)).sum();
         let mut m_phi = vec![0.0; model.free];
@@ -246,7 +262,7 @@ impl PlateApertureReduction {
         }
         checkpoint(gate)?;
         Ok(Self { source, options, symmetry: PlateApertureSymmetry::SingleBlade,
-            mass_kg: mass, stiffness_n_m: stiffness, area_m2: area,
+            mass_kg: mass, stiffness_n_m: stiffness, damping_ratio, area_m2: area,
             width_m: width, closing_pressure_pa: closing, lambda_interval: pair.interval,
             in_window_modes: report.modes.len(), shape, slope_per_m, slit_variation: variation })
     }
@@ -317,6 +333,11 @@ impl PlateApertureReduction {
     /// Combined restoring stiffness in that same coordinate [N/m].
     #[must_use]
     pub const fn stiffness_n_m(&self) -> f64 { self.stiffness_n_m }
+    /// Effective damping of the retained mode. Selected regional material loss
+    /// replaces authored damping; conservative prestress never acquires viscosity.
+    /// This ratio is unchanged by symmetric opposed-pair reduction.
+    #[must_use]
+    pub const fn damping_ratio(&self) -> f64 { self.damping_ratio }
     /// Combined uniform-pressure force area, also used for swept volume [m²].
     #[must_use]
     pub const fn pressure_area_m2(&self) -> f64 { self.area_m2 }
@@ -390,7 +411,7 @@ impl PlateApertureReduction {
             aperture: BernoulliAperture { rest_opening_m: self.options.rest_opening_m,
                 width_m: self.width_m, closing_pressure_pa: self.closing_pressure_pa },
             mass_kg: self.mass_kg, stiffness_n_m: self.stiffness_n_m,
-            damping_ratio: self.options.damping_ratio, density_kg_m3,
+            damping_ratio: self.damping_ratio, density_kg_m3,
             impedance_pa_s_m3, time_step_s, max_steps,
         }
     }

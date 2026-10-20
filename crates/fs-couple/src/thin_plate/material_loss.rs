@@ -41,6 +41,17 @@ impl ResolvedPlateChart {
     pub fn bending_viscosity(&self) -> Option<&[IsotropicPlateBendingViscosity]> {
         self.bending_viscosity.as_deref()
     }
+
+    /// Project selected material loss on an existing mode of this exact chart.
+    /// The caller owns the assembly/eigensolve and must supply its matching DOF
+    /// map and mode. This keeps valve, body and force ports on the same basis.
+    pub(crate) fn modal_bending_damping_ratio(
+        &self, model: &PlateModel, phi: &[f64], omega: f64,
+    ) -> Result<Option<f64>, AcousticRealizeError> {
+        self.bending_viscosity().map(|laws| {
+            RegionalBendingLoss::new(self, laws, model)?.modal_zeta(model, phi, omega)
+        }).transpose()
+    }
 }
 
 /// Derive body modes, losses and observation ports from one regional specimen.

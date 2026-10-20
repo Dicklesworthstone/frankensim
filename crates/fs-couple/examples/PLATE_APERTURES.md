@@ -62,8 +62,14 @@ The reduction keeps the complete source chart and material binding; it exposes
 its mass, stiffness, pressure area, slit width, closing pressure and normalized
 physical shape. The eigenvalue interval is evidence about the **discrete pencil**,
 not a bound on omitted physical modes or a measured-reed fidelity certificate.
-Damping is an explicit independent input. An elastic material card does not
-provide a viscous loss law by implication.
+To use material loss, select `chart.with_kelvin_voigt_bending_loss()` before
+`from_material_chart` and set the authored damping ratio to zero. The existing
+regional bending operator projects each region's viscosity onto the retained
+reed mode and checks its frequency against the source bands. Replacing a
+region's material re-resolves that same loss selection; `damping_ratio()` reports
+the resulting effective ratio. Single blades, symmetric pairs and independent
+pairs consume it in their actual motion and pressure coupling. Without a selected
+material loss law, damping remains an explicit independent input.
 
 ## One work-conjugate coordinate
 

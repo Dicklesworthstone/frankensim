@@ -399,7 +399,7 @@ impl PairedAperture {
         }
         let blade = |p: &PlateApertureReduction| ApertureBlade {
             mass_kg: p.mass_kg(), stiffness_n_m: p.stiffness_n_m(),
-            damping_n_s_m: 2.0 * p.options().damping_ratio
+            damping_n_s_m: 2.0 * p.damping_ratio()
                 * fs_math::det::sqrt(p.mass_kg() * p.stiffness_n_m()),
             pressure_area_m2: p.pressure_area_m2(),
         };
