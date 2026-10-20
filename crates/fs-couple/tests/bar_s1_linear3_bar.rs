@@ -1572,6 +1572,25 @@ fn write_artifacts(
     );
     let hash = fs_blake3::hash_domain("org.frankensim.music-render.wav.v1", &wav).to_hex();
     std::fs::write(out.join("bar-s1-after.wav"), wav).unwrap();
+    // The bare near-null radiator is quiet: report how many PCM16 steps the
+    // signal spans, and keep the same pressure history at float32 precision.
+    let lsb = FULL_SCALE_PA / f64::from(i16::MAX);
+    let rms = (signal.iter().map(|p| p * p).sum::<f64>() / signal.len() as f64).sqrt();
+    let peak = signal.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
+    println!(
+        "{{\"suite\":\"bar-s1-resolution\",\"pcm16_lsb_pa\":{lsb},\"rms_pa\":{rms},\"peak_pa\":{peak},\"rms_lsb\":{},\"peak_lsb\":{}}}",
+        rms / lsb,
+        peak / lsb
+    );
+    let f32_wav = fs_couple::pcm_wav::high_resolution::encode_pressure_wav(
+        signal,
+        RATE,
+        1,
+        FULL_SCALE_PA,
+        fs_couple::pcm_wav::high_resolution::Encoding::Float32,
+    )
+    .unwrap();
+    std::fs::write(out.join("bar-s1-after-f32.wav"), f32_wav).unwrap();
     let finest = &ladder.rungs[3];
     let est = tet10_estimate(&ladder.rungs, 0);
     let p: Vec<_> = transfer.iter().map(|p| [p.re, p.im]).collect();
