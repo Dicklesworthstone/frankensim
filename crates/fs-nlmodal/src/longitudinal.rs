@@ -33,6 +33,19 @@ fn invalid(what: &'static str) -> NlModalError {
     NlModalError::Parameter { what }
 }
 
+/// Dot product with four independent partial sums (equal-length slices).
+fn dot4(a: &[f64], b: &[f64]) -> f64 {
+    let mut sums = [0.0_f64; 4];
+    let (ca, cb) = (a.chunks_exact(4), b.chunks_exact(4));
+    let tail: f64 = ca.remainder().iter().zip(cb.remainder()).map(|(x, y)| x * y).sum();
+    for (x, y) in ca.zip(cb) {
+        for i in 0..4 {
+            sums[i] += x[i] * y[i];
+        }
+    }
+    (sums[0] + sums[1]) + (sums[2] + sums[3]) + tail
+}
+
 /// Conservative axial storage for a prestressed string in modal coordinates.
 ///
 /// Slopes are plane-major arrays `[a_0, a_1, ..., a_N]`, repeated for a
@@ -265,6 +278,140 @@ impl LongitudinalString {
         } else {
             Err(invalid("longitudinal string strain overflow"))
         }
+    }
+
+    /// `EA L / 2` [N m]: storage is this times `s_0^2` plus half of it times
+    /// each retained `(d_j u_j + s_j)^2`.
+    #[must_use]
+    pub fn strain_energy_coefficient(&self) -> f64 {
+        self.mean_energy_coefficient
+    }
+
+    /// Geometric strain of one state: returns the mean `s_0` and writes each
+    /// retained axial mode's cosine coefficient `s_j`, one pass per harmonic.
+    /// With [`Self::storage_from_strain`] and [`Self::geometric_strain_gradient`]
+    /// it gives `energy`, `strain_bounds` and the equal-endpoint `discrete_gradient`
+    /// of one state, to rounding (the products are summed in a different order, for
+    /// a real-time caller), without recomputing a harmonic. Allocates nothing.
+    ///
+    /// # Errors
+    /// Refuses incomplete/nonfinite slopes or a wrong output length.
+    pub fn geometric_strain(&self, slopes: &[f64], harmonics: &mut [f64]) -> Result<f64, NlModalError> {
+        if slopes.len() != self.slope_count()
+            || harmonics.len() != self.axial_modes.len()
+            || slopes.iter().any(|x| !x.is_finite())
+        {
+            return Err(invalid("complete finite longitudinal string slopes"));
+        }
+        let n = self.transverse_modes;
+        for (slot, &mode) in harmonics.iter_mut().zip(&self.axial_modes) {
+            let mut total = 0.0;
+            for plane in slopes.chunks_exact(n + 1) {
+                if mode <= n {
+                    total += plane[0] * plane[mode] + 0.5 * dot4(&plane[1..=n - mode], &plane[1 + mode..]);
+                }
+                let low = mode.saturating_sub(n).max(1);
+                let high = (mode - 1).min(n);
+                for j in low..=high {
+                    total += 0.25 * plane[j] * plane[mode - j];
+                }
+            }
+            *slot = total;
+        }
+        Ok(self.geometric_mean(slopes))
+    }
+
+    /// Storage and nonuniform strain bound from [`Self::geometric_strain`]'s
+    /// output and the axial coordinates; writes each retained mode's total
+    /// strain coefficient `d_j u_j + s_j` to `strain`. Same arithmetic as
+    /// `energy` and `strain_bounds`.
+    ///
+    /// # Errors
+    /// Refuses wrong lengths, nonfinite input, or overflow.
+    pub fn storage_from_strain(
+        &self,
+        mean: f64,
+        harmonics: &[f64],
+        axial: &[f64],
+        strain: &mut [f64],
+    ) -> Result<(f64, f64), NlModalError> {
+        let n = self.axial_modes.len();
+        if harmonics.len() != n || axial.len() != n || strain.len() != n
+            || !mean.is_finite() || harmonics.iter().chain(axial).any(|x| !x.is_finite())
+        {
+            return Err(invalid("complete finite longitudinal string strain"));
+        }
+        let mut energy = self.mean_energy_coefficient * mean * mean;
+        let mut nonuniform = 0.0;
+        for (((slot, &s), &u), &scale) in strain.iter_mut().zip(harmonics).zip(axial).zip(&self.axial_slope_scales) {
+            *slot = scale * u + s;
+            energy += 0.5 * self.mean_energy_coefficient * *slot * *slot;
+            nonuniform += slot.abs();
+        }
+        if energy.is_finite() && nonuniform.is_finite() {
+            Ok((energy, nonuniform))
+        } else {
+            Err(invalid("longitudinal string energy overflow"))
+        }
+    }
+
+    /// Gradient with respect to the slope coefficients of
+    /// `mean_weight * s_0 + sum_j weights[j] * s_j` at one state. With
+    /// `mean_weight = 2 c s_0` and `weights[j] = c (d_j u_j + s_j)`, `c` the
+    /// [`Self::strain_energy_coefficient`], this is the slope part of the
+    /// equal-endpoint `discrete_gradient`, to rounding. Allocates nothing.
+    ///
+    /// # Errors
+    /// Refuses wrong lengths, nonfinite input, or overflow.
+    pub fn geometric_strain_gradient(
+        &self,
+        slopes: &[f64],
+        mean_weight: f64,
+        weights: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), NlModalError> {
+        if slopes.len() != self.slope_count()
+            || out.len() != self.slope_count()
+            || weights.len() != self.axial_modes.len()
+            || !mean_weight.is_finite()
+            || slopes.iter().chain(weights).any(|x| !x.is_finite())
+        {
+            return Err(invalid("complete finite longitudinal string gradient input"));
+        }
+        let n = self.transverse_modes;
+        for (a, out) in slopes.chunks_exact(n + 1).zip(out.chunks_exact_mut(n + 1)) {
+            out[0] = mean_weight * a[0];
+            for j in 1..=n {
+                out[j] = 0.5 * mean_weight * a[j];
+            }
+        }
+        for (&factor, &mode) in weights.iter().zip(&self.axial_modes) {
+            for (a, out) in slopes.chunks_exact(n + 1).zip(out.chunks_exact_mut(n + 1)) {
+                if mode <= n {
+                    out[0] += factor * a[mode];
+                    out[mode] += factor * a[0];
+                    // Two contiguous axpys (vectorizable) instead of one interleaved loop.
+                    let half = 0.5 * factor;
+                    for (o, &x) in out[1..=n - mode].iter_mut().zip(&a[1 + mode..]) {
+                        *o += half * x;
+                    }
+                    for (o, &x) in out[1 + mode..].iter_mut().zip(&a[1..=n - mode]) {
+                        *o += half * x;
+                    }
+                }
+                let low = mode.saturating_sub(n).max(1);
+                let high = (mode - 1).min(n);
+                for k in low..=high {
+                    let other = mode - k;
+                    out[k] += 0.25 * factor * a[other];
+                    out[other] += 0.25 * factor * a[k];
+                }
+            }
+        }
+        if out.iter().any(|x| !x.is_finite()) {
+            return Err(invalid("longitudinal string gradient overflow"));
+        }
+        Ok(())
     }
 
     /// Exact discrete gradient of total axial storage between two states.

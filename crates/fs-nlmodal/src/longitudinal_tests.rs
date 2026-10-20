@@ -87,6 +87,46 @@ fn energy_matches_independent_span_integral_with_explicit_static_condensation() 
 }
 
 #[test]
+fn one_state_strain_storage_and_gradient_are_the_equal_endpoint_methods() {
+    // Two planes; axial indices below, at and above the transverse count (both
+    // product branches) on a count long enough for the four-way sums; and an
+    // empty axial set (the Kirchhoff--Carrier image). Same quantities, summed
+    // in another order: equal to rounding.
+    let n = 11;
+    let slopes: Vec<f64> = (0..2 * (n + 1)).map(|i| 0.01 * (0.7 * i as f64 + 0.3).sin()).collect();
+    for axial_modes in [&[1usize, 2, 5, 11, 15][..], &[][..]] {
+        let model = LongitudinalString::new(parameters(), n, 2, axial_modes).unwrap();
+        let count = axial_modes.len();
+        let axial: Vec<f64> = (0..count).map(|j| 1e-7 * (j as f64 - 1.5)).collect();
+        let (mut harmonics, mut strain) = (vec![0.0; count], vec![0.0; count]);
+        let mean = model.geometric_strain(&slopes, &mut harmonics).unwrap();
+        let (energy, nonuniform) = model.storage_from_strain(mean, &harmonics, &axial, &mut strain).unwrap();
+        relative(energy, model.energy(&slopes, &axial).unwrap(), 1e-14);
+        let (bound_mean, bound_nonuniform) = model.strain_bounds(&slopes, &axial).unwrap();
+        assert_eq!(mean.to_bits(), bound_mean.to_bits());
+        relative(nonuniform, bound_nonuniform, 1e-14);
+        let c = model.strain_energy_coefficient();
+        let weights: Vec<f64> = strain.iter().map(|s| c * s).collect();
+        let mut one = vec![0.0; slopes.len()];
+        model.geometric_strain_gradient(&slopes, 2.0 * c * mean, &weights, &mut one).unwrap();
+        let (mut two, mut axial_gradient) = (vec![0.0; slopes.len()], vec![0.0; count]);
+        model.discrete_gradient(&slopes, &slopes, &axial, &axial, &mut two, &mut axial_gradient).unwrap();
+        let scale = two.iter().fold(0.0_f64, |m, g| m.max(g.abs()));
+        for (a, b) in one.iter().zip(&two) {
+            assert!((a - b).abs() <= 1e-14 * scale, "{a:e} vs {b:e}");
+        }
+        for ((&g, &s), &d) in axial_gradient.iter().zip(&strain).zip(model.axial_slope_scales()) {
+            relative(g, c * d * s, 1e-14);
+        }
+    }
+    let model = LongitudinalString::new(parameters(), 4, 1, &[1, 3]).unwrap();
+    assert!(model.geometric_strain(&[0.0; 5], &mut [0.0; 1]).is_err());
+    assert!(model.geometric_strain(&[f64::NAN, 0.0, 0.0, 0.0, 0.0], &mut [0.0; 2]).is_err());
+    assert!(model.storage_from_strain(0.0, &[0.0; 2], &[0.0; 1], &mut [0.0; 2]).is_err());
+    assert!(model.geometric_strain_gradient(&[0.0; 5], 0.0, &[0.0; 2], &mut [0.0; 4]).is_err());
+}
+
+#[test]
 fn force_matches_energy_derivatives_in_both_planes_and_every_axial_coordinate() {
     let model = LongitudinalString::new(parameters(), 4, 2, &[1, 2, 5, 8]).unwrap();
     let slopes = [
