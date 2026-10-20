@@ -1,0 +1,817 @@
+//! M2.1-W3b continuous multimodal Riccati (IRP pexfp.72). Gauntlet tiers
+//! are named per test; each prints one JSON line per rung or check.
+
+use super::*;
+use crate::modal::{
+    bessel_j0, bessel_j0_certified, bessel_j1, mm_input_impedance, modal_characteristic_impedances,
+};
+use crate::profile::{MAX_RICCATI_STEPS, profile_impedance};
+use crate::{Duct, Segment};
+use fs_material::gas::GasSpec;
+use fs_mms::{LadderSide, OrderGate, RefinementLadder};
+use std::time::Instant;
+
+fn air20() -> GasState {
+    GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air")
+}
+fn rel(a: C64, b: C64) -> f64 {
+    (a - b).abs() / b.abs()
+}
+fn cents(f: f64, reference: f64) -> f64 {
+    1200.0 * (f / reference).log2()
+}
+fn tau_hz(f: f64) -> f64 {
+    core::f64::consts::TAU * f
+}
+fn z00(
+    profile: &RadiusProfile,
+    f_hz: f64,
+    loss: LossModel,
+    load: MouthLoad<'_>,
+    modes: usize,
+    steps: usize,
+) -> C64 {
+    mm_profile_impedance(
+        profile,
+        &air20(),
+        tau_hz(f_hz),
+        loss,
+        load,
+        ModeCount(modes),
+        RiccatiSteps(steps),
+    )
+    .expect("continuous modal impedance")
+    .plane_impedance
+}
+/// Steps that keep `kappa |h|` just inside the guard for `modes` at the
+/// narrowest radius (a conservative bound: cutoff from `gamma/r_min` alone).
+fn guarded_steps(length: f64, r_min: f64, modes: usize) -> usize {
+    if modes == 1 {
+        return 64;
+    }
+    let gamma = *j1_roots_unchecked(modes - 1).last().unwrap();
+    ((gamma / r_min * length / (0.95 * MAX_EVANESCENT_STEP)).ceil() as usize).max(16)
+}
+fn exp_horn() -> RadiusProfile {
+    // 6 mm to 60 mm over 0.5 m: r = r0 exp(a x / 2).
+    RadiusProfile::exponential(0.006, 2.0 * det::ln(10.0) / 0.5, 0.5).unwrap()
+}
+fn complex_exp(z: C64) -> C64 {
+    let (s, c) = det::sin_cos(z.im);
+    C64::new(c, s).scale(det::exp(z.re))
+}
+
+/// `J_n(x) = (1/2 pi) int_0^{2 pi} cos(n t - x sin t) dt` by the trapezoid
+/// rule, spectrally accurate on the full period (error ~ 2|J_{2M}(x)|).
+fn quad_jn(order: u32, x: f64) -> f64 {
+    const M: u32 = 512;
+    let mut acc = 0.0;
+    for j in 0..M {
+        let t = core::f64::consts::TAU * f64::from(j) / f64::from(M);
+        let (s, _) = det::sin_cos(t);
+        acc += det::sin_cos(f64::from(order) * t - x * s).1;
+    }
+    acc / f64::from(M)
+}
+/// `d/dx` of the `J0` quadrature, `-(1/2 pi) int sin t sin(x sin t) dt`:
+/// an independent route to `J0'`, so `J0' = -J1` is checked as an identity.
+fn quad_j0_prime(x: f64) -> f64 {
+    const M: u32 = 512;
+    let mut acc = 0.0;
+    for j in 0..M {
+        let t = core::f64::consts::TAU * f64::from(j) / f64::from(M);
+        let (s, _) = det::sin_cos(t);
+        acc -= s * det::sin_cos(x * s).0;
+    }
+    acc / f64::from(M)
+}
+
+#[test]
+fn mm_bessel_certified_to_gamma16() {
+    // G0. The bead also names a J/Y Wronskian. It is omitted on purpose:
+    // no Y owner exists here, and the Wronskian is blind to common phase
+    // errors (fs-aeroac's own finding). The independent spectral
+    // quadrature below bounds J0, J1 and J0' = -J1 pointwise instead.
+    let start = Instant::now();
+    let (mut e0, mut e1, mut ed, mut legacy) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+    let mut grid: Vec<f64> = (0..=1024)
+        .map(|i| BESSEL_CERTIFIED_X * f64::from(i) / 1024.0)
+        .collect();
+    grid.extend([17.999_999_999, 18.0, 18.000_000_001]);
+    for &x in &grid {
+        e0 = e0.max((bessel_j0_certified(x) - quad_jn(0, x)).abs());
+        if x <= 26.0 {
+            // Disclosure, not a gate: the staircase's bit-frozen legacy series.
+            legacy = legacy.max((bessel_j0(x) - quad_jn(0, x)).abs());
+        }
+        e1 = e1.max((bessel_j1(x) - quad_jn(1, x)).abs());
+        ed = ed.max((quad_j0_prime(x) + bessel_j1(x)).abs());
+    }
+    let cap = certified_mode_cap();
+    let roots = j1_roots_unchecked(cap - 1);
+    let worst_root = roots
+        .iter()
+        .map(|&g| bessel_j1(g).abs())
+        .fold(0.0, f64::max);
+    println!(
+        "{{\"suite\":\"fs-duct\",\"case\":\"mm-bessel-certified\",\"inputs\":\"x in [0,{BESSEL_CERTIFIED_X}] \
+         ({} points incl. the 18 switch)\",\"observed\":{{\"j0_certified\":{e0:e},\"legacy_j0_to_26\":{legacy:e},\"j1\":{e1:e},\"j0_prime_plus_j1\":{ed:e},\
+         \"j1_at_roots\":{worst_root:e},\"gamma_max\":{}}},\"tol\":1e-13,\"elapsed_us\":{}}}",
+        grid.len(),
+        roots.last().unwrap(),
+        start.elapsed().as_micros()
+    );
+    assert!(e0 < 1e-13 && e1 < 1e-13 && ed < 1e-13 && worst_root < 1e-13);
+    assert!(
+        *roots.last().unwrap() > 51.0,
+        "certified range reaches past gamma_16"
+    );
+}
+
+#[test]
+fn mm_mode_cap_refusal() {
+    // G0: the cap is computed from the roots; cap admits and cap + 1 refuses.
+    let cap = certified_mode_cap();
+    let roots = j1_roots_unchecked(cap);
+    assert!(roots[cap - 2] < BESSEL_CERTIFIED_X && roots[cap - 1] >= BESSEL_CERTIFIED_X);
+    assert!(cap >= 17, "at least 16 modes are admitted (cap {cap})");
+    assert!(ModeCount(cap).validate().is_ok());
+    assert!(ModeCount(cap + 1).validate().is_err());
+    assert!(ModeCount(0).validate().is_err());
+    let profile = RadiusProfile::power(0.05, 1.0, 0.0, 0.01).unwrap();
+    let call = |modes: usize, steps: usize| {
+        mm_profile_impedance(
+            &profile,
+            &air20(),
+            tau_hz(500.0),
+            LossModel::Lossless,
+            MouthLoad::Matched,
+            ModeCount(modes),
+            RiccatiSteps(steps),
+        )
+    };
+    assert!(matches!(
+        call(cap + 1, 64),
+        Err(DuctError::BadParameter { .. })
+    ));
+    assert!(call(1, 0).is_err() && call(1, MAX_RICCATI_STEPS + 1).is_err());
+    // Evanescent guard: a 0.1 m cylinder of radius 10 mm, N = 2, at 100 Hz.
+    let cyl = RadiusProfile::power(0.01, 1.0, 0.0, 0.1).unwrap();
+    let k = tau_hz(100.0) / air20().sound_speed;
+    let gamma1 = j1_roots_unchecked(1)[0];
+    let kappa = ((gamma1 / 0.01) * (gamma1 / 0.01) - k * k).sqrt();
+    let admitted = (kappa * 0.1 / MAX_EVANESCENT_STEP).ceil() as usize;
+    let run = |steps: usize| {
+        mm_profile_impedance(
+            &cyl,
+            &air20(),
+            tau_hz(100.0),
+            LossModel::Lossless,
+            MouthLoad::Matched,
+            ModeCount(2),
+            RiccatiSteps(steps),
+        )
+    };
+    assert!(
+        run(admitted).is_ok(),
+        "kappa h = {} admitted",
+        kappa * 0.1 / admitted as f64
+    );
+    assert!(
+        run(admitted - 1).is_err(),
+        "kappa h = {} refused",
+        kappa * 0.1 / (admitted - 1) as f64
+    );
+    println!(
+        "{{\"suite\":\"fs-duct\",\"case\":\"mm-mode-cap-refusal\",\"observed\":{{\"cap\":{cap},\
+         \"guard_steps_admitted\":{admitted}}},\"verdict\":\"pass\"}}"
+    );
+}
+
+#[test]
+fn profile_slope_matches_central_differences() {
+    // G0: analytic dr/dx for every profile shape, and C1 at spline knots.
+    let stations: Vec<(f64, f64)> = (0..=12)
+        .map(|i| {
+            let x = 0.05 * f64::from(i);
+            (x, 0.01 + 0.004 * x + 0.03 * x * x * x)
+        })
+        .collect();
+    let shapes = [
+        exp_horn(),
+        RadiusProfile::power(0.007, 0.08, 1.7, 0.4).unwrap(),
+        RadiusProfile::spline(stations, Some([0.004, 0.004 + 0.09 * 0.36])).unwrap(),
+    ];
+    let mut worst = 0.0_f64;
+    for p in &shapes {
+        let d = 1e-6;
+        for i in 1..40 {
+            let x = p.length() * f64::from(i) / 40.0;
+            let fd = (p.radius(x + d).unwrap() - p.radius(x - d).unwrap()) / (2.0 * d);
+            let s = p.slope(x).unwrap();
+            worst = worst.max((s - fd).abs() / s.abs().max(1e-3));
+        }
+        assert!(p.slope(-1e-9).is_err() && p.slope(p.length() + 1e-9).is_err());
+    }
+    let spline = &shapes[2];
+    for i in 1..12 {
+        let x = 0.05 * f64::from(i);
+        let (l, r) = (
+            spline.slope(x - 1e-12).unwrap(),
+            spline.slope(x + 1e-12).unwrap(),
+        );
+        assert!((l - r).abs() < 1e-9, "spline slope continuous at knot {x}");
+    }
+    assert!(worst < 1e-7, "slope vs central difference {worst:e}");
+}
+
+#[test]
+fn mm_riccati_n1_equals_plane_riccati() {
+    // G2: one mode is the plane-wave Webster/Riccati of M2.1-W3a.
+    let profile = exp_horn();
+    let state = air20();
+    let r_mouth = profile.outlet_radius();
+    let mut worst = 0.0_f64;
+    for loss in [LossModel::Lossless, LossModel::Bessel] {
+        for f in [150.0, 700.0, 2300.0] {
+            let omega = tau_hz(f);
+            for (name, load, z_load) in [
+                (
+                    "matched",
+                    MouthLoad::Matched,
+                    segment_wave(&state, r_mouth, omega, loss)
+                        .unwrap()
+                        .characteristic_impedance,
+                ),
+                (
+                    "flanged",
+                    MouthLoad::Analytic(Termination::FlangedOpen),
+                    termination_impedance(Termination::FlangedOpen, &state, r_mouth, omega)
+                        .unwrap()
+                        .0
+                        .unwrap(),
+                ),
+            ] {
+                let mm = z00(&profile, f, loss, load, 1, 400);
+                let plane =
+                    profile_impedance(&profile, &state, omega, loss, z_load, RiccatiSteps(400))
+                        .unwrap()
+                        .z_in;
+                let e = rel(mm, plane);
+                worst = worst.max(e);
+                println!(
+                    "{{\"suite\":\"fs-duct\",\"case\":\"mm-riccati-n1-plane\",\"inputs\":{{\"f_hz\":{f},\
+                     \"loss\":\"{loss:?}\",\"load\":\"{name}\"}},\"modes\":1,\"steps\":400,\
+                     \"z00\":[{},{}],\"rel_err\":{e:e},\"tol\":1e-10}}",
+                    mm.re, mm.im
+                );
+            }
+        }
+    }
+    assert!(worst < 1e-10, "N = 1 vs plane Riccati {worst:e}");
+}
+
+#[test]
+fn mm_riccati_cylinder_decouples() {
+    // G2: R' = 0 decouples the modes into the staircase's uniform waves.
+    let (r, length, f) = (0.007, 0.4, 500.0);
+    let cyl = RadiusProfile::power(r, 1.0, 0.0, length).unwrap();
+    let state = air20();
+    let omega = tau_hz(f);
+    let loss = LossModel::WideTube;
+    let steps = guarded_steps(length, r, 4);
+    let z = mm_profile_impedance(
+        &cyl,
+        &state,
+        omega,
+        loss,
+        MouthLoad::Analytic(Termination::Closed),
+        ModeCount(4),
+        RiccatiSteps(steps),
+    )
+    .unwrap()
+    .impedance_matrix;
+    let wave = segment_wave(&state, r, omega, loss).unwrap();
+    // Closed end under e^{-i omega t}: Z = i Zc cot(k L).
+    let kl = wave.wavenumber.scale(length);
+    let (e_pos, e_neg) = (
+        complex_exp(C64::new(-kl.im, kl.re)),
+        complex_exp(C64::new(kl.im, -kl.re)),
+    );
+    let cot = C64::new(0.0, 1.0) * (e_pos + e_neg) * (e_pos - e_neg).recip();
+    let closed = C64::new(0.0, 1.0) * wave.characteristic_impedance * cot;
+    let zc = modal_characteristic_impedances(&state, r, omega, loss, 4).unwrap();
+    let mut diag = rel(z[0], closed);
+    for n in 1..4 {
+        diag = diag.max(rel(z[n * 4 + n], zc[n]));
+    }
+    let off = (0..16)
+        .filter(|i| i / 4 != i % 4)
+        .map(|i| z[i].abs())
+        .fold(0.0, f64::max);
+    println!(
+        "{{\"suite\":\"fs-duct\",\"case\":\"mm-riccati-cylinder\",\"modes\":4,\"steps\":{steps},\
+         \"z00\":[{},{}],\"observed\":{{\"diag_rel\":{diag:e},\"off_diag_abs\":{off:e}}},\"tol\":1e-12}}",
+        z[0].re, z[0].im
+    );
+    assert!(diag < 1e-12, "diagonal vs closed form {diag:e}");
+    assert!(off <= 1e-14 * z[0].abs(), "off-diagonals {off:e}");
+}
+
+/// Staircase `Z00` at slice multipliers 4/8/16/32 for a duct, its observed
+/// order through fs-mms, and the first-order Richardson limit. The coarser
+/// 1/2/4/8 ladder measured order 1.38 on the cone (pre-asymptotic: first-
+/// and second-order terms mixed), so rungs were added, never the band widened.
+fn staircase_ladder(duct: &Duct, f: f64, modes: usize) -> (Vec<C64>, f64, C64) {
+    let z: Vec<C64> = [4_usize, 8, 16, 32]
+        .iter()
+        .map(|&e| {
+            mm_input_impedance(
+                duct,
+                &air20(),
+                tau_hz(f),
+                LossModel::WideTube,
+                Termination::FlangedOpen,
+                modes,
+                e,
+            )
+            .expect("staircase")
+            .plane_impedance
+        })
+        .collect();
+    let diffs: Vec<f64> = z
+        .windows(2)
+        .map(|w| (w[0] - w[1]).abs() / w[1].abs())
+        .collect();
+    let ladder = RefinementLadder::new(vec![1.0, 0.5, 0.25], diffs).expect("ladder");
+    let verdict = OrderGate { theoretical: 1.0 }
+        .check("mm-staircase-order", LadderSide::Primal, &ladder)
+        .unwrap_or_else(|e| panic!("staircase is not O(dx): {e}"));
+    println!("{}", verdict.json_line(true));
+    let limit = z[3].scale(2.0) - z[2];
+    (z, verdict.fit.observed, limit)
+}
+
+#[test]
+fn mm_riccati_matches_extrapolated_staircase() {
+    // G1/G3: the staircase converges at O(dx); its Richardson limit is the
+    // continuous result (an independent discretization of the same model).
+    let modes = 4;
+    let f = 900.0;
+    // Linear cone 6 -> 30 mm over 0.3 m.
+    let cone_duct = Duct {
+        segments: vec![Segment::Cone {
+            inlet_radius: 0.006,
+            outlet_radius: 0.03,
+            length: 0.3,
+        }],
+    };
+    let cone = RadiusProfile::power(0.006, 0.006 * 0.3 / 0.024, 1.0, 0.3).unwrap();
+    // Exponential flare as 400 exact-station cones; the polygon differs from
+    // the curve by ~ dx^2 r''/8 ~ 1e-6 relative, far inside the 1e-4 band.
+    let horn = exp_horn();
+    let k = 400;
+    let horn_duct = Duct {
+        segments: (0..k)
+            .map(|i| {
+                let (xa, xb) = (0.5 * i as f64 / k as f64, 0.5 * (i + 1) as f64 / k as f64);
+                Segment::Cone {
+                    inlet_radius: horn.radius(xa).unwrap(),
+                    outlet_radius: horn.radius(xb).unwrap(),
+                    length: xb - xa,
+                }
+            })
+            .collect(),
+    };
+    for (name, duct, profile) in [
+        ("cone", &cone_duct, &cone),
+        ("exponential", &horn_duct, &horn),
+    ] {
+        let (z, order, limit) = staircase_ladder(duct, f, modes);
+        let steps = guarded_steps(profile.length(), profile.inlet_radius(), modes).max(1024);
+        let cont = z00(
+            profile,
+            f,
+            LossModel::WideTube,
+            MouthLoad::Analytic(Termination::FlangedOpen),
+            modes,
+            steps,
+        );
+        let cont2 = z00(
+            profile,
+            f,
+            LossModel::WideTube,
+            MouthLoad::Analytic(Termination::FlangedOpen),
+            modes,
+            2 * steps,
+        );
+        let e = rel(limit, cont);
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"mm-riccati-vs-staircase\",\"inputs\":{{\"fixture\":\"{name}\",\
+             \"f_hz\":{f}}},\"modes\":{modes},\"steps\":{steps},\"z00\":[{},{}],\"observed\":{{\
+             \"staircase_order\":{order:.3},\"staircase_x1\":[{},{}],\"richardson_rel_err\":{e:e},\
+             \"step_refinement_rel\":{:e}}},\"tol\":1e-4}}",
+            cont.re,
+            cont.im,
+            z[0].re,
+            z[0].im,
+            rel(cont, cont2)
+        );
+        assert!(
+            rel(cont, cont2) < 1e-9,
+            "{name}: continuous result is step-converged"
+        );
+        assert!(e < 1e-4, "{name}: Richardson staircase vs continuous {e:e}");
+    }
+}
+
+#[test]
+fn mm_riccati_step_ladder() {
+    // G1: fourth-order Magnus, gated by fs-mms (+-0.2) on a gentle flare.
+    let profile = RadiusProfile::exponential(0.02, 2.0 * det::ln(3.0) / 0.5, 0.5).unwrap();
+    let (f, modes) = (1500.0, 4);
+    let load = MouthLoad::Analytic(Termination::FlangedOpen);
+    let reference = z00(&profile, f, LossModel::WideTube, load, modes, 4096);
+    let rungs = [32_usize, 64, 128, 256];
+    let errors: Vec<f64> = rungs
+        .iter()
+        .map(|&s| {
+            rel(
+                z00(&profile, f, LossModel::WideTube, load, modes, s),
+                reference,
+            )
+        })
+        .collect();
+    for (s, e) in rungs.iter().zip(&errors) {
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"mm-riccati-step-ladder\",\"axis\":\"steps\",\"rung\":{s},\
+             \"modes\":{modes},\"rel_err\":{e:e},\"reference_steps\":4096}}"
+        );
+    }
+    assert!(
+        errors[0] > 1e-6,
+        "liveness: the coarse rung must show discretization error"
+    );
+    let ladder =
+        RefinementLadder::new(rungs.iter().map(|&s| 1.0 / s as f64).collect(), errors).unwrap();
+    let verdict = OrderGate { theoretical: 4.0 }
+        .check("mm-riccati-step-ladder", LadderSide::Primal, &ladder)
+        .unwrap_or_else(|e| panic!("{e}"));
+    println!("{}", verdict.json_line(true));
+}
+
+/// The trombone bell of Amir, Pagneux & Kergomard (1997, Part II), Table I:
+/// the only numeric geometry in either paper. The table header prints both
+/// rows as [cm], but the radii are millimetres (the text gives a 25.4 mm
+/// throat diameter and Fig. 1 a ~0.115 m mouth); distances are cm. Joined
+/// here by the C2 spline (the paper used local cubics through 4 points).
+fn trombone_bell() -> RadiusProfile {
+    const TABLE_I: [(f64, f64); 22] = [
+        (0.0, 12.25),
+        (5.5, 12.25),
+        (5.6, 12.25),
+        (5.7, 12.25),
+        (5.8, 12.65),
+        (5.9, 12.65),
+        (8.3, 13.0),
+        (12.4, 14.0),
+        (16.2, 15.0),
+        (20.3, 16.5),
+        (25.3, 18.5),
+        (31.2, 21.5),
+        (36.0, 24.5),
+        (40.0, 28.0),
+        (43.2, 32.0),
+        (45.7, 37.0),
+        (48.2, 44.5),
+        (50.0, 52.0),
+        (51.5, 62.0),
+        (52.7, 74.5),
+        (53.6, 89.5),
+        (54.4, 114.5),
+    ];
+    RadiusProfile::spline(
+        TABLE_I
+            .iter()
+            .map(|&(cm, mm)| (cm * 1e-2, mm * 1e-3))
+            .collect(),
+        None,
+    )
+    .unwrap()
+}
+
+/// A bracketed |Z00| maximum: walk until the middle sample beats both
+/// neighbours, then contract by parabolic vertices kept inside the bracket.
+fn refined_peak(eval: &dyn Fn(f64) -> f64, guess: f64, half: f64) -> f64 {
+    let mut half = half;
+    let mut b = guess;
+    let (mut fa, mut fb, mut fc) = (eval(b - half), eval(b), eval(b + half));
+    let walk = |b: &mut f64, fa: &mut f64, fb: &mut f64, fc: &mut f64, half: f64| {
+        for _ in 0..64 {
+            if *fb >= *fa && *fb >= *fc {
+                return;
+            }
+            if *fa > *fc {
+                *b -= half;
+                (*fc, *fb) = (*fb, *fa);
+                *fa = eval(*b - half);
+            } else {
+                *b += half;
+                (*fa, *fb) = (*fb, *fc);
+                *fc = eval(*b + half);
+            }
+        }
+        panic!("no |Z00| maximum bracketed near {guess} Hz");
+    };
+    walk(&mut b, &mut fa, &mut fb, &mut fc, half);
+    for _ in 0..3 {
+        b += 0.5 * half * (fa - fc) / (fa - 2.0 * fb + fc);
+        half *= 0.25;
+        (fa, fb, fc) = (eval(b - half), eval(b), eval(b + half));
+        walk(&mut b, &mut fa, &mut fb, &mut fc, half);
+    }
+    b + 0.5 * half * (fa - fc) / (fa - 2.0 * fb + fc)
+}
+
+#[test]
+fn mm_riccati_mode_ladder() {
+    // G1: N = 1, 2, 4, 8, 16 on the published trombone bell; |dZ00| shrinks
+    // and the tail bound is reported. Liveness: N = 1 vs N = 8 must move an
+    // impedance peak by >= 5 c (the plane image misses mode conversion).
+    let bell = trombone_bell();
+    let r_min = 0.01225;
+    let load = MouthLoad::Analytic(Termination::FlangedOpen);
+    let f = 1000.0;
+    let mut z = Vec::new();
+    for &n in &[1_usize, 2, 4, 8, 16] {
+        let steps = guarded_steps(bell.length(), r_min, n).max(256);
+        let start = Instant::now();
+        let resp = mm_profile_impedance(
+            &bell,
+            &air20(),
+            tau_hz(f),
+            LossModel::WideTube,
+            load,
+            ModeCount(n),
+            RiccatiSteps(steps),
+        )
+        .unwrap();
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"mm-riccati-mode-ladder\",\"inputs\":\"Amir 1997 Table I bell\",\
+             \"axis\":\"modes\",\"rung\":{n},\"steps\":{steps},\"z00\":[{},{}],\"tail_bound_estimate\":{:?},\
+             \"elapsed_us\":{}}}",
+            resp.plane_impedance.re,
+            resp.plane_impedance.im,
+            resp.tail_bound_estimate,
+            start.elapsed().as_micros()
+        );
+        z.push(resp.plane_impedance);
+    }
+    let deltas: Vec<f64> = z.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+    println!(
+        "{{\"suite\":\"fs-duct\",\"case\":\"mm-riccati-mode-ladder\",\"observed\":{{\"abs_dz00\":{deltas:?}}}}}"
+    );
+    assert!(
+        deltas.windows(2).all(|w| w[1] < w[0]),
+        "mode ladder must shrink monotonically: {deltas:?}"
+    );
+    // Liveness: every plane-image peak below 1.5 kHz, refined for N = 1 and
+    // N = 8 at one shared step count (so step error cannot pose as physics).
+    let steps = guarded_steps(bell.length(), r_min, 8).max(256);
+    let mag = |n: usize| {
+        move |hz: f64| z00(&trombone_bell(), hz, LossModel::WideTube, load, n, steps).abs()
+    };
+    let (m1, m8) = (mag(1), mag(8));
+    let mut coarse = Vec::new();
+    let (mut a, mut b) = (m1(60.0), m1(70.0));
+    let mut hz: f64 = 70.0;
+    while hz < 1500.0 {
+        let c = m1(hz + 10.0);
+        if b > a && b > c {
+            coarse.push(hz);
+        }
+        (a, b, hz) = (b, c, hz + 10.0);
+    }
+    let mut shift = 0.0_f64;
+    for &g in &coarse {
+        let p1 = refined_peak(&m1, g, 2.0);
+        let p8 = refined_peak(&m8, p1, 2.0);
+        let c = cents(p8, p1);
+        shift = shift.max(c.abs());
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"mm-riccati-mode-liveness\",\"inputs\":{{\"peak_n1_hz\":{p1:.4}}},\
+             \"steps\":{steps},\"observed\":{{\"peak_n8_hz\":{p8:.4},\"cents\":{c:.3}}}}}"
+        );
+    }
+    assert!(
+        coarse.len() >= 3,
+        "expected peaks below 1.5 kHz, found {}",
+        coarse.len()
+    );
+    assert!(
+        shift >= 5.0,
+        "liveness: N = 1 vs N = 8 must move a peak by >= 5 c (max {shift:.3})"
+    );
+}
+
+/// Exact one-mode (Webster) input impedance of the exponential horn
+/// `S = S0 e^{m x}`, lossless, with a mouth impedance `z_l` (Pagneux et al.
+/// 1996, Part I, App. E). `P = e^{-mx/2}(A e^{i b x} + B e^{-i b x})`,
+/// `b^2 = k^2 - m^2/4`, `U = S P'/(i omega rho)`.
+fn webster_exponential(
+    r0: f64,
+    m: f64,
+    length: f64,
+    state: &GasState,
+    omega: f64,
+    z_l: C64,
+) -> C64 {
+    let k = omega / state.sound_speed;
+    let beta = C64::from_re(k * k - 0.25 * m * m).sqrt();
+    let i = C64::new(0.0, 1.0);
+    let lam1 = C64::from_re(-0.5 * m) + i * beta;
+    let lam2 = C64::from_re(-0.5 * m) - i * beta;
+    let area = |x: f64| core::f64::consts::PI * r0 * r0 * det::exp(m * x);
+    let flow = |x: f64| (i.scale(omega * state.density)).recip().scale(area(x));
+    let (f1, f2) = (
+        complex_exp(lam1.scale(length)),
+        complex_exp(lam2.scale(length)),
+    );
+    let cl = flow(length);
+    let det = f1 * f2 * cl * (lam2 - lam1);
+    let a = (z_l * cl * lam2 * f2 - f2) * det.recip();
+    let b = (f1 - cl * lam1 * f1 * z_l) * det.recip();
+    (a + b) * (flow(0.0) * (lam1 * a + lam2 * b)).recip()
+}
+
+#[test]
+fn mm_riccati_pagneux_cases() {
+    // G2. Pagneux et al. (1996, Part I; 1997, Part II) publish their
+    // benchmark results as figures only (checked 2026-10-20 on the authors'
+    // site), so no 1 % comparison against printed numbers is claimed here.
+    // What is reproducible: (a) the exact one-mode solution of Part I App. E
+    // for the exponential horn, above and below the horn cutoff, and (b) the
+    // Part I 45-degree truncated cone (0.08 -> 0.30 m, infinite-pipe end,
+    // plane piston, 600 Hz, 7 and 17 modes), whose results must be
+    // reciprocal and settle with the mode count.
+    let state = air20();
+    let horn = exp_horn();
+    let m = 2.0 * det::ln(10.0) / 0.5;
+    let f_cut = state.sound_speed * m / (4.0 * core::f64::consts::PI);
+    let mut worst = 0.0_f64;
+    for f in [0.5 * f_cut, 500.0, 1000.0, 2000.0] {
+        let omega = tau_hz(f);
+        let z_l = segment_wave(&state, horn.outlet_radius(), omega, LossModel::Lossless)
+            .unwrap()
+            .characteristic_impedance;
+        let exact = webster_exponential(0.006, m, 0.5, &state, omega, z_l);
+        let mm = z00(&horn, f, LossModel::Lossless, MouthLoad::Matched, 1, 8192);
+        let e = rel(mm, exact);
+        worst = worst.max(e);
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"mm-riccati-pagneux-webster\",\"inputs\":{{\"fixture\":\
+             \"exponential horn, Part I App. E\",\"f_hz\":{f:.2},\"f_cut_hz\":{f_cut:.2}}},\"modes\":1,\
+             \"steps\":8192,\"z00\":[{},{}],\"oracle\":[{},{}],\"rel_err\":{e:e},\"tol\":1e-9}}",
+            mm.re, mm.im, exact.re, exact.im
+        );
+    }
+    assert!(worst < 1e-9, "one-mode exponential horn vs exact {worst:e}");
+    let cone = RadiusProfile::power(0.08, 0.08, 1.0, 0.22).unwrap();
+    let mut z_by_n = Vec::new();
+    for modes in [7_usize, 17] {
+        let steps = guarded_steps(0.22, 0.08, modes).max(64);
+        let resp = mm_profile_impedance(
+            &cone,
+            &state,
+            tau_hz(600.0),
+            LossModel::Lossless,
+            MouthLoad::Matched,
+            ModeCount(modes),
+            RiccatiSteps(steps),
+        )
+        .unwrap();
+        let z = &resp.impedance_matrix;
+        let scale = z.iter().map(|v| v.abs()).fold(0.0, f64::max);
+        let asym = (0..modes * modes)
+            .map(|idx| (z[idx] - z[(idx % modes) * modes + idx / modes]).abs())
+            .fold(0.0, f64::max)
+            / scale;
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"mm-riccati-pagneux-cone\",\"inputs\":{{\"fixture\":\
+             \"Part I 45-degree cone 0.08->0.30 m, infinite-pipe end\",\"f_hz\":600}},\"modes\":{modes},\
+             \"steps\":{steps},\"z00\":[{},{}],\"observed\":{{\"asymmetry\":{asym:e},\"tail_bound\":{:?}}}}}",
+            resp.plane_impedance.re, resp.plane_impedance.im, resp.tail_bound_estimate
+        );
+        assert!(asym < 1e-10, "reciprocity at N = {modes}: {asym:e}");
+        z_by_n.push((resp.plane_impedance, resp.tail_bound_estimate.unwrap()));
+    }
+    // Modal convergence on a 45-degree wall is slow (the rigid-duct modes
+    // meet the sloped wall's Neumann condition only in the limit), so the
+    // claim is the shrinking tail, not a chosen settling band.
+    let settle = rel(z_by_n[0].0, z_by_n[1].0);
+    println!(
+        "{{\"suite\":\"fs-duct\",\"case\":\"mm-riccati-pagneux-cone\",\"observed\":{{\"n7_vs_n17_rel\":{settle:e}}}}}"
+    );
+    assert!(
+        z_by_n[1].1 < z_by_n[0].1,
+        "the tail bound must shrink from 7 to 17 modes ({:e} -> {:e})",
+        z_by_n[0].1,
+        z_by_n[1].1
+    );
+}
+
+#[test]
+fn mm_riccati_reciprocity_and_power() {
+    // G0: Z = Z^T (lossy and lossless) and, lossless with every retained mode
+    // propagating, input power equals the matched mouth's absorbed power.
+    let state = air20();
+    let cone = RadiusProfile::power(0.08, 0.08, 1.0, 0.22).unwrap();
+    let (n, f) = (4_usize, 8000.0);
+    for loss in [LossModel::Lossless, LossModel::WideTube] {
+        let p = propagate(
+            &cone,
+            &state,
+            tau_hz(f),
+            loss,
+            MouthLoad::Matched,
+            n,
+            RiccatiSteps(512),
+            true,
+        )
+        .unwrap();
+        let scale = p.zeta.iter().map(|v| v.abs()).fold(0.0, f64::max);
+        let asym = (0..n * n)
+            .map(|idx| (p.zeta[idx] - p.zeta[(idx % n) * n + idx / n]).abs())
+            .fold(0.0, f64::max)
+            / scale;
+        assert!(asym < 1e-10, "{loss:?}: reciprocity {asym:e}");
+        if loss != LossModel::Lossless {
+            continue;
+        }
+        let g = p.flow.unwrap();
+        let g_inv = mat_inv(&g, n).unwrap();
+        let mouth = modal_wave(
+            &state,
+            cone.outlet_radius(),
+            tau_hz(f),
+            loss,
+            &j1_roots_unchecked(n - 1),
+        )
+        .unwrap();
+        let mut worst = 0.0_f64;
+        for drive in [vec![1.0, 0.0, 0.0, 0.0], vec![0.3, -0.7, 0.2, 0.5]] {
+            let u_in: Vec<C64> = drive.iter().map(|&v| C64::from_re(v)).collect();
+            let power_in: f64 = (0..n)
+                .map(|r| {
+                    let pr = (0..n).fold(C64::ZERO, |acc, c| {
+                        acc + p.zeta[r * n + c].scale(p.zref) * u_in[c]
+                    });
+                    (u_in[r].conj() * pr).re
+                })
+                .sum();
+            let u_out: Vec<C64> = (0..n)
+                .map(|r| {
+                    (0..n).fold(C64::ZERO, |acc, c| {
+                        acc + g_inv[r * n + c] * u_in[c].scale(1.0 / p.zref)
+                    })
+                })
+                .map(|v| v.scale(p.zref))
+                .collect();
+            let power_out: f64 = (0..n)
+                .map(|r| (u_out[r].conj() * mouth.zc[r] * u_out[r]).re)
+                .sum();
+            let e = (power_in - power_out).abs() / power_in.abs();
+            worst = worst.max(e);
+        }
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"mm-riccati-reciprocity-power\",\"inputs\":{{\"fixture\":\
+             \"Pagneux Part I cone\",\"f_hz\":{f}}},\"modes\":{n},\"steps\":512,\"observed\":{{\
+             \"asymmetry\":{asym:e},\"power_rel\":{worst:e}}},\"tol\":1e-10}}"
+        );
+        assert!(worst < 1e-10, "lossless power balance {worst:e}");
+    }
+}
+
+#[test]
+fn mm_riccati_bitwise_repeat() {
+    // G5: deterministic fixed-order arithmetic.
+    let run = || {
+        mm_profile_impedance(
+            &trombone_bell(),
+            &air20(),
+            tau_hz(700.0),
+            LossModel::WideTube,
+            MouthLoad::Analytic(Termination::FlangedOpen),
+            ModeCount(4),
+            RiccatiSteps(guarded_steps(0.544, 0.01225, 4).max(256)),
+        )
+        .unwrap()
+        .impedance_matrix
+    };
+    let (a, b) = (run(), run());
+    assert!(
+        a.iter()
+            .zip(&b)
+            .all(|(x, y)| x.re.to_bits() == y.re.to_bits() && x.im.to_bits() == y.im.to_bits())
+    );
+}

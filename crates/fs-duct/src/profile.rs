@@ -236,6 +236,34 @@ impl RadiusProfile {
         }
         Ok(r)
     }
+    /// dr/dx on the axial support. Every shape is at least C1 (the spline is
+    /// C2), so the continuous multimodal coupling `R'/R` is defined everywhere.
+    pub fn slope(&self, x: f64) -> Result<f64, DuctError> {
+        if !x.is_finite() || !(0.0..=self.length).contains(&x) {
+            return Err(bad("profile coordinate outside its axial support"));
+        }
+        let s = match &self.shape {
+            Shape::Exponential { area_flare, .. } => 0.5 * area_flare * self.eval(x),
+            Shape::Power { x0, exponent, .. } => exponent * self.eval(x) / (x0 + x),
+            Shape::Spline { stations, second } => {
+                let x = x + stations[0].0;
+                let i = stations
+                    .partition_point(|&(xi, _)| xi <= x)
+                    .saturating_sub(1)
+                    .min(stations.len() - 2);
+                let h = stations[i + 1].0 - stations[i].0;
+                let b = (x - stations[i].0) / h;
+                let a = 1.0 - b;
+                (stations[i + 1].1 - stations[i].1) / h
+                    + ((1.0 - 3.0 * a * a) * second[i] + (3.0 * b * b - 1.0) * second[i + 1]) * h
+                        / 6.0
+            }
+        };
+        if !s.is_finite() {
+            return Err(bad("profile slope evaluation is not finite"));
+        }
+        Ok(s)
+    }
     pub(super) fn eval(&self, x: f64) -> f64 {
         match &self.shape {
             Shape::Exponential { r0, area_flare } => r0 * det::exp(0.5 * area_flare * x),

@@ -53,13 +53,25 @@ use crate::{
     termination_impedance,
 };
 
-/// Hard cap on the retained mode count (series-accuracy bound for the
-/// in-crate Bessel evaluation: arguments stay below `gamma_8 ~ 26`).
+/// Hard cap on the retained mode count of the STAIRCASE image (its
+/// Bessel arguments stay below `gamma_8 ~ 26`). The continuous image
+/// admits up to [`certified_mode_cap`].
 pub const MAX_MODES: usize = 8;
 
-/// `J0(x)` by power series in double-double arithmetic (m = 0 modes only
-/// need arguments up to `gamma_MAX_MODES`; the dd accumulation makes the
-/// alternating-series cancellation harmless there).
+/// Continuous multimodal propagation on smooth profiles (M2.1-W3b).
+mod riccati;
+pub use riccati::{
+    BESSEL_CERTIFIED_X, MAX_EVANESCENT_STEP, ModeCount, MouthLoad, certified_mode_cap,
+    mm_profile_impedance,
+};
+
+/// `J0(x)` by the staircase's legacy power series, kept bit-identical
+/// because the staircase image and its goldens are the comparison rung.
+/// Its accuracy is limited by the f64-rounded `1/k^2` factor in the
+/// double-double recurrence: measured (2026-10-20, exact-rational
+/// emulation and the riccati quadrature oracle) 3.4e-14 at x = 12,
+/// 3.0e-9 at `gamma_7 ~ 22.76`, 1.4e-7 at 26. Certified evaluation for
+/// new work is [`bessel_j0_certified`].
 #[must_use]
 pub fn bessel_j0(x: f64) -> f64 {
     let q = Dd::from_f64(-0.25 * x * x);
@@ -74,6 +86,68 @@ pub fn bessel_j0(x: f64) -> f64 {
         }
     }
     sum.to_f64()
+}
+
+/// Series/asymptotic switch of [`bessel_j0_certified`], the J1 owner's
+/// (`fs_math::special`): the peak series term there is ~6e5, and the
+/// optimally truncated expansion's error is ~`e^{-2x}` < 3e-16.
+const J0_SWITCH: f64 = 18.0;
+
+/// `J0(x)` certified to 1e-13 absolute on `[0, BESSEL_CERTIFIED_X]` by
+/// the riccati tests' independent spectral quadrature: the defining
+/// series in double-double with EXACT division by `k^2` for `|x| <= 18`
+/// (DLMF 10.2.2), then the Hankel expansion with generated coefficients
+/// (DLMF 10.17.3). Even; NaN propagates.
+#[must_use]
+pub fn bessel_j0_certified(x: f64) -> f64 {
+    let ax = x.abs();
+    if ax > J0_SWITCH {
+        return j0_asymptotic(ax);
+    }
+    let xd = Dd::from_f64(ax);
+    let z = -(xd * xd) / Dd::from_f64(4.0);
+    let mut term = Dd::ONE;
+    let mut sum = term;
+    for k in 1..=200_u32 {
+        let k = f64::from(k);
+        term = term * z / Dd::from_f64(k * k);
+        sum = sum + term;
+        if term.abs().hi <= 1e-34 * sum.abs().hi.max(1.0) {
+            break;
+        }
+    }
+    sum.to_f64()
+}
+
+/// Order-zero Hankel expansion, `a_{m+1} = a_m (0 - (2m+1)^2) / (8 (m+1))`
+/// generated in code and truncated at its smallest term (the J1 owner's
+/// method in `fs_math::special`).
+fn j0_asymptotic(x: f64) -> f64 {
+    let (mut p, mut q) = (0.0, 0.0);
+    let mut term = 1.0_f64;
+    let mut last = f64::INFINITY;
+    for m in 0..128_u32 {
+        if term.abs() > last {
+            break;
+        }
+        last = term.abs();
+        match m % 4 {
+            0 => p += term,
+            1 => q += term,
+            2 => p -= term,
+            _ => q -= term,
+        }
+        if term.abs() < 1e-18 {
+            break;
+        }
+        let mf = f64::from(m);
+        term *= -((2.0 * mf + 1.0) * (2.0 * mf + 1.0)) / (8.0 * (mf + 1.0)) / x;
+    }
+    // J0 = sqrt(2/(pi x)) (P cos(x - pi/4) - Q sin(x - pi/4)); angle
+    // addition keeps x - pi/4 out of the trig arguments.
+    let (s, c) = det::sin_cos(x);
+    let amp = det::sqrt(1.0 / (core::f64::consts::PI * x));
+    amp * ((p + q) * c + (p - q) * s)
 }
 
 /// Shared deterministic real J₁ owner (double-double series/Hankel expansion).
@@ -92,6 +166,12 @@ pub fn j1_roots(count: usize) -> Result<Vec<f64>, DuctError> {
             what: "mode count exceeds the certified Bessel-argument range",
         });
     }
+    Ok(j1_roots_unchecked(count))
+}
+
+/// The bracket-and-bisect body behind [`j1_roots`]; callers apply their
+/// own certified cap (the staircase `MAX_MODES`, or [`certified_mode_cap`]).
+fn j1_roots_unchecked(count: usize) -> Vec<f64> {
     let mut roots = Vec::with_capacity(count);
     // J1's positive roots interlace with pi-spaced asymptotic slots
     // near (n + 1/4) pi; bracket each by sign change and bisect.
@@ -128,7 +208,7 @@ pub fn j1_roots(count: usize) -> Result<Vec<f64>, DuctError> {
         roots.push(root);
         lo = root + 0.5;
     }
-    Ok(roots)
+    roots
 }
 
 /// One uniform station of the staircased modal chain.
@@ -155,6 +235,12 @@ pub struct ModalResponse {
     /// Local cutoff frequencies [Hz] of modes 1..N-1 at the NARROWEST
     /// station (the last place each mode can propagate).
     pub cutoffs_at_throat_hz: Vec<f64>,
+    /// Axial resolution actually used: staircase stations, or continuous
+    /// Magnus steps.
+    pub steps_used: usize,
+    /// Continuous image only: `|Z00(N) - Z00(N/2)|` [Pa s/m^3], the
+    /// mode-truncation tail indicator (`None` for N = 1 and the staircase).
+    pub tail_bound_estimate: Option<f64>,
 }
 
 /// Slices for one cone segment in the modal staircase: at least the
@@ -610,6 +696,8 @@ fn mm_core(
         min_shear_number: min_shear,
         mouth_ka,
         cutoffs_at_throat_hz: cutoffs,
+        steps_used: stations.len(),
+        tail_bound_estimate: None,
     })
 }
 

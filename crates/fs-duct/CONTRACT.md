@@ -261,6 +261,41 @@ pipe `Z_in = +i Zc cot(kL)`.
   the `Im k >= 0` branch rule and the `Zc_n = Zc_0 k_0/k_n`
   derivation single-sourced here.
 
+- `modal::mm_profile_impedance(profile, state, omega, loss, load, modes,
+  steps) -> ModalResponse` (IRP M2.1-W3b): CONTINUOUS multimodal m = 0
+  propagation on a smooth `RadiusProfile`, after Pagneux, Amir &
+  Kergomard (1996, Part I). It integrates the coupled modal equations
+  `P' = (R'/R) A P + Z' U`, `U' = Y' P - (R'/R) A^T U` from the mouth to
+  the inlet with no staircase. The coupling is closed form:
+  `A_mn = 2 gamma_n^2 s_m s_n / (gamma_n^2 - gamma_m^2)`, `s_n = sgn J0(gamma_n)`.
+  It is derived in the module doc from the Bessel ODE and orthogonality,
+  with no quadrature.
+  - Each fixed step is a fourth-order two-node Gauss-Magnus exponential
+    of the `2N x 2N` generator, applied to the scaled impedance as a
+    Moebius map, so evanescent modes relax onto their decaying branch
+    without explicit Riccati marching.
+  - `MAX_EVANESCENT_STEP = 8` refuses a step whose `max_n |Im k_n| |h|`
+    would put the O(1) propagating entries below accuracy. The error is
+    "refine Riccati steps"; it never silently degrades.
+  - `ModeCount` is admitted up to `certified_mode_cap()`, which is
+    computed as 1 plus the number of `J1` roots below
+    `BESSEL_CERTIFIED_X = 64` (21 modes). `RiccatiSteps` uses the W3a caps.
+  - `MouthLoad` selects the plane-mode load: `Analytic` (the scalar
+    termination with its refusals), `Tabulated`, or `Matched` (Pagneux's
+    infinite-pipe end). Higher modes stay matched, the staircase's
+    disclosed closure.
+  - Losses follow the staircase rule: `segment_wave` for the plane mode,
+    `k_n` from the lossy `k_0`, `Zc_n = Zc_0 k_0/k_n`. A uniform section
+    reproduces both exactly.
+  - `ModalResponse` gains `steps_used` and, for the continuous image,
+    `tail_bound_estimate = |Z00(N) - Z00(N/2)|`.
+  - `RadiusProfile::slope` supplies the analytic `R'` for every shape.
+  - `bessel_j0` keeps its double-double series below 26, so every
+    staircase argument keeps its bits. Above 26 it switches to the
+    generated Hankel expansion.
+  - The staircase image, its goldens and `MAX_MODES = 8` are unchanged;
+    it is now the O(dx) comparison rung.
+
 - `TabulatedLoad` + `input_impedance_load` / `input_impedance_tabulated`
   / `modal::mm_input_impedance_tabulated`: the measured/baked mouth-load
   lane (bead zolja). The TABLE is the source of truth: admission
@@ -431,6 +466,36 @@ measure-mode run caught a coarse-staircase artifact posing as a treble
 mode shift — the trigger is therefore judged with BOTH arms on the fine
 staircase).
 
+`src/modal/riccati/tests.rs` (IRP M2.1-W3b), one JSON line per rung:
+- `mm_bessel_certified_to_gamma16` (G0): `bessel_j0_certified`, `J1` and
+  the `J0' = -J1` identity match an independent spectral quadrature to
+  1e-13 on [0, 64]; measured about 1.7e-15. It reports, without gating,
+  the legacy `bessel_j0`'s 1.4e-7 at 26.
+- `mm_mode_cap_refusal` (G0): the computed cap is 21; cap and cap+1;
+  steps 0 and cap+1; the evanescent-step guard at its boundary.
+- `profile_slope_matches_central_differences` (G0).
+- `mm_riccati_n1_equals_plane_riccati` (G2): N = 1 matches the W3a
+  plane Riccati to 1e-10.
+- `mm_riccati_cylinder_decouples` (G2): closed-form `i Zc cot kL` and
+  matched `Zc_n` to 1e-12; off-diagonals exactly zero.
+- `mm_riccati_matches_extrapolated_staircase` (G1/G3): the staircase is
+  O(dx), gated at order 1 +- 0.2 on slice multipliers 4/8/16/32. Its
+  first-order Richardson limit agrees with the continuous result to
+  1e-4 on a cone and a 400-cone exponential polygon; measured 2.5e-5
+  and 1.3e-5. Multipliers 1/2/4/8 were pre-asymptotic (order 1.38).
+- `mm_riccati_step_ladder` (G1): order 4 +- 0.2 via fs-mms; observed
+  4.00.
+- `mm_riccati_mode_ladder` (G1): uses the Amir, Pagneux & Kergomard 1997
+  Table I trombone bell. `|dZ00|` shrinks monotonically for N = 1 to 16.
+  Liveness: N = 1 vs N = 8 moves its peaks by -15.5, -36.6 and -61.0 c.
+- `mm_riccati_pagneux_cases` (G2): the exact one-mode exponential horn
+  (Part I App. E) to 1e-9, above and below cutoff; measured 9e-14.
+  Also the Part I 45-degree cone at 7 and 17 modes: reciprocal, with a
+  shrinking tail.
+- `mm_riccati_reciprocity_and_power` (G0): `Z = Z^T` and lossless power
+  balance to 1e-10.
+- `mm_riccati_bitwise_repeat` (G5).
+
 `src/lib.rs` `tabulated_load_tests` + `bell_bake_artifact`, cases
 tl-001..tl-004 and the committed-artifact gate — table admission /
 interpolation / refusals, the `ka` lift (analytic refusal and tabulated
@@ -442,6 +507,18 @@ refusals including too-coarse-never-extrapolate, and the
 divergence-theorem closure/orientation pin on the lathe).
 
 ## No-claim boundaries
+
+- Continuous multimodal image (M2.1-W3b): published Pagneux benchmark
+  results exist only as figures, so no 1 % comparison against printed
+  values is claimed. Agreement is shown against exact solutions, the
+  independent staircase limit and conservation laws.
+  - Mode convergence is algebraic. On the 45-degree cone, 7 vs 17 modes
+    differ by 3.1 % in `Z00`, so `tail_bound_estimate` is an indicator,
+    not a bound.
+  - Higher modes terminate matched (no radiation matrix), per-mode
+    boundary-layer loss is approximated as in the staircase, and holes
+    and C0 profiles are out of scope.
+  - Accuracy above `MAX_EVANESCENT_STEP` is refused, not degraded.
 
 - Wide-tube first order refuses `rv < 10`. `LossModel::Bessel` uses
   the shared fs-phs exact law on its admitted shear range [1e-6,1e6],
