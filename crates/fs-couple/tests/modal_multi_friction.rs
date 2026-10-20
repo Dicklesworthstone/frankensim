@@ -10,6 +10,8 @@ use fs_exec::CancelGate;
 use fs_math::c64::C64;
 use fs_tribo::FrictionLaw;
 
+mod nonlinear;
+
 fn budgets() -> ModalCouplingConfig {
     ModalCouplingConfig { max_modes: 8, max_connections: 4, max_setup_terms: 4096,
         nyquist_guard_fraction: 0.9, maximum_total_energy_j: 100.0,

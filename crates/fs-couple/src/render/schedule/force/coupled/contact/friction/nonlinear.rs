@@ -1,8 +1,8 @@
 //! Nonlinear storage coupled to the SAME exact linear and friction owners.
 //!
 //! Each trial supplies a held reaction -DG(V,q0,q1) to the original complete
-//! linear network. The original scalar bow solve includes that reaction. The
-//! fixed point is accepted only when the reaction law AND the combined energy
+//! linear network. The original scalar or simultaneous bow solve includes that
+//! reaction. The fixed point is accepted only when the reaction law AND the combined energy
 //! balance close. fs-phs owns DG; this adapter changes neither the exponential
 //! linear propagator nor the friction law, its stick/slip branch or work port.
 //! This is a bounded iterated discrete-gradient composition, not SAV, a unique
@@ -77,6 +77,76 @@ pub struct NonlinearFrictionFrame {
     pub reaction_residual: f64,
     /// Absolute-plus-relative allowed mismatch [N/sqrt(kg)].
     pub reaction_tolerance: f64,
+}
+
+/// Constitutive report shared by scalar and simultaneous prescribed friction.
+/// The additional storage is already included in the accepted network energy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NonlinearFrictionDiagnostics {
+    /// Additional conservative storage [J].
+    pub nonlinear_energy_j: f64,
+    /// Complete network/friction trials required by this accepted sample.
+    pub nonlinear_iterations: usize,
+    /// Maximum constitutive force mismatch [N/sqrt(kg)].
+    pub reaction_residual: f64,
+    /// Absolute-plus-relative allowed mismatch [N/sqrt(kg)].
+    pub reaction_tolerance: f64,
+}
+impl NonlinearFrictionFrame {
+    pub(super) fn diagnostics(self) -> NonlinearFrictionDiagnostics {
+        NonlinearFrictionDiagnostics {
+            nonlinear_energy_j: self.nonlinear_energy_j,
+            nonlinear_iterations: self.nonlinear_iterations,
+            reaction_residual: self.reaction_residual,
+            reaction_tolerance: self.reaction_tolerance,
+        }
+    }
+}
+
+// Both adapters stage the ORIGINAL complete network, with no publication. The
+// constitutive iteration below owns neither a friction law nor a propagator.
+pub(super) trait NonlinearTrial {
+    fn core(&self) -> &FrictionModalSystem;
+    fn stage(&mut self, forces: &[f64], gate: Option<&CancelGate>)
+        -> Result<NonlinearTrialWork, ModalFrictionError>;
+}
+pub(super) struct NonlinearTrialWork {
+    pub observer_pressure_pa: f64,
+    pub network_energy_j: f64,
+    pub drive_work_j: f64,
+    pub absolute_drive_work_j: f64,
+    pub network_dissipation_j: f64,
+    pub friction_dissipation_j: f64,
+}
+pub(super) struct NonlinearCorrection {
+    pub observer_pressure_pa: f64,
+    pub network_energy_j: f64,
+    pub external_work_j: f64,
+    pub energy_residual_j: f64,
+    pub energy_tolerance_j: f64,
+    pub diagnostics: NonlinearFrictionDiagnostics,
+}
+struct SingleTrial<'a> {
+    inner: &'a mut FrictionModalSystem,
+    drive: FrictionDrive,
+    frame: Option<FrictionModalFrame>,
+}
+impl NonlinearTrial for SingleTrial<'_> {
+    fn core(&self) -> &FrictionModalSystem { self.inner }
+    fn stage(&mut self, forces: &[f64], gate: Option<&CancelGate>)
+        -> Result<NonlinearTrialWork, ModalFrictionError>
+    {
+        let frame = self.inner.stage_inner(forces, self.drive, gate)?;
+        self.frame = Some(frame);
+        Ok(NonlinearTrialWork {
+            observer_pressure_pa: frame.observer_pressure_pa,
+            network_energy_j: frame.network_energy_j,
+            drive_work_j: frame.drive_work_j,
+            absolute_drive_work_j: frame.drive_work_j.abs(),
+            network_dissipation_j: frame.network_dissipation_j,
+            friction_dissipation_j: frame.friction_dissipation_j,
+        })
+    }
 }
 struct BoundPotential {
     offset: usize,
@@ -192,7 +262,30 @@ impl NonlinearFrictionState {
         drive: FrictionDrive,
         gate: Option<&CancelGate>,
     ) -> Result<NonlinearFrictionFrame, ModalFrictionError> {
+        let mut trial = SingleTrial { inner, drive, frame: None };
+        let correction = self.stage_trial(&mut trial, external, gate)?;
+        let mut frame = trial.frame.ok_or_else(|| invalid("nonlinear solve accepted no mechanical trial"))?;
+        frame.observer_pressure_pa = correction.observer_pressure_pa;
+        frame.network_energy_j = correction.network_energy_j;
+        frame.external_work_j = correction.external_work_j;
+        frame.energy_residual_j = correction.energy_residual_j;
+        frame.energy_tolerance_j = correction.energy_tolerance_j;
+        Ok(NonlinearFrictionFrame {
+            friction: frame,
+            nonlinear_energy_j: correction.diagnostics.nonlinear_energy_j,
+            nonlinear_iterations: correction.diagnostics.nonlinear_iterations,
+            reaction_residual: correction.diagnostics.reaction_residual,
+            reaction_tolerance: correction.diagnostics.reaction_tolerance,
+        })
+    }
+    pub(super) fn stage_trial<T: NonlinearTrial>(
+        &self,
+        trial: &mut T,
+        external: &[f64],
+        gate: Option<&CancelGate>,
+    ) -> Result<NonlinearCorrection, ModalFrictionError> {
         poll(gate)?;
+        let inner = trial.core();
         if external.len() != inner.mode_count() || external.iter().any(|v| !v.is_finite()) {
             return Err(
                 invalid("external force must retain every nonlinear bank coordinate").into(),
@@ -216,7 +309,8 @@ impl NonlinearFrictionState {
                     finite(external[i] + reaction[i])?
                 };
             }
-            let mut frame = inner.stage_inner(&forces, drive, gate)?;
+            let frame = trial.stage(&forces, gate)?;
+            let inner = trial.core();
             let after_q = coordinates(&inner.network.candidates);
             let after_potential = self.potential_energy(&after_q)?;
             self.reactions(&before_q, &after_q, &mut next_reaction, gate)?;
@@ -244,7 +338,7 @@ impl NonlinearFrictionState {
                 .max(frame.network_dissipation_j)
                 .max(frame.friction_dissipation_j)
                 .max(external_work.abs())
-                .max(frame.drive_work_j.abs());
+                .max(frame.absolute_drive_work_j);
             let energy_tolerance = finite(
                 inner.network.config.energy_absolute_tolerance_j
                     + inner.network.config.energy_relative_tolerance * energy_scale,
@@ -257,30 +351,33 @@ impl NonlinearFrictionState {
                     inner.network.config.maximum_total_energy_j,
                 )?;
                 // Actual endpoint pressure uses -grad V(q1), not held DG.
+                let mut observer_pressure_pa = frame.observer_pressure_pa;
                 if let Some(weights) = inner.acceleration_pressure_weights() {
                     self.reactions(&after_q, &after_q, &mut next_reaction, gate)?;
                     for ((weight, endpoint), held) in
                         weights.iter().zip(&next_reaction).zip(&reaction)
                     {
-                        frame.observer_pressure_pa =
-                            finite(frame.observer_pressure_pa + weight * (endpoint - held))?;
+                        observer_pressure_pa =
+                            finite(observer_pressure_pa + weight * (endpoint - held))?;
                     }
                     limit(
                         "nonlinear acceleration observer pressure",
-                        frame.observer_pressure_pa.abs(),
+                        observer_pressure_pa.abs(),
                         inner.network.config.maximum_abs_pressure_pa,
                     )?;
                 }
-                frame.network_energy_j = after;
-                frame.external_work_j = external_work;
-                frame.energy_residual_j = balance;
-                frame.energy_tolerance_j = energy_tolerance;
-                let accepted = NonlinearFrictionFrame {
-                    friction: frame,
-                    nonlinear_energy_j: after_potential,
-                    nonlinear_iterations: iteration,
-                    reaction_residual: residual,
-                    reaction_tolerance: tolerance,
+                let accepted = NonlinearCorrection {
+                    observer_pressure_pa,
+                    network_energy_j: after,
+                    external_work_j: external_work,
+                    energy_residual_j: balance,
+                    energy_tolerance_j: energy_tolerance,
+                    diagnostics: NonlinearFrictionDiagnostics {
+                        nonlinear_energy_j: after_potential,
+                        nonlinear_iterations: iteration,
+                        reaction_residual: residual,
+                        reaction_tolerance: tolerance,
+                    },
                 };
                 poll(gate)?;
                 return Ok(accepted);

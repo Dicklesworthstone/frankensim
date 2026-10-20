@@ -2970,17 +2970,22 @@ string/body/bridge/cavity coordinate, optional torsion, complete tensor damping,
 and causal cylinder-fluid mass/memory. The actual loaded string mass normalizes
 the geometric channel; material EA is neither fitted nor counted as linear
 stiffness again. Each nonlinear trial reuses the original exact complete linear
-response and scalar friction branch/root, with `fs_phs::discrete_gradient`
-supplying held constitutive reactions. Both reaction residual and total
+response and original scalar or simultaneous friction branch/root solve, with
+`fs_phs::discrete_gradient` supplying held constitutive reactions. Both reaction residual and total
 storage/work balance must close before the original transaction publishes.
 Rejected trials preserve accepted components, fluid state, clock and diagnostics.
 The acceleration pressure path evaluates the endpoint geometric force. Existing
-single-bow scheduling and the one-port multi-friction forwarding route retain
-this state. The material performance file selects it with the optional
+single- and multiple-bow scheduling retain this state, including the exact
+one-port forwarding route. Several prescribed bow contacts share every DG trial
+and one final publication; each contact retains its own traction, actual slip,
+work and loss. The joint energy tolerance uses the sum of absolute bow supplies,
+so opposing surface work cannot hide scale. Joint reports retain nonlinear
+storage and reaction convergence. The material performance file selects it with
+the optional
 `geometric-stretching SLOPE ITERATIONS MAX_FORCE ABS_TOL REL_TOL` record, so
 material and gas changes propagate through the bow, shared body and PCM writer.
-Cold attachment is explicit; subsequent gas/torque rebuilds, additional bows,
-independent stops and linear static preload refuse rather than dropping storage.
+Cold attachment is explicit; subsequent gas/torque rebuilds, independent stops,
+contact-loaded bows and linear static preload refuse rather than dropping storage.
 This bounded iterated DG composition is not SAV, a full rod model, a unique
 nonlinear-branch guarantee or measured instrument/trajectory qualification.
 

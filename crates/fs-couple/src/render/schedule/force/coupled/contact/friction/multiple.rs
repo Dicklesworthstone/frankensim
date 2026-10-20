@@ -5,6 +5,8 @@
 //! coordinate sweeps reuse the original scalar stick/slip solver, then check
 //! ALL laws on the same endpoint before publishing a single mechanical step.
 //! No sequential voice advancement, averaged material law or delayed reaction.
+//! Bound geometric storage wraps these same trials in the shared DG iteration;
+//! prescribed bow loads, material reaction and total work must all agree.
 //!
 //! Normal loads are prescribed by default. Explicit contact bindings instead
 //! use the simultaneously solved compliant reaction, including automatic release
@@ -21,6 +23,8 @@ pub mod obstacles;
 
 /// One normal-contact reaction driving the corresponding tangential law.
 pub mod normal_load;
+
+mod stretching;
 
 /// Bounded joint setup and nonlinear work, in addition to each port's limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,7 +71,7 @@ pub struct MultiFrictionFrame {
     pub sample: u64,
     /// Original modal or acceleration pressure observation [Pa].
     pub observer_pressure_pa: f64,
-    /// Modal and bilateral-spring storage [J].
+    /// Modal, bilateral-spring and any bound nonlinear storage [J].
     pub network_energy_j: f64,
     /// Work of the supplied external modal forces [J].
     pub external_work_j: f64,
@@ -90,6 +94,9 @@ pub struct MultiFrictionFrame {
     pub energy_tolerance_j: f64,
     /// Joint sweeps used; one for the exact original single-port path.
     pub sweeps: usize,
+    /// Jointly accepted nonlinear storage and reaction convergence, when bound.
+    /// Refused trials leave this report and every port report unchanged.
+    pub nonlinear: Option<super::nonlinear::NonlinearFrictionDiagnostics>,
     /// Original port first, then additional ports in their declared order.
     pub ports: Vec<FrictionPortFrame>,
 }
@@ -122,8 +129,8 @@ pub struct MultiFrictionModalSystem {
 }
 impl FrictionModalSystem {
     /// Add prescribed friction contacts without resetting the original network.
-    /// Existing body/cavity vibration, clock, pressure weights and material
-    /// bindings stay intact. No additional contact stores mechanical energy.
+    /// Existing body/cavity vibration, clock, pressure weights, nonlinear storage
+    /// and material bindings stay intact. No additional contact stores energy.
     /// Empty additions use the original single-port step exactly.
     ///
     /// # Errors
@@ -139,9 +146,6 @@ impl MultiFrictionModalSystem {
         config: MultiFrictionConfig, gate: &CancelGate) -> Result<Self, ModalFrictionError>
     {
         poll(Some(gate))?;
-        if core.has_nonlinear_potentials() && !additional.is_empty() {
-            return Err(invalid("simultaneous affine friction cannot discard bound nonlinear storage").into());
-        }
         let p = additional.len().checked_add(1).ok_or_else(|| invalid("friction port count overflow"))?;
         if !(1..=64).contains(&config.max_ports) || p > config.max_ports
             || !(1..=128).contains(&config.max_sweeps) {
@@ -193,7 +197,7 @@ impl MultiFrictionModalSystem {
     #[must_use] pub fn port_count(&self) -> usize { self.points.len() }
     /// Original geometry and law, with no mutable bypass of admission.
     #[must_use] pub fn port(&self, index: usize) -> Option<&ModalFrictionPort> { self.points.get(index).map(|p| &p.port) }
-    /// Actual modal, bilateral and optional obstacle stored energy [J].
+    /// Actual modal, bilateral, nonlinear and optional obstacle stored energy [J].
     pub fn total_energy_j(&self) -> Result<f64, ModalCouplingError> {
         let network = self.core.total_energy_j()?;
         match &self.obstacles {
@@ -257,9 +261,36 @@ impl MultiFrictionModalSystem {
             self.frame.drive_work_j = f.drive_work_j; self.frame.network_dissipation_j = f.network_dissipation_j;
             self.frame.friction_dissipation_j = f.friction_dissipation_j;
             self.frame.energy_residual_j = f.energy_residual_j; self.frame.energy_tolerance_j = f.energy_tolerance_j;
+            self.frame.nonlinear = self.core.nonlinear_frame().copied().map(|f| f.diagnostics());
             self.frame.sweeps = 1; self.accepted = true;
             return Ok(&self.frame);
         }
+        let mut accepted = if self.core.has_nonlinear_potentials() {
+            self.stage_with_nonlinear(external, drives, gate)?
+        } else {
+            self.stage_multiple(external, drives, obstacle_offsets, gate)?
+        };
+        poll(gate)?;
+        self.core.network.staged_frame.observer_pressure_pa = accepted.observer_pressure_pa;
+        self.core.network.publish_staged();
+        if let Some(obstacles) = &mut self.obstacles { obstacles.publish(); }
+        // Reuse the accepted port allocation through repeated constitutive
+        // trials. No fallible work follows mechanical publication.
+        std::mem::swap(&mut accepted.ports, &mut self.frame.ports);
+        accepted.ports.copy_from_slice(&self.staged_ports);
+        self.frame = accepted;
+        self.accepted = true;
+        Ok(&self.frame)
+    }
+
+    // Original simultaneous friction/obstacle solve with held modal forces.
+    // Only candidates and scratch change. Nonlinear storage can repeat this
+    // solve until every bow and the shared constitutive reaction agree.
+    fn stage_multiple(&mut self, external: &[f64], drives: &[FrictionDrive],
+        obstacle_offsets: Option<&[f64]>, gate: Option<&CancelGate>)
+        -> Result<MultiFrictionFrame, ModalFrictionError>
+    {
+        let p = self.points.len();
         for i in 0..p {
             poll(gate)?;
             if self.contact_loads[i].is_none() {
@@ -372,20 +403,16 @@ impl MultiFrictionModalSystem {
         if loss < 0.0 || residual.abs() > tolerance {
             return Err(ModalCouplingError::EnergyBalance { residual_j: residual, tolerance_j: tolerance }.into());
         }
-        let sample = staged.sample;
         poll(gate)?;
-        self.core.network.staged_frame.observer_pressure_pa = pressure;
-        self.core.network.publish_staged();
-        if let Some(obstacles) = &mut self.obstacles { obstacles.publish(); }
-        self.frame.sample = sample; self.frame.observer_pressure_pa = pressure;
-        self.frame.network_energy_j = network_energy; self.frame.external_work_j = external_work;
-        self.frame.drive_work_j = work; self.frame.network_dissipation_j = network_loss;
-        self.frame.friction_dissipation_j = loss; self.frame.energy_residual_j = residual;
-        self.frame.obstacle_energy_j = obstacle_energy; self.frame.obstacle_dissipation_j = obstacle_loss;
-        self.frame.obstacle_work_j = obstacle_work;
-        self.frame.energy_tolerance_j = tolerance; self.frame.sweeps = sweeps;
-        self.frame.ports.copy_from_slice(&self.staged_ports); self.accepted = true;
-        Ok(&self.frame)
+        Ok(MultiFrictionFrame {
+            sample: staged.sample, observer_pressure_pa: pressure,
+            network_energy_j: network_energy, external_work_j: external_work,
+            drive_work_j: work, network_dissipation_j: network_loss,
+            friction_dissipation_j: loss, energy_residual_j: residual,
+            obstacle_energy_j: obstacle_energy, obstacle_dissipation_j: obstacle_loss,
+            obstacle_work_j: obstacle_work, energy_tolerance_j: tolerance, sweeps,
+            nonlinear: None, ports: Vec::new(),
+        })
     }
 }
 

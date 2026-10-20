@@ -5,7 +5,9 @@
 //! fs-nlmodal geometric stress channel, in that SAME normalized transverse
 //! basis. No body or fluid component is rebuilt, omitted or stepped separately.
 use super::super::{MaterialStringBankSource, MaterialStringSource, ReciprocalStringBank};
+use super::super::multiple::MultiBowStringBank;
 use super::{BodyPotential, ImpactError, StringStretching, WireSpan, invalid};
+use crate::modal_acoustic_time::ModalAcousticTimeModel;
 use crate::render::plate::impact::string::{StringObservation, StringPotential};
 use crate::render::schedule::force::coupled::ModalCouplingError;
 use crate::render::schedule::force::coupled::contact::friction::nonlinear::{
@@ -71,6 +73,8 @@ impl ReciprocalStringBank {
     /// law once before playback. Existing initial coordinates are preserved;
     /// adding their geometric energy is an explicit initial condition. The
     /// original scheduled renderer executes the combined nonlinear bow equation.
+    /// Additional prescribed bows may then be attached; they share this same
+    /// constitutive iteration and complete network rather than separate voices.
     ///
     /// Moderate-slope fixed-end Kirchhoff--Carrier mechanics; no axial wave
     /// inertia, dynamic temperature, helical winding slip or full rod. The
@@ -168,16 +172,23 @@ impl ReciprocalStringBank {
     }
     /// Original stress channel at accepted string coordinates; no state advance.
     pub fn stretching_observation(&self, string: usize) -> Result<StringObservation, ImpactError> {
-        let potential = self
-            .source
-            .geometric_stretching
-            .as_ref()
-            .and_then(|binding| binding.potentials.get(string))
-            .ok_or_else(|| invalid("string has no bound material geometric stretching law"))?;
-        let q: Vec<_> = self.system.components()[string].states()[..potential.mode_count()]
-            .iter()
-            .map(|state| state.displacement_m_sqrt_kg)
-            .collect();
-        potential.observe(&q)
+        observe(&self.source, self.system.components(), string)
     }
+}
+impl MultiBowStringBank {
+    /// The same source-derived strain, tension and energy at the jointly
+    /// accepted coordinates of this string, including every prescribed bow.
+    pub fn stretching_observation(&self, string: usize) -> Result<StringObservation, ImpactError> {
+        observe(self.source().bank(), self.system().components(), string)
+    }
+}
+fn observe(source: &MaterialStringBankSource, components: &[ModalAcousticTimeModel],
+    string: usize) -> Result<StringObservation, ImpactError>
+{
+    let potential = source.geometric_stretching.as_ref()
+        .and_then(|binding| binding.potentials.get(string))
+        .ok_or_else(|| invalid("string has no bound material geometric stretching law"))?;
+    let q: Vec<_> = components[string].states()[..potential.mode_count()]
+        .iter().map(|state| state.displacement_m_sqrt_kg).collect();
+    potential.observe(&q)
 }

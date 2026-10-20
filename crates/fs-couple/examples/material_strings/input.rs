@@ -271,9 +271,8 @@ impl Spec {
             }
         }
         let schedule = GestureSchedule::from_canonical_bytes(schedule.as_bytes())?;
-        if geometric_stretching.is_some() && (schedule.tracks().len() != 1
-            || initialization == ForceInitialization::StaticPreload) {
-            return Err("geometric stretching currently requires one prescribed bow and retained initial state; nonlinear multi-bow/preload is not implemented".into());
+        if geometric_stretching.is_some() && initialization == ForceInitialization::StaticPreload {
+            return Err("geometric stretching requires retained initial state; nonlinear static preload is not implemented".into());
         }
         if schedule.to_canonical_bytes() != text.split_once("\nschedule\n").unwrap().1.as_bytes()
             || schedule.control_rate_hz > rate || schedule.tracks().is_empty() || schedule.tracks().len() > 16 {

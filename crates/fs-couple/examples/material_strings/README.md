@@ -372,17 +372,29 @@ cargo run --release -p fs-couple --example material_strings -- \
 
 Both transverse planes contribute to one shared strain and tension. The same
 loaded string mass normalizes the geometric storage, including selected gas
-added inertia. The original complete linear network and scalar friction solver
-participate in each `fs_phs::discrete_gradient` constitutive trial; both reaction
-residual and full storage/work balance must close before state is published.
+added inertia. The original complete linear network and scalar or simultaneous
+friction solver participate in each `fs_phs::discrete_gradient` constitutive
+trial; both reaction residual and full storage/work balance must close before
+state is published.
 The acceleration observer uses the endpoint geometric force. Existing gesture
 scheduling and PCM writing consume this same state.
 
+`nonlinear-double-bow.material-strings` uses two existing canonical bow tracks
+to drive two bonded, two-plane, torsional strings through the same body, cavity
+and fluid memory. Each bow retains its own traction, actual slip, work and loss;
+all bows see the same constitutively accepted mechanical endpoint. No new
+performance format or independent nonlinear voice is needed:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/nonlinear-double-bow.material-strings" "$demo/nonlinear-double-bow.wav"
+```
+
 This is the moderate-slope, fixed-end Kirchhoff–Carrier model. Nonlinear
 harmonics and strong coupling require clock/mode refinement; residual closure
-alone does not establish trajectory accuracy. This selection currently supports
-one prescribed bow and `forces retain`. Additional simultaneous bows, independent
-stops (including moving stops and contact-loaded bows) and linear static preload
+alone does not establish trajectory accuracy. This selection supports multiple
+prescribed bows and `forces retain`. Independent stops (including moving stops
+and contact-loaded bows) and linear static preload
 refuse because they require a joint nonlinear contact/equilibrium solve. Select
 gas loading and rotational bridges before attaching stretching. Axial wave
 inertia, winding slip, evolving temperature and measured instrument qualification
