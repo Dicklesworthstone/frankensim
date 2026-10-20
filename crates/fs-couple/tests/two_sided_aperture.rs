@@ -206,3 +206,6 @@ fn mismatched_inlet_gases_and_a_one_sided_valve_load_are_rejected() {
     assert!(TwoSidedAperture::new(paired(z,g,8,1.0).into(), sides, limits(), &gate).is_err());
 }
 
+#[path = "two_sided_aperture/mimo.rs"]
+mod mimo;
+

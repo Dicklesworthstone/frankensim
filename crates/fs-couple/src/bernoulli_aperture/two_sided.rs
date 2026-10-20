@@ -18,6 +18,8 @@
 pub mod observer;
 /// Source-bound bore and tract walls in the same two-sided mechanical solve.
 pub mod material;
+/// Source-bound mutual radiation on each original duct's ordered outlets.
+pub mod radiation;
 /// Fixed material-gas supply passage in the same accepted pressure/flow solve.
 pub mod supply;
 
@@ -27,6 +29,7 @@ use super::network::{NetworkNode, NodeFrame, SectionRealization, TubeNetworkSpec
 use super::fractional::{FractionalSection, FractionalTubePolicy};
 use super::paired::{PairedAperture, PairedTrial};
 use super::modal::{ModalAperture, ModalApertureFrame};
+use super::radiation::environment::multiport::MimoEnvironment;
 use super::viscothermal::{ViscothermalSection, ViscothermalSectionSpec,
     with_regional_viscothermal_sections, with_regional_fractional_viscothermal_sections};
 use crate::acoustic_realize::AcousticRealizeError;
@@ -190,6 +193,7 @@ pub struct TwoSidedFrame {
     /// Optional fixed supply passage, distinct from the moving aperture slit.
     pub supply: Option<SupplyChannelFrame>,
     /// Actual valve + both networks' wave/load + optional supply-fluid storage [J].
+    /// Excludes the rational exterior's unmodeled stored-energy coordinate.
     pub stored_energy_j: f64,
     /// Independently evaluated change of total storage [J].
     pub storage_change_j: f64,
@@ -197,6 +201,10 @@ pub struct TwoSidedFrame {
     /// Supply backward-Euler numerical loss is included and separately reported
     /// in supply.channel; it is not relabeled as material heat.
     pub dissipated_energy_j: f64,
+    /// Signed work delivered to both coupled terminal groups, counted once [J].
+    /// May be negative when an exterior returns energy. This is neither a loss
+    /// nor an estimate of the rational exterior's stored energy.
+    pub coupled_terminal_work_j: f64,
     /// Explicit series-source work P_s Q dt [J], which may be negative.
     pub source_work_j: f64,
 }
@@ -204,7 +212,7 @@ impl TwoSidedFrame {
     /// No junction or nonlinear-solve defect is subtracted from this balance.
     #[must_use]
     pub fn balance_residual_j(&self) -> f64 {
-        self.storage_change_j + self.dissipated_energy_j
+        self.storage_change_j + self.dissipated_energy_j + self.coupled_terminal_work_j
             - self.source_work_j - self.aperture.mechanical_work_j
     }
 }
@@ -217,6 +225,7 @@ struct DuctSide {
     losses: Vec<ViscothermalSection>,
     network: WaveguideNetwork,
     fractional: Option<(FractionalTubePolicy, Vec<FractionalSection>)>,
+    mimo_environment: Option<MimoEnvironment>,
 }
 fn invalid(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
@@ -320,7 +329,8 @@ impl TwoSidedAperture {
                 let (network, represented) = graph.realize_waveguide(&gases, dt, gate)?;
                 (network, represented, None)
             };
-            Ok(DuctSide { source, graph, gases, represented, losses, network, fractional })
+            Ok(DuctSide { source, graph, gases, represented, losses, network, fractional,
+                mimo_environment: None })
         };
         let [up, down] = sources;
         let model = Self { valve, sides: [prepare(up, policies.map(|p|p[0]))?,
@@ -451,6 +461,7 @@ impl TwoSidedAperture {
             storage_change_j: aperture.storage_change_j + up.storage_change_j + down.storage_change_j,
             dissipated_energy_j: aperture.dissipated_energy_j + up.terminal_loss_j + up.interior_loss_j
                 + down.terminal_loss_j + down.interior_loss_j,
+            coupled_terminal_work_j: up.coupled_terminal_work_j + down.coupled_terminal_work_j,
             source_work_j: drive.source_pressure_pa * (q * dt),
         };
         if let Some(s) = supply {
@@ -468,10 +479,13 @@ impl TwoSidedAperture {
         let flow_allowance = self.limits.flow_absolute_tolerance_m3_s
             + self.limits.flow_relative_tolerance * flow_scale;
         let scale = before + frame.stored_energy_j + frame.dissipated_energy_j.abs()
-            + frame.source_work_j.abs() + aperture.mechanical_work_j.abs();
+            + up.coupled_terminal_work_j.abs() + down.coupled_terminal_work_j.abs()
+            + frame.source_work_j.abs()
+            + aperture.mechanical_work_j.abs();
         let allowance = self.limits.energy_absolute_tolerance_j + self.limits.energy_relative_tolerance * scale;
         if ![upstream_pressure, dp, frame.stored_energy_j, frame.storage_change_j,
-            frame.dissipated_energy_j, frame.source_work_j, frame.balance_residual_j(),
+            frame.dissipated_energy_j, frame.coupled_terminal_work_j, frame.source_work_j,
+            frame.balance_residual_j(),
             flow_scale, flow_allowance, scale, allowance].iter().all(|x| x.is_finite())
             || frame.stored_energy_j > self.limits.maximum_energy_j
             || frame.balance_residual_j().abs() > allowance

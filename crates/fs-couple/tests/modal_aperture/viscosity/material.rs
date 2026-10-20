@@ -30,6 +30,95 @@ type Input = (
 );
 
 #[test]
+fn mutual_exterior_retains_original_material_modes_viscosity_and_source_receipts() {
+    use fs_couple::bernoulli_aperture::network::{NetworkNode, TubeSection};
+    use fs_couple::bernoulli_aperture::paired::BladePropagator;
+    use fs_couple::bernoulli_aperture::radiation::environment::multiport::{
+        MimoRadiationLimits, MimoRadiationModel,
+    };
+    use fs_couple::bernoulli_aperture::two_sided::observer::TwoSidedPressure;
+    use fs_couple::bernoulli_aperture::two_sided::{
+        LoadedAperture, TwoSidedAperture, TwoSidedDrive, TwoSidedLimits, ValveSide,
+        combined_inlet_state,
+    };
+    use fs_couple::pcm_wav::baffled::openings::{CircularOpening, duct::{
+        DuctOpening, DuctRadiationSpec, DuctReconstruction,
+    }};
+    use fs_couple::pcm_wav::{baffled::CircularOutletReceiver, observation::PressureRenderer};
+    use fs_math::c64::C64;
+    use fs_vfit::{mimo::MimoModel, model::PoleTerm};
+    let dt = 1.0 / 48_000.0;
+    let gate = CancelGate::new_clock_free();
+    let mut ducts = sides();
+    ducts[1].graph.nodes[1] = NetworkNode::Junction;
+    for (node, delay, radius) in [(2, 12.0, 0.006), (3, 20.0, 0.005)] {
+        ducts[1].graph.nodes.push(NetworkNode::Termination { reflection: -0.8 });
+        ducts[1].graph.sections.push(TubeSection { nodes: [1, node],
+            length_m: delay * gas().sound_speed * dt, radius_m: radius, max_length_error_m: 1e-12 });
+        ducts[1].gases.push(gas());
+    }
+    let (g, z) = combined_inlet_state(&ducts).unwrap();
+    let mut inputs = vec![input(1.0, 900.0), input(0.0, 1200.0)];
+    for plate in &mut inputs { plate.1.maximum_angular_step = 2.0; }
+    let identities: Vec<_> = inputs.iter().map(|p| p.0.specimen_identity()).collect();
+    let valve = ModalAperture::from_viscous_material_plates_with_propagator(
+        inputs, 4e-4, g, z, dt, 256, limits(), vec![BladeState::default(); 6],
+        contact(), BladePropagator::ExactZoh, &gate,
+    ).unwrap();
+    let original_spec = valve.spec().clone();
+    let original_viscosity = valve.viscosity_matrix_n_s_m().unwrap().to_vec();
+    let mut radiation = DuctRadiationSpec {
+        openings: vec![DuctOpening { network: 0, node: 2, center_m: [0.0, 0.0] },
+            DuctOpening { network: 0, node: 3, center_m: [0.05, 0.0] }],
+        exterior: Some(g),
+        receiver: CircularOutletReceiver { position_m: [0.0, 0.0, 0.25], radial_rings: 4,
+            angular_points: 16, maximum_frequency_hz: 1000.0 },
+        reconstruction: DuctReconstruction::FiniteDifference { sample_rate_hz: 48_000 },
+    };
+    let d = vec![1e5, 2e4, 2e4, 1.5e5];
+    let source = MimoRadiationModel {
+        declaration_identity: [3; 32], realization_identity: [4; 32], exterior: g,
+        apertures: radiation.openings.iter().zip([0.006, 0.005]).map(|(o, radius_m)|
+            CircularOpening { center_m: o.center_m, radius_m }).collect(),
+        band_hz: [1.0, 24_000.0], impedance: MimoModel { ports: 2,
+            poles: vec![PoleTerm::Real { pole: -3000.0, residue: 0.0 }],
+            residues: vec![d.iter().map(|v| C64::from_re(3000.0 * v)).collect()],
+            d, e: vec![0.0; 4], reciprocal: true },
+    };
+    let system = TwoSidedAperture::new(valve.into(), ducts, TwoSidedLimits {
+        maximum_energy_j: 1.0, energy_absolute_tolerance_j: 1e-16,
+        energy_relative_tolerance: 1e-7, flow_absolute_tolerance_m3_s: 1e-16,
+        flow_relative_tolerance: 1e-8,
+    }, &gate).unwrap().with_mimo_environment(ValveSide::Downstream, source,
+        radiation.clone(), MimoRadiationLimits { max_states: 16, max_memory_bytes: 1 << 20,
+            sampled_passivity_points: 257 }, &gate).unwrap();
+    for opening in &mut radiation.openings { opening.network = 1; }
+    let mut pressure = TwoSidedPressure::with_radiation(system, radiation, 64).unwrap();
+    pressure.set_drive(TwoSidedDrive { source_pressure_pa: 5.0,
+        blade_forces_n: [0.0; 2] }).unwrap();
+    let mut out = [0.0; 256];
+    let mut exchanged = 0.0;
+    for block in out.chunks_mut(37) {
+        pressure.block(block).unwrap();
+        let frame = pressure.last_frame().unwrap();
+        assert!(frame.balance_residual_j().abs() < 1e-12);
+        exchanged += frame.coupled_terminal_work_j.abs();
+    }
+    assert!(exchanged > 0.0 && out.iter().any(|p| p.abs() > 1e-12));
+    let LoadedAperture::Modal(valve) = pressure.system().valve() else {
+        panic!("original material-modal owner");
+    };
+    assert_eq!(valve.spec(), &original_spec);
+    assert_eq!(valve.viscosity_matrix_n_s_m().unwrap(), original_viscosity);
+    assert_eq!(valve.accepted_steps(), 256);
+    assert_eq!(valve.blade_propagator(), BladePropagator::ExactZoh);
+    for (plate, identity) in valve.material_plates().iter().zip(identities) {
+        assert_eq!(plate.source().specimen_identity(), identity);
+        assert_eq!(plate.viscosity().unwrap().chart_identity(), identity);
+    }
+}
+
+#[test]
 fn exact_material_tensor_reaches_both_ducts_and_microphone_at_the_declared_audio_clock() {
     use fs_couple::bernoulli_aperture::paired::BladePropagator;
     use fs_couple::bernoulli_aperture::two_sided::observer::TwoSidedPressure;

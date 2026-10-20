@@ -2726,6 +2726,27 @@ clock, band and exterior density/sound speed (relative tolerance 1e-12).
 reaction load, changes no bore gas and never changes a termination to admit it.
 Existing one-way builders retain Diagnostic scope.
 
+`TwoSidedAperture::with_mimo_environment` attaches the same source-bound
+`MimoEnvironment` and original `WaveguideNetwork` terminal host used by the
+flue to single, paired and material-modal valves. Each side admits one ordered
+group before stepping; valve materials, full modal viscosity, regional gases,
+fractional travel, distributed losses, material walls and supply states retain
+their original owners. The terminal host returns mutually coupled pressures
+inside the valve feedback loop. `TwoSidedFrame::coupled_terminal_work_j` sums
+both sides' signed exterior work exactly once in the complete work admission;
+it is neither dissipation nor an inferred rational stored-energy coordinate.
+
+The two-sided microphone checks installed groups even under Diagnostic. It
+preserves each side's port order while remapping global network 0/1 to the
+source environment's local 0, then requires the exact source gas, actual outlet
+geometry and mechanics clock. Omitted/reordered ports and mismatches refuse.
+Output reconstruction/rate may change within the shared receiver's admission.
+The supplied models are proper, undelayed, reciprocal and bound to the existing
+coplanar infinite-baffle observer. Separate side groups do not represent
+cross-side mutual radiation. The sampled passivity report remains GridOnly;
+this path does not promote observation to Acceptance or close M2.5-W3c's
+full-band bake, clock-refinement and closed-loop qualification requirements.
+
 G1/G2 analytic tests in `baffled_pressure_qualification.rs` check on-axis piston
 pressure at z/a=2,10,100 and signed 2J1(x)/x directivity at ka=0.5,2,5 within
 1e-3, with radial/angular refinement. The on-axis fixture uses a=25 mm to

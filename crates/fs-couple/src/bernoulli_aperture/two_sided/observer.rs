@@ -63,6 +63,10 @@ impl TwoSidedPressure {
     /// delays and original terminal loads remain with the existing source. No
     /// valve is rebuilt, retuned or replaced by a sampled pressure track. The
     /// shared infinite-baffle observer does not introduce radiation backreaction.
+    /// If a side already owns a MIMO exterior, every outlet in that ordered group
+    /// must appear with the same geometry, gas and mechanics clock. Validation
+    /// remaps global side indices to the group's local graph without relabeling
+    /// its atmosphere or operator. This also applies to diagnostic playback.
     ///
     /// # Errors
     /// Late attachment, clock mismatch, zero callback bound, invalid ports/gas,
@@ -100,6 +104,8 @@ impl TwoSidedPressure {
             DuctView { graph: &system.sides[0].graph, gases: &system.sides[0].gases },
             DuctView { graph: &system.sides[1].graph, gases: &system.sides[1].gases },
         ], radiation).map_err(observation)?;
+        system.validate_mimo_receiver(receiver.source(), *receiver.exterior_gas())
+            .map_err(RenderError::Voice)?;
         if policy == ObservationPolicy::Acceptance || !bindings.is_empty() {
             let source = receiver.source();
             if bindings.len() != source.openings.len() {
