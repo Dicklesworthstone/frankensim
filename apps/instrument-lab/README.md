@@ -302,11 +302,14 @@ a lane on a coarser grid while it plays, so the lists end at 8x for slow devices
 (`jazz_chord_progression_editor_html`), `smf.ts` reads the result under that editor's M0 laws plus
 the controllers a player needs, `chords.ts` names chords with its reverse-T1 templates, and
 `arrange.ts` maps the file (pitched channels to the piano, GM channel 10 to kit pieces, velocity to
-hammer or stick speed, CC64 to the pedal) and counts every fold, merge, thinning and skipped drum. `orchestrate.ts` turns a General MIDI
-arrangement into one pianist's part first: the file's own channel volume and expression (CC7, CC11)
-shape every strike, parts that double or echo another part are left out, chiptune ornaments are
-thinned, parts written at one flat velocity get dynamics by role, and the page lists what happened
-to every part. The shelf's second pack (`public/midi/game-pack*`) holds video-game files of that
+hammer or stick speed, CC64 to the sustain pedal, CC66 to sostenuto and CC67 to una corda, the
+grand's own pedals) and counts every fold, merge, thinning and skipped drum. Seeking or resuming
+restores the dampers sostenuto had caught with silent key presses before re-striking held keys.
+`orchestrate.ts` turns a General MIDI arrangement into one pianist's part first: the file's own
+channel volume and expression (CC7, CC11) shape every strike, parts that double or echo another
+part are left out, chiptune ornaments are thinned, parts written at one flat velocity get dynamics
+by role (before their channel volume and expression), and the page lists what happened to every
+part. The shelf's second pack (`public/midi/game-pack*`) holds video-game files of that
 kind, supplied by the owner.
 
 The shelf's rolls are that editor's chord-chart library played through its own bass and comping
