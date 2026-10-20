@@ -132,6 +132,7 @@ pub use simple::{
     simple_flow_with_material_resistance, simple_flow_with_viscosity,
     simple_flow_with_viscosity_and_force,
 };
+pub use simple::viscous_heat::{ViscousHeatControls, ViscousPower, creeping_flow_with_viscous_heat};
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 pub use unsteady::{
     Boussinesq, ConjugateMarch, FlowStepRecord, UnsteadyConfig, UnsteadyFlow, march_conjugate,

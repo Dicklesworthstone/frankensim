@@ -38,6 +38,9 @@ mod feedback;
 #[path = "liquid_flow_enthalpy/mushy.rs"]
 mod mushy;
 
+#[path = "liquid_flow_enthalpy/viscous.rs"]
+mod viscous;
+
 fn absolute() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature, ValueForm::Static,

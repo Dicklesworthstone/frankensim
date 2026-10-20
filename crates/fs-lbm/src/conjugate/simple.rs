@@ -78,6 +78,8 @@ use super::turbulence::{TURBULENT_PRANDTL, law_of_the_wall_ratios, wall_distance
 use super::{ChtError, finite, finite_positive, poll};
 use crate::d3q19::Face3;
 
+pub mod viscous_heat;
+
 /// Flow rule on one domain face.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FvBoundary {
@@ -516,6 +518,8 @@ pub(super) struct Solver<'a> {
     /// Admitted laminar molecular viscosity per cell. Nonempty selects the
     /// complete symmetric Newtonian stress, including cross-component shear.
     molecular_viscosity: Vec<f64>,
+    /// Explicit Stokes reduction; all ordinary SIMPLE entries keep convection.
+    creeping: bool,
     comps: [Component; 3],
     /// Face velocities per component, m/s.
     vel: [Vec<f64>; 3],
@@ -767,6 +771,7 @@ impl<'a> Solver<'a> {
             rho: fluid.density_kg_m3,
             mu: fluid.density_kg_m3 * fluid.kinematic_viscosity_m2_s,
             molecular_viscosity: Vec::new(),
+            creeping: false,
             comps,
             vel,
             pressure: vec![0.0; domain.cell_count()],
@@ -1239,6 +1244,7 @@ impl<'a> Solver<'a> {
             return Ok(0.0);
         }
         let alpha = self.config.velocity_relaxation;
+        let advective_density = if self.creeping { 0.0 } else { self.rho };
         let width = |axis: usize, i: usize| self.domain.width(axis, i);
         let mut coo = Coo::new(rows, rows);
         let mut b = vec![0.0f64; rows];
@@ -1284,7 +1290,7 @@ impl<'a> Solver<'a> {
                         if beyond {
                             // Outlet: the mirrored outside centre moves with
                             // the face itself, so only the flux remains.
-                            net_out += s * self.rho * face_area * self.vel[a][index];
+                            net_out += s * advective_density * face_area * self.vel[a][index];
                             continue;
                         }
                         let nf = {
@@ -1297,7 +1303,7 @@ impl<'a> Solver<'a> {
                             comp.index(g)
                         };
                         let flux =
-                            s * self.rho * face_area * 0.5 * (self.vel[a][index] + self.vel[a][nf]);
+                            s * advective_density * face_area * 0.5 * (self.vel[a][index] + self.vel[a][nf]);
                         net_out += flux;
                         // Diffusion across the cell between the two faces.
                         let side_cell = if plus { plus_cell } else { minus_cell };
@@ -1331,7 +1337,7 @@ impl<'a> Solver<'a> {
                     let edge_flux = {
                         let vm = self.vel[d][self.cell_face(d, minus_cell, plus)];
                         let vp = self.vel[d][self.cell_face(d, plus_cell, plus)];
-                        s * self.rho * w3 * (0.5 * w_minus).mul_add(vm, 0.5 * w_plus * vp)
+                        s * advective_density * w3 * (0.5 * w_minus).mul_add(vm, 0.5 * w_plus * vp)
                     };
                     let outside = if plus {
                         f[d] + 1 >= self.n[d]
@@ -1371,7 +1377,7 @@ impl<'a> Solver<'a> {
                             }
                             FvBoundary::Symmetry => {}
                             FvBoundary::Inlet { velocity } => {
-                                let flux = s * self.rho * side_area * velocity[d];
+                                let flux = s * advective_density * side_area * velocity[d];
                                 net_out += flux;
                                 let coef = (2.0 * diff)
                                     .mul_add(self.weight(flux / (2.0 * diff)), (-flux).max(0.0));
@@ -2057,6 +2063,20 @@ fn material_flow(
     config: &SimpleConfig,
     gate: &CancelGate,
 ) -> Result<FvFlow, ChtError> {
+    let solver = material_solver(domain, fluid, dynamic_viscosity_pa_s,
+        force_density_n_m3, drag_pa_s_m2, config, gate)?;
+    solve_steady(solver, fluid, config, gate)
+}
+
+fn material_solver<'a>(
+    domain: &'a VoxelDomain,
+    fluid: &FluidProperties,
+    dynamic_viscosity_pa_s: &[f64],
+    force_density_n_m3: Option<&[[f64; 3]]>,
+    drag_pa_s_m2: Option<&[f64]>,
+    config: &'a SimpleConfig,
+    gate: &CancelGate,
+) -> Result<Solver<'a>, ChtError> {
     poll(gate)?;
     admit(domain, fluid, config)?;
     if dynamic_viscosity_pa_s.len() != domain.cell_count()
@@ -2136,7 +2156,7 @@ fn material_flow(
     if let Some(force) = force_density_n_m3 {
         solver.set_force(force.to_vec());
     }
-    solve_steady(solver, fluid, config, gate)
+    Ok(solver)
 }
 
 fn solve_steady(

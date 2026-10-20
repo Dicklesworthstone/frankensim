@@ -21,11 +21,15 @@ use fs_material::phase::mushy::MushyPhaseLaw;
 
 use super::{FlowEnthalpyInput, admit_map, invalid, mass_graph};
 use crate::conjugate::{
-    ChtError, FluidProperties, FvFlow, SimpleConfig, Turbulence, VoxelDomain,
-    simple_flow_with_material_resistance, simple_flow_with_viscosity,
-    simple_flow_with_viscosity_and_force,
+    ChtError, FluidProperties, FvFlow, SimpleConfig, Turbulence, ViscousHeatControls, ViscousPower,
+    VoxelDomain, creeping_flow_with_viscous_heat, simple_flow_with_material_resistance,
+    simple_flow_with_viscosity, simple_flow_with_viscosity_and_force,
 };
 use crate::material::transport::boussinesq::{BoussinesqConfig, BoussinesqMaterial};
+
+mod viscous;
+use viscous::ViscousHeating;
+pub use viscous::ViscousHeatingAudit;
 
 /// A coupled refusal retains the originating material, flow or history error.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +89,9 @@ pub struct MaterialFlowEpoch<F> {
     /// Applied isotropic `mu/K(phi(h))` [Pa s/m2], in native voxel order.
     /// None without an explicitly attached stationary mushy closure.
     pub mushy_drag_pa_s_m2: Option<Vec<f64>>,
+    /// Molecular heat and independent actuator work at this same source epoch.
+    /// Present only after explicit closed creeping-flow admission.
+    pub viscous_power: Option<ViscousPower>,
 }
 
 /// Live local viscosity/momentum/enthalpy coupling around any existing observer.
@@ -111,7 +118,9 @@ pub struct MaterialFlowEpoch<F> {
 /// explicit starting epoch, not a claimed momentum solve at the returned T.
 /// Refine the thermal step and establish rapid viscous equilibration relative
 /// to thermal evolution before using this approximation. There is no kinetic
-/// energy storage, pressure-work heat, viscous heating or free-surface motion.
+/// energy storage, pressure-work heat or free-surface motion. Explicit
+/// `Self::with_viscous_heating` admits wall-supplied molecular heat in a closed
+/// creeping-flow box; the ordinary entry adds no viscous heat.
 #[derive(Clone)]
 pub struct MaterialFlowFeedback<'a, F, R, O> {
     domain: &'a VoxelDomain,
@@ -122,6 +131,7 @@ pub struct MaterialFlowFeedback<'a, F, R, O> {
     reference: FluidTransportState,
     buoyancy: Option<([f64; 3], fn(&F) -> f64)>,
     mushy: Option<&'a MushyPhaseLaw<'a>>,
+    viscous_heating: Option<ViscousHeating>,
     fluid_conduction: BTreeMap<(CellId, CellId), FluidConductionFace>,
     advected: Option<Advected<O>>,
     applied: Option<MaterialFlowEpoch<F>>,
@@ -180,6 +190,7 @@ where
             reference,
             buoyancy: None,
             mushy: None,
+            viscous_heating: None,
             fluid_conduction: BTreeMap::new(),
             advected: Some(advected),
             applied: None,
@@ -265,6 +276,9 @@ where
         mut self,
         law: &'a MushyPhaseLaw<'a>,
     ) -> Result<Self, MaterialFlowError<O::Error>> {
+        if self.viscous_heating.is_some() {
+            return Err(invalid("viscous heating excludes unaccounted mushy drag work").into());
+        }
         let rho = law.fixed_density_kg_m3().ok_or(invalid(
             "fixed-volume mushy flow requires equal constant phase densities",
         ))?;
@@ -320,6 +334,40 @@ where
             drag[sample.voxel] = value;
         }
         Ok(Some(drag))
+    }
+
+    /// Thermalize molecular stress power in a closed, fully fluid Stokes box.
+    ///
+    /// This opt-in explicitly removes momentum convection from each native
+    /// solve. Only tangential moving/stationary walls and symmetry are admitted;
+    /// openings, obstacles, buoyancy, fans, turbulence and drag refuse. Source
+    /// viscosity and the actual returned velocity must satisfy the declared
+    /// global creeping-flow bound and independent wall-work power check.
+    ///
+    /// The original registered h/T law, source receipts and cell masses remain
+    /// the sole thermal owners. Each actual substep adds its molecular heat once
+    /// to the existing source map, alongside any wrapped source. The audit uses
+    /// that step's accepted duration. Heat already appears in the original
+    /// thermal audit's external_heat_j; never add the wall supply a second time.
+    ///
+    /// This is a fixed-volume, incompressible caloric approximation. There is no
+    /// kinetic store or pressure-work thermalization. Wall drives are prescribed
+    /// actuators, not finite mechanical bodies. Establish rapid viscous settling
+    /// relative to thermal evolution and refine the original max_dt_s for the
+    /// nonlinear viscosity/heat feedback; its thermal CFL alone is insufficient.
+    pub fn with_viscous_heating(
+        mut self,
+        controls: ViscousHeatControls,
+    ) -> Result<Self, MaterialFlowError<O::Error>> {
+        check_gate(self.gate, &mut || Ok(()))?;
+        if self.buoyancy.is_some() || self.mushy.is_some() {
+            return Err(
+                invalid("viscous heating excludes unaccounted body-force and drag work").into(),
+            );
+        }
+        crate::conjugate::simple::viscous_heat::admit_heating(self.domain, self.config, controls)?;
+        self.viscous_heating = Some(ViscousHeating::new(controls));
+        Ok(self)
     }
 
     /// Assign existing full voxel-face links to molecular fluid conduction.
@@ -460,6 +508,11 @@ where
     pub const fn audit(&self) -> AdvectionAudit {
         self.audit
     }
+    /// Wall work and the same heat already included in the thermal owner.
+    /// Resets per advance; failed candidates cannot publish these counters.
+    pub fn viscous_heating_audit(&self) -> Option<ViscousHeatingAudit> {
+        self.viscous_heating.as_ref().map(|owner| owner.audit)
+    }
     /// Number of actual momentum solves in the last successful advance.
     pub const fn momentum_solves(&self) -> usize {
         self.solves
@@ -504,6 +557,9 @@ where
             .begin()
             .map_err(MaterialFlowError::Inner)?;
         self.audit = AdvectionAudit::default();
+        if let Some(owner) = &mut self.viscous_heating {
+            owner.begin();
+        }
         self.solves = 0;
         Ok(())
     }
@@ -551,27 +607,52 @@ where
             None
         };
         let mushy_drag_pa_s_m2 = self.mushy_drag(&samples, check)?;
-        let flow = if let Some(drag) = &mushy_drag_pa_s_m2 {
-            simple_flow_with_material_resistance(
+        let (flow, viscous_power) = if let Some(owner) = &self.viscous_heating {
+            let (flow, power) = creeping_flow_with_viscous_heat(
                 self.domain,
                 &fluid,
                 &viscosities,
-                drag,
-                buoyancy_force_n_m3.as_deref(),
                 self.config,
+                owner.controls,
                 self.gate,
-            )?
+            )?;
+            (flow, Some(power))
+        } else if let Some(drag) = &mushy_drag_pa_s_m2 {
+            (
+                simple_flow_with_material_resistance(
+                    self.domain,
+                    &fluid,
+                    &viscosities,
+                    drag,
+                    buoyancy_force_n_m3.as_deref(),
+                    self.config,
+                    self.gate,
+                )?,
+                None,
+            )
         } else if let Some(forces) = &buoyancy_force_n_m3 {
-            simple_flow_with_viscosity_and_force(
-                self.domain,
-                &fluid,
-                &viscosities,
-                forces,
-                self.config,
-                self.gate,
-            )?
+            (
+                simple_flow_with_viscosity_and_force(
+                    self.domain,
+                    &fluid,
+                    &viscosities,
+                    forces,
+                    self.config,
+                    self.gate,
+                )?,
+                None,
+            )
         } else {
-            simple_flow_with_viscosity(self.domain, &fluid, &viscosities, self.config, self.gate)?
+            (
+                simple_flow_with_viscosity(
+                    self.domain,
+                    &fluid,
+                    &viscosities,
+                    self.config,
+                    self.gate,
+                )?,
+                None,
+            )
         };
         check_gate(self.gate, check)?;
         let (flows, boundaries) = mass_graph(
@@ -589,9 +670,22 @@ where
         // It does not call begin() again or reset another owner's work counter.
         let mut advected = Advected::new(old.into_inner(), flows, self.input.max_connections)?
             .with_boundaries(boundaries, self.input.max_connections)?;
-        let sources = advected
+        let mut sources = advected
             .sources(thermal, check)
             .map_err(MaterialFlowError::Inner)?;
+        if let Some(power) = &viscous_power {
+            for sample in &samples {
+                check_gate(self.gate, check)?;
+                let heat = power.cell_heat_w[sample.voxel];
+                if heat != 0.0 {
+                    let value = sources.entry(sample.cell).or_insert(0.0);
+                    *value += heat;
+                    if !value.is_finite() {
+                        return Err(DepositionError::Arithmetic.into());
+                    }
+                }
+            }
+        }
         self.advected = Some(advected);
         self.applied = Some(MaterialFlowEpoch {
             time_s: thermal.time_s(),
@@ -599,6 +693,7 @@ where
             flow,
             buoyancy_force_n_m3,
             mushy_drag_pa_s_m2,
+            viscous_power,
         });
         self.solves += 1;
         Ok(sources)
@@ -743,6 +838,24 @@ where
             .step(start_s, dt, old, thermal, check)
             .map_err(MaterialFlowError::Inner)?;
         add_audit(&mut self.audit, advected.audit())?;
+        if let Some(owner) = &mut self.viscous_heating {
+            let applied = self
+                .applied
+                .as_ref()
+                .ok_or(invalid("missing viscous-power source epoch"))?;
+            if applied.time_s.to_bits() != start_s.to_bits() {
+                return Err(invalid("stale viscous-power source epoch").into());
+            }
+            owner.accept(
+                applied
+                    .viscous_power
+                    .as_ref()
+                    .ok_or(invalid("missing applied molecular power"))?,
+                start_s,
+                dt,
+                thermal.time_s(),
+            )?;
+        }
         check_gate(self.gate, check)?;
         Ok(())
     }

@@ -1,0 +1,326 @@
+//! Viscous power from the SAME source-resolved staggered stress operator.
+//!
+//! This entry solves steady Stokes flow in a closed, completely fluid Cartesian
+//! box. Molecular viscosity may vary by cell; walls may move tangentially.
+//! Inertia, momentum convection, openings, obstacles, body forces, porous drag,
+//! turbulence and fans are excluded. Wall actuators supply all mechanical work.
+//! It has no kinetic-energy store and makes no Navier--Stokes energy claim.
+//!
+//! Normal stress uses `2 mu (du_a/dx_a)^2 V` at each cell. Each reciprocal MAC
+//! shear edge contributes `mu_edge (du_a/dx_d + du_d/dx_a)^2 V_edge` once. The
+//! original harmonic edge viscosity supplies the common stress; its half-cell
+//! resistance fractions partition the heat. At a wall, the original parallel
+//! half-cell conductances supply both traction work and local heat. No residual,
+//! upwind diffusion or pressure-constraint work is converted into heat.
+
+use super::*;
+
+/// Explicit creeping-flow and algebraic work gates, not accuracy certificates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViscousHeatControls {
+    /// Based on the full box's longest dimension, maximum wall/face speed, and
+    /// minimum molecular kinematic viscosity. Must be in (0, 0.1].
+    pub maximum_reynolds: f64,
+    /// Absolute W allowance for each independent power/partition constraint.
+    pub power_tolerance_w: f64,
+}
+
+/// Actual molecular stress power at one solved material/velocity epoch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViscousPower {
+    /// Nonnegative physical heat in native voxel order [W].
+    pub cell_heat_w: Vec<f64>,
+    pub heat_w: f64,
+    /// Signed actuator supply at each Face3::ALL boundary [W].
+    pub wall_power_w: [f64; 6],
+    /// Tangential force exerted by each actuator on the fluid [N]. Normal
+    /// pressure reactions are not included and do no work in this fixed box.
+    pub wall_tangential_force_n: [[f64; 3]; 6],
+    pub supplied_wall_power_w: f64,
+    /// Discrete sum p div(u) V [W]; independently required to be negligible.
+    pub pressure_constraint_power_w: f64,
+    /// Wall supply plus pressure constraint minus physical heat [W].
+    pub residual_w: f64,
+    pub reynolds: f64,
+}
+
+fn invalid_power(reason: &str) -> ChtError {
+    ChtError::InvalidInput {
+        field: "simple.viscous_heat",
+        reason: reason.into(),
+    }
+}
+
+pub(crate) fn admit_heating(
+    domain: &VoxelDomain,
+    config: &SimpleConfig,
+    controls: ViscousHeatControls,
+) -> Result<(), ChtError> {
+    if domain.fluid_count() != domain.cell_count()
+        || config
+            .faces
+            .iter()
+            .any(|f| !matches!(f, FvBoundary::Wall { .. } | FvBoundary::Symmetry))
+        || config.turbulence != Turbulence::Laminar
+        || config.fan.is_some()
+        || !config.internal_fans.is_empty()
+        || !config.resistances.is_empty()
+    {
+        return Err(invalid_power(
+            "viscous heat requires a closed all-fluid box with walls/symmetry, without fans, drag or turbulence",
+        ));
+    }
+    if !controls.maximum_reynolds.is_finite()
+        || controls.maximum_reynolds <= 0.0
+        || controls.maximum_reynolds > 0.1
+        || !controls.power_tolerance_w.is_finite()
+        || controls.power_tolerance_w <= 0.0
+    {
+        return Err(invalid_power(
+            "positive finite power gate and Reynolds ceiling at most 0.1 required",
+        ));
+    }
+    for (side, face) in config.faces.iter().enumerate() {
+        if let FvBoundary::Wall { velocity } = face {
+            if velocity.iter().any(|v| !v.is_finite())
+                || velocity[side / 2] != 0.0
+                || (0..3).any(|a| velocity[a] != 0.0 && domain.dims()[a] < 2)
+            {
+                return Err(invalid_power(
+                    "walls must move tangentially with at least two cells along every driven component",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Original MAC/SIMPLE solve with momentum convection explicitly omitted.
+/// The power sampler consumes the RETURNED projected face field, so the thermal
+/// owner never uses velocities different from those whose heat was audited.
+/// Density, material claims and caloric state remain the caller's original owners.
+pub fn creeping_flow_with_viscous_heat(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    viscosity_pa_s: &[f64],
+    config: &SimpleConfig,
+    controls: ViscousHeatControls,
+    gate: &CancelGate,
+) -> Result<(FvFlow, ViscousPower), ChtError> {
+    poll(gate)?;
+    admit_heating(domain, config, controls)?;
+    let mut solver = material_solver(domain, fluid, viscosity_pa_s, None, None, config, gate)?;
+    solver.creeping = true;
+    let flow = solve_steady(solver, fluid, config, gate)?;
+    // Reconstruct only the original coefficient/geometry owner from its public
+    // projected field. This is an audit, not another flow solve or projection.
+    let mut sampler = Solver::new(domain, fluid, config);
+    sampler.molecular_viscosity = viscosity_pa_s.to_vec();
+    let arrays = flow.field.face_arrays();
+    for (a, fluxes) in arrays.into_iter().enumerate() {
+        for (i, flux) in fluxes.iter().enumerate() {
+            if i % 256 == 0 {
+                poll(gate)?;
+            }
+            sampler.vel[a][i] = finite(
+                "viscous_heat.velocity",
+                *flux / sampler.comp_face_area(a, i),
+            )?;
+        }
+    }
+    let power = sampler.viscous_power(&flow, controls, gate)?;
+    Ok((flow, power))
+}
+
+impl Solver<'_> {
+    fn viscous_power(
+        &self,
+        flow: &FvFlow,
+        controls: ViscousHeatControls,
+        gate: &CancelGate,
+    ) -> Result<ViscousPower, ChtError> {
+        let domain = self.domain;
+        let mut heat = vec![0.0; domain.cell_count()];
+        let mut quadrature_w = 0.0;
+        let mut wall_power_w = [0.0; 6];
+        let mut wall_tangential_force_n = [[0.0; 3]; 6];
+        let add = |value: &mut f64, amount: f64| -> Result<(), ChtError> {
+            *value = finite("viscous_heat.power", *value + amount)?;
+            Ok(())
+        };
+        for (c, cell_heat) in heat.iter_mut().enumerate() {
+            poll(gate)?;
+            let at = domain.coords(c);
+            for a in 0..3 {
+                let gradient = (self.vel[a][self.cell_face(a, at, true)]
+                    - self.vel[a][self.cell_face(a, at, false)])
+                    / domain.width(a, at[a]);
+                let power = 2.0 * self.mu_eff(at) * domain.volume(c) * gradient * gradient;
+                add(cell_heat, power)?;
+                add(&mut quadrature_w, power)?;
+            }
+        }
+        // One edge for each unordered pair of velocity components, including
+        // graded cells. Normal fixed boundary DOFs carry no normal wall work.
+        for a in 0..3 {
+            for d in a + 1..3 {
+                let third = 3 - a - d;
+                for c in 0..domain.cell_count() {
+                    poll(gate)?;
+                    let plus = domain.coords(c);
+                    if plus[a] == 0 || plus[d] == 0 {
+                        continue;
+                    }
+                    let mut minus_a = plus;
+                    minus_a[a] -= 1;
+                    let mut minus_d = plus;
+                    minus_d[d] -= 1;
+                    let mut minus_both = minus_a;
+                    minus_both[d] -= 1;
+                    let la = 0.5 * (domain.width(a, minus_a[a]) + domain.width(a, plus[a]));
+                    let ld = 0.5 * (domain.width(d, minus_d[d]) + domain.width(d, plus[d]));
+                    let gradient = (self.vel[a][self.comps[a].index(plus)]
+                        - self.vel[a][self.comps[a].index(minus_d)])
+                        / ld
+                        + (self.vel[d][self.comps[d].index(plus)]
+                            - self.vel[d][self.comps[d].index(minus_a)])
+                            / la;
+                    let mu = self.edge_mu(minus_a, plus, d, false);
+                    let power =
+                        mu * la * ld * domain.width(third, plus[third]) * gradient * gradient;
+                    add(&mut quadrature_w, power)?;
+                    let cells = [minus_both, minus_d, minus_a, plus];
+                    let minimum = cells
+                        .iter()
+                        .map(|&p| self.mu_eff(p))
+                        .fold(f64::INFINITY, f64::min);
+                    let area: f64 = cells
+                        .iter()
+                        .map(|p| domain.width(a, p[a]) * domain.width(d, p[d]))
+                        .sum();
+                    let weights = cells.map(|p| {
+                        domain.width(a, p[a]) * domain.width(d, p[d]) / area
+                            * (minimum / self.mu_eff(p))
+                    });
+                    let total: f64 = weights.iter().sum();
+                    for (p, weight) in cells.into_iter().zip(weights) {
+                        add(&mut heat[cell_of(self.n, p)], power * (weight / total))?;
+                    }
+                }
+            }
+        }
+        // Use exactly the parallel half-cell wall coefficient in momentum().
+        for a in 0..3 {
+            for &index in &self.comps[a].unknowns {
+                poll(gate)?;
+                let plus = self.comps[a].coords(index);
+                let mut minus = plus;
+                minus[a] -= 1;
+                let wm = domain.width(a, minus[a]);
+                let wp = domain.width(a, plus[a]);
+                for d in 0..3 {
+                    if d == a {
+                        continue;
+                    }
+                    for side in [0, 1] {
+                        if plus[d] != if side == 0 { 0 } else { self.n[d] - 1 } {
+                            continue;
+                        }
+                        let face = 2 * d + side;
+                        let FvBoundary::Wall { velocity } = self.faces[face] else {
+                            continue;
+                        };
+                        let wall_mu = self.wall_mu(minus, plus);
+                        let coefficient = 2.0
+                            * wall_mu
+                            * 0.5
+                            * (wm + wp)
+                            * domain.width(3 - a - d, plus[3 - a - d])
+                            / domain.width(d, plus[d]);
+                        let difference = velocity[a] - self.vel[a][index];
+                        let power = coefficient * difference * difference;
+                        add(&mut quadrature_w, power)?;
+                        add(
+                            &mut wall_tangential_force_n[face][a],
+                            coefficient * difference,
+                        )?;
+                        add(
+                            &mut wall_power_w[face],
+                            coefficient * difference * velocity[a],
+                        )?;
+                        for (p, width) in [(minus, wm), (plus, wp)] {
+                            add(
+                                &mut heat[cell_of(self.n, p)],
+                                power * (width / (wm + wp)) * (self.mu_eff(p) / wall_mu),
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        let heat_w = finite("viscous_heat.total", heat.iter().sum())?;
+        let supplied_wall_power_w = finite("viscous_heat.supply", wall_power_w.iter().sum())?;
+        let mut pressure_constraint_power_w = 0.0;
+        for c in 0..domain.cell_count() {
+            poll(gate)?;
+            let outward: f64 = (0..6).map(|face| flow.field.outward(domain, c, face)).sum();
+            add(
+                &mut pressure_constraint_power_w,
+                flow.pressure_pa[c] * outward,
+            )?;
+        }
+        let residual_w = finite(
+            "viscous_heat.residual",
+            supplied_wall_power_w + pressure_constraint_power_w - heat_w,
+        )?;
+        let mut speed = self
+            .vel
+            .iter()
+            .flatten()
+            .map(|u| u.abs())
+            .fold(0.0, f64::max)
+            * 3.0_f64.sqrt();
+        for face in self.faces {
+            if let FvBoundary::Wall { velocity } = face {
+                speed = speed.max(velocity.iter().map(|u| u * u).sum::<f64>().sqrt());
+            }
+        }
+        let length = (0..3)
+            .map(|a| domain.face_coord(a, self.n[a]) - domain.face_coord(a, 0))
+            .fold(0.0, f64::max);
+        let minimum_mu = self
+            .molecular_viscosity
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let reynolds = finite(
+            "viscous_heat.reynolds",
+            self.rho * speed * length / minimum_mu,
+        )?;
+        if reynolds > controls.maximum_reynolds {
+            return Err(invalid_power(
+                "source viscosity and actual wall/flow speed exceed the declared creeping-flow bound",
+            ));
+        }
+        if (heat_w - quadrature_w).abs() > controls.power_tolerance_w
+            || pressure_constraint_power_w.abs() > controls.power_tolerance_w
+            || residual_w.abs() > controls.power_tolerance_w
+            || (supplied_wall_power_w - heat_w).abs() > controls.power_tolerance_w
+        {
+            return Err(invalid_power(
+                "independent wall work, constraint and molecular viscous-power accounts do not close",
+            ));
+        }
+        poll(gate)?;
+        Ok(ViscousPower {
+            cell_heat_w: heat,
+            heat_w,
+            wall_power_w,
+            wall_tangential_force_n,
+            supplied_wall_power_w,
+            pressure_constraint_power_w,
+            residual_w,
+            reynolds,
+        })
+    }
+}
