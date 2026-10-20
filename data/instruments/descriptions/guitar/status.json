@@ -1,0 +1,23 @@
+{
+  "schema": "frankensim.instrument-status.v1",
+  "family": "guitar",
+  "title": "Classical guitar",
+  "reference_instrument": "Iowa MIS classical guitar (Raimundo 118)",
+  "summary": "First slice (Gt-S1): three plain nylon treble strings (G3, B3, E4) plucked by a load-release gesture, coupled through one shared bridge to a flat rectangular cedar soundboard chart and a Helmholtz cavity, rendered by the generic material_strings example. It tests the existing string-to-body coupling; it is not yet a guitar body. Wound bass strings are not rendered.",
+  "physics_present": [
+    "Each string is a convergent modal beam in two transverse polarizations, with nylon density and bending modulus from Lynch-Aird and Woodhouse 2017 (harp-string proxy) and gauges from the D'Addario EJ45 specification",
+    "Tension is set per string to equal-tempered pitch (A4 = 440 Hz) by the setup protocol, never from a recording; the result is compared with the published tension",
+    "All strings share one reciprocal bridge on a plane-stress orthotropic cedar plate chart (FPL-GTR-282 constants) and a Helmholtz cavity with a flanged sound hole, so unplucked strings ring sympathetically",
+    "Pressure is observed through the compact baffled body and neck monopole at an assumed 1 m"
+  ],
+  "physics_missing": [
+    "The body is a flat unbraced rectangle, not a fan-braced arched guitar top with thickness map, back, ribs and neck (assembly route exists as shell components but its geometry is not authored)",
+    "Wound bass strings: the multifilament core and silver-plated winding dimensions are unknown",
+    "Nylon internal loss, cedar cross-grain and shear loss, and the saddle contact stiffness are unknown; loss is a declared scenario, not a measurement",
+    "Finger and nail contact, fret contact for fretted notes, and the player's holding contacts",
+    "Radiation is the compact monopole, not a boundary-element microphone with fluid loading",
+    "The stretched-string state (the working tension of a real nylon string is about 10 percent below the unstretched-mass value) is not modelled"
+  ],
+  "blocked": "No render yet: waiting for the native build of the material_strings example and the matdb pack tool on the central Linux host.",
+  "beads": ["pexfp.283", "pexfp.278"]
+}
