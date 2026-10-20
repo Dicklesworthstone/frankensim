@@ -125,6 +125,17 @@ connectedness, winding, vertex fans and unresolved tangent projections; it does
 not add a global self-intersection certificate. `ShearShellSection::with_material_angle_rad`
 preserves the physical section while selecting the resulting facet angle.
 
+`shell::pressure::ShellPressurePort` selects original oriented midsurface
+triangles and supplies one P1 unit-pressure load/normal-volume-flow operator.
+The legacy DKT `ShellReduction::volume_port` and material MITC consumers share
+that integral. Empty selections retain the complete mechanical coordinate
+extent with zero fluid participation; omitted internal facets do not create
+fictitious enclosed volume. Duplicate selection, out-of-range geometry,
+nonfinite modes, projection budgets and cancellation refuse. G0/G3 manufactured
+tests check closed-surface rigid motion, affine volume, pressure work, signed
+orientation and exclusion of internal structure. This owner does not extrude
+skins, infer fluid ownership, certify closure or supply radiation impedance.
+
 
 `shell::arching` (IRP M1.2-W6) admits explicit cubic-Hermite section curves or
 a sampled bicubic height grid, with a required unloaded/declared-loaded

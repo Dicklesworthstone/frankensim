@@ -362,6 +362,50 @@ equilibrium, separately connected ribs, resolved soundpost and bass-bar solids,
 distributed glue mortars or full exterior acoustic back-loading. The fixture's coefficients are synthetic;
 it establishes the data-to-pressure path, not measured whole-instrument fidelity.
 
+## Separate exterior and cavity pressure surfaces
+
+A v3 profile can declare which original triangles participate in exterior
+radiation and which change the enclosed air volume. Place this optional block
+after the supports and any interfaces, immediately before `bridges`:
+
+```text
+pressure-surfaces 2 2
+exterior-facet 10 positive
+exterior-facet 11 positive
+cavity-facet 10 positive
+cavity-facet 11 positive
+```
+
+The header gives the exterior count followed by the cavity count. Each count
+is in `0..=TRIANGLE_COUNT`; the corresponding rows follow in that order.
+Triangle indices are zero based and refer to the original mesh, independently
+of material regions. `positive` uses its original winding normal and `negative`
+reverses that normal. For the cavity row, the supplied normal points **outward
+from the cavity**, so positive displacement increases cavity volume. A wall
+bounding both fluid domains normally appears once in each list with the same
+outward-from-cavity sign. Repeated triangles within one role refuse.
+
+Only the listed facets enter each role. Internal mechanical members can be
+excluded from exterior monopole radiation and net enclosed volume while keeping
+their stiffness, mass, shear deformation, full material damping, bridge reactions
+and material interfaces. Both independent signed volume rows use the same
+physical modal basis and shared P1 pressure operator. The cavity row drives the
+existing collective air spring and reciprocal body force; the exterior row
+drives the existing compact pressure observer. Changing receiver participation
+alone preserves mechanical history.
+
+An explicit zero count means zero participation, including when the other
+role remains active. `pressure-surfaces 0 0` retains a mechanical body with no
+selected compact acoustic coupling. Omitting the entire block preserves the
+original whole-midsurface selection for both roles.
+
+These are oriented **midsurface** pressure declarations. They do not extrude
+physical skins, infer cavity volume, certify an enclosed/watertight air domain,
+or establish that an omitted component has zero dipole or higher radiation.
+The performance continues to supply its explicit cavity geometry and gas.
+The existing compact observer and lumped cavity retain their approximation
+limits; separately resolved interior/exterior fluid meshes require those owners.
+
 ## Compliant holding and bonded interface footprints
 
 A v3 body can now include an optional material interface block after its last

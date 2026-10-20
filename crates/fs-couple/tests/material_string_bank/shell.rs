@@ -164,3 +164,6 @@ fn g0_shell_budget_detached_force_and_cancellation_refuse_before_playback() {
 
 #[path = "shell/connections.rs"]
 mod connections;
+
+#[path = "shell/pressure.rs"]
+mod pressure;

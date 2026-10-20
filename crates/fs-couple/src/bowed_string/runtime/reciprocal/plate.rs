@@ -174,7 +174,7 @@ pub(super) fn reduce_material_body(
     validate_body_medium(gas, sample_rate_hz, listener_m, cavity, gate)?;
     // Fresh reduction only; the original DKT/modal owner is synchronous.
     let radiators = certified_radiators(description).map_err(ReciprocalStringError::Material)?;
-    reduce_radiating_body(&radiators, gas, sample_rate_hz, modal_budget, listener_m, cavity, gate)
+    reduce_radiating_body(&radiators, gas, sample_rate_hz, modal_budget, listener_m, cavity, None, gate)
 }
 
 // Admission before either uniform or regional geometry enters its eigensolve.
@@ -198,14 +198,22 @@ pub(super) fn validate_body_medium(
 
 // A fresh modal image from either geometry owner enters exactly the same
 // mass-normalization, signed volume, cavity and acceleration-pressure lowering.
+// An explicit cavity row uses the same mass-normalized mechanical basis but may
+// address different physical facets. Without it, uniform/chart plates preserve
+// the existing coincident front/back midsurface trace.
 // No receiver states or radiation-filter history may enter this private path.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn reduce_radiating_body(
     radiators: &[crate::thin_plate::CompactBody], gas: &GasState, sample_rate_hz: u32,
     modal_budget: ModalAcousticTimeBudget, listener_m: f64,
-    cavity: Option<&MaterialBodyCavity>, gate: &CancelGate,
+    cavity: Option<&MaterialBodyCavity>, cavity_volume_shapes: Option<&[f64]>, gate: &CancelGate,
 ) -> Result<MaterialBodyImage, ReciprocalStringError> {
     validate_body_medium(gas, sample_rate_hz, listener_m, cavity, gate)?;
     if radiators.is_empty() { return Err(invalid("shared body reduction returned no modes")); }
+    if cavity_volume_shapes.is_some_and(|row| row.len()!=radiators.len()
+        || row.iter().any(|value| !value.is_finite())) {
+        return Err(invalid("cavity pressure row must use every finite original body coordinate"));
+    }
     let mut modes = Vec::with_capacity(radiators.len());
     let mut bridge = Vec::with_capacity(radiators.len());
     let mut areas = Vec::with_capacity(radiators.len());
@@ -235,7 +243,7 @@ pub(super) fn reduce_radiating_body(
     if let Some(c) = cavity {
         bodies.push(c.cavity.neck_component(sample_rate_hz, c.modal_budget)
             .map_err(ReciprocalStringError::Network)?);
-        body_connections = c.cavity.connections(0, 1, &areas)
+        body_connections = c.cavity.connections(0, 1, cavity_volume_shapes.unwrap_or(&areas))
             .map_err(ReciprocalStringError::Network)?;
         // Existing compact half-space observation, with the physical outward
         // neck volume coordinate. No assigned oscillator frequency or gain.

@@ -151,3 +151,6 @@ fn shell_rotational_chord_uses_actual_3d_nodes_and_common_force_direction() {
 
 #[path = "interface_tests.rs"]
 mod interfaces;
+
+#[path = "pressure_tests.rs"]
+mod pressure_surfaces;

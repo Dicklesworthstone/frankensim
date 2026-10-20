@@ -2,7 +2,8 @@
 //!
 //! Shear-deformable shell geometry, elastic spectrum, full material loss,
 //! physical bridge footprints and signed displaced volume share one basis.
-//! The compact baffled pressure/cavity owner observes accepted body acceleration.
+//! Exterior observation and reciprocal cavity pressure use independently owned
+//! surfaces; internal structural members need not border either acoustic fluid.
 //! This is an unloaded linear shell discretization: no assembled violin anatomy,
 //! prestressed equilibrium, full exterior radiation or measured timbre claim.
 
@@ -99,7 +100,8 @@ impl ReciprocalStringBank {
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         let mut image=reduce_radiating_body(projected.radiators(),&gas,options.sample_rate_hz,
-            body.modal_budget,body.listener_m,cavity.as_ref(),gate)?;
+            body.modal_budget,body.listener_m,cavity.as_ref(),
+            Some(projected.cavity_volume_shapes_m2_per_sqrt_kg()),gate)?;
         image.body_connections.extend(projected.damping().connections(0));
         image.body_connections.extend(projected.interface_damping_connections(0));
         let mut bank=finish_material_body_with_ports(cx,sources,&body.bridges,string_modes,

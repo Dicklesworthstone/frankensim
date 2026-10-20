@@ -46,6 +46,7 @@ pub struct MaterialShellImage {
     physical_modes: Vec<Vec<f64>>,
     force_ports: Vec<Vec<f64>>,
     volume_shapes: Vec<f64>,
+    cavity_volume_shapes: Vec<f64>,
     intervals: Vec<(f64,f64)>,
     radiators: Vec<CompactBody>,
     damping: ModalPlateViscosity,
@@ -59,9 +60,14 @@ impl MaterialShellImage {
     pub fn physical_modes(&self) -> &[Vec<f64>] { &self.physical_modes }
     /// Work-conjugate modal force/displacement rows in original caller order.
     pub fn force_ports(&self) -> &[Vec<f64>] { &self.force_ports }
-    /// Integral n dot phi dA, [m²/sqrt(kg)] in the same normalized basis.
+    /// Exterior integral n dot phi dA, [m²/sqrt(kg)] in the same normalized basis.
+    /// Only the explicitly selected exterior facets enter compact observation.
     /// Zero monopole volume does not establish silence under other radiation.
     pub fn volume_shapes_m2_per_sqrt_kg(&self) -> &[f64] { &self.volume_shapes }
+    /// Independently selected outward-from-cavity integral n dot phi dA in the
+    /// SAME basis [m²/sqrt(kg)]. Compression work uses this row once, regardless
+    /// of exterior observation or the number of internal structural members.
+    pub fn cavity_volume_shapes_m2_per_sqrt_kg(&self) -> &[f64] { &self.cavity_volume_shapes }
     /// Original eigenvalue residual intervals, not continuum error bounds.
     pub fn eigenvalue_intervals(&self) -> &[(f64,f64)] { &self.intervals }
     /// Complete symmetric modal C and passive connection realization.
@@ -113,13 +119,17 @@ impl ResolvedShearShell {
                 || !p.iter().any(|v| *v!=0.0)) {
             return Err(invalid("shell reduction requires bounded modes, physical ports, window and resistance"));
         }
+        let (exterior_facets,cavity_facets)=self.pressure_surfaces().map_or((elements,elements),
+            |surfaces|(surfaces.exterior.len(),surfaces.cavity.len()));
         let work=projection_terms(nodes,elements,n)
             .and_then(|w|6usize.checked_mul(nodes)?.checked_mul(n)?.checked_mul(force_ports.len())?.checked_add(w))
             .and_then(|w|w.checked_add(4*n*n*n))
-            .and_then(|w|w.checked_add(12*elements*n));
+            .and_then(|w|w.checked_add(fs_plate::shell::pressure::projection_terms(nodes,exterior_facets,n)?))
+            .and_then(|w|w.checked_add(fs_plate::shell::pressure::projection_terms(nodes,cavity_facets,n)?));
         if work.is_none_or(|w|w>budget.max_projection_terms) {
             return Err(invalid("complete shell condensation and physical projections exceed their declared allowance"));
         }
+        let pressure=self.pressure_ports(gate)?;
         let model=assemble_mitc3p(&self.mesh,directors,&self.sections,&options.constraints,
             options.mass,options.assembly_budget,options.drilling_alpha,||gate.is_requested()).map_err(owner)?;
         let interface_laws: Vec<_> = self.interfaces.iter().map(|i| i.law().clone()).collect();
@@ -172,27 +182,18 @@ impl ResolvedShearShell {
                 return Err(invalid("shell force footprint is detached from every retained mode"));
             }
         }
-        let mut volume_shapes=vec![0.0;n];
-        let mut area=0.0;
-        for (e,tri) in self.mesh.tris.iter().enumerate() {
-            poll(gate)?;
-            let g=self.mesh.facet(e).map_err(owner)?;
-            area+=g.area_m2;
-            for (j,p) in physical_modes.iter().enumerate() {
-                for &node in tri {
-                    volume_shapes[j]+=g.area_m2/3.0*(0..3)
-                        .map(|c|g.frame[2][c]*p[6*node+c]).sum::<f64>();
-                }
-            }
-        }
+        let volume_shapes=pressure.exterior.project_modes(&physical_modes,
+            budget.max_projection_terms,||gate.is_requested()).map_err(owner)?;
+        let cavity_volume_shapes=pressure.cavity.project_modes(&physical_modes,
+            budget.max_projection_terms,||gate.is_requested()).map_err(owner)?;
         let matrix=project_viscosity(&self.mesh,directors,&self.sections,&self.viscosity,
             &physical_modes,options.assembly_budget,budget.max_projection_terms,||gate.is_requested()).map_err(owner)?;
         let damping=ModalPlateViscosity::factor(matrix,n,budget.reference_resistance_n_s_m,gate)?;
         let radiators=omega.iter().enumerate().map(|(i,&w)|
-            CompactBody::from_mass_normalized_projection(w,volume_shapes[i],projected[0][i],area))
+            CompactBody::from_mass_normalized_projection(w,volume_shapes[i],projected[0][i],pressure.exterior.area_m2()))
             .collect::<Result<Vec<_>,_>>()?;
         poll(gate)?;
         Ok(MaterialShellImage { source:self.clone(),physical_modes,force_ports:projected,
-            volume_shapes,intervals,radiators,damping,interface_columns })
+            volume_shapes,cavity_volume_shapes,intervals,radiators,damping,interface_columns })
     }
 }

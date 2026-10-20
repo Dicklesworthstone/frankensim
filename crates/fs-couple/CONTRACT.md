@@ -3165,6 +3165,21 @@ does not imply full exterior radiation feedback or an assembled, prestressed
 violin/cello/bass corpus. Mesh/mode/stabilization/time refinement and measured
 instrument qualification remain separate from source-level composition tests.
 
+`shear_shell::pressure::ShellPressureSurfaces` independently selects exterior
+and outward-from-cavity original facets. Both rows use the shared
+`fs-plate::shell::pressure` owner and the same material eigenbasis. Exterior
+acceleration pressure uses only the exterior row; the existing single
+`HelmholtzModalCavity` compression spring uses only the cavity row. Internal
+structural members retain their complete mechanics without being counted as
+fluid boundaries. Explicit empty rows mean zero participation; omitted source
+selection preserves the historical whole-midsurface path. Material rebinding
+retains authored fluid roles and geometry. The uniform cavity, midsurface
+pressure and compact observation remain model-form rungs: this does not imply
+closed finite-thickness fluid skins, resolved interior acoustics, or exterior
+radiation back-loading. Source tests exercise independent physical pressure and
+cavity rows, identical mechanical histories under observer-only changes, one
+collective air spring, material rebinding and zero exterior participation.
+
 ### Prepared material conduction on the shared thermal timeline
 
 `PreparedMaterialNetwork::observe` composes the original pinned transport

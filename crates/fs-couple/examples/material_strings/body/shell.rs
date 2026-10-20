@@ -16,6 +16,8 @@ use fs_plate::shell::survey::validate_midsurface;
 
 #[path = "shell/interfaces.rs"]
 mod interfaces;
+#[path = "shell/pressure.rs"]
+mod pressure;
 
 const MAX_NODES: usize = 128;
 const MAX_TRIANGLES: usize = 256;
@@ -51,6 +53,7 @@ pub(super) struct Spec {
     regions: Vec<RegionInput>,
     supports: Vec<ShellConstraint>,
     interfaces: interfaces::Inputs,
+    pressure_surfaces: Option<fs_couple::shear_shell::pressure::ShellPressureSurfaces>,
     bridges: Vec<Bridge>,
     minimum_facet_dot: f64,
     mass: ShellMass,
@@ -151,6 +154,7 @@ impl Spec {
         if supports.is_empty() && interfaces.connection_count() == 0 {
             return Err("shell body requires explicit supports or material interfaces".into());
         }
+        let pressure_surfaces = pressure::parse(&mut r, triangles.len())?;
         let n = count(r.row("bridges", 1)?[0], 1, 8)?;
         let mut bridges = Vec::with_capacity(n);
         for _ in 0..n {
@@ -167,7 +171,7 @@ impl Spec {
         if r.lines.next().is_some() {
             return Err("unconsumed shell body profile record".into());
         }
-        Ok(Self { nodes, triangles, regions, supports, interfaces, bridges, minimum_facet_dot,
+        Ok(Self { nodes, triangles, regions, supports, interfaces, pressure_surfaces, bridges, minimum_facet_dot,
             mass, drilling_alpha, window, projection_work })
     }
 
@@ -281,6 +285,9 @@ impl Spec {
         }
         let specimen = compile_material_shear_shell(mesh, regions, assembly_budget, gate)?;
         let specimen = self.interfaces.bind(specimen, gate)?;
+        let specimen = if let Some(surfaces) = &self.pressure_surfaces {
+            specimen.with_pressure_surfaces(surfaces.clone(), gate)?
+        } else { specimen };
         let force_ports = self.bridges.iter().map(|bridge| {
             let mut port = vec![0.0; 6 * self.nodes.len()];
             port[6 * bridge.node..6 * bridge.node + 3].copy_from_slice(&bridge.direction);

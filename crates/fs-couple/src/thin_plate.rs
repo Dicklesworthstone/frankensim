@@ -60,7 +60,7 @@ impl CompactBody {
         omega: f64, area: f64, drive: f64, face_area: f64,
     ) -> Result<Self, AcousticRealizeError> {
         if !omega.is_finite() || omega <= 0.0 || !area.is_finite() || !drive.is_finite()
-            || !face_area.is_finite() || face_area <= 0.0 {
+            || !face_area.is_finite() || face_area < 0.0 || (face_area == 0.0 && area != 0.0) {
             return Err(AcousticRealizeError::InvalidDescription {
                 what: "geometric radiator requires finite physical mode projections",
             });
@@ -201,6 +201,11 @@ impl CompactBody {
         gas: &GasState,
         sample_rate_hz: u32,
     ) -> Result<(), AcousticRealizeError> {
+        if !self.piston_area_m2.is_finite() || self.piston_area_m2 <= 0.0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "piston radiation loading requires an actual positive physical face area",
+            });
+        }
         if self.rad.is_some() || self.area_m2 == 0.0 {
             return Ok(());
         }
@@ -1854,6 +1859,19 @@ fn map_plate(err: PlateError) -> AcousticRealizeError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_no_exterior_surface_retains_mechanics_without_a_fictitious_piston() {
+        use super::*;
+        let mut body = CompactBody::from_mass_normalized_projection(1000.0, 0.0, 2.0, 0.0).unwrap();
+        let acceleration = body.drive(1.0, 1.0 / 48_000.0).unwrap();
+        assert!(acceleration != 0.0);
+        assert_eq!(body.radiate_mass_normalized(acceleration, 1.2, 1.0), 0.0);
+        let gas = GasState::try_new(&fs_material::gas::GasSpec::dry_air_ussa1976(),
+            293.15, 101_325.0).unwrap();
+        assert!(body.attach_piston_load(&gas, 48_000).is_err());
+        assert!(CompactBody::from_mass_normalized_projection(1000.0, 0.1, 2.0, 0.0).is_err());
+    }
+
     #[test]
     fn plate_bank_cavity_island_is_invariant_under_time_partition() {
         use super::*;
