@@ -2768,6 +2768,31 @@ source scope and synthetic integration fixtures are in
 `examples/MIMO_RADIATION_ARTIFACTS.md`; native execution of their new regression
 sources remains required.
 
+`multiport::bake::bake_baffled_mimo` connects the original `fs-bem` circular
+piston/Rayleigh array to the shared `fs-vfit` proper MIMO fit and existing
+terminal host. Its source is the actual ordered geometry and coherent exterior
+gas, with force/velocity converted by both aperture areas and conjugated once
+to the causal phasor convention. Native `computed-baffled` selectors on flute
+and either material-modal side rebuild that source after data-only geometry or
+atmosphere substitutions, without an imported matrix or a parallel runtime.
+The full mechanical Nyquist band, bounded source sweeps, three explicit orders,
+separate working/runtime memory, training and withheld matrix errors, source
+causality assumptions, continuous passivity and interval-mean ZOH passivity are
+admitted before attachment. All three unchanged fits and refusals are retained;
+the smallest passing order is selected, without repair, clipping, damping or
+gain changes. The gas record retains original thermochemical receipts.
+Cancellation is polled between samples, causality and orders; the existing
+individual quadrature/fitting/eigen kernels have no mid-call poll. This remains
+a finite-band proper approximation of stationary coplanar uniform apertures in
+an infinite rigid baffle and homogeneous inviscid gas. Sampled errors and
+declared-tail causality consistency do not certify unsampled frequencies or
+closed-loop accuracy; sampled passivity is GridOnly, not stored energy. No
+delay extraction, measured-instrument claim or full M2.5-W3 qualification is
+added. G0/G3 source/unit/gas and native integration regressions are included;
+native execution remains required. An independent development-only SciPy
+oracle found admissible order-four two-port fits at 8 and 48 kHz, but does not
+substitute for the unavailable Rust checks.
+
 G1/G2 analytic tests in `baffled_pressure_qualification.rs` check on-axis piston
 pressure at z/a=2,10,100 and signed 2J1(x)/x directivity at ka=0.5,2,5 within
 1e-3, with radial/angular refinement. The on-axis fixture uses a=25 mm to

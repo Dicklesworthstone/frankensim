@@ -7,6 +7,10 @@
 
 /// Bounded native source-artifact admission shared by wind instrument loaders.
 pub mod input;
+/// Geometry- and gas-derived impedance through the existing BEM and VF owners.
+pub mod bake;
+/// Shared selection of an imported operator or a computed baffled exterior.
+pub mod source;
 
 use super::{invalid, poll};
 use crate::acoustic_realize::AcousticRealizeError;

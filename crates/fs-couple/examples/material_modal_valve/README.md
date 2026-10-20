@@ -106,6 +106,15 @@ See [the shared artifact grammar](../MIMO_RADIATION_ARTIFACTS.md), including
 thermochemical source-pack and complete gas-state binding. The importer never
 relabels old coefficients with a changed current atmosphere.
 
+Alternatively, `radiation computed-baffled GROUP_COUNT` accepts the same side
+groups with fourteen numerical controls in place of the artifact path/limits.
+It derives the matrix from that side's actual opening radii/centers and common
+exterior, so data-only geometry or gas changes rebuild the physical operator.
+The [shared source guide](../MIMO_RADIATION_ARTIFACTS.md) documents the fields,
+finite-band approximation, three-order admission and separate memory budgets.
+Both routes attach through the same original terminal host and preserve the
+material reed, source-force projections, supply and complete duct histories.
+
 `propagation integer` selects the original integer delay image.
 The separate `propagator` row is optional and appears immediately after `audio`.
 Omitting it preserves the original `midpoint` method and its complete loaded
@@ -174,7 +183,7 @@ declared mode basis, an effective uniform slit/contact, plane-wave duct graphs,
 and either compact independent or source-bound mutual infinite-baffle radiation.
 It does not supply distributed
 reed-surface collision, shell/solid wet-cane geometry, resolved moving-channel
-flow, nonlinear jet separation, unbaffled bells, automatic radiation refitting, or live
+flow, nonlinear jet separation, unbaffled bells, delayed broadband radiation, or live
 material/gas evolution. It does not qualify instrument recordings.
 
 Focused regressions are in

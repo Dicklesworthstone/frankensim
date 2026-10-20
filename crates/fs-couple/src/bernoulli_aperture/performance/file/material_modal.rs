@@ -22,6 +22,7 @@ use crate::bernoulli_aperture::paired::{BladePropagator, BladeState, PairedApert
 use crate::bernoulli_aperture::performance::AperturePerformanceConfig;
 use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
 use crate::bernoulli_aperture::radiation::environment::multiport::input::MimoRadiationRecord;
+use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledRecord;
 use crate::bernoulli_aperture::slit_channel::{SlitChannel, SlitChannelSpec, SlitExit};
 use crate::bernoulli_aperture::two_sided::{TwoSidedLimits, ValveSide, combined_inlet_state};
 use crate::bernoulli_aperture::two_sided::supply::combined_inlet_state_with_supply;
@@ -76,6 +77,7 @@ pub struct MaterialModalValvePerformance {
     ambient: GasState,
     radiation: Vec<BaffledOutletBinding>,
     mimo_radiation: Vec<(ValveSide, MimoRadiationRecord)>,
+    computed_radiation: Vec<(ValveSide, ComputedBaffledRecord)>,
 }
 
 impl MaterialModalValvePerformance {
@@ -158,6 +160,7 @@ impl MaterialModalValvePerformance {
             return Err(bad(row.line, "exterior and ambient must share one static pressure; mean interface flow is not modeled"));
         }
         row.finish()?;
+        let exterior_record = gases.last().expect("exterior parser retains its original gas record").clone();
         rows.row("upstream")?.finish()?;
         let up = DuctInput::read_with_gas_sources(&mut rows, &ambient, gate, gas_sources, &mut gases)?
             .into_two_sided(&ambient, dt, gate)?;
@@ -301,9 +304,9 @@ impl MaterialModalValvePerformance {
         if let Some(length) = slit {
             valve.set_material_viscous_slit(length).map_err(PlateValveInputError::Physics)?;
         }
-        let (source, radiation, mimo_radiation) = radiation::build(
+        let (source, radiation, mimo_radiation, computed_radiation) = radiation::build(
             radiation_selection, valve.into(), sides, channel, coupling, policies,
-            radiation_spec, max_block, gas_sources, &mut load_radiation, gate)?;
+            radiation_spec, &exterior_record, max_block, gas_sources, &mut load_radiation, gate)?;
         let renderer = ScheduledTwoSidedPressure::new(source, schedule, AperturePerformanceConfig {
             sample_rate_hz: output, samples, max_block, max_compile_work, max_controls,
         }).map_err(PlateValveInputError::Gesture)?;
@@ -312,7 +315,7 @@ impl MaterialModalValvePerformance {
             input_hash: hash_domain("org.frankensim.fs-couple.material-modal-valve.v1", bytes),
             mechanics_rate_hz: mechanics, propagator, output_rate_hz: output, samples, full_scale_pa,
             blades, modes, nodes, triangles,
-        }, renderer, materials, gases, ambient, radiation, mimo_radiation })
+        }, renderer, materials, gases, ambient, radiation, mimo_radiation, computed_radiation })
     }
 
     /// Immutable original source dimensions, coordinates, clocks and PCM scale.
@@ -330,6 +333,8 @@ impl MaterialModalValvePerformance {
     /// Original source receipts for each independently coupled acoustic side.
     /// Two groups do not imply mutual exterior coupling across the valve.
     pub fn mimo_radiation_records(&self) -> &[(ValveSide, MimoRadiationRecord)] { &self.mimo_radiation }
+    /// Actual source geometry/gas and numerical results for computed side groups.
+    pub fn computed_radiation_records(&self) -> &[(ValveSide, ComputedBaffledRecord)] { &self.computed_radiation }
     /// Move the complete loaded mechanics, source clock and microphone history.
     pub fn into_renderer(self) -> ScheduledTwoSidedPressure { self.renderer }
 }

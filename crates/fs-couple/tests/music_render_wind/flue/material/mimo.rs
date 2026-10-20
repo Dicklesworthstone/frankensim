@@ -7,6 +7,90 @@ use fs_couple::flue_loop::network::performance::file::FlueInputError;
 const PERFORMANCE: &str = include_str!("../../../../examples/flue-mimo.performance");
 const ARTIFACT: &str = include_str!("../../../../examples/flue-mutual.mimo-radiation");
 const SELECTION: &str = "radiation mimo flue-mutual.mimo-radiation 32 1048576 257";
+const COMPUTED: &str = "radiation computed-baffled 20 65 4 8 12 20 0.01 67108864 2 100 1e-8 64 1048576 257";
+
+fn computed_source() -> String {
+    native_source(false).replace("clock 96000 48000", "clock 8000 8000")
+        .replace("output 1024 1", "output 256 1")
+        .replace("duct_section 0 1 0.18 0.006", "duct_section 0 1 0.18 0.002")
+        .replace("duct_section 0 3 0.04 0.004", "duct_section 0 3 0.08 0.0015")
+        .replace("outlet 3 0.08 0", "outlet 3 0.015 0")
+        .replace("windway unsteady 0.015 32 64", "windway none")
+        .replace("viscothermal sections 2\nloss_section 1 4 300 500\nloss_section 2 4 300 500", "viscothermal none")
+        .replace("fractional 1000 0.01", "fractional 500 1")
+        .replace("receiver 0 0 0.5 4 16 1000", "receiver 0 0 0.5 4 16 500")
+        .replace(SELECTION, COMPUTED)
+}
+
+fn load_computed(text: &str, block: usize) -> FlueFilePerformance {
+    FlueFilePerformance::from_bytes_with_all_sources(text.as_bytes(), block,
+        &CancelGate::new_clock_free(), None,
+        |_| panic!("this physical fixture has no solid walls"),
+        |_| panic!("computed radiation must not require a matrix artifact")).unwrap()
+}
+
+fn computed_pressure(file: FlueFilePerformance) -> Vec<f64> {
+    let samples = file.info().samples as usize;
+    let mut renderer = file.into_renderer();
+    let mut result = vec![0.0; samples];
+    for chunk in result.chunks_mut(renderer.config().max_block) { renderer.block(chunk).unwrap(); }
+    assert_eq!(renderer.voice().samples_rendered(), samples as u64);
+    assert!(result.iter().all(|p| p.is_finite()));
+    assert!(result.iter().any(|p| p.abs() > 1e-15));
+    result
+}
+
+#[test]
+fn computed_geometry_and_atmosphere_reach_the_original_jet_and_microphone_without_an_artifact() {
+    let text = computed_source();
+    let file = load_computed(&text, 37);
+    assert!(file.mimo_radiation_record().is_none());
+    assert!(file.radiation_bindings().is_empty());
+    let record = file.computed_radiation_record().unwrap();
+    assert_eq!(record.band_hz(), [20.0, 4000.0]);
+    assert_eq!(record.apertures()[0].radius_m, 0.002);
+    assert_eq!(record.apertures()[1].radius_m, 0.0015);
+    assert_eq!(record.apertures()[1].center_m, [0.015, 0.0]);
+    let environment = file.renderer().voice().network().unwrap().mimo_environment().unwrap();
+    assert_eq!(record.gas_record().state(), &environment.source().exterior);
+    assert_eq!(record.apertures(), environment.source().apertures);
+    let identity = record.realization_identity();
+    let matrix = environment.source().impedance.eval_iw(core::f64::consts::TAU * 713.0);
+    let reference = computed_pressure(file);
+    assert_eq!(computed_pressure(load_computed(&text, 1)), reference);
+
+    // No new matrix file or coefficient edits: source gas data alone causes a
+    // new physical source sweep and changes both the load and rendered sound.
+    let changed = load_computed(&text.replace("101325", "81060"), 37);
+    let record = changed.computed_radiation_record().unwrap();
+    assert_eq!(record.gas_record().state().pressure, 81060.0);
+    assert_ne!(record.realization_identity(), identity);
+    let load = &changed.renderer().voice().network().unwrap().mimo_environment().unwrap().source().impedance;
+    let updated = load.eval_iw(core::f64::consts::TAU * 713.0);
+    for (a, b) in matrix.iter().zip(updated) {
+        assert!((b - a.scale(0.8)).abs() < 0.001 * a.abs());
+    }
+    assert_ne!(computed_pressure(changed), reference);
+}
+
+#[test]
+fn computed_physical_source_reaches_cli_pcm_and_reports_actual_fit_scope() {
+    let text = include_str!("../../../../examples/flue-computed-radiation.performance");
+    let pressure = computed_pressure(load_computed(text, 37));
+    let expected = encode_pcm16_wav(&pressure, 48_000, 5.0).unwrap().0;
+    let dir = directory();
+    let input = dir.join("computed.performance");
+    let output = dir.join("computed.wav");
+    std::fs::write(&input, text).unwrap();
+    success(run(&input, &output, 137, false));
+    assert_eq!(std::fs::read(&output).unwrap(), expected);
+    let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+    for token in ["\"source\":\"computed-baffled\"", "\"band_hz\":[1.2e2,2.4e4]",
+        "\"held_out_samples\":64", "\"sampled_passivity_class\":\"GridOnly\"",
+        "\"radiation_feedback_added\":true", "\"rungs\":[", "no passivity repair"] {
+        assert!(metadata.contains(token), "{token}: {metadata}");
+    }
+}
 
 fn native_source(walls: bool) -> String {
     let mut head = PERFORMANCE.split_once("\ngesture\n").unwrap().0

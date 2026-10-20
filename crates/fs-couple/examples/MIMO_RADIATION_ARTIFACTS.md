@@ -1,4 +1,4 @@
-# Source-bound mutual radiation artifacts
+# Computed and imported mutual radiation
 
 The native flute and material-modal valve formats can select the same original
 multiport impedance artifact. Each source goes through
@@ -7,12 +7,79 @@ multiport impedance artifact. Each source goes through
 returns to the live jet or moving valve. The microphone observes the same
 ordered apertures in the artifact's exact exterior gas.
 
-This is an importer for externally produced coefficients. It does not calculate
+The `mimo` selection is an importer for externally produced coefficients. It does not calculate
 a new radiation model when geometry, materials or atmosphere change, or attest
 a declared offline bake. Supply a corresponding new artifact when the changed
 source requires one. A mismatch refuses construction before audio is produced.
 The included operators are **manufactured integration data**, with no measured
 instrument or broadband radiation accuracy claim.
+
+## Compute radiation from actual geometry and gas
+
+The `computed-baffled` selection derives the complete pressure/volume-flow
+matrix from the performance's actual circular outlet radii, ordered planar
+centers and resolved exterior gas. Changing the atmosphere or aperture data
+recomputes the source. It requires no radiation artifact, material-name rule,
+or hand-edited impedance coefficients. The existing `fs-bem` baffled-piston
+array supplies the self and mutual terms; shared `fs-vfit` identifies the
+proper rational matrix, and the same `MimoEnvironment` terminal owner feeds
+reaction back to the live instrument and supplies microphone flows.
+
+For flute inputs:
+
+```text
+radiation computed-baffled 120 65 4 8 12 20 0.02 67108864 2 100 1e-8 64 1048576 257
+```
+
+[flue-computed-radiation.performance](flue-computed-radiation.performance)
+is a complete 48 kHz example with two different physical openings and regional
+interior gases. Render it through the existing `music_render wind` command.
+This manufactured geometry is a functional example, not a measured flute.
+
+For material-modal valve inputs, use the same fourteen fields per side:
+
+```text
+radiation computed-baffled 1
+radiation_group downstream 20 65 4 8 12 20 0.01 67108864 2 100 1e-8 64 1048576 257
+```
+
+These are explicit numerical choices, in order:
+
+| Fields | Meaning |
+| --- | --- |
+| `120` | Lower physical fit frequency in Hz. The upper edge is always the actual mechanical Nyquist frequency. |
+| `65` | Logarithmic training frequencies; 64 interleaved frequencies are withheld, and a separate 65-point uniform grid checks source causality. |
+| `4 8 12` | Three strictly increasing shared-pole orders. All three are attempted; the smallest passing fit is selected. |
+| `20` | Maximum vector-fitting iterations per order. |
+| `0.02` | Maximum relative matrix Frobenius error at both training and withheld points. |
+| `67108864` | Separate fitting/certification scratch allowance in bytes. |
+| `2 100 1e-8` | Causality subtractions, assumed high-frequency tail bound ratio and relative source-data tolerance. |
+| `64 1048576 257` | Maximum real states, runtime memory bytes and interval-mean sampled-passivity grid points. |
+
+At most eight separated circular openings, 513 frequencies, 64 shared poles
+per order and 256 real states are admitted. Requested working memory is capped
+at 512 MiB, independently of the terminal's retained memory. The complete
+three-order scratch requirement is admitted before the source sweep. Failed
+quadrature, causality, fit accuracy or passivity returns a construction error;
+the runtime does not clip residues, add damping or fall back to independent
+openings. A numerically more accurate higher order can still fail passivity.
+Each attempted order and its actual refusal are retained in the CLI sidecar.
+
+The physical image is uniform circular apertures in an infinite rigid baffle
+and homogeneous inviscid exterior gas. The force/velocity matrix is converted
+to pressure/volume-flow using both aperture areas and the phasor convention
+exactly once. Existing arbitrary gas mixtures and thermochemical pack-backed
+gas records are resolved before building, including their original source
+receipts. Reaction and observation share that exact exterior.
+
+The finite rational approximation represents propagation without extracting
+separate delays. Its sampled errors do not bound every intermediate frequency,
+closed-loop sound error, or instrument accuracy. The causality result is a
+consistency test under the explicitly declared tail/data assumptions; a large
+tail allowance weakens that test. Continuous passivity keeps the original
+certificate class, while interval-mean ZOH admission is explicitly `GridOnly`,
+not a discrete storage certificate. This does not complete the plan's delayed
+radiation, passivity-repair, or measured-instrument qualification work.
 
 ## Select the source
 

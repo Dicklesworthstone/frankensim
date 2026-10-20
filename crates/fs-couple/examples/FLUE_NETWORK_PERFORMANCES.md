@@ -147,6 +147,17 @@ performance directory. `mimo_radiation_record()` retains the exact artifact
 hash, declared identities, gas record, geometry, band and limits. The existing
 constructors and `prescribed`/`compact-baffled` selections retain their behavior.
 
+To derive that matrix from the actual aperture geometry and exterior instead,
+use `radiation computed-baffled` with the fourteen explicit numerical controls
+in [the shared source guide](MIMO_RADIATION_ARTIFACTS.md).
+`flue-computed-radiation.performance` is a complete 48 kHz example. Changes to
+the gas or openings rerun the existing physical array and fitting owners;
+no radiation artifact or edited coefficient table is needed. The same terminal
+host supplies reaction and observation, and `computed_radiation_record()`
+retains the actual geometry/gas, attempted orders and accuracy/passivity results.
+The finite-band baffled approximation must pass every requested gate; it does
+not imply measured flute accuracy or complete delayed-radiation qualification.
+
 ## Pressure and jet direction in one performance
 
 `flue-embouchure.performance` adds a prescribed jet-angle phrase, the

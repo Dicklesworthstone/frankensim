@@ -30,6 +30,10 @@ pub enum MimoRadiationInputError {
     Gas { line: usize, source: GasInputError },
     /// Caller-owned artifact loader refused the original relative path.
     Source { path: String, source: String },
+    /// The actual graph, receiver or material-gas context refused construction.
+    Physics(crate::acoustic_realize::AcousticRealizeError),
+    /// Geometry-derived radiation sampling or realization refused construction.
+    Bake(super::bake::BaffledMimoBakeError),
     /// Cancellation before publication of a decoded source.
     Cancelled,
 }
@@ -39,13 +43,20 @@ impl core::fmt::Display for MimoRadiationInputError {
             Self::Input { line, what } => write!(f, "MIMO radiation input line {line}: {what}"),
             Self::Gas { line, source } => write!(f, "MIMO radiation gas line {line}: {source}"),
             Self::Source { path, source } => write!(f, "MIMO radiation artifact {path}: {source}"),
+            Self::Physics(source) => write!(f, "MIMO radiation physical source: {source}"),
+            Self::Bake(source) => write!(f, "MIMO radiation bake: {source}"),
             Self::Cancelled => f.write_str("MIMO radiation input cancelled"),
         }
     }
 }
 impl std::error::Error for MimoRadiationInputError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self { Self::Gas { source, .. } => Some(source), _ => None }
+        match self {
+            Self::Gas { source, .. } => Some(source),
+            Self::Physics(source) => Some(source),
+            Self::Bake(source) => Some(source),
+            _ => None,
+        }
     }
 }
 fn bad(line: usize, what: &'static str) -> MimoRadiationInputError {

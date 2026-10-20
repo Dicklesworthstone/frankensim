@@ -16,6 +16,9 @@ use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
 use crate::bernoulli_aperture::radiation::environment::multiport::input::{
     MimoRadiationInput, MimoRadiationInputError, MimoRadiationRecord,
 };
+use crate::bernoulli_aperture::radiation::environment::multiport::source::{
+    ComputedBaffledInput, ComputedBaffledRecord, MimoSourceInput, MimoSourceRecord,
+};
 use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice, network::FlueNetworkSpec};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::openings::duct::{
@@ -127,6 +130,7 @@ pub struct FlueFilePerformance {
     boundary_records: Vec<FlueBoundaryRecord>,
     radiation_bindings: Vec<BaffledOutletBinding>,
     mimo_radiation_record: Option<MimoRadiationRecord>,
+    computed_radiation_record: Option<ComputedBaffledRecord>,
 }
 impl FlueFilePerformance {
     /// Parse the fixed-order source shown in `examples/flue.performance`.
@@ -258,12 +262,15 @@ impl FlueFilePerformance {
             |_| Err("MIMO radiation artifacts require an explicit source loader".into()))
     }
 
-    /// The same native performance with explicitly supplied radiation artifacts.
+    /// The same native performance with imported or computed mutual radiation.
     /// Both loaders resolve paths relative to this performance's source directory;
     /// the library performs no filesystem I/O. The common MIMO decoder resolves
     /// its own gas record using the same optional thermochemical registry. A
-    /// changed atmosphere requires a matching supplied operator; stale artifacts
-    /// refuse instead of silently replacing their baked gas or coefficients.
+    /// changed atmosphere requires a matching supplied operator for `mimo`;
+    /// stale artifacts refuse instead of silently replacing their baked gas or
+    /// coefficients. `computed-baffled` instead samples the actual source
+    /// geometry and exterior through the shared physical bake owner, without
+    /// calling the artifact loader.
     /// Walls, moving boundaries, mouth laws, controls and receiver clocks remain
     /// in their original owners. Omitting the MIMO selector never calls its loader.
     pub fn from_bytes_with_all_sources(bytes: &[u8], max_block: usize, gate: &CancelGate,
@@ -310,6 +317,7 @@ impl FlueFilePerformance {
             row.end()?;
             state
         };
+        let exterior_record = gas_records.last().expect("both gas routes retain their source record").clone();
         let mut duct = duct::Input::read(&mut rows, gas, sources, &mut gas_records, gate)?;
         let walls = wall::ParsedWalls::read(&mut rows)?;
         let boundaries = boundary::ParsedBoundaries::read(&mut rows)?;
@@ -319,10 +327,14 @@ impl FlueFilePerformance {
                 "prescribed" => (false, None),
                 "compact-baffled" => (true, None),
                 _ => {
-                    let Some(("mimo", arguments)) = record.split_once(char::is_whitespace) else {
-                        return Err(bad(rows.line, "radiation requires prescribed, compact-baffled or mimo ARTIFACT MAX_STATES MAX_MEMORY_BYTES PASSIVITY_POINTS"));
+                    let Some((kind, arguments)) = record.split_once(char::is_whitespace) else {
+                        return Err(bad(rows.line, "radiation requires prescribed, compact-baffled, mimo ARTIFACT LIMITS, or computed-baffled NUMERICAL_CONTROLS"));
                     };
-                    let input = MimoRadiationInput::parse(arguments)
+                    let input = match kind {
+                        "mimo" => MimoRadiationInput::parse(arguments).map(MimoSourceInput::Artifact),
+                        "computed-baffled" => ComputedBaffledInput::parse(arguments).map(MimoSourceInput::ComputedBaffled),
+                        _ => return Err(bad(rows.line, "unknown physical radiation source selection")),
+                    }
                         .map_err(|source| FlueInputError::RadiationSource { line: rows.line, source })?;
                     (false, Some((rows.line, input)))
                 }
@@ -486,15 +498,21 @@ impl FlueFilePerformance {
             Some(paths) => voice.with_source_control_paths(paths).map_err(FlueInputError::Physics)?,
             None => voice,
         };
-        let (voice, mimo_radiation_record) = match mimo_input {
+        let (voice, mimo_radiation_record, computed_radiation_record) = match mimo_input {
             Some((line, input)) => {
-                let (model, record) = input.load(sources, &mut load_radiation, gate)
+                let context = radiation();
+                let original = voice.network().expect("constructed physical flue graph").source();
+                let (model, record) = input.build(&original.graph, &original.gases, &context,
+                    &exterior_record, sources, &mut load_radiation, gate)
                     .map_err(|source| FlueInputError::RadiationSource { line, source })?;
-                let voice = voice.with_mimo_environment(model, radiation(), input.limits(), gate)
+                let voice = voice.with_mimo_environment(model, context, input.limits(), gate)
                     .map_err(FlueInputError::Physics)?;
-                (voice, Some(record))
+                match record {
+                    MimoSourceRecord::Artifact(record) => (voice, Some(record), None),
+                    MimoSourceRecord::ComputedBaffled(record) => (voice, None, Some(record)),
+                }
             }
-            None => (voice, None),
+            None => (voice, None, None),
         };
         let mut renderer = FlueOutletPerformance::with_multirate_radiation(voice, schedule,
             FlueOutletConfig { sample_rate_hz, samples, max_block, max_controls, max_compile_work,
@@ -509,7 +527,7 @@ impl FlueFilePerformance {
             mechanics_rate_hz, sample_rate_hz, samples, full_scale_pa,
             jet_card_hash: card.content_hash(), jet_card_source, compiled_controls: renderer.controls.len() };
         Ok(Self { info, renderer, geometry, card, gas_records, wall_records, boundary_records,
-            radiation_bindings, mimo_radiation_record })
+            radiation_bindings, mimo_radiation_record, computed_radiation_record })
     }
     /// Original identity and finite clocks, separate from the evolving solver.
     #[must_use] pub const fn info(&self) -> FluePerformanceInfo { self.info }
@@ -531,6 +549,10 @@ impl FlueFilePerformance {
     /// from the shared terminal model's evolving state and passivity diagnostics.
     #[must_use] pub const fn mimo_radiation_record(&self) -> Option<&MimoRadiationRecord> {
         self.mimo_radiation_record.as_ref()
+    }
+    /// Actual geometry/gas and numerical results of computed mutual radiation.
+    #[must_use] pub const fn computed_radiation_record(&self) -> Option<&ComputedBaffledRecord> {
+        self.computed_radiation_record.as_ref()
     }
     /// Move the original physical pressure producer into streaming/PCM output.
     #[must_use] pub fn into_renderer(self) -> FlueOutletPerformance { self.renderer }

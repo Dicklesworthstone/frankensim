@@ -143,3 +143,38 @@ fn explicit_compact_selector_and_legacy_omission_preserve_identical_pcm() {
     assert!(compact.mimo_radiation_records().is_empty());
     assert_eq!(render(compact).0, render(build(&legacy, 1)).0);
 }
+
+#[test]
+fn computed_physical_load_uses_original_side_openings_and_retains_material_valve() {
+    let text = mimo_input()
+        .replace("audio 768000 48000 512", "audio 8000 8000 64")
+        .replace("control_rate_hz\t48000", "control_rate_hz\t8000")
+        .replace("duct_section 1 2 0.15 0.007 0.002 gas 303.15 0 viscothermal 80 1000 8 8",
+            "duct_section 1 2 0.15 0.002 0.002 gas 303.15 0")
+        .replace("duct_section 1 3 0.12 0.007", "duct_section 1 3 0.12 0.0015")
+        .replace("opening downstream 3 0.03 0", "opening downstream 3 0.015 0")
+        .replace("propagation fractional 1000 0.02", "propagation fractional 500 1")
+        .replace("receiver 0 0 0.25 4 16 1000", "receiver 0 0 0.25 4 16 500")
+        .replace("radiation mimo 1", "radiation computed-baffled 1")
+        .replace("radiation_group downstream mutual.radiation 256 8388608 65",
+            "radiation_group downstream 20 65 4 8 12 20 0.01 67108864 2 100 1e-8 64 1048576 257");
+    let loaded = MaterialModalValvePerformance::from_bytes_with_all_sources(text.as_bytes(), 37,
+        &CancelGate::new_clock_free(), None, |_| Ok(pack(900.0, false)),
+        |_| panic!("computed radiation never loads an artifact")).unwrap();
+    assert!(loaded.mimo_radiation_records().is_empty());
+    assert!(loaded.radiation_bindings().is_empty());
+    assert_eq!(valve(&loaded).modal_states().len(), 6);
+    assert_eq!(loaded.material_records().len(), 4);
+    let (side, record) = &loaded.computed_radiation_records()[0];
+    assert_eq!(*side, ValveSide::Downstream);
+    assert_eq!(record.band_hz(), [20.0, 4000.0]);
+    let system = loaded.renderer().source().system();
+    let environment = system.mimo_environment(*side).unwrap();
+    assert_eq!(environment.source().apertures, record.apertures());
+    assert_eq!(environment.source().exterior, *record.gas_record().state());
+    assert_eq!(environment.radiation().openings.iter().map(|o| (o.network, o.node)).collect::<Vec<_>>(),
+        vec![(0, 2), (0, 3)]);
+    assert!(system.mimo_environment(ValveSide::Upstream).is_none());
+    assert_eq!(system.source(ValveSide::Upstream).graph.nodes[0],
+        crate::bernoulli_aperture::network::NetworkNode::Termination { reflection: 0.7 });
+}

@@ -4,6 +4,39 @@ use fs_couple::bernoulli_aperture::performance::{ApertureObservation,CoupledAper
 use fs_couple::bernoulli_aperture::performance::file::PlateValvePerformance;
 use fs_vfit::impedance::SeriesImpedanceSpec;
 
+pub(super) fn computed_baffled_provenance(
+    record: &fs_couple::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledRecord,
+) -> String {
+    let options = record.options();
+    let limits = record.limits();
+    let band = record.band_hz();
+    let report = record.report();
+    let apertures = record.apertures().iter().enumerate().map(|(port, aperture)| format!(
+        "{{\"port\":{port},\"center_m\":[{:e},{:e}],\"radius_m\":{:e}}}",
+        aperture.center_m[0], aperture.center_m[1], aperture.radius_m
+    )).collect::<Vec<_>>().join(",");
+    let number = |value: Option<f64>| value.filter(|v| v.is_finite())
+        .map_or_else(|| "null".into(), |value| format!("{value:e}"));
+    let rungs = report.rungs.iter().map(|rung| format!(
+        "{{\"order\":{},\"fit_relative_error\":{},\"held_out_relative_error\":{},\"continuous_passive\":{},\"sampled_passive\":{},\"refusal\":{}}}",
+        rung.order, number(rung.fit_relative_error), number(rung.held_out_relative_error),
+        rung.continuous_passive, rung.sampled_passive,
+        rung.refusal.as_ref().map_or_else(|| "null".into(), |text| super::json_string(text))
+    )).collect::<Vec<_>>().join(",");
+    let gas_sources = super::thermochemical::provenance(core::slice::from_ref(record.gas_record()));
+    format!("{{\"source\":\"computed-baffled\",\"declaration_identity\":\"{}\",\"realization_identity\":\"{}\",\"exterior_gas\":{},\"band_hz\":[{:e},{:e}],\"ordered_apertures\":[{apertures}],\"frequency_samples\":{},\"orders\":[{},{},{}],\"fit_iterations\":{},\"maximum_relative_error\":{:e},\"max_fit_memory_bytes\":{},\"causality_subtractions\":{},\"causality_tail_bound_ratio\":{:e},\"causality_data_tolerance\":{:e},\"max_states\":{},\"max_memory_bytes\":{},\"sampled_passivity_points\":{},\"selected_order\":{},\"held_out_samples\":{},\"fit_relative_error\":{:e},\"held_out_relative_error\":{:e},\"maximum_causality_ratio\":{:e},\"continuous_passivity_class\":\"{:?}\",\"sampled_passivity_class\":\"{:?}\",\"rungs\":[{rungs}],\"scope\":\"actual coplanar circular openings and resolved exterior; shared closed-form piston and Rayleigh mutual operator; proper undelayed rational approximation over full mechanical Nyquist band; no passivity repair, delayed realization or measured-instrument qualification; sampled GridOnly is not a storage certificate\"{gas_sources}}}",
+        fs_blake3::ContentHash(record.declaration_identity()).to_hex(),
+        fs_blake3::ContentHash(record.realization_identity()).to_hex(),
+        gas_state(record.gas_record().state()), band[0], band[1],
+        options.frequency_samples, options.orders[0], options.orders[1], options.orders[2],
+        options.fit_iterations, options.maximum_relative_error, options.max_fit_memory_bytes,
+        options.causality.subtractions, options.causality.tail_bound_ratio,
+        options.causality.relative_data_tolerance, limits.max_states, limits.max_memory_bytes,
+        limits.sampled_passivity_points, report.selected_order, report.held_out_samples,
+        report.maximum_fit_relative_error, report.maximum_held_out_relative_error,
+        report.maximum_causality_ratio, report.continuous.class, report.sampled.class)
+}
+
 // Both native wind loaders describe the same original source artifact. Its
 // byte identity is deliberately separate from caller-declared bake identities.
 pub(super) fn mimo_radiation_provenance(
