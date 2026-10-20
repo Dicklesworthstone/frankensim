@@ -2066,16 +2066,31 @@ None.
   a limit cycle's RMS does not move when the seed drops tenfold);
   (3) an amplification band with no low edge lets the integral gain
   win at 6 Hz where the open pipe has no impedance (a relaxation cycle,
-  not a note). MEASURED on the flute-class fixture (6 mm bore, 12 kHz
+  not a note). Historical observations on the flute-class fixture (6 mm bore, 12 kHz
   line for the radiation law's `ka < 1`, 10 x 1 mm flue, 4 mm cut-up,
   tonal interim card): 10-50 Pa lock the fundamental (0.90-1.01 f1),
   110-240 Pa the octave (1.85-2.02 f1), 360 Pa the twelfth (2.84 f1);
   a 5 mm cut-up locks one mode below a 3 mm one at equal pressure; four
   rank voices are bitwise their solo selves in any stepping order;
-  replay is bitwise and keyed by Philox voice identity. The card's
+  replay is bitwise and keyed by Philox voice identity. Those register-pressure
+  observations predate the retarded-time correction below and do not qualify
+  its corrected feedback phase; they require a fresh sweep. The card's
   Reynolds band (144-264) does not cover playing pressures (Re ~1500),
   so `claim_check` refuses every claim from this fixture: that boundary
   is inherited by the flue-gates bead, not papered over.
+
+  Quasi-steady convection reads mouth velocity at the actual retarded time
+  `t_n - tau`: the newest committed history entry is `t_(n-1)`, not `t_n`.
+  For transit shorter than one sample, the current-velocity interpolation
+  term is solved simultaneously with the jet cut-flow and acoustic mouth,
+  including any selected contraction loss. Trial evaluations preserve the
+  filter memories and consume no extra onset-noise draws. A sufficient global
+  uniqueness bound is required before committing the mouth wave; unresolved
+  feedback refuses rather than acquiring an artificial extra sample of delay.
+  The interpolation regression establishes second-order retarded interpolation,
+  not second-order accuracy of the complete jet integrator or measured flute
+  fidelity. Gas and windway material changes cross the one-sample boundary
+  through the same physical transit calculation.
 
   Optional `with_viscous_windway(length_m)` binds the same material-gas
   `ViscousSlit` used by reeds to the actual flue exit width/height. Its solved

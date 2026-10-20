@@ -25,6 +25,7 @@ pub mod closure;
 use crate::thin_plate::ResolvedPlateChart;
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::{BernoulliAperture, dynamic::DynamicApertureSpec};
+use crate::plate_viscosity::{PlateViscosity, PlateViscosityLimits};
 use fs_exec::CancelGate;
 use fs_plate::{AssemblyOptions, PlateChart, SliceOptions, modes};
 
@@ -100,6 +101,7 @@ pub struct PlateApertureReduction {
     mass_kg: f64,
     stiffness_n_m: f64,
     damping_ratio: f64,
+    viscosity: Option<(PlateViscosity, PlateViscosityLimits)>,
     area_m2: f64,
     width_m: f64,
     closing_pressure_pa: f64,
@@ -131,7 +133,7 @@ impl PlateApertureReduction {
     pub fn from_chart(chart: PlateChart, options: PlateApertureOptions, gate: &CancelGate)
         -> Result<Self, AcousticRealizeError>
     {
-        Self::reduce(PlateSource::Authored(chart), options, gate)
+        Self::reduce(PlateSource::Authored(chart), options, None, gate)
     }
 
     /// Same reduction with the exact immutable regional material receipts retained.
@@ -144,10 +146,32 @@ impl PlateApertureReduction {
     pub fn from_material_chart(chart: ResolvedPlateChart, options: PlateApertureOptions, gate: &CancelGate)
         -> Result<Self, AcousticRealizeError>
     {
-        Self::reduce(PlateSource::Material(chart), options, gate)
+        Self::reduce(PlateSource::Material(chart), options, None, gate)
     }
 
-    fn reduce(source: PlateSource, options: PlateApertureOptions, gate: &CancelGate)
+    /// Project an explicitly selected regional viscosity tensor on the original
+    /// retained mode. Material axes, source bands and all six constitutive
+    /// coefficients come from the existing plate-viscosity owner. No second
+    /// eigensolve, scalar material approximation or damping of prestress is added.
+    /// The selected law and its exact chart identity remain with the reduction,
+    /// including after symmetric pairing or independent blade composition.
+    ///
+    /// This is a single-mode image: its complete projected C is one scalar.
+    /// Use ModalAperture for cross-mode damping and multimode blade motion.
+    ///
+    /// # Errors
+    /// Original geometry/mode refusals, a mismatched material chart, duplicate
+    /// authored/scalar loss, exhausted projection budget or out-of-band mode.
+    pub fn from_viscous_material_chart(chart: ResolvedPlateChart,
+        options: PlateApertureOptions, viscosity: PlateViscosity,
+        limits: PlateViscosityLimits, gate: &CancelGate)
+        -> Result<Self, AcousticRealizeError>
+    {
+        Self::reduce(PlateSource::Material(chart), options, Some((viscosity, limits)), gate)
+    }
+
+    fn reduce(source: PlateSource, options: PlateApertureOptions,
+        viscosity: Option<(PlateViscosity, PlateViscosityLimits)>, gate: &CancelGate)
         -> Result<Self, AcousticRealizeError>
     {
         checkpoint(gate)?;
@@ -165,6 +189,15 @@ impl PlateApertureReduction {
         if matches!(&source, PlateSource::Material(c) if c.bending_viscosity().is_some())
             && options.damping_ratio != 0.0 {
             return Err(invalid("source-bound plate aperture loss requires zero authored damping"));
+        }
+        if let Some((law, limits)) = &viscosity {
+            let PlateSource::Material(c) = &source else {
+                return Err(invalid("tensor aperture loss requires its original material chart"));
+            };
+            if options.damping_ratio != 0.0 {
+                return Err(invalid("tensor aperture loss requires zero authored damping"));
+            }
+            law.preflight(c, 1, *limits, gate)?;
         }
         // Assembly owns mesh/section/support validation; do not inspect unchecked
         // triangle indices first. No duplicate plate element or eigensolver here.
@@ -202,13 +235,6 @@ impl PlateApertureReduction {
         if pair.phi.len() != model.free || pair.phi.iter().any(|x| !x.is_finite()) {
             return Err(invalid("plate aperture mode has invalid coordinates"));
         }
-        let damping_ratio = match &source {
-            PlateSource::Material(c) => c.modal_bending_damping_ratio(
-                &model, &pair.phi, fs_math::det::sqrt(pair.lambda),
-            )?.unwrap_or(options.damping_ratio),
-            PlateSource::Authored(_) => options.damping_ratio,
-        };
-        checkpoint(gate)?;
         let nodal_w = |node: usize| model.dof_map[3*node].map_or(0.0, |i| pair.phi[i]);
         let s: f64 = weights.iter().enumerate().map(|(i, w)| w * nodal_w(i)).sum();
         let mut m_phi = vec![0.0; model.free];
@@ -230,6 +256,27 @@ impl PlateApertureReduction {
         if ![mass, stiffness, area, closing].iter().all(|x| x.is_finite() && *x > 0.0) {
             return Err(invalid("selected plate mode must move the slit and close under uniform positive pressure"));
         }
+        let omega = fs_math::det::sqrt(pair.lambda);
+        let damping_ratio = match (&source, &viscosity) {
+            (PlateSource::Material(c), Some((law, limits))) => {
+                let root_mass = fs_math::det::sqrt(modal_mass);
+                let normalized = pair.phi.iter().map(|p| p / root_mass).collect();
+                let projected = law.project(c, &model, &[normalized], &[omega], *limits, gate)?;
+                // The existing projector returns C/M [1/s], independent of the
+                // arbitrary eigensolver amplitude and the slit coordinate scale.
+                let rate = projected.matrix_per_s()[0];
+                let ratio = rate / (2.0 * omega);
+                if !ratio.is_finite() || (rate > 0.0 && ratio == 0.0) {
+                    return Err(invalid("tensor aperture damping ratio is unrepresentable"));
+                }
+                ratio
+            }
+            (PlateSource::Material(c), None) => c.modal_bending_damping_ratio(
+                &model, &pair.phi, omega,
+            )?.unwrap_or(options.damping_ratio),
+            (PlateSource::Authored(_), _) => options.damping_ratio,
+        };
+        checkpoint(gate)?;
         let mut shape = Vec::with_capacity(n);
         let mut slope_per_m = 0.0_f64;
         let mut variation = 0.0_f64;
@@ -262,7 +309,7 @@ impl PlateApertureReduction {
         }
         checkpoint(gate)?;
         Ok(Self { source, options, symmetry: PlateApertureSymmetry::SingleBlade,
-            mass_kg: mass, stiffness_n_m: stiffness, damping_ratio, area_m2: area,
+            mass_kg: mass, stiffness_n_m: stiffness, damping_ratio, viscosity, area_m2: area,
             width_m: width, closing_pressure_pa: closing, lambda_interval: pair.interval,
             in_window_modes: report.modes.len(), shape, slope_per_m, slit_variation: variation })
     }
@@ -323,6 +370,17 @@ impl PlateApertureReduction {
     #[must_use]
     pub fn material_chart(&self) -> Option<&ResolvedPlateChart> {
         match &self.source { PlateSource::Material(c) => Some(c), PlateSource::Authored(_) => None }
+    }
+    /// Explicit tensor selection with original coefficients, axes and source
+    /// identity. An absent selection does not imply isotropic or lossless data.
+    #[must_use]
+    pub fn viscosity(&self) -> Option<&PlateViscosity> {
+        self.viscosity.as_ref().map(|(law, _)| law)
+    }
+    /// Original work and factor-scaling limits used for the tensor projection.
+    #[must_use]
+    pub fn viscosity_limits(&self) -> Option<PlateViscosityLimits> {
+        self.viscosity.as_ref().map(|(_, limits)| *limits)
     }
     /// Complete caller choices retained separately from source-material authority.
     #[must_use]

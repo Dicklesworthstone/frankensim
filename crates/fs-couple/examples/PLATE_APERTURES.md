@@ -71,6 +71,14 @@ the resulting effective ratio. Single blades, symmetric pairs and independent
 pairs consume it in their actual motion and pressure coupling. Without a selected
 material loss law, damping remains an explicit independent input.
 
+For an anisotropic loss tensor, use `from_viscous_material_chart(chart, options,
+viscosity, limits, gate)` with the existing `PlateViscosity::from_chart` selection.
+Authored damping must be zero and scalar material loss must be absent. All six
+tensor coefficients and each region's orientation are projected on the same
+retained reed mode. `viscosity()` retains the source law and its chart identity;
+after a material substitution, call `viscosity.rebind(&replacement, gate)` before
+reducing the replacement chart. A stale tensor from another material is refused.
+
 ## One work-conjugate coordinate
 
 Let phi be the retained mode and s its length-weighted mean displacement on

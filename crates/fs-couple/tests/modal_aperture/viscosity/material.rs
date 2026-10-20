@@ -558,3 +558,106 @@ fn explicit_zero_tensor_keeps_original_source_image_and_invalid_bindings_refuse(
     exhausted.3.max_projection_terms = 1;
     assert!(make(vec![exhausted], 1e6).is_err());
 }
+
+fn single_options(o: &ModalPlateOptions) -> fs_couple::bernoulli_aperture::plate::PlateApertureOptions {
+    fs_couple::bernoulli_aperture::plate::PlateApertureOptions {
+        assembly: o.reduction.assembly, eigenvalue_window: o.reduction.eigenvalue_window,
+        mode_index: 0, eigensolver: fs_plate::SliceOptions::default(),
+        max_nodes: o.max_nodes, max_triangles: o.max_triangles,
+        slit_edges: o.slit_edges.clone(), rest_opening_m: 4e-4,
+        damping_ratio: o.reduction.damping_ratio, max_slit_mode_variation: 0.25,
+        max_slope: o.maximum_trace_slope,
+    }
+}
+fn single(input: Input) -> Result<fs_couple::bernoulli_aperture::plate::PlateApertureReduction,
+    fs_couple::acoustic_realize::AcousticRealizeError>
+{
+    fs_couple::bernoulli_aperture::plate::PlateApertureReduction::from_viscous_material_chart(
+        input.0, single_options(&input.1), input.2, input.3, &CancelGate::new_clock_free())
+}
+
+#[test]
+fn anisotropic_material_swap_reaches_single_and_paired_reeds_without_retuning() {
+    use fs_couple::bernoulli_aperture::dynamic::{ApertureState, DynamicAperture};
+    use fs_couple::bernoulli_aperture::paired::BladePropagator;
+    let gate = CancelGate::new_clock_free();
+    let original = input(1.0, 900.0);
+    let mut reference_options = original.1.reduction.clone();
+    reference_options.n_modes = 1;
+    let reference = original.0.certified_viscous_radiators(
+        &reference_options, &original.2, original.3, &gate).unwrap();
+    let mut replacement = original.clone();
+    // Change only one region's anisotropic loss tensor, keeping its elasticity,
+    // density, thickness, angle, mesh and every playing control unchanged.
+    replacement.0 = original.0.with_region_material("part-1", &source(900.0, 16.0)).unwrap();
+    replacement.2 = original.2.rebind(&replacement.0, &gate).unwrap();
+    let projection_limits = original.3;
+    let a = single(original).unwrap();
+    let b = single(replacement).unwrap();
+    assert_eq!(a.mass_kg(), b.mass_kg());
+    assert_eq!(a.stiffness_n_m(), b.stiffness_n_m());
+    assert_eq!(a.pressure_area_m2(), b.pressure_area_m2());
+    let expected = reference.damping().matrix_per_s()[0] / (2.0 * reference.radiators()[0].omega);
+    assert!((a.damping_ratio() - expected).abs() < 1e-8 * expected);
+    assert!(b.damping_ratio() > a.damping_ratio());
+    for p in [&a, &b] {
+        assert_eq!(p.options().damping_ratio, 0.0);
+        assert_eq!(p.viscosity_limits(), Some(projection_limits));
+        assert_eq!(p.viscosity().unwrap().chart_identity(), p.material_chart().unwrap().specimen_identity());
+    }
+    let symmetric = a.clone().into_symmetric_opposed_pair().unwrap();
+    assert_eq!(symmetric.damping_ratio(), a.damping_ratio());
+    assert_eq!(symmetric.viscosity().unwrap().chart_identity(), a.viscosity().unwrap().chart_identity());
+    let mut pair = PairedAperture::from_plates([a.clone(), b.clone()], gas(), 1e6,
+        1.0 / f64::from(MECHANICS_RATE), 64, limits(), [BladeState::default(); 2], contact()).unwrap();
+    assert!(pair.spec().blades[1].damping_n_s_m > pair.spec().blades[0].damping_n_s_m);
+    for p in pair.plates().unwrap() { assert!(p.viscosity().is_some()); }
+    for _ in 0..64 {
+        let frame = pair.step(drive(5.0)).unwrap().aperture;
+        assert!(frame.dissipated_energy_j >= 0.0 && frame.balance_residual_j().abs() < 1e-13);
+    }
+    // Both single and symmetric two-blade sources use the selected tensor in
+    // the actual pressure-coupled exact propagator at the ordinary audio clock.
+    for opposed in [false, true] {
+        let prepare = |p: fs_couple::bernoulli_aperture::plate::PlateApertureReduction| {
+            let p = if opposed { p.into_symmetric_opposed_pair().unwrap() } else { p };
+            DynamicAperture::from_plate_with_propagator(p, gas().density, 1e6, 1.0 / 48000.0,
+                512, ApertureState { opening_m: 4e-4, opening_velocity_m_s: 0.0 },
+                contact(), BladePropagator::ExactZoh).unwrap()
+        };
+        let (mut low, mut high) = (prepare(a.clone()), prepare(b.clone()));
+        let mut pressure_change = 0.0_f64;
+        for n in 0..512 {
+            let input = drive(if n < 256 { 5.0 } else { 0.0 });
+            let x = low.step(input).unwrap();
+            let y = high.step(input).unwrap();
+            pressure_change = pressure_change.max((x.bore_pressure_pa - y.bore_pressure_pa).abs());
+            for frame in [x, y] {
+                assert!(frame.dissipated_energy_j >= 0.0 && frame.balance_residual_j().abs() < 1e-13);
+            }
+        }
+        assert!(pressure_change > 1e-6);
+    }
+}
+
+#[test]
+fn single_mode_tensor_preserves_zero_loss_and_refuses_stale_or_duplicate_sources() {
+    use fs_couple::bernoulli_aperture::plate::PlateApertureReduction;
+    let zero = input(0.0, 900.0);
+    let plain = PlateApertureReduction::from_material_chart(zero.0.clone(), single_options(&zero.1),
+        &CancelGate::new_clock_free()).unwrap();
+    let selected = single(zero).unwrap();
+    assert!(selected.viscosity().unwrap().is_zero());
+    assert_eq!(plain.damping_ratio(), selected.damping_ratio());
+    assert_eq!(plain.mass_kg(), selected.mass_kg());
+    assert_eq!(plain.stiffness_n_m(), selected.stiffness_n_m());
+    let mut stale = input(1.0, 1800.0);
+    stale.2 = input(1.0, 900.0).2;
+    assert!(single(stale).is_err());
+    let mut duplicate = input(1.0, 900.0);
+    duplicate.1.reduction.damping_ratio = 0.01;
+    assert!(single(duplicate).is_err());
+    let mut exhausted = input(1.0, 900.0);
+    exhausted.3.max_projection_terms = 1;
+    assert!(single(exhausted).is_err());
+}
