@@ -5,6 +5,7 @@
 //! has an exact discrete derivative even at repeated eigenvalues. All units,
 //! amplitudes and correlations are authored through the columns of F; these
 //! columns are NOT probabilities or independent mutually exclusive scenarios.
+pub mod design;
 use super::{RobustEvaluation3, RobustOptions3};
 use crate::gradient_check::{audit_design_map, GradientCheckOptions, GradientSample, MultiLoadGradientCheck};
 use crate::pipeline::LoadCase;
