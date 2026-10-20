@@ -174,6 +174,68 @@ fn stiffness_rule() -> Vec<([f64; 3], f64)> {
     q
 }
 
+pub(super) struct ElementStrainField {
+    kin: Kinematics,
+    constant: [[f64; N]; 2],
+    twisting: [f64; N],
+    q: [f64; N],
+    g: FacetGeometry,
+}
+
+impl ElementStrainField {
+    pub(super) fn new(
+        mesh: &ShellMesh,
+        tri: &[usize; 3],
+        g: FacetGeometry,
+        normals: [[f64; 3]; 3],
+        section: &ShearShellSection,
+        u_18: &[f64; 18],
+    ) -> Result<Self, PlateError> {
+        let kin = Kinematics::new(mesh, tri, &g, normals);
+        let k = strain_matrix(&kin, &g, section.matrices(), &mut || false)?;
+        let transform = elastic_transform(&k)?;
+        let (constant, twisting) = kin.shear_ties(&g);
+        let mut q = [0.0; N];
+        q[..18].copy_from_slice(u_18);
+        for j in 0..18 {
+            q[18] += transform[18][j] * u_18[j];
+            q[19] += transform[19][j] * u_18[j];
+        }
+        Ok(Self {
+            kin,
+            g,
+            constant,
+            twisting,
+            q,
+        })
+    }
+
+    pub(super) fn eval(&self, r: f64, s: f64) -> ([f64; 3], [f64; 3], [f64; 2]) {
+        let mut eps_m = [0.0; 3];
+        let mut eps_b = [0.0; 3];
+        let mut gamma = [0.0; 2];
+        for c in 0..N {
+            let qc = self.q[c];
+            if qc == 0.0 {
+                continue;
+            }
+            let (membrane, bending, _) = self.kin.basis(&self.g, r, s, c);
+            for i in 0..3 {
+                eps_m[i] += membrane[i] * qc;
+                eps_b[i] += bending[i] * qc;
+            }
+            let cov = [
+                self.constant[0][c] + self.twisting[c] * (s - 1.0 / 3.0),
+                self.constant[1][c] + self.twisting[c] * (1.0 / 3.0 - r),
+            ];
+            for i in 0..2 {
+                gamma[i] += (self.g.gradient[1][i] * cov[0] + self.g.gradient[2][i] * cov[1]) * qc;
+            }
+        }
+        (eps_m, eps_b, gamma)
+    }
+}
+
 fn mass_rule() -> Vec<([f64; 3], f64)> {
     // Positive collapsed five-by-five Gauss rule, exact beyond the degree-six
     // enriched rotation products. Reference weights normalized to unit area.

@@ -501,3 +501,106 @@ fn g0_section_refusals_and_explicit_mass_choice() {
         compare(one.iter().zip(mone).map(|(a, b)| a * b).sum(), 0.2, 1e-14);
     }
 }
+
+fn mindlin_ssss_square_lambda(m: usize, n: usize, t_over_a: f64, nu: f64, kappa: f64) -> f64 {
+    let pi = core::f64::consts::PI;
+    let lambda0 = pi * pi * ((m * m + n * n) as f64);
+    let r2 = t_over_a * t_over_a / 12.0;
+    let s2 = t_over_a * t_over_a / (6.0 * kappa * (1.0 - nu));
+    let b = 1.0 + lambda0 * (r2 + s2);
+    let disc =
+        det::sqrt(1.0 + 2.0 * lambda0 * (r2 + s2) + lambda0 * lambda0 * (r2 - s2) * (r2 - s2));
+    let mu = (2.0 * lambda0 * lambda0) / (b + disc);
+    det::sqrt(mu)
+}
+
+#[test]
+fn g0_s_norm_zero_for_identical_fields() {
+    let (_, model, load) = supported_square(4, 0.05, 1e-3);
+    let u = solve_static(&model, &load).unwrap();
+    let e_u = model.strain_energy(&u).unwrap();
+    let work: f64 = 0.5 * load.iter().zip(&u).map(|(f, d)| f * d).sum::<f64>();
+    compare(e_u, work, 1e-12);
+    let err = s_norm_error(&model, &u, &u).unwrap();
+    assert_eq!(err, 0.0);
+}
+
+#[test]
+fn g0_s_norm_refuses_non_nested_meshes() {
+    let (mesh3, dirs3) = patch(3, true, false);
+    let (mesh4, dirs4) = patch(4, true, false);
+    let (_, model4, load4) = supported_square(4, 0.05, 1e-3);
+    let u4 = solve_static(&model4, &load4).unwrap();
+    let u3 = vec![0.0; 6 * mesh3.nodes.len()];
+    // Uninterpolated coarse vector length mismatch is refused by s_norm_error.
+    assert!(matches!(
+        s_norm_error(&model4, &u4, &u3),
+        Err(PlateError::BadConstraint { .. })
+    ));
+    // Non-divisible grid resolutions (N_c=3, N_ref=4) are refused by interpolate_nested_shell.
+    assert!(matches!(
+        interpolate_nested_shell(&mesh3, &u3, &mesh4, &dirs4),
+        Err(PlateError::BadConstraint { .. })
+    ));
+    // Independently distorted meshes where coarse vertices do not coincide with reference vertices refuse.
+    let (mesh2_dist, _) = patch(2, false, true);
+    let u2 = vec![0.0; 6 * mesh2_dist.nodes.len()];
+    assert!(matches!(
+        interpolate_nested_shell(&mesh2_dist, &u2, &mesh4, &dirs4),
+        Err(PlateError::BadConstraint { .. })
+    ));
+    let _ = dirs3;
+}
+
+#[test]
+fn g0_reference_rung_must_exceed_finest() {
+    let (mesh4, dirs4) = patch(4, false, false);
+    let (mesh2, dirs2) = patch(2, false, false);
+    let u4 = vec![0.0; 6 * mesh4.nodes.len()];
+    // Equal resolution (N_ref == N_max) refuses.
+    assert!(matches!(
+        interpolate_nested_shell(&mesh4, &u4, &mesh4, &dirs4),
+        Err(PlateError::BadConstraint { .. })
+    ));
+    // Coarser reference (N_ref < N_max) refuses.
+    assert!(matches!(
+        interpolate_nested_shell(&mesh4, &u4, &mesh2, &dirs2),
+        Err(PlateError::BadConstraint { .. })
+    ));
+}
+
+#[test]
+fn g0_no_spurious_zero_energy_modes() {
+    for (mesh, directors) in [patch(3, false, false), patch(3, true, false)] {
+        let model = assemble(&mesh, &directors, 0.02, &[], 1e-3);
+        let modes = fs_modal::eigh_gen_dense(
+            &model.pencil.k.to_dense(),
+            &model.pencil.m.to_dense(),
+            model.pencil.free,
+        )
+        .unwrap();
+        let lambda_max = modes.last().unwrap().lambda;
+        let zero_count = modes
+            .iter()
+            .filter(|m| m.lambda <= 1e-8 * lambda_max)
+            .count();
+        assert_eq!(
+            zero_count, 6,
+            "free shell must have exactly 6 zero-energy modes (got {zero_count})"
+        );
+    }
+}
+
+#[test]
+fn g1_mindlin_oracle_self_check() {
+    let pi = core::f64::consts::PI;
+    for (m, n) in [(1, 1), (1, 2), (2, 1), (2, 2), (1, 3), (3, 1)] {
+        let exact_kirchhoff = pi * pi * ((m * m + n * n) as f64);
+        let mindlin_thin = mindlin_ssss_square_lambda(m, n, 1e-7, 0.3, 5.0 / 6.0);
+        let rel_err = (mindlin_thin - exact_kirchhoff).abs() / exact_kirchhoff;
+        assert!(
+            rel_err < 1e-9,
+            "Mindlin oracle thin limit ({m},{n}) rel_err {rel_err:e} >= 1e-9"
+        );
+    }
+}

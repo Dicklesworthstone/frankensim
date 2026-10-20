@@ -159,6 +159,21 @@ The bicubic C1 claim above applies only to the bicubic path.
 `fs-scenario::assembly_generators::ag_011_arching_second_order_and_existing_mesh_lift`
 tests the measured outline → existing mesher → shared NURBS → existing lift.
 
+`shell::mitc::{MitcShellModel::strain_energy, interpolate_nested_shell, s_norm_error}`
+(IRP M1.2-W1b) evaluate the elastic strain energy `1/2 u^T K u` and the Hiller &
+Bathe (2003) / Lee, Lee & Bathe (2014, Eq. 20) relative s-norm error
+`E_h = ||u_ref - u_h||_s^2 / ||u_ref||_s^2` on nested refinements (`N_ref > N_max`,
+`N_ref % N_c == 0`, with coincident coarse-to-reference vertex verification).
+`tests/shell_vibration_locking.rs` validates the MITC3+ shell against Leissa
+(1973, *J. Sound Vib.* 31:257) thin rectangular plates (SSSS, CCCC, CSCS, CFFF,
+SSFF), closed-form Mindlin (1951) thick plates (`t/a in {0.01, 0.1, 0.2}` with
+`kappa = 5/6`), closed-form Flügge (Leissa 1973, NASA SP-288 ch. 2) shear-diaphragm
+circular cylinders (`R/t = 100`), the Lee & Bathe (2014) / Chapelle & Bathe (2011)
+asymptotic locking suite (`t/L in {1e-2, 1e-3, 1e-4}` on cylinder, hyperboloid,
+and hyperbolic paraboloid in membrane- and bending-dominated regimes), and reports
+orthotropic wood-like (`E_L / G_LT in {15, 20}`) transverse-shear frequency shifts
+against CST/DKT.
+
 - `PlateSection::{orthotropic, isotropic}` — bending rigidity D from
   engineering constants: `D11 = E1h³/12(1−ν12ν21)` etc., `D33 = G12h³/12`.
   Material axis 1 is the grain (L) axis — the matdb axis-convention
