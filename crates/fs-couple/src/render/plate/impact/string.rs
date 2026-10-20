@@ -5,7 +5,7 @@
 //! coordinates, bending, contacts and damping. It supplies no new integrator.
 //! A coiled wire needs its effective axial rigidity supplied independently;
 //! neither winding mass nor transverse bending rigidity identifies E*A.
-use std::rc::Rc;
+use std::sync::Arc;
 use fs_math::det;
 use fs_nlmodal::{KcStringParams, SosModalStorage, kirchhoff_carrier_string};
 use fs_phs::Storage;
@@ -49,7 +49,7 @@ pub struct StringObservation {
 /// Immutable, shared storage compiled by the existing nonlinear-string owner.
 #[derive(Clone)]
 pub struct StringPotential {
-    storage: Rc<SosModalStorage>,
+    storage: Arc<SosModalStorage>,
     stretching: StringStretching,
     rest_tension_n: f64,
     // One physical span, with one or two mass-normalized sine-coordinate blocks.
@@ -94,7 +94,7 @@ impl WireSpan {
             || (0..n).any(|i| storage.channels[0].coupling[i*n+i] <= 0.0) {
             return Err(invalid("derived string stretching channel is unrepresentable"));
         }
-        let potential = StringPotential { storage: Rc::new(storage), stretching,
+        let potential = StringPotential { storage: Arc::new(storage), stretching,
             rest_tension_n: self.tension_n, transverse_planes: 1, affine_endpoint: false };
         let mut q = [0.0; MAX_IMPACT_MODES];
         for (i, s) in body.initial.iter().enumerate() { q[i] = s.displacement_m_sqrt_kg; }
@@ -141,7 +141,7 @@ impl WireSpan {
         storage.channels[0].coupling = coupling;
         storage.omegas.extend_from_within(..);
         let potential = StringPotential {
-            storage: Rc::new(storage), transverse_planes: 2, ..original
+            storage: Arc::new(storage), transverse_planes: 2, ..original
         };
         let mut q = [0.0; MAX_IMPACT_MODES];
         for (i, state) in initial.iter().enumerate() {
@@ -155,6 +155,18 @@ impl WireSpan {
     }
 }
 impl StringPotential {
+    /// The SAME source-owned stress channels without quadratic bending/tension.
+    /// Used only when the original exact linear owner already carries that
+    /// storage and inertia. Zeroing the separate frequency list avoids both
+    /// double stiffness and cancellation from subtracting two large energies.
+    pub(crate) fn geometric_remainder(&self) -> Self {
+        let storage = SosModalStorage {
+            omegas: vec![0.0; self.mode_count()],
+            channels: self.storage.channels.clone(),
+        };
+        Self { storage: Arc::new(storage), ..self.clone() }
+    }
+
     pub fn mode_count(&self) -> usize { self.storage.omegas.len() }
     pub fn omegas(&self) -> &[f64] { &self.storage.omegas }
     pub fn slope_limit(&self) -> f64 { self.stretching.maximum_slope }
@@ -189,7 +201,7 @@ impl StringPotential {
         coupling[n*(n+1)+n] = strain_weight;
         storage.channels[0].coupling = coupling;
         storage.omegas.push(det::sqrt(stiffness));
-        Ok(Self { storage: Rc::new(storage), affine_endpoint: true, ..self })
+        Ok(Self { storage: Arc::new(storage), affine_endpoint: true, ..self })
     }
 
     fn valid_coordinates(&self, q: &[f64]) -> bool {

@@ -1,0 +1,344 @@
+//! Nonlinear storage coupled to the SAME exact linear and friction owners.
+//!
+//! Each trial supplies a held reaction -DG(V,q0,q1) to the original complete
+//! linear network. The original scalar bow solve includes that reaction. The
+//! fixed point is accepted only when the reaction law AND the combined energy
+//! balance close. fs-phs owns DG; this adapter changes neither the exponential
+//! linear propagator nor the friction law, its stick/slip branch or work port.
+//! This is a bounded iterated discrete-gradient composition, not SAV, a unique
+//! nonlinear-solution claim, a trajectory certificate or a real-time guarantee.
+use super::*;
+use fs_phs::Storage;
+
+/// Displacement-only additional energy, excluding the original linear stiffness
+/// and inertia. The constitutive owner admits its own physical validity envelope.
+pub trait ModalPotential: Storage + Send + Sync {
+    /// Number of original mass-normalized displacement coordinates.
+    fn coordinate_count(&self) -> usize;
+    /// Reject nonfinite coordinates or motion outside the constitutive domain.
+    fn validate_coordinates(&self, q: &[f64]) -> Result<(), ModalCouplingError>;
+}
+
+/// A contiguous, nonoverlapping part of one original component.
+pub struct ModalPotentialBinding {
+    /// Original component index, without reordering its states.
+    pub component: usize,
+    /// First coordinate within that component.
+    pub coordinate_start: usize,
+    /// Additional conservative storage in the unchanged normalized basis.
+    pub potential: Box<dyn ModalPotential>,
+}
+
+/// Bounded constitutive iteration; nonconvergence requires physical clock/modal
+/// refinement, not clipping a reaction or publishing a partial solve.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NonlinearModalConfig {
+    /// Maximum complete linear/friction trials, in 1..=128.
+    pub max_iterations: usize,
+    /// Maximum generalized reaction magnitude [N/sqrt(kg)].
+    pub maximum_generalized_force: f64,
+    /// Absolute reaction-law residual allowance [N/sqrt(kg)].
+    pub force_absolute_tolerance: f64,
+    /// Relative reaction-law residual allowance, in (0,1).
+    pub force_relative_tolerance: f64,
+}
+impl NonlinearModalConfig {
+    /// Admit finite positive force budgets and a bounded trial count.
+    pub fn validate(self) -> Result<(), ModalCouplingError> {
+        if !(1..=128).contains(&self.max_iterations)
+            || [
+                self.maximum_generalized_force,
+                self.force_absolute_tolerance,
+                self.force_relative_tolerance,
+            ]
+            .iter()
+            .any(|v| !v.is_finite() || *v <= 0.0)
+            || self.force_relative_tolerance >= 1.0
+        {
+            return Err(invalid(
+                "nonlinear storage requires finite force/iteration budgets",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One jointly accepted constitutive, friction and complete-network sample.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NonlinearFrictionFrame {
+    /// Network energy includes nonlinear storage; external work excludes the
+    /// internal geometric reaction.
+    pub friction: FrictionModalFrame,
+    /// Additional conservative storage [J], already counted in friction energy.
+    pub nonlinear_energy_j: f64,
+    /// Complete linear/friction trials required by this accepted sample.
+    pub nonlinear_iterations: usize,
+    /// Maximum constitutive force mismatch [N/sqrt(kg)].
+    pub reaction_residual: f64,
+    /// Absolute-plus-relative allowed mismatch [N/sqrt(kg)].
+    pub reaction_tolerance: f64,
+}
+struct BoundPotential {
+    offset: usize,
+    potential: Box<dyn ModalPotential>,
+}
+pub(super) struct NonlinearFrictionState {
+    potentials: Vec<BoundPotential>,
+    config: NonlinearModalConfig,
+    last: Option<NonlinearFrictionFrame>,
+}
+impl FrictionModalSystem {
+    /// Bind additional storage once, before playback. Existing nonzero initial
+    /// motion is preserved. Rendering, gestures, interfaces and observation use
+    /// this same owner; refused trials publish no accepted state or diagnostic.
+    pub fn with_nonlinear_potentials(
+        mut self,
+        bindings: Vec<ModalPotentialBinding>,
+        config: NonlinearModalConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalFrictionError> {
+        poll(Some(gate))?;
+        config.validate()?;
+        if self.samples_rendered() != 0
+            || self.nonlinear.is_some()
+            || bindings.is_empty()
+            || bindings.len() > self.mode_count()
+        {
+            return Err(invalid("nonlinear storage requires cold nonempty binding and finite force/iteration budgets").into());
+        }
+        let mut occupied = vec![false; self.mode_count()];
+        let mut potentials = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            poll(Some(gate))?;
+            let component = self.components().get(binding.component).ok_or_else(|| {
+                invalid("nonlinear potential names an unknown original component")
+            })?;
+            let count = binding.potential.coordinate_count();
+            let end = binding
+                .coordinate_start
+                .checked_add(count)
+                .ok_or_else(|| invalid("nonlinear component coordinate overflow"))?;
+            if count == 0 || end > component.modes().len() {
+                return Err(
+                    invalid("nonlinear potential must fit its unchanged component basis").into(),
+                );
+            }
+            let offset = self.network.offsets[binding.component] + binding.coordinate_start;
+            if occupied[offset..offset + count].iter().any(|v| *v) {
+                return Err(
+                    invalid("overlapping additive nonlinear bindings are not admitted").into(),
+                );
+            }
+            occupied[offset..offset + count].fill(true);
+            potentials.push(BoundPotential {
+                offset,
+                potential: binding.potential,
+            });
+        }
+        let state = NonlinearFrictionState {
+            potentials,
+            config,
+            last: None,
+        };
+        let q = coordinates(self.components());
+        let total = finite(self.network.total_energy_j()? + state.potential_energy(&q)?)?;
+        limit(
+            "linear plus nonlinear energy",
+            total,
+            self.network.config.maximum_total_energy_j,
+        )?;
+        self.nonlinear = Some(state);
+        poll(Some(gate))?;
+        Ok(self)
+    }
+    /// Whether an explicit constitutive participant is retained by this owner.
+    pub fn has_nonlinear_potentials(&self) -> bool {
+        self.nonlinear.is_some()
+    }
+    /// Last jointly accepted nonlinear sample; refusal leaves it unchanged.
+    pub fn nonlinear_frame(&self) -> Option<&NonlinearFrictionFrame> {
+        self.nonlinear
+            .as_ref()
+            .and_then(|state| state.last.as_ref())
+    }
+    /// Additional storage [J] at accepted coordinates, without advancing state.
+    pub fn nonlinear_energy_j(&self) -> Result<f64, ModalCouplingError> {
+        match &self.nonlinear {
+            Some(state) => state.potential_energy(&coordinates(self.components())),
+            None => Ok(0.0),
+        }
+    }
+}
+impl NonlinearFrictionState {
+    fn potential_energy(&self, q: &[f64]) -> Result<f64, ModalCouplingError> {
+        let mut energy = 0.0;
+        for binding in &self.potentials {
+            let range = binding.offset..binding.offset + binding.potential.coordinate_count();
+            binding.potential.validate_coordinates(&q[range.clone()])?;
+            let value = finite(binding.potential.hamiltonian(&q[range]))?;
+            if value < 0.0 {
+                return Err(invalid(
+                    "additive nonlinear storage must have a nonnegative energy reference",
+                ));
+            }
+            energy = finite(energy + value)?;
+        }
+        Ok(energy)
+    }
+    pub(super) fn stage(
+        &mut self,
+        inner: &mut FrictionModalSystem,
+        external: &[f64],
+        drive: FrictionDrive,
+        gate: Option<&CancelGate>,
+    ) -> Result<NonlinearFrictionFrame, ModalFrictionError> {
+        poll(gate)?;
+        if external.len() != inner.mode_count() || external.iter().any(|v| !v.is_finite()) {
+            return Err(
+                invalid("external force must retain every nonlinear bank coordinate").into(),
+            );
+        }
+        let before_q = coordinates(inner.components());
+        let before_potential = self.potential_energy(&before_q)?;
+        let before = finite(inner.network.total_energy_j()? + before_potential)?;
+        let mut reaction = vec![0.0; inner.mode_count()];
+        self.reactions(&before_q, &before_q, &mut reaction, gate)?;
+        let mut next_reaction = reaction.clone();
+        let mut forces = external.to_vec();
+        let mut last_ratio = f64::INFINITY;
+        let mut last_energy = (0.0, 0.0);
+        for iteration in 1..=self.config.max_iterations {
+            poll(gate)?;
+            for i in 0..forces.len() {
+                forces[i] = if reaction[i] == 0.0 {
+                    external[i]
+                } else {
+                    finite(external[i] + reaction[i])?
+                };
+            }
+            let mut frame = inner.stage_inner(&forces, drive, gate)?;
+            let after_q = coordinates(&inner.network.candidates);
+            let after_potential = self.potential_energy(&after_q)?;
+            self.reactions(&before_q, &after_q, &mut next_reaction, gate)?;
+            let residual = reaction
+                .iter()
+                .zip(&next_reaction)
+                .fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+            let scale = reaction
+                .iter()
+                .chain(&next_reaction)
+                .fold(0.0_f64, |m, v| m.max(v.abs()));
+            let tolerance = finite(
+                self.config.force_absolute_tolerance + self.config.force_relative_tolerance * scale,
+            )?;
+            last_ratio = finite(residual / tolerance)?;
+            let after = finite(frame.network_energy_j + after_potential)?;
+            let external_work = dot(external, &inner.network.free_delta)?;
+            let balance = finite(
+                after - before + frame.network_dissipation_j + frame.friction_dissipation_j
+                    - external_work
+                    - frame.drive_work_j,
+            )?;
+            let energy_scale = before
+                .max(after)
+                .max(frame.network_dissipation_j)
+                .max(frame.friction_dissipation_j)
+                .max(external_work.abs())
+                .max(frame.drive_work_j.abs());
+            let energy_tolerance = finite(
+                inner.network.config.energy_absolute_tolerance_j
+                    + inner.network.config.energy_relative_tolerance * energy_scale,
+            )?;
+            last_energy = (balance, energy_tolerance);
+            if residual <= tolerance && balance.abs() <= energy_tolerance {
+                limit(
+                    "linear plus nonlinear energy",
+                    after,
+                    inner.network.config.maximum_total_energy_j,
+                )?;
+                // Actual endpoint pressure uses -grad V(q1), not held DG.
+                if let Some(weights) = inner.acceleration_pressure_weights() {
+                    self.reactions(&after_q, &after_q, &mut next_reaction, gate)?;
+                    for ((weight, endpoint), held) in
+                        weights.iter().zip(&next_reaction).zip(&reaction)
+                    {
+                        frame.observer_pressure_pa =
+                            finite(frame.observer_pressure_pa + weight * (endpoint - held))?;
+                    }
+                    limit(
+                        "nonlinear acceleration observer pressure",
+                        frame.observer_pressure_pa.abs(),
+                        inner.network.config.maximum_abs_pressure_pa,
+                    )?;
+                }
+                frame.network_energy_j = after;
+                frame.external_work_j = external_work;
+                frame.energy_residual_j = balance;
+                frame.energy_tolerance_j = energy_tolerance;
+                let accepted = NonlinearFrictionFrame {
+                    friction: frame,
+                    nonlinear_energy_j: after_potential,
+                    nonlinear_iterations: iteration,
+                    reaction_residual: residual,
+                    reaction_tolerance: tolerance,
+                };
+                poll(gate)?;
+                return Ok(accepted);
+            }
+            std::mem::swap(&mut reaction, &mut next_reaction);
+        }
+        if last_ratio <= 1.0 {
+            return Err(ModalCouplingError::EnergyBalance {
+                residual_j: last_energy.0,
+                tolerance_j: last_energy.1,
+            }
+            .into());
+        }
+        Err(ModalCouplingError::SolveResidual {
+            relative: last_ratio,
+            tolerance: 1.0,
+        }
+        .into())
+    }
+    pub(super) fn publish(&mut self, frame: NonlinearFrictionFrame) {
+        self.last = Some(frame);
+    }
+    fn reactions(
+        &self,
+        before: &[f64],
+        after: &[f64],
+        out: &mut [f64],
+        gate: Option<&CancelGate>,
+    ) -> Result<(), ModalFrictionError> {
+        out.fill(0.0);
+        for binding in &self.potentials {
+            poll(gate)?;
+            let range = binding.offset..binding.offset + binding.potential.coordinate_count();
+            let gradient = fs_phs::discrete_gradient(
+                binding.potential.as_ref(),
+                &before[range.clone()],
+                &after[range.clone()],
+            );
+            for (force, value) in out[range].iter_mut().zip(gradient) {
+                *force = finite(-value)?;
+                limit(
+                    "nonlinear generalized reaction",
+                    force.abs(),
+                    self.config.maximum_generalized_force,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+fn coordinates(models: &[ModalAcousticTimeModel]) -> Vec<f64> {
+    models
+        .iter()
+        .flat_map(|model| {
+            model
+                .states()
+                .iter()
+                .map(|state| state.displacement_m_sqrt_kg)
+        })
+        .collect()
+}

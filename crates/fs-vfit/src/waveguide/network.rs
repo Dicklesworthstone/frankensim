@@ -11,6 +11,8 @@
 //! junctions, with one degree-one inlet and passive resistive, R-L-C or relaxation
 //! terminal loads and explicit interior series/shunt loads. All load storage
 //! participates in the total balance; distributed laws must be supplied explicitly.
+//! An explicitly installed MIMO terminal group shares that same scattering step;
+//! its signed external work is separate from local load storage/dissipation.
 //! No extra sample of junction delay, fitted-filter energy claim, branch end
 //! correction, automatically inferred wall loss, fractional delay or radiation law is implied.
 
@@ -22,6 +24,8 @@ use crate::relaxation::RelaxationImpedanceSpec;
 pub mod admittance;
 /// Explicit fixed fractional transit on the same scattering and load runtime.
 pub mod fractional;
+/// Simultaneous exact-ZOH rational feedback across selected physical outlets.
+pub mod multiport;
 mod load;
 mod interior;
 use load::{TerminalFrame, TerminalLoad};
@@ -105,7 +109,8 @@ pub struct NetworkFrame {
     pub stored_energy_j: f64,
     /// Energy in bidirectional buffers and optional fractional-transit states [J].
     pub wave_stored_energy_j: f64,
-    /// Energy in every terminal and interior load state [J].
+    /// Energy in local R-L-C/relaxation terminal and interior load states [J].
+    /// Excludes an attached rational MIMO model, whose exchange is reported as work.
     pub load_stored_energy_j: f64,
     /// Difference in independently evaluated combined storage [J].
     pub storage_change_j: f64,
@@ -116,6 +121,10 @@ pub struct NetworkFrame {
     /// Irreversible loss at interior series/shunt elements [J], counted once
     /// per element, not once per attached section. Excludes reversible storage.
     pub interior_loss_j: f64,
+    /// Signed work delivered to an explicitly attached MIMO terminal model [J].
+    /// Its rational states are not included in this network's stored energy,
+    /// and this exchange is not classified as irreversible dissipation.
+    pub coupled_terminal_work_j: f64,
     /// Incident minus departing energy at internal junctions [J]. Rounding
     /// diagnostic only: it is NOT treated as dissipation or used to repair storage.
     pub junction_residual_j: f64,
@@ -124,7 +133,8 @@ impl NetworkFrame {
     /// Total balance [J], without subtracting away any scattering defect.
     #[must_use]
     pub fn balance_residual_j(&self) -> f64 {
-        self.storage_change_j + self.terminal_loss_j + self.interior_loss_j - self.inlet_work_j
+        self.storage_change_j + self.terminal_loss_j + self.interior_loss_j
+            + self.coupled_terminal_work_j - self.inlet_work_j
     }
 }
 
@@ -144,6 +154,9 @@ pub struct WaveguideNetwork {
     load_candidate: Vec<TerminalFrame>,
     inlet_port: usize,
     time_step_s: f64,
+    accepted_steps: u64,
+    mimo: Option<multiport::MimoTerminals>,
+    mimo_arriving: Vec<f64>,
 }
 
 fn buffer<T: Clone>(n: usize, value: T) -> Result<Vec<T>, WaveguideError> {
@@ -309,6 +322,7 @@ impl WaveguideNetwork {
             departing: buffer(port_count, 0.0)?, observed: buffer(nodes.len(), NodeFrame::default())?,
             candidate: buffer(nodes.len(), NodeFrame::default())?, inlet_port, time_step_s,
             loads, load_candidate: buffer(nodes.len(), TerminalFrame::default())?,
+            accepted_steps: 0, mimo: None, mimo_arriving: Vec::new(),
         })
     }
 
@@ -372,7 +386,8 @@ impl WaveguideNetwork {
     #[must_use]
     pub fn node_frame(&self, node: usize) -> Option<&NodeFrame> { self.observed.get(node) }
 
-    /// Current boundary/junction declaration.
+    /// Original local boundary/junction declaration. A separately installed
+    /// coupled group is available through `mimo_terminal_spec`.
     #[must_use]
     pub fn node(&self, node: usize) -> Option<NetworkNode> { self.nodes.get(node).copied() }
 
@@ -384,6 +399,9 @@ impl WaveguideNetwork {
     /// # Errors
     /// Unknown/nonterminal node or nonfinite/active reflectance; no mutation.
     pub fn set_terminal_reflection(&mut self, node: usize, reflection: f64) -> Result<(), WaveguideError> {
+        if self.mimo.as_ref().is_some_and(|m| m.index(node).is_some()) {
+            return Err(WaveguideError("reflection control cannot replace a retained MIMO terminal state"));
+        }
         if !reflection.is_finite() || reflection.abs() > 1.0 {
             return Err(WaveguideError("terminal reflectance must be finite and passive"));
         }
@@ -401,13 +419,16 @@ impl WaveguideNetwork {
     /// Nonfinite input, port quantities, candidate wave storage or work.
     pub fn preview_step(&mut self, outgoing: f64) -> Result<NetworkFrame, WaveguideError> {
         if !outgoing.is_finite() { return Err(WaveguideError("network input must be finite")); }
+        if self.accepted_steps == u64::MAX { return Err(WaveguideError("network step counter exhausted")); }
         let incoming = self.incoming_pressure_pa();
         let z = self.inlet_impedance_pa_s_m3();
         let mut terminal_loss = 0.0;
         let mut interior_loss = 0.0;
         let mut junction_residual = 0.0;
         let mut load_stored = 0.0;
+        let coupled_terminal_work = self.preview_mimo()?;
         for n in 0..self.nodes.len() {
+            if self.mimo.as_ref().is_some_and(|m| m.index(n).is_some()) { continue; }
             if matches!(self.nodes[n], NetworkNode::Shunt { .. } | NetworkNode::ShuntAdmittance { .. } | NetworkNode::Series { .. }) {
                 let residual = self.preview_interior(n)?;
                 let trial = self.load_candidate[n].port();
@@ -497,6 +518,7 @@ impl WaveguideNetwork {
             wave_stored_energy_j: wave_stored, load_stored_energy_j: load_stored,
             inlet_work_j: (outgoing + incoming) * (((outgoing - incoming) / z) * self.time_step_s),
             terminal_loss_j: terminal_loss, interior_loss_j: interior_loss, junction_residual_j: junction_residual,
+            coupled_terminal_work_j: coupled_terminal_work,
         };
         if ![frame.inlet_pressure_pa, frame.inlet_flow_m3_s, stored, frame.storage_change_j,
             frame.inlet_work_j, terminal_loss, interior_loss, junction_residual, frame.balance_residual_j()]
@@ -548,7 +570,9 @@ impl WaveguideNetwork {
         for (load, candidate) in self.loads.iter_mut().zip(&self.load_candidate) {
             if let Some(load) = load { load.accept_frame(*candidate); }
         }
+        if let Some(model) = &mut self.mimo { model.accept(); }
         self.observed.copy_from_slice(&self.candidate);
+        self.accepted_steps += 1;
     }
 }
 

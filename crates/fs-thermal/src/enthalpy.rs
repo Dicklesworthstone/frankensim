@@ -135,6 +135,42 @@ pub struct ThermalLink {
     pub conductance_w_k: f64,
 }
 
+
+/// Bulk conductance [W/K] of two homogeneous isotropic layers in series.
+///
+/// Distances are positive layer thicknesses [m], conductivity is [W/(m K)],
+/// and area is the shared transfer area [m2]. Geometry and material/source
+/// admission belong to the caller; this adds no contact resistance. Explicit
+/// zero area or conductivity insulates, but does not excuse invalid inputs.
+/// Unrepresentable positive resistances or conductance refuse.
+pub fn series_conductance_w_k(
+    area_m2: f64,
+    distances_m: [f64; 2],
+    conductivity_w_m_k: [f64; 2],
+) -> Result<f64, DepositionError> {
+    if !nonnegative(area_m2)
+        || !distances_m.into_iter().all(positive)
+        || !conductivity_w_m_k.into_iter().all(nonnegative)
+    {
+        return Err(DepositionError::InvalidInput(
+            "series conduction needs finite area/conductivity and positive distances",
+        ));
+    }
+    if area_m2 == 0.0 || conductivity_w_m_k.contains(&0.0) {
+        return Ok(0.0);
+    }
+    let ra = finite(distances_m[0] / conductivity_w_m_k[0])?;
+    let rb = finite(distances_m[1] / conductivity_w_m_k[1])?;
+    let total = finite(ra + rb)?;
+    let conductance = finite(area_m2 / total)?;
+    if ra <= 0.0 || rb <= 0.0 || total <= 0.0 || conductance <= 0.0 {
+        return Err(DepositionError::InvalidInput(
+            "unrepresentable material conduction",
+        ));
+    }
+    Ok(conductance)
+}
+
 /// A signed INTERNAL energy transfer, independent of contact area/coverage.
 /// The identical watts are subtracted from `a` and added to `b`; they never
 /// enter the external-heat account. Both endpoints must be distinct active cells.
@@ -561,6 +597,18 @@ fn validate_boundary(b: Boundary) -> Result<(), DepositionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn series_conduction_retains_both_layers_and_explicit_insulation() {
+        let g = series_conductance_w_k(6.0, [0.25, 0.5], [12.0, 10.0]).unwrap();
+        close(g, 6.0 / (0.25 / 12.0 + 0.5 / 10.0), 1e-12);
+        assert_eq!(series_conductance_w_k(0.0, [1.0; 2], [1.0; 2]), Ok(0.0));
+        assert_eq!(series_conductance_w_k(1.0, [1.0; 2], [0.0, 1.0]), Ok(0.0));
+        assert!(series_conductance_w_k(0.0, [f64::NAN, 1.0], [0.0, 1.0]).is_err());
+        assert!(series_conductance_w_k(1.0, [1.0; 2], [-1.0, 1.0]).is_err());
+        assert!(series_conductance_w_k(1.0, [f64::MIN_POSITIVE; 2], [f64::MAX; 2],).is_err());
+    }
 
     struct Sensible;
     impl ThermalLaw for Sensible {

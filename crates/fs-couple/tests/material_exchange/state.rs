@@ -125,3 +125,7 @@ fn chamber_free_state_keeps_the_same_finite_electrical_thermal_evolution() {
         assert_eq!(report.step,*direct.step());assert_eq!(state.time_s(),0.00005);
     }));
 }
+
+
+#[path = "flow.rs"]
+mod flow;

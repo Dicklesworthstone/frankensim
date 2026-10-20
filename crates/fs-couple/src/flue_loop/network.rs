@@ -17,6 +17,9 @@ use crate::bernoulli_aperture::wall::WallState;
 use crate::bernoulli_aperture::wall::material::{
     BoundMaterialWall, MaterialWallInput, bind_material_walls,
 };
+use crate::bernoulli_aperture::radiation::environment::multiport::{
+    MimoEnvironment, MimoRadiationLimits, MimoRadiationModel,
+};
 use crate::wind_line::WindLineBank;
 use fs_aeroac::jetcard::JetCard;
 use fs_exec::CancelGate;
@@ -56,6 +59,7 @@ pub struct FlueNetwork {
     physics: WaveguideNetwork,
     last: Option<NetworkFrame>,
     fractional: Option<(FractionalTubePolicy, Vec<FractionalSection>)>,
+    mimo_environment: Option<MimoEnvironment>,
 }
 
 pub(super) enum FlueResonator {
@@ -115,7 +119,7 @@ impl FlueNetwork {
         };
         poll(gate)?;
         Ok(Self { source, wall_input, walls, graph, gases, represented, losses, physics,
-            last: None, fractional })
+            last: None, fractional, mimo_environment: None })
     }
     /// Original data before any loss-cell subdivision.
     #[must_use]
@@ -176,6 +180,19 @@ impl FlueNetwork {
     /// Actual wave plus reactive-load storage, not an integrated work estimate.
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 { self.physics.stored_energy_j() }
+    /// Source-bound mutual terminal operator actually installed in this network.
+    #[must_use]
+    pub const fn mimo_environment(&self) -> Option<&MimoEnvironment> { self.mimo_environment.as_ref() }
+    /// Same-sample pressure, flow and signed work of the shared exterior model.
+    #[must_use]
+    pub fn mimo_port_frames(&self) -> Option<&[fs_vfit::waveguide::network::multiport::MimoPortFrame]> {
+        self.physics.mimo_port_frames()
+    }
+    /// Continuous certificate and separate actual-ZOH sampled-response diagnostic.
+    #[must_use]
+    pub fn mimo_passivity(&self) -> Option<(&fs_vfit::mimo::MimoPassivityReport, &fs_vfit::mimo::MimoPassivityReport)> {
+        self.physics.mimo_passivity()
+    }
 }
 
 impl FlueResonator {
@@ -212,6 +229,38 @@ impl FlueResonator {
 }
 
 impl FlueVoice {
+    /// Attach a source-bound mutual radiation operator to an unadvanced physical
+    /// jet/bore, preserving its original walls, gases, losses, windway and seed.
+    /// One matrix solve returns pressure to every selected outlet in the SAME
+    /// sample; all source jets continue through the existing flue runtime.
+    ///
+    /// The declaration's exterior and aperture order are retained for every
+    /// later FlueOutletPerformance receiver. Changing a baked material requires
+    /// its corresponding source operator, never an arbitrary gain rescaling.
+    /// The actual ZOH grid is explicitly GridOnly: no continuous certificate is
+    /// promoted to a discrete storage law or complete M2.5-W3c qualification.
+    /// Full clock bandwidth is mandatory. Delayed/improper operators, existing
+    /// reactive loads, live attachment and non-baffled observer geometry refuse.
+    pub fn with_mimo_environment(mut self, source: MimoRadiationModel,
+        radiation: crate::pcm_wav::baffled::openings::duct::DuctRadiationSpec,
+        limits: MimoRadiationLimits, gate: &CancelGate,
+    ) -> Result<Self, FlueError> {
+        poll(gate)?;
+        if self.poisoned || self.samples != 0
+            || self.dt.to_bits() != (1.0 / f64::from(radiation.reconstruction.mechanics_rate_hz())).to_bits() {
+            return Err(invalid("MIMO exterior requires an unadvanced flue and its actual mechanical clock"));
+        }
+        let FlueResonator::Network(network) = &mut self.line else {
+            return Err(invalid("mutual terminal radiation requires an explicitly ported physical tube graph"));
+        };
+        let (environment, terminal) = MimoEnvironment::prepare(&network.graph, &network.gases,
+            source, radiation, limits, gate).map_err(physical)?;
+        network.physics.install_mimo_terminals(terminal).map_err(wave)?;
+        poll(gate)?;
+        network.mimo_environment = Some(environment);
+        Ok(self)
+    }
+
     /// Compose the ORIGINAL jet-drive loop with physical regional tube sections.
     ///
     /// Geometry sets delays/impedances; selected viscothermal laws and supplied

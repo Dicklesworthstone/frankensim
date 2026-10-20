@@ -155,3 +155,6 @@ mod moving_stops;
 
 #[path = "stops/contact_load_tests.rs"]
 mod contact_loaded_bow;
+
+#[path = "tests/nonlinear.rs"]
+mod nonlinear;

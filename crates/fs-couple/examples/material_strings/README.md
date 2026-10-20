@@ -343,6 +343,51 @@ constructor. Generic callers needing an initially larger network can explicitly
 use `CoupledModalSystem::new_prepared` or `new_with_columns_prepared` with their
 own complete models and budgets.
 
+## Nonlinear stretching with the same bow, body and gas memory
+
+An optional record after `prepared-linear` (or the cylinder-loading record when
+preparation is omitted), before `cavity`, selects source-derived geometric
+stretching:
+
+```text
+geometric-stretching 0.2 64 100000 1e-11 1e-10
+```
+
+The fields are the maximum continuous-span slope, maximum constitutive
+iterations, maximum generalized reaction [N/sqrt(kg)], absolute force residual
+tolerance [N/sqrt(kg)] and relative force residual tolerance. The original
+material or bonded section supplies axial rigidity EA; there is no independent
+nonlinear stiffness or pitch parameter. Omitting the record retains the
+original linear route.
+
+`nonlinear-cylinder-bow.material-strings` combines a bonded string's two
+transverse planes and material torsion with causal cylinder-gas memory, the
+shared material plate, its cavity and an actual bow gesture. With the existing
+wire, body and sleeve packs built, render to a new output:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/nonlinear-cylinder-bow.material-strings" "$demo/nonlinear-cylinder-bow.wav"
+```
+
+Both transverse planes contribute to one shared strain and tension. The same
+loaded string mass normalizes the geometric storage, including selected gas
+added inertia. The original complete linear network and scalar friction solver
+participate in each `fs_phs::discrete_gradient` constitutive trial; both reaction
+residual and full storage/work balance must close before state is published.
+The acceleration observer uses the endpoint geometric force. Existing gesture
+scheduling and PCM writing consume this same state.
+
+This is the moderate-slope, fixed-end Kirchhoff–Carrier model. Nonlinear
+harmonics and strong coupling require clock/mode refinement; residual closure
+alone does not establish trajectory accuracy. This selection currently supports
+one prescribed bow and `forces retain`. Additional simultaneous bows, independent
+stops (including moving stops and contact-loaded bows) and linear static preload
+refuse because they require a joint nonlinear contact/equilibrium solve. Select
+gas loading and rotational bridges before attaching stretching. Axial wave
+inertia, winding slip, evolving temperature and measured instrument qualification
+remain outside this composition.
+
 ## Material profile and physical limits
 
 The input profile queries **bare SI axes `T` and `omega`**, at the explicitly
@@ -367,7 +412,7 @@ cavity/circular neck. Bridges are interior transverse connections on the full
 span **including afterlength**, plus explicitly selected scalar rotational
 spring/dashpot joints. It does not model carved wood shells, a full 3D unilateral
 bridge-contact law, f-hole geometry, distributed cavity
-modes, helical winding/slip, nonlinear tension, solved finger disengagement,
+modes, helical winding/slip, solved finger disengagement,
 bow-hair normal-load distribution, or exterior radiation back-loading. The body
 and neck observations retain the existing compact baffled, zero-retardation
 approximation. Source-state validity is not measured instrument-fidelity evidence.

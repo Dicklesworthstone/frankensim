@@ -25,6 +25,7 @@ use fs_couple::render::schedule::force::{ForceInitialization,ForceRenderConfig,M
 use fs_couple::render::schedule::force::coupled::{ModalCouplingConfig,MAX_MODAL_CONNECTIONS,PreparedModalBudget};
 use fs_couple::air_path::cylinder::CylinderFlowResolution;
 use fs_couple::render::schedule::force::coupled::contact::friction::ModalFrictionConfig;
+use fs_couple::render::schedule::force::coupled::contact::friction::nonlinear::NonlinearModalConfig;
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::MultiFrictionConfig;
 use fs_couple::string_specimen::{with_uniform_circular_material_state,
     with_uniform_circular_material_and_constraints, StringGeometryConstraint, StringPrestress,
@@ -114,6 +115,9 @@ impl input::Spec {
         poll(gate)?;
         if let Some(body)=&profile { body.preflight(&self)?; }
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
+        if self.geometric_stretching.is_some() && stop_profile.is_some() {
+            return Err("geometric stretching with independent stops needs a joint nonlinear normal-contact solve".into());
+        }
         // Count every fluid inertia and physical connection before pack I/O.
         // The exact owner still applies its stricter connected-island bound.
         let additional_body_connections = profile.as_ref()
@@ -194,6 +198,9 @@ impl input::Spec {
         };
         let bank = if let Some(resolution) = self.cylinder_gas_loading {
             bank.with_cylinder_gas_loading(resolution, gate)?
+        } else { bank };
+        let bank = if let Some((slope, config)) = self.geometric_stretching {
+            bank.with_geometric_stretching(slope, config, gate)?
         } else { bank };
         let additional=contacts[1..].iter().map(|location|MaterialBowContact { location:*location,
             law:self.law.clone(),friction:settings.friction }).collect();

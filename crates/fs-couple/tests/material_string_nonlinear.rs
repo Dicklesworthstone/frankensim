@@ -5,6 +5,8 @@ mod polarization;
 mod pressure;
 #[path = "material_string_nonlinear/support.rs"]
 mod support;
+#[path = "material_string_nonlinear/bank.rs"]
+mod bank;
 use support::*;
 use fs_couple::bowed_string::BowedStringCard;
 use fs_couple::bowed_string::runtime::reciprocal::bank::MaterialStringSource;

@@ -1127,6 +1127,7 @@ pub struct MimoZoh {
     d: Vec<f64>,
     e: Vec<f64>,
     state: Vec<C64>,
+    candidate_state: Vec<C64>,
     last_input: Vec<f64>,
 }
 
@@ -1160,6 +1161,7 @@ impl MimoModel {
             ports: n,
             time_step_s,
             state: vec![C64::ZERO; terms.len() * n],
+            candidate_state: vec![C64::ZERO; terms.len() * n],
             terms,
             d: self.d.clone(),
             e: self.e.clone(),
@@ -1169,6 +1171,83 @@ impl MimoModel {
 }
 
 impl MimoZoh {
+    /// Actual sampled transfer matrix at angular frequency `omega` [rad/s].
+    /// This includes the held-input state update and start-of-interval output;
+    /// it is not the continuous rational response relabeled as a digital filter.
+    #[must_use]
+    pub fn eval_discrete_iw(&self, omega: f64) -> Vec<C64> {
+        let (s, c) = det::sin_cos(omega * self.time_step_s);
+        let z = C64::new(c, s);
+        let mut y: Vec<C64> = self.d.iter().zip(&self.e).map(|(&d, &e)|
+            C64::from_re(d) + (C64::ONE - z.conj()).scale(e / self.time_step_s)).collect();
+        for (decay, gain, r, pair) in &self.terms {
+            let first = *gain * (z - *decay).recip();
+            let second = gain.conj() * (z - decay.conj()).recip();
+            for (y, r) in y.iter_mut().zip(r) {
+                *y = *y + if *pair { *r * first + r.conj() * second }
+                    else { first.scale(r.re) };
+            }
+        }
+        y
+    }
+
+    /// Check the actual sampled impedance on an explicit uniform DC-to-Nyquist
+    /// grid. A continuous Hamiltonian certificate does not certify a sampled
+    /// interconnection. This diagnostic is always `GridOnly`, even if every
+    /// point passes; no gain scaling or residue repair is performed here.
+    ///
+    /// # Panics
+    /// Fewer than two grid points.
+    #[must_use]
+    pub fn sampled_passivity(&self, points: usize) -> MimoPassivityReport {
+        assert!(points >= 2, "passivity grid needs DC and Nyquist");
+        let mut worst = (f64::INFINITY, 0.0);
+        let mut violation_freqs = Vec::new();
+        for i in 0..points {
+            let w = core::f64::consts::PI / self.time_step_s * (i as f64 / (points - 1) as f64);
+            let response = self.eval_discrete_iw(w);
+            let lambda = if response.iter().all(|z| z.re.is_finite() && z.im.is_finite()) {
+                hermitian_part(&response, self.ports).0[0]
+            } else { f64::NAN };
+            if !lambda.is_finite() || lambda < 0.0 { violation_freqs.push(w); }
+            if lambda < worst.0 { worst = (lambda, w); }
+        }
+        MimoPassivityReport { passive: violation_freqs.is_empty(), class: CertificateClass::GridOnly,
+            worst, crossings: Vec::new(), violation_freqs }
+    }
+
+    pub(crate) fn history_output_into(&self, y: &mut [f64]) {
+        y.fill(0.0);
+        let n = self.ports;
+        for (k, (_, _, r, pair)) in self.terms.iter().enumerate() {
+            let x = &self.state[k * n..(k + 1) * n];
+            for (a, ya) in y.iter_mut().enumerate() {
+                let mut acc = C64::ZERO;
+                for (b, xb) in x.iter().enumerate() { acc = acc + r[a * n + b] * *xb; }
+                *ya += if *pair { 2.0 * acc.re } else { acc.re };
+            }
+        }
+    }
+
+    // The network previews the SAME ZOH state update before publishing waves.
+    // No heap allocation or physical mutation occurs here.
+    pub(crate) fn preview_state(&mut self, u: &[f64]) -> bool {
+        let n = self.ports;
+        for (k, (decay, gain, _, _)) in self.terms.iter().enumerate() {
+            for (b, &u) in u.iter().enumerate() {
+                self.candidate_state[k * n + b] = *decay * self.state[k * n + b] + gain.scale(u);
+            }
+        }
+        self.candidate_state.iter().all(|z| z.re.is_finite() && z.im.is_finite())
+    }
+    pub(crate) fn accept_state(&mut self, u: &[f64]) {
+        self.state.copy_from_slice(&self.candidate_state);
+        self.last_input.copy_from_slice(u);
+    }
+    /// Accepted original pole states, in pole-term then input-port order.
+    #[must_use]
+    pub fn pole_states(&self) -> &[C64] { &self.state }
+
     /// Advance one sample with the held input `u` (one value per port) and
     /// return the output at the start of the interval.
     ///
@@ -1187,8 +1266,8 @@ impl MimoZoh {
                     .sum()
             })
             .collect();
-        for (k, (decay, gain, r, pair)) in self.terms.iter().enumerate() {
-            let x = &mut self.state[k * n..(k + 1) * n];
+        for (k, (_, _, r, pair)) in self.terms.iter().enumerate() {
+            let x = &self.state[k * n..(k + 1) * n];
             for (a, ya) in y.iter_mut().enumerate() {
                 let mut acc = C64::ZERO;
                 for (b, xb) in x.iter().enumerate() {
@@ -1196,11 +1275,9 @@ impl MimoZoh {
                 }
                 *ya += if *pair { 2.0 * acc.re } else { acc.re };
             }
-            for (xb, &ub) in x.iter_mut().zip(u) {
-                *xb = *decay * *xb + gain.scale(ub);
-            }
         }
-        self.last_input.copy_from_slice(u);
+        self.preview_state(u);
+        self.accept_state(u);
         y
     }
 }

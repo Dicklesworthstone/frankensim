@@ -4,8 +4,9 @@
 //! their existing owners. Only clock/event splits and physical port wiring live
 //! here. The legacy constructor observes one opening in its adjacent gas;
 //! `with_radiation` binds several coplanar openings and an explicit exterior gas.
-//! Both are prescribed-flow, infinite-baffle images, NOT complete free-field
-//! flute/mouth/body radiation, inter-opening reaction or room scattering.
+//! Observation is an infinite-baffle image. A separately installed MIMO source
+//! load supplies mutual reaction and retains its medium/port binding here.
+//! No complete free-field flute/mouth/body radiation or room scattering follows.
 //! The original tonal/estimated jet remains tonal/estimated, not turbulent CFD.
 
 /// Versioned data-driven flue construction through this same pressure renderer.
@@ -225,6 +226,10 @@ impl FlueOutletPerformance {
         }], DuctRadiationSpec { openings, exterior: radiation.as_ref().map(|r| r.exterior),
             receiver: config.receiver, reconstruction,
         }).map_err(|e| GestureCompileError::Render(RenderError::Voice(AcousticRealizeError::Nonlinear(e))))?;
+        if let Some(environment) = network.mimo_environment() {
+            environment.validate_receiver(network.graph(), receiver.source(), *receiver.exterior_gas())
+                .map_err(|e| GestureCompileError::Render(RenderError::Voice(e)))?;
+        }
         let controls = controls::compile(&voice, &schedule, &config,
             mechanics_rate_hz, mechanical_samples)?;
         let mut launched = Vec::new();

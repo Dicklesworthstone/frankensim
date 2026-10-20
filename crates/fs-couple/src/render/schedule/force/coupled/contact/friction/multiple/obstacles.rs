@@ -75,6 +75,9 @@ impl MultiFrictionModalSystem {
     {
         poll(Some(gate))?;
         if contacts.is_empty() { return Ok(self); }
+        if self.core.has_nonlinear_potentials() {
+            return Err(invalid("affine obstacle solve cannot discard bound nonlinear storage").into());
+        }
         if self.samples_rendered() != 0 || self.obstacles.is_some() {
             return Err(invalid("friction obstacles bind once before the first physical sample").into());
         }

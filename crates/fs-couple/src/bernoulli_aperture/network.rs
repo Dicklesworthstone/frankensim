@@ -136,7 +136,8 @@ impl ApertureNetworkFrame {
     /// Total balance diagnostic; neither junction nor solver error is removed.
     #[must_use]
     pub fn balance_residual_j(&self) -> f64 {
-        self.storage_change_j + self.dissipated_energy_j - self.upstream_work_j - self.body_work_j - self.aperture.mechanical_work_j
+        self.storage_change_j + self.dissipated_energy_j + self.network.coupled_terminal_work_j
+            - self.upstream_work_j - self.body_work_j - self.aperture.mechanical_work_j
     }
 }
 

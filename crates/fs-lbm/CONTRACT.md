@@ -1767,3 +1767,27 @@ The seven regression sources exercise the actual native duct and internal-fan
 solves, independent upwind energy accounting, a viscosity-only material swap,
 original-claim support loss, candidate rollback, and context/selection/object
 identity, complete-chart and dynamic thermal-source refusals.
+
+### Local liquid viscosity and molecular conduction on native substeps
+
+`LiquidFlowEnthalpyInput::feedback` binds the original pinned liquid/caloric
+sources to `MaterialFlowFeedback`. Each actual thermal source epoch supplies
+the native full-stress laminar MAC viscosity field and conservative face mass
+fluxes. Momentum is quasisteady; density and reference cell mass stay fixed.
+Thermal storage, advection, source histories and energy accounting keep their
+existing owners.
+
+`MaterialFlowFeedback::with_fluid_conduction` optionally assigns existing full
+fluid-face thermal link IDs. The same applied material samples supply k(T);
+the shared thermal series-conductance helper reduces both native half-cell
+resistances. The original pairwise link exchange and combined CFL use those
+values, without adding sources or replacing authored contacts. Both patch
+coverages and total cell surfaces must match native voxel geometry. Parallel
+links on an owned face, competing coefficient owners, stale h/time epochs and
+changed geometry refuse the whole candidate. Missing k never implies insulation.
+
+G1/G3 source-only conductivity and viscosity swaps exercise actual native
+momentum, heat propagation, graded-cell resistance, cell mass and boundary
+energy. G0/G4 ownership/source/geometry refusals preserve accepted state.
+This fixed-density, scalar Newtonian bulk-fluid model supplies no additional
+contact resistance, phase mobility, pressure/viscous heat or moving surface.

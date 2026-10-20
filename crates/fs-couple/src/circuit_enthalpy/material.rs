@@ -253,12 +253,8 @@ impl MaterialNetwork<'_> {
                 k[i]=samples[&id].conductivity.as_ref().ok_or(invalid("linked conductivity is absent"))?
                     .property(key.name()).ok_or(invalid("linked conductivity key is absent"))?.value_si();
             }
-            let g=if link.area_m2==0.0 || k.contains(&0.0) {0.0} else {
-                let ra=finite(source.distance_a_m/k[0])?;let rb=finite(source.distance_b_m/k[1])?;
-                let total=finite(ra+rb)?;let value=finite(link.area_m2/total)?;
-                if ra<=0.0 || rb<=0.0 || total<=0.0 || value<=0.0 {return Err(invalid("unrepresentable material conduction"));}
-                value
-            };
+            let g=fs_thermal::enthalpy::series_conductance_w_k(
+                link.area_m2,[source.distance_a_m,source.distance_b_m],k)?;
             conductances.insert(source.link,g);
             links.insert(source.link,LinkMaterialSample {link:source.link,cells:[link.a,link.b],
                 conductivity_w_m_k:k,conductance_w_k:g});
