@@ -25,6 +25,7 @@ pub struct Profile {
 enum BodyModel {
     Plate(PlateProfile),
     Shell(shell::Spec),
+    Assembly(shell::assembly::Spec),
 }
 impl Profile {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
@@ -36,19 +37,24 @@ impl Profile {
             "frankensim-string-body-v1" | "frankensim-string-body-v2" =>
                 BodyModel::Plate(PlateProfile::parse(bytes)?),
             "frankensim-string-body-v3" => BodyModel::Shell(shell::Spec::parse(bytes)?),
+            "frankensim-string-body-v4" => BodyModel::Assembly(shell::assembly::Spec::parse(bytes)?),
             _ => return Err("unsupported body profile version".into()),
         };
         Ok(Self { bytes: bytes.to_vec(), model })
     }
     pub fn preflight(&self, spec: &input::Spec) -> Result<()> {
-        if let BodyModel::Shell(shell) = &self.model { shell.preflight(spec)?; }
-        Ok(())
+        match &self.model {
+            BodyModel::Plate(_) => Ok(()),
+            BodyModel::Shell(shell) => shell.preflight(spec),
+            BodyModel::Assembly(assembly) => assembly.preflight(spec),
+        }
     }
     /// Conservative source-declared viscous channel allowance before pack I/O.
     pub fn additional_body_connections(&self) -> usize {
         match &self.model {
             BodyModel::Plate(_) => 0,
             BodyModel::Shell(shell) => shell.additional_body_connections(),
+            BodyModel::Assembly(assembly) => assembly.additional_body_connections(),
         }
     }
     /// Load original ordered interface packs before the ordinary bulk loader.
@@ -58,8 +64,10 @@ impl Profile {
     {
         poll(gate)?;
         self.preflight(spec)?;
-        if let BodyModel::Shell(shell) = &mut self.model {
-            shell.load_interfaces(gate, &mut loader)?;
+        match &mut self.model {
+            BodyModel::Plate(_) => {},
+            BodyModel::Shell(shell) => shell.load_interfaces(gate, &mut loader)?,
+            BodyModel::Assembly(assembly) => assembly.load_interfaces(gate, &mut loader)?,
         }
         Ok(())
     }
@@ -67,12 +75,14 @@ impl Profile {
         match &self.model {
             BodyModel::Plate(_) => Ok(0),
             BodyModel::Shell(shell) => shell.interface_pack_bytes(),
+            BodyModel::Assembly(assembly) => assembly.interface_pack_bytes(),
         }
     }
     pub fn bridge_separation_m(&self, spec: &input::Spec, positive: usize, negative: usize) -> Result<f64> {
         match &self.model {
             BodyModel::Plate(plate) => plate.bridge_separation_m(spec, positive, negative),
             BodyModel::Shell(shell) => shell.bridge_separation_m(spec, positive, negative),
+            BodyModel::Assembly(assembly) => assembly.bridge_separation_m(spec, positive, negative),
         }
     }
     pub fn compile(&self, spec:&input::Spec, sources:Vec<MaterialStringSource>,
@@ -82,6 +92,7 @@ impl Profile {
         match &self.model {
             BodyModel::Plate(plate) => plate.compile(spec, sources, catalog, loader, settings, cx, gate),
             BodyModel::Shell(shell) => shell.compile(spec, sources, catalog, loader, settings, cx, gate),
+            BodyModel::Assembly(assembly) => assembly.compile(spec, sources, catalog, loader, settings, cx, gate),
         }
     }
 }

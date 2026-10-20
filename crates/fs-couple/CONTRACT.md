@@ -3490,3 +3490,18 @@ Helmholtz closure; a closed skin or resolved interior/exterior air is not
 inferred. Focused regression sources cover common modes and work, independent
 fluid roles, full summed viscous cross terms, material substitution and original
 performer retention. Their native numerical execution remains required.
+
+### Source data for assembled string bodies
+
+The existing `material_strings --body-profile` route accepts v4 component
+assemblies through the shared v3 component reader and material cache. It
+retains explicit directors, regional packs, support frames, material interfaces
+and independently selected fluid surfaces per part, then supplies physical
+edge/face ties and per-string bridge footprints to the common assembled owner.
+One whole-body window and projection allowance apply after component assembly.
+Empty fluid roles are explicit, individually free parts may be tied, and at
+least one region retains the performance's original body source. Source-bound
+bow interfaces, torsion, physical rocking levers, preloads and the original
+receiver remain in the existing performer. The bounded grammar, synthetic
+two-component fixture and unqualified native regression sources are documented
+in `examples/material_strings/BODY_PROFILES.md`.

@@ -278,3 +278,6 @@ mod fluid;
 
 #[path = "shell/tests.rs"]
 mod shell_input;
+
+#[path = "shell/assembly_tests.rs"]
+mod assembly_input;

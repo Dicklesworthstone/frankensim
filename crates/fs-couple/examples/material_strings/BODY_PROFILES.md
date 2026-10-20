@@ -1,15 +1,17 @@
 # Material plate and curved shell bodies in the shared string performer
 
 `material_strings PERFORMANCE NEW_OUTPUT.wav --body-profile PROFILE` selects
-an explicit rectangular material chart (v1/v2) or a curved shear-deformable
-shell (v3). Omitting the flag retains the original construction and material profile.
+an explicit rectangular material chart (v1/v2), a curved shear-deformable
+shell (v3), or an assembly of separately sourced shell components (v4).
+Omitting the flag retains the original construction and material profile.
 The performance's `body` record still supplies its pack, dimensions, thickness,
 mode count and observer distance. String layers, support prescriptions, torsion,
 loads, plucks, bow tracks, shared gas and optional cavity are unchanged.
 
 The rectangular profiles use `from_viscous_material_plate_chart`; the curved
 profile uses `from_material_shear_shell` and the shared MITC3+ shell owner.
-Both project material tensors on the SAME eigenbasis as bridge displacement,
+The assembled profile uses `from_material_shell_assembly` and the original
+work-conjugate mortar ties. All project material tensors on the SAME eigenbasis as bridge displacement,
 force and radiation. Full modal viscous cross terms participate in the shared
 string/body/friction solve; the body is not a bank of independent decay filters.
 No extra scalar body damping or an elastic-modulus-derived viscosity is added.
@@ -503,3 +505,109 @@ fixture retains its original outer supports. These bilateral linear resultants
 resolve compliant holding or a finite bonded footprint at the reference state.
 They do not supply unilateral separation, frictional slip, a resolved soundpost
 solid, prestressed corpus equilibrium or a distributed glue mortar.
+
+## Assembled material shell bodies (v4)
+
+A v4 profile describes independently oriented structural parts and their actual
+connections. Each component retains the v3 regional material, mesh, director,
+support and optional material-interface inputs. The original MITC owner
+assembles every complete component, and the original shell mortar owner joins
+their stiffness and mass matrices **before one body eigensolve**. All strings,
+full material loss, cavity pressure and exterior observation use those same
+assembled modes. There is no per-component modal truncation or mixing of
+independently rendered audio.
+
+Use [assembled.body](assembled.body) with the existing `pluck.material-strings`
+performance and directional body pack:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/pluck.material-strings" "$demo/assembled.wav" \
+  --body-profile crates/fs-couple/examples/material_strings/assembled.body
+```
+
+This synthetic fixture has two coplanar material pieces connected along their
+common seam. It demonstrates component assembly; it is not a violin or cello
+geometry. The first piece is clamped at its outer edge, and the second receives
+the string force. Changing only the second component's pack or grain changes
+the coupled mechanics without retuning the string or changing physics code.
+
+The record order is:
+
+```text
+frankensim-string-body-v4
+window LAMBDA_LOW LAMBDA_HIGH
+projection-work MAX_WORK
+components COUNT
+component NAME
+director-min-dot MIN_DOT
+mass consistent
+drilling ALPHA
+regions COUNT
+region ...
+nodes COUNT
+node ...
+triangles COUNT
+triangle ...
+supports COUNT
+support ...
+interfaces ...
+pressure-surfaces N_EXTERIOR N_CAVITY
+exterior-facet TRIANGLE positive
+cavity-facet TRIANGLE positive
+end-component
+tie-budget MAX_SEGMENTS MAX_SLAVE_DOFS GAP_TOLERANCE_M ANGLE_TOLERANCE_RAD
+edge-ties COUNT
+edge-tie MASTER_COMPONENT SLAVE_COMPONENT OFFSET ROTATIONS N_MASTER N_SLAVE
+master-node NODE
+slave-node NODE
+face-ties COUNT
+face-tie MASTER_COMPONENT SLAVE_COMPONENT OFFSET ROTATIONS N_MASTER N_SLAVE
+master-triangle TRIANGLE
+slave-triangle TRIANGLE
+bridges COUNT
+bridge COMPONENT NODE DIRECTION_X DIRECTION_Y DIRECTION_Z
+```
+
+Repeat each component and its records in declaration order. The `region`,
+`node`, `triangle`, `support`, optional `interfaces`, and pressure records have
+their unchanged v3 meanings. Components inherit the assembly's window and
+projection-work allowance; they do not declare their own window or bridges.
+Individual components may have `supports 0` without an interface. The complete
+assembly must still pass the original mechanics and spectral checks.
+
+Every component must explicitly declare both fluid roles. `pressure-surfaces
+0 0` makes an internal structural member mechanically active without inventing
+an exterior or cavity pressure surface. Exterior and cavity rows are summed
+independently over the complete body. They are not inferred from part names.
+
+An edge tie supplies all ordered master nodes followed by all ordered slave
+nodes. A face tie similarly supplies all master triangles followed by all slave
+triangles. Indices are local to their named components. `OFFSET` is
+`midsurface`, `positive-skin` or `negative-skin`; skin attachment arms come from
+the master's actual resolved thickness. `ROTATIONS` is `full` or
+`translations`. These records select the original rigid mortar law. Nonmatching
+seams and overlapping patches remain subject to that owner's geometric and
+work limits. Prescribed slave coordinates that the tie would eliminate refuse;
+the profile cannot silently discard a support.
+
+Each final `bridge` is one physical nodal force footprint, in actual string
+order, on any component. Rotational bridges can use footprints on different
+components; they retain the same physical chord and perpendicular-lever rule
+as v3. The other string controls, material bow interfaces, afterlength, torsion,
+preloads and shared gas continue through the original performer.
+
+Profiles retain the 64 KiB limit and admit at most eight components, 512 total
+nodes, 1024 total triangles, 64 ties and 16 shared body modes. Per-component v3
+mesh limits still apply. Material/interface source bytes and every damping
+channel remain under the existing complete-performance budgets. At least one
+region across the assembly must retain `@body`; other regions can select
+different source packs. Repeated bulk paths share the original material cache.
+
+This is unloaded linear component mechanics with rigid ties. It does not add
+prestressed assembly equilibrium, compliant glue between components, solid
+soundpost contact, a certified closed cavity skin, or resolved interior and
+exterior acoustic fields. The inherited compact observer and Helmholtz cavity
+remain explicit approximations. The new native regression sources check tied
+motion, complete material-to-pressure/PCM propagation, material-only changes
+and callback equivalence; they still require execution in the pinned build.

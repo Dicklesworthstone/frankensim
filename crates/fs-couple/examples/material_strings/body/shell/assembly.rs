@@ -1,0 +1,385 @@
+//! Data-only multi-part bodies on the original material shell and mortar owners.
+use super::*;
+use fs_couple::bowed_string::runtime::reciprocal::bank::shell::SharedMaterialShellAssemblyBody;
+use fs_couple::shear_shell::assembly::{
+    MaterialShellAssembly, ShellAssemblyForcePort, ShellAssemblyReductionOptions,
+};
+use fs_plate::shell::junction::{
+    EdgeTie, FaceTie, RotationCoupling, TieBudget, TieKind, TieOffset, TieSide,
+};
+
+const MAX_COMPONENTS: usize = 8;
+const MAX_TOTAL_NODES: usize = 512;
+const MAX_TOTAL_TRIANGLES: usize = 1024;
+const MAX_TIES: usize = 64;
+
+#[derive(Clone, Debug)]
+struct Component {
+    name: String,
+    shell: super::Spec,
+}
+#[derive(Clone, Debug)]
+struct AssemblyBridge {
+    component: usize,
+    node: usize,
+    direction: [f64; 3],
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Spec {
+    components: Vec<Component>,
+    edges: Vec<EdgeTie>,
+    faces: Vec<FaceTie>,
+    ties: TieBudget,
+    bridges: Vec<AssemblyBridge>,
+    window: (f64, f64),
+    projection_work: usize,
+}
+
+impl Spec {
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
+        let mut r = Records {
+            lines: std::str::from_utf8(bytes)?.lines(),
+            line: 0,
+        };
+        r.row("frankensim-string-body-v4", 0)?;
+        let (window, projection_work) = read_window(&mut r)?;
+        let n = count(r.row("components", 1)?[0], 1, MAX_COMPONENTS)?;
+        let mut components = Vec::<Component>::with_capacity(n);
+        let (mut nodes, mut triangles) = (0, 0);
+        for _ in 0..n {
+            let name = r.row("component", 1)?[0];
+            if name.len() > 128
+                || name.chars().any(char::is_control)
+                || components.iter().any(|c| c.name == name)
+            {
+                return Err("assembly component names must be unique bounded tokens".into());
+            }
+            let shell = super::Spec::read(&mut r, Some((window, projection_work)))?;
+            nodes += shell.nodes.len();
+            triangles += shell.triangles.len();
+            if nodes > MAX_TOTAL_NODES || triangles > MAX_TOTAL_TRIANGLES {
+                return Err(
+                    "assembled body exceeds 512 total nodes or 1024 total triangles".into(),
+                );
+            }
+            r.row("end-component", 0)?;
+            components.push(Component {
+                name: name.into(),
+                shell,
+            });
+        }
+        if !components
+            .iter()
+            .any(|c| c.shell.regions.iter().any(|r| r.pack == "@body"))
+        {
+            return Err("assembled body must retain the performance body material pack".into());
+        }
+        let v = r.row("tie-budget", 4)?;
+        let ties = TieBudget {
+            max_segments: count(v[0], 1, 65536)?,
+            max_slave_dofs: count(v[1], 1, 6 * MAX_TOTAL_NODES)?,
+            gap_tolerance_m: scalar(v[2])?,
+            angle_tolerance_rad: scalar(v[3])?,
+        };
+        if ties.gap_tolerance_m < 0.0
+            || !(0.0..=core::f64::consts::PI).contains(&ties.angle_tolerance_rad)
+        {
+            return Err("tie tolerances need nonnegative gap and angle in [0,pi]".into());
+        }
+        let n = count(r.row("edge-ties", 1)?[0], 0, MAX_TIES)?;
+        let mut edges = Vec::with_capacity(n);
+        for _ in 0..n {
+            let v = r.row("edge-tie", 6)?;
+            let a = component(&components, v[0])?;
+            let b = component(&components, v[1])?;
+            if a == b {
+                return Err("assembly ties must address distinct components".into());
+            }
+            let offset = offset(v[2])?;
+            let rotations = rotations(v[3])?;
+            let na = count(v[4], 2, components[a].shell.nodes.len())?;
+            let nb = count(v[5], 2, components[b].shell.nodes.len())?;
+            let master = indices(&mut r, "master-node", na, components[a].shell.nodes.len())?;
+            let slave = indices(&mut r, "slave-node", nb, components[b].shell.nodes.len())?;
+            edges.push(EdgeTie {
+                a: TieSide {
+                    component: a,
+                    nodes: master,
+                },
+                b: TieSide {
+                    component: b,
+                    nodes: slave,
+                },
+                offset,
+                rotations,
+                kind: TieKind::Rigid,
+            });
+        }
+        let n = count(r.row("face-ties", 1)?[0], 0, MAX_TIES - edges.len())?;
+        let mut faces = Vec::with_capacity(n);
+        for _ in 0..n {
+            let v = r.row("face-tie", 6)?;
+            let a = component(&components, v[0])?;
+            let b = component(&components, v[1])?;
+            if a == b {
+                return Err("assembly ties must address distinct components".into());
+            }
+            let offset = offset(v[2])?;
+            let rotations = rotations(v[3])?;
+            let na = count(v[4], 1, components[a].shell.triangles.len())?;
+            let nb = count(v[5], 1, components[b].shell.triangles.len())?;
+            let master_tris = indices(
+                &mut r,
+                "master-triangle",
+                na,
+                components[a].shell.triangles.len(),
+            )?;
+            let slave_tris = indices(
+                &mut r,
+                "slave-triangle",
+                nb,
+                components[b].shell.triangles.len(),
+            )?;
+            faces.push(FaceTie {
+                master_component: a,
+                master_tris,
+                slave_component: b,
+                slave_tris,
+                offset,
+                rotations,
+                kind: TieKind::Rigid,
+            });
+        }
+        let n = count(r.row("bridges", 1)?[0], 1, 8)?;
+        let mut bridges = Vec::with_capacity(n);
+        for _ in 0..n {
+            let v = r.row("bridge", 5)?;
+            let component = component(&components, v[0])?;
+            let shell = &components[component].shell;
+            let node = index(v[1], shell.nodes.len())?;
+            let direction = unit_direction(&v[2..5])?;
+            if shell
+                .supports
+                .iter()
+                .any(|s| s.node == node && !(0..3).any(|i| direction[i] != 0.0 && !s.mask[i]))
+            {
+                return Err("assembly bridge has no unconstrained translational direction".into());
+            }
+            bridges.push(AssemblyBridge {
+                component,
+                node,
+                direction,
+            });
+        }
+        if r.lines.next().is_some() {
+            return Err("unconsumed assembly body profile record".into());
+        }
+        Ok(Self {
+            components,
+            edges,
+            faces,
+            ties,
+            bridges,
+            window,
+            projection_work,
+        })
+    }
+
+    pub(crate) fn preflight(&self, spec: &input::Spec) -> Result<()> {
+        if self.bridges.len() != spec.strings.len() {
+            return Err("assembled body requires one physical bridge per actual string".into());
+        }
+        if !(1..=MAX_MODES).contains(&spec.body.modes) {
+            return Err("assembled body admits 1..=16 retained global body modes".into());
+        }
+        spec.network_dimensions_with_body_connections(true, self.additional_body_connections())?;
+        for component in &self.components {
+            component.shell.geometry(spec)?;
+            component
+                .shell
+                .interfaces
+                .preflight(&component.shell, spec)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn additional_body_connections(&self) -> usize {
+        self.components
+            .iter()
+            .map(|c| c.shell.additional_body_connections())
+            .sum()
+    }
+
+    pub(crate) fn load_interfaces(
+        &mut self,
+        gate: &CancelGate,
+        loader: &mut impl FnMut(&str) -> Result<fs_matdb::NormalizedInterfacePack>,
+    ) -> Result<()> {
+        // Commit a complete source set only after cumulative source admission.
+        // Cache caller reads across all components; each part retains its own
+        // exact ordered interface identity and application geometry.
+        let mut candidate = self.components.clone();
+        let mut packs = BTreeMap::<String, fs_matdb::NormalizedInterfacePack>::new();
+        let mut cached = |name: &str| {
+            if let Some(pack) = packs.get(name) {
+                return Ok(pack.clone());
+            }
+            let pack = loader(name)?;
+            packs.insert(name.into(), pack.clone());
+            Ok(pack)
+        };
+        let mut bytes = 0usize;
+        for c in &mut candidate {
+            c.shell.load_interfaces(gate, &mut cached)?;
+            bytes = bytes
+                .checked_add(c.shell.interface_pack_bytes()?)
+                .ok_or("assembly interface source bytes overflow")?;
+            if bytes > input::MAX_TOTAL_PACK_BYTES {
+                return Err(
+                    "assembled interface packs exceed the original total source byte budget".into(),
+                );
+            }
+        }
+        self.components = candidate;
+        Ok(())
+    }
+
+    pub(crate) fn interface_pack_bytes(&self) -> Result<usize> {
+        self.components.iter().try_fold(0usize, |n, c| {
+            n.checked_add(c.shell.interface_pack_bytes()?)
+                .ok_or_else(|| "assembly interface source bytes overflow".into())
+        })
+    }
+
+    pub(crate) fn bridge_separation_m(
+        &self,
+        spec: &input::Spec,
+        positive: usize,
+        negative: usize,
+    ) -> Result<f64> {
+        if self.bridges.len() != spec.strings.len() {
+            return Err("assembly rotation requires one physical bridge per string".into());
+        }
+        let p = self
+            .bridges
+            .get(positive)
+            .ok_or("unknown positive assembly bridge")?;
+        let n = self
+            .bridges
+            .get(negative)
+            .ok_or("unknown negative assembly bridge")?;
+        if p.direction != n.direction {
+            return Err(
+                "assembly chord rotation requires a common physical translation direction".into(),
+            );
+        }
+        bridge_lever(
+            self.components[p.component].shell.position(p.node, spec),
+            self.components[n.component].shell.position(n.node, spec),
+            p.direction,
+        )
+    }
+
+    pub(crate) fn compile(
+        &self,
+        spec: &input::Spec,
+        sources: Vec<MaterialStringSource>,
+        catalog: &mut Catalog,
+        loader: &mut impl FnMut(&str) -> Result<NormalizedPack>,
+        settings: StringBankOptions,
+        cx: &Cx<'_>,
+        gate: &CancelGate,
+    ) -> Result<ReciprocalStringBank> {
+        poll(gate)?;
+        self.preflight(spec)?;
+        let components = self
+            .components
+            .iter()
+            .map(|c| {
+                c.shell
+                    .resolve_component(&c.name, spec, catalog, loader, gate)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let force_ports = self
+            .bridges
+            .iter()
+            .map(|bridge| {
+                let mut rows: Vec<_> = self
+                    .components
+                    .iter()
+                    .map(|c| vec![0.0; 6 * c.shell.nodes.len()])
+                    .collect();
+                rows[bridge.component][6 * bridge.node..6 * bridge.node + 3]
+                    .copy_from_slice(&bridge.direction);
+                ShellAssemblyForcePort { components: rows }
+            })
+            .collect();
+        let body = SharedMaterialShellAssemblyBody {
+            specimen: MaterialShellAssembly {
+                components,
+                edge_ties: self.edges.clone(),
+                face_ties: self.faces.clone(),
+                tie_budget: self.ties,
+            },
+            reduction: ShellAssemblyReductionOptions {
+                eigenvalue_window: self.window,
+                n_modes: spec.body.modes,
+                projection_budget: ShellProjectionBudget {
+                    max_modes: MAX_MODES,
+                    max_projection_terms: self.projection_work,
+                    reference_resistance_n_s_m: 1.0,
+                },
+                max_total_nodes: MAX_TOTAL_NODES,
+                max_total_triangles: MAX_TOTAL_TRIANGLES,
+            },
+            force_ports,
+            bridges: spec.strings.iter().map(|s| s.bridge).collect(),
+            modal_budget: modal_budget(),
+            listener_m: spec.body.listener,
+        };
+        Ok(ReciprocalStringBank::from_material_shell_assembly(
+            cx,
+            sources,
+            spec.gas,
+            body,
+            spec.cavity.clone(),
+            spec.bow_law(0)?.clone(),
+            settings,
+            gate,
+        )?)
+    }
+}
+
+fn component(components: &[Component], name: &str) -> Result<usize> {
+    components
+        .iter()
+        .position(|c| c.name == name)
+        .ok_or_else(|| "assembly reference names an unknown component".into())
+}
+fn offset(value: &str) -> Result<TieOffset> {
+    match value {
+        "midsurface" => Ok(TieOffset::Midsurface),
+        "positive-skin" => Ok(TieOffset::Skin { side: 1 }),
+        "negative-skin" => Ok(TieOffset::Skin { side: -1 }),
+        _ => Err("tie offset must be midsurface, positive-skin or negative-skin".into()),
+    }
+}
+fn rotations(value: &str) -> Result<RotationCoupling> {
+    match value {
+        "full" => Ok(RotationCoupling::Full),
+        "translations" => Ok(RotationCoupling::TranslationsOnly),
+        _ => Err("tie rotation policy must be full or translations".into()),
+    }
+}
+fn indices(r: &mut Records<'_>, record: &str, n: usize, bound: usize) -> Result<Vec<usize>> {
+    let mut result = Vec::with_capacity(n);
+    for _ in 0..n {
+        let i = index(r.row(record, 1)?[0], bound)?;
+        if result.contains(&i) {
+            return Err("tie node or triangle list repeats an index".into());
+        }
+        result.push(i);
+    }
+    Ok(result)
+}

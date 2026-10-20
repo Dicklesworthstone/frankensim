@@ -18,6 +18,8 @@ use fs_plate::shell::survey::validate_midsurface;
 mod interfaces;
 #[path = "shell/pressure.rs"]
 mod pressure;
+#[path = "shell/assembly.rs"]
+pub(super) mod assembly;
 
 const MAX_NODES: usize = 128;
 const MAX_TRIANGLES: usize = 256;
@@ -66,6 +68,17 @@ impl Spec {
     pub(super) fn parse(bytes: &[u8]) -> Result<Self> {
         let mut r = Records { lines: std::str::from_utf8(bytes)?.lines(), line: 0 };
         r.row("frankensim-string-body-v3", 0)?;
+        let result = Self::read(&mut r, None)?;
+        if r.lines.next().is_some() {
+            return Err("unconsumed shell body profile record".into());
+        }
+        Ok(result)
+    }
+
+    /// One geometry/material reader for standalone bodies and assembled parts.
+    /// Components inherit the assembly's spectral budget and declare their
+    /// physical bridge footprints at the assembly level.
+    fn read(r: &mut Records<'_>, assembly_window: Option<((f64, f64), usize)>) -> Result<Self> {
         let minimum_facet_dot = scalar(r.row("director-min-dot", 1)?[0])?;
         if minimum_facet_dot <= 0.0 || minimum_facet_dot > 1.0 {
             return Err("shell director-min-dot must lie in (0,1]".into());
@@ -79,12 +92,11 @@ impl Spec {
         if drilling_alpha <= 0.0 {
             return Err("shell drilling strength must be explicitly positive".into());
         }
-        let v = r.row("window", 2)?;
-        let window = (scalar(v[0])?, scalar(v[1])?);
-        if window.0 < 0.0 || window.1 <= window.0 {
-            return Err("shell eigenvalue window must be nonnegative and increasing".into());
-        }
-        let projection_work = count(r.row("projection-work", 1)?[0], 1, MAX_PROJECTION_WORK)?;
+        let (window, projection_work) = if let Some(settings) = assembly_window {
+            settings
+        } else {
+            read_window(r)?
+        };
         let n = count(r.row("regions", 1)?[0], 1, 16)?;
         let mut regions = Vec::<RegionInput>::with_capacity(n);
         for _ in 0..n {
@@ -110,7 +122,7 @@ impl Spec {
                 triangles: Vec::new(),
             });
         }
-        if !regions.iter().any(|x| x.pack == "@body") {
+        if assembly_window.is_none() && !regions.iter().any(|x| x.pack == "@body") {
             return Err("shell regions must retain the performance body material pack".into());
         }
         let n = count(r.row("nodes", 1)?[0], 3, MAX_NODES)?;
@@ -150,12 +162,15 @@ impl Spec {
             let mask = core::array::from_fn(|i| bytes[i] == b'1');
             supports.push(ShellConstraint { node, mask, frame: ConstraintFrame::Global });
         }
-        let interfaces = interfaces::Inputs::parse(&mut r, &nodes, &triangles, &regions)?;
-        if supports.is_empty() && interfaces.connection_count() == 0 {
+        let interfaces = interfaces::Inputs::parse(r, &nodes, &triangles, &regions)?;
+        if assembly_window.is_none() && supports.is_empty() && interfaces.connection_count() == 0 {
             return Err("shell body requires explicit supports or material interfaces".into());
         }
-        let pressure_surfaces = pressure::parse(&mut r, triangles.len())?;
-        let n = count(r.row("bridges", 1)?[0], 1, 8)?;
+        let pressure_surfaces = pressure::parse(r, triangles.len())?;
+        if assembly_window.is_some() && pressure_surfaces.is_none() {
+            return Err("every assembled shell component must declare its pressure surfaces".into());
+        }
+        let n = if assembly_window.is_some() { 0 } else { count(r.row("bridges", 1)?[0], 1, 8)? };
         let mut bridges = Vec::with_capacity(n);
         for _ in 0..n {
             let v = r.row("bridge", 4)?;
@@ -167,9 +182,6 @@ impl Spec {
                 }
             }
             bridges.push(Bridge { node, direction });
-        }
-        if r.lines.next().is_some() {
-            return Err("unconsumed shell body profile record".into());
         }
         Ok(Self { nodes, triangles, regions, supports, interfaces, pressure_surfaces, bridges, minimum_facet_dot,
             mass, drilling_alpha, window, projection_work })
@@ -227,25 +239,8 @@ impl Spec {
         }
         let p = self.position(p.node, spec);
         let n = self.position(n.node, spec);
-        let chord = [p[0] - n[0], p[1] - n[1], p[2] - n[2]];
         let d = self.bridges[positive].direction;
-        // For rigid motion, d dot (theta cross chord) =
-        // theta dot (chord cross d). The angular coordinate is therefore
-        // rotation about this cross-product axis, with its perpendicular
-        // lever arm; full chord length would mis-scale an oblique attachment.
-        let lever = norm([
-            chord[1] * d[2] - chord[2] * d[1],
-            chord[2] * d[0] - chord[0] * d[2],
-            chord[0] * d[1] - chord[1] * d[0],
-        ]);
-        let chord_length = norm(chord);
-        // Inverting a cross product below its arithmetic resolution can turn
-        // nearly parallel products into a spurious finite angular coordinate.
-        if !lever.is_finite() || !chord_length.is_finite() || lever <= 0.0
-            || lever <= 64.0 * f64::EPSILON * chord_length {
-            return Err("shell rotational bridges need a resolved lever perpendicular to their force direction".into());
-        }
-        Ok(lever)
+        bridge_lever(p, n, d)
     }
 
     pub(super) fn compile(&self, spec: &input::Spec, sources: Vec<MaterialStringSource>,
@@ -254,6 +249,32 @@ impl Spec {
     {
         poll(gate)?;
         self.preflight(spec)?;
+        let component = self.resolve_component("body", spec, catalog, loader, gate)?;
+        let force_ports = self.bridges.iter().map(|bridge| {
+            let mut port = vec![0.0; 6 * self.nodes.len()];
+            port[6 * bridge.node..6 * bridge.node + 3].copy_from_slice(&bridge.direction);
+            port
+        }).collect();
+        let body = SharedMaterialShellBody {
+            specimen: component.specimen, directors: component.directors,
+            constraints: component.constraints, mass: component.mass,
+            drilling_alpha: component.drilling_alpha, eigenvalue_window: self.window,
+            n_modes: spec.body.modes, force_ports,
+            bridges: spec.strings.iter().map(|s| s.bridge).collect(),
+            assembly_budget: component.assembly_budget,
+            projection_budget: ShellProjectionBudget { max_modes: MAX_MODES,
+                max_projection_terms: self.projection_work, reference_resistance_n_s_m: 1.0 },
+            modal_budget: modal_budget(), listener_m: spec.body.listener,
+        };
+        Ok(ReciprocalStringBank::from_material_shear_shell(cx, sources, spec.gas, body,
+            spec.cavity.clone(), spec.bow_law(0)?.clone(), settings, gate)?)
+    }
+
+    fn resolve_component(&self, name: &str, spec: &input::Spec,
+        catalog: &mut Catalog, loader: &mut impl FnMut(&str) -> Result<NormalizedPack>,
+        gate: &CancelGate) -> Result<fs_couple::shear_shell::assembly::MaterialShellComponent>
+    {
+        poll(gate)?;
         let (mesh, directors) = self.geometry(spec)?;
         let assembly_budget = MitcBudget { max_nodes: MAX_NODES, max_triangles: MAX_TRIANGLES };
         let mut regions = Vec::with_capacity(self.regions.len());
@@ -288,22 +309,38 @@ impl Spec {
         let specimen = if let Some(surfaces) = &self.pressure_surfaces {
             specimen.with_pressure_surfaces(surfaces.clone(), gate)?
         } else { specimen };
-        let force_ports = self.bridges.iter().map(|bridge| {
-            let mut port = vec![0.0; 6 * self.nodes.len()];
-            port[6 * bridge.node..6 * bridge.node + 3].copy_from_slice(&bridge.direction);
-            port
-        }).collect();
-        let body = SharedMaterialShellBody {
-            specimen, directors, constraints: self.supports.clone(), mass: self.mass,
-            drilling_alpha: self.drilling_alpha, eigenvalue_window: self.window, n_modes: spec.body.modes,
-            force_ports, bridges: spec.strings.iter().map(|s| s.bridge).collect(), assembly_budget,
-            projection_budget: ShellProjectionBudget { max_modes: MAX_MODES,
-                max_projection_terms: self.projection_work, reference_resistance_n_s_m: 1.0 },
-            modal_budget: modal_budget(), listener_m: spec.body.listener,
-        };
-        Ok(ReciprocalStringBank::from_material_shear_shell(cx, sources, spec.gas, body,
-            spec.cavity.clone(), spec.bow_law(0)?.clone(), settings, gate)?)
+        Ok(fs_couple::shear_shell::assembly::MaterialShellComponent {
+            name: name.into(), specimen, directors, constraints: self.supports.clone(),
+            mass: self.mass, drilling_alpha: self.drilling_alpha, assembly_budget,
+        })
     }
+}
+
+fn read_window(r: &mut Records<'_>) -> Result<((f64, f64), usize)> {
+    let v = r.row("window", 2)?;
+    let window = (scalar(v[0])?, scalar(v[1])?);
+    if window.0 < 0.0 || window.1 <= window.0 {
+        return Err("shell eigenvalue window must be nonnegative and increasing".into());
+    }
+    let work = count(r.row("projection-work", 1)?[0], 1, MAX_PROJECTION_WORK)?;
+    Ok((window, work))
+}
+
+fn bridge_lever(p: [f64; 3], n: [f64; 3], d: [f64; 3]) -> Result<f64> {
+    let chord = [p[0] - n[0], p[1] - n[1], p[2] - n[2]];
+    // d dot (theta cross chord) = theta dot (chord cross d): the
+    // work-conjugate angular coordinate uses the perpendicular lever.
+    let lever = norm([
+        chord[1] * d[2] - chord[2] * d[1],
+        chord[2] * d[0] - chord[0] * d[2],
+        chord[0] * d[1] - chord[1] * d[0],
+    ]);
+    let chord_length = norm(chord);
+    if !lever.is_finite() || !chord_length.is_finite() || lever <= 0.0
+        || lever <= 64.0 * f64::EPSILON * chord_length {
+        return Err("shell rotational bridges need a resolved lever perpendicular to their force direction".into());
+    }
+    Ok(lever)
 }
 
 fn count(value: &str, min: usize, max: usize) -> Result<usize> {

@@ -1,0 +1,107 @@
+frankensim-string-body-v4
+window 1 100000000
+projection-work 67108864
+components 2
+component left
+director-min-dot 1
+mass consistent
+drilling 0.001
+regions 1
+region left @body orthotropic12 1 0.17 0.8333333333333334 1 0 0
+nodes 9
+node 0 0 0 0 0 1
+node 0.25 0 0 0 0 1
+node 0.5 0 0 0 0 1
+node 0 0.5 0 0 0 1
+node 0.25 0.5 0 0 0 1
+node 0.5 0.5 0 0 0 1
+node 0 1 0 0 0 1
+node 0.25 1 0 0 0 1
+node 0.5 1 0 0 0 1
+triangles 8
+triangle 0 1 4 left
+triangle 0 4 3 left
+triangle 1 2 5 left
+triangle 1 5 4 left
+triangle 3 4 7 left
+triangle 3 7 6 left
+triangle 4 5 8 left
+triangle 4 8 7 left
+supports 3
+support 0 111111
+support 3 111111
+support 6 111111
+pressure-surfaces 8 8
+exterior-facet 0 positive
+exterior-facet 1 positive
+exterior-facet 2 positive
+exterior-facet 3 positive
+exterior-facet 4 positive
+exterior-facet 5 positive
+exterior-facet 6 positive
+exterior-facet 7 positive
+cavity-facet 0 positive
+cavity-facet 1 positive
+cavity-facet 2 positive
+cavity-facet 3 positive
+cavity-facet 4 positive
+cavity-facet 5 positive
+cavity-facet 6 positive
+cavity-facet 7 positive
+end-component
+component right
+director-min-dot 1
+mass consistent
+drilling 0.001
+regions 1
+region right @body orthotropic12 1 0.17 0.8333333333333334 1 0 0
+nodes 9
+node 0.5 0 0 0 0 1
+node 0.75 0 0 0 0 1
+node 1 0 0 0 0 1
+node 0.5 0.5 0 0 0 1
+node 0.75 0.5 0 0 0 1
+node 1 0.5 0 0 0 1
+node 0.5 1 0 0 0 1
+node 0.75 1 0 0 0 1
+node 1 1 0 0 0 1
+triangles 8
+triangle 0 1 4 right
+triangle 0 4 3 right
+triangle 1 2 5 right
+triangle 1 5 4 right
+triangle 3 4 7 right
+triangle 3 7 6 right
+triangle 4 5 8 right
+triangle 4 8 7 right
+supports 0
+pressure-surfaces 8 8
+exterior-facet 0 positive
+exterior-facet 1 positive
+exterior-facet 2 positive
+exterior-facet 3 positive
+exterior-facet 4 positive
+exterior-facet 5 positive
+exterior-facet 6 positive
+exterior-facet 7 positive
+cavity-facet 0 positive
+cavity-facet 1 positive
+cavity-facet 2 positive
+cavity-facet 3 positive
+cavity-facet 4 positive
+cavity-facet 5 positive
+cavity-facet 6 positive
+cavity-facet 7 positive
+end-component
+tie-budget 256 128 1e-10 1e-8
+edge-ties 1
+edge-tie left right midsurface full 3 3
+master-node 2
+master-node 5
+master-node 8
+slave-node 0
+slave-node 3
+slave-node 6
+face-ties 0
+bridges 1
+bridge right 4 0 0 1
