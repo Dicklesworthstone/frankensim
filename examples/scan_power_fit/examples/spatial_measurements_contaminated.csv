@@ -1,0 +1,10 @@
+time_s,observable,target,scale,readout,selection
+1,specific_enthalpy_j_kg,152,1,volume,0;1;2;3;4;5
+1,specific_enthalpy_j_kg,152,1,volume,0;1;2;3;4;5
+1,specific_enthalpy_j_kg,152,1,volume,0;1;2;3;4;5
+1,specific_enthalpy_j_kg,152,1,volume,0;1;2;3;4;5
+2,specific_enthalpy_j_kg,157,1,volume,0;1;2;3;4;5
+2,specific_enthalpy_j_kg,157,1,volume,0;1;2;3;4;5
+2,specific_enthalpy_j_kg,157,1,volume,0;1;2;3;4;5
+2,specific_enthalpy_j_kg,157,1,volume,0;1;2;3;4;5
+2,specific_enthalpy_j_kg,197,1,volume,0;1;2;3;4;5

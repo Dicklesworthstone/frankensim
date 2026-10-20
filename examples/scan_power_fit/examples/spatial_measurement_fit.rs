@@ -12,6 +12,7 @@ use fs_conduction::bc::history::march::enthalpy::scanning::ScanningEnthalpyRun;
 use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::{ScanSensitivityError,
     objective::{ScanObservable, ScanObjectiveSampling, ScanObjectiveBudget}};
 use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::spatial::{ScanReadout, ScanSpatialObservation};
+use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::loss::{ScanObservationWithLoss, ScanResidualLoss};
 use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::checkpoint::ScanCheckpointBudget;
 use fs_conduction::bc::history::march::moving::{MovingHeatSource, MovingHeatBudget};
 use fs_conduction::transient::enthalpy::{EnthalpyBudget, EnthalpyStepConfig};
@@ -29,7 +30,26 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const MAX_BYTES: usize = 128 * 1024;
 const MAX_ROWS: usize = 256;
 const HEADER: &str = "time_s,observable,target,scale,readout,selection";
-const USAGE: &str = "spatial_measurement_fit measurements.csv [initial_first_W initial_second_W]";
+const USAGE: &str = "spatial_measurement_fit measurements.csv [initial_first_W initial_second_W] [--huber positive_threshold]";
+
+struct Options {
+    path: String,
+    initial: [f64;2],
+    loss: ScanResidualLoss,
+}
+fn options(args: &[String]) -> Result<Options> {
+    let positional=args.iter().position(|s|s=="--huber").unwrap_or(args.len());
+    if (positional!=1 && positional!=3)
+        || (positional<args.len() && args.len()!=positional+2)
+    { return Err(USAGE.into()); }
+    let loss=if positional<args.len() {
+        ScanResidualLoss::Huber {threshold:finite(&args[positional+1])?}
+    } else {ScanResidualLoss::Quadratic};
+    loss.validate()?;
+    let initial=if positional==3 {[finite(&args[1])?,finite(&args[2])?]} else {[1.,1.]};
+    if initial.iter().any(|p|*p<0.) {return Err("initial watts must be nonnegative".into());}
+    Ok(Options {path:args[0].clone(),initial,loss})
+}
 
 struct Measurements<'m> {
     endpoints: Vec<f64>,
@@ -124,7 +144,8 @@ struct Fit {
     converged: bool,
     violation: f64,
 }
-fn fit(cx: &Cx<'_>, text: &str, initial: [f64;2]) -> Result<Fit> {
+fn fit(cx: &Cx<'_>, text: &str, initial: [f64;2], loss: ScanResidualLoss) -> Result<Fit> {
+    loss.validate()?;
     if initial.iter().any(|p|!p.is_finite() || *p<0.) { return Err("initial watts must be finite and nonnegative".into()); }
     let (complex,positions)=fs_conduction::fixtures::box_grid([1,1,1],[1.;3]);
     let mesh=ConductionMesh::new(complex,positions)?;
@@ -153,7 +174,9 @@ fn fit(cx: &Cx<'_>, text: &str, initial: [f64;2]) -> Result<Fit> {
         Ok(ScanningEnthalpyRun::new(cx,base,sources,1,None)?)
     };
     let segment=n.min(8);
-    let objective=ScanPowerObjective {endpoints_s:data.endpoints.clone(),observations:data.rows.clone(),
+    let observations=data.rows.iter().cloned().map(|row|ScanObservationWithLoss::new(row,loss))
+        .collect::<std::result::Result<Vec<_>,_>>()?;
+    let objective=ScanPowerObjective {endpoints_s:data.endpoints.clone(),observations,
         sampling:ScanObjectiveSampling::EventLeft,
         step:EnthalpyStepConfig {newton:NewtonKrylovConfig {absolute_tolerance:1e-11,relative_tolerance:1e-12,
             linear_restart:8,max_linear_cycles:16,forcing_minimum:1e-12,forcing_maximum:1e-3,..Default::default()},
@@ -186,20 +209,21 @@ fn fit(cx: &Cx<'_>, text: &str, initial: [f64;2]) -> Result<Fit> {
 }
 fn main() -> Result<()> {
     let args:Vec<_>=std::env::args().skip(1).collect();
-    if args.len()!=1 && args.len()!=3 { return Err(USAGE.into()); }
+    let options=options(&args)?;
     let mut text=String::new();
-    std::fs::File::open(&args[0])?.take(MAX_BYTES as u64+1).read_to_string(&mut text)?;
-    let initial=if args.len()==3 {[finite(&args[1])?,finite(&args[2])?]} else {[1.,1.]};
+    std::fs::File::open(&options.path)?.take(MAX_BYTES as u64+1).read_to_string(&mut text)?;
     let gate=CancelGate::new(); let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let result=pool.scope(|arena|fit(&Cx::new(&gate,arena,
-        StreamKey {seed:76,kernel_id:51,tile:0,iteration:0},Budget::INFINITE,ExecMode::Deterministic),&text,initial))?;
+        StreamKey {seed:76,kernel_id:51,tile:0,iteration:0},Budget::INFINITE,ExecMode::Deterministic),&text,options.initial,options.loss))?;
     println!("# Synthetic unit-cube reference model; not automatic experimental calibration.");
+    println!("# residual_loss={:?}; residuals below are raw, not clipped",options.loss);
     println!("# objective={:.17e} converged={} max_scaled_violation={:.17e} evaluations={}",
         result.objective,result.converged,result.violation,result.evaluations);
     println!("time_s,absorbed_power_w");
     for (time,power) in [0.,1.,2.].into_iter().zip(&result.powers) {println!("{time:.17e},{power:.17e}");}
     for (i,(time,quantity,target,prediction,residual)) in result.measurements.iter().enumerate() {
-        println!("# measurement={i} time_s={time:.17e} observable={quantity:?} target={target:.17e} prediction={prediction:.17e} standardized_residual={residual:.17e}");
+        let (term,slope)=options.loss.value_derivative(*residual)?;
+        println!("# measurement={i} time_s={time:.17e} observable={quantity:?} target={target:.17e} prediction={prediction:.17e} standardized_residual={residual:.17e} loss_term={term:.17e} dloss_dstandardized_residual={slope:.17e}");
     }
     if !result.converged || result.violation>1e-8 { return Err("fit did not pass convergence and nonnegative-domain checks".into()); }
     Ok(())
@@ -217,7 +241,7 @@ mod tests {
     #[test]
     fn g1_csv_measurements_fit_their_actual_spatial_mean_from_off() {
         with_cx(|cx| {
-            let solved=fit(cx,DATA,[0.,0.]).unwrap();
+            let solved=fit(cx,DATA,[0.,0.],ScanResidualLoss::Quadratic).unwrap();
             assert!(solved.converged && solved.violation<=1e-8 && solved.objective<1e-12);
             assert!((solved.powers[0]-2.).abs()<1e-5 && (solved.powers[1]-5.).abs()<1e-5);
             assert_eq!(solved.powers[2],0.);
@@ -250,6 +274,51 @@ mod tests {
             assert_eq!(data.endpoints,vec![0.5,1.,1.5,2.]);
             assert_eq!(data.rows.iter().map(|r|r.endpoint).collect::<Vec<_>>(),vec![2,0]);
             assert_eq!(data.rows[0].readout.evaluate(cx,&[310.;8]).unwrap(),310.);
+        });
+    }
+}
+
+#[cfg(test)]
+mod robust_tests {
+    use super::*;
+
+    #[test]
+    fn g0_huber_options_are_explicit_and_invalid_thresholds_refuse_before_io() {
+        let parse=|items:&[&str]|options(&items.iter().map(|s|s.to_string()).collect::<Vec<_>>());
+        assert_eq!(parse(&["data.csv"]).unwrap().loss,ScanResidualLoss::Quadratic);
+        let chosen=parse(&["data.csv","0","0","--huber","1.5"]).unwrap();
+        assert_eq!(chosen.initial,[0.,0.]);
+        assert_eq!(chosen.loss,ScanResidualLoss::Huber {threshold:1.5});
+        assert_eq!(parse(&["data.csv","--huber","1"]).unwrap().initial,[1.,1.]);
+        for args in [vec![],vec!["--huber","1"],vec!["data.csv","--huber"],
+            vec!["data.csv","--huber","0"],vec!["data.csv","--huber","NaN"],
+            vec!["data.csv","--huber","-1"],vec!["data.csv","0"],
+            vec!["data.csv","--huber","1","--huber","2"]] {
+            assert!(parse(&args).is_err());
+        }
+    }
+
+    #[test]
+    fn g1_contaminated_mean_fit_limits_influence_without_hiding_raw_residuals() {
+        let mut data=format!("{HEADER}\n");
+        for _ in 0..4 {data.push_str("1,specific_enthalpy_j_kg,152,1,volume,0;1;2;3;4;5\n");}
+        for _ in 0..4 {data.push_str("2,specific_enthalpy_j_kg,157,1,volume,0;1;2;3;4;5\n");}
+        data.push_str("2,specific_enthalpy_j_kg,197,1,volume,0;1;2;3;4;5\n");
+        let gate=CancelGate::new();let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx=Cx::new(&gate,arena,StreamKey {seed:76,kernel_id:51,tile:0,iteration:0},
+                Budget::INFINITE,ExecMode::Deterministic);
+            for (loss,expected) in [(ScanResidualLoss::Quadratic,[2.,13.]),
+                (ScanResidualLoss::Huber {threshold:1.},[2.,5.25])] {
+                let result=fit(&cx,&data,[0.,0.],loss).unwrap();
+                assert!(result.converged && result.violation<=1e-8);
+                for (power,target) in result.powers.iter().zip(expected) {assert!((power-target).abs()<1e-4);}
+                assert_eq!(result.powers[2],0.);
+                assert_eq!(result.measurements.len(),9);
+                assert!(result.measurements[8].4.abs()>30.);
+                let manual:f64=result.measurements.iter().map(|m|loss.value_derivative(m.4).unwrap().0).sum();
+                assert!((result.objective-manual).abs()<1e-10*(1.+manual));
+            }
         });
     }
 }

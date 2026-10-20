@@ -258,3 +258,6 @@ fn g3_spatial_vertex_reduction_preserves_the_existing_default_observation_api() 
         assert_eq!(a.physical.predictions,b.physical.predictions);
     });
 }
+
+#[path = "spatial_design/robust.rs"]
+mod robust;
