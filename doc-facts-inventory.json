@@ -828,6 +828,7 @@
     "crates/fs-duct/tests/cross_isa_golden.rs",
     "crates/fs-duct/tests/duct_conformance.rs",
     "crates/fs-duct/tests/ernoult_corpus.rs",
+    "crates/fs-duct/tests/specimen_geometry.rs",
     "crates/fs-dwr/tests/battery.rs",
     "crates/fs-dwr/tests/elasticity.rs",
     "crates/fs-dwr/tests/elasticity3.rs",

@@ -33,6 +33,24 @@ This finite metadata parser has no compute scope, cancellation, unsafe boundary,
 new dependency or feature gate; source acquisition and consumer admission remain
 separate operations.
 
+`specimen` (IRP M8-W3) parses the six tables of a
+`data/instruments/geometry/<id>/` specimen directory (`specimen.tsv`,
+`frames.tsv`, `dimensions.tsv`, `parts.tsv`, `unknowns.tsv`, optional
+`fingerings.tsv`), each behind an exact schema line and column line, without
+I/O. Dimension rows are SI (`m`, `m2`, `m3`, `kg`, `rad`, `1`) with a finite
+non-negative σ or the explicit word `unstated`, and an M6.3 acquisition route.
+Required specimen keys, duplicate keys, malformed hole lists and 4096-byte
+field overruns refuse with typed `SpecimenError`s; `Dimensions::require`
+names the absent `part/feature/quantity` instead of defaulting.
+`SpecimenDescription::try_new` refuses a dimensioned part without a frame or
+parts row and a cited source missing from `specimen.tsv`. Lookups are keyed
+and row-order independent; each table keeps the BLAKE3 digest of its exact
+bytes. Admission checks form and identity only: physical correctness, source
+authenticity and completeness are not claimed (`unknowns.tsv` carries the
+gaps). Unit tests in `src/specimen.rs` cover every refusal, cap and cap+1, and
+permutation invariance; `crates/fs-duct/tests/specimen_geometry.rs` binds the
+committed specimen directories to the duct solver.
+
 Layer UTIL (versioned registry data + fail-closed citation, corpus-query, and
 standards-source gates). Depends on `fs-blake3` (domain-separated content
 identity), `fs-evidence` (`Evidence<T>` plus claim-color caps), and `fs-qty`

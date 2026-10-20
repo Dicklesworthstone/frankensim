@@ -1,0 +1,6 @@
+frankensim.specimen-frames.v1
+part	origin	axis_x	axis_y	axis_z	note
+barrel	mouthpiece-exit / barrel-entry junction on the bore axis (source sec. 2.2)	+x along the bore axis toward the bell	unstated	unstated	one assembly frame; azimuthal hole orientation is not given (u-hole-azimuth)
+bore	mouthpiece-exit / barrel-entry junction on the bore axis (source sec. 2.2)	+x along the bore axis toward the bell	unstated	unstated	one assembly frame; azimuthal hole orientation is not given (u-hole-azimuth)
+mouthpiece	mouthpiece-exit / barrel-entry junction on the bore axis (source sec. 2.2)	+x along the bore axis toward the bell	unstated	unstated	one assembly frame; azimuthal hole orientation is not given (u-hole-azimuth)
+tone-holes	mouthpiece-exit / barrel-entry junction on the bore axis (source sec. 2.2)	+x along the bore axis toward the bell	unstated	unstated	one assembly frame; azimuthal hole orientation is not given (u-hole-azimuth)

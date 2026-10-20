@@ -1,0 +1,98 @@
+frankensim.specimen-dimensions.v1
+part	feature	quantity	value_si	unit	sigma_si	route	source_id	note
+tone-holes	hole-01	axial-position	0.5441	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-01	bore-radius	0.0084	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-01	chimney-height	0.00446	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-01	hole-radius	0.00571	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-02	axial-position	0.50578	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-02	bore-radius	0.00767	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-02	chimney-height	0.00463	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-02	hole-radius	0.0057	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-03	axial-position	0.4736	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-03	bore-radius	0.00752	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-03	chimney-height	0.00527	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-03	hole-radius	0.00622	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-04	axial-position	0.44663	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-04	bore-radius	0.00753	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-04	chimney-height	0.00513	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-04	hole-radius	0.00525	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-05	axial-position	0.41434	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-05	bore-radius	0.00755	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-05	chimney-height	0.00866	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-05	hole-radius	0.00491	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-06	axial-position	0.39139	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-06	bore-radius	0.00754	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-06	chimney-height	0.00866	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-06	hole-radius	0.00402	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-07	axial-position	0.37036	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-07	bore-radius	0.00752	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-07	chimney-height	0.00699	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-07	hole-radius	0.0038	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-08	axial-position	0.36519	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-08	bore-radius	0.00751	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-08	chimney-height	0.00872	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-08	hole-radius	0.00413	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-09	axial-position	0.34986	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-09	bore-radius	0.00749	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-09	chimney-height	0.00608	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-09	hole-radius	0.00365	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-10	axial-position	0.31888	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-10	bore-radius	0.00747	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-10	chimney-height	0.00666	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-10	hole-radius	0.00261	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-11	axial-position	0.30862	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-11	bore-radius	0.00747	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-11	chimney-height	0.00719	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-11	hole-radius	0.00394	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-12	axial-position	0.28995	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-12	bore-radius	0.00747	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-12	chimney-height	0.00667	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-12	hole-radius	0.00283	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-13	axial-position	0.28743	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-13	bore-radius	0.00747	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-13	chimney-height	0.0066	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-13	hole-radius	0.00275	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-14	axial-position	0.28512	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-14	bore-radius	0.00747	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-14	chimney-height	0.0092	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-14	hole-radius	0.00344	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-15	axial-position	0.27138	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-15	bore-radius	0.00747	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-15	chimney-height	0.00691	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-15	hole-radius	0.00236	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-16	axial-position	0.2529	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-16	bore-radius	0.00747	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-16	chimney-height	0.00895	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-16	hole-radius	0.00269	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-17	axial-position	0.24178	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-17	bore-radius	0.00747	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-17	chimney-height	0.00689	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-17	hole-radius	0.00248	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-18	axial-position	0.23966	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-18	bore-radius	0.00747	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-18	chimney-height	0.01023	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-18	hole-radius	0.00358	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-19	axial-position	0.23114	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-19	bore-radius	0.00746	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-19	chimney-height	0.00668	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-19	hole-radius	0.00247	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-20	axial-position	0.21374	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-20	bore-radius	0.00746	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-20	chimney-height	0.00681	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-20	hole-radius	0.00247	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-21	axial-position	0.20351	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-21	bore-radius	0.00746	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-21	chimney-height	0.00666	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-21	hole-radius	0.0027	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-22	axial-position	0.19398	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-22	bore-radius	0.00746	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-22	chimney-height	0.00687	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-22	hole-radius	0.00288	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-23	axial-position	0.16733	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-23	bore-radius	0.0075	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-23	chimney-height	0.0069	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-23	hole-radius	0.00246	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated
+tone-holes	hole-24	axial-position	0.1565	m	unstated	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; x from the reed tip
+tone-holes	hole-24	bore-radius	0.00753	m	0.000005	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.005 mm stated
+tone-holes	hole-24	chimney-height	0.0125	m	0.00004	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.04 mm stated
+tone-holes	hole-24	hole-radius	0.0015	m	0.00002	published-measured	moers-kergomard-2011-normal-fingerings	App. A Table 1; +-0.02 mm stated

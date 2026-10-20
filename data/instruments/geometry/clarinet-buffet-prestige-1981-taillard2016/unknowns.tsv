@@ -1,0 +1,19 @@
+frankensim.specimen-unknowns.v1
+id	what	bound	correlation_group	blocks	route
+u-model-identity	the specimen is a 1981 Buffet Prestige, not the UIowa R13 nor any R13	categorical	identity	same-model and same-specimen claims (X-Cl-R0, M8-W8a); R13 completion of M8-W3a	owner-measured R13 (OD4/OD15) or a published R13 table
+u-undercut	tone-hole undercut profiles (source sec. 2.2: not measured)	unbounded	lattice	fingering pitch claims tighter than the 100 c gross-error guard; X-Cl-R0	CT of the specimen (OD15) or owner casts
+u-pad-geometry	pad diameters, open pad heights (key rise) and pad material	unbounded	lattice	open-hole radiation and pad-loading claims	owner measurement (OD4/OD15)
+u-key-mechanics	key linkages, pivots and spring constants	unbounded	mechanism	fingering-transition (M5.3) and key-noise claims	owner measurement (OD4/OD15)
+u-joint-lengths	upper/lower joint and bell lengths, tenon and socket gaps	unbounded	assembly	part-level structure claims; caliper cross-check	owner measurement (OD4/OD15)
+u-hole-azimuth	azimuthal orientation of each chimney	unbounded	lattice	multi-port radiation directivity (M2.5-W3c)	owner measurement or CT
+u-hole-sigma	no uncertainty is stated for chimney positions, diameters or heights (values given to 0.1 mm)	unstated	lattice	per-hole uncertainty propagation	owner measurement with stated instrument precision
+u-bore-bell	the last 20 cm of the bore (x >= 381.5 mm) are 'very indicative' with manual corrections	unstated	bore	bell-region and lattice-cutoff claims finer than the ladder band	owner bore gauge or CT
+u-bore-circularity	the micrometers assume a circular bore; circularity was not verified	unstated	bore	non-axisymmetric bore claims	CT
+u-mouthpiece-interior	Vandoren M30 chamber, baffle, throat, tip opening and lay curve; only length, volume and the exit cone are given. The UIowa Bowen B4 has no published data	unbounded	mouthpiece	reed-side volume, lay contact (BR-04 #1) and every mouthpiece-sensitive claim	CT or casts of a B4 (OD15)
+u-reed	reed vamp thickness map and wet state for this setup	unbounded	reed	reed continuum claims (M3.1-W5)	Taillard et al. 2014 Acta Acustica App. B (Vandoren V12 reed) lead via M8-W2a, or owner measurement
+u-materials	grenadilla body, mouthpiece and pad materials have no matdb pack	unbounded	materials	wall-vibration and pad-loss claims	M8-W2a woodwind materials
+u-register-tube	register tube protrusion into the bore is not stated	unbounded	lattice	register-hole detail claims	owner measurement or CT
+u-fingering-nonnormal	fingerings outside the Moers 2011 normal set (F#3, G#3, B3, C#4, D#4, F#4, A#4, C#5, D#5, F#5, G#5, A#5, altissimo) and all alternate/vent fingerings	categorical	fingering	rendering those notes (M-CL0 lists them by name)	a sourced pad-state chart for this keywork, or owner measurement
+u-environment	measurement temperature and humidity	unstated	environment	thermal-expansion corrections	none available from the source
+u-caliper-crosscheck	no independent caliper measurement of this specimen exists to cross-check the published tables	unbounded	assembly	closure of M8-W3a (completion rule element: calibrated reconstruction evidence)	owner access to an R13 specimen (OD4/OD15)
+u-player-anatomy	player airway, lips and tongue for this setup	unbounded	player	in-loop airway claims	M8-W3k, or M8-W9 if OD16 allows

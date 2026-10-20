@@ -1,0 +1,14 @@
+frankensim.specimen.v1
+key	value
+specimen_id	clarinet-yamaha-y250-moers2011
+maker	Yamaha
+model	Y250
+serial	unstated
+year	unstated
+system	B-flat Boehm clarinet
+holder	Laboratoire de Mecanique et d'Acoustique, Marseille (measurement site); not accessible to FrankenSim
+reference_state	assembled
+environment	unstated
+source_ids	moers-kergomard-2011-normal-fingerings
+target_relation	fingering-chart and lattice-layout source; not a Buffet and not a complete description (no bore profile, bell or mouthpiece)
+hole_index	hole-01 is farthest from the reed tip; hole-24 is the register hole (source App. A)

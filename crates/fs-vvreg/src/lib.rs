@@ -1981,3 +1981,7 @@ pub fn canonical_row(entry: &RegistryEntry) -> String {
 
 /// Cross-domain instrument source ledger and explicit retention decisions.
 pub mod instrument_data;
+
+/// Specimen geometry tables (M8-W3): SI dimensions with uncertainty,
+/// frames, parts, unknowns and fingering charts, admitted without defaults.
+pub mod specimen;

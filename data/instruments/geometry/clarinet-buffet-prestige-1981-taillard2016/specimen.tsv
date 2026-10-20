@@ -1,0 +1,14 @@
+frankensim.specimen.v1
+key	value
+specimen_id	clarinet-buffet-prestige-1981-taillard2016
+maker	Buffet Crampon
+model	Prestige (as named by the source; the source never calls it an R13)
+serial	unstated
+year	1981
+system	B-flat Boehm clarinet, grenadilla; pitch about A = 442 Hz per the source
+holder	first author's own instrument (source sec. 2.1); not accessible to FrankenSim
+reference_state	assembled
+environment	unstated
+source_ids	taillard-sanchez-2016-buffet-prestige;moers-kergomard-2011-normal-fingerings
+target_relation	population evidence for the UIowa Buffet R13: same maker and Robert Carree polycylindrical bore family (source sec. 2.2); not the R13 model and not the UIowa specimen (u-model-identity)
+hole_index	hole-01 is farthest from the mouthpiece (the Debut 2005 / Moers 2011 numbering); hole-01=Fa2; hole-02=Solb2; hole-03=Sol2; hole-04=Lab2; hole-05=annul d; hole-06=majeur d; hole-07=Si2F; hole-08=index d; hole-09=Do3; hole-10=Réb3; hole-11=annul g; hole-12=Mib3 C; hole-13=Mib3 F; hole-14=majeur g; hole-15=Mi3; hole-16=index g; hole-17=trille2; hole-18=pouce g; hole-19=Sol3; hole-20=Lab3; hole-21=La3; hole-22=trille3; hole-23=trille4; hole-24=registre

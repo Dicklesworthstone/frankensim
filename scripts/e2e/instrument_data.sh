@@ -33,6 +33,15 @@ readonly -a EXPECTED_TESTS=(
   "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_fetch_verify_mode_never_downloads_when_present"
   "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_fetch_refuses_escaping_paths"
   "python:scripts/tests/test_instrument_references.py:ReferenceTests.test_fetch_checks_remote_bytes_before_retaining"
+  "fs-duct:specimen_geometry:buffet_tables_parse_complete_with_uncertainty"
+  "fs-duct:specimen_geometry:buffet_units_and_frames_refuse_mismatches"
+  "fs-duct:specimen_geometry:buffet_caliper_cross_checks_are_recorded_unavailable"
+  "fs-duct:specimen_geometry:buffet_builds_solver_object_without_defaults"
+  "fs-duct:specimen_geometry:buffet_frequency_grid_ladder_converges"
+  "fs-duct:specimen_geometry:buffet_first_peak_gross_error_guard"
+  "fs-duct:specimen_geometry:falsifier_buffet_hole_shift_moves_the_peak"
+  "fs-duct:specimen_geometry:buffet_hole_index_corresponds_to_the_fingering_source"
+  "fs-duct:specimen_geometry:buffet_ledger_rows_cover_every_source"
 )
 
 exec python3 -I - "$REPO_ROOT" "${1:---check}" "${EXPECTED_TESTS[@]}" <<'PY'

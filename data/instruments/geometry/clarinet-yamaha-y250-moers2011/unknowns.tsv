@@ -1,0 +1,7 @@
+frankensim.specimen-unknowns.v1
+id	what	bound	correlation_group	blocks	route
+u-bore-profile	bore radius between holes, barrel, mouthpiece and bell profile	unbounded	bore	every impedance claim for this specimen	none in the source
+u-undercut	tone-hole undercut profiles	unbounded	lattice	fingering pitch claims	none in the source
+u-pad-geometry	pad diameters, heights and materials	unbounded	lattice	open-hole radiation claims	none in the source
+u-position-sigma	no uncertainty is stated for hole positions	unstated	lattice	position uncertainty propagation	none in the source
+u-fingering-nonnormal	fingerings outside the normal set	categorical	fingering	rendering those notes	a sourced pad-state chart

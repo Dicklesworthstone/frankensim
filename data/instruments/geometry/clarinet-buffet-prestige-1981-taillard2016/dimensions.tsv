@@ -1,0 +1,210 @@
+frankensim.specimen-dimensions.v1
+part	feature	quantity	value_si	unit	sigma_si	route	source_id	note
+barrel	original-barrel	bore-diameter	0.01536	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	sec. 2.4: approximately cylindrical bore
+barrel	original-barrel	useful-length	0.0289	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	sec. 2.4: useful length excluding tenons
+bore	station-01	axial-position	0	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-01	diameter	0.01535	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-02	axial-position	0.0048	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-02	diameter	0.01534	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-03	axial-position	0.0128	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-03	diameter	0.01534	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-04	axial-position	0.0178	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-04	diameter	0.01534	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-05	axial-position	0.0228	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-05	diameter	0.01536	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-06	axial-position	0.0289	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-06	diameter	0.01536	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-07	axial-position	0.0291	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-07	diameter	0.01493	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-08	axial-position	0.0341	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-08	diameter	0.01493	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-09	axial-position	0.0391	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-09	diameter	0.01495	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-10	axial-position	0.0491	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-10	diameter	0.0149	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-11	axial-position	0.0591	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-11	diameter	0.01489	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-12	axial-position	0.0691	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-12	diameter	0.0149	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-13	axial-position	0.0791	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-13	diameter	0.01491	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-14	axial-position	0.0891	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-14	diameter	0.0149	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-15	axial-position	0.0991	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-15	diameter	0.0149	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-16	axial-position	0.1091	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-16	diameter	0.01485	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-17	axial-position	0.1141	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-17	diameter	0.01475	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-18	axial-position	0.1191	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-18	diameter	0.01467	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-19	axial-position	0.1291	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-19	diameter	0.01465	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-20	axial-position	0.1391	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-20	diameter	0.01465	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-21	axial-position	0.1569	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-21	diameter	0.01465	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-22	axial-position	0.1619	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-22	diameter	0.01465	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-23	axial-position	0.1719	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-23	diameter	0.01465	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-24	axial-position	0.1819	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-24	diameter	0.01465	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-25	axial-position	0.1919	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-25	diameter	0.01465	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-26	axial-position	0.2019	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-26	diameter	0.01465	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-27	axial-position	0.2119	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-27	diameter	0.01465	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-28	axial-position	0.2219	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-28	diameter	0.01465	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-29	axial-position	0.2319	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-29	diameter	0.01464	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-30	axial-position	0.2419	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-30	diameter	0.01464	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-31	axial-position	0.2519	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-31	diameter	0.01464	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-32	axial-position	0.253	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-32	diameter	0.01464	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-33	axial-position	0.263	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-33	diameter	0.01464	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-34	axial-position	0.273	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-34	diameter	0.01464	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-35	axial-position	0.283	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-35	diameter	0.01464	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-36	axial-position	0.293	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-36	diameter	0.01464	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-37	axial-position	0.303	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-37	diameter	0.01464	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-38	axial-position	0.313	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-38	diameter	0.01465	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-39	axial-position	0.323	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-39	diameter	0.01463	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-40	axial-position	0.333	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-40	diameter	0.01465	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-41	axial-position	0.343	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-41	diameter	0.01463	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-42	axial-position	0.353	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-42	diameter	0.01465	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-43	axial-position	0.363	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-43	diameter	0.01465	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-44	axial-position	0.373	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-44	diameter	0.01472	m	0.00001	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; Tesa inside micrometers, precision of the order of 0.01 mm (source sec. 2.2); circular bore assumed, not verified
+bore	station-45	axial-position	0.383	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-45	diameter	0.01479	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-46	axial-position	0.393	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-46	diameter	0.01505	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-47	axial-position	0.403	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-47	diameter	0.01524	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-48	axial-position	0.413	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-48	diameter	0.01555	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-49	axial-position	0.423	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-49	diameter	0.01636	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-50	axial-position	0.433	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-50	diameter	0.01694	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-51	axial-position	0.443	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-51	diameter	0.01746	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-52	axial-position	0.479	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-52	diameter	0.0196	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-53	axial-position	0.485	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-53	diameter	0.0211	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-54	axial-position	0.493	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-54	diameter	0.022	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-55	axial-position	0.4933	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-55	diameter	0.022	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-56	axial-position	0.5008	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-56	diameter	0.024	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-57	axial-position	0.5168	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-57	diameter	0.0289	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-58	axial-position	0.5189	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-58	diameter	0.0296	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-59	axial-position	0.5241	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-59	diameter	0.0318	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-60	axial-position	0.5327	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-60	diameter	0.0348	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-61	axial-position	0.5351	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-61	diameter	0.036	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-62	axial-position	0.5549	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-62	diameter	0.0446	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-63	axial-position	0.5735	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-63	diameter	0.0527	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+bore	station-64	axial-position	0.5815	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3 (Buffet Prestige column), x from the mouthpiece-exit/barrel-entry junction
+bore	station-64	diameter	0.056	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 3; inside the last 20 cm, where the source calls the measurements very indicative (manual corrections to the bore)
+mouthpiece	exit-station-0mm	axial-position	0	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	sec. 2.3: the mouthpiece exit, at the assembly origin
+mouthpiece	exit-station-0mm	diameter	0.01485	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	sec. 2.3 exit cone
+mouthpiece	exit-station-45mm	axial-position	-0.045	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	sec. 2.3: 45 mm upstream of the mouthpiece exit (assembly origin)
+mouthpiece	exit-station-45mm	diameter	0.01387	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	sec. 2.3 exit cone
+mouthpiece	vandoren-m30	internal-volume	0.0000112	m3	0.0000002	published-measured	taillard-sanchez-2016-buffet-prestige	sec. 2.3: bore volume evaluated at 11.2 cm3 +-0.2
+mouthpiece	vandoren-m30	total-length	0.0896	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	sec. 2.3
+tone-holes	hole-01	axial-position	0.4524	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Fa2'; chimney axis position
+tone-holes	hole-01	chimney-height	0.0044	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Fa2'; measured along the chimney axis; undercut not measured
+tone-holes	hole-01	min-diameter	0.0115	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Fa2'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-02	axial-position	0.414	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Solb2'; chimney axis position
+tone-holes	hole-02	chimney-height	0.0051	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Solb2'; measured along the chimney axis; undercut not measured
+tone-holes	hole-02	min-diameter	0.0111	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Solb2'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-03	axial-position	0.3819	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Sol2'; chimney axis position
+tone-holes	hole-03	chimney-height	0.0051	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Sol2'; measured along the chimney axis; undercut not measured
+tone-holes	hole-03	min-diameter	0.012	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Sol2'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-04	axial-position	0.3548	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Lab2'; chimney axis position
+tone-holes	hole-04	chimney-height	0.0058	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Lab2'; measured along the chimney axis; undercut not measured
+tone-holes	hole-04	min-diameter	0.0107	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Lab2'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-05	axial-position	0.3224	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'annul d'; chimney axis position
+tone-holes	hole-05	chimney-height	0.009	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'annul d'; measured along the chimney axis; undercut not measured
+tone-holes	hole-05	min-diameter	0.0096	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'annul d'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-06	axial-position	0.2996	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'majeur d'; chimney axis position
+tone-holes	hole-06	chimney-height	0.009	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'majeur d'; measured along the chimney axis; undercut not measured
+tone-holes	hole-06	min-diameter	0.0078	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'majeur d'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-07	axial-position	0.279	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Si2F'; chimney axis position
+tone-holes	hole-07	chimney-height	0.0065	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Si2F'; measured along the chimney axis; undercut not measured
+tone-holes	hole-07	min-diameter	0.0079	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Si2F'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-08	axial-position	0.273	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'index d'; chimney axis position
+tone-holes	hole-08	chimney-height	0.009	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'index d'; measured along the chimney axis; undercut not measured
+tone-holes	hole-08	min-diameter	0.0081	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'index d'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-09	axial-position	0.2578	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Do3'; chimney axis position
+tone-holes	hole-09	chimney-height	0.0064	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Do3'; measured along the chimney axis; undercut not measured
+tone-holes	hole-09	min-diameter	0.0071	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Do3'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-10	axial-position	0.2291	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Réb3'; chimney axis position
+tone-holes	hole-10	chimney-height	0.0068	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Réb3'; measured along the chimney axis; undercut not measured
+tone-holes	hole-10	min-diameter	0.0048	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Réb3'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-11	axial-position	0.2181	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'annul g'; chimney axis position
+tone-holes	hole-11	chimney-height	0.0073	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'annul g'; measured along the chimney axis; undercut not measured
+tone-holes	hole-11	min-diameter	0.0077	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'annul g'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-12	axial-position	0.1998	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Mib3 C'; chimney axis position
+tone-holes	hole-12	chimney-height	0.007	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Mib3 C'; measured along the chimney axis; undercut not measured
+tone-holes	hole-12	min-diameter	0.0058	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Mib3 C'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-13	axial-position	0.1971	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Mib3 F'; chimney axis position
+tone-holes	hole-13	chimney-height	0.0068	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Mib3 F'; measured along the chimney axis; undercut not measured
+tone-holes	hole-13	min-diameter	0.0054	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Mib3 F'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-14	axial-position	0.1951	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'majeur g'; chimney axis position
+tone-holes	hole-14	chimney-height	0.0089	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'majeur g'; measured along the chimney axis; undercut not measured
+tone-holes	hole-14	min-diameter	0.0067	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'majeur g'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-15	axial-position	0.1809	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Mi3'; chimney axis position
+tone-holes	hole-15	chimney-height	0.0067	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Mi3'; measured along the chimney axis; undercut not measured
+tone-holes	hole-15	min-diameter	0.0046	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Mi3'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-16	axial-position	0.1626	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'index g'; chimney axis position
+tone-holes	hole-16	chimney-height	0.0088	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'index g'; measured along the chimney axis; undercut not measured
+tone-holes	hole-16	min-diameter	0.005	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'index g'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-17	axial-position	0.1514	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'trille2'; chimney axis position
+tone-holes	hole-17	chimney-height	0.0069	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'trille2'; measured along the chimney axis; undercut not measured
+tone-holes	hole-17	min-diameter	0.0047	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'trille2'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-18	axial-position	0.1493	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'pouce g'; chimney axis position
+tone-holes	hole-18	chimney-height	0.0109	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'pouce g'; measured along the chimney axis; undercut not measured
+tone-holes	hole-18	min-diameter	0.0078	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'pouce g'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-19	axial-position	0.1408	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Sol3'; chimney axis position
+tone-holes	hole-19	chimney-height	0.0057	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Sol3'; measured along the chimney axis; undercut not measured
+tone-holes	hole-19	min-diameter	0.0049	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Sol3'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-20	axial-position	0.1231	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Lab3'; chimney axis position
+tone-holes	hole-20	chimney-height	0.0067	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Lab3'; measured along the chimney axis; undercut not measured
+tone-holes	hole-20	min-diameter	0.0051	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'Lab3'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-21	axial-position	0.113	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'La3'; chimney axis position
+tone-holes	hole-21	chimney-height	0.0069	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'La3'; measured along the chimney axis; undercut not measured
+tone-holes	hole-21	min-diameter	0.0054	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'La3'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-22	axial-position	0.1037	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'trille3'; chimney axis position
+tone-holes	hole-22	chimney-height	0.007	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'trille3'; measured along the chimney axis; undercut not measured
+tone-holes	hole-22	min-diameter	0.0054	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'trille3'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-23	axial-position	0.077	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'trille4'; chimney axis position
+tone-holes	hole-23	chimney-height	0.0069	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'trille4'; measured along the chimney axis; undercut not measured
+tone-holes	hole-23	min-diameter	0.0047	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'trille4'; minimal chimney diameter (generally on the outer side)
+tone-holes	hole-24	axial-position	0.0631	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'registre'; chimney axis position
+tone-holes	hole-24	chimney-height	0.0127	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'registre'; measured along the chimney axis; undercut not measured
+tone-holes	hole-24	min-diameter	0.0027	m	unstated	published-measured	taillard-sanchez-2016-buffet-prestige	Tableau 2 hole 'registre'; minimal chimney diameter (generally on the outer side)

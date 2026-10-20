@@ -1,0 +1,6 @@
+frankensim.specimen-parts.v1
+part	material	state	joins	note
+barrel	unstated	assembled	mouthpiece;bore	original barrel; grenadilla per the source, no matdb pack (u-materials)
+bore	unstated	assembled	barrel;tone-holes	assembled air column, barrel entry to bell rim; joint boundaries unstated (u-joint-lengths)
+mouthpiece	unstated	assembled	barrel	Vandoren M30; material unstated (u-materials)
+tone-holes	unstated	assembled	bore	24 chimneys incl. trill and register holes; pads and keys unstated (u-pad-geometry, u-key-mechanics)
