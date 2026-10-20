@@ -14,6 +14,8 @@
 
 /// Source-backed converging-nozzle flow and pressure-driven paired exchange.
 pub mod nozzle;
+/// Shared-snapshot multi-inlet/outlet transfer with one reconstruction per volume.
+pub mod snapshot;
 
 use std::collections::BTreeMap;
 use super::ClosedGasParcel;
@@ -129,9 +131,21 @@ fn water(model: &ThermochemicalGasModel) -> Option<SpeciesId> {
 fn mixed_model(
     receiver: &ClosedGasParcel, donor: &ClosedGasParcel, mass: f64, total_mass: f64,
 ) -> Result<ThermochemicalGasModel, GasEnergyError> {
+    mixed_model_from_portions(&[(&receiver.parcel.model, receiver.mass_kg()),
+        (&donor.parcel.model, mass)], total_mass)
+}
+
+// Each portion is an extensive mass with its ORIGINAL source model. Both the
+// pair and multiport paths use this single species/transport/pack join.
+fn mixed_model_from_portions(
+    portions: &[(&ThermochemicalGasModel, f64)], total_mass: f64,
+) -> Result<ThermochemicalGasModel, GasEnergyError> {
+    if portions.is_empty() || !positive(total_mass)
+        || portions.iter().any(|(_, amount)| !positive(*amount)) {
+        return Err(invalid("positive finite material portions and total mass required"));
+    }
     let mut components: BTreeMap<SpeciesId, (Nasa9StandardStateModelV1, SpeciesTransportMaterial, f64)> = BTreeMap::new();
-    for (parcel, amount) in [(receiver, receiver.mass_kg()), (donor, mass)] {
-        let model = &parcel.parcel.model;
+    for &(model, amount) in portions {
         let fractions = mass_fractions(model)?;
         for ((species, transport), fraction) in model.thermodynamics().components().iter()
             .zip(model.transport_materials()).zip(fractions.fractions()) {
@@ -151,11 +165,15 @@ fn mixed_model(
             }
         }
     }
-    let (a, b) = (water(&receiver.parcel.model), water(&donor.parcel.model));
-    if a.is_some() && b.is_some() && a != b {
-        return Err(invalid("gas sources disagree about the explicit water species"));
+    let mut explicit_water = None;
+    for &(source, _) in portions {
+        if let Some(id) = water(source) {
+            if explicit_water.as_ref().is_some_and(|previous| previous != &id) {
+                return Err(invalid("gas sources disagree about the explicit water species"));
+            }
+            explicit_water = Some(id);
+        }
     }
-    let water = a.or(b);
     let mut species = Vec::with_capacity(components.len());
     let mut transport = Vec::with_capacity(components.len());
     let mut fractions = Vec::with_capacity(components.len());
@@ -184,9 +202,9 @@ fn mixed_model(
     }
     let composition = Composition::new(CompositionBasis::MoleFraction, mole).map_err(source_error)?;
     let thermo = FrozenIdealGasMixtureModelV1::new(species, composition).map_err(source_error)?;
-    let mut model = ThermochemicalGasModel::new(thermo, transport, water.as_ref())?;
+    let mut model = ThermochemicalGasModel::new(thermo, transport, explicit_water.as_ref())?;
     let mut receipts = BTreeMap::new();
-    for source in [&receiver.parcel.model, &donor.parcel.model] {
+    for &(source, _) in portions {
         for receipt in source.source_packs() {
             if let Some(previous) = receipts.insert(receipt.species.clone(), receipt.clone()) {
                 if previous != *receipt {
