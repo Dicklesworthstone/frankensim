@@ -3,7 +3,8 @@
 //! It is not a characteristic-line time-domain network realization.
 
 use fs_duct::network::{
-    DuctNetwork, NetworkDriveResponse, NodeBoundary, PortTermination, network_port_impedance,
+    CoupledTermination, DuctNetwork, NetworkDriveResponse, NodeBoundary, PortTermination,
+    network_port_impedance,
 };
 use fs_duct::{DuctError, LossModel};
 use fs_material::gas::GasState;
@@ -17,6 +18,7 @@ pub struct NetworkDrivingPoint {
     active_port: String,
     terminations: Vec<PortTermination>,
     schema: PortSchema,
+    coupled_ports: Vec<String>,
 }
 
 /// Complex pressure and owner-outward volume flow bound to an explicit schema.
@@ -41,6 +43,20 @@ impl NetworkDrivingPoint {
         terminations: Vec<PortTermination>,
         schema: PortSchema,
     ) -> Result<Self, DuctError> {
+        Self::new_with_coupled_ports(network, active_port, terminations, Vec::new(), schema)
+    }
+
+    /// Declare one coupled boundary's port order, plus independent loads on every
+    /// remaining port. The frequency-specific matrix is supplied to
+    /// `response_coupled`; it is never replaced with independent diagonal loads.
+    /// An empty coupled list has exactly the original constructor's semantics.
+    pub fn new_with_coupled_ports(
+        network: DuctNetwork,
+        active_port: String,
+        terminations: Vec<PortTermination>,
+        coupled_ports: Vec<String>,
+        schema: PortSchema,
+    ) -> Result<Self, DuctError> {
         network.validate()?;
         if schema.kind() != PortKind::FluidPressureFlux
             || schema.shape() != PortValueShape::Scalar
@@ -61,21 +77,23 @@ impl NetworkDrivingPoint {
         let bad = || DuctError::BadParameter {
             what: "network driving point requires an active port and exactly one explicit load for every other port",
         };
-        if !ports.contains(&active_port.as_str()) || terminations.len() + 1 != ports.len() {
+        if !ports.contains(&active_port.as_str()) || terminations.len().checked_add(coupled_ports.len()).and_then(|n| n.checked_add(1)) != Some(ports.len()) {
             return Err(bad());
         }
         let mut labels = vec![active_port.as_str()];
-        for t in &terminations {
-            if !ports.contains(&t.label.as_str()) || labels.contains(&t.label.as_str()) {
+        for label in terminations.iter().map(|t| t.label.as_str())
+            .chain(coupled_ports.iter().map(String::as_str)) {
+            if !ports.contains(&label) || labels.contains(&label) {
                 return Err(bad());
             }
-            labels.push(t.label.as_str());
+            labels.push(label);
         }
         Ok(Self {
             network,
             active_port,
             terminations,
             schema,
+            coupled_ports,
         })
     }
 
@@ -86,6 +104,11 @@ impl NetworkDrivingPoint {
         omega: f64,
         loss: LossModel,
     ) -> Result<NetworkDriveResponse, DuctError> {
+        if !self.coupled_ports.is_empty() {
+            return Err(DuctError::BadParameter {
+                what: "declared coupled ports require their complete boundary matrix",
+            });
+        }
         network_port_impedance(&self.network, gas, omega, loss)?.drive(
             &self.active_port,
             &self.terminations,
@@ -132,3 +155,48 @@ impl NetworkDrivingPoint {
         })
     }
 }
+
+impl NetworkDrivingPoint {
+    /// Original complete matrix order, not the network node order. A producer
+    /// must use these labels in this order; transposition/permutation is never
+    /// guessed from dimensions. The independent loads are disjoint by admission.
+    #[must_use]
+    pub fn coupled_ports(&self) -> &[String] { &self.coupled_ports }
+
+    /// Solve one complete physical boundary. The original duct owner checks the
+    /// exact frequency, source identity, finite entries and full Hermitian
+    /// passivity; this adapter neither symmetrizes nor clips its matrix.
+    pub fn response_coupled(
+        &self, gas: &GasState, omega: f64, loss: LossModel,
+        boundary: &CoupledTermination,
+    ) -> Result<NetworkDriveResponse, DuctError> {
+        if self.coupled_ports.is_empty() || boundary.labels != self.coupled_ports {
+            return Err(DuctError::BadParameter {
+                what: "coupled boundary must use the declared nonempty port order",
+            });
+        }
+        network_port_impedance(&self.network, gas, omega, loss)?.drive_coupled(
+            &self.active_port, &self.terminations, boundary, gas,
+        )
+    }
+
+    /// The same coupled solution at the original dimensioned active-port seam.
+    /// No second boundary solve or independent-port load is substituted.
+    pub fn harmonic_port_coupled(
+        &self, gas: &GasState, omega: f64, loss: LossModel,
+        boundary: &CoupledTermination, injected_volume_flow: C64,
+    ) -> Result<HarmonicNetworkPort, DuctError> {
+        if !injected_volume_flow.re.is_finite() || !injected_volume_flow.im.is_finite() {
+            return Err(DuctError::BadParameter { what: "network driving flow phasor must be finite" });
+        }
+        let pressure = self.response_coupled(gas, omega, loss, boundary)?.impedance * injected_volume_flow;
+        if !pressure.re.is_finite() || !pressure.im.is_finite() {
+            return Err(DuctError::BadParameter { what: "network harmonic pressure overflowed" });
+        }
+        Ok(HarmonicNetworkPort { omega, schema: self.schema.clone(), pressure,
+            outward_volume_flow: -injected_volume_flow })
+    }
+}
+
+#[cfg(test)]
+mod tests;
