@@ -41,7 +41,7 @@ def tone(f0=F0, dur=2.6, attack=0.04, lead=0.3, delay=0.0, odd_only=False, cents
 
 
 def note_of(x, f0=F0, kind="sustained"):
-    floor = dc.floor_of(dc.highpass(x, f0))
+    floor = dc.render_floor(dc.highpass(x, f0), f0)
     y, info = dc.align(x, f0, floor)
     return Note(y, f0, kind, False, "synthetic", info)
 
@@ -50,8 +50,40 @@ class AlignmentTests(unittest.TestCase):
     def test_delayed_copy_aligns_to_the_millisecond(self):
         a, b = note_of(tone()), note_of(tone(delay=0.137, noise_db=-80))
         self.assertLess(abs(a.info["cut_onset_s"] - b.info["cut_onset_s"]) * 1000, dc.ALIGN_TOL_MS)
-        self.assertAlmostEqual(a.info["cut_onset_s"], dc.PREROLL_S, delta=0.0015)
+        self.assertAlmostEqual(a.info["cut_onset_s"], dc.preroll_s(F0), delta=0.0015)
         self.assertGreater(abs(a.info["onset_s"] - b.info["onset_s"]), 0.1)  # the cut really moved them
+
+    def test_legato_reattack_is_found_through_the_previous_notes_tail(self):
+        n = int(2.0 * SR)
+        t = np.arange(n) / SR
+        first = np.where(t < 0.5, np.exp(-(t - 0.0) * 6), 0) * np.sin(2 * np.pi * 233 * t)  # decaying tail, still audible at 0.5 s
+        env = np.clip((t - 0.5) / 0.03, 0, 1)
+        second = 3.0 * env * np.sin(2 * np.pi * 247 * t)
+        x = 0.1 * (first + second) / 3.0
+        # the search starts 20 ms before the new note, inside the tail
+        ta, tb = dc.onset_times(dc.highpass(x, 247.0), -100.0, anchor_s=0.52, f0_hz=247.0)
+        self.assertAlmostEqual(max(ta, tb), 0.5, delta=0.01)
+
+    def test_slow_ramp_from_rest_with_no_quiet_frames_aligns(self):
+        # a bowed render: starts from silence at sample 0, ramps over 0.4 s, never has a quiet 20 ms frame afterwards
+        n = note_of(tone(attack=0.4, lead=0.0, dur=3.0))
+        self.assertAlmostEqual(n.info["cut_onset_s"], dc.preroll_s(F0), delta=0.0015)
+        again = note_of(n.y)  # cutting at the onset and detecting again finds the same crossing
+        self.assertAlmostEqual(again.info["cut_onset_s"], n.info["cut_onset_s"], delta=0.0015)
+
+    def test_note_that_begins_on_a_loud_tail_is_refused_not_guessed(self):
+        n = int(2.0 * SR)
+        t = np.arange(n) / SR
+        x = 0.1 * (np.sin(2 * np.pi * 233 * t) * np.where(t < 0.5, 1.0, 0) + 1.0 * np.clip((t - 0.5) / 0.03, 0, 1) * np.sin(2 * np.pi * 247 * t))
+        with self.assertRaisesRegex(dc.OnsetMisaligned, "NO_QUIET_BEFORE_ONSET"):
+            dc.onset_times(dc.highpass(x, 247.0), -100.0, anchor_s=0.52, f0_hz=247.0)
+
+    def test_anchor_inside_a_slow_rise_finds_the_start_of_the_rise(self):
+        x = tone(attack=0.2, lead=0.5)
+        y = dc.highpass(x, F0)
+        ta, tb = dc.onset_times(y, -100.0, anchor_s=0.9, f0_hz=F0)  # the anchor lags well inside the ramp
+        first = dc.onset_times(y, -100.0, f0_hz=F0)
+        self.assertAlmostEqual(max(ta, tb), max(first), delta=0.002)
 
     def test_silence_refuses(self):
         with self.assertRaises(dc.OnsetMisaligned):
@@ -178,7 +210,7 @@ class ContractTests(unittest.TestCase):
         ref_e = self.refs.find("syn", 58, "mf")[0]
         y, info = self.refs.aligned(ref_e)
         raw = tone(f0=F0 * 2 ** (1 / 12), dur=2.4, lead=0.2)
-        cy, ci = dc.align(raw, F0 * 2 ** (1 / 12), dc.floor_of(raw))
+        cy, ci = dc.align(raw, F0 * 2 ** (1 / 12), dc.render_floor(raw, F0 * 2 ** (1 / 12)))
         ci = dict(ci, cut_onset_s=ci["cut_onset_s"] + 0.01)  # the render's onset sits 10 ms late in its own cut
         meta = dict(wav="r.wav", git_sha="x", observer="o", sample_rate=48000, recipe="r.sh")
         with self.assertRaises(dc.OnsetMisaligned):

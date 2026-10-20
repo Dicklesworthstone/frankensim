@@ -6,6 +6,7 @@ against how far REAL recordings differ from one another.
            each metric with its real-vs-real ruler (other dynamics, other takes, neighbouring notes)
   pair     one render against the library's recording of the same note: the same, plus ours and the difference
   batch    pair for each candidate in a CANDIDATES.json (list of the pair arguments)
+  report   print every graded pair as a table, the worst gap against its real-vs-real ruler first
 
 Output is P8's site contract: <out>/<family>/<note>/pair.json (frankensim.instrument-pair.v1) with the aligned,
 loudness-matched real.wav / ours.wav and bare spectrogram / scalogram maps. See tools/build_instruments.py.
@@ -53,12 +54,22 @@ class OnsetMisaligned(ValueError):
 
 # ------------------------------------------------------------------------------------------ alignment
 def env_rms_db(y, win=96, hop=48):
-    """2 ms RMS envelope on a 1 ms grid, in dB re full scale (power)."""
+    """RMS envelope over `win` samples on a 1 ms grid, in dB re full scale (power)."""
     c = np.concatenate([[0.0], np.cumsum(y * y)])
     n = max(0, (len(y) - win) // hop + 1)
     idx = np.arange(n) * hop
     ms = (c[idx + win] - c[idx]) / win
     return 10 * np.log10(ms + 1e-18), (idx + win / 2) / SR
+
+
+def env_window(f0_hz):
+    """Envelope window: 2 ms, or two periods of the note if that is longer (a shorter window ripples with the tone)."""
+    return 96 if not f0_hz else int(min(0.05 * SR, max(96, 2.0 / f0_hz * SR)))
+
+
+def preroll_s(f0_hz):
+    """Lead-in kept before the onset: 10 ms, or enough that the envelope window centred on the onset fits inside it."""
+    return max(PREROLL_S, env_window(f0_hz) / 2 / SR + 0.005)
 
 
 def floor_of(y):
@@ -71,45 +82,88 @@ def floor_of(y):
     return float(max(-120.0, 10 * np.log10(np.percentile(ms, 5) + 1e-18)))
 
 
-def onset_times(y, floor_db, start_s=0.0):
-    """(noise-relative crossing, peak-relative crossing) in seconds from the start of y.
+def onset_times(y, floor_db, anchor_s=None, f0_hz=None, peak_db=None):
+    """(noise-floor crossing, peak-relative crossing) in seconds from the start of y; the onset is the later of the two.
 
-    A: first 2 ms envelope above floor + 12 dB.  B: first above peak - 40 dB.  Both searched from `start_s`.
-    The recorded onset is the later one: A alone fires on dust in a digital-silence render, B alone on the
-    skirt of a slow bowed attack in a noisy recording.
+    A: the 2 ms envelope crosses floor + 12 dB.  B: it crosses peak - 30 dB.  Both are absolute levels, so cutting
+    the signal at the onset and detecting again finds the same crossing. A alone fires on dust in a digital-silence
+    render; B alone on the skirt of a slow bowed attack in a noisy recording.
+
+    With no anchor the first crossing is taken (a render, or a cut). With an anchor (a time inside the note, from
+    the library's segmentation) the crossing is the one that precedes it: walk back from the anchor to where the
+    level was last under the threshold. If B never was under it within the window, the note begins legato on the
+    previous one and has no level onset: refused, never guessed.
     """
-    e, t = env_rms_db(y)
-    s = int(start_s * 1000)
-    e, t = e[s:], t[s:]
-    if not len(e):
+    e, t = env_rms_db(y, win=env_window(f0_hz))
+    n = len(e)
+    if not n:
         raise OnsetMisaligned("IRPDECOMP_NO_SIGNAL: empty signal")
-    pk = float(e.max())
+    j0 = 0 if anchor_s is None else min(n - 1, int(anchor_s * 1000))
+    pk = float(e[j0: j0 + int((MAX_S + 1.0) * 1000)].max()) if peak_db is None else float(peak_db)
     if pk < floor_db + 20:
         raise OnsetMisaligned(f"IRPDECOMP_NO_SIGNAL: peak {pk:.1f} dB is under floor {floor_db:.1f} dB + 20")
-    ia = np.flatnonzero(e > floor_db + 12.0)
-    ib = np.flatnonzero(e > pk - 40.0)
-    ta = float(t[ia[0]]) if len(ia) else float(t[ib[0]])
-    tb = float(t[ib[0]])
-    return ta, tb
+
+    def crossing(th, strict):
+        above = e > th
+        if anchor_s is None:
+            idx = np.flatnonzero(above)
+            return float(t[idx[0]]) if len(idx) else None
+        j = min(n - 1, j0 + 25)
+        if not above[j]:
+            idx = np.flatnonzero(above[j:])
+            return float(t[j + idx[0]]) if len(idx) else None
+        i = j
+        while i > 0 and above[i - 1]:
+            i -= 1
+        if i == 0:
+            if strict:
+                raise OnsetMisaligned(f"IRPDECOMP_NO_QUIET_BEFORE_ONSET: the level never falls under {th:.1f} dB before the note "
+                                      "(it begins legato on the previous note)")
+            return None
+        return float(t[i])
+
+    tb = crossing(pk - 30.0, True)
+    ta = crossing(floor_db + 12.0, False)
+    if tb is None:
+        raise OnsetMisaligned("IRPDECOMP_NO_SIGNAL: the note never reaches its own peak window")
+    return (tb if ta is None else ta), tb
 
 
-def align(raw, f0_hz, floor_db, search_from_s=0.0):
-    """High-pass with the note's corner, find the onset, cut PREROLL_S before it. Returns (y, info)."""
+def render_floor(y, f0_hz=None):
+    """A render has no acoustic noise floor: its quietest 20 ms if it has quiet frames, else 50 dB under its peak."""
+    e, _ = env_rms_db(y, win=env_window(f0_hz))
+    return min(floor_of(y), float(e.max()) - 50.0)
+
+
+def align(raw, f0_hz, floor_db, anchor_s=None):
+    """High-pass with the note's corner, find the onset, cut `preroll_s` before it. Returns (y, info).
+
+    The peak that B is measured from is the peak of the cut itself (found by iterating), so that cutting at the
+    onset and detecting again finds the same crossing; that re-detection is the assertion.
+    """
     y = highpass(raw, f0_hz)
-    ta, tb = onset_times(y, floor_db, search_from_s)
-    t_on = max(ta, tb)
-    a = a_in = int(round((t_on - PREROLL_S) * SR))
-    if a < 0:
-        y = np.concatenate([np.zeros(-a), y])
-        a = 0
-    cut = y[a:a + int(MAX_S * SR)]
-    # Re-detect on the cut: the two criteria must still sit at the pre-roll, to the millisecond.
-    ra, rb = onset_times(cut, floor_db)
+    pre = preroll_s(f0_hz)
+    win = env_window(f0_hz)
+    pk = None
+    for _ in range(4):
+        ta, tb = onset_times(y, floor_db, anchor_s, f0_hz, pk)
+        t_on = max(ta, tb)
+        a = a_in = int(round((t_on - pre) * SR))
+        ypad = y
+        if a < 0:
+            ypad, a = np.concatenate([np.zeros(-a), y]), 0
+        cut = ypad[a:a + int(MAX_S * SR)]
+        pk_cut = float(env_rms_db(cut, win=win)[0].max())
+        if pk is not None and abs(pk_cut - pk) < 0.01:
+            break
+        pk = pk_cut
+    ra, rb = onset_times(cut, floor_db, None, f0_hz)
     got = max(ra, rb)
-    if abs(got - PREROLL_S) * 1000 > ALIGN_TOL_MS:
-        raise OnsetMisaligned(f"IRPDECOMP_ONSET_MISALIGNED: cut onset {got * 1000:.2f} ms, expected {PREROLL_S * 1000:.0f} ms")
+    if abs(got - pre) * 1000 > ALIGN_TOL_MS:
+        raise OnsetMisaligned(f"IRPDECOMP_ONSET_MISALIGNED: cut onset {got * 1000:.2f} ms, expected {pre * 1000:.1f} ms")
     return cut, dict(onset_s=float(t_on), noise_criterion_s=float(ta), peak_criterion_s=float(tb),
-                     criteria_spread_ms=float(abs(ta - tb) * 1000), floor_db=float(floor_db), cut_onset_s=float(got), cut_start_s=a_in / SR)
+                     criteria_spread_ms=float(abs(ta - tb) * 1000), floor_db=float(floor_db), cut_onset_s=float(got),
+                     cut_start_s=a_in / SR, preroll_s=pre)
 
 
 # ------------------------------------------------------------------------------- time-frequency maps
@@ -275,12 +329,12 @@ def _decay_db_s(t, lvl):
 
 # --------------------------------------------------------------------------------------- the gaps
 ALL_CATS = ("other_dynamic", "other_take", "neighbour")
-B_RESOLUTION = 2e-5  # smaller inharmonicity differences are inside the stiff-string fit's own scatter
+B_RESOLUTION = 0.2  # B x 1e-4: smaller differences are inside the stiff-string fit's own scatter
 SAME_NOTE = ("other_dynamic", "other_take")  # a neighbouring note is not a spread of THIS note's pitch-absolute measures
 
 
-def _m(label, unit, gap_unit, note, cats=ALL_CATS, value=None):
-    return dict(label=label, unit=unit, gap_unit=gap_unit, note=note, cats=cats, value=value)
+def _m(label, unit, gap_unit, note, cats=ALL_CATS, value=None, scale=1.0):
+    return dict(label=label, unit=unit, gap_unit=gap_unit, note=note, cats=cats, value=value, scale=scale)
 
 
 METRICS = OrderedDict([
@@ -293,7 +347,7 @@ METRICS = OrderedDict([
     ("partial_traj_db", _m("Partial level trajectories", "dB", "dB", "Median over the first eight partials of the RMS difference of their level-versus-time curves with the mean removed.")),
     ("partial_freq_cents", _m("Partial frequencies", "cents", "cents", "RMS over partials of the difference in frequency deviation from the harmonic series (stretch, inharmonicity).")),
     ("f0_cents", _m("Fundamental frequency", "Hz", "cents", "Distance in cents between the two fitted fundamentals.", SAME_NOTE, "f0_hz")),
-    ("inharmonicity_B", _m("Inharmonicity B", "B", "B", "Stiff-string law f_k = k f0 sqrt(1 + B k^2) fitted to the tracked partials.", ALL_CATS, "inharmonicity_B")),
+    ("inharmonicity_B", _m("Inharmonicity B", "B x 1e-4", "B x 1e-4", "Stiff-string law f_k = k f0 sqrt(1 + B k^2) fitted to the tracked partials; shown in units of 1e-4.", ALL_CATS, "inharmonicity_B", 1e4)),
     ("odd_even_db", _m("Odd/even balance", "dB", "dB", "Level of the odd partials (3, 5, 7, 9) against the even ones (2-10).", ALL_CATS, "odd_even_db")),
     ("hnr_db", _m("Harmonics-to-noise", "dB", "dB", "Energy at the tracked partials against the energy between them, 80 Hz to 10 kHz.", ALL_CATS, "hnr_db")),
     ("attack_log2", _m("Attack time 10-90%", "ms", "octaves of time", "Time for the 5 ms RMS envelope to rise from 10% to 90% of its steady (or peak) level; the gap is log2 of the ratio.", ALL_CATS, "attack_ms")),
@@ -442,9 +496,9 @@ class Refs:
         x = self.raw(e["file"])
         if e["file"] not in self._floor:
             self._floor[e["file"]] = floor_of(highpass(x, f0))
-        a = max(0, int((e["start"] - 0.02) * SR) - int(0.1 * SR))
+        a = max(0, int((e["start"] - 2.0) * SR))
         b = min(len(x), int(e["end"] * SR) + int(0.1 * SR))
-        y, info = align(x[a:b], f0, self._floor[e["file"]], search_from_s=(e["start"] - 0.02) - a / SR)
+        y, info = align(x[a:b], f0, self._floor[e["file"]], anchor_s=e["start"] - a / SR)
         info = dict(info, source_onset_s=a / SR + info["onset_s"], source_cut_start_s=a / SR + info["cut_start_s"])
         return y, info
 
@@ -656,6 +710,8 @@ def metric_rows(gaps, real: Note, ours: Note | None, ruler):
     rs, rv = real.scalars(), (ours.scalars() if ours else {})
     rows = []
     for mid, spec in METRICS.items():
+        k = spec["scale"]
+        sc = lambda v: None if v is None else v * k  # noqa: E731
         gp = gaps[mid][0] if gaps else None
         key = spec["value"]
         have = [r["gaps"].get(mid) for c in spec["cats"] for r in ruler.get(c, [])]
@@ -663,16 +719,17 @@ def metric_rows(gaps, real: Note, ours: Note | None, ruler):
             continue
         if mid == "decay_db_s" and rs.get(key) is None:
             continue
-        ruler_rows = [dict(label=r["label"], value=r["gaps"][mid]) for c in spec["cats"] for r in ruler.get(c, [])
+        ruler_rows = [dict(label=r["label"], value=r["gaps"][mid] * k) for c in spec["cats"] for r in ruler.get(c, [])
                       if r["gaps"].get(mid) is not None]
-        context = [dict(label=r["label"], value=r["gaps"][mid]) for c in ("other_articulation", "other_instrument") for r in ruler.get(c, [])
+        context = [dict(label=r["label"], value=r["gaps"][mid] * k) for c in ("other_articulation", "other_instrument") for r in ruler.get(c, [])
                    if r["gaps"].get(mid) is not None]
         note = spec["note"]
         if mid == "inharmonicity_B" and ruler_rows and max(r["value"] for r in ruler_rows) < B_RESOLUTION:
             ruler_rows, note = [], note + " Real recordings of this note differ by less than the fit resolves, so no ruler is offered."
-        rows.append(dict(id=mid, label=spec["label"], unit=spec["unit"], gap_unit=spec["gap_unit"], real=rs.get(key) if key else None,
-                         ours=rv.get(key) if key and ours else None, gap=gp if ours else None, signed_gap=gaps[mid][1] if gaps else None,
-                         ruler=ruler_rows, other_instruments_and_articulations=context, note=note))
+        rows.append(dict(id=mid, label=spec["label"], unit=spec["unit"], gap_unit=spec["gap_unit"], real=sc(rs.get(key)) if key else None,
+                         ours=sc(rv.get(key)) if key and ours else None, gap=sc(gp) if ours else None,
+                         signed_gap=sc(gaps[mid][1]) if gaps else None, ruler=ruler_rows,
+                         other_instruments_and_articulations=context, note=note))
     return rows
 
 
@@ -722,7 +779,7 @@ def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand
                                 + (f"ours was set {off:+.1f} dB beforehand so its RMS over {real.match_window[0]:.1f}-{real.match_window[1]:.1f} s "
                                    "equals the real recording's." if ours else "the real recording is otherwise untouched."))),
         alignment=dict(onset_real_s=ref_info["source_onset_s"], onset_ours_s=cand_info["onset_s"] if cand_info else None, highpass_hz=hp,
-                       level_offset_db=off if ours else None, preroll_ms=PREROLL_S * 1000, tolerance_ms=ALIGN_TOL_MS,
+                       level_offset_db=off if ours else None, preroll_ms=ref_info["preroll_s"] * 1000, tolerance_ms=ALIGN_TOL_MS,
                        onset_criteria_spread_ms=dict(real=ref_info["criteria_spread_ms"], ours=cand_info["criteria_spread_ms"] if cand_info else None)),
         figures=figs, partials=parts, metrics=metric_rows(gaps, real, ours, ruler),
         ruler_with={c: [r["with_"] for r in rs] for c, rs in ruler.items()},
@@ -739,7 +796,7 @@ DEFAULTS = dict(lib="/data/tmp/wa-inst/p2-grade/grade/library-v6-light.json", wa
                 out="/data/tmp/wa-inst/analysis")
 
 
-def pick_entry(refs, family, note, dyn, art):
+def pick_entry(refs, family, note, dyn, art, contains=None):
     inst = INST.get(family, family)
     cands = refs.find(inst, midi_of(note), dyn, art)
     if art is None:
@@ -747,19 +804,22 @@ def pick_entry(refs, family, note, dyn, art):
         if not arts:
             raise SystemExit(f"IRPDECOMP_REFERENCE_MISSING: {family} {note} {dyn}")
         cands = refs.find(inst, midi_of(note), dyn, canon_art(arts))
+    if contains:
+        exact = [e for e in cands if Path(e["file"]).stem.lower() == contains.lower()]
+        cands = exact or [e for e in cands if contains.lower() in e["file"].lower()]
     if not cands:
-        raise SystemExit(f"IRPDECOMP_REFERENCE_MISSING: {family} {note} {dyn} {art or ''}")
+        raise SystemExit(f"IRPDECOMP_REFERENCE_MISSING: {family} {note} {dyn} {art or ''} {contains or ''}")
     return sorted(cands, key=lambda e: e["file"])[0]
 
 
 def run_pair(refs, c, root):
-    ref_e = c.get("ref_entry") or pick_entry(refs, c["family"], c["note"], c.get("dyn", "mf"), c.get("art"))
+    ref_e = c.get("ref_entry") or pick_entry(refs, c["family"], c["note"], c.get("dyn", "mf"), c.get("art"), c.get("ref_contains"))
     ref_y, ref_info = refs.aligned(ref_e)
     cand_y = cand_info = ours_meta = None
     if c.get("wav"):
         f0 = hz_of(ref_e["note"])
         raw = load(Path(c["wav"]))
-        cand_y, cand_info = align(raw, f0, floor_of(highpass(raw, f0)))
+        cand_y, cand_info = align(raw, f0, render_floor(highpass(raw, f0), f0))
         ours_meta = dict(wav=c["wav"], git_sha=c["git_sha"], observer=c["observer"], recipe=c["recipe"], sample_rate=wav_sample_rate(c["wav"]))
     return write_pair(root, c["family"], c["note"], ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, c.get("review", False))
 
@@ -807,7 +867,7 @@ def cmd_refs(a):
 
 def cmd_pair(a):
     refs = Refs(a.lib, a.wav_dir, a.refs_json)
-    c = dict(family=a.family, note=a.note, dyn=a.dyn, art=a.art, wav=a.render, git_sha=a.git_sha, observer=a.observer, recipe=a.recipe, review=a.review)
+    c = dict(family=a.family, note=a.note, dyn=a.dyn, art=a.art, ref_contains=a.ref_contains, wav=a.render, git_sha=a.git_sha, observer=a.observer, recipe=a.recipe, review=a.review)
     if not all((a.render, a.git_sha, a.observer, a.recipe)):
         raise SystemExit("IRPDECOMP_USAGE: a render needs --git-sha, --observer and --recipe (the page shows them)")
     pj = run_pair(refs, c, a.out)
@@ -817,15 +877,55 @@ def cmd_pair(a):
         print(f'{m["id"]:20s} gap {m["gap"] if m["gap"] is None else round(m["gap"], 3)!s:>9} {m["gap_unit"]:16s} real-vs-real max {top if top is None else round(top, 3)!s:>9}  {verdict}')
 
 
+def _batch_job(args):
+    c, root = args
+    try:
+        pj = run_pair(_REFS, c, root)
+        return dict(family=c["family"], note=c["note"], wav=c["wav"], ok=True, metrics=len(pj["metrics"]))
+    except (SystemExit, OnsetMisaligned, GraderRefusalError, ValueError, IndexError, KeyError) as e:
+        return dict(family=c["family"], note=c["note"], wav=c["wav"], ok=False, error=str(e))
+
+
 def cmd_batch(a):
-    refs = Refs(a.lib, a.wav_dir, a.refs_json)
-    for c in json.loads(Path(a.candidates).read_text()):
-        c.setdefault("dyn", "mf")
-        try:
-            pj = run_pair(refs, c, a.out)
-            print(json.dumps(dict(family=c["family"], note=c["note"], ok=True, metrics=len(pj["metrics"]))))
-        except (SystemExit, OnsetMisaligned, GraderRefusalError) as e:
-            print(json.dumps(dict(family=c["family"], note=c["note"], ok=False, error=str(e))))
+    """Pair for every candidate in a JSON list of {family, note, wav, git_sha, observer, recipe, [dyn, art, ref_contains]}."""
+    jobs = [(dict(c, dyn=c.get("dyn", "mf")), a.out) for c in json.loads(Path(a.candidates).read_text())]
+    if a.jobs > 1:
+        with ProcessPoolExecutor(min(a.jobs, 16), mp_context=multiprocessing.get_context("fork"), initializer=_init,
+                                 initargs=(a.lib, a.wav_dir, a.refs_json)) as pool:
+            res = list(pool.map(_batch_job, jobs, chunksize=1))
+    else:
+        _init(a.lib, a.wav_dir, a.refs_json)
+        res = [_batch_job(j) for j in jobs]
+    for r in res:
+        print(json.dumps(r))
+    raise SystemExit(0 if all(r["ok"] for r in res) else 1)
+
+
+def pair_report(pj):
+    """Text table of one pair with a render: each metric's gap against the largest real-vs-real distance, worst first."""
+    rows = []
+    for m in pj["metrics"]:
+        top = max((r["value"] for r in m["ruler"]), default=None)
+        ratio = None if m["gap"] is None or not top else m["gap"] / top
+        rows.append((ratio, m, top))
+    rows.sort(key=lambda r: (r[0] is None, -(r[0] or 0)))
+    o = pj["ours"]
+    out = [f'{pj["family"]} {pj["note"]} {pj["dynamic"]}  ours {Path(o["wav"]).name} @{o["git_sha"]}  vs {pj["real"]["file"]}  '
+           f'(ours set {pj["alignment"]["level_offset_db"]:+.1f} dB; onset {pj["alignment"]["onset_ours_s"]:.3f} s / {pj["alignment"]["onset_real_s"]:.3f} s)',
+           f'  {"metric":34s} {"real":>10s} {"ours":>10s} {"gap":>9s}  {"ruler max":>9s} {"gap/max":>7s}']
+    for ratio, m, top in rows:
+        f = lambda v: "-" if v is None else f"{v:.4g}"  # noqa: E731
+        out.append(f'  {m["label"] + " [" + m["gap_unit"] + "]":34.34s} {f(m["real"]):>10s} {f(m["ours"]):>10s} {f(m["gap"]):>9s}  {f(top):>9s} '
+                   f'{("x" + format(ratio, ".2f")) if ratio is not None else "no ruler":>7s}')
+    return "\n".join(out)
+
+
+def cmd_report(a):
+    root = Path(a.out)
+    for p in sorted(root.glob("*/*/pair.json")):
+        pj = json.loads(p.read_text())
+        if pj.get("ours") and (not a.family or pj["family"] in a.family):
+            print(pair_report(pj) + "\n")
 
 
 def main():
@@ -845,6 +945,7 @@ def main():
     p.add_argument("--note", required=True)
     p.add_argument("--dyn", default="mf")
     p.add_argument("--art")
+    p.add_argument("--ref-contains", help="substring of the library file name, to pick the string/session of the reference")
     p.add_argument("--git-sha")
     p.add_argument("--observer")
     p.add_argument("--recipe")
@@ -852,6 +953,7 @@ def main():
     p = sub.add_parser("batch")
     common(p)
     p.add_argument("candidates")
+    p.add_argument("--jobs", type=int, default=1)
     p.set_defaults(fn=cmd_batch)
     p = sub.add_parser("refs")
     common(p)
@@ -859,6 +961,10 @@ def main():
     p.add_argument("--all", action="store_true", help="every mf note, not four spread ones")
     p.add_argument("--jobs", type=int, default=1)
     p.set_defaults(fn=cmd_refs)
+    p = sub.add_parser("report", help="print each graded pair as a table, worst gap against its ruler first")
+    p.add_argument("--out", default=DEFAULTS["out"])
+    p.add_argument("--family", action="append")
+    p.set_defaults(fn=cmd_report)
     a = ap.parse_args()
     a.fn(a)
 
