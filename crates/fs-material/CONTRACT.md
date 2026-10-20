@@ -1634,3 +1634,19 @@ applies the same mechanical-coordinate/frequency guard as the six native
 thermoplastic roles, and returns its original claim pin. The consuming
 transport owner admits the property quantity. No material state, caloric law,
 plastic history or transport formula is duplicated.
+
+
+### Declared mushy-phase volume and mobility
+
+`phase::mushy::MushyPhaseLaw` binds the original equilibrium h chart to explicit
+constant constituent densities, a permeability scale and a positive minimum
+liquid-volume fraction. `PhaseVolumeFractions` converts mass fractions using
+constituent specific volumes and checks the chart's bulk density. The declared
+Carman–Kozeny closure supplies inverse permeability from liquid volume fraction;
+it is neither a universal melting law nor a measured-data assertion. The source
+state, original chart and model identity remain available. Fully liquid material
+has zero added drag; states below the support floor refuse rather than inventing
+solid locking. Equal constant phase densities are separately admitted for
+fixed-volume consumers. Separate constituent velocities, elastic skeleton
+response, pressure/composition evolution and moving boundaries remain outside
+this closure.

@@ -35,6 +35,9 @@ const MAT: MaterialId = MaterialId(3);
 #[path = "liquid_flow_enthalpy/feedback.rs"]
 mod feedback;
 
+#[path = "liquid_flow_enthalpy/mushy.rs"]
+mod mushy;
+
 fn absolute() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature, ValueForm::Static,

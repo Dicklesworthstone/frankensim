@@ -17,11 +17,13 @@ use fs_conduction::transient::deposition::{
 use fs_exec::CancelGate;
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
+use fs_material::phase::mushy::MushyPhaseLaw;
 
 use super::{FlowEnthalpyInput, admit_map, invalid, mass_graph};
 use crate::conjugate::{
     ChtError, FluidProperties, FvFlow, SimpleConfig, Turbulence, VoxelDomain,
-    simple_flow_with_viscosity, simple_flow_with_viscosity_and_force,
+    simple_flow_with_material_resistance, simple_flow_with_viscosity,
+    simple_flow_with_viscosity_and_force,
 };
 use crate::material::transport::boussinesq::{BoussinesqConfig, BoussinesqMaterial};
 
@@ -80,6 +82,9 @@ pub struct MaterialFlowEpoch<F> {
     /// Applied `(rho(T)-rho0)*g` [N/m³] in native voxel order, zero on solids.
     /// None on the original fixed-density path; never an additional heat input.
     pub buoyancy_force_n_m3: Option<Vec<[f64; 3]>>,
+    /// Applied isotropic `mu/K(phi(h))` [Pa s/m2], in native voxel order.
+    /// None without an explicitly attached stationary mushy closure.
+    pub mushy_drag_pa_s_m2: Option<Vec<f64>>,
 }
 
 /// Live local viscosity/momentum/enthalpy coupling around any existing observer.
@@ -96,8 +101,8 @@ pub struct MaterialFlowEpoch<F> {
 /// stay with the actual registered caloric law; source Cp never replaces it.
 /// Conductivity/contact evolution stays with the wrapped observer except for
 /// explicitly assigned full fluid faces (see `Self::with_fluid_conduction`).
-/// In particular this does not turn a solid/liquid fraction into a porous drag
-/// law, or assume that a partially solid material can move like a liquid.
+/// A solid/liquid fraction supplies mobility only through an explicitly
+/// attached `Self::with_mushy_mobility` closure; it is never inferred from T.
 ///
 /// Each source epoch performs one laminar, quasisteady full-stress momentum
 /// solve. The shared `Advected` owner contributes its actual face mass rates,
@@ -116,6 +121,7 @@ pub struct MaterialFlowFeedback<'a, F, R, O> {
     resolve: R,
     reference: FluidTransportState,
     buoyancy: Option<([f64; 3], fn(&F) -> f64)>,
+    mushy: Option<&'a MushyPhaseLaw<'a>>,
     fluid_conduction: BTreeMap<(CellId, CellId), FluidConductionFace>,
     advected: Option<Advected<O>>,
     applied: Option<MaterialFlowEpoch<F>>,
@@ -173,6 +179,7 @@ where
             resolve,
             reference,
             buoyancy: None,
+            mushy: None,
             fluid_conduction: BTreeMap::new(),
             advected: Some(advected),
             applied: None,
@@ -236,6 +243,83 @@ where
             material.resolved_transport().density_kg_m3()
         }));
         Ok(coupled)
+    }
+
+    /// Attach declared h-dependent stationary mixture mobility to this owner.
+    ///
+    /// The exact registered caloric chart supplies both T(h) and phase mass
+    /// fraction. Equal constant phase densities are mandatory: this fixed-mass
+    /// incompressible graph cannot absorb shrinkage into an unreported source.
+    /// Actual local source viscosity multiplies the admitted inverse
+    /// permeability, implicitly in native momentum. The same native face
+    /// fluxes transport total h, including latent energy, exactly once.
+    ///
+    /// This is the declared homogeneous single-velocity enthalpy/porosity
+    /// approximation, not separate moving-liquid/stationary-solid transport.
+    /// It retains the underlying callback's source receipts and context; it
+    /// does not promote raw permeability/model data to measured authority.
+    /// Below the model's minimum liquid volume fraction (including fully
+    /// solid) refuses at source and endpoint epochs. No finite artificial
+    /// leakage is called solid locking. Drag dissipation is not thermalized.
+    pub fn with_mushy_mobility(
+        mut self,
+        law: &'a MushyPhaseLaw<'a>,
+    ) -> Result<Self, MaterialFlowError<O::Error>> {
+        let rho = law.fixed_density_kg_m3().ok_or(invalid(
+            "fixed-volume mushy flow requires equal constant phase densities",
+        ))?;
+        if rho.to_bits() != self.reference.density_kg_m3().to_bits()
+            || !core::ptr::addr_eq(
+                self.input.caloric as *const dyn fs_conduction::transient::deposition::ThermalLaw,
+                law.curve() as *const fs_material::phase::EquilibriumEnthalpyPhaseCurve,
+            )
+        {
+            return Err(invalid(
+                "mushy mobility must use the original caloric object and fluid density",
+            )
+            .into());
+        }
+        for h in self.input.inlet_specific_h_j_kg.into_iter().flatten() {
+            law.at_specific_enthalpy(h).map_err(|_| {
+                invalid("inlet enthalpy lies outside the admitted mushy mobility domain")
+            })?;
+        }
+        self.mushy = Some(law);
+        self.mushy_drag(&self.endpoint, &mut || Ok(()))?;
+        Ok(self)
+    }
+
+    fn mushy_drag(
+        &self,
+        samples: &[FlowMaterialSample<F>],
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<Vec<f64>>, MaterialFlowError<O::Error>> {
+        let Some(law) = self.mushy else {
+            return Ok(None);
+        };
+        let mut drag = vec![0.0; self.domain.cell_count()];
+        for sample in samples {
+            check_gate(self.gate, check)?;
+            let state = law
+                .at_specific_enthalpy(sample.specific_enthalpy_j_kg)
+                .map_err(|source| MaterialFlowError::Material {
+                    cell: sample.cell,
+                    source,
+                })?;
+            if state.phase.temperature_k().to_bits() != sample.temperature_k.to_bits() {
+                return Err(invalid(
+                    "mushy mobility temperature differs from the original caloric owner",
+                )
+                .into());
+            }
+            let value =
+                sample.transport.dynamic_viscosity_pa_s() * state.inverse_permeability_per_m2;
+            if !value.is_finite() || (state.inverse_permeability_per_m2 > 0.0 && value <= 0.0) {
+                return Err(invalid("mushy Darcy resistance is not representable").into());
+            }
+            drag[sample.voxel] = value;
+        }
+        Ok(Some(drag))
     }
 
     /// Assign existing full voxel-face links to molecular fluid conduction.
@@ -466,7 +550,18 @@ where
         } else {
             None
         };
-        let flow = if let Some(forces) = &buoyancy_force_n_m3 {
+        let mushy_drag_pa_s_m2 = self.mushy_drag(&samples, check)?;
+        let flow = if let Some(drag) = &mushy_drag_pa_s_m2 {
+            simple_flow_with_material_resistance(
+                self.domain,
+                &fluid,
+                &viscosities,
+                drag,
+                buoyancy_force_n_m3.as_deref(),
+                self.config,
+                self.gate,
+            )?
+        } else if let Some(forces) = &buoyancy_force_n_m3 {
             simple_flow_with_viscosity_and_force(
                 self.domain,
                 &fluid,
@@ -503,6 +598,7 @@ where
             samples,
             flow,
             buoyancy_force_n_m3,
+            mushy_drag_pa_s_m2,
         });
         self.solves += 1;
         Ok(sources)
@@ -612,6 +708,7 @@ where
             &mut || Ok(()),
         )?;
         admit_density(&self.endpoint, self.reference.density_kg_m3())?;
+        self.mushy_drag(&self.endpoint, &mut || Ok(()))?;
         self.advected
             .as_mut()
             .ok_or(invalid("unfinished material-flow source epoch"))?
@@ -637,6 +734,7 @@ where
             check,
         )?;
         admit_density(&self.endpoint, self.reference.density_kg_m3())?;
+        self.mushy_drag(&self.endpoint, check)?;
         let advected = self
             .advected
             .as_mut()

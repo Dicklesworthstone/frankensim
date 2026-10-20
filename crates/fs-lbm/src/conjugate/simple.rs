@@ -1981,7 +1981,15 @@ pub fn simple_flow_with_viscosity(
     config: &SimpleConfig,
     gate: &CancelGate,
 ) -> Result<FvFlow, ChtError> {
-    material_flow(domain, fluid, dynamic_viscosity_pa_s, None, config, gate)
+    material_flow(
+        domain,
+        fluid,
+        dynamic_viscosity_pa_s,
+        None,
+        None,
+        config,
+        gate,
+    )
 }
 
 /// Solve the same variable-viscosity momentum system with a cell body force.
@@ -2006,6 +2014,35 @@ pub fn simple_flow_with_viscosity_and_force(
         fluid,
         dynamic_viscosity_pa_s,
         Some(force_density_n_m3),
+        None,
+        config,
+        gate,
+    )
+}
+
+/// Add declared local isotropic Darcy resistance to the same momentum owner.
+///
+/// `drag_pa_s_m2` is the coefficient of `-drag*u` [N/m3], one nonnegative
+/// finite value per voxel, zero on solids. It is implicit in momentum and
+/// SIMPLEC's pressure correction, and adds to authored porous resistances.
+/// Zero restores the existing fluid equations. The calling material owner
+/// supplies its phase/permeability closure and actual h/T epoch; this solver
+/// does not infer a solid-locking threshold or turn drag work into heat.
+pub fn simple_flow_with_material_resistance(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    dynamic_viscosity_pa_s: &[f64],
+    drag_pa_s_m2: &[f64],
+    force_density_n_m3: Option<&[[f64; 3]]>,
+    config: &SimpleConfig,
+    gate: &CancelGate,
+) -> Result<FvFlow, ChtError> {
+    material_flow(
+        domain,
+        fluid,
+        dynamic_viscosity_pa_s,
+        force_density_n_m3,
+        Some(drag_pa_s_m2),
         config,
         gate,
     )
@@ -2016,6 +2053,7 @@ fn material_flow(
     fluid: &FluidProperties,
     dynamic_viscosity_pa_s: &[f64],
     force_density_n_m3: Option<&[[f64; 3]]>,
+    drag_pa_s_m2: Option<&[f64]>,
     config: &SimpleConfig,
     gate: &CancelGate,
 ) -> Result<FvFlow, ChtError> {
@@ -2065,6 +2103,33 @@ fn material_flow(
         for (viscous, _) in axes {
             *viscous = (*viscous / solver.mu) * dynamic_viscosity_pa_s[c];
             finite("simple.material_darcy_resistance", *viscous)?;
+        }
+    }
+    if let Some(drag) = drag_pa_s_m2 {
+        if drag.len() != domain.cell_count() {
+            return Err(ChtError::InvalidInput {
+                field: "simple.drag_pa_s_m2",
+                reason: "one isotropic drag coefficient per voxel is required".into(),
+            });
+        }
+        if solver.porous.is_empty() {
+            solver.porous = vec![[(0.0, 0.0); 3]; domain.cell_count()];
+        }
+        for (c, &coefficient) in drag.iter().enumerate() {
+            if c % 256 == 0 {
+                poll(gate)?;
+            }
+            finite("simple.drag_pa_s_m2", coefficient)?;
+            if coefficient < 0.0 || (!domain.is_fluid(c) && coefficient != 0.0) {
+                return Err(ChtError::InvalidInput {
+                    field: "simple.drag_pa_s_m2",
+                    reason: "drag must be nonnegative and zero in solid voxels".into(),
+                });
+            }
+            for (viscous, _) in &mut solver.porous[c] {
+                *viscous += coefficient;
+                finite("simple.material_darcy_resistance", *viscous)?;
+            }
         }
     }
     solver.molecular_viscosity = dynamic_viscosity_pa_s.to_vec();

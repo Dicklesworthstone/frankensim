@@ -1836,3 +1836,25 @@ state, and does not establish subsequent momentum or surface-energy conservation
 The focused material-free-surface regressions exercise material substitution,
 Guo velocity, exact initial fill, order independence, a native step, and refusal
 and cancellation. Their presence does not imply an executed native test pass.
+
+
+### Enthalpy-dependent mushy mobility in native flow
+
+`MaterialFlowFeedback::with_mushy_mobility` connects the original equilibrium
+h chart and declared phase closure to the existing momentum/enthalpy timeline.
+It requires the exact registered caloric object and equal constant phase
+densities, multiplies inverse permeability by the same resolved local viscosity,
+and applies that resistance implicitly through the existing MAC/SIMPLE momentum
+and pressure correction. The original face fluxes transport total h once,
+including latent energy. Applied drag is retained in `MaterialFlowEpoch`, and
+source/endpoint support is checked before accepting the coupled candidate.
+The existing liquid-only ingress remains unchanged; the explicit mixed-phase
+attachment uses the existing generic `FlowEnthalpyInput` path.
+
+This is bounded quasisteady, homogeneous single-velocity enthalpy/porosity flow
+in a stationary drag frame. It supplies no phase-volume source, exact solid
+locking, moving skeleton/free surface or drag-dissipation heating. Permeability
+parameters are declared model data. Tests cover isothermal latent-plateau flow,
+data-only permeability changes, independent series-Darcy/enthalpy balances,
+source retention and transactional support refusal; native execution remains a
+separate verification requirement.

@@ -10,6 +10,9 @@
 //! finite-strain, fluid, remeshing, acoustic, and optical consumers own their
 //! respective responses to the returned phase state.
 
+/// Declared stationary solid/liquid mixture mobility on this same h chart.
+pub mod mushy;
+
 use core::fmt;
 
 use fs_blake3::{ContentHash, DomainHasher};
