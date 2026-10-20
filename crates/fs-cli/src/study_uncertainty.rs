@@ -25,6 +25,8 @@ mod compliance;
 mod execution;
 #[path = "study_uncertainty/qmc.rs"]
 mod qmc;
+#[path = "study_uncertainty/lhs.rs"]
+mod lhs;
 #[path = "study_uncertainty/sensitivity.rs"]
 mod sensitivity;
 #[path = "study_uncertainty/legacy.rs"]
@@ -182,6 +184,7 @@ fn plan(model: &Model) -> UqPlan {
     let mut plan = UqPlan::new(study.qoi(), method, study.samples())
         // This is the marginal plan. An explicit copula is supplied separately
         // to its statistical owner, never disguised as uniform Pearson data.
+        // LHS dispatch likewise transfers these marginals into its own LhsPlan.
         .with_correlation(CorrelationModel::Independent)
         .with_compliance_threshold(model.bound.threshold_k());
     plan.seed = study.seed();
@@ -354,6 +357,7 @@ fn persist(
     let id = model.identity();
     let report = execution.monte_carlo().map(UqExecution::report);
     let qmc_report = execution.qmc_report();
+    let lhs_report = execution.lhs_report();
     let sensitivity_report = execution.sensitivity_report();
     let compliance = execution.compliance(model)?;
     let scope = if sensitivity_report.is_some() {
@@ -362,6 +366,8 @@ fn persist(
         compliance::scope(model)
     } else if qmc_report.is_some() {
         qmc::scope(model)
+    } else if lhs_report.is_some() {
+        lhs::scope(model)
     } else {
         fixed_scope(model)
     };
@@ -371,11 +377,15 @@ fn persist(
     let qmc_field = qmc_report.as_ref().map_or_else(String::new, |report| {
         format!(",\"qmc\":{}", qmc::json(report))
     });
+    let lhs_field = lhs_report.as_ref().map_or_else(String::new, |report| {
+        format!(",\"lhs\":{}", lhs::json(report, lhs::layout(model)))
+    });
     let sensitivity_field = sensitivity_report.as_ref().map(|report|
         sensitivity::json(report, model.bound.study().parameters())
             .map(|json| format!(",\"sensitivity\":{json}"))).transpose()?.unwrap_or_default();
     let method = if sensitivity_report.is_some() { "sobol-sensitivity" }
-        else if qmc_report.is_some() { "quasi-monte-carlo" } else { "monte-carlo" };
+        else if qmc_report.is_some() { "quasi-monte-carlo" }
+        else if lhs_report.is_some() { "latin-hypercube" } else { "monte-carlo" };
     let correlation = if model.bound.study().latent_correlation().is_some() {
         "gaussian-copula"
     } else { "independent" };
@@ -404,7 +414,7 @@ fn persist(
         .as_deref()
         .map_or_else(|| "null".into(), quoted);
     let summary = format!(
-        "{{\"schema\":{REPORT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"qoi\":\"temperature-max\",\"unit\":\"K\",\"authority\":\"Estimated\",\"method\":{method:?},\"correlation\":{correlation:?},\"seed\":{},\"samples_evaluated\":{n},\"samples_planned\":{},\"evaluations_attempted\":{},\"temperature_limit_k\":{},\"observations\":{samples},\"statistics\":{statistics},\"failure\":{failure}{compliance_field}{qmc_field}{sensitivity_field}{dependence_field}{control_field},\"no_claim\":{}}}",
+        "{{\"schema\":{REPORT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"qoi\":\"temperature-max\",\"unit\":\"K\",\"authority\":\"Estimated\",\"method\":{method:?},\"correlation\":{correlation:?},\"seed\":{},\"samples_evaluated\":{n},\"samples_planned\":{},\"evaluations_attempted\":{},\"temperature_limit_k\":{},\"observations\":{samples},\"statistics\":{statistics},\"failure\":{failure}{compliance_field}{qmc_field}{lhs_field}{sensitivity_field}{dependence_field}{control_field},\"no_claim\":{}}}",
         quoted(&id.to_hex()),
         quoted(status),
         quoted(termination),
@@ -431,6 +441,8 @@ fn persist(
         sensitivity::html(report)
     } else if let Some(report) = &qmc_report {
         qmc::html(report)
+    } else if let Some(report) = &lhs_report {
+        lhs::html(report, lhs::layout(model))
     } else {
         let complete = report.as_ref().filter(|_| status == "completed");
         format!("<p>Mean: {} K; sample standard deviation: {} K; empirical pass fraction: {}.</p>",
@@ -454,6 +466,9 @@ fn persist(
                 "fixed-count-native-monte-carlo-descriptive-standard-error", report.sampling_error));
         } else if let Some(claim) = qmc_report.as_ref()
             .and_then(|report| qmc::claim(report, hash_bytes(summary.as_bytes()), &scope)) {
+            package = package.with_claim(claim);
+        } else if let Some(claim) = lhs_report.as_ref()
+            .and_then(|report| lhs::claim(report, lhs::layout(model), hash_bytes(summary.as_bytes()), &scope)) {
             package = package.with_claim(claim);
         }
     }

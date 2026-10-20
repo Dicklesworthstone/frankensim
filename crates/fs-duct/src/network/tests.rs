@@ -736,3 +736,105 @@ fn network_expanded_unknown_cap_and_singular_edge_refuse() {
         Err(DuctError::Singular)
     ));
 }
+
+#[test]
+fn network_coupled_termination_even_mode_and_diagonal_limit() {
+    // A symmetric Y-branch: equal branches see equal flows, so a symmetric
+    // coupled load [[z, m], [m, z]] acts on each branch as the single load z+m.
+    let gas = gas();
+    let w = 2.0 * core::f64::consts::PI * 700.0;
+    let net = DuctNetwork {
+        nodes: vec![
+            port("in"),
+            node("j", NodeBoundary::Junction),
+            port("a"),
+            port("b"),
+        ],
+        edges: vec![
+            edge("trunk", 0, 1, 0.008, 0.2),
+            edge("left", 1, 2, 0.005, 0.1),
+            edge("right", 1, 3, 0.005, 0.1),
+        ],
+    };
+    let response = network_port_impedance(&net, &gas, w, LossModel::Bessel).unwrap();
+    let (z, m) = (C64::new(1.0e5, -4.0e5), C64::new(5.0e4, -1.0e5));
+    let coupled = |matrix: Vec<C64>, labels: &[&str]| CoupledTermination {
+        omega: w,
+        labels: labels.iter().map(|s| (*s).to_string()).collect(),
+        z: matrix,
+        source_id: "analytic symmetric coupled load".into(),
+    };
+    let single = |label: &str, value: C64| PortTermination {
+        label: label.into(),
+        load: NetworkLoad::Impedance(value),
+    };
+    let observed = response
+        .drive_coupled("in", &[], &coupled(vec![z, m, m, z], &["a", "b"]), &gas)
+        .unwrap()
+        .impedance;
+    let even = response
+        .driving_point("in", &[single("a", z + m), single("b", z + m)], &gas)
+        .unwrap();
+    assert!(
+        relative(observed, even) <= 1.0e-12,
+        "{observed:?} vs {even:?}"
+    );
+    // The mutual term is live: the uncoupled answer differs.
+    let uncoupled = response
+        .driving_point("in", &[single("a", z), single("b", z)], &gas)
+        .unwrap();
+    assert!(relative(observed, uncoupled) > 1.0e-3);
+    // Zero mutual terms reproduce the per-port loads bitwise, also when only
+    // one port is coupled.
+    let diagonal = response
+        .drive_coupled(
+            "in",
+            &[],
+            &coupled(vec![z, C64::ZERO, C64::ZERO, z], &["a", "b"]),
+            &gas,
+        )
+        .unwrap()
+        .impedance;
+    assert_eq!(
+        (diagonal.re.to_bits(), diagonal.im.to_bits()),
+        (uncoupled.re.to_bits(), uncoupled.im.to_bits())
+    );
+    let mixed = response
+        .drive_coupled("in", &[single("b", z)], &coupled(vec![z], &["a"]), &gas)
+        .unwrap()
+        .impedance;
+    assert_eq!(
+        (mixed.re.to_bits(), mixed.im.to_bits()),
+        (uncoupled.re.to_bits(), uncoupled.im.to_bits())
+    );
+    // Refusals: active, duplicated, unknown or omitted ports; another
+    // frequency; an active Hermitian part; a missing source.
+    let ok = coupled(vec![z, m, m, z], &["a", "b"]);
+    assert!(response.drive_coupled("a", &[], &ok, &gas).is_err());
+    assert!(
+        response
+            .drive_coupled("in", &[single("a", z)], &ok, &gas)
+            .is_err()
+    );
+    assert!(
+        response
+            .drive_coupled("in", &[], &coupled(vec![z, m, m, z], &["a", "x"]), &gas)
+            .is_err()
+    );
+    assert!(
+        response
+            .drive_coupled("in", &[], &coupled(vec![z], &["a"]), &gas)
+            .is_err()
+    );
+    let mut shifted = ok.clone();
+    shifted.omega = w * (1.0 + 1e-9);
+    assert!(response.drive_coupled("in", &[], &shifted, &gas).is_err());
+    let active = coupled(
+        vec![z, C64::new(3.0e5, 0.0), C64::new(3.0e5, 0.0), z],
+        &["a", "b"],
+    );
+    assert!(response.drive_coupled("in", &[], &active, &gas).is_err());
+    let mut anonymous = ok;
+    anonymous.source_id = " ".into();
+    assert!(response.drive_coupled("in", &[], &anonymous, &gas).is_err());
+}

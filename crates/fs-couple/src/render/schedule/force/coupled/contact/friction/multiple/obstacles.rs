@@ -4,8 +4,9 @@
 //! Both mixed responses are retained, including every bilateral body reaction.
 //! The original normal potential/secant, normal root, friction root and modal
 //! transition own the physics. This module supplies their joint coordinates,
-//! not a second contact law or time integrator. In particular, these reactions
-//! do NOT replace the separately prescribed normal loads of the bow ports.
+//! not a second contact law or time integrator. By default these reactions are
+//! independent of bow loads; explicit `normal_load` bindings use a reaction as
+//! the corresponding tangential law's normal load in this SAME joint solve.
 
 use super::*;
 use super::super::super::{
@@ -151,6 +152,11 @@ pub(super) struct ObstacleSet {
     motion: Option<motion::MotionState>,
 }
 impl ObstacleSet {
+    // Only the joint friction owner reads these current trial reactions. An
+    // accepted public report is deliberately not used as a one-sample delay.
+    pub(super) fn normal_reaction(&self, index: usize) -> Option<f64> {
+        self.reactions.get(index).copied()
+    }
     fn new(system: &MultiFrictionModalSystem, contacts: Vec<(ModalContact, ModalContactConfig)>,
         limits: FrictionObstacleConfig, gate: &CancelGate) -> Result<Self, ModalCouplingError>
     {

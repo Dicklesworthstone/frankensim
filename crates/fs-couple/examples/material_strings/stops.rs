@@ -10,6 +10,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::{
 use fs_couple::render::schedule::force::coupled::contact::ModalContactConfig;
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::obstacles::FrictionObstacleConfig;
 use fs_dcontact::Obstacle;
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::contact_load::BowContactLoad;
 use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::TransverseDirection;
 
 pub const MAX_BYTES: usize = 16_384;
@@ -36,6 +37,7 @@ pub struct Profile {
     pub bytes: Vec<u8>,
     entries: Vec<Entry>,
     motion: Option<StopMotionProgram>,
+    bow_contacts: Vec<BowContactLoad>,
 }
 
 fn scalar(word: &str) -> Result<f64> {
@@ -53,11 +55,23 @@ impl Profile {
         }
         let mut entries: Vec<Entry> = Vec::new();
         let mut motion = None;
+        let mut bow_contacts: Vec<BowContactLoad> = Vec::new();
         while let Some(line) = lines.next() {
             let fields: Vec<_> = line.split_ascii_whitespace().collect();
             if fields.first() == Some(&"motion") {
                 motion = Some(parse_motion(&fields, &mut lines, entries.len())?);
                 break;
+            }
+            if fields.first() == Some(&"bow-contact") {
+                if fields.len() != 3 { return Err("expected bow-contact BOW_INDEX STOP_ID".into()); }
+                let bow: usize = fields[1].parse()?;
+                let stop = entries.iter().position(|e| e.name == fields[2])
+                    .ok_or("bow-contact must name a preceding stop declaration")?;
+                if bow >= 16 || bow_contacts.iter().any(|b| b.bow == bow || b.stop == stop) {
+                    return Err("bow contacts require distinct actual bows and distinct normal contacts".into());
+                }
+                bow_contacts.push(BowContactLoad { bow, stop });
+                continue;
             }
             if entries.len() == MAX_STOPS { return Err("stop profile exceeds 32 contacts".into()); }
             if fields.len() < 5 || fields[0] != "stop" {
@@ -100,7 +114,7 @@ impl Profile {
                     force_relative_tolerance: 1e-9 } });
         }
         if entries.is_empty() { return Err("stop profile must declare at least one contact".into()); }
-        Ok(Self { bytes: bytes.to_vec(), entries, motion })
+        Ok(Self { bytes: bytes.to_vec(), entries, motion, bow_contacts })
     }
 
     // Reject unknown member IDs before loading material packs or reducing bodies.
@@ -116,6 +130,20 @@ impl Profile {
     pub fn validate_performance(&self, spec: &input::Spec, gate: &CancelGate) -> Result<()> {
         poll(gate)?;
         self.validate_members(spec.strings.len())?;
+        for binding in &self.bow_contacts {
+            let track = spec.schedule.tracks().get(binding.bow)
+                .ok_or("bow-contact names an absent scheduled bow")?;
+            let stop = &self.entries[binding.stop];
+            if fs_scenario::gesture::path::legacy_member(&track.target, "bow") != Some(stop.location.string) {
+                return Err("bow-contact and stop must address the same material string".into());
+            }
+            for value in std::iter::once(&track.initial).chain(track.events.iter().map(|e| &e.value)) {
+                if !matches!(value, GestureValue::Bow {normal_force_n, station, ..}
+                    if *normal_force_n == 0.0 && station.to_bits() == stop.location.station_fraction.to_bits()) {
+                    return Err("contact-loaded bow requires the stop station and no separately prescribed normal force".into());
+                }
+            }
+        }
         if let Some(motion) = &self.motion {
             motion.validate(self.entries.len(), spec.samples, spec.rate, gate)?;
         }
@@ -123,6 +151,7 @@ impl Profile {
     }
 
     pub fn motion_program(&self) -> Option<&StopMotionProgram> { self.motion.as_ref() }
+    pub fn bow_contacts(&self) -> &[BowContactLoad] { &self.bow_contacts }
 
     /// Bind on the already assembled and optionally preloaded instrument.
     pub fn bind_motion(&self, performance: MultiBowPerformance, gate: &CancelGate) -> Result<MultiBowPerformance> {
@@ -167,9 +196,12 @@ impl Profile {
         }
         // This admission precedes scheduled preload; the stops cannot disappear
         // from equilibrium and reappear only after a pluck has been initialized.
-        Ok(bank.with_string_stops(stops, FrictionObstacleConfig {
+        let bank = bank.with_string_stops(stops, FrictionObstacleConfig {
             max_contacts: MAX_STOPS, max_setup_terms: 1_048_576,
-        }, gate)?)
+        }, gate)?;
+        // Actual material geometry owns co-location, perpendicular directions and
+        // torsional handedness; this adapter never reconstructs its modal maps.
+        Ok(bank.with_bow_contact_loads(self.bow_contacts.clone(), gate)?)
     }
 }
 

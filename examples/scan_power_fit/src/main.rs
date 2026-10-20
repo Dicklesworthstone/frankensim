@@ -1,5 +1,7 @@
 //! Recover two absorbed-power levels using the native thermal history adjoint.
 //! All geometry and materials are synthetic, not experimental calibration.
+mod geometry;
+mod limits;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_ascent::{LbfgsReport, StopReason, StopRule};
 use fs_ascent::scan_design::{ScanPowerControl, ScanPowerObjective, ScanPowerStudy};
@@ -23,7 +25,7 @@ use fs_scenario::signal::{TimeSignal, Interp};
 use fs_solver::NewtonKrylovConfig;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-const USAGE: &str = "scan-power-fit [first_target_J_per_kg second_target_J_per_kg [initial_first_W initial_second_W]]\nDefaults: 152 157 1 1. Targets must increase strictly inside (150,200) J/kg.\nA synthetic unit-volume, unit-density body starts at 150 J/kg and 310 K.\nOutput is a three-row held power schedule with # diagnostic comments.";
+const USAGE: &str = "scan-power-fit [first_target_J_per_kg second_target_J_per_kg [initial_first_W initial_second_W]]\nDefaults: 152 157 1 1. Targets must increase strictly inside (150,200) J/kg.\nA synthetic unit-volume, unit-density body starts at 150 J/kg and 310 K.\nOutput is a three-row held power schedule with # diagnostic comments.\nJoint spatial recovery: --geometry [target_start_m target_end_m target_width_x_m target_first_W target_second_W]";
 
 #[derive(Debug, Clone, Copy)]
 struct FitInput { targets: [f64; 2], initial: [f64; 2] }
@@ -134,7 +136,12 @@ fn with_context<T>(f: impl FnOnce(&Cx<'_>) -> T) -> T {
 }
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") { println!("{USAGE}"); return Ok(()); }
+    if args.first().is_some_and(|arg|arg == "--geometry") { return geometry::run_cli(&args[1..]); }
+    if args.first().is_some_and(|arg|arg == "--limits") { return limits::run_cli(&args[1..]); }
+    if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
+        println!("{USAGE}\nConstrained fitting: --limits [maximum_power_W maximum_absorbed_energy_J]");
+        return Ok(());
+    }
     let input = FitInput::parse(&args)?;
     let result = with_context(|cx| fit(cx, input, false))?;
     println!("# status={:?} objective={:.12e} gradient_norm={:.12e} evaluations={}",

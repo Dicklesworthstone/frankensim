@@ -52,20 +52,15 @@ pub(super) fn lower(
     for surface in &declaration.surfaces {
         if !setup.boundaries.iter().any(|boundary| {
             boundary.target == surface.target
-                && matches!(
-                    boundary.condition,
-                    ThermalBoundaryCondition::Convection { .. }
-                        | ThermalBoundaryCondition::AirflowConvection { .. }
-                        | ThermalBoundaryCondition::NaturalConvection { .. }
-                )
+                && boundary.condition.supports_ambient_radiation()
         }) {
             return Err(conduction_error(
                 "cli-solve-conduction-radiation-boundary",
                 format!(
-                    "radiating surface `{}` target `{}` has no conventional convection boundary",
+                    "radiating surface `{}` target `{}` has no convection or explicit zero-flux boundary",
                     surface.name, surface.target
                 ),
-                "declare convection or airflow-convection on this exterior target; this radiation model augments that boundary",
+                "declare convection or exactly zero outward heat flux on this exterior target; no fictitious convection is needed for radiation-only exchange",
             ));
         }
         let card = library.material(&surface.card).ok_or_else(|| {
@@ -297,13 +292,27 @@ pub(super) fn measure_sensitivity(
     available_wall_s: f64,
     propagated_nominal: Option<f64>,
 ) -> Result<Option<RadiationSensitivity>, SolveRefusal> {
-    if !spec
+    let Some(setup) = spec
         .cooling
         .as_ref()
         .and_then(|cooling| cooling.conduction.as_ref())
-        .is_some_and(|setup| setup.radiation.is_some())
-    {
+    else {
         return Ok(None);
+    };
+    if setup.radiation.is_none() {
+        return Ok(None);
+    }
+    if setup.transient.is_none()
+        && setup.boundaries.iter().all(|boundary| {
+            matches!(boundary.condition, ThermalBoundaryCondition::HeatFlux { .. })
+        })
+    {
+        // Removing the only temperature anchor has no uniquely defined
+        // steady comparison. Do not spend the nominal solve's budget trying
+        // a singular off-model or invent an ambient convection reference.
+        return Ok(Some(RadiationSensitivity::Unavailable {
+            reason: "radiation-off steady problem has no temperature anchor; no unique thermal equilibrium can be compared".into(),
+        }));
     }
     let Some(region) = super::temperature_maximum_region(spec) else {
         return Ok(None);

@@ -1,4 +1,4 @@
-//! Simultaneous prescribed-load friction on ONE retained mechanical network.
+//! Simultaneous prescribed- or contact-loaded friction on ONE mechanical network.
 //!
 //! Every port sees d_i = u_i dt - b_i^T delta_q = d_free_i - sum_j S_ij F_j.
 //! The full S includes all body, spring and dashpot reactions. Bounded nonlinear
@@ -6,9 +6,10 @@
 //! ALL laws on the same endpoint before publishing a single mechanical step.
 //! No sequential voice advancement, averaged material law or delayed reaction.
 //!
-//! This permits double-stops and several driven/braking surfaces. Normal loads
-//! and surface speeds remain explicit inputs, not a solved bow-hair/normal
-//! contact model. Sticking is step-averaged. Nonmonotone laws can have several
+//! Normal loads are prescribed by default. Explicit contact bindings instead
+//! use the simultaneously solved compliant reaction, including automatic release
+//! on separation. Surface speeds remain prescribed; no bow-hair model is inferred.
+//! Sticking is step-averaged. Nonmonotone laws can have several
 //! roots or fail to converge; order-independent/global convergence, continuous
 //! no-slip and alias-free or experimentally validated sound are not claimed.
 
@@ -17,6 +18,9 @@ use super::super::network_response;
 
 /// Compliant obstacles in the same joint solve as prescribed-load friction.
 pub mod obstacles;
+
+/// One normal-contact reaction driving the corresponding tangential law.
+pub mod normal_load;
 
 /// Bounded joint setup and nonlinear work, in addition to each port's limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +37,9 @@ pub struct MultiFrictionConfig {
 /// A port's actual work, loss and law residual on the jointly accepted sample.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrictionPortFrame {
+    /// Normal load used by this law [N]: prescribed or the SAME held contact
+    /// reaction from this accepted step. Not the previous step's normal force.
+    pub normal_force_n: f64,
     /// Applied signed traction [N].
     pub traction_n: f64,
     /// Actual surface-minus-attachment displacement over the step [m].
@@ -48,7 +55,7 @@ pub struct FrictionPortFrame {
 }
 impl Default for FrictionPortFrame {
     fn default() -> Self {
-        Self { traction_n: 0.0, slip_distance_m: 0.0, drive_work_j: 0.0,
+        Self { normal_force_n: 0.0, traction_n: 0.0, slip_distance_m: 0.0, drive_work_j: 0.0,
             dissipation_j: 0.0, constitutive_residual_n: 0.0, regime: ModalFrictionRegime::Released }
     }
 }
@@ -111,6 +118,7 @@ pub struct MultiFrictionModalSystem {
     accepted: bool,
     interfaces: Vec<Option<interface::DryFrictionBinding>>,
     obstacles: Option<obstacles::ObstacleSet>,
+    contact_loads: Vec<Option<usize>>,
 }
 impl FrictionModalSystem {
     /// Add prescribed friction contacts without resetting the original network.
@@ -168,7 +176,7 @@ impl MultiFrictionModalSystem {
             regimes: vec![ModalFrictionRegime::Released; p], iterations: vec![0; p],
             staged_ports: vec![FrictionPortFrame::default(); p],
             frame: MultiFrictionFrame { ports: vec![FrictionPortFrame::default(); p], ..MultiFrictionFrame::default() },
-            accepted: false, interfaces: vec![None; p-1], obstacles: None })
+            accepted: false, interfaces: vec![None; p-1], obstacles: None, contact_loads: vec![None; p] })
     }
     /// Accepted components in their original basis and order.
     #[must_use] pub fn components(&self) -> &[ModalAcousticTimeModel] { self.core.components() }
@@ -235,9 +243,10 @@ impl MultiFrictionModalSystem {
             || !d.normal_force_n.is_finite() || d.normal_force_n < 0.0) {
             return Err(invalid("simultaneous friction requires one finite speed and nonnegative load per port").into());
         }
+        self.validate_contact_normal_drives(drives)?;
         if p == 1 && self.obstacles.is_none() {
             let f = *self.core.step_inner(external, drives[0], gate)?;
-            self.frame.ports[0] = FrictionPortFrame { traction_n: f.traction_n, slip_distance_m: f.slip_distance_m,
+            self.frame.ports[0] = FrictionPortFrame { normal_force_n: drives[0].normal_force_n, traction_n: f.traction_n, slip_distance_m: f.slip_distance_m,
                 drive_work_j: f.drive_work_j, dissipation_j: f.friction_dissipation_j,
                 constitutive_residual_n: f.constitutive_residual_n, regime: f.regime };
             self.frame.sample = f.sample; self.frame.observer_pressure_pa = f.observer_pressure_pa;
@@ -250,8 +259,10 @@ impl MultiFrictionModalSystem {
         }
         for i in 0..p {
             poll(gate)?;
-            interface::check_endpoint(self.interface(i), &self.points[i].column,
-                &self.core.network.models, drives[i])?;
+            if self.contact_loads[i].is_none() {
+                interface::check_endpoint(self.interface(i), &self.points[i].column,
+                    &self.core.network.models, drives[i])?;
+            }
         }
         let before = self.total_energy_j()?;
         self.core.network.prepare_prediction(external, gate)?;
@@ -274,9 +285,10 @@ impl MultiFrictionModalSystem {
                 let mut free = self.free_slip[i];
                 for j in 0..p { if j != i { free = finite(free - self.compliance[i*p+j]*self.tractions[j])?; } }
                 if let Some(obstacles) = &self.obstacles { free = finite(free + obstacles.slip_shift(i)?)?; }
+                let drive = self.contact_loaded_drive(i, drives[i])?;
                 let point = &self.points[i];
                 let (force, regime, iterations) = scalar::solve(&point.port.law, point.config,
-                    self.compliance[i*p+i], self.sample_period_s(), free, drives[i].normal_force_n, gate)?;
+                    self.compliance[i*p+i], self.sample_period_s(), free, drive.normal_force_n, gate)?;
                 self.tractions[i] = force; self.regimes[i] = regime;
                 self.iterations[i] += iterations;
             }
@@ -289,8 +301,9 @@ impl MultiFrictionModalSystem {
                 poll(gate)?;
                 let mut slip = finite(self.free_slip[i] - dot(&self.compliance[i*p..(i+1)*p], &self.tractions)?)?;
                 if let Some(obstacles) = &self.obstacles { slip = finite(slip + obstacles.slip_shift(i)?)?; }
+                let drive = self.contact_loaded_drive(i, drives[i])?;
                 if let Err(error) = scalar::check(&self.points[i].port.law, self.points[i].config,
-                    self.sample_period_s(), drives[i], self.tractions[i], slip, self.regimes[i], self.iterations[i]) {
+                    self.sample_period_s(), drive, self.tractions[i], slip, self.regimes[i], self.iterations[i]) {
                     if failure.is_none() { failure = Some(error); }
                 }
             }
@@ -317,15 +330,24 @@ impl MultiFrictionModalSystem {
             poll(gate)?;
             let distance = finite(drives[i].speed_m_s*self.sample_period_s())?;
             let slip = finite(distance-dot(&self.points[i].column, &self.core.network.free_delta)?)?;
+            let drive = self.contact_loaded_drive(i, drives[i])?;
             let (dissipation, residual) = scalar::check(&self.points[i].port.law, self.points[i].config,
-                self.sample_period_s(), drives[i], self.tractions[i], slip, self.regimes[i], self.iterations[i])?;
-            interface::check_average(self.interface(i), drives[i], slip, self.sample_period_s())?;
+                self.sample_period_s(), drive, self.tractions[i], slip, self.regimes[i], self.iterations[i])?;
+            // A contact-loaded law has no known load until the JOINT solve.
+            // Validate all three slip rates with that same held reaction before
+            // any candidate, observer, normal offset or clock is published.
+            if self.contact_loads[i].is_some() {
+                interface::check_endpoint(self.interface(i), &self.points[i].column,
+                    &self.core.network.models, drive)?;
+            }
+            interface::check_average(self.interface(i), drive, slip, self.sample_period_s())?;
             interface::check_endpoint(self.interface(i), &self.points[i].column,
-                &self.core.network.candidates, drives[i])?;
+                &self.core.network.candidates, drive)?;
             let supply = finite(self.tractions[i]*distance)?;
             loss = finite(loss+dissipation)?; work = finite(work+supply)?;
             absolute_work = finite(absolute_work+supply.abs())?;
-            self.staged_ports[i] = FrictionPortFrame { traction_n: self.tractions[i], slip_distance_m: slip,
+            self.staged_ports[i] = FrictionPortFrame { normal_force_n: drive.normal_force_n,
+                traction_n: self.tractions[i], slip_distance_m: slip,
                 drive_work_j: supply, dissipation_j: dissipation, constitutive_residual_n: residual, regime: self.regimes[i] };
         }
         let pressure = self.core.staged_observer_pressure(gate)?;

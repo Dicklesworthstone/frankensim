@@ -152,3 +152,6 @@ mod prepared;
 
 #[path = "stops/motion_tests.rs"]
 mod moving_stops;
+
+#[path = "stops/contact_load_tests.rs"]
+mod contact_loaded_bow;

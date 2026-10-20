@@ -150,3 +150,6 @@ mod stops;
 
 #[path = "material_bow_interface/directions.rs"]
 mod directions;
+
+#[path = "material_bow_interface/contact_load.rs"]
+mod contact_load;

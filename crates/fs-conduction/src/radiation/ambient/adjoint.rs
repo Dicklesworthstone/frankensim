@@ -14,11 +14,14 @@ use std::collections::BTreeSet;
 /// inferred from the residual-checked numerical derivative.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AmbientRadiationGradient {
-    /// Original convective Robin regions, in the caller's selected order.
+    /// Selected thermal regions, in the caller's order: original convection
+    /// controls and explicitly zero-flux radiation-only traces.
     pub regions: Vec<String>,
     /// Derivatives with respect to ORIGINAL convective references, ln(h_c),
     /// and assembled nodal loads. These include radiative state feedback;
-    /// they are not partials of the artificially combined Robin row.
+    /// they are not partials of the artificially combined Robin row. Reference
+    /// and log-HTC entries for radiation-only traces are exactly zero; they do
+    /// not create a convection law or define the logarithm of a zero HTC.
     pub convection: RobinGradient,
     /// Radiating regions, in the input patch order.
     pub radiation_regions: Vec<String>,
@@ -33,7 +36,7 @@ pub struct AmbientRadiationGradient {
 
 fn invalid(what: &str) -> ConductionError {
     radiation_error("ambient-adjoint", what,
-        "use the retained field, original uniform convection rows, exact radiation patches, and explicit derivative budgets")
+        "use the retained field, original uniform Robin or zero-flux radiating rows, exact radiation patches, and explicit derivative budgets")
 }
 
 impl AmbientRadiationPatch {
@@ -61,12 +64,13 @@ impl AmbientRadiationPatch {
 
 /// Differentiate a nodal-temperature goal on an accepted ambient-radiation field.
 ///
-/// `problem.boundary` is the ORIGINAL convective partition, not the combined
+/// `problem.boundary` is the ORIGINAL physical partition, not the combined
 /// boundary from a radiation solve. `regions` selects uniform Robin controls
+/// and uniform zero-flux traces carrying an explicit radiation patch,
 /// and MUST include every radiation patch and every mean-dependent convection
 /// law. Its `convective_mean_slopes_w_m2_k2` entries are dh_c/d(mean wall T);
-/// use zero for prescribed coefficients. The caller owns and binds these
-/// convection laws to the supplied field (for example a natural-convection
+/// use zero for prescribed coefficients and radiation-only traces. The caller
+/// owns and binds these convection laws to the supplied field (for example a natural-convection
 /// fixed point). Other Robin coefficients are fixed.
 ///
 /// Rebuild the exact physical secant at the ACTUAL wall mean, not the final
@@ -113,6 +117,9 @@ impl AmbientRadiationGradient {
     /// only h_c/(h_c+h_rad) of the convective-reference feedback enters the
     /// combined Robin reference. Adding the unweighted air matrix is wrong.
     /// Empty patches admit nonlinear solid/air coupling without radiation.
+    /// A radiation-only trace has no convective reference: its feedback ROW
+    /// and its convective mean slope must be zero. Its wall mean may still
+    /// drive another trace's declared convection reference through a column.
     ///
     /// Returned convection references are partials of independent additive
     /// offsets of the convective law through the full state Jacobian. Air
@@ -174,12 +181,12 @@ fn pullback(
     }
     let mut seen = BTreeSet::new();
     for &name in regions {
-        if !seen.insert(name) { return Err(invalid("duplicate ambient-adjoint Robin region")); }
+        if !seen.insert(name) { return Err(invalid("duplicate ambient-adjoint thermal region")); }
     }
     seen.clear();
     for patch in patches {
         if !seen.insert(patch.region()) || !regions.contains(&patch.region()) {
-            return Err(invalid("every radiation patch must have exactly one selected Robin region"));
+            return Err(invalid("every radiation patch must have exactly one selected thermal region"));
         }
     }
 
@@ -193,12 +200,25 @@ fn pullback(
     for (i, &name) in regions.iter().enumerate() {
         poll(cx, i)?;
         let region = problem.boundary.region_names().iter().position(|r| r == name)
-            .ok_or_else(|| invalid("unknown ambient-adjoint Robin region"))?;
-        let ThermalBc::Robin { htc: ScalarField::Uniform(hc), t_ref: ScalarField::Uniform(tc) }
-            = &problem.boundary.conditions()[region]
-        else { return Err(invalid("ambient adjoints require selected uniform Robin rows")); };
+            .ok_or_else(|| invalid("unknown ambient-adjoint thermal region"))?;
+        let patch = patches.iter().enumerate().find(|(_, p)| p.region() == name);
         let hc_slope = convective_mean_slopes_w_m2_k2[i];
-        if let Some((j, patch)) = patches.iter().enumerate().find(|(_, p)| p.region() == name) {
+        let (hc, tc) = match &problem.boundary.conditions()[region] {
+            ThermalBc::Robin { htc: ScalarField::Uniform(hc), t_ref: ScalarField::Uniform(tc) } => (*hc, *tc),
+            ThermalBc::Neumann { outward_flux: ScalarField::Uniform(flux) } if *flux == 0.0 => {
+                let (_, radiation) = patch.ok_or_else(||
+                    invalid("a selected zero-flux trace requires its own radiation patch"))?;
+                if hc_slope != 0.0 || reference_feedback.is_some_and(|matrix|
+                    matrix[i*regions.len()..(i+1)*regions.len()].iter().any(|&v| v != 0.0)) {
+                    return Err(invalid("a radiation-only trace has no convective slope or reference feedback"));
+                }
+                // The reservoir is only an algebraically inert placeholder
+                // for T_c: every convection contribution is multiplied by 0.
+                (0.0, radiation.ambient_temperature_k())
+            }
+            _ => return Err(invalid("ambient adjoints require uniform Robin or explicitly zero-flux radiating rows")),
+        };
+        if let Some((j, patch)) = patch {
             let mut area = 0.0;
             let mut integral = 0.0;
             for (slot, face) in problem.mesh.boundary().iter().enumerate() {
@@ -222,17 +242,17 @@ fn pullback(
             h_slopes.push(finite(hc_slope + hr_slope, "combined coefficient slope")?);
             reference_slopes.push(finite((hc_slope/h)*(tc-reference)
                 + (hr_slope/h)*(ambient-reference), "combined reference slope")?);
-            physical.push((*hc, *tc, h, reference));
+            physical.push((hc, tc, h, reference));
             radiative[j] = Some((i, hr, hr_ambient));
         } else {
             // Preserve a fixed or mean-dependent convection-only row exactly.
-            replacements.push((region, *hc, *tc));
+            replacements.push((region, hc, tc));
             h_slopes.push(hc_slope);
             reference_slopes.push(0.0);
-            physical.push((*hc, *tc, *hc, *tc));
+            physical.push((hc, tc, hc, tc));
         }
     }
-    let combined = problem.boundary.with_uniform_robin_replacements(&replacements)?;
+    let combined = problem.boundary.with_radiative_robin_replacements(&replacements)?;
     let combined_problem = ConductionProblem { boundary: &combined, ..problem };
     let mut gradient = if let Some(feedback) = reference_feedback {
         let m = regions.len();

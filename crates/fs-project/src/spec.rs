@@ -675,6 +675,26 @@ pub enum ThermalBoundaryCondition {
     },
 }
 
+impl ThermalBoundaryCondition {
+    /// Whether this original law can share a trace with ambient radiation.
+    /// A zero outward heat flux explicitly declares no nonradiative exchange;
+    /// it does not imply a convection coefficient or a fluid reservoir.
+    /// This checks law compatibility only. Project/card/mesh admission still
+    /// validates quantities, constitutive data, ownership and nonempty area.
+    #[must_use]
+    pub fn supports_ambient_radiation(&self) -> bool {
+        match self {
+            Self::Convection { .. }
+            | Self::AirflowConvection { .. }
+            | Self::NaturalConvection { .. } => true,
+            Self::HeatFlux { outward_flux } => {
+                outward_flux.dims == dims::HEAT_FLUX && outward_flux.value == 0.0
+            }
+            Self::FixedTemperature { .. } => false,
+        }
+    }
+}
+
 /// One thermal boundary, keyed by an existing geometry-assignment target.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThermalBoundary {
@@ -694,7 +714,7 @@ pub struct ThermalBoundary {
 pub struct RadiatingSurface {
     /// Unique surface name retained in radiation results and material receipts.
     pub name: String,
-    /// Existing convection or airflow-convection geometry-assignment target.
+    /// Existing convection or explicit zero-flux geometry-assignment target.
     pub target: String,
     /// Full hexadecimal content hash of the surface-finish material card.
     pub card: String,
@@ -882,7 +902,7 @@ pub struct ConductionSetup {
     /// Whether exterior faces not selected above are deliberately adiabatic.
     /// When false, the execution stage must refuse any uncovered face.
     pub adiabatic_remainder: bool,
-    /// Optional surface radiation added to declared convective boundaries.
+    /// Optional surface radiation on declared convection or zero-flux boundaries.
     /// Absence preserves the non-radiating model; no emissivity or ambient
     /// reservoir is inferred from a bulk conductivity card or the envelope.
     pub radiation: Option<ConductionRadiation>,
@@ -1843,7 +1863,7 @@ impl ProjectSpec {
                     out.push(violation(
                         "project-conduction-boundaries-empty",
                         "cooling.conduction declares no thermal boundary laws",
-                        "declare at least one fixed-temperature or convection boundary",
+                        "declare exterior thermal laws, including an explicit zero heat flux for a radiation-only target",
                     ));
                 }
                 let mut has_anchor = false;
@@ -2071,11 +2091,22 @@ impl ProjectSpec {
                         }
                     }
                 }
+                // A radiative reservoir supplies the positive secant that
+                // anchors an otherwise Neumann-only steady problem. Merely
+                // declaring an empty/unmatched radiation block is not enough.
+                has_anchor |= conduction.radiation.as_ref().is_some_and(|radiation| {
+                    radiation.surfaces.iter().any(|surface| {
+                        conduction.boundaries.iter().any(|boundary| {
+                            boundary.target == surface.target
+                                && boundary.condition.supports_ambient_radiation()
+                        })
+                    })
+                });
                 if !has_anchor && conduction.transient.is_none() {
                     out.push(violation(
                         "project-conduction-boundary-unanchored",
-                        "cooling.conduction carries only heat-flux boundaries",
-                        "declare at least one fixed-temperature or convection boundary so the steady operator is nonsingular",
+                        "cooling.conduction carries only heat-flux boundaries without a matched radiative reservoir",
+                        "declare fixed temperature, convection, or sourced radiation on an explicit zero-flux target; each disconnected component still needs a thermal anchor",
                     ));
                 }
                 if let Some(radiation) = &conduction.radiation {
@@ -2325,20 +2356,15 @@ impl ProjectSpec {
             }
             if !conduction.boundaries.iter().any(|boundary| {
                 boundary.target == surface.target
-                    && matches!(
-                        boundary.condition,
-                        ThermalBoundaryCondition::Convection { .. }
-                            | ThermalBoundaryCondition::AirflowConvection { .. }
-                            | ThermalBoundaryCondition::NaturalConvection { .. }
-                    )
+                    && boundary.condition.supports_ambient_radiation()
             }) {
                 out.push(violation(
                     "project-radiation-target-boundary",
                     format!(
-                        "radiating surface `{}` targets `{}` without a convection or airflow-convection law",
+                        "radiating surface `{}` targets `{}` without convection or an explicit zero-flux law",
                         surface.name, surface.target
                     ),
-                    "add radiation to a declared convective exterior target; fixed-temperature and heat-flux targets are unsupported",
+                    "declare convection or exactly zero outward heat flux on the radiating exterior target; fixed temperature and nonzero prescribed flux remain unsupported",
                 ));
             }
             if !is_hex_digest(&surface.card) {

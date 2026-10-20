@@ -100,3 +100,102 @@ feedback; and source/area/cancellation refusal without changing accepted states.
 The fixtures reuse the original radiation and thermal-contact test sources.
 Native compilation and execution were unavailable during authoring. The separate
 Python/SciPy reference is an equation check, not execution of these Rust tests.
+
+## Conservative reaction stages
+
+`material::reactive::ChamberReaction` optionally associates one existing
+`GasReaction` and its `GasReactionSolve` controls with each chamber ID. Use
+`prepared.reactive_step_candidate` with that list immediately after `chambers`:
+
+```rust,ignore
+let reacting = [ChamberReaction {
+    chamber: cylinder_id,
+    reaction: &source_bound_reaction,
+    controls: chemical_controls,
+}];
+let proposal = prepared.reactive_step_candidate(
+    &cx, &thermal, target_s, &circuit, &source_ports,
+    &chambers, &reacting, &gas_patches, controls, &energy_guess_j,
+)?;
+let (next_thermal, next_circuit, report, combined) = proposal.into_parts();
+// report.source.chambers contains each final GasPiston and its original
+// gas-surface records. report.source.reactions retains each kinetic evaluation,
+// species inventory, extent, entropy and whole-interval gas energy change.
+```
+
+This uses the existing first-order reaction-then-motion split: reaction rates
+are evaluated at the accepted gas state ONCE. Each reaction stage conserves
+mass, volume and total internal energy through the existing species/caloric
+owner, including formation energies. The complete exchange/motion solve then
+starts from the staged gas. Repeated radiation/electrical/thermal Newton trials
+never consume more reactant. Wall heating can change the next step's rate; this
+is not a monolithic kinetic/thermal solve within the same interval.
+
+Chemical formation energy is **not** credited again as prescribed heat. The
+joint balance includes measured chemical-stage roundoff. Native gas port
+history records one whole-interval tick, not an extra chemical time advance.
+The boundary report retains its post-reaction reference, while each reaction
+report records gas energy from the original accepted state through the final
+motion. Inactive reaction entries are not guessed; unlisted chambers are inert.
+Duplicate IDs, aliased original gas owners, unsupported species sources,
+consumption-limit violations and later exchange failures return no endpoint.
+
+Use the original reaction consumption limits and timestep refinement. This is
+one homogeneous caller-declared mass-action law per reacting chamber, not an
+inferred Arrhenius mechanism, ignition model, resolved flame, shock, mass
+exchange or measured engine model. Gas participation in radiation remains
+excluded by the existing enclosure approximation. The three additional Rust
+regressions exercise native isolated-reactor reduction, no-reaction reduction,
+rate-data-only feedback through walls/circuit/motion, exact single-stage extent,
+and rejection/cancellation with unchanged accepted histories.
+
+
+## One live assembled state
+
+`material::state::MaterialExchangeState` owns the accepted thermal timeline,
+circuit and a `BTreeMap<u64, GasPiston>` of all chambers. It advances through the
+same prepared material/reaction/exchange candidate; it adds no physical law or
+new numerical method. Its public constituent accessors are immutable.
+
+```rust,ignore
+let mut state = MaterialExchangeState::from_parts(
+    thermal, circuit, chambers_by_id,
+);
+let prepared = assembly.prepare(&cx, state.thermal())?;
+let step = state.advance(
+    &prepared, &cx, target_s, &source_ports, &chamber_drives,
+    &reacting, &gas_patches, controls, &energy_guess_j,
+)?;
+// The circuit, every finite material cell, every chamber, and the clock
+// are already advanced together. Reports contain the original sources/work;
+// there are no separate gas endpoints left to install or heat to apply again.
+```
+
+Each `ChamberDrive` contains a chamber ID, prescribed external joules, exterior
+pressure, external force, and the original piston/heat-feedback solve controls.
+There must be exactly one drive per owned chamber, regardless of input order.
+The single duration is `target_s - state.time_s()`; no independently supplied
+gas clock is accepted. Unlisted reactions remain inert. Empty chamber/drive maps
+support the same finite electrical/thermal system without a dummy gas.
+
+`step_candidate` previews the same advance and returns `(next_state, report)`
+without modifying the accepted assembly. `advance` moves every returned endpoint
+into the live state only after all solves, owner-coverage checks and the final
+cancellation checkpoint pass. Reports retain source-bearing boundary results but
+do not clone the live gas endpoints. Source refusal, invalid or incomplete drive
+maps, iteration limits and cancellation preserve every accepted history and time.
+
+Initialization still requires caller-supplied owners representing one intended
+starting instant: circuit and gas objects do not have an independent absolute
+clock from which to infer or repair mismatched initial epochs. `into_parts` /
+`from_parts` can move and resume these same in-process owners without resetting
+charge, species or port history. They are not serialization, file checkpointing,
+topology-change integration, or a new initial-condition reconciliation solver.
+Existing independent-wall, uniform-state and first-order physical limits remain.
+
+Four additional native regressions compare joint advancement to the existing
+candidate, preserve previews and moved/resumed states across multiple intervals,
+refuse incomplete drive maps/invalid clocks/failed solves without partial updates,
+and reduce to the original electrical/thermal evolution with no chambers.
+The tests explicitly compare the gas port records as well as physical state.
+Native execution of these new tests remains unverified in the authoring runtime.

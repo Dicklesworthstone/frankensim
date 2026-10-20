@@ -462,3 +462,4 @@ fn g0_fsim_radiation_refuses_missing_emissivity_in_base_and_adaptive() {
 }
 
 mod adaptive_product;
+mod vacuum_product;

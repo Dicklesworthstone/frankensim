@@ -1,4 +1,4 @@
-//! Positive absorbed-power schedule fitting through native scan adjoints.
+//! Joint absorbed-power, path and footprint fitting through native scan adjoints.
 //!
 //! The factory builds the same physical model from supplied source declarations
 //! for every candidate. Its returned sources are checked against those exact
@@ -16,6 +16,11 @@ use fs_conduction::{ConductionError, LinearConfig};
 use fs_exec::Cx;
 use crate::{LbfgsState, LbfgsReport, LbfgsError, StopRule};
 use std::collections::BTreeSet;
+
+mod geometry;
+pub use geometry::ScanGeometryControl;
+/// Physical bounds and absorbed-energy constraints through the existing SQP engine.
+pub mod constraints;
 
 /// One selected authored power value; unselected values (including off states)
 /// remain exactly as declared. Coordinates obey P = reference_w * exp(x).
@@ -38,13 +43,16 @@ pub struct ScanPowerObjective {
     pub source_reference_time_s: f64,
 }
 
-/// One native objective with the exact positive-coordinate chain rule.
+/// One native objective with the complete optimizer-coordinate chain rule.
 #[derive(Debug)]
 pub struct ScanPowerEvaluation {
     pub physical: ScanObjectiveEvaluation,
+    /// Log-power derivatives followed by geometry derivatives in declaration order.
     pub gradient: Vec<f64>,
     /// Selected powers in control declaration order, W.
     pub powers_w: Vec<f64>,
+    /// Selected center values and half widths in geometry-control order, metres.
+    pub geometry_m: Vec<f64>,
 }
 
 /// Bounded inverse-design evaluator over immutable template sources.
@@ -57,6 +65,7 @@ pub struct ScanPowerEvaluation {
 pub struct ScanPowerStudy<F> {
     sources: Vec<MovingHeatSource>,
     controls: Vec<ScanPowerControl>,
+    geometry_controls: Vec<ScanGeometryControl>,
     objective: ScanPowerObjective,
     factory: F,
     initial: Vec<f64>,
@@ -71,8 +80,25 @@ impl<F> ScanPowerStudy<F> {
         objective: ScanPowerObjective, factory: F, evaluation_limit: usize)
         -> Result<Self, ScanSensitivityError>
     {
+        Self::new_joint(cx, sources, controls, Vec::new(), objective, factory, evaluation_limit)
+    }
+
+    /// Optimize selected powers, authored path values and footprint widths in
+    /// one physical study. Either control group may be empty, but not both.
+    /// Coordinates are log powers first, followed by scaled signed centers or
+    /// log widths in geometry declaration order. No event time is a variable.
+    /// Original source support, motion, material and derivative refusals remain
+    /// authoritative; an invalid design is not silently projected or penalized.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_joint(cx: &Cx<'_>, sources: Vec<MovingHeatSource>, controls: Vec<ScanPowerControl>,
+        geometry_controls: Vec<ScanGeometryControl>, objective: ScanPowerObjective,
+        factory: F, evaluation_limit: usize) -> Result<Self, ScanSensitivityError>
+    {
         poll(cx)?;
-        if sources.is_empty() || controls.is_empty() || controls.len() > objective.budget.max_schedule_controls
+        let count = controls.len().checked_add(geometry_controls.len())
+            .filter(|&n| n > 0 && n <= objective.budget.max_schedule_controls)
+            .ok_or_else(|| invalid("scan study needs a nonempty bounded set of power or geometry controls"))?;
+        if sources.is_empty()
             || !objective.source_reference_time_s.is_finite()
         { return Err(invalid("power study needs sources, bounded nonempty controls and an explicit finite reference time")); }
         let mut total_controls = 0usize;
@@ -86,7 +112,7 @@ impl<F> ScanPowerStudy<F> {
             || objective.observations.is_empty() || objective.observations.len() > objective.budget.max_observations
         { return Err(invalid("power study needs bounded nonempty endpoints and observations")); }
         let mut seen = BTreeSet::new();
-        let mut initial = Vec::with_capacity(controls.len());
+        let mut initial = Vec::with_capacity(count);
         for control in &controls {
             poll(cx)?;
             let source = sources.get(control.source).ok_or_else(|| invalid("power control names an absent source"))?;
@@ -98,7 +124,16 @@ impl<F> ScanPowerStudy<F> {
             // Separate logarithms avoid overflow/underflow in value/reference.
             initial.push(finite(fs_math::det::ln(value)-fs_math::det::ln(control.reference_w))?);
         }
-        Ok(Self { sources, controls, objective, factory, initial, evaluations:0, evaluation_limit })
+        let mut geometry_seen = BTreeSet::new();
+        for &control in &geometry_controls {
+            poll(cx)?;
+            let source = sources.get(control.source()).ok_or_else(|| invalid("geometry control names an absent source"))?;
+            if !geometry_seen.insert((control.source(),control.key())) {
+                return Err(invalid("geometry controls must name distinct authored coordinates"));
+            }
+            initial.push(control.initial(source.geometry_value(control.key())?)?);
+        }
+        Ok(Self { sources, controls, geometry_controls, objective, factory, initial, evaluations:0, evaluation_limit })
     }
 
     pub fn initial_coordinates(&self) -> &[f64] { &self.initial }
@@ -111,32 +146,62 @@ impl<F> ScanPowerStudy<F> {
     }
     /// Decode selected positive watts without running or mutating the model.
     pub fn powers_at(&self, point: &[f64]) -> Result<Vec<f64>, ScanSensitivityError> {
-        if point.len() != self.controls.len() { return Err(invalid("log-power point has the wrong shape")); }
-        point.iter().zip(&self.controls).map(|(&x,c)| positive_power(x,c.reference_w)).collect()
+        self.check_point(point)?;
+        point.iter().zip(&self.controls).map(|(&x,c)| positive_coordinate(x,c.reference_w)).collect()
+    }
+
+    /// Decode selected path/width values without a physical solve. The complete
+    /// point uses power coordinates first, then geometry coordinates.
+    pub fn geometry_at(&self, point: &[f64]) -> Result<Vec<f64>, ScanSensitivityError> {
+        self.check_point(point)?;
+        point[self.controls.len()..].iter().zip(&self.geometry_controls)
+            .map(|(&x,&c)| c.decode(x)).collect()
+    }
+
+    fn check_point(&self, point: &[f64]) -> Result<(), ScanSensitivityError> {
+        if point.len() != self.initial.len() { return Err(invalid("scan design point has the wrong shape")); }
+        for &value in point { finite(value)?; }
+        Ok(())
     }
 
     /// Export reusable physical source declarations at an optimizer point.
     /// No trajectory is solved and no physical-evaluation slot is consumed.
-    /// Positions, widths, signal knots, interpolation and unselected power
-    /// values are preserved by the same builder used for optimizer probes.
+    /// All unselected geometry/power values, knots and interpolation are
+    /// preserved by the same builder used for optimizer probes.
     pub fn sources_at(&self, cx: &Cx<'_>, point: &[f64])
         -> Result<Vec<MovingHeatSource>, ScanSensitivityError>
     {
         poll(cx)?;
-        self.rebuild_sources(cx, &self.powers_at(point)?)
+        self.rebuild_sources(cx, &self.powers_at(point)?, &self.geometry_at(point)?)
     }
 
-    fn rebuild_sources(&self, cx: &Cx<'_>, powers: &[f64])
+    fn rebuild_sources(&self, cx: &Cx<'_>, powers: &[f64], geometry: &[f64])
         -> Result<Vec<MovingHeatSource>, ScanSensitivityError>
     {
         let limit = self.objective.budget.max_schedule_controls;
-        let mut values = Vec::with_capacity(self.sources.len());
-        for source in &self.sources { poll(cx)?; values.push(source.absorbed_power_values(limit)?); }
-        for (control, &power) in self.controls.iter().zip(powers) { values[control.source][control.value] = power; }
-        let mut sources = Vec::with_capacity(self.sources.len());
-        for (source, values) in self.sources.iter().zip(&values) {
+        let mut values: Vec<Option<Vec<f64>>> = vec![None; self.sources.len()];
+        for (control, &power) in self.controls.iter().zip(powers) {
             poll(cx)?;
-            sources.push(source.with_absorbed_power_values(values, self.objective.source_reference_time_s, limit)?);
+            if values[control.source].is_none() {
+                values[control.source] = Some(self.sources[control.source].absorbed_power_values(limit)?);
+            }
+            values[control.source].as_mut().expect("power values prepared")[control.value] = power;
+        }
+        let mut edits = vec![Vec::new(); self.sources.len()];
+        for (&control, &value) in self.geometry_controls.iter().zip(geometry) {
+            poll(cx)?;
+            edits[control.source()].push((control.key(), value));
+        }
+        let mut sources = Vec::with_capacity(self.sources.len());
+        for (index, source) in self.sources.iter().enumerate() {
+            poll(cx)?;
+            let powered = match &values[index] {
+                Some(values) => source.with_absorbed_power_values(values, self.objective.source_reference_time_s, limit)?,
+                None => source.clone(),
+            };
+            sources.push(if edits[index].is_empty() { powered } else {
+                powered.with_geometry_values(cx, &edits[index], self.objective.source_reference_time_s, limit)?
+            });
         }
         poll(cx)?;
         Ok(sources)
@@ -151,9 +216,10 @@ impl<F> ScanPowerStudy<F> {
     {
         poll(cx)?;
         let powers_w = self.powers_at(point)?;
+        let geometry_m = self.geometry_at(point)?;
         if self.evaluations >= self.evaluation_limit { return Err(invalid("scan inverse evaluation budget exhausted")); }
         self.evaluations += 1;
-        let sources = self.rebuild_sources(cx, &powers_w)?;
+        let sources = self.rebuild_sources(cx, &powers_w, &geometry_m)?;
         let run = (self.factory)(cx,sources.clone())?;
         if run.conduction().accepted_steps() != 0 {
             return Err(invalid("scan factory must return an unadvanced physical run"));
@@ -161,7 +227,7 @@ impl<F> ScanPowerStudy<F> {
         if run.sources() != sources.as_slice() { return Err(invalid("scan factory replaced the supplied controlled sources")); }
         let physical = evaluate_scan_objective(cx,run,&self.objective.endpoints_s,&self.objective.observations,
             self.objective.sampling,self.objective.step,self.objective.transpose,self.objective.budget)?;
-        let mut gradient = Vec::with_capacity(self.controls.len());
+        let mut gradient = Vec::with_capacity(self.initial.len());
         for (control,&power) in self.controls.iter().zip(&powers_w) {
             poll(cx)?;
             let g = physical.sources.get(control.source)
@@ -169,8 +235,14 @@ impl<F> ScanPowerStudy<F> {
                 .ok_or_else(||invalid("native authored-power gradient changed its control layout"))?;
             gradient.push(finite(power * *g)?);
         }
+        for (&control, &value) in self.geometry_controls.iter().zip(&geometry_m) {
+            poll(cx)?;
+            let source_gradient = physical.sources.get(control.source())
+                .ok_or_else(||invalid("native geometry gradient changed its source layout"))?;
+            gradient.push(control.chain(value, source_gradient)?);
+        }
         poll(cx)?;
-        Ok(ScanPowerEvaluation { physical,gradient,powers_w })
+        Ok(ScanPowerEvaluation { physical,gradient,powers_w,geometry_m })
     }
 
     /// Initialize the existing fallible L-BFGS engine on these exact coordinates.
@@ -200,10 +272,10 @@ impl<F> ScanPowerStudy<F> {
     }
 }
 
-fn positive_power(x: f64, reference: f64) -> Result<f64, ScanSensitivityError> {
+fn positive_coordinate(x: f64, reference: f64) -> Result<f64, ScanSensitivityError> {
     finite(x)?;
     let value = finite(fs_math::det::exp(finite(x+fs_math::det::ln(reference))?))?;
-    if value <= 0.0 { return Err(invalid("log-power coordinate underflowed to zero")); }
+    if value <= 0.0 { return Err(invalid("positive scan coordinate underflowed to zero")); }
     Ok(value)
 }
 fn finite(value: f64) -> Result<f64, ScanSensitivityError> {
@@ -223,15 +295,15 @@ mod tests {
     fn positive_coordinates_preserve_extreme_reference_scales_and_the_chain_rule() {
         for reference in [1e-200_f64,1.,1e200] {
             for x in [-2.,0.,2.] {
-                let p=positive_power(x,reference).unwrap();
+                let p=positive_coordinate(x,reference).unwrap();
                 assert!((p/(reference*x.exp())-1.).abs()<2e-13);
                 let eps=1e-4;
-                let fd=(positive_power(x+eps,reference).unwrap()-positive_power(x-eps,reference).unwrap())/(2.*eps);
+                let fd=(positive_coordinate(x+eps,reference).unwrap()-positive_coordinate(x-eps,reference).unwrap())/(2.*eps);
                 assert!((fd/p-1.).abs()<1e-7);
             }
         }
-        assert!(positive_power(f64::NAN,1.).is_err());
-        assert!(positive_power(1000.,1.).is_err());
-        assert!(positive_power(-1000.,1.).is_err());
+        assert!(positive_coordinate(f64::NAN,1.).is_err());
+        assert!(positive_coordinate(1000.,1.).is_err());
+        assert!(positive_coordinate(-1000.,1.).is_err());
     }
 }

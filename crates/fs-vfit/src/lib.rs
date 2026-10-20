@@ -28,6 +28,8 @@
 //! `|H|` and `Re H` — the cents- and passivity-bearing quantities —
 //! are conjugation-invariant.
 
+/// Dispersion-relation causality tests of sampled responses before fitting.
+pub mod causality;
 pub mod discretize;
 /// Reactive characteristic loads with physical storage and resistive loss.
 pub mod impedance;

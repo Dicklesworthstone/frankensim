@@ -119,6 +119,63 @@ pub struct Config {
     /// RT-0425's published R_H rate term (the reference's `--rt0425-hammer-dissipation`).
     /// Requires `rt0425_hammer_stiffness`, as the reference does.
     pub rt0425_hammer_dissipation: bool,
+    /// Silent strings. Every partial up to this frequency of every string that is not
+    /// sounding moves, as a bank of damped modes driven by the bridge (0: the rigid-chord
+    /// image alone). Their dampers and intrinsic losses act per partial; they exchange
+    /// work with the board through an explicit step, booked in `Ledger::coupling_j`.
+    /// Against attaching the same partials as dynamic strings, an A3 strike differs by
+    /// -48 dB with the dampers down and -54 dB under the sustain pedal (embedded board).
+    pub silent_bank_hz: f64,
+}
+
+/// One partial of a silent string in the bank: the completed-square coordinate z of
+/// mode `k` (unit mass; the same table entry the dynamic set uses when its key
+/// sounds), its velocity, its intrinsic loss rate and its pad's drag, and the exact
+/// damped transition of (z - beta b, v) over one step with the bridge held.
+#[derive(Clone, Debug)]
+struct BankMode {
+    k: usize,
+    w2: f64,
+    beta: f64,
+    c_int: f64,
+    c_pad: f64,
+    z: f64,
+    v: f64,
+    p: [f64; 4],
+}
+
+/// The bank partials of one string segment, `bank[start..end]`, lowest first. While the
+/// segment sounds, the dynamic set owns its first `taken` of them (handed over with
+/// their state); the bank keeps the rest.
+#[derive(Clone, Debug)]
+struct BankSeg {
+    seg: usize,
+    start: usize,
+    end: usize,
+    taken: usize,
+}
+
+/// The bank partials of one course: its segments, the pad engagement its transitions
+/// hold (`NAN` = none yet), and the bridge displacement and force of its last step
+/// (for the coupling books).
+#[derive(Clone, Debug)]
+struct BankCourse {
+    ci: usize,
+    segs: Vec<BankSeg>,
+    damping: f64,
+    b: f64,
+    force: f64,
+}
+
+/// Exact transition of y'' + c y' + w2 y = 0 over `dt` for (y, y'), underdamped.
+fn damped_transition(w2: f64, c: f64, dt: f64) -> [f64; 4] {
+    let w = det::sqrt(w2);
+    let zeta = c / (2.0 * w);
+    let wd = w * det::sqrt(1.0 - zeta * zeta);
+    let (s, co) = det::sin_cos(wd * dt);
+    let e = det::exp(-0.5 * c * dt);
+    let h = 0.5 * c / wd;
+    [e * (co + h * s), e * s / wd, -e * w2 * s / wd, e * (co - h * s)]
 }
 impl Config {
     pub fn live(sample_rate: u32) -> Self {
@@ -140,6 +197,7 @@ impl Config {
             rt0425_string_damping: false,
             rt0425_hammer_stiffness: false,
             rt0425_hammer_dissipation: false,
+            silent_bank_hz: 0.0,
         }
     }
 }
@@ -1376,6 +1434,9 @@ pub struct Ledger {
     pub catch_loss_j: f64,
     /// Relative string energy discarded when keys returned to the static image.
     pub retired_j: f64,
+    /// Work the explicit coupling of the silent-string bank put into the instrument
+    /// (signed): numerical, not physical, and bounded by the energy it couples.
+    pub coupling_j: f64,
     pub residual_j: f64,
 }
 impl Ledger {
@@ -1480,6 +1541,11 @@ pub struct LivePiano {
     last_error: Option<String>,
     /// Test hook (`fail_next_rebuild`): the next rebuild fails after changing the set.
     rebuild_failure_armed: bool,
+    /// The silent-string bank (`Config::silent_bank_hz`), its courses and their bridge
+    /// rows in the current loaded basis (course-major).
+    bank: Vec<BankMode>,
+    bank_courses: Vec<BankCourse>,
+    bank_gl: Vec<f64>,
 }
 
 /// A copy steps bit for bit as the original would from the same point: every
@@ -1558,6 +1624,9 @@ impl Clone for LivePiano {
             shape_cache: self.shape_cache.clone(),
             last_error: self.last_error.clone(),
             rebuild_failure_armed: self.rebuild_failure_armed,
+            bank: self.bank.clone(),
+            bank_courses: self.bank_courses.clone(),
+            bank_gl: self.bank_gl.clone(),
         }
     }
 }
@@ -1704,6 +1773,55 @@ impl LivePiano {
                 strike_fraction: c.strike_fraction,
             });
             key_segs[s.course].push(si);
+        }
+        // The silent-string bank: every partial up to `silent_bank_hz` of every string, with
+        // the same intrinsic loss rate the dynamic set's flows use and its pad's drag on that
+        // partial (the stations of `make_aseg`, one partial at a time).
+        if !cfg.silent_bank_hz.is_finite() || cfg.silent_bank_hz < 0.0 || cfg.silent_bank_hz > cfg.partial_band_hz {
+            return Err("silent bank band must lie in [0, partial band]".into());
+        }
+        let mut bank_modes: Vec<BankMode> = Vec::new();
+        let mut bank_courses: Vec<BankCourse> = Vec::new();
+        if cfg.silent_bank_hz > 0.0 {
+            let top = TAU * cfg.silent_bank_hz;
+            for (ci, c) in courses.iter().enumerate() {
+                let mut course_segs = Vec::new();
+                for &si in &key_segs[ci] {
+                    let seg = &segs[si];
+                    let first = bank_modes.len();
+                    let padded = !seg.duplex && c.midi <= LAST_DAMPED_MIDI;
+                    let width = (DAMPER_WIDTH_FRACTION * seg.length_m).min(DAMPER_WIDTH_MAX_M);
+                    let lead = DAMPER_CENTRE - 0.5 * width / seg.length_m;
+                    let span = width / seg.length_m;
+                    let points = cfg.damper_points;
+                    let root = det::sqrt(seg.modal_mass_kg);
+                    for (p, k) in (seg.off..seg.off + seg.n_max).enumerate() {
+                        if m.omega[k] > top {
+                            break;
+                        }
+                        let c_pad = if padded {
+                            (0..points).map(|j| {
+                                let fraction = lead + span * (j as f64 + 0.5) / points as f64;
+                                let shape = det::sin((p + 1) as f64 * PI * fraction) / root;
+                                DAMPER_DRAG_NS_M / points as f64 * shape * shape
+                            }).sum()
+                        } else {
+                            0.0
+                        };
+                        let c_int = losses[k].mass_rate + losses[k].strain_rate;
+                        if c_int + c_pad >= 1.9 * m.omega[k] {
+                            return Err("a silent-bank partial would be overdamped".into());
+                        }
+                        bank_modes.push(BankMode { k, w2: m.w2[k], beta: m.beta[k], c_int, c_pad, z: 0.0, v: 0.0, p: [1.0, 0.0, 0.0, 1.0] });
+                    }
+                    if bank_modes.len() > first {
+                        course_segs.push(BankSeg { seg: si, start: first, end: bank_modes.len(), taken: 0 });
+                    }
+                }
+                if !course_segs.is_empty() {
+                    bank_courses.push(BankCourse { ci, segs: course_segs, damping: f64::NAN, b: 0.0, force: 0.0 });
+                }
+            }
         }
         drop(bank);
         #[cfg(not(target_arch = "wasm32"))]
@@ -1920,6 +2038,9 @@ impl LivePiano {
             shape_cache: vec![None; n_courses],
             last_error: None,
             rebuild_failure_armed: false,
+            bank_gl: vec![0.0; bank_courses.len() * r],
+            bank: bank_modes,
+            bank_courses,
             cfg,
         };
         piano.rebuild(&[], &[])?;
@@ -1939,6 +2060,10 @@ impl LivePiano {
     pub fn courses(&self) -> &[Course] { &self.courses }
     pub fn sounding_keys(&self) -> usize { self.active.len() }
     pub fn dynamic_modes(&self) -> usize { self.active.iter().map(|a| a.modes).sum() }
+    /// Silent-string partials the bank carries now (those of sounding segments excluded).
+    pub fn bank_modes(&self) -> usize {
+        self.bank_courses.iter().flat_map(|c| c.segs.iter()).map(|s| s.end - s.start - s.taken).sum()
+    }
     pub fn dynamic_strings(&self) -> usize { self.active.iter().map(|a| a.segs.iter().filter(|s| !s.duplex).count()).sum() }
     pub fn take_error(&mut self) -> Option<String> { self.last_error.take() }
     /// Test hook (frankensim-ahffu): the next rebuild fails just before its
@@ -2100,6 +2225,7 @@ impl LivePiano {
             active: Vec<ACourse>, slots: Vec<Option<usize>>, q: Vec<f64>, v: Vec<f64>, bq: Vec<f64>, bvel: Vec<f64>,
             phi: Vec<f64>, k_phys: Vec<f64>, flow: Vec<f64>, bz: Vec<Zoh>, s_inv: Vec<f64>, sd_inv: Vec<f64>,
             wmk: Vec<f64>, wu: Vec<f64>, contact_gl_resp: Vec<f64>, ledger: Ledger, counters: Counters,
+            bank: Vec<BankMode>, bank_courses: Vec<BankCourse>, bank_gl: Vec<f64>,
         }
         let saved = Saved {
             active: self.active.clone(), slots: self.keys.iter().map(|key| key.slot).collect(),
@@ -2107,12 +2233,17 @@ impl LivePiano {
             phi: self.phi.clone(), k_phys: self.k_phys.clone(), flow: self.flow.clone(), bz: self.bz.clone(),
             s_inv: self.s_inv.clone(), sd_inv: self.sd_inv.clone(), wmk: self.wmk.clone(), wu: self.wu.clone(),
             contact_gl_resp: self.contact_gl_resp.clone(), ledger: self.ledger, counters: self.counters,
+            bank: self.bank.clone(), bank_courses: self.bank_courses.clone(), bank_gl: self.bank_gl.clone(),
         };
         let result = self.rebuild_in_place(activate, retire);
         if result.is_err() {
             let Saved {
                 active, slots, q, v, bq, bvel, phi, k_phys, flow, bz, s_inv, sd_inv, wmk, wu, contact_gl_resp, ledger, counters,
+                bank, bank_courses, bank_gl,
             } = saved;
+            self.bank = bank;
+            self.bank_courses = bank_courses;
+            self.bank_gl = bank_gl;
             for (key, slot) in self.keys.iter_mut().zip(slots) {
                 key.slot = slot;
             }
@@ -2144,6 +2275,13 @@ impl LivePiano {
         let mut vs = vec![0.0; r];
         matvec(&self.phi, &self.bq, &mut qs);
         matvec(&self.phi, &self.bvel, &mut vs);
+        // Where each segment's partials sit in the silent-string bank, if anywhere.
+        let mut bank_of: Vec<Option<(usize, usize)>> = vec![None; self.segs.len()];
+        for (bi, course) in self.bank_courses.iter().enumerate() {
+            for (j, seg) in course.segs.iter().enumerate() {
+                bank_of[seg.seg] = Some((bi, j));
+            }
+        }
         for &(slot, which) in retire {
             let ci = self.active[slot].ci;
             let g = &self.g_st[ci * r..(ci + 1) * r];
@@ -2156,14 +2294,28 @@ impl LivePiano {
                     kept.push(s);
                     continue;
                 }
+                // Its partials within the bank go back to it, state and all.
+                let (mut handed, mut handed_beta2) = (0, 0.0);
+                if let Some((bi, j)) = bank_of[s.seg] {
+                    let course = &mut self.bank_courses[bi];
+                    let seg = &mut course.segs[j];
+                    for m in &mut self.bank[seg.start..seg.start + seg.taken] {
+                        m.z = self.q[m.k];
+                        m.v = self.v[m.k];
+                        handed_beta2 += m.beta * m.beta;
+                    }
+                    handed = seg.taken;
+                    seg.taken = 0;
+                    course.damping = f64::NAN;
+                }
                 let range = s.off..s.off + s.n;
                 let mut e = 0.0;
-                for k in range.clone() {
+                for k in range.clone().skip(handed) {
                     let x = self.q[k] - self.m.beta[k] * b;
                     e += 0.5 * self.v[k] * self.v[k] + 0.5 * self.m.w2[k] * x * x;
                 }
                 // Its chord keeps following the bridge: that kinetic energy stays.
-                self.ledger.retired_j += e - 0.5 * s.beta2 * bdot * bdot;
+                self.ledger.retired_j += e - 0.5 * (s.beta2 - handed_beta2) * bdot * bdot;
                 self.q[range.clone()].fill(0.0);
                 self.v[range].fill(0.0);
                 self.counters.retirements += 1;
@@ -2199,10 +2351,19 @@ impl LivePiano {
             }
             // A string joins at rest RELATIVE to its chord: q_n = 0, so
             // z_n = beta_n*b. Kinetic and potential energy are continuous.
+            // Partials the silent-string bank carried join with their own state.
             for s in &fresh {
                 for k in s.off..s.off + s.n {
                     self.q[k] = self.m.beta[k] * b;
                     self.v[k] = self.m.beta[k] * bdot;
+                }
+                if let Some((bi, j)) = bank_of[s.seg] {
+                    let seg = &mut self.bank_courses[bi].segs[j];
+                    seg.taken = (seg.end - seg.start).min(s.n);
+                    for m in &self.bank[seg.start..seg.start + seg.taken] {
+                        self.q[m.k] = m.z;
+                        self.v[m.k] = m.v;
+                    }
                 }
             }
             match self.keys[ci].slot {
@@ -2254,6 +2415,27 @@ impl LivePiano {
                 }
             }
         }
+        // So do the silent-string bank's partials (those it keeps); only their dynamic
+        // reaction w^2 beta z stays outside the pencil (`step_bank`).
+        for course in &self.bank_courses {
+            let (mut beta2, mut mek) = (0.0, 0.0);
+            for seg in &course.segs {
+                for m in &self.bank[seg.start + seg.taken..seg.end] {
+                    beta2 += m.beta * m.beta;
+                    mek += m.w2 * m.beta * m.beta;
+                }
+            }
+            if beta2 == 0.0 {
+                continue;
+            }
+            let g = &self.g_st[course.ci * r..(course.ci + 1) * r];
+            for i in 0..r {
+                for j in 0..r {
+                    mass[i * r + j] -= beta2 * g[i] * g[j];
+                    k_loaded[i * r + j] += mek * g[i] * g[j];
+                }
+            }
+        }
         if std::mem::take(&mut self.rebuild_failure_armed) {
             return Err("injected rebuild failure".into());
         }
@@ -2263,6 +2445,12 @@ impl LivePiano {
             return Err("loaded soundboard mode unresolved or above output band".into());
         }
         self.phi = phi;
+        for (bi, course) in self.bank_courses.iter().enumerate() {
+            let g = &self.g_st[course.ci * r..(course.ci + 1) * r];
+            for j in 0..r {
+                self.bank_gl[bi * r + j] = (0..r).map(|i| g[i] * self.phi[i * r + j]).sum();
+            }
+        }
         // New loaded coordinates of the same physical motion: Phi^T M x.
         let mut mq = vec![0.0; r];
         let mut mv = vec![0.0; r];
@@ -2904,6 +3092,11 @@ impl LivePiano {
             }
         }
         damper_loss += self.damp(true);
+        if !self.bank_courses.is_empty() {
+            let (strings, pads) = self.step_bank();
+            string_loss += strings;
+            damper_loss += pads;
+        }
 
         self.ledger.string_loss_j += string_loss;
         self.ledger.board_loss_j += board_loss;
@@ -3262,9 +3455,84 @@ impl LivePiano {
     }
 
     /// Mechanical energy now stored in strings, board, hammers and felt [J].
+    /// One step of the silent-string bank, after the dynamic set's step. Over the step the
+    /// bridge moved from where the last one left it to where this one did; taking that
+    /// motion as linear, each partial's motion relative to its chord, u = z - beta b,
+    /// obeys u'' + c u' + w^2 u = 0 exactly, its losses acting on the relative velocity
+    /// as the dynamic set's do. The pad's share of that loss is its share of c, exactly
+    /// (both are viscous on u'). Their reaction w^2 beta z (the rest of the coupling is
+    /// in the loaded pencil) then kicks the board's velocity.
+    ///
+    /// Two approximations. Each partial feels its pad on its own (a dynamic string's pad
+    /// also couples its partials to each other and drags its chord). And the exchange with
+    /// the board is explicit: z did not move while the board did, and the board feels z
+    /// only from the next step. Every change of the bank's energy that is not its loss,
+    /// with the kicks' kinetic energy, is that exchange's work, booked in
+    /// `Ledger::coupling_j`. Returns (string loss, damper loss) [J].
+    fn step_bank(&mut self) -> (f64, f64) {
+        let r = self.r;
+        let dt = self.dt;
+        let engagement = (1.0 - self.sustain).powi(2);
+        let (mut string_loss, mut damper_loss) = (0.0, 0.0);
+        let mut exchange = -0.5 * self.bvel.iter().map(|x| x * x).sum::<f64>();
+        for i in 0..self.bank_courses.len() {
+            let damping = if self.lifted(self.bank_courses[i].ci) { 0.0 } else { engagement };
+            let gl = &self.bank_gl[i * r..(i + 1) * r];
+            let b = dot(gl, &self.bq);
+            let course = &mut self.bank_courses[i];
+            let (b0, rate) = (course.b, (b - course.b) / dt);
+            course.b = b;
+            let refresh = course.damping != damping;
+            course.damping = damping;
+            let mut force = 0.0;
+            for seg in &course.segs {
+                for m in &mut self.bank[seg.start + seg.taken..seg.end] {
+                    let pad = damping * m.c_pad;
+                    if refresh {
+                        m.p = damped_transition(m.w2, m.c_int + pad, dt);
+                    }
+                    // The bank's energy before, booked against the bridge where the last step left it.
+                    let before = 0.5 * (m.v * m.v + m.w2 * (m.z - m.beta * b0).powi(2));
+                    let (u, du) = (m.z - m.beta * b0, m.v - m.beta * rate);
+                    let u1 = m.p[0] * u + m.p[1] * du;
+                    let du1 = m.p[2] * u + m.p[3] * du;
+                    let loss = 0.5 * (du * du - du1 * du1 + m.w2 * (u * u - u1 * u1));
+                    let share = if pad == 0.0 { 0.0 } else { pad / (m.c_int + pad) };
+                    damper_loss += share * loss;
+                    string_loss += (1.0 - share) * loss;
+                    m.z = m.beta * b + u1;
+                    m.v = du1 + m.beta * rate;
+                    // Its energy now, against the bridge now; less the part of w^2 beta^2 b^2 / 2
+                    // that the loaded pencil already carried through the step.
+                    let after = 0.5 * (m.v * m.v + m.w2 * u1 * u1);
+                    exchange += after - before + loss - 0.5 * m.w2 * m.beta * m.beta * (b * b - b0 * b0);
+                    force += m.w2 * m.beta * m.z;
+                }
+            }
+            course.force = force;
+            if force != 0.0 {
+                let kick = dt * force;
+                for (x, g) in self.bvel.iter_mut().zip(gl) {
+                    *x += kick * g;
+                }
+            }
+        }
+        self.ledger.coupling_j += exchange + 0.5 * self.bvel.iter().map(|x| x * x).sum::<f64>();
+        (string_loss, damper_loss)
+    }
+
     pub fn stored_energy_j(&self) -> f64 {
         let r = self.r;
         let mut e = 0.5 * self.bvel.iter().map(|x| x * x).sum::<f64>();
+        for (bi, course) in self.bank_courses.iter().enumerate() {
+            let b = dot(&self.bank_gl[bi * r..(bi + 1) * r], &self.bq);
+            for seg in &course.segs {
+                for m in &self.bank[seg.start + seg.taken..seg.end] {
+                    let y = m.z - m.beta * b;
+                    e += 0.5 * (m.v * m.v + m.w2 * y * y);
+                }
+            }
+        }
         for i in 0..r {
             e += 0.5 * self.bq[i] * dot(&self.k_phys[i * r..(i + 1) * r], &self.bq);
         }
@@ -3294,7 +3562,8 @@ impl LivePiano {
     /// Refresh `stored_j` and `residual_j` (input - stored - dissipated - retired).
     pub fn close_ledger(&mut self) -> Ledger {
         self.ledger.stored_j = self.stored_energy_j();
-        self.ledger.residual_j = self.ledger.input_j - self.ledger.stored_j - self.ledger.dissipated_j() - self.ledger.retired_j;
+        self.ledger.residual_j = self.ledger.input_j + self.ledger.coupling_j - self.ledger.stored_j
+            - self.ledger.dissipated_j() - self.ledger.retired_j;
         self.ledger
     }
 
@@ -3355,7 +3624,7 @@ impl LivePiano {
         ]);
         out.extend_from_slice(&[
             self.dynamic_modes() as f32, self.dynamic_strings() as f32, self.counters.peak_pa as f32,
-            self.counters.forced_retirements as f32,
+            self.counters.forced_retirements as f32, ledger.coupling_j as f32,
         ]);
         let mut bare = vec![0.0; self.r];
         self.board_coordinates(&mut bare);

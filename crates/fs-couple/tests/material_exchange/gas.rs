@@ -15,9 +15,10 @@ use fs_thermochem::*;
 use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 use fs_thermal::enthalpy::CellId;
 fn quantity(k:QuantityKind)->QuantitySpec {QuantitySpec::semantic(SemanticType::new(k,ValueForm::Static))}
-fn gas(mass:f64)->ClosedGasParcel {
-    let id=SpeciesId::new("A").unwrap();
+pub fn component(name:&str,mass:f64,formation_j_mol:f64)->(Nasa9StandardStateModelV1,SpeciesTransportMaterial) {
+    let id=SpeciesId::new(name).unwrap();
     let mut coefficients=[0.0;9];coefficients[2]=3.5;
+    coefficients[7]=formation_j_mol/UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
     let mut parameters=required_nasa9_parameter_dims().into_iter().take(9).zip(coefficients)
         .map(|((key,dims),value)|(key.to_owned(),LawParameter {value,dims})).collect::<std::collections::BTreeMap<_,_>>();
     parameters.insert("reference_pressure".into(),LawParameter {value:100000.0,dims:Pressure::DIMS});
@@ -39,6 +40,10 @@ fn gas(mass:f64)->ClosedGasParcel {
     let transport=SpeciesTransportMaterial {species:id,material:MaterialCard::assemble(MaterialStateId {
         chemistry:"synthetic gas".into(),phase:"gas".into(),process:"authored".into(),revision:0},claims,vec![]).unwrap(),
         selection:MaterialPropertySelection::SingleClaimOnly};
+    (species,transport)
+}
+fn gas(mass:f64)->ClosedGasParcel {
+    let (species,transport)=component("A",mass,0.0);
     let model=ThermochemicalGasModel::new(FrozenIdealGasMixtureModelV1::new(vec![species],
         Composition::new(CompositionBasis::MoleFraction,vec![1.0]).unwrap()).unwrap(),vec![transport],None).unwrap();
     let point=QueryPoint::new().with_quantity("temperature",quantity(QuantityKind::AbsoluteTemperature),400.0).unwrap()

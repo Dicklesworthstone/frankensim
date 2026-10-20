@@ -10,7 +10,7 @@
 export const MIDI_MAX_VELOCITY_M_S = 4.5;
 export const midiVelocityToMS = (velocity) => (MIDI_MAX_VELOCITY_M_S * Math.max(0, Math.min(127, velocity))) / 127;
 
-const HEADER = 18; // n_keys, stations, board_modes, sustain, ledger[10], counters[4]
+const HEADER = 19; // n_keys, stations, board_modes, sustain, ledger[10], counters[4], silent-bank exchange
 const KEY_HEADER = 9;
 
 /** Decode the flat Float32Array snapshot posted by the worker. */
@@ -43,13 +43,14 @@ export function parseSnapshot(data) {
       inputJ: data[4],
       storedJ: data[5],
       dissipatedJ: data[6],
-      residualJ: data[7], // input - stored - dissipated - retired: what the books do not explain
+      residualJ: data[7], // input + bank exchange - stored - dissipated - retired: what the books do not explain
       stringLossJ: data[8],
       boardLossJ: data[9],
       damperLossJ: data[10],
       hammerLossJ: data[11], // felt (crush + relaxation) and shank
       catchLossJ: data[12],
       retiredJ: data[13], // relative string energy discarded when keys went back to the static image
+      couplingJ: data[18], // numerical work of the silent-string bank's explicit exchange with the board
     },
     dynamicModes: data[14],
     dynamicStrings: data[15],

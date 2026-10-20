@@ -569,6 +569,37 @@ fn hermitian_part(z: &[C64], n: usize) -> (Vec<f64>, Vec<Vec<C64>>) {
     (vals, vecs)
 }
 
+/// Smallest grid eigenvalue with its frequency, and, per contiguous negative
+/// band, its first, smallest and last frequencies. A wide band would otherwise
+/// hand the repair hundreds of near-duplicate constraints.
+fn grid_scan(grid: &[f64], lambda_min: impl Fn(f64) -> f64) -> ((f64, f64), Vec<f64>) {
+    let mut worst = (f64::INFINITY, 0.0);
+    let mut violation_freqs = Vec::new();
+    let mut run: Option<(f64, f64, f64)> = None; // (first, argmin, min)
+    let mut last = 0.0;
+    for &w in grid {
+        let lam = lambda_min(w);
+        if lam < worst.0 {
+            worst = (lam, w);
+        }
+        if lam < 0.0 {
+            run = Some(match run {
+                None => (w, w, lam),
+                Some((first, _, min)) if lam < min => (first, w, lam),
+                Some(r) => r,
+            });
+        } else if let Some((first, arg, _)) = run.take() {
+            violation_freqs.extend([first, arg, last]);
+        }
+        last = w;
+    }
+    if let Some((first, arg, _)) = run {
+        violation_freqs.extend([first, arg, last]);
+    }
+    violation_freqs.dedup();
+    (worst, violation_freqs)
+}
+
 fn build_grid(model: &MimoModel, band: (f64, f64)) -> Vec<f64> {
     let lo = (band.0 / 10.0).max(1.0e-3);
     let hi = band.1 * 10.0;
@@ -617,31 +648,8 @@ pub fn check_mimo_passivity(
     if e_skew || e_values[0] < -tol || r_values[0] < -tol {
         return Err(PassivityError::NegativeAsymptote);
     }
-    let grid = build_grid(model, band);
     let lambda_min = |w: f64| hermitian_part(&model.eval_iw(w), n).0[0];
-    let mut worst = (f64::INFINITY, 0.0);
-    let mut violation_freqs = Vec::new();
-    let mut run: Option<(f64, f64, f64)> = None; // (first, argmin, min)
-    let mut last = 0.0;
-    for &w in &grid {
-        let lam = lambda_min(w);
-        if lam < worst.0 {
-            worst = (lam, w);
-        }
-        if lam < 0.0 {
-            run = Some(match run {
-                None => (w, w, lam),
-                Some((first, _, min)) if lam < min => (first, w, lam),
-                Some(r) => r,
-            });
-        } else if let Some((first, arg, _)) = run.take() {
-            violation_freqs.extend([first, arg, last]);
-        }
-        last = w;
-    }
-    if let Some((first, arg, _)) = run {
-        violation_freqs.extend([first, arg, last]);
-    }
+    let (worst, mut violation_freqs) = grid_scan(&build_grid(model, band), lambda_min);
     let mut crossings = Vec::new();
     let class = if r_values[0] > 1.0e-9 * r_values[n - 1].abs().max(f64::MIN_POSITIVE) {
         crossings =
@@ -663,7 +671,11 @@ pub fn check_mimo_passivity(
     };
     violation_freqs.sort_by(f64::total_cmp);
     violation_freqs.dedup();
-    let passive = violation_freqs.is_empty() && worst.0 >= 0.0;
+    // As in the SISO check, an exact certificate also needs no crossing: an
+    // eigenvalue touching zero between grid points is not a clean margin.
+    let passive = violation_freqs.is_empty()
+        && worst.0 >= 0.0
+        && (class == CertificateClass::GridOnly || crossings.is_empty());
     Ok(MimoPassivityReport {
         passive,
         class,
@@ -838,7 +850,12 @@ fn qp_min_norm(rows: &[Vec<f64>], rhs: &[f64], nv: usize) -> Vec<f64> {
             let mut mu: Vec<f64> = active.iter().map(|&j| rhs[j]).collect();
             match lu(&gram, na) {
                 Ok(factor) => factor.solve(&mut mu),
-                Err(_) => break,
+                // Degenerate active set (repeated constraints): drop the
+                // newest and retry, as the SISO repair does.
+                Err(_) => {
+                    active.pop();
+                    continue;
+                }
             }
             if let Some(worst) = (0..na)
                 .filter(|&i| mu[i] < 0.0)
@@ -943,15 +960,20 @@ fn repair_with(
             ));
         }
         let mut freqs = report.violation_freqs.clone();
+        freqs.extend(&report.crossings);
         if report.worst.0 < 0.0 {
             freqs.push(report.worst.1);
         }
+        let floor = 1.0e-9 * frobenius(&eval(model, band.1));
+        let dip = report.worst.0.min(0.0).abs();
+        let margin = dip.max(floor) * 0.05 * (round as f64 + 1.0);
         for &w in &freqs {
-            // Constrain every currently negative direction at w, anchored on
-            // the original model (its Rayleigh quotient along v is linear).
+            // Constrain every direction below this round's margin at w,
+            // anchored on the original model (its Rayleigh quotient along v
+            // is linear in the residues). A crossing frequency sits at zero.
             let (vals, vecs) = hermitian_part(&eval(&current, w), model.ports);
             for (lam, v) in vals.iter().zip(&vecs) {
-                if *lam < 0.0 {
+                if *lam < margin {
                     let z0 = eval(model, w);
                     let n = model.ports;
                     let mut quotient = C64::ZERO;
@@ -966,9 +988,6 @@ fn repair_with(
                 }
             }
         }
-        let floor = 1.0e-9 * frobenius(&eval(model, band.1));
-        let dip = report.worst.0.min(0.0).abs();
-        let margin = dip.max(floor) * 0.05 * (round as f64 + 1.0);
         let rhs: Vec<f64> = values.iter().map(|&v| margin - v).collect();
         let delta = qp_min_norm(&rows, &rhs, base.len());
         let x: Vec<f64> = base.iter().zip(&delta).map(|(a, d)| a + d).collect();
@@ -1081,17 +1100,9 @@ pub fn check_delayed_mimo_passivity(
         return Err(PassivityError::Unstable);
     }
     let n = delayed.model.ports;
-    let mut worst = (f64::INFINITY, 0.0);
-    let mut violation_freqs = Vec::new();
-    for w in build_grid(&delayed.model, band) {
-        let lam = hermitian_part(&delayed.eval_iw(w), n).0[0];
-        if lam < worst.0 {
-            worst = (lam, w);
-        }
-        if lam < 0.0 {
-            violation_freqs.push(w);
-        }
-    }
+    let (worst, violation_freqs) = grid_scan(&build_grid(&delayed.model, band), |w| {
+        hermitian_part(&delayed.eval_iw(w), n).0[0]
+    });
     Ok(MimoPassivityReport {
         passive: violation_freqs.is_empty(),
         class: CertificateClass::GridOnly,
