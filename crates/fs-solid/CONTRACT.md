@@ -386,10 +386,25 @@ restraint axes/topology, support-control adjoints, adaptive event discovery,
 temporal/continuum error certification and measured validation are not supplied.
 Prescribed motion requires a physically resolved time-step ladder.
 
+`loads3::history::dynamics` connects typed `SupportMotion3` displacement
+histories to this same inertial trajectory. `begin_transient_with_support_history`
+requires the initial restrained displacement to match the retained history
+sample, with explicit initial velocity and constrained acceleration.
+`advance_history_with_supports` samples all loads and support values together
+at the run's next physical time before delegating one coupled Newmark step.
+Value-table clamping or wrapping does not replace physical time for moving
+frames, and rotating a payload does not rotate the fixed world restraint axes.
+Malformed bindings, sampling failures and cancellation leave the accepted
+trajectory intact. These adapters do not infer analytic derivatives, impulses
+or an event schedule from displacement tables.
+
 `tests/transient_supports3.rs` supplies G1 exact mass/stiffness/both-Rayleigh
 cross-term initialization, a closed-form accelerating-base oscillator with
 second-order refinement, fully prescribed thermal/external/support work and
 reaction checks, and G3/G4 fork, malformed-input and cancellation checks.
+`tests/transient_support_history3.rs` covers rigid translation with damping,
+agreement with explicit core endpoints, physical frame time beyond a clamped
+table, and transactional sampling, binding and cancellation refusals.
 
 ## Public types and semantics
 

@@ -2,6 +2,7 @@
 //! Sampling remains in `TetLoadHistory3`; the sparse Newmark run owns time and
 //! displacement/velocity/acceleration. These adapters never call a static solve.
 use super::*;
+use super::supports::SupportMotion3;
 use crate::loads3::transient::{TetTransientRun3, TransientConfig3, TransientError3, TransientStep3};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +37,59 @@ impl TetLoadHistory3<'_> {
         Ok(initial.case.begin_transient(problem, thermal, time_s, displacement_m,
             velocity_m_s, config, cx)?)
     }
+
+    /// Initialize driven supports from the SAME physical-time sample as every
+    /// distributed force. Initial displacement and velocity are full node-major
+    /// xyz vectors in world coordinates. Each restrained displacement must
+    /// equal its sampled history value; omitted restrained components are zero.
+    /// A disagreement refuses instead of silently overwriting an initial state.
+    ///
+    /// Initial restrained velocity and acceleration are explicit SI inputs,
+    /// never derivatives guessed from two displacement samples. The full
+    /// `prescribed_acceleration_m_s2` array must be zero on free components,
+    /// whose acceleration is solved from the coupled inertial equations.
+    /// Subsequent support velocities/accelerations use the prescribed-support
+    /// Newmark recurrence through `advance_history_with_supports`.
+    /// Thermal state, materials and reference constraint axes remain fixed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_transient_with_support_history<'g, 'm, 'p, 's>(
+        &self,
+        geometry: &'g TetLoadGeometry3<'m>,
+        problem: &'p TetLinearElasticProblem<'s>,
+        thermal: Option<TetThermalStrainField<'_>>,
+        supports: &[SupportMotion3<'_>],
+        time_s: f64,
+        displacement_m: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        prescribed_acceleration_m_s2: &[[f64; 3]],
+        config: TransientConfig3,
+        cx: &Cx<'_>,
+    ) -> Result<TetTransientRun3<'g, 'm, 'p, 's>, TransientHistoryError3> {
+        cx.checkpoint().map_err(|_| LoadHistoryError3::Cancelled)?;
+        if displacement_m.len() != problem.nodes_m.len() {
+            return Err(TransientError3::Invalid(
+                "initial support history needs one displacement vector per node",
+            ).into());
+        }
+        let initial = self.at_with_supports(
+            geometry, problem, supports, time_s, config.maximum_displacement_m, cx,
+        )?;
+        let prescribed = initial.prescribed_dofs_m();
+        for &dof in problem.fixed_dofs {
+            cx.checkpoint().map_err(|_| LoadHistoryError3::Cancelled)?;
+            let expected = prescribed.binary_search_by_key(&dof, |&(d, _)| d)
+                .map(|i| prescribed[i].1).unwrap_or(0.0);
+            if displacement_m[dof / 3][dof % 3] != expected {
+                return Err(TransientError3::Invalid(
+                    "initial restrained displacement differs from its support history",
+                ).into());
+            }
+        }
+        Ok(initial.loads.case.begin_transient_with_supports(
+            problem, thermal, time_s, displacement_m, velocity_m_s,
+            prescribed_acceleration_m_s2, config, cx,
+        )?)
+    }
 }
 impl TetTransientRun3<'_, '_, '_, '_> {
     /// Sample every force at the Newmark endpoint t+h, preserving the physical
@@ -46,8 +100,8 @@ impl TetTransientRun3<'_, '_, '_, '_> {
     /// Endpoint forces are integrated by Newmark's trapezoidal work rule.
     /// This does NOT detect events, resolve jumps or certify temporal error.
     /// Smooth ramps need a time-step ladder; discontinuous/short pulses need
-    /// explicitly resolved forcing intervals. Existing support-motion histories
-    /// are quasi-static and are not silently treated as inertial base excitation.
+    /// explicitly resolved forcing intervals. Driven supports use the explicit
+    /// `advance_history_with_supports` path instead of this force-only adapter.
     pub fn advance_history(&mut self, history: &TetLoadHistory3<'_>, h_s: f64, cx: &Cx<'_>)
         -> Result<TransientStep3, TransientHistoryError3> {
         if !h_s.is_finite() || h_s <= 0.0 {
@@ -60,6 +114,43 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         let geometry = self.geometry; let problem = self.problem;
         let endpoint = history.at(geometry, problem, time, cx)?;
         Ok(self.advance(&endpoint.case, h_s, cx)?)
+    }
+
+    /// Sample typed displacement and load histories together at the accepted
+    /// run clock plus `h_s`, then execute ONE coupled inertial step. Declared
+    /// frames use physical time even when a value table clamps or wraps.
+    /// Restrained axes stay world Cartesian; rotating a payload rotates the
+    /// prescribed displacement vector, not the constraint subspace.
+    ///
+    /// Missing fixed-component rows prescribe zero displacement. Support
+    /// velocity/acceleration follow the discrete Newmark recurrence, so callers
+    /// must resolve kinks and jumps with an appropriate step schedule. A value
+    /// table is not a hidden analytic derivative or impulse model. There is no
+    /// automatic event detection or temporal-error certificate.
+    ///
+    /// Failed sampling, invalid support assignments, cancellation and failed
+    /// dynamic acceptance leave the previous load, support motion and clock
+    /// intact. Reuse the same endpoint after correcting the failure.
+    pub fn advance_history_with_supports(
+        &mut self,
+        history: &TetLoadHistory3<'_>,
+        supports: &[SupportMotion3<'_>],
+        h_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TransientStep3, TransientHistoryError3> {
+        cx.checkpoint().map_err(|_| LoadHistoryError3::Cancelled)?;
+        let time = self.state().time_s + h_s;
+        if !h_s.is_finite() || h_s <= 0.0 || !time.is_finite() || time <= self.state().time_s {
+            return Err(TransientError3::Invalid(
+                "support history step must reach a finite later endpoint",
+            ).into());
+        }
+        let endpoint = history.at_with_supports(
+            self.geometry, self.problem, supports, time, self.maximum_displacement_m(), cx,
+        )?;
+        Ok(self.advance_with_supports(
+            &endpoint.loads.case, endpoint.prescribed_dofs_m(), h_s, cx,
+        )?)
     }
 }
 

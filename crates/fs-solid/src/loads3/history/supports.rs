@@ -1,7 +1,8 @@
 //! Typed support motion sampled at the same physical time as distributed loads.
 //! Constraint components are WORLD xyz, fixed in the reference discretization.
 //! Rotating payload frames rotate the prescribed vector, not the restraint axes.
-//! This is a sequence of absolute quasi-static endpoints, not base-excited dynamics.
+//! Sampling publishes absolute endpoints. `solve` uses them quasi-statically;
+//! the explicit `dynamics` adapters drive the inertial prescribed-support lane.
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,7 +24,7 @@ pub struct SupportMotion3<'a> {
 /// The force and support histories cannot be resampled independently at solve
 /// time, and material density cannot change after acceleration integration.
 pub struct TetSupportSample3<'g, 'm, 'p, 's> {
-    loads: TetLoadSample3<'g, 'm, 'p, 's>,
+    pub(super) loads: TetLoadSample3<'g, 'm, 'p, 's>,
     prescribed_m: Vec<(usize, f64)>,
     maximum_displacement_m: f64,
 }
