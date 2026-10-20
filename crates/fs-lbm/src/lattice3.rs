@@ -69,6 +69,11 @@ pub enum GridError3<E> {
         maximum: usize,
     },
     Allocation,
+    /// A per-cell material binding violates the reference scaling or topology.
+    MaterialField {
+        cell: usize,
+        reason: &'static str,
+    },
     Collision {
         cell: usize,
         source: E,
@@ -360,6 +365,134 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
         std::mem::swap(&mut self.f, &mut self.next);
         self.completed_steps += 1;
         Ok(())
+    }
+}
+
+/// A collision family that can bind material shear viscosity without choosing
+/// a different equilibrium, bulk rate or higher-order damping model.
+/// D3Q19's moment models tie ALL second-order rates together; their existing
+/// bulk/shear tie and unforced-only contract are retained. D3Q27 changes only
+/// omega1, leaving its independent trace and eight higher groups untouched.
+pub trait ViscousLattice3<const Q: usize>: Lattice3<Q> {
+    /// Replace the viscous relaxation time, refusing invalid/unrepresentable
+    /// rates rather than clamping them. Validate the original model as well.
+    fn with_shear_relaxation(
+        collision: Self::Collision,
+        tau: f64,
+    ) -> Result<Self::Collision, Self::Error>;
+}
+
+impl ViscousLattice3<19> for D3q19 {
+    fn with_shear_relaxation(
+        collision: Self::Collision,
+        tau: f64,
+    ) -> Result<Self::Collision, Self::Error> {
+        use crate::d3q19::CollisionModel3;
+        collision.validate()?;
+        CollisionModel3::Bgk { tau }.validate()?;
+        let updated = match collision {
+            CollisionModel3::Bgk { .. } => CollisionModel3::Bgk { tau },
+            CollisionModel3::CentralMoment { higher_order_rate, .. } => {
+                CollisionModel3::CentralMoment {
+                    second_order_rate: 1.0 / tau,
+                    higher_order_rate,
+                }
+            }
+            CollisionModel3::ReducedCumulant { third_order_rate, fourth_order_rate, .. } => {
+                CollisionModel3::ReducedCumulant {
+                    second_order_rate: 1.0 / tau,
+                    third_order_rate,
+                    fourth_order_rate,
+                }
+            }
+        };
+        updated.validate()?;
+        Ok(updated)
+    }
+}
+
+impl ViscousLattice3<27> for crate::d3q27::D3q27 {
+    fn with_shear_relaxation(
+        mut collision: Self::Collision,
+        tau: f64,
+    ) -> Result<Self::Collision, Self::Error> {
+        use crate::d3q27::{CollisionError27, CollisionModel27};
+        collision.validate()?;
+        if !tau.is_finite() || tau <= 0.5 {
+            return Err(CollisionError27::Tau { tau });
+        }
+        match &mut collision.model {
+            CollisionModel27::Bgk { tau: previous, .. } => *previous = tau,
+            CollisionModel27::CentralMoment { rates } | CollisionModel27::Cumulant { rates } => {
+                rates.omega[0] = 1.0 / tau;
+            }
+        }
+        collision.validate()?;
+        Ok(collision)
+    }
+}
+
+impl<L: ViscousLattice3<Q>, const Q: usize> Grid3<L, Q> {
+    /// Compile existing material scalings into the actual per-cell collision
+    /// field, without querying sources again or duplicating SI/lattice scaling.
+    ///
+    /// `reference` must be the grid's original physical scaling. Every fluid
+    /// cell needs Some(scaling), every solid None, in x-fastest order. All local
+    /// scalings must use exactly that dx, dt and reference density. They may
+    /// differ in viscosity, Cp and conductivity, but ONLY viscosity is consumed
+    /// by this isothermal flow path. No mass, temperature, sound speed, pressure
+    /// EOS, force or geometry is changed by compiling coefficients.
+    ///
+    /// Original material owners and source receipts remain borrowed by the
+    /// supplied scalings. This is a frozen numerical binding, not a new source
+    /// authority or a live temperature integrator. Retain the original reference
+    /// throughout evolution; this cannot authorize rescaling an existing state.
+    /// The caller maintains each scaling's scenario speed bound and material
+    /// validity, including any externally updated coefficient epoch.
+    ///
+    /// Feed the complete result to either `step_*_with_collisions` method. The
+    /// grid's original collision family and non-shear choices are preserved.
+    /// Allocation is bounded by the already admitted grid size; cancellation,
+    /// missing ownership and incompatible scalings publish no partial field.
+    pub fn material_collision_field<F: fs_material::fluid_transport::FluidTransport + ?Sized>(
+        &self,
+        cx: &Cx<'_>,
+        reference: &crate::material::MaterialScaling<'_, F>,
+        materials: &[Option<&crate::material::MaterialScaling<'_, F>>],
+    ) -> Result<Vec<L::Collision>, GridError3<L::Error>> {
+        cx.checkpoint().map_err(|_| GridError3::Cancelled)?;
+        if materials.len() != self.f.len() {
+            return Err(GridError3::Input("material field length"));
+        }
+        let mut field = Vec::new();
+        field.try_reserve_exact(materials.len()).map_err(|_| GridError3::Allocation)?;
+        for (cell, local) in materials.iter().enumerate() {
+            if cell % 64 == 0 {
+                cx.checkpoint().map_err(|_| GridError3::Cancelled)?;
+            }
+            if self.solid[cell] {
+                if local.is_some() {
+                    return Err(GridError3::MaterialField { cell, reason: "solid cell has fluid material" });
+                }
+                field.push(self.collision);
+                continue;
+            }
+            let local = local.ok_or(GridError3::MaterialField { cell, reason: "fluid material missing" })?;
+            if local.cell_size_m().to_bits() != reference.cell_size_m().to_bits()
+                || local.timestep_s().to_bits() != reference.timestep_s().to_bits()
+            {
+                return Err(GridError3::MaterialField { cell, reason: "material dx/dt differs from reference" });
+            }
+            if local.transport().density_kg_m3().to_bits() != reference.transport().density_kg_m3().to_bits() {
+                return Err(GridError3::MaterialField { cell, reason: "material reference density differs" });
+            }
+            let tau = 0.5 + local.flow().viscosity / L::CS2;
+            let collision = L::with_shear_relaxation(self.collision, tau)
+                .map_err(|source| GridError3::Collision { cell, source })?;
+            field.push(collision);
+        }
+        cx.checkpoint().map_err(|_| GridError3::Cancelled)?;
+        Ok(field)
     }
 }
 
@@ -778,5 +911,191 @@ mod collision_field_tests {
         with_cx(|cx| reference.step_serial_with_collisions(cx, &laws).unwrap());
         assert_eq!(bits(&grid), bits(&reference));
         assert_eq!(grid.completed_steps(), 1);
+    }
+
+    #[test]
+    fn material_viscosity_changes_real_steps_without_rescaling_other_physics() {
+        use crate::material::plan_scaling_from_material;
+        use fs_material::fluid_transport::FluidTransportState;
+        let thin = FluidTransportState::try_new(1000.0, 4000.0, 0.5, 0.01).unwrap();
+        let thick = FluidTransportState::try_new(1000.0, 4000.0, 0.5, 0.04).unwrap();
+        let a = plan_scaling_from_material(&thin, 0.001, 0.01, 0.001).unwrap();
+        let b = plan_scaling_from_material(&thick, 0.001, 0.01, 0.001).unwrap();
+        let mut grid = make::<D3q27, 27>(bgk27(a.flow().tau));
+        let materials: Vec<_> = (0..CELLS).map(|i| {
+            if grid.solid[i] { None } else if i % 2 == 0 { Some(&a) } else { Some(&b) }
+        }).collect();
+        let field = with_cx(|cx| grid.material_collision_field(cx, &a, &materials).unwrap());
+        let explicit: Vec<_> = (0..CELLS).map(|i| {
+            bgk27(if grid.solid[i] || i % 2 == 0 { a.flow().tau } else { b.flow().tau })
+        }).collect();
+        assert_eq!(field, explicit);
+        assert!(core::ptr::eq(a.material(), &thin));
+        assert!(core::ptr::eq(b.material(), &thick));
+        let mut manual = make::<D3q27, 27>(bgk27(a.flow().tau));
+        let mut uniform = make::<D3q27, 27>(bgk27(a.flow().tau));
+        with_cx(|cx| {
+            for _ in 0..4 {
+                grid.step_serial_with_collisions(cx, &field).unwrap();
+                manual.step_serial_with_collisions(cx, &explicit).unwrap();
+                uniform.step_serial(cx).unwrap();
+            }
+        });
+        assert_eq!(bits(&grid), bits(&manual));
+        assert_ne!(bits(&grid), bits(&uniform));
+        assert_eq!(grid.force, manual.force);
+        assert_eq!(grid.dimensions(), DIMS);
+    }
+
+    #[test]
+    fn material_binding_refuses_density_unit_and_topology_mismatches() {
+        use crate::material::plan_scaling_from_material;
+        use fs_material::fluid_transport::FluidTransportState;
+        let fluid = FluidTransportState::try_new(1000.0, 4000.0, 0.5, 0.01).unwrap();
+        let dense = FluidTransportState::try_new(1100.0, 4000.0, 0.5, 0.01).unwrap();
+        let reference = plan_scaling_from_material(&fluid, 0.001, 0.01, 0.001).unwrap();
+        let density = plan_scaling_from_material(&dense, 0.001, 0.01, 0.001).unwrap();
+        let dx = plan_scaling_from_material(&fluid, 0.002, 0.01, 0.001).unwrap();
+        let dt = plan_scaling_from_material(&fluid, 0.001, 0.02, 0.001).unwrap();
+        let grid = make::<D3q27, 27>(bgk27(0.8));
+        let before = bits(&grid);
+        let materials: Vec<_> = grid.solid.iter().map(|&solid| if solid { None } else { Some(&reference) }).collect();
+        with_cx(|cx| {
+            assert!(matches!(grid.material_collision_field(cx, &reference, &materials[..CELLS-1]),
+                Err(GridError3::Input("material field length"))));
+            for bad in [&density, &dx, &dt] {
+                let mut changed = materials.clone();
+                changed[CELLS - 1] = Some(bad);
+                assert!(matches!(grid.material_collision_field(cx, &reference, &changed),
+                    Err(GridError3::MaterialField { cell, .. }) if cell == CELLS - 1));
+            }
+            for (cell, value) in [(0, None), (67, Some(&reference))] {
+                let mut changed = materials.clone();
+                changed[cell] = value;
+                assert!(matches!(grid.material_collision_field(cx, &reference, &changed),
+                    Err(GridError3::MaterialField { cell: rejected, .. }) if rejected == cell));
+            }
+        });
+        assert_eq!(bits(&grid), before);
+        assert_eq!(grid.completed_steps(), 0);
+    }
+
+    #[test]
+    fn viscosity_retuning_preserves_collision_families_and_free_rates() {
+        let rates = Rates27 { omega: [1.25, 1.0, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5] };
+        for model in [CollisionModel27::CentralMoment { rates }, CollisionModel27::Cumulant { rates }] {
+            let original = CollisionConfig27 { model, maximum_mach: 0.1 };
+            let updated = D3q27::with_shear_relaxation(original, 1.7).unwrap();
+            let expected = Rates27 { omega: [1.0/1.7, 1.0, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5] };
+            let expected_model = match model {
+                CollisionModel27::CentralMoment { .. } => CollisionModel27::CentralMoment { rates: expected },
+                _ => CollisionModel27::Cumulant { rates: expected },
+            };
+            assert_eq!(updated, CollisionConfig27 { model: expected_model, maximum_mach: 0.1 });
+        }
+        let d19 = CollisionModel3::ReducedCumulant {
+            second_order_rate: 1.2, third_order_rate: 0.8, fourth_order_rate: 0.7,
+        };
+        assert_eq!(D3q19::with_shear_relaxation(d19, 1.5).unwrap(),
+            CollisionModel3::ReducedCumulant {
+                second_order_rate: 1.0/1.5, third_order_rate: 0.8, fourth_order_rate: 0.7,
+            });
+        for tau in [0.0, 0.5, f64::NAN, f64::INFINITY] {
+            assert!(D3q19::with_shear_relaxation(d19, tau).is_err());
+            assert!(D3q27::with_shear_relaxation(bgk27(0.8), tau).is_err());
+        }
+        assert!(D3q27::with_shear_relaxation(bgk27(f64::NAN), 0.8).is_err());
+    }
+
+    #[test]
+    fn valid_field_with_late_collision_failure_never_publishes_a_prefix() {
+        let mut field = vec![bgk27(0.8); CELLS];
+        // A valid coefficient whose velocity envelope rejects the last cell
+        // inside the actual collision pass, not during field admission.
+        field[CELLS - 1].maximum_mach = 1e-6;
+        let mut grid = make::<D3q27, 27>(bgk27(0.8));
+        let before = bits(&grid);
+        with_cx(|cx| {
+            assert!(matches!(grid.step_serial_with_collisions(cx, &field),
+                Err(GridError3::Collision { cell, .. }) if cell == CELLS - 1));
+        });
+        assert_eq!(bits(&grid), before);
+        assert_eq!(grid.completed_steps(), 0);
+        let pool = TilePool::for_host(2, SEED);
+        let gate = CancelGate::new_clock_free();
+        assert!(matches!(grid.step_pooled_with_collisions(&pool, &gate, &field),
+            Err(GridError3::Collision { cell, .. }) if cell == CELLS - 1));
+        assert_eq!(bits(&grid), before);
+        assert_eq!(grid.completed_steps(), 0);
+    }
+
+    fn layered_material_channel<L: ViscousLattice3<Q>, const Q: usize>(
+        n: usize,
+        collision: L::Collision,
+    ) -> f64 {
+        use crate::material::plan_scaling_from_material;
+        use fs_material::fluid_transport::FluidTransportState;
+        let thin = FluidTransportState::try_new(1000.0, 4000.0, 0.5, 0.01).unwrap();
+        let thick = FluidTransportState::try_new(1000.0, 4000.0, 0.5, 0.04).unwrap();
+        // One physical 16-mm channel; diffusive refinement keeps lattice nu
+        // fixed while dx, dt, body force and output units change coherently.
+        let dx = 0.016 / n as f64;
+        let dt = 0.01 * (16.0 / n as f64).powi(2);
+        let acceleration = 1e-5;
+        let force = acceleration * dt * dt / dx;
+        let a = plan_scaling_from_material(&thin, dx, dt, 0.0001).unwrap();
+        let b = plan_scaling_from_material(&thick, dx, dt, 0.0001).unwrap();
+        let mut grid = Grid3::<L, Q>::try_new(
+            [1, n, 1], collision, [force, 0.0, 0.0], [true, false, true],
+            GridBudget3 { maximum_cells: n, maximum_mach: 0.2 },
+            |_| false, |_| L::W,
+        ).unwrap();
+        let materials: Vec<_> = (0..n).map(|i| Some(if i < n/2 { &a } else { &b })).collect();
+        let field = with_cx(|cx| grid.material_collision_field(cx, &a, &materials).unwrap());
+        with_cx(|cx| {
+            for _ in 0..12*n*n { grid.step_serial_with_collisions(cx, &field).unwrap(); }
+        });
+        // Independent piecewise-quadratic solution of (nu*u')' = -g:
+        // continuous velocity/traction at 8 mm, no slip at 0 and 16 mm.
+        let height = 0.016;
+        let interface = height / 2.0;
+        let nu_a = 0.01 / 1000.0;
+        let nu_b = 0.04 / 1000.0;
+        let integral = interface / nu_a + (height - interface) / nu_b;
+        let first_moment = interface * interface / (2.0 * nu_a)
+            + (height * height - interface * interface) / (2.0 * nu_b);
+        let traction = acceleration * first_moment / integral;
+        let mut max_error = 0.0_f64;
+        let mut max_exact = 0.0_f64;
+        for i in 0..n {
+            let y = (i as f64 + 0.5) * dx;
+            let exact = if y <= interface {
+                (traction * y - acceleration * y * y / 2.0) / nu_a
+            } else {
+                (traction * interface - acceleration * interface * interface / 2.0) / nu_a
+                    + (traction * (y - interface)
+                        - acceleration * (y * y - interface * interface) / 2.0) / nu_b
+            };
+            let (rho, velocity) = grid.macroscopic(i).unwrap();
+            let observed = velocity[0] * dx / dt;
+            max_error = max_error.max((observed - exact).abs());
+            max_exact = max_exact.max(exact);
+            assert!((rho - 1.0).abs() < 1e-9);
+        }
+        max_error / max_exact
+    }
+
+    #[test]
+    fn two_material_poiseuille_flow_refines_against_traction_continuity() {
+        for (coarse, fine) in [
+            (layered_material_channel::<D3q19, 19>(16, CollisionModel3::Bgk { tau: 0.8 }),
+             layered_material_channel::<D3q19, 19>(32, CollisionModel3::Bgk { tau: 0.8 })),
+            (layered_material_channel::<D3q27, 27>(16, bgk27(0.8)),
+             layered_material_channel::<D3q27, 27>(32, bgk27(0.8))),
+        ] {
+            assert!(coarse < 0.02, "coarse relative error={coarse}");
+            assert!(fine < 0.005, "fine relative error={fine}");
+            assert!(fine < 0.3 * coarse, "refinement {coarse} -> {fine}");
+        }
     }
 }
