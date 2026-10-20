@@ -27,7 +27,8 @@ use fs_phs::WallPin;
 use fs_vfit::discretize::DelayedFilter;
 
 /// Cold-path cap, including axial segments and zero-length tone-hole records.
-pub const MAX_REGIONAL_SEGMENTS: usize = 64;
+/// It admits a complete measured bore table with its split stations and chimneys.
+pub const MAX_REGIONAL_SEGMENTS: usize = 256;
 
 #[derive(Debug, Clone)]
 struct Region {
@@ -68,7 +69,7 @@ impl RegionalDuct {
     pub fn new(duct: &Duct, gases: &[GasState]) -> Result<Self, DuctError> {
         if duct.segments.is_empty() { return Err(DuctError::EmptyDuct); }
         if duct.segments.len() > MAX_REGIONAL_SEGMENTS || gases.len() != duct.segments.len() {
-            return Err(invalid("regional duct requires 1..=64 segments and one gas per segment"));
+            return Err(invalid("regional duct requires 1..=256 segments and one gas per segment"));
         }
         if matches!(duct.segments.first(), Some(Segment::ToneHole { .. }))
             || matches!(duct.segments.last(), Some(Segment::ToneHole { .. })) {

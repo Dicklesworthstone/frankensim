@@ -37,7 +37,10 @@ pub use field_input::steady::SteadyGasPerformance;
 pub const REED_PERFORMANCE_SCHEMA: &str = "frankensim-reed-performance-v1";
 /// Bound input bytes before reading or invoking count-driven decoders.
 pub const MAX_REED_PERFORMANCE_BYTES: usize = 1024 * 1024;
-const MAX_SEGMENTS: usize = 64;
+/// Authored axial and tone-hole records. A measured wind lattice needs one
+/// record per bore station pair plus one per chimney and per split bore, so the
+/// cap must admit a complete published bore table without decimating it.
+const MAX_SEGMENTS: usize = 256;
 const MAX_EVENTS: usize = 16_384;
 const MAX_CONTROLS: usize = 262_144;
 const MAX_WORK: u64 = 16_777_216;
@@ -810,3 +813,6 @@ mod regional_tests;
 
 #[cfg(test)]
 mod field_tests;
+
+#[cfg(test)]
+mod segment_cap_tests;

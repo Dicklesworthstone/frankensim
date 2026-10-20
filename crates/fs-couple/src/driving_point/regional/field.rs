@@ -9,6 +9,10 @@ use fs_material::gas_field::AxialGasField;
 
 use super::{Duct, DuctError, MAX_REGIONAL_SEGMENTS, RegionalDuct, Segment, invalid};
 
+/// Midpoint subdivision limits are independent of the authored segment cap.
+const MAX_CELLS_PER_SEGMENT: usize = 64;
+const MAX_GAS_FIELD_CELLS: usize = 64;
+
 /// Shared material/propagation refusal from the continuous duct owner.
 pub use fs_duct::profile::gas_field::GasFieldDuctError;
 
@@ -85,7 +89,7 @@ impl RegionalDuct {
         field: &AxialGasField,
         cells_per_segment: usize,
     ) -> Result<Self, GasFieldDuctError> {
-        if cells_per_segment == 0 || cells_per_segment > MAX_REGIONAL_SEGMENTS {
+        if cells_per_segment == 0 || cells_per_segment > MAX_CELLS_PER_SEGMENT {
             return Err(invalid("gas-field subdivision needs 1..=64 cells per segment").into());
         }
         if duct.segments.is_empty() {
@@ -106,8 +110,8 @@ impl RegionalDuct {
             .segments
             .len()
             .checked_mul(cells_per_segment)
-            .filter(|count| *count <= MAX_REGIONAL_SEGMENTS)
-            .ok_or_else(|| invalid("gas-field subdivision exceeds MAX_REGIONAL_SEGMENTS"))?;
+            .filter(|count| *count <= MAX_GAS_FIELD_CELLS)
+            .ok_or_else(|| invalid("gas-field subdivision exceeds its cell budget"))?;
         if duct
             .segments
             .iter()

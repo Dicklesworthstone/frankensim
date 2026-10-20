@@ -1,0 +1,23 @@
+{
+  "schema": "frankensim.instrument-status.v1",
+  "family": "clarinet",
+  "title": "Clarinet",
+  "reference_instrument": "Bb clarinet",
+  "summary": "Performance files exist for every normal-set fingering of a published 1981 Buffet Crampon Prestige bore and tone-hole lattice, blown at the published mezzo-forte mouth pressure and observed at the physical baffled outlet receiver. They have not been built or rendered yet, so nothing here is graded. The specimen is a population proxy for the UIowa R13, not the same instrument.",
+  "physics_present": [
+    "fs-duct transfer-matrix air column built from the published Taillard and Sanchez 2016 bore station table, split at every chimney and never decimated, with the Vandoren M30 exit cone",
+    "every tone hole as a side branch (published position, minimal diameter and chimney height); the Moers and Kergomard 2011 normal-set chart decides which are open",
+    "flanged radiation load at the bell and the physical baffled outlet receiver for the radiated pressure (not the listener_m proxy)",
+    "lumped single-reed Bernoulli aperture with lay contact from the shared reed owner, driven by a mezzo-forte mouth pressure program interpolated from Fuks and Sundberg 1996 (two professionals on a Buffet Crampon Prestige)"
+  ],
+  "physics_missing": [
+    "the reed opening, width, closing pressure and damping are the authored BR-04 constants, not a measurement of this reed and mouthpiece; the reed is quasistatic, so reed resonance and mass are not in the loop",
+    "the mouthpiece chamber, baffle, throat and lay are unknown; the cavity is an equivalent cylinder matched to the published internal volume and length",
+    "open tone holes do not radiate in the observer (only the bell does), and undercuts, pad geometry and key rise are unknown",
+    "dry room-temperature air everywhere: the warm humid breath field is not applied",
+    "no wall vibration, no player airway, lips or tongue, and no vibrato",
+    "the specimen is not the UIowa Buffet R13 and no same-specimen passive comparison exists yet; fingerings outside the normal set have no chart"
+  ],
+  "blocked": null,
+  "beads": ["pexfp.228", "pexfp.178"]
+}

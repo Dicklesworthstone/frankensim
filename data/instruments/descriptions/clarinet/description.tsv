@@ -1,0 +1,41 @@
+frankensim.wind-description.v1
+key	value	unit	status	source
+description_id	clarinet-buffet-prestige-taillard2016-reed-v1	-	authored	-
+family	Bb clarinet, single reed, cylindrical bore with 24 tone holes	-	authored	-
+specimen_dir	data/instruments/geometry/clarinet-buffet-prestige-1981-taillard2016	path	published-measured	taillard-sanchez-2016-buffet-prestige;moers-kergomard-2011-normal-fingerings
+fingering_chart	data/instruments/geometry/clarinet-buffet-prestige-1981-taillard2016/fingerings.tsv	path	published-measured	moers-kergomard-2011-normal-fingerings: normal set only; notes outside it are not rendered (u-fingering-nonnormal)
+bore.interpolation	linear radius between consecutive stations (cone), cylinder when equal	-	authored	TMM convention; the source gives stations only (Tableau 3)
+tonehole.radius	half of tone-holes min-diameter	-	derived	taillard-sanchez-2016-buffet-prestige Tableau 2 (minimal chimney diameter); undercut NOT modelled (u-undercut)
+tonehole.height	tone-holes chimney-height	-	published-measured	taillard-sanchez-2016-buffet-prestige Tableau 2
+tonehole.opening	1 for holes in the fingering open set, 0 for every other hole	-	published-measured	moers-kergomard-2011-normal-fingerings App. A Table 2 caption (cumulative open set); pads and key rise UNKNOWN (u-pad-geometry)
+mouthpiece.part	mouthpiece	-	published-measured	taillard-sanchez-2016-buffet-prestige sec. 2.3 (Vandoren M30)
+mouthpiece.exit_cone_features	exit-station-45mm,exit-station-0mm	-	published-measured	taillard-sanchez-2016-buffet-prestige sec. 2.3
+mouthpiece.volume_feature	vandoren-m30	-	published-measured	taillard-sanchez-2016-buffet-prestige sec. 2.3 (11.2 cm3 +-0.2)
+mouthpiece.interior_rule	equivalent-cylinder: radius from (internal-volume minus exit-cone volume) over (total-length minus cone length)	-	derived	UNKNOWN true chamber, baffle, throat, tip and lay (u-mouthpiece-interior); route CT or casts of a B4. The UIowa Bowen B4 has no published data. Limitation: mouthpiece cavity as segments
+reed.rest_opening_m	0.0004	m	authored-BR-04	UNKNOWN for this reed and mouthpiece (u-reed); value inherited from crates/fs-couple/examples/reed-duct.performance; route Dalmont-Gilbert-Ollivier 2003 JASA 114(4) 2253-2262 quasi-static opening measurement or an owner measurement of a Vandoren M30 and reed
+reed.width_m	0.013	m	authored-BR-04	UNKNOWN (u-reed); same inheritance and route as reed.rest_opening_m
+reed.closing_pressure_pa	6000	Pa	authored-BR-04	UNKNOWN (u-reed); same inheritance and route as reed.rest_opening_m
+reed.mass_kg	0	kg	authored-BR-04	UNKNOWN: zero selects the quasistatic aperture; an effective reed mass needs M3.1-W5 or an identification from measured pressure and opening
+reed.stiffness_n_m	0	N/m	authored-BR-04	UNKNOWN: zero selects the derived-stiffness convention of the reed owner
+reed.damping_ratio	0.35	-	authored-BR-04	UNKNOWN (u-reed); inherited authored constant, flagged in every scorecard
+ambient.temperature_k	293.15	K	UNKNOWN	u-environment: the source states no measurement temperature; placeholder is the X-Obs1 audit-arm air. Route: a warm humid breath field through the gas_steady owner
+ambient.pressure_pa	101325	Pa	UNKNOWN	u-environment; standard atmosphere placeholder
+ambient.relative_humidity	0	-	UNKNOWN	u-environment; dry-air placeholder, breath humidity is not modelled in this baseline
+observer.record	baffled_outlet 0 0 0.5 16 64 4800	-	authored	X-Obs1 (data/instruments/grades/clarinet/x-obs1-observer-c7e2712a4.json) convention: outlet on axis at 0.5 m, 16 rings, 64 angles, band 4800 Hz (rate/10). Radiation from open tone holes is NOT in this observer (only the terminal radiates)
+observer.termination	flanged	-	authored	required by the baffled_outlet receiver; a clarinet bell is not a flanged pipe
+audio.rate_hz	48000	Hz	authored	-
+audio.full_scale_pa	20	Pa	authored	PCM scale at the microphone, never a gain; clipped_samples must be 0
+audio.duration_s	2.5	s	authored	-
+compile_limits	100000 4096	-	authored	reed.rs admission budget (visits, stored controls)
+gesture.control_rate_hz	700	Hz	authored	same control clock as the committed reed examples
+gesture.attack_s	0.02	s	authored	UNKNOWN real attack ramp; continues the X-Obs1 audit setting, not fitted to any recording
+gesture.release_start_s	2.3	s	authored	-
+gesture.release_s	0.06	s	authored	UNKNOWN real release ramp; continues the X-Obs1 audit setting, not fitted to any recording
+player.level	mf	-	published-measured	fuks-sundberg-1996-blowing-pressures arpeggio task level mf
+player.instrument_group	Bb clarinet	-	published-measured	Cl1 and Cl2 both played a Buffet-Crampon Prestige (source Table B1)
+player.pressure_table	data/instruments/descriptions/reeds/blowing-pressure-fuks-sundberg-1996.tsv	path	published-measured	Fuks and Sundberg 1996 KTH TMH-QPSR 3/1996 41-57, Tables A1 and A2
+player.pressure_rule	mean over players and arpeggio positions at each tabulated sounding pitch; linear in semitones between pitches; hold the nearest tabulated value up to player.extrapolation_semitones_max	-	derived	-
+player.extrapolation_semitones_max	1	semitone	authored	D3 sounds one semitone below the lowest tabulated pitch (Eb3); recorded per note in performances/index.tsv
+player.pressure_round_pa	1	Pa	authored	cm H2O means are converted at 98.0665 Pa per cm H2O and rounded to this step
+player.airway_lips_tongue	UNKNOWN	-	UNKNOWN	u-player-anatomy: no airway, lip or tongue model; route M8-W3k
+output.prefix	BbClar	-	authored	UIowa MIS name prefix so the grader maps the instrument (BbClar.mf.<concert note>)

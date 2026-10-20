@@ -1,0 +1,546 @@
+frankensim.player-blowing-pressure.v1
+table	player	instrument	seq	pitch	direction	level	mean_cm_h2o	stdev_cm_h2o	source_id	note
+A1	Cl1	Bb clarinet	1	Eb3	up	ff	65	4.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	2	G3	up	ff	55	3.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	3	Bb3	up	ff	46	3.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	4	Eb4	up	ff	47	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	5	G4	up	ff	46	2.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	6	Bb4	up	ff	50	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	7	Eb5	up	ff	46	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	8	G5	up	ff	45	4.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	9	Bb5	up	ff	43	2.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	10	Eb6	apex	ff	37	4.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	11	Bb5	down	ff	37	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	12	G5	down	ff	38	2.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	13	Eb5	down	ff	48	3.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	14	Bb4	down	ff	51	4.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	15	G4	down	ff	46	4.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	16	Eb4	down	ff	44	2.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	17	Bb3	down	ff	43	2.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	18	G3	down	ff	46	2.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	19	Eb3	down	ff	47	6.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	1	Eb3	up	mf	43	2.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	2	G3	up	mf	41	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	3	Bb3	up	mf	39	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	4	Eb4	up	mf	39	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	5	G4	up	mf	40	1.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	6	Bb4	up	mf	43	2.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	7	Eb5	up	mf	39	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	8	G5	up	mf	33	1.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	9	Bb5	up	mf	34	1.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	10	Eb6	apex	mf	31	3.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	11	Bb5	down	mf	32	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	12	G5	down	mf	34	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	13	Eb5	down	mf	39	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	14	Bb4	down	mf	44	3.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	15	G4	down	mf	37	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	16	Eb4	down	mf	37	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	17	Bb3	down	mf	36	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	18	G3	down	mf	40	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	19	Eb3	down	mf	42	1.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	1	Eb3	up	mp	33	1.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	2	G3	up	mp	32	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	3	Bb3	up	mp	30	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	4	Eb4	up	mp	32	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	5	G4	up	mp	32	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	6	Bb4	up	mp	34	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	7	Eb5	up	mp	31	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	8	G5	up	mp	29	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	9	Bb5	up	mp	28	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	10	Eb6	apex	mp	26	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	11	Bb5	down	mp	27	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	12	G5	down	mp	28	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	13	Eb5	down	mp	31	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	14	Bb4	down	mp	34	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	15	G4	down	mp	30	0.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	16	Eb4	down	mp	30	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	17	Bb3	down	mp	30	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	18	G3	down	mp	33	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	19	Eb3	down	mp	33	1.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	1	Eb3	up	pp	26	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	2	G3	up	pp	26	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	3	Bb3	up	pp	24	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	4	Eb4	up	pp	25	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	5	G4	up	pp	26	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	6	Bb4	up	pp	29	1.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	7	Eb5	up	pp	26	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	8	G5	up	pp	24	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	9	Bb5	up	pp	23	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	10	Eb6	apex	pp	23	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	11	Bb5	down	pp	23	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	12	G5	down	pp	24	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	13	Eb5	down	pp	25	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	14	Bb4	down	pp	27	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	15	G4	down	pp	24	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	16	Eb4	down	pp	24	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	17	Bb3	down	pp	24	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	18	G3	down	pp	25	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A1	Cl1	Bb clarinet	19	Eb3	down	pp	26	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	1	Eb3	up	ff	59	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	2	G3	up	ff	60	3.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	3	Bb3	up	ff	59	4.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	4	Eb4	up	ff	56	3.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	5	G4	up	ff	53	2.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	6	Bb4	up	ff	55	3.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	7	Eb5	up	ff	52	3.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	8	G5	up	ff	50	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	9	Bb5	up	ff	44	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	10	Eb6	apex	ff	40	2.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	11	Bb5	down	ff	40	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	12	G5	down	ff	45	2.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	13	Eb5	down	ff	48	2.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	14	Bb4	down	ff	49	2.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	15	G4	down	ff	46	1.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	16	Eb4	down	ff	46	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	17	Bb3	down	ff	48	4.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	18	G3	down	ff	50	3.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	19	Eb3	down	ff	51	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	1	Eb3	up	mf	42	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	2	G3	up	mf	42	1.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	3	Bb3	up	mf	39	2.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	4	Eb4	up	mf	38	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	5	G4	up	mf	37	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	6	Bb4	up	mf	43	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	7	Eb5	up	mf	41	1.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	8	G5	up	mf	37	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	9	Bb5	up	mf	34	1.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	10	Eb6	apex	mf	31	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	11	Bb5	down	mf	33	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	12	G5	down	mf	36	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	13	Eb5	down	mf	39	1.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	14	Bb4	down	mf	40	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	15	G4	down	mf	35	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	16	Eb4	down	mf	36	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	17	Bb3	down	mf	36	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	18	G3	down	mf	38	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	19	Eb3	down	mf	38	2.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	1	Eb3	up	mp	32	2.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	2	G3	up	mp	32	2.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	3	Bb3	up	mp	31	1.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	4	Eb4	up	mp	31	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	5	G4	up	mp	30	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	6	Bb4	up	mp	35	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	7	Eb5	up	mp	33	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	8	G5	up	mp	31	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	9	Bb5	up	mp	29	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	10	Eb6	apex	mp	29	1.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	11	Bb5	down	mp	29	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	12	G5	down	mp	31	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	13	Eb5	down	mp	33	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	14	Bb4	down	mp	34	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	15	G4	down	mp	28	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	16	Eb4	down	mp	29	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	17	Bb3	down	mp	28	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	18	G3	down	mp	29	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	19	Eb3	down	mp	30	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	1	Eb3	up	pp	28	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	2	G3	up	pp	27	1.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	3	Bb3	up	pp	27	1.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	4	Eb4	up	pp	27	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	5	G4	up	pp	25	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	6	Bb4	up	pp	31	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	7	Eb5	up	pp	30	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	8	G5	up	pp	29	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	9	Bb5	up	pp	27	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	10	Eb6	apex	pp	31	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	11	Bb5	down	pp	29	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	12	G5	down	pp	30	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	13	Eb5	down	pp	31	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	14	Bb4	down	pp	33	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	15	G4	down	pp	27	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	16	Eb4	down	pp	27	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	17	Bb3	down	pp	27	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	18	G3	down	pp	27	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A2	Cl2	Bb clarinet	19	Eb3	down	pp	27	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	1	Eb3	up	ff	25	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	2	G3	up	ff	37	3.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	3	Bb3	up	ff	43	4.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	4	Eb4	up	ff	45	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	5	G4	up	ff	61	4.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	6	Bb4	up	ff	60	5.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	7	Eb5	up	ff	49	4.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	8	G5	apex	ff	43	5.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	9	Eb5	down	ff	45	4.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	10	Bb4	down	ff	48	2.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	11	G4	down	ff	55	4.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	12	Eb4	down	ff	35	2.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	13	Bb3	down	ff	34	5.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	14	G3	down	ff	37	2.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	15	Eb3	down	ff	26	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	1	Eb3	up	mf	21	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	2	G3	up	mf	24	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	3	Bb3	up	mf	28	2.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	4	Eb4	up	mf	29	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	5	G4	up	mf	40	1.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	6	Bb4	up	mf	39	1.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	7	Eb5	up	mf	32	2.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	8	G5	apex	mf	29	1.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	9	Eb5	down	mf	32	2.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	10	Bb4	down	mf	32	3.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	11	G4	down	mf	35	4.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	12	Eb4	down	mf	26	3.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	13	Bb3	down	mf	24	2.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	14	G3	down	mf	25	2.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	15	Eb3	down	mf	21	1.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	1	Eb3	up	mp	20	0.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	2	G3	up	mp	23	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	3	Bb3	up	mp	22	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	4	Eb4	up	mp	24	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	5	G4	up	mp	30	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	6	Bb4	up	mp	28	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	7	Eb5	up	mp	26	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	8	G5	apex	mp	24	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	9	Eb5	down	mp	26	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	10	Bb4	down	mp	27	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	11	G4	down	mp	30	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	12	Eb4	down	mp	24	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	13	Bb3	down	mp	23	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	14	G3	down	mp	25	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	15	Eb3	down	mp	21	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	1	Eb3	up	pp	20	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	2	G3	up	pp	21	0.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	3	Bb3	up	pp	20	0.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	4	Eb4	up	pp	21	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	5	G4	up	pp	24	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	6	Bb4	up	pp	23	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	7	Eb5	up	pp	22	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	8	G5	apex	pp	21	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	9	Eb5	down	pp	22	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	10	Bb4	down	pp	23	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	11	G4	down	pp	26	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	12	Eb4	down	pp	21	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	13	Bb3	down	pp	20	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	14	G3	down	pp	22	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A3	Sx1	alto saxophone	15	Eb3	down	pp	21	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	1	Eb3	up	ff	28	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	2	G3	up	ff	36	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	3	Bb3	up	ff	31	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	4	Eb4	up	ff	34	1.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	5	G4	up	ff	48	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	6	Bb4	up	ff	54	2.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	7	Eb5	up	ff	51	1.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	8	G5	apex	ff	45	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	9	Eb5	down	ff	44	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	10	Bb4	down	ff	43	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	11	G4	down	ff	43	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	12	Eb4	down	ff	32	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	13	Bb3	down	ff	28	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	14	G3	down	ff	28	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	15	Eb3	down	ff	25	3.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	1	Eb3	up	mf	16	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	2	G3	up	mf	19	0.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	3	Bb3	up	mf	18	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	4	Eb4	up	mf	19	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	5	G4	up	mf	28	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	6	Bb4	up	mf	27	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	7	Eb5	up	mf	25	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	8	G5	apex	mf	24	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	9	Eb5	down	mf	24	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	10	Bb4	down	mf	26	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	11	G4	down	mf	27	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	12	Eb4	down	mf	19	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	13	Bb3	down	mf	18	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	14	G3	down	mf	20	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	15	Eb3	down	mf	16	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	1	Eb3	up	mp	19	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	2	G3	up	mp	20	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	3	Bb3	up	mp	18	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	4	Eb4	up	mp	19	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	5	G4	up	mp	25	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	6	Bb4	up	mp	24	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	7	Eb5	up	mp	22	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	8	G5	apex	mp	22	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	9	Eb5	down	mp	22	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	10	Bb4	down	mp	23	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	11	G4	down	mp	25	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	12	Eb4	down	mp	20	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	13	Bb3	down	mp	18	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	14	G3	down	mp	20	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	15	Eb3	down	mp	18	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	1	Eb3	up	pp	21	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	2	G3	up	pp	21	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	3	Bb3	up	pp	18	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	4	Eb4	up	pp	18	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	5	G4	up	pp	23	1.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	6	Bb4	up	pp	22	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	7	Eb5	up	pp	20	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	8	G5	apex	pp	20	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	9	Eb5	down	pp	20	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	10	Bb4	down	pp	21	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	11	G4	down	pp	23	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	12	Eb4	down	pp	19	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	13	Bb3	down	pp	18	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	14	G3	down	pp	21	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A4	Sx2	alto saxophone	15	Eb3	down	pp	20	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	1	Bb3	up	ff	41	3.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	2	D4	up	ff	46	5.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	3	F4	up	ff	52	5.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	4	Bb4	up	ff	56	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	5	D5	up	ff	62	5.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	6	F5	up	ff	68	9.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	7	Bb5	up	ff	69	7.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	8	D6	apex	ff	80	4.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	9	Bb5	down	ff	70	3.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	10	F5	down	ff	62	6.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	11	D5	down	ff	56	8.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	12	Bb4	down	ff	46	5.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	13	F4	down	ff	45	4.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	14	D4	down	ff	41	3.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	15	Bb3	down	ff	42	3.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	1	Bb3	up	mf	40	1.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	2	D4	up	mf	43	2.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	3	F4	up	mf	47	5.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	4	Bb4	up	mf	48	3.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	5	D5	up	mf	52	2.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	6	F5	up	mf	57	3.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	7	Bb5	up	mf	57	3.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	8	D6	apex	mf	62	1.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	9	Bb5	down	mf	59	2.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	10	F5	down	mf	54	2.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	11	D5	down	mf	48	1.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	12	Bb4	down	mf	43	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	13	F4	down	mf	39	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	14	D4	down	mf	38	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	15	Bb3	down	mf	38	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	1	Bb3	up	mp	37	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	2	D4	up	mp	39	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	3	F4	up	mp	41	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	4	Bb4	up	mp	42	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	5	D5	up	mp	45	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	6	F5	up	mp	50	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	7	Bb5	up	mp	51	2.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	8	D6	apex	mp	53	3.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	9	Bb5	down	mp	52	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	10	F5	down	mp	49	1.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	11	D5	down	mp	44	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	12	Bb4	down	mp	40	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	13	F4	down	mp	38	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	14	D4	down	mp	37	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	15	Bb3	down	mp	35	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	1	Bb3	up	pp	39	2.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	2	D4	up	pp	40	2.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	3	F4	up	pp	41	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	4	Bb4	up	pp	41	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	5	D5	up	pp	45	3.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	6	F5	up	pp	48	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	7	Bb5	up	pp	46	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	8	D6	apex	pp	50	1.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	9	Bb5	down	pp	46	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	10	F5	down	pp	45	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	11	D5	down	pp	43	1.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	12	Bb4	down	pp	41	1.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	13	F4	down	pp	41	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	14	D4	down	pp	39	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A5	Ob1	oboe	15	Bb3	down	pp	39	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	1	Bb3	up	ff	52	3.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	2	D4	up	ff	63	2.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	3	F4	up	ff	70	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	4	Bb4	up	ff	77	3.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	5	D5	up	ff	82	6.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	6	F5	up	ff	103	7.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	7	Bb5	up	ff	118	5.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	8	D6	apex	ff	113	7.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	9	Bb5	down	ff	120	4.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	10	F5	down	ff	94	3.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	11	D5	down	ff	78	3.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	12	Bb4	down	ff	69	4.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	13	F4	down	ff	59	2.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	14	D4	down	ff	56	4.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	15	Bb3	down	ff	50	3.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	1	Bb3	up	mf	40	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	2	D4	up	mf	45	1.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	3	F4	up	mf	48	1.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	4	Bb4	up	mf	55	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	5	D5	up	mf	57	1.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	6	F5	up	mf	70	1.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	7	Bb5	up	mf	78	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	8	D6	apex	mf	74	2.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	9	Bb5	down	mf	76	2.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	10	F5	down	mf	64	2.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	11	D5	down	mf	56	2.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	12	Bb4	down	mf	52	1.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	13	F4	down	mf	44	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	14	D4	down	mf	42	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	15	Bb3	down	mf	38	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	1	Bb3	up	mp	40	1.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	2	D4	up	mp	39	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	3	F4	up	mp	40	2.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	4	Bb4	up	mp	43	2.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	5	D5	up	mp	47	2.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	6	F5	up	mp	50	3.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	7	Bb5	up	mp	57	4.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	8	D6	apex	mp	56	4.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	9	Bb5	down	mp	54	3.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	10	F5	down	mp	51	2.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	11	D5	down	mp	46	1.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	12	Bb4	down	mp	41	1.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	13	F4	down	mp	39	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	14	D4	down	mp	38	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	15	Bb3	down	mp	38	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	1	Bb3	up	pp	42	1.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	2	D4	up	pp	42	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	3	F4	up	pp	41	1.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	4	Bb4	up	pp	43	2.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	5	D5	up	pp	45	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	6	F5	up	pp	48	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	7	Bb5	up	pp	50	2.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	8	D6	apex	pp	51	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	9	Bb5	down	pp	49	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	10	F5	down	pp	47	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	11	D5	down	pp	44	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	12	Bb4	down	pp	41	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	13	F4	down	pp	40	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	14	D4	down	pp	39	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A6	Ob2	oboe	15	Bb3	down	pp	39	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	1	Bb1	up	ff	26	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	2	D2	up	ff	27	1.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	3	F2	up	ff	31	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	4	Bb2	up	ff	35	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	5	D3	up	ff	35	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	6	F3	up	ff	37	3.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	7	Bb3	up	ff	53	1.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	8	D4	up	ff	61	3.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	9	F4	up	ff	65	2.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	10	Bb4	apex	ff	56	5.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	11	F4	down	ff	58	3.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	12	D4	down	ff	60	4.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	13	Bb3	down	ff	52	3.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	14	F3	down	ff	37	1.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	15	D3	down	ff	35	3.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	16	Bb2	down	ff	32	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	17	F2	down	ff	25	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	18	D2	down	ff	25	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	19	Bb1	down	ff	23	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	1	Bb1	up	mf	18	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	2	D2	up	mf	21	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	3	F2	up	mf	23	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	4	Bb2	up	mf	28	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	5	D3	up	mf	28	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	6	F3	up	mf	30	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	7	Bb3	up	mf	39	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	8	D4	up	mf	45	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	9	F4	up	mf	48	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	10	Bb4	apex	mf	43	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	11	F4	down	mf	43	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	12	D4	down	mf	44	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	13	Bb3	down	mf	38	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	14	F3	down	mf	28	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	15	D3	down	mf	25	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	16	Bb2	down	mf	26	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	17	F2	down	mf	20	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	18	D2	down	mf	19	0.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	19	Bb1	down	mf	15	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	1	Bb1	up	mp	15	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	2	D2	up	mp	17	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	3	F2	up	mp	17	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	4	Bb2	up	mp	21	1.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	5	D3	up	mp	21	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	6	F3	up	mp	24	2.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	7	Bb3	up	mp	31	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	8	D4	up	mp	37	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	9	F4	up	mp	38	1.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	10	Bb4	apex	mp	33	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	11	F4	down	mp	36	2.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	12	D4	down	mp	35	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	13	Bb3	down	mp	31	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	14	F3	down	mp	25	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	15	D3	down	mp	22	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	16	Bb2	down	mp	23	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	17	F2	down	mp	19	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	18	D2	down	mp	17	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	19	Bb1	down	mp	16	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	1	Bb1	up	pp	13	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	2	D2	up	pp	16	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	3	F2	up	pp	16	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	4	Bb2	up	pp	19	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	5	D3	up	pp	19	1.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	6	F3	up	pp	22	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	7	Bb3	up	pp	28	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	8	D4	up	pp	32	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	9	F4	up	pp	33	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	10	Bb4	apex	pp	29	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	11	F4	down	pp	32	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	12	D4	down	pp	32	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	13	Bb3	down	pp	28	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	14	F3	down	pp	23	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	15	D3	down	pp	21	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	16	Bb2	down	pp	21	3.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	17	F2	down	pp	17	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	18	D2	down	pp	16	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A7	Bn1	bassoon	19	Bb1	down	pp	16	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	1	Bb1	up	ff	19	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	2	D2	up	ff	21	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	3	F2	up	ff	22	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	4	Bb2	up	ff	25	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	5	D3	up	ff	24	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	6	F3	up	ff	26	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	7	Bb3	up	ff	34	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	8	D4	up	ff	38	1.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	9	F4	up	ff	42	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	10	Bb4	apex	ff	40	3.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	11	F4	down	ff	44	1.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	12	D4	down	ff	40	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	13	Bb3	down	ff	32	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	14	F3	down	ff	25	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	15	D3	down	ff	23	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	16	Bb2	down	ff	23	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	17	F2	down	ff	19	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	18	D2	down	ff	19	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	19	Bb1	down	ff	17	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	1	Bb1	up	mf	12	0.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	2	D2	up	mf	13	0.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	3	F2	up	mf	14	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	4	Bb2	up	mf	16	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	5	D3	up	mf	16	0.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	6	F3	up	mf	18	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	7	Bb3	up	mf	23	1.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	8	D4	up	mf	27	2.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	9	F4	up	mf	29	4.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	10	Bb4	apex	mf	27	4.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	11	F4	down	mf	29	3.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	12	D4	down	mf	28	2.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	13	Bb3	down	mf	24	4.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	14	F3	down	mf	20	2.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	15	D3	down	mf	19	3.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	16	Bb2	down	mf	19	2.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	17	F2	down	mf	17	1.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	18	D2	down	mf	17	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	19	Bb1	down	mf	16	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	1	Bb1	up	mp	15	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	2	D2	up	mp	17	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	3	F2	up	mp	17	1.2	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	4	Bb2	up	mp	21	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	5	D3	up	mp	21	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	6	F3	up	mp	24	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	7	Bb3	up	mp	31	2.0	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	8	D4	up	mp	37	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	9	F4	up	mp	38	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	10	Bb4	apex	mp	33	1.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	11	F4	down	mp	36	1.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	12	D4	down	mp	35	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	13	Bb3	down	mp	31	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	14	F3	down	mp	25	2.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	15	D3	down	mp	22	1.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	16	Bb2	down	mp	23	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	17	F2	down	mp	19	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	18	D2	down	mp	17	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	19	Bb1	down	mp	16	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	1	Bb1	up	pp	13	0.5	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	2	D2	up	pp	14	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	3	F2	up	pp	14	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	4	Bb2	up	pp	16	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	5	D3	up	pp	16	0.6	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	6	F3	up	pp	18	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	7	Bb3	up	pp	22	2.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	8	D4	up	pp	24	1.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	9	F4	up	pp	27	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	10	Bb4	apex	pp	27	1.1	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	11	F4	down	pp	28	1.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	12	D4	down	pp	25	2.3	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	13	Bb3	down	pp	22	1.4	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	14	F3	down	pp	18	0.8	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	15	D3	down	pp	17	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	16	Bb2	down	pp	16	0.7	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	17	F2	down	pp	15	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	18	D2	down	pp	15	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O
+A8	Bn2	bassoon	19	Bb1	down	pp	13	0.9	fuks-sundberg-1996-blowing-pressures	arpeggio task; pitch is the actual sounding pitch per the source footnote (actual pitches, not transposed notation); cm H2O

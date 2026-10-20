@@ -50,7 +50,7 @@ species, laminate or temperature-dependent solid material card.
 
 `listener_m` is the distance used by the existing compact-jet observation.
 `termination` is one of `closed`, `ideal-open`, `unflanged`, `flanged`.
-Each of the declared 1..64 segments is one of:
+Each of the declared 1..256 segments is one of:
 
 ```
 cylinder RADIUS_M LENGTH_M
