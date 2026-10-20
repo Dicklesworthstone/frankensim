@@ -331,6 +331,71 @@ resource qualifications remain pending central native verification until the
 bead's run receipt exists. In particular a small Krylov residual does not bound
 FMM, panel or model error, and order 4 is not an automatic accuracy certificate.
 
+### `helmholtz::aperture` (IRP M2.5-W3a)
+
+`aperture_impedance(surface, apertures, omegas, medium, route, gate)` returns
+one row per frequency of the self-plus-mutual aperture matrix
+`Z[a][b] = SUM_i A_i shape_a(i) p_b(i)` [N s/m] under `exp(-i w t)`: the
+generalized force on aperture `a` per unit generalized velocity of aperture
+`b`. The body force is `-Z v`, and a mass load has a negative imaginary part.
+An `Aperture` is a real per-panel outward velocity shape plus a declared
+reference point and unit normal. The `declaration` hash binds the surface,
+shapes, reference planes, band, medium and route.
+
+There are two routes, and neither is symmetrized, clipped or loaded:
+- `Collocation` uses Burton-Miller. It solves one dense batch up to
+  `MAX_DENSE_PANELS`. Above that cap it uses the FMM/GMRES owner when
+  `IterativeOptions` are given, and refuses otherwise.
+- `Galerkin` uses the reciprocal P1/P0 velocity ports, within their restricted
+  band.
+
+Each row reports two measured quantities:
+- `reciprocity_defect = ||Z - Z^T||_F / ||Z||_F`;
+- `passivity_margin`, the smallest eigenvalue of `(Z + Z^H)/2` over
+  `||Z||_F`.
+
+`volume_gains[a] = SUM_i A_i shape_a(i)` [m³ per m/s] converts generalized
+velocity to volume flow. `acoustic(row)` returns the acoustic matrix
+`Z[a][b] / (q_a q_b)` [Pa s/m³] and refuses a zero gain. For indicator shapes
+it maps volume flows to aperture-mean pressures. This is the coupled load that
+fs-duct `CoupledTermination` takes.
+
+`baffled_piston_array_impedance` covers coplanar baffled circular pistons.
+- Self terms are the closed-form face impedance times the piston area.
+- Mutual terms are the Rayleigh double integral on a polar Gauss-Legendre ×
+  midpoint disc ladder. A term is accepted at the first two rungs that agree
+  within `PISTON_MUTUAL_TOLERANCE = 1e-9`. Overlapping, touching or unresolved
+  pistons are refused.
+
+The tests check the following:
+- **G2, two pistons:** the mutual term matches the exact King
+  (Hankel-transform) representation, with its tail bound, within 1e-4 for
+  kd in [0.5, 20] and ka <= 2. Measured agreement is 1e-12 to 1e-10.
+  Pritchard's series itself is not evaluated.
+- **G0, reciprocity and passivity:** pistons and Galerkin meet both at
+  roundoff. The partitioned-sphere sum is compared to the pulsating sphere
+  for both routes.
+- **G1, ladder:** a closed equal-area-faceted tube (two wall holes plus the
+  mouth) runs on a 4-rung ladder of 360 / 1488 / 5856 / 23232 panels. The
+  fourth rung routes past the dense cap.
+  - It converges monotonically at a consistent observed order of about
+    h^1.25: successive Frobenius steps 2.1e-2 / 8.6e-3 / 3.6e-3, ratios 2.4
+    (trj b187). The piston velocity jumps at every aperture edge.
+  - The bead's 1e-3 G1 target is NOT met at these rungs.
+  - Collocation and Galerkin also converge together on a partitioned sphere.
+- **Duct-network wiring:** `aperture_matrix_terminates_a_duct_network`
+  terminates the coarse tube's plane-wave bore at its two holes and mouth
+  through one coupled load. It checks `Re Z_in >= 0` on a 121-point
+  300-3000 Hz scan. It also checks that the mutual terms move at least one
+  golden-refined input-impedance peak by more than 0.01 cent against the
+  self-only diagonal. Measured on the 360-panel matrix: -2.33 cent at
+  1040 Hz and +2.70 cent at 2109 Hz (yto y2). This is a wiring check, not an
+  accuracy claim.
+
+No-claim: aperture shapes are panel unions. The collocation route is
+reciprocal only to discretization error. A passive row is not a causal
+positive-real time model; that is M2.5-W3b's realization gate.
+
 ## Invariants
 
 ### Solid-mode radiation loading (IRP M2.5-W4a)

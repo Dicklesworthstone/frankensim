@@ -95,6 +95,10 @@ pub mod bc;
 #[path = "rayleigh_modal.rs"]
 pub mod rayleigh_modal;
 
+/// Self and mutual radiation impedance of declared apertures on one body.
+#[path = "aperture_impedance.rs"]
+pub mod aperture;
+
 /// Dense-LU work cap: a complex dense system above this panel count is
 /// refused rather than silently thrashing (n^2 * 16 bytes; 8192 panels
 /// is already a 1 GiB matrix). The FMM path is the recorded follow-up.
