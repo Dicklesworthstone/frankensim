@@ -5,7 +5,7 @@ use fs_matdb::{
     ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterpolationPolicy, LawId,
     LawParameter, MaterialStateId, ModelNormalizationReceipt, ModelNormalizationTarget,
     NormalizedMaterialCardPack, NormalizedModelPack, NormalizedPack, NormalizedSpeciesPack,
-    PropertyClaim, PropertyKey, PropertyValue, Provenance, SpeciesAssociation,
+    ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance, SpeciesAssociation,
     SpeciesNormalizationReceipt, SpeciesNormalizationTarget, UncertaintyModel,
     ValidityBoundSide, MODEL_PACK_TARGET_BASIS, SPECIES_MOLAR_MASS_DIMS,
     SPECIES_PACK_TARGET_BASIS, SPECIES_REFERENCE_PRESSURE_DIMS,
@@ -99,6 +99,10 @@ pub(super) fn packs(name: &str, mass: f64, cp_r: f64, minimum_temperature: f64) 
         name, "synthetic-field-model-v1", artifact, "CC0-1.0", vec![model], normalizations,
     ).unwrap();
     let mut claims = ClaimSet::new();
+    let observation = claims.register_observation(ObservationDataset {
+        specimen: format!("synthetic {name} transport"), method: "manufactured physical regression".into(),
+        artifact, caveats: "not a measured gas".into(), provenance: provenance.clone(),
+    }).unwrap();
     for (name, dims, value) in [
         ("dynamic_viscosity", DynViscosity::DIMS, 1.8e-5),
         ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, 0.026),
@@ -111,7 +115,7 @@ pub(super) fn packs(name: &str, mass: f64, cp_r: f64, minimum_temperature: f64) 
                 .with_quantity("pressure", typed(QuantityKind::Pressure), 1000.0, 1e7),
             uncertainty: UncertaintyModel::Unstated,
             interpolation: InterpolationPolicy::ConstantWithinValidity,
-            observations: vec![], provenance: provenance.clone(),
+            observations: vec![observation.clone()], provenance: provenance.clone(),
         }).unwrap();
     }
     let claims = NormalizedPack::new(

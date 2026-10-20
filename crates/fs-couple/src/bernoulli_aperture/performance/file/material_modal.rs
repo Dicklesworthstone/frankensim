@@ -129,7 +129,12 @@ impl MaterialModalValvePerformance {
         let ambient = gas::read_with_sources(&mut row, None, gas_sources, &mut gases)?;
         row.finish()?;
         let mut row = rows.row("exterior")?;
-        let exterior = gas::read_with_sources(&mut row, Some(ambient.pressure), gas_sources, &mut gases)?;
+        // A full GAS_RECORD (T P RH or a mixture), as documented; passing the
+        // ambient pressure here would switch the legacy record to `T RH`.
+        let exterior = gas::read_with_sources(&mut row, None, gas_sources, &mut gases)?;
+        if exterior.pressure.to_bits() != ambient.pressure.to_bits() {
+            return Err(bad(row.line, "exterior and ambient must share one static pressure; mean interface flow is not modeled"));
+        }
         row.finish()?;
         rows.row("upstream")?.finish()?;
         let up = DuctInput::read_with_gas_sources(&mut rows, &ambient, gate, gas_sources, &mut gases)?

@@ -86,7 +86,15 @@ fn generated_field_and_original_pressure_path_agree_with_direct_owner_binding() 
     assert!(solution.maximum_mean_mach() <= control.maximum_mean_mach);
     let field = solution.field();
     assert_eq!(performance.gas_field().unwrap().0, field);
-    assert_eq!(field.state_at(0.0).unwrap().state().temperature, 330.0);
+    // The upstream state is the enthalpy-balanced supply mixture, inverted
+    // from h to T by the caloric solve: 330 K only within its J/kg tolerance.
+    // Both synthetic species have cp above 800 J/(kg K) (3.5 R/0.028 and
+    // 4.5 R/0.044), so that tolerance bounds the temperature error.
+    let inlet_k = field.state_at(0.0).unwrap().state().temperature;
+    assert!(
+        (inlet_k - 330.0).abs() <= control.caloric.energy_tolerance_j_kg / 800.0,
+        "inlet {inlet_k} K"
+    );
     let outlet = field.state_at(0.57).unwrap();
     assert!((290.0..330.0).contains(&outlet.state().temperature));
     assert_eq!(*outlet.state(), performance.outlet_receiver().unwrap().gas);

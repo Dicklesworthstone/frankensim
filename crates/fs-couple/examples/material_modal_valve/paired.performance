@@ -14,7 +14,7 @@ duct_node inlet
 duct_node junction
 duct_node reflection 0
 duct_section 0 1 0.1 0.007 0.002
-duct_section 1 2 0.15 0.007 0.002 gas 303.15 101325 0 viscothermal 80 1000 4 8
+duct_section 1 2 0.15 0.007 0.002 gas 303.15 0 viscothermal 80 1000 8 8
 propagation fractional 1000 0.02
 supply none
 slit_length 0.001

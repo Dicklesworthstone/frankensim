@@ -3,14 +3,22 @@ use crate::bernoulli_aperture::two_sided::{LoadedAperture, ValveSide};
 use crate::pcm_wav::{encode_pcm16_wav, observation::PressureRenderer};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
-    NormalizedPack, PropertyClaim, PropertyKey, PropertyValue, Provenance,
-    UncertaintyModel};
+    NormalizedPack, ObservationDataset, PropertyClaim, PropertyKey, PropertyValue,
+    Provenance, UncertaintyModel};
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
 
 const INPUT: &str = include_str!("../../../../../examples/material_modal_valve/paired.performance");
 
 fn pack(rho: f64, missing: bool) -> NormalizedMaterialCardPack {
     let mut claims = ClaimSet::new();
+    let artifact = hash_domain("org.frankensim.test.material-modal", &rho.to_le_bytes());
+    let observation = claims.register_observation(ObservationDataset {
+        specimen: "manufactured material-modal reed".into(),
+        method: "manufactured physical regression".into(), artifact,
+        caveats: "not a measured material".into(),
+        provenance: Provenance { source: "manufactured material-modal fixture".into(),
+            license: "CC0-1.0".into(), artifact: None },
+    }).unwrap();
     for (name, value, dims) in [
         ("density", rho, Density::DIMS),
         ("young_modulus", 4e9, Pressure::DIMS),
@@ -32,15 +40,14 @@ fn pack(rho: f64, missing: bool) -> NormalizedMaterialCardPack {
             interpolation: InterpolationPolicy::ConstantWithinValidity,
             provenance: Provenance { source: "manufactured material-modal fixture".into(),
                 license: "CC0-1.0".into(), artifact: None },
-            observations: vec![],
+            observations: vec![observation.clone()],
         }).unwrap();
     }
     let card = MaterialCard::assemble(MaterialStateId {
         chemistry: "synthetic".into(), phase: "solid".into(),
         process: "manufactured".into(), revision: 0,
     }, claims, vec![]).unwrap();
-    let normalized = NormalizedPack::new("synthetic-reed", "synthetic-v1",
-        hash_domain("org.frankensim.test.material-modal", &rho.to_le_bytes()),
+    let normalized = NormalizedPack::new("synthetic-reed", "synthetic-v1", artifact,
         "CC0-1.0", card.claims().clone(), vec![], vec![]).unwrap();
     NormalizedMaterialCardPack::new(card.id().clone(), normalized).unwrap()
 }
@@ -214,13 +221,21 @@ fn g0_missing_material_coefficients_and_incomplete_physical_inputs_refuse() {
     let missing = MaterialModalValvePerformance::from_bytes_with_sources(text.as_bytes(), 37,
         &gate, None, |_| Ok(pack(900.0, true))).err().unwrap();
     assert!(matches!(missing, PlateValveInputError::Material { .. }));
+    // A section mixture record carries its own pressure (the legacy section
+    // record inherits it); at the shared pressure it is admitted, so the
+    // 65000 Pa refusal below is the static-pressure check.
+    let mixture = |pa: &str| text.replacen("gas 303.15 0 ",
+        &format!("gas mixture 303.15 {pa} mole 2 N2 0.79 O2 0.21 "), 1);
+    assert!(MaterialModalValvePerformance::from_bytes_with_sources(mixture("101325").as_bytes(),
+        37, &gate, None, |_| Ok(pack(900.0, false))).is_ok());
     for altered in [
         text.replacen("blades 2", "blades 3", 1),
         text.replacen("blade 3", "blade 33", 1),
         text.replacen("768000 48000", "800000 48000", 1),
         text.replacen("blade.matpack", "../blade.matpack", 1),
         text.replacen("duct_node reflection 0.7", "duct_node baffled-low-ka 1000", 1),
-        text.replacen("303.15 101325", "303.15 65000", 1),
+        text.replacen("exterior 293.15 101325", "exterior 293.15 65000", 1),
+        mixture("65000"),
     ] {
         assert!(MaterialModalValvePerformance::from_bytes_with_sources(altered.as_bytes(), 37,
             &gate, None, |_| Ok(pack(900.0, false))).is_err());

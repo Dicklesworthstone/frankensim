@@ -158,22 +158,24 @@ pub(crate) fn cylinder() -> Duct {
 fn resonance(duct: &RegionalDuct, harmonic: usize) -> f64 {
     let nominal = harmonic as f64 * duct.inlet_gas().sound_speed / (4.0 * LENGTH);
     let inverse = |f| {
-        let z = duct
-            .response(TAU * f, LossModel::Lossless, Termination::IdealOpen, None)
-            .unwrap()
-            .impedance;
-        // Re(1/Z)=0; its imaginary part crosses zero at an impedance peak.
-        -1.0 / z.im
+        duct.response(TAU * f, LossModel::Lossless, Termination::IdealOpen, None)
+            // Re(1/Z)=0; its imaginary part crosses zero at an impedance peak.
+            .map(|r| -1.0 / r.impedance.im)
     };
     let mut lo = nominal * 0.94;
     let mut hi = nominal * 1.02;
-    let mut flo = inverse(lo);
-    assert!(flo * inverse(hi) < 0.0);
-    // 32 fixed bisections resolve cents far below the spatial ladder error,
-    // without requesting a numerically singular exact lossless pole.
+    let mut flo = inverse(lo).unwrap();
+    assert!(flo * inverse(hi).unwrap() < 0.0);
+    // 32 fixed bisections resolve cents far below the spatial ladder error.
     for _ in 0..32 {
         let mid = 0.5 * (lo + hi);
-        let fmid = inverse(mid);
+        // A midpoint on the exact lossless pole is refused as singular: the
+        // bisection has landed on the peak itself.
+        let fmid = match inverse(mid) {
+            Ok(value) => value,
+            Err(fs_duct::DuctError::Singular) => return mid,
+            Err(error) => panic!("resonance bisection at {mid} Hz: {error}"),
+        };
         if flo * fmid > 0.0 {
             lo = mid;
             flo = fmid;
