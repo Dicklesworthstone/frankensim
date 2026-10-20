@@ -145,7 +145,32 @@ fn reed_field_provenance(p: &fs_couple::render::schedule::reed::ReedPerformance)
         "{{\"species\":{},\"species_pack\":\"{}\",\"nasa9_pack\":\"{}\",\"transport_pack\":\"{}\"}}",
         super::json_string(receipt.species.as_str()), receipt.species_pack.to_hex(),
         receipt.nasa9_pack.to_hex(), receipt.transport_pack.to_hex())).collect();
-    format!(",\"axial_gas_field\":{{\"static_pressure_pa\":{:e}{resolution},\"canonical_species\":[{}],\"stations\":[{}],\"source_packs\":[{}],\"scope\":\"{scope}\"}}",
+    let steady = reed_steady_provenance(p);
+    format!(",\"axial_gas_field\":{{\"static_pressure_pa\":{:e}{resolution},\"canonical_species\":[{}],\"stations\":[{}],\"source_packs\":[{}]{steady},\"scope\":\"{scope}\"}}",
         field.static_pressure_pa(), species.join(","),
         stations.join(","), packs.join(","))
+}
+
+fn reed_steady_provenance(p: &fs_couple::render::schedule::reed::ReedPerformance) -> String {
+    let Some(generated) = p.steady_gas() else { return String::new(); };
+    let problem = generated.problem();
+    let solution = generated.solution();
+    let controls = generated.controls();
+    let cells: Vec<_> = problem.cells.iter().map(|cell| format!(
+        "{{\"end_m\":{:e},\"volume_m3\":{:e},\"wall_area_m2\":{:e},\"wall_conductance_w_k\":{:e},\"wall_temperature_k\":{:e},\"initial_temperature_k\":{:e}}}",
+        cell.end_m, cell.volume_m3, cell.wall_area_m2, cell.wall_conductance_w_k,
+        cell.wall_temperature_k, cell.initial_temperature_k)).collect();
+    let injections: Vec<_> = problem.injections.iter().map(|inlet| format!(
+        "{{\"cell\":{},\"mass_flow_kg_s\":{:e},\"temperature_k\":{:e},\"mole_fractions\":{:?}}}",
+        inlet.cell, inlet.mass_flow_kg_s, inlet.state.temperature_k,
+        inlet.state.composition.fractions())).collect();
+    format!(",\"steady_generation\":{{\"model\":\"shared-advected-enthalpy-species-v1\",\"inlet_mass_flow_kg_s\":{:e},\"inlet_temperature_k\":{:e},\"inlet_mole_fractions\":{:?},\"cells\":[{}],\"injections\":[{}],\"mass_flow_kg_s\":{:?},\"cell_power_residuals_w\":{:?},\"maximum_power_residual_bound_w\":{:e},\"power_tolerance_w\":{:e},\"maximum_energy_residual_j\":{:e},\"energy_tolerance_j\":{:e},\"caloric_residual_tolerance_j_kg\":{:e},\"temperature_bracket_k\":[{:e},{:e}],\"substeps\":{},\"maximum_substeps\":{},\"relaxation_time_s\":{:e},\"maximum_mean_mach\":{:e},\"mean_mach_limit\":{:e},\"scope\":\"source-bound stationary donor-cell heat and species balance; geometry from the same unbranched bore; prescribed total wall conductance; frozen acoustic field without mean-flow correction\"}}",
+        problem.inlet_mass_flow_kg_s, problem.inlet.temperature_k,
+        problem.inlet.composition.fractions(), cells.join(","), injections.join(","),
+        solution.mass_flow_kg_s(), solution.cell_power_residuals_w(),
+        solution.maximum_power_residual_bound_w(), controls.steady_power_tolerance_w,
+        solution.maximum_energy_residual_j(), controls.energy_tolerance_j,
+        controls.caloric.energy_tolerance_j_kg, controls.caloric.minimum_temperature_k,
+        controls.caloric.maximum_temperature_k, solution.substeps(), controls.maximum_substeps,
+        solution.relaxation_time_s(), solution.maximum_mean_mach(), controls.maximum_mean_mach)
 }
