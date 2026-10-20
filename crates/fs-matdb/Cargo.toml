@@ -15,5 +15,10 @@ fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
 fs-qty = { path = "../fs-qty" }
 
+[features]
+# BR-03: `ContactLawCard::load_named_fixture` reads fixture-calibrated contact
+# cards. Only dev-dependencies (tests reproducing the fixture) enable it.
+fixture-packs = []
+
 [lints]
 workspace = true

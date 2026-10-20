@@ -1239,9 +1239,12 @@ fn contact_pack_migration_is_provenance_only() {
         .and_then(std::path::Path::parent)
         .expect("workspace root")
         .to_path_buf();
-    let card =
-        fs_matdb::ContactLawCard::load(&root.join("data/matdb/seed-v1/contact-jawari-bone-bridge"))
-            .expect("committed jawari pack");
+    // The card is fixture-calibrated (BR-03), so it reads only through the
+    // named fixture path; `load` refuses it as material data.
+    let card = fs_matdb::ContactLawCard::load_named_fixture(
+        &root.join("data/matdb/seed-v1/contact-jawari-bone-bridge"),
+    )
+    .expect("committed jawari fixture pack");
     // In-validity operating point (the fixture's regime); the
     // out-of-validity refusal falsifier executes in fs-matdb cp-003.
     let receipt = card.lookup(1.0, 1.0).expect("in-validity lookup");

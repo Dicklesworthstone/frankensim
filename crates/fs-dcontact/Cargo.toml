@@ -16,6 +16,8 @@ fs-matdb = { path = "../fs-matdb" }
 fs-phs = { path = "../fs-phs" }
 
 [dev-dependencies]
+# The jawari wiring test reproduces its own fixture card (BR-03).
+fs-matdb = { path = "../fs-matdb", features = ["fixture-packs"] }
 
 [lints]
 workspace = true

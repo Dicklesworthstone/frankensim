@@ -622,7 +622,12 @@ None.
   mints a typed `ContactReceipt` and REFUSES outside the declared
   validity (never extrapolates — falsifier executed). Seed packs v1:
   contact-jawari-bone-bridge (identified-from-fixture, the executed
-  graded-bridge calibration), contact-cane-reed-on-mouthpiece-lay
+  graded-bridge calibration; BR-03: a fixture, not material data, so
+  `load` and `parse` refuse it with `FixtureCalibrated` and tests read it
+  only through `load_named_fixture`, compiled under `cfg(test)` or the
+  non-default `fixture-packs` feature that only dev-dependencies enable;
+  the refusal follows the identification tag, trimmed and case-folded,
+  never the pack name), contact-cane-reed-on-mouthpiece-lay
   and contact-string-on-fret-nickel (authored-typical Estimates,
   labeled; the fret card's alpha = 1.5 Hertz value carries the
   advisory that rattle fixtures need the alpha >= 2 variant).

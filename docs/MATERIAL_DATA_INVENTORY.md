@@ -470,12 +470,12 @@ Each row has two populated numerical metadata fields, molar mass and reference p
 
 ## Contact-law cards
 
-These three cards have three authored law parameters each. They are Estimate-class inputs, not measured identification data; read their pair, geometry, validity and graze advisory before use.
+These three cards have three authored law parameters each. None is measured identification data; read their pair, geometry, validity and graze advisory before use. Two are authored Estimate-class inputs. The jawari card is fixture-calibrated: its `(K, alpha)` were fitted to a FrankenSim fixture, so `ContactLawCard::load` refuses it (`FixtureCalibrated`), and only tests reproducing that fixture read it, through `load_named_fixture`.
 
 | Bundle | Law | K [N/m^alpha] | alpha | chi [s/m] | KiB |
 | --- | --- | ---: | ---: | ---: | ---: |
 | [contact-cane-reed-on-mouthpiece-lay](../data/matdb/seed-v1/contact-cane-reed-on-mouthpiece-lay/manifest.tsv) | `penalty-power` | 1.0e7 | 2.0 | 1.0e-4 | 1.26 |
-| [contact-jawari-bone-bridge](../data/matdb/seed-v1/contact-jawari-bone-bridge/manifest.tsv) | `penalty-power` | 1.0e8 | 2.0 | 0.0 | 1.27 |
+| [contact-jawari-bone-bridge](../data/matdb/seed-v1/contact-jawari-bone-bridge/manifest.tsv) (fixture-calibrated; refused by `load`) | `penalty-power` | 1.0e8 | 2.0 | 0.0 | 1.27 |
 | [contact-string-on-fret-nickel](../data/matdb/seed-v1/contact-string-on-fret-nickel/manifest.tsv) | `penalty-power` | 5.0e7 | 1.5 | 0.0 | 1.23 |
 
 ## What the counts do not establish

@@ -52,6 +52,12 @@ pub enum ContactPackError {
         /// Which axis and the offending value.
         what: String,
     },
+    /// The card's `(K, alpha)` were fitted to a FrankenSim fixture (BR-03).
+    /// A fixture is not a material datum: only the named fixture path reads it.
+    FixtureCalibrated {
+        /// Pack id.
+        pack: String,
+    },
 }
 
 impl fmt::Display for ContactPackError {
@@ -62,8 +68,26 @@ impl fmt::Display for ContactPackError {
             ContactPackError::OutsideValidity { what } => {
                 write!(f, "contact lookup outside validity: {what}")
             }
+            ContactPackError::FixtureCalibrated { pack } => write!(
+                f,
+                "contact pack {pack} is fixture-calibrated, not material data; \
+                 tests read it through ContactLawCard::load_named_fixture"
+            ),
         }
     }
+}
+
+/// Identification method tags whose `(K, alpha)` were fitted to a FrankenSim
+/// fixture. [`ContactLawCard::load`] and [`ContactLawCard::parse`] refuse such
+/// cards; tags compare trimmed and case-insensitively.
+pub const FIXTURE_CALIBRATED_IDENTIFICATIONS: [&str; 2] =
+    ["identified-from-fixture", "fixture-calibrated"];
+
+fn fixture_calibrated(method: &str) -> bool {
+    let method = method.trim();
+    FIXTURE_CALIBRATED_IDENTIFICATIONS
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case(method))
 }
 
 impl std::error::Error for ContactPackError {}
@@ -117,6 +141,22 @@ pub struct ContactReceipt {
     pub identification: String,
 }
 
+/// The pack id (directory name) and `contact.tsv` text.
+fn read_pack(dir: &Path) -> Result<(String, String), ContactPackError> {
+    let pack_id = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| ContactPackError::Missing {
+            what: "pack directory name".to_string(),
+        })?
+        .to_string();
+    let path = dir.join("contact.tsv");
+    let text = std::fs::read_to_string(&path).map_err(|_| ContactPackError::Missing {
+        what: format!("{} (no default K exists; wire a pack)", path.display()),
+    })?;
+    Ok((pack_id, text))
+}
+
 fn parse_f64(s: &str, what: &str) -> Result<f64, ContactPackError> {
     s.parse::<f64>().map_err(|_| ContactPackError::Schema {
         what: format!("{what}: unparseable number {s:?}"),
@@ -129,27 +169,54 @@ impl ContactLawCard {
     /// # Errors
     /// [`ContactPackError::Missing`] when the pack or file is absent;
     /// [`ContactPackError::Schema`] on any incomplete or non-physical
-    /// row.
+    /// row; [`ContactPackError::FixtureCalibrated`] for a card fitted to a
+    /// fixture.
     pub fn load(dir: &Path) -> Result<ContactLawCard, ContactPackError> {
-        let pack_id = dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| ContactPackError::Missing {
-                what: "pack directory name".to_string(),
-            })?
-            .to_string();
-        let path = dir.join("contact.tsv");
-        let text = std::fs::read_to_string(&path).map_err(|_| ContactPackError::Missing {
-            what: format!("{} (no default K exists; wire a pack)", path.display()),
-        })?;
+        let (pack_id, text) = read_pack(dir)?;
         Self::parse(&pack_id, &text)
     }
 
     /// Parse the `contact.tsv` grammar.
     ///
     /// # Errors
-    /// [`ContactPackError::Schema`] with the offending field.
+    /// [`ContactPackError::Schema`] with the offending field;
+    /// [`ContactPackError::FixtureCalibrated`] for a card fitted to a
+    /// fixture.
     pub fn parse(pack_id: &str, text: &str) -> Result<ContactLawCard, ContactPackError> {
+        Self::parse_with(pack_id, text, false)
+    }
+
+    /// The named fixture path: load a fixture-calibrated card for a test
+    /// that reproduces its fixture. Only under `cfg(test)` or the
+    /// non-default `fixture-packs` feature, which only dev-dependencies
+    /// enable; a card that is not fixture-calibrated refuses here.
+    ///
+    /// # Errors
+    /// As [`ContactLawCard::load`], with [`ContactPackError::Schema`] for a
+    /// card that is not fixture-calibrated.
+    #[cfg(any(test, feature = "fixture-packs"))]
+    pub fn load_named_fixture(dir: &Path) -> Result<ContactLawCard, ContactPackError> {
+        let (pack_id, text) = read_pack(dir)?;
+        Self::parse_named_fixture(&pack_id, &text)
+    }
+
+    /// [`ContactLawCard::load_named_fixture`] on text.
+    ///
+    /// # Errors
+    /// As [`ContactLawCard::load_named_fixture`].
+    #[cfg(any(test, feature = "fixture-packs"))]
+    pub fn parse_named_fixture(
+        pack_id: &str,
+        text: &str,
+    ) -> Result<ContactLawCard, ContactPackError> {
+        Self::parse_with(pack_id, text, true)
+    }
+
+    fn parse_with(
+        pack_id: &str,
+        text: &str,
+        named_fixture: bool,
+    ) -> Result<ContactLawCard, ContactPackError> {
         let mut lines = text.lines();
         if lines.next() != Some("frankensim.matdb-contact.v1") {
             return Err(ContactPackError::Schema {
@@ -171,6 +238,7 @@ impl ContactLawCard {
             material_b,
             geometry,
             law,
+            method,
             identification,
             force_v,
             vel_v,
@@ -202,6 +270,18 @@ impl ContactLawCard {
         if !(chi.is_finite() && chi >= 0.0) {
             return Err(ContactPackError::Schema {
                 what: format!("chi must be non-negative, got {chi}"),
+            });
+        }
+        // BR-03: a law fitted to a fixture is the fixture's, not a material's.
+        let fixture = method.as_deref().is_some_and(fixture_calibrated);
+        if fixture && !named_fixture {
+            return Err(ContactPackError::FixtureCalibrated {
+                pack: pack_id.to_string(),
+            });
+        }
+        if named_fixture && !fixture {
+            return Err(ContactPackError::Schema {
+                what: format!("{pack_id} is not fixture-calibrated; load it with load"),
             });
         }
         Ok(ContactLawCard {
@@ -286,6 +366,7 @@ struct ContactLawRowState {
     material_b: Option<String>,
     geometry: Option<String>,
     law: Option<(f64, f64, f64)>,
+    method: Option<String>,
     identification: Option<String>,
     force_v: Option<(f64, f64)>,
     vel_v: Option<(f64, f64)>,
@@ -311,6 +392,7 @@ fn parse_contact_row(
                     what: "identification needs a method tag and detail".to_string(),
                 });
             }
+            state.method = Some(cols[1].to_string());
             state.identification = Some(format!("{}: {}", cols[1], cols[2]));
             Ok(())
         }
@@ -443,7 +525,14 @@ mod contact_pack_tests {
             "contact-cane-reed-on-mouthpiece-lay",
             "contact-string-on-fret-nickel",
         ] {
-            let card = ContactLawCard::load(&seed.join(pack)).expect(pack);
+            // The jawari card is fixture-calibrated (BR-03): only the named
+            // fixture path reads it (cp-005 executes the refusal).
+            let card = if pack == "contact-jawari-bone-bridge" {
+                ContactLawCard::load_named_fixture(&seed.join(pack))
+            } else {
+                ContactLawCard::load(&seed.join(pack))
+            }
+            .expect(pack);
             assert!(!card.material_a.is_empty() && !card.material_b.is_empty());
             assert!(card.k_n_per_m_alpha > 0.0 && card.alpha >= 1.0);
             assert!(!card.graze_advisory.is_empty());
@@ -499,7 +588,8 @@ mod contact_pack_tests {
 
     #[test]
     fn cp_003_out_of_validity_lookup_refuses() {
-        let card = ContactLawCard::parse("x", GOOD).expect("card");
+        // GOOD is the jawari fixture card, so it reads through the named path.
+        let card = ContactLawCard::parse_named_fixture("x", GOOD).expect("card");
         card.lookup(10.0, 1.0).expect("inside is fine");
         // The falsifier: epsilon outside each axis refuses.
         assert!(matches!(
@@ -545,6 +635,77 @@ mod contact_pack_tests {
         }
         println!(
             "{{\"suite\":\"fs-matdb\",\"case\":\"cp-004-law-refusals\",\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn cp_005_fixture_calibrated_card_refuses_through_load_and_parse() {
+        // BR-03: the committed jawari card can no longer reach a consumer
+        // as a material datum, by file or by text.
+        let pack = "contact-jawari-bone-bridge";
+        let err = ContactLawCard::load(&repo_root().join("data/matdb/seed-v1").join(pack))
+            .expect_err("fixture-calibrated card must refuse");
+        assert_eq!(
+            err,
+            ContactPackError::FixtureCalibrated {
+                pack: pack.to_string()
+            }
+        );
+        assert!(err.to_string().contains("fixture-calibrated"), "{err}");
+        assert_eq!(
+            ContactLawCard::parse("x", GOOD),
+            Err(ContactPackError::FixtureCalibrated {
+                pack: "x".to_string()
+            })
+        );
+        println!(
+            "{{\"suite\":\"fs-matdb\",\"case\":\"cp-005-fixture-refusal\",\"pack\":\"{pack}\",\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn cp_006_named_fixture_path_reads_the_card_bitwise() {
+        let seed = repo_root().join("data/matdb/seed-v1");
+        let card = ContactLawCard::load_named_fixture(&seed.join("contact-jawari-bone-bridge"))
+            .expect("named fixture path");
+        assert_eq!(card.k_n_per_m_alpha.to_bits(), 1.0e8_f64.to_bits());
+        assert_eq!(card.alpha.to_bits(), 2.0_f64.to_bits());
+        assert!(card.identification.starts_with("identified-from-fixture: "));
+        // The named path is not a general loader: a card that is not
+        // fixture-calibrated refuses there.
+        assert!(matches!(
+            ContactLawCard::load_named_fixture(&seed.join("contact-string-on-fret-nickel")),
+            Err(ContactPackError::Schema { .. })
+        ));
+        println!(
+            "{{\"suite\":\"fs-matdb\",\"case\":\"cp-006-named-fixture\",\"k\":{:e},\"alpha\":{},\"verdict\":\"pass\"}}",
+            card.k_n_per_m_alpha, card.alpha
+        );
+    }
+
+    #[test]
+    fn cp_007_refusal_follows_the_identification_not_the_name() {
+        // Renaming the pack or recasing the tag does not admit a fixture;
+        // a source-backed identification of the same law parses.
+        for tag in [
+            "identified-from-fixture",
+            "Identified-From-Fixture",
+            " fixture-calibrated ",
+        ] {
+            let text = GOOD.replace("identified-from-fixture", tag);
+            assert_eq!(
+                ContactLawCard::parse("renamed-pack", &text),
+                Err(ContactPackError::FixtureCalibrated {
+                    pack: "renamed-pack".to_string()
+                }),
+                "{tag:?}"
+            );
+        }
+        let literature = GOOD.replace("identified-from-fixture", "literature");
+        let card = ContactLawCard::parse("x", &literature).expect("source-backed card");
+        assert!(card.identification.starts_with("literature: "));
+        println!(
+            "{{\"suite\":\"fs-matdb\",\"case\":\"cp-007-identification-not-name\",\"verdict\":\"pass\"}}"
         );
     }
 }
