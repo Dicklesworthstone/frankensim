@@ -1,6 +1,6 @@
 //! G0/G1/G2/G3/G5 directional Helmholtz tests. Native release on a quiet host.
 use fs_fmm::{
-    DirectionalOptions, FmmC64, FmmError, HelmholtzAdjointDouble, HelmholtzDouble,
+    ComplexBudget, DirectionalOptions, FmmC64, FmmError, HelmholtzAdjointDouble, HelmholtzDouble,
     HelmholtzHypersingular, HelmholtzSingle, MAX_COMPLEX_COEFFICIENT_SLOTS,
     MAX_DECLARED_COEFFICIENT_SLOTS, MAX_DIRECTIONAL_CONES, MAX_INTERPOLATION_ORDER,
 };
@@ -833,6 +833,30 @@ fn dfmm_declared_envelopes_are_neutral_and_enforced() {
         bad.validate(),
         Err(FmmError::WorkEnvelopeExceeded {
             operation: "directional declared coefficient-slot",
+            ..
+        })
+    ));
+    // k = 0 is below every low-frequency threshold, so the request delegates
+    // whole to W5a, under the declared w5a_budget.
+    let statics = |budget| {
+        let mut o = o.clone();
+        o.w5a_budget = budget;
+        FmmC64::new_double_directional(
+            HelmholtzDouble { k: 0.0 },
+            points.clone(),
+            normals.clone(),
+            o,
+        )
+    };
+    let delegated = statics(ComplexBudget::V1).unwrap();
+    assert!(delegated.directional_stats().is_none());
+    assert!(matches!(
+        statics(ComplexBudget {
+            max_translation_work: 1
+        }),
+        Err(FmmError::WorkEnvelopeExceeded {
+            operation: "complex M2L channel multiply-add",
+            max: 1,
             ..
         })
     ));

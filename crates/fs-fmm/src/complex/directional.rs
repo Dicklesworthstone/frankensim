@@ -49,12 +49,16 @@ pub struct DirectionalOptions {
     /// Simultaneous pass coefficients, retained coupling factors and setup
     /// scratch, in C64 units. Defaults to [`MAX_COMPLEX_COEFFICIENT_SLOTS`].
     /// A request whose root kD is at most `low_freq_threshold` delegates to
-    /// the unchanged W5a owner, which keeps its own ceilings.
+    /// the unchanged W5a owner under `w5a_budget` instead.
     pub max_coefficient_slots: usize,
     /// Counted coupling-setup products. Construction polls no cancellation,
     /// so this also bounds one uncancellable setup. Defaults to
     /// [`MAX_TRANSLATION_WORK`]; the same W5a delegation applies.
     pub max_setup_work: usize,
+    /// W5a ceilings for a request whose root kD is at most
+    /// `low_freq_threshold`, which delegates whole to W5a at this order and
+    /// leaf capacity. Defaults to [`ComplexBudget::V1`].
+    pub w5a_budget: ComplexBudget,
 }
 impl DirectionalOptions {
     /// Order selected by the explicit 4^-p design indicator, not a universal
@@ -72,6 +76,7 @@ impl DirectionalOptions {
             max_rank: MAX_DIRECTIONAL_RANK,
             max_coefficient_slots: MAX_COMPLEX_COEFFICIENT_SLOTS,
             max_setup_work: MAX_TRANSLATION_WORK,
+            w5a_budget: ComplexBudget::V1,
         })
     }
     /// Validate parameters without building geometry or evaluating a kernel.
@@ -367,7 +372,7 @@ impl<'k> FmmC64<'k> {
                 normals,
                 options.order,
                 options.leaf_capacity,
-                ComplexBudget::V1,
+                options.w5a_budget,
             );
         }
         // d_axis G = (x_axis-y_axis) G'(r)/r. Interpolate only the radial

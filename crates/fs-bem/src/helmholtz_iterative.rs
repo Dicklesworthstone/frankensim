@@ -98,20 +98,23 @@ impl IterativeOptions {
         normals: Vec<[f64; 3]>,
     ) -> Result<FmmC64<'static>, FmmError> {
         match (layer, &self.directional) {
-            (NormalLayer::Double, Some(o)) => {
-                FmmC64::new_double_directional(HelmholtzDouble { k }, points, normals, o.clone())
-            }
+            (NormalLayer::Double, Some(o)) => FmmC64::new_double_directional(
+                HelmholtzDouble { k },
+                points,
+                normals,
+                self.directional_for(o),
+            ),
             (NormalLayer::Adjoint, Some(o)) => FmmC64::new_adjoint_double_directional(
                 HelmholtzAdjointDouble { k },
                 points,
                 normals,
-                o.clone(),
+                self.directional_for(o),
             ),
             (NormalLayer::Mixed, Some(o)) => FmmC64::new_hypersingular_directional(
                 HelmholtzHypersingular { k },
                 points,
                 normals,
-                o.clone(),
+                self.directional_for(o),
             ),
             (NormalLayer::Double, None) => FmmC64::new_double_within(
                 HelmholtzDouble { k },
@@ -142,6 +145,15 @@ impl IterativeOptions {
     fn budget(&self) -> ComplexBudget {
         ComplexBudget {
             max_translation_work: self.max_translation_work,
+        }
+    }
+    /// The directional options with this owner's W5a budget, which also
+    /// governs a directional request that delegates whole to W5a (a static
+    /// k = 0 operator, for one).
+    fn directional_for(&self, o: &DirectionalOptions) -> DirectionalOptions {
+        DirectionalOptions {
+            w5a_budget: self.budget(),
+            ..o.clone()
         }
     }
     fn effective_order(&self) -> usize {
@@ -544,7 +556,11 @@ impl<'a> IterativeRadiation<'a> {
             .collect();
         let kernel = HelmholtzSingle { k: self.k };
         let single = match &self.options.directional {
-            Some(o) => FmmC64::new_directional(&kernel, self.surface.centroids(), o.clone())?,
+            Some(o) => FmmC64::new_directional(
+                &kernel,
+                self.surface.centroids(),
+                self.options.directional_for(o),
+            )?,
             None => FmmC64::new_within(
                 &kernel,
                 self.surface.centroids().to_vec(),

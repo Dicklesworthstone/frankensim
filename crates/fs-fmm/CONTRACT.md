@@ -182,7 +182,8 @@ and the `new_within`, `new_double_within`, `new_adjoint_double_within` and
 - Admission still counts every multiply-add, and the budget changes no bit.
   `fmm_c64_declared_translation_budget` admits exactly the counted work, with
   bit-identical potentials, and refuses one less.
-- The directional route's whole-request W5a delegation keeps `V1`.
+- The directional route's whole-request W5a delegation uses
+  `DirectionalOptions::w5a_budget`, which defaults to `V1`.
 
 M2L evaluates each kernel block once per same-level cell offset. Same-level
 Chebyshev grids are translates, so a translation-invariant operator has one
@@ -315,7 +316,12 @@ what v1 refused.
   budgets give bit-identical potentials, and that each budget is enforced at
   its counted value (setup at its exact count, refused one below).
 - A request whose root kD is at most `low_freq_threshold` delegates whole to
-  W5a, which keeps its own v1 ceilings.
+  W5a, at the directional order and leaf capacity, under
+  `DirectionalOptions::w5a_budget` (default `ComplexBudget::V1`).
+  - A static k = 0 operator always delegates. At order 7 and 5120 panels its
+    mixed pass counts more than 8e9 M2L multiply-adds.
+  - fs-bem's iterative owner sets `w5a_budget` from its own
+    `max_translation_work`.
 - The motivating case is the ka = 5 unit-sphere Burton-Miller series (IRP
   M2.5-W7). From 5120 panels on, its double, adjoint and mixed operators need
   more than 8e9 setup products, and its mixed operator more than 8.4e6 C64

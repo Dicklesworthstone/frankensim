@@ -463,8 +463,13 @@ mod impedance_sphere_series {
             let mut directional = fs_fmm::DirectionalOptions::for_tolerance(1e-4).unwrap();
             directional.max_coefficient_slots = 1 << 29;
             directional.max_setup_work = 100_000_000_000;
+            // The static k = 0 rows delegate whole to W5a at this order 7.
+            // At 5120 panels their mixed pass counts past 8e9 M2L
+            // multiply-adds (ts1, 610ada520, ka5_beta0). Each static pass
+            // runs once per solve.
             IterativeOptions {
                 directional: Some(directional),
+                max_translation_work: 200_000_000_000,
                 ..iterative_options()
             }
         } else {
