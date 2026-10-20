@@ -171,17 +171,23 @@ fn g3_hihat_refinement_preserves_joint_load_and_rim_traction() {
         assert!((clutch.iter().map(|l| l.c*speed).sum::<f64>()-20.0).abs()<1e-10);
         // Generalized tilt torque must not grow with the clutch grid radius.
         let angular_k=2.0*PI*1.65e5*(0.5_f64*(0.0065+0.02)).powi(3);
-        for axis in 0..2 {
-            let mut torque=0.0; let mut net=0.0;
-            for l in ins.links.iter().filter(|l|l.a.0==0) {
-                let xa=ins.bodies[0].xy[l.a.1][axis];
-                let xb=l.b.filter(|&(b,_)|b==0).map_or(0.0,|(_,i)|ins.bodies[0].xy[i][axis]);
-                let f=-l.k*0.01*(xa-xb);
-                net+=f; torque+=f*xa;
-                if l.b.is_some_and(|(b,_)|b==0) {net-=f; torque-=f*xb;}
+        let cup:Vec<_>=ins.links.iter().filter(|l|l.a.0==1&&l.b.is_none()).collect();
+        let area=PI*(0.02_f64.powi(2)-0.0065_f64.powi(2));
+        assert!((cup.iter().map(|l|l.k).sum::<f64>()/(9.0e7*area)-1.0).abs()<1e-12);
+        assert!((cup.iter().map(|l|l.c).sum::<f64>()/(2.7e3*area)-1.0).abs()<1e-12);
+        for (body,rot_k) in [(0,angular_k),(1,0.5*angular_k)] {
+            for axis in 0..2 {
+                let mut torque=0.0; let mut net=0.0;
+                for l in ins.links.iter().filter(|l|l.a.0==body) {
+                    let xa=ins.bodies[body].xy[l.a.1][axis];
+                    let xb=l.b.filter(|&(b,_)|b==body).map_or(0.0,|(_,i)|ins.bodies[body].xy[i][axis]);
+                    let f=-l.k*0.01*(xa-xb);
+                    net+=f; torque+=f*xa;
+                    if l.b.is_some_and(|(b,_)|b==body) {net-=f; torque-=f*xb;}
+                }
+                assert!(net.abs()<1e-8);
+                assert!((torque+rot_k*0.01).abs()<1e-9,"scale {scale}, body {body}, axis {axis}, torque {torque}");
             }
-            assert!(net.abs()<1e-8);
-            assert!((torque+angular_k*0.01).abs()<1e-9,"scale {scale}, axis {axis}, torque {torque}");
         }
         let force: f64=ins.contacts.iter().map(|c| {
             let Law::Power{k,alpha,mu}=c.law;

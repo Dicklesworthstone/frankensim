@@ -458,7 +458,7 @@ pub fn hihat_grid_mu(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from
     let mut ins = Instrument::new(OUT_RATE);
     let mut top = cymbal_shell(ts.name, &ts, false)?;
     top.origin = [0.0, 0.0, 0.0];
-    let mut bot = cymbal_body(bs.name, &bs)?;
+    let mut bot = cymbal_shell(bs.name, &bs, false)?;
     // Profiles describe midplanes, while the requested opening is between their faces.
     let rim_half_thickness = 0.5 * (bow_thickness(&ts, ts.radius) + bow_thickness(&bs, bs.radius));
     bot.origin = [0.0, 0.0, -rim_half_thickness - gap];
@@ -487,6 +487,13 @@ pub fn hihat_grid_mu(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from
     let angular_k = 2.0*PI*1.65e5*bearing_radius.powi(3);
     ins.links.extend(Link::affine_mount(ti,&ins.bodies[ti],&nodes,Some((rod,0)),
         [8.0e6,80.0],[angular_k,0.0,angular_k],[0.0;3])?);
+    // The lower cup has one effective felt bearing, using the same declared
+    // line-stiffness estimate. Integrate its axial foundation over the physical
+    // annulus, independent of how many grid nodes represent that annulus.
+    let felt_area=PI*(0.02_f64.powi(2)-0.0065_f64.powi(2));
+    ins.links.extend(Link::affine_mount(bi,&ins.bodies[bi],&nodes,None,
+        [9.0e7*felt_area,2.7e3*felt_area],
+        [0.5*angular_k,0.0,0.5*angular_k],[0.0;3])?);
     // rim contact between the shells: matching nodes in the outer 20 % of the radius, with slight
     // 2-lobe rim waviness (~0.15 mm) so the pedal rests on high spots while adjacent rim arcs sizzle
     let mut pairs = 0;

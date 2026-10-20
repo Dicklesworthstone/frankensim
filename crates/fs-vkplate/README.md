@@ -88,8 +88,11 @@ The angular estimate uses two circular bearings at the annulus mid-radius (13.25
 each contributes `pi K_line r^3`, giving 2.412 N m/rad in total. `K_line = 1.65e5 N/m/m`
 is a measured crash-washer value from [Samejima (2021)](https://doi.org/10.1250/ast.42.314),
 transferred here as an estimate, not a measurement of this hi-hat or an audio fit. Angular
-damping is unmeasured and set to zero. This is a small-slope impedance model, not resolved felt
-contact geometry. The body's existing inertia carries the rocking motion.
+damping is unmeasured and set to zero. The lower cup uses one effective bearing
+(1.206 N m/rad); its axial foundation coefficients (9e7 N/m^3, 2700 N s/m^3) are
+integrated over the physical annulus, independently of the grid node count.
+This is a small-slope impedance model, not resolved felt contact geometry.
+The bodies' existing inertia carries the rocking motion.
 These correct geometry and load semantics; acoustic improvement requires a separate comparison.
 The offline rim law uses Hunt-Crossley `mu` 0.08 s/m.
 
@@ -165,7 +168,8 @@ The subsequent finite-washer A/B isolates the missing rocking motion: at the tru
 opening the rigid clutch produces no rim contacts and no bottom-shell energy; disabling rim
 contacts gives identical PCM. The affine mount restores collisions without changing the
 opening, material, axial grip or strike (2.5 m/s at 0.85 radius). Native open-hat diagnostics
-against the same original overhead give:
+against the same original overhead give the following top-mount-only isolation
+(the lower cup still has its earlier distributed springs in this table):
 
 | Grid spacing | Balance gap, first 250 ms | Energy above 4 kHz | Render duration |
 | --- | --- | --- | --- |
@@ -185,6 +189,16 @@ cannot qualify the tail. On the 24.75 mm grid, open attack energy in the first 5
 mount energy/passivity and axial/torque refinement regressions. This is a mechanical fix
 with partial acoustic gains, not an overall fidelity pass or browser timing qualification;
 the production kit remains held back.
+
+Using finite impedance for both mounts subsequently improves the 24.75 mm open hat to
+9.31 dB balance distance, 2.656% above 4 kHz, and 37.83% first-50-ms energy. Closed-hat
+balance/decay worsen relative to the top-only arm (11.81 dB, 1.73 octaves), while remaining
+better than the pre-mount geometry result. At 16.5 mm, both mounts give open balance
+11.95 dB and 3.291% above 4 kHz; closed balance is 12.69 dB. The lower cup's physical
+axial totals and both mounts' tilt torques are checked across grid sizes.
+A fixed-settled-state rim-loss control (live `mu=3` versus offline `mu=0.08`) moves
+open balance by at most 0.19 dB at these two grids and leaves its decay descriptor
+unchanged. The live loss law is retained: this discrepancy does not explain the missing wash.
 
 ## Graded against a real kit
 
