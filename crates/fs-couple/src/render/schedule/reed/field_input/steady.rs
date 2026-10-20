@@ -66,6 +66,8 @@ pub(in super::super) fn read(
         Segment::Cylinder { length, .. } | Segment::Cone { length, .. } => Ok(sum + length),
         Segment::ToneHole { .. } => Err(bad(line,
             "gas_steady needs an unbranched cylinder/cone bore; side-branch mean flow is not specified")),
+        Segment::Profile { .. } => Err(bad(line,
+            "gas_steady needs a cylinder/cone bore; cell volumes and wall areas of a smooth radius profile are not integrated")),
     })?;
     if !length.is_finite() || length <= 0.0 {
         return Err(bad(
@@ -186,8 +188,8 @@ fn geometry(
                 outlet_radius,
                 length,
             } => (inlet_radius, outlet_radius, length),
-            Segment::ToneHole { .. } => {
-                return Err(bad(line, "gas cell geometry requires axial segments"));
+            Segment::ToneHole { .. } | Segment::Profile { .. } => {
+                return Err(bad(line, "gas cell geometry requires cylinder/cone segments"));
             }
         };
         let lo = start.max(offset);
