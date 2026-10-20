@@ -86,6 +86,8 @@ use fs_exec::CancelGate;
 
 use crate::d3q19::Face3;
 
+/// Face-local material/reservoir exchange with a resolved surface temperature.
+pub mod boundary_exchange;
 mod buoyant;
 mod domain;
 mod electric;
