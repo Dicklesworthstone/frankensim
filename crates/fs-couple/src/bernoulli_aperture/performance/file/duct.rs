@@ -84,6 +84,21 @@ impl DuctInput {
         sources: Option<&ThermochemicalSources<'_>>,
         records: &mut Vec<GasRecord>,
     ) -> Result<Self, PlateValveInputError> {
+        Self::read_with_boundaries(r, air, gate, sources, records, false)
+    }
+
+    pub(super) fn read_two_sided_with_gas_sources(
+        r: &mut Reader<'_>, air: &GasState, gate: &CancelGate,
+        sources: Option<&ThermochemicalSources<'_>>, records: &mut Vec<GasRecord>,
+    ) -> Result<Self, PlateValveInputError> {
+        Self::read_with_boundaries(r, air, gate, sources, records, true)
+    }
+
+    fn read_with_boundaries(
+        r: &mut Reader<'_>, air: &GasState, gate: &CancelGate,
+        sources: Option<&ThermochemicalSources<'_>>, records: &mut Vec<GasRecord>,
+        allow_driven: bool,
+    ) -> Result<Self, PlateValveInputError> {
         let mut row = r.next()?;
         match row.word()? {
             "tube" => {
@@ -122,6 +137,7 @@ impl DuctInput {
                     let mut row = r.row("duct_node")?;
                     let input = match row.word()? {
                         "inlet" => NodeInput::Existing(NetworkNode::Inlet),
+                        "driven" if allow_driven => NodeInput::Existing(NetworkNode::Driven),
                         "junction" => NodeInput::Existing(NetworkNode::Junction),
                         "reflection" => {
                             let reflection = row.scalar()?;

@@ -128,10 +128,20 @@ fn flue_boundary_provenance(p: &FlueFilePerformance) -> String {
     let records = p.boundary_records().iter().map(|record| {
         let aperture = network.boundary_apertures().expect("source-bound apertures")
             .aperture(record.node()).expect("original boundary address");
+        let drive = network.boundary_drive(record.node()).expect("original prescribed drive");
+        material_boundary_record(record, aperture, drive)
+    }).collect::<Vec<_>>().join(",");
+    moving_boundary_provenance(&records)
+}
+
+fn material_boundary_record(
+    record: &fs_couple::bernoulli_aperture::material_boundary::MaterialBoundaryRecord,
+    aperture: &fs_couple::bernoulli_aperture::dynamic::DynamicAperture,
+    drive: &fs_couple::bernoulli_aperture::network::boundaries::BoundaryDrive,
+) -> String {
         let plate = aperture.plate_reduction().expect("source-bound plate");
         let material = &plate.material_chart().expect("retained material chart").regions()[0].input.material;
         let spec = aperture.spec();
-        let drive = network.boundary_drive(record.node()).expect("original prescribed drive");
         let terms = aperture.relaxation().map_or_else(String::new, |memory|
             memory.spec().regions[0].material.terms.iter().map(|(modulus, time)|
                 format!("{{\"modulus_pa\":{modulus:e},\"relaxation_time_s\":{time:e}}}"))
@@ -145,8 +155,28 @@ fn flue_boundary_provenance(p: &FlueFilePerformance) -> String {
             json_string(&record.closing_force().entity.token()), -drive.opening_force_n,
             drive.exterior_pressure_pa, spec.mass_kg, spec.stiffness_n_m, plate.pressure_area_m2(),
             plate.width_m(), spec.aperture.rest_opening_m, spec.density_kg_m3, spec.impedance_pa_s_m3)
-    }).collect::<Vec<_>>().join(",");
+}
+
+fn moving_boundary_provenance(records: &str) -> String {
     format!(",\"moving_boundaries\":[{records}],\"boundary_model_scope\":\"one material plate opening mode with contact, swept volume and retained chimney state; prescribed exterior pressure; not a circular pad or resolved key linkage\"")
+}
+
+fn modal_boundary_provenance(
+    p: &fs_couple::bernoulli_aperture::performance::file::material_modal::MaterialModalValvePerformance,
+) -> String {
+    use fs_couple::bernoulli_aperture::two_sided::ValveSide;
+    let renderer = p.renderer();
+    let records = p.boundary_records().iter().map(|(side, record)| {
+        let aperture = renderer.source().system().boundary_apertures(*side)
+            .expect("source-bound material keys").aperture(record.node())
+            .expect("original side/node address");
+        let drive = renderer.held_boundary_drives(*side).iter()
+            .find(|drive| drive.node == record.node()).expect("complete explicit initial key drives");
+        let name = match side { ValveSide::Upstream => "upstream", ValveSide::Downstream => "downstream" };
+        let source = material_boundary_record(record, aperture, drive);
+        format!("{{\"side\":\"{name}\",\"source\":{source}}}")
+    }).collect::<Vec<_>>().join(",");
+    moving_boundary_provenance(&records)
 }
 
 struct Loaded {
@@ -298,9 +328,14 @@ fn load_with_all_sources(
         let terminals = p.radiation_bindings().len()
             + p.mimo_radiation_records().iter().map(|(_, r)| r.apertures().len()).sum::<usize>()
             + p.computed_radiation_records().iter().map(|(_, r)| r.apertures().len()).sum::<usize>();
-        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}}}",
+        let boundary_json = modal_boundary_provenance(&p);
+        let compiled_controls = p.renderer().pending_controls().len()
+            + [fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream,
+               fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream].into_iter()
+                .map(|side| p.renderer().pending_boundary_controls(side).len()).sum::<usize>();
+        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}}}",
             i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
-            p.renderer().pending_controls().len(), valve.viscosity_matrix_n_s_m().is_some(),
+            compiled_controls, valve.viscosity_matrix_n_s_m().is_some(),
             terminals);
         let ratio = i.mechanics_rate_hz / i.output_rate_hz;
         let observation_json = format!("{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"output_sample_rate_hz\":{},\"ratio\":{ratio},\"filter\":\"shared multirate differentiating Rayleigh receiver with bandlimited propagation\",\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",

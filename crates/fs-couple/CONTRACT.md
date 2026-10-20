@@ -3505,3 +3505,30 @@ bow interfaces, torsion, physical rocking levers, preloads and the original
 receiver remain in the existing performer. The bounded grammar, synthetic
 two-component fixture and unqualified native regression sources are documented
 in `examples/material_strings/BODY_PROFILES.md`.
+
+### Shared material keys in native reed performance inputs
+
+The material-modal valve file consumes the same material-boundary grammar and
+DKT/contact/Maxwell/slit builder as flue files. Explicit upstream/downstream
+driven chimney nodes are completely matched to source-card keys using the
+actual lowered regional gas, impedance, clock and lifetime. Blades and keys
+share one immutable path cache and the original artifact byte allowances.
+
+`control_source` binds all-v2 pressure and nonnegative closing-force tracks
+through the original gesture sampler. The legacy pressure suffix retains
+explicit initial key drives. The canonical two-sided observer and boundary
+programs apply assignments at every mechanical substep; cursors publish after
+physical acceptance and receiver ingestion. Both key sides, source forces and
+pressure share stored-assignment limits, with combined auxiliary compilation
+work. Releasing a force or changing callback partition keeps the original
+material, contact and acoustic histories. Imported/computed MIMO and compact
+outlet reactions remain installed in the original owners.
+
+The CLI retains each key's side, physical node, original material artifact,
+typed consumer and local gas. `examples/material_modal_valve/paired-keyed.performance`
+demonstrates the shared path. Focused regressions cover source-to-pressure/PCM
+changes, mechanical substep controls, one/two-blade sources and the three
+runtime source families. Native execution remains required. Keys remain
+one-mode material cantilever slits with prescribed exterior reservoirs; this
+does not add circular pads, linkages, direct key radiation or instrument
+qualification.

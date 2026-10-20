@@ -1,0 +1,167 @@
+frankensim-material-modal-valve-v1
+audio 768000 48000 2400 0.005
+propagator exact-zoh
+ambient 293.15 101325 0
+exterior 293.15 101325 0
+upstream
+network 2 1 1048576
+duct_node reflection 0.7
+duct_node inlet
+duct_section 1 0 0.12 0.007 0.002
+downstream
+network 4 3 1048576
+duct_node inlet
+duct_node junction
+duct_node reflection 0
+duct_node driven
+duct_section 0 1 0.1 0.007 0.002
+duct_section 1 2 0.15 0.007 0.002 gas 303.15 0 viscothermal 80 1000 8 8
+duct_section 1 3 0.017 0.003 0.002
+propagation fractional 1000 0.02
+supply none
+slit_length 0.001
+receiver 0 0 0.25 4 16 1000
+openings 1
+opening downstream 2 0 0
+valve 0.0004
+limits 0.001 10 1 512 1e-14 1e-11
+coupling 1 1e-16 1e-7 1e-16 1e-8
+contact 100000000 2 0.5
+loss tensor eta11 eta22 eta66 eta12 eta16 eta26 1 1000000
+blades 2
+blade 3 0.2 3000 0.04 0.1 0.00002 1000000
+support clamped 0
+sections 2
+section blade.matpack isotropic 293.15 100 0.0003 0
+section blade.matpack isotropic 293.15 100 0.00027 0
+nodes 21
+node 0 0 1 0
+node 0.004166666666666667 0 0 0
+node 0.008333333333333333 0 0 0
+node 0.012500000000000002 0 0 0
+node 0.016666666666666666 0 0 0
+node 0.020833333333333332 0 0 0
+node 0.025000000000000005 0 0 0
+node 0 0.005 1 0
+node 0.004166666666666667 0.005 0 0
+node 0.008333333333333333 0.005 0 0
+node 0.012500000000000002 0.005 0 0
+node 0.016666666666666666 0.005 0 0
+node 0.020833333333333332 0.005 0 0
+node 0.025000000000000005 0.005 0 1
+node 0 0.01 1 0
+node 0.004166666666666667 0.01 0 0
+node 0.008333333333333333 0.01 0 0
+node 0.012500000000000002 0.01 0 0
+node 0.016666666666666666 0.01 0 0
+node 0.020833333333333332 0.01 0 0
+node 0.025000000000000005 0.01 0 0
+triangles 24
+triangle 0 1 8 0
+triangle 0 8 7 0
+triangle 1 2 9 0
+triangle 1 9 8 0
+triangle 2 3 10 0
+triangle 2 10 9 0
+triangle 3 4 11 1
+triangle 3 11 10 1
+triangle 4 5 12 1
+triangle 4 12 11 1
+triangle 5 6 13 1
+triangle 5 13 12 1
+triangle 7 8 15 0
+triangle 7 15 14 0
+triangle 8 9 16 0
+triangle 8 16 15 0
+triangle 9 10 17 0
+triangle 9 17 16 0
+triangle 10 11 18 1
+triangle 10 18 17 1
+triangle 11 12 19 1
+triangle 11 19 18 1
+triangle 12 13 20 1
+triangle 12 20 19 1
+slit_edges 2
+edge 6 13
+edge 13 20
+initial 3
+state 0 0
+state 0 0
+state 0 0
+blade 3 0.2 3000 0.04 0.1 0.00002 1000000
+support clamped 0
+sections 2
+section blade.matpack isotropic 293.15 100 0.0003 0
+section blade.matpack isotropic 293.15 100 0.00027 0
+nodes 21
+node 0 0 1 0
+node 0.004166666666666667 0 0 0
+node 0.008333333333333333 0 0 0
+node 0.012500000000000002 0 0 0
+node 0.016666666666666666 0 0 0
+node 0.020833333333333332 0 0 0
+node 0.025000000000000005 0 0 0
+node 0 0.005 1 0
+node 0.004166666666666667 0.005 0 0
+node 0.008333333333333333 0.005 0 0
+node 0.012500000000000002 0.005 0 0
+node 0.016666666666666666 0.005 0 0
+node 0.020833333333333332 0.005 0 0
+node 0.025000000000000005 0.005 0 1
+node 0 0.01 1 0
+node 0.004166666666666667 0.01 0 0
+node 0.008333333333333333 0.01 0 0
+node 0.012500000000000002 0.01 0 0
+node 0.016666666666666666 0.01 0 0
+node 0.020833333333333332 0.01 0 0
+node 0.025000000000000005 0.01 0 0
+triangles 24
+triangle 0 1 8 0
+triangle 0 8 7 0
+triangle 1 2 9 0
+triangle 1 9 8 0
+triangle 2 3 10 0
+triangle 2 10 9 0
+triangle 3 4 11 1
+triangle 3 11 10 1
+triangle 4 5 12 1
+triangle 4 12 11 1
+triangle 5 6 13 1
+triangle 5 13 12 1
+triangle 7 8 15 0
+triangle 7 15 14 0
+triangle 8 9 16 0
+triangle 8 16 15 0
+triangle 9 10 17 0
+triangle 9 17 16 0
+triangle 10 11 18 1
+triangle 10 18 17 1
+triangle 11 12 19 1
+triangle 11 19 18 1
+triangle 12 13 20 1
+triangle 12 20 19 1
+slit_edges 2
+edge 6 13
+edge 13 20
+initial 3
+state 0 0
+state 0 0
+state 0 0
+downstream_boundaries
+boundaries 1
+boundary 3 instrument key-1 0.0005 0
+boundary_plate key.matpack 293.15 1000 0.025 0.01 0.0003 6 2 0.0002 0.0002 0
+boundary_mode 0 600 0 0.25 0.1
+boundary_contact 10000000000 2 0.5
+boundary_slit 0.0003
+boundary_loss elastic
+compile_limits 100000 8192
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	48000
+tracks	1
+track	mouth	blowing-pressure
+initial	pressure-pa	0e0
+events	2
+event	0e0	1e-3	pressure-pa	5e0
+event	4e-3	1e-3	pressure-pa	0e0

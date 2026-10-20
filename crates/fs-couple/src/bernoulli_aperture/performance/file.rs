@@ -531,10 +531,15 @@ fn read_receiver(row:&mut Row<'_>)->Result<CircularOutletReceiver,PlateValveInpu
         radial_rings:row.count(128)?,angular_points:row.count(512)?,maximum_frequency_hz:row.scalar()?})
 }
 fn decode_schedule(text:&str)->Result<GestureSchedule,PlateValveInputError> {
+    decode_schedule_with_track_limit(text, 1)
+}
+fn decode_schedule_with_track_limit(text:&str,max_tracks:usize)->Result<GestureSchedule,PlateValveInputError> {
     let lines=text.lines().count();
     for line in text.lines() {
         if let Some(n)=line.strip_prefix("tracks\t") {
-            if n.parse::<usize>().ok()!=Some(1) {return Err(bad(0,"one canonical pressure track is required"));}
+            if n.parse::<usize>().ok().is_none_or(|count| count==0 || count>max_tracks) {
+                return Err(bad(0,"canonical tracks exceed the declared source consumer bound"));
+            }
         }
         if let Some(n)=line.strip_prefix("events\t") {
             let count=n.parse::<usize>().map_err(|_|bad(0,"invalid gesture event count"))?;

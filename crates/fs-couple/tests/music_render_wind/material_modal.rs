@@ -11,7 +11,48 @@ use fs_qty::{Density, Dims, DynViscosity, Pressure};
 const INPUT: &str = include_str!("../../examples/material_modal_valve/paired-mutual.performance");
 const ARTIFACT: &str = include_str!("../../examples/material_modal_valve/mutual.radiation");
 
+#[test]
+fn material_key_file_reaches_actual_wav_through_the_existing_reed_renderer() {
+    let dir = directory();
+    let text = include_str!("../../examples/material_modal_valve/paired-keyed.performance")
+        .replace("audio 768000 48000 2400 0.005", "audio 768000 48000 512 0.005");
+    let input = dir.join("keyed.performance");
+    let blade = pack();
+    let key = pack_with_density(1800.0);
+    std::fs::write(&input, &text).unwrap();
+    std::fs::write(dir.join("blade.matpack"), blade.to_bytes()).unwrap();
+    std::fs::write(dir.join("key.matpack"), key.to_bytes()).unwrap();
+    let loaded = MaterialModalValvePerformance::from_bytes_with_sources(text.as_bytes(), 37,
+        &CancelGate::new_clock_free(), None,
+        |path| Ok(if path == "key.matpack" { key.clone() } else { blade.clone() })).unwrap();
+    assert_eq!(loaded.boundary_records().len(), 1);
+    let mut renderer = loaded.into_renderer();
+    let mut pressure = vec![0.0; 512];
+    for block in pressure.chunks_mut(37) { renderer.block(block).unwrap(); }
+    let expected = encode_pcm16_wav(&pressure, 48000, 0.005).unwrap().0;
+    for block in [1, 37] {
+        let output = dir.join(format!("keys-{block}.wav"));
+        success(run(&input, &output, block, false));
+        assert_eq!(std::fs::read(&output).unwrap(), expected);
+        let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+        for token in ["\"moving_boundaries\":[", "\"side\":\"downstream\"", "\"node\":3",
+            "\"pack_path\":\"key.matpack\"", "\"force_parameter\":\"closing_force\"", "local-chimney-gas"] {
+            assert!(metadata.contains(token), "{token}: {metadata}");
+        }
+        assert!(metadata.contains(&format!("\"pack_hash\":\"{}\"", key.content_hash().to_hex())));
+    }
+    // Only the key material artifact changes; the source file, reed cards,
+    // both ducts, gesture program and microphone remain the original values.
+    std::fs::write(dir.join("key.matpack"), blade.to_bytes()).unwrap();
+    let changed = dir.join("changed-key.wav");
+    success(run(&input, &changed, 37, false));
+    assert_ne!(std::fs::read(&changed).unwrap()[44..], expected[44..]);
+}
+
 fn pack() -> NormalizedMaterialCardPack {
+    pack_with_density(900.0)
+}
+fn pack_with_density(density: f64) -> NormalizedMaterialCardPack {
     let mut claims = ClaimSet::new();
     let artifact = fs_blake3::hash_domain("org.frankensim.test.material-modal-cli", b"manufactured-data");
     let provenance = Provenance { source: "manufactured material-modal CLI regression".into(),
@@ -21,7 +62,7 @@ fn pack() -> NormalizedMaterialCardPack {
         artifact, caveats: "not a measured material or instrument".into(), provenance: provenance.clone(),
     }).unwrap();
     for (name, value, dims) in [
-        ("density", 900.0, Density::DIMS), ("young_modulus", 4e9, Pressure::DIMS),
+        ("density", density, Density::DIMS), ("young_modulus", 4e9, Pressure::DIMS),
         ("poisson_ratio", 0.3, Dims::NONE), ("eta11", 22000.0, DynViscosity::DIMS),
         ("eta22", 35000.0, DynViscosity::DIMS), ("eta66", 11000.0, DynViscosity::DIMS),
         ("eta12", 4500.0, DynViscosity::DIMS), ("eta16", 1000.0, DynViscosity::DIMS),

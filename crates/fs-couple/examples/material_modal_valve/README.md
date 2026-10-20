@@ -36,6 +36,14 @@ The example explicitly selects `propagator exact-zoh`. The clock and retained
 mode bounds stay authored data; exact free structural propagation is not a
 reason to lower the clock without measuring nonlinear time error.
 
+`paired-keyed.performance` adds one material cantilever key on an explicitly
+declared downstream chimney. Supply `key.matpack` through the same normalizer,
+or copy the manufactured `blade.matpack` to that name for the integration
+fixture, then run the unchanged renderer command with a new WAV path. Its
+initial 0.0005 N closing force is explicit data. Replace only `key.matpack` to
+hear the key material change through the retained reed and bore. Typed force
+ramps use the optional control declarations described below.
+
 `paired-mutual.performance` selects an externally supplied two-port operator
 in `mutual.radiation`. Run it through the same command with a new output path.
 It adds a second explicitly declared downstream branch and uses the shared
@@ -83,6 +91,11 @@ contact EFFECTIVE_STIFFNESS_N_PER_M_ALPHA EXPONENT INTERNAL_LOSS_S_PER_M
 loss tensor V11 V22 V66 V12 V16 V26 REFERENCE_RESISTANCE_N_S_M PROJECTION_TERMS
 blades COUNT
 BLADE_RECORDS
+upstream_boundaries
+BOUNDARY_RECORDS
+downstream_boundaries
+BOUNDARY_RECORDS
+control_source ASSEMBLY PART
 compile_limits WORK CONTROLS
 schedule
 CANONICAL_GESTURE_BYTES
@@ -138,6 +151,66 @@ unsteady no-slip fixed passage; it is additional geometry, separate from the
 moving gap. The selected structural propagator and the original channel,
 network, nonlinear work and flow admissions all remain binding. This ingress
 neither changes the passage nor substitutes a static resistance for its state.
+
+### Material moving keys on either acoustic side
+
+The optional `upstream_boundaries` and `downstream_boundaries` blocks follow all
+blade records, in that order, before `control_source` and `compile_limits`.
+Each selected side uses the **same material-boundary grammar and physical
+builder as the flute input**. Add a `duct_node driven` endpoint connected by its
+own chimney section; every driven endpoint must have exactly one key in
+ascending node order. An omitted block is valid only if that side has no driven
+endpoints. A driven key is a coupled source boundary and is not a passive
+radiating `opening`.
+
+```text
+downstream_boundaries
+boundaries 1
+boundary 3 instrument key-1 0 0
+boundary_plate key.matpack 293.15 1000 0.025 0.01 0.0003 6 2 0.0002 0.0002 0
+boundary_mode 0 600 0 0.25 0.1
+boundary_contact 10000000000 2 0.5
+boundary_slit 0.0003
+boundary_loss elastic
+control_source instrument reed
+```
+
+The `boundary` fields are graph node, assembly name, part name, initial closing
+force in newtons and exterior reservoir pressure in pascals. The plate fields
+are original material pack, solid temperature, source angular frequency,
+length/width/thickness in metres, mesh intervals, rest gap, initial gap and
+opening velocity. The material card supplies density, Young's modulus and
+Poisson ratio. Optional `boundary_loss maxwell COUNT MIN_HZ MAX_HZ
+MAX_DT_OVER_TAU MAX_ANGULAR_STEP` plus `boundary_term MODULUS_PROPERTY
+TIME_PROPERTY` records select the same material Maxwell histories as flute
+keys. `boundary_slit LENGTH_M` selects the actual chimney gas's viscosity;
+`boundary_slit none` or omission keeps inviscid gap flow.
+
+All blades and keys use one cached material loader, with one 64 MiB aggregate
+allowance and an 8 MiB limit per normalized pack. Reusing a path reuses the
+same immutable artifact. Changing a key's material, thickness or gas changes
+the physical motion and pressure returned to the original reed/bore solve.
+The source retains every selected reed mode, both acoustic networks, fractional
+and distributed-loss histories, and compact or supplied mutual outlet reaction.
+
+`control_source` selects an all-typed canonical v2 gesture suffix. Use
+`two_sided::observer::schedule::boundaries::source_pressure_path(assembly, part)`
+for the declared source's `PressurePa` track and the shared
+`material_boundary::boundary_closing_force_path(assembly, part)` for each key's
+`ForceN` track. Positive force closes the material slit. A force ramp is sampled
+by the existing gesture owner, then applied before the corresponding mechanical
+sample, including events within a single audio frame. Zero force releases the
+actuator while mechanics, contact, material memory and trapped pressure continue.
+Untracked keys retain their explicit initial drive. Without `control_source`,
+the original one-track pressure suffix remains valid and all keys retain those
+initial drives. Unknown consumers and mixed legacy/typed tracks refuse.
+
+The shared key model is a material-derived one-mode cantilever slit with explicit
+contact, not a resolved circular pad, linkage or tongue. Only declared passive
+outlets feed the existing exterior microphone; direct key/body radiation is not
+added. Source pressure and independent source-mesh forces remain distinct from
+key actuation. New integration regressions require native execution before any
+numerical or measured-instrument qualification claim.
 
 Each blade repeats:
 

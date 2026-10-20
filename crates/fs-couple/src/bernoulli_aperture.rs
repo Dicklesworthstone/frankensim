@@ -33,6 +33,8 @@ pub mod two_sided;
 pub mod tube;
 /// Moving aperture coupled to nonuniform connected tube sections and branches.
 pub mod network;
+/// Shared source-card moving-boundary descriptions for jet and reed networks.
+pub mod material_boundary;
 /// Explicit sub-sample acoustic geometry with a declared phase-error budget.
 pub mod fractional;
 /// Geometry-derived reactive cavity loads for the coupled tube network.

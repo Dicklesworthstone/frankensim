@@ -80,13 +80,17 @@ fn paired_driven_refusal_cannot_publish_the_first_network() {
         DrivenWave { node: 3, outgoing_pressure_pa: -0.2 }];
     for sample in 0..32 {
         let outgoing = [if sample < 5 { 1.0 } else { 0.0 }, 0.3];
-        let [left, right] = &mut pair;
         if sample == 9 {
-            assert!(left.step_pair_with_driven(right, outgoing, [&waves, &waves[..1]]).is_err());
-            for (actual, reference) in pair.iter().zip(&separate) {
-                assert_eq!(actual.accepted_steps(), reference.accepted_steps());
-                assert_eq!(actual.stored_energy_j(), reference.stored_energy_j());
-                for node in 0..4 { assert_eq!(actual.node_frame(node), reference.node_frame(node)); }
+            for bad in [waves[..1].to_vec(), vec![waves[0], waves[0]],
+                vec![waves[0], DrivenWave { outgoing_pressure_pa: f64::NAN, ..waves[1] }],
+                vec![waves[0], DrivenWave { outgoing_pressure_pa: f64::MAX, ..waves[1] }]] {
+                let [left, right] = &mut pair;
+                assert!(left.step_pair_with_driven(right, outgoing, [&waves, &bad]).is_err());
+                for (actual, reference) in pair.iter().zip(&separate) {
+                    assert_eq!(actual.accepted_steps(), reference.accepted_steps());
+                    assert_eq!(actual.stored_energy_j(), reference.stored_energy_j());
+                    for node in 0..4 { assert_eq!(actual.node_frame(node), reference.node_frame(node)); }
+                }
             }
         }
         let [left, right] = &mut pair;

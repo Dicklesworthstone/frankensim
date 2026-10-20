@@ -6,15 +6,17 @@ use super::TwoSidedPressure;
 use crate::bernoulli_aperture::performance::{
     AperturePerformanceConfig, compile_schedule, pressure_candidate,
 };
-use crate::bernoulli_aperture::two_sided::{TwoSidedDrive, ValveSide};
-use crate::bernoulli_aperture::performance::boundaries::BoundarySchedule;
+use crate::bernoulli_aperture::two_sided::TwoSidedDrive;
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::{RenderError, schedule::{GestureCompileError, ScheduledControl}};
 use fs_scenario::gesture::GestureSchedule;
 use crate::bernoulli_aperture::performance::force::ForceSchedule;
+use crate::bernoulli_aperture::performance::boundaries::BoundarySchedule;
+use crate::bernoulli_aperture::two_sided::ValveSide;
 
 mod plate_forces;
-mod boundaries;
+/// Shared physical boundary programs and typed source/key gestures.
+pub mod boundaries;
 
 /// Finite canonical source program retaining all valve, duct and receiver state.
 /// Every control is consumed at its actual mechanical sample, even inside a host
@@ -30,6 +32,7 @@ pub struct ScheduledTwoSidedPressure {
     held_pressure_pa: f64,
     plate_forces: [Option<ForceSchedule>; 2],
     boundaries: [Option<BoundarySchedule>; 2],
+    gesture_work: u64,
     poisoned: bool,
 }
 fn invalid(what: &'static str) -> GestureCompileError { GestureCompileError::Invalid { what } }
@@ -69,7 +72,7 @@ impl ScheduledTwoSidedPressure {
         };
         let controls = compile_schedule(&schedule, &mechanical_config)?;
         Ok(Self { source, schedule, config, controls, next: 0, held_pressure_pa: 0.0,
-            plate_forces: [None, None], boundaries: [None, None], poisoned: false })
+            plate_forces: [None, None], boundaries: [None, None], gesture_work: 0, poisoned: false })
     }
     /// Original loaded mechanics and pressure receiver. Mutable access would
     /// permit stepping around the source schedule and is intentionally absent.
@@ -146,19 +149,19 @@ impl PressureRenderer for ScheduledTwoSidedPressure {
                 let drive = TwoSidedDrive {
                     source_pressure_pa: pressure, blade_forces_n: forces,
                 };
-                for boundary in self.boundaries.iter_mut().flatten() { boundary.prepare(sample); }
-                let boundaries = self.boundaries.each_ref().map(|boundary|
-                    boundary.as_ref().map_or(&[][..], BoundarySchedule::candidate));
+                for boundaries in self.boundaries.iter_mut().flatten() { boundaries.prepare(sample); }
+                let boundary_drives = self.boundaries.each_ref().map(|side|
+                    side.as_ref().map_or(&[][..], BoundarySchedule::candidate));
                 // Same physical/receiver step as held playback. Partial traces
                 // survive every control boundary instead of endpoint sampling.
                 let result = self.source.set_drive(drive)
-                    .and_then(|()| self.source.advance_mechanical_with_boundaries(boundaries));
+                    .and_then(|()| self.source.advance_mechanical_with_boundaries(boundary_drives));
                 match result {
                     Ok(output) => {
                         self.next = next;
                         self.held_pressure_pa = pressure;
                         for force in self.plate_forces.iter_mut().flatten() { force.accept(sample); }
-                        for boundary in self.boundaries.iter_mut().flatten() { boundary.accept(); }
+                        for boundaries in self.boundaries.iter_mut().flatten() { boundaries.accept(); }
                         if let Some(p) = output { *slot = p; }
                     }
                     Err(error) => { self.poisoned = true; return Err(error); }

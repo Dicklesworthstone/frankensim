@@ -10,6 +10,7 @@ use fs_qty::{Density, Dims, DynViscosity, Pressure};
 const INPUT: &str = include_str!("../../../../../examples/material_modal_valve/paired.performance");
 
 mod mimo;
+mod boundaries;
 
 fn pack(rho: f64, missing: bool) -> NormalizedMaterialCardPack {
     let mut claims = ClaimSet::new();

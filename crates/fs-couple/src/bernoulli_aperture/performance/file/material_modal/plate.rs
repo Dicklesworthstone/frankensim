@@ -71,7 +71,7 @@ pub(super) struct MaterialCache {
     bytes: usize,
 }
 impl MaterialCache {
-    fn load(&mut self, path: &str, line: usize,
+    pub(super) fn load(&mut self, path: &str, line: usize,
         loader: &mut impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
         gate: &CancelGate) -> Result<Arc<NormalizedMaterialCardPack>, PlateValveInputError>
     {

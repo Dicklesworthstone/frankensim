@@ -581,13 +581,7 @@ impl WaveguideNetwork {
     pub fn step_pair(&mut self, other: &mut Self, outgoing: [f64; 2])
         -> Result<[NetworkFrame; 2], WaveguideError>
     {
-        if self.time_step_s.to_bits() != other.time_step_s.to_bits() {
-            return Err(WaveguideError("coupled wave networks require identical clocks"));
-        }
-        let frames = [self.preview_step(outgoing[0])?, other.preview_step(outgoing[1])?];
-        self.accept_preview();
-        other.accept_preview();
-        Ok(frames)
+        self.step_pair_with_driven(other, outgoing, [&[], &[]])
     }
 
     // Only called immediately after this owner's successful preview, with no

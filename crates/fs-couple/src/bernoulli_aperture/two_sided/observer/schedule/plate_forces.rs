@@ -23,8 +23,9 @@ impl ScheduledTwoSidedPressure {
     /// once a source-mesh program is attached. This is prescribed actuation, not
     /// a tongue/lip contact law or an additional source of pressure work.
     ///
-    /// max_controls bounds pressure, BOTH force programs and all key assignments.
-    /// max_compile_work bounds combined force projection and boundary compilation;
+    /// max_controls bounds pressure assignments, BOTH raw force programs and
+    /// every moving-boundary drive. max_compile_work separately bounds combined
+    /// force projection/grouping, typed sampling and boundary compilation;
     /// it remains the pressure compiler's independent work allowance. The same
     /// source-owned force/velocity projection and numerical solve do all physics.
     ///

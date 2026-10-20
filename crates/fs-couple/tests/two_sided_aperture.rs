@@ -209,3 +209,6 @@ fn mismatched_inlet_gases_and_a_one_sided_valve_load_are_rejected() {
 #[path = "two_sided_aperture/mimo.rs"]
 mod mimo;
 
+#[path = "two_sided_aperture/keyed.rs"]
+mod keyed;
+

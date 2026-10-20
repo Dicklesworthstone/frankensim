@@ -8,6 +8,7 @@ use crate::pcm_wav::observation::{ObservationError, ObservationPolicy, PressureR
 use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
 use crate::render::RenderError;
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::bernoulli_aperture::network::boundaries::{BoundaryAperture, BoundaryDrive};
 use fs_exec::CancelGate;
 use crate::pcm_wav::baffled::openings::duct::{
     DuctOpening, DuctPressure, DuctRadiationSpec, DuctReconstruction, DuctView,
@@ -183,21 +184,32 @@ impl TwoSidedPressure {
     #[must_use]
     pub const fn last_frame(&self) -> Option<&TwoSidedFrame> { self.last.as_ref() }
 
+    /// Attach material moving boundaries before either mechanics or reception
+    /// advances. The original receiver and both graph histories stay intact.
+    /// A scheduled performer must then bind a complete explicit drive program.
+    pub fn with_boundary_apertures(mut self, side: ValveSide,
+        inputs: Vec<BoundaryAperture>, max_apertures: usize) -> Result<Self, RenderError>
+    {
+        if self.poisoned || self.mechanical_samples_rendered() != 0 || self.completed != 0 {
+            return Err(sizing("moving boundaries require an unadvanced two-sided receiver"));
+        }
+        self.system = self.system.with_boundary_apertures(side, inputs, max_apertures, &self.gate)
+            .map_err(RenderError::Voice)?;
+        Ok(self)
+    }
+
     // The ONLY mechanical/observer step for held and scheduled playback. The
     // scheduler can change pressure between these calls inside an audio packet.
     fn advance_mechanical(&mut self) -> Result<Option<f64>, RenderError> {
         self.advance_mechanical_with_boundaries([&[], &[]])
     }
 
-    // Boundary programs use the same source and receiver transaction. Their
-    // controls commit only after this complete mechanical observation succeeds.
-    fn advance_mechanical_with_boundaries(
-        &mut self,
-        boundaries: [&[super::BoundaryDrive]; 2],
-    ) -> Result<Option<f64>, RenderError> {
+    fn advance_mechanical_with_boundaries(&mut self, drives: [&[BoundaryDrive]; 2])
+        -> Result<Option<f64>, RenderError>
+    {
         if self.poisoned { return Err(RenderError::Poisoned); }
         let result = (|| {
-            let frame = self.system.step_with_boundaries_under_gate(self.held, boundaries, &self.gate)
+            let frame = self.system.step_with_boundaries_under_gate(self.held, drives, &self.gate)
                 .map_err(RenderError::Voice)?;
             let system = &self.system;
             let pressure = self.receiver.push_frame(|network, node| {

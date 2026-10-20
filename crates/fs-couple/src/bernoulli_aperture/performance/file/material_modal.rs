@@ -11,9 +11,10 @@
 //! midpoint. ExactZoh keeps the original material M/K/full C, with pressure and
 //! contact held per mechanical sample; it does not certify nonlinear time error.
 mod plate;
+mod boundaries;
 mod radiation;
 
-use super::{PlateValveInputError, Reader, bad, checkpoint, decode_schedule, gas,
+use super::{PlateValveInputError, Reader, bad, checkpoint, gas,
     read_receiver, MAX_PLATE_VALVE_PERFORMANCE_BYTES, MAX_CONTROLS};
 use super::duct::DuctInput;
 use crate::bernoulli_aperture::fractional::FractionalTubePolicy;
@@ -73,6 +74,7 @@ pub struct MaterialModalValvePerformance {
     info: MaterialModalValveInfo,
     renderer: ScheduledTwoSidedPressure,
     materials: Vec<ModalValveMaterialRecord>,
+    boundaries: Vec<(ValveSide, crate::bernoulli_aperture::material_boundary::MaterialBoundaryRecord)>,
     gases: Vec<GasRecord>,
     ambient: GasState,
     radiation: Vec<BaffledOutletBinding>,
@@ -162,10 +164,10 @@ impl MaterialModalValvePerformance {
         row.finish()?;
         let exterior_record = gases.last().expect("exterior parser retains its original gas record").clone();
         rows.row("upstream")?.finish()?;
-        let up = DuctInput::read_with_gas_sources(&mut rows, &ambient, gate, gas_sources, &mut gases)?
+        let up = DuctInput::read_two_sided_with_gas_sources(&mut rows, &ambient, gate, gas_sources, &mut gases)?
             .into_two_sided(&ambient, dt, gate)?;
         rows.row("downstream")?.finish()?;
-        let down = DuctInput::read_with_gas_sources(&mut rows, &ambient, gate, gas_sources, &mut gases)?
+        let down = DuctInput::read_two_sided_with_gas_sources(&mut rows, &ambient, gate, gas_sources, &mut gases)?
             .into_two_sided(&ambient, dt, gate)?;
         let sides = [up, down];
         let (inlet, mut impedance) = combined_inlet_state(&sides).map_err(PlateValveInputError::Physics)?;
@@ -273,6 +275,7 @@ impl MaterialModalValvePerformance {
             plates.push((source, options));
         }
         let modes = states.len();
+        let boundaries = boundaries::Inputs::read(&mut rows)?;
         let mut row = rows.row("compile_limits")?;
         let max_compile_work: u64 = row.parse()?;
         let max_controls = row.count(MAX_CONTROLS)?;
@@ -283,7 +286,7 @@ impl MaterialModalValvePerformance {
         if rows.lines.next().is_some() {
             return Err(bad(rows.line + 1, "unexpected trailing material-modal record"));
         }
-        let schedule = decode_schedule(gestures)?;
+        let schedule = boundaries.decode_schedule(gestures)?;
         let mut valve = match loss {
             LossSelection::Elastic => ModalAperture::from_material_plates_with_propagator(
                 plates, rest_opening, inlet, impedance, dt, mechanical_samples,
@@ -307,15 +310,15 @@ impl MaterialModalValvePerformance {
         let (source, radiation, mimo_radiation, computed_radiation) = radiation::build(
             radiation_selection, valve.into(), sides, channel, coupling, policies,
             radiation_spec, &exterior_record, max_block, gas_sources, &mut load_radiation, gate)?;
-        let renderer = ScheduledTwoSidedPressure::new(source, schedule, AperturePerformanceConfig {
+        let (renderer, boundaries) = boundaries.compile(source, schedule, AperturePerformanceConfig {
             sample_rate_hz: output, samples, max_block, max_compile_work, max_controls,
-        }).map_err(PlateValveInputError::Gesture)?;
+        }, &mut cache, &mut load_material, gate)?;
         checkpoint(gate)?;
         Ok(Self { info: MaterialModalValveInfo {
             input_hash: hash_domain("org.frankensim.fs-couple.material-modal-valve.v1", bytes),
             mechanics_rate_hz: mechanics, propagator, output_rate_hz: output, samples, full_scale_pa,
             blades, modes, nodes, triangles,
-        }, renderer, materials, gases, ambient, radiation, mimo_radiation, computed_radiation })
+        }, renderer, materials, boundaries, gases, ambient, radiation, mimo_radiation, computed_radiation })
     }
 
     /// Immutable original source dimensions, coordinates, clocks and PCM scale.
@@ -324,6 +327,10 @@ impl MaterialModalValvePerformance {
     pub const fn renderer(&self) -> &ScheduledTwoSidedPressure { &self.renderer }
     /// Exact normalized material artifacts and regional declaration addresses.
     pub fn material_records(&self) -> &[ModalValveMaterialRecord] { &self.materials }
+    /// Original keyed side/node, normalized material artifact and typed force path.
+    pub fn boundary_records(&self) -> &[(ValveSide, crate::bernoulli_aperture::material_boundary::MaterialBoundaryRecord)] {
+        &self.boundaries
+    }
     /// Original ambient, regional and exterior gas declarations.
     pub fn gas_records(&self) -> &[GasRecord] { &self.gases }
     /// Default interior state; actual inlet/remote states stay in the two ducts.
