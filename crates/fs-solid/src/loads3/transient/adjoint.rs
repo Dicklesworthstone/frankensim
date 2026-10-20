@@ -111,8 +111,16 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
         -> Result<TransientAdjoint3<'g, 'm>, TransientAdjointError3> {
         check(cx)?;
         if self.prescribed.is_some() {
-            return Err(TransientAdjointError3::Invalid("prescribed-support trajectory pullbacks are not supplied"));
+            return Err(TransientAdjointError3::Invalid("reduced-only adjoint cannot reverse supports; use prescribed_adjoint"));
         }
+        self.prepare_adjoint(config, cx)
+    }
+
+    // Shared sparse owner. The public reduced-only entry point retains its
+    // homogeneous-support contract; `support` adds the omitted cross terms.
+    fn prepare_adjoint(&self, config: TransientAdjointConfig3, cx: &Cx<'_>)
+        -> Result<TransientAdjoint3<'g, 'm>, TransientAdjointError3> {
+        check(cx)?;
         let tol = config.solve.relative_residual_tolerance;
         if !tol.is_finite() || tol <= 0.0 || tol >= 1.0 || config.solve.maximum_iterations == 0 {
             return Err(TransientAdjointError3::Invalid("positive iteration limit and relative tolerance in (0,1) required"));
@@ -266,3 +274,6 @@ impl From<crate::loads3::history::LoadHistoryError3> for TransientAdjointError3 
 
 /// Endpoint stiffness, density and Rayleigh-damping derivatives.
 pub mod material;
+
+/// Full nodal state and prescribed-support control pullbacks.
+pub mod support;

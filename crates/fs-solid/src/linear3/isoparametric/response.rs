@@ -101,6 +101,52 @@ impl TetLinearElasticProblem<'_> {
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
         Ok(out)
     }
+
+    /// Actual transposed element actions, including all free/fixed cross rows.
+    /// The seed is zero on fixed rows when used by the support-motion adjoint.
+    /// Independently rounded K_e entries are not assumed bitwise symmetric.
+    pub(crate) fn transpose_full_kinematic_actions(
+        &self, seed: &[f64], cx: &Cx<'_>,
+    ) -> Result<(Vec<f64>, Vec<f64>), TetElasticError> {
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        self.validate_budget()?;
+        self.materials.validate(self.tetrahedra.len())?;
+        let full = self.nodes_m.len().checked_mul(3).ok_or(TetElasticError::SizeOverflow)?;
+        let finite = |value: f64| if value.is_finite() { Ok(value) } else {
+            Err(TetElasticError::InvalidStressObservation { what: "nonfinite transposed dynamic action" })
+        };
+        if seed.len() != full {
+            return Err(TetElasticError::InvalidStressObservation {
+                what: "transposed dynamic action needs a full node-major cotangent" });
+        }
+        for chunk in seed.chunks(256) {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            for &value in chunk { finite(value)?; }
+        }
+        let mut mass = vec![0.0; full];
+        let mut stiffness = vec![0.0; full];
+        for (element, tet) in self.tetrahedra.iter().enumerate() {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            validate_connectivity(element, tet, self.nodes_m.len())?;
+            let geometry = TetGeometry::try_new(element, tet.map(|n| self.nodes_m[n]),
+                self.budget.minimum_scaled_jacobian)?;
+            let (ke, me) = element_matrices(&geometry, self.materials.at(element));
+            for column in 0..12 {
+                let mut km = 0.0;
+                let mut mm = 0.0;
+                for row in 0..12 {
+                    let d = 3*tet[row/3] + row%3;
+                    km = ke[row][column].mul_add(seed[d], km);
+                    mm = me[row][column].mul_add(seed[d], mm);
+                }
+                let d = 3*tet[column/3] + column%3;
+                mass[d] = finite(mass[d] + finite(mm)?)?;
+                stiffness[d] = finite(stiffness[d] + finite(km)?)?;
+            }
+        }
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        Ok((mass, stiffness))
+    }
 }
 
 impl TetLinearElasticProblem<'_> {

@@ -130,7 +130,8 @@ impl TetTransientRun3<'_, '_, '_, '_> {
     /// allocated. Cancellation/refusal commits neither support nor free motion.
     /// A discontinuous displacement is not a finite force jump: resolve physical
     /// motion smoothly with an adequate step ladder. No impulse/event or temporal
-    /// accuracy certificate is implied. Support-control adjoints are not supplied.
+    /// accuracy certificate is implied. `adjoint::support` supplies the separate
+    /// discrete pullback for full nodal motion and support displacement controls.
     pub fn advance_with_supports(
         &mut self,
         load_next: &TetLoadCase3<'_, '_>,

@@ -432,11 +432,12 @@ Input admission, full nodal displacement limits, element limits, sparse solve
 limits, per-node/element cancellation checkpoints and the energy/residual
 gates precede atomic publication. A clone retains the prescribed kinematics,
 reaction endpoint and immutable full thermal load as well as the free state.
-Force-only advancement, finite force jumps and existing state/material
-pullbacks explicitly refuse this lane; they cannot omit support terms while
-claiming a valid trajectory or gradient. Displacement impulses, changing
-restraint axes/topology, support-control adjoints, adaptive event discovery,
-temporal/continuum error certification and measured validation are not supplied.
+Force-only advancement, finite force jumps, reduced-only state adjoints and
+existing material pullbacks explicitly refuse this lane; they cannot omit
+support terms while claiming a valid trajectory or gradient. Displacement
+impulses, changing restraint axes/topology, material-design pullbacks, adaptive
+event discovery, temporal/continuum error certification and measured validation
+are not supplied.
 Prescribed motion requires a physically resolved time-step ladder.
 
 `loads3::history::dynamics` connects typed `SupportMotion3` displacement
@@ -458,6 +459,43 @@ reaction checks, and G3/G4 fork, malformed-input and cancellation checks.
 `tests/transient_support_history3.rs` covers rigid translation with damping,
 agreement with explicit core endpoints, physical frame time beyond a clamped
 table, and transactional sampling, binding and cancellation refusals.
+
+### Prescribed-support motion adjoints
+
+`loads3::transient::adjoint::support` supplies a separate full-state transpose
+companion through `prescribed_adjoint`. `NodalMotionCotangent3` includes q/v/a
+on every node, so direct objective dependence on constrained motion is retained.
+`pullback_step` returns previous full-state cotangents, endpoint free-force
+cotangents, and absolute support-displacement control cotangents in sorted
+`fixed_dofs()` order. An omitted primal fixed row is still a zero displacement
+control; varying it requires explicitly adding that row at the endpoint.
+`pullback_initialization` reverses the actual initial coupled mass solve and
+returns initial full q/v and constrained-a derivatives. Free initial a was
+solved and its unused input cotangent is exactly zero.
+
+The reduced solve reuses the original sparse transpose owner. A bounded
+canonical element sweep supplies actual `M_fc^T lambda` and `K_fc^T lambda`
+without assuming bitwise matrix symmetry. For `b=h²/4`, `d=h/2`, the support
+endpoint seeds are `q_bar-K_fc^T lambda`,
+`v_bar-(eta M_fc^T+zeta K_fc^T)lambda`, and `a_bar-M_fc^T lambda`.
+The pullback then reverses the original prescribed Newmark recurrence, including
+the previous support acceleration. Fully prescribed meshes require no sparse
+solve but retain the kinematic transpose and direct objective seeds.
+
+Full-DOF and element caps precede scratch allocation; independent sparse
+transpose/solve limits remain explicit. Failed or cancelled pullbacks publish
+no partial gradient and leave both the companion and primal run reusable. These
+are derivatives of fixed-step discrete motion equations, not of PCG iterations,
+acceptance, floating-point rounding, moving constraint axes, impulses, or step
+times. Direct stress/reaction/work/energy-observation and material derivatives
+are not supplied by this motion pullback. Prescribed derivatives retain the
+forward recurrence's inverse-squared-step conditioning.
+
+`tests/transient_support_adjoint3.rs` checks the analytical one-free-DOF
+mass/stiffness/both-Rayleigh transpose, every initial/force/support control
+group through three native steps against centered differences with full nodal
+objectives, the fully prescribed kinematic limit, fixed-index ordering and
+malformed-input, budget and cancellation refusals.
 
 ## Public types and semantics
 
