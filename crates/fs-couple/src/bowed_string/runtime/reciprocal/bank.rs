@@ -116,6 +116,7 @@ pub struct MaterialStringBankSource {
     gas: GasState,
     options: StringBankOptions,
     body_connections: Vec<ModalConnection>,
+    material_bridge_interfaces: Vec<interfaces::MaterialBridgeInterface>,
     rotational_body_connections: Vec<torsion::StringBodyRotationConnection>,
     fluid_loading: Option<fluid::StringBankFluidLoading>,
     geometric_stretching: Option<nonlinear::bank::StringBankStretching>,
@@ -247,7 +248,7 @@ impl ReciprocalStringBank {
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, prepared_linear: None, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None }, cards, system })
+        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, prepared_linear: None, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None }, cards, system })
     }
 
     /// Select bounded cold exact propagation before playback or before adding
@@ -516,6 +517,10 @@ pub mod plate;
 pub mod chart;
 /// Curved shear-deformable material body in the shared reciprocal mechanics.
 pub mod shell;
+
+/// Original material-interface laws at actual string/body bridge footprints.
+pub mod interfaces;
+pub use interfaces::MaterialBridgeInterface;
 
 /// Several source-bound bow contacts without resetting the shared mechanics.
 pub mod multiple;

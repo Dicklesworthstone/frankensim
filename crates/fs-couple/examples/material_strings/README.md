@@ -43,6 +43,50 @@ Use the same performance geometry/tension to compare materials without hidden
 pitch normalization. The original packs, normalization records, rights and
 physical-source identities remain available throughout rendering.
 
+### Material-derived string/body joints
+
+Every input version can replace the numeric bridge stiffness and damping at
+the end of a `string` record with an ordered interface source:
+
+```text
+string wire.fsmatpk 0.5 0.0003 20 4 3 0.8 interface bridge.fsintpk 0.0001 normal_stiffness normal_viscosity
+```
+
+The fields after `interface` are pack path, physical area in m², stiffness-per-area
+property and resistance-per-area property. The same `ResolvedLinearInterface`
+owner used by material shell connections integrates these claims once into N/m
+and N·s/m. The performance's `state` supplies the frozen T and angular frequency;
+explicit source applicability must cover the retained physical modes. The
+same admission also checks the coupled stiffness bound, including later gas
+and rotational-joint changes. A cavity neck requires coverage down to zero
+because its isolated inertia receives its restoring force through body links.
+These conservative linear bounds do not qualify a nonlinear trajectory's full spectrum. The
+original bilateral string/body solver supplies equal and opposite forces,
+storage, loss and body pressure. Changing either interface property in the data
+therefore changes reciprocal loading and the sound without editing a solver.
+
+The ordered surfaces must match the **outermost string layer** and the actual
+body material under its original physical force footprint. Uniform plates,
+regional plates, shells and shell assemblies use this same check. A scalar
+interface spanning different resolved materials refuses; it does not choose a
+material from a name, a modal weight, a tied node or the interface's expectation.
+Bulk substitution also requires a compatible interface source for that pair.
+This is a fixed-state linear bilateral joint, not a model of a shaped bridge,
+separation, slip, adhesive failure or changing contact area.
+
+After building the wire and body packs above, the synthetic complete example is:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/bridge-manifest.tsv" --out "$demo/bridge.fsintpk"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/source-bridge.material-strings" "$demo/source-bridge.wav"
+```
+
+`bridge.tsv` carries the two source properties and exact ordered surfaces. The
+example combines that joint with a gas-derived physical cavity neck. Its
+coefficients are deliberately synthetic and carry no measured-instrument claim.
+
 ## Input records
 
 The fixed-order header uses ASCII whitespace. File paths are relative to the

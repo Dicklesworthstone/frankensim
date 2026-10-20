@@ -121,6 +121,10 @@ fn repeated_reference_footprints_preserve_both_original_material_paths_exactly()
             let mut a = build(cx, gate, b.clone(), None, tensor);
             let mut b = build(cx, gate, b, Some(PlateBridgeFootprints { weights, max_projection_terms: 100_000 }), tensor);
             assert!(a.source().material_chart_bridges().is_none());
+            for source in [a.source(), b.source()] {
+                assert_eq!(source.bridge_surface_materials(0).unwrap(),
+                    [material(0.0).material().clone(), material(1.0).material().clone()]);
+            }
             let zero = vec![0.0; a.system().mode_count()];
             for _ in 0..128 { assert_eq!(a.step(&zero, drive()).unwrap(), b.step(&zero, drive()).unwrap()); }
         }
@@ -138,6 +142,8 @@ fn spatial_connections_full_damping_and_radiation_share_the_original_reduced_bas
             b, input.clone(), viscosity, limits(), Some(cavity()), law(), options(), gate).unwrap();
         assert_eq!(bank.system().components().len(), 4); // two strings, ONE body, ONE neck
         assert_eq!(bank.source().material_chart_bridges(), Some(&input));
+        assert_eq!(bank.source().bridge_surface_materials(1).unwrap(),
+            [material(0.0).material().clone(), material(1.0).material().clone()]);
         for (i, expected) in ports.iter().enumerate() {
             assert_eq!(&bank.source().strings()[i].connections[0].body.shapes, expected);
         }

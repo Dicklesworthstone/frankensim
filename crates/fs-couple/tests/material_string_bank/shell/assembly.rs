@@ -201,6 +201,8 @@ fn build(
 fn g3_tied_material_parts_feed_one_string_body_cavity_and_pressure_basis() {
     with_cx(|cx, gate| {
         let mut bank = build(cx, gate, body(gate));
+        assert_eq!(bank.source().bridge_surface_materials(1).unwrap(),
+            [material(15_600.0, 100e9).material().clone(), shell_material(700.0, 1000.0).material().clone()]);
         let image = bank.source().material_shell_assembly_image().unwrap();
         assert_eq!(image.source().components.len(), 2);
         assert_eq!(image.tie_receipt().slave_dofs, 24);

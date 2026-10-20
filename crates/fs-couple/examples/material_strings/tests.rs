@@ -162,6 +162,9 @@ mod nonlinear;
 #[path = "tests/bow_interfaces.rs"]
 mod bow_interfaces;
 
+#[path = "tests/bridge_interfaces.rs"]
+mod bridge_interfaces;
+
 #[path = "tests/thermochemical.rs"]
 mod thermochemical_gas;
 

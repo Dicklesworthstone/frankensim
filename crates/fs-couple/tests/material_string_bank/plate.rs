@@ -210,3 +210,6 @@ fn shared_cavity_gas_mismatch_and_total_setup_overflow_refuse() {
             source_plate(7800.0, 2), cavity(0.003, gas(101_325.0)), law(), options(0), gate).is_err());
     });
 }
+
+#[path = "plate_interfaces.rs"]
+mod interfaces;

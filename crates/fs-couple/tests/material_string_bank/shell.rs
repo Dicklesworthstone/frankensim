@@ -85,6 +85,8 @@ fn build_shell(cx:&Cx<'_>,gate:&CancelGate,rho:f64,rise:f64,angle:f64) -> Recipr
 fn g3_curvature_density_and_global_grain_change_the_shared_physical_body() {
     with_cx(|cx,gate| {
         let mut curved=build_shell(cx,gate,700.0,0.02,0.17);
+        assert_eq!(curved.source().bridge_surface_materials(1).unwrap(),
+            [material(15_600.0,100e9).material().clone(), shell_material(700.0,1000.0).material().clone()]);
         let dense=build_shell(cx,gate,1400.0,0.02,0.17);
         let flat=build_shell(cx,gate,700.0,0.0,0.17);
         let cross=build_shell(cx,gate,700.0,0.02,0.91);

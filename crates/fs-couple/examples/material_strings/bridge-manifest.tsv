@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	synthetic-material-string-bridge-interface
+redistribution	permitted	Synthetic integration coefficients; not measured string or bridge joint data
+citation	Manufactured ordered string and body interface fixture
+license	CC0-1.0
+source	fixture	bridge.tsv	interface-tsv-v1

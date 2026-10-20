@@ -185,6 +185,12 @@ impl FrictionModalSystem {
     /// Accepted components, with their existing basis, budgets and state.
     #[must_use]
     pub fn components(&self) -> &[ModalAcousticTimeModel] { self.network.components() }
+    /// Original complete linear-network stiffness bound, including all springs.
+    /// Independent friction/nonlinear trajectories need their own refinement.
+    #[must_use]
+    pub const fn linear_frequency_upper_bound_rad_s(&self) -> f64 {
+        self.network.linear_frequency_upper_bound_rad_s()
+    }
     /// Flattened external-force dimension, component then mode order.
     #[must_use]
     pub fn mode_count(&self) -> usize { self.network.mode_count() }

@@ -1,0 +1,13 @@
+frankensim.matdb-source.v1
+surface_a	source-pack:synthetic-material-string-wire	declared solid model	frozen source-pack realization	0	synthetic outer string surface
+surface_b	source-pack:synthetic-material-string-body	declared solid model	frozen source-pack realization	0	synthetic body attachment surface
+context	bonded	synthetic joint layer	declared frozen state	fixed synthetic history
+observation	synthetic	Synthetic string and body bilateral joint	Manufactured stiffness and resistance per area	Not measured bridge or instrument interface data
+scalar	stiffness	synthetic	normal_stiffness	30000000	Pa/m	constant
+uncertainty	stiffness	unstated	-	-	-	-
+validity	stiffness	T	280	320	K
+validity	stiffness	omega	0	200000	rad/s
+scalar	viscosity	synthetic	normal_viscosity	1000	Pa*s/m	constant
+uncertainty	viscosity	unstated	-	-	-	-
+validity	viscosity	T	280	320	K
+validity	viscosity	omega	0	200000	rad/s

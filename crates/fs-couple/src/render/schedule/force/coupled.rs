@@ -189,6 +189,7 @@ pub struct CoupledModalSystem {
     columns: Vec<Vec<f64>>,
     config: ModalCouplingConfig,
     dt: f64,
+    linear_frequency_upper_bound_rad_s: f64,
     old_q: Vec<f64>,
     free_delta: Vec<f64>,
     forces: Vec<f64>,
@@ -323,7 +324,8 @@ impl CoupledModalSystem {
             upper_squared = finite(upper_squared + link.stiffness_n_m * squared_norm)?;
         }
         let guard = core::f64::consts::PI / dt * config.nyquist_guard_fraction;
-        if upper_squared.sqrt() > guard { return Err(invalid("coupled stiffness bound exceeds the Nyquist guard")); }
+        let linear_frequency_upper_bound_rad_s = upper_squared.sqrt();
+        if linear_frequency_upper_bound_rad_s > guard { return Err(invalid("coupled stiffness bound exceeds the Nyquist guard")); }
         let exact = if let Some(budget) = prepared {
             Some(exact::ExactNetwork::new_prepared(
                 &models, &columns, &connections, count, dt, budget, gate,
@@ -369,7 +371,8 @@ impl CoupledModalSystem {
         }
         let system = Self {
             models, candidates, exact, prepared_budget: prepared, offsets, connections, columns,
-            config, dt, old_q: vec![0.0; count], free_delta: vec![0.0; count],
+            config, dt, linear_frequency_upper_bound_rad_s,
+            old_q: vec![0.0; count], free_delta: vec![0.0; count],
             forces: vec![0.0; count],
             reactions: vec![0.0; links],
             staged_frame: frame.clone(),
@@ -404,6 +407,14 @@ impl CoupledModalSystem {
     /// Explicit dense preparation choice, retained through owner conversions.
     #[must_use]
     pub const fn prepared_budget(&self) -> Option<PreparedModalBudget> { self.prepared_budget }
+
+    /// The original admission bound on this complete linear stiffness operator.
+    /// Includes every positive bridge/support spring in the actual mass basis;
+    /// it is conservative, not an eigenvalue interval or nonlinear spectrum.
+    #[must_use]
+    pub const fn linear_frequency_upper_bound_rad_s(&self) -> f64 {
+        self.linear_frequency_upper_bound_rad_s
+    }
 
     /// Accepted components in original order; callers cannot mutate their basis.
     #[must_use]

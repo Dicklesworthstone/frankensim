@@ -51,6 +51,7 @@ pub struct Spec {
     pub temperature: f64, pub omega: f64, pub gas: GasState, pub body: Body, pub strings: Vec<Wire>,
     /// Retain original thermochemical composition and pack authority with the coefficients.
     pub gas_record: GasRecord,
+    pub bridge_interfaces: bridge_interfaces::Inputs,
     pub rotational_bridges: Vec<RotationalBridge>,
     pub cylinder_gas_loading: Option<CylinderFlowResolution>,
     pub prepared_linear: Option<PreparedModalBudget>,
@@ -100,7 +101,8 @@ impl Spec {
         let mut row = r.row("strings")?; let count = row.count(8)?; row.end()?;
         if count == 0 || body.modes == 0 { return Err("nonempty material strings and body modes required".into()); }
         let mut strings = Vec::with_capacity(count);
-        for _ in 0..count {
+        let mut bridge_sources = Vec::new();
+        for string in 0..count {
             let mut row = r.row("string")?;
             let pack = row.path()?; let length = row.positive()?; let radius = row.positive()?;
             let prestress = if layered {
@@ -112,12 +114,24 @@ impl Spec {
                     _ => return Err("v2 support must be tension N or extension L0 STRAIN_LIMIT".into()),
                 }
             } else { StringPrestress::FixedTension(row.positive()?) };
+            let bending_modes = row.count(MAX_MODES)?;
+            let twist_modes = row.count(MAX_MODES)?;
+            let station_fraction = row.scalar()?;
+            let sourced = row.words.clone().next() == Some("interface");
+            let (stiffness_n_m, damping_n_s_m) = if sourced {
+                row.word()?;
+                bridge_sources.push(bridge_interfaces::Declaration {
+                    string, pack: row.path()?, area_m2: row.positive()?,
+                    stiffness_property: row.word()?.to_string(), viscosity_property: row.word()?.to_string(),
+                });
+                // Unresolved source inputs cannot reach a physics constructor;
+                // the original interface owner supplies both coefficients first.
+                (0.0, 0.0)
+            } else { (row.scalar()?, row.scalar()?) };
             let mut wire = Wire { pack, length, radius, prestress, section: WireSection::Homogeneous,
                 thermal_reference_kelvin: None,
-                polarizations: None,
-                bending_modes: row.count(MAX_MODES)?, twist_modes: row.count(MAX_MODES)?,
-                bridge: SharedPlateBridge { station_fraction: row.scalar()?, stiffness_n_m: row.scalar()?,
-                    damping_n_s_m: row.scalar()?, rest_extension_m: 0.0 } };
+                polarizations: None, bending_modes, twist_modes,
+                bridge: SharedPlateBridge { station_fraction, stiffness_n_m, damping_n_s_m, rest_extension_m: 0.0 } };
             row.end()?;
             if layered { wire.section = r.section(radius)?; }
             if format >= 3 {
@@ -132,7 +146,7 @@ impl Spec {
             }
             if wire.bending_modes == 0 || !(0.0 < wire.bridge.station_fraction && wire.bridge.station_fraction < 1.0)
                 || wire.bridge.stiffness_n_m < 0.0 || wire.bridge.damping_n_s_m < 0.0
-                || !(wire.bridge.stiffness_n_m > 0.0 || wire.bridge.damping_n_s_m > 0.0) {
+                || (!sourced && !(wire.bridge.stiffness_n_m > 0.0 || wire.bridge.damping_n_s_m > 0.0)) {
                 return Err("string needs transverse modes and a physical interior bridge connection".into());
             }
             strings.push(wire);
@@ -390,7 +404,8 @@ impl Spec {
         }
         friction.validate_tracks(&schedule)?;
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
-            gas, gas_record, body, strings, rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, cavity, friction, bow_ribbon, forces, schedule };
+            gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
+            rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, cavity, friction, bow_ribbon, forces, schedule };
         spec.network_dimensions(false)?;
         Ok(spec)
     }

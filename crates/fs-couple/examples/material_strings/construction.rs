@@ -32,9 +32,16 @@ impl input::Wire {
                 let specimen = if let Some((reference, length, strain_limit)) = thermal {
                     // Reuse the exact card/current state; integrate the selected
                     // alpha(T) path across every knot, never endpoint-alpha*dT.
-                    let point = core.query_point().clone().with("T", reference)?;
+                    let mut current = QueryPoint::new();
+                    for (axis, value) in core.query_point() {
+                        current = match core.axis_quantities().get(axis) {
+                            Some(quantity) => current.with_quantity(axis.clone(), *quantity, *value)?,
+                            None => current.with(axis.clone(), *value)?,
+                        };
+                    }
+                    let point = current.clone().with("T", reference)?;
                     let expansion = integrate_isotropic_thermal_expansion(&catalog[&self.pack].card,
-                        &point, core.query_point(), Pick::SingleClaimOnly)?;
+                        &point, &current, Pick::SingleClaimOnly)?;
                     with_uniform_circular_thermal_extension(template(self),
                         StringGeometryConstraint::FixedRadius(self.radius), &core, &expansion,
                         length, strain_limit)?

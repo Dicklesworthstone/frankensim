@@ -10,6 +10,8 @@ mod body;
 mod stops;
 #[path = "material_strings/bow_interfaces.rs"]
 mod bow_interfaces;
+#[path = "material_strings/bridge_interfaces.rs"]
+mod bridge_interfaces;
 // Native entry points share one bounded source loader and phase policy.
 #[path = "../src/bin/music_render/thermochemical.rs"]
 mod thermochemical;
@@ -118,7 +120,7 @@ impl input::Spec {
         loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
         self.compile_with_profiles(cx,gate,profile,None,loader)
     }
-    fn compile_with_profiles(self,cx:&Cx<'_>,gate:&CancelGate,profile:Option<body::Profile>,
+    fn compile_with_profiles(mut self,cx:&Cx<'_>,gate:&CancelGate,profile:Option<body::Profile>,
         stop_profile:Option<stops::Profile>,
         mut loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
         poll(gate)?;
@@ -137,9 +139,12 @@ impl input::Spec {
             let body = profile.as_ref().ok_or("rotational bridges require --body-profile with distinct physical bridge footprints")?;
             baselines.push(body.bridge_separation_m(&self, joint.positive_bridge_string, joint.negative_bridge_string)?);
         }
+        let bridge_interface_bytes = self.bridge_interfaces.pack_bytes()?;
         let interface_bytes = profile.as_ref().map(body::Profile::interface_pack_bytes)
             .transpose()?.unwrap_or(0).checked_add(self.friction.pack_bytes()?)
+            .and_then(|bytes| bytes.checked_add(bridge_interface_bytes))
             .ok_or("combined interface pack byte count overflow")?;
+        self.bridge_interfaces.apply(self.temperature, self.omega, &mut self.strings)?;
         let mut remaining = input::MAX_TOTAL_PACK_BYTES.checked_sub(interface_bytes)
             .ok_or("combined material and interface pack byte budget exceeded")?;
         // Keep the legacy bulk callback, with one combined cold source budget.
@@ -185,6 +190,9 @@ impl input::Spec {
                     self.bow_law(0)?.clone(),settings.clone(),gate)?,
                 None=>ReciprocalStringBank::from_material_plate(cx,sources,self.gas,body,self.bow_law(0)?.clone(),settings.clone(),gate)?,
             }
+        };
+        let bank = if self.bridge_interfaces.bindings().is_empty() { bank } else {
+            bank.with_material_bridge_interfaces(self.bridge_interfaces.bindings().to_vec(), gate)?
         };
         // Select the active prepared owner before either attachment can enlarge
         // its connected linear block. No record means the ordinary owner.
@@ -302,6 +310,11 @@ fn main()->Result<()> {
         remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
         Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
     })?;
+    spec.bridge_interfaces.load(spec.temperature, spec.omega, &gate, |name| {
+        let bytes=read_bounded(&parent.join(name),input::MAX_PACK_BYTES.min(remaining))?;
+        remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
+        Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
+    })?;
     let mut ready=pool.scope(|arena| {
         let cx=Cx::new(&gate,arena,fs_exec::StreamKey {seed:0,kernel_id:0,tile:0,iteration:0},
             fs_exec::Budget::INFINITE,fs_exec::ExecMode::Deterministic);
@@ -316,6 +329,9 @@ fn main()->Result<()> {
             source.pack.content_hash(),source.pack.source_artifact());
     }
     eprintln!("bow_friction={:?}",ready.spec.friction);
+    if !ready.spec.bridge_interfaces.bindings().is_empty() {
+        eprintln!("bridge_interfaces={:?}",ready.spec.bridge_interfaces);
+    }
     if let Some(ribbon)=ready.performance.bank().source().ribbon() { eprintln!("bow_ribbon={ribbon:?}"); }
     if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
     if let Some(profile)=&ready.stop_profile { eprintln!("stop_profile_bytes={}; stops={}",
