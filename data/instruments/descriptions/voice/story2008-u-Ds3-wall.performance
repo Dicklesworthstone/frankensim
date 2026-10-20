@@ -27,8 +27,10 @@
 # TERMINATION: flanged (the mouth modelled as a piston in an infinite baffle, matching the receiver below).
 # WALL: AUTHORED ESTIMATE, NOT CITED: surface density 15 kg/m^2, stiffness 8.5e6 Pa/m, resistance 1.6e3 Pa s/m, the
 #   single-pin tissue wall the in-repo tract gates use (tract.rs tract_tests). The measured wall impedance is UNKNOWN
-#   here (it would come from direct vocal-tract wall-impedance measurements). This variant exists to show how much the
-#   wall alone moves formant widths and to let a vowel whose rigid-wall line does not converge be rendered at all.
+#   here (it would come from direct vocal-tract wall-impedance measurements). This variant shows how much the wall
+#   alone moves formant widths.
+#   REFUSES at the 96 kHz clock all the same: the mouth-flow ladder reaches 65536 taps (0.68 s) at tail energy 6.07e-8
+#   against 1e-10. The wall does not cure it; the -r1 variant (48 kHz clock, 1.37 s of taps) is the /u/ that renders.
 # MICROPHONE: 0.30 m from the mouth at 45 degrees off axis (x = z = 0.30 sin 45 deg), the geometry of the paper's
 #   recordings (AKG CK92 at 30 cm, 45 degrees off axis). Infinite baffle: no head diffraction. 16 rings x 64 points,
 #   8 kHz resolved band (quadrature admission: 2 pi f cell / c <= pi/4).
