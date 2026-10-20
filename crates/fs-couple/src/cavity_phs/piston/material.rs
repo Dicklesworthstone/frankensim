@@ -93,6 +93,42 @@ impl MaterialGasPiston {
         Ok(candidate)
     }
 
+    /// Preserve source-resolved rigid inertia while reaction products exchange
+    /// heat with a finite material body and drive the original pressure solve.
+    /// The thermal store may be separate from this translating rigid specimen.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reactive_thermal_candidate<S, E>(
+        &self, reaction: &super::reactive::GasReaction, input: PistonInput,
+        thermal_body: UniformEnthalpyStepInput<'_>, kinetics: super::reactive::GasReactionSolve,
+        controls: PistonSolve, exchange: HeatExchangeSolve,
+        resolve: impl FnMut(&ResolvedThermochemicalGasState, EquilibriumPhaseState)
+            -> Result<ConductanceSample<S>, E>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<super::reactive::thermal::ReactiveThermalPistonCandidate<S, Self>,
+        super::reactive::thermal::ReactiveThermalPistonError<E>>
+    {
+        let candidate = self.piston.reactive_thermal_candidate(reaction, input, thermal_body,
+            kinetics, controls, exchange, resolve, &mut cancelled)?
+            .map_piston(|piston| Self { body: self.body.clone(), piston });
+        if cancelled() { return Err(super::reactive::thermal::ReactiveThermalPistonError::Cancelled); }
+        Ok(candidate)
+    }
+
+    /// Source-bound wall conductivity and enthalpy coupled to chemical gas
+    /// evolution. No second gas transport snapshot or piston mass is supplied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reactive_thermal_layers_candidate(
+        &self, reaction: &super::reactive::GasReaction, input: PistonInput,
+        thermal_body: UniformEnthalpyStepInput<'_>, kinetics: super::reactive::GasReactionSolve,
+        controls: PistonSolve, exchange: HeatExchangeSolve,
+        layers: MaterialConductionLayers<'_>, cancelled: impl FnMut() -> bool,
+    ) -> Result<super::reactive::thermal::ReactiveThermalPistonCandidate<ResolvedMaterialStatePoint, Self>,
+        super::reactive::thermal::ReactiveThermalPistonError<LayerConductionError>>
+    {
+        self.reactive_thermal_candidate(reaction, input, thermal_body, kinetics, controls, exchange,
+            |gas, thermal| layers.resolve(gas, thermal), cancelled)
+    }
+
     /// Use the same conservative finite-reservoir exchange with the original
     /// source-resolved rigid-body inertia and retained material regions.
     #[allow(clippy::too_many_arguments)]

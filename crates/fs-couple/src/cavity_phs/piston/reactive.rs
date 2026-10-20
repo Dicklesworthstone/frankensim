@@ -22,6 +22,9 @@
 //! Rate activities and units are those of `fs_thermochem::equilibrium`, not
 //! concentration-based rate constants copied without their basis conversion.
 
+/// Chemical composition coupled to finite material-wall heat and piston motion.
+pub mod thermal;
+
 use super::{GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_material::MaterialError;
 use fs_material::thermochemical_gas::ThermochemicalGasModel;
@@ -487,6 +490,48 @@ impl ReactivePistonCandidate {
     }
 }
 impl GasPiston {
+    // The chemical stage has no separate physical clock or port tick. Retain
+    // its entropy and actual energy roundoff in the enclosing accepted account.
+    fn record_reactive_account(
+        &self,
+        next: &mut Self,
+        input: PistonInput,
+        piston: &PistonStep,
+        reaction: &GasReactionStep,
+        gas_energy_j: f64,
+        tolerance_j: f64,
+    ) -> Result<(), GasReactionError> {
+        let storage = gas_energy_j + piston.kinetic_energy_change_j;
+        let entropy = piston.gas.entropy_change_j_k + reaction.entropy_change_j_k;
+        if !storage.is_finite() || !entropy.is_finite() {
+            return Err(invalid("reactive gas storage or entropy account is unrepresentable"));
+        }
+        next.ports = self.ports.clone();
+        next.ports.accept(
+            crate::port_adoption::StepAccount {
+                tick: next.ports.next_tick(),
+                duration_s: input.duration_s,
+                storage_change_j: Some(storage),
+                loss_j: Some(0.0),
+                included_work_j: 0.0,
+                entropy_change_j_k: entropy,
+                tolerance_j: Some(tolerance_j),
+                unavailable: None,
+            },
+            [
+                crate::port_adoption::PortTransfer::work(
+                    piston.external_force_work_j - piston.exterior_pressure_work_j,
+                    true,
+                ),
+                crate::port_adoption::PortTransfer::heat(
+                    input.heat_j,
+                    piston.midpoint.state().temperature,
+                ),
+            ],
+        );
+        Ok(())
+    }
+
     /// React once, then solve the original simultaneous gas pressure/work and
     /// wall momentum equations. Every mechanical trial sees the SAME reacted
     /// gas; Newton iterations never burn another fraction of the inventory.
@@ -516,31 +561,8 @@ impl GasPiston {
                 "reactive gas and original mechanical work do not close whole-interval energy",
             ));
         }
-        // The inner candidate's port tick is replaced by one whole-interval
-        // account, including chemical entropy and measured chemical roundoff.
-        next.ports = self.ports.clone();
-        next.ports.accept(
-            crate::port_adoption::StepAccount {
-                tick: next.ports.next_tick(),
-                duration_s: input.duration_s,
-                storage_change_j: Some(gas_energy + piston.kinetic_energy_change_j),
-                loss_j: Some(0.0),
-                included_work_j: 0.0,
-                entropy_change_j_k: piston.gas.entropy_change_j_k + reaction.entropy_change_j_k,
-                tolerance_j: Some(controls.energy_tolerance_j),
-                unavailable: None,
-            },
-            [
-                crate::port_adoption::PortTransfer::work(
-                    piston.external_force_work_j - piston.exterior_pressure_work_j,
-                    true,
-                ),
-                crate::port_adoption::PortTransfer::heat(
-                    input.heat_j,
-                    piston.midpoint.state().temperature,
-                ),
-            ],
-        );
+        self.record_reactive_account(&mut next, input, &piston, &reaction,
+            gas_energy, controls.energy_tolerance_j)?;
         poll(&mut cancelled)?;
         Ok(ReactivePistonCandidate {
             piston: next,
