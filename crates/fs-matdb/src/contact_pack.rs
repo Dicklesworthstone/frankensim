@@ -708,4 +708,63 @@ mod contact_pack_tests {
             "{{\"suite\":\"fs-matdb\",\"case\":\"cp-007-identification-not-name\",\"verdict\":\"pass\"}}"
         );
     }
+
+    fn rust_sources(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn cp_008_named_fixture_path_is_not_reachable_from_runtime_code() {
+        // "Only tests" made checkable. No manifest may enable fixture-packs
+        // outside [dev-dependencies]; fs-matdb itself may declare it under
+        // [features]. No crate's src/ may name the fixture path.
+        let crates = repo_root().join("crates");
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(&crates).expect("crates").flatten() {
+            let Ok(manifest) = std::fs::read_to_string(entry.path().join("Cargo.toml")) else {
+                continue;
+            };
+            let own = entry.file_name() == "fs-matdb";
+            let mut section = String::new();
+            for line in manifest.lines().map(str::trim) {
+                if line.starts_with('[') {
+                    section = line.to_owned();
+                } else if line.contains("fixture-packs") && !line.starts_with('#') {
+                    assert!(
+                        section == "[dev-dependencies]" || (own && section == "[features]"),
+                        "{} enables fixture-packs under {section}",
+                        entry.path().display()
+                    );
+                }
+            }
+            if !own {
+                let mut sources = Vec::new();
+                rust_sources(&entry.path().join("src"), &mut sources);
+                for source in &sources {
+                    let text = std::fs::read_to_string(source).unwrap_or_default();
+                    assert!(
+                        !text.contains("load_named_fixture")
+                            && !text.contains("parse_named_fixture"),
+                        "{} names the fixture path",
+                        source.display()
+                    );
+                }
+            }
+            checked += 1;
+        }
+        println!(
+            "{{\"suite\":\"fs-matdb\",\"case\":\"cp-008-fixture-path-unreachable\",\"crates_checked\":{checked},\"verdict\":\"pass\"}}"
+        );
+        assert!(checked > 100, "the scan must see the workspace ({checked})");
+    }
 }
