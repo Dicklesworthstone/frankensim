@@ -28,11 +28,13 @@ use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{QuantitySpec, Temperature};
 
 use super::interfaces::{self, InterfaceSource, ThermalInterfaceState};
+use super::radiation::{FaceReport, Radiation};
+use fs_lbm::conjugate::boundary_exchange::PreparedBoundaryExchange;
 
 pub(super) struct Source {
     pub pack: NormalizedMaterialCardPack,
     point: QueryPoint,
-    temperature_axis: String,
+    pub(super) temperature_axis: String,
     temperature_quantity: Option<QuantitySpec>,
     pub conducting: bool,
     conductivity: ScalarPropertyRequirement,
@@ -85,7 +87,7 @@ impl Source {
         Ok(Self { pack, point, temperature_axis, temperature_quantity, conducting, conductivity })
     }
 
-    fn point_at(&self, temperature: f64) -> Result<QueryPoint, ChtError> {
+    pub(super) fn point_at(&self, temperature: f64) -> Result<QueryPoint, ChtError> {
         if !temperature.is_finite() || temperature <= 0.0 {
             return Err(invalid("material.temperature", "temperature must be finite positive kelvin"));
         }
@@ -131,6 +133,7 @@ pub(super) struct Problem {
     pub max_thermal_passes: usize,
     pub conductivity_tolerance: f64,
     pub fluid: Option<Fluid>,
+    pub radiation: Option<Radiation>,
 }
 
 pub(super) struct ResultField {
@@ -141,6 +144,7 @@ pub(super) struct ResultField {
     pub thermal_contact_relative_defect: f64,
     pub thermal_solves: usize,
     pub conductivity_relative_defect: f64,
+    pub radiation: Vec<FaceReport>,
 }
 
 impl Problem {
@@ -190,6 +194,9 @@ impl Problem {
         let mut thermal_solves = 0usize;
         let mut thermal_interfaces = Vec::new();
         let mut thermal_contact_relative_defect = 0.0;
+        let mut radiation = Vec::new();
+        let mut surface_temperatures = self.radiation.as_ref()
+            .map_or_else(Vec::new, Radiation::initial_temperatures);
         // Electrical and thermal laws share physical faces/state coordinates,
         // but neither response is inferred from the other. Each owner retains
         // the exact final source data and its own convergence defect.
@@ -201,10 +208,12 @@ impl Problem {
             },
             |temperature| interfaces::resolve(&self.electrical_interfaces, temperature, gate),
             |heated, temperature| {
-                let (energy, joints, defect) = self.solve_heat(
-                    heated, temperature, &solids, fluid, flow, storage, &mut thermal_solves, gate,
+                let (energy, joints, defect, surfaces) = self.solve_heat(
+                    heated, temperature, &solids, fluid, flow, storage, &mut thermal_solves,
+                    &mut surface_temperatures, gate,
                 )?;
                 thermal_interfaces = joints;
+                radiation = surfaces;
                 thermal_contact_relative_defect = defect;
                 Ok(energy)
             },
@@ -219,36 +228,47 @@ impl Problem {
         }
         poll(gate)?;
         Ok(ResultField { coupled, sources, interfaces, thermal_interfaces,
-            thermal_contact_relative_defect, thermal_solves, conductivity_relative_defect })
+            thermal_contact_relative_defect, thermal_solves, conductivity_relative_defect, radiation })
     }
 
     #[allow(clippy::too_many_arguments)] // existing physical owners and the accumulated work count
     fn solve_heat(
         &self, setup: &ThermalSetup, start: &[f64], solids: &[SolidMaterial],
         fluid: &FluidProperties, flow: &FlowField, storage: Option<&transient::Storage<'_>>,
-        solves: &mut usize, gate: &CancelGate,
-    ) -> Result<(EnergySolution, Vec<ThermalInterfaceState>, f64), ChtError> {
+        solves: &mut usize, surface_temperatures: &mut [f64], gate: &CancelGate,
+    ) -> Result<(EnergySolution, Vec<ThermalInterfaceState>, f64, Vec<FaceReport>), ChtError> {
         let mut previous = start.to_vec();
         let mut states = self.states(&previous, gate)?;
         let mut configured = setup.clone();
         let mut defect = f64::INFINITY;
-        for _ in 0..self.max_thermal_passes {
+        let mut radiation_defect = 0.0;
+        let passes = self.radiation.as_ref().map_or(self.max_thermal_passes,
+            |r| self.max_thermal_passes.min(r.config.max_iterations));
+        for _ in 0..passes {
             poll(gate)?;
             let field: Vec<[f64; 3]> = states.iter().map(|state| [state.k; 3]).collect();
             let joints = interfaces::resolve_thermal(&self.thermal_interfaces, &previous, gate)?;
             configured.face_contacts.clone_from(&setup.face_contacts);
             configured.face_contacts.extend(joints.iter().map(ThermalInterfaceState::face));
+            let boundary = self.radiation.as_ref().map(|r|
+                r.prepare(self, &configured, &field, surface_temperatures, gate)).transpose()?;
+            let with_boundary = boundary.as_ref().map_or(&configured, PreparedBoundaryExchange::setup);
             let capacity = storage.map(|s| s.capacities(&previous, gate)).transpose()?;
             let solution = match (storage, &capacity) {
                 (Some(s), Some(capacity)) => self.energy.step_with_conductivity(
-                    &self.domain, fluid, solids, flow, &configured, &field,
+                    &self.domain, fluid, solids, flow, with_boundary, &field,
                     capacity, s.previous, s.dt, gate,
                 )?.0,
                 _ => self.energy.solve_with_conductivity(
-                    &self.domain, fluid, solids, flow, &configured, &field, gate,
+                    &self.domain, fluid, solids, flow, with_boundary, &field, gate,
                 )?,
             };
             *solves += 1;
+            let (radiation, surface_defect) = match (&self.radiation, &boundary) {
+                (Some(r), Some(b)) => r.audit(self, b, &solution, surface_temperatures, gate)?,
+                _ => (Vec::new(), 0.0),
+            };
+            radiation_defect = surface_defect;
             // Re-query every thermal response at the proposed endpoint. Small
             // temperature change cannot mask a large change in joint resistance.
             let next = self.states(&solution.temperature, gate)?;
@@ -264,15 +284,29 @@ impl Problem {
                 .map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
             if conductivity_defect <= self.conductivity_tolerance
                 && contact_defect <= self.thermal_contact_tolerance
-                && change <= self.coupling.temperature_tolerance_k && storage_consistent
+                && change <= self.coupling.temperature_tolerance_k && storage_consistent && radiation_defect <= 1.0
             {
-                return Ok((solution, next_joints, contact_defect));
+                for (temperature, face) in surface_temperatures.iter_mut().zip(&radiation) {
+                    *temperature = face.surface_temperature_k;
+                }
+                return Ok((solution, next_joints, contact_defect, radiation));
+            }
+            if let Some(r) = &self.radiation {
+                for (temperature, face) in surface_temperatures.iter_mut().zip(&radiation) {
+                    *temperature = r.config.relaxation.mul_add(face.surface_temperature_k - *temperature, *temperature);
+                }
             }
             previous = solution.temperature;
             states = next;
         }
+        if radiation_defect > 1.0 {
+            return Err(ChtError::SolverNotConverged {
+                system: "source-resolved surface radiation", iterations: passes,
+                relative_residual: radiation_defect, tolerance: 1.0,
+            });
+        }
         Err(ChtError::SolverNotConverged {
-            system: "source-resolved thermal conductivity/contact/storage", iterations: self.max_thermal_passes,
+            system: "source-resolved thermal conductivity/contact/storage", iterations: passes,
             relative_residual: defect, tolerance: self.conductivity_tolerance.min(self.thermal_contact_tolerance),
         })
     }

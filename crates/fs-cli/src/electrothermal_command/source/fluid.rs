@@ -185,7 +185,13 @@ mod tests {
         let mut faces = [ThermalFace::Adiabatic; 6];
         faces[0] = ThermalFace::Temperature(300.0);
         faces[1] = ThermalFace::Temperature(300.0);
+        if speed != 0.0 {
+            faces[0] = ThermalFace::Inflow { temperature: 300.0 };
+            faces[1] = ThermalFace::Outflow { backflow_temperature: 300.0 };
+        }
         Problem { domain, material_indices: indices, materials, fluid,
+            electrical_interfaces: Vec::new(), thermal_interfaces: Vec::new(),
+            thermal_contact_tolerance: 1e-10, radiation: None,
             electric: ElectricSetup { conductors: vec![], electrodes: vec![
                 Electrode { lo: [0,0,0], hi: [1,1,1], drive: ElectrodeDrive::Voltage(0.0) },
                 Electrode { lo: [2,0,0], hi: [3,1,1], drive: ElectrodeDrive::Voltage(3.0) },

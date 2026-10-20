@@ -17,7 +17,7 @@ use fs_qty::Density;
 use super::{Problem, ResultField, invalid, poll};
 use super::super::{J, array, budget, fields, integer, number, positive, quote, read, scalar, string, values};
 
-const NO_CLAIM: &str = "fixed-mass fixed-geometry single-solid-phase backward-Euler electrothermal evolution; nominal source data with bounded Cp-chart interpolation, no propagated uncertainty, phase change, thermal deformation, fluid transport or experimental qualification; temporal accuracy requires time-step refinement";
+const NO_CLAIM: &str = "fixed-mass fixed-geometry single-solid-phase backward-Euler electrothermal evolution; nominal source data with bounded Cp-chart interpolation and optional exterior gray radiation to black isothermal unit-view reservoirs, no propagated uncertainty, phase change, thermal deformation, fluid transport or experimental qualification; temporal accuracy requires time-step refinement";
 
 pub(crate) struct Request {
     dt: f64,
@@ -208,7 +208,11 @@ pub(crate) fn march(problem: &Problem, request: &Request, gate: &CancelGate) -> 
         // Use electrical heat at the accepted endpoint, not the preceding
         // outer iterate's source, when auditing the complete time step.
         let source_j = request.dt * (thermal.power_w.iter().sum::<f64>() + result.coupled.electric.total_joule_w);
-        let outflow_j = request.dt * (next.report.balance.boundary_outflow_w + physical_sink);
+        // Boundary radiation/convection was already present in the heat solve.
+        // Audit its independently re-evaluated physical flux, not storage sinks.
+        let surface_w: f64 = result.radiation.iter().map(|r| r.outward_w()).sum();
+        let radiated_w: f64 = result.radiation.iter().map(|r| r.radiated_w).sum();
+        let outflow_j = request.dt * (next.report.balance.boundary_outflow_w + physical_sink + surface_w);
         let closure_j = stored + outflow_j - source_j;
         let tolerance = request.absolute_j + request.relative * (stored_scale + source_j.abs() + outflow_j.abs());
         if [stored, source_j, outflow_j, closure_j, tolerance, result.coupled.electric.delivered_w]
@@ -220,7 +224,7 @@ pub(crate) fn march(problem: &Problem, request: &Request, gate: &CancelGate) -> 
         let record = TransientRecord {
             time_s: request.dt * step as f64, max_temperature_k: peak, max_solid_temperature_k: peak,
             stored_energy_change_j: stored, source_j, boundary_outflow_j: outflow_j,
-            closure_j, radiated_w: 0.0, iterations: next.report.iterations,
+            closure_j, radiated_w, iterations: next.report.iterations,
         };
         poll(gate)?;
         temperature.clone_from(&next.temperature);
@@ -244,8 +248,8 @@ pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> 
             trajectory.last.thermal_contact_relative_defect, NO_CLAIM);
     }
     let records = trajectory.records.iter().map(|r| format!(
-        "{{\"time_s\":{},\"max_temperature_k\":{},\"stored_energy_change_j\":{},\"source_j\":{},\"physical_outflow_j\":{},\"closure_j\":{}}}",
-        r.time_s, r.max_temperature_k, r.stored_energy_change_j, r.source_j, r.boundary_outflow_j, r.closure_j,
+        "{{\"time_s\":{},\"max_temperature_k\":{},\"stored_energy_change_j\":{},\"source_j\":{},\"physical_outflow_j\":{},\"closure_j\":{},\"radiated_w\":{}}}",
+        r.time_s, r.max_temperature_k, r.stored_energy_change_j, r.source_j, r.boundary_outflow_j, r.closure_j, r.radiated_w,
     )).collect::<Vec<_>>().join(",");
     let materials = problem.materials.iter().zip(&trajectory.curves).map(|(source, chart)| format!(
         "{{\"pack_identity\":{},\"card_identity\":{},\"storage_chart_identity\":{},\"storage_receipts\":{}}}",
@@ -263,12 +267,13 @@ pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> 
         "\"total_joule_w\":{},\"electrode_power_w\":{},\"resolved_conductivity_w_m_k\":{},",
         "\"thermal_solves\":{},\"records\":[{}],\"materials\":[{}],\"source_states\":[{}],",
         "\"electrical_interfaces\":{},\"thermal_interfaces\":{},",
-        "\"thermal_contact_relative_defect\":{},\"no_claim\":{}}}\n"),
+        "\"thermal_contact_relative_defect\":{},\"radiation\":{},\"no_claim\":{}}}\n"),
         record.time_s, trajectory.records.len(), problem.domain.dims(), values(trajectory.masses.iter().copied()),
         values(last.thermal.temperature.iter().copied()), values(last.electric.potential_v.iter().copied()),
         values(last.electric.joule_w.iter().copied()), last.electric.total_joule_w, last.electric.delivered_w,
         values(trajectory.last.sources.iter().map(|s| s.k)), trajectory.thermal_solves, records, materials,
         source_states, super::super::interfaces::render(problem, &trajectory.last.interfaces),
         super::super::interfaces::render_thermal(problem, &trajectory.last),
-        trajectory.last.thermal_contact_relative_defect, quote(NO_CLAIM))
+        trajectory.last.thermal_contact_relative_defect,
+        super::super::radiation::render(&trajectory.last.radiation), quote(NO_CLAIM))
 }

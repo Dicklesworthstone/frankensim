@@ -6,6 +6,9 @@
 mod json;
 mod interfaces;
 mod source;
+mod radiation;
+#[cfg(test)]
+mod radiation_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -39,8 +42,8 @@ const MAX_MATERIALS: usize = 64;
 const MAX_SCENE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PACK_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TOTAL_PACK_BYTES: u64 = 64 * 1024 * 1024;
-const NO_CLAIM: &str = "steady fixed-geometry all-solid isotropic ohmic/thermal conduction; source nominal values, not propagated uncertainty or experimental qualification; optional zero-thickness electrical interfaces use explicit heat partition, thermal interfaces use independently sourced resistance; no phase change, thermal deformation, fluid flow, microscopic contact-area model or AC effects";
-const HELP: &str = "Usage: frankensim [--json] electrothermal <scene.json> [--transient <time.json>]\n\nLoad canonical FSMCDPK material-card packs and solve spatial current, Joule\nheating and temperature together. Both resistivity and conductivity are\nre-resolved at every changed local temperature; unsupported states refuse.\nMaterial substitutions change pack data, not solver code. Optional\nelectrical_interfaces and thermal_interfaces bind canonical FSINTPK ordered\ninterface cards to voxel faces. Electrical heating and thermal resistance\nremain independent responses, evaluated at the same local temperatures.\n\nAn optional fluid object assigns one material to prescribed conservative flow,\nwith sourced frozen reference transport. See docs/MATERIAL_ELECTROTHERMAL_FLUID.md.\n\n--transient additionally requires sourced density and heat capacity over an\nexplicit temperature interval, and advances stored energy with scheduled\nelectrode drives and authored heat sources. Cell mass remains fixed.\n\nScene schema: frankensim.electrothermal.v1. Time request schema:\nfrankensim.electrothermal.transient.v1. See docs/MATERIAL_ELECTROTHERMAL.md,\ndocs/MATERIAL_ELECTROTHERMAL_TRANSIENT.md, docs/ELECTRICAL_CONTACTS.md and\ndocs/THERMAL_FACE_CONTACTS.md. All lengths are metres, temperatures kelvin,\ncurrent amperes and power watts. --json includes fields, source identities\nand coupling/energy defects.\n";
+const NO_CLAIM: &str = "steady fixed-geometry all-solid isotropic ohmic/thermal conduction; source nominal values, not propagated uncertainty or experimental qualification; optional source-backed exterior gray radiation to black isothermal unit-view reservoirs; zero-thickness electrical interfaces use explicit heat partition, thermal interfaces use independently sourced resistance; no phase change, thermal deformation, fluid flow, microscopic contact-area model or AC effects";
+const HELP: &str = "Usage: frankensim [--json] electrothermal <scene.json> [--transient <time.json>]\n\nLoad canonical FSMCDPK material-card packs and solve spatial current, Joule\nheating and temperature together. Both resistivity and conductivity are\nre-resolved at every changed local temperature; unsupported states refuse.\nMaterial substitutions change pack data, not solver code. Optional\nelectrical_interfaces and thermal_interfaces bind canonical FSINTPK ordered\ninterface cards to voxel faces. Electrical heating and thermal resistance\nremain independent responses, evaluated at the same local temperatures.\n\nAn optional fluid object assigns one material to prescribed conservative flow,\nwith sourced frozen reference transport. See docs/MATERIAL_ELECTROTHERMAL_FLUID.md.\n\n--transient additionally requires sourced density and heat capacity over an\nexplicit temperature interval, and advances stored energy with scheduled\nelectrode drives and authored heat sources. Cell mass remains fixed.\n\nScene schema: frankensim.electrothermal.v1. Time request schema:\nfrankensim.electrothermal.transient.v1. See docs/MATERIAL_ELECTROTHERMAL.md,\ndocs/MATERIAL_ELECTROTHERMAL_TRANSIENT.md, docs/ELECTRICAL_CONTACTS.md and\ndocs/THERMAL_FACE_CONTACTS.md. For source-backed exterior radiation see docs/ELECTROTHERMAL_RADIATION.md.\nAll lengths are metres, temperatures kelvin,\ncurrent amperes and power watts. --json includes fields, source identities\nand coupling/energy defects.\n";
 
 pub fn run(args: &[OsString], json: bool) -> CommandOutput {
     if args.len() == 1 && matches!(args[0].to_str(), Some("--help" | "-h")) {
@@ -187,7 +190,7 @@ fn load(path: &Path) -> Result<Problem, String> {
     let root = J::parse(std::str::from_utf8(&bytes).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     fields(&root, &["schema", "cells", "cell_size_m", "materials", "material_indices",
         "initial_temperature_k", "thermal_faces", "power_w", "contacts", "electrodes", "numerics",
-        "fluid", "electrical_interfaces", "thermal_interfaces"])?;
+        "fluid", "electrical_interfaces", "thermal_interfaces", "radiation"])?;
     if string(&root, "schema")? != "frankensim.electrothermal.v1" { return Err("unsupported electrothermal schema".into()); }
     let [nx, ny, nz] = triple(required(&root, "cells")?)?;
     let cells = nx.checked_mul(ny).and_then(|n| n.checked_mul(nz))
@@ -312,7 +315,8 @@ fn load(path: &Path) -> Result<Problem, String> {
     if coupling.power_tolerance_w < 0.0 || !(0.0..1.0).contains(&coupling.relative_tolerance)
         || conductivity_tolerance >= 1.0 || energy.tolerance >= 1.0 || thermal_contact_tolerance >= 1.0
     { return Err("invalid coupling or solver tolerance".into()); }
-    Ok(Problem { domain, material_indices, materials, fluid, electrical_interfaces,
+    let radiation = radiation::load(&root, &domain, &materials, &material_indices, &thermal)?;
+    Ok(Problem { domain, material_indices, materials, fluid, electrical_interfaces, radiation,
         thermal_interfaces, thermal_contact_tolerance,
         electric: ElectricSetup { conductors: Vec::new(), electrodes }, thermal, initial_temperature,
         coupling, energy, max_thermal_passes: budget(n, "max_thermal_passes", 1000)?, conductivity_tolerance })
@@ -374,7 +378,7 @@ fn render(problem: &Problem, result: &ResultField, json: bool) -> String {
         "\"temperature_defect_k\":{},\"joule_source_defect_w\":{},\"conductivity_relative_defect\":{},",
         "\"materials\":[{}],\"source_states\":[{}],\"electrodes\":[{}],\"fluid_reference\":{},",
         "\"electrical_interfaces\":{},\"thermal_interfaces\":{},",
-        "\"thermal_contact_relative_defect\":{},\"no_claim\":{}}}\n"),
+        "\"thermal_contact_relative_defect\":{},\"radiation\":{},\"no_claim\":{}}}\n"),
         problem.domain.dims(), problem.domain.dx(), values(r.thermal.temperature.iter().copied()),
         values(r.electric.potential_v.iter().copied()), values(r.electric.joule_w.iter().copied()),
         values(r.thermal.conductivity.iter().map(|k| k[0])), values(result.sources.iter().map(|s| s.k)),
@@ -383,5 +387,5 @@ fn render(problem: &Problem, result: &ResultField, json: bool) -> String {
         r.report.temperature_change_k, r.report.joule_source_change_w, result.conductivity_relative_defect,
         materials, sources, electrodes, problem.fluid.as_ref().map_or_else(|| "null".into(), |f| f.render()),
         interfaces::render(problem, &result.interfaces), interfaces::render_thermal(problem, result),
-        result.thermal_contact_relative_defect, quote(no_claim))
+        result.thermal_contact_relative_defect, radiation::render(&result.radiation), quote(no_claim))
 }
