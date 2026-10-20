@@ -2812,16 +2812,27 @@ The loop runs at 16 kHz. Each check compares the model loop with the exact one:
 - the playing frequency: within 1 cent;
 - the harmonic spectrum up to 8 kHz: within 0.5 dB rms.
 
-Measured (yto y11):
+Measured (yto g3n):
 - order-6 fit error 1.07e-7, repair change 1.3e-8;
-- 15 peaks within 1e-5 cent and 1e-5 dB;
+- 15 peaks within 3e-6 cent and 6e-7 dB;
 - 7 modes within 0.0025 cent and 7e-5 decay;
-- threshold 2242.7 Pa identical; pitch 298.5 Hz identical; 11 harmonics
-  within 1e-4 dB rms.
+- threshold 2242.7 Pa identical; pitch 298.5 Hz within 1e-8 cent; 11
+  harmonics within 3e-6 dB rms.
 
-No-claim: this is a well-fitted model on one fixture. A failing model would be
-caught at these gates, but no degraded model is planted. Relaxed vector
-fitting collapsed at every order when the band started at 10 Hz.
+The exact loop is measured once, and every candidate is audited against it.
+A planted negative must fail: independent mouths, the exact self terms with
+the mutual terms removed. It is passive and exact on the diagonal, so only the
+coupling separates it from the reference. It fails six of the seven gates:
+- peaks shift 2.59 cent and 2.30 dB;
+- modes shift 1.99 cent, with 23 % decay;
+- the pitch shifts 1.24 cent;
+- the harmonics differ by 1.42 dB rms.
+
+The threshold alone does not see it (0.17 %). A NaN departure fails its gate.
+
+No-claim: this is a well-fitted model on one fixture, with one planted
+negative. Relaxed vector fitting collapsed at every order when the band
+started at 10 Hz.
 
 `tract::network::tests::network_branched_tract_nasal` uses Assaneo's licensed
 /a/ chart plus a DECLARED SYNTHETIC 0.13 m x 4 mm-radius branch after section 2.

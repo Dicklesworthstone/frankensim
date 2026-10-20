@@ -20,13 +20,16 @@
 //! "Loaded modes" are the radiation-loaded resonances of the
 //! realized line below the realizer's 0.5-Nyquist taper; the valve enters
 //! through the oscillation threshold and the rendered sound.
+//! Planted negative: the exact matrix with its mutual terms removed, i.e.
+//! two independent mouths, is passive and exact on the diagonal. The same
+//! gates must refuse it.
 
 use std::collections::HashMap;
 
 use fs_bem::helmholtz::Medium;
 use fs_bem::helmholtz::aperture::{BaffledPiston, baffled_piston_array_impedance};
 use fs_couple::driving_point::LineLadder;
-use fs_couple::driving_point::network::NetworkDrivingPoint;
+use fs_couple::driving_point::network::{CoupledSource, NetworkDrivingPoint};
 use fs_couple::render::ReedBoreVoice;
 use fs_couple::thin_plate::PlateBank;
 use fs_duct::network::{
@@ -48,6 +51,7 @@ const HOLE_RADIUS: f64 = 0.004;
 const SPACING: f64 = 0.045;
 const BAND_HZ: (f64, f64) = (200.0, 8000.0);
 const TAU: f64 = core::f64::consts::TAU;
+const LOSS: LossModel = LossModel::Bessel;
 
 fn gas() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap()
@@ -372,13 +376,275 @@ fn harmonics(signal: &[f64]) -> (f64, Vec<f64>) {
     (f0, levels)
 }
 
+fn render(
+    point: &NetworkDrivingPoint,
+    gas: &GasState,
+    source: CoupledSource<'_>,
+    pressure: f64,
+    samples: usize,
+) -> Vec<f64> {
+    let ladder = LineLadder::default();
+    let mut voice = ReedBoreVoice::new_with_network(
+        point,
+        gas,
+        LOSS,
+        reed(pressure),
+        PlateBank::default(),
+        1.0,
+        RATE_HZ,
+        &ladder,
+        Some(source),
+    )
+    .unwrap();
+    let mut out = vec![0.0; samples];
+    voice.step_block(&mut out).unwrap();
+    out
+}
+
+/// Blowing pressure [Pa] at which the loop starts to sound, bisected.
+fn threshold(point: &NetworkDrivingPoint, gas: &GasState, source: CoupledSource<'_>) -> f64 {
+    let mut sounding = |pressure: f64| {
+        let p = render(point, gas, &mut *source, pressure, 9600);
+        let (late, later) = (ac_rms(&p[4800..7200]), ac_rms(&p[7200..]));
+        later > 0.01 * pressure || (later > 1.0e-6 * pressure && later > late)
+    };
+    let (mut lo, mut hi) = (1000.0, 5000.0);
+    assert!(!sounding(lo) && sounding(hi), "threshold bracket");
+    for _ in 0..12 {
+        let mid = 0.5 * (lo + hi);
+        if sounding(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// An input-impedance peak of the exact loop: the scan bracket it was found
+/// in, its frequency [Hz], |Z| and half-power width [Hz] when resolved.
+struct Peak {
+    bracket: (f64, f64),
+    hz: f64,
+    magnitude: f64,
+    width_hz: Option<f64>,
+}
+
+/// The exact loop, measured once for every candidate.
+struct Reference {
+    peaks: Vec<Peak>,
+    threshold_pa: f64,
+    f0_hz: f64,
+    levels_db: Vec<f64>,
+}
+
+fn reference_loop(
+    point: &NetworkDrivingPoint,
+    gas: &GasState,
+    exact_at: CoupledSource<'_>,
+) -> Reference {
+    let mut z_exact = |f: f64| {
+        let c = exact_at(TAU * f).unwrap();
+        point
+            .response_coupled(gas, TAU * f, LOSS, &c)
+            .unwrap()
+            .impedance
+            .abs()
+    };
+    let scan: Vec<f64> = (0..600)
+        .map(|i| 100.0 * det::exp(det::ln(80.0) * f64::from(i) / 599.0))
+        .collect();
+    let values: Vec<f64> = scan.iter().map(|&f| z_exact(f)).collect();
+    let mut peaks = Vec::new();
+    for i in 1..scan.len() - 1 {
+        if values[i] > values[i - 1] && values[i] > values[i + 1] {
+            let bracket = (scan[i - 1], scan[i + 1]);
+            let hz = maximize(bracket.0, bracket.1, &mut z_exact);
+            let magnitude = z_exact(hz);
+            let width_hz = bandwidth(hz, &mut |f| {
+                let z = z_exact(f);
+                z * z
+            });
+            peaks.push(Peak {
+                bracket,
+                hz,
+                magnitude,
+                width_hz,
+            });
+        }
+    }
+    let threshold_pa = threshold(point, gas, &mut *exact_at);
+    let (f0_hz, levels_db) = harmonics(&render(
+        point,
+        gas,
+        &mut *exact_at,
+        1.3 * threshold_pa,
+        16_000,
+    ));
+    Reference {
+        peaks,
+        threshold_pa,
+        f0_hz,
+        levels_db,
+    }
+}
+
+/// Worst departures of a candidate loop from the exact one, with the number
+/// of features compared.
+#[derive(Debug)]
+struct Gates {
+    peaks: usize,
+    peak_cents: f64,
+    peak_db: f64,
+    modes: usize,
+    mode_cents: f64,
+    mode_decay: f64,
+    threshold_rel: f64,
+    pitch_cents: f64,
+    harmonics: usize,
+    harmonic_rms_db: f64,
+}
+
+impl Gates {
+    /// The W3b closed-loop tolerances this candidate does not meet; a NaN
+    /// departure fails its gate.
+    fn exceeded(&self) -> Vec<&'static str> {
+        [
+            ("input-impedance peaks 1 c", self.peak_cents <= 1.0),
+            ("input-impedance peaks 0.5 dB", self.peak_db <= 0.5),
+            ("loaded modes 1 c", self.mode_cents <= 1.0),
+            ("loaded-mode decay 2 %", self.mode_decay <= 0.02),
+            ("threshold 1 %", self.threshold_rel <= 0.01),
+            ("playing frequency 1 c", self.pitch_cents <= 1.0),
+            ("harmonics 0.5 dB rms", self.harmonic_rms_db <= 0.5),
+        ]
+        .into_iter()
+        .filter(|(_, met)| !met)
+        .map(|(gate, _)| gate)
+        .collect()
+    }
+}
+
+/// Running maximum that keeps a NaN.
+fn worst(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
+    }
+}
+
+fn audit(
+    point: &NetworkDrivingPoint,
+    gas: &GasState,
+    reference: &Reference,
+    candidate: CoupledSource<'_>,
+    name: &str,
+) -> Gates {
+    // Complex response: input-impedance peaks.
+    let mut z_candidate = |f: f64| {
+        let c = candidate(TAU * f).unwrap();
+        point
+            .response_coupled(gas, TAU * f, LOSS, &c)
+            .unwrap()
+            .impedance
+            .abs()
+    };
+    let (mut peak_cents, mut peak_db) = (0.0, 0.0);
+    for peak in &reference.peaks {
+        let hz = maximize(peak.bracket.0, peak.bracket.1, &mut z_candidate);
+        let shift = cents(hz, peak.hz);
+        let level = 20.0 * det::ln(z_candidate(hz) / peak.magnitude) / core::f64::consts::LN_10;
+        println!(
+            "{{\"suite\":\"fs-couple-w3b-g3\",\"case\":\"input-impedance-peak\",\"candidate\":\"{name}\",\"exact_hz\":{:.3},\"cents\":{shift:.5},\"db\":{level:.5}}}",
+            peak.hz
+        );
+        peak_cents = worst(peak_cents, shift.abs());
+        peak_db = worst(peak_db, level.abs());
+    }
+
+    // Loaded modes and decay rates of the candidate's realized line.
+    let zc = gas.characteristic_impedance / area(BORE_RADIUS);
+    let ladder = LineLadder::default();
+    let (line, receipt) = point
+        .realize_line(gas, LOSS, RATE_HZ, zc, &ladder, Some(&mut *candidate))
+        .unwrap();
+    let ir = taps(&line, receipt.n_fft);
+    let (mut modes, mut mode_cents, mut mode_decay) = (0, 0.0, 0.0);
+    for peak in reference
+        .peaks
+        .iter()
+        .filter(|p| p.hz < 0.25 * f64::from(RATE_HZ))
+    {
+        let mut power_line = |f: f64| line_power(&ir, f);
+        let f_line = maximize(0.99 * peak.hz, 1.01 * peak.hz, &mut power_line);
+        let (Some(width_line), Some(width_exact)) =
+            (bandwidth(f_line, &mut power_line), peak.width_hz)
+        else {
+            continue;
+        };
+        let shift = cents(f_line, peak.hz);
+        let decay = width_line / width_exact - 1.0;
+        println!(
+            "{{\"suite\":\"fs-couple-w3b-g3\",\"case\":\"loaded-mode\",\"candidate\":\"{name}\",\"n_fft\":{},\"exact_hz\":{:.3},\"cents\":{shift:.5},\"decay_rel\":{decay:.3e}}}",
+            receipt.n_fft, peak.hz
+        );
+        mode_cents = worst(mode_cents, shift.abs());
+        mode_decay = worst(mode_decay, decay.abs());
+        modes += 1;
+    }
+
+    // Valve threshold and rendered sound in the closed loop.
+    let threshold_rel = threshold(point, gas, &mut *candidate) / reference.threshold_pa - 1.0;
+    let (f0, levels) = harmonics(&render(
+        point,
+        gas,
+        &mut *candidate,
+        1.3 * reference.threshold_pa,
+        16_000,
+    ));
+    // Harmonics within 60 dB of the exact loop's strongest, on both spectra.
+    let strongest = reference
+        .levels_db
+        .iter()
+        .fold(f64::NEG_INFINITY, |m, &v| m.max(v));
+    let compared: Vec<(f64, f64)> = reference
+        .levels_db
+        .iter()
+        .zip(&levels)
+        .filter(|(a, _)| **a > strongest - 60.0)
+        .map(|(&a, &b)| (a, b))
+        .collect();
+    let harmonic_rms_db = det::sqrt(
+        compared.iter().map(|(a, b)| (a - b) * (a - b)).sum::<f64>() / compared.len() as f64,
+    );
+    let pitch = cents(f0, reference.f0_hz);
+    println!(
+        "{{\"suite\":\"fs-couple-w3b-g3\",\"case\":\"closed-loop\",\"candidate\":\"{name}\",\"threshold_exact_pa\":{:.2},\"threshold_rel\":{threshold_rel:.3e},\"f0_hz\":{:.3},\"pitch_cents\":{pitch:.4},\"harmonics\":{},\"harmonic_rms_db\":{harmonic_rms_db:.4}}}",
+        reference.threshold_pa,
+        reference.f0_hz,
+        compared.len()
+    );
+    Gates {
+        peaks: reference.peaks.len(),
+        peak_cents,
+        peak_db,
+        modes,
+        mode_cents,
+        mode_decay,
+        threshold_rel: threshold_rel.abs(),
+        pitch_cents: pitch.abs(),
+        harmonics: compared.len(),
+        harmonic_rms_db,
+    }
+}
+
 #[test]
 fn closed_loop_audit_reed_bore_radiation() {
     let gas = gas();
     let medium = Medium::from(&gas);
     let point = driving_point();
     let model = fitted_model(medium);
-    let loss = LossModel::Bessel;
     let mut cache: HashMap<u64, Vec<C64>> = HashMap::new();
     let mut exact_at = |omega: f64| -> Result<CoupledTermination, DuctError> {
         let z = match cache.get(&omega.to_bits()) {
@@ -398,152 +664,40 @@ fn closed_loop_audit_reed_bore_radiation() {
             "repaired delayed MIMO model",
         ))
     };
+    let reference = reference_loop(&point, &gas, &mut exact_at);
 
-    // Complex response: input impedance peaks (1 cent) and levels (0.5 dB).
-    let mut z_exact = |f: f64| {
-        let c = exact_at(TAU * f).unwrap();
-        point
-            .response_coupled(&gas, TAU * f, loss, &c)
-            .unwrap()
-            .impedance
-            .abs()
-    };
-    let mut z_model = |f: f64| {
-        let c = model_at(TAU * f).unwrap();
-        point
-            .response_coupled(&gas, TAU * f, loss, &c)
-            .unwrap()
-            .impedance
-            .abs()
-    };
-    let scan: Vec<f64> = (0..600)
-        .map(|i| 100.0 * det::exp(det::ln(80.0) * f64::from(i) / 599.0))
-        .collect();
-    let values: Vec<f64> = scan.iter().map(|&f| z_exact(f)).collect();
-    let mut peaks = Vec::new();
-    for i in 1..scan.len() - 1 {
-        if values[i] > values[i - 1] && values[i] > values[i + 1] {
-            let f_exact = maximize(scan[i - 1], scan[i + 1], &mut z_exact);
-            let f_model = maximize(scan[i - 1], scan[i + 1], &mut z_model);
-            let shift = cents(f_model, f_exact);
-            let level =
-                20.0 * det::ln(z_model(f_model) / z_exact(f_exact)) / core::f64::consts::LN_10;
-            println!(
-                "{{\"suite\":\"fs-couple-w3b-g3\",\"case\":\"input-impedance-peak\",\"exact_hz\":{f_exact:.3},\"cents\":{shift:.5},\"db\":{level:.5}}}"
-            );
-            assert!(
-                shift.abs() <= 1.0 && level.abs() <= 0.5,
-                "{f_exact} Hz: {shift} c, {level} dB"
-            );
-            peaks.push(f_exact);
-        }
-    }
-    assert!(peaks.len() >= 4, "input impedance peaks in band: {peaks:?}");
+    let gates = audit(&point, &gas, &reference, &mut model_at, "model");
+    println!("{gates:?}");
+    assert!(gates.peaks >= 4, "input impedance peaks in band: {gates:?}");
+    assert!(gates.modes >= 3, "loaded modes audited: {gates:?}");
+    assert!(gates.harmonics >= 5, "harmonics compared: {gates:?}");
+    let failed = gates.exceeded();
+    assert!(failed.is_empty(), "model fails {failed:?}: {gates:?}");
 
-    // Loaded modes and decay rates of the realized model line (1 cent, 2 %).
-    let zc = gas.characteristic_impedance / area(BORE_RADIUS);
-    let ladder = LineLadder::default();
-    let (line, receipt) = point
-        .realize_line(&gas, loss, RATE_HZ, zc, &ladder, Some(&mut model_at))
-        .unwrap();
-    let ir = taps(&line, receipt.n_fft);
-    let mut audited = 0;
-    for &f_exact in peaks.iter().filter(|&&f| f < 0.25 * f64::from(RATE_HZ)) {
-        let mut power_line = |f: f64| line_power(&ir, f);
-        let f_line = maximize(0.99 * f_exact, 1.01 * f_exact, &mut power_line);
-        let mut power_exact = |f: f64| {
-            let z = z_exact(f);
-            z * z
-        };
-        let (Some(width_line), Some(width_exact)) = (
-            bandwidth(f_line, &mut power_line),
-            bandwidth(f_exact, &mut power_exact),
-        ) else {
-            continue;
-        };
-        let shift = cents(f_line, f_exact);
-        let decay = width_line / width_exact - 1.0;
-        println!(
-            "{{\"suite\":\"fs-couple-w3b-g3\",\"case\":\"loaded-mode\",\"n_fft\":{},\"exact_hz\":{f_exact:.3},\"cents\":{shift:.5},\"decay_rel\":{decay:.3e}}}",
-            receipt.n_fft
-        );
-        assert!(
-            shift.abs() <= 1.0 && decay.abs() <= 0.02,
-            "{f_exact} Hz: {shift} c, {decay}"
-        );
-        audited += 1;
-    }
-    assert!(audited >= 3, "loaded modes audited: {audited}");
-
-    // Valve threshold (1 %) and rendered sound in the closed loop.
-    let render = |source: &mut dyn FnMut(f64) -> Result<CoupledTermination, DuctError>,
-                  pressure: f64,
-                  samples: usize| {
-        let mut voice = ReedBoreVoice::new_with_network(
-            &point,
-            &gas,
-            loss,
-            reed(pressure),
-            PlateBank::default(),
-            1.0,
-            RATE_HZ,
-            &ladder,
-            Some(source),
-        )
-        .unwrap();
-        let mut out = vec![0.0; samples];
-        voice.step_block(&mut out).unwrap();
-        out
+    // Planted negative: independent mouths, the exact self terms with the
+    // mutual terms removed. It is passive, so the loop admits it; only the
+    // coupling separates it from the reference.
+    let mut independent_at = |omega: f64| -> Result<CoupledTermination, DuctError> {
+        let mut c = exact_at(omega)?;
+        c.z[1] = C64::ZERO;
+        c.z[2] = C64::ZERO;
+        c.source_id = "exact self terms, mutual terms removed".into();
+        Ok(c)
     };
-    let threshold = |source: &mut dyn FnMut(f64) -> Result<CoupledTermination, DuctError>| {
-        let mut sounding = |pressure: f64| {
-            let p = render(&mut *source, pressure, 9600);
-            let (late, later) = (ac_rms(&p[4800..7200]), ac_rms(&p[7200..]));
-            later > 0.01 * pressure || (later > 1.0e-6 * pressure && later > late)
-        };
-        let (mut lo, mut hi) = (1000.0, 5000.0);
-        assert!(!sounding(lo) && sounding(hi), "threshold bracket");
-        for _ in 0..12 {
-            let mid = 0.5 * (lo + hi);
-            if sounding(mid) {
-                hi = mid;
-            } else {
-                lo = mid;
-            }
-        }
-        0.5 * (lo + hi)
-    };
-    let threshold_exact = threshold(&mut exact_at);
-    let threshold_model = threshold(&mut model_at);
-    let threshold_rel = threshold_model / threshold_exact - 1.0;
-    let pressure = 1.3 * threshold_exact;
-    let (f0_exact, levels_exact) = harmonics(&render(&mut exact_at, pressure, 16_000));
-    let (f0_model, levels_model) = harmonics(&render(&mut model_at, pressure, 16_000));
-    // Harmonics within 60 dB of the exact loop's strongest, on both spectra.
-    let strongest = levels_exact
-        .iter()
-        .fold(f64::NEG_INFINITY, |m, &v| m.max(v));
-    let compared: Vec<(f64, f64)> = levels_exact
-        .iter()
-        .zip(&levels_model)
-        .filter(|(a, _)| **a > strongest - 60.0)
-        .map(|(&a, &b)| (a, b))
-        .collect();
-    let count = compared.len();
-    let distance =
-        det::sqrt(compared.iter().map(|(a, b)| (a - b) * (a - b)).sum::<f64>() / count as f64);
-    let pitch = cents(f0_model, f0_exact);
+    let negative = audit(
+        &point,
+        &gas,
+        &reference,
+        &mut independent_at,
+        "independent-mouths",
+    );
+    println!("{negative:?}");
+    let failed = negative.exceeded();
     println!(
-        "{{\"suite\":\"fs-couple-w3b-g3\",\"case\":\"closed-loop\",\"threshold_exact_pa\":{threshold_exact:.2},\"threshold_rel\":{threshold_rel:.3e},\"f0_hz\":{f0_exact:.3},\"pitch_cents\":{pitch:.4},\"harmonics\":{count},\"harmonic_rms_db\":{distance:.4}}}"
+        "{{\"suite\":\"fs-couple-w3b-g3\",\"case\":\"planted-negative\",\"candidate\":\"independent-mouths\",\"gates_failed\":{failed:?}}}"
     );
     assert!(
-        threshold_rel.abs() <= 0.01,
-        "threshold differs by {threshold_rel}"
-    );
-    assert!(count >= 5, "harmonics compared: {count}");
-    assert!(pitch.abs() <= 1.0, "playing frequency differs by {pitch} c");
-    assert!(
-        distance <= 0.5,
-        "harmonic spectrum differs by {distance} dB rms"
+        !failed.is_empty(),
+        "independent mouths pass every gate: {negative:?}"
     );
 }
