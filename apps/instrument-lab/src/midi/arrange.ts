@@ -18,7 +18,7 @@ export const PIECE_NAMES: Record<PieceId, string> = {
 /** A key the piano plays: times in seconds of the file at its own tempo. */
 export interface PianoNote { key: number; t: number; off: number; vel: number; speed: number }
 /** A key event for the engine (strike, release) or a pedal position. */
-export interface PianoEvent { t: number; on?: number; off?: number; speed?: number; sustain?: number }
+export interface PianoEvent { t: number; on?: number; off?: number; silent?: number; speed?: number; sustain?: number; unaCorda?: boolean; sostenuto?: boolean }
 /** A stroke: where on the piece, as fractions of its radius, and a factor on its standard stick speed. */
 export interface DrumHit { t: number; piece: PieceId; u: number; v: number; g: number; note: number; vel: number }
 export type { Role } from "./orchestrate";
@@ -51,6 +51,8 @@ export interface Arrangement {
     thinnedDensity: number;
     pedalChanges: number;
     pedalSkipped: number;
+    softPedalChanges: number;
+    sostenutoChanges: number;
     peakKeys: number;
     tempoChanges: number;
     drumsMapped: Record<string, number>;
@@ -75,27 +77,59 @@ export interface Arrangement {
  * held there. This restores key/pedal controls, not the earlier vibration.
  * Boundary events win: a key released or struck exactly at `from` needs no
  * synthetic strike. Work from key events so overlapping notes remain one key.
+ * Apply to a piano whose keys and pedals have first been released (allNotesOff).
  */
 export function pianoEventsFrom(events: readonly PianoEvent[], from: number): PianoEvent[] {
   const held = new Map<number, PianoEvent>();
-  let pedal = 0, i = 0;
+  const latched = new Set<number>();
+  let pedal = 0, soft = false, sostenuto = false, allLatched = false, i = 0;
   for (; i < events.length && events[i]!.t < from; i++) {
     const e = events[i]!;
     if (e.on !== undefined) held.set(e.on, e);
+    else if (e.silent !== undefined) held.set(e.silent, e);
     else if (e.off !== undefined) held.delete(e.off);
     else if (e.sustain !== undefined) pedal = e.sustain;
+    else if (e.unaCorda !== undefined) soft = e.unaCorda;
+    else if (e.sostenuto !== undefined) {
+      if (e.sostenuto && !sostenuto) {
+        allLatched = pedal >= 1;
+        latched.clear();
+        for (const key of held.keys()) latched.add(key);
+      } else if (!e.sostenuto) { allLatched = false; latched.clear(); }
+      sostenuto = e.sostenuto;
+    }
   }
-  let j = i, pedalAtStart = false;
+  const alreadyHeld = new Set(held.keys());
+  let j = i, pedalAtStart = false, softAtStart = false, captureAtStart = false, releaseAtStart = false;
   for (; j < events.length && events[j]!.t === from; j++) {
     const e = events[j]!;
     if (e.on !== undefined) held.delete(e.on);
-    else if (e.off !== undefined) held.delete(e.off);
+    else if (e.silent !== undefined) held.delete(e.silent);
+    else if (e.off !== undefined) { held.delete(e.off); alreadyHeld.delete(e.off); }
     else if (e.sustain !== undefined) pedalAtStart = true;
+    else if (e.unaCorda !== undefined) softAtStart = true;
+    else if (e.sostenuto === true) captureAtStart = true;
+    else if (e.sostenuto === false) releaseAtStart = true;
   }
+  const setup: PianoEvent[] = [];
+  // Rebuild the old captured dampers before restoring the current sustain or
+  // striking later keys. All commands share one frame: no hammer is launched here.
+  if (sostenuto && !releaseAtStart) {
+    if (allLatched) setup.push({ t: from, sustain: 1 }, { t: from, sostenuto: true }, { t: from, sustain: 0 });
+    else {
+      for (const key of latched) setup.push({ t: from, silent: key });
+      setup.push({ t: from, sostenuto: true });
+      for (const key of latched) setup.push({ t: from, off: key });
+    }
+  }
+  // A pedal first pressed on the boundary must see keys that were already down,
+  // even though their replacement hammer strikes come after the pedal event.
+  if (captureAtStart) for (const key of alreadyHeld) setup.push({ t: from, silent: key });
   const out = events.slice(i, j);
   if (pedal > 0 && !pedalAtStart) out.unshift({ t: from, sustain: pedal });
-  for (const [key, e] of held) out.push({ t: from, on: key, speed: e.speed });
-  return out.concat(events.slice(j));
+  if (soft && !softAtStart) out.unshift({ t: from, unaCorda: true });
+  for (const [key, e] of held) out.push(e.silent !== undefined ? { t: from, silent: key } : { t: from, on: key, speed: e.speed });
+  return setup.concat(out, events.slice(j));
 }
 
 // ----------------------------------------------------------------- calibrations
@@ -204,7 +238,7 @@ function classify(name: string, notes: readonly PairedNote[], channel: number): 
 export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
   const sec = tempoClock(midi);
   const report: Arrangement["report"] = {
-    pianoNotesIn: 0, drumNotesIn: 0, folded: 0, merged: 0, thinnedChord: 0, thinnedDensity: 0, pedalChanges: 0, pedalSkipped: 0,
+    pianoNotesIn: 0, drumNotesIn: 0, folded: 0, merged: 0, thinnedChord: 0, thinnedDensity: 0, pedalChanges: 0, pedalSkipped: 0, softPedalChanges: 0, sostenutoChanges: 0,
     peakKeys: 0, tempoChanges: Math.max(0, midi.tempoMap.length - 1), drumsMapped: {}, drumsSkipped: {}, ignoredControllers: 0,
     salvage: midi.salvageNote, lenient: [], silencedByVolume: 0, partsLeftOut: 0, tooFast: 0, drumsLayered: 0, pitchBends: 0,
   };
@@ -220,6 +254,7 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
   // sends neither plays as written.
   const cc = new Map<number, { t: number; c: number; v: number }[]>();
   const pedalByChannel = new Map<number, { t: number; value: number }[]>();
+  const switchedPedals: { t: number; channel: number; controller: 66 | 67; on: boolean }[] = [];
   for (const track of midi.tracks) for (const c of track.controls) {
     if (c.controller === 7 || c.controller === 11) {
       const list = cc.get(c.channel) ?? [];
@@ -229,6 +264,9 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
       const list = pedalByChannel.get(c.channel) ?? [];
       list.push({ t: sec(c.tick), value: c.value / 127 });
       pedalByChannel.set(c.channel, list);
+    } else if ((c.controller === 66 || c.controller === 67) && c.channel !== 9) {
+      // Sostenuto and soft pedal are switches (0..63 off, 64..127 on).
+      switchedPedals.push({ t: sec(c.tick), channel: c.channel, controller: c.controller, on: c.value >= 64 });
     } else if (c.controller !== 0 && c.controller !== 32 && c.controller < 120) report.ignoredControllers++;
   }
   for (const list of cc.values()) list.sort((a, b) => a.t - b.t);
@@ -401,13 +439,23 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
   const level = new Map<number, number>();
   const pedal: { t: number; value: number }[] = [];
   let last = 0;
-  for (const e of pedalRaw) {
-    level.set(e.ch, e.value);
+  for (let i = 0; i < pedalRaw.length;) {
+    const t = pedalRaw[i]!.t, start = i;
+    // As with the switched pedals, combine every channel's simultaneous
+    // request before moving the one shared grand's pedal.
+    do {
+      const e = pedalRaw[i++]!;
+      level.set(e.ch, e.value);
+    } while (i < pedalRaw.length && pedalRaw[i]!.t === t);
+    report.pedalSkipped += i - start - 1;
     const v = Math.max(0, ...level.values());
     const prev = pedal[pedal.length - 1];
     const crossing = (v >= 0.5) !== (last >= 0.5);
-    if (!crossing && (Math.abs(v - last) < 0.05 || (prev && e.t - prev.t < 0.012))) { report.pedalSkipped++; continue; }
-    pedal.push({ t: e.t, value: Math.round(v * 100) / 100 });
+    // Full travel changes the physical damper/sostenuto state. Never smooth
+    // away arrival at or departure from either endpoint, even in a fast ramp.
+    const endpoint = v !== last && (v === 0 || v === 1 || last === 0 || last === 1);
+    if (!crossing && !endpoint && (Math.abs(v - last) < 0.05 || (prev && t - prev.t < 0.012))) { report.pedalSkipped++; continue; }
+    pedal.push({ t, value: Math.round(v * 100) / 100 });
     last = v;
   }
   report.pedalChanges = pedal.length;
@@ -428,11 +476,34 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
     if (end > -Infinity) events.push({ t: end, off: key });
   }
   for (const p of pedal) events.push({ t: p.t, sustain: p.value });
+  // One shared grand: either pitched hand/part can keep either switch down.
+  switchedPedals.sort((a, b) => a.t - b.t);
+  for (const controller of [66, 67]) {
+    const channels = new Set<number>();
+    let down = false;
+    for (let i = 0; i < switchedPedals.length;) {
+      const t = switchedPedals[i]!.t;
+      // Resolve simultaneous requests together: an across-part handover cannot
+      // lift the shared sostenuto rod and catch a different set of dampers.
+      do {
+        const p = switchedPedals[i++]!;
+        if (p.controller === controller) {
+          if (p.on) channels.add(p.channel); else channels.delete(p.channel);
+        }
+      } while (i < switchedPedals.length && switchedPedals[i]!.t === t);
+      const on = channels.size > 0;
+      if (on !== down) {
+        if (controller === 66) { events.push({ t, sostenuto: on }); report.sostenutoChanges++; }
+        else { events.push({ t, unaCorda: on }); report.softPedalChanges++; }
+      }
+      down = on;
+    }
+  }
   // releases before strikes at the same instant, so a repeated key is struck after it is let go
   events.sort((a, b) => a.t - b.t || rank(a) - rank(b));
 
-  // peak keys sounding: held, or kept ringing by the pedal until it lifts (a lower bound on courses)
-  report.peakKeys = peakSounding(notes, pedal);
+  // Control-based overlap estimate, before quiet-key retirement and the mode budget.
+  report.peakKeys = peakSounding(events);
 
   // ------------------------------------------------------------ labels
   const markers = midi.tracks.flatMap((t) => t.texts.filter((x) => x.kind === "marker").map((x) => ({ t: sec(x.tick), text: x.text })));
@@ -456,7 +527,7 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
 
   const lastNote = notes.reduce((m, n) => Math.max(m, n.off), 0);
   const lastHit = hits.length ? hits[hits.length - 1]!.t : 0;
-  const lastEventS = Math.max(lastNote, lastHit, pedal.length ? pedal[pedal.length - 1]!.t : 0);
+  const lastEventS = Math.max(lastNote, lastHit, events.at(-1)?.t ?? 0);
   const usedPieces = [...new Set(hits.map((h) => h.piece))];
   const order: PieceId[] = ["kick", "snare", "snare-off", "hihat-closed", "hihat-open", "tom-12", "tom-14", "ride", "crash"];
   const tempo0 = midi.tempoMap.find((e) => e.tick <= 0) ?? midi.tempoMap[0];
@@ -486,32 +557,36 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
   };
 }
 
-const rank = (e: PianoEvent): number => (e.off !== undefined ? 0 : e.sustain !== undefined ? 1 : 2);
+const rank = (e: PianoEvent): number => (e.off !== undefined ? 0 : e.sustain !== undefined || e.unaCorda !== undefined ? 1 : e.sostenuto !== undefined ? 2 : 3);
 
 function programOf(track: DecodedTrack, channel: number): number | null {
   const p = track.programs.find((x) => x.channel === channel);
   return p ? p.program : null;
 }
 
-function peakSounding(notes: PianoNote[], pedal: { t: number; value: number }[]): number {
-  // a note rings until its key is up and the pedal is up (an upper bound on real ringing)
-  const ups = pedal.filter((p) => p.value < 0.5).map((p) => p.t);
-  const times = pedal.map((p) => p.t);
-  const after = (arr: number[], t: number): number => { // index of the first entry > t
-    let lo = 0, hi = arr.length;
-    while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m]! <= t) lo = m + 1; else hi = m; }
-    return lo;
-  };
-  const edges: [number, number][] = [];
-  for (const n of notes) {
-    let end = n.off;
-    const k = after(times, n.off) - 1;
-    if (k >= 0 && pedal[k]!.value >= 0.5) end = ups[after(ups, n.off)] ?? n.off + 4;
-    edges.push([n.t, 1], [Math.min(end, n.t + 6), -1]);
+function peakSounding(events: PianoEvent[]): number {
+  // Distinct struck keys protected by fingers or pedals, not an energy/decay
+  // prediction. Keep the existing half-travel threshold for the sustain estimate.
+  const held = new Set<number>(), ringing = new Set<number>(), latched = new Set<number>();
+  let sustain = 0, sostenuto = false, allLatched = false, peak = 0;
+  for (const e of events) {
+    if (e.on !== undefined) { held.add(e.on); ringing.add(e.on); }
+    else if (e.silent !== undefined) { held.add(e.silent); ringing.add(e.silent); }
+    else if (e.off !== undefined) held.delete(e.off);
+    else if (e.sustain !== undefined) sustain = e.sustain;
+    else if (e.sostenuto !== undefined) {
+      if (e.sostenuto && !sostenuto) {
+        allLatched = sustain >= 1;
+        latched.clear();
+        for (const key of held) latched.add(key);
+      } else if (!e.sostenuto) { allLatched = false; latched.clear(); }
+      sostenuto = e.sostenuto;
+    }
+    if (sustain < 0.5 && !allLatched) {
+      for (const key of ringing) if (!held.has(key) && !latched.has(key)) ringing.delete(key);
+    }
+    peak = Math.max(peak, ringing.size);
   }
-  edges.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  let cur = 0, peak = 0;
-  for (const [, d] of edges) { cur += d; peak = Math.max(peak, cur); }
   return peak;
 }
 
