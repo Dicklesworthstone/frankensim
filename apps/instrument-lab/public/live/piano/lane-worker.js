@@ -25,7 +25,7 @@
 //       governor     false turns the load governor off (default on; see createGovernor)
 //   {type:'note', midi, speed, frame?} | {type:'off', midi, frame?} | {type:'sustain', value, frame?}
 //   {type:'sequence', startFrame, loopFrames, events:[{offset, on?, off?, speed?}]}
-//   {type:'score', events:[{frame, on?, off?, speed?, sustain?}]}   a fixed score, played once
+//   {type:'score', events:[{frame, on?, off?, silent?, speed?, sustain?, unaCorda?, sostenuto?}]}   a fixed score, played once
 //   {type:'stopScore'}   drop the rest of the score and release every key and the pedal
 //   {type:'resync', epoch}   render for the clock as it is now (after the mix flushed this lane)
 //   {type:'stop'}   end the sequence and release every key
@@ -187,7 +187,10 @@ self.onmessage = async (event) => {
         apply: (e) => {
           if (e.on !== undefined) { active = true; quietFrames = 0; engine.noteOn(e.on, e.speed); }
           else if (e.off !== undefined) engine.noteOff(e.off);
+          else if (e.silent !== undefined) { active = true; quietFrames = 0; engine.silentKeyDown(e.silent); }
           else if (e.sustain !== undefined) engine.sustain(e.sustain);
+          else if (e.unaCorda !== undefined) engine.unaCorda(e.unaCorda);
+          else if (e.sostenuto !== undefined) engine.sostenuto(e.sostenuto);
           else if (e.allOff) engine.allNotesOff();
         },
         render: (n) => {
@@ -248,7 +251,15 @@ self.onmessage = async (event) => {
     } else if (m.type === 'sequence') {
       lane.sequence(m.startFrame, m.loopFrames, m.events);
     } else if (m.type === 'score') {
-      lane.score(Array.isArray(m.events) ? m.events : []);
+      const events = Array.isArray(m.events) ? m.events : [];
+      if (events.some(e => e.unaCorda !== undefined) && typeof engine.unaCorda !== 'function') {
+        throw new Error('This piano WASM cannot play the soft pedal. Reload with a matching engine build.');
+      }
+      if (events.some(e => e.sostenuto !== undefined || e.silent !== undefined)
+          && (typeof engine.sostenuto !== 'function' || typeof engine.silentKeyDown !== 'function')) {
+        throw new Error('This piano WASM cannot play sostenuto. Reload with a matching engine build.');
+      }
+      lane.score(events);
     } else if (m.type === 'stopScore') {
       lane.stopScore();
       lane.event({ allOff: true });

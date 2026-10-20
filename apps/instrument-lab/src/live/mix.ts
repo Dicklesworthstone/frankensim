@@ -208,8 +208,8 @@ export interface LaneWorkerStats {
 
 /** A stroke of a fixed score: absolute context frame, point on the surface [m], stick speed [m/s]. */
 export interface KitScoreEvent { frame: number; x: number; y: number; speed: number }
-/** A key event of a fixed score (exactly one of on / off / sustain). */
-export interface PianoScoreEvent { frame: number; on?: number; off?: number; speed?: number; sustain?: number }
+/** A key or pedal event of a fixed score (one operation per event; silent lifts a key without a strike). */
+export interface PianoScoreEvent { frame: number; on?: number; off?: number; silent?: number; speed?: number; sustain?: number; unaCorda?: boolean; sostenuto?: boolean }
 
 /** One kit piece computed in its own Worker, playing into a lane of the mix. */
 export class KitLane {

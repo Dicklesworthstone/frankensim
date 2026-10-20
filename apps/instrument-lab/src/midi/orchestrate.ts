@@ -132,9 +132,11 @@ export function orchestrate(parts: SourcePart[]): { notes: PlayedNote[]; plans: 
     const target = TARGET[plan.role];
     let vels: number[];
     if (flat && target) {
-      const mid = Math.max(1, median(eff));
+      // Calibrate the written velocity, keeping the controller multiplier.
+      // Normalizing by effective velocity erases quiet parts and boosts fades.
+      const mid = Math.max(1, median(written));
       vels = eff.map((e) => target * (e / mid));
-      plan.actions.push(`every note written at velocity ${median(written)}: played as ${ROLE_WORD[plan.role] ?? plan.role}, around ${target}`);
+      plan.actions.push(`every note written at velocity ${median(written)}: played as ${ROLE_WORD[plan.role] ?? plan.role}, around ${target} before channel volume and expression`);
     } else {
       vels = eff;
       if (ns.some((n) => n.level < 0.999)) plan.actions.push("dynamics from the file's own velocity, volume and expression");
