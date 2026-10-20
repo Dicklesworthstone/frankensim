@@ -1,0 +1,14 @@
+frankensim.specimen.v1
+key	value
+specimen_id	loc-stradivari-family-bouts
+maker	population of six historic instruments in the Library of Congress Music Division: four violins (Stradivari 'Betts' 1704, 'Castelbarco' 1699, 'Ward' 1700; Guarneri 'Kreisler' ca. 1730), one viola (Stradivari 'Cassavetti' 1727), one cello (Stradivari 'Castelbarco' 1697)
+model	body length and three bout widths as printed in each catalog record's description
+serial	unstated
+year	1654 to 1730 (instrument dates as titled)
+system	violin family bodies; the catalog gives four numbers per instrument and no outline curve
+holder	Library of Congress, Music Division, Washington DC; not accessible to FrankenSim
+reference_state	unstated
+environment	unstated
+source_ids	loc-stradivari-family-bouts
+target_relation	population evidence for violin, viola and cello body proportions. The Guarneri 'Kreisler' record may be the instrument whose outline McLennan 2009 copied ('the Guarneri (del Gesu) of 1733 owned and played by Fritz Kreisler', thesis sec. 4.2); neither source states the identity, so it is unproven (u-kreisler-identity). Not the UIowa instruments.
+records	betts-1704=https://www.loc.gov/item/2022560101/;castelbarco-violin-1699=https://www.loc.gov/item/2022560098/;ward-1700=https://www.loc.gov/item/2022560100/;kreisler-guarneri-ca1730=https://www.loc.gov/item/2022560099/;castelbarco-cello-1697=https://www.loc.gov/item/2022560102/;cassavetti-viola-1727=https://www.loc.gov/item/2022560103/

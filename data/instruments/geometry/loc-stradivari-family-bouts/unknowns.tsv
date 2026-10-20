@@ -1,0 +1,7 @@
+frankensim.specimen-unknowns.v1
+id	what	bound	blocks	route
+u-outline-curve	the outline between the four printed numbers: the stations of the widest upper and lower bouts and of the waist along the length, corner geometry and the curve itself	unbounded	any shell mesh of the plates; a parametric outline through four widths would invent the shape	a dimensioned drawing, the Strad3D/Messiah CT data (permission-required in the data ledger) or a measured outline of a named violin
+u-kreisler-identity	whether the LOC Guarneri 'Kreisler' ca. 1730 is the 1733 Kreisler instrument whose outline McLennan 2009 used	categorical	linking the LOC widths to the McLennan specimen	a source that states it, or McLennan's poster reference
+u-bass	no double bass record was retrieved	absent	bass body dimensions	an equivalent catalog or maker table for the double bass
+u-body-thickness-arching	the LOC records print no arching or thickness values	absent	plate stiffness	see geometry/violin-mclennan2009 for one violin's values
+u-record-text	each row quotes the record's description text as served by the loc.gov JSON API on 2026-10-20 (the HTML pages return HTTP 403 to scripts); the Kreisler record prints 'Middle bouts: 11.2 m'	unit typo in source	none beyond the Kreisler middle-bout unit	view the record in a browser
