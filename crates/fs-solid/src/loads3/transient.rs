@@ -1,8 +1,9 @@
 //! Sparse average-acceleration Newmark dynamics on the existing P1 operators.
 //!
 //! M a + (eta M + zeta K) v + K u = f_external(t) + f_thermal.
-//! Materials, topology, thermal eigenstrain and zero-valued component supports
-//! are fixed for the run. Free bodies are admitted: mass, not artificial clamps,
+//! Materials, topology, thermal eigenstrain and restraint components are fixed
+//! for the run; `motion` additionally admits prescribed support trajectories.
+//! Free bodies are admitted: mass, not artificial clamps,
 //! makes the acceleration solve nonsingular. Forces retain their original mesh.
 //!
 //! This is the sparse acceleration-form backend of the average-acceleration
@@ -26,6 +27,8 @@ pub mod response;
 pub mod events;
 /// Discrete state and load pullbacks through the original inertial equations.
 pub mod adjoint;
+/// Absolute prescribed support motion with full inertial coupling and work.
+pub mod motion;
 
 /// Explicit resource, solve, motion and energy allowances, all in coherent SI.
 #[derive(Debug, Clone, Copy)]
@@ -186,6 +189,8 @@ pub struct TransientStep3 {
     pub iterations: usize,
     pub force_residual_n: f64,
     pub mechanical_work_j: f64,
+    /// Work of support reactions ON the solid; zero for stationary zero supports.
+    pub support_work_j: f64,
     pub thermal_equivalent_work_j: f64,
     pub damping_loss_j: f64,
     pub quadratic_energy_j: f64,
@@ -206,6 +211,7 @@ pub struct TetTransientRun3<'g, 'm, 'p, 's> {
     force: Vec<f64>,
     full_force: Vec<(usize, f64)>,
     config: TransientConfig3,
+    prescribed: Option<motion::PrescribedMotion3>,
 }
 impl<'g, 'm> TetLoadCase3<'g, 'm> {
     /// Assemble K and consistent M ONCE and solve M a0=f0-C v0-K u0.
@@ -215,6 +221,16 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
     pub fn begin_transient<'p, 's>(&self, problem: &'p TetLinearElasticProblem<'s>,
         thermal: Option<TetThermalStrainField<'_>>, time_s: f64,
         displacement_m: &[[f64; 3]], velocity_m_s: &[[f64; 3]], config: TransientConfig3,
+        cx: &Cx<'_>) -> Result<TetTransientRun3<'g, 'm, 'p, 's>, TransientError3> {
+        self.begin_transient_impl(problem, thermal, time_s, displacement_m, velocity_m_s,
+            None, config, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn begin_transient_impl<'p, 's>(&self, problem: &'p TetLinearElasticProblem<'s>,
+        thermal: Option<TetThermalStrainField<'_>>, time_s: f64,
+        displacement_m: &[[f64; 3]], velocity_m_s: &[[f64; 3]],
+        prescribed_acceleration_m_s2: Option<&[[f64; 3]]>, config: TransientConfig3,
         cx: &Cx<'_>) -> Result<TetTransientRun3<'g, 'm, 'p, 's>, TransientError3> {
         check(cx)?; config.validate()?; number(time_s)?;
         if problem.nodes_m != self.geometry.nodes || problem.tetrahedra != self.geometry.tets {
@@ -237,10 +253,13 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
             tetrahedra: problem.tetrahedra, materials: problem.materials,
             fixed_dofs: problem.fixed_dofs, budget: problem.budget };
         request.budget.maximum_free_dofs = request.budget.maximum_free_dofs.min(config.maximum_free_dofs);
-        let operators = Arc::new(request.assemble(cx)?);
+        let operators = Arc::new(if prescribed_acceleration_m_s2.is_some() {
+            request.assemble_prescribed_dynamics(cx)?
+        } else { request.assemble(cx)? });
         for &d in problem.fixed_dofs {
             check(cx)?;
-            if displacement_m[d/3][d%3] != 0.0 || velocity_m_s[d/3][d%3] != 0.0 {
+            if prescribed_acceleration_m_s2.is_none()
+                && (displacement_m[d/3][d%3] != 0.0 || velocity_m_s[d/3][d%3] != 0.0) {
                 return Err(TransientError3::Invalid("transient component supports must be stationary and zero"));
             }
         }
@@ -254,10 +273,16 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
         }
         let n = operators.free_dofs.len();
         let thermal_field = thermal;
-        let thermal = match thermal {
-            Some(field) => request.assemble_thermal_load(field, cx)?.reduced_force_n,
-            None => vec![0.0; n],
+        let (thermal, full_thermal) = match thermal {
+            Some(field) => {
+                let load = request.assemble_thermal_load(field, cx)?;
+                (load.reduced_force_n, load.full_equivalent_force_n)
+            }
+            None => (vec![0.0; n], Vec::new()),
         };
+        let prescribed = prescribed_acceleration_m_s2.map(|a|
+            motion::PrescribedMotion3::initial(problem, &operators.free_dofs,
+                displacement_m, velocity_m_s, a, full_thermal, cx)).transpose()?;
         let thermal_strains = thermal_field.map(|field| response::FrozenThermal3::capture(field, cx)).transpose()?;
         let q: Vec<_> = operators.free_dofs.iter().map(|&d| displacement_m[d/3][d%3]).collect();
         let v: Vec<_> = operators.free_dofs.iter().map(|&d| velocity_m_s[d/3][d%3]).collect();
@@ -265,16 +290,18 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
             state: DynamicState { time_s, step: 0, displacement: q, velocity: v,
                 acceleration: vec![0.0; n], kinetic_energy_j: 0.0, strain_energy_j: 0.0,
                 total_energy_j: 0.0 }, thermal, thermal_strains, force: vec![0.0; n],
-            full_force: self.nodal_forces_n().to_vec(), config };
+            full_force: self.nodal_forces_n().to_vec(), config, prescribed };
         run.force = run.reduce_force(self, cx)?;
         let ku = run.apply(0.0, 1.0, &run.state.displacement, cx)?;
         let cv = run.apply(config.mass_damping_per_s, config.stiffness_damping_s, &run.state.velocity, cx)?;
-        let rhs: Vec<_> = (0..n).map(|i| run.force[i] + run.thermal[i] - ku[i] - cv[i]).collect();
+        let mut rhs: Vec<_> = (0..n).map(|i| run.force[i] + run.thermal[i] - ku[i] - cv[i]).collect();
+        if let Some(supports) = &run.prescribed { run.subtract_support_force(supports, &mut rhs, cx)?; }
         let op = run.operator(1.0, 0.0, cx);
         run.state.acceleration = solve(&op, &rhs, config)?.0;
         let (kinetic, strain) = run.energy(&run.state.displacement, &run.state.velocity, cx)?;
         run.state.kinetic_energy_j = kinetic; run.state.strain_energy_j = strain;
         run.state.total_energy_j = number(kinetic + strain)?;
+        run.initialize_support_energy(cx)?;
         check(cx)?; Ok(run)
     }
 }
@@ -282,6 +309,8 @@ impl TetTransientRun3<'_, '_, '_, '_> {
     /// Reduced state, ordered by `free_dofs`; no mutable checkpoint escape.
     pub fn state(&self) -> &DynamicState { &self.state }
     pub fn free_dofs(&self) -> &[usize] { &self.operators.free_dofs }
+    /// The admitted bound on full nodal displacement, including support motion.
+    pub fn maximum_displacement_m(&self) -> f64 { self.config.maximum_displacement_m }
     /// Expand one accepted state to full node-major xyz displacement/velocity/acceleration.
     pub fn nodal_motion(&self, cx: &Cx<'_>) -> Result<[Vec<[f64; 3]>; 3], TransientError3> {
         check(cx)?;
@@ -291,6 +320,12 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             out[0][d/3][d%3] = self.state.displacement[i];
             out[1][d/3][d%3] = self.state.velocity[i];
             out[2][d/3][d%3] = self.state.acceleration[i];
+        }
+        if let Some(supports) = &self.prescribed {
+            for &d in self.problem.fixed_dofs {
+                check(cx)?;
+                for field in 0..3 { out[field][d/3][d%3] = supports.motion[field][d]; }
+            }
         }
         check(cx)?; Ok(out)
     }
@@ -324,6 +359,16 @@ impl TetTransientRun3<'_, '_, '_, '_> {
     pub fn advance(&mut self, load_next: &TetLoadCase3<'_, '_>, h_s: f64, cx: &Cx<'_>)
         -> Result<TransientStep3, TransientError3> {
         check(cx)?;
+        if self.prescribed.is_some() {
+            return Err(TransientError3::Invalid("prescribed-support runs require an explicit next support endpoint"));
+        }
+        self.advance_impl(load_next, None, h_s, cx)
+    }
+
+    fn advance_impl(&mut self, load_next: &TetLoadCase3<'_, '_>,
+        mut next_supports: Option<motion::PrescribedMotion3>, h_s: f64, cx: &Cx<'_>)
+        -> Result<TransientStep3, TransientError3> {
+        check(cx)?;
         if self.state.step >= self.config.maximum_steps { return Err(TransientError3::Budget); }
         let next_time = self.state.time_s + h_s;
         if !h_s.is_finite() || h_s <= 0.0 || !next_time.is_finite() || next_time <= self.state.time_s {
@@ -341,7 +386,8 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         }
         let eta = self.config.mass_damping_per_s; let zeta = self.config.stiffness_damping_s;
         let ku = self.apply(0.0, 1.0, &qp, cx)?; let cv = self.apply(eta, zeta, &vp, cx)?;
-        let rhs: Vec<_> = (0..n).map(|i| force[i]+self.thermal[i]-ku[i]-cv[i]).collect();
+        let mut rhs: Vec<_> = (0..n).map(|i| force[i]+self.thermal[i]-ku[i]-cv[i]).collect();
+        if let Some(supports) = &next_supports { self.subtract_support_force(supports, &mut rhs, cx)?; }
         let op = self.operator(number(1.0+0.5*h_s*eta)?, number(b+0.5*h_s*zeta)?, cx);
         let (a, iterations, force_residual_n) = solve(&op, &rhs, self.config)?;
         let mut q = Vec::with_capacity(n); let mut v = Vec::with_capacity(n);
@@ -361,22 +407,28 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 return Err(TransientError3::Invalid("candidate exceeds displacement allowance"));
             }
         }
-        let (kinetic, strain) = self.energy(&q, &v, cx)?;
+        let (kinetic, strain, mechanical_work_j, support_work_j,
+            thermal_equivalent_work_j, damping_loss_j) = if let Some(supports) = &mut next_supports {
+            self.supported_accounting(supports, [&q, &v, &a], load_next, h_s, cx)?
+        } else {
+            let (kinetic, strain) = self.energy(&q, &v, cx)?;
+            let average_force: Vec<_> = force.iter().zip(&self.force).map(|(a,b)| 0.5*a+0.5*b).collect();
+            (kinetic, strain, number(inner(&average_force, &dq))?, 0.0,
+                number(inner(&self.thermal, &dq))?,
+                number(h_s*inner(&average_v, &self.apply(eta,zeta,&average_v,cx)?))?)
+        };
         let quadratic_energy_j = number(kinetic+strain)?;
-        let average_force: Vec<_> = force.iter().zip(&self.force).map(|(a,b)| 0.5*a+0.5*b).collect();
-        let mechanical_work_j = number(inner(&average_force, &dq))?;
-        let thermal_equivalent_work_j = number(inner(&self.thermal, &dq))?;
-        let damping_loss_j = number(h_s*inner(&average_v, &self.apply(eta,zeta,&average_v,cx)?))?;
         let balance_error_j = number(quadratic_energy_j - self.state.total_energy_j
-            + damping_loss_j - mechanical_work_j - thermal_equivalent_work_j)?;
+            + damping_loss_j - mechanical_work_j - thermal_equivalent_work_j - support_work_j)?;
         let scale = self.state.total_energy_j.abs().max(quadratic_energy_j.abs())
-            .max(mechanical_work_j.abs()).max(thermal_equivalent_work_j.abs()).max(damping_loss_j.abs());
+            .max(mechanical_work_j.abs()).max(thermal_equivalent_work_j.abs()).max(damping_loss_j.abs())
+            .max(support_work_j.abs());
         let allowance = number(self.config.absolute_energy_tolerance_j + self.config.relative_energy_tolerance*scale)?;
         if balance_error_j.abs() > allowance || kinetic < -allowance || strain < -allowance || damping_loss_j < -allowance {
             return Err(TransientError3::Energy { defect_j: balance_error_j, allowance_j: allowance });
         }
         let report = TransientStep3 { time_s: next_time, step_size_s: h_s, iterations, force_residual_n,
-            mechanical_work_j, thermal_equivalent_work_j, damping_loss_j, quadratic_energy_j, balance_error_j };
+            mechanical_work_j, support_work_j, thermal_equivalent_work_j, damping_loss_j, quadratic_energy_j, balance_error_j };
         let full_force = load_next.nodal_forces_n().to_vec();
         check(cx)?;
         self.state = DynamicState { time_s: next_time, step: self.state.step.checked_add(1).ok_or(TransientError3::Budget)?,
@@ -384,6 +436,7 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             strain_energy_j: strain, total_energy_j: quadratic_energy_j };
         self.force = force;
         self.full_force = full_force;
+        self.prescribed = next_supports;
         Ok(report)
     }
 }

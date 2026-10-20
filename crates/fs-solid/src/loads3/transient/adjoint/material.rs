@@ -69,6 +69,9 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         cx: &Cx<'_>,
     ) -> Result<MaterialScaleGradient3, TransientAdjointError3> {
         check(cx)?;
+        if self.prescribed.is_some() {
+            return Err(TransientAdjointError3::Invalid("prescribed-support material pullbacks are not supplied"));
+        }
         let n = self.free_dofs().len();
         validate_values(force_cotangent, n, cx)?;
         for values in [&state.displacement, &state.velocity, &state.acceleration] {

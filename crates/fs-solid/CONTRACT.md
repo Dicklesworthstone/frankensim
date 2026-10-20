@@ -341,6 +341,56 @@ This is source-data covariance conditional on fixed orientation, not solved-fiel
 uncertainty, a confidence/domain bound, material/frame calibration, propagation
 of uncertain temperature/stiffness/orientation, or experimental validation.
 
+## Prescribed support motion in sparse P1 dynamics
+
+`loads3::transient::motion` extends the existing sparse average-acceleration
+Newmark trajectory with absolute world-component support displacement. The
+fixed DOF set, reference mesh, materials, thermal eigenstrain and Rayleigh
+damping remain frozen. `begin_transient_with_supports` accepts full initial
+displacement/velocity fields and explicit constrained acceleration; free
+acceleration entries in that input must be zero because they are solved.
+Initialization and every step include the complete partitioned load
+`f_f + fT_f - M_fc a_c - C_fc v_c - K_fc u_c`, with
+`C = eta M + zeta K`. Consistent-mass coupling is retained.
+
+`advance_with_supports` accepts sorted, unique fixed-DOF displacement values.
+Omitted fixed components mean zero at that endpoint. Support acceleration
+and velocity follow the same beta=1/4, gamma=1/2 recurrence as the free state;
+they are not finite differences with an unrelated integration convention.
+Recovering acceleration from rounded displacement samples amplifies their
+roundoff by the inverse squared step size; a smaller step is not an unlimited
+accuracy guarantee for prescribed derivatives.
+Full element actions reuse the canonical P1 stiffness/mass kernel. No dense
+global operator is assembled. Fully prescribed meshes use empty reduced
+matrices and zero solve iterations after full geometry/material validation;
+public modal assembly still refuses `NoFreeDofs`.
+
+`nodal_motion` includes the accepted support u/v/a. State energy includes all
+nodes, and `TransientStep3::support_work_j` is the trapezoidal work of support
+reactions **on the solid**. Mechanical work includes external loads on both
+free and prescribed components; the frozen full thermal equivalent load has
+its own work term. The acceptance identity is
+`delta(kinetic + quadratic_strain_energy) + damping_loss = mechanical_work +
+thermal_equivalent_work + support_work`. Quadratic strain energy remains
+`u'Ku/2`; `recover_response` separately reports the actual thermally shifted
+elastic energy and stress, full inertia/damping and support reactions.
+
+Input admission, full nodal displacement limits, element limits, sparse solve
+limits, per-node/element cancellation checkpoints and the energy/residual
+gates precede atomic publication. A clone retains the prescribed kinematics,
+reaction endpoint and immutable full thermal load as well as the free state.
+Force-only advancement, finite force jumps and existing state/material
+pullbacks explicitly refuse this lane; they cannot omit support terms while
+claiming a valid trajectory or gradient. Displacement impulses, changing
+restraint axes/topology, support-control adjoints, adaptive event discovery,
+temporal/continuum error certification and measured validation are not supplied.
+Prescribed motion requires a physically resolved time-step ladder.
+
+`tests/transient_supports3.rs` supplies G1 exact mass/stiffness/both-Rayleigh
+cross-term initialization, a closed-form accelerating-base oscillator with
+second-order refinement, fully prescribed thermal/external/support work and
+reaction checks, and G3/G4 fork, malformed-input and cancellation checks.
+
 ## Public types and semantics
 
 - `Mesh2` / `Patch`: structured body-fitted meshes — P1 triangles, Q1

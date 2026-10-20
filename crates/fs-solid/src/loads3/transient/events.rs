@@ -35,6 +35,9 @@ impl TetTransientRun3<'_, '_, '_, '_> {
     pub fn apply_load_jump(&mut self, load_after: &TetLoadCase3<'_, '_>, cx: &Cx<'_>)
         -> Result<LoadJump3, TransientError3> {
         check(cx)?;
+        if self.prescribed.is_some() {
+            return Err(TransientError3::Invalid("finite load jumps with prescribed support motion are not admitted"));
+        }
         let force = self.reduce_force(load_after, cx)?;
         let ku = self.apply(0.0, 1.0, &self.state.displacement, cx)?;
         let cv = self.apply(self.config.mass_damping_per_s, self.config.stiffness_damping_s,

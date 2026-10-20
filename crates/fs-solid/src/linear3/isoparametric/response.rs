@@ -8,6 +8,101 @@ pub(crate) struct TetKinematicResponse3 {
     pub damping_n: Vec<[f64; 3]>,
 }
 
+/// Full-row actions for prescribed-support dynamics. These retain free/fixed
+/// coupling using the same element matrices as the reduced acceleration solve.
+pub(crate) struct TetFullActions3 {
+    pub ku: Vec<f64>,
+    pub mv: Vec<f64>,
+    pub kv: Vec<f64>,
+    pub ma: Vec<f64>,
+}
+
+impl TetLinearElasticProblem<'_> {
+    /// Fully prescribed dynamics still has physical inertia and support work.
+    /// Keep the public modal assembly's NoFreeDofs contract unchanged.
+    pub(crate) fn assemble_prescribed_dynamics(&self, cx: &Cx<'_>)
+        -> Result<TetElasticAssembly, TetElasticError> {
+        match self.assemble(cx) {
+            Ok(assembly) => return Ok(assembly),
+            Err(TetElasticError::NoFreeDofs) => {},
+            Err(error) => return Err(error),
+        }
+        // assemble already admitted budgets/materials and every fixed DOF,
+        // but its empty-free-set return precedes connectivity/geometry work.
+        let mut incident = vec![false; self.nodes_m.len()];
+        let mut volumes = Vec::with_capacity(self.tetrahedra.len());
+        let mut minimum = f64::INFINITY;
+        let mut total_mass = 0.0;
+        for (element, tet) in self.tetrahedra.iter().enumerate() {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            validate_connectivity(element, tet, self.nodes_m.len())?;
+            for &node in tet { incident[node] = true; }
+            let geometry = TetGeometry::try_new(element, tet.map(|n| self.nodes_m[n]),
+                self.budget.minimum_scaled_jacobian)?;
+            minimum = minimum.min(geometry.scaled_jacobian);
+            total_mass += self.materials.at(element).density_kg_m3*geometry.volume;
+            if !total_mass.is_finite() {
+                return Err(TetElasticError::InvalidMaterial { what: "nonfinite prescribed-body mass" });
+            }
+            volumes.push(geometry.volume);
+        }
+        if let Some(node) = incident.iter().position(|seen| !seen) {
+            return Err(TetElasticError::UnreferencedNode { node });
+        }
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        Ok(TetElasticAssembly { stiffness: Coo::new(0, 0).assemble(), mass: Coo::new(0, 0).assemble(),
+            free_dofs: Vec::new(), total_mass_kg: total_mass, minimum_scaled_jacobian: minimum,
+            element_volumes_m3: volumes })
+    }
+
+    pub(crate) fn apply_full_kinematics(
+        &self, motion: &[Vec<f64>; 3], cx: &Cx<'_>,
+    ) -> Result<TetFullActions3, TetElasticError> {
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        self.validate_budget()?;
+        self.materials.validate(self.tetrahedra.len())?;
+        let full = self.nodes_m.len().checked_mul(3).ok_or(TetElasticError::SizeOverflow)?;
+        let finite = |value: f64| if value.is_finite() { Ok(value) } else {
+            Err(TetElasticError::InvalidStressObservation { what: "nonfinite full dynamic operator action" })
+        };
+        for field in motion {
+            if field.len() != full {
+                return Err(TetElasticError::InvalidStressObservation { what: "full dynamic action needs node-major xyz fields" });
+            }
+            for chunk in field.chunks(256) {
+                cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+                for &value in chunk { finite(value)?; }
+            }
+        }
+        let mut out = TetFullActions3 { ku: vec![0.0; full], mv: vec![0.0; full],
+            kv: vec![0.0; full], ma: vec![0.0; full] };
+        for (element, tet) in self.tetrahedra.iter().enumerate() {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            validate_connectivity(element, tet, self.nodes_m.len())?;
+            let geometry = TetGeometry::try_new(element, tet.map(|n| self.nodes_m[n]),
+                self.budget.minimum_scaled_jacobian)?;
+            let (ke, me) = element_matrices(&geometry, self.materials.at(element));
+            for i in 0..12 {
+                let mut ku = 0.0; let mut mv = 0.0; let mut kv = 0.0; let mut ma = 0.0;
+                for j in 0..12 {
+                    let column = 3*tet[j/3] + j%3;
+                    ku = ke[i][j].mul_add(motion[0][column], ku);
+                    mv = me[i][j].mul_add(motion[1][column], mv);
+                    kv = ke[i][j].mul_add(motion[1][column], kv);
+                    ma = me[i][j].mul_add(motion[2][column], ma);
+                }
+                let row = 3*tet[i/3] + i%3;
+                out.ku[row] = finite(out.ku[row] + finite(ku)?)?;
+                out.mv[row] = finite(out.mv[row] + finite(mv)?)?;
+                out.kv[row] = finite(out.kv[row] + finite(kv)?)?;
+                out.ma[row] = finite(out.ma[row] + finite(ma)?)?;
+            }
+        }
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        Ok(out)
+    }
+}
+
 impl TetLinearElasticProblem<'_> {
     /// Internal response kernel for an already accepted, immutable P1 trajectory.
     /// Full rows retain inertia/damping on constrained nodes. No reduced matrix

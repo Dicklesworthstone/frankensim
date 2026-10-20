@@ -110,6 +110,9 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
     pub fn adjoint(&self, config: TransientAdjointConfig3, cx: &Cx<'_>)
         -> Result<TransientAdjoint3<'g, 'm>, TransientAdjointError3> {
         check(cx)?;
+        if self.prescribed.is_some() {
+            return Err(TransientAdjointError3::Invalid("prescribed-support trajectory pullbacks are not supplied"));
+        }
         let tol = config.solve.relative_residual_tolerance;
         if !tol.is_finite() || tol <= 0.0 || tol >= 1.0 || config.solve.maximum_iterations == 0 {
             return Err(TransientAdjointError3::Invalid("positive iteration limit and relative tolerance in (0,1) required"));

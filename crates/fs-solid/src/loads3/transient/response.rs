@@ -4,7 +4,7 @@ use crate::linear3::TetThermalStrainState;
 
 /// Actual elastic stress and full-node equation terms at a single accepted time.
 /// `inertia_force_n` is +M*a on the equation's left side, not -M*a.
-/// Reactions are forces exerted by stationary supports ON the solid:
+/// Reactions are forces exerted by the admitted supports ON the solid:
 /// R = M*a + C*v + integral(B' sigma) - f_external at constrained components.
 /// Free residuals are measured from those full rows, never reported as zero by
 /// construction. These are discrete fields, not continuum error estimates.
