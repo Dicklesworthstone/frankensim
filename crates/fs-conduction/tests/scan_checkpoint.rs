@@ -196,3 +196,56 @@ fn g0_checkpoint_work_memory_and_cancellation_refusals_return_no_objective() {
     with_cancelled_cx(|cx|assert!(evaluate_scan_objective_checkpointed(cx,ready,&[0.001,0.002],&observations(1),
         ScanObjectiveSampling::RightEndpoint,config(),linear(),budget(2,1),checkpoint_budget(2,1)).is_err()));
 }
+
+#[test]
+fn g5_point_and_peak_constraints_share_replay_without_changing_their_gradients() {
+    use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::{
+        checkpoint::evaluate_scan_objective_checkpointed_with_peaks,
+        responses::{ScanResponse,ScanResponseBudget,peaks::{ScanPeakResponse,evaluate_scan_objective_with_peaks}},
+    };
+    let mesh = mesh(); let curve = chart();
+    let material = ConductivityModel::isotropic(ConductivityTable::declared_curve(vec![(280.,1.),(380.,3.)]).unwrap());
+    with_cx(|cx| {
+        let hist=history(cx,&mesh);let times=[0.001,0.002,0.004,0.006,0.009];let obs=observations(4);
+        let rows=[ScanResponse {endpoint:1,vertex:0,observable:ScanObservable::Temperature},
+            ScanResponse {endpoint:3,vertex:1,observable:ScanObservable::SpecificEnthalpy}];
+        let peaks=[ScanPeakResponse {first_endpoint:0,last_endpoint:4,vertices:vec![0,1,2,3],
+            observable:ScanObservable::Temperature,smoothing_scale:0.2},
+            ScanPeakResponse {first_endpoint:1,last_endpoint:3,vertices:vec![0,2],
+                observable:ScanObservable::SpecificEnthalpy,smoothing_scale:0.5}];
+        let extra=ScanResponseBudget {max_responses:4,max_gradient_entries:128,max_transpose_solves:20};
+        for initial in [20.,150.] {
+            for rad in [false,true] {
+                let make=||run(cx,&hist,&material,&curve,&[initial;4],
+                    vec![heater([0.2,0.25,0.3,1.4,1.3,1.2,3.])],rad);
+                let (objective,full_rows,full_peaks)=evaluate_scan_objective_with_peaks(cx,make(),&times,&obs,
+                    ScanObjectiveSampling::RightEndpoint,config(),linear(),budget(5,5),&rows,&peaks,extra,26).unwrap();
+                for segment in [1,2,5] {
+                    let replay=evaluate_scan_objective_checkpointed_with_peaks(cx,make(),&times,&obs,
+                        ScanObjectiveSampling::RightEndpoint,config(),linear(),budget(5,segment),&rows,&peaks,
+                        extra,26,checkpoint_budget(5,segment)).unwrap();
+                    same(&objective,&replay.objective);
+                    assert_eq!(replay.work.recomputed_forward_solves,5);
+                    for (a,b) in full_rows.iter().zip(&replay.responses) {
+                        assert_eq!(a.value.to_bits(),b.value.to_bits());
+                        assert_eq!(a.sources,b.sources);
+                        assert_eq!(a.initial_specific_enthalpy,b.initial_specific_enthalpy);
+                        assert_eq!(a.transpose_iterations,b.transpose_iterations);
+                    }
+                    for (a,b) in full_peaks.iter().zip(&replay.peaks) {
+                        assert_eq!(a.value.to_bits(),b.value.to_bits());
+                        assert_eq!(a.sampled_maximum,b.sampled_maximum);
+                        assert_eq!(a.smoothing_gap,b.smoothing_gap);
+                        assert_eq!(a.maximum_smoothing_gap,b.maximum_smoothing_gap);
+                        assert_eq!(a.sources,b.sources);
+                        assert_eq!(a.initial_specific_enthalpy,b.initial_specific_enthalpy);
+                        assert_eq!(a.transpose_iterations,b.transpose_iterations);
+                    }
+                }
+                assert!(evaluate_scan_objective_checkpointed_with_peaks(cx,make(),&times,&obs,
+                    ScanObjectiveSampling::RightEndpoint,config(),linear(),budget(5,2),&rows,&peaks,
+                    extra,25,checkpoint_budget(5,2)).is_err());
+            }
+        }
+    });
+}

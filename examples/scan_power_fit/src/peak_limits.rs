@@ -10,6 +10,11 @@ struct PeakFit {
 }
 
 fn fit_peak(cx:&Cx<'_>, maximum:f64, smoothing:f64, audit:bool) -> Result<PeakFit> {
+    fit_peak_with_checkpointing(cx,maximum,smoothing,audit,false)
+}
+
+fn fit_peak_with_checkpointing(cx:&Cx<'_>, maximum:f64, smoothing:f64,
+    audit:bool, checkpointed:bool) -> Result<PeakFit> {
     if !maximum.is_finite() || maximum<=150. || maximum>=190.
         || !smoothing.is_finite() || smoothing<=0. || smoothing>1.
     {return Err("require 150 < maximum < 190 J/kg and 0 < smoothing <= 1 J/kg".into());}
@@ -49,9 +54,12 @@ fn fit_peak(cx:&Cx<'_>, maximum:f64, smoothing:f64, audit:bool) -> Result<PeakFi
     let geometry=if audit {vec![
         ScanGeometryControl::CenterValue {source:0,axis:0,value:0,reference_m:0.2,scale_m:0.25},
         ScanGeometryControl::HalfWidth {source:0,axis:0,reference_m:1.8}]} else {vec![]};
-    let study=ScanPowerStudy::new_joint(cx,vec![source],vec![
+    let mut study=ScanPowerStudy::new_joint(cx,vec![source],vec![
         ScanPowerControl {source:0,value:0,reference_w:1.},ScanPowerControl {source:0,value:1,reference_w:1.}],
         geometry,objective,factory,1)?;
+    if checkpointed {
+        study.set_checkpointing(cx,ScanCheckpointBudget {segment_steps:1,max_checkpoint_vertices:24,max_forward_solves:4})?;
+    }
     let bounds=vec![ScanPeakBound {response:ScanPeakResponse {first_endpoint:0,last_endpoint:1,
         vertices:(0..8).collect(),observable:ScanObservable::SpecificEnthalpy,smoothing_scale:smoothing},
         maximum,scale:10.}];
@@ -91,6 +99,12 @@ fn fit_peak(cx:&Cx<'_>, maximum:f64, smoothing:f64, audit:bool) -> Result<PeakFi
     assert_eq!(powers[2],0.);assert_eq!(constrained.evaluations(),before);
     constrained.extend_evaluation_budget(128)?;
     let (replay,rows)=constrained.replay_with_constraints(cx)?;
+    if checkpointed {
+        let work=replay.checkpoint_work.ok_or("constrained replay omitted the selected checkpoint policy")?;
+        assert_eq!(work.original_forward_solves,2);
+        assert_eq!(work.recomputed_forward_solves,2);
+        assert_eq!(work.peak_retained_linearizations,1);
+    }
     if (replay.physical.value-report.solution.f).abs()>1e-10
         || (rows.residuals[0]-constrained.sample().ci[0]).abs()>1e-10
     {return Err("peak-constrained replay disagrees with the accepted point".into());}
@@ -123,6 +137,16 @@ pub(super) fn run_cli(args:&[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn g5_checkpointed_sqp_keeps_peak_constraints_and_the_accepted_design() {
+        let full=with_context(|cx|fit_peak_with_checkpointing(cx,155.,0.05,false,false)).unwrap();
+        let short=with_context(|cx|fit_peak_with_checkpointing(cx,155.,0.05,false,true)).unwrap();
+        assert_eq!(full.powers,short.powers);
+        assert_eq!(full.report.solution.f,short.report.solution.f);
+        assert_eq!(full.constraints,short.constraints);
+        assert!(short.report.solution.converged);
+        assert!(short.constraints.max_scaled_violation()<=1e-8);
+    }
     #[test]
     fn g1_one_peak_row_limits_all_selected_nodes_and_times_while_replaying_the_fit() {
         for smoothing in [0.05,0.2] {

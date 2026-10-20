@@ -14,6 +14,8 @@ use fs_conduction::bc::history::march::enthalpy::{EnthalpyHistoryRun, EnthalpyHi
 use fs_conduction::bc::history::march::enthalpy::scanning::ScanningEnthalpyRun;
 use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::{ScanSensitivityError,
     objective::{ScanObservable, ScanObservation, ScanObjectiveSampling, ScanObjectiveBudget}};
+use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::checkpoint::{
+    ScanCheckpointBudget, ScanCheckpointWork};
 use fs_conduction::bc::history::march::moving::{MovingHeatSource, MovingHeatBudget};
 use fs_conduction::transient::enthalpy::{EnthalpyBudget, EnthalpyStepConfig};
 use fs_conduction::transient::enthalpy::heterogeneous::ReferenceEnthalpyMaterial;
@@ -62,10 +64,20 @@ struct FitResult {
     final_temperatures: Vec<f64>,
     evaluations: usize,
     loss: f64,
+    checkpoint_work: Option<ScanCheckpointWork>,
 }
 
 fn fit(cx: &Cx<'_>, input: FitInput, replace_sources: bool) -> Result<FitResult> {
+    fit_with_grid(cx, input, replace_sources, 2, None)
+}
+
+fn fit_with_grid(cx: &Cx<'_>, input: FitInput, replace_sources: bool,
+    endpoints: usize, segment: Option<usize>) -> Result<FitResult> {
     input.validate()?;
+    if endpoints < 2 || endpoints > 4096 || endpoints % 2 != 0
+        || segment.is_some_and(|n| n == 0 || n > endpoints)
+    { return Err("require an even endpoint count in 2..=4096 and a segment length in 1..=endpoints".into()); }
+    let retained = segment.unwrap_or(endpoints);
     let (complex, positions) = fs_conduction::fixtures::box_grid([1,1,1], [1.;3]);
     let mesh = ConductionMesh::new(complex, positions)?;
     let material = ConductivityModel::isotropic_declared(2.)?;
@@ -88,24 +100,28 @@ fn fit(cx: &Cx<'_>, input: FitInput, replace_sources: bool) -> Result<FitResult>
             element_materials:None, interfaces:None, source:HeatSourceHistory::Fixed(ScalarField::Uniform(0.)) },
             EnthalpyHistoryMaterials { table:&[ReferenceEnthalpyMaterial { curve:&curve, reference_density_kg_m3:1. }],
                 of_element:&[0;6], phase_conductivity:None }, &[150.;8],
-            EnthalpyHistoryBudget { spatial:EnthalpyBudget { max_vertices:8, max_elements:6 }, max_steps:2 })?;
+            EnthalpyHistoryBudget { spatial:EnthalpyBudget { max_vertices:8, max_elements:6 }, max_steps:endpoints })?;
         Ok(ScanningEnthalpyRun::new(cx, base, sources, 1, None)?)
     };
-    let objective = ScanPowerObjective { endpoints_s:vec![1.,2.], observations:vec![
-        ScanObservation { endpoint:0, vertex:0, observable:ScanObservable::SpecificEnthalpy,
+    let objective = ScanPowerObjective { endpoints_s:(1..=endpoints).map(|i| 2.0*i as f64/endpoints as f64).collect(), observations:vec![
+        ScanObservation { endpoint:endpoints/2-1, vertex:0, observable:ScanObservable::SpecificEnthalpy,
             target:input.targets[0], scale:10. },
-        ScanObservation { endpoint:1, vertex:0, observable:ScanObservable::SpecificEnthalpy,
+        ScanObservation { endpoint:endpoints-1, vertex:0, observable:ScanObservable::SpecificEnthalpy,
             target:input.targets[1], scale:10. }], sampling:ScanObjectiveSampling::EventLeft,
         step:EnthalpyStepConfig { newton:NewtonKrylovConfig { absolute_tolerance:1e-11, relative_tolerance:1e-12,
             linear_restart:8, max_linear_cycles:16, forcing_minimum:1e-12, forcing_maximum:1e-3, ..Default::default() },
             max_newton_iterations:64, energy_tolerance_j:1e-8 },
         transpose:LinearConfig { tolerance:1e-10, max_iterations:1000, restart:8 },
-        budget:ScanObjectiveBudget { max_steps:2, max_observations:2, max_retained_vertices:16,
-            max_retained_source_vertices:16, max_schedule_controls:16, max_retained_radiation_entries:0 },
+        budget:ScanObjectiveBudget { max_steps:endpoints, max_observations:2, max_retained_vertices:8*retained,
+            max_retained_source_vertices:8*retained, max_schedule_controls:16, max_retained_radiation_entries:0 },
         source_reference_time_s:0. };
     let controls = vec![ScanPowerControl { source:0, value:0, reference_w:1. },
         ScanPowerControl { source:0, value:1, reference_w:1. }];
     let mut study = ScanPowerStudy::new(cx, vec![source], controls, objective, factory, 1)?;
+    if let Some(segment_steps) = segment {
+        study.set_checkpointing(cx, ScanCheckpointBudget { segment_steps,
+            max_checkpoint_vertices:8*(endpoints.div_ceil(segment_steps)+1), max_forward_solves:2*endpoints })?;
+    }
     let mut state = study.begin_optimizer(cx, 8)?;
     let original = state.x.clone();
     let paused = study.advance_optimizer(cx, &mut state, &StopRule::GradNorm(1e-9), 80)?;
@@ -128,7 +144,8 @@ fn fit(cx: &Cx<'_>, input: FitInput, replace_sources: bool) -> Result<FitResult>
     }
     let final_temperatures = verified.physical.final_step.solution().temperature.clone();
     Ok(FitResult { report, powers, predictions:verified.physical.predictions,
-        final_temperatures, evaluations:study.evaluations(), loss:verified.physical.value })
+        final_temperatures, evaluations:study.evaluations(), loss:verified.physical.value,
+        checkpoint_work:verified.checkpoint_work })
 }
 
 fn with_context<T>(f: impl FnOnce(&Cx<'_>) -> T) -> T {
@@ -142,17 +159,35 @@ fn main() -> Result<()> {
     if args.first().is_some_and(|arg|arg == "--limits") { return limits::run_cli(&args[1..]); }
     if args.first().is_some_and(|arg|arg == "--state-limits") { return state_limits::run_cli(&args[1..]); }
     if args.first().is_some_and(|arg|arg == "--peak-limits") { return peak_limits::run_cli(&args[1..]); }
+    if args.first().is_some_and(|arg|arg == "--checkpointed") {
+        let (endpoints, segment) = match &args[1..] {
+            [] => (64,8), [n,s] => (n.parse()?,s.parse()?),
+            _ => return Err("--checkpointed [even_endpoint_count segment_steps]".into()),
+        };
+        let input = FitInput::default();
+        let result = with_context(|cx| fit_with_grid(cx,input,false,endpoints,Some(segment)))?;
+        return print_result(input,result);
+    }
     if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
         println!("{USAGE}\nConstrained fitting: --limits [maximum_power_W maximum_absorbed_energy_J]");
         println!("Sampled hot-spot fitting: --peak-limits [maximum_enthalpy_J_per_kg smoothing_J_per_kg]");
+        println!("Short-tape fitting: --checkpointed [even_endpoint_count segment_steps] (defaults: 64 8)");
         return Ok(());
     }
     let input = FitInput::parse(&args)?;
     let result = with_context(|cx| fit(cx, input, false))?;
+    print_result(input,result)
+}
+
+fn print_result(input: FitInput, result: FitResult) -> Result<()> {
     println!("# status={:?} objective={:.12e} gradient_norm={:.12e} evaluations={}",
         result.report.reason, result.loss, result.report.grad_norm, result.evaluations);
     println!("# target_enthalpy_J_per_kg={:?} fitted_enthalpy_J_per_kg={:?}", input.targets, result.predictions);
     println!("# final_nodal_temperatures_K={:?}", result.final_temperatures);
+    if let Some(work) = result.checkpoint_work {
+        println!("# final_replay: original_endpoints={} recomputed_endpoints={} checkpoint_states={} peak_live_tangents={}",
+            work.original_forward_solves,work.recomputed_forward_solves,work.checkpoint_states,work.peak_retained_linearizations);
+    }
     println!("time_s,absorbed_power_w\n0,{:.12e}\n1,{:.12e}\n2,0", result.powers[0], result.powers[1]);
     if result.report.reason != StopReason::GradNorm {
         return Err("fit stopped before its requested gradient threshold; the printed schedule is not a convergence claim".into());
@@ -163,6 +198,25 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn g5_checkpointed_optimizer_retains_the_fit_and_reports_recomputed_work() {
+        let input=FitInput::default();
+        let full=with_context(|cx|fit_with_grid(cx,input,false,8,None)).unwrap();
+        let short=with_context(|cx|fit_with_grid(cx,input,false,8,Some(2))).unwrap();
+        assert_eq!(full.powers,short.powers);
+        assert_eq!(full.loss,short.loss);
+        assert_eq!(full.evaluations,short.evaluations);
+        assert_eq!(short.report.reason,StopReason::GradNorm);
+        let work=short.checkpoint_work.unwrap();
+        assert_eq!(work.original_forward_solves,8);
+        assert_eq!(work.recomputed_forward_solves,8);
+        assert_eq!(work.checkpoint_states,5);
+        assert_eq!(work.peak_retained_linearizations,2);
+        assert!(full.checkpoint_work.is_none());
+        for (n,s) in [(0,1),(3,1),(2,0),(2,3),(4098,2)] {
+            assert!(with_context(|cx|fit_with_grid(cx,input,false,n,Some(s))).is_err());
+        }
+    }
     #[test]
     fn g1_original_adjoint_and_lbfgs_recover_both_levels_after_budget_resume() {
         let fit = with_context(|cx| fit(cx, FitInput::default(), false)).unwrap();

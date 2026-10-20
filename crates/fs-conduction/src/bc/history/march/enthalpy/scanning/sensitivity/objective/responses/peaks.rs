@@ -90,38 +90,7 @@ pub fn evaluate_scan_objective_with_peaks(
     responses: &[ScanResponse], peaks: &[ScanPeakResponse], response_budget: ScanResponseBudget,
     max_peak_samples: usize,
 ) -> Result<(ScanObjectiveEvaluation, Vec<ScanResponseEvaluation>, Vec<ScanPeakEvaluation>), ScanSensitivityError> {
-    poll(cx, 0)?;
-    let count = responses.len().checked_add(peaks.len())
-        .filter(|&n| n <= response_budget.max_responses)
-        .ok_or_else(|| invalid("combined scan point/peak response allowance exceeded"))?;
-    let vertices = run.conduction().temperature().len();
-    let mut entries = vertices;
-    for (i, source) in run.sources().iter().enumerate() {
-        poll(cx, i)?;
-        entries = entries.checked_add(source.schedule_control_count()?)
-            .ok_or_else(|| invalid("scan peak gradient shape overflow"))?;
-    }
-    if entries.checked_mul(count).is_none_or(|n| n > response_budget.max_gradient_entries) {
-        return Err(invalid("combined scan point/peak gradients exceed their retained scalar allowance"));
-    }
-    let mut solves = endpoints.len();
-    for (i, response) in responses.iter().enumerate() {
-        poll(cx, i)?;
-        if response.endpoint >= endpoints.len() || response.vertex >= vertices {
-            return Err(invalid("scan point response must name an existing endpoint and vertex"));
-        }
-        solves = solves.checked_add(response.endpoint + 1)
-            .ok_or_else(|| invalid("scan point response work overflow"))?;
-    }
-    let mut samples = 0usize;
-    for peak in peaks {
-        samples += peak.validate(cx, endpoints.len(), vertices, max_peak_samples - samples)?;
-        solves = solves.checked_add(peak.last_endpoint + 1)
-            .ok_or_else(|| invalid("scan peak response work overflow"))?;
-    }
-    if solves > response_budget.max_transpose_solves {
-        return Err(invalid("combined objective/point/peak sweeps exceed their transpose allowance"));
-    }
+    admit_rows(cx, &run, endpoints.len(), responses, peaks, response_budget, max_peak_samples)?;
     let (objective, (points, peaks)) = evaluate_with_tape(cx, run, endpoints, observations,
         sampling, step, transpose, budget, |run, tape| {
             let mut points = Vec::with_capacity(responses.len());
@@ -139,6 +108,49 @@ pub fn evaluate_scan_objective_with_peaks(
     Ok((objective, points, peaks))
 }
 
+// Same physical response/work admission for full and checkpointed tapes.
+pub(crate) fn admit_rows(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
+    endpoint_count: usize, responses: &[ScanResponse], peaks: &[ScanPeakResponse],
+    response_budget: ScanResponseBudget, max_peak_samples: usize,
+) -> Result<Vec<usize>, ScanSensitivityError> {
+    poll(cx, 0)?;
+    let count = responses.len().checked_add(peaks.len())
+        .filter(|&n| n <= response_budget.max_responses)
+        .ok_or_else(|| invalid("combined scan point/peak response allowance exceeded"))?;
+    let vertices = run.conduction().temperature().len();
+    let mut entries = vertices;
+    for (i, source) in run.sources().iter().enumerate() {
+        poll(cx, i)?;
+        entries = entries.checked_add(source.schedule_control_count()?)
+            .ok_or_else(|| invalid("scan peak gradient shape overflow"))?;
+    }
+    if entries.checked_mul(count).is_none_or(|n| n > response_budget.max_gradient_entries) {
+        return Err(invalid("combined scan point/peak gradients exceed their retained scalar allowance"));
+    }
+    let mut solves = endpoint_count;
+    for (i, response) in responses.iter().enumerate() {
+        poll(cx, i)?;
+        if response.endpoint >= endpoint_count || response.vertex >= vertices {
+            return Err(invalid("scan point response must name an existing endpoint and vertex"));
+        }
+        solves = solves.checked_add(response.endpoint + 1)
+            .ok_or_else(|| invalid("scan point response work overflow"))?;
+    }
+    let mut samples = 0usize;
+    let mut sample_counts = Vec::with_capacity(peaks.len());
+    for peak in peaks {
+        let count = peak.validate(cx, endpoint_count, vertices, max_peak_samples - samples)?;
+        samples += count;
+        sample_counts.push(count);
+        solves = solves.checked_add(peak.last_endpoint + 1)
+            .ok_or_else(|| invalid("scan peak response work overflow"))?;
+    }
+    if solves > response_budget.max_transpose_solves {
+        return Err(invalid("combined objective/point/peak sweeps exceed their transpose allowance"));
+    }
+    Ok(sample_counts)
+}
+
 fn sample(binding: &ScanStepLinearization<'_>, observable: ScanObservable, vertex: usize) -> f64 {
     let solution = binding.report().solution();
     match observable {
@@ -149,34 +161,54 @@ fn sample(binding: &ScanStepLinearization<'_>, observable: ScanObservable, verte
 
 // A finite ordered difference may overflow toward -infinity. Its exponential
 // is zero; do not square, exponentiate positive magnitudes or invent clipping.
-fn weight(value: f64, maximum: f64, scale: f64) -> f64 {
+pub(crate) fn weight(value: f64, maximum: f64, scale: f64) -> f64 {
     let argument = (value - maximum) / scale;
     if argument == f64::NEG_INFINITY { 0.0 } else { fs_math::det::exp(argument) }
+}
+
+pub(crate) struct PeakSummary {
+    pub maximum: f64,
+    pub sum: f64,
+    pub gap: f64,
+    pub value: f64,
+    pub bound: f64,
+}
+
+// Shared reduction: checkpoint samples and full-tape samples use the same
+// summation order, normalization and binary64 envelope, not two approximations.
+pub(crate) fn summarize_samples(cx: &Cx<'_>, count: usize, scale: f64,
+    sample: impl Fn(usize) -> f64,
+) -> Result<PeakSummary, ScanSensitivityError> {
+    if count == 0 || !scale.is_finite() || scale <= 0.0 {
+        return Err(invalid("scan peak reduction needs samples and a positive finite scale"));
+    }
+    let mut maximum = f64::NEG_INFINITY;
+    for i in 0..count {
+        if i % 256 == 0 { poll(cx, i)?; }
+        maximum = maximum.max(finite(sample(i))?);
+    }
+    let mut sum = 0.0;
+    for i in 0..count {
+        if i % 256 == 0 { poll(cx, i)?; }
+        sum += weight(sample(i), maximum, scale);
+    }
+    if !sum.is_finite() || sum < 1.0 { return Err(invalid("scan peak normalization is not representable")); }
+    let gap = finite(scale * fs_math::det::ln(sum))?;
+    let value = finite(maximum + gap)?;
+    let bound = finite(scale * fs_math::det::ln(count as f64))?;
+    poll(cx, count)?;
+    Ok(PeakSummary { maximum, sum, gap, value, bound })
 }
 
 fn pull_peak(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
     tape: &[ScanStepLinearization<'_>], peak: &ScanPeakResponse,
     sampling: ScanObjectiveSampling, transpose: LinearConfig, max_controls: usize,
 ) -> Result<ScanPeakEvaluation, ScanSensitivityError> {
-    let mut maximum = f64::NEG_INFINITY;
-    for binding in &tape[peak.first_endpoint..=peak.last_endpoint] {
-        for (i, &vertex) in peak.vertices.iter().enumerate() {
-            if i % 256 == 0 { poll(cx, i)?; }
-            maximum = maximum.max(finite(sample(binding, peak.observable, vertex))?);
-        }
-    }
-    let mut sum = 0.0;
-    for binding in &tape[peak.first_endpoint..=peak.last_endpoint] {
-        for (i, &vertex) in peak.vertices.iter().enumerate() {
-            if i % 256 == 0 { poll(cx, i)?; }
-            sum += weight(sample(binding, peak.observable, vertex), maximum, peak.smoothing_scale);
-        }
-    }
-    if !sum.is_finite() || sum < 1.0 { return Err(invalid("scan peak normalization is not representable")); }
     let sample_count = (peak.last_endpoint - peak.first_endpoint + 1) * peak.vertices.len();
-    let gap = finite(peak.smoothing_scale * fs_math::det::ln(sum))?;
-    let value = finite(maximum + gap)?;
-    let bound = finite(peak.smoothing_scale * fs_math::det::ln(sample_count as f64))?;
+    let PeakSummary { maximum, sum, gap, value, bound } = summarize_samples(cx,
+        sample_count, peak.smoothing_scale, |i| sample(
+            &tape[peak.first_endpoint+i/peak.vertices.len()], peak.observable,
+            peak.vertices[i%peak.vertices.len()]))?;
     let mut seed = zeros(run.conduction().temperature().len())?;
     let mut accumulated: Option<Vec<MovingHeatScheduleGradient>> = None;
     let mut iterations = 0usize;

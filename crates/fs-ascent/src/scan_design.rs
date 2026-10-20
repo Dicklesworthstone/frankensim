@@ -15,6 +15,8 @@ use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objectiv
     peaks::{evaluate_scan_objective_with_peaks, ScanPeakResponse, ScanPeakEvaluation}};
 use fs_conduction::bc::history::march::moving::sensitivity::schedule::MovingHeatScheduleGradient;
 use fs_conduction::bc::history::march::moving::MovingHeatSource;
+use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::checkpoint::{
+    ScanCheckpointBudget, ScanCheckpointWork, evaluate_scan_objective_checkpointed_with_peaks};
 use fs_conduction::transient::enthalpy::EnthalpyStepConfig;
 use fs_conduction::{ConductionError, LinearConfig};
 use fs_exec::Cx;
@@ -57,6 +59,9 @@ pub struct ScanPowerEvaluation {
     pub powers_w: Vec<f64>,
     /// Selected center values and half widths in geometry-control order, metres.
     pub geometry_m: Vec<f64>,
+    /// Actual original/recomputed endpoint work when short-tape mode is selected.
+    /// None means the existing full-storage path was used.
+    pub checkpoint_work: Option<ScanCheckpointWork>,
 }
 
 /// Bounded inverse-design evaluator over immutable template sources.
@@ -75,6 +80,7 @@ pub struct ScanPowerStudy<F> {
     initial: Vec<f64>,
     evaluations: usize,
     evaluation_limit: usize,
+    checkpointing: Option<ScanCheckpointBudget>,
 }
 
 impl<F> ScanPowerStudy<F> {
@@ -137,12 +143,36 @@ impl<F> ScanPowerStudy<F> {
             }
             initial.push(control.initial(source.geometry_value(control.key())?)?);
         }
-        Ok(Self { sources, controls, geometry_controls, objective, factory, initial, evaluations:0, evaluation_limit })
+        Ok(Self { sources, controls, geometry_controls, objective, factory, initial, evaluations:0,
+            evaluation_limit, checkpointing: None })
     }
 
     pub fn initial_coordinates(&self) -> &[f64] { &self.initial }
     pub const fn evaluations(&self) -> usize { self.evaluations }
     pub const fn evaluation_limit(&self) -> usize { self.evaluation_limit }
+
+    /// Select short-tape differentiation before the first physical evaluation.
+    /// Applies to unconstrained fitting AND point/peak-constrained SQP without
+    /// discarding any state requirements. The objective's retained-tangent caps
+    /// bound one segment; its endpoint cap still bounds the whole trajectory.
+    /// Checkpoint arrays and the original-plus-replayed solve work have separate
+    /// explicit allowances. Mesh-dependent shapes are checked by the evaluator.
+    ///
+    /// The policy cannot change after a successful or failed physical probe, so
+    /// an optimizer checkpoint cannot silently resume under a different policy.
+    pub fn set_checkpointing(&mut self, cx: &Cx<'_>, policy: ScanCheckpointBudget)
+        -> Result<(), ScanSensitivityError>
+    {
+        poll(cx)?;
+        if self.evaluations != 0 || policy.segment_steps == 0 || policy.max_checkpoint_vertices == 0
+            || self.objective.endpoints_s.len().checked_mul(2)
+                .is_none_or(|n| n > policy.max_forward_solves)
+        { return Err(invalid("select positive checkpoint allowances before any physical probe, including both original and replayed endpoints")); }
+        self.checkpointing = Some(policy);
+        Ok(())
+    }
+
+    pub const fn checkpointing(&self) -> Option<ScanCheckpointBudget> { self.checkpointing }
     pub fn extend_evaluation_budget(&mut self, total: usize) -> Result<(), ScanSensitivityError> {
         if total <= self.evaluation_limit { return Err(invalid("scan evaluation allowance must increase")); }
         self.evaluation_limit = total;
@@ -239,16 +269,27 @@ impl<F> ScanPowerStudy<F> {
             return Err(invalid("scan factory must return an unadvanced physical run"));
         }
         if run.sources() != sources.as_slice() { return Err(invalid("scan factory replaced the supplied controlled sources")); }
-        let (physical, rows, peaks) = match responses {
+        let mut checkpoint_work = None;
+        let (physical, rows, peaks) = if let Some(checkpoints) = self.checkpointing {
+            let (rows, peaks, response_budget, max_samples) = responses.unwrap_or((
+                &[], &[], ScanResponseBudget { max_responses: 0, max_gradient_entries: 0,
+                    max_transpose_solves: self.objective.endpoints_s.len() }, 0));
+            let result = evaluate_scan_objective_checkpointed_with_peaks(cx, run,
+                &self.objective.endpoints_s, &self.objective.observations, self.objective.sampling,
+                self.objective.step, self.objective.transpose, self.objective.budget,
+                rows, peaks, response_budget, max_samples, checkpoints)?;
+            checkpoint_work = Some(result.work);
+            (result.objective, result.responses, result.peaks)
+        } else { match responses {
             None => (evaluate_scan_objective(cx,run,&self.objective.endpoints_s,&self.objective.observations,
                 self.objective.sampling,self.objective.step,self.objective.transpose,self.objective.budget)?, Vec::new(), Vec::new()),
             Some((responses, peaks, response_budget, max_samples)) => evaluate_scan_objective_with_peaks(cx,run,
                 &self.objective.endpoints_s,&self.objective.observations,self.objective.sampling,
                 self.objective.step,self.objective.transpose,self.objective.budget,responses,peaks,response_budget,max_samples)?,
-        };
+        }};
         let gradient = self.chain_gradient(cx, &powers_w, &geometry_m, &physical.sources)?;
         poll(cx)?;
-        Ok((ScanPowerEvaluation { physical,gradient,powers_w,geometry_m }, rows, peaks))
+        Ok((ScanPowerEvaluation { physical,gradient,powers_w,geometry_m,checkpoint_work }, rows, peaks))
     }
 
     // Both objective and unsquared state-response derivatives use this same

@@ -14,6 +14,9 @@ use super::{ScanObjectiveBudget, ScanObjectiveEvaluation, ScanObservation,
     invalid, poll, zeros};
 use fs_exec::Cx;
 
+mod responses;
+pub use responses::{CheckpointedScanResponses, evaluate_scan_objective_checkpointed_with_peaks};
+
 /// Separate checkpoint storage and recomputation allowances.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanCheckpointBudget {
@@ -67,50 +70,11 @@ pub fn evaluate_scan_objective_checkpointed(
     step: EnthalpyStepConfig, transpose: LinearConfig, budget: ScanObjectiveBudget,
     checkpoints: ScanCheckpointBudget,
 ) -> Result<CheckpointedScanObjective, ScanSensitivityError> {
-    let segment = admit_checkpoints(cx, &run, endpoints.len(), checkpoints)?;
-    let (at_endpoint, per_step) = admit_layout(cx, &run, endpoints, observations, budget, segment)?;
-    let vertices = run.conduction().temperature().len();
-    let mut predictions = zeros(observations.len())?;
-    let mut residuals = zeros(observations.len())?;
-    let mut value = 0.0;
-    let mut replay = ReplayedScan::forward(cx, run, endpoints, sampling, step, segment,
-        |index, report| {
-            for &i in &at_endpoint[index] {
-                poll(cx, i)?;
-                let observation = observations[i];
-                let prediction = observed(report, observation.observable, observation.vertex);
-                let residual = finite((prediction-observation.target)/observation.scale)?;
-                value = finite(value + 0.5 * residual * residual)?;
-                predictions[i] = prediction;
-                residuals[i] = residual;
-            }
-            Ok(())
-        })?;
-    let mut reverse = ReverseState::new(vertices)?;
-    for segment_index in (0..replay.segments()).rev() {
-        let (begin, tape) = replay.segment(cx, segment_index, endpoints, sampling, step, per_step)?;
-        for local in (0..tape.len()).rev() {
-            let index = begin + local;
-            let binding = &tape[local];
-            for &i in &at_endpoint[index] {
-                poll(cx, i)?;
-                let o = observations[i];
-                same_scalar(observed(binding.report(), o.observable, o.vertex), predictions[i])?;
-            }
-            reverse.inject_observations(cx, binding, observations, &at_endpoint[index], &residuals)?;
-            reverse.pull(cx, &replay.run, binding, sampling, transpose, budget.max_schedule_controls)?;
-        }
-        // Drop the tape before allocating the preceding segment.
-    }
-    poll(cx, endpoints.len())?;
-    Ok(CheckpointedScanObjective {
-        objective: ScanObjectiveEvaluation { value, predictions, standardized_residuals: residuals,
-            sources: reverse.sources.ok_or_else(|| invalid("missing checkpointed scan reverse sweep"))?,
-            initial_specific_enthalpy: reverse.seed, final_step: replay.final_step,
-            endpoint_count: endpoints.len(), transpose_iterations: reverse.iterations,
-            max_transpose_relative_residual: reverse.residual },
-        work: replay.work,
-    })
+    let result = evaluate_scan_objective_checkpointed_with_peaks(cx, run, endpoints,
+        observations, sampling, step, transpose, budget, &[], &[],
+        super::responses::ScanResponseBudget { max_responses: 0, max_gradient_entries: 0,
+            max_transpose_solves: endpoints.len() }, 0, checkpoints)?;
+    Ok(CheckpointedScanObjective { objective: result.objective, work: result.work })
 }
 
 fn admit_checkpoints(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
