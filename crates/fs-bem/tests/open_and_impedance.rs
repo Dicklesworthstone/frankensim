@@ -421,146 +421,202 @@ fn iterative_options() -> IterativeOptions {
         tol: 1e-8,
         fmm_order: 6,
         max_iters: 900,
+        // The 82k-panel rung's double and mixed near fields need about 2 GiB;
+        // the cache is bitwise-neutral (bem_near_field_cache_is_bitwise).
+        near_field_cache_bytes: 1 << 31,
         ..IterativeOptions::default()
     }
 }
 
-#[test]
-fn impedance_sphere_series() {
-    let medium = Medium::air();
-    let rho_c = medium.density * medium.sound_speed;
-    let gate = CancelGate::new_clock_free();
-    let options = iterative_options();
-    let directions: Vec<_> = (0..33)
-        .map(|i| {
-            let mu = -1.0 + 2.0 * i as f64 / 32.0;
-            [(1.0 - mu * mu).sqrt(), 0.0, mu]
-        })
-        .collect();
-    for ka in [0.1, 1.0, 5.0] {
+/// The series is ka in {0.1, 1, 5} by beta in {0, 0.5, 1, 2 + 1i}, one test
+/// per case. Each case solves alone, and in sequence the twelve take more
+/// than 12 h, so the harness may run them in parallel.
+mod impedance_sphere_series {
+    use super::*;
+
+    fn case(ka: f64, beta: C64) {
+        let medium = Medium::air();
+        let rho_c = medium.density * medium.sound_speed;
+        let gate = CancelGate::new_clock_free();
+        let directions: Vec<_> = (0..33)
+            .map(|i| {
+                let mu = -1.0 + 2.0 * i as f64 / 32.0;
+                [(1.0 - mu * mu).sqrt(), 0.0, mu]
+            })
+            .collect();
         // Exact ka=5: use .108's explicit high-kD owner, including root-box
         // padding. Do not perturb the benchmark input to evade the W5a cap.
         let options = if ka == 5.0 {
             IterativeOptions {
                 directional: Some(fs_fmm::DirectionalOptions::for_tolerance(1e-4).unwrap()),
-                ..options.clone()
+                ..iterative_options()
             }
         } else {
-            options.clone()
+            iterative_options()
         };
-        for beta in [C64::ZERO, C64::from_re(0.5), C64::ONE, C64::new(2.0, 1.0)] {
-            let rigid = C64::new(ka * ka, -ka).scale(1.0 / (1.0 + ka * ka));
-            let oracle = (rigid / (C64::ONE + beta * rigid)).scale(rho_c);
-            let mut errors = Vec::new();
-            let mut scattering_errors = Vec::new();
-            for rung in 3..=6 {
-                let start = Instant::now();
-                let surface = SpherePanels::icosphere(1.0, rung).unwrap();
-                let n = surface.areas().len();
-                let coefficients = vec![beta; n];
-                let law = Admittance::Local {
-                    beta: &coefficients,
-                    declared_active: false,
-                };
-                let drive = vec![C64::ONE; n];
-                let (actual, report, receipt) = bc::solve_radiation_bc_iterative(
-                    &surface,
-                    ka,
-                    medium,
-                    SurfaceBc {
-                        drive_velocity: &drive,
-                        admittance: law,
-                    },
-                    Formulation::BurtonMiller,
-                    &options,
-                    &gate,
-                )
-                .unwrap();
-                assert!(report.converged_euclidean());
-                let value = mean(&surface, &actual.radiation.pressure);
-                let error = relative(value, oracle);
-                errors.push(error);
-                record(
-                    "impedance-sphere-pulsating",
-                    "analytic l=0 Robin sphere: z=z0/(1+beta*z0)",
-                    "sphere-mesh",
-                    rung as usize,
-                    value,
-                    oracle,
-                    error,
-                    TOL,
-                    start,
-                    &format!(
-                        ",\"ka\":{ka},\"beta\":[{},{}],\"panels\":{n},\"iterations\":{},\"rel_residual\":{},\"near_field_bytes\":{}",
-                        beta.re,
-                        beta.im,
-                        report.iters,
-                        report.rel_residual,
-                        receipt.near_field_bytes
-                    ),
-                );
-                let (scatter, report, _) = bc::solve_scattering_bc_iterative(
-                    &surface,
-                    ka,
-                    medium,
-                    law,
-                    PlaneWave {
-                        direction: [0.0, 0.0, 1.0],
-                        amplitude_pa: C64::ONE,
-                    },
-                    Formulation::BurtonMiller,
-                    &options,
-                    &gate,
-                )
-                .unwrap();
-                assert!(report.converged_euclidean());
-                let values = helmholtz::far_field_integrated(
-                    &surface,
-                    &scatter.scattered,
-                    medium,
-                    &directions,
-                );
-                let mut numerator = 0.0;
-                let mut denominator = 0.0;
-                for (&d, &got) in directions.iter().zip(&values) {
-                    let want = sphere_scattering(ka, beta, d[2]);
-                    numerator += (got - want).norm_sq();
-                    denominator += want.norm_sq();
-                }
-                let scatter_error = (numerator / denominator).sqrt();
-                scattering_errors.push(scatter_error);
-                record(
-                    "impedance-sphere-scattering",
-                    "analytic spherical Hankel Robin partial-wave series, l<=32",
-                    "sphere-mesh",
-                    rung as usize,
-                    C64::from_re(scatter_error),
-                    C64::ZERO,
-                    scatter_error,
-                    TOL,
-                    start,
-                    &format!(
-                        ",\"ka\":{ka},\"beta\":[{},{}],\"panels\":{n}",
-                        beta.re, beta.im
-                    ),
-                );
-                assert!(actual.absorbed_power_w >= -1e-10 && scatter.absorbed_power_w >= -1e-10);
-                // At least three spatial rungs; stop only after BOTH strict gates.
-                if rung >= 5 && error <= TOL && scatter_error <= TOL {
-                    break;
-                }
+        let rigid = C64::new(ka * ka, -ka).scale(1.0 / (1.0 + ka * ka));
+        let oracle = (rigid / (C64::ONE + beta * rigid)).scale(rho_c);
+        let mut errors = Vec::new();
+        let mut scattering_errors = Vec::new();
+        for rung in 3..=6 {
+            let start = Instant::now();
+            let surface = SpherePanels::icosphere(1.0, rung).unwrap();
+            let n = surface.areas().len();
+            let coefficients = vec![beta; n];
+            let law = Admittance::Local {
+                beta: &coefficients,
+                declared_active: false,
+            };
+            let drive = vec![C64::ONE; n];
+            let (actual, report, receipt) = bc::solve_radiation_bc_iterative(
+                &surface,
+                ka,
+                medium,
+                SurfaceBc {
+                    drive_velocity: &drive,
+                    admittance: law,
+                },
+                Formulation::BurtonMiller,
+                &options,
+                &gate,
+            )
+            .unwrap();
+            assert!(report.converged_euclidean());
+            let value = mean(&surface, &actual.radiation.pressure);
+            let error = relative(value, oracle);
+            errors.push(error);
+            record(
+                "impedance-sphere-pulsating",
+                "analytic l=0 Robin sphere: z=z0/(1+beta*z0)",
+                "sphere-mesh",
+                rung as usize,
+                value,
+                oracle,
+                error,
+                TOL,
+                start,
+                &format!(
+                    ",\"ka\":{ka},\"beta\":[{},{}],\"panels\":{n},\"iterations\":{},\"rel_residual\":{},\"near_field_bytes\":{}",
+                    beta.re, beta.im, report.iters, report.rel_residual, receipt.near_field_bytes
+                ),
+            );
+            let (scatter, report, _) = bc::solve_scattering_bc_iterative(
+                &surface,
+                ka,
+                medium,
+                law,
+                PlaneWave {
+                    direction: [0.0, 0.0, 1.0],
+                    amplitude_pa: C64::ONE,
+                },
+                Formulation::BurtonMiller,
+                &options,
+                &gate,
+            )
+            .unwrap();
+            assert!(report.converged_euclidean());
+            let values =
+                helmholtz::far_field_integrated(&surface, &scatter.scattered, medium, &directions);
+            let mut numerator = 0.0;
+            let mut denominator = 0.0;
+            for (&d, &got) in directions.iter().zip(&values) {
+                let want = sphere_scattering(ka, beta, d[2]);
+                numerator += (got - want).norm_sq();
+                denominator += want.norm_sq();
             }
-            assert!(
-                *errors.last().unwrap() <= TOL,
-                "ka={ka} beta={beta:?}: {errors:?}"
+            let scatter_error = (numerator / denominator).sqrt();
+            scattering_errors.push(scatter_error);
+            record(
+                "impedance-sphere-scattering",
+                "analytic spherical Hankel Robin partial-wave series, l<=32",
+                "sphere-mesh",
+                rung as usize,
+                C64::from_re(scatter_error),
+                C64::ZERO,
+                scatter_error,
+                TOL,
+                start,
+                &format!(
+                    ",\"ka\":{ka},\"beta\":[{},{}],\"panels\":{n}",
+                    beta.re, beta.im
+                ),
             );
-            assert!(
-                *scattering_errors.last().unwrap() <= TOL,
-                "ka={ka} beta={beta:?}: {scattering_errors:?}"
-            );
-            assert!(errors.last().unwrap() < &errors[0]);
-            assert!(scattering_errors.last().unwrap() < &scattering_errors[0]);
+            assert!(actual.absorbed_power_w >= -1e-10 && scatter.absorbed_power_w >= -1e-10);
+            // At least three spatial rungs; stop only after BOTH strict gates.
+            if rung >= 5 && error <= TOL && scatter_error <= TOL {
+                break;
+            }
         }
+        assert!(
+            *errors.last().unwrap() <= TOL,
+            "ka={ka} beta={beta:?}: {errors:?}"
+        );
+        assert!(
+            *scattering_errors.last().unwrap() <= TOL,
+            "ka={ka} beta={beta:?}: {scattering_errors:?}"
+        );
+        assert!(errors.last().unwrap() < &errors[0]);
+        assert!(scattering_errors.last().unwrap() < &scattering_errors[0]);
+    }
+
+    #[test]
+    fn ka0_1_beta0() {
+        case(0.1, C64::ZERO);
+    }
+
+    #[test]
+    fn ka0_1_beta0_5() {
+        case(0.1, C64::from_re(0.5));
+    }
+
+    #[test]
+    fn ka0_1_beta1() {
+        case(0.1, C64::ONE);
+    }
+
+    #[test]
+    fn ka0_1_beta2_1i() {
+        case(0.1, C64::new(2.0, 1.0));
+    }
+
+    #[test]
+    fn ka1_beta0() {
+        case(1.0, C64::ZERO);
+    }
+
+    #[test]
+    fn ka1_beta0_5() {
+        case(1.0, C64::from_re(0.5));
+    }
+
+    #[test]
+    fn ka1_beta1() {
+        case(1.0, C64::ONE);
+    }
+
+    #[test]
+    fn ka1_beta2_1i() {
+        case(1.0, C64::new(2.0, 1.0));
+    }
+
+    #[test]
+    fn ka5_beta0() {
+        case(5.0, C64::ZERO);
+    }
+
+    #[test]
+    fn ka5_beta0_5() {
+        case(5.0, C64::from_re(0.5));
+    }
+
+    #[test]
+    fn ka5_beta1() {
+        case(5.0, C64::ONE);
+    }
+
+    #[test]
+    fn ka5_beta2_1i() {
+        case(5.0, C64::new(2.0, 1.0));
     }
 }
 
