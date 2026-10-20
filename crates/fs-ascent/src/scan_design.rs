@@ -8,15 +8,17 @@
 
 use fs_conduction::bc::history::march::enthalpy::scanning::ScanningEnthalpyRun;
 use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::{ScanSensitivityError,
-    objective::{evaluate_scan_objective, ScanObjectiveEvaluation, ScanObjectiveBudget,
+    objective::{ScanObjectiveEvaluation, ScanObjectiveBudget,
         ScanObjectiveSampling, ScanObservation}};
 use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::responses::{
     ScanResponse, ScanResponseBudget, ScanResponseEvaluation,
-    peaks::{evaluate_scan_objective_with_peaks, ScanPeakResponse, ScanPeakEvaluation}};
+    peaks::{ScanPeakResponse, ScanPeakEvaluation}};
+use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::spatial::{
+    evaluate_scan_observations, ScanObservationSpec};
 use fs_conduction::bc::history::march::moving::sensitivity::schedule::MovingHeatScheduleGradient;
 use fs_conduction::bc::history::march::moving::MovingHeatSource;
 use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::checkpoint::{
-    ScanCheckpointBudget, ScanCheckpointWork, evaluate_scan_objective_checkpointed_with_peaks};
+    ScanCheckpointBudget, ScanCheckpointWork};
 use fs_conduction::transient::enthalpy::EnthalpyStepConfig;
 use fs_conduction::{ConductionError, LinearConfig};
 use fs_exec::Cx;
@@ -41,9 +43,11 @@ pub struct ScanPowerControl {
 }
 
 /// Original fixed-grid objective and independent physical/adjoint allowances.
-pub struct ScanPowerObjective {
+/// The default uses vertex observations. Use `ScanSpatialObservation` for
+/// fixed interior probes or normalized sensor/region readouts on the same mesh.
+pub struct ScanPowerObjective<O = ScanObservation> {
     pub endpoints_s: Vec<f64>,
-    pub observations: Vec<ScanObservation>,
+    pub observations: Vec<O>,
     pub sampling: ScanObjectiveSampling,
     pub step: EnthalpyStepConfig,
     pub transpose: LinearConfig,
@@ -74,12 +78,12 @@ pub struct ScanPowerEvaluation {
 /// original state. The study's evaluation counter is independent of optimizer
 /// checkpoints; cloning or restarting L-BFGS cannot refund physical work.
 /// No uniqueness, global optimum, or experimentally calibrated result is claimed.
-pub struct ScanPowerStudy<F> {
+pub struct ScanPowerStudy<F, O = ScanObservation> {
     sources: Vec<MovingHeatSource>,
     controls: Vec<ScanPowerControl>,
     power_coordinates: ScanPowerCoordinates,
     geometry_controls: Vec<ScanGeometryControl>,
-    objective: ScanPowerObjective,
+    objective: ScanPowerObjective<O>,
     factory: F,
     initial: Vec<f64>,
     evaluations: usize,
@@ -87,11 +91,11 @@ pub struct ScanPowerStudy<F> {
     checkpointing: Option<ScanCheckpointBudget>,
 }
 
-impl<F> ScanPowerStudy<F> {
+impl<F, O: ScanObservationSpec> ScanPowerStudy<F, O> {
     /// Bind controls without a primal solve. Selected initial values and their
     /// reference scales must be positive; leave exact zero/off entries unselected.
     pub fn new(cx: &Cx<'_>, sources: Vec<MovingHeatSource>, controls: Vec<ScanPowerControl>,
-        objective: ScanPowerObjective, factory: F, evaluation_limit: usize)
+        objective: ScanPowerObjective<O>, factory: F, evaluation_limit: usize)
         -> Result<Self, ScanSensitivityError>
     {
         Self::new_joint(cx, sources, controls, Vec::new(), objective, factory, evaluation_limit)
@@ -105,7 +109,7 @@ impl<F> ScanPowerStudy<F> {
     /// authoritative; an invalid design is not silently projected or penalized.
     #[allow(clippy::too_many_arguments)]
     pub fn new_joint(cx: &Cx<'_>, sources: Vec<MovingHeatSource>, controls: Vec<ScanPowerControl>,
-        geometry_controls: Vec<ScanGeometryControl>, objective: ScanPowerObjective,
+        geometry_controls: Vec<ScanGeometryControl>, objective: ScanPowerObjective<O>,
         factory: F, evaluation_limit: usize) -> Result<Self, ScanSensitivityError>
     {
         Self::new_joint_with_power_coordinates(cx, sources, controls, geometry_controls,
@@ -121,7 +125,7 @@ impl<F> ScanPowerStudy<F> {
     #[allow(clippy::too_many_arguments)]
     pub fn new_joint_with_power_coordinates(cx: &Cx<'_>, sources: Vec<MovingHeatSource>,
         controls: Vec<ScanPowerControl>, geometry_controls: Vec<ScanGeometryControl>,
-        power_coordinates: ScanPowerCoordinates, objective: ScanPowerObjective,
+        power_coordinates: ScanPowerCoordinates, objective: ScanPowerObjective<O>,
         factory: F, evaluation_limit: usize) -> Result<Self, ScanSensitivityError>
     {
         poll(cx)?;
@@ -310,24 +314,17 @@ impl<F> ScanPowerStudy<F> {
             return Err(invalid("scan factory must return an unadvanced physical run"));
         }
         if run.sources() != sources.as_slice() { return Err(invalid("scan factory replaced the supplied controlled sources")); }
-        let mut checkpoint_work = None;
-        let (physical, rows, peaks) = if let Some(checkpoints) = self.checkpointing {
-            let (rows, peaks, response_budget, max_samples) = responses.unwrap_or((
-                &[], &[], ScanResponseBudget { max_responses: 0, max_gradient_entries: 0,
-                    max_transpose_solves: self.objective.endpoints_s.len() }, 0));
-            let result = evaluate_scan_objective_checkpointed_with_peaks(cx, run,
-                &self.objective.endpoints_s, &self.objective.observations, self.objective.sampling,
-                self.objective.step, self.objective.transpose, self.objective.budget,
-                rows, peaks, response_budget, max_samples, checkpoints)?;
-            checkpoint_work = Some(result.work);
-            (result.objective, result.responses, result.peaks)
-        } else { match responses {
-            None => (evaluate_scan_objective(cx,run,&self.objective.endpoints_s,&self.objective.observations,
-                self.objective.sampling,self.objective.step,self.objective.transpose,self.objective.budget)?, Vec::new(), Vec::new()),
-            Some((responses, peaks, response_budget, max_samples)) => evaluate_scan_objective_with_peaks(cx,run,
-                &self.objective.endpoints_s,&self.objective.observations,self.objective.sampling,
-                self.objective.step,self.objective.transpose,self.objective.budget,responses,peaks,response_budget,max_samples)?,
-        }};
+        let (rows, peaks, response_budget, max_samples) = responses.unwrap_or((
+            &[], &[], ScanResponseBudget { max_responses: 0, max_gradient_entries: 0,
+                max_transpose_solves: self.objective.endpoints_s.len() }, 0));
+        // Vertex and spatial measurements share the original forward/reverse
+        // owner. One sensor produces one residual after its physical readout;
+        // it must not become independent fitting targets at its support nodes.
+        // The same mesh-bound row and its transpose survive checkpoint replay.
+        let (physical, rows, peaks, checkpoint_work) = evaluate_scan_observations(cx, run,
+            &self.objective.endpoints_s, &self.objective.observations, self.objective.sampling,
+            self.objective.step, self.objective.transpose, self.objective.budget,
+            rows, peaks, response_budget, max_samples, self.checkpointing)?;
         let gradient = self.chain_gradient(cx, &powers_w, &geometry_m, &physical.sources)?;
         poll(cx)?;
         Ok((ScanPowerEvaluation { physical,gradient,powers_w,geometry_m,checkpoint_work }, rows, peaks))

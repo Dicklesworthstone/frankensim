@@ -6,7 +6,7 @@
 //! not a feasible optimum: inspect the returned KKT residuals and physical rows.
 
 use super::{ScanGeometryControl,ScanPowerStudy,ScanPowerEvaluation,ScanSensitivityError,
-    MovingHeatSource,ScanningEnthalpyRun,finite,invalid,poll};
+    MovingHeatSource,ScanningEnthalpyRun,ScanObservation,ScanObservationSpec,finite,invalid,poll};
 use crate::{SqpState,SqpSample,SqpError,SqpRunReport};
 use fs_exec::Cx;
 use std::collections::{BTreeMap,BTreeSet};
@@ -106,13 +106,13 @@ struct Limits { bounds: Vec<ScanControlBound>, energy: Vec<EnergyRow>,
 /// This owner prevents resuming a checkpoint with a different constraint set.
 /// The native dense SQP is for bounded small design spaces, not large sparse
 /// constrained optimization. All physical evaluations retain the study budget.
-pub struct ConstrainedScanStudy<F> {
-    study: ScanPowerStudy<F>,
+pub struct ConstrainedScanStudy<F, O = ScanObservation> {
+    study: ScanPowerStudy<F, O>,
     limits: Limits,
     state: SqpState,
 }
 
-impl<F> ConstrainedScanStudy<F> {
+impl<F, O: ScanObservationSpec> ConstrainedScanStudy<F, O> {
     /// Admit all constraint shapes before allocating a dense Jacobian or doing
     /// physics, then evaluate the original initial design once. Starts may be
     /// constraint-infeasible but must be physically evaluable. Equal lower/upper
@@ -122,7 +122,7 @@ impl<F> ConstrainedScanStudy<F> {
     /// per selected power, counted in the KKT cap. No user bounds are needed
     /// just to admit the off boundary. Other design limits may remain infeasible
     /// during the search; negative heater inputs never enter a physics solve.
-    pub fn new<'h,'m,'c>(cx: &Cx<'_>, study: ScanPowerStudy<F>,
+    pub fn new<'h,'m,'c>(cx: &Cx<'_>, study: ScanPowerStudy<F, O>,
         bounds: Vec<ScanControlBound>, energy: Vec<ScanEnergyCap>, max_kkt_dimension: usize)
         -> Result<Self,SqpError<ScanSensitivityError>>
     where F: FnMut(&Cx<'_>,Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>,ScanSensitivityError>
@@ -137,7 +137,7 @@ impl<F> ConstrainedScanStudy<F> {
     /// State-only constrained studies are valid. Bounds stay immutable across
     /// SQP continuation, and every extra reverse sweep has an explicit budget.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_state_bounds<'h,'m,'c>(cx: &Cx<'_>, study: ScanPowerStudy<F>,
+    pub fn new_with_state_bounds<'h,'m,'c>(cx: &Cx<'_>, study: ScanPowerStudy<F, O>,
         bounds: Vec<ScanControlBound>, energy: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>,
         response_budget: ScanResponseBudget, max_kkt_dimension: usize)
         -> Result<Self,SqpError<ScanSensitivityError>>
@@ -156,7 +156,7 @@ impl<F> ConstrainedScanStudy<F> {
     /// bounds total selected vertex/time pairs. Peak selection, smoothing and
     /// limits stay immutable across optimizer continuation and physical replay.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_peak_bounds<'h,'m,'c>(cx: &Cx<'_>, mut study: ScanPowerStudy<F>,
+    pub fn new_with_peak_bounds<'h,'m,'c>(cx: &Cx<'_>, mut study: ScanPowerStudy<F, O>,
         bounds: Vec<ScanControlBound>, energy: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>,
         peaks: Vec<ScanPeakBound>, response_budget: ScanResponseBudget,
         max_peak_samples: usize, max_kkt_dimension: usize)
@@ -246,7 +246,7 @@ impl<F> ConstrainedScanStudy<F> {
 
 impl Limits {
     #[allow(clippy::too_many_arguments)]
-    fn new<F>(cx: &Cx<'_>, study: &ScanPowerStudy<F>, bounds: Vec<ScanControlBound>,
+    fn new<F, O: ScanObservationSpec>(cx: &Cx<'_>, study: &ScanPowerStudy<F, O>, bounds: Vec<ScanControlBound>,
         caps: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>, peaks: Vec<ScanPeakBound>,
         response_budget: ScanResponseBudget, max_peak_samples: usize, maximum: usize)
         -> Result<Self,ScanSensitivityError>
@@ -342,7 +342,7 @@ impl Limits {
         Ok(Self {bounds,energy,states,peaks,max_peak_samples,response_budget,rows})
     }
 
-    fn at<F>(&self,cx: &Cx<'_>,study: &ScanPowerStudy<F>,point: &[f64])
+    fn at<F, O: ScanObservationSpec>(&self,cx: &Cx<'_>,study: &ScanPowerStudy<F, O>,point: &[f64])
         -> Result<ScanConstraintEvaluation,ScanSensitivityError>
     {
         poll(cx)?;
@@ -394,7 +394,7 @@ impl Limits {
         Ok(out)
     }
 
-    fn sample<'h,'m,'c,F>(&self,cx: &Cx<'_>,study: &mut ScanPowerStudy<F>,point: &[f64])
+    fn sample<'h,'m,'c,F,O: ScanObservationSpec>(&self,cx: &Cx<'_>,study: &mut ScanPowerStudy<F, O>,point: &[f64])
         -> Result<Option<SqpSample>,ScanSensitivityError>
     where F: FnMut(&Cx<'_>,Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>,ScanSensitivityError>
     {
@@ -411,7 +411,7 @@ impl Limits {
             ce:Vec::new(),je:Vec::new(),ci:constraints.residuals,ji:constraints.jacobian}))
     }
 
-    fn evaluate<'h,'m,'c,F>(&self,cx: &Cx<'_>,study: &mut ScanPowerStudy<F>,point: &[f64])
+    fn evaluate<'h,'m,'c,F,O: ScanObservationSpec>(&self,cx: &Cx<'_>,study: &mut ScanPowerStudy<F, O>,point: &[f64])
         -> Result<(ScanPowerEvaluation,ScanConstraintEvaluation),ScanSensitivityError>
     where F: FnMut(&Cx<'_>,Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>,ScanSensitivityError>
     {
