@@ -273,15 +273,30 @@ pub enum LedgerErrorKind {
     /// Schema identifier or column heading does not match.
     Header,
     /// Wrong number of row fields.
-    ColumnCount { expected: usize, found: usize },
+    ColumnCount {
+        /// Columns the schema declares.
+        expected: usize,
+        /// Columns the row carries.
+        found: usize,
+    },
     /// A mandatory column was empty or whitespace-only.
     MissingField(&'static str),
     /// Unknown vocabulary, malformed id, path, licence token or date.
-    UnknownValue { field: &'static str, value: String },
+    UnknownValue {
+        /// Column name.
+        field: &'static str,
+        /// The rejected text.
+        value: String,
+    },
     /// Repeated source key; no first-row-wins fallback.
     DuplicateSourceId(String),
     /// Field exceeded the UTF-8 byte cap.
-    FieldTooLong { field: &'static str, cap: usize },
+    FieldTooLong {
+        /// Column name.
+        field: &'static str,
+        /// The byte cap.
+        cap: usize,
+    },
     /// Row-local retention or identity rule failed.
     Inconsistent(&'static str),
 }
