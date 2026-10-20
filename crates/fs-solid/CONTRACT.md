@@ -526,9 +526,9 @@ directions at two parameter points, and the fully prescribed zero-gradient,
 budget, cancellation and retry limits.
 
 `adjoint::support::trajectory` records complete prescribed-support simulations
-through `record_prescribed_controls`. Its owning recorder retains only accepted
-interval times: the frozen linear motion Jacobian needs no full primal tape or
-finite-difference replay. Each successful original coupled step is recorded
+through `record_prescribed_controls`. For controls alone, its owning recorder
+retains only accepted interval times: the frozen linear motion Jacobian needs
+no full primal tape or finite-difference replay. Each successful original coupled step is recorded
 atomically; failed sampling, support admission, solves, cancellation or storage
 admission preserves both the accepted state and schedule. Cloning forks both.
 The typed-history adapter samples one retained force/support endpoint before
@@ -544,14 +544,37 @@ contributions. Sparse observations preserve caller summation order with
 O(steps + observations) indexing. Explicit step, returned-gradient and observation
 caps precede allocation. Refused/cancelled reversals return no partial gradient.
 
+`enable_material_recording` additionally retains the original full nodal q/v/a
+at initialization and each accepted endpoint. It must be enabled once, before
+the first finite step. Independent element/full-DOF limits and a checked
+`samples * nodes * 9` scalar cap precede recording; failed advancement preserves
+both the accepted motion and material tape. Cloning forks the retained tape.
+The typed-history adapter uses the same bounded atomic recording path.
+
+`reverse_design_with_observations` returns all existing control derivatives and
+per-element stiffness/density plus global Rayleigh damping derivatives in one
+reverse sweep. It contracts each residual multiplier against the exact retained
+full motion, including the solved initial acceleration. No additional transpose
+solve, replay or finite difference is needed. Material derivatives hold geometry,
+restraint axes, authored support kinematics, free thermal strain and independent
+external nodal loads fixed. The stiffness-induced thermal equivalent force is
+already included; its dependence must not be chained again through the separate
+frozen-material thermal-force cotangent. Parameter-dependent external loads and
+direct objective terms remain caller-owned chains. Refusal/cancellation returns
+no partial combined gradient and leaves the tape reusable.
+
 Callers supply actual residual/quadrature weights for their motion objectives
 and chain returned world-component controls through authored waveforms. This
 does not infer derivatives of frame transforms, knot/step times, interpolation,
-geometry, material, direct control costs, reaction/work observations or acceptance.
+geometry, direct control costs, reaction/work observations or acceptance.
 `tests/transient_support_trajectory3.rs` supplies a multi-step least-squares
 objective checked against all twelve independent initial/force/support control
 directions, an analytical typed fully-prescribed ramp-amplitude chain rule,
 and bounded recording, cloning, cancellation and refusal/retry checks.
+`tests/transient_support_design3.rs` adds a thermal multi-step least-squares
+objective observed at every endpoint, compared with six material/damping/support/
+force directions at two parameter points, plus opt-in recording, storage refusal,
+atomic failure, cancellation/retry, clone identity and fully prescribed limits.
 
 ## Public types and semantics
 

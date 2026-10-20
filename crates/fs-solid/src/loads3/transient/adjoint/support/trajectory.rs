@@ -1,9 +1,11 @@
 //! Reverse complete driven-support trajectories on a fixed accepted time grid.
 //!
 //! The linear motion Jacobian depends on the interval and frozen operators,
-//! not on the primal state. Recording therefore retains O(steps) times rather
-//! than a full motion tape. Sparse observations seed any accepted endpoint;
-//! one reverse sweep returns every force and support-displacement derivative.
+//! not on the primal state. Control recording therefore retains O(steps) times.
+//! Material design optionally retains bounded full endpoint motion. Sparse
+//! observations seed any accepted endpoint; one reverse sweep returns all
+//! requested material, force and support-displacement derivatives.
+use super::super::material::{MaterialGradientBudget3, MaterialScaleGradient3};
 use super::super::trajectory::{ControlForceKind3, ForceCotangent3};
 use super::super::{TransientAdjointConfig3, TransientAdjointError3, check, number};
 use super::{NodalMotionCotangent3, PrescribedTransientAdjoint3, SupportAdjointBudget3};
@@ -71,6 +73,42 @@ pub struct PrescribedControlGradient3 {
     pub maximum_adjoint_relative_residual: f64,
 }
 
+/// Opt-in storage for differentiating material parameters through a trajectory.
+/// Controls alone need no motion tape; material residuals need the accepted
+/// full q/v/a at initialization and each interval endpoint.
+#[derive(Debug, Clone, Copy)]
+pub struct PrescribedMaterialRecordingBudget3 {
+    /// Maximum retained motion scalars: samples * nodes * 9. Metadata remains
+    /// bounded by the recorder's independent maximum_steps allowance.
+    pub maximum_motion_values: usize,
+    pub gradient: MaterialGradientBudget3,
+}
+impl Default for PrescribedMaterialRecordingBudget3 {
+    fn default() -> Self {
+        Self {
+            maximum_motion_values: 1_000_000,
+            gradient: MaterialGradientBudget3::default(),
+        }
+    }
+}
+
+/// One reverse sweep for both authored controls and frozen material parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrescribedDesignGradient3 {
+    pub controls: PrescribedControlGradient3,
+    /// Independent element stiffness/density scales and global Rayleigh terms.
+    /// These already include stiffness-induced changes of the thermal load at
+    /// fixed free thermal strain; do not chain that change a second time through
+    /// controls.thermal_equivalent_force. External nodal loads are held fixed.
+    pub material: MaterialScaleGradient3,
+}
+
+#[derive(Clone)]
+struct MaterialTape3 {
+    motion: Vec<[Vec<[f64; 3]>; 3]>,
+    budget: PrescribedMaterialRecordingBudget3,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Interval3 {
     time_s: f64,
@@ -86,6 +124,7 @@ pub struct RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
     intervals: Vec<Interval3>,
     initial_time_s: f64,
     budget: PrescribedRecordingBudget3,
+    material: Option<MaterialTape3>,
 }
 
 impl<'g, 'm, 'p, 's> TetTransientRun3<'g, 'm, 'p, 's> {
@@ -121,6 +160,7 @@ impl<'g, 'm, 'p, 's> TetTransientRun3<'g, 'm, 'p, 's> {
             intervals: Vec::new(),
             initial_time_s,
             budget,
+            material: None,
         })
     }
 }
@@ -139,6 +179,33 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
         std::iter::once(self.initial_time_s).chain(self.intervals.iter().map(|i| i.time_s))
     }
 
+    /// Retain original accepted full motion for material-design derivatives.
+    /// Enable this once, before advancing; storage/cancellation refusal leaves
+    /// the existing recorder usable. This changes no primal numerical policy.
+    pub fn enable_material_recording(
+        &mut self,
+        budget: PrescribedMaterialRecordingBudget3,
+        cx: &Cx<'_>,
+    ) -> Result<(), TransientAdjointError3> {
+        check(cx)?;
+        if !self.intervals.is_empty() || self.material.is_some() {
+            return Err(TransientAdjointError3::Invalid(
+                "enable material recording once before the first recorded step",
+            ));
+        }
+        admit_material_size(
+            1,
+            self.run.problem.nodes_m.len(),
+            self.run.geometry.tets.len(),
+            budget,
+        )?;
+        let mut motion = reserved(1)?;
+        motion.push(self.run.nodal_motion(cx)?);
+        check(cx)?;
+        self.material = Some(MaterialTape3 { motion, budget });
+        Ok(())
+    }
+
     pub(crate) fn admit_next_step(&self, cx: &Cx<'_>) -> Result<(), TransientAdjointError3> {
         check(cx)?;
         let next = self
@@ -151,10 +218,21 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
             self.run.problem.nodes_m.len(),
             self.run.free_dofs().len(),
             self.budget,
-        )
+        )?;
+        if let Some(tape) = &self.material {
+            let samples = next.checked_add(1).ok_or(TransientAdjointError3::Budget)?;
+            admit_material_size(
+                samples,
+                self.run.problem.nodes_m.len(),
+                self.run.geometry.tets.len(),
+                tape.budget,
+            )?;
+        }
+        Ok(())
     }
 
-    /// Advance the original coupled solver and record only its accepted time.
+    /// Advance the original coupled solver and record its accepted time, plus
+    /// full endpoint motion when material recording is enabled.
     /// Storage refusal, malformed support inputs, numerical refusal and
     /// cancellation leave both the primal and schedule reusable.
     pub fn advance_with_supports(
@@ -168,13 +246,26 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
         self.intervals
             .try_reserve(1)
             .map_err(|_| TransientAdjointError3::Budget)?;
+        if let Some(tape) = &mut self.material {
+            tape.motion
+                .try_reserve(1)
+                .map_err(|_| TransientAdjointError3::Budget)?;
+        }
         let mut candidate = self.run.clone();
         let report = candidate.advance_with_supports(load, prescribed_dofs_m, h_s, cx)?;
+        let motion = if self.material.is_some() {
+            Some(candidate.nodal_motion(cx)?)
+        } else {
+            None
+        };
         check(cx)?;
         self.intervals.push(Interval3 {
             time_s: report.time_s,
             h_s,
         });
+        if let (Some(tape), Some(motion)) = (&mut self.material, motion) {
+            tape.motion.push(motion);
+        }
         self.run = candidate;
         Ok(report)
     }
@@ -201,6 +292,80 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
         &self,
         terminal: &NodalMotionCotangent3,
         observations: &[NodalMotionObservation3],
+        cx: &Cx<'_>,
+    ) -> Result<PrescribedControlGradient3, TransientAdjointError3> {
+        self.reverse_accumulating(terminal, observations, |_, _| Ok(()), cx)
+    }
+
+    /// Differentiate a terminal motion objective with respect to controls,
+    /// per-element stiffness/density scales, and global Rayleigh damping.
+    pub fn reverse_design(
+        &self,
+        terminal: &NodalMotionCotangent3,
+        cx: &Cx<'_>,
+    ) -> Result<PrescribedDesignGradient3, TransientAdjointError3> {
+        self.reverse_design_with_observations(terminal, &[], cx)
+    }
+
+    /// Reverse observed motion and contract material residuals at their EXACT
+    /// original accepted endpoints, including the initial mass solve. Requires
+    /// enable_material_recording before the first step. Geometry, restraint
+    /// axes, authored support histories, free thermal strain, and independent
+    /// external nodal loads remain fixed in the material derivative.
+    ///
+    /// Direct objective/material or mass-dependent external-load derivatives
+    /// belong to their owner. This is a fixed-grid discrete derivative, with
+    /// no differentiation of solver iterations, step acceptance or event times.
+    /// Failure/cancellation publishes no partial result and keeps the tape.
+    pub fn reverse_design_with_observations(
+        &self,
+        terminal: &NodalMotionCotangent3,
+        observations: &[NodalMotionObservation3],
+        cx: &Cx<'_>,
+    ) -> Result<PrescribedDesignGradient3, TransientAdjointError3> {
+        check(cx)?;
+        let tape = self
+            .material
+            .as_ref()
+            .ok_or(TransientAdjointError3::Invalid(
+                "material design needs motion recording enabled before advancement",
+            ))?;
+        let mut material = MaterialScaleGradient3 {
+            element_scales: filled(self.run.geometry.tets.len(), [0.0; 2])?,
+            rayleigh: [0.0; 2],
+        };
+        let controls = self.reverse_accumulating(
+            terminal,
+            observations,
+            |state, force| {
+                let row = self.run.material_scale_pullback_nodal_at(
+                    &tape.motion[state],
+                    force,
+                    tape.budget.gradient,
+                    cx,
+                )?;
+                for (sum, value) in material.element_scales.iter_mut().zip(row.element_scales) {
+                    check(cx)?;
+                    for axis in 0..2 {
+                        sum[axis] = number(sum[axis] + value[axis])?;
+                    }
+                }
+                for axis in 0..2 {
+                    material.rayleigh[axis] = number(material.rayleigh[axis] + row.rayleigh[axis])?;
+                }
+                Ok(())
+            },
+            cx,
+        )?;
+        check(cx)?;
+        Ok(PrescribedDesignGradient3 { controls, material })
+    }
+
+    fn reverse_accumulating(
+        &self,
+        terminal: &NodalMotionCotangent3,
+        observations: &[NodalMotionObservation3],
+        mut residual: impl FnMut(usize, &[f64]) -> Result<(), TransientAdjointError3>,
         cx: &Cx<'_>,
     ) -> Result<PrescribedControlGradient3, TransientAdjointError3> {
         check(cx)?;
@@ -253,6 +418,7 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
         for (i, interval) in self.intervals.iter().enumerate().rev() {
             check(cx)?;
             let pb = self.adjoint.pullback_step(interval.h_s, &seed, cx)?;
+            residual(i + 1, &pb.force)?;
             add_thermal(&mut thermal, &pb.force, cx)?;
             iterations = iterations
                 .checked_add(pb.iterations)
@@ -271,6 +437,7 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
             inject(&mut seed, i, observations, &heads, &next, cx)?;
         }
         let mut initial = self.adjoint.pullback_initialization(&seed, cx)?;
+        residual(0, &initial.force)?;
         add_thermal(&mut thermal, &initial.force, cx)?;
         iterations = iterations
             .checked_add(initial.iterations)
@@ -303,6 +470,26 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
             maximum_adjoint_relative_residual: maximum_relative,
         })
     }
+}
+
+fn admit_material_size(
+    samples: usize,
+    nodes: usize,
+    elements: usize,
+    budget: PrescribedMaterialRecordingBudget3,
+) -> Result<(), TransientAdjointError3> {
+    let full = nodes.checked_mul(3).ok_or(TransientAdjointError3::Budget)?;
+    let values = full
+        .checked_mul(3)
+        .and_then(|n| n.checked_mul(samples))
+        .ok_or(TransientAdjointError3::Budget)?;
+    if values > budget.maximum_motion_values
+        || full > budget.gradient.maximum_full_dofs
+        || elements > budget.gradient.maximum_elements
+    {
+        return Err(TransientAdjointError3::Budget);
+    }
+    Ok(())
 }
 
 fn admit_gradient_size(
