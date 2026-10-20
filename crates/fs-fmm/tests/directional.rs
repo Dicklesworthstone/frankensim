@@ -1,8 +1,8 @@
 //! G0/G1/G2/G3/G5 directional Helmholtz tests. Native release on a quiet host.
 use fs_fmm::{
     DirectionalOptions, FmmC64, FmmError, HelmholtzAdjointDouble, HelmholtzDouble,
-    HelmholtzHypersingular, HelmholtzSingle, MAX_COMPLEX_COEFFICIENT_SLOTS, MAX_DIRECTIONAL_CONES,
-    MAX_INTERPOLATION_ORDER,
+    HelmholtzHypersingular, HelmholtzSingle, MAX_COMPLEX_COEFFICIENT_SLOTS,
+    MAX_DECLARED_COEFFICIENT_SLOTS, MAX_DIRECTIONAL_CONES, MAX_INTERPOLATION_ORDER,
 };
 use fs_math::{c64::C64, det};
 use std::{sync::Once, time::Instant};
@@ -737,6 +737,105 @@ fn dfmm_caps_refuse() {
             started.elapsed().as_secs_f64()
         ),
     );
+}
+
+#[test]
+fn dfmm_declared_envelopes_are_neutral_and_enforced() {
+    // The ka = 5 unit-sphere regime of the impedance sphere series (kD about
+    // 10, shared low-frequency couplings compressed), at a size a test affords.
+    let points = sphere(1024);
+    let normals = points.clone();
+    let q = charges(points.len());
+    let kernel = HelmholtzSingle { k: 5.0 };
+    let mut o = DirectionalOptions::for_tolerance(1e-3).unwrap();
+    o.leaf_capacity = 16;
+    let build = |kind: usize, o: DirectionalOptions| match kind {
+        0 => FmmC64::new_directional(&kernel, &points, o),
+        _ => FmmC64::new_double_directional(
+            HelmholtzDouble { k: kernel.k },
+            points.clone(),
+            normals.clone(),
+            o,
+        ),
+    };
+    for kind in [0, 1] {
+        let started = Instant::now();
+        let base = build(kind, o.clone()).unwrap();
+        let stats = base.directional_stats().unwrap().clone();
+        assert!(
+            stats.setup_work > 0 && stats.maximum_rank > 0,
+            "the fixture must compress a shared coupling: {stats:?}"
+        );
+        let reference = bits(&base.potentials(&q).unwrap());
+        // The widest declarable budgets admit the same plan, bit for bit.
+        let mut wide = o.clone();
+        wide.max_coefficient_slots = MAX_DECLARED_COEFFICIENT_SLOTS;
+        wide.max_setup_work = usize::MAX;
+        let wide_op = build(kind, wide).unwrap();
+        assert_eq!(reference, bits(&wide_op.potentials(&q).unwrap()));
+        assert_eq!(wide_op.stats(), base.stats());
+        // Setup is admitted at exactly its counted products, refused one below.
+        let mut setup = o.clone();
+        setup.max_setup_work = stats.setup_work;
+        assert_eq!(
+            reference,
+            bits(&build(kind, setup.clone()).unwrap().potentials(&q).unwrap())
+        );
+        setup.max_setup_work = stats.setup_work - 1;
+        assert!(matches!(
+            build(kind, setup),
+            Err(FmmError::WorkEnvelopeExceeded {
+                operation: "directional coupling setup",
+                requested,
+                max,
+            }) if requested == stats.setup_work && max == stats.setup_work - 1
+        ));
+        // A slot budget below the retained factors refuses before allocation.
+        let mut slots = o.clone();
+        slots.max_coefficient_slots = stats.coefficient_slots - 1;
+        assert!(matches!(
+            build(kind, slots),
+            Err(FmmError::WorkEnvelopeExceeded {
+                operation: "complex coefficient-slot (two f64 per C64)"
+                    | "directional basis coefficient-slot",
+                ..
+            })
+        ));
+        emit(
+            "dfmm-declared-envelopes",
+            format!(
+                "{{\"case\":\"dfmm-declared-envelopes\",\"inputs\":\"Fibonacci unit sphere, 1024 points, k=5\",\"axis\":\"kernel-kind\",\"rung\":{kind},\"observed\":{{\"setup_work\":{},\"coefficient_slots\":{},\"maximum_rank\":{},\"coupling_blocks\":{}}},\"verdict\":\"pass\",\"elapsed_s\":{}}}",
+                stats.setup_work,
+                stats.coefficient_slots,
+                stats.maximum_rank,
+                stats.coupling_blocks,
+                started.elapsed().as_secs_f64()
+            ),
+        );
+    }
+    let mut bad = o.clone();
+    bad.max_coefficient_slots = 0;
+    assert!(matches!(
+        bad.validate(),
+        Err(FmmError::ComplexRequest { .. })
+    ));
+    bad = o.clone();
+    bad.max_setup_work = 0;
+    assert!(matches!(
+        bad.validate(),
+        Err(FmmError::ComplexRequest { .. })
+    ));
+    bad = o.clone();
+    bad.max_coefficient_slots = MAX_DECLARED_COEFFICIENT_SLOTS;
+    assert!(bad.validate().is_ok());
+    bad.max_coefficient_slots += 1;
+    assert!(matches!(
+        bad.validate(),
+        Err(FmmError::WorkEnvelopeExceeded {
+            operation: "directional declared coefficient-slot",
+            ..
+        })
+    ));
 }
 
 #[test]

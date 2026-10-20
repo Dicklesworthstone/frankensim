@@ -208,11 +208,17 @@ impl<'k> FmmC64<'k> {
     /// Validate a peak complex coefficient count before allocation. The bound
     /// includes both passes and transient cell buffers, in C64 units.
     pub fn validate_coefficient_slots(slots: usize) -> Result<(), FmmError> {
-        if slots > MAX_COMPLEX_COEFFICIENT_SLOTS {
+        Self::validate_coefficient_slots_within(slots, MAX_COMPLEX_COEFFICIENT_SLOTS)
+    }
+
+    /// The same check against a caller-declared ceiling, also in C64 units.
+    /// The error reports both counts in f64 slots, as the v1 check does.
+    pub fn validate_coefficient_slots_within(slots: usize, max: usize) -> Result<(), FmmError> {
+        if slots > max {
             return Err(FmmError::WorkEnvelopeExceeded {
                 operation: "complex coefficient-slot (two f64 per C64)",
                 requested: slots.saturating_mul(2),
-                max: MAX_COEFFICIENT_SLOTS,
+                max: max.saturating_mul(2),
             });
         }
         Ok(())

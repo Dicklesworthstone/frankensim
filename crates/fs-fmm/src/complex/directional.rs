@@ -20,6 +20,9 @@ pub const MAX_DIRECTIONAL_CONES: usize = 16_777_216;
 pub const MAX_DIRECTIONAL_DEPTH: u32 = 10;
 /// A coupling cannot have rank above its uncompressed tensor-grid dimension.
 pub const MAX_DIRECTIONAL_RANK: usize = MAX_INTERPOLATION_ORDER.pow(3);
+/// Largest declarable coefficient budget, in C64 units: its f64 count and
+/// byte size stay representable.
+pub const MAX_DECLARED_COEFFICIENT_SLOTS: usize = usize::MAX / (2 * core::mem::size_of::<C64>());
 const ZERO_CONE: Cone = (6, 0, 0);
 type Cone = (usize, usize, usize); // cube face, first bin, second bin
 type Expansion = (CellKey, Cone);
@@ -43,6 +46,15 @@ pub struct DirectionalOptions {
     pub compression_tolerance: f64,
     /// Coupling rank budget; only needed when a shared block is compressed.
     pub max_rank: usize,
+    /// Simultaneous pass coefficients, retained coupling factors and setup
+    /// scratch, in C64 units. Defaults to [`MAX_COMPLEX_COEFFICIENT_SLOTS`].
+    /// A request whose root kD is at most `low_freq_threshold` delegates to
+    /// the unchanged W5a owner, which keeps its own ceilings.
+    pub max_coefficient_slots: usize,
+    /// Counted coupling-setup products. Construction polls no cancellation,
+    /// so this also bounds one uncancellable setup. Defaults to
+    /// [`MAX_TRANSLATION_WORK`]; the same W5a delegation applies.
+    pub max_setup_work: usize,
 }
 impl DirectionalOptions {
     /// Order selected by the explicit 4^-p design indicator, not a universal
@@ -58,6 +70,8 @@ impl DirectionalOptions {
             leaf_capacity: 64,
             compression_tolerance: tolerance * 0.01,
             max_rank: MAX_DIRECTIONAL_RANK,
+            max_coefficient_slots: MAX_COMPLEX_COEFFICIENT_SLOTS,
+            max_setup_work: MAX_TRANSLATION_WORK,
         })
     }
     /// Validate parameters without building geometry or evaluating a kernel.
@@ -110,6 +124,16 @@ impl DirectionalOptions {
             self.max_cones_per_level,
             MAX_DIRECTIONAL_CONES,
         )?;
+        budget(
+            "directional declared coefficient-slot",
+            self.max_coefficient_slots,
+            MAX_DECLARED_COEFFICIENT_SLOTS,
+        )?;
+        if self.max_coefficient_slots == 0 || self.max_setup_work == 0 {
+            return Err(FmmError::ComplexRequest {
+                reason: "directional coefficient-slot and setup-work budgets must be positive",
+            });
+        }
         Ok(())
     }
 }
@@ -636,7 +660,10 @@ impl DirectionalPlan {
             + plan.targets.len().saturating_mul(nt)
             + 4 * (ns + nt))
             .saturating_mul(p3);
-        FmmC64::validate_coefficient_slots(plan.stats.coefficient_slots)?;
+        FmmC64::validate_coefficient_slots_within(
+            plan.stats.coefficient_slots,
+            plan.options.max_coefficient_slots,
+        )?;
         plan.prepare_couplings(op)?;
         budget(
             "directional total translation",
@@ -706,7 +733,7 @@ impl DirectionalPlan {
             budget(
                 "directional basis coefficient-slot",
                 records.len().saturating_mul(p3 * channels),
-                MAX_COMPLEX_COEFFICIENT_SLOTS,
+                self.options.max_coefficient_slots,
             )?;
             budget("directional basis transfer", work, MAX_TRANSLATION_WORK)?;
         }
@@ -779,14 +806,15 @@ impl DirectionalPlan {
                     let gb = op.grid(b);
                     let mut channels = Vec::new();
                     for channel in 0..ns * nt {
-                        FmmC64::validate_coefficient_slots(
+                        FmmC64::validate_coefficient_slots_within(
                             retained.saturating_add(n * n).saturating_add(2 * n),
+                            self.options.max_coefficient_slots,
                         )?;
                         self.stats.setup_work = self.stats.setup_work.saturating_add(n * n);
                         budget(
                             "directional coupling setup",
                             self.stats.setup_work,
-                            MAX_TRANSLATION_WORK,
+                            self.options.max_setup_work,
                         )?;
                         let mut matrix = vec![C64::ZERO; n * n];
                         for (i, &x) in ga.iter().enumerate() {
@@ -806,7 +834,11 @@ impl DirectionalPlan {
                             n,
                             self.options.compression_tolerance,
                             self.options.max_rank,
-                            retained,
+                            Envelope {
+                                retained,
+                                max_slots: self.options.max_coefficient_slots,
+                                max_setup: self.options.max_setup_work,
+                            },
                             &mut self.stats.setup_work,
                         )?;
                         retained = retained.saturating_add(factor.slots());
@@ -999,12 +1031,20 @@ fn frobenius(values: &[C64]) -> f64 {
             )
     }
 }
+/// Coefficient slots already retained before a block is compressed, and the
+/// declared slot and setup-work ceilings it must stay within.
+#[derive(Clone, Copy)]
+struct Envelope {
+    retained: usize,
+    max_slots: usize,
+    max_setup: usize,
+}
 fn compress(
     mut residual: Vec<C64>,
     n: usize,
     tolerance: f64,
     max_rank: usize,
-    retained: usize,
+    envelope: Envelope,
     setup_work: &mut usize,
 ) -> Result<LowRank, FmmError> {
     let mut factor = LowRank {
@@ -1029,16 +1069,18 @@ fn compress(
     while current > tolerance * norm {
         let requested = factor.rank() + 1;
         budget("directional coupling rank", requested, max_rank.min(n))?;
-        FmmC64::validate_coefficient_slots(
-            retained
+        FmmC64::validate_coefficient_slots_within(
+            envelope
+                .retained
                 .saturating_add(n * n)
                 .saturating_add(2 * n * requested),
+            envelope.max_slots,
         )?;
         *setup_work = setup_work.saturating_add(n * n);
         budget(
             "directional coupling setup",
             *setup_work,
-            MAX_TRANSLATION_WORK,
+            envelope.max_setup,
         )?;
         // Full residual pivoting, fixed lowest-index ties. Unlike heuristic
         // partial ACA stopping, the entire residual matrix is measured.
@@ -1085,6 +1127,13 @@ fn compress(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn v1(retained: usize) -> Envelope {
+        Envelope {
+            retained,
+            max_slots: MAX_COMPLEX_COEFFICIENT_SLOTS,
+            max_setup: MAX_TRANSLATION_WORK,
+        }
+    }
     #[test]
     fn directional_compression_singular_value_ladder_and_caps() {
         let n = 8;
@@ -1096,7 +1145,7 @@ mod tests {
         for (rung, tol) in [0.2, 0.02, 0.002].into_iter().enumerate() {
             let rank = rung + 1;
             let mut work = 0;
-            let f = compress(matrix.clone(), n, tol, 8, 0, &mut work).unwrap();
+            let f = compress(matrix.clone(), n, tol, 8, v1(0), &mut work).unwrap();
             let expected = det::sqrt(
                 (rank..n)
                     .map(|i| det::powi(2.0, -(6 * i as i32)))
@@ -1123,7 +1172,7 @@ mod tests {
         let mut work = 0;
         for scale in [1e-200, 1e200] {
             let scaled: Vec<_> = matrix.iter().map(|z| z.scale(scale)).collect();
-            let f = compress(scaled, n, 0.02, 8, 0, &mut 0).unwrap();
+            let f = compress(scaled, n, 0.02, 8, v1(0), &mut 0).unwrap();
             assert_eq!(f.rank(), 2);
             let first =
                 f.u.iter()
@@ -1132,7 +1181,7 @@ mod tests {
             assert!((first.re / scale - 1.0).abs() < 1e-14 && first.im == 0.0);
         }
         assert!(matches!(
-            compress(matrix.clone(), n, 0.002, 2, 0, &mut work),
+            compress(matrix.clone(), n, 0.002, 2, v1(0), &mut work),
             Err(FmmError::WorkEnvelopeExceeded {
                 operation: "directional coupling rank",
                 requested: 3,
@@ -1140,9 +1189,9 @@ mod tests {
             })
         ));
         let retained = MAX_COMPLEX_COEFFICIENT_SLOTS - n * n - 2 * n;
-        assert!(compress(matrix.clone(), n, 0.2, 1, retained, &mut 0).is_ok());
+        assert!(compress(matrix.clone(), n, 0.2, 1, v1(retained), &mut 0).is_ok());
         assert!(matches!(
-            compress(matrix.clone(), n, 0.2, 1, retained + 1, &mut 0),
+            compress(matrix.clone(), n, 0.2, 1, v1(retained + 1), &mut 0),
             Err(FmmError::WorkEnvelopeExceeded { .. })
         ));
         assert!(
@@ -1151,18 +1200,18 @@ mod tests {
                 n,
                 0.2,
                 1,
-                0,
+                v1(0),
                 &mut (MAX_TRANSLATION_WORK - n * n)
             )
             .is_ok()
         );
         assert!(matches!(
             compress(
-                matrix,
+                matrix.clone(),
                 n,
                 0.2,
                 1,
-                0,
+                v1(0),
                 &mut (MAX_TRANSLATION_WORK - n * n + 1)
             ),
             Err(FmmError::WorkEnvelopeExceeded {
@@ -1170,6 +1219,34 @@ mod tests {
                 ..
             })
         ));
+        // A declared envelope moves both caps, below or above the v1 ceilings.
+        let declared = |max_slots, max_setup| Envelope {
+            retained: 0,
+            max_slots,
+            max_setup,
+        };
+        let slots = n * n + 2 * n;
+        assert!(compress(matrix.clone(), n, 0.2, 1, declared(slots, n * n), &mut 0).is_ok());
+        assert!(matches!(
+            compress(matrix.clone(), n, 0.2, 1, declared(slots - 1, n * n), &mut 0),
+            Err(FmmError::WorkEnvelopeExceeded {
+                operation: "complex coefficient-slot (two f64 per C64)",
+                requested,
+                max,
+            }) if requested == 2 * slots && max == 2 * (slots - 1)
+        ));
+        assert!(matches!(
+            compress(matrix.clone(), n, 0.2, 1, declared(slots, n * n - 1), &mut 0),
+            Err(FmmError::WorkEnvelopeExceeded {
+                operation: "directional coupling setup",
+                requested,
+                max,
+            }) if requested == n * n && max == n * n - 1
+        ));
+        let mut past_v1 = MAX_TRANSLATION_WORK;
+        let above = MAX_TRANSLATION_WORK + n * n;
+        assert!(compress(matrix, n, 0.2, 1, declared(slots, above), &mut past_v1).is_ok());
+        assert_eq!(past_v1, above);
     }
     #[test]
     fn directional_pair_partition_and_low_frequency_identity() {

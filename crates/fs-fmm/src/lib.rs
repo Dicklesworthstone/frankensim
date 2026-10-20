@@ -22,8 +22,8 @@ use std::collections::BTreeMap;
 
 mod complex;
 pub use complex::directional::{
-    DirectionalOptions, DirectionalStats, MAX_DIRECTIONAL_CONES, MAX_DIRECTIONAL_DEPTH,
-    MAX_DIRECTIONAL_RANK,
+    DirectionalOptions, DirectionalStats, MAX_DECLARED_COEFFICIENT_SLOTS, MAX_DIRECTIONAL_CONES,
+    MAX_DIRECTIONAL_DEPTH, MAX_DIRECTIONAL_RANK,
 };
 pub use complex::{
     ComplexKernel, FmmC64, HelmholtzAdjointDouble, HelmholtzDouble, HelmholtzGradient,

@@ -281,12 +281,32 @@ error certificate for arbitrary charge cancellation or custom kernels.
 range or a request whose supplied order is below that selector. Native oracle
 ladders remain the accuracy authority on their declared domains.
 
-The existing point, coefficient-slot, near-pair, cell-pair scan and translation
+The existing point, near-pair, cell-pair scan and per-pass translation
 ceilings are retained. Directional work admission counts actual M2L channel
 products (compressed or tensor), interlevel transfers and leaf interpolation
-before complex pass allocation. Coupling setup has its own application of the
-unchanged translation-work ceiling. Storage accounts for source and target
+before complex pass allocation. Storage accounts for source and target
 active cone sets, retained factors and transient coefficients/matrices.
+
+Two directional envelopes are caller-declared in `DirectionalOptions`.
+`for_tolerance` sets each to its v1 ceiling, so the defaults refuse exactly
+what v1 refused.
+- `max_coefficient_slots` (C64 units) bounds that storage. The default is
+  `MAX_COMPLEX_COEFFICIENT_SLOTS`. Any positive value up to
+  `MAX_DECLARED_COEFFICIENT_SLOTS` is admitted, so the f64 count and the bytes
+  stay representable.
+- `max_setup_work` bounds the counted coupling-setup products. The default is
+  `MAX_TRANSLATION_WORK`. Construction polls no cancellation, so a larger
+  budget is a longer uncancellable construction, chosen explicitly.
+- Neither budget changes the plan or its arithmetic, only what is admitted.
+  `dfmm_declared_envelopes_are_neutral_and_enforced` checks that the widest
+  budgets give bit-identical potentials, and that each budget is enforced at
+  its counted value (setup at its exact count, refused one below).
+- A request whose root kD is at most `low_freq_threshold` delegates whole to
+  W5a, which keeps its own v1 ceilings.
+- The motivating case is the ka = 5 unit-sphere Burton-Miller series (IRP
+  M2.5-W7). From 5120 panels on, its double, adjoint and mixed operators need
+  more than 8e9 setup products, and its mixed operator more than 8.4e6 C64
+  slots.
 New explicit limits are depth 10 and 16,777,216
 directions in any active level's angular grid; this grid is sparse, not an
 allocation of every possible cone. All cap failures return named
