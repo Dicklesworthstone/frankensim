@@ -49,3 +49,7 @@ required-features = ["nurbs-sdf"]
 [[test]]
 name = "distance"
 required-features = ["nurbs-sdf"]
+
+[[test]]
+name = "trimmed_distance"
+required-features = ["nurbs-sdf"]

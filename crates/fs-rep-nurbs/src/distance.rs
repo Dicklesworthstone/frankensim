@@ -1,4 +1,4 @@
-//! Outward unsigned-distance bounds for one admitted, untrimmed rational
+//! Outward unsigned-distance bounds for one admitted rational
 //! B-spline surface. This lane does not use the measured Bezier conversion.
 //!
 //! Each original nonzero knot-span rectangle is covered. Interval tensor de
@@ -13,13 +13,23 @@
 //! Discontinuous knot spans contribute their image infimum, including limits;
 //! the retained witness is always evaluated on the actual owned side.
 //!
-//! This is a source-bound arithmetic primitive, not a portable authority
-//! artifact, signed field, trim certificate, or executor lifecycle owner.
+//! Exact trim coupling additionally restricts the kept parameter region without
+//! promoting uncertain membership to a witness. These are source-bound
+//! arithmetic primitives, not portable authority artifacts, signed fields,
+//! topology certificates, or executor lifecycle owners.
+
+mod trimmed;
+use trimmed::TrimDomain;
+pub use trimmed::{
+    TrimmedSurfaceDistance, TrimmedSurfaceDistanceRun, TrimmedSurfaceDistanceStop,
+    TrimmedSurfaceDistanceWork,
+};
 
 use crate::NurbsError;
 use crate::basis::AdmittedKnotVector;
 use crate::closest::CLOSEST_MAX_SPLITS;
 use crate::surface::{AdmittedNurbsSurface, NurbsSurface};
+use crate::trim::Classification;
 use fs_exec::Cx;
 use fs_ivl::Interval;
 use std::cmp::Ordering;
@@ -34,13 +44,14 @@ type Homogeneous = [Interval; 4];
 /// Caller limits for the complete admitted query, including original-span
 /// coverage. Work units conservatively price interval blends and source visits;
 /// they are not machine instructions or elapsed time. Retained payload includes
-/// the borrowed source, frontier, span indices and reusable scratch. Allocator
+/// the borrowed source, frontier, span indices and reusable scratch. Trimmed
+/// queries additionally reserve their trim source and classifier envelope. Allocator
 /// bookkeeping and bounded stack storage are outside that payload count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SurfaceDistanceBudget {
     /// Number of binary parameter-cell refinements after complete seeding.
     pub max_splits: u32,
-    /// One allowance shared by planning, hull construction and all evaluations.
+    /// Shared planning, hull, evaluation and (when used) exact-trim allowance.
     pub max_work_units: u128,
     /// Simultaneously retained payload limit; a 256 MiB ceiling also applies.
     pub max_retained_bytes: usize,
@@ -62,7 +73,7 @@ pub enum SurfaceDistanceStop {
 /// Measured work and retained coverage information for this invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SurfaceDistanceWork {
-    /// Every nonzero original span rectangle was seeded before publication.
+    /// Every nonzero original span rectangle was covered before publication.
     pub original_span_cells: usize,
     /// Actual binary refinements.
     pub splits: u32,
@@ -70,7 +81,7 @@ pub struct SurfaceDistanceWork {
     pub remaining_cells: usize,
     /// Cells removed only after an outward lower bound excluded improvement.
     pub excluded_cells: usize,
-    /// Charged conservative interval/source/heap work units.
+    /// Charged conservative interval/source/heap and exact-trim work units.
     pub charged_work_units: u128,
     /// Admitted simultaneously live payload, including the borrowed source.
     pub retained_payload_bytes: usize,
@@ -469,25 +480,57 @@ fn enclose_cell(
     if cancel() { Ok(None) } else { Ok(Some(point)) }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct Witness {
     upper: f64,
     param: [f64; 2],
     position: [Interval; 3],
 }
+
+struct SearchState<'d, 't> {
+    witness: Option<Witness>,
+    meter: Meter,
+    trim: Option<&'d mut TrimDomain<'t>>,
+}
+
+impl SearchState<'_, '_> {
+    fn classify(
+        &mut self,
+        min: [f64; 2],
+        max: [f64; 2],
+        cancel: &mut impl FnMut() -> bool,
+    ) -> Result<Option<Classification>, NurbsError> {
+        match self.trim.as_deref_mut() {
+            Some(trim) => trim.classify(min, max, &mut self.meter, cancel),
+            None => Ok(Some(Classification::Inside)),
+        }
+    }
+}
+
+/// `None` is cancellation; `Some(false)` is exact trim exclusion. Either a
+/// retained cell or an exclusion is required before its parent can disappear.
 fn evaluate_cell(
     source: AdmittedNurbsSurface<'_, f64>,
     query: [f64; 3],
     cell: &mut Cell,
     hull: [Interval; 3],
     scratch: &mut Scratch,
-    witness: &mut Option<Witness>,
+    state: &mut SearchState<'_, '_>,
     cancel: &mut impl FnMut() -> bool,
-) -> Result<bool, NurbsError> {
+) -> Result<Option<bool>, NurbsError> {
+    let Some(classification) = state.classify(cell.min, cell.max, cancel)? else {
+        return Ok(None);
+    };
+    if classification == Classification::Outside {
+        if let Some(trim) = state.trim.as_deref_mut() {
+            trim.outside_cells += 1;
+        }
+        return Ok(Some(false));
+    }
     let Some(position) =
         enclose_cell(source, cell.span, cell.min, cell.max, hull, scratch, cancel)?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     cell.lower = cell.lower.max(distance_to_box(query, position)?.lo());
     let mut param = [
@@ -501,19 +544,30 @@ fn evaluate_cell(
             param[axis] = cell.min[axis];
         }
     }
+    // A whole-cell Inside verdict also proves this point. Boundary cells need
+    // a distinct exact point verdict; neither proximity nor a rounded proxy
+    // may authorize a witness on the trimmed surface.
+    if classification != Classification::Inside {
+        let Some(point_class) = state.classify(param, param, cancel)? else {
+            return Ok(None);
+        };
+        if point_class != Classification::Inside {
+            return Ok(Some(true));
+        }
+    }
     let Some(position) = enclose_cell(source, cell.span, param, param, hull, scratch, cancel)?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let upper = distance_to_box(query, position)?.hi();
-    if witness.is_none_or(|old| upper < old.upper) {
-        *witness = Some(Witness {
+    if state.witness.is_none_or(|old| upper < old.upper) {
+        state.witness = Some(Witness {
             upper,
             param,
             position,
         });
     }
-    Ok(!cancel())
+    if cancel() { Ok(None) } else { Ok(Some(true)) }
 }
 
 fn distance_with_poll<'a>(
@@ -523,6 +577,55 @@ fn distance_with_poll<'a>(
     budget: SurfaceDistanceBudget,
     cancel: &mut impl FnMut() -> bool,
 ) -> Result<SurfaceDistanceRun<'a>, NurbsError> {
+    let SearchRun::Complete(result) =
+        search_with_poll(source, query, tolerance, budget, None, cancel)?
+    else {
+        return Ok(SurfaceDistanceRun::Cancelled);
+    };
+    let witness = result
+        .witness
+        .expect("untrimmed complete coverage supplies a witness");
+    let enclosure = SurfaceDistanceEnclosure {
+        source,
+        query,
+        tolerance,
+        bounds: result
+            .bounds
+            .expect("an admitted untrimmed surface is nonempty"),
+        witness_param: witness.param,
+        witness_position: witness.position,
+        work: result.work,
+    };
+    Ok(match result.stop {
+        None => SurfaceDistanceRun::Complete { enclosure },
+        Some(SearchStop::Refinement(stop)) => SurfaceDistanceRun::Unresolved { enclosure, stop },
+        Some(SearchStop::TrimRefused) => unreachable!("untrimmed search does not classify trims"),
+    })
+}
+
+enum SearchStop {
+    Refinement(SurfaceDistanceStop),
+    TrimRefused,
+}
+struct SearchResult {
+    bounds: Option<Interval>,
+    witness: Option<Witness>,
+    work: SurfaceDistanceWork,
+    stop: Option<SearchStop>,
+}
+enum SearchRun {
+    Complete(SearchResult),
+    Cancelled,
+}
+
+fn search_with_poll(
+    source: AdmittedNurbsSurface<'_, f64>,
+    query: [f64; 3],
+    tolerance: f64,
+    budget: SurfaceDistanceBudget,
+    trim: Option<&mut TrimDomain<'_>>,
+    cancel: &mut impl FnMut() -> bool,
+) -> Result<SearchRun, NurbsError> {
     if query.iter().any(|x| !x.is_finite()) || !tolerance.is_finite() || tolerance <= 0.0 {
         return Err(refusal(
             "surface-distance needs a finite point and positive finite absolute tolerance",
@@ -534,7 +637,7 @@ fn distance_with_poll<'a>(
         ));
     }
     if cancel() {
-        return Ok(SurfaceDistanceRun::Cancelled);
+        return Ok(SearchRun::Cancelled);
     }
     let ku = source.knots_u();
     let kv = source.knots_v();
@@ -544,18 +647,31 @@ fn distance_with_poll<'a>(
         ku.control_count(),
         kv.control_count(),
     );
-    let mut meter = Meter {
-        used: 0,
-        limit: budget.max_work_units.min(MAX_WORK),
+    let mut state = SearchState {
+        witness: None,
+        meter: Meter {
+            used: 0,
+            limit: budget.max_work_units.min(MAX_WORK),
+        },
+        trim,
     };
-    let Some(source_bytes) = source_payload(source, &mut meter, cancel)? else {
-        return Ok(SurfaceDistanceRun::Cancelled);
+    let extra_bytes = if let Some(trim) = state.trim.as_deref_mut() {
+        let Some(bytes) = trim.retained_payload(&mut state.meter, cancel)? else {
+            return Ok(SearchRun::Cancelled);
+        };
+        bytes
+    } else {
+        0
     };
-    let Some(su) = span_count(ku, &mut meter, cancel)? else {
-        return Ok(SurfaceDistanceRun::Cancelled);
+    let Some(source_bytes) = source_payload(source, &mut state.meter, cancel)? else {
+        return Ok(SearchRun::Cancelled);
     };
-    let Some(sv) = span_count(kv, &mut meter, cancel)? else {
-        return Ok(SurfaceDistanceRun::Cancelled);
+    let source_bytes = checked(source_bytes.checked_add(extra_bytes))?;
+    let Some(su) = span_count(ku, &mut state.meter, cancel)? else {
+        return Ok(SearchRun::Cancelled);
+    };
+    let Some(sv) = span_count(kv, &mut state.meter, cancel)? else {
+        return Ok(SearchRun::Cancelled);
     };
     let seeds = checked(su.checked_mul(sv))?;
     if seeds == 0 {
@@ -591,7 +707,7 @@ fn distance_with_poll<'a>(
     let heap_work = 8 * (usize::BITS - capacity.leading_zeros()) as u128 + 8;
     let cell_work = 2 * evaluation_work + heap_work;
     let seed_work = seeds as u128 * cell_work + nu as u128 * nv as u128 * 64 + (nu + nv) as u128;
-    if !meter.charge(seed_work) {
+    if !state.meter.charge(seed_work) {
         return Err(refusal(
             "surface-distance work cannot establish complete original-span coverage",
         ));
@@ -633,12 +749,11 @@ fn distance_with_poll<'a>(
         ));
     }
     if !span_indices(ku, &mut spans_u, cancel) || !span_indices(kv, &mut spans_v, cancel) {
-        return Ok(SurfaceDistanceRun::Cancelled);
+        return Ok(SearchRun::Cancelled);
     }
     let Some(hull) = control_hull(source, cancel)? else {
-        return Ok(SurfaceDistanceRun::Cancelled);
+        return Ok(SearchRun::Cancelled);
     };
-    let mut witness = None;
     let mut order = 0u64;
     for &u in &spans_u {
         for &v in &spans_v {
@@ -651,29 +766,37 @@ fn distance_with_poll<'a>(
                 depth: [0, 0],
             };
             order += 1;
-            if !evaluate_cell(
+            let Some(keep) = evaluate_cell(
                 source,
                 query,
                 &mut cell,
                 hull,
                 &mut scratch,
-                &mut witness,
+                &mut state,
                 cancel,
-            )? {
-                return Ok(SurfaceDistanceRun::Cancelled);
+            )?
+            else {
+                return Ok(SearchRun::Cancelled);
+            };
+            if keep {
+                frontier.push(cell);
             }
-            frontier.push(cell);
         }
     }
     let mut splits = 0u32;
     let mut excluded = 0usize;
     let stop = loop {
         if cancel() {
-            return Ok(SurfaceDistanceRun::Cancelled);
+            return Ok(SearchRun::Cancelled);
         }
-        let upper = witness
-            .expect("all original span cells were evaluated")
-            .upper;
+        if state
+            .trim
+            .as_ref()
+            .is_some_and(|trim| trim.refusal.is_some())
+        {
+            break Some(SearchStop::TrimRefused);
+        }
+        let upper = state.witness.map_or(f64::INFINITY, |w| w.upper);
         let Some(cell) = frontier.peek().copied() else {
             break None;
         };
@@ -682,14 +805,14 @@ fn distance_with_poll<'a>(
             frontier.clear();
             break None;
         }
-        if Interval::new(cell.lower, upper).width() <= tolerance {
+        if state.witness.is_some() && Interval::new(cell.lower, upper).width() <= tolerance {
             break None;
         }
         if splits == budget.max_splits {
-            break Some(SurfaceDistanceStop::SplitLimit);
+            break Some(SearchStop::Refinement(SurfaceDistanceStop::SplitLimit));
         }
         if frontier.len() == capacity {
-            break Some(SurfaceDistanceStop::MemoryLimit);
+            break Some(SearchStop::Refinement(SurfaceDistanceStop::MemoryLimit));
         }
         let mids = [
             f64::midpoint(cell.min[0], cell.max[0]),
@@ -700,7 +823,9 @@ fn distance_with_poll<'a>(
             mids[1] > cell.min[1] && mids[1] < cell.max[1],
         ];
         if !possible[0] && !possible[1] {
-            break Some(SurfaceDistanceStop::ParameterResolution);
+            break Some(SearchStop::Refinement(
+                SurfaceDistanceStop::ParameterResolution,
+            ));
         }
         // Balance halvings in the original span coordinates. Logical depths
         // avoid overflow/underflow and dependence on unrelated U/V knot units.
@@ -709,8 +834,8 @@ fn distance_with_poll<'a>(
         } else {
             1
         };
-        if !meter.charge(2 * cell_work + heap_work) {
-            break Some(SurfaceDistanceStop::WorkLimit);
+        if !state.meter.charge(2 * cell_work + heap_work) {
+            break Some(SearchStop::Refinement(SurfaceDistanceStop::WorkLimit));
         }
         frontier.pop();
         for half in 0..2 {
@@ -723,18 +848,22 @@ fn distance_with_poll<'a>(
             } else {
                 child.min[axis] = mids[axis];
             }
-            if !evaluate_cell(
+            let Some(keep) = evaluate_cell(
                 source,
                 query,
                 &mut child,
                 hull,
                 &mut scratch,
-                &mut witness,
+                &mut state,
                 cancel,
-            )? {
-                return Ok(SurfaceDistanceRun::Cancelled);
+            )?
+            else {
+                return Ok(SearchRun::Cancelled);
+            };
+            if !keep {
+                continue;
             }
-            if child.lower >= witness.expect("retained witness").upper {
+            if child.lower >= state.witness.map_or(f64::INFINITY, |w| w.upper) {
                 excluded += 1;
             } else {
                 frontier.push(child);
@@ -742,18 +871,19 @@ fn distance_with_poll<'a>(
         }
         splits += 1;
     };
-    let witness = witness.expect("complete initial coverage supplies a witness");
-    let lower = frontier
-        .peek()
-        .map_or(witness.upper, |c| c.lower)
-        .min(witness.upper);
-    let bounds = Interval::new(lower, witness.upper);
+    let upper = state.witness.map_or(f64::INFINITY, |w| w.upper);
+    let lower = frontier.peek().map_or(upper, |c| c.lower).min(upper);
+    let bounds = if frontier.is_empty() && state.witness.is_none() {
+        None
+    } else {
+        Some(Interval::new(lower, upper))
+    };
     let work = SurfaceDistanceWork {
         original_span_cells: seeds,
         splits,
         remaining_cells: frontier.len(),
         excluded_cells: excluded,
-        charged_work_units: meter.used,
+        charged_work_units: state.meter.used,
         retained_payload_bytes: retained,
     };
     drop(frontier);
@@ -761,21 +891,14 @@ fn distance_with_poll<'a>(
     drop(spans_u);
     drop(spans_v);
     if cancel() {
-        return Ok(SurfaceDistanceRun::Cancelled);
+        return Ok(SearchRun::Cancelled);
     }
-    let enclosure = SurfaceDistanceEnclosure {
-        source,
-        query,
-        tolerance,
+    Ok(SearchRun::Complete(SearchResult {
         bounds,
-        witness_param: witness.param,
-        witness_position: witness.position,
+        witness: state.witness,
         work,
-    };
-    Ok(match stop {
-        None => SurfaceDistanceRun::Complete { enclosure },
-        Some(stop) => SurfaceDistanceRun::Unresolved { enclosure, stop },
-    })
+        stop,
+    }))
 }
 
 #[cfg(test)]

@@ -24,7 +24,7 @@ pub(crate) const TRIM_CLASSIFY_MAX_WORK_UNITS: u128 = 1_048_576;
 
 /// Aggregate retained-memory ceiling for the conversion, span-box, and
 /// offending-interval phases of one exact trim classification.
-const TRIM_CLASSIFY_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
+pub(crate) const TRIM_CLASSIFY_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const TRIM_SPAN_BOX_WORK_PER_CONTROL: u128 = 16;
 const TRIM_WINDING_WORK_PER_CONTROL: u128 = 128;
 const TRIM_EXACT_MIDPOINT_WORK_UNITS: u128 = 1_024;

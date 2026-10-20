@@ -2,7 +2,7 @@
 
 Rational B-spline charts (plan §7.2): bounded EXACT spline algebra, trimmed
 patches with certified classification, measured closest-point brackets,
-bounded outward unsigned-distance enclosures for admitted untrimmed surfaces,
+bounded outward unsigned-distance enclosures with exact trim coupling,
 and the HONEST Boolean position.
 
 Ambition tags: exact algebra / trims / closest-point [F per bead label;
@@ -249,10 +249,48 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   after scratch destruction before publication; `Cancelled` carries no
   enclosure, witness, or resumable frontier. The primitive reuses structural
   admission and does not consume the `Cx` budget or own executor scope
-  drain/finalization. It supplies no trims, sign, topology, unique minimizer,
+  drain/finalization. This untrimmed entry point supplies no trims, sign,
+  topology, unique minimizer,
   portable certificate/checker, or scene-field authority. The measured
   `closest` and `sdf` results retain their existing semantics; the broader
   bead remains open.
+- `trimmed_distance_enclosure_with_cx` couples that same outward search to an
+  `AdmittedTrimmedPatch`, with the result bound to both immutable sources.
+  The target is the closure of **actual surface images of kept parameters**:
+  in-domain points away from the trim curves with nonzero total winding.
+  Ordinary trim boundaries are approached from the kept side. At a full
+  surface break, evaluation uses the actual owned span; a left image limit
+  belongs only if approached by kept parameters. This is not the image of the
+  closed parameter region, which can differ at a discontinuity. Conservative
+  closed cells can retain additional unkept limits and leave width unresolved.
+  Every cell uses the exact connected-box trim classifier: only `Outside`
+  excludes it, while `Boundary` stays covered. Only a point proved `Inside`
+  (directly or through its whole cell) supplies a finite upper bound. Binary
+  f64 parameters convert to their exact reduced `Rat` values where i128 can
+  represent them, with no fixed-grid snapping; unsupported values remain
+  `Boundary`, never a kept witness or an exclusion. Compound cell and point
+  classification use at most two and four exact refinement rounds respectively,
+  and never exceed the admitted trim policy.
+  `TrimmedSurfaceDistanceRun::Complete` requires a finite width-closed interval
+  and a kept witness. `Unresolved` retains full coverage; if no kept point was
+  found its upper bound is +infinity and its witness is absent. `Empty` requires
+  exhaustive exact outside exclusion and carries neither a distance nor a
+  witness. Empty trim-loop lists have the classifier's zero-winding semantics.
+  Geometric and exact-trim work spend the same `SurfaceDistanceBudget` allowance.
+  A classifier `Domain` or `Exactness` refusal retains the affected cell as
+  `Boundary`, finishes the already-admitted cell coverage, and returns
+  `Unresolved` with the `ClassificationRefused` stop and original diagnostic. No work
+  allowance is reissued. The memory envelope reserves the classifier's full
+  64 MiB defensive peak, actual trim-source allocation capacities, and all
+  surface-search payload simultaneously; the reserve is conservative even for
+  tiny trims. Cancellation crosses classification, geometry, and final
+  publication and returns no partial bound or empty-region verdict.
+  The exact trim kernel still has its documented i128 arithmetic boundary:
+  generic `Rat` Add/Sub/Mul/Div during curve conversion, subdivision and winding
+  can raise a named overflow panic instead of a typed refusal. This path makes
+  no total panic-free claim and publishes no result on that failure. It adds no
+  sign, topology, portable certificate/checker, scene-field, or executor
+  drain/finalize authority; the broader `.57.1` bead remains open.
 - `boolean(op, policy)` — THE BOOLEAN POSITION: always a structured
   `BooleanRefusal` in v0. Default policy routes through SDF (convert →
   implicit CSG → re-fit); `DirectCertificateGated` refuses pending a
