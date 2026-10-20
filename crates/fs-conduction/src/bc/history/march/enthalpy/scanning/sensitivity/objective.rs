@@ -18,6 +18,8 @@ pub mod checkpoint;
 pub mod spatial;
 /// Explicit quadratic or outlier-resistant losses on physical measurements.
 pub mod loss;
+/// Original physical objective without tangent construction or reverse storage.
+pub mod value;
 
 use super::{ScanSensitivityBudget, ScanSensitivityError, ScanStepLinearization};
 use super::super::{ScanStep, ScanningEnthalpyRun};
@@ -211,36 +213,10 @@ fn admit_layout<O: ScanObservationSpec>(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'
     if retained.checked_mul(run.sources().len()).is_none_or(|n| n > budget.max_retained_source_vertices) {
         return Err(invalid("scan objective retained source-vertex allowance exceeded"));
     }
-    let mut controls = 0usize;
-    for (i, source) in run.sources().iter().enumerate() {
-        poll(cx, i)?;
-        controls = controls.checked_add(source.schedule_control_count()?)
-            .filter(|&n| n <= budget.max_schedule_controls)
-            .ok_or_else(|| invalid("scan objective authored-control allowance exceeded"))?;
-    }
-    let mut previous = run.conduction().time_s();
-    for (i, &time) in endpoints.iter().enumerate() {
-        poll(cx, i)?;
-        if !time.is_finite() || !(time-previous).is_finite() || time <= previous {
-            return Err(invalid("scan objective endpoints must increase from the input state with finite positive intervals"));
-        }
-        previous = time;
-    }
-    let mut at_endpoint = Vec::new();
-    at_endpoint.try_reserve_exact(count).map_err(|_| invalid("scan observation index allocation refused"))?;
-    at_endpoint.resize_with(count, Vec::new);
-    for (i, observation) in observations.iter().enumerate() {
-        poll(cx, i)?;
-        if observation.endpoint() >= count
-            || !observation.target().is_finite() || !observation.scale().is_finite() || observation.scale() <= 0.0
-        { return Err(invalid("scan observation needs an existing endpoint/vertex, finite target and positive finite physical scale")); }
-        observation.validate_readout(run.run.problem.boundary.mesh())?;
-        observation.loss().validate()?;
-        if observation.observable() == ScanObservable::LiquidMassFraction
-            && !(0.0..=1.0).contains(&observation.target())
-        { return Err(invalid("liquid mass fraction targets must be dimensionless values in [0,1], not percentages")); }
-        at_endpoint[observation.endpoint()].push(i);
-    }
+    let at_endpoint = value::admit_values(cx, run, endpoints, observations, value::ScanValueBudget {
+        max_steps: budget.max_steps, max_observations: budget.max_observations,
+        max_schedule_controls: budget.max_schedule_controls,
+    })?;
     let per_step = ScanSensitivityBudget {
         max_source_vertices: budget.max_retained_source_vertices / retained_steps,
         max_radiation_feedback_entries: budget.max_retained_radiation_entries / retained_steps,

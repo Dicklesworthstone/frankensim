@@ -31,6 +31,8 @@ mod power;
 pub use power::ScanPowerCoordinates;
 /// Physical bounds and absorbed-energy constraints through the existing SQP engine.
 pub mod constraints;
+/// Physical objective-only evaluations for screening and derivative-free search.
+pub mod value;
 
 /// One selected authored power value; unselected values (including off states)
 /// remain exactly as declared. `reference_w` is the positive watt scale of

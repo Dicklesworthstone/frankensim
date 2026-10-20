@@ -261,3 +261,6 @@ fn g3_spatial_vertex_reduction_preserves_the_existing_default_observation_api() 
 
 #[path = "spatial_design/robust.rs"]
 mod robust;
+
+#[path = "spatial_design/value.rs"]
+mod value;
