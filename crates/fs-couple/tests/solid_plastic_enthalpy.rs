@@ -1,5 +1,8 @@
 //! G1 loaded-tet oracle, G3 spatial source/conduction feedback, G0 work and
 //! history preservation, G4 late refusal. All material numbers are synthetic.
+#[path = "solid_plastic_enthalpy/contact.rs"]
+mod contact;
+
 use std::collections::BTreeMap;
 
 use fs_couple::solid_enthalpy::plastic::{

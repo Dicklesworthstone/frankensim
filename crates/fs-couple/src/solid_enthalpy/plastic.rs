@@ -14,6 +14,8 @@
 //! remain in DepositionSimulation. Refine both physical load intervals and
 //! thermal substeps; a fixed-point gate is not a time-accuracy certificate.
 
+pub mod contact;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::sync::Arc;
