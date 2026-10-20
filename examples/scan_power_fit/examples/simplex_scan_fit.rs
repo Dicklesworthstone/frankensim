@@ -18,6 +18,8 @@ use fs_conduction::transient::enthalpy::heterogeneous::ReferenceEnthalpyMaterial
 use fs_conduction::{ConductionMesh, ConductivityModel, ScalarField, ThermalBc,
     ThermalBoundaryBuilder, LinearConfig, COMPONENT_POWER_DIMS};
 use fs_dfo::neldermead::state::{NelderMeadConfig, NelderMeadReport, NelderMeadState, NelderMeadStop};
+use fs_dfo::differential_evolution::{DifferentialEvolutionConfig, DifferentialEvolutionReport,
+    DifferentialEvolutionState, DifferentialEvolutionStop};
 use fs_exec::{Cx, Budget, CancelGate, ExecMode, StreamKey};
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EnthalpyPhaseKnot};
 use fs_qty::{Dims, QtyAny};
@@ -27,19 +29,43 @@ use fs_solver::NewtonKrylovConfig;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const TARGET: f64 = 1e-12;
-const USAGE: &str = "simplex_scan_fit [first_fraction second_fraction [maximum_W total_evaluations]]";
+const USAGE: &str = "simplex_scan_fit [--population] [--initial-enthalpy J/kg] [--seed u64] [first_fraction second_fraction [maximum_W total_evaluations]]";
 
 #[derive(Clone, Copy)]
-struct Options { targets:[f64;2], maximum_w:f64, evaluations:usize }
+struct Options {
+    targets: [f64;2], maximum_w: f64, evaluations: usize,
+    population: bool, initial_h: f64, seed: u64,
+}
 fn options(args: &[String]) -> Result<Options> {
-    if !matches!(args.len(),0|2|4) { return Err(USAGE.into()); }
-    let targets: [f64;2]=if args.is_empty() {[0.1,0.3]} else {[args[0].parse()?,args[1].parse()?]};
-    let (maximum_w,evaluations): (f64,usize)=if args.len()==4 {(args[2].parse()?,args[3].parse()?)} else {(50.0,400)};
+    let mut values=Vec::new();
+    let (mut population,mut initial_h,mut seed)=(false,100.0_f64,17_u64);
+    let mut seen=[false;3];
+    let mut i=0;
+    while i<args.len() {
+        match args[i].as_str() {
+            "--population" if !seen[0] => { population=true;seen[0]=true; },
+            "--initial-enthalpy" if !seen[1] => {
+                i+=1;initial_h=args.get(i).ok_or(USAGE)?.parse()?;seen[1]=true;
+            },
+            "--seed" if !seen[2] => {
+                i+=1;seed=args.get(i).ok_or(USAGE)?.parse()?;seen[2]=true;
+            },
+            value if !value.starts_with("--") => values.push(value),
+            _ => return Err(USAGE.into()),
+        }
+        i+=1;
+    }
+    if !matches!(values.len(),0|2|4) || (seen[2] && !population) { return Err(USAGE.into()); }
+    let targets: [f64;2]=if values.is_empty() {[0.1,0.3]} else {[values[0].parse()?,values[1].parse()?]};
+    let (maximum_w,evaluations): (f64,usize)=if values.len()==4 {
+        (values[2].parse()?,values[3].parse()?)
+    } else { (50.0,if population {3000} else {400}) };
     if targets.iter().any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
         || !maximum_w.is_finite() || maximum_w <= 0.0 || maximum_w > 100.0
         || !(10..=10_000).contains(&evaluations)
-    { return Err("fractions must be in [0,1], maximum watts in (0,100], total evaluations in [10,10000]".into()); }
-    Ok(Options { targets, maximum_w, evaluations })
+        || !initial_h.is_finite() || !(-100.0..=200.0).contains(&initial_h)
+    { return Err("fractions in [0,1], watts in (0,100], evaluations in [10,10000], initial enthalpy in [-100,200] J/kg required".into()); }
+    Ok(Options { targets,maximum_w,evaluations,population,initial_h,seed })
 }
 
 fn source() -> Result<MovingHeatSource> {
@@ -53,8 +79,37 @@ fn source() -> Result<MovingHeatSource> {
             min_active_vertices:1, power_relative_tolerance:1e-11 })?)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum SearchReport { Simplex(NelderMeadReport), Population(DifferentialEvolutionReport) }
+impl SearchReport {
+    fn best(&self) -> Result<(&[f64],f64)> {
+        match self {
+            Self::Simplex(r) => r.best.as_ref().map(|p|(p.coordinates.as_slice(),p.value)),
+            Self::Population(r) => r.best.as_ref().map(|p|(p.coordinates.as_slice(),p.value)),
+        }.ok_or_else(||"search returned no evaluated design".into())
+    }
+    fn evaluations(&self) -> usize {
+        match self { Self::Simplex(r)=>r.evaluations,Self::Population(r)=>r.evaluations }
+    }
+    fn method(&self) -> &'static str {
+        match self { Self::Simplex(_)=>"Nelder-Mead",Self::Population(_)=>"DE/rand/1/bin" }
+    }
+    fn stop(&self) -> &'static str {
+        match self {
+            Self::Simplex(r) => match r.stop {
+                NelderMeadStop::TargetReached=>"TargetReached",NelderMeadStop::SimplexSmall=>"SimplexSmall",
+                NelderMeadStop::EvaluationLimit=>"EvaluationLimit",NelderMeadStop::Paused=>"Paused",
+            },
+            Self::Population(r) => match r.stop {
+                DifferentialEvolutionStop::TargetReached=>"TargetReached",
+                DifferentialEvolutionStop::EvaluationLimit=>"EvaluationLimit",
+                DifferentialEvolutionStop::Paused=>"Paused",
+            },
+        }
+    }
+}
 struct Outcome {
-    search: NelderMeadReport,
+    search: SearchReport,
     replay: ScanPowerValueEvaluation,
     spent: usize,
     sources: Vec<MovingHeatSource>,
@@ -83,8 +138,9 @@ fn fit(cx: &Cx<'_>, input: Options, pause: bool) -> Result<Outcome> {
             source:HeatSourceHistory::Fixed(ScalarField::Uniform(0.)) },
             EnthalpyHistoryMaterials { table:&[ReferenceEnthalpyMaterial {
                 curve:&curve, reference_density_kg_m3:1. }], of_element:&[0;6], phase_conductivity:None },
-            // Exactly at the solidus: a valid state, not a two-sided adjoint point.
-            &[100.;8],EnthalpyHistoryBudget {
+            // The default is the solidus; an explicit colder start introduces
+            // a flat liquid-fraction response before sensible heating reaches it.
+            &[input.initial_h;8],EnthalpyHistoryBudget {
                 spatial:EnthalpyBudget { max_vertices:8, max_elements:6 },max_steps:2 })?;
         Ok(ScanningEnthalpyRun::new(cx,run,sources,1,None)?)
     };
@@ -104,32 +160,50 @@ fn fit(cx: &Cx<'_>, input: Options, pause: bool) -> Result<Outcome> {
                 max_retained_vertices:0,max_retained_source_vertices:0,
                 max_schedule_controls:16,max_retained_radiation_entries:0},source_reference_time_s:0.,
         },factory,initial_cap+1)?;
-    let mut solver=NelderMeadState::new(study.initial_coordinates(),
-        &[input.maximum_w.min(1.);2],NelderMeadConfig {
-            max_evaluations:initial_cap,max_simplex_entries:6,target:Some(TARGET),
-            x_tolerance:1e-8,f_tolerance:1e-14,bounds:Some(vec![[0.,input.maximum_w];2]),
-        })?;
-    let mut search=solver.advance(cx,usize::MAX,&mut |point|
-        study.evaluate_value(cx,point).map(|value|value.physical.value))?;
-    if pause && search.stop==NelderMeadStop::EvaluationLimit {
-        // Keep both cumulative counters. One physical evaluation stays reserved
-        // for independent replay of the exported best candidate.
-        study.extend_evaluation_budget(input.evaluations)?;
-        solver.extend_evaluation_budget(input.evaluations-1)?;
-        search=solver.advance(cx,usize::MAX,&mut |point|
+    let search=if input.population {
+        let mut solver=DifferentialEvolutionState::new(cx,&[[0.,input.maximum_w];2],
+            Some(study.initial_coordinates()),DifferentialEvolutionConfig {
+                population_size:24,differential_weight:0.8,crossover_probability:0.9,seed:input.seed,
+                max_evaluations:initial_cap,max_population_entries:48,target:Some(TARGET),
+            })?;
+        let mut report=solver.advance(cx,usize::MAX,&mut |point|
             study.evaluate_value(cx,point).map(|value|value.physical.value))?;
-    }
-    let best=search.best.as_ref().ok_or("search returned no evaluated design")?;
+        if pause && report.stop==DifferentialEvolutionStop::EvaluationLimit {
+            study.extend_evaluation_budget(input.evaluations)?;
+            solver.extend_evaluation_budget(input.evaluations-1)?;
+            report=solver.advance(cx,usize::MAX,&mut |point|
+                study.evaluate_value(cx,point).map(|value|value.physical.value))?;
+        }
+        SearchReport::Population(report)
+    } else {
+        let mut solver=NelderMeadState::new(study.initial_coordinates(),
+            &[input.maximum_w.min(1.);2],NelderMeadConfig {
+                max_evaluations:initial_cap,max_simplex_entries:6,target:Some(TARGET),
+                x_tolerance:1e-8,f_tolerance:1e-14,bounds:Some(vec![[0.,input.maximum_w];2]),
+            })?;
+        let mut report=solver.advance(cx,usize::MAX,&mut |point|
+            study.evaluate_value(cx,point).map(|value|value.physical.value))?;
+        if pause && report.stop==NelderMeadStop::EvaluationLimit {
+            study.extend_evaluation_budget(input.evaluations)?;
+            solver.extend_evaluation_budget(input.evaluations-1)?;
+            report=solver.advance(cx,usize::MAX,&mut |point|
+                study.evaluate_value(cx,point).map(|value|value.physical.value))?;
+        }
+        SearchReport::Simplex(report)
+    };
+    // Both search methods reserve the same final physical replay and keep
+    // original callbacks charged when their lifetime allowance is extended.
+    let (best_coordinates,best_value)=search.best()?;
     let before_export=study.evaluations();
-    let sources=study.sources_at(cx,&best.coordinates)?;
+    let sources=study.sources_at(cx,best_coordinates)?;
     if study.evaluations()!=before_export || sources[0].absorbed_power_values(3)?[2]!=0. {
         return Err("source export changed work accounting or fixed shutdown".into());
     }
-    let replay=study.evaluate_value(cx,&best.coordinates)?;
-    if replay.physical.value.to_bits()!=best.value.to_bits() {
+    let replay=study.evaluate_value(cx,best_coordinates)?;
+    if replay.physical.value.to_bits()!=best_value.to_bits() {
         return Err("best-candidate replay changed the physical objective".into());
     }
-    if study.evaluations()!=search.evaluations+1 || study.evaluations()>input.evaluations {
+    if study.evaluations()!=search.evaluations()+1 || study.evaluations()>input.evaluations {
         return Err("callback and physical-evaluation budgets disagree".into());
     }
     Ok(Outcome { search,replay,spent:study.evaluations(),sources })
@@ -145,9 +219,10 @@ fn main() -> Result<()> {
     let args:Vec<_>=std::env::args().skip(1).collect();
     let input=options(&args)?;
     let outcome=with_cx(|_,cx|fit(cx,input,true))?;
-    println!("# synthetic specimen; derivative-free local search, not a global optimum");
-    println!("# stop={:?}; objective={:.17e}; callback_attempts={}; total_physical_evaluations={}",
-        outcome.search.stop,outcome.replay.physical.value,outcome.search.evaluations,outcome.spent);
+    println!("# synthetic specimen; search={}; no global-optimality guarantee; initial_h_j_kg={}; seed={}",
+        outcome.search.method(),input.initial_h,input.seed);
+    println!("# stop={}; objective={:.17e}; callback_attempts={}; total_physical_evaluations={}",
+        outcome.search.stop(),outcome.replay.physical.value,outcome.search.evaluations(),outcome.spent);
     println!("start_s,end_s,absorbed_power_w,mean_fraction_at_end,target_fraction_at_end");
     for i in 0..2 {
         println!("{},{},{:.17e},{:.17e},{:.17e}",i,i+1,outcome.replay.powers_w[i],
@@ -168,12 +243,12 @@ mod tests {
         let input=options(&[]).unwrap();
         let result=with_cx(|_,cx|fit(cx,input,true)).unwrap();
         assert!(result.target_met());
-        assert_eq!(result.search.stop,NelderMeadStop::TargetReached);
+        assert!(matches!(&result.search,SearchReport::Simplex(r) if r.stop==NelderMeadStop::TargetReached));
         for (actual,expected) in result.replay.powers_w.iter().zip([10.,20.]) {
             assert!((*actual-expected).abs()<1e-3,"{actual} != {expected}");
         }
         assert!(result.replay.physical.final_step.solution().temperature.iter().all(|t|(*t-310.).abs()<1e-8));
-        assert_eq!(result.spent,result.search.evaluations+1);
+        assert_eq!(result.spent,result.search.evaluations()+1);
         assert!(result.spent<=400);
     }
     #[test]
@@ -198,5 +273,46 @@ mod tests {
             assert!(options(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
         }
         with_cx(|gate,cx| { gate.request();assert!(fit(cx,options(&[])?,true).is_err());Ok(()) }).unwrap();
+    }
+
+    #[test]
+    fn g1_population_heats_through_a_flat_solid_regime_and_resumes_identically() {
+        let input=options(&["--population","--initial-enthalpy","80"]
+            .map(str::to_owned)).unwrap();
+        with_cx(|_,cx| {
+            let paused=fit(cx,input,true)?;
+            let direct=fit(cx,input,false)?;
+            assert!(paused.target_met());
+            assert!(matches!(&paused.search,SearchReport::Population(r)
+                if r.stop==DifferentialEvolutionStop::TargetReached));
+            assert_eq!(paused.search,direct.search);
+            assert_eq!(paused.replay.physical.predictions,direct.replay.physical.predictions);
+            for (actual,expected) in paused.replay.powers_w.iter().zip([30.,20.]) {
+                assert!((*actual-expected).abs()<2e-3,"{actual} != {expected}");
+            }
+            assert_eq!(paused.spent,paused.search.evaluations()+1);
+            assert!(paused.spent<=input.evaluations);
+            let local=fit(cx,Options {population:false,evaluations:400,..input},true)?;
+            assert!(!local.target_met());
+            assert!(local.replay.physical.value>1.);
+            Ok(())
+        }).unwrap();
+    }
+    #[test]
+    fn g0_population_reports_unreachable_targets_and_rejects_ambiguous_options() {
+        for args in [vec!["--population","--population"],vec!["--seed","1"],
+            vec!["--population","--seed","-1"],vec!["--initial-enthalpy"],
+            vec!["--initial-enthalpy","NaN"],vec!["--initial-enthalpy","900"]] {
+            assert!(options(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
+        }
+        let input=options(&["--population","--initial-enthalpy","80","0.1","0.3","1","65"]
+            .map(str::to_owned)).unwrap();
+        let result=with_cx(|_,cx|fit(cx,input,true)).unwrap();
+        assert!(!result.target_met());
+        assert!(matches!(&result.search,SearchReport::Population(r)
+            if r.stop==DifferentialEvolutionStop::EvaluationLimit));
+        assert_eq!(result.spent,65);
+        assert!(result.replay.powers_w.iter().all(|&p|(0.0..=1.0).contains(&p)));
+        with_cx(|gate,cx| {gate.request();assert!(fit(cx,input,true).is_err());Ok(())}).unwrap();
     }
 }
