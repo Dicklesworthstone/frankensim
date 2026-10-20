@@ -1,0 +1,25 @@
+{
+ "schema": "frankensim.instrument-status.v1",
+ "family": "violin",
+ "title": "Violin",
+ "reference_instrument": "Violin (University of Iowa MIS)",
+ "summary": "Open-string arco cards for the G, D, A and E strings (G3 D4 A4 E5), written from published string properties, a Schelleng-range bow and a published rosin friction curve, each number with a source row. They run through the existing one-string point-bow reader with a one-way compact body, which is a reduced baseline and not yet a violin body: the body is one oscillator whose frequency, effective mass and damping come from a published measured violin (McLennan, UNSW) and whose radiating area is unknown.",
+ "physics_present": [
+  "fs-couple bowed_string: pinned Euler-Bernoulli string modes from vibrating length, tension and mass per length; tension is set from the table so the open-string pitch is a result of the card",
+  "fs-couple stribeck_friction on the shared fs-tribo law with event stiction: static cap, then a Gaussian drop to the kinetic coefficient",
+  "a point bow driven by a canonical gesture schedule: on the string at rest, constant acceleration to a bow speed, constant force, then lift",
+  "a one-way compact radiating body at a 1 m observer; modal damping from the fundamental's measured Q where one was retrieved"
+ ],
+ "physics_missing": [
+  "the real body: bridge, arched plates, ribs, f-holes, soundpost, bass bar, enclosed air and radiation back-loading; the radiating area of the single oscillator is unknown",
+  "string torsion and the second polarisation, and a ribbon bow with hair compliance",
+  "bending stiffness and mode-dependent loss of the real wound strings; the card carries zero stiffness and one damping ratio for every mode",
+  "a hyperbolic or thermal rosin law: the solver's Stribeck law is Gaussian and its regularisation speed is tied to the same file field",
+  "stopped notes and finger damping; only open strings are described",
+  "mode-count, friction-substep and time-step convergence ladders"
+ ],
+ "blocked": "waiting for the first native render: the music_render build of the green SHA is still compiling on trj",
+ "beads": [
+  "pexfp.298"
+ ]
+}
