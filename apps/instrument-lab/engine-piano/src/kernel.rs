@@ -3454,7 +3454,6 @@ impl LivePiano {
         }
     }
 
-    /// Mechanical energy now stored in strings, board, hammers and felt [J].
     /// One step of the silent-string bank, after the dynamic set's step. Over the step the
     /// bridge moved from where the last one left it to where this one did; taking that
     /// motion as linear, each partial's motion relative to its chord, u = z - beta b,
@@ -3521,6 +3520,8 @@ impl LivePiano {
         (string_loss, damper_loss)
     }
 
+    /// Mechanical energy now stored in strings (the silent-string bank's too), board,
+    /// hammers and felt [J].
     pub fn stored_energy_j(&self) -> f64 {
         let r = self.r;
         let mut e = 0.5 * self.bvel.iter().map(|x| x * x).sum::<f64>();

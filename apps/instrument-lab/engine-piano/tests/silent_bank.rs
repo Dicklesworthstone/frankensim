@@ -2,7 +2,7 @@
 //! string that is not sounding moves, driven by the bridge.
 //! - Against the same partials attached as dynamic strings (every other key held down
 //!   silently, the partial band at the bank's band), both under the full sustain pedal so
-//!   no pad touches either, an A3 strike sounds the same to within -30 dB.
+//!   no pad touches either, an A3 strike sounds the same to within -50 dB (measured -57.7).
 //! - The books close with the bank's explicit exchange booked, through a struck key handing
 //!   its bank partials to the dynamic set, returning them when it retires, and a re-strike.
 use fs_live_piano::{Config, Description, LivePiano};
@@ -52,7 +52,7 @@ fn the_bank_sounds_as_the_same_partials_attached_as_strings() {
     }
     let db = 10.0 * (num / den).log10();
     println!("bank vs attached strings: {db:.1} dB");
-    assert!(db < -30.0, "the bank differs from the attached strings by {db:.1} dB");
+    assert!(db < -50.0, "the bank differs from the attached strings by {db:.1} dB");
     // And the bank changes the strike: without it the silent strings are rigid chords.
     let mut none = LivePiano::new(&desc, Config::live(RATE)).unwrap();
     none.set_sustain(1.0).unwrap();
@@ -83,6 +83,7 @@ fn the_books_close_with_the_bank_exchange_booked() {
     let l = p.close_ledger();
     println!("{l:?}");
     assert!(l.residual_j.abs() < 1.0e-9 * l.input_j, "residual {:e} of {:e} J", l.residual_j, l.input_j);
-    assert!(l.coupling_j.abs() < 1.0e-2 * l.input_j, "coupling {:e} of {:e} J", l.coupling_j, l.input_j);
+    // Measured 5.5e-4 of the input.
+    assert!(l.coupling_j.abs() < 2.0e-3 * l.input_j, "coupling {:e} of {:e} J", l.coupling_j, l.input_j);
     assert!(l.damper_loss_j > 0.0 && p.take_error().is_none());
 }
