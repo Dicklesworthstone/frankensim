@@ -1,0 +1,66 @@
+frankensim.description-sources.v1
+quantity	scope	value	unit	route	citation_id	locator	note
+vibrating_length	all strings	0.69	m	published-measured	guettler2012-typical	table, column 'String length'	single length for the whole family; stopped notes are not used
+tuning_frequency	C2	65.4	Hz	published-measured	guettler2012-typical	table, column 'Frequency'	printed rounded value; f1 below is computed
+propagation_speed	C2	90.3	m/s	published-measured	guettler2012-typical	table, column 'Propagation speed'	equals 2*L*f0
+linear_density_range	C2	0.01433..0.01698	kg/m	published-measured	guettler2012-typical	table, column 'Mass per unit length'	range across commercial strings; brand of the reference specimen: UNKNOWN
+linear_density	C2	0.015655	kg/m	derived-from-published	guettler2012-typical	midpoint of the published range	selection rule fixed before any render; not tuned
+tension	C2	127.6523	N	derived-from-published	guettler2012-typical	T = mu * c^2 with c from the same table row	the 'setup protocol': tension set from the model, independent of recordings
+tension_range	C2	116.7..138.3	N	published-measured	guettler2012-typical	table, column 'Tension'	printed range for this string; the derived tension 127.65 N lies inside it
+fundamental_frequency	C2	65.43478	Hz	computed-check	-	f1 = (1/2L) sqrt(T/mu), EI=0	+0.921 cents against the printed tuning frequency
+transverse_impedance	C2	1.413647	kg/s	derived-from-published	guettler2012-typical	Z0 = mu*c	
+modal_damping_ratio	C2	0.00121951	1	placeholder-unknown	schoonderwaldt2008	Table VI: Q1 = 410 (violin, open D, wound steel), 945 (monochord, plain steel E)	zeta_n = 1/(2*Q1) = 1/(2*410) for every mode n; Q1 of this string is UNKNOWN; the violin D measurement is borrowed; mode-number dependence UNKNOWN
+retained_string_modes	C2	305	1	numerical	frankensim-baseline-numerics	floor(20000 Hz / f1)	highest retained mode below 20 kHz; mode-count ladder not yet run
+bow_force	C2	2.862771	N	derived-from-published	schoonderwaldt2008	geometric mid-window between Schelleng F_max and F_min	F_max = 2*Z0*vB/(beta*dmu) = 11.66 N (Schelleng eq. 1, dmu = 0.4); F_min = F_max / 16.6, the measured F_max/F_min at beta=1/11, vB=10 cm/s (Table I); torsion is not in this solver
+tuning_frequency	G2	98	Hz	published-measured	guettler2012-typical	table, column 'Frequency'	printed rounded value; f1 below is computed
+propagation_speed	G2	135.2	m/s	published-measured	guettler2012-typical	table, column 'Propagation speed'	equals 2*L*f0
+linear_density_range	G2	0.00638..0.00756	kg/m	published-measured	guettler2012-typical	table, column 'Mass per unit length'	range across commercial strings; brand of the reference specimen: UNKNOWN
+linear_density	G2	0.00697	kg/m	derived-from-published	guettler2012-typical	midpoint of the published range	selection rule fixed before any render; not tuned
+tension	G2	127.4049	N	derived-from-published	guettler2012-typical	T = mu * c^2 with c from the same table row	the 'setup protocol': tension set from the model, independent of recordings
+tension_range	G2	116.7..138.3	N	published-measured	guettler2012-typical	table, column 'Tension'	printed range for this string; the derived tension 127.40 N lies inside it
+fundamental_frequency	G2	97.97101	Hz	computed-check	-	f1 = (1/2L) sqrt(T/mu), EI=0	-0.512 cents against the printed tuning frequency
+transverse_impedance	G2	0.942344	kg/s	derived-from-published	guettler2012-typical	Z0 = mu*c	
+modal_damping_ratio	G2	0.00121951	1	placeholder-unknown	schoonderwaldt2008	Table VI: Q1 = 410 (violin, open D, wound steel), 945 (monochord, plain steel E)	zeta_n = 1/(2*Q1) = 1/(2*410) for every mode n; Q1 of this string is UNKNOWN; the violin D measurement is borrowed; mode-number dependence UNKNOWN
+retained_string_modes	G2	204	1	numerical	frankensim-baseline-numerics	floor(20000 Hz / f1)	highest retained mode below 20 kHz; mode-count ladder not yet run
+bow_force	G2	1.908338	N	derived-from-published	schoonderwaldt2008	geometric mid-window between Schelleng F_max and F_min	F_max = 2*Z0*vB/(beta*dmu) = 7.774 N (Schelleng eq. 1, dmu = 0.4); F_min = F_max / 16.6, the measured F_max/F_min at beta=1/11, vB=10 cm/s (Table I); torsion is not in this solver
+tuning_frequency	D3	146.9	Hz	published-measured	guettler2012-typical	table, column 'Frequency'	printed rounded value; f1 below is computed
+propagation_speed	D3	202.7	m/s	published-measured	guettler2012-typical	table, column 'Propagation speed'	equals 2*L*f0
+linear_density_range	D3	0.00294..0.00357	kg/m	published-measured	guettler2012-typical	table, column 'Mass per unit length'	range across commercial strings; brand of the reference specimen: UNKNOWN
+linear_density	D3	0.003255	kg/m	derived-from-published	guettler2012-typical	midpoint of the published range	selection rule fixed before any render; not tuned
+tension	D3	133.7391	N	derived-from-published	guettler2012-typical	T = mu * c^2 with c from the same table row	the 'setup protocol': tension set from the model, independent of recordings
+tension_range	D3	121.0..146.9	N	published-measured	guettler2012-typical	table, column 'Tension'	printed range for this string; the derived tension 133.74 N lies inside it
+fundamental_frequency	D3	146.8841	Hz	computed-check	-	f1 = (1/2L) sqrt(T/mu), EI=0	-0.188 cents against the printed tuning frequency
+transverse_impedance	D3	0.6597885	kg/s	derived-from-published	guettler2012-typical	Z0 = mu*c	
+modal_damping_ratio	D3	0.00121951	1	placeholder-unknown	schoonderwaldt2008	Table VI: Q1 = 410 (violin, open D, wound steel), 945 (monochord, plain steel E)	zeta_n = 1/(2*Q1) = 1/(2*410) for every mode n; Q1 of this string is UNKNOWN; the violin D measurement is borrowed; mode-number dependence UNKNOWN
+retained_string_modes	D3	136	1	numerical	frankensim-baseline-numerics	floor(20000 Hz / f1)	highest retained mode below 20 kHz; mode-count ladder not yet run
+bow_force	D3	1.336136	N	derived-from-published	schoonderwaldt2008	geometric mid-window between Schelleng F_max and F_min	F_max = 2*Z0*vB/(beta*dmu) = 5.443 N (Schelleng eq. 1, dmu = 0.4); F_min = F_max / 16.6, the measured F_max/F_min at beta=1/11, vB=10 cm/s (Table I); torsion is not in this solver
+tuning_frequency	A3	220	Hz	published-measured	guettler2012-typical	table, column 'Frequency'	printed rounded value; f1 below is computed
+propagation_speed	A3	303.6	m/s	published-measured	guettler2012-typical	table, column 'Propagation speed'	equals 2*L*f0
+linear_density_range	A3	0.0015..0.00192	kg/m	published-measured	guettler2012-typical	table, column 'Mass per unit length'	range across commercial strings; brand of the reference specimen: UNKNOWN
+linear_density	A3	0.00171	kg/m	derived-from-published	guettler2012-typical	midpoint of the published range	selection rule fixed before any render; not tuned
+tension	A3	157.6158	N	derived-from-published	guettler2012-typical	T = mu * c^2 with c from the same table row	the 'setup protocol': tension set from the model, independent of recordings
+tension_range	A3	138.3..177.2	N	published-measured	guettler2012-typical	table, column 'Tension'	printed range for this string; the derived tension 157.62 N lies inside it
+fundamental_frequency	A3	220	Hz	computed-check	-	f1 = (1/2L) sqrt(T/mu), EI=0	+0.000 cents against the printed tuning frequency
+transverse_impedance	A3	0.519156	kg/s	derived-from-published	guettler2012-typical	Z0 = mu*c	
+modal_damping_ratio	A3	0.00121951	1	placeholder-unknown	schoonderwaldt2008	Table VI: Q1 = 410 (violin, open D, wound steel), 945 (monochord, plain steel E)	zeta_n = 1/(2*Q1) = 1/(2*410) for every mode n; Q1 of this string is UNKNOWN; the violin D measurement is borrowed; mode-number dependence UNKNOWN
+retained_string_modes	A3	90	1	numerical	frankensim-baseline-numerics	floor(20000 Hz / f1)	highest retained mode below 20 kHz; mode-count ladder not yet run
+bow_force	A3	1.051341	N	derived-from-published	schoonderwaldt2008	geometric mid-window between Schelleng F_max and F_min	F_max = 2*Z0*vB/(beta*dmu) = 4.283 N (Schelleng eq. 1, dmu = 0.4); F_min = F_max / 16.6, the measured F_max/F_min at beta=1/11, vB=10 cm/s (Table I); torsion is not in this solver
+audio_rate	all	48000	Hz	numerical	frankensim-baseline-numerics	audio record	48 kHz mono to match the converted reference library
+pcm_full_scale	all	0.04	Pa	numerical	frankensim-baseline-numerics	audio record and render.sh --full-scale-pa	chosen as a round number putting the loudest string of a 1 Pa probe render near half of 16-bit full scale; it scales PCM only and is not an acoustic gain
+render_samples	all	144000	1	numerical	frankensim-baseline-numerics	audio record	3.0 s
+ambient	all	293.15 K, 101325 Pa, 0 % RH	SI	placeholder-unknown	frankensim-baseline-numerics	ambient record	enters only the observer air density; the reference room conditions are UNKNOWN
+listener_distance	all	1	m	placeholder-unknown	frankensim-baseline-numerics	listener_m record	reference microphone distance: UNKNOWN
+bending_stiffness	all	0	N m^2	placeholder-unknown	-	string record field 4	EI=0 switches dispersion off (an omission, not a measurement); true EI of wound strings: UNKNOWN
+viscous_bending_loss	all	0	N m^2 s	placeholder-unknown	-	string record field 5	UNKNOWN
+friction_mu_static	all	0.8	1	published-assumed	schoonderwaldt2008	sec. 3.3: K = 8 cm/s, mu_d = 0.4, z0 = 20 cm/s => mu_s = 0.8	values quoted there as commonly used in violin bowed-string simulations (Guettler; Woodhouse); not a measurement of this rosin
+friction_mu_dynamic	all	0.4	1	published-assumed	schoonderwaldt2008	sec. 3.3: mu_d = 0.4 (asymptote)	
+friction_speed	all	0.240224	m/s	derived-from-published	schoonderwaldt2008	Gaussian width vs with mu(z)-mu_d halved at z = K/((mu_s-mu_d)/2) - z0 = 0.20 m/s: vs = 0.20/sqrt(ln 2)	the published rosin law is hyperbolic mu_d + K/(z+z0); this solver's law is mu_d + (mu_s-mu_d) exp(-(z/vs)^2) and the v1 file grammar also sets the ODE regularisation speed equal to vs (family mismatch, see unknowns.tsv)
+bow_speed	all	0.15	m/s	selected-from-published-range	schoonderwaldt2008	bowing-machine velocities 5, 10, 15, 20 cm/s	player bow speed for an mf note: UNKNOWN; the third machine value is used; no viola/cello/bass machine data retrieved
+bow_station_beta	all	0.090909091	1	selected-from-published-range	schoonderwaldt2008	Fig. 6 axis: beta = 1/30, 1/22, 1/16, 1/11, 1/8, 1/6	distance from the bridge as a fraction of the string length
+bow_acceleration	all	1	m/s^2	selected-from-published-range	guettler2002	sec. 6: simulated parameter space 50 to 900 cm/s^2	constant acceleration from rest to bow speed (ramp length = vB/a = 0.15 s); bow already on the string, force constant
+bow_release_time	all	2.5	s	numerical	-	gesture event	force ramps to zero over 20 ms; the string rings down to 3.0 s
+friction_subsamples	all	16	1	numerical	frankensim-baseline-numerics	subsamples record	friction refresh steps per audio sample; no convergence ladder yet
+body_frequency	body	280	Hz	placeholder-unknown	frankensim-baseline-body	baseline record	UNKNOWN for this instrument; baseline value kept, it is not this instrument's body
+body_mass	body	0.15	kg	placeholder-unknown	frankensim-baseline-body	baseline record	UNKNOWN
+body_damping_ratio	body	0.02	1	placeholder-unknown	frankensim-baseline-body	baseline record	UNKNOWN
+body_area	body	0.003	m^2	placeholder-unknown	frankensim-baseline-body	baseline record	effective radiating area: UNKNOWN for every family (needs the monopole volume per unit force; Marshall 1985 ODS volume changes are not force-normalised)

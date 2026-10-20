@@ -1,0 +1,27 @@
+{
+ "schema": "frankensim.instrument-status.v1",
+ "family": "cello",
+ "title": "Cello",
+ "reference_instrument": "Cello (University of Iowa MIS)",
+ "summary": "A labelled diagnostic baseline, not a cello: open-string arco cards for the C, G, D and A strings, written from published string properties, a Schelleng-range bow and a published rosin friction curve, each number with a source row. They run through the one-string point-bow reader with a one-way one-oscillator body, which is reduced physics. The oscillator is the existing baseline oscillator, kept only as a placeholder because no measured cello body or string loss was retrieved.",
+ "physics_present": [
+  "fs-couple bowed_string: pinned Euler-Bernoulli string modes from vibrating length, tension and mass per length; tension is set from the table so the open-string pitch is a result of the card",
+  "fs-couple stribeck_friction on the shared fs-tribo law with event stiction: static cap, then a Gaussian drop to the kinetic coefficient",
+  "a point bow driven by a canonical gesture schedule: on the string at rest, constant acceleration to a bow speed, constant force, then lift",
+  "a one-way compact radiating body at a 1 m observer; modal damping from the fundamental's measured Q where one was retrieved"
+ ],
+ "physics_missing": [
+  "the whole body (a reduced stand-in is rendered): bridge, arched top and back with graduated thickness, ribs, bass bar, soundpost, f-holes, enclosed air and radiation back-loading; the physical route is the material_strings shell body with published plate geometry and wood data, finite-width bow ribbon",
+  "measured string Q and body admittance for this instrument (placeholders are labelled UNKNOWN in sources.tsv)",
+  "string torsion and the second polarisation, and a ribbon bow with hair compliance",
+  "bending stiffness and mode-dependent loss of the real wound strings; the card carries zero stiffness and one damping ratio for every mode",
+  "a hyperbolic or thermal rosin law: the solver's Stribeck law is Gaussian and its regularisation speed is tied to the same file field",
+  "stopped notes and finger damping; only open strings are described",
+  "mode-count, friction-substep and time-step convergence ladders",
+  "wolf note at the main body resonance, endpin and floor coupling"
+ ],
+ "blocked": null,
+ "beads": [
+  "pexfp.306"
+ ]
+}
