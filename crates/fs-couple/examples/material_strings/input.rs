@@ -49,6 +49,7 @@ pub struct Spec {
     pub rotational_bridges: Vec<RotationalBridge>,
     pub cylinder_gas_loading: Option<CylinderFlowResolution>,
     pub prepared_linear: Option<PreparedModalBudget>,
+    pub geometric_stretching: Option<(f64, NonlinearModalConfig)>,
     pub cavity: Option<MaterialBodyCavity>, pub law: FrictionLaw, pub forces: Option<StringForceProgram>,
     pub schedule: GestureSchedule,
 }
@@ -174,6 +175,21 @@ impl Spec {
             budget.validate()?;
             Some(budget)
         } else { None };
+        let geometric_stretching = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("geometric-stretching") {
+            let mut row = r.row("geometric-stretching")?;
+            let slope = row.positive()?;
+            let config = NonlinearModalConfig {
+                max_iterations: row.count(128)?, maximum_generalized_force: row.positive()?,
+                force_absolute_tolerance: row.positive()?, force_relative_tolerance: row.positive()?,
+            };
+            row.end()?;
+            config.validate()?;
+            fs_couple::render::plate::impact::string::StringStretching {
+                axial_rigidity_n: 0.0, maximum_slope: slope,
+            }.validate()?;
+            Some((slope, config))
+        } else { None };
         let mut row = r.row("cavity")?;
         let cavity = match row.word()? {
             "none" => None,
@@ -255,6 +271,10 @@ impl Spec {
             }
         }
         let schedule = GestureSchedule::from_canonical_bytes(schedule.as_bytes())?;
+        if geometric_stretching.is_some() && (schedule.tracks().len() != 1
+            || initialization == ForceInitialization::StaticPreload) {
+            return Err("geometric stretching currently requires one prescribed bow and retained initial state; nonlinear multi-bow/preload is not implemented".into());
+        }
         if schedule.to_canonical_bytes() != text.split_once("\nschedule\n").unwrap().1.as_bytes()
             || schedule.control_rate_hz > rate || schedule.tracks().is_empty() || schedule.tracks().len() > 16 {
             return Err("canonical bow schedule and control rate no greater than physics required".into());
@@ -273,7 +293,7 @@ impl Spec {
             }
         }
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
-            gas, body, strings, rotational_bridges, cylinder_gas_loading, prepared_linear, cavity, law, forces, schedule };
+            gas, body, strings, rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, cavity, law, forces, schedule };
         spec.network_dimensions(false)?;
         Ok(spec)
     }

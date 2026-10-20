@@ -2887,6 +2887,26 @@ source review and independent numerical oracles are not a Rust test pass.
 
 `MaterialStringSource::into_nonlinear` admits both transverse planes to one existing fs-nlmodal Kirchhoff–Carrier stress channel, with one source-derived EA, elongation, live tension and cross-plane stretching work. Original EI, prestress, mass, material/gas loss, torsion and directional centreline/surface/torque maps retain their ordering. `NonlinearMaterialString::prepare` retains that source while composing explicitly supplied receiver/contact/felt/volume participants in the original `PreparedImpactSystem`; `MaterialStringRun` implements the existing `ImpactSource` for the existing causal pressure renderer. The continuous vector-slope bound is invariant to transverse basis rotation. This is a frozen, moderate-slope reference model. Scalar translating supports still refuse two planes; full rod/longitudinal dynamics, transfer from a nonlinear bow-friction bank, acoustic reaction, full instrument validation and exact-linear/SAV bandwidth work remain open.
 
+`ReciprocalStringBank::with_geometric_stretching` adds those same source-owned
+quartic channels to the existing `FrictionModalSystem`, preserving every original
+string/body/bridge/cavity coordinate, optional torsion, complete tensor damping,
+and causal cylinder-fluid mass/memory. The actual loaded string mass normalizes
+the geometric channel; material EA is neither fitted nor counted as linear
+stiffness again. Each nonlinear trial reuses the original exact complete linear
+response and scalar friction branch/root, with `fs_phs::discrete_gradient`
+supplying held constitutive reactions. Both reaction residual and total
+storage/work balance must close before the original transaction publishes.
+Rejected trials preserve accepted components, fluid state, clock and diagnostics.
+The acceleration pressure path evaluates the endpoint geometric force. Existing
+single-bow scheduling and the one-port multi-friction forwarding route retain
+this state. The material performance file selects it with the optional
+`geometric-stretching SLOPE ITERATIONS MAX_FORCE ABS_TOL REL_TOL` record, so
+material and gas changes propagate through the bow, shared body and PCM writer.
+Cold attachment is explicit; subsequent gas/torque rebuilds, additional bows,
+independent stops and linear static preload refuse rather than dropping storage.
+This bounded iterated DG composition is not SAV, a full rod model, a unique
+nonlinear-branch guarantee or measured instrument/trajectory qualification.
+
 `ReedPerformance::from_bytes_with_gas_field` accepts the same source-retaining `AxialGasField` for authored geometry and gestures. Its exact inlet state drives reed density and impedance; the resolved midpoint cells supply one existing regional TMM for both feedback and terminal pressure. The exact outlet field state supplies the default exterior, and an explicit exterior record replaces that single binding for both flanged loading and baffled observation. The field remains frozen during rendering. Common pressure, full length, geometry/refinement and conflicting per-segment source declarations refuse through the existing owners. Standalone and ensemble sidecars can inspect the original primitive stations and source-pack identities.
 
 The flue performance file accepts optional `walls COUNT FMIN_HZ FMAX_HZ` plus addressed `wall NODE isotropic PACK T_K OMEGA_RAD_S THICKNESS_M stress-free|strain-fixed elastic|kelvin-voigt` records after the original duct geometry, followed by `radiation prescribed|compact-baffled`. The CLI loads caller-relative NormalizedMaterialCardPack artifacts (8 MiB each, 64 MiB aggregate), while the library resolves original cards at independent solid T/omega states with SingleClaimOnly property selection and retained source/usage receipts. Shared artifact paths load once; geometry, branches, regional gases, existing losses and outlet addresses remain with their original owners. Each material wall occupies the existing degree-two node's physical dual strip; unselected and endpoint half-strips stay rigid, and actual area/coverage is reported. Compact radiation binds every declared observed outlet through FlueVoice::from_baffled_environment, then validates each installed binding against the lowered graph and the same exterior/receiver declaration. Material substitutions reach wall storage, jet-returning bore pressure and the common physical microphone; exterior substitutions affect both reaction and propagation when selected. This remains the existing frozen small-motion isotropic local-ring image plus independent low-ka baffled loads: no full shell coupling/exterior wall radiation, full-band unbaffled or mutual reaction, resolved turbulence or measured Boehm claim. The composition remains EstimateOnly and these additions do not close full M0.5 or M2.5-W3c/W4b qualification beads.

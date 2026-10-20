@@ -212,6 +212,9 @@ impl ReciprocalStringBank {
     ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
         if connections.is_empty() { return Ok(self); }
+        if self.system.has_nonlinear_potentials() {
+            return Err(invalid("bind rotational bridges before geometric stretching; a rebuild must not discard its storage"));
+        }
         if self.system.samples_rendered() != 0 || !self.source.rotational_body_connections.is_empty()
             || self.system.components()[..self.cards.len()].iter().flat_map(|c| c.states())
                 .any(|s| s.displacement_m_sqrt_kg != 0.0 || s.velocity_m_sqrt_kg_per_s != 0.0) {

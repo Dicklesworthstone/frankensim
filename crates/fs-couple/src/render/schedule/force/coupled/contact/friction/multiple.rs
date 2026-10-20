@@ -139,6 +139,9 @@ impl MultiFrictionModalSystem {
         config: MultiFrictionConfig, gate: &CancelGate) -> Result<Self, ModalFrictionError>
     {
         poll(Some(gate))?;
+        if core.has_nonlinear_potentials() && !additional.is_empty() {
+            return Err(invalid("simultaneous affine friction cannot discard bound nonlinear storage").into());
+        }
         let p = additional.len().checked_add(1).ok_or_else(|| invalid("friction port count overflow"))?;
         if !(1..=64).contains(&config.max_ports) || p > config.max_ports
             || !(1..=128).contains(&config.max_sweeps) {

@@ -19,6 +19,9 @@ use crate::render::plate::impact::{BodyPotential, ImpactBody, ImpactError, MAX_I
 use crate::render::plate::impact::linear::wire::WireSpan;
 use crate::render::plate::impact::string::StringStretching;
 
+/// Geometric stretching in the original playable material bank and scheduler.
+pub mod bank;
+
 fn invalid(what: &'static str) -> ImpactError { ImpactError::Invalid(what) }
 fn poll(cx: &Cx<'_>, gate: &CancelGate) -> Result<(), ImpactError> {
     if gate.is_requested() { return Err(ImpactError::Cancelled); }
@@ -40,6 +43,19 @@ pub struct NonlinearMaterialString {
     sample_rate_hz: u32,
 }
 impl MaterialStringSource {
+    fn axial_rigidity_n(&self) -> Result<f64, ImpactError> {
+        let value = match self {
+            Self::WithPolarizations(p) => return p.source().axial_rigidity_n(),
+            Self::WithTorsion(t) => return t.bending().axial_rigidity_n(),
+            Self::Homogeneous(s) => s.string().axial_stiffness_n,
+            Self::Concentric { section, .. } => section.elastic().axial_stiffness_n(),
+        };
+        if !value.is_finite() || value <= 0.0 {
+            return Err(invalid("material string stretching requires its positive source-derived EA"));
+        }
+        Ok(value)
+    }
+
     /// Derive linear bending, geometric stretching and optional twist together.
     ///
     /// Mass, T0, EA, EI, bending loss, shear loss and gas drag all come through
@@ -71,22 +87,8 @@ impl MaterialStringSource {
                 || !s.velocity_m_sqrt_kg_per_s.is_finite()) {
             return Err(invalid("nonlinear material string needs bounded complete finite initial coordinates"));
         }
-        let (original, planes) = match &self {
-            Self::WithPolarizations(p) => (p.source(), 2),
-            other => (other, 1),
-        };
-        let bending = match original {
-            Self::WithTorsion(t) => t.bending(), other => other,
-        };
-        let axial_rigidity_n = match bending {
-            Self::Homogeneous(s) => s.string().axial_stiffness_n,
-            Self::Concentric { section, .. } => section.elastic().axial_stiffness_n(),
-            Self::WithTorsion(_) => return Err(invalid("nested torsion is not a physical string source")),
-            Self::WithPolarizations(_) => return Err(invalid("nested polarizations are not a physical string source")),
-        };
-        if !axial_rigidity_n.is_finite() || axial_rigidity_n <= 0.0 {
-            return Err(invalid("material string stretching requires its positive source-derived EA"));
-        }
+        let planes = if matches!(&self, Self::WithPolarizations(_)) { 2 } else { 1 };
+        let axial_rigidity_n = self.axial_rigidity_n()?;
         let stretching = StringStretching { axial_rigidity_n, maximum_slope };
         stretching.validate()?;
         let card = self.lower(cx, &gas, sample_rate_hz).map_err(|e| ImpactError::Owner(e.to_string()))?;

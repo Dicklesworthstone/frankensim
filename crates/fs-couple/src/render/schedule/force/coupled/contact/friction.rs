@@ -108,7 +108,7 @@ pub struct FrictionModalFrame {
     pub sample: u64,
     /// Original read-only pressure sum, or the explicit acceleration observation [Pa].
     pub observer_pressure_pa: f64,
-    /// Modal plus bilateral-spring stored energy [J].
+    /// Modal, bilateral-spring and any explicitly bound nonlinear storage [J].
     pub network_energy_j: f64,
     /// Work of external modal forces, excluding friction [J].
     pub external_work_j: f64,
@@ -147,6 +147,7 @@ pub struct FrictionModalSystem {
     last: Option<FrictionModalFrame>,
     acceleration_pressure: Option<Vec<f64>>,
     interface: Option<interface::DryFrictionBinding>,
+    nonlinear: Option<nonlinear::NonlinearFrictionState>,
 }
 
 impl FrictionModalSystem {
@@ -160,7 +161,7 @@ impl FrictionModalSystem {
         let compliance = effective_compliance(&network, &column, gate)?;
         poll(Some(gate))?;
         Ok(Self { forces: vec![0.0; network.mode_count()], network, port,
-            config, column, compliance, last: None, acceleration_pressure: None, interface: None })
+            config, column, compliance, last: None, acceleration_pressure: None, interface: None, nonlinear: None })
     }
 
     /// Explicitly prepare the SAME full linear operator before playback.
@@ -193,8 +194,12 @@ impl FrictionModalSystem {
     /// Original accepted sample clock; refused trials never advance it.
     #[must_use]
     pub fn samples_rendered(&self) -> u64 { self.network.samples_rendered() }
-    /// Current modal plus bilateral connection energy [J].
-    pub fn total_energy_j(&self) -> Result<f64, ModalCouplingError> { self.network.total_energy_j() }
+    /// Current complete storage, including any explicitly bound nonlinear law [J].
+    pub fn total_energy_j(&self) -> Result<f64, ModalCouplingError> {
+        let linear = self.network.total_energy_j()?;
+        if self.nonlinear.is_some() { finite(linear + self.nonlinear_energy_j()?) }
+        else { Ok(linear) }
+    }
     /// Settle external loads against the COMPLETE connected instrument with all
     /// friction contacts released. Delegates to the original static solver;
     /// compression/bridge springs and any supported free coordinates remain
@@ -204,6 +209,9 @@ impl FrictionModalSystem {
     pub fn initialize_released_equilibrium(&mut self, external: &[f64], gate: &CancelGate)
         -> Result<f64, ModalFrictionError>
     {
+        if self.nonlinear.is_some() {
+            return Err(invalid("linear static preload cannot discard bound nonlinear storage").into());
+        }
         self.network.initialize_static_equilibrium(external, gate).map_err(Into::into)
     }
 
@@ -223,6 +231,26 @@ impl FrictionModalSystem {
 
     fn step_inner(&mut self, external: &[f64], drive: FrictionDrive, gate: Option<&CancelGate>)
         -> Result<&FrictionModalFrame, ModalFrictionError>
+    {
+        let (accepted, nonlinear_frame) = if let Some(mut state) = self.nonlinear.take() {
+            let trial = state.stage(self, external, drive, gate);
+            self.nonlinear = Some(state);
+            let frame = trial?;
+            (frame.friction, Some(frame))
+        } else { (self.stage_inner(external, drive, gate)?, None) };
+        poll(gate)?;
+        self.network.staged_frame.observer_pressure_pa = accepted.observer_pressure_pa;
+        self.network.publish_staged();
+        if let (Some(state), Some(frame)) = (&mut self.nonlinear, nonlinear_frame) {
+            state.publish(frame);
+        }
+        Ok(self.last.insert(accepted))
+    }
+
+    // The nonlinear storage adapter may repeat this SAME held-force/friction
+    // solve. Only the final jointly admitted candidate is ever published.
+    fn stage_inner(&mut self, external: &[f64], drive: FrictionDrive, gate: Option<&CancelGate>)
+        -> Result<FrictionModalFrame, ModalFrictionError>
     {
         poll(gate)?;
         if !drive.speed_m_s.is_finite() || !drive.normal_force_n.is_finite() || drive.normal_force_n < 0.0 {
@@ -267,9 +295,7 @@ impl FrictionModalSystem {
             slip_distance_m: slip, constitutive_residual_n, regime, iterations,
         };
         poll(gate)?;
-        self.network.staged_frame.observer_pressure_pa = observer_pressure_pa;
-        self.network.publish_staged();
-        Ok(self.last.insert(accepted))
+        Ok(accepted)
     }
 
 
@@ -286,3 +312,6 @@ pub mod multiple;
 
 /// Original dry-interface identities and domains on actual coupled contact motion.
 pub mod interface;
+
+/// Additive nonlinear storage on the original exact linear/friction network.
+pub mod nonlinear;

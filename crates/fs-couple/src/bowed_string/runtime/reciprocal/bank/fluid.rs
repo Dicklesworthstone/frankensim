@@ -160,6 +160,9 @@ impl ReciprocalStringBank {
     ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
         resolution.validate().map_err(ReciprocalStringError::Material)?;
+        if self.system.has_nonlinear_potentials() {
+            return Err(invalid("bind cylinder gas loading before geometric stretching; a rebuild must not discard its storage"));
+        }
         if self.source.fluid_loading.is_some() || self.system.samples_rendered() != 0
             || self.system.components()[..self.cards.len()].iter().flat_map(|c| c.states())
                 .any(|s| s.displacement_m_sqrt_kg != 0.0 || s.velocity_m_sqrt_kg_per_s != 0.0) {
