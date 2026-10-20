@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	guitar-nylon-e4-lynch-aird-woodhouse2017
+redistribution	permitted	Materials 2017 10(5) 497 is distributed under Creative Commons Attribution 4.0; this pack retains factual measurements only and reproduces no article figure; D'Addario EJ45 gauge and tension are published product specifications used as facts
+citation	Lynch-Aird, N. and Woodhouse, J. (2017), Mechanical Properties of Nylon Harp Strings, Materials 10(5) 497, PMC5459001; D'Addario Pro-Arte EJ45 Normal Tension tension chart (item J4501 E4 16.200 lbf), https://www.daddario.com/products/guitar/classical-guitar/pro-arte-nylon/ej45-pro-arte-nylon-normal-tension/
+license	CC-BY-4.0
+source	primary	nylon-e4.tsv	material-tsv-v1

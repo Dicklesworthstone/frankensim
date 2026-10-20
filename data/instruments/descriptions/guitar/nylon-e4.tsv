@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	lynch-aird-woodhouse-2017	Monofilament nylon harp strings (Bowbrand and Pirastro), unstretched diameters 0.613-2.362 mm, used as the MATERIAL PROXY for the D'Addario Pro-Arte EJ45 plain nylon treble E4 (the maker does not state the nylon type or density of its classical strings)	Table 1 unstretched bulk density (weighing and micrometer diameter); Table A1 fit E_B0 = 4.53 + 0.0389 sigma_N GPa from overtone frequencies (bending stiffness, millisecond time-scale, r2 0.957), sigma_N the notional stress in MPa; sigma_N here is the D'Addario EJ45 J4501 published tension 16.200 lbf = 72.06 N over the nominal 0.0280 in (0.7112 mm) unstretched section = 181.4 MPa	Lynch-Aird and Woodhouse, Materials 2017 10(5) 497 (CC BY 4.0, PMC5459001). Density is the midpoint of the 1067-1097 kg/m3 Table 1 range for strings of diameter 0.61-1.28 mm. The fit is reported for roughly 30-220 MPa; 181.4 MPa is inside it. Internal loss of nylon is NOT reported by the source and is UNKNOWN; the bending viscosity is entered as exactly zero (lossless string material) and is not a measurement
+scalar	density	lynch-aird-woodhouse-2017	density	1082	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	200000	rad/s
+scalar	young_modulus	lynch-aird-woodhouse-2017	young_modulus	11586000000	Pa	constant
+uncertainty	young_modulus	unstated	-	-	-	-
+validity	young_modulus	T	280	320	K
+validity	young_modulus	omega	0	200000	rad/s
+scalar	kelvin_voigt_bending_viscosity	lynch-aird-woodhouse-2017	kelvin_voigt_bending_viscosity	0	Pa*s	constant
+uncertainty	kelvin_voigt_bending_viscosity	unstated	-	-	-	-
+validity	kelvin_voigt_bending_viscosity	T	280	320	K
+validity	kelvin_voigt_bending_viscosity	omega	0	200000	rad/s

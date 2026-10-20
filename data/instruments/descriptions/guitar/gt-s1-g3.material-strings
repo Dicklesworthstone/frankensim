@@ -1,0 +1,28 @@
+frankensim-material-strings-v3
+audio 48000 120000 1.0 512
+state 293.15 1000
+gas mixture 293.15 101325 mole 2 N2 0.7905 O2 0.2095
+body cedar-top.fsmatpk 0.47 0.37 0.0025 16 1.0
+strings 3
+string nylon-g3.fsmatpk 0.680 0.00051181 tension 57.807 14 0 0.955882 1000000 0.5
+section homogeneous
+polarizations two 0.7071067811865476 0.7071067811865476 1 0
+string nylon-b3.fsmatpk 0.680 0.00040894 tension 58.583 14 0 0.955882 1000000 0.5
+section homogeneous
+polarizations two 0.7071067811865476 0.7071067811865476 1 0
+string nylon-e4.fsmatpk 0.680 0.0003556 tension 78.929 14 0 0.955882 1000000 0.5
+section homogeneous
+polarizations two 0.7071067811865476 0.7071067811865476 1 0
+prepared-linear 128 1073741824 4000000000000
+cavity physical-neck 0.0115 0.043 0.0025 flanged flanged 1.0
+friction stribeck 0.8 0.4 0.1 0
+forces preload 1 1
+port 0 0.720588 along 0.7071067811865476 0.7071067811865476 0.9585
+force 0 0 0
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	700
+tracks	1
+track	bow	bow	0
+initial	bow	0e0	0e0	2e-1
+events	0

@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	guitar-cedar-top-fpl-gtr282-qiu2026
+redistribution	permitted	United States Government work (USDA Forest Service Forest Products Laboratory) plus Forests 2026 17 669 under Creative Commons Attribution 4.0; this pack retains factual values and derived products only
+citation	Forest Products Laboratory (2021), Wood Handbook, FPL-GTR-282 ch.5 Tables 5-1 5-2 5-3a (Western redcedar); Qiu, H. et al. (2026), Forests 17 669, doi:10.3390/f17060669 (Sitka spruce loss factor, proxy)
+license	CC-BY-4.0
+source	primary	cedar-top.tsv	material-tsv-v1

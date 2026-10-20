@@ -1,0 +1,46 @@
+frankensim.matdb-source.v1
+observation	fpl-gtr282-qiu2026-cedar-top	Western redcedar (Thuja plicata) clear straight-grained soundboard, quarter-sawn: grain axis 1 = L, in-plane axis 2 = T, thickness = R (the Raimundo 118 top is cedar; the species is not stated beyond cedar)	Elastic constants are products of matdb:cedar-western-red-fpl-gtr282 (FPL-GTR-282 ch.5 Tables 5-1, 5-2, 5-3a, 12 percent moisture content): E1 = E_L = 8470 MPa; E2 = E_T = 0.055 E_L = 465.85 MPa; G12 = G_LT = 0.086 E_L = 728.42 MPa; nu12 = nu_LT = 0.296; density 358.4 kg/m3. The six plane-stress viscosities are k C_ij with C the plane-stress stiffness (den = 1 - nu12 nu21 = 0.995181, nu21 = 0.01628: C11 = 8.51103 GPa, C22 = 0.468106 GPa, C12 = 0.138559 GPa, C66 = G12) and k = tan_delta/(2 pi f_ref) = 0.01424/(2 pi 300 Hz) = 7.554555e-6 s	LOSS IS A DECLARED SCENARIO, NOT CEDAR DATA: tan_delta 0.01424 is Sitka spruce longitudinal mode 1 at 62.36 Hz, 12 percent moisture content (matdb:spruce-sitka-loss-qiu2026, Qiu et al. Forests 2026 17 669, CC BY 4.0), applied to every stiffness component (isotropic-loss assumption; cross-grain and shear loss factors are UNKNOWN, route: Obataya 2000 or a measured cedar top). f_ref = 300 Hz is the declared mid-band reference of the Kelvin-Voigt conversion: a Kelvin-Voigt viscosity gives tan_delta proportional to frequency whereas wood loss is nearly flat (Qiu mode 5 0.01134), so loss is under-stated below 300 Hz and over-stated above it. Hysteretic or fractional-derivative wood loss is a material-model gap
+scalar	density	fpl-gtr282-qiu2026-cedar-top	density	358.4	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	200000	rad/s
+scalar	young_modulus_1	fpl-gtr282-qiu2026-cedar-top	young_modulus_1	8470000000	Pa	constant
+uncertainty	young_modulus_1	unstated	-	-	-	-
+validity	young_modulus_1	T	280	320	K
+validity	young_modulus_1	omega	0	200000	rad/s
+scalar	young_modulus_2	fpl-gtr282-qiu2026-cedar-top	young_modulus_2	465850000	Pa	constant
+uncertainty	young_modulus_2	unstated	-	-	-	-
+validity	young_modulus_2	T	280	320	K
+validity	young_modulus_2	omega	0	200000	rad/s
+scalar	poisson_ratio_12	fpl-gtr282-qiu2026-cedar-top	poisson_ratio_12	0.296	1	constant
+uncertainty	poisson_ratio_12	unstated	-	-	-	-
+validity	poisson_ratio_12	T	280	320	K
+validity	poisson_ratio_12	omega	0	200000	rad/s
+scalar	shear_modulus_12	fpl-gtr282-qiu2026-cedar-top	shear_modulus_12	728420000	Pa	constant
+uncertainty	shear_modulus_12	unstated	-	-	-	-
+validity	shear_modulus_12	T	280	320	K
+validity	shear_modulus_12	omega	0	200000	rad/s
+scalar	plane_stress_viscosity_11	fpl-gtr282-qiu2026-cedar-top	plane_stress_viscosity_11	64297	Pa*s	constant
+uncertainty	plane_stress_viscosity_11	unstated	-	-	-	-
+validity	plane_stress_viscosity_11	T	280	320	K
+validity	plane_stress_viscosity_11	omega	0	200000	rad/s
+scalar	plane_stress_viscosity_22	fpl-gtr282-qiu2026-cedar-top	plane_stress_viscosity_22	3536.3	Pa*s	constant
+uncertainty	plane_stress_viscosity_22	unstated	-	-	-	-
+validity	plane_stress_viscosity_22	T	280	320	K
+validity	plane_stress_viscosity_22	omega	0	200000	rad/s
+scalar	plane_stress_viscosity_66	fpl-gtr282-qiu2026-cedar-top	plane_stress_viscosity_66	5502.9	Pa*s	constant
+uncertainty	plane_stress_viscosity_66	unstated	-	-	-	-
+validity	plane_stress_viscosity_66	T	280	320	K
+validity	plane_stress_viscosity_66	omega	0	200000	rad/s
+scalar	plane_stress_viscosity_12	fpl-gtr282-qiu2026-cedar-top	plane_stress_viscosity_12	1046.8	Pa*s	constant
+uncertainty	plane_stress_viscosity_12	unstated	-	-	-	-
+validity	plane_stress_viscosity_12	T	280	320	K
+validity	plane_stress_viscosity_12	omega	0	200000	rad/s
+scalar	plane_stress_viscosity_16	fpl-gtr282-qiu2026-cedar-top	plane_stress_viscosity_16	0	Pa*s	constant
+uncertainty	plane_stress_viscosity_16	unstated	-	-	-	-
+validity	plane_stress_viscosity_16	T	280	320	K
+validity	plane_stress_viscosity_16	omega	0	200000	rad/s
+scalar	plane_stress_viscosity_26	fpl-gtr282-qiu2026-cedar-top	plane_stress_viscosity_26	0	Pa*s	constant
+uncertainty	plane_stress_viscosity_26	unstated	-	-	-	-
+validity	plane_stress_viscosity_26	T	280	320	K
+validity	plane_stress_viscosity_26	omega	0	200000	rad/s
