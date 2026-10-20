@@ -11,7 +11,7 @@ use crate::{SqpState,SqpSample,SqpError,SqpRunReport};
 use fs_exec::Cx;
 use std::collections::{BTreeMap,BTreeSet};
 pub use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::responses::{
-    ScanResponse, ScanResponseBudget};
+    ScanResponse, ScanResponseBudget, peaks::ScanPeakResponse};
 
 /// A bound on one selected control in its original physical units, not its
 /// transformed optimizer coordinate. Powers come first [W], then geometry [m].
@@ -50,6 +50,20 @@ pub struct ScanStateBound {
     pub scale: f64,
 }
 
+/// Upper limit on a smooth envelope of selected nodal temperature/enthalpy
+/// samples. Unlike bounding their mean, this constrains every selected sample
+/// in exact arithmetic. The explicit smoothing bias makes it conservative,
+/// not an interval/continuum certificate. A lower bound on this envelope would
+/// NOT establish a lower bound on every sample and is intentionally absent.
+#[derive(Debug,Clone,PartialEq)]
+pub struct ScanPeakBound {
+    pub response: ScanPeakResponse,
+    pub maximum: f64,
+    /// Same K or J/kg units as the response; SQP tolerance tau permits a
+    /// tau*scale violation independently of smoothing and physical solve error.
+    pub scale: f64,
+}
+
 /// Constraint observations and derivatives at exactly one design point.
 #[derive(Debug,Clone,PartialEq)]
 pub struct ScanConstraintEvaluation {
@@ -59,8 +73,14 @@ pub struct ScanConstraintEvaluation {
     pub absorbed_energy_j: Vec<f64>,
     /// Actual kelvin/J-per-kg responses in state-bound declaration order.
     pub state_values: Vec<f64>,
+    /// Smooth upper envelopes, in peak-bound declaration order.
+    pub peak_values: Vec<f64>,
+    /// Actual selected maxima from the same trajectories, before smoothing.
+    pub sampled_peak_values: Vec<f64>,
+    /// Added smoothing margins in physical units, not solver-error estimates.
+    pub peak_smoothing_gaps: Vec<f64>,
     /// <= 0 is feasible. Control lower/upper rows, energy rows, then state
-    /// lower/upper rows, each group in original declaration order.
+    /// lower/upper rows, then peak upper rows, in original declaration order.
     pub residuals: Vec<f64>,
     /// Row-major derivatives with respect to original optimizer coordinates.
     pub jacobian: Vec<f64>,
@@ -76,7 +96,8 @@ impl ScanConstraintEvaluation {
 
 struct EnergyRow { cap: ScanEnergyCap, fixed_j: f64, power_weights_s: Vec<f64> }
 struct Limits { bounds: Vec<ScanControlBound>, energy: Vec<EnergyRow>,
-    states: Vec<ScanStateBound>, response_budget: ScanResponseBudget, rows: usize }
+    states: Vec<ScanStateBound>, peaks: Vec<ScanPeakBound>, max_peak_samples: usize,
+    response_budget: ScanResponseBudget, rows: usize }
 
 /// One study, immutable constraints and its own accepted SQP checkpoint.
 /// This owner prevents resuming a checkpoint with a different constraint set.
@@ -109,13 +130,33 @@ impl<F> ConstrainedScanStudy<F> {
     /// State-only constrained studies are valid. Bounds stay immutable across
     /// SQP continuation, and every extra reverse sweep has an explicit budget.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_state_bounds<'h,'m,'c>(cx: &Cx<'_>, mut study: ScanPowerStudy<F>,
+    pub fn new_with_state_bounds<'h,'m,'c>(cx: &Cx<'_>, study: ScanPowerStudy<F>,
         bounds: Vec<ScanControlBound>, energy: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>,
         response_budget: ScanResponseBudget, max_kkt_dimension: usize)
         -> Result<Self,SqpError<ScanSensitivityError>>
     where F: FnMut(&Cx<'_>,Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>,ScanSensitivityError>
     {
-        let limits=Limits::new(cx,&study,bounds,energy,states,response_budget,max_kkt_dimension)
+        Self::new_with_peak_bounds(cx,study,bounds,energy,states,Vec::new(),
+            response_budget,0,max_kkt_dimension)
+    }
+
+    /// Constrain hot spots across whole selected regions and time windows with
+    /// one response sweep per peak. Ordinary point/input constraints can coexist.
+    /// All rows share one original forward trajectory. Each peak adds just one
+    /// dense SQP row irrespective of its number of nodal/time samples.
+    ///
+    /// Combined point/peak reverse work uses response_budget; max_peak_samples
+    /// bounds total selected vertex/time pairs. Peak selection, smoothing and
+    /// limits stay immutable across optimizer continuation and physical replay.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_peak_bounds<'h,'m,'c>(cx: &Cx<'_>, mut study: ScanPowerStudy<F>,
+        bounds: Vec<ScanControlBound>, energy: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>,
+        peaks: Vec<ScanPeakBound>, response_budget: ScanResponseBudget,
+        max_peak_samples: usize, max_kkt_dimension: usize)
+        -> Result<Self,SqpError<ScanSensitivityError>>
+    where F: FnMut(&Cx<'_>,Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>,ScanSensitivityError>
+    {
+        let limits=Limits::new(cx,&study,bounds,energy,states,peaks,response_budget,max_peak_samples,max_kkt_dimension)
             .map_err(SqpError::Evaluation)?;
         let initial=study.initial_coordinates().to_vec();
         let state=SqpState::try_new(&initial,max_kkt_dimension,
@@ -136,7 +177,7 @@ impl<F> ConstrainedScanStudy<F> {
         -> Result<ScanConstraintEvaluation,ScanSensitivityError>
     {
         poll(cx)?;
-        if !self.limits.states.is_empty() {
+        if !self.limits.states.is_empty() || !self.limits.peaks.is_empty() {
             return Err(invalid("state constraints need a physical evaluation; use evaluate_at or replay_with_constraints"));
         }
         self.limits.at(cx,&self.study,point)
@@ -144,6 +185,9 @@ impl<F> ConstrainedScanStudy<F> {
 
     /// Original immutable sampled-state requirements, in report order.
     pub fn state_bounds(&self) -> &[ScanStateBound] { &self.limits.states }
+
+    /// Original peak selections and physical smoothing choices, in report order.
+    pub fn peak_bounds(&self) -> &[ScanPeakBound] { &self.limits.peaks }
 
     /// Evaluate the objective AND all constraints at a supplied candidate.
     /// Costs one physical evaluation plus the admitted response sweeps; never
@@ -194,13 +238,15 @@ impl<F> ConstrainedScanStudy<F> {
 }
 
 impl Limits {
+    #[allow(clippy::too_many_arguments)]
     fn new<F>(cx: &Cx<'_>, study: &ScanPowerStudy<F>, bounds: Vec<ScanControlBound>,
-        caps: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>, response_budget: ScanResponseBudget,
-        maximum: usize) -> Result<Self,ScanSensitivityError>
+        caps: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>, peaks: Vec<ScanPeakBound>,
+        response_budget: ScanResponseBudget, max_peak_samples: usize, maximum: usize)
+        -> Result<Self,ScanSensitivityError>
     {
         poll(cx)?;
         let n=study.initial.len();let mut rows=caps.len();let mut seen=BTreeSet::new();
-        if states.len()>response_budget.max_responses {
+        if states.len().checked_add(peaks.len()).is_none_or(|n|n>response_budget.max_responses) {
             return Err(invalid("state bounds exceed their response allowance"));
         }
         let mut response_solves=study.objective.endpoints_s.len();
@@ -217,7 +263,21 @@ impl Limits {
             response_solves=response_solves.checked_add(state.response.endpoint+1)
                 .ok_or_else(||invalid("state response work count overflow"))?;
         }
-        if !states.is_empty() && response_solves>response_budget.max_transpose_solves {
+        let mut peak_samples=0usize;
+        for peak in &peaks {
+            poll(cx)?;
+            if !peak.maximum.is_finite() || !peak.scale.is_finite() || peak.scale<=0.0 {
+                return Err(invalid("scan peak bounds need a finite physical maximum and positive scale"));
+            }
+            // The factory supplies the actual mesh. The physical evaluator
+            // additionally validates every vertex ID before the forward solve.
+            peak_samples+=peak.response.validate(cx,study.objective.endpoints_s.len(),
+                usize::MAX,max_peak_samples-peak_samples)?;
+            rows=rows.checked_add(1).ok_or_else(||invalid("scan peak row count overflow"))?;
+            response_solves=response_solves.checked_add(peak.response.last_endpoint+1)
+                .ok_or_else(||invalid("scan peak response work count overflow"))?;
+        }
+        if (!states.is_empty() || !peaks.is_empty()) && response_solves>response_budget.max_transpose_solves {
             return Err(invalid("state bounds and objective exceed their transpose allowance"));
         }
         for bound in &bounds {
@@ -265,7 +325,7 @@ impl Limits {
             energy.push(row);
         }
         poll(cx)?;
-        Ok(Self {bounds,energy,states,response_budget,rows})
+        Ok(Self {bounds,energy,states,peaks,max_peak_samples,response_budget,rows})
     }
 
     fn at<F>(&self,cx: &Cx<'_>,study: &ScanPowerStudy<F>,point: &[f64])
@@ -276,6 +336,8 @@ impl Limits {
         let mut out=ScanConstraintEvaluation {bound_values:Vec::with_capacity(self.bounds.len()),
             absorbed_energy_j:Vec::with_capacity(self.energy.len()),residuals:Vec::with_capacity(self.rows),
             state_values:Vec::with_capacity(self.states.len()),jacobian:vec![0.0;self.rows*n],
+            peak_values:Vec::with_capacity(self.peaks.len()),sampled_peak_values:Vec::with_capacity(self.peaks.len()),
+            peak_smoothing_gaps:Vec::with_capacity(self.peaks.len()),
             state_transpose_iterations:0,max_state_transpose_relative_residual:0.0};
         for b in &self.bounds {
             poll(cx)?;
@@ -322,8 +384,10 @@ impl Limits {
     {
         let mut out=self.at(cx,study,point)?;
         let requests:Vec<_>=self.states.iter().map(|state|state.response).collect();
-        let (physical,responses)=study.evaluate_with_responses(cx,point,
-            if requests.is_empty() {None} else {Some((&requests,self.response_budget))})?;
+        let peaks:Vec<_>=self.peaks.iter().map(|peak|peak.response.clone()).collect();
+        let (physical,responses,peak_responses)=study.evaluate_with_responses(cx,point,
+            if requests.is_empty() && peaks.is_empty() {None}
+            else {Some((&requests,&peaks,self.response_budget,self.max_peak_samples))})?;
         if responses.len()!=self.states.len() {return Err(invalid("state response layout changed"));}
         for (state,response) in self.states.iter().zip(responses) {
             poll(cx)?;
@@ -344,6 +408,25 @@ impl Limits {
                     out.residuals.push(finite(sign*finite(response.value-limit)?/state.scale)?);
                 }
             }
+        }
+        if peak_responses.len()!=self.peaks.len() {return Err(invalid("scan peak response layout changed"));}
+        for (bound,response) in self.peaks.iter().zip(peak_responses) {
+            poll(cx)?;
+            if response.peak!=bound.response {return Err(invalid("scan peak response identity changed"));}
+            let gradient=study.chain_gradient(cx,&physical.powers_w,&physical.geometry_m,&response.sources)?;
+            out.peak_values.push(response.value);
+            out.sampled_peak_values.push(response.sampled_maximum);
+            out.peak_smoothing_gaps.push(response.smoothing_gap);
+            out.state_transpose_iterations=out.state_transpose_iterations.checked_add(response.transpose_iterations)
+                .ok_or_else(||invalid("scan peak iteration count overflow"))?;
+            out.max_state_transpose_relative_residual=out.max_state_transpose_relative_residual
+                .max(response.max_transpose_relative_residual);
+            let offset=out.residuals.len()*point.len();
+            for (i,&g) in gradient.iter().enumerate() {
+                if i%256==0 {poll(cx)?;}
+                out.jacobian[offset+i]=finite(g/bound.scale)?;
+            }
+            out.residuals.push(finite(finite(response.value-bound.maximum)?/bound.scale)?);
         }
         poll(cx)?;
         Ok((physical,out))

@@ -189,3 +189,158 @@ mod response_rows {
             objective_budget(),&[request],response_budget()).is_err()));
     }
 }
+
+mod peak_rows {
+    use super::*;
+    use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::{
+        evaluate_scan_objective, ScanObjectiveBudget, ScanObjectiveSampling, ScanObservable, ScanObservation,
+        responses::{evaluate_scan_objective_with_responses, ScanResponse, ScanResponseBudget,
+            peaks::{evaluate_scan_objective_with_peaks, ScanPeakResponse}},
+    };
+    fn budget() -> ScanObjectiveBudget {
+        ScanObjectiveBudget { max_steps:2, max_observations:1, max_retained_vertices:8,
+            max_retained_source_vertices:8, max_schedule_controls:16, max_retained_radiation_entries:2048 }
+    }
+    fn allowance() -> ScanResponseBudget {
+        ScanResponseBudget { max_responses:3, max_gradient_entries:96, max_transpose_solves:8 }
+    }
+    fn observation() -> [ScanObservation;1] {
+        [ScanObservation { endpoint:1, vertex:2, observable:ScanObservable::SpecificEnthalpy, target:50., scale:10. }]
+    }
+    fn peak(observable:ScanObservable) -> ScanPeakResponse {
+        ScanPeakResponse { first_endpoint:0, last_endpoint:1, vertices:vec![0,1,2,3], observable,
+            smoothing_scale:if observable==ScanObservable::Temperature {0.5} else {2.0} }
+    }
+    fn components(g:&fs_conduction::bc::history::march::moving::sensitivity::schedule::MovingHeatScheduleGradient)
+        -> [f64;7]
+    { [g.center_values_m[0][0],g.center_values_m[1][0],g.center_values_m[2][0],
+        g.half_width_m[0],g.half_width_m[1],g.half_width_m[2],g.absorbed_power_values_w[0]] }
+    fn smooth(values:&[f64], tau:f64) -> f64 {
+        let max=values.iter().copied().fold(f64::NEG_INFINITY,f64::max);
+        max+tau*values.iter().map(|y|((y-max)/tau).exp()).sum::<f64>().ln()
+    }
+
+    #[test]
+    fn g3_spacetime_peaks_share_the_original_primal_and_match_all_source_control_differences() {
+        let m=mesh();let curve=chart();let mat=ConductivityModel::isotropic(
+            ConductivityTable::declared_curve(vec![(280.,1.),(380.,3.)]).unwrap());
+        with_cx(|cx| {
+            let hist=history(cx,&m);let old=[10.,20.,30.,40.];let p=[0.2,0.25,0.3,1.4,1.3,1.2,3.];
+            let endpoints=[0.002,0.005];let peaks=[peak(ScanObservable::Temperature),peak(ScanObservable::SpecificEnthalpy)];
+            let points=[ScanResponse {endpoint:0,vertex:2,observable:ScanObservable::Temperature}];
+            for rad in [false,true] {
+                let make=|p|run(cx,&hist,&mat,&curve,&old,vec![heater(p)],rad);
+                let (objective,point_rows,rows)=evaluate_scan_objective_with_peaks(cx,make(p),&endpoints,&observation(),
+                    ScanObjectiveSampling::RightEndpoint,config(),linear(),budget(),&points,&peaks,allowance(),16).unwrap();
+                let (original,original_points)=evaluate_scan_objective_with_responses(cx,make(p),&endpoints,&observation(),
+                    ScanObjectiveSampling::RightEndpoint,config(),linear(),budget(),&points,allowance()).unwrap();
+                assert_eq!(objective.value,original.value);assert_eq!(objective.sources,original.sources);
+                assert_eq!(point_rows[0].value,original_points[0].value);
+                assert_eq!(point_rows[0].sources,original_points[0].sources);
+                let direct=|p| {
+                    let mut r=make(p);let mut temperatures=Vec::new();let mut enthalpies=Vec::new();
+                    for &time in &endpoints {
+                        let step=r.advance_to(cx,time,config()).unwrap();
+                        temperatures.extend_from_slice(&step.solution().temperature);
+                        enthalpies.extend_from_slice(&step.solution().specific_enthalpy_j_kg);
+                    }
+                    [smooth(&temperatures,0.5),smooth(&enthalpies,2.0)]
+                };
+                let expected=direct(p);
+                for (i,row) in rows.iter().enumerate() {
+                    assert!((row.value-expected[i]).abs()<1e-10);
+                    assert_eq!(row.sample_count,8);
+                    assert!(row.value>=row.sampled_maximum);
+                    assert!(row.smoothing_gap<=row.maximum_smoothing_gap+1e-13);
+                    assert!(row.max_transpose_relative_residual<=linear().tolerance);
+                }
+                for coordinate in 0..7 {
+                    let (mut plus,mut minus)=(p,p);let eps=2e-5;
+                    plus[coordinate]+=eps;minus[coordinate]-=eps;
+                    let (a,b)=(direct(plus),direct(minus));
+                    for (i,row) in rows.iter().enumerate() {
+                        let expected=(a[i]-b[i])/(2.*eps);
+                        let got=components(&row.sources[0])[coordinate];
+                        assert!((got-expected).abs()<2e-6*(1.+expected.abs()),"{got:e} != {expected:e}");
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn g1_ties_preserve_the_upper_envelope_and_latent_peaks_ignore_future_power() {
+        let m=mesh();let curve=chart();let mat=ConductivityModel::isotropic_declared(2.).unwrap();
+        with_cx(|cx| {
+            let hist=history(cx,&m);let p=[0.2,0.25,0.3,1.4,1.3,1.2,3.];
+            let source=MovingHeatSource::new([p[0],p[1],p[2]].map(|v|constant(v,Dims([1,0,0,0,0,0]))),
+                [p[3],p[4],p[5]],TimeSignal::Table {times:vec![0.,0.002,0.005],values:vec![3.,1.,0.],
+                    dims:COMPONENT_POWER_DIMS,interp:Interp::Hold},0.,heater(p).budget()).unwrap();
+            let peaks=[peak(ScanObservable::Temperature),ScanPeakResponse {
+                last_endpoint:0,..peak(ScanObservable::SpecificEnthalpy)}];
+            let (_,_,rows)=evaluate_scan_objective_with_peaks(cx,
+                run(cx,&hist,&mat,&curve,&[150.;4],vec![source],false),&[0.002,0.005],&observation(),
+                ScanObjectiveSampling::EventLeft,config(),linear(),budget(),&[],&peaks,allowance(),12).unwrap();
+            assert_eq!(rows[0].sampled_maximum,310.);
+            assert!((rows[0].value-(310.+0.5*8_f64.ln())).abs()<1e-12);
+            assert_eq!(rows[0].smoothing_gap,rows[0].maximum_smoothing_gap);
+            assert!(rows[0].sources[0].absorbed_power_values_w.iter().all(|&g|g==0.));
+            assert!(rows[0].initial_specific_enthalpy.iter().all(|&g|g==0.));
+            assert!(rows[1].sources[0].absorbed_power_values_w[0]>0.);
+            assert_eq!(rows[1].sources[0].absorbed_power_values_w[1],0.);
+            assert_eq!(rows[1].sources[0].absorbed_power_values_w[2],0.);
+            assert!((rows[1].initial_specific_enthalpy.iter().sum::<f64>()-1.).abs()<1e-10);
+        });
+    }
+
+    #[test]
+    fn g3_single_sample_peak_matches_the_original_point_response_without_bias() {
+        let m=mesh();let curve=chart();let mat=ConductivityModel::isotropic_declared(2.).unwrap();
+        with_cx(|cx| {
+            let hist=history(cx,&m);let p=[0.2,0.25,0.3,1.4,1.3,1.2,3.];
+            let request=ScanResponse {endpoint:1,vertex:3,observable:ScanObservable::SpecificEnthalpy};
+            let peak=ScanPeakResponse {first_endpoint:1,last_endpoint:1,vertices:vec![3],
+                observable:request.observable,smoothing_scale:1e-100};
+            let (_,points,peaks)=evaluate_scan_objective_with_peaks(cx,
+                run(cx,&hist,&mat,&curve,&[10.,20.,30.,40.],vec![heater(p)],true),&[0.002,0.005],&observation(),
+                ScanObjectiveSampling::RightEndpoint,config(),linear(),budget(),&[request],&[peak],allowance(),1).unwrap();
+            assert_eq!(points[0].value,peaks[0].value);
+            assert_eq!(points[0].sources,peaks[0].sources);
+            assert_eq!(points[0].initial_specific_enthalpy,peaks[0].initial_specific_enthalpy);
+            assert_eq!(peaks[0].smoothing_gap,0.);assert_eq!(peaks[0].maximum_smoothing_gap,0.);
+        });
+    }
+
+    #[test]
+    fn g0_peak_selection_budget_and_cancellation_refuse_before_partial_results() {
+        let m=mesh();let curve=chart();let mat=ConductivityModel::isotropic_declared(2.).unwrap();
+        let hist=with_cx(|cx|history(cx,&m));
+        with_cx(|cx| {
+            let good=peak(ScanObservable::Temperature);
+            for bad in [ScanPeakResponse {vertices:vec![],..good.clone()},
+                ScanPeakResponse {vertices:vec![0,0],..good.clone()},
+                ScanPeakResponse {vertices:vec![1,0],..good.clone()},
+                ScanPeakResponse {vertices:vec![4],..good.clone()},
+                ScanPeakResponse {last_endpoint:2,..good.clone()},
+                ScanPeakResponse {first_endpoint:1,last_endpoint:0,..good.clone()},
+                ScanPeakResponse {smoothing_scale:0.,..good.clone()},
+                ScanPeakResponse {smoothing_scale:f64::NAN,..good.clone()}]
+            { assert!(bad.validate(cx,2,4,8).is_err()); }
+            let call=|b,samples|evaluate_scan_objective_with_peaks(cx,
+                run(cx,&hist,&mat,&curve,&[20.;4],vec![heater([0.2,0.25,0.3,1.4,1.3,1.2,3.])],false),
+                &[0.002,0.005],&observation(),ScanObjectiveSampling::RightEndpoint,config(),linear(),budget(),
+                &[],&[good.clone()],b,samples);
+            assert!(call(allowance(),7).is_err());
+            assert!(call(ScanResponseBudget {max_responses:0,..allowance()},8).is_err());
+            assert!(call(ScanResponseBudget {max_gradient_entries:0,..allowance()},8).is_err());
+            assert!(call(ScanResponseBudget {max_transpose_solves:3,..allowance()},8).is_err());
+            // Eight samples use two, not sixteen, additional reverse solves.
+            assert!(call(ScanResponseBudget {max_transpose_solves:4,..allowance()},8).is_ok());
+        });
+        let ready=with_cx(|cx|run(cx,&hist,&mat,&curve,&[20.;4],
+            vec![heater([0.2,0.25,0.3,1.4,1.3,1.2,3.])],false));
+        with_cancelled_cx(|cx|assert!(evaluate_scan_objective_with_peaks(cx,ready,&[0.002,0.005],
+            &observation(),ScanObjectiveSampling::RightEndpoint,config(),linear(),budget(),&[],
+            &[peak(ScanObservable::Temperature)],allowance(),8).is_err()));
+    }
+}
