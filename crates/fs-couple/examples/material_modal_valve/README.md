@@ -51,6 +51,16 @@ chimneys retain their own gas temperatures; the downstream chimney has
 distributed viscothermal loss. This fixture uses the alternative
 `boundary_groups` declaration described below and needs no additional pack.
 
+`paired-forced.performance` adds independent prescribed loads on both original
+reed plates while retaining those material keys, their reservoir programs, the
+no-slip supply and all six reed modes. After normalizing `blade.matpack` above,
+render this complete example with:
+
+```bash
+cargo run --release -p fs-couple --bin music_render -- wind \
+  "$modal_demo_dir/paired-forced.performance" "$modal_demo_dir/paired-forced.wav" --block 37
+```
+
 `paired-mutual.performance` selects an externally supplied two-port operator
 in `mutual.radiation`. Run it through the same command with a new output path.
 It adds a second explicitly declared downstream branch and uses the shared
@@ -121,6 +131,8 @@ BOUNDARY_RECORDS
 downstream_boundaries
 BOUNDARY_RECORDS
 control_source ASSEMBLY PART
+source_forces COUNT
+source_force MECHANICAL_SAMPLE BLADE_INDEX FORCE_N
 compile_limits WORK CONTROLS
 schedule
 CANONICAL_GESTURE_BYTES
@@ -199,6 +211,43 @@ unsteady no-slip fixed passage; it is additional geometry, separate from the
 moving gap. The selected structural propagator and the original channel,
 network, nonlinear work and flow admissions all remain binding. This ingress
 neither changes the passage nor substitutes a static resistance for its state.
+
+### Physical force on each original source plate
+
+The optional `source_forces` block follows every blade and any key/control
+declarations, immediately before `compile_limits`. Omission or `source_forces
+none` retains the original pressure-only source drive. Each `source_force` row
+names a zero-based mechanical sample, an existing zero-based blade index and a
+finite signed force in newtons. Positive force acts toward opening; a negative
+force closes. Each blade begins at zero force and holds its last assignment.
+Zero releases only the actuator while the original mechanics keep evolving.
+
+```text
+source_forces 4
+source_force 97 0 -0.0001
+source_force 225 1 -0.00015
+source_force 769 0 0
+source_force 2049 1 0
+```
+
+Each blade's `node` records already declare the physical `FORCE_WEIGHT`
+footprint. The load multiplies those original nodal weights; the original plate
+reduction projects it into **every retained mode**. The same signed projection
+maps modal velocity back to actuator velocity, so mechanical work remains
+force times displacement at that physical port. A force is never substituted
+for blowing pressure or applied to an independently animated reed. Material,
+thickness, support and force-site changes therefore alter the physical response
+through the existing source basis.
+
+Assignments may be unsorted. At one sample, input order is retained and the
+last assignment to a blade wins; intermediate assignments do not advance
+physics. Both blades share control storage and auxiliary compilation work with
+all key programs and the existing pressure schedule. Events execute before
+their mechanical step, including within one output audio frame, and commit
+only with accepted physics. The input and sidecar retain the node weights,
+modal force projections and mechanical-time force program. These are prescribed
+actuator loads; they do not supply compliant lip or tongue contact, muscle
+dynamics, or a new source of pressure work.
 
 ### Material moving keys on either acoustic side
 

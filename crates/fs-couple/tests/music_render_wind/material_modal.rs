@@ -84,6 +84,7 @@ fn pack_with_density(density: f64) -> NormalizedMaterialCardPack {
 }
 
 mod keyed;
+mod forces;
 
 #[test]
 fn native_material_mimo_cli_matches_original_performer_and_preserves_source_authority() {

@@ -14,6 +14,7 @@ mod plate;
 mod boundaries;
 mod radiation;
 mod wall;
+mod forces;
 
 use super::{PlateValveInputError, Reader, bad, checkpoint, gas,
     read_receiver, MAX_PLATE_VALVE_PERFORMANCE_BYTES, MAX_CONTROLS};
@@ -99,6 +100,8 @@ impl MaterialModalValvePerformance {
     /// Optional keys share the original plate cache and final chimney gas/load.
     /// They attach before receiver admission, then use the existing typed force
     /// gestures or explicitly selected mechanical-sample reservoir/force programs.
+    /// Optional `source_forces` records act through each blade's original node
+    /// weights and signed modal projection on that same mechanical clock.
     ///
     /// # Errors
     /// Missing/ambiguous/out-of-domain source properties, malformed or oversized
@@ -286,6 +289,7 @@ impl MaterialModalValvePerformance {
         }
         let modes = states.len();
         let boundaries = boundaries::Inputs::read(&mut rows)?;
+        let forces = forces::read(&mut rows, blades, mechanical_samples, gate)?;
         let mut row = rows.row("compile_limits")?;
         let max_compile_work: u64 = row.parse()?;
         let max_controls = row.count(MAX_CONTROLS)?;
@@ -324,9 +328,15 @@ impl MaterialModalValvePerformance {
             prepared.system, &mut cache, &mut load_material, gate)?;
         prepared.system = system;
         let (source, radiation, mimo_radiation, computed_radiation) = prepared.observe(max_block)?;
-        let renderer = programs.compile(source, schedule, AperturePerformanceConfig {
+        let mut renderer = programs.compile(source, schedule, AperturePerformanceConfig {
             sample_rate_hz: output, samples, max_block, max_compile_work, max_controls,
         })?;
+        for (blade, events) in forces.into_iter().enumerate() {
+            if !events.is_empty() {
+                renderer = renderer.with_material_plate_force_controls(blade, events)
+                    .map_err(PlateValveInputError::Gesture)?;
+            }
+        }
         checkpoint(gate)?;
         Ok(Self { info: MaterialModalValveInfo {
             input_hash: hash_domain("org.frankensim.fs-couple.material-modal-valve.v1", bytes),

@@ -42,7 +42,7 @@ pub(in crate::bernoulli_aperture) struct ForceSchedule {
 impl ForceSchedule {
     // One projection/grouping owner. Callers pass REMAINING shared control/work
     // capacity, so independent blades do not each consume the entire allowance.
-    pub(in crate::bernoulli_aperture) fn compile(plate: &PlateApertureReduction, mut program: ApertureForceProgram,
+    pub(in crate::bernoulli_aperture) fn compile(plate: &PlateApertureReduction, program: ApertureForceProgram,
         samples: u64, max_events: usize, max_work: u64) -> Result<Self, GestureCompileError>
     {
         let count = program.footprints.len();
@@ -59,33 +59,62 @@ impl ForceSchedule {
         let physics = |e| GestureCompileError::Render(RenderError::Voice(e));
         let ports: Vec<_> = program.footprints.into_iter().map(|p| plate.force_port(p))
             .collect::<Result<_, _>>().map_err(physics)?;
-        for event in &program.events {
+        let (events, groups) = Self::groups(program.events, count, samples,
+            |port, force| ports[port].generalized_force_n(force).map_err(physics))?;
+        Ok(Self { ports, events, groups, next: 0, applied: 0, held: 0.0, work: work as u64 })
+    }
+
+    /// Keep force in the existing source port's physical newtons. Its retained
+    /// multimode basis owns the force/velocity projection during the same solve;
+    /// projecting to an opening coordinate here would discard the other modes.
+    pub(in crate::bernoulli_aperture) fn source_port(events: Vec<ApertureForceEvent>,
+        samples: u64, max_events: usize, max_work: u64) -> Result<Self, GestureCompileError>
+    {
+        let work = 2 * events.len() as u128;
+        if events.len() > max_events || work > u128::from(max_work) {
+            return Err(invalid("source force assignments exceed the shared compilation budget"));
+        }
+        let (events, groups) = Self::groups(events, 1, samples, |_, force| {
+            if force.is_finite() { Ok(force) }
+            else { Err(invalid("source force requires finite physical newtons")) }
+        })?;
+        Ok(Self { ports: Vec::new(), events, groups, next: 0, applied: 0, held: 0.0,
+            work: work as u64 })
+    }
+
+    // The original stable grouping and preview/accept rules serve both explicit
+    // one-coordinate footprints and already-projected material source ports.
+    fn groups(mut events: Vec<ApertureForceEvent>, count: usize, samples: u64,
+        mut project: impl FnMut(usize, f64) -> Result<f64, GestureCompileError>)
+        -> Result<(Vec<ApertureForceEvent>, Vec<Group>), GestureCompileError>
+    {
+        for event in &events {
             if event.sample >= samples || event.port >= count {
                 return Err(invalid("mechanical control names an absent port or a sample outside the performance"));
             }
-            ports[event.port].generalized_force_n(event.force_n).map_err(physics)?;
+            project(event.port, event.force_n)?;
         }
-        program.events.sort_by_key(|e| e.sample);
+        events.sort_by_key(|e| e.sample);
         let mut groups = Vec::new();
-        groups.try_reserve_exact(program.events.len())
+        groups.try_reserve_exact(events.len())
             .map_err(|_| invalid("cannot reserve mechanical force controls"))?;
         let mut held = vec![0.0; count];
         let mut i = 0;
-        while i < program.events.len() {
-            let sample = program.events[i].sample;
-            while i < program.events.len() && program.events[i].sample == sample {
-                let e = program.events[i]; held[e.port] = e.force_n; i += 1;
+        while i < events.len() {
+            let sample = events[i].sample;
+            while i < events.len() && events[i].sample == sample {
+                let e = events[i]; held[e.port] = e.force_n; i += 1;
             }
             // No intermediate same-sample assignment is a physical time step.
             // Sum only the final values, retaining signed cancellation and order.
             let mut force_n = 0.0;
-            for (port, force) in ports.iter().zip(&held) {
-                force_n += port.generalized_force_n(*force).map_err(physics)?;
+            for (port, force) in held.iter().enumerate() {
+                force_n += project(port, *force)?;
                 if !force_n.is_finite() { return Err(invalid("sum of simultaneous mechanical forces overflowed")); }
             }
             groups.push(Group { sample, force_n, end: i });
         }
-        Ok(Self { ports, events: program.events, groups, next: 0, applied: 0, held: 0.0, work: work as u64 })
+        Ok((events, groups))
     }
 
     /// Immutable sample preview. Clock admission guarantees no skipped group.

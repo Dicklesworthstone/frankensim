@@ -128,7 +128,7 @@ fn key_maxwell_memory_and_supplied_mutual_radiation_survive_the_same_native_path
     assert!(rendered.source().last_frame().unwrap().balance_residual_j().abs() < 1e-12);
 }
 
-fn direct_system(source: &MaterialModalValvePerformance) -> TwoSidedAperture {
+pub(super) fn direct_system(source: &MaterialModalValvePerformance) -> TwoSidedAperture {
     let gate = CancelGate::new_clock_free();
     let original = source.renderer().source().system();
     let reed = valve(source);

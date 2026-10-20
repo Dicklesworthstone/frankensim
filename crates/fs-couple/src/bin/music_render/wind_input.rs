@@ -349,11 +349,26 @@ fn load_with_all_sources(
             + p.mimo_radiation_records().iter().map(|(_, r)| r.apertures().len()).sum::<usize>()
             + p.computed_radiation_records().iter().map(|(_, r)| r.apertures().len()).sum::<usize>();
         let boundary_json = modal_boundary_provenance(&p);
+        let force_programs = valve.material_plates().iter().enumerate().filter_map(|(blade, plate)| {
+            let events = p.renderer().pending_plate_force_controls(blade);
+            if events.is_empty() { return None; }
+            let weights = plate.options().reduction.unit_force_weights.iter()
+                .map(|weight| format!("{weight:e}")).collect::<Vec<_>>().join(",");
+            let projection = valve.spec().modes[plate.mode_range()].iter()
+                .map(|mode| format!("{:e}", mode.force_projection[blade]))
+                .collect::<Vec<_>>().join(",");
+            let events = events.iter().map(|event| format!(
+                "{{\"mechanical_sample\":{},\"force_n\":{:e}}}", event.sample, event.force_n))
+                .collect::<Vec<_>>().join(",");
+            Some(format!("{{\"blade\":{blade},\"node_force_weights\":[{weights}],\"modal_force_projection\":[{projection}],\"controls\":[{events}]}}"))
+        }).collect::<Vec<_>>().join(",");
+        let force_json = format!(",\"source_force_programs\":[{force_programs}],\"source_force_clock_hz\":{},\"source_force_scope\":\"prescribed physical newtons through original plate footprints and all retained modal coordinates; no tongue or lip contact law\"", i.mechanics_rate_hz);
         let compiled_controls = p.renderer().pending_controls().len()
             + [fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream,
                fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream].into_iter()
-                .map(|side| p.renderer().pending_boundary_controls(side).len()).sum::<usize>();
-        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}}}",
+                .map(|side| p.renderer().pending_boundary_controls(side).len()).sum::<usize>()
+            + (0..i.blades).map(|blade| p.renderer().pending_plate_force_controls(blade).len()).sum::<usize>();
+        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}{force_json}}}",
             i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
             compiled_controls, valve.viscosity_matrix_n_s_m().is_some(),
             terminals);

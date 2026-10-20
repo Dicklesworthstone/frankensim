@@ -13,6 +13,7 @@ mod mimo;
 mod boundaries;
 mod keyed;
 mod walls;
+mod forces;
 
 fn pack(rho: f64, missing: bool) -> NormalizedMaterialCardPack {
     let mut claims = ClaimSet::new();
