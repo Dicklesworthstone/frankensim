@@ -2,7 +2,7 @@
 // lane whose audio is stamped with the context frame it plays at, summed in lock-step with the
 // AudioContext clock. See public/live/lane.js for the Worker side.
 
-import { LIVE_BASE_URL, LIVE_SAMPLE_RATE, LiveRefusal } from "./liveAudio";
+import { LIVE_BASE_URL, LIVE_SAMPLE_RATE, LiveRefusal, loadWorkletModule } from "./liveAudio";
 
 export interface LaneStats {
   queuedFrames: number;
@@ -30,21 +30,13 @@ export interface LiveMix {
   dispose(): void;
 }
 
-const loaded = new WeakMap<BaseAudioContext, Promise<void>>();
-
 export async function createLiveMix(context: AudioContext, destination: AudioNode, channels = 2): Promise<LiveMix> {
   if (context.sampleRate !== LIVE_SAMPLE_RATE) {
     throw new LiveRefusal("sample_rate", `live engines render ${LIVE_SAMPLE_RATE} Hz only; this AudioContext runs at ${context.sampleRate} Hz.`);
   }
-  let loading = loaded.get(context);
-  if (!loading) {
-    loading = context.audioWorklet.addModule(`${LIVE_BASE_URL}/mix-worklet.js`).catch((e: unknown) => {
-      loaded.delete(context); // a failed load is not remembered: the next start tries again
-      throw new Error(`the live mixer could not be loaded (if the site was just updated, reload the page): ${(e as Error)?.message ?? e}`);
-    });
-    loaded.set(context, loading);
-  }
-  await loading;
+  await loadWorkletModule(context, `${LIVE_BASE_URL}/mix-worklet.js`).catch((e: unknown) => {
+    throw new Error(`the live mixer could not be loaded (if the site was just updated, reload the page): ${(e as Error)?.message ?? e}`);
+  });
   const node = new AudioWorkletNode(context, "fs-live-mix", { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [channels] });
   node.connect(destination);
   const listeners = new Set<(frame: number, lanes: Record<string, LaneStats>) => void>();
@@ -114,20 +106,19 @@ class LaneWorker<R> {
         if (this.disposed || !m) return;
         if (m.type === "ready") {
           if (this.settled) return;
+          try { mix.attach(id, this.channel.port2); }
+          catch (e) { this.fail(e instanceof Error ? e : new Error(String(e))); return; }
           this.settled = true;
           this.attached = true;
-          mix.attach(id, this.channel.port2);
           resolve(m as R);
         } else if (m.type === "error") {
-          if (!this.settled) { this.settled = true; reject(new Error(String(m.message))); }
-          else this.fail(new Error(String(m.message)));
+          this.fail(new Error(String(m.message)));
         } else onMessage(m);
       };
       // a module Worker that fails to load (a 404 after the site was updated, say) fires a bare Event
       this.worker.onerror = (e) => {
-        if (this.settled) { e.preventDefault(); this.fail(new Error(e.message || `${label} failed`)); return; }
-        this.settled = true;
-        reject(new Error(e.message || `${label} could not be loaded (if the site was just updated, reload the page)`));
+        e.preventDefault();
+        this.fail(new Error(e.message || (this.settled ? `${label} failed` : `${label} could not be loaded (if the site was just updated, reload the page)`)));
       };
     });
     this.ready.catch(() => {}); // a caller that awaits it sees the rejection; nobody else should
@@ -144,6 +135,7 @@ class LaneWorker<R> {
     this.worker.onmessage = null;
     this.worker.onerror = null;
     this.worker.terminate();
+    this.channel.port1.close();
     // only a lane that joined the mix leaves it: a new lane may already be joining under the same id
     if (this.attached) this.mix.dropLane(this.id);
     else this.channel.port2.close();
@@ -151,8 +143,10 @@ class LaneWorker<R> {
   }
 
   private fail(e: Error): void {
-    const report = this.onFailure;
+    if (this.disposed) return;
+    const report = this.settled ? this.onFailure : null;
     this.onFailure = null;
+    if (!this.settled) { this.settled = true; this.rejectReady(e); }
     this.dispose();
     report?.(e);
   }

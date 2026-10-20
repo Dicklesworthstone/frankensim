@@ -91,7 +91,26 @@ export function createLiveAudioContext(): AudioContext {
   return new AudioContext({ sampleRate: LIVE_SAMPLE_RATE, latencyHint: 'interactive' });
 }
 
-const loadedSinkModules = new WeakMap<BaseAudioContext, Promise<void>>();
+const workletLoads = new WeakMap<BaseAudioContext, Map<string, { attempt: number; pending: Promise<void> | null }>>();
+
+/** Share successful/in-flight loads; failed URLs must change for the browser to fetch them again. */
+export function loadWorkletModule(context: BaseAudioContext, url: string): Promise<void> {
+  let loads = workletLoads.get(context);
+  if (!loads) { loads = new Map(); workletLoads.set(context, loads); }
+  const previous = loads.get(url);
+  if (previous?.pending) return previous.pending;
+  const attempt = previous ? previous.attempt + 1 : 0;
+  const entry = { attempt, pending: null as Promise<void> | null };
+  // Chrome retains a failed module URL in this context even after our promise is discarded.
+  const address = attempt ? `${url}${url.includes('?') ? '&' : '?'}retry=${attempt}` : url;
+  const pending = context.audioWorklet.addModule(address).catch((error: unknown) => {
+    entry.pending = null;
+    throw error;
+  });
+  entry.pending = pending;
+  loads.set(url, entry);
+  return pending;
+}
 
 /** Install the sink worklet (once per context) and create a sink node. */
 export async function createLiveSink(context: AudioContext, options: LiveSinkOptions = {}): Promise<LiveSink> {
@@ -103,12 +122,7 @@ export async function createLiveSink(context: AudioContext, options: LiveSinkOpt
     );
   }
   const baseUrl = options.baseUrl ?? LIVE_BASE_URL;
-  let loading = loadedSinkModules.get(context);
-  if (!loading) {
-    loading = context.audioWorklet.addModule(`${baseUrl}/sink-worklet.js`);
-    loadedSinkModules.set(context, loading);
-  }
-  await loading;
+  await loadWorkletModule(context, `${baseUrl}/sink-worklet.js`);
 
   const channels = options.channels ?? 2;
   const node = new AudioWorkletNode(context, 'fs-live-sink', {
