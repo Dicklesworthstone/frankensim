@@ -4,11 +4,17 @@
 
 use std::time::Instant;
 
-use fs_duct::{Duct, LossModel, Segment, Termination, input_impedance_wall};
+use fs_duct::network::{
+    CoupledTermination, DuctNetwork, JunctionCorrections, NetworkEdge, NetworkLoad, NetworkNode,
+    NodeBoundary, PortTermination,
+};
+use fs_duct::{Duct, DuctError, LossModel, Segment, Termination, input_impedance_wall};
 use fs_material::gas::{GasSpec, GasState};
+use fs_math::c64::C64;
 use fs_phs::WallPin;
 use fs_vfit::discretize::DelayedFilter;
 
+use super::network::NetworkDrivingPoint;
 use super::{
     DrivingPointError, LineLadder, PoleState, analyze_reflectance_ir, impedance_line,
     realize_impedance_line, realize_line,
@@ -664,4 +670,309 @@ fn line_ladder_bitwise_repeat() {
         t0.elapsed().as_micros()
     );
     assert!(bits_match, "DelayedFilter taps must be bit-identical across runs");
+}
+
+fn network_schema() -> fs_ports::PortSchema {
+    use fs_ports::{CoordinateBinding, PortKind, PortOrientation, PortTimestamp, StableId};
+    let id = |s: &str| StableId::new(s).unwrap();
+    PortKind::FluidPressureFlux
+        .scalar_seed_schema(
+            id("network-line-test"),
+            CoordinateBinding::new(
+                id("pressure-volume-flow"),
+                id("input-plane"),
+                PortOrientation::OutwardFromOwner,
+            ),
+            PortTimestamp::new(id("declared-frequency-sweep"), 0),
+        )
+        .unwrap()
+}
+
+fn network_node(id: &str, boundary: NodeBoundary) -> NetworkNode {
+    NetworkNode {
+        id: id.into(),
+        boundary,
+    }
+}
+
+fn network_port(label: &str) -> NetworkNode {
+    network_node(
+        label,
+        NodeBoundary::Port {
+            label: label.into(),
+        },
+    )
+}
+
+fn radiating(id: &str, radius: f64) -> NetworkNode {
+    network_node(
+        id,
+        NodeBoundary::Termination(NetworkLoad::Radiation {
+            radius,
+            termination: Termination::UnflangedOpen,
+        }),
+    )
+}
+
+fn network_edge(id: &str, from: usize, to: usize, segments: Vec<Segment>) -> NetworkEdge {
+    NetworkEdge {
+        id: id.into(),
+        from,
+        to,
+        duct: Duct { segments },
+        corrections: JunctionCorrections::Disabled,
+    }
+}
+
+fn cylinder(radius: f64, length: f64) -> Segment {
+    Segment::Cylinder { radius, length }
+}
+
+fn max_abs(values: &[f64]) -> f64 {
+    values.iter().fold(0.0_f64, |m, v| m.max(v.abs()))
+}
+
+/// G0: a one-edge network line is the duct line. The network solves the same
+/// chain through its port Schur complement, so the ladder stops on the same
+/// rung and the taps agree to roundoff. The 2.2 mm mouth keeps the compact
+/// radiation load inside its ka <= 1 domain up to the 24 kHz Nyquist bin.
+#[test]
+fn network_line_matches_the_duct_line_for_one_edge() {
+    let gas = air20();
+    let segments = vec![cylinder(0.002, 0.30), cylinder(0.0022, 0.12)];
+    let duct = Duct {
+        segments: segments.clone(),
+    };
+    let zc = gas.characteristic_impedance / (core::f64::consts::PI * 0.002 * 0.002);
+    let ladder = LineLadder::default();
+    let (line, receipt) = realize_line(
+        &duct,
+        &gas,
+        Termination::UnflangedOpen,
+        RATE_HZ,
+        zc,
+        None,
+        &ladder,
+    )
+    .unwrap();
+    let point = NetworkDrivingPoint::new(
+        DuctNetwork {
+            nodes: vec![network_port("in"), radiating("bell", 0.0022)],
+            edges: vec![network_edge("bore", 0, 1, segments)],
+        },
+        "in".into(),
+        Vec::new(),
+        network_schema(),
+    )
+    .unwrap();
+    let (network_line, network_receipt) = point
+        .realize_line(&gas, LossModel::Bessel, RATE_HZ, zc, &ladder, None)
+        .unwrap();
+    assert_eq!(network_receipt.n_fft, receipt.n_fft);
+    assert_eq!(network_receipt.rungs_tried.len(), receipt.rungs_tried.len());
+    let a = line_taps(&line, receipt.n_fft);
+    let b = line_taps(&network_line, receipt.n_fft);
+    let difference: Vec<f64> = a.iter().zip(&b).map(|(x, y)| x - y).collect();
+    let error = max_abs(&difference) / max_abs(&a);
+    eprintln!(
+        "{{\"suite\":\"fs-couple\",\"case\":\"network-line-one-edge\",\"n_fft\":{},\"max_relative_tap_difference\":{error:.3e},\"tol\":1e-9}}",
+        receipt.n_fft
+    );
+    assert!(
+        error <= 1.0e-9,
+        "network taps differ from the duct taps by {error:.3e}"
+    );
+}
+
+/// G0: a constant one-port coupled termination realizes the SISO line bitwise,
+/// and the coupled declaration is enforced in both directions.
+#[test]
+fn network_line_coupled_constant_load_is_the_siso_line() {
+    let gas = air20();
+    let net = DuctNetwork {
+        nodes: vec![network_port("in"), network_port("out")],
+        edges: vec![network_edge("bore", 0, 1, vec![cylinder(0.0075, 0.35)])],
+    };
+    let zc = gas.characteristic_impedance / (core::f64::consts::PI * 0.0075 * 0.0075);
+    // A frequency-independent load must be real: a constant reactance would
+    // break Hermitian symmetry at DC, and the line could not converge.
+    let z0 = C64::new(0.6 * zc, 0.0);
+    let ladder = LineLadder::default();
+    let siso = NetworkDrivingPoint::new(
+        net.clone(),
+        "in".into(),
+        vec![PortTermination {
+            label: "out".into(),
+            load: NetworkLoad::Impedance(z0),
+        }],
+        network_schema(),
+    )
+    .unwrap();
+    let coupled = NetworkDrivingPoint::new_coupled(
+        net.clone(),
+        "in".into(),
+        Vec::new(),
+        vec!["out".into()],
+        network_schema(),
+    )
+    .unwrap();
+    let constant = |labels: &[&str], omega: f64| CoupledTermination {
+        omega,
+        labels: labels.iter().map(|s| (*s).to_string()).collect(),
+        z: vec![z0],
+        source_id: "constant diagnostic load".into(),
+    };
+    let mut source =
+        |omega: f64| -> Result<CoupledTermination, DuctError> { Ok(constant(&["out"], omega)) };
+    let (a, ra) = siso
+        .realize_line(&gas, LossModel::Bessel, RATE_HZ, zc, &ladder, None)
+        .unwrap();
+    let (b, rb) = coupled
+        .realize_line(
+            &gas,
+            LossModel::Bessel,
+            RATE_HZ,
+            zc,
+            &ladder,
+            Some(&mut source),
+        )
+        .unwrap();
+    assert_eq!(ra, rb);
+    let (ta, tb) = (line_taps(&a, ra.n_fft), line_taps(&b, rb.n_fft));
+    assert!(ta.iter().zip(&tb).all(|(x, y)| x.to_bits() == y.to_bits()));
+    assert!(
+        coupled
+            .realize_line(&gas, LossModel::Bessel, RATE_HZ, zc, &ladder, None)
+            .is_err()
+    );
+    assert!(
+        siso.realize_line(
+            &gas,
+            LossModel::Bessel,
+            RATE_HZ,
+            zc,
+            &ladder,
+            Some(&mut source)
+        )
+        .is_err()
+    );
+    let w = core::f64::consts::TAU * 400.0;
+    assert!(coupled.response(&gas, w, LossModel::Bessel).is_err());
+    assert!(
+        coupled
+            .response_coupled(&gas, w, LossModel::Bessel, &constant(&["in"], w))
+            .is_err()
+    );
+    let mut wrong =
+        |omega: f64| -> Result<CoupledTermination, DuctError> { Ok(constant(&["in"], omega)) };
+    assert!(
+        coupled
+            .realize_line(
+                &gas,
+                LossModel::Bessel,
+                RATE_HZ,
+                zc,
+                &ladder,
+                Some(&mut wrong)
+            )
+            .is_err()
+    );
+    for labels in [vec!["in"], vec!["nowhere"], vec!["out", "out"]] {
+        assert!(
+            NetworkDrivingPoint::new_coupled(
+                net.clone(),
+                "in".into(),
+                Vec::new(),
+                labels.into_iter().map(String::from).collect(),
+                network_schema(),
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        NetworkDrivingPoint::new_coupled(
+            net,
+            "in".into(),
+            vec![PortTermination {
+                label: "out".into(),
+                load: NetworkLoad::Impedance(z0),
+            }],
+            vec!["out".into()],
+            network_schema(),
+        )
+        .is_err()
+    );
+}
+
+/// G1: a branched bore (an open chimney mid-bore and a radiating bell) keeps
+/// its resonances as one network line. Each of the line's first peaks, refined
+/// on the DTFT of its taps, lies within the ladder's 0.05 cent of the refined
+/// |Z| maximum of the same network solved in the frequency domain. Mouth
+/// radii keep the compact radiation loads at ka <= 1 to the Nyquist bin.
+#[test]
+fn network_line_keeps_the_branched_bore_resonances() {
+    let gas = air20();
+    let point = NetworkDrivingPoint::new(
+        DuctNetwork {
+            nodes: vec![
+                network_port("in"),
+                network_node("junction", NodeBoundary::Junction),
+                radiating("bell", 0.002),
+                radiating("hole", 0.0012),
+            ],
+            edges: vec![
+                network_edge("upper", 0, 1, vec![cylinder(0.002, 0.22)]),
+                network_edge("lower", 1, 2, vec![cylinder(0.002, 0.10)]),
+                network_edge("chimney", 1, 3, vec![cylinder(0.0012, 0.003)]),
+            ],
+        },
+        "in".into(),
+        Vec::new(),
+        network_schema(),
+    )
+    .unwrap();
+    let zc = gas.characteristic_impedance / (core::f64::consts::PI * 0.002 * 0.002);
+    let ladder = LineLadder::default();
+    let (line, receipt) = point
+        .realize_line(&gas, LossModel::Bessel, RATE_HZ, zc, &ladder, None)
+        .unwrap();
+    let dt = 1.0 / f64::from(RATE_HZ);
+    let taps = line_taps(&line, receipt.n_fft);
+    let (max_r, peaks) = analyze_reflectance_ir(&taps, dt, 2.0 * 0.32 / gas.sound_speed / dt);
+    assert!(max_r <= 1.0 + super::PASSIVITY_TOL);
+    assert!(peaks.len() >= 2, "branched bore peaks: {peaks:?}");
+    // Golden-section maximum of `value` on [0.99 f, 1.01 f]; one peak per bracket.
+    let refine = |f: f64, value: &dyn Fn(f64) -> f64| -> f64 {
+        let ratio = 0.5 * (5.0_f64.sqrt() - 1.0);
+        let (mut a, mut b) = (0.99 * f, 1.01 * f);
+        for _ in 0..50 {
+            let c = b - ratio * (b - a);
+            let d = a + ratio * (b - a);
+            if value(c) > value(d) {
+                b = d;
+            } else {
+                a = c;
+            }
+        }
+        0.5 * (a + b)
+    };
+    let tau = core::f64::consts::TAU;
+    for &f in &peaks {
+        let f_line = refine(f, &|g| super::dtft_norm_impedance_sq(&taps, dt, tau * g));
+        let f_network = refine(f, &|g| {
+            point
+                .impedance(&gas, tau * g, LossModel::Bessel)
+                .unwrap()
+                .abs()
+        });
+        let cents = 1200.0 * (f_line / f_network).log2();
+        eprintln!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"network-line-branched-peak\",\"n_fft\":{},\"line_hz\":{f_line:.4},\"network_hz\":{f_network:.4},\"cents\":{cents:.5},\"tol\":0.05}}",
+            receipt.n_fft
+        );
+        assert!(
+            cents.abs() < ladder.peak_tol_cents,
+            "{f_line} vs {f_network} Hz: {cents} c"
+        );
+    }
 }

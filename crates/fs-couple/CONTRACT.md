@@ -2757,6 +2757,37 @@ at each evaluation. `harmonic_port` performs the actual complex transfer
 `p=Z U_in`, `U_out=-U_in` with that schema. It does not claim a time-window
 energy audit, glottal dynamics, or a completed M3.1-W7 player-airway realization.
 
+`NetworkDrivingPoint::realize_line` realizes that driving point as a
+characteristic line. It uses the same ladder, Fourier convention and
+4x-oversampled passivity gate as `realize_line`, and samples
+`R = (Z - zc)/(Z + zc)` from the network solve. The nominal round trip is twice
+the longest shortest axial path from the active port, computed with the
+single-duct arithmetic. A network solve may refuse the realizer's
+1e-3 rad/s DC probe as ill-conditioned. Below the largest rung's first bin,
+that probe is answered from the lowest admitted decade. A fallback of
+`R = -1` would ignore a lossy bore's Poiseuille resistance (`R(0+) = -0.945`
+on a 2 mm bore) and leave a tail that only halves per rung. `new_coupled`
+declares ports that one
+`fs_duct::network::CoupledTermination` terminates together, for example a
+multi-aperture radiation matrix. The caller supplies that matrix at every
+sampled frequency, including the near-DC point, and a source is required
+exactly when coupled ports are declared. `ReedBoreVoice::new_with_network` runs
+the existing reed and compact-jet observer on that line. The active port's edge
+radius sets the source impedance. This is a frozen-geometry FIR line. It is not
+M2.2-W3c's DG network, a moving-geometry line, or a radiated far field from the
+openings.
+
+Tests in `driving_point::ladder_tests`:
+- `network_line_matches_the_duct_line_for_one_edge`: same rung, taps within
+  1e-9 of the duct line.
+- `network_line_coupled_constant_load_is_the_siso_line`: bitwise equal, plus
+  both declaration refusals.
+- `network_line_keeps_the_branched_bore_resonances`: an open mid-bore chimney
+  and a radiating bell. Line and network `|Z|` maxima agree within 0.05 cent.
+
+`render::inlet_geometry_tests::reed_voice_on_a_one_edge_network_matches_the_duct_voice`
+renders within 1e-6 of the duct voice.
+
 `tract::network::tests::network_branched_tract_nasal` uses Assaneo's licensed
 /a/ chart plus a DECLARED SYNTHETIC 0.13 m x 4 mm-radius branch after section 2.
 The mouths are explicitly ideal pressure release; this is a pole-zero diagnostic,

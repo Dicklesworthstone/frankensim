@@ -118,6 +118,120 @@ mod inlet_geometry_tests {
             assert!(pressure.iter().any(|p| p.abs() > 0.0));
         }
     }
+
+    /// G0: a one-edge network bore drives the reed like the same duct: the
+    /// active port's area sets the source, and the network line sits on the
+    /// duct line's ladder rung. The 2 mm mouth keeps the compact radiation
+    /// load at ka <= 1 up to the 24 kHz Nyquist bin.
+    #[test]
+    fn reed_voice_on_a_one_edge_network_matches_the_duct_voice() {
+        use crate::driving_point::LineLadder;
+        use crate::driving_point::network::NetworkDrivingPoint;
+        use fs_duct::network::{
+            DuctNetwork, JunctionCorrections, NetworkEdge, NetworkLoad, NetworkNode, NodeBoundary,
+        };
+        use fs_ports::{CoordinateBinding, PortKind, PortOrientation, PortTimestamp, StableId};
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+        let duct = Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.002,
+                length: 0.40,
+            }],
+        };
+        let id = |s: &str| StableId::new(s).unwrap();
+        let schema = PortKind::FluidPressureFlux
+            .scalar_seed_schema(
+                id("reed-network-test"),
+                CoordinateBinding::new(
+                    id("pressure-volume-flow"),
+                    id("mouthpiece-plane"),
+                    PortOrientation::OutwardFromOwner,
+                ),
+                PortTimestamp::new(id("declared-frequency-sweep"), 0),
+            )
+            .unwrap();
+        let network = DuctNetwork {
+            nodes: vec![
+                NetworkNode {
+                    id: "in".into(),
+                    boundary: NodeBoundary::Port { label: "in".into() },
+                },
+                NetworkNode {
+                    id: "bell".into(),
+                    boundary: NodeBoundary::Termination(NetworkLoad::Radiation {
+                        radius: 0.002,
+                        termination: Termination::UnflangedOpen,
+                    }),
+                },
+            ],
+            edges: vec![NetworkEdge {
+                id: "bore".into(),
+                from: 0,
+                to: 1,
+                duct: duct.clone(),
+                corrections: JunctionCorrections::Disabled,
+            }],
+        };
+        let point = NetworkDrivingPoint::new(network, "in".into(), Vec::new(), schema).unwrap();
+        let reed = BeatingReed {
+            rest_opening_m: 4e-4,
+            width_m: 0.013,
+            closing_pressure_pa: 6000.0,
+            blowing_pressure_pa: 2800.0,
+            attack_s: 0.008,
+            mass_kg: 0.0,
+            stiffness_n_m: 0.0,
+            damping_ratio: 0.35,
+        };
+        let ladder = LineLadder::default();
+        let mut by_duct = ReedBoreVoice::new_with_ladder(
+            &duct,
+            &gas,
+            reed,
+            Termination::UnflangedOpen,
+            PlateBank::default(),
+            1.0,
+            48_000,
+            65_536,
+            None,
+            Some(&ladder),
+        )
+        .unwrap();
+        let mut by_network = ReedBoreVoice::new_with_network(
+            &point,
+            &gas,
+            fs_duct::LossModel::Bessel,
+            reed,
+            PlateBank::default(),
+            1.0,
+            48_000,
+            &ladder,
+            None,
+        )
+        .unwrap();
+        assert_eq!(by_network.zc.to_bits(), by_duct.zc.to_bits());
+        assert_eq!(
+            by_network.line_realization.n_fft,
+            by_duct.line_realization.n_fft
+        );
+        let (mut a, mut b) = (vec![0.0; 4800], vec![0.0; 4800]);
+        by_duct.step_block(&mut a).unwrap();
+        by_network.step_block(&mut b).unwrap();
+        let peak = a.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
+        let error = a
+            .iter()
+            .zip(&b)
+            .fold(0.0_f64, |m, (x, y)| m.max((x - y).abs()))
+            / peak;
+        eprintln!(
+            "{{\"suite\":\"fs-couple-render\",\"case\":\"reed-network-one-edge\",\"n_fft\":{},\"max_relative_difference\":{error:.3e}}}",
+            by_duct.line_realization.n_fft
+        );
+        assert!(
+            peak > 0.0 && error <= 1.0e-6,
+            "network voice differs from the duct voice by {error:.3e}"
+        );
+    }
 }
 
 /// One reed-on-a-characteristic-line voice: the `realize_reed_bore`
@@ -318,10 +432,85 @@ impl ReedBoreVoice {
             })
     }
 
-    // One mechanical initial state, lay-contact admission and priming operation
-    // for both physical line providers. Neither provider advances the voice.
+    /// Build the same reed mechanics on a duct network's driving point. The
+    /// network line ([`crate::driving_point::network::NetworkDrivingPoint::realize_line`])
+    /// replaces the single-duct line, and the source impedance uses the active
+    /// port's cross-section. Coupled external ports, for example a
+    /// multi-aperture radiation matrix, are supplied per sampled frequency by
+    /// `coupled_at`. This is the existing reed and compact-jet observer.
+    ///
+    /// # Errors
+    /// Reed or listener refusals, an active port without one incident edge,
+    /// and network-line refusals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_network(
+        driving_point: &crate::driving_point::network::NetworkDrivingPoint,
+        gas: &GasState,
+        loss: fs_duct::LossModel,
+        reed: BeatingReed,
+        plates: PlateBank,
+        listener_m: f64,
+        sample_rate_hz: u32,
+        ladder: &crate::driving_point::LineLadder,
+        coupled_at: Option<crate::driving_point::network::CoupledSource<'_>>,
+    ) -> Result<Self, AcousticRealizeError> {
+        Self::with_inlet_line(
+            || {
+                driving_point
+                    .active_port_radius()
+                    .map_err(AcousticRealizeError::Duct)
+            },
+            gas,
+            reed,
+            plates,
+            listener_m,
+            sample_rate_hz,
+            |zc| {
+                driving_point
+                    .realize_line(gas, loss, sample_rate_hz, zc, ladder, coupled_at)
+                    .map_err(crate::acoustic_realize::map_drive)
+            },
+        )
+    }
+
     fn with_line(
         physics: &Duct,
+        gas: &GasState,
+        reed: BeatingReed,
+        plates: PlateBank,
+        listener_m: f64,
+        sample_rate_hz: u32,
+        build_line: impl FnOnce(
+            f64,
+        ) -> Result<
+            (fs_vfit::discretize::DelayedFilter, crate::driving_point::LineRealization),
+            AcousticRealizeError,
+        >,
+    ) -> Result<Self, AcousticRealizeError> {
+        let inlet_radius = || -> Result<f64, AcousticRealizeError> {
+            Ok(physics
+                .segments
+                .first()
+                .ok_or(AcousticRealizeError::InvalidDescription {
+                    what: "duct has no segments",
+                })?
+                .inlet_radius())
+        };
+        Self::with_inlet_line(
+            inlet_radius,
+            gas,
+            reed,
+            plates,
+            listener_m,
+            sample_rate_hz,
+            build_line,
+        )
+    }
+
+    // One mechanical initial state, lay-contact admission and priming operation
+    // for every physical line provider. No provider advances the voice.
+    fn with_inlet_line(
+        inlet_radius: impl FnOnce() -> Result<f64, AcousticRealizeError>,
         gas: &GasState,
         reed: BeatingReed,
         plates: PlateBank,
@@ -344,13 +533,7 @@ impl ReedBoreVoice {
                 what: "listener distance must be positive and finite",
             });
         }
-        let inlet_r = physics
-            .segments
-            .first()
-            .ok_or(AcousticRealizeError::InvalidDescription {
-                what: "duct has no segments",
-            })?
-            .inlet_radius();
+        let inlet_r = inlet_radius()?;
         let area_bore = core::f64::consts::PI * inlet_r * inlet_r;
         let zc = gas.density * gas.sound_speed / area_bore;
         let (mut line, line_realization) = build_line(zc)?;
