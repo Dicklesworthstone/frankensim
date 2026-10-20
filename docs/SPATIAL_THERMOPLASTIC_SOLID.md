@@ -78,3 +78,32 @@ load/unload history, six-tet localized heating and grip-force relaxation,
 conductive temperature redistribution, and atomic late refusal. The numerical
 fixtures use synthetic material data; they are not experimental validation of
 a named engineering alloy.
+
+## Material-driven conduction from the same structural sources
+
+Call `source_solid.thermal_material_cells(&conductivity)` with one explicit
+conductivity key/selection per structural cell. The returned cells reuse the
+original material cards, caloric objects, connectivity order and complete fixed
+pressure/composition context. The lowering selects conductivity at the mapped
+accepted enthalpy and retains that claim identity.
+
+Use these cells in the existing `MaterialNetwork`, supply its declared
+half-cell link distances, and compose `network.prepare(...).observe(inner)`
+with the existing thermal observer. Pinned conductivity is then evaluated at
+the actual thermal states and drives the original conductive exchange and
+timestep limit. Heat redistribution changes local yield and the next global
+equilibrium solve without separately entering conductance values.
+
+Keep the original source solid alive as the immutable borrowed context anchor
+while accepting candidate solid, thermal and observer histories. Additional
+thermal cells retain their own bindings in the complete material network.
+Selected transport claims share the native thermoplastic source guard:
+temperature dependence and fixed external pressure are supported; bounds on
+evolving strain, stress, rate or frequency require an explicit constitutive
+response.
+
+`solid_plastic_material_transport.rs` compares data-only conductivity and Cp
+changes against independent two-tet mixed-shear equilibrium and two-cell heat
+recurrences. It also checks original temperature/pressure/card/claim identity,
+unloading history, separate physical and numerical dissipation, and joint
+refusal when conductivity leaves its pinned source domain.

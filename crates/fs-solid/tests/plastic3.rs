@@ -396,3 +396,250 @@ fn cantilever_yields_progressively() {
         assert!(record.residual_history.len() <= 12, "{record:?}");
     }
 }
+
+fn continuation_prescribed(nodes: &[[f64; 3]], length: f64, drive_end: bool) -> Vec<(usize, f64)> {
+    let mut prescribed = Vec::new();
+    for (node, x) in nodes.iter().enumerate() {
+        if x[0] == 0.0 {
+            prescribed.push((3 * node, 0.0));
+        }
+        if drive_end && x[0] == length {
+            prescribed.push((3 * node, length));
+        }
+        if x[1] == 0.0 {
+            prescribed.push((3 * node + 1, 0.0));
+        }
+        if x[2] == 0.0 {
+            prescribed.push((3 * node + 2, 0.0));
+        }
+    }
+    prescribed
+}
+
+#[test]
+fn split_loading_reversal_and_reloading_preserve_the_native_path() {
+    let (nodes, tets) = box_mesh([2, 1, 1], [2.0, 1.0, 1.0]);
+    let law = j2();
+    let prescribed = continuation_prescribed(&nodes, 2.0, true);
+    let path = [0.002, 0.004, 0.006, 0.0045, -0.002, 0.007];
+    let problem = SmallStrainTetProblem {
+        prescribed_m: &prescribed,
+        load_path: &path,
+        ..problem_for(&nodes, &tets, &law)
+    };
+    let whole = with_cx(|cx| problem.solve(cx)).unwrap();
+    let prefix_problem = SmallStrainTetProblem {
+        load_path: &path[..3],
+        ..problem
+    };
+    let loaded = with_cx(|cx| prefix_problem.solve(cx)).unwrap();
+    let accepted = loaded.clone();
+    assert!(loaded.element_states.iter().all(|state| state.alpha > 0.0));
+    let remainder = SmallStrainTetProblem {
+        load_path: &path[3..],
+        ..prefix_problem
+    };
+    let resumed = with_cx(|cx| {
+        remainder.solve_from(
+            loaded.displacement_m.as_flattened(),
+            &loaded.element_states,
+            cx,
+        )
+    })
+    .unwrap();
+    assert_eq!(resumed.displacement_m, whole.displacement_m);
+    assert_eq!(resumed.element_strain, whole.element_strain);
+    assert_eq!(resumed.element_stress, whole.element_stress);
+    assert_eq!(resumed.element_states, whole.element_states);
+    let mut joined = loaded.increments.clone();
+    joined.extend(resumed.increments.clone());
+    assert_eq!(joined, whole.increments);
+    assert_eq!(loaded, accepted);
+}
+
+#[test]
+fn releasing_driven_constraints_retains_closed_form_permanent_strain() {
+    let (nodes, tets) = box_mesh([2, 1, 1], [2.0, 1.0, 1.0]);
+    let law = j2();
+    let driven = continuation_prescribed(&nodes, 2.0, true);
+    let peak = 0.006;
+    let peak_path = [peak];
+    let problem = SmallStrainTetProblem {
+        prescribed_m: &driven,
+        load_path: &peak_path,
+        ..problem_for(&nodes, &tets, &law)
+    };
+    let loaded = with_cx(|cx| problem.solve(cx)).unwrap();
+    let accepted = loaded.clone();
+    let rollers = continuation_prescribed(&nodes, 2.0, false);
+    let release = SmallStrainTetProblem {
+        prescribed_m: &rollers,
+        ..problem_for(&nodes, &tets, &law)
+    };
+    let unloaded = with_cx(|cx| {
+        release.solve_from(
+            loaded.displacement_m.as_flattened(),
+            &loaded.element_states,
+            cx,
+        )
+    })
+    .unwrap();
+    // Independent uniaxial energetic-hardening solution; the driven end is
+    // now free, so it returns to plastic strain rather than zero displacement.
+    let peak_stress = E * (SIGMA_Y + H * peak) / (E + H);
+    let plastic = peak - peak_stress / E;
+    for (x, u) in nodes.iter().zip(&unloaded.displacement_m) {
+        let expected = [plastic * x[0], -0.5 * plastic * x[1], -0.5 * plastic * x[2]];
+        for (&actual, reference) in u.iter().zip(expected) {
+            assert!((actual - reference).abs() < 1e-9, "{actual} != {reference}");
+        }
+    }
+    for (old, next) in loaded.element_states.iter().zip(&unloaded.element_states) {
+        assert!((next.alpha - plastic).abs() < 1e-9);
+        assert!((next.alpha - old.alpha).abs() < 1e-9);
+    }
+    assert!(
+        unloaded
+            .element_stress
+            .iter()
+            .flatten()
+            .all(|s| s.abs() < 1e-8)
+    );
+    assert_eq!(loaded, accepted);
+}
+
+#[test]
+fn changed_element_yield_data_continue_history_at_fixed_displacement() {
+    let (nodes, tets) = box_mesh([2, 1, 1], [2.0, 1.0, 1.0]);
+    let law = j2();
+    let driven = continuation_prescribed(&nodes, 2.0, true);
+    let problem = SmallStrainTetProblem {
+        prescribed_m: &driven,
+        load_path: &[0.006],
+        ..problem_for(&nodes, &tets, &law)
+    };
+    let loaded = with_cx(|cx| problem.solve(cx)).unwrap();
+    let endpoint: Vec<_> = loaded
+        .displacement_m
+        .iter()
+        .flatten()
+        .copied()
+        .enumerate()
+        .collect();
+    let softened = J2Plasticity::new(
+        IsotropicElastic::new(E, NU, 0.05).unwrap(),
+        0.5 * SIGMA_Y,
+        H,
+    )
+    .unwrap();
+    let laws: Vec<_> = (0..tets.len())
+        .map(|element| {
+            if element % 2 == 0 {
+                softened.clone()
+            } else {
+                law.clone()
+            }
+        })
+        .collect();
+    let changed = SmallStrainTetProblem {
+        laws: SmallStrainLawField::PerElement(&laws),
+        prescribed_m: &endpoint,
+        ..problem_for(&nodes, &tets, &law)
+    };
+    let next = with_cx(|cx| {
+        changed.solve_from(
+            loaded.displacement_m.as_flattened(),
+            &loaded.element_states,
+            cx,
+        )
+    })
+    .unwrap();
+    assert_eq!(next.displacement_m, loaded.displacement_m);
+    // At fixed total strain, reducing only yield releases deviatoric elastic
+    // storage. The radial-return consistency equation gives this delta alpha.
+    let shear = E / (2.0 * (1.0 + NU));
+    let delta_alpha = 0.5 * SIGMA_Y / (3.0 * shear + H);
+    for (element, (old, state)) in loaded
+        .element_states
+        .iter()
+        .zip(&next.element_states)
+        .enumerate()
+    {
+        let expected = old.alpha + if element % 2 == 0 { delta_alpha } else { 0.0 };
+        assert!((state.alpha - expected).abs() < 1e-9);
+        if element % 2 == 0 {
+            assert!(state.alpha > old.alpha);
+        }
+    }
+}
+
+#[test]
+fn continuation_refusal_does_not_consume_the_accepted_history() {
+    let (nodes, tets) = box_mesh([2, 1, 1], [2.0, 1.0, 1.0]);
+    let law = j2();
+    let prescribed = continuation_prescribed(&nodes, 2.0, true);
+    let problem = SmallStrainTetProblem {
+        prescribed_m: &prescribed,
+        load_path: &[0.006],
+        ..problem_for(&nodes, &tets, &law)
+    };
+    let loaded = with_cx(|cx| problem.solve(cx)).unwrap();
+    let accepted = loaded.clone();
+    let failing = SmallStrainTetProblem {
+        load_path: &[0.006, 0.012],
+        settings: IncrementSettings {
+            max_newton_iterations: 1,
+            ..IncrementSettings::default()
+        },
+        ..problem
+    };
+    let result = with_cx(|cx| {
+        failing.solve_from(
+            loaded.displacement_m.as_flattened(),
+            &loaded.element_states,
+            cx,
+        )
+    });
+    assert!(matches!(
+        result,
+        Err(fs_solid::SmallStrainTetError::NewtonStalled { increment: 1, .. })
+    ));
+    assert!(matches!(
+        with_cx(|cx| failing.solve_from(
+            loaded.displacement_m[..nodes.len() - 1].as_flattened(),
+            &loaded.element_states,
+            cx,
+        )),
+        Err(fs_solid::SmallStrainTetError::InvalidInput { .. })
+    ));
+    assert!(matches!(
+        with_cx(|cx| failing.solve_from(
+            loaded.displacement_m.as_flattened(),
+            &loaded.element_states[..tets.len() - 1],
+            cx,
+        )),
+        Err(fs_solid::SmallStrainTetError::InvalidInput { .. })
+    ));
+    let mut nonfinite = loaded.displacement_m.clone();
+    nonfinite[0][0] = f64::NAN;
+    assert!(matches!(
+        with_cx(|cx| failing.solve_from(nonfinite.as_flattened(), &loaded.element_states, cx,)),
+        Err(fs_solid::SmallStrainTetError::InvalidInput { .. })
+    ));
+    assert_eq!(loaded, accepted);
+    let retry = SmallStrainTetProblem {
+        settings: IncrementSettings::default(),
+        ..failing
+    };
+    assert!(
+        with_cx(|cx| {
+            retry.solve_from(
+                loaded.displacement_m.as_flattened(),
+                &loaded.element_states,
+                cx,
+            )
+        })
+        .is_ok()
+    );
+    assert_eq!(loaded, accepted);
+}

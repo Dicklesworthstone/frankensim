@@ -3111,3 +3111,23 @@ instrument fidelity. The direction remains an instantaneous geometric
 approximation, not resolved transient jet turning, moving lips, coverage,
 time-varying mouth area/cut-up, or a material-state evolution law. The
 separation closure does not resolve vortex memory or turbulence.
+
+### Shared structural and conductive material assignments
+
+`solid_enthalpy::plastic::ThermoplasticSolid::thermal_material_cells` lowers
+the existing per-tetrahedron bindings into the original material transport
+network. It retains cell/material identity, the original caloric object and
+fixed pressure/composition context, selects conductivity at accepted enthalpy,
+and pins the admitted claim. The existing prepared observer evaluates that
+claim at actual heat states. Source support loss refuses the complete coupled
+interval; mechanically or frequency-bounded conductivity requires an evolving
+response. Additional thermal cells need their own complete network bindings.
+The original source solid remains the immutable borrowed context anchor while
+accepted candidate histories evolve.
+
+G1/G3 regressions compare two-tet mixed-shear equilibrium and conservative heat
+exchange under data-only conductivity/Cp changes. They exercise a free
+mechanical displacement, local plastic history through unloading, source
+identity and context continuity, physical versus numerical heat, and G4 atomic
+source-domain refusal. These synthetic numerical fixtures do not extend the
+existing small-strain, fixed-density, fixed-geometry, single-solid model.

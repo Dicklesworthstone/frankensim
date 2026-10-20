@@ -1593,3 +1593,13 @@ and combined-work gates accept the candidate. A rejected or cancelled proposal
 changes neither history nor time. The model includes no thermal eigenstrain,
 variable elastic free energy, phase change or finite-deformation volume work;
 source receipts and residual gates do not establish empirical accuracy.
+
+### Structural source bindings for thermal transport
+
+`ThermoplasticSource::thermal_material_point` exposes the exact original card,
+complete fixed context and declared temperature axis. `pin_thermal_transport`
+selects a nonnegative static property at the actual accepted caloric state,
+applies the same mechanical-coordinate/frequency guard as the six native
+thermoplastic roles, and returns its original claim pin. The consuming
+transport owner admits the property quantity. No material state, caloric law,
+plastic history or transport formula is duplicated.

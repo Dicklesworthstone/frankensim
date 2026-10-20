@@ -206,6 +206,57 @@ impl<'a> ThermoplasticSolid<'a> {
         &self.materials
     }
 
+    /// Lower these exact structural source bindings to the existing material
+    /// conduction network. Entries remain in tetrahedron order; linked cells
+    /// require an explicit conductivity selection. Selected transport sources
+    /// are pinned and share the native rate-independent admission; strain,
+    /// stress or rate dependent conductivity needs an evolving response.
+    /// Additional thermal cells retain their own bindings in the complete network.
+    ///
+    /// The returned bindings borrow this accepted solid as their immutable
+    /// card/context anchor. Keep it alive while advancing candidate solids and
+    /// retain the prepared network to preserve transport claim identities.
+    pub fn thermal_material_cells<'s>(
+        &'s self,
+        conductivity: &'s [Option<(
+            fs_matdb::PropertyKey,
+            fs_material::state_point::MaterialPropertySelection,
+        )>],
+    ) -> Result<Vec<crate::circuit_enthalpy::material::MaterialCell<'s>>, ThermoplasticError> {
+        if conductivity.len() != self.cells.len() {
+            return Err(ThermoplasticError::Invalid(
+                "one transport selection per structural material cell required",
+            ));
+        }
+        self.cells
+            .iter()
+            .zip(conductivity)
+            .map(|(bound, selection)| {
+                let conductivity = selection
+                    .as_ref()
+                    .map(|(key, policy)| {
+                        bound
+                            .source
+                            .pin_thermal_transport(
+                                bound.accepted.specific_h_j_kg,
+                                key,
+                                policy.clone(),
+                            )
+                            .map(|pinned| (key, pinned))
+                            .map_err(ThermoplasticError::Material)
+                    })
+                    .transpose()?;
+                Ok(crate::circuit_enthalpy::material::MaterialCell {
+                    cell: bound.accepted.id,
+                    material_id: bound.accepted.material_id,
+                    curve: bound.source.caloric_source().curve(),
+                    point: bound.source.thermal_material_point(),
+                    conductivity,
+                })
+            })
+            .collect()
+    }
+
     fn enthalpies<E>(
         &self,
         thermal: &DepositionSimulation<'_>,
