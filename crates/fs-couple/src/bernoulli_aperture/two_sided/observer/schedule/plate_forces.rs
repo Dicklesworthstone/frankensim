@@ -23,8 +23,8 @@ impl ScheduledTwoSidedPressure {
     /// once a source-mesh program is attached. This is prescribed actuation, not
     /// a tongue/lip contact law or an additional source of pressure work.
     ///
-    /// max_controls bounds pressure assignments plus BOTH raw force programs.
-    /// max_compile_work separately bounds combined force projection/grouping;
+    /// max_controls bounds pressure, BOTH force programs and all key assignments.
+    /// max_compile_work bounds combined force projection and boundary compilation;
     /// it remains the pressure compiler's independent work allowance. The same
     /// source-owned force/velocity projection and numerical solve do all physics.
     ///
@@ -44,12 +44,7 @@ impl ScheduledTwoSidedPressure {
             LoadedAperture::Paired(a) => a.plates().map(|p| &p[blade]),
             _ => None,
         }.ok_or_else(|| invalid("physical force footprints require this blade's retained source plate"))?;
-        let mut events = self.config.max_controls.saturating_sub(self.controls.len());
-        let mut work = self.config.max_compile_work;
-        for force in self.plate_forces.iter().flatten() {
-            events = events.saturating_sub(force.events.len());
-            work = work.saturating_sub(force.work);
-        }
+        let (events, work) = self.remaining_control_budgets()?;
         let samples = self.config.samples.checked_mul(self.source.mechanics_per_output() as u64)
             .ok_or_else(|| invalid("physical force mechanical window overflow"))?;
         self.plate_forces[blade] = Some(ForceSchedule::compile(plate, program, samples, events, work)?);

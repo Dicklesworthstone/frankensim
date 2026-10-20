@@ -18,6 +18,8 @@
 pub mod observer;
 /// Source-bound bore and tract walls in the same two-sided mechanical solve.
 pub mod material;
+/// Material/contact keys on either retained acoustic side.
+mod keyed;
 /// Source-bound mutual radiation on each original duct's ordered outlets.
 pub mod radiation;
 /// Fixed material-gas supply passage in the same accepted pressure/flow solve.
@@ -26,6 +28,8 @@ pub mod supply;
 use super::dynamic::{ApertureDrive, ApertureFrame, ApertureProgress, ApertureTerminal,
     ApertureTrial, DynamicAperture};
 use super::network::{NetworkNode, NodeFrame, SectionRealization, TubeNetworkSpec};
+use super::network::boundaries::{BoundaryApertures, BoundaryDrive, BoundaryNetworkFrame};
+use super::network::keyed as keyed_network;
 use super::fractional::{FractionalSection, FractionalTubePolicy};
 use super::paired::{PairedAperture, PairedTrial};
 use super::modal::{ModalAperture, ModalApertureFrame};
@@ -141,7 +145,7 @@ impl ValveTrial {
 /// Explicit whole-system limits, additional to every participant's original gates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TwoSidedLimits {
-    /// Maximum actual valve + both wave/load + optional supply-fluid storage [J].
+    /// Maximum valve, keys, both wave/load and optional supply-fluid storage [J].
     pub maximum_energy_j: f64,
     /// Absolute full-step energy-balance allowance [J].
     pub energy_absolute_tolerance_j: f64,
@@ -190,9 +194,12 @@ pub struct TwoSidedFrame {
     pub upstream: NetworkFrame,
     /// Downstream network port/work/storage; its inlet flow is through-flow.
     pub downstream: NetworkFrame,
+    /// Complete key/graph accounts in upstream/downstream order. Each graph's
+    /// storage and loss is already included here, not an additional subsystem.
+    pub boundaries: [Option<BoundaryNetworkFrame>; 2],
     /// Optional fixed supply passage, distinct from the moving aperture slit.
     pub supply: Option<SupplyChannelFrame>,
-    /// Actual valve + both networks' wave/load + optional supply-fluid storage [J].
+    /// Actual valve, keys, both networks and optional supply-fluid storage [J].
     /// Excludes the rational exterior's unmodeled stored-energy coordinate.
     pub stored_energy_j: f64,
     /// Independently evaluated change of total storage [J].
@@ -212,8 +219,12 @@ impl TwoSidedFrame {
     /// No junction or nonlinear-solve defect is subtracted from this balance.
     #[must_use]
     pub fn balance_residual_j(&self) -> f64 {
-        self.storage_change_j + self.dissipated_energy_j + self.coupled_terminal_work_j
-            - self.source_work_j - self.aperture.mechanical_work_j
+        let mut residual = self.storage_change_j + self.dissipated_energy_j + self.coupled_terminal_work_j
+            - self.source_work_j - self.aperture.mechanical_work_j;
+        for boundary in self.boundaries.iter().flatten() {
+            residual -= boundary.exterior_work_j + boundary.mechanical_work_j;
+        }
+        residual
     }
 }
 
@@ -226,6 +237,7 @@ struct DuctSide {
     network: WaveguideNetwork,
     fractional: Option<(FractionalTubePolicy, Vec<FractionalSection>)>,
     mimo_environment: Option<MimoEnvironment>,
+    boundaries: Option<BoundaryApertures>,
 }
 fn invalid(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
@@ -330,7 +342,7 @@ impl TwoSidedAperture {
                 (network, represented, None)
             };
             Ok(DuctSide { source, graph, gases, represented, losses, network, fractional,
-                mimo_environment: None })
+                mimo_environment: None, boundaries: None })
         };
         let [up, down] = sources;
         let model = Self { valve, sides: [prepare(up, policies.map(|p|p[0]))?,
@@ -380,8 +392,11 @@ impl TwoSidedAperture {
     /// Current stored energy, evaluated from the original state owners.
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
-        let energy = self.valve.energy() + self.sides[0].network.stored_energy_j()
+        let mut energy = self.valve.energy() + self.sides[0].network.stored_energy_j()
             + self.sides[1].network.stored_energy_j();
+        for boundaries in self.sides.iter().filter_map(|side| side.boundaries.as_ref()) {
+            energy += boundaries.stored_energy_j();
+        }
         match &self.supply_channel {
             Some(channel) => energy + channel.last_step().kinetic_energy_j,
             None => energy,
@@ -397,13 +412,20 @@ impl TwoSidedAperture {
         side.graph.nodes[node] = NetworkNode::Termination { reflection };
         Ok(())
     }
-    /// Extend the shared lifetime horizon without clearing valve or wave history.
+    /// Extend the shared lifetime horizon without clearing valve, keys or waves.
     pub fn extend_step_budget(&mut self, total: u64) -> Result<(), AcousticRealizeError> {
+        for side in &self.sides {
+            keyed_network::validate_step_budget(side.boundaries.as_ref(), total)?;
+        }
         match &mut self.valve {
             LoadedAperture::Single(a) => a.extend_step_budget(total),
             LoadedAperture::Paired(a) => a.extend_step_budget(total),
             LoadedAperture::Modal(a) => a.extend_step_budget(total),
+        }?;
+        for side in &mut self.sides {
+            keyed_network::extend_step_budget(side.boundaries.as_mut(), total)?;
         }
+        Ok(())
     }
 
     /// Solve both acoustic loads and the original moving valve at the same step.
@@ -413,6 +435,19 @@ impl TwoSidedAperture {
     pub fn step_under_gate(&mut self, drive: TwoSidedDrive, gate: &CancelGate)
         -> Result<TwoSidedFrame, AcousticRealizeError>
     {
+        self.step_with_boundaries_under_gate(drive, [&[], &[]], gate)
+    }
+
+    /// Same complete physical solve with explicit upstream/downstream key drives.
+    /// Each attached side requires every original node in its admitted order.
+    /// Closure changes the original aperture motion and flow; no terminal is
+    /// switched, no chimney is removed, and no material or acoustic state resets.
+    pub fn step_with_boundaries_under_gate(
+        &mut self,
+        drive: TwoSidedDrive,
+        boundaries: [&[BoundaryDrive]; 2],
+        gate: &CancelGate,
+    ) -> Result<TwoSidedFrame, AcousticRealizeError> {
         poll(gate)?;
         if !drive.source_pressure_pa.is_finite()
             || drive.blade_forces_n.iter().any(|f| !f.is_finite()) {
@@ -441,8 +476,13 @@ impl TwoSidedAperture {
             _ => None,
         };
         let outgoing = [a[0] - z[0] * q, a[1] + z[1] * q];
-        let up = self.sides[0].network.preview_step(outgoing[0]).map_err(wave)?;
-        let down = self.sides[1].network.preview_step(outgoing[1]).map_err(wave)?;
+        let [upstream, downstream] = &mut self.sides;
+        let up_trial = keyed_network::preview_duct(&mut upstream.network,
+            upstream.boundaries.as_ref(), outgoing[0], boundaries[0])?;
+        let down_trial = keyed_network::preview_duct(&mut downstream.network,
+            downstream.boundaries.as_ref(), outgoing[1], boundaries[1])?;
+        let up = up_trial.network;
+        let down = down_trial.network;
         let upstream_pressure = drive.source_pressure_pa + up.inlet_pressure_pa;
         let upstream_pressure = match supply {
             Some(s) => upstream_pressure - s.pressure_drop_pa,
@@ -457,6 +497,7 @@ impl TwoSidedAperture {
         let mut frame = TwoSidedFrame {
             aperture, upstream_pressure_pa: upstream_pressure, pressure_drop_pa: dp,
             upstream: up, downstream: down, supply,
+            boundaries: [up_trial.boundary_frame, down_trial.boundary_frame],
             stored_energy_j: aperture.stored_energy_j + up.stored_energy_j + down.stored_energy_j,
             storage_change_j: aperture.storage_change_j + up.storage_change_j + down.storage_change_j,
             dissipated_energy_j: aperture.dissipated_energy_j + up.terminal_loss_j + up.interior_loss_j
@@ -464,6 +505,20 @@ impl TwoSidedAperture {
             coupled_terminal_work_j: up.coupled_terminal_work_j + down.coupled_terminal_work_j,
             source_work_j: drive.source_pressure_pa * (q * dt),
         };
+        if frame.boundaries.iter().any(Option::is_some) {
+            // Each optional boundary frame already includes its original graph.
+            // The primary valve belongs to the pair and is counted only once.
+            let accounts = [&up_trial, &down_trial].map(|trial| {
+                trial.boundary_frame.map_or(
+                    (trial.network.stored_energy_j, trial.network.storage_change_j,
+                     trial.network.terminal_loss_j + trial.network.interior_loss_j),
+                    |b| (b.stored_energy_j, b.storage_change_j, b.dissipated_energy_j),
+                )
+            });
+            frame.stored_energy_j = aperture.stored_energy_j + accounts[0].0 + accounts[1].0;
+            frame.storage_change_j = aperture.storage_change_j + accounts[0].1 + accounts[1].1;
+            frame.dissipated_energy_j = aperture.dissipated_energy_j + accounts[0].2 + accounts[1].2;
+        }
         if let Some(s) = supply {
             frame.stored_energy_j += s.channel.kinetic_energy_j;
             frame.storage_change_j += s.channel.stored_delta_j;
@@ -478,10 +533,13 @@ impl TwoSidedAperture {
         };
         let flow_allowance = self.limits.flow_absolute_tolerance_m3_s
             + self.limits.flow_relative_tolerance * flow_scale;
-        let scale = before + frame.stored_energy_j + frame.dissipated_energy_j.abs()
+        let mut scale = before + frame.stored_energy_j + frame.dissipated_energy_j.abs()
             + up.coupled_terminal_work_j.abs() + down.coupled_terminal_work_j.abs()
             + frame.source_work_j.abs()
             + aperture.mechanical_work_j.abs();
+        for boundary in frame.boundaries.iter().flatten() {
+            scale += boundary.exterior_work_j.abs() + boundary.mechanical_work_j.abs();
+        }
         let allowance = self.limits.energy_absolute_tolerance_j + self.limits.energy_relative_tolerance * scale;
         if ![upstream_pressure, dp, frame.stored_energy_j, frame.storage_change_j,
             frame.dissipated_energy_j, frame.coupled_terminal_work_j, frame.source_work_j,
@@ -496,7 +554,11 @@ impl TwoSidedAperture {
         { return Err(invalid("two-sided valve refused the complete storage, work or flow balance")); }
         poll(gate)?;
         let [upstream, downstream] = &mut self.sides;
-        upstream.network.step_pair(&mut downstream.network, outgoing).map_err(wave)?;
+        keyed_network::accept_pair(
+            [&mut upstream.network, &mut downstream.network],
+            [upstream.boundaries.as_mut(), downstream.boundaries.as_mut()],
+            [up_trial, down_trial],
+        )?;
         self.valve.accept(trial);
         self.supply_channel = supply_trial;
         Ok(frame)

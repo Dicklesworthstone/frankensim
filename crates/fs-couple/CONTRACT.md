@@ -2726,6 +2726,24 @@ clock, band and exterior density/sound speed (relative tolerance 1e-12).
 reaction load, changes no bore gas and never changes a termination to admit it.
 Existing one-way builders retain Diagnostic scope.
 
+`TwoSidedAperture` binds the original `BoundaryApertures` on either physical
+duct, including material-modal valves. Every driven node retains its complete
+local gas, represented chimney and material/contact/Maxwell owner on the same
+valve clock and horizon. Both graph/key previews and the whole-system work
+gate complete before either graph, key, valve or supply state publishes; paired
+driven acceptance retains MIMO, fractional, reactive and supply histories.
+Storage/loss includes each graph and key once, with key-reservoir work and
+mechanical actuation separate from series-pressure/reed work and signed MIMO
+terminal exchange. `ScheduledTwoSidedPressure` reuses `BoundaryProgram` and
+`BoundarySchedule` per side at mechanical sample addresses, including audio
+substeps; both sides and source-force programs share the auxiliary control/work
+budgets. A keyed side without an explicit program refuses before playback.
+G0/G3 regressions exercise material substitution, complete work, atomic refusal
+and cancellation, source/receiver parity and material-modal retention; native
+execution remains required. The approximation remains a material cantilever
+moving slit, not a resolved circular pad, key linkage, moving-opening mutual
+exterior, or full M2.1-W4b qualification.
+
 `TwoSidedAperture::with_mimo_environment` attaches the same source-bound
 `MimoEnvironment` and original `WaveguideNetwork` terminal host used by the
 flue to single, paired and material-modal valves. Each side admits one ordered

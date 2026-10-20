@@ -186,9 +186,19 @@ impl TwoSidedPressure {
     // The ONLY mechanical/observer step for held and scheduled playback. The
     // scheduler can change pressure between these calls inside an audio packet.
     fn advance_mechanical(&mut self) -> Result<Option<f64>, RenderError> {
+        self.advance_mechanical_with_boundaries([&[], &[]])
+    }
+
+    // Boundary programs use the same source and receiver transaction. Their
+    // controls commit only after this complete mechanical observation succeeds.
+    fn advance_mechanical_with_boundaries(
+        &mut self,
+        boundaries: [&[super::BoundaryDrive]; 2],
+    ) -> Result<Option<f64>, RenderError> {
         if self.poisoned { return Err(RenderError::Poisoned); }
         let result = (|| {
-            let frame = self.system.step_under_gate(self.held, &self.gate).map_err(RenderError::Voice)?;
+            let frame = self.system.step_with_boundaries_under_gate(self.held, boundaries, &self.gate)
+                .map_err(RenderError::Voice)?;
             let system = &self.system;
             let pressure = self.receiver.push_frame(|network, node| {
                 let side = match network { 0 => ValveSide::Upstream, 1 => ValveSide::Downstream, _ => return None };

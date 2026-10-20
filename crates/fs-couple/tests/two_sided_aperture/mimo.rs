@@ -372,3 +372,5 @@ fn a_second_or_late_group_and_mismatched_source_geometry_refuse() {
     assert!(new().with_mimo_environment(side, source(side, 0.04), local_observation(side),
         radiation_limits(), &cancelled).is_err());
 }
+
+mod keyed;

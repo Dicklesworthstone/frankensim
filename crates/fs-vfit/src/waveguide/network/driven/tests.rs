@@ -71,3 +71,28 @@ fn driven_ports_and_mutual_radiation_keep_their_separate_work_supplies() {
     }
     assert!(radiation_work > 0.0);
 }
+
+#[test]
+fn paired_driven_refusal_cannot_publish_the_first_network() {
+    let mut pair = [graph(NetworkNode::Driven), graph(NetworkNode::Driven)];
+    let mut separate = [graph(NetworkNode::Driven), graph(NetworkNode::Driven)];
+    let waves = [DrivenWave { node: 2, outgoing_pressure_pa: 0.7 },
+        DrivenWave { node: 3, outgoing_pressure_pa: -0.2 }];
+    for sample in 0..32 {
+        let outgoing = [if sample < 5 { 1.0 } else { 0.0 }, 0.3];
+        let [left, right] = &mut pair;
+        if sample == 9 {
+            assert!(left.step_pair_with_driven(right, outgoing, [&waves, &waves[..1]]).is_err());
+            for (actual, reference) in pair.iter().zip(&separate) {
+                assert_eq!(actual.accepted_steps(), reference.accepted_steps());
+                assert_eq!(actual.stored_energy_j(), reference.stored_energy_j());
+                for node in 0..4 { assert_eq!(actual.node_frame(node), reference.node_frame(node)); }
+            }
+        }
+        let [left, right] = &mut pair;
+        let frames = left.step_pair_with_driven(right, outgoing, [&waves, &waves]).unwrap();
+        for i in 0..2 {
+            assert_eq!(frames[i], separate[i].step_with_driven(outgoing[i], &waves).unwrap());
+        }
+    }
+}

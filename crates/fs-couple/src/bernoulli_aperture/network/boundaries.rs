@@ -84,7 +84,7 @@ pub(super) struct BoundaryTrial {
     pub frame: BoundaryNetworkFrame,
     accepted_steps: u64,
     inlet_outgoing_pa: f64,
-    waves: Vec<DrivenWave>,
+    pub(super) waves: Vec<DrivenWave>,
     apertures: Vec<ApertureTrial>,
 }
 fn wave(error: fs_vfit::waveguide::WaveguideError) -> AcousticRealizeError {
@@ -344,6 +344,18 @@ impl BoundaryApertures {
         network: &mut WaveguideNetwork,
         trial: BoundaryTrial,
     ) -> Result<BoundaryNetworkFrame, AcousticRealizeError> {
+        self.validate_trial(network, &trial)?;
+        network
+            .step_with_driven(trial.inlet_outgoing_pa, &trial.waves)
+            .map_err(wave)?;
+        Ok(self.publish_trial(trial))
+    }
+
+    pub(super) fn validate_trial(
+        &self,
+        network: &WaveguideNetwork,
+        trial: &BoundaryTrial,
+    ) -> Result<(), AcousticRealizeError> {
         if self.accepted_steps != trial.accepted_steps
             || network.accepted_steps() != trial.accepted_steps
         {
@@ -351,9 +363,12 @@ impl BoundaryApertures {
                 "moving boundary trial must retain its original shared accepted-step clock",
             ));
         }
-        network
-            .step_with_driven(trial.inlet_outgoing_pa, &trial.waves)
-            .map_err(wave)?;
+        Ok(())
+    }
+
+    // The enclosing transaction has validated this trial and accepted its
+    // original graph. Publishing its original key candidates cannot now fail.
+    pub(super) fn publish_trial(&mut self, trial: BoundaryTrial) -> BoundaryNetworkFrame {
         for ((boundary, last), trial) in self
             .boundaries
             .iter_mut()
@@ -363,8 +378,8 @@ impl BoundaryApertures {
             *last = trial.frame;
             boundary.aperture.accept_frame(trial);
         }
-        self.accepted_steps = network.accepted_steps();
+        self.accepted_steps += 1;
         self.last = Some(trial.frame);
-        Ok(trial.frame)
+        trial.frame
     }
 }

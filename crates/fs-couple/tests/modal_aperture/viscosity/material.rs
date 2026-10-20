@@ -29,6 +29,8 @@ type Input = (
     PlateViscosityLimits,
 );
 
+mod keyed;
+
 #[test]
 fn mutual_exterior_retains_original_material_modes_viscosity_and_source_receipts() {
     use fs_couple::bernoulli_aperture::network::{NetworkNode, TubeSection};

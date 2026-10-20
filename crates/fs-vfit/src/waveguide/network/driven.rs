@@ -78,6 +78,28 @@ impl WaveguideNetwork {
         self.accept_preview();
         Ok(frame)
     }
+
+    /// Publish two coupled networks with independently solved moving endpoints.
+    /// Both original previews must pass before either wave, reactive/MIMO load,
+    /// observation or clock advances. No accepted history is cloned or reset.
+    /// Outgoing inlet waves and endpoint lists use self/other order.
+    pub fn step_pair_with_driven(
+        &mut self,
+        other: &mut Self,
+        outgoing: [f64; 2],
+        waves: [&[DrivenWave]; 2],
+    ) -> Result<[NetworkFrame; 2], WaveguideError> {
+        if self.time_step_s.to_bits() != other.time_step_s.to_bits() {
+            return Err(WaveguideError("coupled wave networks require identical clocks"));
+        }
+        let frames = [
+            self.preview_step_with_driven(outgoing[0], waves[0])?,
+            other.preview_step_with_driven(outgoing[1], waves[1])?,
+        ];
+        self.accept_preview();
+        other.accept_preview();
+        Ok(frames)
+    }
 }
 
 #[cfg(test)]
