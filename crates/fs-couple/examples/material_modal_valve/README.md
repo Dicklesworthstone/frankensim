@@ -31,6 +31,9 @@ each original mesh, different regional gas temperatures, distributed bore loss,
 fractional travel, gap viscosity and a physical exterior receiver. Mechanical
 steps run at 768 kHz and pressure frames at 48 kHz. The renderer consumes every
 mechanical step; do not add `--decimate`. WAV and sidecar paths must be new.
+The example explicitly selects `propagator exact-zoh`. The clock and retained
+mode bounds stay authored data; exact free structural propagation is not a
+reason to lower the clock without measuring nonlinear time error.
 
 To change one blade or region, normalize another material source and change its
 `section` pack path. Original geometry and numerical choices remain explicit.
@@ -49,6 +52,7 @@ section suffixes retain their original owners.
 ```text
 frankensim-material-modal-valve-v1
 audio MECHANICS_HZ OUTPUT_HZ OUTPUT_FRAMES FULL_SCALE_PA
+propagator midpoint|exact-zoh
 ambient GAS_RECORD
 exterior GAS_RECORD
 upstream
@@ -81,12 +85,28 @@ memoryless endpoints; the common exterior installs each load once. Do not place
 their declared mechanical role. Outlet radii come from the original geometry.
 
 `propagation integer` selects the original integer delay image.
+The separate `propagator` row is optional and appears immediately after `audio`.
+Omitting it preserves the original `midpoint` method and its complete loaded
+one-cent clock admission. `exact-zoh` uses the original mass, stiffness and full
+material viscosity matrix in the shared exact structural propagator. Pressure,
+contact and external forces are held over each mechanical sample; swept volume
+and force work use actual displacement increments, and viscous dissipation is
+integrated along the same trajectory. The wind sidecar reports the selection
+and its physical scope. Both methods retain the original two ducts, supply
+passage, gas states, contact, materials and matched exterior microphone.
+
+With `exact-zoh`, each blade's `MAX_ANGULAR_STEP` is an explicit positive bound
+strictly below pi. Every retained mode must satisfy that bound. Midpoint keeps
+its original cap and stricter loaded phase gate. Raising the exact bound admits
+a coarser numerical rung; it does not establish convergence of the nonlinear
+valve, contact, channel flow or acoustic network.
+
 `slit_length none` selects the original inviscid gap law.
 `supply slit LENGTH_M WIDTH_M HEIGHT_M TRANSVERSE_CELLS` selects the shared
 unsteady no-slip fixed passage; it is additional geometry, separate from the
-moving gap. All loaded-clock limits still apply. A large condensed passage
-inertance can refuse even as the clock is refined; this ingress neither changes
-the passage nor relaxes that existing solver admission.
+moving gap. The selected structural propagator and the original channel,
+network, nonlinear work and flow admissions all remain binding. This ingress
+neither changes the passage nor substitutes a static resistance for its state.
 
 Each blade repeats:
 
@@ -138,5 +158,8 @@ Focused regressions are in
 `bernoulli_aperture::performance::file::material_modal::tests`: original source
 and complete coordinate retention, physical pressure changes from material and
 atmospheric-pressure substitutions, callback/PCM identity, and missing-source,
-clock, count, gas-pressure and double-radiation refusals. Native compilation and
+clock, count, gas-pressure and double-radiation refusals. Additional selector
+regressions preserve omission/explicit-midpoint parity, exercise full-tensor and
+elastic exact material sources at a coarser clock, and retain material changes
+in the actual microphone signal. Native compilation and
 execution remain required; committed tests are not evidence of a passed run.

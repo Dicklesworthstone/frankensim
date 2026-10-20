@@ -6,6 +6,10 @@
 //! geometry, flow, nonlinear contact, propagation, radiation and scheduling.
 //! Flat DKT walls and the effective uniform slit/contact remain approximations;
 //! source provenance and matched baffled observation do not qualify a recording.
+//! An optional `propagator midpoint|exact-zoh` record after `audio` selects the
+//! structural clock image before material modes are admitted. Omission retains
+//! midpoint. ExactZoh keeps the original material M/K/full C, with pressure and
+//! contact held per mechanical sample; it does not certify nonlinear time error.
 mod plate;
 
 use super::{PlateValveInputError, Reader, bad, checkpoint, decode_schedule, gas,
@@ -13,7 +17,7 @@ use super::{PlateValveInputError, Reader, bad, checkpoint, decode_schedule, gas,
 use super::duct::DuctInput;
 use crate::bernoulli_aperture::fractional::FractionalTubePolicy;
 use crate::bernoulli_aperture::modal::ModalAperture;
-use crate::bernoulli_aperture::paired::{BladeState, PairedApertureLimits};
+use crate::bernoulli_aperture::paired::{BladePropagator, BladeState, PairedApertureLimits};
 use crate::bernoulli_aperture::performance::AperturePerformanceConfig;
 use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
 use crate::bernoulli_aperture::slit_channel::{SlitChannel, SlitChannelSpec, SlitExit};
@@ -43,6 +47,8 @@ pub struct MaterialModalValveInfo {
     pub input_hash: ContentHash,
     /// Actual mechanical clock [Hz].
     pub mechanics_rate_hz: u32,
+    /// Original midpoint image or exact held-force material structural image.
+    pub propagator: BladePropagator,
     /// Output microphone clock [Hz].
     pub output_rate_hz: u32,
     /// Finite output frame count, including the authored release/ringdown window.
@@ -117,6 +123,7 @@ impl MaterialModalValvePerformance {
         let mechanical_samples = samples.checked_mul(u64::from(mechanics / output))
             .ok_or_else(|| bad(rows.line, "mechanical sample window overflow"))?;
         let dt = 1.0 / f64::from(mechanics);
+        let propagator = read_propagator(&mut rows)?;
         let mut gases = Vec::new();
         let mut row = rows.row("ambient")?;
         let ambient = gas::read_with_sources(&mut row, None, gas_sources, &mut gases)?;
@@ -247,9 +254,9 @@ impl MaterialModalValvePerformance {
         }
         let schedule = decode_schedule(gestures)?;
         let mut valve = match loss {
-            LossSelection::Elastic => ModalAperture::from_material_plates(
+            LossSelection::Elastic => ModalAperture::from_material_plates_with_propagator(
                 plates, rest_opening, inlet, impedance, dt, mechanical_samples,
-                limits, states, contact, gate),
+                limits, states, contact, propagator, gate),
             LossSelection::Tensor { properties, limits: projection } => {
                 let mut viscous = Vec::with_capacity(plates.len());
                 for (source, options) in plates {
@@ -258,9 +265,9 @@ impl MaterialModalValvePerformance {
                         .map_err(PlateValveInputError::Physics)?;
                     viscous.push((source, options, law, projection));
                 }
-                ModalAperture::from_viscous_material_plates(
+                ModalAperture::from_viscous_material_plates_with_propagator(
                     viscous, rest_opening, inlet, impedance, dt, mechanical_samples,
-                    limits, states, contact, gate)
+                    limits, states, contact, propagator, gate)
             }
         }.map_err(PlateValveInputError::Physics)?;
         if let Some(length) = slit {
@@ -280,7 +287,7 @@ impl MaterialModalValvePerformance {
         checkpoint(gate)?;
         Ok(Self { info: MaterialModalValveInfo {
             input_hash: hash_domain("org.frankensim.fs-couple.material-modal-valve.v1", bytes),
-            mechanics_rate_hz: mechanics, output_rate_hz: output, samples, full_scale_pa,
+            mechanics_rate_hz: mechanics, propagator, output_rate_hz: output, samples, full_scale_pa,
             blades, modes, nodes, triangles,
         }, renderer, materials, gases, ambient, radiation })
     }
@@ -299,6 +306,21 @@ impl MaterialModalValvePerformance {
     pub fn radiation_bindings(&self) -> &[BaffledOutletBinding] { &self.radiation }
     /// Move the complete loaded mechanics, source clock and microphone history.
     pub fn into_renderer(self) -> ScheduledTwoSidedPressure { self.renderer }
+}
+
+fn read_propagator(rows: &mut Reader<'_>) -> Result<BladePropagator, PlateValveInputError> {
+    if rows.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next())
+        != Some("propagator") {
+        return Ok(BladePropagator::Midpoint);
+    }
+    let mut row = rows.row("propagator")?;
+    let selected = match row.word()? {
+        "midpoint" => BladePropagator::Midpoint,
+        "exact-zoh" => BladePropagator::ExactZoh,
+        _ => return Err(bad(row.line, "propagator must be midpoint or exact-zoh")),
+    };
+    row.finish()?;
+    Ok(selected)
 }
 
 fn optional_positive(row: &mut super::Row<'_>) -> Result<Option<f64>, PlateValveInputError> {

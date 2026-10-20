@@ -1,5 +1,6 @@
 frankensim-material-modal-valve-v1
 audio 768000 48000 2400 0.005
+propagator exact-zoh
 ambient 293.15 101325 0
 exterior 293.15 101325 0
 upstream

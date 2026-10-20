@@ -230,7 +230,13 @@ fn load_with_sources(
                 spec.length_m, spec.width_m, spec.height_m, spec.transverse_cells,
                 channel.gas().density, channel.gas().dynamic_viscosity)
         });
-        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; compact independent baffled reaction and shared exterior pressure; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}}}",
+        let (propagator, linear_scope) = match i.propagator {
+            fs_couple::bernoulli_aperture::paired::BladePropagator::Midpoint =>
+                ("midpoint", "original material structure with loaded one-cent midpoint admission"),
+            fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh =>
+                ("exact-zoh", "original M/K/full C; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"),
+        };
+        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; compact independent baffled reaction and shared exterior pressure; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}}}",
             i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
             p.renderer().pending_controls().len(), valve.viscosity_matrix_n_s_m().is_some(),
             p.radiation_bindings().len());
