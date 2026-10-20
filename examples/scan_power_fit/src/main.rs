@@ -4,6 +4,7 @@ mod geometry;
 mod limits;
 mod state_limits;
 mod peak_limits;
+mod zero_power;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_ascent::{LbfgsReport, StopReason, StopRule};
 use fs_ascent::scan_design::{ScanPowerControl, ScanPowerObjective, ScanPowerStudy};
@@ -175,6 +176,7 @@ fn main() -> Result<()> {
     if args.first().is_some_and(|arg|arg == "--limits") { return limits::run_cli(&args[1..]); }
     if args.first().is_some_and(|arg|arg == "--state-limits") { return state_limits::run_cli(&args[1..]); }
     if args.first().is_some_and(|arg|arg == "--peak-limits") { return peak_limits::run_cli(&args[1..]); }
+    if args.first().is_some_and(|arg|arg == "--heater-off") { return zero_power::run_cli(&args[1..]); }
     if args.first().is_some_and(|arg|arg == "--melt-fraction") {
         let targets=match &args[1..] {
             [] => [0.6,0.8], [a,b] => [a.parse()?,b.parse()?],
@@ -198,6 +200,7 @@ fn main() -> Result<()> {
         println!("Sampled hot-spot fitting: --peak-limits [maximum_enthalpy_J_per_kg smoothing_J_per_kg]");
         println!("Short-tape fitting: --checkpointed [even_endpoint_count segment_steps] (defaults: 64 8)");
         println!("Melt-state fitting: --melt-fraction [first_fraction second_fraction] (defaults: 0.6 0.8)");
+        println!("Heater activation/off optimization: --heater-off [first_target_J_per_kg second_target_J_per_kg [initial_first_W initial_second_W]]");
         return Ok(());
     }
     let input = FitInput::parse(&args)?;
