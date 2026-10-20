@@ -1,6 +1,6 @@
 //! Hi-hat with rim friction: one stick stroke on a grid `scale` times the offline one.
 //! usage: hatfric SCALE FRICTION RIM_MU SECONDS OUT.wav [SPEED_M_S] [open|apart]
-//! (RIM_MU: the rims' Hunt-Crossley loss, 0.08 shared default, 3.0 historical live value)
+//! (RIM_MU: the rims' Hunt-Crossley loss, 0.08 offline, 3.0 in the live module)
 use fs_vkplate::*;
 
 fn main() {

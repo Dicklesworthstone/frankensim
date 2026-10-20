@@ -110,16 +110,27 @@ the open hat, whose rims seldom touch, is unchanged (balance 4.8 dB, decay 2.6 o
 time in WebAssembly), struck anywhere on its playing surface, stepped in 48 kHz blocks, and not
 stepped at all once its motion is 70 dB below its peak. On grids too coarse to put four nodes in
 the 6.5-20 mm annulus round a cymbal's hole, the felt washers and the hi-hat clutch spread their
-total stiffness and damping over the first ring of nodes instead. Live hi-hats share the offline
-rim contact law (Hunt-Crossley `mu` 0.08 s/m) through `kit::hihat_scaled`, with a 5 mm stick tip
-rather than the offline hat's 4 mm tip. They rub with the same friction as offline. The following
-live-grid measurements came from the earlier nearest-node build with `mu` 3.0 s/m; they have
-not been rerun for the shared-law, interpolated-tip source: at 4x / 4.5x the closed hat's
+total stiffness and damping over the first ring of nodes instead. The live hi-hats keep the rim
+contact law from before the retuning (Hunt-Crossley `mu` 3.0 s/m, set in `live.rs`) and a 5 mm
+stick tip; the offline hat's lighter rim damping (0.08 s/m) and 4 mm tip were not carried over to
+real-time play. They rub with the same friction as offline. The following measurements predate
+the bilinear point-contact correction and do not qualify its sound: at 4x / 4.5x the closed hat's
 500 Hz-1 kHz T60 falls from 1.3-2.8 s to 0.5-0.7 s, and a stroke puts
 87-91 % of its energy in its first 50 ms (65-75 % without; the real closed hat 90-93 %). On grids of
 22-25 mm it still carries little above ~3.5 kHz. A clone of a `Live` steps bit for bit as the original would, so the browser kit
 settles each grid once: it plays a clone kept from before the timing stroke.
 `apps/instrument-lab/engine-kit` compiles it for the browser.
+
+Closed-hat rim solves now stop when a Newton update rounds to the same value;
+the stick and open-hat rim policies are unchanged. In Chrome 155 on an Apple
+Silicon Mac, 20 alternating pairs per grid (600 ms, 48 kHz, 128-frame blocks,
+2.5 m/s at 0.42 radius) measured median paired render speedups of 1.109x at
+4.5x and 1.024x at 3x. The largest PCM change was 7.46e-9; the open-hat
+control was bit-identical. These measurements include bilinear point contacts.
+This saves solver work; it does not fix the timbre or qualify production audio.
+At 4.5x the closed hat still puts only 0.15% of its first 250 ms energy above
+4 kHz, versus 91.65% in the reference, and the 3x grid still takes 719 ms to
+render 600 ms. The four reference spectrogram comparisons remain failures.
 
 ## Graded against a real kit
 

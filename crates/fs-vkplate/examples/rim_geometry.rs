@@ -10,7 +10,11 @@ fn main() {
     fs::create_dir(&destination).expect("new output directory");
     for (name, gap, pedal) in [("closed", 0.0, 80.0), ("open", 0.002, 0.0)] {
         for scale in [4.5, 3.0] {
-            let original = kit::hihat_scaled(gap, pedal, &[(0.005, 2.5)], scale).unwrap();
+            let original = kit::hihat_grid(
+                gap, pedal, &[(0.005, 2.5)],
+                fs_vkplate::Law::Power { k: 2.0e9, alpha: 1.5, mu: 0.08 },
+                0.8, scale,
+            ).unwrap();
             assert_eq!(original.oversample, 1);
             let effective_gap = if pedal == 0.0 { gap.min(1.4e-4) } else { gap };
             for rep in 0..2 {
