@@ -49,6 +49,8 @@
 //!   linearly from zero at low Strouhal (a high-pass at half the neutral
 //!   frequency): the loop cannot lock above or far below the band, and
 //!   the band rises with the jet speed;
+//!   the quasi-steady history is interpolated at the actual retarded time,
+//!   with sub-sample transit coupled to the current mouth solve;
 //! - the jet is cut by the labium: the volume flow entering the pipe is
 //!   `Q_j = Q_max * (1 + tanh((eta - y0) / b)) / 2`, the card's
 //!   smoothed top-hat profile integrated, `b` its half-width scaled to
@@ -176,6 +178,59 @@ struct MouthStep {
     outgoing_pa: f64,
     incoming_pa: f64,
     pressure_pa: f64,
+}
+
+#[derive(Clone, Copy)]
+struct RetardedVelocity {
+    past_m_s: f64,
+    current_weight: f64,
+}
+
+// The newest ring entry is v_(n-1), not v_n. At t_n-tau, a delay below
+// one step therefore includes the UNKNOWN current mouth velocity. Return
+// that coefficient to the simultaneous port solve instead of adding a step.
+fn retarded_velocity(history: &[f64], head: usize, delay_samples: f64)
+    -> Result<RetardedVelocity, FlueError>
+{
+    if history.len() < 2 || head >= history.len() || !delay_samples.is_finite()
+        || delay_samples < 0.0 || delay_samples > (history.len()-1) as f64 {
+        return Err(FlueError::Invalid { what: "jet convection exceeds its finite retained history" });
+    }
+    let past = |back: usize| history[(head+history.len()-1-back)%history.len()];
+    let value = if delay_samples < 1.0 {
+        RetardedVelocity { past_m_s: delay_samples*past(0),
+            current_weight: 1.0-delay_samples }
+    } else {
+        let back = delay_samples-1.0;
+        let whole = back.floor() as usize;
+        let fraction = back-whole as f64;
+        RetardedVelocity { past_m_s: (1.0-fraction)*past(whole)+fraction*past(whole+1),
+            current_weight: 0.0 }
+    };
+    if !value.past_m_s.is_finite() {
+        return Err(FlueError::Invalid { what: "retarded mouth velocity is not finite" });
+    }
+    Ok(value)
+}
+
+#[derive(Clone, Copy)]
+struct JetStepCoefficients {
+    q_max: f64,
+    half_width_m: f64,
+    offset_m: f64,
+    band_alpha: f64,
+    hp_alpha: f64,
+    leak_rate: f64,
+}
+
+#[derive(Clone, Copy)]
+struct JetTrial {
+    band_state: [f64; 2],
+    band_hp: [f64; 2],
+    displacement_m: f64,
+    eta_m: f64,
+    flow_m3_s: f64,
+    source_pa: f64,
 }
 
 // Series source + inertance + resistance, coupled to an affine wave boundary:
@@ -809,14 +864,132 @@ impl FlueVoice {
         self.geometry.cut_up_m / (self.island.convection_ratio * self.jet_speed_m_s())
     }
 
-    fn delayed_velocity(&self, delay_samples: f64) -> f64 {
-        let len = self.history.len();
-        let clamped = delay_samples.min((len - 2) as f64).max(0.0);
-        let whole = clamped.floor();
-        let frac = clamped - whole;
-        let idx = |back: usize| self.history[(self.head + len - 1 - back) % len];
-        let k = whole as usize;
-        (1.0 - frac) * idx(k) + frac * idx(k + 1)
+    // Evaluate the original filter, displacement and cut law without advancing
+    // any memory. Nonlinear trials all use the same one-per-sample onset seed.
+    fn jet_trial(&self, velocity: f64, seed: f64, c: JetStepCoefficients)
+        -> Result<JetTrial, FlueError>
+    {
+        let mut band_state = self.band_state;
+        band_state[0] += c.band_alpha*(velocity-band_state[0]);
+        band_state[1] += c.band_alpha*(band_state[0]-band_state[1]);
+        let hp_in = band_state[1];
+        let hp_out = c.hp_alpha*(self.band_hp[1]+hp_in-self.band_hp[0]);
+        let displacement_m = self.displacement_state
+            + self.dt*(hp_out+seed-c.leak_rate*self.displacement_state);
+        let eta_m = self.island.displacement_gain*displacement_m;
+        let flow_m3_s = if c.q_max > 0.0 {
+            0.5*c.q_max*(1.0+((eta_m-c.offset_m)/c.half_width_m).tanh())
+        } else { 0.0 };
+        let source_pa = self.source_coeff*(flow_m3_s-self.flow_prev)/self.dt;
+        if ![velocity, band_state[0], band_state[1], hp_out, displacement_m,
+            eta_m, flow_m3_s, source_pa].iter().all(|v| v.is_finite()) {
+            return Err(FlueError::Invalid { what: "jet trial left the finite physical domain" });
+        }
+        Ok(JetTrial { band_state, band_hp: [hp_in, hp_out], displacement_m,
+            eta_m, flow_m3_s, source_pa })
+    }
+
+    fn solve_jet_mouth(&self, boundary: WindBoundary, delayed: RetardedVelocity,
+        seed: f64, c: JetStepCoefficients) -> Result<(MouthStep, JetTrial, f64), FlueError>
+    {
+        let (l, r, zc, dt) = (self.inertance, self.resistance, self.zc, self.dt);
+        let area = self.geometry.mouth_area_m2();
+        let jet = |q: f64| self.jet_trial(delayed.past_m_s+delayed.current_weight*q/area, seed, c);
+        let mouth = |source| match &self.mouth_contraction {
+            Some(loss) => mouth_loss::solve(boundary, source, self.q_prev, l, r, zc, dt, loss),
+            None => Ok((solve_mouth_port(boundary, source, self.q_prev, l, r, zc, dt)?, 0.0)),
+        };
+        // Spatial windway transport and delays >= dt have no current-sample
+        // coefficient. A closed wave boundary instead fixes q independently.
+        if delayed.current_weight == 0.0 || c.q_max == 0.0 || boundary.direct_reflection == 1.0 {
+            let trial = jet(if boundary.direct_reflection == 1.0 {
+                -boundary.history_pressure_pa/zc
+            } else { 0.0 })?;
+            let (step, power) = mouth(trial.source_pa)?;
+            let trial = if delayed.current_weight != 0.0 { jet(step.flow_m3_s)? } else { trial };
+            return Ok((step, trial, power));
+        }
+        // tanh' <= 1 gives a global bound for the current-sample feedback.
+        // Together with passive port and separation impedances, feedback < 1
+        // makes the scalar residual strictly increasing. Otherwise refine the
+        // source clock; choosing an arbitrary root would change its dynamics.
+        let direct = boundary.direct_reflection;
+        let denominator = (l/dt+r)*(1.0-direct)+zc*(1.0+direct);
+        let compliance = (1.0-direct)/denominator;
+        let eta_slope = self.island.displacement_gain*dt*c.hp_alpha*c.band_alpha*c.band_alpha
+            *delayed.current_weight/area;
+        let feedback = compliance*(self.source_coeff/dt)*(0.5*c.q_max)*eta_slope/c.half_width_m;
+        if direct.abs() > 1.0 || !compliance.is_finite() || compliance <= 0.0
+            || !feedback.is_finite() || !(0.0..1.0).contains(&feedback) {
+            return Err(FlueError::Invalid { what: "current jet feedback is underresolved; refine the source time step" });
+        }
+        // The cut jet lies between zero and Qmax. The lossless responses at
+        // those extremes, extended to zero, bracket every passive-loss root.
+        let linear = |flow| solve_mouth_port(boundary,
+            self.source_coeff*(flow-self.flow_prev)/dt, self.q_prev, l, r, zc, dt);
+        let mut lo = linear(0.0)?.flow_m3_s.min(0.0);
+        let mut hi = linear(c.q_max)?.flow_m3_s.max(0.0);
+        if let Some(loss) = &self.mouth_contraction {
+            let area = loss.effective_area_m2();
+            let speed = loss.gas().sound_speed;
+            let mach = loss.spec().maximum_contracted_mach;
+            let mut bound = area*(speed*mach);
+            // Multiplication then division can round just outside the strict
+            // constitutive domain. Round the search endpoint inward, never
+            // weaken the actual Mach admission or clip the accepted solution.
+            for _ in 0..4 {
+                if (bound/area)/speed <= mach { break; }
+                bound = bound.next_down();
+            }
+            if !bound.is_finite() || bound <= 0.0 {
+                return Err(FlueError::Invalid { what: "mouth contraction flow bound is not representable" });
+            }
+            lo = lo.max(-bound);
+            hi = hi.min(bound);
+        }
+        let evaluate = |q: f64| -> Result<(f64, MouthStep, JetTrial, f64), FlueError> {
+            let trial = jet(q)?;
+            let (drop, power) = match &self.mouth_contraction {
+                Some(loss) => {
+                    let frame = loss.at_flow(q).map_err(FlueError::Physics)?;
+                    (frame.pressure_drop_pa, frame.dissipated_power_w)
+                }
+                None => (0.0, 0.0),
+            };
+            let step = solve_mouth_port(boundary, trial.source_pa-drop,
+                self.q_prev, l, r, zc, dt)?;
+            let residual = q-step.flow_m3_s;
+            if !residual.is_finite() {
+                return Err(FlueError::Invalid { what: "jet-mouth residual is not finite" });
+            }
+            Ok((residual, step, trial, power))
+        };
+        let low = evaluate(lo)?;
+        let high = evaluate(hi)?;
+        let accept = |step: MouthStep, trial: JetTrial, power: f64|
+            -> Result<(MouthStep, JetTrial, f64), FlueError> {
+            // The wave response differs from the trial flow by the stopping
+            // residual. Admit and account the ACTUALLY accepted port flow,
+            // including the strict constitutive limit at a rounded endpoint.
+            let power = if let Some(loss) = &self.mouth_contraction {
+                loss.at_flow(step.flow_m3_s).map_err(FlueError::Physics)?.dissipated_power_w
+            } else { power };
+            Ok((step, trial, power))
+        };
+        let tolerance = 32.0*f64::EPSILON*lo.abs().max(hi.abs());
+        for candidate in [low, high] {
+            if candidate.0.abs() <= tolerance { return accept(candidate.1, candidate.2, candidate.3); }
+        }
+        if low.0 > 0.0 || high.0 < 0.0 {
+            return Err(FlueError::Invalid { what: "jet-mouth root lies outside the admitted flow domain" });
+        }
+        for _ in 0..96 {
+            let q = 0.5*lo+0.5*hi;
+            let candidate = evaluate(q)?;
+            if candidate.0.abs() <= tolerance { return accept(candidate.1, candidate.2, candidate.3); }
+            if candidate.0 < 0.0 { lo = q; } else { hi = q; }
+        }
+        Err(FlueError::Invalid { what: "same-sample jet-mouth flow is unresolved" })
     }
 
     /// Advance one block, writing the wave launched into the pipe
@@ -855,7 +1028,7 @@ impl FlueVoice {
         let b = 0.5 * self.geometry.flue_height_m;
         let s_m = self.geometry.mouth_area_m2();
         let y0 = self.geometry.effective_offset_m();
-        let (l, r, zc) = (self.inertance, self.resistance, self.zc);
+        let (l, r) = (self.inertance, self.resistance);
         // The mouth and wave boundary are solved together below. A TMM FIR
         // can reflect instantaneously; a delayed tube graph has r0 exactly zero.
         let mut blow_work = 0.0;
@@ -905,43 +1078,28 @@ impl FlueVoice {
             let omega_h = 0.5 * omega_c;
             let hp_alpha = 1.0 / (1.0 + omega_h * dt);
             let leak_rate = omega_c / 100.0;
-            // Jet deflection at the labium from the delayed mouth velocity
-            // plus the voice-keyed onset seed.
-            let v_raw = convected.unwrap_or_else(|| self.delayed_velocity(delay_samples));
-            self.band_state[0] += band_alpha * (v_raw - self.band_state[0]);
-            self.band_state[1] += band_alpha * (self.band_state[0] - self.band_state[1]);
-            let hp_in = self.band_state[1];
-            let hp_out = hp_alpha * (self.band_hp[1] + hp_in - self.band_hp[0]);
-            self.band_hp = [hp_in, hp_out];
-            let v_delayed = hp_out;
+            // The unsteady channel keeps its original spatial transport. The
+            // quasi-steady history is sampled at THIS time minus the physical
+            // transit, including a current-mouth term when transit < dt.
+            let delayed = match convected {
+                Some(velocity) => RetardedVelocity { past_m_s: velocity, current_weight: 0.0 },
+                None => retarded_velocity(&self.history, self.head, delay_samples)?,
+            };
             let seed = if seed_scale > 0.0 {
                 seed_scale * (2.0 * self.seed.next_f64() - 1.0)
             } else {
                 0.0
             };
-            // Receptivity: the jet root is displaced by the integral of the
-            // transverse velocity (with a leak far below the band to keep
-            // the mean at zero); the seed enters as transverse velocity.
-            self.displacement_state +=
-                dt * (v_delayed + seed - leak_rate * self.displacement_state);
-            let eta = self.island.displacement_gain * self.displacement_state;
+            let coefficients = JetStepCoefficients { q_max, half_width_m: b,
+                offset_m: y0, band_alpha, hp_alpha, leak_rate };
+            let boundary = self.line.mouth_boundary()?;
+            let (mouth, trial, separation_power) = self.solve_jet_mouth(boundary, delayed, seed, coefficients)?;
+            let (eta, flow, p_source) = (trial.eta_m, trial.flow_m3_s, trial.source_pa);
             eta_sq += eta * eta;
-            let flow = if u > 0.0 {
-                0.5 * q_max * (1.0 + ((eta - y0) / b).tanh())
-            } else {
-                0.0
-            };
             if eta > y0 {
                 pipe_side += 1;
             }
             blow_work += self.blow_pa * flow * dt;
-            let p_source = self.source_coeff * (flow - self.flow_prev) / dt;
-            self.flow_prev = flow;
-            let boundary = self.line.mouth_boundary()?;
-            let (mouth, separation_power) = match &self.mouth_contraction {
-                Some(loss) => mouth_loss::solve(boundary, p_source, self.q_prev, l, r, zc, dt, loss)?,
-                None => (solve_mouth_port(boundary, p_source, self.q_prev, l, r, zc, dt)?, 0.0),
-            };
             let next_separation = separation + separation_power*dt;
             if !next_separation.is_finite() {
                 return Err(FlueError::Invalid { what: "mouth separation energy overflow" });
@@ -955,6 +1113,10 @@ impl FlueVoice {
                 && committed.to_bits() != mouth.incoming_pa.to_bits() {
                 return Err(FlueError::Invalid { what: "mouth solve and committed reflection disagree" });
             }
+            self.band_state = trial.band_state;
+            self.band_hp = trial.band_hp;
+            self.displacement_state = trial.displacement_m;
+            self.flow_prev = flow;
             separation = next_separation;
             // Ledger terms of the implicit step (exact identity).
             source_work += p_source * q * dt;
@@ -1129,6 +1291,169 @@ impl FlueRank {
     }
 }
 
+
+#[cfg(test)]
+mod convection_tests {
+    use super::*;
+    use crate::bernoulli_aperture::{contraction::ContractionSpec,
+        network::{NetworkNode, TubeNetworkSpec, TubeSection}};
+    use fs_exec::CancelGate;
+    use fs_material::gas::GasSpec;
+
+    // Short windows deliberately exercise both sides of one sample of transit.
+    // These are numerical fixtures, not qualified flute/recorder specimens.
+    fn geometry() -> FlueGeometry {
+        FlueGeometry { flue_width_m: 0.010, flue_height_m: 0.001, cut_up_m: 6e-5,
+            labium_offset_m: 0.0, jet_angle_rad: 0.0,
+            bore_area_m2: core::f64::consts::PI*0.006*0.006, mouth_loss_rel: 0.02 }
+    }
+    fn gas(pressure: f64) -> GasState {
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, pressure).unwrap()
+    }
+    fn voice(gas: GasState, geometry: FlueGeometry, gain: f64) -> FlueVoice {
+        let source = network::FlueNetworkSpec {
+            graph: TubeNetworkSpec {
+                nodes: vec![NetworkNode::Inlet, NetworkNode::Termination { reflection: -0.7 }],
+                sections: vec![TubeSection { nodes: [0,1], length_m: 0.3, radius_m: 0.006,
+                    max_length_error_m: 0.005 }],
+                sound_speed_m_s: gas.sound_speed, max_wave_memory_bytes: 1_000_000,
+            },
+            gases: vec![gas], viscothermal: vec![], minimum_jet_speed_m_s: 1.0,
+            maximum_jet_mach: 0.3, max_jet_history_samples: 4096,
+        };
+        FlueVoice::from_network(Some(&fs_aeroac::jetcard::mint_tonal_interim_card().unwrap()),
+            gain, 1e-6, geometry, source, 48_000, 3, 0, &CancelGate::new_clock_free()).unwrap()
+    }
+    fn contraction() -> ContractionSpec {
+        ContractionSpec { area_ratio: 0.8, maximum_contracted_mach: 0.3,
+            provenance: "authored numerical convection fixture".into() }
+    }
+    fn assert_work(v: &FlueVoice) {
+        for d in v.diagnostics() {
+            let scale = d.source_work_j.abs()+d.pipe_work_j.abs()+d.stored_delta_j.abs()
+                +d.radiation_loss_j+d.numerical_dissipation_j+d.separation_loss_j;
+            assert!(d.ledger_defect_j.abs() <= 2e-12*scale+1e-30, "{d:?}");
+            assert!(d.separation_loss_j >= 0.0);
+        }
+    }
+
+    #[test]
+    fn g1_retarded_affine_signal_has_no_extra_sample_at_any_ring_position() {
+        for head in [0,3,31] {
+            let mut history = [0.0; 32];
+            for back in 0..32 { history[(head+31-back)%32] = 2.0-0.7*(back+1) as f64; }
+            for delay in [0.0,0.25,0.75,1.0,1.25,5.3,31.0] {
+                let value = retarded_velocity(&history, head, delay).unwrap();
+                let actual = value.past_m_s+value.current_weight*2.0;
+                let expected = 2.0-0.7*delay;
+                assert!((actual-expected).abs() < 64.0*f64::EPSILON*expected.abs().max(1.0));
+            }
+            for delay in [-1.0, f64::NAN, f64::INFINITY, 32.0] {
+                assert!(retarded_velocity(&history, head, delay).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn g1_retarded_interpolation_has_its_expected_second_order_ladder() {
+        // Prescribed v(t)=t^2 has midpoint interpolation error dt^2/4.
+        // This grades the delay interpolation, not the full jet integrator.
+        let transit = 0.03;
+        let mut errors = Vec::new();
+        for dt in [0.06,0.02,0.02/3.0] {
+            let mut history = [0.0; 32];
+            for back in 0..32 { history[31-back] = ((back+1) as f64*dt).powi(2); }
+            let value = retarded_velocity(&history, 0, transit/dt).unwrap();
+            let error = (value.past_m_s-transit*transit).abs(); // current v(0)=0
+            assert!((error-dt*dt/4.0).abs() < 1e-16);
+            errors.push(error);
+        }
+        for pair in errors.windows(2) { assert!((pair[0]/pair[1]-9.0).abs() < 1e-10); }
+    }
+
+    #[test]
+    fn g3_gas_driven_subsample_jet_preserves_work_and_block_partition() {
+        for pressure in [50_000.0,100_000.0,200_000.0] {
+            for separated in [false,true] {
+                let build = || {
+                    let v = voice(gas(pressure), geometry(), 0.01);
+                    if separated { v.with_mouth_contraction(contraction()).unwrap() } else { v }
+                };
+                let (mut one, mut many) = (build(), build());
+                for v in [&mut one, &mut many] {
+                    v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+                }
+                assert_eq!(one.transit_s() < one.dt, pressure < 150_000.0);
+                let (mut a, mut b) = ([0.0;257], [0.0;257]);
+                one.step_block(&mut a).unwrap();
+                for chunk in b.chunks_mut(31) { many.step_block(chunk).unwrap(); }
+                assert_eq!(a,b);
+                assert!(a.iter().any(|p| *p != 0.0));
+                assert_eq!(one.network().unwrap().last_frame(), many.network().unwrap().last_frame());
+                assert_eq!(one.mouth_flow_m3_s(), many.mouth_flow_m3_s());
+                assert_work(&one); assert_work(&many);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_actual_viscous_windway_speed_selects_the_convection_interval() {
+        let ordinary = gas(101_325.0);
+        let mut spec = GasSpec::dry_air_ussa1976();
+        spec.sutherland_beta *= 4.0; // Synthetic viscosity-only substitution.
+        let viscous = GasState::try_new(&spec, 293.15, ordinary.pressure).unwrap();
+        assert_eq!(ordinary.density, viscous.density);
+        assert_eq!(ordinary.sound_speed, viscous.sound_speed);
+        let mut a = voice(ordinary, geometry(), 0.01).with_viscous_windway(0.015).unwrap();
+        let mut b = voice(viscous, geometry(), 0.01).with_viscous_windway(0.015).unwrap();
+        for v in [&mut a, &mut b] { v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap(); }
+        assert!(a.transit_s() < a.dt && b.transit_s() > b.dt);
+        for v in [&a, &b] {
+            assert!((v.transit_s()*v.jet_speed_m_s()*v.island.convection_ratio
+                -v.geometry.cut_up_m).abs() < 1e-18);
+        }
+        let (mut first, mut second) = ([0.0;257], [0.0;257]);
+        a.step_block(&mut first).unwrap(); b.step_block(&mut second).unwrap();
+        assert_ne!(first,second);
+        assert_work(&a); assert_work(&b);
+    }
+
+    #[test]
+    fn g0_contraction_cap_rounding_cannot_refuse_an_interior_jet_root() {
+        let mut geometry = geometry();
+        geometry.flue_width_m = 0.001;
+        geometry.cut_up_m = 0.00005;
+        geometry.mouth_loss_rel = 0.0;
+        let mut v = voice(gas(101_325.0), geometry, 0.01)
+            .with_mouth_contraction(contraction()).unwrap();
+        let loss = v.mouth_contraction().unwrap();
+        let raw_bound = loss.effective_area_m2()
+            *(loss.gas().sound_speed*loss.spec().maximum_contracted_mach);
+        // Arithmetic witness: the nominal endpoint rounds above Mach 0.3.
+        assert!(loss.at_flow(raw_bound).is_err());
+        v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        assert!(v.transit_s() < v.dt);
+        v.step_block(&mut [0.0;257]).unwrap();
+        assert!(v.mouth_flow_m3_s().abs() < raw_bound);
+        v.mouth_contraction().unwrap().at_flow(v.mouth_flow_m3_s()).unwrap();
+        assert!(v.diagnostics()[0].separation_loss_j > 0.0);
+        assert_work(&v);
+    }
+
+    #[test]
+    fn g0_underresolved_current_jet_feedback_refuses_before_any_wave_commit() {
+        let mut v = voice(gas(101_325.0), geometry(), 1e6);
+        v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        assert!(matches!(v.step_block(&mut [0.0]),
+            Err(FlueError::Invalid { what }) if what.contains("refine")));
+        assert_eq!(v.samples_rendered(), 0);
+        assert!(v.network().unwrap().last_frame().is_none());
+        assert_eq!(v.mouth_flow_m3_s(), 0.0);
+        assert_eq!(v.band_state, [0.0;2]);
+        assert_eq!(v.displacement_state, 0.0);
+        assert!(v.claim_check().is_err());
+    }
+}
 
 #[cfg(test)]
 mod mouth_boundary_tests {
