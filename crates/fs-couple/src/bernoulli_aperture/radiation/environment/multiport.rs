@@ -8,7 +8,7 @@
 use super::{invalid, poll};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec};
-use crate::pcm_wav::baffled::CircularOpening;
+use crate::pcm_wav::baffled::openings::CircularOpening;
 use crate::pcm_wav::baffled::openings::duct::{DuctPressure, DuctRadiationSpec, DuctView};
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
