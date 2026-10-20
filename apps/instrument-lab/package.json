@@ -9,7 +9,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "data": "uv run --with numpy --with pillow python tools/build_data.py"
+    "data": "uv run --with numpy --with pillow python tools/build_data.py",
+    "data:instruments": "uv run --with numpy --with pillow python tools/build_instruments.py"
   },
   "devDependencies": {
     "@types/three": "^0.186.0",
