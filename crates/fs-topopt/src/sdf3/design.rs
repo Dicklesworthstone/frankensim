@@ -95,7 +95,7 @@ fn row(
 // proportional to r^q/(e_min+(1-e_min)r^p). Below this turning point it decreases
 // when material is removed, because the ersatz floor carries the load. Such a
 // branch cannot be admitted as a strength-constrained minimum-volume design.
-fn monotone_stress_branch(r: f64, params: SimpParams, q: f64) -> bool {
+pub(super) fn monotone_stress_branch(r: f64, params: SimpParams, q: f64) -> bool {
     let turnover_power = q * params.e_min / ((params.penal - q) * (1.0 - params.e_min));
     r.is_finite() && r > 0.0 && fs_math::det::pow(r, params.penal) > turnover_power
 }

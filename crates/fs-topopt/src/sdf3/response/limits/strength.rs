@@ -10,6 +10,8 @@ use crate::pipeline::LoadCase;
 use crate::sdf3::stress::{self as stress_owner, StressError3, StressEvaluation3,
     StressMeasure3, StressOptions3};
 
+pub mod design;
+
 /// Explicit reference-model policy. Stress always uses SampledPeakBound,
 /// including every declared experiment; a normalized average is NOT a cap on
 /// each sample. The stress p-norm and outer log-sum-exp both add conservatism.

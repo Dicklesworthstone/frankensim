@@ -169,3 +169,5 @@ fn g3_both_components_honor_the_same_protected_material_regions() {
     assert_eq!(a.response.projected_rho,a.stress.projected_rho);
     let b=s.evaluate_response_stress_limits(&rho,&cases,Default::default(),&mut c).unwrap();same(&a,&b);
 }
+
+mod design;

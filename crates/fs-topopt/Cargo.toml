@@ -182,3 +182,7 @@ required-features = ["newton-design"]
 [[test]]
 name = "load_case_newton"
 required-features = ["newton-design"]
+
+[[example]]
+name = "response_stress_sdf3"
+required-features = ["cutfem-marquee"]
