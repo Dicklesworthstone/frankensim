@@ -167,3 +167,6 @@ mod connections;
 
 #[path = "shell/pressure.rs"]
 mod pressure;
+
+#[path = "shell/assembly.rs"]
+mod assembly;

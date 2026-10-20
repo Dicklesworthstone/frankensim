@@ -20,6 +20,8 @@ use fs_qty::{Density, DynViscosity, Pressure};
 
 /// Ordered material-interface compliance on physical shell attachments.
 pub mod connections;
+/// Source-bound component surfaces joined by the original shell mortar owner.
+pub mod assembly;
 /// Independently owned exterior and cavity pressure boundaries.
 pub mod pressure;
 mod reduction;

@@ -3424,3 +3424,29 @@ mechanical displacement, local plastic history through unloading, source
 identity and context continuity, physical versus numerical heat, and G4 atomic
 source-domain refusal. These synthetic numerical fixtures do not extend the
 existing small-strain, fixed-density, fixed-geometry, single-solid model.
+
+## Assembled material shell bodies in the reciprocal string bank
+
+`shear_shell::assembly::MaterialShellAssembly` joins independently sourced
+component midsurfaces through the original shell mortar owner. Complete
+component stiffness and mass are tied before one shared eigensolve; no part
+is independently truncated or fitted to a desired body spectrum. Each mode
+is recovered through the original component support/director mapping. Physical
+bridge forces, full tensor viscosity, source-bound interface damping and the
+independently selected exterior/cavity pressure rows use this same basis.
+
+`ReciprocalStringBank::from_material_shell_assembly` retains the original
+parts, material records, ties, physical ports and projected image in the
+existing bank. All strings share one body and optional Helmholtz cavity.
+Changing one component's material recomputes its actual mass, stiffness, loss
+and thickness-dependent tie geometry while keeping the other sources intact.
+Internal parts must explicitly select empty fluid surfaces when appropriate.
+
+Current junction admission requires global support frames and refuses
+prescribed slave coordinates that the original mortar elimination cannot
+compose. Rigid ties do not provide compliant glue, assembled prestress or
+nonlinear contact. Pressure remains the inherited compact observer and single
+Helmholtz closure; a closed skin or resolved interior/exterior air is not
+inferred. Focused regression sources cover common modes and work, independent
+fluid roles, full summed viscous cross terms, material substitution and original
+performer retention. Their native numerical execution remains required.

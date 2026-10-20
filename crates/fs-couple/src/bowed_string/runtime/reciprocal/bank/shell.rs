@@ -11,6 +11,8 @@ use super::*;
 use super::plate::{SharedPlateBridge, material_body_preflight, finish_material_body_with_ports};
 use super::super::plate::{MaterialBodyCavity, reduce_radiating_body, validate_body_medium};
 use crate::shear_shell::{ResolvedShearShell, ShellProjectionBudget, ShellReductionOptions};
+use crate::shear_shell::assembly::{MaterialShellAssembly, ShellAssemblyForcePort,
+    ShellAssemblyReductionOptions};
 use fs_plate::shell::mitc::{MitcBudget, NodalDirectors, ShellConstraint, ShellMass};
 
 /// Complete source-bound curved body and physical connection geometry.
@@ -45,7 +47,83 @@ pub struct SharedMaterialShellBody {
     /// Compact baffled monopole listener distance [m].
     pub listener_m: f64,
 }
+
+/// Separate material component surfaces joined before a common body eigensolve.
+/// Every string, cavity and observer receives the SAME assembled modal basis.
+#[derive(Clone, Debug)]
+pub struct SharedMaterialShellAssemblyBody {
+    /// Original material parts, global supports, directors, seams and fluid roles.
+    pub specimen: MaterialShellAssembly,
+    /// Whole-body spectral slice and cumulative geometry/projection limits.
+    pub reduction: ShellAssemblyReductionOptions,
+    /// Exactly one physical force/moment footprint per string; a footprint may
+    /// act on several parts and is never replaced by a normalized fitted gain.
+    pub force_ports: Vec<ShellAssemblyForcePort>,
+    /// One physical string/body attachment law in original string order.
+    pub bridges: Vec<SharedPlateBridge>,
+    /// Original body time-domain discretization/admission.
+    pub modal_budget: ModalAcousticTimeBudget,
+    /// Physical compact exterior listener distance [m].
+    pub listener_m: f64,
+}
 impl ReciprocalStringBank {
+    /// Connect every material string to one complete, tied material shell body.
+    /// Component stiffness/mass are assembled before any modal truncation, and
+    /// all bulk/interface loss, pressure and force maps use that common basis.
+    /// One cavity compression law sees the sum of its authored wall-volume rows.
+    ///
+    /// This retains the original reciprocal bow, sympathetic strings, torsion,
+    /// gas loading and scheduled performance. It is an unloaded linear assembly
+    /// with explicit rigid seams, a compact observer and optional uniform air;
+    /// it does not claim prestressed anatomy or measured instrument accuracy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_material_shell_assembly(
+        cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
+        body: SharedMaterialShellAssemblyBody, cavity: Option<MaterialBodyCavity>,
+        law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        poll(gate)?;
+        let string_modes = material_body_preflight(&sources, &body.bridges,
+            body.reduction.n_modes, cavity.as_ref(), &options, gate)?;
+        if body.force_ports.len() != sources.len() {
+            return Err(invalid("material shell assembly needs one original force footprint per string"));
+        }
+        let has_loss = body.specimen.components.iter().any(|part|
+            part.specimen.regions().iter().any(|r| !r.viscosity().is_zero()));
+        let interfaces = body.specimen.components.iter().map(|part|
+            part.specimen.interfaces().iter().filter(|i| i.law().damping_n_s_m != 0.0).count())
+            .try_fold(0usize, usize::checked_add)
+            .ok_or_else(|| invalid("shell assembly interface connection extent overflow"))?;
+        let cavity_connections = cavity.as_ref().map_or(0, |c|
+            1 + usize::from(c.cavity.resistance_pa_s_m3() != 0.0));
+        let connections = sources.len().checked_add(if has_loss { body.reduction.n_modes } else { 0 })
+            .and_then(|n| n.checked_add(interfaces))
+            .and_then(|n| n.checked_add(cavity_connections))
+            .ok_or_else(|| invalid("shell assembly connection extent overflow"))?;
+        if connections > options.network.max_connections || connections > MAX_MODAL_CONNECTIONS {
+            return Err(invalid("shell assembly loss, bridges and cavity exceed connection allowance"));
+        }
+        validate_body_medium(&gas, options.sample_rate_hz, body.modal_budget,
+            body.listener_m, cavity.as_ref())?;
+        cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
+            crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
+        let projected = body.specimen.reduce(&body.reduction, &body.force_ports, gate)?;
+        cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
+            crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
+        let mut image = reduce_radiating_body(projected.radiators(), &gas,
+            options.sample_rate_hz, body.modal_budget, body.listener_m, cavity.as_ref(),
+            Some(projected.cavity_volume_shapes_m2_per_sqrt_kg()), gate)?;
+        image.connections.extend(projected.damping().connections(0));
+        image.connections.extend(projected.interface_damping_connections(0));
+        let mut bank = finish_material_body_with_ports(cx, sources, &body.bridges,
+            Some(projected.force_ports()), string_modes, gas, image, law, options, gate)?;
+        bank.source.material_shell_assembly = Some(body);
+        bank.source.material_shell_assembly_image = Some(projected);
+        bank.source.material_cavity = cavity;
+        poll(gate)?;
+        Ok(bank)
+    }
+
     /// Compile true curved shear-deformable shell mechanics into the existing
     /// all-string/body/friction/cavity network. Material swaps replace actual
     /// element density, membrane/bending/shear stiffness and full viscous C.

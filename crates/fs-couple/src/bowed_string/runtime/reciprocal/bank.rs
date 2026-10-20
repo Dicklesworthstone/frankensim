@@ -126,6 +126,8 @@ pub struct MaterialStringBankSource {
     material_chart_bridges: Option<chart::PlateBridgeFootprints>,
     material_shell: Option<shell::SharedMaterialShellBody>,
     material_shell_image: Option<crate::shear_shell::MaterialShellImage>,
+    material_shell_assembly: Option<shell::SharedMaterialShellAssemblyBody>,
+    material_shell_assembly_image: Option<crate::shear_shell::assembly::MaterialShellAssemblyImage>,
     material_cavity: Option<super::plate::MaterialBodyCavity>,
 }
 impl MaterialStringBankSource {
@@ -172,6 +174,18 @@ impl MaterialStringBankSource {
     #[must_use]
     pub const fn material_shell_image(&self) -> Option<&crate::shear_shell::MaterialShellImage> {
         self.material_shell_image.as_ref()
+    }
+    /// Complete material parts, ties and physical ports before body reduction.
+    #[must_use]
+    pub const fn material_shell_assembly(&self) -> Option<&shell::SharedMaterialShellAssemblyBody> {
+        self.material_shell_assembly.as_ref()
+    }
+    /// Shared assembled basis for all strings, material losses and fluid rows.
+    #[must_use]
+    pub const fn material_shell_assembly_image(&self)
+        -> Option<&crate::shear_shell::assembly::MaterialShellAssemblyImage>
+    {
+        self.material_shell_assembly_image.as_ref()
     }
     /// Original body-air law, geometry, gas and observer, when supplied.
     #[must_use]
@@ -233,7 +247,7 @@ impl ReciprocalStringBank {
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, prepared_linear: None, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_cavity: None }, cards, system })
+        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, prepared_linear: None, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None }, cards, system })
     }
 
     /// Select bounded cold exact propagation before playback or before adding
