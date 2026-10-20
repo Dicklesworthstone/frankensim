@@ -4,6 +4,9 @@
 //! piston owns the translational constraint and thermal/momentum time step.
 //! Binding them does not create a second mass calculator or rigid-body solver.
 
+/// Shared-state multiport flow with the original source-resolved wall inertias.
+pub mod graph;
+
 use super::{ClosedGasParcel, GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_mbd_material::ResolvedBody;
 use super::thermal::{ConductanceSample, HeatExchangeSolve, ThermalPistonError};
