@@ -37,6 +37,11 @@
 //! renders authored reed primitives, segmented ducts and pressure phrases.
 //! See `examples/REED_PERFORMANCES.md`; the legacy `reed` fixture is unchanged.
 //!
+//! `music_render voice INPUT.performance OUT.wav [--block N]` plays a lumped
+//! glottal source into a tract area function and writes the pressure at a
+//! baffled microphone. The file owns every physical input; see
+//! `fs_couple::voice_performance` for the format and its stated limits.
+//!
 //! `--schedule performance.gesture` loads the existing canonical
 //! `GestureSchedule` format. The reed fixture accepts exactly one explicitly
 //! typed blowing-pressure track, bound to voice zero. A new command interrupts
@@ -79,6 +84,8 @@ mod wind_input;
 mod modal_input;
 #[path = "music_render/plate_input.rs"]
 mod plate_input;
+#[path = "music_render/voice_input.rs"]
+mod voice_input;
 #[path = "music_render/stream_output.rs"]
 mod stream_output;
 #[path = "music_render/ensemble_input.rs"]
@@ -345,6 +352,11 @@ fn main() {
     if args.first().is_some_and(|arg| arg == "modal") {
         if gas_registry.is_some() || gas_options.record.is_some() { fail("modal input has no gas consumer"); }
         modal_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
+        return;
+    }
+    if args.first().is_some_and(|arg| arg == "voice") {
+        if gas_registry.is_some() || gas_options.record.is_some() { fail("voice input declares its own ambient gas"); }
+        voice_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
         return;
     }
     let mut positional = Vec::new();

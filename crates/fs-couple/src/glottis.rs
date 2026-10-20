@@ -33,7 +33,7 @@ use fs_dcontact::{DContactError, Obstacle};
 use fs_duct::{Duct, Termination};
 use fs_material::gas::GasState;
 use fs_math::det;
-use fs_phs::{PhsError, PortHamiltonian, mass_spring_damper};
+use fs_phs::{PhsError, PortHamiltonian, WallPin, mass_spring_damper};
 use fs_vfit::discretize::DelayedFilter;
 
 /// Where a fold card's numbers came from.
@@ -249,6 +249,24 @@ impl GlottalIsland {
         termination: Termination,
         sample_rate_hz: u32,
     ) -> Result<Self, GlottisError> {
+        Self::new_with_wall(card, two_mass, tract, gas, termination, sample_rate_hz, None)
+    }
+
+    /// [`GlottalIsland::new`] with an optional yielding tract wall, so the
+    /// characteristic line sees the same wall admittance as any other
+    /// observer of the tract (`None` is the rigid-wall line of `new`).
+    ///
+    /// # Errors
+    /// As [`GlottalIsland::new`].
+    pub fn new_with_wall(
+        card: FoldCard,
+        two_mass: bool,
+        tract: &Duct,
+        gas: &GasState,
+        termination: Termination,
+        sample_rate_hz: u32,
+        wall: Option<&WallPin>,
+    ) -> Result<Self, GlottisError> {
         card.validate()?;
         let inlet_r = tract
             .segments
@@ -279,7 +297,7 @@ impl GlottalIsland {
             zc_flow, // VOLUME-normalized zc (rho c / S) — input_impedance
             // returns volume impedance; the specific rho*c here
             // flattened R toward +1 (found via the tract lane)
-            None,
+            wall,
         )?;
         let valve = if two_mass {
             // The S-H rest state is an UNSTABLE equilibrium whose
@@ -333,6 +351,22 @@ impl GlottalIsland {
                 mucosal_delay.max(1)
             ]),
         })
+    }
+
+    /// Wave incident on the tract during the last `step`, referenced to
+    /// [`GlottalIsland::port_impedance`] (`p_supra = p+ + p-`,
+    /// `U = (p+ - p-) / Zc`). Any other linear observer of the same tract
+    /// (flow at its mouth) is a causal filter of this one signal.
+    #[must_use]
+    pub fn incident_wave_pa(&self) -> f64 {
+        self.p_plus_prev
+    }
+
+    /// Volume-normalized port impedance `rho c / S` [Pa s/m^3] the tract line
+    /// is referenced to.
+    #[must_use]
+    pub fn port_impedance(&self) -> f64 {
+        self.zc_flow
     }
 
     /// The effective aperture gap [m].

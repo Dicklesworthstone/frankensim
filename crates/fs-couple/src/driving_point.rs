@@ -7,6 +7,8 @@
 pub mod regional;
 /// Explicitly terminated generic acoustic-network frequency-domain ports.
 pub mod network;
+/// Mouth volume flow of a duct from the wave incident on its inlet.
+pub mod outlet;
 
 use fs_duct::compose::input_reflection_wall;
 use fs_duct::{

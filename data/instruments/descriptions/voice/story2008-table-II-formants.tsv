@@ -1,0 +1,17 @@
+# Story, B. H. (2008). Comparison of magnetic resonance imaging-based vocal tract area functions obtained from the same speaker in 1994 and 2002. J. Acoust. Soc. Am. 123(1):327-335, doi:10.1121/1.2805683; author manuscript PMC2377017.
+# Table II. Fo [Hz]; measured formants F1N-F3N [Hz] (mean +- sd over several seconds of the
+# speaker's long sustained vowels, recorded supine, AKG CK92 at 30 cm and 45 degrees off axis,
+# 44.1 kHz); calculated formants F1C-F3C [Hz] from the area functions by the paper's own
+# frequency-domain model (yielding walls, viscosity, heat conduction, radiation); D1-D3 are the
+# paper's percent errors of the calculation. Parsed from the PMC HTML table.
+	i	ɪ	e	ε	æ	ʌ	ɑ	ɔ	o	ʊ	u
+Fo	159	154	149	154	153	155	154	154	155	156	155
+F1N Sd	295±17	478±9	509±10	659±15	765±15	752±13	715±9	665±19	563±9	518±8	430±5
+F2N Sd	1923±28	1965±11	1917±10	1740±26	1724±22	1300±23	1180±31	932±12	835±30	947±13	917±14
+F3N Sd	2797±60	2688±27	2617±42	2485±69	2501±59	2698±33	2691±21	2814±54	2637±26	2355±30	2087±14
+F1C	325	413	484	565	810	593	694	557	499	477	314
+F2C	2139	2103	1887	1595	1655	836	942	709	768	789	702
+F3C	2976	2626	2404	2200	2310	3099	2948	3176	2421	2499	2298
+Δ1	10.0	−13.6	−4.9	−14.3	5.8	−21.1	−3.0	−16.2	−11.3	−7.9	−27.1
+Δ2	11.2	7.0	−1.6	−8.3	−4.0	−35.7	−20.2	−23.9	−8.0	−16.7	−23.5
+Δ3	6.4	−2.3	−8.1	−11.5	−7.6	14.9	9.6	12.9	−8.2	6.1	10.1

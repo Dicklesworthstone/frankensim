@@ -79,6 +79,8 @@ pub mod thin_plate;
 /// Material-bound curved shear shells with shared mechanical and pressure ports.
 pub mod shear_shell;
 pub mod tract;
+/// Data-driven glottal source plus tract area function, observed at a baffled microphone.
+pub mod voice_performance;
 // TOMBSTONE-3ez8g.13.5: dead module, deny new consumers (see its header).
 pub mod traveling_wave_line;
 pub mod unilateral_contact;
