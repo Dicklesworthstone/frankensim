@@ -42,6 +42,9 @@ use fs_exec::CancelGate;
 use super::sparse::{SparseError3, SparseGrid3, demorton3, morton3};
 use super::{CollisionError3, E3, OPP3, Q3, TILE, equilibrium3};
 
+mod initial;
+pub use initial::FreeSurfaceInitialCell3;
+
 /// D3Q19 lattice speed of sound squared.
 const CS2_3: f64 = 1.0 / 3.0;
 
@@ -148,6 +151,14 @@ pub enum FreeSurfaceError3 {
     NoFluid,
     /// The imposed angle or its finite-difference ghost slope is inadmissible.
     InvalidContactAngle,
+    /// Initial liquid state cannot be represented without changing its mass
+    /// or physical velocity. No candidate is published on this refusal.
+    InvalidInitialState {
+        /// Offending cell, if the refusal concerns one supplied cell.
+        coordinates: Option<[usize; 3]>,
+        /// Failed admission condition.
+        reason: &'static str,
+    },
     /// Cancellation was observed before physical state publication.
     Cancelled,
 }
@@ -168,6 +179,9 @@ impl core::fmt::Display for FreeSurfaceError3 {
             FreeSurfaceError3::InvalidContactAngle => f.write_str(
                 "contact angle must lie in (0, pi) radians with a representable wall slope",
             ),
+            FreeSurfaceError3::InvalidInitialState { coordinates, reason } => {
+                write!(f, "free-surface initial state at {coordinates:?} refused: {reason}")
+            }
             FreeSurfaceError3::Cancelled => {
                 f.write_str("free-surface step cancelled before publication")
             }

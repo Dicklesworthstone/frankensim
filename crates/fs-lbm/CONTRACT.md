@@ -1814,3 +1814,25 @@ model: gravitational/kinetic storage, pressure/viscous heat, phase mobility and
 free surfaces remain outside this path. G1/G3 source-density swap regressions
 exercise a heated porous column without a fan and independent Darcy/heat
 balances. G4 endpoint-bound and binding refusals preserve accepted history.
+
+
+### Conservative initial fill and physical velocity
+
+`FreeSurface3::from_cells` and
+`MaterialFreeSurfaceScaling::free_surface3_from_cells` initialize the original
+sparse VOF from supplied cell fills and physical velocities. They preserve
+initial mass and Guo-corrected momentum to floating-point tolerance instead of
+creating a half-filled resting shell. Full wet boundary cells retain fill one;
+fractional interior cells remain interfaces. Deterministic Morton/lane
+initialization refuses duplicate, invalid, out-of-domain or wall cells. The SI
+adapter retains the original sourced rho/mu/sigma and planar-wetting binding,
+uses reference density one, and checks the admitted speed and domain budgets.
+
+Construction uses the same `Cx` and returns a new candidate; it never resets an
+accepted trajectory. Positive populations and finite conserved moments are
+necessary admission checks, not a stability certificate. Equilibrium population
+projection does not transfer non-equilibrium stress, subcell moments or caloric
+state, and does not establish subsequent momentum or surface-energy conservation.
+The focused material-free-surface regressions exercise material substitution,
+Guo velocity, exact initial fill, order independence, a native step, and refusal
+and cancellation. Their presence does not imply an executed native test pass.

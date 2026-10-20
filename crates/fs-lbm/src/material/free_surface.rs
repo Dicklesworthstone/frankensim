@@ -17,6 +17,9 @@ use crate::d3q19::sparse::MORTON_COORD_BITS;
 use crate::d3q19::{Q3, TILE};
 use crate::{CS2, ScalingPlan};
 
+mod initial;
+pub use initial::MaterialFreeSurfaceInitialCell3;
+
 /// One frozen source state and its physical-to-lattice conversion.
 ///
 /// A necessary numerical admission, not a stability or accuracy certificate.

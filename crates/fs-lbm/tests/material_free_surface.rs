@@ -71,6 +71,93 @@ fn drop(x: usize, y: usize, z: usize) -> bool {
     d.iter().map(|v| v * v).sum::<f64>() <= 3.5 * 3.5
 }
 
+fn with_cx<T>(gate: &fs_exec::CancelGate, f: impl FnOnce(&fs_exec::Cx<'_>) -> T) -> T {
+    use fs_alloc::{ArenaConfig, ArenaPool};
+    use fs_exec::{Budget, Cx, ExecMode, StreamKey};
+    ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+        f(&Cx::new(gate, arena, StreamKey { seed: 41, kernel_id: 27, tile: 0, iteration: 0 },
+            Budget::INFINITE, ExecMode::Deterministic))
+    })
+}
+
+#[test]
+fn transferred_fill_and_velocity_preserve_mass_and_momentum_with_material_substitution() {
+    use fs_lbm::material::free_surface::MaterialFreeSurfaceInitialCell3;
+    let initial = [
+        MaterialFreeSurfaceInitialCell3 {
+            coordinates: [6, 6, 6], fill_fraction: 1.0, velocity_m_s: [0.03, -0.02, 0.01],
+        },
+        MaterialFreeSurfaceInitialCell3 {
+            coordinates: [7, 6, 6], fill_fraction: 0.25, velocity_m_s: [-0.01, 0.02, 0.0],
+        },
+        MaterialFreeSurfaceInitialCell3 {
+            coordinates: [6, 7, 6], fill_fraction: 0.6, velocity_m_s: [0.01, 0.0, -0.02],
+        },
+    ];
+    let gate = fs_exec::CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let mut bits = None;
+        for rho in [1_000.0, 2_000.0] {
+            let source = liquid(rho, rho * 0.0001, None);
+            let mut flow = plan(&source).free_surface3_from_cells(domain(), &initial, cx).unwrap();
+            let mass_unit = rho * 1e-9;
+            near(flow.ledger_mass_kg().unwrap(), 1.85 * mass_unit, 2e-14);
+            assert_eq!(flow.carry_mass_kg().unwrap(), 0.0);
+            let mut momentum = [0.0; 3];
+            let mut expected = [0.0; 3];
+            for cell in initial {
+                let [x, y, z] = cell.coordinates;
+                let sample = flow.sample_at_si(x, y, z).unwrap().unwrap();
+                near(sample.fill_fraction, cell.fill_fraction, 2e-14);
+                for axis in 0..3 {
+                    assert!((sample.velocity_m_s[axis] - cell.velocity_m_s[axis]).abs() < 2e-16);
+                    momentum[axis] += sample.density_kg_m3 * 1e-9
+                        * sample.fill_fraction * sample.velocity_m_s[axis];
+                    expected[axis] += mass_unit * cell.fill_fraction * cell.velocity_m_s[axis];
+                }
+            }
+            for axis in 0..3 { near(momentum[axis], expected[axis], 3e-13); }
+            let mut reversed = initial;
+            reversed.reverse();
+            let reordered = plan(&source).free_surface3_from_cells(domain(), &reversed, cx).unwrap();
+            assert_eq!(flow.lattice().grid().state_bits(), reordered.lattice().grid().state_bits());
+            if let Some(previous) = &bits { assert_eq!(&flow.lattice().grid().state_bits(), previous); }
+            bits = Some(flow.lattice().grid().state_bits());
+            let before = flow.ledger_mass_kg().unwrap();
+            flow.step().unwrap();
+            near(flow.ledger_mass_kg().unwrap(), before, 2e-12);
+        }
+    });
+}
+
+#[test]
+fn transferred_state_refuses_duplicate_wall_bad_fill_speed_and_cancelled_candidates() {
+    use fs_lbm::d3q19::freesurface3::FreeSurfaceError3;
+    use fs_lbm::material::MaterialLbmError;
+    use fs_lbm::material::free_surface::MaterialFreeSurfaceInitialCell3;
+    let source = liquid(1_000.0, 0.1, None);
+    let cell = MaterialFreeSurfaceInitialCell3 {
+        coordinates: [6, 6, 6], fill_fraction: 0.7, velocity_m_s: [0.03, 0.0, 0.0],
+    };
+    let gate = fs_exec::CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        assert!(plan(&source).free_surface3_from_cells(domain(), &[cell, cell], cx).is_err());
+        let wall = MaterialFreeSurfaceDomain3 { solid_tiles: &[(1, 1, 1)], ..domain() };
+        assert!(plan(&source).free_surface3_from_cells(wall, &[cell], cx).is_err());
+        for fill_fraction in [0.0, -0.1, 1.1, f64::NAN] {
+            let invalid = MaterialFreeSurfaceInitialCell3 { fill_fraction, ..cell };
+            assert!(plan(&source).free_surface3_from_cells(domain(), &[invalid], cx).is_err());
+        }
+        let too_fast = MaterialFreeSurfaceInitialCell3 { velocity_m_s: [0.101, 0.0, 0.0], ..cell };
+        assert!(plan(&source).free_surface3_from_cells(domain(), &[too_fast], cx).is_err());
+    });
+    gate.request();
+    with_cx(&gate, |cx| {
+        assert!(matches!(plan(&source).free_surface3_from_cells(domain(), &[cell], cx),
+            Err(MaterialLbmError::FreeSurface(FreeSurfaceError3::Cancelled))));
+    });
+}
+
 #[test]
 fn free_surface_shares_momentum_scaling_and_preserves_laplace_units() {
     let state = liquid(1_000.0, 0.1, Some(0.01));
