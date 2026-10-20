@@ -5,10 +5,11 @@ use crate::bernoulli_aperture::radiation::environment::multiport::{
 use crate::flue_loop::network::performance::{
     FlueOutletConfig, FlueOutletPerformance, FlueRadiatingOutlet, FlueRadiationInput,
 };
+use crate::pcm_wav::baffled::CircularOutletReceiver;
+use crate::pcm_wav::baffled::openings::CircularOpening;
 use crate::pcm_wav::baffled::openings::duct::{
     DuctOpening, DuctPressure, DuctRadiationSpec, DuctReconstruction, DuctView,
 };
-use crate::pcm_wav::baffled::{CircularOpening, CircularOutletReceiver};
 use crate::pcm_wav::observation::PressureRenderer;
 use fs_math::c64::C64;
 use fs_scenario::gesture::{GestureSchedule, GestureTarget, GestureTrack, GestureValue};
