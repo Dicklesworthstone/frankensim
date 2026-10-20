@@ -62,7 +62,7 @@ pub fn total_degree_basis_size(dim: usize, degree: usize) -> Option<usize> {
 /// Work is proportional to the output size, not the enclosing (p + 1)^d
 /// Cartesian grid. The iterative successor also avoids a dimension-deep
 /// recursion stack and a final sort.
-fn total_degree_indices(d: usize, p: usize) -> Vec<Vec<usize>> {
+pub(crate) fn total_degree_indices(d: usize, p: usize) -> Vec<Vec<usize>> {
     let count = total_degree_basis_size(d, p).expect("PCE basis size overflow");
     let mut out = Vec::with_capacity(count);
     let mut idx = vec![0usize; d];
@@ -91,6 +91,7 @@ fn total_degree_indices(d: usize, p: usize) -> Vec<Vec<usize>> {
 }
 
 /// A fitted PCE surrogate.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PceModel {
     /// Basis multi-indices (graded-lex).
     pub indices: Vec<Vec<usize>>,
