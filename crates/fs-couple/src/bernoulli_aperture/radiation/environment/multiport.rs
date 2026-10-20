@@ -5,6 +5,9 @@
 //! a pressure signal or promote a sampled passivity check into certification.
 //! The first observation binding is the existing coplanar baffled receiver.
 
+/// Bounded native source-artifact admission shared by wind instrument loaders.
+pub mod input;
+
 use super::{invalid, poll};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec};

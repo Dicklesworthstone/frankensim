@@ -2747,6 +2747,27 @@ cross-side mutual radiation. The sampled passivity report remains GridOnly;
 this path does not promote observation to Acceptance or close M2.5-W3c's
 full-band bake, clock-refinement and closed-loop qualification requirements.
 
+Native flute and material-modal files now select original radiation artifacts
+through one bounded `multiport::input` decoder and their existing performers.
+The artifact independently encodes its exterior, ordered aperture basis,
+physical band and full pole/residue/direct matrices. Exact imported-byte hashes
+remain distinct from declared geometry/material and realization identities;
+import retains those declarations without attesting an offline bake. A
+thermochemical exterior additionally binds the original canonical species,
+NASA-9 and transport pack hashes and all twelve resolved gas-state fields by
+bits. Replacing a registry pack under the same species id, changing a snapshot
+or relabeling coefficients with the current caller gas cannot silently pass.
+The existing runtime owns stability, reciprocity, properness, full source-clock
+band, passivity, resource and geometry admission. Selected groups replace only
+their observed memoryless endpoints. Unselected outlets/sides retain authored
+loads, material/gas histories and losses; side groups have no cross-side
+exterior coupling. Both source callbacks and CLI artifact reads are bounded,
+legacy selectors are preserved, and failures precede performer/output
+publication. This adds no fitting engine or instrument qualification. Grammar,
+source scope and synthetic integration fixtures are in
+`examples/MIMO_RADIATION_ARTIFACTS.md`; native execution of their new regression
+sources remains required.
+
 G1/G2 analytic tests in `baffled_pressure_qualification.rs` check on-axis piston
 pressure at z/a=2,10,100 and signed 2J1(x)/x directivity at ka=0.5,2,5 within
 1e-3, with radial/angular refinement. The on-axis fixture uses a=25 mm to

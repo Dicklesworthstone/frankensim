@@ -3,9 +3,9 @@
 //! The versioned source selects existing owners, including fractional travel,
 //! optional gas-derived wide-tube loss, material wall motion, terminal reaction,
 //! and the multirate Rayleigh receiver. Every physical selection is source data.
-//! The local isotropic wall and compact independent baffled-load images retain
-//! their original limits; this is not a measured Boehm flute, full shell model,
-//! resolved turbulent jet or broadband unbaffled radiation qualification.
+//! Local isotropic walls, compact baffled loads and supplied mutual-radiation
+//! operators retain their original limits; this is not a measured Boehm flute,
+//! full shell model, resolved turbulent jet or broadband unbaffled qualification.
 
 use super::{FlueOutletConfig, FlueOutletPerformance, FlueRadiationInput};
 use crate::bernoulli_aperture::fractional::FractionalTubePolicy;
@@ -13,6 +13,9 @@ use crate::bernoulli_aperture::contraction::ContractionSpec;
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
 use crate::bernoulli_aperture::viscothermal::ViscothermalSectionSpec;
 use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
+use crate::bernoulli_aperture::radiation::environment::multiport::input::{
+    MimoRadiationInput, MimoRadiationInputError, MimoRadiationRecord,
+};
 use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice, network::FlueNetworkSpec};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::openings::duct::{
@@ -59,6 +62,10 @@ pub enum FlueInputError {
     Material { /// One-based material declaration line.
         line: usize, /// Original material owner's refusal.
         source: fs_material::state_point::MaterialStatePointError },
+    /// Explicit mutual-radiation artifact loading or shared decoder refusal.
+    RadiationSource { /// One-based radiation selection line.
+        line: usize, /// Original source, gas, format or resource refusal.
+        source: MimoRadiationInputError },
     /// Original jet-card schema or authority refusal.
     Card { /// One-based card line.
         line: usize, /// Shared source-card error.
@@ -75,6 +82,7 @@ impl core::fmt::Display for FlueInputError {
             Self::Gas { line, source } => write!(f, "flue gas line {line}: {source}"),
             Self::MaterialSource { line, source } => write!(f, "flue material source line {line}: {source}"),
             Self::Material { line, source } => write!(f, "flue material line {line}: {source}"),
+            Self::RadiationSource { line, source } => write!(f, "flue radiation source line {line}: {source}"),
             Self::Card { line, source } => write!(f, "flue card line {line}: {source}"),
             Self::Physics(source) => write!(f, "flue physics: {source}"),
             Self::Performance(source) => write!(f, "flue performance: {source}"),
@@ -118,6 +126,7 @@ pub struct FlueFilePerformance {
     wall_records: Vec<FlueWallRecord>,
     boundary_records: Vec<FlueBoundaryRecord>,
     radiation_bindings: Vec<BaffledOutletBinding>,
+    mimo_radiation_record: Option<MimoRadiationRecord>,
 }
 impl FlueFilePerformance {
     /// Parse the fixed-order source shown in `examples/flue.performance`.
@@ -194,7 +203,13 @@ impl FlueFilePerformance {
     /// An optional `radiation prescribed` or `radiation compact-baffled` row then
     /// selects whether every observed outlet retains its supplied load or receives
     /// the existing compact passive load in the same exterior as the receiver.
-    /// Preexisting reactive loads refuse replacement. No mutual reaction is added.
+    /// `radiation mimo ARTIFACT MAX_STATES MAX_MEMORY_BYTES PASSIVITY_POINTS`
+    /// instead loads one explicit reciprocal rational operator for all declared
+    /// outlets, in their original order. The shared artifact decoder retains its
+    /// independently declared gas, geometry, identities and band; these must
+    /// agree with the actual receiver and cover the mechanical Nyquist frequency.
+    /// Preexisting reactive loads refuse replacement. Mutual feedback uses the
+    /// existing terminal owner and does not fit or rescale the supplied operator.
     ///
     /// The original jet card keeps its own narrow lab scope. The complete
     /// authored composition remains EstimateOnly, including outside-card
@@ -232,7 +247,25 @@ impl FlueFilePerformance {
     /// The complete file remains an estimated composition of the stated images.
     pub fn from_bytes_with_sources(bytes: &[u8], max_block: usize, gate: &CancelGate,
         sources: Option<&ThermochemicalSources<'_>>,
-        mut load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>)
+        load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>)
+        -> Result<Self, FlueInputError>
+    {
+        Self::from_bytes_with_all_sources(bytes, max_block, gate, sources, load_material,
+            |_| Err("MIMO radiation artifacts require an explicit source loader".into()))
+    }
+
+    /// The same native performance with explicitly supplied radiation artifacts.
+    /// Both loaders resolve paths relative to this performance's source directory;
+    /// the library performs no filesystem I/O. The common MIMO decoder resolves
+    /// its own gas record using the same optional thermochemical registry. A
+    /// changed atmosphere requires a matching supplied operator; stale artifacts
+    /// refuse instead of silently replacing their baked gas or coefficients.
+    /// Walls, moving boundaries, mouth laws, controls and receiver clocks remain
+    /// in their original owners. Omitting the MIMO selector never calls its loader.
+    pub fn from_bytes_with_all_sources(bytes: &[u8], max_block: usize, gate: &CancelGate,
+        sources: Option<&ThermochemicalSources<'_>>,
+        mut load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+        mut load_radiation: impl FnMut(&str) -> Result<Vec<u8>, String>)
         -> Result<Self, FlueInputError>
     {
         poll(gate)?;
@@ -276,13 +309,21 @@ impl FlueFilePerformance {
         let mut duct = duct::Input::read(&mut rows, gas, sources, &mut gas_records, gate)?;
         let walls = wall::ParsedWalls::read(&mut rows)?;
         let boundaries = boundary::ParsedBoundaries::read(&mut rows)?;
-        let radiation_reaction = if rows.next_is("radiation") {
-            match rows.record("radiation")? {
-                "prescribed" => false,
-                "compact-baffled" => true,
-                _ => return Err(bad(rows.line, "radiation requires prescribed or compact-baffled")),
+        let (radiation_reaction, mimo_input) = if rows.next_is("radiation") {
+            let record = rows.record("radiation")?;
+            match record {
+                "prescribed" => (false, None),
+                "compact-baffled" => (true, None),
+                _ => {
+                    let Some(("mimo", arguments)) = record.split_once(char::is_whitespace) else {
+                        return Err(bad(rows.line, "radiation requires prescribed, compact-baffled or mimo ARTIFACT MAX_STATES MAX_MEMORY_BYTES PASSIVITY_POINTS"));
+                    };
+                    let input = MimoRadiationInput::parse(arguments)
+                        .map_err(|source| FlueInputError::RadiationSource { line: rows.line, source })?;
+                    (false, Some((rows.line, input)))
+                }
             }
-        } else { false };
+        } else { (false, None) };
         let inlet = duct.graph.inlet_section_index().map_err(|source|
             FlueInputError::Physics(FlueError::Physics(source)))?;
         let radius_m = duct.graph.sections[inlet].radius_m;
@@ -387,19 +428,21 @@ impl FlueFilePerformance {
             None => (None, Vec::new()),
         };
         poll(gate)?;
-        let (voice, radiation_bindings) = if radiation_reaction {
+        let radiation = || {
             let mut openings = vec![DuctOpening { network: 0, node: outlet_node, center_m: [0.0; 2] }];
             openings.extend(additional_outlets.iter().map(|outlet| DuctOpening {
                 network: 0, node: outlet.node, center_m: outlet.center_m,
             }));
-            let radiation = DuctRadiationSpec { openings, exterior: Some(exterior), receiver,
+            DuctRadiationSpec { openings, exterior: Some(exterior), receiver,
                 reconstruction: DuctReconstruction::Differentiating {
                     mechanics_rate_hz, output_rate_hz: sample_rate_hz,
                 },
-            };
+            }
+        };
+        let (voice, radiation_bindings) = if radiation_reaction {
             let (voice, environment) = FlueVoice::from_baffled_environment(Some(&card),
                 displacement_gain, seed_amplitude_rel, geometry, source, walls, Some(policy),
-                radiation, voice_seed, voice_index, gate).map_err(FlueInputError::Physics)?;
+                radiation(), voice_seed, voice_index, gate).map_err(FlueInputError::Physics)?;
             for binding in environment.bindings() {
                 binding.validate_receiver(voice.network().expect("constructed graph").graph(),
                     environment.radiation(), exterior)
@@ -432,6 +475,16 @@ impl FlueFilePerformance {
             Some(paths) => voice.with_source_control_paths(paths).map_err(FlueInputError::Physics)?,
             None => voice,
         };
+        let (voice, mimo_radiation_record) = match mimo_input {
+            Some((line, input)) => {
+                let (model, record) = input.load(sources, &mut load_radiation, gate)
+                    .map_err(|source| FlueInputError::RadiationSource { line, source })?;
+                let voice = voice.with_mimo_environment(model, radiation(), input.limits(), gate)
+                    .map_err(FlueInputError::Physics)?;
+                (voice, Some(record))
+            }
+            None => (voice, None),
+        };
         let renderer = FlueOutletPerformance::with_multirate_radiation(voice, schedule,
             FlueOutletConfig { sample_rate_hz, samples, max_block, max_controls, max_compile_work,
                 outlet_node, receiver, maximum_abs_pressure_pa },
@@ -441,7 +494,8 @@ impl FlueFilePerformance {
         let info = FluePerformanceInfo { input_hash: hash_domain("org.frankensim.fs-couple.flue-performance.v1",bytes),
             mechanics_rate_hz, sample_rate_hz, samples, full_scale_pa,
             jet_card_hash: card.content_hash(), jet_card_source, compiled_controls: renderer.controls.len() };
-        Ok(Self { info, renderer, geometry, card, gas_records, wall_records, boundary_records, radiation_bindings })
+        Ok(Self { info, renderer, geometry, card, gas_records, wall_records, boundary_records,
+            radiation_bindings, mimo_radiation_record })
     }
     /// Original identity and finite clocks, separate from the evolving solver.
     #[must_use] pub const fn info(&self) -> FluePerformanceInfo { self.info }
@@ -459,6 +513,11 @@ impl FlueFilePerformance {
     #[must_use] pub fn boundary_records(&self) -> &[FlueBoundaryRecord] { &self.boundary_records }
     /// Exact installed reaction loads, in the observed outlet order.
     #[must_use] pub fn radiation_bindings(&self) -> &[BaffledOutletBinding] { &self.radiation_bindings }
+    /// Exact artifact bytes' identity and declared source gas/geometry, separate
+    /// from the shared terminal model's evolving state and passivity diagnostics.
+    #[must_use] pub const fn mimo_radiation_record(&self) -> Option<&MimoRadiationRecord> {
+        self.mimo_radiation_record.as_ref()
+    }
     /// Move the original physical pressure producer into streaming/PCM output.
     #[must_use] pub fn into_renderer(self) -> FlueOutletPerformance { self.renderer }
 }

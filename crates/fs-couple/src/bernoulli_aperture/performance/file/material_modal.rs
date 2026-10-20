@@ -11,6 +11,7 @@
 //! midpoint. ExactZoh keeps the original material M/K/full C, with pressure and
 //! contact held per mechanical sample; it does not certify nonlinear time error.
 mod plate;
+mod radiation;
 
 use super::{PlateValveInputError, Reader, bad, checkpoint, decode_schedule, gas,
     read_receiver, MAX_PLATE_VALVE_PERFORMANCE_BYTES, MAX_CONTROLS};
@@ -20,8 +21,9 @@ use crate::bernoulli_aperture::modal::ModalAperture;
 use crate::bernoulli_aperture::paired::{BladePropagator, BladeState, PairedApertureLimits};
 use crate::bernoulli_aperture::performance::AperturePerformanceConfig;
 use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
+use crate::bernoulli_aperture::radiation::environment::multiport::input::MimoRadiationRecord;
 use crate::bernoulli_aperture::slit_channel::{SlitChannel, SlitChannelSpec, SlitExit};
-use crate::bernoulli_aperture::two_sided::{TwoSidedLimits, combined_inlet_state};
+use crate::bernoulli_aperture::two_sided::{TwoSidedLimits, ValveSide, combined_inlet_state};
 use crate::bernoulli_aperture::two_sided::supply::combined_inlet_state_with_supply;
 use crate::bernoulli_aperture::two_sided::observer::TwoSidedPressure;
 use crate::bernoulli_aperture::two_sided::observer::schedule::ScheduledTwoSidedPressure;
@@ -73,6 +75,7 @@ pub struct MaterialModalValvePerformance {
     gases: Vec<GasRecord>,
     ambient: GasState,
     radiation: Vec<BaffledOutletBinding>,
+    mimo_radiation: Vec<(ValveSide, MimoRadiationRecord)>,
 }
 
 impl MaterialModalValvePerformance {
@@ -98,7 +101,26 @@ impl MaterialModalValvePerformance {
         max_block: usize,
         gate: &CancelGate,
         gas_sources: Option<&ThermochemicalSources<'_>>,
+        load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+    ) -> Result<Self, PlateValveInputError> {
+        Self::from_bytes_with_all_sources(bytes, max_block, gate, gas_sources, load_material,
+            |_| Err("MIMO radiation artifacts require an explicit source loader".into()))
+    }
+
+    /// Admit material packs and original MIMO radiation artifacts through
+    /// separate caller-owned loaders. Omitted radiation keeps the original
+    /// compact-baffled behavior. A selected MIMO group uses the same two-sided
+    /// system, gas fields, material modes and source-clock microphone; its
+    /// independently declared exterior must exactly match that microphone.
+    /// No source is refitted or relabeled following a material/gas substitution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_bytes_with_all_sources(
+        bytes: &[u8],
+        max_block: usize,
+        gate: &CancelGate,
+        gas_sources: Option<&ThermochemicalSources<'_>>,
         mut load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+        mut load_radiation: impl FnMut(&str) -> Result<Vec<u8>, String>,
     ) -> Result<Self, PlateValveInputError> {
         checkpoint(gate)?;
         if bytes.len() > MAX_PLATE_VALVE_PERFORMANCE_BYTES || !(1..=65536).contains(&max_block) {
@@ -197,6 +219,7 @@ impl MaterialModalValvePerformance {
             reconstruction: DuctReconstruction::Differentiating {
                 mechanics_rate_hz: mechanics, output_rate_hz: output,
             } };
+        let radiation_selection = radiation::Selection::read(&mut rows, &radiation_spec)?;
         let mut row = rows.row("valve")?;
         let rest_opening = row.scalar()?;
         row.finish()?;
@@ -278,14 +301,9 @@ impl MaterialModalValvePerformance {
         if let Some(length) = slit {
             valve.set_material_viscous_slit(length).map_err(PlateValveInputError::Physics)?;
         }
-        let (source, radiation) = match channel {
-            Some(channel) => TwoSidedPressure::from_baffled_environment_with_supply(
-                valve.into(), sides, [None, None], channel, coupling, policies,
-                radiation_spec, max_block, gate),
-            None => TwoSidedPressure::from_baffled_environment(
-                valve.into(), sides, [None, None], coupling, policies,
-                radiation_spec, max_block, gate),
-        }.map_err(|e| PlateValveInputError::Gesture(GestureCompileError::Render(e)))?;
+        let (source, radiation, mimo_radiation) = radiation::build(
+            radiation_selection, valve.into(), sides, channel, coupling, policies,
+            radiation_spec, max_block, gas_sources, &mut load_radiation, gate)?;
         let renderer = ScheduledTwoSidedPressure::new(source, schedule, AperturePerformanceConfig {
             sample_rate_hz: output, samples, max_block, max_compile_work, max_controls,
         }).map_err(PlateValveInputError::Gesture)?;
@@ -294,7 +312,7 @@ impl MaterialModalValvePerformance {
             input_hash: hash_domain("org.frankensim.fs-couple.material-modal-valve.v1", bytes),
             mechanics_rate_hz: mechanics, propagator, output_rate_hz: output, samples, full_scale_pa,
             blades, modes, nodes, triangles,
-        }, renderer, materials, gases, ambient, radiation })
+        }, renderer, materials, gases, ambient, radiation, mimo_radiation })
     }
 
     /// Immutable original source dimensions, coordinates, clocks and PCM scale.
@@ -309,6 +327,9 @@ impl MaterialModalValvePerformance {
     pub const fn ambient_gas(&self) -> &GasState { &self.ambient }
     /// Actual compact reaction models, in the authored physical-opening order.
     pub fn radiation_bindings(&self) -> &[BaffledOutletBinding] { &self.radiation }
+    /// Original source receipts for each independently coupled acoustic side.
+    /// Two groups do not imply mutual exterior coupling across the valve.
+    pub fn mimo_radiation_records(&self) -> &[(ValveSide, MimoRadiationRecord)] { &self.mimo_radiation }
     /// Move the complete loaded mechanics, source clock and microphone history.
     pub fn into_renderer(self) -> ScheduledTwoSidedPressure { self.renderer }
 }

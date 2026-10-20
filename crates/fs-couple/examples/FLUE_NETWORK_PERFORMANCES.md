@@ -91,11 +91,61 @@ quadrature limits. The example's two outlets contribute to one pressure
 history, preserving propagation timing and interference. A single-tube source
 may omit this block and retain its original sole terminal receiver.
 
-This remains a plane-wave graph of cylindrical sections, ideal junctions and
-supplied passive loads with a one-way infinite-baffle receiver. It does not
-provide moving finger pads, branch end corrections, matched mutual radiation,
-a resolved jet or measured flute fidelity. These limitations are unchanged by
-making the existing physical construction accessible from data.
+Prescribed terminal loads retain their one-way infinite-baffle receiver. The
+explicit MIMO selection below instead supplies shared exterior feedback. These
+remain plane-wave cylindrical sections and ideal junctions; the source file
+does not establish measured flute fidelity, a resolved jet or a validated
+three-dimensional radiation model.
+
+## Explicit mutual radiation from a supplied artifact
+
+`flue-mimo.performance` and its adjacent `flue-mutual.mimo-radiation` exercise
+the existing common terminal operator through the native loader:
+
+```sh
+cargo run --release -p fs-couple --bin music_render -- wind \
+  crates/fs-couple/examples/flue-mimo.performance flue-mimo.wav
+```
+
+The artifact is an explicitly **synthetic passive two-port example**. Its
+coefficients demonstrate the complete source-to-feedback-to-microphone route;
+they are not a measured flute or a validated exterior-radiation bake.
+
+After optional wall and moving-boundary records, select:
+
+```text
+radiation mimo flue-mutual.mimo-radiation 32 1048576 257
+```
+
+The fields are the relative artifact path, maximum rational states, maximum
+runtime memory bytes and sampled-passivity grid points. The common MIMO decoder
+also limits artifact input to 8 MiB. The original runtime enforces the declared
+state/memory limits and checks both continuous and actual sampled responses.
+The sampled result remains `GridOnly`; it is not a discrete storage certificate.
+
+Artifact ports follow the exact `outlets`/`outlet` order. Their circle centers
+and radii must match those openings. The artifact separately declares its
+exterior gas using the same gas-record grammar as the performance, and its
+frequency band must cover the entire mechanical Nyquist band, even when the
+receiver emits a narrower audio band. Existing reactive terminal loads cannot
+be replaced. No matrix is inferred from the instrument name, fitted at load
+time or rescaled to conceal a stale gas declaration.
+
+Each accepted terminal flow drives the one shared rational state, whose full
+matrix pressure returns to the same duct and jet solve. The same openings and
+exterior gas drive the multirate microphone. Changing off-diagonal coefficients
+therefore changes the jet's returning wave as well as emitted pressure. Material
+walls, regional section gases, windway dynamics, mouth contraction, moving-key
+mechanics and the gesture clock remain attached to their original owners.
+
+An atmosphere change that affects the baked operator requires a matching
+artifact. Changing only the performance gas while retaining an incompatible
+artifact refuses before rendering. The library entry point
+`FlueFilePerformance::from_bytes_with_all_sources` accepts the existing material
+loader plus a radiation-byte loader; the CLI resolves both relative to the
+performance directory. `mimo_radiation_record()` retains the exact artifact
+hash, declared identities, gas record, geometry, band and limits. The existing
+constructors and `prescribed`/`compact-baffled` selections retain their behavior.
 
 ## Pressure and jet direction in one performance
 

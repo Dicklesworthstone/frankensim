@@ -9,6 +9,8 @@ use fs_qty::{Density, Dims, DynViscosity, Pressure};
 
 const INPUT: &str = include_str!("../../../../../examples/material_modal_valve/paired.performance");
 
+mod mimo;
+
 fn pack(rho: f64, missing: bool) -> NormalizedMaterialCardPack {
     let mut claims = ClaimSet::new();
     let artifact = hash_domain("org.frankensim.test.material-modal", &rho.to_le_bytes());

@@ -7,6 +7,7 @@ use fs_couple::render::schedule::reed::{ReedPerformance, REED_PERFORMANCE_SCHEMA
 use fs_couple::bernoulli_aperture::performance::{ApertureObservation, AperturePerformance, CoupledAperture};
 use fs_couple::bernoulli_aperture::performance::file::{PlateValvePerformance, MAX_PLATE_VALVE_PERFORMANCE_BYTES, PLATE_VALVE_PERFORMANCE_SCHEMA};
 use fs_couple::bernoulli_aperture::radiation::BaffledRadiationLoad;
+use fs_couple::bernoulli_aperture::radiation::environment::multiport::input::MAX_MIMO_RADIATION_BYTES;
 use fs_couple::flue_loop::network::performance::file::{
     FlueFilePerformance, FLUE_PERFORMANCE_SCHEMA, MAX_FLUE_WALL_PACK_BYTES,
 };
@@ -225,12 +226,23 @@ fn load_with_sources(
     sources: Option<&ThermochemicalSources<'_>>,
     load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
 ) -> Result<Loaded, String> {
+    load_with_all_sources(bytes, block, policy, sources, load_material,
+        |_| Err("MIMO radiation artifacts require an explicit source loader".into()))
+}
+fn load_with_all_sources(
+    bytes: &[u8],
+    block: usize,
+    policy: ObservationPolicy,
+    sources: Option<&ThermochemicalSources<'_>>,
+    load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+    load_radiation: impl FnMut(&str) -> Result<Vec<u8>, String>,
+) -> Result<Loaded, String> {
     if bytes.starts_with(b"frankensim-material-modal-valve-v1\n") {
         if policy == ObservationPolicy::Acceptance {
             return Err("material-modal files retain flat DKT walls and an effective uniform slit; matched baffled observation is not a measured instrument qualification".into());
         }
-        let p = fs_couple::bernoulli_aperture::performance::file::material_modal::MaterialModalValvePerformance::from_bytes_with_sources(
-            bytes, block, &CancelGate::new(), sources, load_material).map_err(|e| e.to_string())?;
+        let p = fs_couple::bernoulli_aperture::performance::file::material_modal::MaterialModalValvePerformance::from_bytes_with_all_sources(
+            bytes, block, &CancelGate::new(), sources, load_material, load_radiation).map_err(|e| e.to_string())?;
         let i = p.info();
         if i.output_rate_hz != RATE {
             return Err("material-modal wind output must declare 48000 Hz; mechanical refinement belongs to its separate source clock".into());
@@ -263,10 +275,25 @@ fn load_with_sources(
             fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh =>
                 ("exact-zoh", "original M/K/full C; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"),
         };
-        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; compact independent baffled reaction and shared exterior pressure; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}}}",
+        let (radiation_scope, mimo_json) = if p.mimo_radiation_records().is_empty() {
+            ("compact independent baffled reaction and shared exterior pressure", String::new())
+        } else {
+            let groups = p.mimo_radiation_records().iter().map(|(side, record)| {
+                let side = match side {
+                    fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream => "upstream",
+                    fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream => "downstream",
+                };
+                format!("{{\"side\":\"{side}\",\"source\":{}}}", super::duct_metadata::mimo_radiation_provenance(record))
+            }).collect::<Vec<_>>().join(",");
+            ("source-bound mutual baffled reaction within each selected side and matched exterior pressure; unselected outlets retain authored loads; no cross-side exterior coupling",
+                format!(",\"mimo_radiation_groups\":[{groups}]"))
+        };
+        let terminals = p.radiation_bindings().len()
+            + p.mimo_radiation_records().iter().map(|(_, r)| r.apertures().len()).sum::<usize>();
+        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}}}",
             i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
             p.renderer().pending_controls().len(), valve.viscosity_matrix_n_s_m().is_some(),
-            p.radiation_bindings().len());
+            terminals);
         let ratio = i.mechanics_rate_hz / i.output_rate_hz;
         let observation_json = format!("{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"output_sample_rate_hz\":{},\"ratio\":{ratio},\"filter\":\"shared multirate differentiating Rayleigh receiver with bandlimited propagation\",\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
             i.mechanics_rate_hz, i.samples * u64::from(ratio), i.output_rate_hz);
@@ -280,8 +307,8 @@ fn load_with_sources(
         if policy == ObservationPolicy::Acceptance {
             return Err("flue files retain an explicitly estimated tonal-jet/cylindrical-graph image; --acceptance requires an independently qualified physical model".into());
         }
-        let p = FlueFilePerformance::from_bytes_with_sources(bytes, block,
-            &CancelGate::new(), sources, load_material).map_err(|e| e.to_string())?;
+        let p = FlueFilePerformance::from_bytes_with_all_sources(bytes, block,
+            &CancelGate::new(), sources, load_material, load_radiation).map_err(|e| e.to_string())?;
         let i = p.info();
         if i.sample_rate_hz != RATE {
             return Err("flue wind output must declare 48000 Hz; its file separately declares the faster mechanical clock".into());
@@ -320,16 +347,22 @@ fn load_with_sources(
         let duct_json = flue_duct_provenance(renderer);
         let wall_json = flue_wall_provenance(&p);
         let boundary_json = flue_boundary_provenance(&p);
-        let reaction = !p.radiation_bindings().is_empty();
+        let mimo_json = p.mimo_radiation_record().map_or_else(String::new, |record|
+            format!(",\"mimo_radiation\":{}", super::duct_metadata::mimo_radiation_provenance(record)));
+        let reaction = !p.radiation_bindings().is_empty() || p.mimo_radiation_record().is_some();
         let radiation_json = p.radiation_bindings().iter().map(|binding| format!(
             "{{\"node\":{},\"original_reflection\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e}{}}}",
             binding.opening().node,binding.previous_reflection(),binding.load().density_kg_m3(),
             binding.load().sound_speed_m_s(),radiation_provenance(Some(*binding.load()))
         )).collect::<Vec<_>>().join(",");
-        let observation_scope = if reaction {
+        let observation_scope = if p.mimo_radiation_record().is_some() {
+            "in-loop source-bound mutual baffled terminal reaction and matched-medium ordered outlet pressure"
+        } else if reaction {
             "in-loop independent compact baffled terminal reaction and matched-medium outlet pressure"
         } else { "one-way infinite-baffle outlet pressure; supplied passive loads" };
-        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; wall image separately declared; no full shell dynamics, broadband unbaffled or mutual radiation, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{duct_json}{wall_json}{boundary_json}}}",
+        let radiation_exclusion = if p.mimo_radiation_record().is_some() { "broadband unbaffled radiation" }
+            else { "broadband unbaffled or mutual radiation" };
+        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; wall image separately declared; no full shell dynamics, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{duct_json}{wall_json}{boundary_json}{mimo_json}}}",
             i.jet_card_source,i.jet_card_hash,p.card().claim.kind(),p.card().authority.label(),i.compiled_controls,
             geometry.flue_width_m,geometry.flue_height_m,geometry.cut_up_m,geometry.labium_offset_m,
             geometry.jet_angle_rad,geometry.mouth_loss_rel,island.displacement_gain,island.seed_amplitude_rel,
@@ -409,7 +442,7 @@ pub(super) fn run_with_gas_sources(
     file.take((MAX_PLATE_VALVE_PERFORMANCE_BYTES + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("wind input read failed: {e}"))?;
     let parent = Path::new(input).parent().unwrap_or(Path::new("."));
-    let loaded = load_with_sources(&bytes, block, policy, sources, |name| {
+    let loaded = load_with_all_sources(&bytes, block, policy, sources, |name| {
         let file = std::fs::File::open(parent.join(name))
             .map_err(|e| format!("material-card pack {name:?} open failed: {e}"))?;
         let mut pack_bytes = Vec::new();
@@ -420,6 +453,16 @@ pub(super) fn run_with_gas_sources(
         }
         NormalizedMaterialCardPack::from_bytes(&pack_bytes)
             .map_err(|e| format!("material-card pack {name:?}: {e}"))
+    }, |name| {
+        let file = std::fs::File::open(parent.join(name))
+            .map_err(|e| format!("MIMO radiation artifact {name:?} open failed: {e}"))?;
+        let mut bytes = Vec::new();
+        file.take((MAX_MIMO_RADIATION_BYTES + 1) as u64).read_to_end(&mut bytes)
+            .map_err(|e| format!("MIMO radiation artifact {name:?} read failed: {e}"))?;
+        if bytes.len() > MAX_MIMO_RADIATION_BYTES {
+            return Err("MIMO radiation artifact exceeds 8 MiB".into());
+        }
+        Ok(bytes)
     })?;
     if decimate && loaded.observation_json.is_some() {
         return Err("this source already declares mechanical and output clocks; omit --decimate to avoid a second observer".into());

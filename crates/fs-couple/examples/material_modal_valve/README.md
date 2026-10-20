@@ -5,7 +5,7 @@ This input path makes the existing multimode material-wall solver available to
 and a bore. Original regional material cards determine density, stiffness and
 the complete selected viscous tensor. Every requested signed mode, slit trace,
 pressure traction and swept-volume projection stays in the same coupled system.
-A shared exterior declaration drives both compact radiation reaction and the
+A shared exterior declaration drives both selected radiation reaction and the
 microphone; pressure is never replaced by an internal bore signal.
 
 The supplied geometry and material values are **manufactured integration data**.
@@ -19,6 +19,7 @@ With the repository's admitted Rust toolchain and dependencies:
 modal_demo_dir="$(mktemp -d)"
 cp crates/fs-couple/examples/material_modal_valve/*.tsv "$modal_demo_dir/"
 cp crates/fs-couple/examples/material_modal_valve/*.performance "$modal_demo_dir/"
+cp crates/fs-couple/examples/material_modal_valve/*.radiation "$modal_demo_dir/"
 cargo run -p xtask -- matdb-pack \
   --manifest "$modal_demo_dir/blade-manifest.tsv" --out "$modal_demo_dir/blade.matpack" \
   --material-state synthetic solid manufactured 0
@@ -34,6 +35,14 @@ mechanical step; do not add `--decimate`. WAV and sidecar paths must be new.
 The example explicitly selects `propagator exact-zoh`. The clock and retained
 mode bounds stay authored data; exact free structural propagation is not a
 reason to lower the clock without measuring nonlinear time error.
+
+`paired-mutual.performance` selects an externally supplied two-port operator
+in `mutual.radiation`. Run it through the same command with a new output path.
+It adds a second explicitly declared downstream branch and uses the shared
+MIMO terminal host, so off-diagonal reaction returns to the original material
+valve before the same exterior microphone emits pressure. The supplied matrix
+is synthetic integration data, not a measured or geometry-validated radiation
+bake. The original `paired.performance` keeps compact baffled reaction.
 
 To change one blade or region, normalize another material source and change its
 `section` pack path. Original geometry and numerical choices remain explicit.
@@ -65,6 +74,8 @@ slit_length LENGTH_M
 receiver X Y Z RADIAL_RINGS ANGULAR_POINTS MAX_HZ
 openings COUNT
 opening upstream|downstream NODE X Y
+radiation mimo GROUP_COUNT
+radiation_group upstream|downstream ARTIFACT MAX_STATES MAX_MEMORY_BYTES PASSIVITY_POINTS
 valve TOTAL_REST_OPENING_M
 limits MAX_DISPLACEMENT_M MAX_VELOCITY_M_S MAX_ENERGY_J EVALUATIONS VELOCITY_TOLERANCE_M_S RELATIVE_TOLERANCE
 coupling MAX_ENERGY_J ABS_ENERGY_J REL_ENERGY ABS_FLOW_M3_S REL_FLOW
@@ -83,6 +94,17 @@ mixture and thermochemical-source selections. Radiating openings must name cold
 memoryless endpoints; the common exterior installs each load once. Do not place
 `baffled-low-ka` loads inside these input ducts. Other explicit loads retain
 their declared mechanical role. Outlet radii come from the original geometry.
+
+The radiation rows are optional. Omission or `radiation compact-baffled` retains
+the original compact reaction. MIMO mode requires one group per observed side,
+at most two groups, each in that side's original opening order. Unobserved
+sides and unselected outlets retain their authored loads and histories;
+independent upstream/downstream groups do not couple through the exterior.
+The operator's independently declared gas must exactly match the receiver,
+and its geometry and band must match the actual ports and mechanics clock.
+See [the shared artifact grammar](../MIMO_RADIATION_ARTIFACTS.md), including
+thermochemical source-pack and complete gas-state binding. The importer never
+relabels old coefficients with a changed current atmosphere.
 
 `propagation integer` selects the original integer delay image.
 The separate `propagator` row is optional and appears immediately after `audio`.
@@ -149,9 +171,10 @@ the complete distinct-source set at 64 MiB. Mechanical/output ratio is an intege
 
 This is a source/renderer integration over flat linear DKT plates, a finite
 declared mode basis, an effective uniform slit/contact, plane-wave duct graphs,
-and compact independent infinite-baffle radiation. It does not supply distributed
+and either compact independent or source-bound mutual infinite-baffle radiation.
+It does not supply distributed
 reed-surface collision, shell/solid wet-cane geometry, resolved moving-channel
-flow, nonlinear jet separation, unbaffled bells, mutual radiation, or live
+flow, nonlinear jet separation, unbaffled bells, automatic radiation refitting, or live
 material/gas evolution. It does not qualify instrument recordings.
 
 Focused regressions are in
@@ -163,3 +186,8 @@ regressions preserve omission/explicit-midpoint parity, exercise full-tensor and
 elastic exact material sources at a coarser clock, and retain material changes
 in the actual microphone signal. Native compilation and
 execution remain required; committed tests are not evidence of a passed run.
+Native MIMO regressions additionally retain source byte hashes and declared
+bake identities separately, preserve all material/gas/loss/supply owners,
+exercise off-diagonal feedback and PCM partition parity, reject stale
+atmospheres and source mismatches, and compare the actual CLI against the
+original library performer before any WAV/sidecar publication.

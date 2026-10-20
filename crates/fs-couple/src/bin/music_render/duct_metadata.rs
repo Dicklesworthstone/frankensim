@@ -4,6 +4,26 @@ use fs_couple::bernoulli_aperture::performance::{ApertureObservation,CoupledAper
 use fs_couple::bernoulli_aperture::performance::file::PlateValvePerformance;
 use fs_vfit::impedance::SeriesImpedanceSpec;
 
+// Both native wind loaders describe the same original source artifact. Its
+// byte identity is deliberately separate from caller-declared bake identities.
+pub(super) fn mimo_radiation_provenance(
+    record: &fs_couple::bernoulli_aperture::radiation::environment::multiport::input::MimoRadiationRecord,
+) -> String {
+    let limits = record.limits();
+    let band = record.band_hz();
+    let apertures = record.apertures().iter().enumerate().map(|(port, aperture)| format!(
+        "{{\"port\":{port},\"center_m\":[{:e},{:e}],\"radius_m\":{:e}}}",
+        aperture.center_m[0], aperture.center_m[1], aperture.radius_m
+    )).collect::<Vec<_>>().join(",");
+    let gas_sources = super::thermochemical::provenance(core::slice::from_ref(record.gas_record()));
+    format!("{{\"schema\":\"frankensim-mimo-radiation-v1\",\"path\":{},\"artifact_blake3\":\"{}\",\"declaration_identity\":\"{}\",\"realization_identity\":\"{}\",\"exterior_gas\":{},\"band_hz\":[{:e},{:e}],\"ordered_apertures\":[{apertures}],\"max_states\":{},\"max_memory_bytes\":{},\"sampled_passivity_points\":{},\"source_convention\":\"proper undelayed reciprocal impedance in Pa s/m^3; s=+i omega\",\"work_scope\":\"signed terminal exchange, not dissipation or certified rational stored energy\",\"scope\":\"original externally produced operator, shared mean-recovery ZOH terminal host and coplanar infinite-baffle observer; declared bake identities are retained, not attested; continuous and sampled GridOnly checks do not qualify a physical instrument\"{gas_sources}}}",
+        super::json_string(record.path()), record.artifact_hash().to_hex(),
+        fs_blake3::ContentHash(record.declaration_identity()).to_hex(),
+        fs_blake3::ContentHash(record.realization_identity()).to_hex(),
+        gas_state(record.gas_record().state()), band[0], band[1],
+        limits.max_states, limits.max_memory_bytes, limits.sampled_passivity_points)
+}
+
 fn impedance(load:SeriesImpedanceSpec)->String {
     let compliance=load.compliance_m3_pa.map_or_else(||"null".into(),|v|format!("{v:e}"));
     format!("\"resistance_pa_s_m3\":{:e},\"inertance_pa_s2_m3\":{:e},\"compliance_m3_pa\":{compliance}",

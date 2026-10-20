@@ -68,6 +68,10 @@ pub enum PlateValveInputError {
     MaterialSource { /// One-based declaration line.
         line: usize, /// Original source refusal.
         source: String },
+    /// Original source-bound mutual radiation artifact admission.
+    RadiationSource { /// One-based performance declaration line.
+        line: usize, /// Artifact loader, decoder or gas-owner refusal.
+        source: crate::bernoulli_aperture::radiation::environment::multiport::input::MimoRadiationInputError },
     /// Constitutive material-state resolution failed without a fallback.
     Material { /// One-based declaration line.
         line: usize, /// Original material owner refusal.
@@ -85,6 +89,7 @@ impl core::fmt::Display for PlateValveInputError {
             Self::Input { line, what } => write!(f,"plate-valve input line {line}: {what}"),
             Self::Gas { line, source } => write!(f,"plate-valve gas line {line}: {source}"),
             Self::MaterialSource { line, source } => write!(f,"plate-valve material source line {line}: {source}"),
+            Self::RadiationSource { line, source } => write!(f,"plate-valve radiation source line {line}: {source}"),
             Self::Material { line, source } => write!(f,"plate-valve material line {line}: {source}"),
             Self::Geometry(e) => write!(f,"plate-valve geometry: {e}"),
             Self::Physics(e) => write!(f,"plate-valve physics: {e}"),
@@ -97,6 +102,7 @@ impl std::error::Error for PlateValveInputError {
         match self {
             Self::Gas { source, .. } => Some(source),
             Self::Material { source, .. } => Some(source),
+            Self::RadiationSource { source, .. } => Some(source),
             _ => None,
         }
     }
