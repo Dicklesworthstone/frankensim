@@ -9,6 +9,9 @@
 //! This is a bounded full-storage evaluation, not checkpoint recomputation or
 //! differentiation of adaptive grids, event times, geometry or material charts.
 
+/// Independent physical response rows sharing the original forward trajectory.
+pub mod responses;
+
 use super::{ScanSensitivityBudget, ScanSensitivityError, ScanStepLinearization};
 use super::super::{ScanStep, ScanningEnthalpyRun};
 use crate::bc::history::march::moving::sensitivity::schedule::MovingHeatScheduleGradient;
@@ -102,10 +105,24 @@ pub struct ScanObjectiveEvaluation {
 /// derivatives at phase/material corners are refused by the original owner.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_scan_objective(
-    cx: &Cx<'_>, mut run: ScanningEnthalpyRun<'_, '_, '_>, endpoints: &[f64],
+    cx: &Cx<'_>, run: ScanningEnthalpyRun<'_, '_, '_>, endpoints: &[f64],
     observations: &[ScanObservation], sampling: ScanObjectiveSampling,
     step: EnthalpyStepConfig, transpose: LinearConfig, budget: ScanObjectiveBudget,
 ) -> Result<ScanObjectiveEvaluation, ScanSensitivityError> {
+    evaluate_with_tape(cx, run, endpoints, observations, sampling, step, transpose,
+        budget, |_, _| Ok(())).map(|(objective, ())| objective)
+}
+
+// Keep one primal/least-squares owner. Additional response pullbacks borrow its
+// checked endpoint tape before it is dropped; they cannot mutate the trajectory.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_with_tape<R>(
+    cx: &Cx<'_>, mut run: ScanningEnthalpyRun<'_, '_, '_>, endpoints: &[f64],
+    observations: &[ScanObservation], sampling: ScanObjectiveSampling,
+    step: EnthalpyStepConfig, transpose: LinearConfig, budget: ScanObjectiveBudget,
+    responses: impl FnOnce(&ScanningEnthalpyRun<'_, '_, '_>, &[ScanStepLinearization<'_>])
+        -> Result<R, ScanSensitivityError>,
+) -> Result<(ScanObjectiveEvaluation, R), ScanSensitivityError> {
     poll(cx, 0)?;
     let count = endpoints.len();
     let vertices = run.conduction().temperature().len();
@@ -227,10 +244,12 @@ pub fn evaluate_scan_objective(
     }
     let final_step = tape.last().ok_or_else(|| invalid("missing scan endpoint"))?.report().clone();
     poll(cx, count)?;
-    Ok(ScanObjectiveEvaluation { value, predictions, standardized_residuals: residuals,
+    let extra = responses(&run, &tape)?;
+    poll(cx, count)?;
+    Ok((ScanObjectiveEvaluation { value, predictions, standardized_residuals: residuals,
         sources: accumulated.ok_or_else(|| invalid("missing scan reverse sweep"))?,
         initial_specific_enthalpy: seed, final_step, endpoint_count: count,
-        transpose_iterations: iterations, max_transpose_relative_residual: residual })
+        transpose_iterations: iterations, max_transpose_relative_residual: residual }, extra))
 }
 
 fn add(cx: &Cx<'_>, target: &mut [f64], values: &[f64]) -> Result<(), ScanSensitivityError> {
