@@ -45,7 +45,7 @@ impl MultiBowStringBank {
             .map(|p| source.track(p).map(|t| t.id.clone()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(GestureCompileError::Gesture)?;
-        let performance = self.into_scheduled_admitted(source.schedule().clone(), tracks, config,Some(paths))?;
+        let performance = self.into_scheduled_admitted(source.schedule().clone(), tracks, config,Some(paths),false)?;
         Ok((performance, bound))
     }
     /// Compile a complete finite performance on the unchanged physical clock.
@@ -72,11 +72,31 @@ impl MultiBowStringBank {
         tracks: Vec<String>,
         config: MultiBowPerformanceConfig,
     ) -> Result<MultiBowPerformance, GestureCompileError> {
-        self.into_scheduled_admitted(schedule,tracks,config,None)
+        self.into_scheduled_admitted(schedule,tracks,config,None,false)
+    }
+
+    /// Drive a finite ribbon from ONE original centre-station gesture track.
+    ///
+    /// Its speed acts at every cell; its total normal force is divided by the
+    /// explicit spatial quadrature. Every cell keeps an independent friction
+    /// regime in the joint solve. The original schedule is retained verbatim,
+    /// including release, reversal and interrupted ramps. No per-cell or audio
+    /// normalization is applied beyond distributing the declared total load.
+    /// Use `into_scheduled` for independently prescribed cell drives instead.
+    pub fn into_scheduled_ribbon(
+        self, schedule: GestureSchedule, track: String, config: MultiBowPerformanceConfig,
+    ) -> Result<MultiBowPerformance, GestureCompileError> {
+        let ribbon = self.source.ribbon().ok_or_else(|| source_invalid(
+            "ribbon scheduling requires a source-bound finite-width contact"))?;
+        if schedule.tracks().len() != 1 || ribbon.stations().len() != self.source.bows().len() {
+            return Err(source_invalid("one original gesture track must drive the complete ribbon"));
+        }
+        let tracks = vec![track; ribbon.stations().len()];
+        self.into_scheduled_admitted(schedule,tracks,config,None,true)
     }
 
     fn into_scheduled_admitted(self,schedule:GestureSchedule,tracks:Vec<String>,config:MultiBowPerformanceConfig,
-        paths:Option<&[fs_scenario::assembly::ParameterPath]>)->Result<MultiBowPerformance,GestureCompileError> {
+        paths:Option<&[fs_scenario::assembly::ParameterPath]>,ribbon_projection:bool)->Result<MultiBowPerformance,GestureCompileError> {
         let rate = self.source.bank().options().sample_rate_hz;
         let base_sample = self.system.samples_rendered();
         if config.samples == 0 || config.max_block == 0 || tracks.len() != self.source.bows().len()
@@ -87,7 +107,7 @@ impl MultiBowStringBank {
         let mut events = Vec::new();
         let mut remaining_work = config.max_work;
         for (port, (name, bow)) in tracks.iter().zip(self.source.bows()).enumerate() {
-            if tracks[..port].contains(name) {
+            if !ribbon_projection && tracks[..port].contains(name) {
                 return Err(source_invalid("each physical bow requires its own explicit track binding"));
             }
             let source_track = schedule.tracks().iter().find(|t| &t.id == name);
@@ -99,10 +119,17 @@ impl MultiBowStringBank {
             if !accepts {
                 return Err(source_invalid("bow track must address the actual material string at that contact"));
             }
+            let (station_fraction,load_fraction) = if ribbon_projection {
+                let ribbon = self.source.ribbon().ok_or_else(|| source_invalid("missing ribbon source"))?;
+                if self.system.contact_normal_load(port).is_some() {
+                    return Err(source_invalid("uniform ribbon scheduling requires prescribed normal loads at every cell"));
+                }
+                (ribbon.centre().station_fraction,ribbon.load_fraction())
+            } else { (bow.location.station_fraction,1.0) };
             let compiled = compile_friction_track_admitted(&schedule, name, FrictionGestureConfig {
                 sample_rate_hz: rate, samples: config.samples, max_block: config.max_block,
                 max_work: remaining_work, max_events: config.max_events-events.len(),
-                station_fraction: bow.location.station_fraction,
+                station_fraction,
             },path)?;
             if self.system.contact_normal_load(port).is_some()
                 && compiled.events.iter().any(|e| e.drive.normal_force_n != 0.0) {
@@ -111,7 +138,9 @@ impl MultiBowStringBank {
             remaining_work -= compiled.required_work;
             events.try_reserve(compiled.events.len())
                 .map_err(|_| source_invalid("cannot reserve complete bow controls"))?;
-            events.extend(compiled.events.into_iter().map(|e| BowDriveEvent { sample: e.sample, port, drive: e.drive }));
+            events.extend(compiled.events.into_iter().map(|e| BowDriveEvent { sample: e.sample, port,
+                drive: FrictionDrive { speed_m_s:e.drive.speed_m_s,
+                    normal_force_n:e.drive.normal_force_n*load_fraction } }));
         }
         events.sort_unstable_by_key(|e| (e.sample, e.port));
         let count = self.source.bows().len();

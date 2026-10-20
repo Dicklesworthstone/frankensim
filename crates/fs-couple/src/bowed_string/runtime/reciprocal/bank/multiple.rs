@@ -37,6 +37,7 @@ pub struct MultiBowStringBankSource {
     joint: MultiFrictionConfig,
     stops: Vec<stops::MaterialStringStop>,
     bow_contact_loads: Vec<contact_load::BowContactLoad>,
+    ribbon: Option<ribbon::UniformBowRibbon>,
 }
 impl MultiBowStringBankSource {
     /// Original strings, layers, regional/uniform body, cavity, gas and supports.
@@ -108,6 +109,7 @@ impl ReciprocalStringBank {
         poll(gate)?;
         Ok(MultiBowStringBank { source: MultiBowStringBankSource {
             bank: self.source, bows, joint, stops: Vec::new(), bow_contact_loads: Vec::new(),
+            ribbon: None,
         }, cards: self.cards, system })
     }
 }
@@ -148,3 +150,6 @@ mod interface;
 
 /// Co-located normal and tangential material-string contacts in one solve.
 pub mod contact_load;
+
+/// Finite-width prescribed ribbons resolved by the original joint contact solver.
+pub mod ribbon;

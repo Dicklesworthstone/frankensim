@@ -103,6 +103,124 @@ fn performance_config()->MultiBowPerformanceConfig {
 }
 fn drive(speed:f64,load:f64)->FrictionDrive {FrictionDrive {speed_m_s:speed,normal_force_n:load}}
 
+fn ribbon_limits()->MultiFrictionConfig {
+    MultiFrictionConfig {max_ports:15,max_sweeps:128,max_setup_terms:1_000_000}
+}
+
+#[test]
+fn finite_ribbon_quadrature_converges_to_the_uniform_physical_load_integral() {
+    // G1: integrate the actual sine modes independently over a fixed interval.
+    // This tests the mechanical force map, not a spectral filter on the output.
+    with_cx(|cx,gate| {
+        let (width,centre)=(0.08,0.2);
+        let mut previous_error=f64::INFINITY;
+        for cells in [1,3,9] {
+            let bank=base(cx,gate,7800.0).with_uniform_bow_ribbon(width,cells,ribbon_limits(),gate).unwrap();
+            let ribbon=bank.source().ribbon().unwrap();
+            let card=&bank.cards()[0];
+            assert_eq!(ribbon.centre(),options().bow);
+            assert_eq!(ribbon.width_m(),width);
+            assert_eq!(ribbon.stations().len(),cells);
+            let mut error=0.0;
+            for k in 1..=card.mode_count {
+                let wavenumber=k as f64*core::f64::consts::PI;
+                let half_phase=wavenumber*width/(2.0*card.length_m);
+                let exact=(wavenumber*centre).sin()*half_phase.sin()/half_phase
+                    /(card.linear_density_kg_m*card.length_m/2.0).sqrt();
+                let actual=(0..cells).map(|port|bank.system().port(port).unwrap().left.shapes[k-1]
+                    *ribbon.load_fraction()).sum::<f64>();
+                error+=(actual-exact).abs();
+            }
+            assert!(error<previous_error/4.0,"midpoint load integration did not refine: {error} >= {previous_error}");
+            previous_error=error;
+            let mut drives=vec![drive(0.0,0.0);cells];
+            ribbon.project_drive(drive(-0.04,0.7),&mut drives).unwrap();
+            assert!(drives.iter().all(|d|d.speed_m_s == -0.04));
+            assert!((drives.iter().map(|d|d.normal_force_n).sum::<f64>()-0.7).abs()<2e-15);
+        }
+    });
+}
+
+#[test]
+fn finite_ribbon_solves_separate_slip_with_shared_body_and_conserved_work() {
+    with_cx(|cx,gate| {
+        let mut original=base(cx,gate,15600.0);
+        let zero=vec![0.0;original.system().mode_count()];
+        for _ in 0..7 { original.step(&zero,drive(0.1,0.0001)).unwrap(); }
+        let initial:Vec<_>=original.system().components().iter().flat_map(|c|c.states().iter().copied()).collect();
+        let mut bank=original.with_uniform_bow_ribbon(0.03,3,ribbon_limits(),gate).unwrap();
+        assert_eq!(states(&bank),initial);
+        assert_eq!(bank.system().samples_rendered(),7);
+        assert!(bank.source().bank().material_cavity().is_some());
+        assert_eq!(bank.source().bank().strings().len(),2);
+        let ribbon=bank.source().ribbon().unwrap().clone();
+        let mut drives=vec![drive(0.0,0.0);3];
+        let (mut nonuniform_slip,mut peak)=(0.0_f64,0.0_f64);
+        for sample in 0..256 {
+            ribbon.project_drive(drive(0.1,if sample<192 {0.0003} else {0.0}),&mut drives).unwrap();
+            let frame=bank.step(&zero,&drives).unwrap();
+            assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j);
+            assert!(frame.ports.iter().all(|p|p.dissipation_j>=0.0));
+            nonuniform_slip=nonuniform_slip.max((frame.ports[1].slip_distance_m-frame.ports[2].slip_distance_m).abs());
+            peak=peak.max(frame.observer_pressure_pa.abs());
+            if sample>=192 { assert_eq!(frame.drive_work_j,0.0);assert_eq!(frame.friction_dissipation_j,0.0); }
+        }
+        assert!(peak>1e-12);
+        assert!(nonuniform_slip>1e-14,"spatial cells were collapsed to one averaged slip");
+        assert!(bank.system().total_energy_j().unwrap()>0.0,"ribbon release erased sympathetic ringing");
+    });
+}
+
+#[test]
+fn ribbon_gestures_keep_original_total_load_ramps_and_block_invariance() {
+    with_cx(|cx,gate| {
+        let source=GestureSchedule::try_new(700,vec![GestureTrack {
+            id:"ribbon".into(),target:GestureTarget::BowStroke {string:0},
+            initial:value(0.1,0.0003,0.2),events:vec![
+                GestureEvent {time_s:0.002,transition_s:0.006,value:value(0.2,0.0006,0.2)},
+                GestureEvent {time_s:0.004,transition_s:0.0,value:value(0.1,0.00015,0.2)},
+                GestureEvent {time_s:0.007,transition_s:0.0,value:value(0.0,0.0,0.2)},
+            ],
+        }]).unwrap();
+        let build=||base(cx,gate,7800.0).with_uniform_bow_ribbon(0.03,3,ribbon_limits(),gate).unwrap()
+            .into_scheduled_ribbon(source.clone(),"ribbon".into(),performance_config()).unwrap();
+        let mut a=build();let mut b=build();
+        assert_eq!(a.schedule().to_canonical_bytes(),source.to_canonical_bytes());
+        let compiled=fs_couple::render::schedule::force::coupled::render::friction::compile_friction_track(
+            &source,"ribbon",FrictionGestureConfig {sample_rate_hz:48000,samples:513,max_block:128,
+                max_work:10000,max_events:128,station_fraction:0.2}).unwrap();
+        assert_eq!(a.events().len(),compiled.events.len()*3);
+        for (chunk,event) in a.events().chunks_exact(3).zip(&compiled.events) {
+            assert!(chunk.iter().all(|e|e.sample==event.sample && e.drive.speed_m_s==event.drive.speed_m_s));
+            assert!((chunk.iter().map(|e|e.drive.normal_force_n).sum::<f64>()-event.drive.normal_force_n).abs()<1e-18);
+        }
+        let mut first=vec![0.0;513];let mut second=first.clone();
+        for block in first.chunks_mut(1) { a.block(block).unwrap(); }
+        for block in second.chunks_mut(127) { b.block(block).unwrap(); }
+        assert_eq!(first,second);assert_eq!(states(a.bank()),states(b.bank()));
+        assert!(first.iter().any(|p|p.abs()>1e-12));
+    });
+}
+
+#[test]
+fn finite_ribbon_refuses_invalid_geometry_budgets_and_partial_drives() {
+    with_cx(|cx,gate| {
+        for (width,cells) in [(0.0,3),(-0.01,3),(f64::NAN,3),(0.25,3),(0.01,0),(0.01,2),(0.01,65)] {
+            assert!(base(cx,gate,7800.0).with_uniform_bow_ribbon(width,cells,ribbon_limits(),gate).is_err());
+        }
+        assert!(base(cx,gate,7800.0).with_uniform_bow_ribbon(0.01,5,joint_limits(),gate).is_err());
+        let bank=base(cx,gate,7800.0).with_uniform_bow_ribbon(0.01,3,ribbon_limits(),gate).unwrap();
+        let ribbon=bank.source().ribbon().unwrap();
+        let mut partial=[drive(1.0,2.0);2];
+        assert!(ribbon.project_drive(drive(0.1,0.1),&mut partial).is_err());
+        assert!(partial.iter().all(|d|d.speed_m_s==1.0 && d.normal_force_n==2.0));
+        let mut complete=[drive(1.0,2.0);3];
+        assert!(ribbon.project_drive(drive(0.1,-0.1),&mut complete).is_err());
+        assert!(complete.iter().all(|d|d.speed_m_s==1.0 && d.normal_force_n==2.0));
+        assert!(bank.into_scheduled_ribbon(schedule(),"bow-0".into(),performance_config()).is_err());
+    });
+}
+
 #[test]
 fn adding_material_contacts_preserves_vibration_sources_and_physical_pressure_basis() {
     with_cx(|cx,gate| {
