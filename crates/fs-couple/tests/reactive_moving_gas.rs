@@ -230,3 +230,111 @@ fn invalid_bindings_late_reaction_refusal_and_final_cancellation_leave_all_input
     assert_eq!((&p, &r), (&original.0, &original.1));
     for id in [1, 2] { assert!(p[&id].last_window_transfers().is_none()); }
 }
+
+mod material {
+    use super::*;
+    use fs_couple::cavity_phs::piston::material::{MaterialGasPiston, graph as material_graph};
+    use fs_evidence::ValidityDomain;
+    use fs_ga::Vec3;
+    use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
+        PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
+    use fs_material::state_point::MaterialPropertySelection;
+    use fs_mbd_material::{RegionBinding, VolumeMoments, resolve_body, ResolvedBody};
+    use fs_qty::{Density, Temperature};
+
+    fn body(density: f64) -> ResolvedBody {
+        let mut claims = ClaimSet::new();
+        claims.insert_claim(PropertyClaim { key: PropertyKey::new("density", Density::DIMS),
+            value: PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
+                knots: vec![(200.0, density), (400.0, density)], dims: Density::DIMS },
+            validity: ValidityDomain::unconstrained().with("T", 200.0, 400.0),
+            uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
+            observations: vec![], provenance: Provenance { source: "synthetic wall specimen".into(),
+                license: "CC0-1.0".into(), artifact: None } }).unwrap();
+        let card = MaterialCard::assemble(MaterialStateId { chemistry: "synthetic wall".into(),
+            phase: "solid".into(), process: "specified".into(), revision: 0 }, claims, vec![]).unwrap();
+        let point = QueryPoint::new().with("T", 300.0).unwrap();
+        resolve_body(&[RegionBinding { key: "wall", material: &card, point: &point,
+            geometry: VolumeMoments::cuboid(Vec3::new(0.1, 0.1, 0.01)).unwrap(),
+            selection: MaterialPropertySelection::SingleClaimOnly }], 1, || false).unwrap()
+    }
+    fn material_owners(law: &GasReaction, density: f64)
+        -> (BTreeMap<u64, MaterialGasPiston>, BTreeMap<u64, ClosedGasParcel>)
+    {
+        let (p, r) = owners(law);
+        (p.into_iter().map(|(id, p)| (id, MaterialGasPiston::new(p.gas().clone(),
+            body(if id == 1 { density } else { 10000.0 }), p.area_m2(), p.velocity_m_s()).unwrap())).collect(), r)
+    }
+    #[test]
+    fn material_path_matches_shared_dynamics_and_retains_exact_source_records() {
+        let law = law(8000.0, 1000.0);
+        let (p, r) = material_owners(&law, 8000.0);
+        let numeric = p.iter().map(|(&id, p)| (id, p.piston().clone())).collect();
+        let reference = reactive::step_candidate(&numeric, &r, &links(), 5e-5, &endpoints(), &drives(5e-5),
+            &bindings(&law), solve(), || false).unwrap();
+        let actual = material_graph::reactive_step_candidate(&p, &r, &links(), 5e-5, &endpoints(), &drives(5e-5),
+            &bindings(&law), solve(), || false).unwrap();
+        assert_eq!(actual.step(), reference.step());
+        assert_eq!(actual.reactions(), reference.reactions());
+        assert_eq!(actual.reservoirs(), reference.reservoirs());
+        for id in [1, 2] {
+            assert_eq!(actual.pistons()[&id].piston(), &reference.pistons()[&id]);
+            assert_eq!(actual.pistons()[&id].body(), p[&id].body());
+            assert_eq!(actual.pistons()[&id].piston().mass_kg(), p[&id].body().inertia().mass());
+        }
+        let reference = material_graph::step_candidate(&p, &r, &links(), 5e-5, &endpoints(), &drives(5e-5), solve(), || false).unwrap();
+        let empty = material_graph::reactive_step_candidate(&p, &r, &links(), 5e-5, &endpoints(), &drives(5e-5), &[], solve(), || false).unwrap();
+        assert_eq!(empty.pistons(), reference.pistons()); assert_eq!(empty.step(), reference.step());
+    }
+    fn run(density: f64, rate: f64, count: u32) -> (BTreeMap<u64, MaterialGasPiston>, BTreeMap<u64, ClosedGasParcel>) {
+        let law = law(8000.0, rate);
+        let (mut p, mut r) = material_owners(&law, density);
+        let original = p.clone();
+        let dt = 0.0016 / f64::from(count);
+        for _ in 0..count {
+            let next = material_graph::reactive_step_candidate(&p, &r, &links(), dt, &endpoints(), &drives(dt),
+                &bindings(&law), solve(), || false).unwrap();
+            assert!(next.step().total_energy_residual_j.abs() <= solve().total_energy_tolerance_j);
+            let (np, nr, _, _) = next.into_parts(); p = np; r = nr;
+            for id in [1, 2] { assert_eq!(p[&id].body(), original[&id].body()); }
+        }
+        (p, r)
+    }
+    #[test]
+    fn changing_only_density_and_rate_data_propagates_through_reacting_flow_and_motion() {
+        let (light, light_r) = run(1000.0, 1000.0, 64);
+        let (dense, dense_r) = run(8000.0, 1000.0, 64);
+        let (faster, _) = run(8000.0, 2000.0, 64);
+        assert!(light[&1].piston().velocity_m_s() > dense[&1].piston().velocity_m_s());
+        assert_ne!(light[&1].gas().state().state().temperature, dense[&1].gas().state().state().temperature);
+        assert_ne!(light[&1].gas().state().state().sound_speed, dense[&1].gas().state().state().sound_speed);
+        assert_ne!(light_r[&3].mass_kg(), dense_r[&3].mass_kg());
+        assert!(amount(faster[&1].gas(), "B") > amount(dense[&1].gas(), "B"));
+        assert!(faster[&1].piston().velocity_m_s() > dense[&1].piston().velocity_m_s());
+    }
+    #[test]
+    fn material_reacting_trajectory_refines_at_the_declared_first_order() {
+        let values = [32, 64, 128].map(|n| run(8000.0, 1000.0, n).0[&1].piston().velocity_m_s());
+        let ratio = (values[0]-values[1]).abs()/(values[1]-values[2]).abs();
+        assert!((1.8..2.2).contains(&ratio), "{values:?}, ratio {ratio}");
+    }
+    #[test]
+    fn cancellation_after_material_rebinding_and_arriving_source_conflicts_are_atomic() {
+        let law = law(8000.0, 1000.0);
+        let (p, r) = material_owners(&law, 8000.0);
+        let original = (p.clone(), r.clone());
+        let mut polls = 0;
+        material_graph::reactive_step_candidate(&p, &r, &links(), 5e-5, &endpoints(), &drives(5e-5),
+            &bindings(&law), solve(), || { polls += 1; false }).unwrap();
+        let mut calls = 0;
+        assert_eq!(material_graph::reactive_step_candidate(&p, &r, &links(), 5e-5, &endpoints(), &drives(5e-5),
+            &bindings(&law), solve(), || { calls += 1; calls == polls }), Err(MovingGasError::Cancelled));
+        // The transported A/I sources, not just the originally inert chamber,
+        // must match the selected reaction's original source catalog.
+        let conflicting = super::law(9000.0, 1000.0);
+        let b = bindings(&conflicting);
+        assert!(matches!(material_graph::reactive_step_candidate(&p, &r, &links(), 5e-5, &endpoints(), &drives(5e-5),
+            &b, solve(), || false), Err(MovingGasError::Reaction { .. })));
+        assert_eq!((&p, &r), (&original.0, &original.1));
+    }
+}
