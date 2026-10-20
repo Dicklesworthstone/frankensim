@@ -18,6 +18,8 @@
 
 pub mod cma;
 pub mod cma_family;
+/// Bounded global exploration with resumable physical evaluations.
+pub mod differential_evolution;
 pub mod dro;
 pub mod moo;
 pub mod neldermead;
