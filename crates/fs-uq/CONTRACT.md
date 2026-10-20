@@ -144,8 +144,9 @@ structured errors rather than panicking.
   sequential stream, so old product-plan sample sequences are not preserved.
   Result hashes use the `org.frankensim.uq.result.v2` domain and include every
   result field without the former six-decimal truncation of observed ranges.
-- Product-plan QMC/PCE/MLMC/epistemic bounding, confidence-band sampling,
-  unstated inputs and non-Gaussian correlated models refuse before model calls.
+- The single-level product-plan driver refuses QMC/PCE/MLMC/epistemic bounding,
+  confidence-band sampling, unstated inputs and non-Gaussian correlated models
+  before model calls.
   A confidence half-width is not a probability measure. Units are required
   labels; dimensional compatibility and physical applicability remain caller
   obligations. Non-finite model values stop with an explicit refusal and the
@@ -155,6 +156,33 @@ structured errors rather than panicking.
   no cancellation/resume or Cooling project driver in this API yet.
   `tests/product_plan.rs` checks analytic correlated-Gaussian variance,
   singular dependence, pre-callback refusals, finite statistics, and authority.
+- `product_mlmc::MlmcExecution` is the method-specific MLMC producer for
+  1..=64 caller-declared resolution levels with at least two corrections per
+  level. It reuses the existing Gaussian/uniform probability-law admission,
+  numerical joint-Gaussian factor and physical Philox sampler. The immutable
+  plan budget equals `N0 + 2*sum(Nl, l>0)` physical model calls and remains
+  capped at one million. Level-major corrections have disjoint sample ordinals;
+  every fine/coarse pair receives the identical physical parameter vector.
+  A completed fine half-pair survives chunk boundaries, cancellation and clone
+  resumption without another fine solve. An interrupted unfinished call retries
+  its same level and parameters; its internal cost belongs to the solver.
+  Errors and nonfinite physical values/corrections are terminal, with no sample
+  skipping or replacement. Completed corrections and call counts remain visible.
+  The global estimate appears only after the entire fixed allocation and is
+  `sum(mean(Yl))`, with descriptive sampling variance `sum(s_l^2/Nl)`.
+  Scaled moment arithmetic is shared with the independent-replicate QMC owner.
+  A singleton partial level has undefined dispersion; unrepresentable variance
+  remains absent even when its standard error is representable. Optional
+  compliance applies the indicator to each physical level before differencing.
+  Its finite-sample telescoping probability estimate can leave `[0,1]` and is
+  not clipped. Correction samples are not a physical-QoI distribution and
+  produce no pooled quantiles or CVaR. All reports remain Estimated. There is
+  no automatic level/allocation adaptation, bias/continuum/model-error bound,
+  anytime stopping rule, hidden-randomness coupling or durable checkpoint format.
+  `tests/product_mlmc.rs` covers a backward-Euler cooling ladder with an exact
+  finest-level expectation, independent reconstruction of correction statistics,
+  one-level MC equivalence, correlated inputs, paired-call continuation,
+  compliance, admission failures and terminal numerical/model refusals.
 - Slice-1 scope. The bead's split lanes: seismic machinery
   (Kanai–Tajimi spectra via fs-scenario, response-spectrum CQC fast
   path, IDA fragility curves — needs fs-solid-advanced), e-process

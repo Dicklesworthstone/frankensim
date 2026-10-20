@@ -288,7 +288,7 @@ fn scaled_mean_interruptible(values: &[f64], cancelled: &mut impl FnMut() -> boo
     Ok((total / values.len() as f64).clamp(-1.0, 1.0) * scale)
 }
 
-fn summarize_replicates(values: &[f64]) -> Option<QmcEstimate> {
+pub(crate) fn summarize_replicates(values: &[f64]) -> Option<QmcEstimate> {
     if values.is_empty() { return None; }
     let mean = scaled_mean(values);
     let scale = values.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
