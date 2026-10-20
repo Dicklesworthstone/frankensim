@@ -199,6 +199,25 @@ axial totals and both mounts' tilt torques are checked across grid sizes.
 A fixed-settled-state rim-loss control (live `mu=3` versus offline `mu=0.08`) moves
 open balance by at most 0.19 dB at these two grids and leaves its decay descriptor
 unchanged. The live loss law is retained: this discrepancy does not explain the missing wash.
+A zero-friction control also barely changes the open-hat result (at most 0.14 dB balance
+at these grids). It substantially lengthens the closed attack and decay; dry friction is
+retained rather than removed to improve one spectral score.
+
+A full one-second 5.5 mm render with both finite mounts measures 6.30 dB balance distance
+and 10.478% above 4 kHz. Its first-50-ms energy is 62.83% versus the reference's 38.54%,
+and the 8 kHz band falls 20 dB in 170 ms versus 640 ms. Thus finer spatial resolution
+does not close the tail or attack gap.
+
+The SIMD WASM built from this source (SHA-256
+`d93446abd4cf6c1b090e2328ca36d814f063dbbdf856ff7505c5f45f0bc4afd1`)
+completed eight 600 ms buffered Chrome Worker checks with contiguous finite pressure,
+including 96 kHz internal physics returning 48 kHz output for the 2x open hat and 7x snare.
+The old level table was correctly ignored for the new hash. Browser open-hat balance
+at 4.5x improves 11.60 to 9.32 dB, and energy above 4 kHz changes 2.596% to 2.661%.
+This is not real-time qualification: a forced 3x live-clock probe dropped frames; buffered
+render rates on that host were 0.40-0.49x at 3x and 0.086x for the 2x open hat.
+The initial failed probe is retained separately from the 10-second-lead transport check.
+A fresh level table and real-time qualification remain outstanding; this package is not deployed.
 
 ## Graded against a real kit
 
