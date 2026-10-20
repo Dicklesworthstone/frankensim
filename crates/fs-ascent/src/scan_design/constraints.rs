@@ -10,6 +10,8 @@ use super::{ScanGeometryControl,ScanPowerStudy,ScanPowerEvaluation,ScanSensitivi
 use crate::{SqpState,SqpSample,SqpError,SqpRunReport};
 use fs_exec::Cx;
 use std::collections::{BTreeMap,BTreeSet};
+pub use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::responses::{
+    ScanResponse, ScanResponseBudget};
 
 /// A bound on one selected control in its original physical units, not its
 /// transformed optimizer coordinate. Powers come first [W], then geometry [m].
@@ -34,6 +36,20 @@ pub struct ScanEnergyCap {
     pub scale_j: f64,
 }
 
+/// A lower/upper limit on actual temperature [K] or specific enthalpy [J/kg]
+/// at one fixed-grid endpoint and mesh vertex. These are separate constraints,
+/// not fitting targets. One response sweep supplies both sides of an interval.
+/// No claim is made about unsampled vertices, times or a continuous maximum.
+#[derive(Debug,Clone,Copy,PartialEq)]
+pub struct ScanStateBound {
+    pub response: ScanResponse,
+    pub lower: Option<f64>,
+    pub upper: Option<f64>,
+    /// Same physical units as the response. SQP feasibility tolerance tau
+    /// permits tau*scale violation, independently of the primal solve error.
+    pub scale: f64,
+}
+
 /// Constraint observations and derivatives at exactly one design point.
 #[derive(Debug,Clone,PartialEq)]
 pub struct ScanConstraintEvaluation {
@@ -41,10 +57,16 @@ pub struct ScanConstraintEvaluation {
     pub bound_values: Vec<f64>,
     /// Joules per declared energy window, including fixed source contributions.
     pub absorbed_energy_j: Vec<f64>,
-    /// <= 0 is feasible. Bound lower then upper rows, followed by energy rows.
+    /// Actual kelvin/J-per-kg responses in state-bound declaration order.
+    pub state_values: Vec<f64>,
+    /// <= 0 is feasible. Control lower/upper rows, energy rows, then state
+    /// lower/upper rows, each group in original declaration order.
     pub residuals: Vec<f64>,
     /// Row-major derivatives with respect to original optimizer coordinates.
     pub jacobian: Vec<f64>,
+    /// Additional response reverse work, excluding the fitting-objective sweep.
+    pub state_transpose_iterations: usize,
+    pub max_state_transpose_relative_residual: f64,
 }
 impl ScanConstraintEvaluation {
     pub fn max_scaled_violation(&self) -> f64 {
@@ -53,7 +75,8 @@ impl ScanConstraintEvaluation {
 }
 
 struct EnergyRow { cap: ScanEnergyCap, fixed_j: f64, power_weights_s: Vec<f64> }
-struct Limits { bounds: Vec<ScanControlBound>, energy: Vec<EnergyRow>, rows: usize }
+struct Limits { bounds: Vec<ScanControlBound>, energy: Vec<EnergyRow>,
+    states: Vec<ScanStateBound>, response_budget: ScanResponseBudget, rows: usize }
 
 /// One study, immutable constraints and its own accepted SQP checkpoint.
 /// This owner prevents resuming a checkpoint with a different constraint set.
@@ -71,12 +94,29 @@ impl<F> ConstrainedScanStudy<F> {
     /// constraint-infeasible but must be physically evaluable. Equal lower/upper
     /// bounds are refused: keep a fixed coordinate unselected instead.
     /// All energy windows require constant/ramp/held-or-linear power schedules.
-    pub fn new<'h,'m,'c>(cx: &Cx<'_>, mut study: ScanPowerStudy<F>,
+    pub fn new<'h,'m,'c>(cx: &Cx<'_>, study: ScanPowerStudy<F>,
         bounds: Vec<ScanControlBound>, energy: Vec<ScanEnergyCap>, max_kkt_dimension: usize)
         -> Result<Self,SqpError<ScanSensitivityError>>
     where F: FnMut(&Cx<'_>,Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>,ScanSensitivityError>
     {
-        let limits=Limits::new(cx,&study,bounds,energy,max_kkt_dimension).map_err(SqpError::Evaluation)?;
+        Self::new_with_state_bounds(cx,study,bounds,energy,Vec::new(),
+            ScanResponseBudget {max_responses:0,max_gradient_entries:0,max_transpose_solves:0},max_kkt_dimension)
+    }
+
+    /// Add limits on the solved trajectory, sharing each original forward run
+    /// with the fitting objective. All response gradients pass through full
+    /// previous enthalpy, nonlinear conductivity and optional radiation.
+    /// State-only constrained studies are valid. Bounds stay immutable across
+    /// SQP continuation, and every extra reverse sweep has an explicit budget.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_state_bounds<'h,'m,'c>(cx: &Cx<'_>, mut study: ScanPowerStudy<F>,
+        bounds: Vec<ScanControlBound>, energy: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>,
+        response_budget: ScanResponseBudget, max_kkt_dimension: usize)
+        -> Result<Self,SqpError<ScanSensitivityError>>
+    where F: FnMut(&Cx<'_>,Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>,ScanSensitivityError>
+    {
+        let limits=Limits::new(cx,&study,bounds,energy,states,response_budget,max_kkt_dimension)
+            .map_err(SqpError::Evaluation)?;
         let initial=study.initial_coordinates().to_vec();
         let state=SqpState::try_new(&initial,max_kkt_dimension,
             &mut |point| limits.sample(cx,&mut study,point),Some(cx))?;
@@ -89,10 +129,36 @@ impl<F> ConstrainedScanStudy<F> {
     pub fn evaluation_limit(&self) -> usize { self.study.evaluation_limit() }
     pub fn iterations(&self) -> usize { self.state.iterations() }
 
-    /// Check constraints without a physics evaluation or spent-budget change.
+    /// Check input-only constraints without physics. With state bounds this
+    /// refuses rather than silently omitting them; use evaluate_at or
+    /// replay_with_constraints for all physical response values and gradients.
     pub fn constraints_at(&self,cx: &Cx<'_>,point: &[f64])
         -> Result<ScanConstraintEvaluation,ScanSensitivityError>
-    { self.limits.at(cx,&self.study,point) }
+    {
+        poll(cx)?;
+        if !self.limits.states.is_empty() {
+            return Err(invalid("state constraints need a physical evaluation; use evaluate_at or replay_with_constraints"));
+        }
+        self.limits.at(cx,&self.study,point)
+    }
+
+    /// Original immutable sampled-state requirements, in report order.
+    pub fn state_bounds(&self) -> &[ScanStateBound] { &self.limits.states }
+
+    /// Evaluate the objective AND all constraints at a supplied candidate.
+    /// Costs one physical evaluation plus the admitted response sweeps; never
+    /// changes the accepted SQP point, multipliers or curvature history.
+    pub fn evaluate_at<'h,'m,'c>(&mut self,cx: &Cx<'_>,point: &[f64])
+        -> Result<(ScanPowerEvaluation,ScanConstraintEvaluation),ScanSensitivityError>
+    where F: FnMut(&Cx<'_>,Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>,ScanSensitivityError>
+    { self.limits.evaluate(cx,&mut self.study,point) }
+
+    /// Re-run the accepted design with every attached state requirement. The
+    /// values come from that same trajectory, not reconstructed penalty terms.
+    pub fn replay_with_constraints<'h,'m,'c>(&mut self,cx: &Cx<'_>)
+        -> Result<(ScanPowerEvaluation,ScanConstraintEvaluation),ScanSensitivityError>
+    where F: FnMut(&Cx<'_>,Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>,ScanSensitivityError>
+    { self.limits.evaluate(cx,&mut self.study,self.state.point()) }
 
     /// Export the current candidate. It may be infeasible or unconverged after
     /// an interrupted run; export alone makes no constraint-satisfaction claim.
@@ -124,15 +190,36 @@ impl<F> ConstrainedScanStudy<F> {
     /// consuming one physical evaluation. This does not reset the SQP checkpoint.
     pub fn replay<'h,'m,'c>(&mut self,cx: &Cx<'_>) -> Result<ScanPowerEvaluation,ScanSensitivityError>
     where F: FnMut(&Cx<'_>,Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>,ScanSensitivityError>
-    { self.study.evaluate(cx,self.state.point()) }
+    { self.replay_with_constraints(cx).map(|(physical,_)|physical) }
 }
 
 impl Limits {
     fn new<F>(cx: &Cx<'_>, study: &ScanPowerStudy<F>, bounds: Vec<ScanControlBound>,
-        caps: Vec<ScanEnergyCap>, maximum: usize) -> Result<Self,ScanSensitivityError>
+        caps: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>, response_budget: ScanResponseBudget,
+        maximum: usize) -> Result<Self,ScanSensitivityError>
     {
         poll(cx)?;
         let n=study.initial.len();let mut rows=caps.len();let mut seen=BTreeSet::new();
+        if states.len()>response_budget.max_responses {
+            return Err(invalid("state bounds exceed their response allowance"));
+        }
+        let mut response_solves=study.objective.endpoints_s.len();
+        for state in &states {
+            poll(cx)?;
+            if state.response.endpoint>=study.objective.endpoints_s.len()
+                || !state.scale.is_finite() || state.scale<=0.0
+                || (state.lower.is_none() && state.upper.is_none())
+                || state.lower.into_iter().chain(state.upper).any(|v|!v.is_finite())
+                || state.lower.zip(state.upper).is_some_and(|(a,b)|a>=b)
+            { return Err(invalid("state bounds require an existing endpoint, finite ordered limits and a positive physical scale")); }
+            rows=rows.checked_add(usize::from(state.lower.is_some())+usize::from(state.upper.is_some()))
+                .ok_or_else(||invalid("state constraint count overflow"))?;
+            response_solves=response_solves.checked_add(state.response.endpoint+1)
+                .ok_or_else(||invalid("state response work count overflow"))?;
+        }
+        if !states.is_empty() && response_solves>response_budget.max_transpose_solves {
+            return Err(invalid("state bounds and objective exceed their transpose allowance"));
+        }
         for bound in &bounds {
             poll(cx)?;
             if bound.coordinate>=n || !seen.insert(bound.coordinate) || !bound.scale.is_finite()
@@ -178,7 +265,7 @@ impl Limits {
             energy.push(row);
         }
         poll(cx)?;
-        Ok(Self {bounds,energy,rows})
+        Ok(Self {bounds,energy,states,response_budget,rows})
     }
 
     fn at<F>(&self,cx: &Cx<'_>,study: &ScanPowerStudy<F>,point: &[f64])
@@ -188,7 +275,8 @@ impl Limits {
         let powers=study.powers_at(point)?;let geometry=study.geometry_at(point)?;let n=point.len();
         let mut out=ScanConstraintEvaluation {bound_values:Vec::with_capacity(self.bounds.len()),
             absorbed_energy_j:Vec::with_capacity(self.energy.len()),residuals:Vec::with_capacity(self.rows),
-            jacobian:vec![0.0;self.rows*n]};
+            state_values:Vec::with_capacity(self.states.len()),jacobian:vec![0.0;self.rows*n],
+            state_transpose_iterations:0,max_state_transpose_relative_residual:0.0};
         for b in &self.bounds {
             poll(cx)?;
             let (value,chain)=if b.coordinate<powers.len() {(powers[b.coordinate],powers[b.coordinate])}
@@ -223,9 +311,41 @@ impl Limits {
         -> Result<Option<SqpSample>,ScanSensitivityError>
     where F: FnMut(&Cx<'_>,Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>,ScanSensitivityError>
     {
-        let constraints=self.at(cx,study,point)?;
-        let physical=study.evaluate(cx,point)?;
+        let (physical,constraints)=self.evaluate(cx,study,point)?;
         Ok(Some(SqpSample {f:physical.physical.value,gradient:physical.gradient,
             ce:Vec::new(),je:Vec::new(),ci:constraints.residuals,ji:constraints.jacobian}))
+    }
+
+    fn evaluate<'h,'m,'c,F>(&self,cx: &Cx<'_>,study: &mut ScanPowerStudy<F>,point: &[f64])
+        -> Result<(ScanPowerEvaluation,ScanConstraintEvaluation),ScanSensitivityError>
+    where F: FnMut(&Cx<'_>,Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>,ScanSensitivityError>
+    {
+        let mut out=self.at(cx,study,point)?;
+        let requests:Vec<_>=self.states.iter().map(|state|state.response).collect();
+        let (physical,responses)=study.evaluate_with_responses(cx,point,
+            if requests.is_empty() {None} else {Some((&requests,self.response_budget))})?;
+        if responses.len()!=self.states.len() {return Err(invalid("state response layout changed"));}
+        for (state,response) in self.states.iter().zip(responses) {
+            poll(cx)?;
+            if response.response!=state.response {return Err(invalid("state response identity changed"));}
+            let gradient=study.chain_gradient(cx,&physical.powers_w,&physical.geometry_m,&response.sources)?;
+            out.state_values.push(response.value);
+            out.state_transpose_iterations=out.state_transpose_iterations.checked_add(response.transpose_iterations)
+                .ok_or_else(||invalid("state response iteration count overflow"))?;
+            out.max_state_transpose_relative_residual=out.max_state_transpose_relative_residual
+                .max(response.max_transpose_relative_residual);
+            for (limit,sign) in [(state.lower,-1.0),(state.upper,1.0)] {
+                if let Some(limit)=limit {
+                    let offset=out.residuals.len()*point.len();
+                    for (i,&g) in gradient.iter().enumerate() {
+                        if i%256==0 {poll(cx)?;}
+                        out.jacobian[offset+i]=finite(sign*(g/state.scale))?;
+                    }
+                    out.residuals.push(finite(sign*finite(response.value-limit)?/state.scale)?);
+                }
+            }
+        }
+        poll(cx)?;
+        Ok((physical,out))
     }
 }

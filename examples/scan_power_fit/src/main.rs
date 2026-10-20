@@ -2,6 +2,7 @@
 //! All geometry and materials are synthetic, not experimental calibration.
 mod geometry;
 mod limits;
+mod state_limits;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_ascent::{LbfgsReport, StopReason, StopRule};
 use fs_ascent::scan_design::{ScanPowerControl, ScanPowerObjective, ScanPowerStudy};
@@ -138,6 +139,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|arg|arg == "--geometry") { return geometry::run_cli(&args[1..]); }
     if args.first().is_some_and(|arg|arg == "--limits") { return limits::run_cli(&args[1..]); }
+    if args.first().is_some_and(|arg|arg == "--state-limits") { return state_limits::run_cli(&args[1..]); }
     if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
         println!("{USAGE}\nConstrained fitting: --limits [maximum_power_W maximum_absorbed_energy_J]");
         return Ok(());

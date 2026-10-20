@@ -10,6 +10,9 @@ use fs_conduction::bc::history::march::enthalpy::scanning::ScanningEnthalpyRun;
 use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::{ScanSensitivityError,
     objective::{evaluate_scan_objective, ScanObjectiveEvaluation, ScanObjectiveBudget,
         ScanObjectiveSampling, ScanObservation}};
+use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::responses::{
+    evaluate_scan_objective_with_responses, ScanResponse, ScanResponseBudget, ScanResponseEvaluation};
+use fs_conduction::bc::history::march::moving::sensitivity::schedule::MovingHeatScheduleGradient;
 use fs_conduction::bc::history::march::moving::MovingHeatSource;
 use fs_conduction::transient::enthalpy::EnthalpyStepConfig;
 use fs_conduction::{ConductionError, LinearConfig};
@@ -214,6 +217,16 @@ impl<F> ScanPowerStudy<F> {
         -> Result<ScanPowerEvaluation, ScanSensitivityError>
     where F: FnMut(&Cx<'_>, Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>, ScanSensitivityError>
     {
+        self.evaluate_with_responses(cx, point, None).map(|(objective, _)| objective)
+    }
+
+    // Constraint rows and the fitting objective share the exact supplied-source
+    // check, one original trajectory, and one cumulative evaluation reservation.
+    fn evaluate_with_responses<'h,'m,'c>(&mut self, cx: &Cx<'_>, point: &[f64],
+        responses: Option<(&[ScanResponse], ScanResponseBudget)>)
+        -> Result<(ScanPowerEvaluation, Vec<ScanResponseEvaluation>), ScanSensitivityError>
+    where F: FnMut(&Cx<'_>, Vec<MovingHeatSource>) -> Result<ScanningEnthalpyRun<'h,'m,'c>, ScanSensitivityError>
+    {
         poll(cx)?;
         let powers_w = self.powers_at(point)?;
         let geometry_m = self.geometry_at(point)?;
@@ -225,24 +238,39 @@ impl<F> ScanPowerStudy<F> {
             return Err(invalid("scan factory must return an unadvanced physical run"));
         }
         if run.sources() != sources.as_slice() { return Err(invalid("scan factory replaced the supplied controlled sources")); }
-        let physical = evaluate_scan_objective(cx,run,&self.objective.endpoints_s,&self.objective.observations,
-            self.objective.sampling,self.objective.step,self.objective.transpose,self.objective.budget)?;
+        let (physical, rows) = match responses {
+            None => (evaluate_scan_objective(cx,run,&self.objective.endpoints_s,&self.objective.observations,
+                self.objective.sampling,self.objective.step,self.objective.transpose,self.objective.budget)?, Vec::new()),
+            Some((responses, response_budget)) => evaluate_scan_objective_with_responses(cx,run,
+                &self.objective.endpoints_s,&self.objective.observations,self.objective.sampling,
+                self.objective.step,self.objective.transpose,self.objective.budget,responses,response_budget)?,
+        };
+        let gradient = self.chain_gradient(cx, &powers_w, &geometry_m, &physical.sources)?;
+        poll(cx)?;
+        Ok((ScanPowerEvaluation { physical,gradient,powers_w,geometry_m }, rows))
+    }
+
+    // Both objective and unsquared state-response derivatives use this same
+    // positive-power, signed-position and positive-width coordinate chain.
+    fn chain_gradient(&self, cx: &Cx<'_>, powers_w: &[f64], geometry_m: &[f64],
+        sources: &[MovingHeatScheduleGradient]) -> Result<Vec<f64>, ScanSensitivityError>
+    {
         let mut gradient = Vec::with_capacity(self.initial.len());
-        for (control,&power) in self.controls.iter().zip(&powers_w) {
+        for (control,&power) in self.controls.iter().zip(powers_w) {
             poll(cx)?;
-            let g = physical.sources.get(control.source)
+            let g = sources.get(control.source)
                 .and_then(|s|s.absorbed_power_values_w.get(control.value))
                 .ok_or_else(||invalid("native authored-power gradient changed its control layout"))?;
             gradient.push(finite(power * *g)?);
         }
-        for (&control, &value) in self.geometry_controls.iter().zip(&geometry_m) {
+        for (&control, &value) in self.geometry_controls.iter().zip(geometry_m) {
             poll(cx)?;
-            let source_gradient = physical.sources.get(control.source())
+            let source_gradient = sources.get(control.source())
                 .ok_or_else(||invalid("native geometry gradient changed its source layout"))?;
             gradient.push(control.chain(value, source_gradient)?);
         }
         poll(cx)?;
-        Ok(ScanPowerEvaluation { physical,gradient,powers_w,geometry_m })
+        Ok(gradient)
     }
 
     /// Initialize the existing fallible L-BFGS engine on these exact coordinates.
