@@ -98,7 +98,12 @@ class LaneWorker<R> {
 
   /** `name`: the Worker's name (devtools); `label`: how errors name it ("the snare engine"). */
   constructor(url: string, name: string, private readonly label: string, private readonly mix: LiveMix, private readonly id: string, onMessage: (m: { type: string; [k: string]: unknown }) => void) {
-    this.worker = new Worker(url, { type: "module", name });
+    try { this.worker = new Worker(url, { type: "module", name }); }
+    catch (e) {
+      this.channel.port1.close();
+      this.channel.port2.close();
+      throw e;
+    }
     this.ready = new Promise<R>((resolve, reject) => {
       this.rejectReady = reject;
       this.worker.onmessage = (e: MessageEvent) => {
@@ -124,9 +129,11 @@ class LaneWorker<R> {
     this.ready.catch(() => {}); // a caller that awaits it sees the rejection; nobody else should
   }
 
-  /** The producer end for the Worker's `init` message. */
-  takePort(): MessagePort {
-    return this.channel.port1;
+  /** If init cannot be transferred, construction leaves no caller able to dispose this lane. */
+  initialize(options: Record<string, unknown>): void {
+    const port = this.channel.port1;
+    try { this.worker.postMessage({ type: "init", ...options, port }, [port]); }
+    catch (e) { this.dispose(); throw e; }
   }
 
   dispose(): void {
@@ -228,8 +235,7 @@ export class KitLane {
     });
     this.worker = this.lane.worker;
     this.ready = this.lane.ready;
-    const port = this.lane.takePort();
-    this.worker.postMessage({ type: "init", piece, port, ...opts }, [port]);
+    this.lane.initialize({ piece, ...opts });
   }
   strike(x: number, y: number, speed: number, frame?: number): void {
     this.worker.postMessage({ type: "strike", x, y, speed, frame });
@@ -292,8 +298,7 @@ export class PianoLane {
     });
     this.worker = this.lane.worker;
     this.ready = this.lane.ready;
-    const port = this.lane.takePort();
-    this.worker.postMessage({ type: "init", port, ...opts }, [port]);
+    this.lane.initialize(opts);
   }
   sequence(startFrame: number, loopFrames: number, events: { offset: number; on?: number; off?: number; speed?: number }[]): void {
     this.worker.postMessage({ type: "sequence", startFrame, loopFrames, events });

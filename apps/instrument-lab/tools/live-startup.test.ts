@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
 import { loadWorkletModule } from "../src/live/liveAudio";
-import { KitLane } from "../src/live/mix";
+import { KitLane, PianoLane } from "../src/live/mix";
 
 test("failed worklet URLs change on retry; concurrent and successful loads are shared", async () => {
   const urls: string[] = [];
@@ -81,6 +81,53 @@ for (const failure of ["startup-message", "startup-native", "attach", "running-m
       workers.forEach(w => w.terminate());
       attached.forEach(p => p.close());
       Object.assign(globalThis, { Worker: previousWorker });
+    }
+  });
+}
+
+for (const kind of ["kit", "piano"] as const) for (const failure of ["construct", "init"] as const) {
+  test(`${kind} lane releases resources when worker ${failure} throws synchronously`, async () => {
+    const previousWorker = globalThis.Worker, previousChannel = globalThis.MessageChannel;
+    const ports: { closeCount: number; close(): void }[] = [];
+    const workers: WorkerBoundary[] = [];
+    const refusal = new Error(`worker ${failure} refused`);
+    let fail = true;
+    class WorkerBoundary {
+      onmessage: ((event: { data: object }) => void) | null = null;
+      onerror: ((event: ErrorEvent) => void) | null = null;
+      terminated = false;
+      constructor() {
+        if (fail && failure === "construct") throw refusal;
+        workers.push(this);
+      }
+      postMessage() { if (fail && failure === "init") throw refusal; }
+      terminate() { this.terminated = true; }
+    }
+    const makePort = () => {
+      const port = { closeCount: 0, close() { this.closeCount++; } };
+      ports.push(port);
+      return port;
+    };
+    Object.assign(globalThis, { Worker: WorkerBoundary, MessageChannel: class {
+      port1 = makePort();
+      port2 = makePort();
+    } });
+    const mix = { attach() {}, dropLane() {} } as unknown as ConstructorParameters<typeof KitLane>[0];
+    const create = () => kind === "kit" ? new KitLane(mix, "kick", { gain: 0.2 }) : new PianoLane(mix);
+    let replacement: KitLane | PianoLane | undefined;
+    try {
+      assert.throws(create, error => error === refusal, "preserve the original startup error");
+      assert.equal(ports.length, 2);
+      assert.ok(ports.every(p => p.closeCount === 1), "both untransferred ports must close");
+      assert.ok(workers.every(w => w.terminated), "failed init must terminate the worker");
+      assert.ok(workers.every(w => w.onmessage === null && w.onerror === null));
+      fail = false;
+      replacement = create();
+      workers.at(-1)!.onmessage!({ data: { type: "ready" } });
+      await replacement.ready;
+    } finally {
+      replacement?.dispose();
+      Object.assign(globalThis, { Worker: previousWorker, MessageChannel: previousChannel });
     }
   });
 }
