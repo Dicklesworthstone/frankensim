@@ -285,7 +285,7 @@ function buildCard(c: Card, notes: Record<string, string>): HTMLElement {
       const i = el("i");
       i.style.background = PARTIAL_COLOURS[(t.n - 1) % PARTIAL_COLOURS.length]!;
       return el("span", {}, i, `partial ${t.n}${t.ref_hz ? ` (${num(t.ref_hz, "Hz", 4)})` : ""}`);
-    }), el("span", {}, pair.ours ? "solid: recording · dashed: FrankenSim" : "solid: recording"));
+    }), el("span", {}, tracks.some((t) => t.ours) ? "solid: recording · dashed: FrankenSim" : pair.ours ? "solid: recording; none of the render's partials matched these" : "solid: recording"));
     morePartials.textContent = allPartials ? "Show fewer partials" : "Show 8 partials";
     morePartials.hidden = pt.tracks.length <= 4;
   };

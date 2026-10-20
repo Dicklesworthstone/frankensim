@@ -149,6 +149,9 @@ class Refusals(unittest.TestCase):
     def test_track_length_must_match_the_frame_times(self):
         self.assertTrue(any("must have 4 entries" in p for p in self.check(lambda pj: pj["partials"]["real"][0].update(f_hz=[1.0]))))
 
+    def test_a_render_none_of_whose_partials_matched_is_still_shown(self):
+        self.assertEqual(self.check(lambda pj: pj["partials"].update(ours=None)), [])
+
     def test_a_missing_render_cannot_carry_ours_files(self):
         self.assertTrue(any("must be null" in p for p in self.check(lambda pj: pj["audio"].update(ours="real.wav"), with_ours=False)))
 

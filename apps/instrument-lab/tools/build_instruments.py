@@ -44,7 +44,8 @@ A reference-only pair (no render yet) has "ours": null and no ours/diff files.
                   diff = ours minus real in dB (positive: ours louder), +-diff_range_db.
   partials        null, or {t_s: [frame times], f0_hz: {real, ours | null},
                             real: [{n, f_hz: [...], level_db: [...]}, ...],      one entry per tracked partial
-                            ours: same shape | null}                              (null where untrackable)
+                            ours: same shape | null}                              (null where untrackable;
+                  ours null with a render present means none of its partials matched the recording's)
                   level_db is dB re the same reference for both sides (the clips are loudness-matched).
   metrics         [{id, label, unit, real, ours | null, gap | null, gap_unit (default: unit),
                     ruler: [{label, value}, ...], note}]
@@ -260,7 +261,8 @@ def validate_pair(pj: dict, family: str, note: str, base: Path, refs_by_id: dict
         else:
             check_tracks(parts.get("real"), len(t), "real", problems)
             if has_ours:
-                check_tracks(parts.get("ours"), len(t), "ours", problems)
+                if parts.get("ours") is not None:  # null: the render exists but none of its partials matched the recording's
+                    check_tracks(parts.get("ours"), len(t), "ours", problems)
             elif parts.get("ours") is not None:
                 problems.append("partials.ours must be null for a pair with no render")
     metrics = pj.get("metrics")
