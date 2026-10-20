@@ -262,9 +262,32 @@ and capacity refusals, and cancellation before publication.
 - `colleague::certified_roots` — fs-ivl interval Newton on Clenshaw
   evaluated in interval arithmetic: eligible isolated interior roots can come
   back CERTIFIED (unique-root proofs, widths ~6e-15 measured). Multiple or
-  endpoint roots, `min_width` termination, and the finite subdivision budget
-  can return honest `Possible` boxes. Returned boxes are mapped back to the
-  physical Cheb1 domain.
+  endpoint roots and `min_width` termination can return honest `Possible`
+  boxes. The list-only convenience entry point now refuses a spent box budget
+  instead of discarding the exhaustion result; callers needing partial roots
+  use `certified_roots_bounded`.
+- `colleague::{certified_roots_bounded, certified_roots_budgeted,
+  certified_roots_with_checkpoint}` retain a `CertifiedRootReport`:
+  closed physical domain, exact stored-polynomial classification, disjoint
+  physical root clusters, examined-box count, domain-exhaustion flag, and the
+  dimensionless reference-width trajectory. Checkpoint/Cx outcomes distinguish
+  completed subdivision, box-budget exhaustion, and the original cancellation
+  error. Zero polynomials explicitly represent a continuum of roots; even a
+  nonzero subnormal constant is classified before its c0/2 could round to zero.
+  Nonconstant normalization refuses information loss as a typed numerical
+  error. `admit_root_certification` bounds coefficient storage, interval work,
+  subdivision/result buffers and affine revalidation before allocation.
+  Coefficient scans and interval Clenshaw poll every 64 coefficients; interval
+  Newton polls before numerical calls; physical mapping polls every 64 boxes;
+  publication polls once more. Cancellation preserves conservative root
+  coverage. Bounded sorting/mapping finalization is synchronous.
+  Outward affine images are independently revalidated before retaining local
+  uniqueness; overlapping physical images merge to `Possible` clusters.
+  `domain_exhausted` does not mean every cluster is resolved. The checked
+  `isolated_unique_roots` projection is available only for nonzero polynomials
+  after completed subdivision with every disjoint physical box certified.
+  These claims concern the represented real polynomial, not the function from
+  which an interpolant was sampled, complex roots, or algebraic multiplicities.
 - `cheb2::Cheb2` — Chebfun2-style adaptive cross approximation:
   deterministic max-residual pivots, rank-1 slice updates at FIXED
   resolution (ACA residual slices carry absolute cancellation noise,
@@ -285,6 +308,13 @@ ranks/accuracy/integral; cheb-106 Fourier recovery/derivative/decay/
 Bessel integral; cheb-107 bitwise replays; cheb-108 fail-fast guards
 for invalid policies, domains, samples, widths, and public spectral
 structs.
+
+The same variants battery checks explicit zero/constant classification,
+partial-domain coverage under a one-box allowance, physical-coordinate
+mapping and overlap merging on adjacent-float domains, retained repeated-root
+ambiguity, checked finite enumeration, every callback cancellation boundary,
+and admission/normalization refusals. These are focused G0/G3/G4 numerical
+regressions, not new cross-ISA or multiplicity/completeness-theorem evidence.
 
 ## No-claim boundaries
 - Even-multiplicity roots: the colleague path recovers the retained admitted

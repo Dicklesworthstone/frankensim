@@ -4,10 +4,14 @@
 //! approximation, and the Fourier-periodic representation.
 
 use fs_cheb::Cheb1;
+use fs_cheb::budget::{ChebBudget, ChebError};
 use fs_cheb::cheb2::Cheb2;
-use fs_cheb::colleague::{ColleaguePolicy, certified_roots, colleague_roots};
+use fs_cheb::colleague::{
+    ColleaguePolicy, RootPolynomialClass, certified_roots, certified_roots_bounded,
+    certified_roots_with_checkpoint, colleague_roots,
+};
 use fs_cheb::fourier::FourierSeries;
-use fs_ivl::RootBox;
+use fs_ivl::{RootBox, RootSearchConfig, RootSearchTermination};
 use fs_math::c64::C64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -165,6 +169,189 @@ fn cheb_104_certification() {
             dboxes.len(),
         ),
     );
+}
+
+#[test]
+fn certified_search_preserves_exhaustion_and_physical_coverage() {
+    let p = Cheb1::from_coeffs(2.0, 6.0, vec![0.0, 0.0, 1.0]);
+    let config = RootSearchConfig {
+        min_width: 1e-10,
+        max_boxes: 1,
+    };
+    let partial = certified_roots_bounded(&p, config, &ChebBudget::default()).unwrap();
+    assert!(!partial.domain_exhausted);
+    assert_eq!(partial.boxes_examined, 1);
+    assert_eq!(partial.reference_width_trajectory.len(), 1);
+    assert!(partial.reference_width_trajectory[0] >= 2.0);
+    assert!(partial.isolated_unique_roots().is_none());
+    for root in [4.0 - 2.0_f64.sqrt(), 4.0 + 2.0_f64.sqrt()] {
+        assert!(partial.roots.iter().any(|r| r.interval().contains(root)));
+    }
+    assert!(
+        partial
+            .roots
+            .iter()
+            .all(|r| r.interval().lo() >= 2.0 && r.interval().hi() <= 6.0)
+    );
+    let finished = certified_roots_bounded(
+        &p,
+        RootSearchConfig {
+            max_boxes: 1024,
+            ..config
+        },
+        &ChebBudget::default(),
+    )
+    .unwrap();
+    assert!(finished.domain_exhausted);
+    assert_eq!(
+        finished.polynomial_class,
+        RootPolynomialClass::Nonconstant { degree: 2 }
+    );
+    assert_eq!(finished.isolated_unique_roots().unwrap().len(), 2);
+    assert_eq!(
+        finished.boxes_examined,
+        finished.reference_width_trajectory.len()
+    );
+    for root in [4.0 - 2.0_f64.sqrt(), 4.0 + 2.0_f64.sqrt()] {
+        assert_eq!(
+            finished
+                .roots
+                .iter()
+                .filter(|r| r.interval().contains(root))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn certified_search_classifies_zero_constant_and_repeated_roots() {
+    let config = RootSearchConfig {
+        min_width: 1e-6,
+        max_boxes: 4096,
+    };
+    let budget = ChebBudget::default();
+    let zero = Cheb1::from_coeffs(-1.0, 1.0, vec![0.0, -0.0, 0.0]);
+    let report = certified_roots_bounded(&zero, config, &budget).unwrap();
+    assert_eq!(
+        report.polynomial_class,
+        RootPolynomialClass::IdenticallyZero
+    );
+    assert_eq!(report.boxes_examined, 0);
+    assert!(report.domain_exhausted);
+    assert_eq!(report.roots, vec![RootBox::Possible(report.domain)]);
+    assert!(report.isolated_unique_roots().is_none());
+    // The stored c0/2 is positive in exact arithmetic even though a scalar
+    // binary64 halving of this coefficient would underflow to zero.
+    let constant = Cheb1::from_coeffs(-1.0, 1.0, vec![f64::from_bits(1), 0.0]);
+    let report = certified_roots_bounded(&constant, config, &budget).unwrap();
+    assert_eq!(
+        report.polynomial_class,
+        RootPolynomialClass::NonzeroConstant
+    );
+    assert_eq!(report.isolated_unique_roots(), Some([].as_slice()));
+    let repeated = Cheb1::from_coeffs(-1.0, 1.0, vec![1.0, 0.0, 0.5]);
+    let report = certified_roots_bounded(&repeated, config, &budget).unwrap();
+    assert!(report.domain_exhausted);
+    assert!(report.isolated_unique_roots().is_none());
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|r| matches!(r, RootBox::Possible(iv) if iv.contains(0.0)))
+    );
+}
+
+#[test]
+fn certified_search_merges_unresolved_affine_clusters() {
+    let a = 1.0;
+    let b = f64::from_bits(1.0_f64.to_bits() + 1);
+    let p = Cheb1::from_coeffs(a, b, vec![0.0, 0.0, 1.0]);
+    let report = certified_roots_bounded(
+        &p,
+        RootSearchConfig {
+            min_width: 1e-10,
+            max_boxes: 1024,
+        },
+        &ChebBudget::default(),
+    )
+    .unwrap();
+    assert!(report.domain_exhausted);
+    assert_eq!(report.roots, vec![RootBox::Possible(report.domain)]);
+    assert!(report.isolated_unique_roots().is_none());
+}
+
+#[test]
+fn certified_search_cancellation_never_becomes_a_complete_root_list() {
+    let p = Cheb1::from_coeffs(2.0, 6.0, vec![0.0, 0.0, 1.0]);
+    let config = RootSearchConfig {
+        min_width: 1e-10,
+        max_boxes: 1024,
+    };
+    let budget = ChebBudget::default();
+    let mut polls = 0;
+    let complete = certified_roots_with_checkpoint(&p, config, &budget, &mut || {
+        polls += 1;
+        Ok::<(), usize>(())
+    })
+    .unwrap();
+    assert_eq!(complete.termination, RootSearchTermination::Complete);
+    for stop in 0..polls {
+        let mut count = 0;
+        let outcome = certified_roots_with_checkpoint(&p, config, &budget, &mut || {
+            let current = count;
+            count += 1;
+            if current == stop { Err(stop) } else { Ok(()) }
+        })
+        .unwrap();
+        assert_eq!(outcome.termination, RootSearchTermination::Cancelled(stop));
+        assert!(!outcome.report.domain_exhausted);
+        assert!(outcome.report.isolated_unique_roots().is_none());
+        assert_eq!(
+            outcome.report.boxes_examined,
+            outcome.report.reference_width_trajectory.len()
+        );
+        for root in [4.0 - 2.0_f64.sqrt(), 4.0 + 2.0_f64.sqrt()] {
+            assert!(
+                outcome
+                    .report
+                    .roots
+                    .iter()
+                    .any(|r| r.interval().contains(root)),
+                "root {root} lost at checkpoint {stop}: {:?}",
+                outcome.report
+            );
+        }
+    }
+}
+
+#[test]
+fn certified_search_admission_refuses_before_polynomial_work() {
+    let p = Cheb1::from_coeffs(-1.0, 1.0, vec![0.0, 1.0]);
+    let config = RootSearchConfig {
+        min_width: 1e-10,
+        max_boxes: usize::MAX,
+    };
+    let result = certified_roots_with_checkpoint(
+        &p,
+        config,
+        &ChebBudget::default(),
+        &mut || -> Result<(), ()> { panic!("inadmissible work must not run") },
+    );
+    assert!(matches!(
+        result,
+        Err(ChebError::CapExceeded { .. } | ChebError::Overflow { .. })
+    ));
+    let wide = Cheb1::from_coeffs(-1.0, 1.0, vec![f64::from_bits(1), f64::MAX]);
+    let result = certified_roots_bounded(
+        &wide,
+        RootSearchConfig {
+            max_boxes: 32,
+            ..config
+        },
+        &ChebBudget::default(),
+    );
+    assert!(matches!(result, Err(ChebError::Numerical { .. })));
 }
 
 /// cheb-105: 2D low-rank — separable functions captured at exact

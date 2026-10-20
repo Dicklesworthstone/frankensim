@@ -5,13 +5,19 @@
 //! eigenvalues of its colleague matrix; this finite-precision implementation
 //! returns approximate candidates after a documented filtering and clustering
 //! policy, so it does not claim complete enumeration or multiplicity recovery.
-//! Eigenvalues come from the fs-la complex nonsymmetric stack, and eligible
-//! candidates may be upgraded by `certified_roots` to rigorous fs-ivl
-//! interval-Newton enclosures (Clenshaw evaluated in interval arithmetic).
-//! Each certified enclosure is a local proof, not a complete root-set proof.
+//! Eigenvalues come from the fs-la complex nonsymmetric stack. Independently,
+//! `certified_roots_bounded` searches the full real domain using interval
+//! Newton and retains exhaustion, unresolved regions, and polynomial class.
+//! A local unique-root proof does not establish complete enumeration.
 
-use crate::{Cheb1, affine_from_reference, normalize_coefficients_exact};
-use fs_ivl::{Interval, RootBox, krawczyk_step, newton_roots};
+use crate::budget::{ChebBudget, ChebError, admit_root_certification};
+#[cfg(test)]
+use crate::normalize_coefficients_exact;
+use crate::{Cheb1, affine_from_reference};
+use fs_ivl::{
+    DEFAULT_MAX_ROOT_BOXES, Interval, RootBox, RootSearchConfig, RootSearchTermination,
+    krawczyk_step, newton_roots_with_checkpoint,
+};
 use fs_la::eigen_complex::eig;
 use fs_math::c64::C64;
 
@@ -278,23 +284,10 @@ pub fn clenshaw_interval(coeffs: &[f64], t: Interval) -> Interval {
 /// derivative together in interval arithmetic. Differentiating rounded f64
 /// coefficients first would make interval Newton certify a nearby polynomial
 /// instead of the polynomial supplied by the caller.
+#[cfg(test)]
 fn clenshaw_interval_with_derivative(coeffs: &[Interval], t: Interval) -> (Interval, Interval) {
-    let two = Interval::point(2.0);
-    let two_t = two * t;
-    let mut b1 = Interval::point(0.0);
-    let mut b2 = Interval::point(0.0);
-    let mut db1 = Interval::point(0.0);
-    let mut db2 = Interval::point(0.0);
-    for &coefficient in coeffs.iter().rev() {
-        let b0 = coefficient + two_t * b1 - b2;
-        let db0 = two * b1 + two_t * db1 - db2;
-        b2 = b1;
-        b1 = b0;
-        db2 = db1;
-        db1 = db0;
-    }
-    // p(t) = b0 − t·b1_old = b1 − t·b2 after the loop shuffle.
-    (b1 - t * b2, db1 - b2 - t * db2)
+    clenshaw_interval_checkpointed(coeffs, t, &mut || Ok::<(), core::convert::Infallible>(()))
+        .unwrap()
 }
 
 /// Certified root enclosures over the interpolant's domain via
@@ -304,45 +297,339 @@ fn clenshaw_interval_with_derivative(coeffs: &[Interval], t: Interval) -> (Inter
 /// or the interval search's finite box budget can all land here). `min_width`
 /// is a dimensionless width in the reference coordinate, not a physical
 /// length.
+///
+/// This list-only convenience API refuses box-budget exhaustion and the zero
+/// polynomial. Use [`certified_roots_bounded`] or [`certified_roots_budgeted`]
+/// to retain explicit classification, work, and partial-search results.
 #[must_use]
 pub fn certified_roots(p: &Cheb1, min_width: f64) -> Vec<RootBox> {
+    let report = certified_roots_bounded(
+        p,
+        RootSearchConfig {
+            min_width,
+            max_boxes: DEFAULT_MAX_ROOT_BOXES,
+        },
+        &ChebBudget::default(),
+    )
+    .unwrap_or_else(|error| panic!("invalid certified root search: {error}"));
     assert!(
-        min_width.is_finite() && min_width > 0.0,
-        "certified root min_width must be finite and positive"
+        report.polynomial_class != RootPolynomialClass::IdenticallyZero,
+        "the identically zero polynomial has a continuum of roots; use certified_roots_bounded"
     );
-    // Normalize all STORED coefficients by one exact power of two. The c₀/2
-    // conversion is then performed in interval arithmetic so even a
-    // subnormal constant term remains enclosed instead of rounding to zero.
-    let mut coeffs = p.coeffs().to_vec();
-    normalize_coefficients_exact(&mut coeffs, "exact root certification");
-    let mut interval_coeffs: Vec<Interval> = coeffs.iter().copied().map(Interval::point).collect();
-    interval_coeffs[0] = Interval::point(0.5) * interval_coeffs[0];
+    assert!(
+        report.domain_exhausted,
+        "certified root search exhausted its box budget; use certified_roots_bounded to retain unresolved regions"
+    );
+    report.roots
+}
+
+/// Exact classification of the stored finite binary64 coefficients, including
+/// trailing-zero degree drops. This does not classify a sampled source function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootPolynomialClass {
+    /// Cancellation occurred before coefficient classification finished.
+    Unclassified,
+    /// Every point of the closed physical domain is a root.
+    IdenticallyZero,
+    /// The represented polynomial has no roots.
+    NonzeroConstant,
+    /// A nonconstant real polynomial with the given effective degree.
+    Nonconstant {
+        /// Highest index with a nonzero stored coefficient.
+        degree: usize,
+    },
+}
+
+/// Full-domain real root-search result. Physical enclosures and reference
+/// widths have deliberately separate fields. No complex-root or algebraic
+/// multiplicity claim is made.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CertifiedRootReport {
+    /// Closed physical domain, with both endpoints included.
+    pub domain: Interval,
+    /// Classification of the exact represented polynomial.
+    pub polynomial_class: RootPolynomialClass,
+    /// Disjoint physical root clusters in increasing order. Overlapping
+    /// affine images are merged and downgraded to `Possible`.
+    pub roots: Vec<RootBox>,
+    /// Number of reference-domain subdivision boxes evaluated.
+    pub boxes_examined: usize,
+    /// Whether subdivision finished without budget exhaustion or cancellation.
+    /// `true` can still accompany `Possible` boxes and does not establish counts.
+    pub domain_exhausted: bool,
+    /// Evaluated box widths in dimensionless reference coordinates, in visit order.
+    pub reference_width_trajectory: Vec<f64>,
+}
+
+impl CertifiedRootReport {
+    /// A checked finite enumeration, available only after a completed search
+    /// whose disjoint boxes each prove existence and uniqueness. An empty slice
+    /// then proves no real roots in the declared domain. The zero polynomial
+    /// and any unresolved region cannot pass this projection.
+    #[must_use]
+    pub fn isolated_unique_roots(&self) -> Option<&[RootBox]> {
+        (self.domain_exhausted
+            && matches!(
+                self.polynomial_class,
+                RootPolynomialClass::NonzeroConstant | RootPolynomialClass::Nonconstant { .. }
+            )
+            && self.roots.iter().all(RootBox::is_certified))
+        .then_some(self.roots.as_slice())
+    }
+}
+
+/// Root enclosures and the reason the bounded computation stopped.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CertifiedRootOutcome<E> {
+    /// Physical root coverage, including unresolved work.
+    pub report: CertifiedRootReport,
+    /// Exhaustion and cancellation are distinct from a completed subdivision.
+    pub termination: RootSearchTermination<E>,
+}
+
+/// Search the full real domain with caller-supplied box, work, and memory caps.
+/// `config.min_width` is in the dimensionless reference coordinate.
+/// Unlike [`certified_roots`], this API represents zero polynomials and partial
+/// searches without a panic or a list-only projection.
+pub fn certified_roots_bounded(
+    p: &Cheb1,
+    config: RootSearchConfig,
+    budget: &ChebBudget,
+) -> Result<CertifiedRootReport, ChebError> {
+    let outcome = certified_roots_with_checkpoint(p, config, budget, &mut || {
+        Ok::<(), core::convert::Infallible>(())
+    })?;
+    Ok(outcome.report)
+}
+
+/// The explicit [`fs_exec::Cx`] entry point for bounded root certification.
+pub fn certified_roots_budgeted(
+    p: &Cheb1,
+    config: RootSearchConfig,
+    budget: &ChebBudget,
+    cx: &fs_exec::Cx<'_>,
+) -> Result<CertifiedRootOutcome<fs_exec::Cancelled>, ChebError> {
+    certified_roots_with_checkpoint(p, config, budget, &mut || cx.checkpoint())
+}
+
+/// Cancellable interval-Newton search. Polls occur during coefficient admission
+/// and every 64 Clenshaw coefficients, before Newton evaluations, and before
+/// publication. Cancellation retains conservative physical coverage, never an
+/// apparently complete prefix of roots. `Err` is an admission/numerical refusal;
+/// checkpoint errors are retained in the returned `Cancelled` outcome.
+pub fn certified_roots_with_checkpoint<E, C>(
+    p: &Cheb1,
+    config: RootSearchConfig,
+    budget: &ChebBudget,
+    checkpoint: &mut C,
+) -> Result<CertifiedRootOutcome<E>, ChebError>
+where
+    C: FnMut() -> Result<(), E>,
+{
+    if !config.min_width.is_finite() || config.min_width <= 0.0 {
+        return Err(ChebError::Shape {
+            what: "certified root reference min_width must be finite and positive",
+        });
+    }
+    admit_root_certification(p.coeffs().len(), config.max_boxes, budget)?;
     let (a, b) = p.domain();
-    let f = |t: Interval| clenshaw_interval_with_derivative(&interval_coeffs, t).0;
-    let fp = |t: Interval| clenshaw_interval_with_derivative(&interval_coeffs, t).1;
-    newton_roots(&f, &fp, Interval::new(-1.0, 1.0), min_width)
-        .into_iter()
-        .map(|root| {
-            let mapped = map_interval_to_domain(root.interval(), a, b);
-            match root {
-                RootBox::Certified(_) => {
-                    // The directed physical enclosure can be wider than the
-                    // exact affine image. Revalidate uniqueness on its entire
-                    // inverse image before retaining Certified authority.
-                    let back = map_interval_to_reference(mapped, a, b);
-                    if back.lo().is_finite()
-                        && back.hi().is_finite()
-                        && krawczyk_step(&f, &fp, back).is_some_and(|(_, strict)| strict)
-                    {
-                        RootBox::Certified(mapped)
-                    } else {
-                        RootBox::Possible(mapped)
-                    }
-                }
-                RootBox::Possible(_) => RootBox::Possible(mapped),
+    let domain = Interval::new(a, b);
+    let mut report = CertifiedRootReport {
+        domain,
+        polynomial_class: RootPolynomialClass::Unclassified,
+        roots: vec![RootBox::Possible(domain)],
+        boxes_examined: 0,
+        domain_exhausted: false,
+        reference_width_trajectory: Vec::new(),
+    };
+    let mut last_nonzero = None;
+    let mut cmax = 0.0_f64;
+    for (index, &coefficient) in p.coeffs().iter().enumerate() {
+        if index.is_multiple_of(64) {
+            if let Err(error) = checkpoint() {
+                return Ok(CertifiedRootOutcome {
+                    report,
+                    termination: RootSearchTermination::Cancelled(error),
+                });
             }
-        })
-        .collect()
+        }
+        if coefficient != 0.0 {
+            last_nonzero = Some(index);
+        }
+        cmax = cmax.max(coefficient.abs());
+    }
+    report.polynomial_class = match last_nonzero {
+        None => RootPolynomialClass::IdenticallyZero,
+        Some(0) => RootPolynomialClass::NonzeroConstant,
+        Some(degree) => RootPolynomialClass::Nonconstant { degree },
+    };
+    if !matches!(
+        report.polynomial_class,
+        RootPolynomialClass::Nonconstant { .. }
+    ) {
+        if let Err(error) = checkpoint() {
+            return Ok(CertifiedRootOutcome {
+                report,
+                termination: RootSearchTermination::Cancelled(error),
+            });
+        }
+        if report.polynomial_class == RootPolynomialClass::NonzeroConstant {
+            report.roots.clear();
+        }
+        report.domain_exhausted = true;
+        return Ok(CertifiedRootOutcome {
+            report,
+            termination: RootSearchTermination::Complete,
+        });
+    }
+    let scale = crate::normalization_power_of_two(cmax);
+    let mut coeffs = Vec::new();
+    coeffs
+        .try_reserve_exact(p.coeffs().len())
+        .map_err(|_| ChebError::Numerical {
+            what: "root interval coefficient allocation failed",
+        })?;
+    for (index, &original) in p.coeffs().iter().enumerate() {
+        if index.is_multiple_of(64) {
+            if let Err(error) = checkpoint() {
+                return Ok(CertifiedRootOutcome {
+                    report,
+                    termination: RootSearchTermination::Cancelled(error),
+                });
+            }
+        }
+        let normalized = original / scale;
+        if !normalized.is_finite() || normalized * scale != original {
+            return Err(ChebError::Numerical {
+                what: "root certification cannot normalize coefficients without information loss",
+            });
+        }
+        let value = Interval::point(normalized);
+        coeffs.push(if index == 0 {
+            Interval::point(0.5) * value
+        } else {
+            value
+        });
+    }
+    // The interval solver's callbacks return enclosures, so a checkpoint
+    // failure inside Clenshaw supplies WHOLE temporarily. The next solver
+    // checkpoint consumes the original error before accepting any contraction.
+    let callback = core::cell::RefCell::new(checkpoint);
+    let pending = core::cell::RefCell::new(None);
+    let poll = || match pending.borrow_mut().take() {
+        Some(error) => Err(error),
+        None => (*callback.borrow_mut())(),
+    };
+    let evaluate = |t| match clenshaw_interval_checkpointed(&coeffs, t, &mut || poll()) {
+        Ok(value) => value,
+        Err(error) => {
+            *pending.borrow_mut() = Some(error);
+            (Interval::WHOLE, Interval::WHOLE)
+        }
+    };
+    let f = |t| evaluate(t).0;
+    let fp = |t| evaluate(t).1;
+    let outcome =
+        newton_roots_with_checkpoint(&f, &fp, Interval::new(-1.0, 1.0), config, &mut || poll())
+            .map_err(|_| ChebError::Shape {
+                what: "invalid interval root-search configuration",
+            })?;
+    report.boxes_examined = outcome.report.boxes_examined;
+    report.reference_width_trajectory = outcome.report.width_trajectory;
+    report.domain_exhausted = outcome.report.complete;
+    let mut termination = outcome.termination;
+    let mut roots = outcome.report.roots;
+    for (index, root) in roots.iter_mut().enumerate() {
+        if index.is_multiple_of(64)
+            && !matches!(termination, RootSearchTermination::Cancelled(_))
+            && let Err(error) = poll()
+        {
+            termination = RootSearchTermination::Cancelled(error);
+            report.domain_exhausted = false;
+        }
+        let mapped = map_interval_to_domain(root.interval(), a, b);
+        let mut certified = false;
+        if root.is_certified() && !matches!(termination, RootSearchTermination::Cancelled(_)) {
+            if let Err(error) = poll() {
+                termination = RootSearchTermination::Cancelled(error);
+                report.domain_exhausted = false;
+            } else {
+                let back = map_interval_to_reference(mapped, a, b);
+                certified = back.lo().is_finite()
+                    && back.hi().is_finite()
+                    && krawczyk_step(&f, &fp, back).is_some_and(|(_, strict)| strict);
+                if let Some(error) = pending.borrow_mut().take() {
+                    termination = RootSearchTermination::Cancelled(error);
+                    report.domain_exhausted = false;
+                    certified = false;
+                }
+            }
+        }
+        *root = if certified {
+            RootBox::Certified(mapped)
+        } else {
+            RootBox::Possible(mapped)
+        };
+    }
+    // Outward affine rounding can make distinct reference boxes overlap,
+    // especially on a domain containing only a few representable numbers.
+    // Such a physical cluster has no unique-root count until independently resolved.
+    roots.sort_by(|x, y| {
+        x.interval()
+            .lo()
+            .total_cmp(&y.interval().lo())
+            .then_with(|| x.interval().hi().total_cmp(&y.interval().hi()))
+    });
+    let mut kept = 0;
+    for index in 0..roots.len() {
+        let root = roots[index];
+        if kept > 0 && roots[kept - 1].interval().hi() >= root.interval().lo() {
+            roots[kept - 1] = RootBox::Possible(roots[kept - 1].interval().hull(root.interval()));
+        } else {
+            roots[kept] = root;
+            kept += 1;
+        }
+    }
+    roots.truncate(kept);
+    report.roots = roots;
+    if !matches!(termination, RootSearchTermination::Cancelled(_)) {
+        if let Err(error) = poll() {
+            termination = RootSearchTermination::Cancelled(error);
+            report.domain_exhausted = false;
+        }
+    }
+    Ok(CertifiedRootOutcome {
+        report,
+        termination,
+    })
+}
+
+fn clenshaw_interval_checkpointed<E, C>(
+    coeffs: &[Interval],
+    t: Interval,
+    checkpoint: &mut C,
+) -> Result<(Interval, Interval), E>
+where
+    C: FnMut() -> Result<(), E>,
+{
+    let two = Interval::point(2.0);
+    let two_t = two * t;
+    let mut b1 = Interval::point(0.0);
+    let mut b2 = Interval::point(0.0);
+    let mut db1 = Interval::point(0.0);
+    let mut db2 = Interval::point(0.0);
+    for (index, &coefficient) in coeffs.iter().rev().enumerate() {
+        if index.is_multiple_of(64) {
+            checkpoint()?;
+        }
+        let b0 = coefficient + two_t * b1 - b2;
+        let db0 = two * b1 + two_t * db1 - db2;
+        b2 = b1;
+        b1 = b0;
+        db2 = db1;
+        db1 = db0;
+    }
+    Ok((b1 - t * b2, db1 - b2 - t * db2))
 }
 
 fn map_interval_to_domain(iv: Interval, a: f64, b: f64) -> Interval {
@@ -399,6 +686,23 @@ mod affine_certificate_tests {
     use super::*;
 
     #[test]
+    fn interval_clenshaw_checks_inside_long_coefficient_arrays() {
+        let coefficients = vec![Interval::point(1.0); 129];
+        let mut polls = 0;
+        let result =
+            clenshaw_interval_checkpointed(&coefficients, Interval::point(0.5), &mut || {
+                polls += 1;
+                if polls == 2 {
+                    Err("coefficient tile cancelled")
+                } else {
+                    Ok(())
+                }
+            });
+        assert_eq!(result, Err("coefficient tile cancelled"));
+        assert_eq!(polls, 2);
+    }
+
+    #[test]
     fn colleague_half_ratio_avoids_representable_intermediate_overflow() {
         let denominator = f64::MIN_POSITIVE / 7.0;
         assert!((1.0 / denominator).is_infinite());
@@ -433,7 +737,7 @@ mod affine_certificate_tests {
             vec![0.0, fs_math::det::powi(2.0, -100), 0.0, 1.0],
         );
         let result = std::panic::catch_unwind(|| {
-            colleague_roots(
+            let _ = colleague_roots(
                 &polynomial,
                 ColleaguePolicy {
                     trim_rel: 0.0,

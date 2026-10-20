@@ -606,6 +606,60 @@ pub fn admit_root_scan(coeff_len: usize, budget: &ChebBudget) -> Result<ChebAdmi
     })
 }
 
+/// Admit interval-Newton root isolation, including interval Clenshaw and its
+/// derivative, subdivision storage, and physical-domain revalidation.
+///
+/// Each examined box permits at most 257 interval evaluations in the Newton
+/// search. The 512-evaluation envelope also covers physical-box Krawczyk
+/// checks, normalization, and deterministic result ordering. These are
+/// interval work operations, not samples of an external function.
+pub fn admit_root_certification(
+    coeff_len: usize,
+    max_boxes: usize,
+    budget: &ChebBudget,
+) -> Result<ChebAdmission, ChebError> {
+    if coeff_len == 0 || max_boxes == 0 {
+        return Err(ChebError::Shape {
+            what: "root certification requires coefficients and a positive box budget",
+        });
+    }
+    cap_check(
+        "root-certification coefficients",
+        coeff_len as u128,
+        budget.max_coefficients as u128,
+    )?;
+    let boxes = checked_add("root-certification storage", max_boxes as u128, 2)?;
+    let ops = checked_mul(
+        "root-certification work",
+        boxes,
+        checked_mul("root-certification work", coeff_len as u128, 32_768)?,
+    )?;
+    cap_check(
+        "root-certification work",
+        ops,
+        u128::from(budget.max_work_ops),
+    )?;
+    // Includes Vec growth headroom, pending/retained/mapped root boxes, sort
+    // scratch, the width trajectory, and interval coefficient storage.
+    let temp_bytes = checked_add(
+        "root-certification temporary bytes",
+        checked_mul("root-certification temporary bytes", boxes, 512)?,
+        checked_mul("root-certification temporary bytes", coeff_len as u128, 64)?,
+    )?;
+    cap_check(
+        "root-certification temporary bytes",
+        temp_bytes,
+        u128::from(budget.max_temp_bytes),
+    )?;
+    Ok(ChebAdmission {
+        schema_version: CHEB_BUDGET_SCHEMA_VERSION,
+        samples_admitted: 0,
+        coefficients_admitted: coeff_len,
+        ops_admitted: admitted_u64("root-certification work", ops)?,
+        temp_bytes_admitted: admitted_u64("root-certification temporary bytes", temp_bytes)?,
+    })
+}
+
 /// Fallible mirror of the private sampler: identical sample sequence
 /// (bitwise), refusing a non-finite sample instead of panicking.
 fn sample_first_kind_checked<F: Fn(f64) -> f64>(
