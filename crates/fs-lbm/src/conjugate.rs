@@ -114,7 +114,8 @@ pub use electric::{
 };
 pub use energy::{
     CellSink, CompactComponent, ContactResistance, ConvectionScheme, EnergyBalance, EnergyConfig,
-    EnergyReport, EnergySolution, JunctionSolution, ThermalFace, ThermalSetup, solve_energy,
+    EnergyReport, EnergySolution, FaceContactResistance, JunctionSolution, ThermalFace,
+    ThermalSetup, solve_energy,
 };
 pub use flow::{
     FlowFace, FlowField, LbmCollisionChoice, LbmFlow, LbmFlowConfig, LbmFlowReport,

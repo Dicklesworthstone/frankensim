@@ -22,6 +22,8 @@ use super::{ChtError, finite, finite_positive};
 use crate::d3q19::Face3;
 
 mod material_field;
+mod face_contact;
+pub use face_contact::FaceContactResistance;
 
 /// Thermal rule on one domain face.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -77,6 +79,11 @@ pub struct ThermalSetup {
     /// Thermal contact (interface) resistances between pairs of solid
     /// materials, in series on every face the two materials share.
     pub contacts: Vec<ContactResistance>,
+    /// Explicit face-local resistances, including joints between cells of the
+    /// SAME material. A face cannot also have a material-pair contact rule.
+    /// These interfaces have no storage and admit no through-flow; they do not
+    /// change either cell's mechanical occupancy or material assignment.
+    pub face_contacts: Vec<FaceContactResistance>,
     /// Linear exchanges `G (T_cell - T_sink)` leaving individual cells (a
     /// linearized radiation exchange, a compact thermal model's link).
     pub cell_sinks: Vec<CellSink>,
@@ -176,6 +183,7 @@ impl ThermalSetup {
             power_w: Vec::new(),
             fixed_temperature: Vec::new(),
             contacts: Vec::new(),
+            face_contacts: Vec::new(),
             cell_sinks: Vec::new(),
             eddy_conductivity_w_m_k: Vec::new(),
             compact_components: Vec::new(),
@@ -300,6 +308,9 @@ pub struct EnergySolution {
     pub temperature: Vec<f64>,
     /// Conductivity per cell along x, y, z used by the solve, W/(m K).
     pub conductivity: Vec<[f64; 3]>,
+    /// Canonical `(lower cell, upper cell)` face resistances actually used by
+    /// this solve, m² K/W. Kept for consistent downstream heat-flow observers.
+    pub face_contact_resistance_m2_k_w: std::collections::BTreeMap<(usize, usize), f64>,
     /// One entry per `ThermalSetup::compact_components`, in order.
     pub junctions: Vec<JunctionSolution>,
     /// Solve evidence.
@@ -346,7 +357,7 @@ impl EnergySolution {
     }
 
     /// Heat conducted from solid cells into fluid cells across every
-    /// fluid/solid face, W.
+    /// fluid/solid face, W, including any explicitly resolved face resistance.
     #[must_use]
     pub fn solid_to_fluid_heat_w(&self, domain: &VoxelDomain) -> f64 {
         let mut total = 0.0;
@@ -375,8 +386,10 @@ impl EnergySolution {
                 {
                     let axis = f / 2;
                     let (kc, kn) = (self.conductivity[c][axis], self.conductivity[n][axis]);
+                    let contact = self.face_contact_resistance_m2_k_w
+                        .get(&(c.min(n), c.max(n))).copied().unwrap_or(0.0);
                     let d = domain.face_area(c, axis)
-                        / (0.5 * domain.widths(c)[axis] / kc + 0.5 * domain.widths(n)[axis] / kn);
+                        / (0.5 * domain.widths(c)[axis] / kc + contact + 0.5 * domain.widths(n)[axis] / kn);
                     total += d * (self.temperature[c] - self.temperature[n]);
                 }
             }
@@ -410,12 +423,16 @@ struct Context<'a> {
     k: Vec<[f64; 3]>,
     /// Contact resistances keyed by the ordered material pair.
     contacts: Vec<((u16, u16), f64)>,
+    face_contacts: std::collections::BTreeMap<(usize, usize), f64>,
     rho_c: f64,
     scheme: ConvectionScheme,
 }
 
 impl Context<'_> {
     fn contact(&self, c: usize, n: usize) -> f64 {
+        if let Some(&resistance) = self.face_contacts.get(&(c.min(n), c.max(n))) {
+            return resistance;
+        }
         if self.contacts.is_empty() {
             return 0.0;
         }
@@ -846,12 +863,15 @@ fn solve_energy_field(
         }
         contacts.push(((a.min(b), a.max(b)), contact.resistance_m2_k_w));
     }
+    let compact = Compact::new(domain, &k, setup)?;
+    let face_contacts = face_contact::prepare(domain, flow, setup, &k, &compact, gate)?;
     let ctx = Context {
         domain,
         flow,
         faces: setup.faces,
         k,
         contacts,
+        face_contacts,
         rho_c: fluid.volumetric_heat_capacity(),
         scheme: config.scheme,
     };
@@ -862,7 +882,6 @@ fn solve_energy_field(
             setup.power_w[c]
         }
     };
-    let compact = Compact::new(domain, &ctx.k, setup)?;
     let parts = setup.compact_components.len();
     let unknowns = cells + parts;
 
@@ -1123,6 +1142,7 @@ fn solve_energy_field(
     Ok(EnergySolution {
         temperature,
         conductivity: ctx.k,
+        face_contact_resistance_m2_k_w: ctx.face_contacts,
         junctions,
         report,
     })
