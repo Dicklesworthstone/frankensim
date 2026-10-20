@@ -54,6 +54,19 @@ impl FitInput {
         { return Err("require 150 < first target < second target < 200 J/kg and positive initial powers summing to less than 50 W".into()); }
         Ok(())
     }
+    fn validate_observable(self, observable: ScanObservable) -> Result<()> {
+        match observable {
+            ScanObservable::SpecificEnthalpy => self.validate(),
+            ScanObservable::LiquidMassFraction => {
+                if self.targets.iter().chain(&self.initial).any(|v| !v.is_finite())
+                    || self.targets[0] <= 0.5 || self.targets[1] <= self.targets[0] || self.targets[1] >= 1.
+                    || self.initial.iter().any(|&v| v <= 0.) || self.initial[0]+self.initial[1] >= 50.
+                { return Err("require 0.5 < first liquid mass fraction < second < 1, and positive initial watts summing to less than 50".into()); }
+                Ok(())
+            }
+            ScanObservable::Temperature => Err("this isothermal fixture fits enthalpy or liquid fraction, not temperature".into()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -62,18 +75,19 @@ struct FitResult {
     powers: Vec<f64>,
     predictions: Vec<f64>,
     final_temperatures: Vec<f64>,
+    final_fractions: Vec<f64>,
     evaluations: usize,
     loss: f64,
     checkpoint_work: Option<ScanCheckpointWork>,
 }
 
 fn fit(cx: &Cx<'_>, input: FitInput, replace_sources: bool) -> Result<FitResult> {
-    fit_with_grid(cx, input, replace_sources, 2, None)
+    fit_with_grid(cx, input, replace_sources, 2, None, ScanObservable::SpecificEnthalpy)
 }
 
 fn fit_with_grid(cx: &Cx<'_>, input: FitInput, replace_sources: bool,
-    endpoints: usize, segment: Option<usize>) -> Result<FitResult> {
-    input.validate()?;
+    endpoints: usize, segment: Option<usize>, observable: ScanObservable) -> Result<FitResult> {
+    input.validate_observable(observable)?;
     if endpoints < 2 || endpoints > 4096 || endpoints % 2 != 0
         || segment.is_some_and(|n| n == 0 || n > endpoints)
     { return Err("require an even endpoint count in 2..=4096 and a segment length in 1..=endpoints".into()); }
@@ -104,10 +118,11 @@ fn fit_with_grid(cx: &Cx<'_>, input: FitInput, replace_sources: bool,
         Ok(ScanningEnthalpyRun::new(cx, base, sources, 1, None)?)
     };
     let objective = ScanPowerObjective { endpoints_s:(1..=endpoints).map(|i| 2.0*i as f64/endpoints as f64).collect(), observations:vec![
-        ScanObservation { endpoint:endpoints/2-1, vertex:0, observable:ScanObservable::SpecificEnthalpy,
-            target:input.targets[0], scale:10. },
-        ScanObservation { endpoint:endpoints-1, vertex:0, observable:ScanObservable::SpecificEnthalpy,
-            target:input.targets[1], scale:10. }], sampling:ScanObjectiveSampling::EventLeft,
+        ScanObservation { endpoint:endpoints/2-1, vertex:0, observable,
+            target:input.targets[0], scale:if observable==ScanObservable::LiquidMassFraction {0.1} else {10.} },
+        ScanObservation { endpoint:endpoints-1, vertex:0, observable,
+            target:input.targets[1], scale:if observable==ScanObservable::LiquidMassFraction {0.1} else {10.} }],
+        sampling:ScanObjectiveSampling::EventLeft,
         step:EnthalpyStepConfig { newton:NewtonKrylovConfig { absolute_tolerance:1e-11, relative_tolerance:1e-12,
             linear_restart:8, max_linear_cycles:16, forcing_minimum:1e-12, forcing_maximum:1e-3, ..Default::default() },
             max_newton_iterations:64, energy_tolerance_j:1e-8 },
@@ -143,8 +158,9 @@ fn fit_with_grid(cx: &Cx<'_>, input: FitInput, replace_sources: bool,
         return Err("replayed fitted schedule differs from the accepted objective".into());
     }
     let final_temperatures = verified.physical.final_step.solution().temperature.clone();
+    let final_fractions = verified.physical.final_step.solution().liquid_mass_fraction.clone();
     Ok(FitResult { report, powers, predictions:verified.physical.predictions,
-        final_temperatures, evaluations:study.evaluations(), loss:verified.physical.value,
+        final_temperatures, final_fractions, evaluations:study.evaluations(), loss:verified.physical.value,
         checkpoint_work:verified.checkpoint_work })
 }
 
@@ -159,30 +175,45 @@ fn main() -> Result<()> {
     if args.first().is_some_and(|arg|arg == "--limits") { return limits::run_cli(&args[1..]); }
     if args.first().is_some_and(|arg|arg == "--state-limits") { return state_limits::run_cli(&args[1..]); }
     if args.first().is_some_and(|arg|arg == "--peak-limits") { return peak_limits::run_cli(&args[1..]); }
+    if args.first().is_some_and(|arg|arg == "--melt-fraction") {
+        let targets=match &args[1..] {
+            [] => [0.6,0.8], [a,b] => [a.parse()?,b.parse()?],
+            _ => return Err("--melt-fraction [first_fraction second_fraction], using fractions not percentages".into()),
+        };
+        let input=FitInput {targets,initial:[5.,5.]};
+        let result=with_context(|cx|fit_with_grid(cx,input,false,8,Some(2),ScanObservable::LiquidMassFraction))?;
+        return print_result(input,result,ScanObservable::LiquidMassFraction);
+    }
     if args.first().is_some_and(|arg|arg == "--checkpointed") {
         let (endpoints, segment) = match &args[1..] {
             [] => (64,8), [n,s] => (n.parse()?,s.parse()?),
             _ => return Err("--checkpointed [even_endpoint_count segment_steps]".into()),
         };
         let input = FitInput::default();
-        let result = with_context(|cx| fit_with_grid(cx,input,false,endpoints,Some(segment)))?;
-        return print_result(input,result);
+        let result = with_context(|cx| fit_with_grid(cx,input,false,endpoints,Some(segment),ScanObservable::SpecificEnthalpy))?;
+        return print_result(input,result,ScanObservable::SpecificEnthalpy);
     }
     if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
         println!("{USAGE}\nConstrained fitting: --limits [maximum_power_W maximum_absorbed_energy_J]");
         println!("Sampled hot-spot fitting: --peak-limits [maximum_enthalpy_J_per_kg smoothing_J_per_kg]");
         println!("Short-tape fitting: --checkpointed [even_endpoint_count segment_steps] (defaults: 64 8)");
+        println!("Melt-state fitting: --melt-fraction [first_fraction second_fraction] (defaults: 0.6 0.8)");
         return Ok(());
     }
     let input = FitInput::parse(&args)?;
     let result = with_context(|cx| fit(cx, input, false))?;
-    print_result(input,result)
+    print_result(input,result,ScanObservable::SpecificEnthalpy)
 }
 
-fn print_result(input: FitInput, result: FitResult) -> Result<()> {
+fn print_result(input: FitInput, result: FitResult, observable: ScanObservable) -> Result<()> {
     println!("# status={:?} objective={:.12e} gradient_norm={:.12e} evaluations={}",
         result.report.reason, result.loss, result.report.grad_norm, result.evaluations);
-    println!("# target_enthalpy_J_per_kg={:?} fitted_enthalpy_J_per_kg={:?}", input.targets, result.predictions);
+    if observable==ScanObservable::LiquidMassFraction {
+        println!("# target_liquid_mass_fraction={:?} fitted_liquid_mass_fraction={:?}", input.targets, result.predictions);
+        println!("# final_nodal_liquid_mass_fractions={:?}", result.final_fractions);
+    } else {
+        println!("# target_enthalpy_J_per_kg={:?} fitted_enthalpy_J_per_kg={:?}", input.targets, result.predictions);
+    }
     println!("# final_nodal_temperatures_K={:?}", result.final_temperatures);
     if let Some(work) = result.checkpoint_work {
         println!("# final_replay: original_endpoints={} recomputed_endpoints={} checkpoint_states={} peak_live_tangents={}",
@@ -191,6 +222,9 @@ fn print_result(input: FitInput, result: FitResult) -> Result<()> {
     println!("time_s,absorbed_power_w\n0,{:.12e}\n1,{:.12e}\n2,0", result.powers[0], result.powers[1]);
     if result.report.reason != StopReason::GradNorm {
         return Err("fit stopped before its requested gradient threshold; the printed schedule is not a convergence claim".into());
+    }
+    if observable==ScanObservable::LiquidMassFraction && result.loss>1e-10 {
+        return Err("stationary fraction fit still misses the requested targets; saturation is not target recovery".into());
     }
     Ok(())
 }
@@ -201,8 +235,8 @@ mod tests {
     #[test]
     fn g5_checkpointed_optimizer_retains_the_fit_and_reports_recomputed_work() {
         let input=FitInput::default();
-        let full=with_context(|cx|fit_with_grid(cx,input,false,8,None)).unwrap();
-        let short=with_context(|cx|fit_with_grid(cx,input,false,8,Some(2))).unwrap();
+        let full=with_context(|cx|fit_with_grid(cx,input,false,8,None,ScanObservable::SpecificEnthalpy)).unwrap();
+        let short=with_context(|cx|fit_with_grid(cx,input,false,8,Some(2),ScanObservable::SpecificEnthalpy)).unwrap();
         assert_eq!(full.powers,short.powers);
         assert_eq!(full.loss,short.loss);
         assert_eq!(full.evaluations,short.evaluations);
@@ -214,8 +248,34 @@ mod tests {
         assert_eq!(work.peak_retained_linearizations,2);
         assert!(full.checkpoint_work.is_none());
         for (n,s) in [(0,1),(3,1),(2,0),(2,3),(4098,2)] {
-            assert!(with_context(|cx|fit_with_grid(cx,input,false,n,Some(s))).is_err());
+            assert!(with_context(|cx|fit_with_grid(cx,input,false,n,Some(s),ScanObservable::SpecificEnthalpy)).is_err());
         }
+    }
+    #[test]
+    fn g1_fraction_targets_recover_heating_levels_with_full_and_short_tapes() {
+        for (targets,expected) in [([0.6,0.8],[10.,20.]),([0.55,0.7],[5.,15.])] {
+            let input=FitInput {targets,initial:[5.,5.]};
+            let full=with_context(|cx|fit_with_grid(cx,input,false,4,None,ScanObservable::LiquidMassFraction)).unwrap();
+            let short=with_context(|cx|fit_with_grid(cx,input,false,4,Some(1),ScanObservable::LiquidMassFraction)).unwrap();
+            assert_eq!(full.powers,short.powers); assert_eq!(full.loss,short.loss);
+            assert_eq!(short.report.reason,StopReason::GradNorm);
+            assert!(short.loss<1e-12);
+            for i in 0..2 { assert!((short.powers[i]-expected[i]).abs()<1e-5); }
+            assert_eq!(short.powers[2],0.);
+            assert!(short.final_temperatures.iter().all(|&t|t==310.));
+            assert!(short.final_fractions.iter().all(|&f|(f-targets[1]).abs()<1e-7));
+        }
+    }
+    #[test]
+    fn g0_fraction_inputs_reject_percentages_and_stationarity_is_not_target_recovery() {
+        for targets in [[60.,80.],[0.4,0.8],[0.8,0.6],[0.6,1.],[f64::NAN,0.8]] {
+            let input=FitInput {targets,initial:[5.,5.]};
+            assert!(input.validate_observable(ScanObservable::LiquidMassFraction).is_err());
+        }
+        let input=FitInput {targets:[0.6,0.8],initial:[5.,5.]};
+        let mut result=with_context(|cx|fit_with_grid(cx,input,false,2,None,ScanObservable::LiquidMassFraction)).unwrap();
+        result.loss=1.;
+        assert!(print_result(input,result,ScanObservable::LiquidMassFraction).is_err());
     }
     #[test]
     fn g1_original_adjoint_and_lbfgs_recover_both_levels_after_budget_resume() {

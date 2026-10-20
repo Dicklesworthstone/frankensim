@@ -29,6 +29,23 @@ pub enum ScanObservable {
     Temperature,
     /// Specific enthalpy [J/kg], retaining sensitivity on latent plateaus.
     SpecificEnthalpy,
+    /// Dimensionless liquid MASS fraction in [0,1], from the original per-node
+    /// chart. Not percent, volume fraction or an inferred temperature threshold.
+    LiquidMassFraction,
+}
+
+impl ScanObservable {
+    // Only newly injected observation seeds are converted. Derivatives carried
+    // from later timesteps already use enthalpy coordinates, even on a plateau.
+    fn seed_in_enthalpy(self, cx: &Cx<'_>, binding: &ScanStepLinearization<'_>, seed: Vec<f64>)
+        -> Result<Vec<f64>, ScanSensitivityError>
+    {
+        match self {
+            Self::Temperature => Ok(binding.transport().transport().temperature_pullback(cx, &seed)?),
+            Self::SpecificEnthalpy => Ok(seed),
+            Self::LiquidMassFraction => binding.liquid_mass_fraction_pullback(cx, &seed),
+        }
+    }
 }
 
 /// One scaled observation; duplicates add independent residual terms.
@@ -40,7 +57,7 @@ pub struct ScanObservation {
     pub vertex: usize,
     /// Selects the units of both target and scale.
     pub observable: ScanObservable,
-    /// Target in kelvin or J/kg as selected above.
+    /// Target in kelvin, J/kg or dimensionless mass fraction as selected above.
     pub target: f64,
     /// Positive residual scale in the same units. It need not be an uncertainty.
     pub scale: f64,
@@ -209,6 +226,9 @@ fn admit_layout(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
         if observation.endpoint >= count || observation.vertex >= vertices
             || !observation.target.is_finite() || !observation.scale.is_finite() || observation.scale <= 0.0
         { return Err(invalid("scan observation needs an existing endpoint/vertex, finite target and positive finite physical scale")); }
+        if observation.observable == ScanObservable::LiquidMassFraction
+            && !(0.0..=1.0).contains(&observation.target)
+        { return Err(invalid("liquid mass fraction targets must be dimensionless values in [0,1], not percentages")); }
         at_endpoint[observation.endpoint].push(i);
     }
     let per_step = ScanSensitivityBudget {
@@ -237,6 +257,7 @@ fn observed(report: &ScanStep, observable: ScanObservable, vertex: usize) -> f64
     match observable {
         ScanObservable::Temperature => report.solution().temperature[vertex],
         ScanObservable::SpecificEnthalpy => report.solution().specific_enthalpy_j_kg[vertex],
+        ScanObservable::LiquidMassFraction => report.solution().liquid_mass_fraction[vertex],
     }
 }
 
@@ -257,6 +278,7 @@ impl ReverseState {
         observations: &[ScanObservation], indices: &[usize], residuals: &[f64],
     ) -> Result<(), ScanSensitivityError> {
         let mut temperature_seed = zeros(self.seed.len())?;
+        let mut fraction_seed = None;
         for &i in indices {
             poll(cx, i)?;
             let observation = observations[i];
@@ -264,11 +286,20 @@ impl ReverseState {
             let target = match observation.observable {
                 ScanObservable::Temperature => &mut temperature_seed[observation.vertex],
                 ScanObservable::SpecificEnthalpy => &mut self.seed[observation.vertex],
+                ScanObservable::LiquidMassFraction => {
+                    if fraction_seed.is_none() { fraction_seed = Some(zeros(self.seed.len())?); }
+                    &mut fraction_seed.as_mut().expect("fraction seed allocated")[observation.vertex]
+                },
             };
             *target = finite(*target + local)?;
         }
         let local_h = binding.transport().transport().temperature_pullback(cx, &temperature_seed)?;
-        add(cx, &mut self.seed, &local_h)
+        add(cx, &mut self.seed, &local_h)?;
+        if let Some(seed) = fraction_seed {
+            let local_h = binding.liquid_mass_fraction_pullback(cx, &seed)?;
+            add(cx, &mut self.seed, &local_h)?;
+        }
+        Ok(())
     }
 
     fn pull(&mut self, cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,

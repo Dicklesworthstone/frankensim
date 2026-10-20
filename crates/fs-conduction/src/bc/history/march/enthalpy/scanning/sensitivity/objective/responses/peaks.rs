@@ -27,7 +27,7 @@ pub struct ScanPeakResponse {
     /// IDs to cover the full mesh; an empty selection never means "everywhere".
     pub vertices: Vec<usize>,
     pub observable: ScanObservable,
-    /// Kelvin for temperature, J/kg for enthalpy. Smaller values reduce the
+    /// Kelvin, J/kg or dimensionless mass fraction. Smaller values reduce the
     /// envelope bias but can increase optimization curvature. Never inferred.
     pub smoothing_scale: f64,
 }
@@ -156,6 +156,7 @@ fn sample(binding: &ScanStepLinearization<'_>, observable: ScanObservable, verte
     match observable {
         ScanObservable::Temperature => solution.temperature[vertex],
         ScanObservable::SpecificEnthalpy => solution.specific_enthalpy_j_kg[vertex],
+        ScanObservable::LiquidMassFraction => solution.liquid_mass_fraction[vertex],
     }
 }
 
@@ -222,11 +223,9 @@ fn pull_peak(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
                 if i % 256 == 0 { poll(cx, i)?; }
                 local[vertex] = weight(sample(binding, peak.observable, vertex), maximum, peak.smoothing_scale) / sum;
             }
-            if peak.observable == ScanObservable::Temperature {
-                local = binding.transport().transport().temperature_pullback(cx, &local)?;
-            }
+            local = peak.observable.seed_in_enthalpy(cx, binding, local)?;
             // Earlier downstream derivatives are already in enthalpy coordinates.
-            // Convert only the NEW local temperature seed, never the whole seed.
+            // Convert only the NEW local observable seed, never the whole seed.
             add(cx, &mut seed, &local)?;
         }
         let gradient = binding.pullback(cx, &seed, transpose)?;

@@ -131,3 +131,109 @@ fn g0_fraction_pullback_rejects_bad_seeds_and_honors_cancellation() {
     });
     with_cancelled_cx(|cx| assert!(binding.pullback_liquid_mass_fraction(cx,&[1.;4],linear()).is_err()));
 }
+
+use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::{
+    ScanObservable, ScanObservation, ScanObjectiveBudget, ScanObjectiveSampling,
+    evaluate_scan_objective,
+    responses::{ScanResponse, ScanResponseBudget, peaks::{ScanPeakResponse, evaluate_scan_objective_with_peaks}},
+    checkpoint::{ScanCheckpointBudget, evaluate_scan_objective_checkpointed_with_peaks},
+};
+fn objective_budget(retained: usize) -> ScanObjectiveBudget {
+    ScanObjectiveBudget {max_steps:4, max_observations:3, max_retained_vertices:4*retained,
+        max_retained_source_vertices:4*retained, max_schedule_controls:16, max_retained_radiation_entries:0}
+}
+
+#[test]
+fn g5_mixed_fraction_objective_points_and_peaks_match_checkpointed_reverse_history() {
+    let mesh=mesh(); let curve=chart(false); let material=ConductivityModel::isotropic_declared(2.).unwrap();
+    with_cx(|cx| {
+        let history=history(cx,&mesh); let old=[130.,150.,160.,170.]; let times=[0.001,0.002,0.004,0.006];
+        let observations=[
+            ScanObservation {endpoint:0,vertex:0,observable:ScanObservable::LiquidMassFraction,target:0.4,scale:0.1},
+            ScanObservation {endpoint:1,vertex:1,observable:ScanObservable::Temperature,target:311.,scale:2.},
+            ScanObservation {endpoint:3,vertex:2,observable:ScanObservable::SpecificEnthalpy,target:165.,scale:10.},
+        ];
+        let responses=[ScanResponse {endpoint:0,vertex:0,observable:ScanObservable::LiquidMassFraction},
+            ScanResponse {endpoint:3,vertex:1,observable:ScanObservable::LiquidMassFraction}];
+        let peaks=[ScanPeakResponse {first_endpoint:0,last_endpoint:3,vertices:vec![0,1,2,3],
+            observable:ScanObservable::LiquidMassFraction,smoothing_scale:0.01}];
+        let response_budget=ScanResponseBudget {max_responses:3,max_gradient_entries:64,max_transpose_solves:13};
+        let (full, points, peak)=evaluate_scan_objective_with_peaks(cx,
+            run(cx,&history,&material,&curve,&old,3.), &times,&observations,
+            ScanObjectiveSampling::RightEndpoint,config(),linear(),objective_budget(4),
+            &responses,&peaks,response_budget,16).unwrap();
+        let short=evaluate_scan_objective_checkpointed_with_peaks(cx,
+            run(cx,&history,&material,&curve,&old,3.), &times,&observations,
+            ScanObjectiveSampling::RightEndpoint,config(),linear(),objective_budget(2),
+            &responses,&peaks,response_budget,16,
+            ScanCheckpointBudget {segment_steps:2,max_checkpoint_vertices:12,max_forward_solves:8}).unwrap();
+        assert_eq!(full.value,short.objective.value);
+        assert_eq!(full.sources,short.objective.sources);
+        assert_eq!(full.initial_specific_enthalpy,short.objective.initial_specific_enthalpy);
+        assert_eq!(full.predictions,short.objective.predictions);
+        for (a,b) in points.iter().zip(&short.responses) {
+            assert_eq!(a.value,b.value); assert_eq!(a.sources,b.sources);
+            assert_eq!(a.initial_specific_enthalpy,b.initial_specific_enthalpy);
+        }
+        assert_eq!(peak[0].value,short.peaks[0].value);
+        assert_eq!(peak[0].sources,short.peaks[0].sources);
+        assert_eq!(peak[0].initial_specific_enthalpy,short.peaks[0].initial_specific_enthalpy);
+        assert!(peak[0].value>=peak[0].sampled_maximum);
+        assert_eq!(short.work.original_forward_solves,4);
+        assert_eq!(short.work.recomputed_forward_solves,4);
+        let objective=|power| evaluate_scan_objective(cx,run(cx,&history,&material,&curve,&old,power),
+            &times,&observations,ScanObjectiveSampling::RightEndpoint,config(),linear(),objective_budget(4)).unwrap().value;
+        close(full.sources[0].absorbed_power_values_w[0],(objective(3.0001)-objective(2.9999))/0.0002);
+    });
+}
+
+#[test]
+fn g0_fraction_targets_reject_percent_units_and_classical_derivatives_at_corners() {
+    let mesh=mesh(); let curve=chart(true); let material=ConductivityModel::isotropic_declared(2.).unwrap();
+    with_cx(|cx| {
+        let history=history(cx,&mesh);
+        let evaluate=|target| evaluate_scan_objective(cx,
+            run(cx,&history,&material,&curve,&[150.;4],0.),&[0.002],
+            &[ScanObservation {endpoint:0,vertex:0,observable:ScanObservable::LiquidMassFraction,target,scale:0.1}],
+            ScanObjectiveSampling::RightEndpoint,config(),linear(),objective_budget(1));
+        for target in [-0.1,1.1,50.,f64::NAN] { assert!(evaluate(target).is_err()); }
+        assert!(matches!(evaluate(0.4), Err(ScanSensitivityError::Adjoint(EnthalpyAdjointError::ChartKink {..}))));
+        // Squared residual at its exact target has zero derivative despite a
+        // corner in the underlying fraction; independent response limits still
+        // seed one and correctly refuse that unavailable classical derivative.
+        assert_eq!(evaluate(0.25).unwrap().value,0.);
+    });
+}
+
+#[test]
+fn g1_fraction_chain_uses_each_original_material_not_one_averaged_latent_heat() {
+    let mesh=ConductionMesh::new(TetComplex::from_tets(8,vec![[0,1,2,3],[4,5,6,7]]),
+        vec![[0.,0.,0.],[1.,0.,0.],[0.,1.,0.],[0.,0.,1.],
+            [2.,0.,0.],[3.,0.,0.],[2.,1.,0.],[2.,0.,1.]]).unwrap();
+    let first=chart(false);
+    let second=EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([92;32]),
+        [(-200.,280.,0.),(100.,310.,0.),(400.,310.,1.),(1100.,380.,1.)].into_iter()
+        .map(|(h,t,f)|EnthalpyPhaseKnot {specific_enthalpy_j_kg:h,temperature_k:t,
+            liquid_mass_fraction:f,bulk_density_kg_m3:2.}).collect()).unwrap();
+    let material=ConductivityModel::isotropic_declared(2.).unwrap();
+    with_cx(|cx| {
+        let history=history(cx,&mesh);
+        let base=EnthalpyHistoryRun::new(cx,ThermalHistoryProblem {boundary:&history,material:&material,
+            element_materials:None,interfaces:None,source:HeatSourceHistory::Fixed(ScalarField::Uniform(0.))},
+            EnthalpyHistoryMaterials {table:&[
+                ReferenceEnthalpyMaterial {curve:&first,reference_density_kg_m3:1.},
+                ReferenceEnthalpyMaterial {curve:&second,reference_density_kg_m3:2.}],
+                of_element:&[0,1],phase_conductivity:None},&[150.,150.,150.,150.,250.,250.,250.,250.],
+            EnthalpyHistoryBudget {spatial:EnthalpyBudget {max_vertices:8,max_elements:2},max_steps:1}).unwrap();
+        let heater=MovingHeatSource::new([1.5,0.25,0.25].map(|v|TimeSignal::Constant(
+            QtyAny::new(v,Dims([1,0,0,0,0,0])))),[4.;3],
+            TimeSignal::Constant(QtyAny::new(1.,COMPONENT_POWER_DIMS)),0.,
+            MovingHeatBudget {max_vertices:8,max_elements:2,min_active_vertices:8,power_relative_tolerance:1e-12}).unwrap();
+        let mut model=ScanningEnthalpyRun::new(cx,base,vec![heater],1,None).unwrap();
+        let binding=model.advance_linearized_to(cx,0.002,config(),ScanSensitivityBudget {
+            max_source_vertices:8,max_radiation_feedback_entries:0}).unwrap();
+        let seed=binding.liquid_mass_fraction_pullback(cx,&[1.;8]).unwrap();
+        for vertex in 0..8 { close(seed[vertex], if vertex<4 {0.01} else {1./300.}); }
+        assert!(binding.report().solution().temperature.iter().all(|&t|t==310.));
+    });
+}

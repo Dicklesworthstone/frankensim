@@ -8,7 +8,7 @@ use super::{ScanCheckpointBudget, ScanCheckpointWork, ScanObjectiveBudget,
     ScanSensitivityError, ScanningEnthalpyRun, EnthalpyStepConfig, LinearConfig,
     ReverseState, ReplayedScan, admit_checkpoints, admit_layout, observed,
     same_scalar, finite, invalid, poll, zeros};
-use super::super::{ScanObservable, add};
+use super::super::add;
 use super::super::responses::{ScanResponse, ScanResponseBudget, ScanResponseEvaluation};
 use super::super::responses::peaks::{ScanPeakResponse, ScanPeakEvaluation,
     PeakSummary, admit_rows, summarize_samples, weight};
@@ -108,9 +108,8 @@ pub fn evaluate_scan_objective_checkpointed_with_peaks(
                 if index == response.endpoint {
                     same_scalar(observed(binding.report(), response.observable, response.vertex), point_values[i])?;
                     reverse.seed[response.vertex] = 1.0;
-                    if response.observable == ScanObservable::Temperature {
-                        reverse.seed = binding.transport().transport().temperature_pullback(cx, &reverse.seed)?;
-                    }
+                    reverse.seed = response.observable.seed_in_enthalpy(cx, binding,
+                        std::mem::take(&mut reverse.seed))?;
                 }
                 reverse.pull(cx, &replay.run, binding, sampling, transpose, budget.max_schedule_controls)?;
             }
@@ -126,9 +125,7 @@ pub fn evaluate_scan_objective_checkpointed_with_peaks(
                         same_scalar(sample, peak_values[i][offset+j])?;
                         seed[vertex] = weight(sample, summary.maximum, peak.smoothing_scale)/summary.sum;
                     }
-                    if peak.observable == ScanObservable::Temperature {
-                        seed = binding.transport().transport().temperature_pullback(cx, &seed)?;
-                    }
+                    seed = peak.observable.seed_in_enthalpy(cx, binding, seed)?;
                     // The carried downstream seed is already in h coordinates.
                     add(cx, &mut reverse.seed, &seed)?;
                 }

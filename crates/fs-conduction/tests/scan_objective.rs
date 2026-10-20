@@ -117,6 +117,7 @@ fn g3_full_objective_gradient_includes_intermediate_data_earlier_heat_and_both_s
                         let predicted=match observation.observable {
                             ScanObservable::Temperature=>solved.report.solution().temperature[observation.vertex],
                             ScanObservable::SpecificEnthalpy=>solved.report.solution().specific_enthalpy_j_kg[observation.vertex],
+                            ScanObservable::LiquidMassFraction=>solved.report.solution().liquid_mass_fraction[observation.vertex],
                         };
                         loss+=0.5*((predicted-observation.target)/observation.scale).powi(2);
                     }

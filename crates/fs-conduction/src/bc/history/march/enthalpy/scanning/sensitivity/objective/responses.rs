@@ -40,7 +40,7 @@ pub struct ScanResponseBudget {
 #[derive(Debug)]
 pub struct ScanResponseEvaluation {
     pub response: ScanResponse,
-    /// Kelvin or J/kg, as selected by response.observable.
+    /// Kelvin, J/kg or dimensionless mass fraction, as selected by the observable.
     pub value: f64,
     pub sources: Vec<MovingHeatScheduleGradient>,
     pub initial_specific_enthalpy: Vec<f64>,
@@ -112,6 +112,7 @@ fn pull_response(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
     let value = finite(match response.observable {
         ScanObservable::Temperature => solution.temperature[response.vertex],
         ScanObservable::SpecificEnthalpy => solution.specific_enthalpy_j_kg[response.vertex],
+        ScanObservable::LiquidMassFraction => solution.liquid_mass_fraction[response.vertex],
     })?;
     let mut seed = zeros(solution.temperature.len())?;
     seed[response.vertex] = 1.0;
@@ -121,11 +122,11 @@ fn pull_response(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
     for index in (0..=response.endpoint).rev() {
         poll(cx, index)?;
         let binding = &tape[index];
-        // Only the local temperature seed is transformed by dT/dh. All earlier
-        // seeds already represent derivatives with respect to stored enthalpy.
-        let gradient = if index == response.endpoint && response.observable == ScanObservable::Temperature {
-            binding.pullback_temperature(cx, &seed, transpose)?
-        } else { binding.pullback(cx, &seed, transpose)? };
+        // Convert only the local response seed, never the carried h derivative.
+        if index == response.endpoint {
+            seed = response.observable.seed_in_enthalpy(cx, binding, seed)?;
+        }
+        let gradient = binding.pullback(cx, &seed, transpose)?;
         iterations = iterations.checked_add(gradient.storage.transport.iterations)
             .ok_or_else(|| invalid("scan response transpose iteration count overflow"))?;
         residual = residual.max(gradient.storage.transport.relative_residual);
