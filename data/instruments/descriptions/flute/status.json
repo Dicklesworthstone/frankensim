@@ -14,13 +14,13 @@
     "a tone-hole model beyond a plane-wave chimney on an ideal junction: no matching-volume or end-correction treatment of the junction, no pad cups, no undercut",
     "a broadband, mutually coupled radiation model: the computed operator admits at most eight openings and is fitted to the mechanics Nyquist, where its baffled-piston quadrature fails at the clock this flute needs; the compact load holds only for ka up to 0.5 and so limits the receiver band to about 2.8 kHz, far below the flute's harmonic content; the holes also sit on a cylinder in the real flute but are placed in a flat baffle plane here",
     "frequency-dependent loss above 3 kHz, and any loss in the tone-hole chimneys and the riser: the viscothermal cell needs rate of about fifty times its band edge, so loss is selected only on bore sections of 17 mm or more and only to 3 kHz",
-    "the right mode: the first renders lock onto a single steady high-order tone near 1.5 to 2 kHz for every note tested, instead of the played register; suspected but not yet isolated: the jet source, whose interim card and authored displacement gain are not measured for a lip jet and may give too little roll-off at the flutist's Strouhal numbers",
+    "a jet source that speaks the played register: every flute render locks onto a single steady high-order tone (1.5 to 2 kHz) and none of these changes moves it to mode 1: authored jet gain 10 to 90, mouth pressure 250 to 550 Pa and jet length 4.5 to 8 mm (20-point map: always 3 to 10 times the target), flue height, a jet card convection ratio of 0.3 to 0.6, the jet seed, dropping the compact radiation reaction, dropping the mouth radiation. The repository's own committed single-pipe example does the same (a 0.3 m pipe with a fundamental near 550 Hz sounds its third mode at 1712 Hz), so this is the generic jet source (interim edge-tone card, authored gain, band-limited receptivity), not this flute's data",
     "the true head-joint taper profile (only the two published endpoints are known; it is a stack of cylinders on a straight line between them) and a convergence ladder on that stacking",
     "a flutist's lip jet: the jet card in use is the interim tonal card from a staging rig, the jet displacement gain is the demonstrator value, and the labium offset, jet angle and onset ramp are not published and are neutral or authored",
     "breath-warmed bore gas: the bore is at the UNSW measurement state, which sits flat of a played flute",
     "a same-specimen impedance pair, so the passive chain is checked only against the pooled UNSW statements, not against a measured impedance of this flute",
     "wall and pad vibration, fork fingerings (F sharp, B flat), vibrato, and the register-hole and trill-hole notes"
   ],
-  "blocked": null,
+  "blocked": "Rendered, but not the played note: the generic jet source locks every flue instrument onto a high-order tone, including the repository's own single-pipe example. A validated lip-jet source at playing Reynolds number (plan item M3.2-W4) is the prerequisite for the flute, recorder, tin whistle and pan pipes.",
   "beads": ["pexfp.320"]
 }
