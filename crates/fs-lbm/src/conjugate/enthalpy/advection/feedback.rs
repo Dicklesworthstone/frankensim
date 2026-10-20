@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use fs_conduction::transient::deposition::advection::{Advected, AdvectionAudit};
 use fs_conduction::transient::deposition::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation, Event,
-    HeatTransfer,
+    HeatTransfer, series_conductance_w_k,
 };
 use fs_exec::CancelGate;
 use fs_material::MaterialError;
@@ -86,9 +86,10 @@ pub struct MaterialFlowEpoch<F> {
 /// callback owns its material selection, fixed pressure/composition and phase
 /// mobility admission. It must not mutate shared external physical history.
 ///
-/// Density must remain bitwise equal to the initial snapshot. T(h), mass and
-/// conductivity/contact evolution stay with the actual registered caloric law
-/// and wrapped observer; the source Cp is never substituted for that law.
+/// Density must remain bitwise equal to the initial snapshot. T(h) and mass
+/// stay with the actual registered caloric law; source Cp never replaces it.
+/// Conductivity/contact evolution stays with the wrapped observer except for
+/// explicitly assigned full fluid faces (see `Self::with_fluid_conduction`).
 /// In particular this does not turn a solid/liquid fraction into a porous drag
 /// law, or assume that a partially solid material can move like a liquid.
 ///
@@ -108,6 +109,7 @@ pub struct MaterialFlowFeedback<'a, F, R, O> {
     gate: &'a CancelGate,
     resolve: R,
     reference: FluidTransportState,
+    fluid_conduction: BTreeMap<(CellId, CellId), FluidConductionFace>,
     advected: Option<Advected<O>>,
     applied: Option<MaterialFlowEpoch<F>>,
     endpoint: Vec<FlowMaterialSample<F>>,
@@ -163,6 +165,7 @@ where
             gate,
             resolve,
             reference,
+            fluid_conduction: BTreeMap::new(),
             advected: Some(advected),
             applied: None,
             endpoint,
@@ -170,6 +173,131 @@ where
             solves: 0,
             max_solves,
         })
+    }
+
+    /// Assign existing full voxel-face links to molecular fluid conduction.
+    ///
+    /// The same applied transport samples supply both k(T) and momentum's
+    /// viscosity. The original thermal owner uses the resulting series
+    /// conductances for heat exchange and its combined conductive/advective CFL.
+    /// No material is queried again, and no graph, contact area or heat source
+    /// is created. Other links remain with their authored/wrapped owners.
+    ///
+    /// Each selected link must cover one entire face of two adjacent mapped
+    /// fluid cells, in both contact-patch measures. Their total surface areas
+    /// must match the native voxels. Parallel links on an owned face and an
+    /// inner observer claiming the same conductance refuse. This models bulk
+    /// isotropic conduction with no additional interface resistance; do not
+    /// assign solid contacts, partial faces or material contact-resistance laws.
+    pub fn with_fluid_conduction(
+        mut self,
+        thermal: &DepositionSimulation<'_>,
+        links: &[u64],
+    ) -> Result<Self, MaterialFlowError<O::Error>> {
+        self.check_map(thermal, &mut || Ok(()))?;
+        if links.len() > self.input.max_connections {
+            return Err(DepositionError::Budget("material-flow conductive faces").into());
+        }
+        let voxels: BTreeMap<_, _> = self
+            .input
+            .cell_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(voxel, id)| id.map(|id| (id, voxel)))
+            .collect();
+        let mut faces = BTreeMap::new();
+        for &id in links {
+            check_gate(self.gate, &mut || Ok(()))?;
+            let link = thermal
+                .links()
+                .get(&id)
+                .ok_or(invalid("inactive material-flow conductive link"))?;
+            let cells = ordered_cells(link.a, link.b);
+            let a = *voxels
+                .get(&cells.0)
+                .ok_or(invalid("conductive link needs two mapped fluid cells"))?;
+            let b = *voxels
+                .get(&cells.1)
+                .ok_or(invalid("conductive link needs two mapped fluid cells"))?;
+            let axis = (0..6)
+                .find(|&face| self.domain.neighbor(a, face) == Some(b))
+                .ok_or(invalid("fluid conduction needs adjacent voxel faces"))?
+                / 2;
+            if faces
+                .insert(
+                    cells,
+                    FluidConductionFace {
+                        link: id,
+                        voxels: [a, b],
+                        axis,
+                    },
+                )
+                .is_some()
+            {
+                return Err(invalid("duplicate material-flow conductive face").into());
+            }
+        }
+        self.fluid_conduction = faces;
+        self.check_fluid_conduction(thermal, &mut || Ok(()))?;
+        Ok(self)
+    }
+
+    fn check_fluid_conduction(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        if self.fluid_conduction.is_empty() {
+            return Ok(());
+        }
+        for (&cells, face) in &self.fluid_conduction {
+            check_gate(self.gate, check)?;
+            let patch = thermal
+                .contact_patch(face.link)
+                .ok_or(invalid("inactive material-flow conductive link"))?;
+            let area = self.domain.face_area(face.voxels[0], face.axis);
+            if ordered_cells(patch.link.a, patch.link.b) != cells
+                || [
+                    patch.link.area_m2,
+                    patch.covered_area_m2[0],
+                    patch.covered_area_m2[1],
+                ]
+                .into_iter()
+                .any(|value| !same_measure(value, area))
+            {
+                return Err(invalid(
+                    "fluid conduction must retain both full-face coverages",
+                ));
+            }
+            for (id, voxel) in [cells.0, cells.1].into_iter().zip(face.voxels) {
+                let surface = 2.0
+                    * (0..3)
+                        .map(|axis| self.domain.face_area(voxel, axis))
+                        .sum::<f64>();
+                let cell = thermal
+                    .cells()
+                    .get(&id)
+                    .ok_or(invalid("inactive conductive cell"))?;
+                if !same_measure(cell.geometry.surface_area_m2, surface) {
+                    return Err(invalid(
+                        "conducting fluid surface must match the native voxel",
+                    ));
+                }
+            }
+        }
+        for link in thermal.links().values() {
+            check_gate(self.gate, check)?;
+            if self
+                .fluid_conduction
+                .get(&ordered_cells(link.a, link.b))
+                .is_some_and(|face| face.link != link.id)
+            {
+                return Err(invalid(
+                    "parallel thermal links duplicate an owned fluid face",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Source-backed inputs and actual MAC result for the last applied step.
@@ -210,6 +338,7 @@ where
             self.input,
             check,
         )?;
+        self.check_fluid_conduction(thermal, check)?;
         Ok(())
     }
 }
@@ -299,11 +428,63 @@ where
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<u64, f64>, Self::Error> {
-        self.advected
+        let mut values = self
+            .advected
             .as_mut()
             .ok_or(invalid("missing material-flow source epoch"))?
             .conductances(thermal, check)
-            .map_err(MaterialFlowError::Inner)
+            .map_err(MaterialFlowError::Inner)?;
+        if self.fluid_conduction.is_empty() {
+            return Ok(values);
+        }
+        self.check_map(thermal, check)?;
+        let applied = self.applied.as_ref().ok_or(invalid(
+            "fluid conduction requires the applied material source epoch",
+        ))?;
+        if applied.time_s.to_bits() != thermal.time_s().to_bits() {
+            return Err(invalid("stale fluid-conduction source epoch").into());
+        }
+        let mut samples = BTreeMap::new();
+        for sample in &applied.samples {
+            check_gate(self.gate, check)?;
+            let cell = thermal
+                .cells()
+                .get(&sample.cell)
+                .ok_or(invalid("inactive conductive cell"))?;
+            if cell.specific_h_j_kg.to_bits() != sample.specific_enthalpy_j_kg.to_bits() {
+                return Err(
+                    invalid("fluid conduction must use the actual applied enthalpy state").into(),
+                );
+            }
+            samples.insert(sample.cell, sample);
+        }
+        for (&cells, face) in &self.fluid_conduction {
+            check_gate(self.gate, check)?;
+            if values.contains_key(&face.link) {
+                return Err(invalid("multiple owners supplied one fluid-face conductance").into());
+            }
+            let mut k = [0.0; 2];
+            for (i, id) in [cells.0, cells.1].into_iter().enumerate() {
+                k[i] = samples
+                    .get(&id)
+                    .ok_or(invalid(
+                        "fluid conduction lacks an applied transport sample",
+                    ))?
+                    .transport
+                    .thermal_conductivity_w_m_k();
+            }
+            let distances = face
+                .voxels
+                .map(|voxel| 0.5 * self.domain.widths(voxel)[face.axis]);
+            let g = series_conductance_w_k(
+                self.domain.face_area(face.voxels[0], face.axis),
+                distances,
+                k,
+            )?;
+            values.insert(face.link, g);
+        }
+        check_gate(self.gate, check)?;
+        Ok(values)
     }
 
     fn heat_transfers(
@@ -382,6 +563,25 @@ where
         check_gate(self.gate, check)?;
         Ok(())
     }
+}
+
+#[derive(Clone, Copy)]
+struct FluidConductionFace {
+    link: u64,
+    voxels: [usize; 2],
+    axis: usize,
+}
+
+fn ordered_cells(a: CellId, b: CellId) -> (CellId, CellId) {
+    if a < b { (a, b) } else { (b, a) }
+}
+
+fn same_measure(a: f64, b: f64) -> bool {
+    a.is_finite()
+        && b.is_finite()
+        && a > 0.0
+        && b > 0.0
+        && (a - b).abs() <= 64.0 * f64::EPSILON * a.max(b)
 }
 
 fn check_gate(

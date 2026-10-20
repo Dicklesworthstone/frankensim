@@ -45,11 +45,47 @@ physical thermal evolution time. The returned flow belongs to the explicitly
 reported starting temperature, not an implicit endpoint solve. Time and space
 refinement remain necessary. Density-change continuity, phase mobility, moving
 surfaces, inertia history, pressure-work heat and viscous dissipation are not
-supplied. Thermal conduction remains with the original thermal/contact owner;
-local k is retained in the same material samples for that owner's use.
+supplied. Unassigned thermal/contact links retain their original owner.
+Existing full fluid-face links can opt into the same-sample conduction below.
 
 `tests/liquid_flow_enthalpy/feedback.rs` exercises data-only viscosity curves,
 native Darcy flow and donor-cell enthalpy, fixed-viscosity parity, pinned source
 support, borrowed law/context consistency and atomic refusal. The independent
 Darcy-series energy recurrence is a reference check, not native Rust test
 execution or experimental material qualification.
+
+## Molecular conduction from the same material epoch
+
+Call `observer.with_fluid_conduction(&accepted_thermal, &fluid_face_link_ids)?`
+to assign existing full fluid-face thermal links. Each actual substep then
+uses the **same resolved transport sample** for molecular viscosity and thermal
+conductivity. Changing conductivity data changes the next temperature field,
+which changes local viscosity and the next momentum solve.
+
+For neighboring cells with normal widths `dx_a, dx_b`, the applied link law is
+
+```
+G = A / (dx_a / (2 k_a) + dx_b / (2 k_b))
+```
+
+The shared `fs_thermal::enthalpy::series_conductance_w_k` also supplies the
+existing material circuit network. The native graded voxel geometry supplies
+area and both half-cell distances; no material query, enthalpy law or interface
+resistance is added. The original thermal link owner applies opposite heat
+rates and uses these same conductances in its combined conductive/advective
+timestep bound. Authored links and both covered areas remain unchanged.
+
+This opt-in assignment requires an existing link across adjacent mapped fluid
+voxels, their native total surface areas, and full face coverage on **both**
+sides of the authoritative contact patch. Partial/solid interfaces, changed
+endpoints, duplicate or parallel links on an owned face, and a wrapped observer
+supplying that same link's conductance refuse. Unassigned contacts retain their
+original owner. Source time and every applied cell enthalpy must still match
+the actual thermal state before the stored transport bundle can supply k.
+The assignment is bounded by the existing connection budget.
+
+The added native tests exercise a conductivity-only card swap affecting heat
+spread, outlet energy, subsequent viscosity-driven flow and the actual CFL
+substeps; a graded-cell series-resistance/mass balance; and atomic refusal for
+partial coverage, parallel/competing ownership and stale source epochs. These
+remain numerical coupling fixtures, not experimentally qualified material laws.
