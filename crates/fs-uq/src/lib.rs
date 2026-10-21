@@ -68,6 +68,7 @@ pub use product_mlmc_allocation::{
 };
 pub use product_mlmc_pilot::{PilotMlmcConfig, PilotMlmcExecution, PilotMlmcReport, PilotMlmcStage};
 pub use product_multi::{MultiQoiExecution, MultiQoiReport, QoiDefinition, QoiReport};
+pub use product_multi::{MultiQoiAssessmentError, MultiQoiCovariance};
 pub use product_pce::{PceConfig, PceExecution, PceReport, PceSummary};
 pub use product_pce_control::{
     PceControlError, PceMeanConfig, PceMeanControl, PceMeanEstimate, PceMeanExecution,

@@ -64,3 +64,54 @@ The study-level evidence dispersion is infinite because output units can differ.
 No durable checkpoint, multivariate quantile, automatic optimization integration
 or physical-model validation is supplied. The focused Rust regressions are in
 `tests/product_multi.rs` and require native execution before claiming a test pass.
+
+## Paired dependence and uncertainty in estimated means
+
+`assess_covariance(max_products, cancelled)` uses the original paired rows to
+report the sample covariance, the estimated covariance of the vector mean, and
+Pearson correlations. The first matrix divides centered cross products by n-1;
+the second divides by n*(n-1). These have different meanings and are not
+interchangeable. Matrix indices retain output definitions; covariance (i,j)
+has units unit_i*unit_j, whereas correlation is dimensionless.
+
+The implementation independently centers and scales each output, using compensated
+reductions. Small differences on a large offset are retained by subtracting an
+anchor before scaling. Opposite finite extremes instead scale first. Mixed-unit
+rescaling avoids premature products of huge/tiny scales. An unrepresentable
+nonzero covariance is None, not zero. Mean covariance can remain available when
+sample covariance overflows; correlations can remain available when dimensional
+moments overflow or underflow. Constant outputs have zero covariance but undefined
+correlations. Subnormal results retain their ordinary f64 quantization limits.
+
+The n*d*(d+1)/2 scalar-product count is checked against both the caller allowance
+and a hard 67,108,864 cap before scratch allocation. Normalization uses O(n*d)
+scratch within the existing observation cap. Cancellation is checked throughout
+normalization and pair reductions; no partial matrix is published. Assessments
+are read-only. Fewer than two rows returns None, not a zero matrix. Refused
+executions cannot publish covariance. Finite rounding can perturb positive
+semidefiniteness; no PSD certificate, repair or distribution fitting is claimed.
+
+## Confidence for joint physical compliance
+
+`assess_joint_compliance(alpha, target_half_width, cancelled)` sends each paired
+ALL-limits indicator to the existing `fs-eproc` Bernoulli-mixture confidence
+sequence. It does not assume outputs are independent or reconstruct a Gaussian
+law from their covariance. With the fixed-event sampling assumptions of that
+owner, this is one time-uniform event assessment. Multiple response constraints
+inside the fixed conjunction do not require multiplying marginal probabilities.
+Searching across different events, limits, models, seeds or confidence levels
+still requires separate selection/multiplicity control.
+
+The event and alpha must be chosen before looking at results. Bounds can be
+asymmetric; `converged` requires both endpoint distances from the empirical mean
+to meet the requested half-width. No observed failures does not return a
+probability-one certificate. Cancellation brackets the bounded interval solve
+and every row; raw observations, work counts and execution status are unchanged.
+The fixed-budget executor does not automatically stop on this assessment.
+
+These are sampling statements for the declared model, not outward numerical
+certificates, population transfer or physical qualification. Neither covariance
+nor confidence invokes a physical callback. `tests/product_multi_assessment.rs`
+adds paired affine/offset/extreme-scale checks, reconstruction through the scalar
+Bernoulli owner, boundary decisions and every cancellation checkpoint. Native
+execution is required before claiming these Rust tests pass.

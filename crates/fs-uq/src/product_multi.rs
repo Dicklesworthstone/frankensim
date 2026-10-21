@@ -6,6 +6,9 @@
 //! never a product of marginal probabilities.
 //! Bead: `frankensim-extreal-program-f85xj.6.7` (multi-response propagation).
 
+pub mod assessment;
+pub use assessment::{MultiQoiAssessmentError, MultiQoiCovariance};
+
 use core::fmt::Display;
 use fs_evidence::Color;
 use crate::product_qmc::summarize_replicates;
