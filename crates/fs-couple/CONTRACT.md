@@ -3065,6 +3065,32 @@ duplicate bindings, unrepresentable energy and cancellation refuse atomically.
 C/L remain fixed within an ordinary circuit step. This linear lossless update
 does not supply continuous thermal/mechanical feedback or switching impulses.
 
+## Material conductivity at solved field and current
+
+`MaterialCircuit::conductivity_candidate` and its thermally refreshed-seed
+variant bind explicitly typed electric-field and current-density coordinates to
+the original bulk conductor cards. Each bounded constitutive iteration calls
+the existing Kirchhoff descriptor from the SAME accepted charge/flux history,
+obtains actual bulk branch voltage/current, and refreshes the complete original
+material bundle through `ResolvedMaterialStatePoint::at_query_point`. Geometry,
+source basis, selected claims, requirements and other physical coordinates
+remain explicit. Signed and magnitude axes are separate authored choices; a
+curve that requires an electrical operating axis cannot silently freeze it.
+
+Admission requires resistance consistency and an independent constitutive
+power gate. The original native circuit step remains the sole owner of charge,
+flux, source work and deposited Joule heat. The material evaluation at the
+solved operating point and its resistance/voltage/power residuals are retained
+separately; iteration discrepancy never becomes heat. Every reported iteration
+is one native circuit solve. Unsupported source states, changed source/geometry
+bindings, exhausted work and cancellation refuse without advancing history.
+This is isotropic, uniform, quasi-static bulk conduction with fixed C/L and
+geometry. It does not add switching, hysteresis, tensor/AC transport or contact
+laws; contact-bound circuits require their separate explicit contact owner.
+Five regression sources cover constant-law parity, analytic nonlinear RC
+discharge, current-density/polarity response, complete temperature refresh and
+atomic refusal. Native execution remains pending.
+
 ## Reciprocal material electric and magnetic gap motion
 
 `material_circuit::motion::MaterialFieldMotion` composes the existing source-bound

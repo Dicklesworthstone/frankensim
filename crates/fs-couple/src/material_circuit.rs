@@ -12,6 +12,8 @@ pub mod thermal;
 pub mod storage;
 /// Reciprocal electric/magnetic gap motion driven by the same field energy.
 pub mod motion;
+/// Self-consistent conductivity at solved electric field and current density.
+pub mod conductivity;
 /// Source-bound electrical contacts in series with original bulk branches.
 pub mod contacts;
 use contacts::{SeriesElectricalContact, ContactHeat};
@@ -61,6 +63,15 @@ pub enum MaterialCircuitError {
     Material(fs_material::state_point::MaterialStatePointError),
     /// Independent branch heat or total electrical balance did not close.
     Balance(&'static str),
+    /// The material response did not agree with the solved branch fields.
+    ConductivityConvergence {
+        /// Actual native circuit trials performed.
+        iterations: usize,
+        /// Largest absolute applied/evaluated resistance difference [ohm].
+        resistance_defect_ohm: f64,
+        /// Largest absolute constitutive branch-power difference [W].
+        power_defect_w: f64,
+    },
     /// Cancellation before publication.
     Cancelled,
 }
