@@ -9,7 +9,8 @@ use super::{ScanPowerStudy, ScanObservation, ScanObservationSpec, ScanSensitivit
     ScanControlBound, ScanEnergyCap, ScanStateBound, ScanPeakBound, ScanResponseBudget,
     ScanConstraintEvaluation, ScanningEnthalpyRun, MovingHeatSource,
     Limits, LimitAdmission, finite, invalid, poll};
-use super::super::value::{ScanPowerValueEvaluation, ScanValueResponseBudget};
+use super::super::value::{ScanPowerValueEvaluation, ScanValueResponseBudget,
+    ScanValueBatch, ScanResponseValue, ScanPeakValue};
 use fs_exec::Cx;
 
 /// Explicit retained scalar/selection limits, with no irrelevant KKT allowance.
@@ -75,6 +76,40 @@ pub struct ValueConstrainedScanStudy<F, O = ScanObservation> {
     limits: Limits,
 }
 
+/// Borrow one immutable objective/constraint declaration for concurrent value
+/// evaluations. Workers receive their own Cx and independent physical runs.
+/// The underlying batch reserves and settles the original lifetime budget;
+/// no worker can replace source controls, constraints or feasibility scales.
+pub struct ScanConstraintValueBatch<'a, F, O = ScanObservation> {
+    values: ScanValueBatch<'a, F, O>,
+    limits: &'a Limits,
+}
+
+impl<F, O: ScanObservationSpec> ScanConstraintValueBatch<'_, F, O> {
+    pub fn started_evaluations(&self) -> usize { self.values.started_evaluations() }
+    pub fn evaluations(&self) -> usize { self.values.evaluations() }
+    pub fn evaluation_allowance(&self) -> usize { self.values.evaluation_allowance() }
+
+    /// Evaluate every original inequality, without a derivative or penalty.
+    /// F must be callable through an immutable reference; sharing the batch
+    /// between threads additionally requires F and its observation layout Sync.
+    pub fn evaluate_at<'h, 'm, 'c>(&self, cx: &Cx<'_>, point: &[f64])
+        -> Result<(ScanPowerValueEvaluation, ScanConstraintValues), ScanSensitivityError>
+    where F: Fn(&Cx<'_>, Vec<MovingHeatSource>)
+        -> Result<ScanningEnthalpyRun<'h, 'm, 'c>, ScanSensitivityError>
+    {
+        let out = ScanConstraintValues::from_inputs(
+            self.limits.at_impl(cx, self.values.study(), point, false)?);
+        let requests: Vec<_> = self.limits.states.iter().map(|state| state.response).collect();
+        let peaks: Vec<_> = self.limits.peaks.iter().map(|peak| peak.response.clone()).collect();
+        let (physical, responses, peak_responses) = self.values.evaluate_value_with_responses(cx, point,
+            &requests, &peaks, ScanValueResponseBudget {
+                max_responses: self.limits.response_budget.max_responses,
+                max_peak_samples: self.limits.max_peak_samples })?;
+        Ok((physical, self.limits.finish_values(cx, out, &responses, &peak_responses)?))
+    }
+}
+
 impl<F, O: ScanObservationSpec> ValueConstrainedScanStudy<F, O> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(cx: &Cx<'_>, study: ScanPowerStudy<F, O>, bounds: Vec<ScanControlBound>,
@@ -102,6 +137,16 @@ impl<F, O: ScanObservationSpec> ValueConstrainedScanStudy<F, O> {
         self.study.extend_evaluation_budget(total)
     }
 
+    /// Admit bounded shared evaluation without cloning factories or constraints.
+    /// Drop after draining workers restores only unused reservation slots;
+    /// started failed/cancelled work remains charged to this same study.
+    pub fn value_batch(&mut self, cx: &Cx<'_>, allowance: usize)
+        -> Result<ScanConstraintValueBatch<'_, F, O>, ScanSensitivityError>
+    {
+        let Self { study, limits } = self;
+        Ok(ScanConstraintValueBatch { values: study.value_batch(cx, allowance)?, limits })
+    }
+
     /// Export the original candidate declarations without asserting feasibility.
     pub fn sources_at(&self, cx: &Cx<'_>, point: &[f64])
         -> Result<Vec<MovingHeatSource>, ScanSensitivityError>
@@ -127,17 +172,28 @@ impl<F, O: ScanObservationSpec> ValueConstrainedScanStudy<F, O> {
     where F: FnMut(&Cx<'_>, Vec<MovingHeatSource>)
         -> Result<ScanningEnthalpyRun<'h, 'm, 'c>, ScanSensitivityError>
     {
-        let mut out = ScanConstraintValues::from_inputs(self.limits.at_impl(cx, &self.study, point, false)?);
+        let out = ScanConstraintValues::from_inputs(self.limits.at_impl(cx, &self.study, point, false)?);
         let requests: Vec<_> = self.limits.states.iter().map(|state| state.response).collect();
         let peaks: Vec<_> = self.limits.peaks.iter().map(|peak| peak.response.clone()).collect();
         let (physical, responses, peak_responses) = self.study.evaluate_value_with_responses(cx, point,
             &requests, &peaks, ScanValueResponseBudget {
                 max_responses: self.limits.response_budget.max_responses,
                 max_peak_samples: self.limits.max_peak_samples })?;
-        if responses.len() != self.limits.states.len() || peak_responses.len() != self.limits.peaks.len() {
+        Ok((physical, self.limits.finish_values(cx, out, &responses, &peak_responses)?))
+    }
+}
+
+impl Limits {
+    // Keep row ordering, physical scales and smoothing reports identical for
+    // ordinary FnMut serial studies and immutable concurrently shared batches.
+    fn finish_values(&self, cx: &Cx<'_>, mut out: ScanConstraintValues,
+        responses: &[ScanResponseValue], peak_responses: &[ScanPeakValue])
+        -> Result<ScanConstraintValues, ScanSensitivityError>
+    {
+        if responses.len() != self.states.len() || peak_responses.len() != self.peaks.len() {
             return Err(invalid("value-only state response layout changed"));
         }
-        for (bound, response) in self.limits.states.iter().zip(responses) {
+        for (bound, response) in self.states.iter().zip(responses) {
             poll(cx)?;
             if response.response != bound.response { return Err(invalid("value-only response identity changed")); }
             out.state_values.push(response.value);
@@ -147,7 +203,7 @@ impl<F, O: ScanObservationSpec> ValueConstrainedScanStudy<F, O> {
                 }
             }
         }
-        for (bound, response) in self.limits.peaks.iter().zip(peak_responses) {
+        for (bound, response) in self.peaks.iter().zip(peak_responses) {
             poll(cx)?;
             if response.peak != bound.response { return Err(invalid("value-only peak identity changed")); }
             out.peak_values.push(response.value);
@@ -155,8 +211,8 @@ impl<F, O: ScanObservationSpec> ValueConstrainedScanStudy<F, O> {
             out.peak_smoothing_gaps.push(response.smoothing_gap);
             out.residuals.push(finite(finite(response.value - bound.maximum)? / bound.scale)?);
         }
-        if out.residuals.len() != self.limits.rows { return Err(invalid("value-only constraint row count changed")); }
+        if out.residuals.len() != self.rows { return Err(invalid("value-only constraint row count changed")); }
         poll(cx)?;
-        Ok((physical, out))
+        Ok(out)
     }
 }
