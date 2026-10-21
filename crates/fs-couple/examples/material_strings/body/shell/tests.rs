@@ -283,12 +283,12 @@ fn a_mesh_and_mode_count_beyond_every_former_ceiling_run_through_the_whole_pipel
     let (nx, ny) = (15, 11);
     let text = clamped_plate_body(nx, ny, "window 1 400000000", 2_000_000_000);
     let profile = Profile::parse(text.as_bytes()).unwrap();
-    // A connected network above 42 modal coordinates needs the explicit prepared-linear record: 70 body modes, the
-    // cavity, two string planes, twist and the gas memory make 82, so declare room for 128.
+    // The fixture's own dimensions: 4096 samples and 12 gas-memory intervals, nothing shrunk. A connected network above
+    // 42 modal coordinates needs the explicit prepared-linear record: 70 body modes, the cavity, two string planes,
+    // twist and the gas memory (2 planes x 12 intervals) make 98, so declare room for 128.
     let performance = include_str!("../../cylinder-flow.material-strings")
-        .replace("48000 4096 0.01 128", "48000 96 0.01 128")
         .replace("cylinder-gas-loading 0.001 30 12",
-            "cylinder-gas-loading 0.001 30 4\nprepared-linear 128 1073741824 10000000000000");
+            "cylinder-gas-loading 0.001 30 12\nprepared-linear 128 1073741824 10000000000000");
     let mut spec = input::Spec::parse(performance.as_bytes()).unwrap();
     spec.body.modes = 70;
     scoped(|cx, gate| {
