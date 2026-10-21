@@ -108,13 +108,13 @@ pub struct FrictionModalFrame {
     pub sample: u64,
     /// Original read-only pressure sum, or the explicit acceleration observation [Pa].
     pub observer_pressure_pa: f64,
-    /// Modal, bilateral-spring and any explicitly bound nonlinear storage [J].
+    /// Modal, bilateral-spring, material-memory and bound nonlinear storage [J].
     pub network_energy_j: f64,
     /// Work of external modal forces, excluding friction [J].
     pub external_work_j: f64,
     /// Work of the prescribed moving surface, F*u*dt [J]. May be negative.
     pub drive_work_j: f64,
-    /// Original component and bilateral-dashpot loss [J].
+    /// Original component, bilateral-dashpot and material-relaxation loss [J].
     pub network_dissipation_j: f64,
     /// Nonnegative F*d on sliding; zero for sticking/released [J].
     pub friction_dissipation_j: f64,
@@ -174,6 +174,40 @@ impl FrictionModalSystem {
         self.compliance = effective_compliance(&self.network, &self.column, gate)?;
         poll(Some(gate))?;
         Ok(self)
+    }
+
+    /// Bind genuine constitutive memory to the unchanged coupled owner before
+    /// playback. Refresh the SAME friction force response, including material
+    /// feedback; existing interfaces, nonlinear storage and pressure weights
+    /// remain attached. See [`CoupledModalSystem::with_material_relaxation`].
+    pub fn with_material_relaxation(
+        mut self, branches: Vec<fs_phs::RelaxationBranch>, initial_memory: Option<Vec<f64>>,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalFrictionError> {
+        self.network = self.network.with_material_relaxation(branches, initial_memory, gate)?;
+        self.compliance = effective_compliance(&self.network, &self.column, gate)?;
+        limit("complete initial material/nonlinear energy", self.total_energy_j()?,
+            self.network.config.maximum_total_energy_j)?;
+        poll(Some(gate))?;
+        Ok(self)
+    }
+
+    /// Unmodified material projections and coefficients, in memory order.
+    #[must_use]
+    pub fn material_relaxation_branches(&self) -> &[fs_phs::RelaxationBranch] {
+        self.network.material_relaxation_branches()
+    }
+    /// Accepted energy-normalized internal strains, including prior unloaded history.
+    #[must_use]
+    pub fn material_memory(&self) -> &[f64] { self.network.material_memory() }
+    /// Current independent constitutive storage [J].
+    pub fn material_energy_j(&self) -> Result<f64, ModalCouplingError> {
+        self.network.material_energy_j()
+    }
+    /// Last accepted linear-network account, with independent constitutive loss.
+    #[must_use]
+    pub fn coupled_frame(&self) -> Option<&super::super::CoupledModalFrame> {
+        self.network.last_frame()
     }
 
     /// Explicit complete-operator preparation choice, if supplied.
@@ -282,8 +316,8 @@ impl FrictionModalSystem {
         interface::check_endpoint(self.interface.as_ref(), &self.column, &self.network.candidates, drive)?;
         let observer_pressure_pa = self.staged_observer_pressure(gate)?;
         let frame = &self.network.staged_frame;
-        let after = finite(frame.modal_energy_j+frame.connection_energy_j)?;
-        let network_loss = finite(frame.component_dissipation_j+frame.connection_dissipation_j)?;
+        let after = finite(frame.total_energy_j())?;
+        let network_loss = finite(frame.total_dissipation_j())?;
         let external_work = dot(external, &self.network.free_delta)?;
         let drive_work = finite(traction*drive_distance)?;
         let residual = finite((after-before)+network_loss+loss-external_work-drive_work)?;

@@ -130,5 +130,6 @@ pub(super) fn initialize(
     limit("static total energy including contacts", energy, network.config.maximum_total_energy_j)?;
     poll(Some(gate))?;
     std::mem::swap(&mut network.models, &mut network.candidates);
+    std::mem::swap(&mut network.material_memory, &mut network.candidate_material_memory);
     Ok(energy)
 }

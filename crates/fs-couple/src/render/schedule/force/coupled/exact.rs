@@ -13,6 +13,7 @@ pub(super) struct ExactNetwork {
     blocks: Vec<(Vec<usize>, ExactBlock)>,
     prepared: Option<prepared::PreparedNetwork>,
     count: usize,
+    memory_count: usize,
 }
 
 // Diagonal component dynamics and held inputs cannot connect distinct K/C
@@ -21,7 +22,8 @@ pub(super) struct ExactNetwork {
 // exact blocks. Contacts still act through the complete original force vector.
 // This API's original modes have identity mass in normalized coordinates;
 // connection storage is k*(column.q-rest)^2/2 with no momentum cross terms.
-// Thus these actual K/C columns exhaust every possible inter-mode coupling.
+// These K/C columns and the bound material projections exhaust every possible
+// inter-mode coupling. An arm's internal strain belongs to exactly one island.
 // This changes no retained coordinate, physical limit or dense-block capacity.
 impl ExactNetwork {
     pub(super) fn new_prepared(
@@ -36,7 +38,7 @@ impl ExactNetwork {
         let prepared = prepared::PreparedNetwork::new(
             models, columns, links, count, dt, budget, gate,
         )?;
-        Ok(Self { blocks: Vec::new(), prepared: Some(prepared), count })
+        Ok(Self { blocks: Vec::new(), prepared: Some(prepared), count, memory_count: 0 })
     }
 
     pub(super) fn new(
@@ -44,6 +46,17 @@ impl ExactNetwork {
         columns: &[Vec<f64>],
         links: &[ConnectionLaw],
         count: usize,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        Self::new_with_relaxation(models, columns, links, count, &[], gate)
+    }
+
+    pub(super) fn new_with_relaxation(
+        models: &[ModalAcousticTimeModel],
+        columns: &[Vec<f64>],
+        links: &[ConnectionLaw],
+        count: usize,
+        branches: &[fs_phs::RelaxationBranch],
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         let modes: Vec<_> = models
@@ -54,6 +67,7 @@ impl ExactNetwork {
             || modes.len() != count
             || columns.len() != links.len()
             || columns.iter().any(|c| c.len() != count)
+            || branches.iter().any(|b| b.projection.len() != 2 * count)
         {
             return Err(invalid("complete modal island layout"));
         }
@@ -79,6 +93,19 @@ impl ExactNetwork {
                 }
             }
         }
+        // One shared internal strain couples every displacement in its
+        // projection, even when no ordinary spring or dashpot joins them.
+        for branch in branches {
+            poll(Some(gate))?;
+            let mut members = branch.projection.iter().step_by(2).enumerate()
+                .filter(|(_, value)| **value != 0.0);
+            if let Some((first, _)) = members.next() {
+                for (next, _) in members {
+                    let (a, b) = (root(&labels, first), root(&labels, next));
+                    if a != b { labels[a.max(b)] = a.min(b); }
+                }
+            }
+        }
         let mut groups = std::collections::BTreeMap::<usize, Vec<usize>>::new();
         for index in 0..count {
             groups.entry(root(&labels, index)).or_default().push(index);
@@ -91,17 +118,36 @@ impl ExactNetwork {
                 .iter()
                 .map(|c| indices.iter().map(|&i| c[i]).collect())
                 .collect();
-            let block = ExactBlock::new(&local_modes, &local_columns, links, gate)?;
+            let memory_indices: Vec<_> = branches.iter().enumerate()
+                .filter(|(_, branch)| indices.iter().any(|&i| branch.projection[2 * i] != 0.0))
+                .map(|(i, _)| i).collect();
+            let local_branches: Vec<_> = memory_indices.iter().map(|&arm| {
+                let branch = &branches[arm];
+                fs_phs::RelaxationBranch {
+                    projection: indices.iter().flat_map(|&i|
+                        [branch.projection[2 * i], branch.projection[2 * i + 1]]).collect(),
+                    stiffness: branch.stiffness,
+                    relaxation_time_s: branch.relaxation_time_s,
+                }
+            }).collect();
+            let mut block = if local_branches.is_empty() {
+                ExactBlock::new(&local_modes, &local_columns, links, gate)?
+            } else {
+                ExactBlock::new_with_relaxation(&local_modes, &local_columns, links, local_branches, gate)?
+            };
+            block.memory_indices = memory_indices;
             blocks.push((indices, block));
         }
-        Ok(Self { blocks, prepared: None, count })
+        Ok(Self { blocks, prepared: None, count, memory_count: branches.len() })
     }
 
-    fn local_state(indices: &[usize], x: &[f64]) -> Vec<f64> {
-        indices
+    fn local_state(&self, indices: &[usize], block: &ExactBlock, x: &[f64]) -> Vec<f64> {
+        let mut state: Vec<_> = indices
             .iter()
             .flat_map(|&i| [x[2 * i], x[2 * i + 1]])
-            .collect()
+            .collect();
+        state.extend(block.memory_indices.iter().map(|&i| x[2 * self.count + i]));
+        state
     }
 
     fn hamiltonian(&self, x: &[f64]) -> f64 {
@@ -110,17 +156,19 @@ impl ExactNetwork {
         }
         self.blocks
             .iter()
-            .map(|(indices, b)| b.system.hamiltonian(&Self::local_state(indices, x)))
+            .map(|(indices, b)| b.system.hamiltonian(&self.local_state(indices, b, x)))
             .sum()
     }
 
     pub(super) fn advance(
         &self,
         models: &[ModalAcousticTimeModel],
+        memory: &[f64],
         external: &[f64],
         dt: f64,
     ) -> Result<(StepRecord, Vec<f64>, Vec<f64>), ModalCouplingError> {
-        if external.len() != self.count || external.iter().any(|v| !v.is_finite()) {
+        if external.len() != self.count || external.iter().any(|v| !v.is_finite())
+            || memory.len() != self.memory_count || memory.iter().any(|z| !z.is_finite()) {
             return Err(invalid(
                 "external forces must match every original modal coordinate",
             ));
@@ -128,10 +176,11 @@ impl ExactNetwork {
         if let Some(prepared) = &self.prepared {
             return prepared.advance(models, external, dt);
         }
-        let x = flatten(models);
+        let mut x = flatten(models);
+        x.extend_from_slice(memory);
         let mut u = vec![0.0; self.count];
         let mut record = StepRecord {
-            x: vec![0.0; 2 * self.count],
+            x: vec![0.0; 2 * self.count + self.memory_count],
             y: vec![0.0; self.count],
             delta_h: 0.0,
             dissipated: 0.0,
@@ -146,7 +195,7 @@ impl ExactNetwork {
             let local = step_render(
                 &block.system,
                 &block.split,
-                &Self::local_state(indices, &x),
+                &self.local_state(indices, block, &x),
                 &local_u,
                 dt,
             )
@@ -155,6 +204,9 @@ impl ExactNetwork {
                 record.x[2 * i..2 * i + 2].copy_from_slice(&local.x[2 * j..2 * j + 2]);
                 record.y[i] = local.y[j];
                 u[i] = local_u[j];
+            }
+            for (j, &i) in block.memory_indices.iter().enumerate() {
+                record.x[2 * self.count + i] = local.x[2 * indices.len() + j];
             }
             record.delta_h = finite(record.delta_h + local.delta_h)?;
             record.dissipated = finite(record.dissipated + local.dissipated)?;
@@ -166,16 +218,16 @@ impl ExactNetwork {
     /// The free prediction of the next sample: (end state, start state). With the prepared owner and `verify == false` the
     /// loss Gramians and the trajectory energy-residual check are skipped (see `PreparedNetwork::predict_free`); `verify`
     /// runs the full `advance`. Every other owner always runs the full `advance`.
-    pub(super) fn predict(&self, models: &[ModalAcousticTimeModel], external: &[f64], dt: f64, verify: bool)
+    pub(super) fn predict(&self, models: &[ModalAcousticTimeModel], memory: &[f64], external: &[f64], dt: f64, verify: bool)
         -> Result<(Vec<f64>, Vec<f64>), ModalCouplingError>
     {
         if let (Some(prepared), false) = (&self.prepared, verify) {
-            if external.len() != self.count || external.iter().any(|v| !v.is_finite()) {
+            if !memory.is_empty() || external.len() != self.count || external.iter().any(|v| !v.is_finite()) {
                 return Err(invalid("external forces must match every original modal coordinate"));
             }
             return prepared.predict_free(models, external, dt);
         }
-        let (record, x, _) = self.advance(models, external, dt)?;
+        let (record, x, _) = self.advance(models, memory, external, dt)?;
         Ok((record.x, x))
     }
 
@@ -202,13 +254,13 @@ impl ExactNetwork {
         u: &[f64],
         dt: f64,
         total: f64,
-    ) -> Result<(f64, f64), ModalCouplingError> {
+    ) -> Result<(f64, f64, f64), ModalCouplingError> {
         if let Some(prepared) = &self.prepared {
-            return prepared.losses(x, u, dt, total);
+            return prepared.losses(x, u, dt, total).map(|(a, b)| (a, b, 0.0));
         }
-        let (mut component, mut connection) = (0.0, 0.0);
+        let (mut component, mut connection, mut material) = (0.0, 0.0, 0.0);
         for (indices, block) in &self.blocks {
-            let local_x = Self::local_state(indices, x);
+            let local_x = self.local_state(indices, block, x);
             let local_u: Vec<_> = indices.iter().map(|&i| u[i]).collect();
             let block_total = if self.blocks.len() == 1 {
                 total
@@ -219,11 +271,12 @@ impl ExactNetwork {
                     .map_err(ModalCouplingError::Propagation)?
                     .dissipated
             };
-            let (a, b) = block.losses(&local_x, &local_u, dt, block_total)?;
+            let (a, b, c) = block.losses(&local_x, &local_u, dt, block_total)?;
             component = finite(component + a)?;
             connection = finite(connection + b)?;
+            material = finite(material + c)?;
         }
-        Ok((component, connection))
+        Ok((component, connection, material))
     }
 
     fn connection_work(
@@ -243,8 +296,8 @@ impl ExactNetwork {
         let mut work = vec![0.0; links.len()];
         for (indices, block) in &self.blocks {
             poll(gate)?;
-            let local_x = Self::local_state(indices, x);
-            let local_endpoint = Self::local_state(indices, endpoint);
+            let local_x = self.local_state(indices, block, x);
+            let local_endpoint = self.local_state(indices, block, endpoint);
             let local_u: Vec<_> = indices.iter().map(|&i| u[i]).collect();
             let local_columns: Vec<Vec<_>> = columns
                 .iter()
@@ -292,6 +345,8 @@ struct ExactBlock {
     rest_force: Vec<f64>,
     component_r: Vec<f64>,
     connection_r: Vec<f64>,
+    material_r: Vec<f64>,
+    memory_indices: Vec<usize>,
 }
 
 impl ExactBlock {
@@ -301,11 +356,23 @@ impl ExactBlock {
         links: &[ConnectionLaw],
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
+        Self::new_with_relaxation(modes, columns, links, Vec::new(), gate)
+    }
+
+    fn new_with_relaxation(
+        modes: &[crate::modal_acoustic_time::ModalAcousticMode],
+        columns: &[Vec<f64>],
+        links: &[ConnectionLaw],
+        branches: Vec<fs_phs::RelaxationBranch>,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
         let count = modes.len();
         let n = count
             .checked_mul(2)
             .ok_or_else(|| invalid("full linear state extent"))?;
-        let block = n
+        let augmented = n.checked_add(branches.len())
+            .ok_or_else(|| invalid("full material state extent"))?;
+        let block = augmented
             .checked_add(count)
             .and_then(|v| v.checked_add(1))
             .and_then(|v| v.checked_mul(2))
@@ -334,7 +401,7 @@ impl ExactBlock {
             r[pi * n + pi] = 2.0 * mode.damping_ratio * mode.angular_frequency_rad_s;
             at += 1;
         }
-        let component_r = r.clone();
+        let mut component_r = r.clone();
         let mut connection_r = vec![0.0; n * n];
         let mut rest_force = vec![0.0; count];
         for (column, link) in columns.iter().zip(links) {
@@ -352,12 +419,31 @@ impl ExactBlock {
             *value += extra;
         }
         let storage = QuadraticStorage::new(q, n).map_err(ModalCouplingError::Propagation)?;
-        let system = PortHamiltonian::new(n, count, j, r, g, Box::new(storage))
+        let mut system = PortHamiltonian::new(n, count, j, r, g, Box::new(storage))
             .map_err(ModalCouplingError::Propagation)?;
+        let mut material_r = Vec::new();
+        if !branches.is_empty() {
+            let embed = |original: &[f64]| {
+                let mut out = vec![0.0; augmented * augmented];
+                for i in 0..n {
+                    out[i * augmented..i * augmented + n]
+                        .copy_from_slice(&original[i * n..(i + 1) * n]);
+                }
+                out
+            };
+            component_r = embed(&component_r);
+            connection_r = embed(&connection_r);
+            material_r = vec![0.0; augmented * augmented];
+            for (i, branch) in branches.iter().enumerate() {
+                material_r[(n + i) * augmented + n + i] = 1.0 / branch.relaxation_time_s;
+            }
+            system = system.with_relaxation_branches(branches)
+                .map_err(ModalCouplingError::Propagation)?;
+        }
         let split = split_quadratic(
             &system,
             LinearSplitBudget {
-                max_modes: n,
+                max_modes: augmented,
                 max_omega_dt: core::f64::consts::PI,
             },
         )
@@ -369,6 +455,8 @@ impl ExactBlock {
             rest_force,
             component_r,
             connection_r,
+            material_r,
+            memory_indices: Vec::new(),
         })
     }
 
@@ -396,7 +484,7 @@ impl ExactBlock {
             dt,
         )
         .map_err(ModalCouplingError::Propagation)?;
-        Ok(rec.x.chunks_exact(2).map(|s| s[0]).collect())
+        Ok(rec.x[..2 * self.rest_force.len()].chunks_exact(2).map(|s| s[0]).collect())
     }
 
     fn losses(
@@ -405,12 +493,30 @@ impl ExactBlock {
         u: &[f64],
         dt: f64,
         total: f64,
-    ) -> Result<(f64, f64), ModalCouplingError> {
+    ) -> Result<(f64, f64, f64), ModalCouplingError> {
+        if !self.material_r.is_empty() {
+            // Independently integrate each actual resistance against the SAME
+            // augmented trajectory. No endpoint energy remainder or modal-loss
+            // allocation is used to invent a constitutive loss channel.
+            let integrate = |resistance: &[f64]| {
+                if resistance.iter().all(|v| *v == 0.0) { return Ok(0.0); }
+                integrated_resistance_loss(&self.system, &self.split, x, u, dt, resistance)
+                    .map_err(ModalCouplingError::Propagation)
+            };
+            let component = integrate(&self.component_r)?;
+            let connection = integrate(&self.connection_r)?;
+            let material = integrate(&self.material_r)?;
+            let scale = self.system.hamiltonian(x).abs().max(total.abs()).max(f64::MIN_POSITIVE);
+            if (component + connection + material - total).abs() > 1e-12 * scale {
+                return Err(invalid("independent material/modal/connection losses do not sum to complete loss"));
+            }
+            return Ok((component, connection, material));
+        }
         if self.component_r.iter().all(|v| *v == 0.0) {
-            return Ok((0.0, total));
+            return Ok((0.0, total, 0.0));
         }
         if self.connection_r.iter().all(|v| *v == 0.0) {
-            return Ok((total, 0.0));
+            return Ok((total, 0.0, 0.0));
         }
         let component =
             integrated_resistance_loss(&self.system, &self.split, x, u, dt, &self.component_r)
@@ -429,7 +535,7 @@ impl ExactBlock {
                 "independent linear loss channels do not sum to the complete loss",
             ));
         }
-        Ok((component, connection))
+        Ok((component, connection, 0.0))
     }
 
     // Work INTO the retained bodies from each signed connection column:
@@ -514,12 +620,12 @@ pub(super) fn stage(
         .checked_add(1)
         .ok_or_else(|| invalid("coupled sample clock overflow"))?;
     let before = network.total_energy_j()?;
-    let (rec_x, x, u, component_loss, connection_loss, h_x) = if let Some(exact) = &network.exact {
-        let (rec, x, u) = exact.advance(&network.models, external, network.dt)?;
+    let (rec_x, x, u, component_loss, connection_loss, material_loss, h_x) = if let Some(exact) = &network.exact {
+        let (rec, x, u) = exact.advance(&network.models, &network.material_memory, external, network.dt)?;
         poll(gate)?;
-        let (comp_loss, conn_loss) = exact.losses(&x, &u, network.dt, rec.dissipated)?;
+        let (comp_loss, conn_loss, material_loss) = exact.losses(&x, &u, network.dt, rec.dissipated)?;
         let h_x = exact.hamiltonian(&x);
-        (rec.x, x, u, comp_loss, conn_loss, h_x)
+        (rec.x, x, u, comp_loss, conn_loss, material_loss, h_x)
     } else {
         if external.len() != network.mode_count() || external.iter().any(|v| !v.is_finite()) {
             return Err(invalid(
@@ -550,7 +656,7 @@ pub(super) fn stage(
                 k += 1;
             }
         }
-        (rec_x, x, u, comp_loss, 0.0, before)
+        (rec_x, x, u, comp_loss, 0.0, 0.0, before)
     };
     let mut pressure = 0.0;
     let mut modal_after = 0.0;
@@ -631,18 +737,19 @@ pub(super) fn stage(
             network.config.maximum_abs_connection_force_n,
         )?;
     }
-    let after = finite(modal_after + spring_after)?;
+    let material_after = network.stage_material_state(&rec_x)?;
+    let after = finite(modal_after + spring_after + material_after)?;
     limit("total energy", after, network.config.maximum_total_energy_j)?;
     limit(
         "observer pressure",
         pressure.abs(),
         network.config.maximum_abs_pressure_pa,
     )?;
-    let residual = finite(after - before + component_loss + connection_loss - work)?;
+    let residual = finite(after - before + component_loss + connection_loss + material_loss - work)?;
     let scale = before
         .max(after)
         .max(work.abs())
-        .max((component_loss + connection_loss).abs());
+        .max((component_loss + connection_loss + material_loss).abs());
     let tolerance = finite(
         network.config.energy_absolute_tolerance_j
             + network.config.energy_relative_tolerance * scale,
@@ -659,9 +766,11 @@ pub(super) fn stage(
         observer_pressure_pa: pressure,
         modal_energy_j: modal_after,
         connection_energy_j: spring_after,
+        material_energy_j: material_after,
         external_work_j: work,
         component_dissipation_j: component_loss,
         connection_dissipation_j: connection_loss,
+        material_dissipation_j: material_loss,
         energy_residual_j: residual,
         energy_tolerance_j: tolerance,
         solve_relative_residual: 0.0,
@@ -696,7 +805,7 @@ pub(super) fn stage(
             tick: sample,
             duration_s: network.dt,
             storage_change_j: Some(after - before),
-            loss_j: Some(component_loss + connection_loss),
+            loss_j: Some(component_loss + connection_loss + material_loss),
             included_work_j: work,
             entropy_change_j_k: 0.0,
             tolerance_j: Some(tolerance),
@@ -1051,7 +1160,7 @@ mod tests {
         let full = ExactBlock::new(&modes, &columns, &links, &gate).unwrap();
         let dt = 1.0 / 48_000.0;
         let external = [1e-4, -2e-4, 3e-4, -4e-4];
-        let (actual, x, u) = islands.advance(&models, &external, dt).unwrap();
+        let (actual, x, u) = islands.advance(&models, &[], &external, dt).unwrap();
         assert_eq!(u, full.held_input(&external).unwrap());
         let expected = step_render(&full.system, &full.split, &x, &u, dt).unwrap();
         // Energy changes, supplies and losses are differences of the stored
@@ -1150,7 +1259,7 @@ mod tests {
                 ExactNetwork::new(&models, &cross_columns, &cross_links, 4, &gate).unwrap();
             assert_eq!(merged.blocks.len(), 1);
             assert_eq!(merged.blocks[0].0, vec![0, 1, 2, 3]);
-            let (changed, _, held) = merged.advance(&models, &external, dt).unwrap();
+            let (changed, _, held) = merged.advance(&models, &[], &external, dt).unwrap();
             assert!(
                 actual
                     .x

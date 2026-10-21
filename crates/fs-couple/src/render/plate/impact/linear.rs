@@ -345,8 +345,8 @@ impl LinearImpactSystem {
         let mut next = match &mut self.prepared {
             Prepared::Bilateral(system) => {
                 let f = system.step_under_gate(external, gate).map_err(owner)?;
-                LinearImpactFrame { sample: f.sample, stored_energy_j: f.modal_energy_j+f.connection_energy_j,
-                    dissipated_energy_j: f.component_dissipation_j+f.connection_dissipation_j,
+                LinearImpactFrame { sample: f.sample, stored_energy_j: f.total_energy_j(),
+                    dissipated_energy_j: f.total_dissipation_j(),
                     supplied_work_j: f.external_work_j, balance_residual_j: f.energy_residual_j,
                     ..LinearImpactFrame::default() }
             }

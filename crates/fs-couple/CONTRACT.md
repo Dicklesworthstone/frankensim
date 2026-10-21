@@ -3361,6 +3361,33 @@ viscosity, regional material memory, source substitution, callback partitions,
 CLI PCM parity and rejected-step rollback. Parse-only Rust and whitespace checks
 passed; native execution and measured-instrument qualification remain open.
 
+### Constitutive memory in the shared coupled modal owner
+
+`CoupledModalSystem::with_material_relaxation` appends the existing fs-phs
+Maxwell internal-strain coordinates to the original coupled exact islands.
+Displacement projections connect those islands; mechanical q/v ordering and
+all force ports remain unchanged. Each positive arm stores
+`(sqrt(k) b.q - z)^2/2` and dissipates that mismatch squared divided by its
+relaxation time. No artificial inertia or independent material time stepper is
+introduced. Explicit initial history or fully relaxed initialization is required.
+
+The owner independently integrates modal, connection and material loss on one
+trajectory. Material restoring loads enter endpoint acceleration and pressure.
+Scalar/multiple contact, scalar/multiple friction and nonlinear storage use the
+complete account. Candidate q/v/z publish together only after acceptance;
+rejected pressure, nonlinear or cancellation trials preserve accepted history.
+Cold internal-component extension zero-extends original projections and keeps
+memory; static equilibrium publishes the corresponding relaxed memory.
+
+The original dense augmented exponential ceiling, instantaneous stiffness
+Nyquist bound, total energy and explicit setup-work budget remain binding.
+The larger mechanical-only prepared backend refuses memory in either binding
+order. Empty memory retains the original arithmetic. Focused G0/G3 regression
+sources exercise analytic free-mass relaxation, independent work/loss channels,
+initial history, force response, friction, component extension and rollback.
+Rust parse checks and an independent analytic/matrix-exponential oracle passed;
+native Rust execution and general continuum/modal accuracy remain unqualified.
+
 `SupportedMaterialStrings::in_stationary_gas_with_longitudinal_waves` extends
 that same support owner with material-solid axial inertia and selected
 longitudinal sine modes. Actual 3D span endpoints, a declared transverse frame

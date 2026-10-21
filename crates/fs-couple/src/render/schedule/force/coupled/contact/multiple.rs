@@ -365,8 +365,8 @@ impl MultiContactModalSystem {
             friction.stage(&self.network, &self.reactions, &self.points, sweeps, gate)?
         } else { 0.0 };
         let frame = &self.network.staged_frame;
-        let network_energy = finite(frame.modal_energy_j + frame.connection_energy_j)?;
-        let network_loss = finite(frame.component_dissipation_j + frame.connection_dissipation_j)?;
+        let network_energy = finite(frame.total_energy_j())?;
+        let network_loss = finite(frame.total_dissipation_j())?;
         let external_work = dot(external, &self.network.free_delta)?;
         let after = finite(network_energy + contact_energy)?;
         limit("total energy including contacts", after, self.network.config.maximum_total_energy_j)?;

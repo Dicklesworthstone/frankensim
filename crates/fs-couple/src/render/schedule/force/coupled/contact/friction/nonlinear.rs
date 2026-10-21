@@ -346,6 +346,11 @@ impl FrictionModalSystem {
             Some(budget) => CoupledModalSystem::new_with_columns_prepared(models, columns, self.network.config, budget, gate),
             None => CoupledModalSystem::new_with_columns(models, columns, self.network.config, gate),
         }?;
+        let network = if self.network.relaxation_branches.is_empty() { network } else {
+            let mut branches = self.network.relaxation_branches.clone();
+            for branch in &mut branches { branch.projection.resize(2 * count, 0.0); }
+            network.with_material_relaxation(branches, Some(self.network.material_memory.clone()), gate)?
+        };
         let mut next = Self::new(network, self.port, self.config, gate)?;
         if let Some(mut weights) = self.acceleration_pressure {
             weights.resize(count, 0.0);

@@ -71,13 +71,13 @@ pub struct MultiFrictionFrame {
     pub sample: u64,
     /// Original modal or acceleration pressure observation [Pa].
     pub observer_pressure_pa: f64,
-    /// Modal, bilateral-spring and any bound nonlinear storage [J].
+    /// Modal, bilateral-spring, material-memory and any bound nonlinear storage [J].
     pub network_energy_j: f64,
     /// Work of the supplied external modal forces [J].
     pub external_work_j: f64,
     /// Sum of the separately reported surface supplies [J].
     pub drive_work_j: f64,
-    /// Original modal and bilateral-dashpot loss [J].
+    /// Original modal, bilateral-dashpot and material-relaxation loss [J].
     pub network_dissipation_j: f64,
     /// Sum of actual sliding losses [J].
     pub friction_dissipation_j: f64,
@@ -187,6 +187,19 @@ impl MultiFrictionModalSystem {
     }
     /// Accepted components in their original basis and order.
     #[must_use] pub fn components(&self) -> &[ModalAcousticTimeModel] { self.core.components() }
+    /// Original constitutive parameters, retained through the joint friction solve.
+    #[must_use]
+    pub fn material_relaxation_branches(&self) -> &[fs_phs::RelaxationBranch] {
+        self.core.material_relaxation_branches()
+    }
+    /// Accepted first-order material history, with no mutable admission bypass.
+    #[must_use]
+    pub fn material_memory(&self) -> &[f64] { self.core.material_memory() }
+    /// Last accepted linear account, including independent material storage/loss.
+    #[must_use]
+    pub fn coupled_frame(&self) -> Option<&super::super::super::CoupledModalFrame> {
+        self.core.coupled_frame()
+    }
     /// External modal-force dimension.
     #[must_use] pub fn mode_count(&self) -> usize { self.core.mode_count() }
     /// Original shared mechanical period [s].
@@ -408,9 +421,9 @@ impl MultiFrictionModalSystem {
             limit("acceleration observer pressure", pressure.abs(), self.core.network.config.maximum_abs_pressure_pa)?;
         }
         let staged = &self.core.network.staged_frame;
-        let network_energy = finite(staged.modal_energy_j+staged.connection_energy_j)?;
+        let network_energy = finite(staged.total_energy_j())?;
         let after = if self.obstacles.is_some() { finite(network_energy+obstacle_energy)? } else { network_energy };
-        let network_loss = finite(staged.component_dissipation_j+staged.connection_dissipation_j)?;
+        let network_loss = finite(staged.total_dissipation_j())?;
         let external_work = dot(external, &self.core.network.free_delta)?;
         let residual = if self.obstacles.is_some() {
             finite((after-before)+network_loss+loss+obstacle_loss-external_work-work-obstacle_work)?

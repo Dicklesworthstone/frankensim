@@ -13,7 +13,7 @@ impl FrictionModalSystem {
     /// source validity and the radiation approximation; this API invents none.
     ///
     /// Acceleration uses the SAME held forces that advanced the candidate,
-    /// including friction and all bilateral reactions, minus its elastic and
+    /// including friction, material-memory and all bilateral reactions, minus its elastic and
     /// viscous restoring loads. Thus a static force-balanced deflection emits
     /// no pressure. No radiation reaction, delay, directivity or pressure-field
     /// energy is inferred from these observation coefficients.

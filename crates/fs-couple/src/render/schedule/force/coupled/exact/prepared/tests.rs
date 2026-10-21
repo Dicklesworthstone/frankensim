@@ -256,7 +256,7 @@ fn free_prediction_keeps_its_energy_check_on_every_64th_sample_and_equals_the_fu
         // The sentinel: a loss sweep (and with it the trajectory energy-residual check) only on samples 0, 64 and 128.
         assert_eq!(sweeps(&system) - before, u64::from(sample % 64 == 0), "sample {sample}");
         // Skipped or not, the prediction is exactly the full advance's end state, bit for bit.
-        let (record, x, _) = system.exact.as_ref().unwrap().advance(&system.models, &external, system.dt).unwrap();
+        let (record, x, _) = system.exact.as_ref().unwrap().advance(&system.models, &[], &external, system.dt).unwrap();
         for k in 0..system.mode_count() {
             assert_eq!(system.old_q[k].to_bits(), x[2 * k].to_bits());
             assert_eq!(system.free_delta[k].to_bits(), (record.x[2 * k] - x[2 * k]).to_bits());

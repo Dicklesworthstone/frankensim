@@ -106,13 +106,13 @@ pub struct ContactModalFrame {
     pub sample: u64,
     /// Sum of the original pressure observations [Pa].
     pub observer_pressure_pa: f64,
-    /// Modal oscillator plus bilateral-spring energy [J].
+    /// Modal oscillator, bilateral-spring and material-memory energy [J].
     pub network_energy_j: f64,
     /// fs-dcontact potential at the accepted endpoint [J].
     pub contact_energy_j: f64,
     /// Work by authored external modal forces, EXCLUDING contact reactions [J].
     pub external_work_j: f64,
-    /// Original component plus bilateral-dashpot loss [J].
+    /// Original component, bilateral-dashpot and material-relaxation loss [J].
     pub network_dissipation_j: f64,
     /// Nonadhesive contact loss (constitutive R - conservative R)*delta_x [J].
     pub contact_dissipation_j: f64,
@@ -269,8 +269,8 @@ impl ContactModalSystem {
         let contact_dissipation_j = finite((expected-elastic)*delta)?;
         if contact_dissipation_j < 0.0 { return Err(invalid("contact loss must not create energy")); }
         let frame = &self.network.staged_frame;
-        let network_energy_j = finite(frame.modal_energy_j + frame.connection_energy_j)?;
-        let network_dissipation_j = finite(frame.component_dissipation_j + frame.connection_dissipation_j)?;
+        let network_energy_j = finite(frame.total_energy_j())?;
+        let network_dissipation_j = finite(frame.total_dissipation_j())?;
         let external_work_j = dot(external, &self.network.free_delta)?;
         let after = finite(network_energy_j + contact_energy_j)?;
         limit("total energy including contact", after, self.network.config.maximum_total_energy_j)?;

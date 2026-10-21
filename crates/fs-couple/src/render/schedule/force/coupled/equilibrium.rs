@@ -28,6 +28,7 @@ impl CoupledModalSystem {
         let energy = self.stage_static_equilibrium(&q, external, gate)?;
         poll(Some(gate))?;
         std::mem::swap(&mut self.models, &mut self.candidates);
+        std::mem::swap(&mut self.material_memory, &mut self.candidate_material_memory);
         Ok(energy)
     }
 
@@ -60,9 +61,10 @@ impl CoupledModalSystem {
     fn require_static_initialization(&self, external: &[f64]) -> Result<(), ModalCouplingError> {
         if self.samples_rendered() != 0 || external.len() != self.mode_count()
             || external.iter().any(|x| !x.is_finite())
+            || self.material_memory.iter().any(|z| *z != 0.0)
             || self.models.iter().flat_map(|m| m.states()).any(|s|
                 s.displacement_m_sqrt_kg != 0.0 || s.velocity_m_sqrt_kg_per_s != 0.0) {
-            return Err(invalid("coupled preload requires zero initial vibration, sample zero and finite complete forces"));
+            return Err(invalid("coupled preload requires zero initial vibration/material history, sample zero and finite complete forces"));
         }
         Ok(())
     }
@@ -116,6 +118,9 @@ impl CoupledModalSystem {
             return Err(ModalCouplingError::SolveResidual { relative, tolerance: self.config.solve_relative_tolerance });
         }
         limit("static total energy", energy, self.config.maximum_total_energy_j)?;
+        // Settled Maxwell arms have no elastic mismatch. Retain that actual
+        // viscous strain on the candidate; publish it only with the equilibrium.
+        self.candidate_material_memory = relaxation::relaxed_memory(&self.relaxation_branches, &self.candidates)?;
         poll(Some(gate))?;
         Ok(energy)
     }

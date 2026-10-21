@@ -189,8 +189,8 @@ impl SharedCavity {
             let frame = self.system.step_under_gate(&self.external, gate)?;
             (
                 frame.sample,
-                frame.modal_energy_j + frame.connection_energy_j,
-                frame.component_dissipation_j + frame.connection_dissipation_j,
+                frame.total_energy_j(),
+                frame.total_dissipation_j(),
                 frame.energy_tolerance_j,
             )
         };
