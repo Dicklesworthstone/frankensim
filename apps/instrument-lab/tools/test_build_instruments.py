@@ -100,7 +100,7 @@ class Verdicts(unittest.TestCase):
 class Badges(unittest.TestCase):
     def pair(self, verdicts):
         ms = [B.metric_view(metric(f"m{i}", g, [2.0] if g is not None else []), True) for i, g in enumerate(verdicts)]
-        return {"note": "D3", "ours": {"x": 1}, "metrics": ms}
+        return {"note": "D3", "real": {}, "ours": {"x": 1}, "metrics": ms}
 
     def test_no_pairs_says_no_render_yet(self):
         j = B.judge(None, [])
@@ -111,7 +111,7 @@ class Badges(unittest.TestCase):
         self.assertEqual((j["badge"], j["line"]), ("blocked", "needs the tone-hole operator"))
 
     def test_reference_only_pairs_are_not_a_render(self):
-        ref_only = {"note": "D3", "ours": None, "metrics": []}
+        ref_only = {"note": "D3", "real": {}, "ours": None, "metrics": []}
         self.assertEqual(B.judge(None, [ref_only])["badge"], "none")
 
     def test_close_mixed_off(self):
@@ -282,6 +282,94 @@ class Credits(unittest.TestCase):
             self.assertEqual((src["credit"], src["external"], src["licence"]), (VOCAL_SOURCE["credit"], True, "CC BY 4.0"))
             index = json.loads((out / "index.json").read_text())
             self.assertIsNone(next(f for f in index["families"] if f["id"] == "voice")["reference"])
+
+
+def make_listening(root: Path, family: str = "pan-pipes", note: str = "C5") -> dict:
+    """A render with no reference recording, in the shape P2 and P8 agreed: real null, no_reference.reason, our audio and figures only."""
+    d = root / family / note
+    d.mkdir(parents=True)
+    write_wav(d / "ours.wav", 0.5)
+    for name in ("s_ours", "c_ours"):
+        write_png(d / f"{name}.png")
+    one = {"real": None, "ours": None, "diff": None, "f_lo_hz": 40, "f_hi_hz": 16000, "span_db": 90}
+    pj = {
+        "schema": B.PAIR_SCHEMA, "family": family, "note": note, "dynamic": "mf", "duration_s": 1.0,
+        "real": None, "no_reference": {"reason": "No licensed recording of this instrument is in the reference library."},
+        "ours": {"wav": "/x/ours.wav", "git_sha": "abc123", "observer": "baffled_outlet 0 0 0.5", "sample_rate": 48000, "recipe": "data/instruments/descriptions/pan-pipes/render.sh"},
+        "audio": {"real": None, "ours": "ours.wav", "level_match": "peak at -6 dBFS; there is no recording to match"},
+        "alignment": None,
+        "figures": {"spectrogram": dict(one, ours="s_ours.png"), "scalogram": dict(one, ours="c_ours.png")},
+        "partials": None, "metrics": [],
+    }
+    (d / "pair.json").write_text(json.dumps(pj))
+    return pj
+
+
+class Listening(unittest.TestCase):
+    def check(self, pj: dict, root: Path, family: str = "pan-pipes", note: str = "C5") -> list[str]:
+        return B.validate_pair(pj, family, note, root / family / note, {})
+
+    def test_a_render_with_no_reference_is_valid_and_has_nothing_to_grade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pj = make_listening(root)
+            self.assertEqual(self.check(pj, root), [])
+            self.assertEqual(B.check_audio(root / "pan-pipes" / "C5", pj), [])
+
+    def test_anything_that_needs_a_recording_is_refused_on_such_a_note(self):
+        cases = {
+            "audio.real must be null": lambda p: p["audio"].update(real="real.wav"),
+            "figures.spectrogram.real must be null": lambda p: p["figures"]["spectrogram"].update(real="s_ours.png"),
+            "figures.scalogram.diff must be null": lambda p: p["figures"]["scalogram"].update(diff="c_ours.png"),
+            "metrics must be []": lambda p: p.update(metrics=[metric("a", 1.0, [2.0])]),
+            "partials must be null": lambda p: p.update(partials={"t_s": [0, 1], "f0_hz": {}, "real": None, "ours": None}),
+            "alignment must be null": lambda p: p.update(alignment={"onset_real_s": 0.1, "onset_ours_s": 0.1, "highpass_hz": 50, "level_offset_db": 0}),
+            "no_reference must be {reason}": lambda p: p.update(no_reference={"reason": "  "}),
+            "needs a render": lambda p: p.update(ours=None),
+            "figures.spectrogram.ours names no file": lambda p: p["figures"]["spectrogram"].update(ours="missing.png"),
+        }
+        for expect, mutate in cases.items():
+            with self.subTest(expect), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                pj = make_listening(root)
+                mutate(pj)
+                self.assertTrue(any(expect in p for p in self.check(pj, root)), self.check(pj, root))
+
+    def test_real_null_without_no_reference_is_not_a_listening_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pj = make_listening(root)
+            del pj["no_reference"]
+            self.assertTrue(any("real is missing" in p for p in self.check(pj, root)))
+
+    def test_the_card_offers_our_audio_and_pictures_only_and_the_badge_says_there_is_nothing_to_grade_against(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / "analysis", Path(tmp) / "out"
+            make_listening(root)
+            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out), "--descriptions", str(root / "none"), "--audio-ext", "mp4"]):
+                self.assertEqual(B.main(), 0)
+            card = json.loads((out / "pan-pipes" / "card.json").read_text())
+            p = card["pairs"][0]
+            self.assertEqual((card["status"]["badge"], card["status"]["label"]), ("listening", "Rendered, no reference to grade against"))
+            self.assertEqual((p["real"], p["audio"]["real"], p["metrics"], p["partials"]), (None, None, [], None))
+            self.assertEqual(p["no_reference"], "No licensed recording of this instrument is in the reference library.")
+            self.assertEqual((card["status"]["counts"]["within"], card["status"]["counts"]["outside"], card["status"]["counts"]["notes_no_reference"]), (0, 0, 1))
+            self.assertEqual(sorted(f.name for f in (out / "pan-pipes" / "C5").iterdir()), ["ours.mp4", "scalogram-ours.webp", "spectrogram-ours.webp"])
+            self.assertEqual(p["figures"]["spectrogram"]["real"], None)
+            index = json.loads((out / "index.json").read_text())
+            self.assertEqual(next(f for f in index["families"] if f["id"] == "pan-pipes")["badge"], "listening")
+
+    def test_next_to_graded_notes_it_does_not_change_the_families_badge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / "analysis", Path(tmp) / "out"
+            make_pair(root)
+            make_listening(root, "clarinet", "E3")
+            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out), "--descriptions", str(root / "none")]):
+                self.assertEqual(B.main(), 0)
+            card = json.loads((out / "clarinet" / "card.json").read_text())
+            self.assertEqual(card["status"]["badge"], "mixed")
+            self.assertEqual([p["note"] for p in card["pairs"]], ["D3", "E3"])
+            self.assertEqual((card["status"]["counts"]["within"], card["status"]["counts"]["outside"]), (1, 1), "the graded note alone decides the counts")
 
 
 class GraderRefusals(unittest.TestCase):

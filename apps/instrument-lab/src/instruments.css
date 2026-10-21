@@ -4,7 +4,7 @@
 .ir-close { --vc: var(--ivory-2); }
 .ir-mixed { --vc: var(--brass); }
 .ir-off { --vc: var(--ember); }
-.ir-ungraded { --vc: var(--air); }
+.ir-ungraded, .ir-listening { --vc: var(--air); }
 .ir-blocked { --vc: var(--ember); }
 .ir-none { --vc: var(--ivory-3); }
 
@@ -38,6 +38,7 @@
 
 .ir-figs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 @media (max-width: 900px) { .ir-figs { grid-template-columns: 1fr; } }
+.ir-figs.one { grid-template-columns: minmax(0, 1fr); max-width: 640px; }
 .ir-fig figcaption { margin-bottom: 6px; font: 500 11px/1.3 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ivory-3); }
 .ir-img-box { position: relative; overflow: hidden; border-radius: var(--radius-sm); background: #06070a; border: 1px solid var(--line); }
 .ir-img { display: block; width: 100%; height: 100%; object-fit: fill; }

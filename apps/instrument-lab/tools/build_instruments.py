@@ -66,6 +66,13 @@ checked when present) and moves the old figures and audio into <note>/superseded
 "refused by the grader: <reason>", no badge counts it, and the build still exits 0 (the data is saying what is true).
 A family whose only renders were refused reads "Rendered, not graded".
 
+A render of an instrument with NO reference recording (pan pipes, tin whistle) is a listening-only note: "real": null and
+"no_reference": {"reason": one sentence on why there is no recording}. It has ours and audio.ours (plus audio.level_match),
+figures {spectrogram: F, scalogram: F} with F = {real: null, ours, diff: null, f_lo_hz, f_hi_hz, span_db}, and
+alignment null, partials null, metrics []. Anything else on such a pair is refused. The card shows our audio and our
+spectrogram and scalogram, no metrics and no recording credit, and a family with only such notes reads "Rendered, no
+reference to grade against". Next to graded notes they do not change the family's badge.
+
 --only FAMILY=NOTE,NOTE shows just those notes of a family (the review build's file limit). The others get no files, are
 listed on the card as card.withheld, and are in no badge: the badge covers exactly the notes the page shows.
 
@@ -140,6 +147,7 @@ BADGE_LABEL = {
     "none": "No render yet",
     "blocked": "Blocked",
     "ungraded": "Rendered, not graded",
+    "listening": "Rendered, no reference to grade against",
     "close": "Inside the real spread",
     "mixed": "Partly inside the real spread",
     "off": "Outside the real spread",
@@ -238,6 +246,62 @@ def check_tracks(tracks, t_len: int, side: str, problems: list[str]) -> None:
                 return
 
 
+def is_listening(pj) -> bool:
+    """A render with no reference recording: real is null and no_reference says why."""
+    return isinstance(pj, dict) and pj.get("real") is None and pj.get("no_reference") is not None
+
+
+def validate_listening(pj: dict, base: Path) -> list[str]:
+    """The parts of a listening-only note: our render, our figures, and nothing that needs a recording."""
+    problems: list[str] = []
+    nr = pj["no_reference"]
+    if not isinstance(nr, dict) or not isinstance(nr.get("reason"), str) or not nr["reason"].strip():
+        problems.append("no_reference must be {reason} with a non-empty reason")
+    ours = pj.get("ours")
+    if not isinstance(ours, dict):
+        problems.append("a note with no reference needs a render: ours is missing")
+    else:
+        for key in ("wav", "git_sha", "observer", "recipe"):
+            if not isinstance(ours.get(key), str) or not ours[key]:
+                problems.append(f"ours.{key} is required")
+    audio = pj.get("audio")
+    if not isinstance(audio, dict):
+        problems.append("audio is missing")
+    else:
+        if audio.get("real") is not None:
+            problems.append("audio.real must be null for a note with no reference")
+        v = audio.get("ours")
+        if not (isinstance(v, str) and (base / v).is_file()):
+            problems.append(f"audio.ours names no file ({v!r})")
+        if not isinstance(audio.get("level_match"), str) or not audio["level_match"]:
+            problems.append("audio.level_match must say how loudness was set")
+    figs = pj.get("figures")
+    if not isinstance(figs, dict):
+        problems.append("figures is missing")
+    else:
+        for name in ("spectrogram", "scalogram"):
+            fig = figs.get(name)
+            if not isinstance(fig, dict):
+                problems.append(f"figures.{name} is missing")
+                continue
+            for key in ("f_lo_hz", "f_hi_hz", "span_db"):
+                if not finite(fig.get(key)) or fig[key] <= 0:
+                    problems.append(f"figures.{name}.{key} must be a positive number")
+            if finite(fig.get("f_lo_hz")) and finite(fig.get("f_hi_hz")) and fig["f_hi_hz"] <= fig["f_lo_hz"]:
+                problems.append(f"figures.{name}: f_hi_hz must exceed f_lo_hz")
+            if not (isinstance(fig.get("ours"), str) and (base / fig["ours"]).is_file()):
+                problems.append(f"figures.{name}.ours names no file ({fig.get('ours')!r})")
+            for side in ("real", "diff"):
+                if fig.get(side) is not None:
+                    problems.append(f"figures.{name}.{side} must be null for a note with no reference")
+    for key in ("alignment", "partials"):
+        if pj.get(key) is not None:
+            problems.append(f"{key} must be null for a note with no reference")
+    if pj.get("metrics") != []:
+        problems.append("metrics must be [] for a note with no reference: there is nothing to measure it against")
+    return problems
+
+
 def validate_pair(pj: dict, family: str, note: str, base: Path, refs_by_id: dict) -> list[str]:
     problems: list[str] = []
     if pj.get("schema") != PAIR_SCHEMA:
@@ -251,8 +315,10 @@ def validate_pair(pj: dict, family: str, note: str, base: Path, refs_by_id: dict
     if not finite(pj.get("duration_s")) or pj["duration_s"] <= 0:
         problems.append("duration_s must be a positive number")
     real = pj.get("real")
+    if is_listening(pj):
+        return problems + validate_listening(pj, base)
     if not isinstance(real, dict):
-        problems.append("real is missing")
+        problems.append("real is missing (a render with no reference recording sets real null and no_reference.reason)")
     elif real.get("reference_id") in refs_by_id:
         entry = refs_by_id[real["reference_id"]]
         lic = entry.get("licence") if isinstance(entry, dict) else None
@@ -426,8 +492,9 @@ def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: di
     has_ours = pj.get("ours") is not None
     note = pj["note"]
     rel = f"{out_dir.parent.name}/{out_dir.name}"
-    ref = refs_by_id.get(pj["real"]["reference_id"])
-    source = real_source(pj["real"], ref, licences)
+    listening = is_listening(pj)
+    ref = None if listening else refs_by_id.get(pj["real"]["reference_id"])
+    source = None if listening else real_source(pj["real"], ref, licences)
     audio = {}
     for side in ("real", "ours"):
         if pj["audio"].get(side):
@@ -438,7 +505,7 @@ def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: di
     figures = {}
     for kind in ("spectrogram", "scalogram"):
         fig = pj["figures"][kind]
-        entry = {k: fig[k] for k in ("f_lo_hz", "f_hi_hz", "span_db", "diff_range_db")}
+        entry = {k: fig.get(k) for k in ("f_lo_hz", "f_hi_hz", "span_db", "diff_range_db")}  # a note with no reference has no diff_range_db
         for side in ("real", "ours", "diff"):
             if fig.get(side):
                 w, h = convert_image(base / fig[side], out_dir / f"{kind}-{side}.webp")
@@ -450,13 +517,14 @@ def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: di
     chain = chains.get(ref.get("chain"), {}) if ref else {}
     return {
         "note": note, "dynamic": pj["dynamic"], "duration_s": r(pj["duration_s"], 3),
-        "real": {
+        "real": None if listening else {
             "reference_id": source["id"], "file": pj["real"].get("file") or (Path(ref.get("path") or "").name if ref else ""),
             "segment_s": pj["real"].get("segment_s"), "url": source["url"], "sha256": ref.get("sha256") if ref else None,
             "licence": ref.get("licence") if ref else source["licence"], "source": source,
             "mic": chain.get("mic"), "pattern": chain.get("pattern"), "distance_m": chain.get("distance_m"), "distance_status": chain.get("distance_status"),
             "room": chain.get("room"), "format": chain.get("format"),
         },
+        "no_reference": pj["no_reference"]["reason"].strip() if listening else None,
         "ours": pj.get("ours"),
         "audio": audio, "level_match": pj["audio"]["level_match"],
         "alignment": pj.get("alignment"),
@@ -469,11 +537,18 @@ def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: di
 
 def judge(status: dict | None, pairs: list[dict], grader_refused: list[dict] | None = None) -> dict:
     """The badge, and the sentence under it. Both are computed from the metrics; a note the grader refused counts in none."""
+    listening = [p for p in pairs if p["real"] is None]  # renders with no reference recording: nothing to grade them against
+    pairs = [p for p in pairs if p["real"] is not None]
     rendered = [p for p in pairs if p["ours"]]
     blocked = (status or {}).get("blocked")
     refused_renders = [x for x in (grader_refused or []) if x.get("render_sha")]
-    counts = {"notes_with_render": len(rendered), "notes_reference_only": len(pairs) - len(rendered), "notes_refused_by_grader": len(grader_refused or []), "within": 0, "outside": 0, "unruled": 0}
+    counts = {"notes_with_render": len(rendered) + len(listening), "notes_reference_only": len(pairs) - len(rendered), "notes_no_reference": len(listening),
+              "notes_refused_by_grader": len(grader_refused or []), "within": 0, "outside": 0, "unruled": 0}
     if not rendered:
+        if listening:
+            n = len(listening)
+            return {"badge": "listening", "label": BADGE_LABEL["listening"], "counts": counts,
+                    "line": f"{n} note{'s' if n != 1 else ''} rendered. There is no reference recording for this instrument, so nothing is compared or graded: this is audio to listen to, with its spectrogram and scalogram."}
         if refused_renders:
             why = "; ".join(f"{x['note']}: {x['reason']}" for x in refused_renders)
             return {"badge": "ungraded", "label": BADGE_LABEL["ungraded"], "counts": counts,
