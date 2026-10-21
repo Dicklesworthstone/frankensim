@@ -19,7 +19,7 @@ use super::linear::wire::{LineContact, WireSpan};
 use super::string::{StringObservation, StringPotential, StringStretching};
 
 /// One physical rail/bridge. Its selected wire endpoints share this transverse
-/// displacement. Positive motion has the same direction for every wire.
+/// displacement, mapped into each wire's declared transverse frame.
 #[derive(Clone, Copy, Debug)]
 pub struct TranslatingSupport {
     /// Rail/actuator effective mass only [kg]. Wire mass is added exactly once.
@@ -85,6 +85,36 @@ impl StringEndMotion {
     }
 }
 
+/// Retained transverse displacement components and physical support direction.
+/// A two-plane string still has one mass and one geometric extension. Its
+/// bridge direction is independent of the direction of any bow or contact.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StringTransverseMotion {
+    /// Original scalar displacement, with positive support motion along it.
+    OnePlane,
+    /// Both components in one orthonormal transverse frame. The supplied unit
+    /// vector maps the common support translation into that frame, verbatim.
+    TwoPlanes { support_direction: [f64; 2] },
+}
+impl StringTransverseMotion {
+    fn planes(self) -> usize {
+        match self { Self::OnePlane => 1, Self::TwoPlanes { .. } => 2 }
+    }
+    fn direction(self) -> [f64; 2] {
+        match self { Self::OnePlane => [1.0, 0.0], Self::TwoPlanes { support_direction } => support_direction }
+    }
+    fn validate(self) -> Result<(), ImpactError> {
+        validate_direction(self.direction())
+    }
+}
+fn validate_direction(direction: [f64; 2]) -> Result<(), ImpactError> {
+    if direction.iter().any(|v| !v.is_finite())
+        || (direction[0]*direction[0] + direction[1]*direction[1] - 1.0).abs() > 1e-12 {
+        return Err(invalid("supported transverse direction must be a finite unit vector"));
+    }
+    Ok(())
+}
+
 /// Passive drag on projections of ABSOLUTE string velocity, not curvature rate.
 /// Original sine projections and their orthogonal endpoint-lift remainder are
 /// separate channels. A uniform per-mass rate makes this exactly the spatial
@@ -92,7 +122,8 @@ impl StringEndMotion {
 /// These rates must NOT also be included in WireSpan's relative damping.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AbsoluteStringDrag {
-    /// One nonnegative rate [1/s] per original relative sine mode.
+    /// One nonnegative rate [1/s] per retained relative displacement mode,
+    /// in plane-major order when both transverse components are retained.
     pub modal_per_s: Vec<f64>,
     /// Nonnegative rate [1/s] for the unresolved affine/constant lift field.
     pub remainder_per_s: f64,
@@ -109,6 +140,7 @@ struct Data {
     end_motion: Vec<StringEndMotion>,
     remainder_mass: Vec<f64>,
     absolute_drag: Option<Vec<AbsoluteStringDrag>>,
+    transverse: Vec<StringTransverseMotion>,
     weight: f64,
     total_mass_kg: f64,
     // A Gershgorin upper bound for the coupled SMALL-SIGNAL pencil, not its
@@ -125,7 +157,8 @@ impl SupportedStrings {
     pub fn new(wires: &[WireSpan], stretching: Option<StringStretching>, support: TranslatingSupport)
         -> Result<Self, ImpactError>
     {
-        Self::prepare(wires, support, |_| stretching, |_| StringEndMotion::Both)
+        Self::prepare(wires, support, |_| stretching, |_| StringEndMotion::Both,
+            |_| StringTransverseMotion::OnePlane)
     }
 
     /// Use one independent stretching law per wire, in original wire order.
@@ -139,7 +172,8 @@ impl SupportedStrings {
         if stretching.len() != wires.len() {
             return Err(invalid("each supported wire requires its own explicit stretching selection"));
         }
-        Self::prepare(wires, support, |i| stretching[i], |_| StringEndMotion::Both)
+        Self::prepare(wires, support, |i| stretching[i], |_| StringEndMotion::Both,
+            |_| StringTransverseMotion::OnePlane)
     }
 
     /// Bind actual endpoint kinematics, including fixed-nut/moving-bridge spans.
@@ -153,15 +187,35 @@ impl SupportedStrings {
         if stretching.len()!=wires.len() || motion.len()!=wires.len() {
             return Err(invalid("each supported wire requires explicit stretching and endpoint kinematics"));
         }
-        Self::prepare(wires, support, |i| stretching[i], |i| motion[i])
+        Self::prepare(wires, support, |i| stretching[i], |i| motion[i],
+            |_| StringTransverseMotion::OnePlane)
+    }
+
+    /// Retain one or both physical transverse components on the SAME support.
+    /// For direction d, w_alpha=h*d_alpha*X+sum(phi*q_alpha), so the exact
+    /// kinetic change is z_alpha=q_alpha+d_alpha*c*X. The Schur complement
+    /// retains the unresolved lift mass once; two planes do not double mass.
+    /// Both planes feed one EA stress channel, including affine bridge strain.
+    /// The shared support has one translation; independent rotation or a second
+    /// support translation is not inferred from this representation.
+    pub fn with_transverse_motion(wires: &[WireSpan], stretching: &[Option<StringStretching>],
+        motion: &[StringEndMotion], transverse: &[StringTransverseMotion],
+        support: TranslatingSupport) -> Result<Self, ImpactError>
+    {
+        if stretching.len()!=wires.len() || motion.len()!=wires.len() || transverse.len()!=wires.len() {
+            return Err(invalid("each supported wire requires complete stretching, endpoint and transverse data"));
+        }
+        Self::prepare(wires, support, |i| stretching[i], |i| motion[i], |i| transverse[i])
     }
 
     fn prepare(wires: &[WireSpan], support: TranslatingSupport,
         stretching: impl Fn(usize) -> Option<StringStretching>,
-        motion: impl Fn(usize) -> StringEndMotion) -> Result<Self, ImpactError>
+        motion: impl Fn(usize) -> StringEndMotion,
+        transverse: impl Fn(usize) -> StringTransverseMotion) -> Result<Self, ImpactError>
     {
         support.validate()?;
-        let count=wires.iter().try_fold(0usize,|n,w|n.checked_add(w.damping_per_s.len()))
+        let count=wires.iter().enumerate().try_fold(0usize,|n,(i,w)|
+            w.damping_per_s.len().checked_mul(transverse(i).planes()).and_then(|m| n.checked_add(m)))
             .ok_or_else(||invalid("supported wire mode count overflow"))?;
         if wires.is_empty() || wires.len()>32 || count==0 || count>=MAX_IMPACT_MODES {
             return Err(invalid("supported wires exceed the bounded complete mechanical basis"));
@@ -169,6 +223,7 @@ impl SupportedStrings {
         let mut potentials=Vec::with_capacity(wires.len());let mut ranges=Vec::with_capacity(wires.len());
         let mut translation=Vec::with_capacity(count);let mut damping=Vec::with_capacity(count);
         let mut end_motion=Vec::with_capacity(wires.len());let mut remainder_mass=Vec::with_capacity(wires.len());
+        let mut transverse_motion=Vec::with_capacity(wires.len());
         let mut endpoint_stiffness=0.0;
         let mut total_mass=support.mass_kg;let mut residual_mass=support.mass_kg;let mut frequencies=Vec::with_capacity(count);
         for (index, wire) in wires.iter().enumerate() {
@@ -179,18 +234,27 @@ impl SupportedStrings {
                 maximum_slope: selected.map_or(support.maximum_slope,
                     |s| s.maximum_slope.min(support.maximum_slope)),
             };
-            let n=wire.damping_per_s.len();
-            let body=wire.stretching_body(vec![ModalAcousticState::default();n],law)?;
+            let transverse=transverse(index);
+            transverse.validate()?;
+            let per_plane=wire.damping_per_s.len();
+            let n=per_plane*transverse.planes();
+            let initial=vec![ModalAcousticState::default();n];
+            let body=if transverse.planes()==2 {
+                wire.stretching_body_two_planes(initial,law)?
+            } else { wire.stretching_body(initial,law)? };
             let BodyPotential::String(potential)=body.potential else {return Err(invalid("wire preparation changed its storage image"));};
             let ends=motion(index);
             let potential=if ends.affine() {potential.with_affine_endpoint(wire.length_m())?} else {potential};
             if ends.affine() {endpoint_stiffness+=potential.omegas()[n].powi(2);}
             end_motion.push(ends);
+            transverse_motion.push(transverse);
             let mass=wire.linear_density_kg_m*wire.length_m();
             let start=translation.len();let mut represented=0.0;
-            for k in 1..=n {
-                let c=ends.participation(k,mass);
-                represented+=c*c;translation.push(c);
+            for plane in 0..transverse.planes() {
+                for k in 1..=per_plane {
+                    let c=ends.participation(k,mass)*transverse.direction()[plane];
+                    represented+=c*c;translation.push(c);
+                }
             }
             let remainder=mass*ends.mass_fraction()-represented;
             if !mass.is_finite() || mass<=0.0 || !remainder.is_finite() || remainder<=0.0 {
@@ -201,7 +265,7 @@ impl SupportedStrings {
             remainder_mass.push(remainder);
             residual_mass+=remainder;total_mass+=mass;ranges.push(start..start+n);
             frequencies.extend_from_slice(&potential.omegas()[..n]);potentials.push(potential);
-            damping.extend_from_slice(&wire.damping_per_s);
+            for _ in 0..transverse.planes() { damping.extend_from_slice(&wire.damping_per_s); }
         }
         let weight=1.0/det::sqrt(residual_mass);
         if !total_mass.is_finite() || !weight.is_finite() || weight<=0.0 {
@@ -209,14 +273,24 @@ impl SupportedStrings {
         }
         let mut support_row=support.stiffness_n_m*weight*weight;let mut bound=0.0_f64;
         if endpoint_stiffness!=0.0 {support_row+=endpoint_stiffness*weight*weight;}
-        for (&omega,&c) in frequencies.iter().zip(&translation) {
-            let a=c*weight;let k=omega*omega;
-            bound=bound.max(k*(1.0+a.abs()));support_row+=k*(a*a+a.abs());
+        for (index,r) in ranges.iter().enumerate() {
+            let planes=transverse_motion[index].planes();let per_plane=r.len()/planes;
+            for mode in 0..per_plane {
+                // Degenerate transverse partners can be rotated into the
+                // support direction for this eigenvalue bound. Only that
+                // combination couples to X; its orthogonal partner keeps k.
+                // Summing both coordinate-wise row norms would make clock
+                // admission depend on an arbitrary transverse frame.
+                let c=if planes==2 {det::hypot(translation[r.start+mode],
+                    translation[r.start+per_plane+mode])} else {translation[r.start+mode]};
+                let a=c*weight;let omega=frequencies[r.start+mode];let k=omega*omega;
+                bound=bound.max(k*(1.0+a.abs()));support_row+=k*(a*a+a.abs());
+            }
         }
         bound=bound.max(support_row);
         if !bound.is_finite() {return Err(invalid("moving support linear clock bound overflow"));}
         let result=Self(Rc::new(Data {support,wires:wires.to_vec(),potentials,ranges,translation,damping,
-            end_motion,remainder_mass,absolute_drag:None,weight,
+            end_motion,remainder_mass,absolute_drag:None,transverse:transverse_motion,weight,
             total_mass_kg:total_mass,clock_bounds:vec![det::sqrt(bound);count+1]}));
         // Check initial energy/motion representation before returning an adapter.
         result.observe_interleaved(&result.initial_state(),0)?;
@@ -231,6 +305,8 @@ impl SupportedStrings {
     pub fn total_mass_kg(&self)->f64 {self.0.total_mass_kg}
     /// Original endpoint choice, in wire order.
     pub fn endpoint_motion(&self)->&[StringEndMotion] {&self.0.end_motion}
+    /// Physical support directions and retained plane counts, in source order.
+    pub fn transverse_motion(&self)->&[StringTransverseMotion] {&self.0.transverse}
     /// Original absolute-velocity loss declaration; absent on the legacy path.
     pub fn absolute_drag(&self)->Option<&[AbsoluteStringDrag]> {self.0.absolute_drag.as_deref()}
 
@@ -310,25 +386,48 @@ impl SupportedStrings {
     /// velocity. Its transpose applies a signed force without omitting the
     /// support reaction. Only the declared endpoints follow the common support.
     /// Interior sine shapes come from the original string-collocation owner.
+    /// This convenience method observes the first transverse plane; use
+    /// `absolute_shape_along` for an independent physical contact direction.
     pub fn absolute_shape(&self, wire: usize, station_fraction: f64)
         -> Result<Vec<f64>, ImpactError>
     {
+        self.absolute_shape_along(wire, station_fraction, [1.0, 0.0])
+    }
+
+    /// Absolute displacement and transposed force in a physical transverse
+    /// direction, including the common support reaction. A one-plane source
+    /// refuses a nonzero missing component instead of projecting it away.
+    pub fn absolute_shape_along(&self, wire: usize, station_fraction: f64,
+        direction: [f64; 2]) -> Result<Vec<f64>, ImpactError>
+    {
         let r = self.0.ranges.get(wire).ok_or_else(|| invalid("unknown supported wire"))?;
+        validate_direction(direction)?;
+        let transverse=self.0.transverse[wire];
+        if transverse.planes()==1 && direction[1]!=0.0 {
+            return Err(invalid("a one-plane supported string cannot carry a second-plane force"));
+        }
         if !station_fraction.is_finite() || !(0.0..=1.0).contains(&station_fraction) {
             return Err(invalid("supported point station must lie on its physical span"));
         }
+        let support_direction=transverse.direction();
+        let projection=direction[0]*support_direction[0]+direction[1]*support_direction[1];
         let mut row = vec![0.0; self.mode_count()];
         if station_fraction == 0.0 || station_fraction == 1.0 {
-            row[self.support_coordinate()] = self.0.end_motion[wire].lift(station_fraction)*self.force_weight();
+            row[self.support_coordinate()] = projection*self.0.end_motion[wire].lift(station_fraction)*self.force_weight();
             return Ok(row);
         }
         let source = &self.0.wires[wire];
+        let per_plane=source.damping_per_s.len();
         let shape = fs_dcontact::string_collocation(source.length_m(), source.linear_density_kg_m,
-            &[station_fraction * source.length_m()], r.len())
+            &[station_fraction * source.length_m()], per_plane)
             .map_err(|e| ImpactError::Owner(e.to_string()))?;
-        row[r.clone()].copy_from_slice(&shape);
-        let cross = shape.iter().zip(&self.0.translation[r.clone()]).map(|(b,c)| b*c).sum::<f64>();
-        row[self.support_coordinate()] = (self.0.end_motion[wire].lift(station_fraction) - cross) * self.force_weight();
+        for plane in 0..transverse.planes() {
+            for (k,value) in shape.iter().enumerate() {
+                row[r.start+plane*per_plane+k]=direction[plane]*value;
+            }
+        }
+        let cross = row[r.clone()].iter().zip(&self.0.translation[r.clone()]).map(|(b,c)| b*c).sum::<f64>();
+        row[self.support_coordinate()] = (projection*self.0.end_motion[wire].lift(station_fraction) - cross) * self.force_weight();
         if row.iter().any(|v| !v.is_finite()) {
             return Err(invalid("supported absolute point projection overflows"));
         }
@@ -402,18 +501,43 @@ impl SupportedStrings {
     pub fn contact(&self,wire:usize,line:&LineContact,receiver_shapes:&[Vec<f64>],
         receiver:Range<usize>,first:usize,total:usize)->Result<Obstacle,ImpactError>
     {
+        self.contact_along(wire,line,receiver_shapes,receiver,first,total,[1.0,0.0])
+    }
+    /// The same distributed contact law along a declared physical direction.
+    /// Receiver rows must observe that same direction in their own basis.
+    #[allow(clippy::too_many_arguments)]
+    pub fn contact_along(&self,wire:usize,line:&LineContact,receiver_shapes:&[Vec<f64>],
+        receiver:Range<usize>,first:usize,total:usize,direction:[f64;2])->Result<Obstacle,ImpactError>
+    {
         let r=self.0.ranges.get(wire).ok_or_else(||invalid("unknown supported wire"))?;
+        validate_direction(direction)?;
+        let transverse=self.0.transverse[wire];
+        if transverse.planes()==1 && direction[1]!=0.0 {
+            return Err(invalid("a one-plane supported string cannot carry a second-plane contact"));
+        }
         let end=first.checked_add(self.mode_count()).ok_or_else(||invalid("supported wire address overflow"))?;
         if end>total || receiver.start<end && first<receiver.end {
             return Err(invalid("supported wire and receiver ranges must be disjoint and complete"));
         }
-        let ob=self.0.wires[wire].contact(line,receiver_shapes,receiver,first+r.start..first+r.end,total)?;
+        // The original wire owner admits geometry, contact law, receiver and
+        // quadrature. Replace its scalar point row by the SAME directed row
+        // used by physical force and velocity observation in this reduction.
+        let per_plane=self.0.wires[wire].damping_per_s.len();
+        let ob=self.0.wires[wire].contact(line,receiver_shapes,receiver,first+r.start..first+r.start+per_plane,total)?;
         let mut rows=ob.collocation().to_vec();
         for (row,station) in rows.chunks_exact_mut(total).zip(&line.stations_m) {
+            let original=row[first+r.start..first+r.start+per_plane].to_vec();
+            for plane in 0..transverse.planes() {
+                for (k,value) in original.iter().enumerate() {
+                    row[first+r.start+plane*per_plane+k]=direction[plane]*value;
+                }
+            }
             let cross=row[first+r.start..first+r.end].iter().zip(&self.0.translation[r.clone()])
                 .map(|(b,c)|b*c).sum::<f64>();
+            let support_direction=transverse.direction();
+            let projection=direction[0]*support_direction[0]+direction[1]*support_direction[1];
             let lift=self.0.end_motion[wire].lift(station/self.0.wires[wire].length_m());
-            row[first+self.support_coordinate()]=(-lift-cross)*self.0.weight;
+            row[first+self.support_coordinate()]=(-projection*lift-cross)*self.0.weight;
         }
         Obstacle::new(rows,ob.n_points(),total,ob.gaps().to_vec(),ob.weights().to_vec(),
             ob.stiffness(),ob.alpha(),ob.provenance().into())

@@ -7,7 +7,6 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::{
 };
 use fs_couple::render::plate::impact::supported::TranslatingSupport;
 use fs_couple::render::plate::impact::audio::ImpactSource;
-use fs_couple::render::plate::impact::ImpactError;
 
 fn directions(bow: [f64; 2], bridge: [f64; 2]) -> TransverseDirections {
     TransverseDirections::try_new(bow, bridge).unwrap()
@@ -213,7 +212,7 @@ fn original_material_twist_and_directional_force_torque_ports_survive_the_shared
 }
 
 #[test]
-fn scalar_endpoint_support_and_wrong_clocks_are_refused_without_discarding_a_plane() {
+fn directed_endpoint_support_retains_both_planes_and_wrong_clocks_still_refuse() {
     with_cx(|cx,gate| {
         let image = source(7800.0,200e9,3)
             .with_transverse_polarizations(directions([1.0,0.0],[1.0,0.0])).unwrap()
@@ -221,8 +220,10 @@ fn scalar_endpoint_support_and_wrong_clocks_are_refused_without_discarding_a_pla
         let support = TranslatingSupport { mass_kg: 0.05, stiffness_n_m: 1000.0,
             damping_n_s_m: 0.1, initial_position_m: 0.0, initial_velocity_m_s: 0.0,
             maximum_travel_m: 0.01, maximum_slope: 0.2 };
-        let result = SupportedMaterialStrings::in_comoving_gas(vec![image.clone()], support, gate);
-        assert!(matches!(result, Err(ImpactError::Invalid(message)) if message.contains("one transverse plane")));
+        let supported = SupportedMaterialStrings::in_comoving_gas(vec![image.clone()], support, gate).unwrap();
+        assert_eq!(supported.mode_count(),7);
+        assert_eq!(supported.sources()[0].transverse_mode_count(),6);
+        assert_eq!(supported.bodies()[0].initial.len(),7);
         assert!(image.clone().prepare(vec![],vec![],vec![],vec![],config_at(96_000),gate).is_err());
         assert!(image.angular_shape(0.27).is_err());
         for station in [0.0,1.0,-1.0,f64::NAN] {

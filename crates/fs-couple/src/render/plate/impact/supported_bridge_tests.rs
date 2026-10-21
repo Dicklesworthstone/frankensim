@@ -153,3 +153,114 @@ fn one_plucked_span_drives_the_shared_bridge_and_unplayed_string_in_the_existing
     }
     assert_ne!(end_states[0],end_states[1]);
 }
+
+#[test]
+fn g1_two_plane_bridge_matches_spatial_mass_strain_drag_and_directed_contact() {
+    let w=wire(3);let length=w.length_m();let direction=[0.6,0.8];
+    let support=TranslatingSupport {initial_position_m:0.001,initial_velocity_m_s:0.03,..support()};
+    let base=SupportedStrings::with_transverse_motion(&[w.clone()],&[law()],
+        &[StringEndMotion::Second],&[StringTransverseMotion::TwoPlanes {support_direction:direction}],support).unwrap();
+    let relative:Vec<_>=(0..6).map(|i|ModalAcousticState {
+        displacement_m_sqrt_kg:2e-5*(i as f64-1.2),
+        velocity_m_sqrt_kg_per_s:0.003*(i as f64+0.7),
+    }).collect();
+    let body=base.body_with_relative_states(&relative).unwrap();
+    let z:Vec<_>=body.initial.iter().map(|q|q.displacement_m_sqrt_kg).collect();
+    let velocity:Vec<_>=body.initial.iter().map(|q|q.velocity_m_sqrt_kg_per_s).collect();
+    let x=support.initial_position_m;let speed=support.initial_velocity_m_s;
+    let normalization=(2.0/(w.linear_density_kg_m*length)).sqrt();
+    let cells=8192;let dx=length/cells as f64;
+    let (mut kinetic,mut slope2,mut curvature2,mut gas_power)=(0.0,0.0,0.0,0.0);
+    for cell in 0..cells {
+        let t=(cell as f64+0.5)/cells as f64;
+        for plane in 0..2 {
+            let mut local_speed=direction[plane]*t*speed;
+            let mut slope=direction[plane]*x/length;let mut curvature=0.0;
+            for mode in 0..3 {
+                let k=(mode+1) as f64*core::f64::consts::PI/length;
+                let original=relative[plane*3+mode];
+                local_speed+=normalization*original.velocity_m_sqrt_kg_per_s*(k*t*length).sin();
+                slope+=normalization*original.displacement_m_sqrt_kg*k*(k*t*length).cos();
+                curvature-=normalization*original.displacement_m_sqrt_kg*k*k*(k*t*length).sin();
+            }
+            kinetic+=0.5*w.linear_density_kg_m*local_speed*local_speed*dx;
+            gas_power+=4.0*w.linear_density_kg_m*local_speed*local_speed*dx;
+            slope2+=slope*slope*dx;curvature2+=curvature*curvature*dx;
+        }
+    }
+    kinetic+=0.5*support.mass_kg*speed*speed;
+    let energy=0.5*support.stiffness_n_m*x*x+0.5*w.tension_n*slope2
+        +0.5*w.bending_stiffness_n_m2*curvature2+100.0/(8.0*length)*slope2*slope2;
+    near(0.5*velocity.iter().map(|v|v*v).sum::<f64>(),kinetic,2e-8);
+    near(base.potential(&z),energy,2e-10);
+    let observation=base.string_observation(0,&z).unwrap();
+    near(observation.additional_strain,slope2/(2.0*length),2e-10);
+    let bound=x.abs()/length+(0..3).map(|mode| {
+        normalization*(mode+1) as f64*core::f64::consts::PI/length
+            *relative[mode].displacement_m_sqrt_kg.hypot(relative[3+mode].displacement_m_sqrt_kg)
+    }).sum::<f64>();
+    near(observation.slope_bound,bound,1e-13);
+    assert_eq!(base.total_mass_kg(),0.012);
+    let n=base.mode_count();let mut original=vec![0.0;4*n*n];let mut loaded=original.clone();
+    base.add_resistance(0,2*n,&mut original).unwrap();
+    let drag=base.clone().with_absolute_drag(vec![AbsoluteStringDrag {
+        modal_per_s:vec![4.0;6],remainder_per_s:4.0,
+    }]).unwrap();
+    drag.add_resistance(0,2*n,&mut loaded).unwrap();
+    let mut power=0.0;
+    for i in 0..n {for j in 0..n {
+        power+=velocity[i]*(loaded[(2*i+1)*2*n+2*j+1]-original[(2*i+1)*2*n+2*j+1])*velocity[j];
+    }}
+    near(power,gas_power,2e-8);
+    let line=LineContact::uniform(length,5,0.0,1e4,1.5,0.0,"two-plane fixture".into()).unwrap();
+    let contact=base.contact_along(0,&line,&vec![vec![1.0];5],0..1,1,n+1,[-0.8,0.6]).unwrap();
+    for (row,station) in contact.collocation().chunks_exact(n+1).zip(&line.stations_m) {
+        let point=base.absolute_shape_along(0,station/length,[-0.8,0.6]).unwrap();
+        for (a,b) in row[1..].iter().zip(point) {near(*a,-b,1e-13);}
+    }
+    assert_eq!(base.absolute_shape_along(0,1.0,[-0.8,0.6]).unwrap(),vec![0.0;n]);
+    let mut gradient=vec![0.0;n];base.gradient(&z,&mut gradient);
+    for i in 0..n {
+        let mut plus=z.clone();let mut minus=z.clone();plus[i]+=1e-9;minus[i]-=1e-9;
+        near(gradient[i],(base.potential(&plus)-base.potential(&minus))/2e-9,3e-6);
+    }
+}
+
+#[test]
+fn g3_two_plane_bridge_is_covariant_under_transverse_rotation() {
+    let mut histories=Vec::new();let mut clocks=Vec::new();
+    for rotated in [false,true] {
+        let direction=if rotated {[0.0,1.0]} else {[0.6,0.8]};
+        let source=SupportedStrings::with_transverse_motion(&[wire(2)],&[law()],
+            &[StringEndMotion::First],&[StringTransverseMotion::TwoPlanes {support_direction:direction}],support()).unwrap();
+        clocks.push(source.clock_bounds()[0]);
+        let mut q=[2e-5,4e-5,3e-5,-1e-5];
+        if rotated {for mode in 0..2 {
+            let (x,y)=(q[mode],q[2+mode]);
+            q[mode]=0.8*x-0.6*y;q[2+mode]=0.6*x+0.8*y;
+        }}
+        let initial=q.iter().map(|&q|ModalAcousticState {displacement_m_sqrt_kg:q,
+            velocity_m_sqrt_kg_per_s:0.0}).collect::<Vec<_>>();
+        let body=source.body_with_relative_states(&initial).unwrap();
+        let cfg=ImpactConfig {dt_s:2e-5,max_steps:128,maximum_energy_j:1.0,
+            energy_absolute_tolerance_j:1e-11,energy_relative_tolerance:1e-8,maximum_generalized_force:1e4};
+        let mut run=ImpactSystem::new(vec![body],vec![],vec![],vec![],cfg).unwrap().prepare_analytic().unwrap();
+        let force_direction=if rotated {[0.8,0.6]} else {[1.0,0.0]};
+        let row=source.absolute_shape_along(0,0.37,force_direction).unwrap();
+        let mut history=Vec::new();
+        for step in 0..128 {
+            let force:Vec<_>=row.iter().map(|value|value*if step<12 {0.001} else {0.0}).collect();
+            let frame=run.step(&force,&CancelGate::new_clock_free()).unwrap();
+            history.push((run.state()[8]*source.force_weight(),frame.stored_energy_j));
+        }
+        histories.push(history);
+    }
+    near(clocks[0],clocks[1],1e-14);
+    for (a,b) in histories[0].iter().zip(&histories[1]) {
+        near(a.0,b.0,1e-7);near(a.1,b.1,1e-8);
+    }
+    let invalid=StringTransverseMotion::TwoPlanes {support_direction:[1.0,1.0]};
+    assert!(SupportedStrings::with_transverse_motion(&[wire(2)],&[law()],
+        &[StringEndMotion::Second],&[invalid],support()).is_err());
+    assert!(model().absolute_shape_along(0,0.4,[0.0,1.0]).is_err());
+}

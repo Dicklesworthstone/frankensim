@@ -5,7 +5,8 @@
 //!
 //! Endpoint motion and gas frame are explicit: the legacy co-moving rail carries
 //! both ends, while stationary-gas construction permits a fixed nut and moving
-//! bridge. Material curvature loss and absolute-velocity gas loss remain distinct.
+//! bridge. Both transverse components use the source's physical bridge direction
+//! and share one stretching channel. Material curvature loss and absolute-velocity gas loss remain distinct.
 //! Gas loss is a passive spectral approximation, not unsteady fluid added mass
 //! or full broadband hydrodynamics. Support rotation, live material changes,
 //! winding slip, torsional gas drag and a bow friction law remain absent.
@@ -13,7 +14,10 @@ use std::ops::Range;
 use super::{NonlinearMaterialString, BodyPotential, ImpactBody, ImpactError, MAX_IMPACT_MODES, invalid};
 use crate::render::plate::impact::{ImpactConfig, ImpactFrame, ImpactSystem, PreparedImpactSystem};
 use crate::render::plate::impact::string::StringStretching;
-use crate::render::plate::impact::supported::{SupportedStrings, TranslatingSupport, StringEndMotion};
+use crate::render::plate::impact::supported::{SupportedStrings, TranslatingSupport, StringEndMotion,
+    StringTransverseMotion};
+use crate::bowed_string::runtime::reciprocal::bank::{MaterialStringSource,
+    polarization::TransverseDirection};
 use fs_exec::CancelGate;
 
 mod stationary;
@@ -78,7 +82,8 @@ impl SupportedMaterialStrings {
     /// `Second` fixes the nut at station zero and moves the bridge at station
     /// one; `First` reverses that assignment. A shared bridge can thus join a
     /// speaking span and a distinct afterlength without duplicating its mass.
-    /// All spans currently share one transverse bridge coordinate, not a full
+    /// All spans share one bridge translation, along each source's declared
+    /// bridge direction when it retains two planes. This is not a full
     /// rotating bridge or a carved body. The support input is its effective
     /// mass/stiffness/loss, independent from all string material definitions.
     ///
@@ -130,6 +135,7 @@ impl SupportedMaterialStrings {
         let mut laws = Vec::with_capacity(sources.len());
         let mut relative = Vec::with_capacity(mode_count - 1);
         let mut drag = Vec::with_capacity(sources.len());
+        let mut transverse = Vec::with_capacity(sources.len());
         for source in &sources {
             poll(gate)?;
             if source.sample_rate_hz() != sample_rate_hz || *source.gas() != gas {
@@ -141,12 +147,18 @@ impl SupportedMaterialStrings {
             let BodyPotential::String(potential) = &bending.potential else {
                 return Err(invalid("supported source must retain its original nonlinear string law"));
             };
-            if potential.transverse_planes() != 1 {
-                return Err(invalid("the translating support requires one transverse plane; a vector endpoint lift is not implemented"));
-            }
-            if tail.len() > 1 || bending.initial.len() != source.card().mode_count {
+            let motion=match source.source() {
+                MaterialStringSource::WithPolarizations(p) => StringTransverseMotion::TwoPlanes {
+                    support_direction: p.directions().bridge(),
+                },
+                _ => StringTransverseMotion::OnePlane,
+            };
+            let planes=if matches!(motion,StringTransverseMotion::TwoPlanes {..}) {2} else {1};
+            if tail.len() > 1 || potential.transverse_planes()!=planes
+                || bending.initial.len() != planes*source.card().mode_count {
                 return Err(invalid("supported source has an incompatible bending/torsion layout"));
             }
+            transverse.push(motion);
             match gas_frame {
                 SupportGasFrame::CoMoving => wires.push(source.wire_span().clone()),
                 SupportGasFrame::StationaryModal { remainder_frequency_hz } => {
@@ -158,11 +170,12 @@ impl SupportedMaterialStrings {
                 maximum_slope: potential.slope_limit() }));
             relative.extend_from_slice(&bending.initial);
         }
-        let supported = match motion {
-            None => SupportedStrings::with_individual_stretching(&wires, &laws, support)?,
-            Some(ends) => SupportedStrings::with_endpoint_motion(&wires, &laws, ends, support)?
-                .with_absolute_drag(drag)?,
-        };
+        let default_ends=vec![StringEndMotion::Both;sources.len()];
+        let supported=SupportedStrings::with_transverse_motion(&wires,&laws,
+            motion.unwrap_or(&default_ends),&transverse,support)?;
+        let supported=if matches!(gas_frame,SupportGasFrame::StationaryModal {..}) {
+            supported.with_absolute_drag(drag)?
+        } else { supported };
         let mut bodies = vec![supported.body_with_relative_states(&relative)?];
         let mut torsion = Vec::with_capacity(sources.len());
         let mut at = supported.mode_count();
@@ -196,10 +209,24 @@ impl SupportedMaterialStrings {
     /// Original string order; absent torsion remains absent, not fabricated.
     pub fn torsion_ranges(&self) -> &[Option<Range<usize>>] { &self.torsion }
 
-    /// Absolute physical transverse point map in the complete normalized basis.
-    /// Only selected endpoints move; transverse force applies no torque.
+    /// Absolute physical transverse point map along the source's bow direction
+    /// in the complete normalized basis. Only selected endpoints move;
+    /// transverse centreline force applies no torque.
     pub fn transverse_shape(&self, string: usize, station: f64) -> Result<Vec<f64>, ImpactError> {
-        let mut row = self.supported.absolute_shape(string, station)?;
+        let source=self.sources.get(string).ok_or_else(|| invalid("unknown supported material string"))?;
+        let direction=match source.source() {
+            MaterialStringSource::WithPolarizations(p) => p.directions().bow(),
+            _ => [1.0,0.0],
+        };
+        self.transverse_shape_along(string,station,
+            TransverseDirection::try_new(direction).map_err(|e|ImpactError::Owner(e.to_string()))?)
+    }
+    /// Physical force/velocity row in an independently declared transverse
+    /// direction. Both planes and their common support reaction are retained;
+    /// a normal centreline load carries no invented torsional moment.
+    pub fn transverse_shape_along(&self, string: usize, station: f64,
+        direction: TransverseDirection) -> Result<Vec<f64>, ImpactError> {
+        let mut row = self.supported.absolute_shape_along(string, station, direction.components())?;
         row.resize(self.mode_count, 0.0);
         Ok(row)
     }
@@ -213,7 +240,7 @@ impl SupportedMaterialStrings {
             if station != 0.0 && station != 1.0 {
                 let source = &self.sources[string];
                 let original = source.surface_shape(station)?;
-                row[range.clone()].copy_from_slice(&original[source.card().mode_count..]);
+                row[range.clone()].copy_from_slice(&original[source.transverse_mode_count()..]);
             }
         }
         Ok(row)

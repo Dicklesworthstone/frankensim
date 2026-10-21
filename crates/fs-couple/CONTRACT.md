@@ -3088,7 +3088,18 @@ are not a Rust test pass.
 
 ### Material two-plane nonlinear string composition
 
-`MaterialStringSource::into_nonlinear` admits both transverse planes to one existing fs-nlmodal Kirchhoff–Carrier stress channel, with one source-derived EA, elongation, live tension and cross-plane stretching work. Original EI, prestress, mass, material/gas loss, torsion and directional centreline/surface/torque maps retain their ordering. `NonlinearMaterialString::prepare` retains that source while composing explicitly supplied receiver/contact/felt/volume participants in the original `PreparedImpactSystem`; `MaterialStringRun` implements the existing `ImpactSource` for the existing causal pressure renderer. The continuous vector-slope bound is invariant to transverse basis rotation. This is a frozen, moderate-slope reference model. Scalar translating supports still refuse two planes; full rod/longitudinal dynamics, transfer from a nonlinear bow-friction bank, acoustic reaction, full instrument validation and exact-linear/SAV bandwidth work remain open.
+`MaterialStringSource::into_nonlinear` admits both transverse planes to one existing fs-nlmodal Kirchhoff–Carrier stress channel, with one source-derived EA, elongation, live tension and cross-plane stretching work. Original EI, prestress, mass, material/gas loss, torsion and directional centreline/surface/torque maps retain their ordering. `NonlinearMaterialString::prepare` retains that source while composing explicitly supplied receiver/contact/felt/volume participants in the original `PreparedImpactSystem`; `MaterialStringRun` implements the existing `ImpactSource` for the existing causal pressure renderer. The continuous vector-slope bound is invariant to transverse basis rotation. This is a frozen, moderate-slope reference model. Full rod/longitudinal dynamics, transfer from a nonlinear bow-friction bank, acoustic reaction, full instrument validation and exact-linear/SAV bandwidth work remain open for this impact route.
+
+`SupportedMaterialStrings` also retains both source-selected transverse planes
+on one physically directed translating support. Its exact kinetic transformation
+counts each string's mass once; both planes share material EA and the affine
+fixed-nut/moving-bridge strain. Bow and bridge directions may differ. Directed
+centreline/contact rows, original torsion and each plane's stationary-gas loss
+remain in the same mechanical solve. Independent spatial integrals check
+kinetic energy, strain, drag and force maps; rotations and material/gas swaps
+check the source binding. This is one bridge translation, not a six-DOF bridge,
+resolved winding slip, dynamic longitudinal inertia or measured instrument
+qualification.
 
 `ReciprocalStringBank::with_geometric_stretching` adds those same source-owned
 quartic channels to the existing `FrictionModalSystem`, preserving every original

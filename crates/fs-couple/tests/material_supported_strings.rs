@@ -139,3 +139,86 @@ fn conflicting_frames_clocks_invalid_ports_and_refused_steps_do_not_become_parti
         run.step(&[0.0;6],gate).unwrap();assert_eq!(run.system().samples(),1);
     });
 }
+
+#[test]
+fn g3_two_plane_material_swaps_reach_the_common_bridge_and_sympathetic_motion() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::TransverseDirections;
+    use fs_couple::render::plate::impact::supported::StringEndMotion;
+    with_cx(|cx,gate| {
+        let mut histories=Vec::new();
+        for (young,pressure) in [(50e9,101325.0),(200e9,101325.0),(50e9,55000.0)] {
+            let gas=GasState::try_new(&GasSpec::dry_air_ussa1976(),293.15,pressure).unwrap();
+            let directions=TransverseDirections::try_new([1.0,0.0],[0.6,0.8]).unwrap();
+            let sources=vec![
+                source(7800.0,young,2).with_transverse_polarizations(directions).unwrap()
+                    .into_nonlinear(cx,gas,48_000,0.2,initial(4,0.001),gate).unwrap(),
+                source(7800.0,200e9,2).with_transverse_polarizations(directions).unwrap()
+                    .into_nonlinear(cx,gas,48_000,0.2,initial(4,0.0),gate).unwrap(),
+            ];
+            let total_mass=rail().mass_kg+sources.iter()
+                .map(|s|s.card().linear_density_kg_m*s.card().length_m).sum::<f64>();
+            let image=SupportedMaterialStrings::in_stationary_gas(sources,
+                TranslatingSupport {initial_position_m:0.0,initial_velocity_m_s:0.0,..rail()},
+                vec![StringEndMotion::Second,StringEndMotion::First],300.0,gate).unwrap();
+            assert_eq!(image.mode_count(),9);
+            assert!((image.supported().total_mass_kg()-total_mass).abs()<1e-15);
+            for law in image.supported().absolute_drag().unwrap() {
+                assert_eq!(law.modal_per_s.len(),4);
+                assert_eq!(law.modal_per_s[..2],law.modal_per_s[2..]);
+            }
+            let force_row=image.surface_shape(0,0.2).unwrap();
+            let neighbor=image.transverse_shape(1,0.37).unwrap();
+            let mut run=image.prepare(config(),gate).unwrap();
+            let before=run.system().stored_energy_j();let mut work=0.0;let mut loss=0.0;
+            for step in 0..256 {
+                let force:Vec<_>=force_row.iter().map(|b|b*if step<16 {0.001} else {0.0}).collect();
+                let frame=run.step(&force,gate).unwrap();
+                work+=frame.supplied_work_j;loss+=frame.dissipated_energy_j;
+                assert!((frame.stored_energy_j+loss-before-work).abs()<1e-8);
+            }
+            let state=run.system().state();
+            let neighbor_motion: f64=neighbor.iter().zip(state.chunks_exact(2)).map(|(b,q)|b*q[0]).sum();
+            assert!(neighbor_motion.abs()>1e-10);
+            histories.push((state.to_vec(),neighbor_motion));
+        }
+        assert_ne!(histories[0].0[16],histories[1].0[16]); // Same bridge, changed source material.
+        assert_ne!(histories[0].1,histories[1].1); // Original unplayed string remains coupled.
+        assert_ne!(histories[0].0,histories[2].0); // Both planes retain actual stationary-gas loss.
+    });
+}
+
+#[test]
+fn g0_two_plane_moving_support_preserves_torsional_surface_work_and_source_order() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{
+        TransverseDirection,TransverseDirections,
+    };
+    use fs_couple::render::plate::impact::supported::StringEndMotion;
+    with_cx(|cx,gate| {
+        let original=source(7800.0,200e9,2).with_torsion("G","eta_s",2).unwrap()
+            .with_transverse_polarizations(TransverseDirections::try_new([0.8,-0.6],[0.6,0.8]).unwrap()).unwrap()
+            .into_nonlinear(cx,gas(),TORSION_RATE_HZ,0.2,initial(6,0.0),gate).unwrap();
+        let image=SupportedMaterialStrings::in_stationary_gas(vec![original.clone()],
+            TranslatingSupport {initial_position_m:0.0,initial_velocity_m_s:0.0,..rail()},
+            vec![StringEndMotion::Second],300.0,gate).unwrap();
+        assert_eq!(image.mode_count(),7);
+        assert_eq!(image.torsion_ranges(),&[Some(5..7)]);
+        assert_eq!(image.bodies()[1].initial,original.bodies()[1].initial);
+        assert_eq!(image.bodies()[1].damping_per_s,original.bodies()[1].damping_per_s);
+        let normal=image.transverse_shape(0,0.27).unwrap();
+        let surface=image.surface_shape(0,0.27).unwrap();
+        assert_eq!(normal[..5],surface[..5]);assert_eq!(normal[5..],[0.0;2]);
+        assert_eq!(surface[5..],original.surface_shape(0.27).unwrap()[4..]);
+        assert_eq!(image.surface_shape(0,1.0).unwrap(),vec![0.0;7]); // Bow is orthogonal to bridge motion.
+        let bridge_direction=TransverseDirection::try_new([0.6,0.8]).unwrap();
+        let endpoint=image.transverse_shape_along(0,1.0,bridge_direction).unwrap();
+        assert_eq!(endpoint,image.support_shape());
+        let mut normal_run=image.clone().prepare(config_at(TORSION_RATE_HZ),gate).unwrap();
+        let mut surface_run=image.prepare(config_at(TORSION_RATE_HZ),gate).unwrap();
+        for _ in 0..64 {
+            normal_run.step(&normal.iter().map(|v|v*1e-4).collect::<Vec<_>>(),gate).unwrap();
+            surface_run.step(&surface.iter().map(|v|v*1e-4).collect::<Vec<_>>(),gate).unwrap();
+        }
+        assert!(normal_run.system().state()[10..].iter().all(|v|*v==0.0));
+        assert!(surface_run.system().state()[10..].iter().any(|v|v.abs()>0.0));
+    });
+}

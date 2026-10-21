@@ -173,8 +173,9 @@ impl StringPotential {
     /// Transverse components sharing this one physical elongation and tension.
     pub const fn transverse_planes(&self) -> usize { self.transverse_planes }
 
-    /// Extend the SAME stress channel by the affine lift w(s)=s*X/L+u(s)
-    /// (or (1-s/L)*X+u). Since u vanishes at both ends, integral(u')=0:
+    /// Extend the SAME stress channel by the affine lift w(s)=d*s*X/L+u(s)
+    /// (or d*(1-s/L)*X+u), with unit transverse direction d. This also applies
+    /// to vector u: since it vanishes at both ends, integral(u')=0:
     /// strain = sum(e_n*q_n^2)/4 + X^2/(2 L^2). The linear lift stores
     /// T0*X^2/(2L); its curvature is zero, so EI is not counted again.
     /// Only potential/gradient/Hessian/observation are consumed by the support.
@@ -182,9 +183,6 @@ impl StringPotential {
         let n = self.mode_count();
         let stiffness = self.rest_tension_n / length_m;
         let strain_weight = 2.0 / length_m / length_m;
-        if self.transverse_planes != 1 {
-            return Err(invalid("the translating support requires one transverse plane; a vector endpoint lift is not implemented"));
-        }
         if self.affine_endpoint || n >= MAX_IMPACT_MODES
             || !length_m.is_finite() || length_m <= 0.0
             || !stiffness.is_finite() || stiffness <= 0.0
@@ -258,10 +256,16 @@ impl StringPotential {
             // Triangle inequality for the continuous vector slope. Pair modes
             // before taking their norm so rotating the transverse basis changes
             // neither the validity envelope nor the physical strain.
-            let per_plane = n / 2;
+            let per_plane = (n - usize::from(self.affine_endpoint)) / 2;
             for i in 0..per_plane {
                 slope_bound += det::sqrt(ch.coupling[i*n+i])
                     * det::hypot(q[i], q[per_plane+i]);
+            }
+            if self.affine_endpoint {
+                // The support moves along a unit vector in this transverse
+                // frame. Its constant vector slope has norm |X|/L, whatever
+                // that direction; the lift is one physical coordinate.
+                slope_bound += det::sqrt(0.5 * ch.coupling[n*n-1]) * q[n-1].abs();
             }
         }
         let additional_strain = 0.25*s;

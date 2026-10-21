@@ -10,7 +10,11 @@ pub(super) fn split_loss(source: &NonlinearMaterialString, remainder_hz: f64,
     gate: &CancelGate) -> Result<(WireSpan, AbsoluteStringDrag), ImpactError>
 {
     poll(gate)?;
-    let bending=match source.source() {
+    let original=match source.source() {
+        MaterialStringSource::WithPolarizations(p) => p.source(),
+        other => other,
+    };
+    let bending=match original {
         MaterialStringSource::WithTorsion(t) => t.bending(),
         other => other,
     };
@@ -18,7 +22,7 @@ pub(super) fn split_loss(source: &NonlinearMaterialString, remainder_hz: f64,
         MaterialStringSource::Homogeneous(s) => 0.5*s.string().width_m,
         MaterialStringSource::Concentric { section, .. } => section.elastic().outer_radius_m(),
         MaterialStringSource::WithTorsion(_) => return Err(invalid("nested torsion is not a physical gas-drag source")),
-        MaterialStringSource::WithPolarizations(_) => return Err(invalid("nonlinear support gas drag currently requires one transverse plane")),
+        MaterialStringSource::WithPolarizations(_) => return Err(invalid("nested polarizations are not a physical gas-drag source")),
     };
     let card=source.card();
     let mut wire=source.wire_span().clone();
@@ -40,6 +44,11 @@ pub(super) fn split_loss(source: &NonlinearMaterialString, remainder_hz: f64,
             return Err(invalid("material and gas modal losses cannot be separated at the retained precision"));
         }
         *total=material_rate;modal_per_s.push(gas_rate);
+    }
+    if matches!(source.source(),MaterialStringSource::WithPolarizations(_)) {
+        // The same gas resistance acts on two velocity components. The
+        // orthogonal support-lift remainder is still one physical field.
+        modal_per_s.extend_from_within(..);
     }
     let resistance=oscillating_cylinder_air_resistance_per_length(radius,
         core::f64::consts::TAU*remainder_hz,source.gas())
