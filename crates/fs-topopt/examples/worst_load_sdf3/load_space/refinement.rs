@@ -1,4 +1,7 @@
 //! Assess -> refit the complete load-space cap -> assess the NEW material.
+#[path = "refinement/adaptive.rs"]
+mod adaptive;
+pub fn run_adaptive(args: &[String]) -> CommandResult { adaptive::run(args) }
 use super::*;
 use fs_cutfem::elastic3::{adaptive::{AdaptiveElasticity3,
     enrichment::precondition::AdaptiveSolveSpace3}, surface::ReferenceLoad3};
