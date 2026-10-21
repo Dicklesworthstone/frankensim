@@ -26,7 +26,9 @@ use fs_scenario::{
 };
 use fs_tribo::FrictionLaw;
 
+#[path = "bank/multiple.rs"]
 mod multiple;
+#[path = "bank/longitudinal.rs"]
 mod longitudinal;
 
 fn nonlinear_config() -> NonlinearModalConfig {

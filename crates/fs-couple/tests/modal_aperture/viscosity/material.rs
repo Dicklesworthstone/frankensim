@@ -29,6 +29,7 @@ type Input = (
     PlateViscosityLimits,
 );
 
+#[path = "material/keyed.rs"]
 mod keyed;
 
 #[test]

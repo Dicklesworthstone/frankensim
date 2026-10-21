@@ -10,6 +10,7 @@ use fs_exec::CancelGate;
 use fs_math::c64::C64;
 use fs_tribo::FrictionLaw;
 
+#[path = "modal_multi_friction/nonlinear.rs"]
 mod nonlinear;
 
 fn budgets() -> ModalCouplingConfig {
