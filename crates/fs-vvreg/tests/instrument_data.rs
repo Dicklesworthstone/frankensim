@@ -583,6 +583,18 @@ fn manifest_field<'a>(text: &'a str, key: &str) -> Result<&'a str, String> {
     }
 }
 
+/// The free-text column after a manifest field's value, or empty.
+fn manifest_terms<'a>(text: &'a str, key: &str) -> &'a str {
+    text.lines()
+        .find_map(|line| {
+            let mut columns = line.split('\t');
+            (columns.next() == Some(key))
+                .then(|| columns.nth(1))
+                .flatten()
+        })
+        .unwrap_or("")
+}
+
 fn validate_references(ledger: &InstrumentDataLedger, emit: bool) -> Result<usize, String> {
     let start = Instant::now();
     let mut checked = 0;
@@ -600,7 +612,14 @@ fn validate_references(ledger: &InstrumentDataLedger, emit: bool) -> Result<usiz
                     ] {
                         let actual = manifest_field(&text, key)
                             .map_err(|e| format!("{}: {e}", row.source_id))?;
-                        if actual != expected {
+                        // The pack compiler admits only `permitted` manifests. A pack
+                        // that carries nothing but a facts-only source's facts is what
+                        // facts-only allows, and its terms must say so.
+                        let facts_only_pack = key == "redistribution"
+                            && row.redistribution == Redistribution::FactsOnly
+                            && actual == "permitted"
+                            && manifest_terms(&text, key).contains("facts");
+                        if actual != expected && !facts_only_pack {
                             return Err(format!(
                                 "{}: {key} mismatch for {slug}: ledger={expected}, manifest={actual}",
                                 row.source_id
@@ -994,6 +1013,7 @@ fn falsifier_licence_mismatch_is_caught() {
         error.contains(&source_id) && error.contains("license mismatch"),
         "{error}"
     );
+    // A facts-only row may not back a pack whose terms redistribute the article (CC BY).
     fields[6] = "CC-BY-4.0".to_owned();
     fields[7] = "facts-only".to_owned();
     rows[index] = fields.join("\t");
