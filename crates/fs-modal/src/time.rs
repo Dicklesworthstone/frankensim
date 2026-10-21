@@ -481,6 +481,17 @@ impl ModalAcousticTimeModel {
         &self.modes
     }
 
+    /// A copy of this model with every narrow-band pressure transfer set to zero. This read-only transfer edit changes no
+    /// mechanical coefficient, cached transition or state; it exists so that a broadband receiver can own the pressure ceiling.
+    #[must_use]
+    pub fn without_pressure_transfers(&self) -> Self {
+        let mut copy = self.clone();
+        for mode in &mut copy.modes {
+            mode.pressure_per_modal_velocity = C64::ZERO;
+        }
+        copy
+    }
+
     /// Borrow the current sample-boundary states.
     #[must_use]
     pub fn states(&self) -> &[ModalAcousticState] {

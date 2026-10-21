@@ -241,13 +241,10 @@ impl BroadbandModalObserver {
                 model: fit,
             });
         }
-        let mut mechanics = model.clone();
         // The new receiver owns the pressure ceiling. Retaining an unrelated
         // old narrow-band receiver here would admit/refuse on a second pressure.
         // This read-only transfer edit changes no mechanical coefficient/state.
-        for mode in &mut mechanics.modes {
-            mode.pressure_per_modal_velocity = C64::ZERO;
-        }
+        let mechanics = model.without_pressure_transfers();
         let observer = Self {
             model: mechanics,
             workspace: ModalAcousticWorkspace::new(model),
