@@ -96,10 +96,7 @@ It emits retained evidence before returning late errors. It returns an error
 when no feasible incumbent was accepted; an iteration limit with a feasible
 incumbent is reported as that limit, not as convergence.
 
-This increment is fixed-grid. Response-only checkpoint, binary-endpoint and
-DWR APIs do not represent the joint objective; joint persistence/refinement
-requires explicit future integration. There is no follower load, shape
-sensitivity, global optimality, actuator-energy or manufacturing certificate.
+This increment remains fixed-grid. The joint owner now exposes in-memory checkpoint/restore for the real projected-AL state. It preserves multiplier, penalty, spectral schedule, evaluation accounting, accepted history and the separate least-volume feasible incumbent, but never trusts saved displacement, reaction, stress, adjoint or gradient fields. Restoration re-solves the accepted endpoint and a distinct incumbent under the caller-bound original geometry, experiment family and policy before installing saved search state.\n\nThose endpoint evaluations are reserved against the original optimizer allowance before physics starts, and all solve/preparation work remains on the supplied cumulative SolveControl. Changed bounds, stress cap, motion/load laws or material mapping that change retained evidence refuse restoration. Callback identity remains a caller obligation; matching endpoints do not prove arbitrary laws globally equivalent. No byte/disk format or adaptive-grid migration is introduced.\n\nBinary-endpoint checks are separate physical post-processing and DWR APIs still do not represent the joint objective. Adaptive joint refinement remains future integration. There is no follower load, shape sensitivity, global optimality, actuator-energy or manufacturing certificate.
 
 ## Verification scope
 
@@ -125,3 +122,6 @@ mode or changed stopping policy. Native execution of these new tests remains
 unverified: DSR (including its documented absolute path), RCH and Cargo are
 unavailable in the editing environment. Source comparisons verify that the
 component arithmetic was preserved; they are not Rust compilation evidence.
+
+
+Three focused checkpoint regressions cover resumed trajectory equivalence with charged endpoint reconstruction, changed-requirement rollback, and malformed feasible-incumbent metadata. They are authored source evidence until the native Rust target runs.

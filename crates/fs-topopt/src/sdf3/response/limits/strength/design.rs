@@ -4,8 +4,8 @@
 use super::*;
 use std::{cell::RefCell, ops::ControlFlow};
 use crate::sdf3::{PhysicalRegion3, design::monotone_stress_branch};
-use fs_ascent::projected_al::{ProjectedAlError, ProjectedAlOptions, ProjectedAlReport,
-    ProjectedAlSample, ProjectedAlState, ProjectedAlStop, ProjectedAlWork};
+use fs_ascent::projected_al::{ProjectedAlCheckpoint, ProjectedAlError, ProjectedAlOptions,
+    ProjectedAlReport, ProjectedAlSample, ProjectedAlState, ProjectedAlStop, ProjectedAlWork};
 
 type DesignError = ProjectedAlError<ResponseStressError3>;
 
@@ -38,6 +38,23 @@ fn row(e: &ResponseStressEvaluation3, iteration: usize, tolerance: f64) -> Respo
         constraint: e.constraint, worst_response_residual: e.response.worst_residual,
         stress_aggregate: e.stress.aggregate, sampled_physical_max: e.stress.sampled_physical_max,
         feasible: e.feasible(tolerance) }
+}
+
+/// Search state without cached physical fields. Consumers must bind this to the
+/// original geometry, material law, complete experiment family and policy.
+#[derive(Debug, Clone)]
+pub struct ResponseStressDesignCheckpoint3 {
+    pub optimizer: ProjectedAlCheckpoint,
+    pub best_feasible_density: Option<Vec<f64>>,
+    pub history: Vec<ResponseStressDesignIteration3>,
+    pub restoration_evaluations: usize,
+}
+impl ResponseStressDesignCheckpoint3 {
+    #[must_use]
+    pub fn restoration_cost(&self) -> usize {
+        1 + usize::from(self.best_feasible_density.as_ref()
+            .is_some_and(|rho| rho != &self.optimizer.point))
+    }
 }
 fn sample<O: AdaptiveSdf3Elasticity>(study: &mut CutDensityStudy3<O>,
     cases: &[ResponseLimitCase3<'_>], rho: &[f64], options: ResponseStressDesignOptions3,
@@ -80,6 +97,7 @@ pub struct ResponseStressDesignStudy3<'a, 'callback, O: AdaptiveSdf3Elasticity> 
     accepted: ResponseStressEvaluation3,
     best_feasible: Option<ResponseStressEvaluation3>,
     history: Vec<ResponseStressDesignIteration3>,
+    restoration_evaluations: usize,
 }
 impl<'a, 'callback, O: AdaptiveSdf3Elasticity> ResponseStressDesignStudy3<'a, 'callback, O> {
     pub fn new(study: &'a mut CutDensityStudy3<O>, cases: &'a [ResponseLimitCase3<'a>],
@@ -112,7 +130,8 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> ResponseStressDesignStudy3<'a, 'c
         study.operator.set_scales(&accepted.stress.scales).expect("evaluated scales remain valid");
         let first = row(&accepted, 0, options.optimizer.tolerance);
         let best_feasible = first.feasible.then(|| accepted.clone());
-        Ok(Self { study, cases, control, options, state, accepted, best_feasible, history:vec![first] })
+        Ok(Self { study, cases, control, options, state, accepted, best_feasible,
+            history:vec![first], restoration_evaluations:0 })
     }
     #[must_use] pub fn accepted(&self) -> &ResponseStressEvaluation3 { &self.accepted }
     #[must_use] pub fn best_feasible(&self) -> Option<&ResponseStressEvaluation3> { self.best_feasible.as_ref() }
@@ -122,6 +141,96 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> ResponseStressDesignStudy3<'a, 'c
     #[must_use] pub fn work(&self) -> SolveWork { self.control.work() }
     #[must_use] pub fn optimizer_work(&self) -> ProjectedAlWork { self.state.work() }
     #[must_use] pub fn feasible(&self) -> bool { self.accepted.feasible(self.options.optimizer.tolerance) }
+
+    #[must_use]
+    pub fn checkpoint(&self) -> ResponseStressDesignCheckpoint3 {
+        ResponseStressDesignCheckpoint3 {
+            optimizer:self.state.checkpoint(),
+            best_feasible_density:self.best_feasible.as_ref().map(|e|e.response.rho.clone()),
+            history:self.history.clone(),
+            restoration_evaluations:self.restoration_evaluations,
+        }
+    }
+
+    /// Restore the projected-AL search only after freshly re-solving its retained
+    /// physical endpoints under the caller-supplied original fixed-grid problem.
+    pub fn restore(study:&'a mut CutDensityStudy3<O>, cases:&'a [ResponseLimitCase3<'a>],
+        checkpoint:ResponseStressDesignCheckpoint3, options:ResponseStressDesignOptions3,
+        control:&'a mut SolveControl<'callback>) -> Result<Self,DesignError> {
+        let n=study.cells();
+        let cost=checkpoint.restoration_cost();
+        let restoration_evaluations=checkpoint.restoration_evaluations.checked_add(cost)
+            .ok_or(ProjectedAlError::Invalid("joint restoration counter overflow"))?;
+        let mut optimizer=checkpoint.optimizer;
+        let previous_evaluations=optimizer.work.evaluations;
+        optimizer.work.evaluations=previous_evaluations.checked_add(cost)
+            .ok_or(ProjectedAlError::Invalid("joint restoration evaluation overflow"))?;
+        let restored=ProjectedAlState::try_restore(optimizer,
+            &vec![options.density_floor;n],&vec![1.0;n],options.optimizer)?;
+        let history=checkpoint.history;
+        if checkpoint.restoration_evaluations>=previous_evaluations
+            || history.len()!=restored.work().iterations+1
+            || history.iter().enumerate().any(|(i,r)| {
+                r.iteration!=i || !r.volume_fraction.is_finite()
+                    || !(0.0..=1.0).contains(&r.volume_fraction)
+                    || !r.constraint.is_finite() || !r.worst_response_residual.is_finite()
+                    || !r.stress_aggregate.is_finite() || r.stress_aggregate<0.0
+                    || !r.sampled_physical_max.is_finite() || r.sampled_physical_max<0.0
+            }) {
+            return Err(ProjectedAlError::Invalid("invalid joint checkpoint history or work"));
+        }
+        let best_row=history.iter().filter(|r|r.feasible).fold(None,
+            |best:Option<&ResponseStressDesignIteration3>,r| {
+                if best.is_none_or(|b|r.volume_fraction<b.volume_fraction){Some(r)}else{best}
+            });
+        if best_row.is_some()!=checkpoint.best_feasible_density.is_some() {
+            return Err(ProjectedAlError::Invalid("joint checkpoint lost its feasible incumbent"));
+        }
+        let previous_scales=study.operator.scales().to_vec();
+        let mut result=Self::new(study,cases,restored.point(),options,control)?;
+        let rebuilt=(|| {
+            if result.state.sample()!=restored.sample()
+                || history.last()!=Some(&row(&result.accepted,restored.work().iterations,
+                    options.optimizer.tolerance)) {
+                return Err(ProjectedAlError::Invalid("restored joint point changed its physical response"));
+            }
+            let best=match checkpoint.best_feasible_density {
+                None=>None,
+                Some(rho) if rho==result.accepted.response.rho=>Some(result.accepted.clone()),
+                Some(rho)=>{
+                    if rho.len()!=n || rho.iter().any(|r|!r.is_finite()
+                        || !(options.density_floor..=1.0).contains(r)) {
+                        return Err(ProjectedAlError::Invalid("invalid retained joint feasible density"));
+                    }
+                    let mut evaluated=None;
+                    sample(result.study,cases,&rho,options,&mut evaluated,result.control)
+                        .map_err(ProjectedAlError::Evaluation)?;
+                    evaluated
+                }
+            };
+            if let (Some(e),Some(expected))=(&best,best_row) {
+                if row(e,expected.iteration,options.optimizer.tolerance)!=*expected {
+                    return Err(ProjectedAlError::Invalid("retained joint feasible design changed its physical response"));
+                }
+            }
+            Ok(best)
+        })();
+        let best=match rebuilt {
+            Ok(best)=>best,
+            Err(error)=>{
+                result.study.operator.set_scales(&previous_scales)
+                    .expect("incoming joint scales remain valid");
+                return Err(error);
+            }
+        };
+        result.state=restored;
+        result.best_feasible=best;
+        result.history=history;
+        result.restoration_evaluations=restoration_evaluations;
+        result.study.operator.set_scales(&result.accepted.stress.scales)
+            .expect("restored accepted joint scales remain valid");
+        Ok(result)
+    }
 
     /// Continue without resetting multipliers, spectral steps or spent work.
     /// Late cancellation still installs a completed accepted transition before
