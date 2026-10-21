@@ -18,6 +18,9 @@ use fs_phs::circuit::{Branch, CircuitGraph};
 use fs_qty::{Density, QuantitySpec, Temperature};
 use fs_thermal::enthalpy::*;
 
+#[path = "circuit_thermoelectric/motion.rs"]
+mod motion_tests;
+
 fn source(s: f64, resistance: f64, k: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     source_value(PropertyValue::Scalar { value: s, dims: SEEBECK_DIMS },
         InterpolationPolicy::ConstantWithinValidity, resistance, k)

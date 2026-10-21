@@ -7,16 +7,21 @@
 //! links carry Fourier conduction using the SAME material/geometry bindings.
 //! All material, electrical and thermal candidates use the same proposed state.
 
-use super::{CircuitEnthalpyCandidate, CircuitEnthalpyError, CircuitEnthalpyInput,
+/// Reciprocal thermoelectric, field-motion and finite-thermal evolution.
+pub mod motion;
+
+use super::{CircuitEnthalpyError, CircuitEnthalpyInput,
     CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,
-    DrivenCoefficients, driven_candidate};
+    DrivenCoefficients, ThermalDriver, coupled_driver_candidate};
 use super::material::{MaterialNetwork, MaterialNetworkError, MaterialNetworkSample};
-use crate::material_circuit::MaterialCircuit;
+use crate::material_circuit::{MaterialCircuit, MaterialCircuitCandidate,
+    MaterialCircuitError, MaterialResistor};
 use fs_material::conductor::ElectricalPropertyBasis;
 use fs_material::state_point::MaterialPropertySelection;
 use fs_material::thermoelectric::{ABSOLUTE_SEEBECK_PROPERTY, ResolvedSeebeckSpan,
     ThermoelectricError, ThermoelectricTransfer};
 use fs_phs::circuit::Branch;
+use fs_phs::StepRecord;
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -242,8 +247,47 @@ pub fn step_candidate<'m>(
     material: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
     circuit: &MaterialCircuit, ports: &[f64], legs: &[ThermoelectricLeg],
     electrical_bases: &[(usize, ElectricalPropertyBasis)], controls: CircuitEnthalpySolve,
-    guess_j: &[f64], cancelled: impl FnMut() -> bool,
+    guess_j: &[f64], mut cancelled: impl FnMut() -> bool,
 ) -> Result<ThermoelectricCandidate<'m>, Error> {
+    let (thermal, circuit, coupled) = coupled_candidate(material, thermal, target_s,
+        circuit, ports, legs, electrical_bases, controls, guess_j,
+        |sources, inputs, dt, cancelled| circuit.step_candidate(sources, inputs, dt,
+            controls.circuit, cancelled), &mut cancelled)?;
+    let external_electrical_work_j = finite(coupled.electrical.native.supplied
+        - coupled.source.reversible_electrical_work_j)?;
+    let external_heat_j = finite(coupled.non_electrical_heat_j - coupled.source.reversible_heat_j)?;
+    let total_energy_residual_j = finite(coupled.electrical.stored_after_j
+        - coupled.electrical.stored_before_j + coupled.thermal.stored_energy_change_j
+        - external_electrical_work_j - external_heat_j)?;
+    if total_energy_residual_j.abs() > controls.total_energy_tolerance_j {
+        return Err(invalid("combined thermoelectric and thermal storage do not close external supply"));
+    }
+    if cancelled() { return Err(CircuitEnthalpyError::Cancelled); }
+    Ok(ThermoelectricCandidate { thermal, circuit, report: ThermoelectricReport {
+        coupled, external_electrical_work_j, external_heat_j, total_energy_residual_j } })
+}
+
+// Both native candidates expose the SAME Kirchhoff source-port ordering. The
+// moving driver merely appends its mechanical port; it cannot author Seebeck
+// current, loss, or a second thermal/electrical update.
+trait ThermoelectricDriver: ThermalDriver {
+    fn native(&self) -> &StepRecord;
+}
+impl ThermoelectricDriver for MaterialCircuitCandidate {
+    fn native(&self) -> &StepRecord { &self.step().native }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coupled_candidate<'m, D: ThermoelectricDriver>(
+    material: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
+    circuit: &MaterialCircuit, ports: &[f64], legs: &[ThermoelectricLeg],
+    electrical_bases: &[(usize, ElectricalPropertyBasis)], controls: CircuitEnthalpySolve,
+    guess_j: &[f64],
+    advance: impl Fn(Vec<MaterialResistor>, &[f64], f64, &mut dyn FnMut() -> bool)
+        -> Result<D, MaterialCircuitError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(DepositionSimulation<'m>, D::Model,
+    CircuitEnthalpyReport<ThermoelectricSample, D::Step>), Error> {
     let cancel = RefCell::new(cancelled);
     let check = || -> Result<(), Error> {
         if (*cancel.borrow_mut())() { Err(CircuitEnthalpyError::Cancelled) } else { Ok(()) }
@@ -264,9 +308,9 @@ pub fn step_candidate<'m>(
     }
     let dt = target_s - thermal.time_s();
     let destinations = material.resistors.iter().map(|r| r.destination).collect::<Vec<_>>();
-    let candidate: CircuitEnthalpyCandidate<'m, ThermoelectricSample> = driven_candidate(
+    coupled_driver_candidate(
         thermal, target_s, CircuitEnthalpyInput { circuit, ports, destinations: &destinations },
-        controls, guess_j, |state, _remaining| {
+        &[], controls, guess_j, |state, _remaining| {
             let mut coefficients = prepared.resolve(state, || (*cancel.borrow_mut())()).map_err(network)?;
             let mut inputs = ports.to_vec();
             let mut spans = Vec::with_capacity(legs.len());
@@ -277,18 +321,18 @@ pub fn step_candidate<'m>(
                     CircuitEnthalpyError::Source(ThermoelectricNetworkError::Seebeck(e)))?.voltage_drop_v;
                 spans.push(source);
             }
-            let electrical = circuit.step_candidate(coefficients.resistors, &inputs, dt,
-                controls.circuit, || (*cancel.borrow_mut())())?;
+            let electrical = advance(coefficients.resistors, &inputs, dt,
+                &mut || (*cancel.borrow_mut())())?;
             let mut samples = Vec::with_capacity(legs.len());
             let mut heat_w = 0.0;
             let mut electrical_work_j = 0.0;
             for ((leg, &(port, cell_index)), source) in legs.iter().zip(&routing).zip(spans) {
                 check()?;
                 // Native y is minus the a-to-b voltage-source branch current.
-                let current_a = -electrical.step().native.y[port];
+                let current_a = -electrical.native().y[port];
                 let transfer = source.transfer(current_a).map_err(|e|
                     CircuitEnthalpyError::Source(ThermoelectricNetworkError::Seebeck(e)))?;
-                electrical_work_j = finite(electrical_work_j + dt * inputs[port] * electrical.step().native.y[port])?;
+                electrical_work_j = finite(electrical_work_j + dt * inputs[port] * electrical.native().y[port])?;
                 let bulk = material.cells[cell_index].cell;
                 for (cell, power) in [(leg.terminals[0], transfer.terminal_heat_w[0]),
                     (bulk, transfer.bulk_heat_w), (leg.terminals[1], transfer.terminal_heat_w[1])] {
@@ -307,18 +351,5 @@ pub fn step_candidate<'m>(
                 conductances_w_k: coefficients.conductances_w_k, circuit_trials: 1,
                 source: ThermoelectricSample { network: coefficients.source, legs: samples,
                     reversible_electrical_work_j: electrical_work_j, reversible_heat_j: heat_j } })
-        }, || (*cancel.borrow_mut())())?;
-    let (thermal, circuit, coupled) = candidate.into_parts();
-    let external_electrical_work_j = finite(coupled.electrical.native.supplied
-        - coupled.source.reversible_electrical_work_j)?;
-    let external_heat_j = finite(coupled.non_electrical_heat_j - coupled.source.reversible_heat_j)?;
-    let total_energy_residual_j = finite(coupled.electrical.stored_after_j
-        - coupled.electrical.stored_before_j + coupled.thermal.stored_energy_change_j
-        - external_electrical_work_j - external_heat_j)?;
-    if total_energy_residual_j.abs() > controls.total_energy_tolerance_j {
-        return Err(invalid("combined thermoelectric and thermal storage do not close external supply"));
-    }
-    check()?;
-    Ok(ThermoelectricCandidate { thermal, circuit, report: ThermoelectricReport {
-        coupled, external_electrical_work_j, external_heat_j, total_energy_residual_j } })
+        }, || (*cancel.borrow_mut())())
 }
