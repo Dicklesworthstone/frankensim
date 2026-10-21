@@ -3091,6 +3091,31 @@ Five regression sources cover constant-law parity, analytic nonlinear RC
 discharge, current-density/polarity response, complete temperature refresh and
 atomic refusal. Native execution remains pending.
 
+## Joint nonlinear conduction and finite enthalpy
+
+`circuit_enthalpy::conductivity::step_candidate` places the same field/current
+material iteration inside the existing finite-enthalpy residual. Each thermal
+trial first refreshes the original source bundle at that proposed endpoint;
+the original circuit then resolves the electrical operating point from the
+same accepted charge/flux. Only its native per-branch Joule account reaches the
+existing receiving cells, conduction and authored boundary/source owners.
+There is no additional thermal integrator or duplicate heat calculation.
+
+The shared driver counts every inner native circuit solve, including discarded
+thermal stencils and fresh final admission. Source errors, operating-domain
+failures, nonconvergence, exhausted work and cancellation publish neither
+history. Authored conduction controls are admitted before the remaining outer
+budget narrows them. The report retains both actual circuit work and material
+evaluation at the joint temperature/field/current state. Thermal-only circuit
+members preserve their original query schema without dummy field coordinates.
+
+The existing first-order endpoint-thermal/midpoint-electrical discretization,
+fixed geometry/C/L, lumped bulk heating and explicit single-axis source-law
+limitations still apply. A two-resistor finite-capacitor fixture independently
+eliminates the coupled field and temperature laws and two-cell enthalpy
+equations; regressions cover data-only substitutions, energy balance, replay
+and atomic refusal. Equation checks do not substitute for native test execution.
+
 ## Reciprocal material electric and magnetic gap motion
 
 `material_circuit::motion::MaterialFieldMotion` composes the existing source-bound
