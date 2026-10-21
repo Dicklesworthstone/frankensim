@@ -7,6 +7,7 @@ against how far REAL recordings differ from one another.
   pair     one render against the library's recording of the same note: the same, plus ours and the difference
   batch    pair for each candidate in a CANDIDATES.json (list of the pair arguments)
   report   print every graded pair as a table, the worst gap against its real-vs-real ruler first
+  diff     for every re-graded note, what moved against the ruler since the grading kept in superseded/
 
 Output is P8's site contract: <out>/<family>/<note>/pair.json (frankensim.instrument-pair.v1) with the aligned,
 loudness-matched real.wav / ours.wav and bare spectrogram / scalogram maps. See tools/build_instruments.py.
@@ -1089,6 +1090,51 @@ def pair_report(pj):
     return "\n".join(out)
 
 
+def pair_view(pj):
+    """{metric id: (gap, largest real-vs-real distance | None)} of a pair with a render."""
+    return {m["id"]: (m["gap"], max((r["value"] for r in m["ruler"]), default=None)) for m in pj["metrics"] if m["gap"] is not None}
+
+
+def diff_pairs(old, new):
+    """What moved between two gradings of the same note: per metric the old and new gap, the old and new gap / ruler
+    ratio (None where there is no ruler) and whether the verdict flipped, plus the inside/outside totals of each."""
+    vo, vn = pair_view(old), pair_view(new)
+    rows, tot = [], {"old": [0, 0], "new": [0, 0]}
+    for mid in vn:
+        if mid not in vo:
+            continue
+        (go, to), (gn, tn) = vo[mid], vn[mid]
+        ro = None if not to else go / to
+        rn = None if not tn else gn / tn
+        for key, g, t in (("old", go, to), ("new", gn, tn)):
+            if t is not None:
+                tot[key][0 if g <= t else 1] += 1
+        rows.append(dict(id=mid, label=next(m["label"] for m in new["metrics"] if m["id"] == mid), unit=next(m["gap_unit"] for m in new["metrics"] if m["id"] == mid),
+                         gap_old=go, gap_new=gn, ratio_old=ro, ratio_new=rn,
+                         flipped=(ro is not None and rn is not None and (ro <= 1.0) != (rn <= 1.0))))
+    return rows, tot
+
+
+def cmd_diff(a):
+    """For every graded note that has an earlier grading in superseded/, print what moved against the real-vs-real ruler."""
+    root = Path(a.out)
+    for p in sorted(root.glob("*/*/pair.json")):
+        pj = json.loads(p.read_text())
+        if not pj.get("ours") or (a.family and pj["family"] not in a.family):
+            continue
+        prev = sorted((p.parent / "superseded").glob("*/pair.json")) if (p.parent / "superseded").is_dir() else []
+        prev = [q for q in prev if (json.loads(q.read_text()).get("ours") or {}).get("git_sha") != pj["ours"]["git_sha"] and json.loads(q.read_text()).get("ours")]
+        if not prev:
+            continue
+        old = json.loads(prev[-1].read_text())
+        rows, tot = diff_pairs(old, pj)
+        print(f'{pj["family"]} {pj["note"]}: {old["ours"]["git_sha"][:9]} -> {pj["ours"]["git_sha"][:9]}   inside {tot["old"][0]} -> {tot["new"][0]}, outside {tot["old"][1]} -> {tot["new"][1]}')
+        for r in sorted(rows, key=lambda r: -abs((r["ratio_new"] or 0) - (r["ratio_old"] or 0))):
+            if r["flipped"] or (r["ratio_old"] is not None and r["ratio_new"] is not None and abs(r["ratio_new"] - r["ratio_old"]) >= 0.5):
+                arrow = "  FLIPPED" if r["flipped"] else ""
+                print(f'    {r["label"]} [{r["unit"]}]: gap {r["gap_old"]:.4g} -> {r["gap_new"]:.4g}   x{r["ratio_old"]:.2f} -> x{r["ratio_new"]:.2f}{arrow}')
+
+
 def cmd_report(a):
     root = Path(a.out)
     for p in sorted(root.glob("*/*/pair.json")):
@@ -1131,6 +1177,10 @@ def main():
     p.add_argument("--since", type=float, help="epoch seconds: skip notes whose reference-only pair.json is at least this new (resume a run)")
     p.add_argument("--jobs", type=int, default=1)
     p.set_defaults(fn=cmd_refs)
+    p = sub.add_parser("diff", help="for every re-graded note, what moved against the real-vs-real ruler since the grading in superseded/")
+    p.add_argument("--out", default=DEFAULTS["out"])
+    p.add_argument("--family", action="append")
+    p.set_defaults(fn=cmd_diff)
     p = sub.add_parser("report", help="print each graded pair as a table, worst gap against its ruler first")
     p.add_argument("--out", default=DEFAULTS["out"])
     p.add_argument("--family", action="append")

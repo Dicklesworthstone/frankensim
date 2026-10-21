@@ -378,6 +378,25 @@ class ContractTests(unittest.TestCase):
         self.assertIn("NOT_THE_NAMED_NOTE", res["error"])
         self.assertIn("NOT_THE_NAMED_NOTE", json.loads((root / "syn" / "Bb3" / "pair.json").read_text())["refused"]["reason"])
 
+    def test_diff_reports_what_moved_between_two_gradings_of_a_note(self):
+        from instrgrade import write_wav
+        root = self.tmp / "diffroot"
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="old1", observer="o", recipe="r.sh")
+        dc.run_pair(self.refs, c, root)
+        far = self.tmp / "far.wav"
+        write_wav(far, 0.3 * tone(f0=F0 * 2 ** (1 / 12), dur=2.4, lead=0.2, noise_db=-85, cents=60))
+        dc.run_pair(self.refs, dict(c, wav=str(far), git_sha="new2"), root)
+        d = root / "syn" / "Bb3"
+        old = __import__("json").loads(next((d / "superseded").glob("*/pair.json")).read_text())
+        new = __import__("json").loads((d / "pair.json").read_text())
+        rows, tot = dc.diff_pairs(old, new)
+        f0 = next(r for r in rows if r["id"] == "f0_cents")
+        self.assertAlmostEqual(f0["gap_old"], 8.0, delta=1.5)
+        self.assertAlmostEqual(f0["gap_new"], 60.0, delta=2.0)
+        self.assertGreater(f0["gap_new"], f0["gap_old"])
+        self.assertNotEqual(old["ours"]["git_sha"], new["ours"]["git_sha"])
+        self.assertEqual(sum(tot["old"]), sum(tot["new"]))  # the same measures are judged both times
+
     def test_a_refused_render_batch_job_writes_the_record(self):
         import json
         root = self.tmp / "refbatch"
