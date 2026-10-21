@@ -2,7 +2,7 @@
 
 use super::{DepositionError, ViscousHeatControls, ViscousPower, invalid};
 
-/// Mechanical actuator supply and the same molecular heat deposited into h.
+/// Mechanical actuator supply and the same molecular/Darcy heat deposited into h.
 /// This is one accepted advance's account, not an additional thermal input.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ViscousHeatingAudit {
@@ -12,6 +12,9 @@ pub struct ViscousHeatingAudit {
     pub wall_work_j: [f64; 6],
     pub supplied_wall_work_j: f64,
     pub generated_heat_j: f64,
+    /// Subaccounts of generated_heat_j, never additional thermal inputs.
+    pub molecular_heat_j: f64,
+    pub darcy_heat_j: f64,
     /// Diagnostic only: it is bounded near zero and is never deposited as heat.
     pub pressure_constraint_work_j: f64,
     pub residual_j: f64,
@@ -80,6 +83,8 @@ impl ViscousHeating {
         for (sum, watts) in [
             (&mut next.supplied_wall_work_j, power.supplied_wall_power_w),
             (&mut next.generated_heat_j, power.heat_w),
+            (&mut next.molecular_heat_j, power.molecular_heat_w),
+            (&mut next.darcy_heat_j, power.darcy_heat_w),
             (
                 &mut next.pressure_constraint_work_j,
                 power.pressure_constraint_power_w,
@@ -93,6 +98,7 @@ impl ViscousHeating {
             || next.residual_j.abs() > allowance
             || next.pressure_constraint_work_j.abs() > allowance
             || (next.supplied_wall_work_j - next.generated_heat_j).abs() > allowance
+            || (next.generated_heat_j - next.molecular_heat_j - next.darcy_heat_j).abs() > allowance
         {
             return Err(invalid(
                 "integrated wall work and physical heat do not close",

@@ -5,6 +5,9 @@ use fs_lbm::conjugate::enthalpy::advection::feedback::MaterialFlowFeedback;
 use fs_material::phase::mushy::MushyPhaseLaw;
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 
+#[path = "mushy/heating.rs"]
+mod heating;
+
 fn phase_curve(card: &MaterialCard, rho: [f64; 2]) -> EquilibriumEnthalpyPhaseCurve {
     EquilibriumEnthalpyPhaseCurve::try_new(
         card.content_hash(),

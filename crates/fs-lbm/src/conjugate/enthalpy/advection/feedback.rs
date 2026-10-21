@@ -22,8 +22,9 @@ use fs_material::phase::mushy::MushyPhaseLaw;
 use super::{FlowEnthalpyInput, admit_map, invalid, mass_graph};
 use crate::conjugate::{
     ChtError, FluidProperties, FvFlow, SimpleConfig, Turbulence, ViscousHeatControls, ViscousPower,
-    VoxelDomain, creeping_flow_with_viscous_heat, simple_flow_with_material_resistance,
-    simple_flow_with_viscosity, simple_flow_with_viscosity_and_force,
+    VoxelDomain, creeping_flow_with_darcy_heat, creeping_flow_with_viscous_heat,
+    simple_flow_with_material_resistance, simple_flow_with_viscosity,
+    simple_flow_with_viscosity_and_force,
 };
 use crate::material::transport::boussinesq::{BoussinesqConfig, BoussinesqMaterial};
 
@@ -271,14 +272,13 @@ where
     /// does not promote raw permeability/model data to measured authority.
     /// Below the model's minimum liquid volume fraction (including fully
     /// solid) refuses at source and endpoint epochs. No finite artificial
-    /// leakage is called solid locking. Drag dissipation is not thermalized.
+    /// leakage is called solid locking. With explicit `Self::with_viscous_heating`,
+    /// molecular and Darcy losses heat the same mixed-phase enthalpy cell at
+    /// local thermal equilibrium. Otherwise drag dissipation is not thermalized.
     pub fn with_mushy_mobility(
         mut self,
         law: &'a MushyPhaseLaw<'a>,
     ) -> Result<Self, MaterialFlowError<O::Error>> {
-        if self.viscous_heating.is_some() {
-            return Err(invalid("viscous heating excludes unaccounted mushy drag work").into());
-        }
         let rho = law.fixed_density_kg_m3().ok_or(invalid(
             "fixed-volume mushy flow requires equal constant phase densities",
         ))?;
@@ -336,17 +336,22 @@ where
         Ok(Some(drag))
     }
 
-    /// Thermalize molecular stress power in a closed, fully fluid Stokes box.
+    /// Thermalize molecular and admitted stationary Darcy power in a Stokes box.
     ///
     /// This opt-in explicitly removes momentum convection from each native
     /// solve. Only tangential moving/stationary walls and symmetry are admitted;
-    /// openings, obstacles, buoyancy, fans, turbulence and drag refuse. Source
-    /// viscosity and the actual returned velocity must satisfy the declared
+    /// openings, solid voxels, buoyancy, fans, turbulence and configured
+    /// resistances refuse. An attached `Self::with_mushy_mobility` supplies the
+    /// only optional drag: its actual mu/K(phi(h)) becomes heat in the ORIGINAL
+    /// equilibrium mixture cell. The fixed skeleton performs zero reaction work;
+    /// its heat and latent energy belong to that same fixed-reference-mass h.
+    /// Separate phase temperatures/velocities and moving skeletons are excluded.
+    /// Source viscosity and the actual returned velocity must satisfy the declared
     /// global creeping-flow bound and independent wall-work power check.
     ///
     /// The original registered h/T law, source receipts and cell masses remain
-    /// the sole thermal owners. Each actual substep adds its molecular heat once
-    /// to the existing source map, alongside any wrapped source. The audit uses
+    /// the sole thermal owners. Each actual substep adds molecular plus Darcy heat
+    /// once to the existing source map, alongside any wrapped source. The audit uses
     /// that step's accepted duration. Heat already appears in the original
     /// thermal audit's external_heat_j; never add the wall supply a second time.
     ///
@@ -360,10 +365,8 @@ where
         controls: ViscousHeatControls,
     ) -> Result<Self, MaterialFlowError<O::Error>> {
         check_gate(self.gate, &mut || Ok(()))?;
-        if self.buoyancy.is_some() || self.mushy.is_some() {
-            return Err(
-                invalid("viscous heating excludes unaccounted body-force and drag work").into(),
-            );
+        if self.buoyancy.is_some() {
+            return Err(invalid("viscous heating excludes unaccounted body-force work").into());
         }
         crate::conjugate::simple::viscous_heat::admit_heating(self.domain, self.config, controls)?;
         self.viscous_heating = Some(ViscousHeating::new(controls));
@@ -608,14 +611,26 @@ where
         };
         let mushy_drag_pa_s_m2 = self.mushy_drag(&samples, check)?;
         let (flow, viscous_power) = if let Some(owner) = &self.viscous_heating {
-            let (flow, power) = creeping_flow_with_viscous_heat(
-                self.domain,
-                &fluid,
-                &viscosities,
-                self.config,
-                owner.controls,
-                self.gate,
-            )?;
+            let (flow, power) = if let Some(drag) = &mushy_drag_pa_s_m2 {
+                creeping_flow_with_darcy_heat(
+                    self.domain,
+                    &fluid,
+                    &viscosities,
+                    drag,
+                    self.config,
+                    owner.controls,
+                    self.gate,
+                )?
+            } else {
+                creeping_flow_with_viscous_heat(
+                    self.domain,
+                    &fluid,
+                    &viscosities,
+                    self.config,
+                    owner.controls,
+                    self.gate,
+                )?
+            };
             (flow, Some(power))
         } else if let Some(drag) = &mushy_drag_pa_s_m2 {
             (

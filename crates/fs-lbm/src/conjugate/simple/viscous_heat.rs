@@ -1,9 +1,10 @@
 //! Viscous power from the SAME source-resolved staggered stress operator.
 //!
-//! This entry solves steady Stokes flow in a closed, completely fluid Cartesian
-//! box. Molecular viscosity may vary by cell; walls may move tangentially.
-//! Inertia, momentum convection, openings, obstacles, body forces, porous drag,
-//! turbulence and fans are excluded. Wall actuators supply all mechanical work.
+//! This entry solves steady Stokes flow in a closed Cartesian box of flow-active
+//! voxels. Molecular viscosity may vary by cell; walls may move tangentially.
+//! A declared stationary linear Darcy frame may absorb work as local heat.
+//! Inertia, momentum convection, openings, obstacles, body forces, nonlinear
+//! resistance, turbulence and fans are excluded. Wall actuators supply all work.
 //! It has no kinetic-energy store and makes no Navier--Stokes energy claim.
 //!
 //! Normal stress uses `2 mu (du_a/dx_a)^2 V` at each cell. Each reciprocal MAC
@@ -31,12 +32,18 @@ pub struct ViscousHeatControls {
     pub power_tolerance_w: f64,
 }
 
-/// Actual molecular stress power at one solved material/velocity epoch.
+/// Actual molecular stress and optional stationary Darcy power at one epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViscousPower {
     /// Nonnegative physical heat in native voxel order [W].
     pub cell_heat_w: Vec<f64>,
+    /// Total molecular plus Darcy heat [W], deposited exactly once.
     pub heat_w: f64,
+    pub molecular_heat_w: f64,
+    pub darcy_heat_w: f64,
+    /// Darcy contribution in native voxel order. None without a declared drag
+    /// frame; zero entries at zero drag. Already included in cell_heat_w.
+    pub cell_darcy_heat_w: Option<Vec<f64>>,
     /// Signed actuator supply at each Face3::ALL boundary [W].
     pub wall_power_w: [f64; 6],
     /// Tangential force exerted by each actuator on the fluid [N]. Normal
@@ -73,7 +80,7 @@ pub(crate) fn admit_heating(
         || !config.resistances.is_empty()
     {
         return Err(invalid_power(
-            "viscous heat requires a closed all-fluid box with walls/symmetry, without fans, drag or turbulence",
+            "viscous heat requires a closed all-fluid box with walls/symmetry, without fans, configured resistances or turbulence",
         ));
     }
     if !controls.maximum_reynolds.is_finite()
@@ -113,15 +120,71 @@ pub fn creeping_flow_with_viscous_heat(
     controls: ViscousHeatControls,
     gate: &CancelGate,
 ) -> Result<(FvFlow, ViscousPower), ChtError> {
+    creeping_material_heat(domain, fluid, viscosity_pa_s, None, config, controls, gate)
+}
+
+/// The same native Stokes/stress owner with declared stationary Darcy drag.
+///
+/// `drag_pa_s_m2` is the coefficient beta of `-beta*u` [N/m3], one finite
+/// nonnegative value per voxel. Native half-cell volumes supply both momentum
+/// resistance and local dissipation. A stationary frame performs no reaction
+/// work: every absorbed watt becomes heat in the mapped bulk/mixture cell.
+/// The caloric model must enclose that frame at local thermal equilibrium;
+/// separate solid/fluid temperatures or a moving porous skeleton need another
+/// accounting boundary. No nonlinear inertial/Forchheimer loss is admitted.
+pub fn creeping_flow_with_darcy_heat(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    viscosity_pa_s: &[f64],
+    drag_pa_s_m2: &[f64],
+    config: &SimpleConfig,
+    controls: ViscousHeatControls,
+    gate: &CancelGate,
+) -> Result<(FvFlow, ViscousPower), ChtError> {
+    creeping_material_heat(
+        domain,
+        fluid,
+        viscosity_pa_s,
+        Some(drag_pa_s_m2),
+        config,
+        controls,
+        gate,
+    )
+}
+
+fn creeping_material_heat(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    viscosity_pa_s: &[f64],
+    drag_pa_s_m2: Option<&[f64]>,
+    config: &SimpleConfig,
+    controls: ViscousHeatControls,
+    gate: &CancelGate,
+) -> Result<(FvFlow, ViscousPower), ChtError> {
     poll(gate)?;
     admit_heating(domain, config, controls)?;
-    let mut solver = material_solver(domain, fluid, viscosity_pa_s, None, None, config, gate)?;
+    let mut solver = material_solver(
+        domain,
+        fluid,
+        viscosity_pa_s,
+        None,
+        drag_pa_s_m2,
+        config,
+        gate,
+    )?;
     solver.creeping = true;
     let flow = solve_steady(solver, fluid, config, gate)?;
     // Reconstruct only the original coefficient/geometry owner from its public
     // projected field. This is an audit, not another flow solve or projection.
-    let mut sampler = Solver::new(domain, fluid, config);
-    sampler.molecular_viscosity = viscosity_pa_s.to_vec();
+    let mut sampler = material_solver(
+        domain,
+        fluid,
+        viscosity_pa_s,
+        None,
+        drag_pa_s_m2,
+        config,
+        gate,
+    )?;
     let arrays = flow.field.face_arrays();
     for (a, fluxes) in arrays.into_iter().enumerate() {
         for (i, flux) in fluxes.iter().enumerate() {
@@ -264,6 +327,60 @@ impl Solver<'_> {
                 }
             }
         }
+        let molecular_heat_w = finite_value("viscous_heat.molecular", heat.iter().sum())?;
+        let (cell_darcy_heat_w, darcy_heat_w) = if self.porous.is_empty() {
+            (None, 0.0)
+        } else {
+            let mut drag_heat = vec![0.0; domain.cell_count()];
+            for (c, cell_heat) in drag_heat.iter_mut().enumerate() {
+                poll(gate)?;
+                let at = domain.coords(c);
+                for a in 0..3 {
+                    let (beta, inertial) = self.porous[c][a];
+                    if inertial != 0.0 {
+                        return Err(invalid_power(
+                            "only stationary linear Darcy heating is admitted",
+                        ));
+                    }
+                    // The two MAC half cells, not the square of an averaged
+                    // cell-centre velocity. Fixed normal boundary faces are zero.
+                    for plus in [false, true] {
+                        let u = self.vel[a][self.cell_face(a, at, plus)];
+                        add(cell_heat, (0.5 * domain.volume(c)) * beta * u * u)?;
+                    }
+                }
+                if *cell_heat != 0.0 {
+                    add(&mut heat[c], *cell_heat)?;
+                }
+            }
+            // Independent traversal of the exact implicit momentum coefficient
+            // confirms its staggered work equals the original-cell heat split.
+            let mut staggered_drag_w = 0.0;
+            for a in 0..3 {
+                for &index in &self.comps[a].unknowns {
+                    poll(gate)?;
+                    let plus = self.comps[a].coords(index);
+                    let mut minus = plus;
+                    minus[a] -= 1;
+                    let wm = domain.width(a, minus[a]);
+                    let wp = domain.width(a, plus[a]);
+                    let bm = self.porous[cell_of(self.n, minus)][a].0;
+                    let bp = self.porous[cell_of(self.n, plus)][a].0;
+                    let coefficient =
+                        self.comp_face_area(a, index) * (0.5 * wm).mul_add(bm, 0.5 * wp * bp);
+                    let u = self.vel[a][index];
+                    add(&mut staggered_drag_w, coefficient * u * u)?;
+                }
+            }
+            let total = finite_value("viscous_heat.darcy", drag_heat.iter().sum())?;
+            if (total - staggered_drag_w).abs() > controls.power_tolerance_w {
+                return Err(invalid_power(
+                    "Darcy momentum work and original-cell heat partition disagree",
+                ));
+            }
+            add(&mut quadrature_w, staggered_drag_w)?;
+            (Some(drag_heat), total)
+        };
         let heat_w = finite_value("viscous_heat.total", heat.iter().sum())?;
         let supplied_wall_power_w = finite_value("viscous_heat.supply", wall_power_w.iter().sum())?;
         let mut pressure_constraint_power_w = 0.0;
@@ -309,18 +426,22 @@ impl Solver<'_> {
             ));
         }
         if (heat_w - quadrature_w).abs() > controls.power_tolerance_w
+            || (heat_w - molecular_heat_w - darcy_heat_w).abs() > controls.power_tolerance_w
             || pressure_constraint_power_w.abs() > controls.power_tolerance_w
             || residual_w.abs() > controls.power_tolerance_w
             || (supplied_wall_power_w - heat_w).abs() > controls.power_tolerance_w
         {
             return Err(invalid_power(
-                "independent wall work, constraint and molecular viscous-power accounts do not close",
+                "independent wall work, constraint, molecular and Darcy power accounts do not close",
             ));
         }
         poll(gate)?;
         Ok(ViscousPower {
             cell_heat_w: heat,
             heat_w,
+            molecular_heat_w,
+            darcy_heat_w,
+            cell_darcy_heat_w,
             wall_power_w,
             wall_tangential_force_n,
             supplied_wall_power_w,
