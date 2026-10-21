@@ -40,10 +40,18 @@ SNAP=${SNAP:-/data/tmp/wa-inst/snap/$SHA12/frankensim}
 OUT=${OUT:-/data/tmp/wa-inst/renders/trumpet/$SHA12}
 DIR=data/instruments/descriptions/trumpet
 RATE=32000
-HOLD_TENSIONS=${HOLD_TENSIONS:-"1e0 1.5e0 2.2e0 2.9e0"}
-HOLD_PRESSURE=${HOLD_PRESSURE:-3e3}
-RAMP_TENSIONS=${RAMP_TENSIONS:-"1e0 1.5e0 2.2e0 2.9e0"}
+HOLD_TENSIONS=${HOLD_TENSIONS-"1e0 1.5e0 2.2e0 2.9e0"}
+RAMP_TENSIONS=${RAMP_TENSIONS-"1e0 1.5e0 2.2e0 2.9e0"}
 RAMP_PEAK=${RAMP_PEAK:-1.2e4}
+# Held notes use an attack: mouth pressure rises to ATTACK_PRESSURE in 50 ms (above the onset the pressure
+# ramps measured), stays there for ATTACK_SECONDS, then relaxes over 0.5 s to SUSTAIN_PRESSURE (inside the
+# hysteresis band: above the extinction pressure, below the onset). Both pressures come from the model's own
+# measured threshold map, not from a recording and not from a published mf pressure (the published mouth
+# pressures belong to other lips; see the note above).
+ATTACK_PRESSURE=${ATTACK_PRESSURE:-1.2e4}
+ATTACK_SECONDS=${ATTACK_SECONDS:-8e-1}
+SUSTAIN_PRESSURE=${SUSTAIN_PRESSURE:-6e3}
+HOLD_SECONDS=${HOLD_SECONDS:-4}
 SWEEP_PRESSURE=${SWEEP_PRESSURE:-8e3}
 
 cd "$SNAP"
@@ -81,6 +89,20 @@ compose_pressure_ramp() {
   } > "$file"
 }
 
+# compose_attack <file> <seconds> <pre-stress>: the held-note gesture described above.
+compose_attack() {
+  local file=$1 seconds=$2 tension=$3
+  {
+    printf 'frankensim-lip-performance-v1\naudio %d %d\n' "$RATE" $((RATE * seconds))
+    cat "$DIR/trumpet-open.head"
+    printf 'schedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t2\n'
+    printf 'track\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\n'
+    printf 'event\t0e0\t5e-2\tpressure-pa\t%s\n' "$ATTACK_PRESSURE"
+    printf 'event\t%s\t5e-1\tpressure-pa\t%s\n' "$ATTACK_SECONDS" "$SUSTAIN_PRESSURE"
+    printf 'track\tlip\tpre-stress\ninitial\tmultiplier\t%s\nevents\t0\n' "$tension"
+  } > "$file"
+}
+
 # At most 8 renders at once (lane budget on the shared trj host).
 MAX_JOBS=8
 render() {
@@ -90,15 +112,15 @@ render() {
       && echo "rendered $name" || echo "FAILED $name (see $OUT/$name.log)"; } &
 }
 
-compose "$OUT/sweep-p$SWEEP_PRESSURE.performance" 10 "$SWEEP_PRESSURE" 7e-1 3.5e0
+compose "$OUT/sweep-p$SWEEP_PRESSURE.performance" 8 "$SWEEP_PRESSURE" 7e-1 3.5e0
 render "sweep-p$SWEEP_PRESSURE"
 for tension in $RAMP_TENSIONS; do
   compose_pressure_ramp "$OUT/pramp-t$tension.performance" 8 "$RAMP_PEAK" "$tension"
   render "pramp-t$tension"
 done
 for tension in $HOLD_TENSIONS; do
-  name="hold-t${tension}-p${HOLD_PRESSURE}"
-  compose "$OUT/$name.performance" 3 "$HOLD_PRESSURE" "$tension"
+  name="hold-t${tension}"
+  compose_attack "$OUT/$name.performance" "$HOLD_SECONDS" "$tension"
   render "$name"
 done
 wait
