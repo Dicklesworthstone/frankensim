@@ -5,6 +5,7 @@ use fs_couple::flue_loop::network::performance::file::FlueFilePerformance;
 use fs_exec::CancelGate;
 
 const FLUE: &str = include_str!("../../examples/flue.performance");
+#[path = "flue/network.rs"]
 mod network;
 fn short() -> String {
     let head = FLUE.split_once("\ngesture\n").unwrap().0

@@ -8,8 +8,11 @@ use fs_couple::bernoulli_aperture::tube::{ApertureTube, TubeDrive, UniformTubeSp
 use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
 
+#[path = "aperture_network/keyed.rs"]
 mod keyed;
+#[path = "aperture_network/keyed_paired.rs"]
 mod keyed_paired;
+#[path = "aperture_network/keyed_render.rs"]
 mod keyed_render;
 
 const DT: f64 = 1e-5;

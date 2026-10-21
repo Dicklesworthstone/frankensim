@@ -88,8 +88,11 @@ fn pack_with_relaxation(density: f64, modulus: f64, time: f64) -> NormalizedMate
     NormalizedMaterialCardPack::new(card.id().clone(), normalized).unwrap()
 }
 
+#[path = "material_modal/keyed.rs"]
 mod keyed;
+#[path = "material_modal/forces.rs"]
 mod forces;
+#[path = "material_modal/relaxation.rs"]
 mod relaxation;
 
 #[test]

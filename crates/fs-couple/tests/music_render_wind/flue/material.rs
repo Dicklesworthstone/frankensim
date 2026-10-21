@@ -9,7 +9,9 @@ use fs_matdb::{
 };
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
 
+#[path = "material/boundaries.rs"]
 mod boundaries;
+#[path = "material/mimo.rs"]
 mod mimo;
 
 fn pack(density: f64, young: f64, omit: Option<&str>, upper_omega: f64)
