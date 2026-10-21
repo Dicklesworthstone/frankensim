@@ -1,11 +1,12 @@
 //! G2 loop-closure regression of the opt-in Nolle/Price jet transfer on the real island.
 //!
-//! The fixture tube (0.3 m, r 6 mm, far-end reflection -0.7, Bernoulli jet, no viscothermal loss) has, from the
-//! closed form of Price's J with the module's constants (phase-zero crossing of
-//! `Lambda = i w M_d Phi / (i w L + R + Z_in)`), a linear margin of about 14 near 1.03 kHz for flue 10 mm x 1 mm
-//! with cut-up 8 mm at 800 Pa, and no crossing at all for flue 4 mm x 0.5 mm with cut-up 5 mm at 100 Pa. A loop that
-//! is wired must sustain the first and ring down the second. These are fixture geometries chosen for a large
-//! margin, not instrument claims.
+//! The fixture tube (0.3 m, r 6 mm, far-end reflection -0.7, no viscothermal loss) has, from the closed form of
+//! Price's J with the module's constants (phase-zero crossing of `Lambda = i w M_d Phi / (i w L + R + Z_in)`, scanned
+//! to 6 kHz): a linear margin of about 14 near 1.03 kHz for flue 10 mm x 1 mm with cut-up 8 mm at 800 Pa with the
+//! Bernoulli jet, and about 20 near 1.68 kHz for the same flue at 1200 Pa behind a 24.55 mm viscous slit windway
+//! (Poiseuille centre speed 1.5 x bulk). A loop that is wired must sustain both. These are fixture geometries chosen for a
+//! large margin, not instrument claims. (A third "no crossing" fixture of an earlier version was wrong: the scan
+//! stopped at 3 kHz and that flue is unstable above it.)
 use fs_aeroac::jetcard::mint_tonal_interim_card;
 use fs_couple::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
 use fs_couple::flue_loop::network::FlueNetworkSpec;
@@ -14,7 +15,7 @@ use fs_couple::flue_loop::{FlueControl, FlueGeometry, FlueVoice};
 use fs_exec::CancelGate;
 use fs_material::gas::{GasSpec, GasState};
 
-fn last_block_rms(width: f64, height: f64, cut_up: f64, pressure: f64, hosted: bool) -> f64 {
+fn last_block_rms(width: f64, height: f64, cut_up: f64, pressure: f64, windway_m: Option<f64>, hosted: bool) -> f64 {
     let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
     let geometry = FlueGeometry {
         flue_width_m: width,
@@ -41,6 +42,9 @@ fn last_block_rms(width: f64, height: f64, cut_up: f64, pressure: f64, hosted: b
     let card = mint_tonal_interim_card().unwrap();
     let mut voice = FlueVoice::from_network(Some(&card), 90.0, 1e-6, geometry, source, 48_000, 3, 0, &CancelGate::new_clock_free())
         .unwrap();
+    if let Some(length) = windway_m {
+        voice = voice.with_viscous_windway(length).unwrap();
+    }
     if hosted {
         voice = voice.with_nolle_jet(NolleSpec::price_2015(ChannelClass::Long, 0.0).unwrap()).unwrap();
     }
@@ -56,19 +60,23 @@ fn last_block_rms(width: f64, height: f64, cut_up: f64, pressure: f64, hosted: b
 
 #[test]
 fn g2_hosted_jet_transfer_sustains_the_loop_where_the_linear_margin_exceeds_one() {
-    let sounding = last_block_rms(0.010, 0.001, 0.008, 800.0, true);
-    let silent = last_block_rms(0.004, 0.0005, 0.005, 100.0, true);
-    println!("hosted transfer: margin-14 fixture rms {sounding:.3e} Pa, no-crossing fixture rms {silent:.3e} Pa");
-    assert!(sounding > 1.0, "predicted unstable (margin about 14) but rms {sounding} Pa");
-    assert!(silent < 1e-3 * sounding, "predicted stable but rms {silent} Pa against {sounding} Pa");
+    let rms = last_block_rms(0.010, 0.001, 0.008, 800.0, None, true);
+    println!("Bernoulli jet, linear margin about 14: rms {rms:.3e} Pa");
+    assert!(rms > 1.0, "predicted unstable (margin about 14) but rms {rms} Pa");
+}
+
+#[test]
+fn g2_hosted_jet_transfer_sustains_the_loop_behind_a_viscous_windway() {
+    let rms = last_block_rms(0.010, 0.001, 0.008, 1200.0, Some(0.02455), true);
+    println!("viscous windway (Poiseuille U0 = 1.5 u), linear margin about 20: rms {rms:.3e} Pa");
+    assert!(rms > 1.0, "predicted unstable (margin about 20) but rms {rms} Pa");
 }
 
 #[test]
 fn g2_default_island_is_not_the_hosted_transfer() {
-    // Same fixture, transfer not named: the island's own chain runs (opt-in, default untouched). Only
-    // records the two levels; the assertion is that naming the transfer changes the jet response.
-    let island = last_block_rms(0.010, 0.001, 0.008, 800.0, false);
-    let hosted = last_block_rms(0.010, 0.001, 0.008, 800.0, true);
+    // Same fixture, transfer not named: the island's own chain runs (opt-in, default untouched).
+    let island = last_block_rms(0.010, 0.001, 0.008, 800.0, None, false);
+    let hosted = last_block_rms(0.010, 0.001, 0.008, 800.0, None, true);
     println!("island chain rms {island:.3e} Pa, hosted transfer rms {hosted:.3e} Pa");
     assert!((island - hosted).abs() > 1e-6 * hosted.max(island), "{island} vs {hosted}");
 }
