@@ -72,8 +72,15 @@ impl GasPoint {
 }
 
 fn valid(p: &GasPoint, k: f64) -> bool {
-    [p.rho0, p.t0, p.gas_constant, p.gamma - 1.0, k].iter().all(|v| v.is_finite() && *v > 0.0)
-        && p.mu.is_finite() && p.mu >= 0.0 && p.mu_bulk.is_finite() && p.mu_bulk >= 0.0 && p.kappa.is_finite() && p.kappa >= 0.0
+    [p.rho0, p.t0, p.gas_constant, p.gamma - 1.0, k]
+        .iter()
+        .all(|v| v.is_finite() && *v > 0.0)
+        && p.mu.is_finite()
+        && p.mu >= 0.0
+        && p.mu_bulk.is_finite()
+        && p.mu_bulk >= 0.0
+        && p.kappa.is_finite()
+        && p.kappa >= 0.0
 }
 
 fn cubic(s: f64, b: [f64; 3]) -> f64 {
@@ -86,13 +93,19 @@ fn cubic(s: f64, b: [f64; 3]) -> f64 {
 /// [`NsfError::Input`] for a non-positive or non-finite state or wavenumber.
 pub fn linearized_modes(p: &GasPoint, k: f64) -> Result<[C64; 5], NsfError> {
     if !valid(p, k) {
-        return Err(NsfError::Input("linearized modes need a positive finite gas state, non-negative transport and wavenumber"));
+        return Err(NsfError::Input(
+            "linearized modes need a positive finite gas state, non-negative transport and wavenumber",
+        ));
     }
     let nu_l = (4.0 * p.mu / 3.0 + p.mu_bulk) / p.rho0;
     let chi = (p.gamma - 1.0) * p.kappa / (p.rho0 * p.gas_constant);
     let c2 = p.gamma * p.gas_constant * p.t0;
     let q2 = k * k;
-    let b = [q2 * (nu_l + chi), c2 * q2 + nu_l * chi * q2 * q2, p.gas_constant * p.t0 * chi * q2 * q2];
+    let b = [
+        q2 * (nu_l + chi),
+        c2 * q2 + nu_l * chi * q2 * q2,
+        p.gas_constant * p.t0 * chi * q2 * q2,
+    ];
     // a real root in (-bound, 0]: the polynomial is -inf at -bound and b2 >= 0 at 0 (all coefficients non-negative)
     let bound = 1.0 + b[0].max(b[1]).max(b[2]);
     let (mut lo, mut hi) = (-bound.max(2.0 * (c2 * q2).sqrt() + 2.0 * b[0]), 0.0);
@@ -120,7 +133,16 @@ pub fn linearized_modes(p: &GasPoint, k: f64) -> Result<[C64; 5], NsfError> {
     let disc = qa * qa - 4.0 * qb;
     let (m1, m2) = if disc < 0.0 {
         let w = 0.5 * (-disc).sqrt();
-        (C64 { re: -0.5 * qa, im: w }, C64 { re: -0.5 * qa, im: -w })
+        (
+            C64 {
+                re: -0.5 * qa,
+                im: w,
+            },
+            C64 {
+                re: -0.5 * qa,
+                im: -w,
+            },
+        )
     } else {
         // real pair (overdamped): stable quadratic formula
         let sq = disc.sqrt();
@@ -128,14 +150,32 @@ pub fn linearized_modes(p: &GasPoint, k: f64) -> Result<[C64; 5], NsfError> {
         let (x1, x2) = (big, if big != 0.0 { qb / big } else { 0.0 });
         (C64 { re: x1, im: 0.0 }, C64 { re: x2, im: 0.0 })
     };
-    let shear = C64 { re: -p.mu * q2 / p.rho0, im: 0.0 };
+    let shear = C64 {
+        re: -p.mu * q2 / p.rho0,
+        im: 0.0,
+    };
     // the entropy mode is the real root of smallest magnitude when the pair is complex; otherwise order by magnitude
     if m1.im != 0.0 {
         Ok([m1, m2, C64 { re: r, im: 0.0 }, shear, shear])
     } else {
         let mut real = [r, m1.re, m2.re];
         real.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
-        Ok([C64 { re: real[1], im: 0.0 }, C64 { re: real[2], im: 0.0 }, C64 { re: real[0], im: 0.0 }, shear, shear])
+        Ok([
+            C64 {
+                re: real[1],
+                im: 0.0,
+            },
+            C64 {
+                re: real[2],
+                im: 0.0,
+            },
+            C64 {
+                re: real[0],
+                im: 0.0,
+            },
+            shear,
+            shear,
+        ])
     }
 }
 
@@ -145,4 +185,41 @@ pub fn linearized_modes(p: &GasPoint, k: f64) -> Result<[C64; 5], NsfError> {
 /// As [`linearized_modes`].
 pub fn linearized_nsf_modes(law: &NsfLaw, k_m: f64) -> Result<[C64; 5], NsfError> {
     linearized_modes(&GasPoint::from_law(law), k_m)
+}
+
+/// Eigenvector `[rho / rho0, u / c, T / T0]` (complex, unit relative density) of the longitudinal mode `exp(i k x + s t)`, for
+/// `s` one of the three roots of the cubic (`s = conj(modes[0])` is the right-moving acoustic wave, `modes[0]` the left-moving
+/// one, `modes[2]` the entropy mode). Continuity gives `u / c = i s / (k c)` and the energy equation
+/// `T / T0 = (gamma - 1) s / (s + chi k^2)`; the momentum equation is then the eigenvalue condition. Initialising a grid with the
+/// right-moving vector excites that mode alone, and projecting a measured `(rho, u, T)` triple onto the three vectors separates
+/// the modes exactly.
+///
+/// # Errors
+/// As [`linearized_modes`].
+pub fn longitudinal_eigenvector(p: &GasPoint, k: f64, s: C64) -> Result<[C64; 3], NsfError> {
+    if !valid(p, k) || !s.re.is_finite() || !s.im.is_finite() {
+        return Err(NsfError::Input(
+            "an eigenvector needs a positive finite gas state, wavenumber and a finite rate",
+        ));
+    }
+    let c = p.sound_speed();
+    let chi = (p.gamma - 1.0) * p.kappa / (p.rho0 * p.gas_constant);
+    let u = C64 {
+        re: -s.im / (k * c),
+        im: s.re / (k * c),
+    };
+    let d = C64 {
+        re: s.re + chi * k * k,
+        im: s.im,
+    };
+    let n = C64 {
+        re: (p.gamma - 1.0) * s.re,
+        im: (p.gamma - 1.0) * s.im,
+    };
+    let den = d.re * d.re + d.im * d.im;
+    let t = C64 {
+        re: (n.re * d.re + n.im * d.im) / den,
+        im: (n.im * d.re - n.re * d.im) / den,
+    };
+    Ok([C64 { re: 1.0, im: 0.0 }, u, t])
 }
