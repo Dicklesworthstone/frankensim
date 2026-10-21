@@ -171,7 +171,8 @@ fn sycamore_maple_spycher_bars_pass_physicality_gates() {
         assert!(rel((el / rho).sqrt(), c_ax) < 0.015, "{g}: axial speed");
         assert!(rel((er / rho).sqrt(), c_rad) < 0.015, "{g}: radial speed");
     }
-    assert!((p["loss-factor-longitudinal"] - 0.043 / std::f64::consts::PI).abs() < 1.0e-6);
+    // Damping stays with the loss packs (row wood-spycher-2008-loss-frequency): the text value conflicts with Fig. 4.
+    assert!(!p.keys().any(|id| id.contains("loss")));
 }
 
 #[test]

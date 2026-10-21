@@ -29,8 +29,3 @@ validity	dynamic-young-modulus-longitudinal-control	moisture_content	10.5	10.5	%
 scalar	dynamic-young-modulus-radial-control	spycher-control	dynamic_young_modulus_radial	1645	MPa	constant
 uncertainty	dynamic-young-modulus-radial-control	absolute	66	MPa	0.68	1
 validity	dynamic-young-modulus-radial-control	moisture_content	10.5	10.5	%
-observation	spycher-damping	Sycamore maple axial bars of the same study (which samples are averaged is not stated)	Damping factor d = pi * delta f / f_r from the half-power bandwidth (Eq. 4, p. 332); value printed in the text p. 335	Loss factor = d / pi = 0.043 / pi, derived by the pack author; frequency 540 Hz as printed; no dispersion printed
-scalar	loss-factor-longitudinal	spycher-damping	loss_factor_longitudinal	0.013687	1	constant
-uncertainty	loss-factor-longitudinal	unstated	-	-	-	-
-validity	loss-factor-longitudinal	frequency	540	540	Hz
-validity	loss-factor-longitudinal	moisture_content	10.5	10.5	%
