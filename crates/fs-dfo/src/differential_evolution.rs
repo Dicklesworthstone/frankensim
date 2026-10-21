@@ -16,10 +16,15 @@
 //! extending budgets does not redraw candidates. No flat-objective convergence
 //! rule is used: a flat phase fraction can hide unexplored heating regimes.
 //! Stops mean target reached, work exhausted or paused, not KKT stationarity,
-//! guaranteed coverage or global optimality. Execution is serial and in-memory.
+//! guaranteed coverage or global optimality. The serial path and optional
+//! tile-backed parallel waves share candidate generation and selection.
+
+/// Parallel objective waves on the existing cancellation-aware tile executor.
+pub mod parallel;
 
 use fs_exec::Cx;
 use fs_rand::{Stream, StreamKey};
+use std::collections::VecDeque;
 use std::fmt;
 
 /// Kernel identity for the candidate streams of this algorithm.
@@ -37,8 +42,9 @@ pub struct DifferentialEvolutionConfig {
     pub seed: u64,
     /// Lifetime callback attempts, including failures. May be zero.
     pub max_evaluations: usize,
-    /// Population-size times dimension. Two populations and O(dimension)
-    /// candidate/best buffers coexist; this is a shape cap, not bytes.
+    /// Population-size times dimension. Two populations, at most one parallel
+    /// wave of candidate coordinates, and O(dimension) candidate/best buffers
+    /// coexist; this is a shape cap, not a total allocation or byte bound.
     pub max_population_entries: usize,
     /// Optional finite objective threshold, not an inferred global minimum.
     pub target: Option<f64>,
@@ -117,6 +123,9 @@ pub struct DifferentialEvolutionState {
     population: Vec<DifferentialEvolutionPoint>,
     next: Vec<DifferentialEvolutionPoint>,
     pending: Option<Pending>,
+    // Future members of the SAME frozen generation. Successful parallel scores
+    // survive cancellation; the serial path can also drain/retry this queue.
+    queued: VecDeque<Pending>,
     best: Option<DifferentialEvolutionPoint>,
     evaluations: usize,
     generations: usize,
@@ -165,7 +174,8 @@ impl DifferentialEvolutionState {
         let next = reserved(config.population_size)?;
         checkpoint(poll)?;
         Ok(Self { bounds: stored_bounds, initial, config, population, next,
-            pending: None, best: None, evaluations: 0, generations: 0, random_stride })
+            pending: None, queued: VecDeque::new(), best: None,
+            evaluations: 0, generations: 0, random_stride })
     }
 
     pub const fn evaluations(&self) -> usize { self.evaluations }
@@ -198,6 +208,7 @@ impl DifferentialEvolutionState {
         let mut spent = 0;
         loop {
             checkpoint(poll)?;
+            if self.pending.is_none() { self.pending = self.queued.pop_front(); }
             if self.pending.as_ref().is_some_and(|p| p.value.is_some()) {
                 self.consume(poll)?;
                 continue;
@@ -225,6 +236,14 @@ impl DifferentialEvolutionState {
     fn candidate(&self, poll: &mut impl FnMut() -> bool) -> Result<Vec<f64>, DifferentialEvolutionError> {
         let initializing = self.population.len() < self.config.population_size;
         let member = if initializing { self.population.len() } else { self.next.len() };
+        self.candidate_at(member, poll)
+    }
+
+    // Random identity is the logical member, never its wave/worker position.
+    fn candidate_at(&self, member: usize, poll: &mut impl FnMut() -> bool)
+        -> Result<Vec<f64>, DifferentialEvolutionError>
+    {
+        let initializing = self.population.len() < self.config.population_size;
         if initializing && member == 0 {
             if let Some(initial) = &self.initial { return copied(initial, poll); }
         }
