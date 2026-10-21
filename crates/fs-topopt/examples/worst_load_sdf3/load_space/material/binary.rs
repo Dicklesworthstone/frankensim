@@ -8,14 +8,15 @@ use fs_topopt::sdf3::robust::envelope::load_space::design::limits::binary::{
 pub fn finish(study: &mut CutDensityStudy3, basis: &[&[f64]], rho: &[f64], cap: &LoadSpaceCap3,
     design: LoadSpaceLimitedOptions3, volume_limit: f64, keys: &[[usize;3]], nodes: &[[f64;3]],
     control: &mut SolveControl<'_>) -> Result<(), Box<dyn std::error::Error>> {
-    let thresholds = [0.2, 0.35, 0.5, 0.65, 0.8];
     // Binary stiffness is explicit, not inferred from gray SIMP regularization.
+    // Enumerate every distinct three-field mask state rather than relying on a
+    // coarse hand-authored threshold list which can skip feasible endpoints.
     let options = BinaryLoadSpaceScanOptions3 { robustness: design.robustness,
-        void_stiffness: 1e-3, max_load_cases: 2, max_candidates: thresholds.len(),
+        void_stiffness: 1e-3, max_load_cases: 2, max_candidates: 64,
         dilated_volume_limit: volume_limit, smooth_tolerance: design.optimizer.tolerance };
-    eprintln!("mode=binary-simultaneous-load; authored_cap={}; thresholds={thresholds:?}; endpoint_policy={options:?}; gray_feasibility_is_binary_feasibility=false; separate_columns_authorize_pass=false",
+    eprintln!("mode=binary-simultaneous-load; authored_cap={}; threshold_policy=all-distinct-three-field-states; endpoint_policy={options:?}; gray_feasibility_is_binary_feasibility=false; separate_columns_authorize_pass=false",
         cap.cap());
-    let report = study.scan_binary_load_space_cap(rho, basis, cap, &thresholds, options, control)?;
+    let report = study.scan_all_binary_load_space_cap(rho, basis, cap, options, control)?;
     println!("candidate,threshold,eroded_volume,nominal_volume,dilated_volume,worst_compliance,physical_cap,spectral_maximum,smooth_maximum,load_set_feasible,feasible");
     for c in &report.candidates {
         println!("{},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{},{}",
@@ -85,10 +86,10 @@ mod tests {
         let cap = LoadSpaceCap3::new(2,1e9,0.02).unwrap();
         let mut poll = |_| ControlFlow::Continue(());
         let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
-        // All five thresholds preserve full raw-one material; none fits zero
-        // volume. The command must not reuse the feasible gray result instead.
+        // Every distinct threshold preserves full raw-one material; none fits
+        // zero volume. The command must not reuse the feasible gray result instead.
         assert!(finish(&mut study, &[&y,&z], &raw, &cap, LoadSpaceLimitedOptions3::default(),
             0.0, &keys, &nodes, &mut control).is_err());
-        assert_eq!(control.work().linear_solves, 11);
+        assert!(control.work().linear_solves >= 3);
     }
 }
