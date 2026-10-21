@@ -4,8 +4,14 @@ use fs_couple::tribothermal::dynamics::*;
 use fs_thermal::enthalpy::{DepositionBudget, Event, MaterialId, StepConfig, ThermalLaw, TimedEvent};
 
 fn motion_controls() -> MotionSolve {
+    let mut sliding = controls();
+    // Resolve the native compliant return map more tightly than the outer
+    // source/impulse gate, so its bisection error cannot mask source feedback.
+    sliding.tangential.max_iterations = 64;
+    sliding.tangential.force_absolute_tolerance_n = 1e-12;
+    sliding.tangential.force_relative_tolerance = 1e-12;
     MotionSolve {
-        sliding: controls(), maximum_motion_trials: 80, maximum_newton_iterations: 20,
+        sliding, maximum_motion_trials: 80, maximum_newton_iterations: 20,
         difference_step_mps: 1e-5, impulse_tolerance_n_s: 1e-8,
         total_energy_tolerance_j: 1e-6,
         newton: NewtonKrylovConfig { absolute_tolerance: 1e-10, relative_tolerance: 1e-12,
@@ -34,7 +40,9 @@ fn original_body_masses_and_force_work_close_momentum_heat_and_kinetic_storage()
     let (a, ca) = common::material(1.0, 2.0, 0.0);
     let (b, cb) = common::material(1.0, 3.0, 0.0);
     let cards = [a, b]; let curves = [ca, cb]; let point = context();
-    let card = interface(&cards, "speed", SPEED, [(0.0, 0.2), (2.0, 0.2)], 2000.0);
+    // This reference is Coulomb with equal static/kinetic capacity; distinct
+    // stiction thresholds are exercised independently below.
+    let card = interface_with_static(&cards, 0.2, "speed", SPEED, [(0.0, 0.2), (2.0, 0.2)], 2000.0);
     let thermal = inventory(&curves, [2.0, 3.0]);
     let contact = MaterialSlidingContact::new(&thermal,
         binding(&cards, &curves, &card, &point, HeatPartition::new(0.4, 0.6, 0.0).unwrap()),
@@ -76,7 +84,9 @@ fn heat_capacity_data_changes_actual_slowing_through_endpoint_material_friction(
         let (b, cb) = common::material(1.0, 3.0, 0.0);
         let cards = [a, b]; let curves = [ca, cb]; let point = context();
         // mu(Ta) = 0.2 + 0.1*(Ta-300), explicitly within its 299..310 K range.
-        let card = interface(&cards, "Ta", Temperature::DIMS, [(299.0, 0.1), (310.0, 1.2)], 2000.0);
+        // Static capacity 4 N is below the 5 N reaction needed to arrest this
+        // interval, and above the reached temperature-dependent kinetic force.
+        let card = interface_with_static(&cards, 0.4, "Ta", Temperature::DIMS, [(299.0, 0.1), (310.0, 1.2)], 2000.0);
         let thermal = common::initial(&curves, 0.0, None);
         let contact = MaterialSlidingContact::new(&thermal,
             binding(&cards, &curves, &card, &point, HeatPartition::new(0.5, 0.5, 0.0).unwrap()),
@@ -109,11 +119,11 @@ fn heat_capacity_data_changes_actual_slowing_through_endpoint_material_friction(
 }
 
 #[test]
-fn late_failures_stopping_and_budget_refuse_before_any_motion_or_heat_is_published() {
+fn late_failures_and_budget_refuse_before_any_motion_or_heat_is_published() {
     let (a, ca) = common::material(1.0, 2.0, 0.0);
     let (b, cb) = common::material(1.0, 3.0, 0.0);
     let cards = [a, b]; let curves = [ca, cb]; let point = context();
-    let card = interface(&cards, "speed", SPEED, [(0.0, 0.2), (2.0, 0.2)], 2000.0);
+    let card = interface_with_static(&cards, 0.2, "speed", SPEED, [(0.0, 0.2), (2.0, 0.2)], 2000.0);
     let thermal = common::initial(&curves, 0.0, None);
     let original_cells = thermal.cells().clone();
     let contact = MaterialSlidingContact::new(&thermal,
@@ -130,8 +140,6 @@ fn late_failures_stopping_and_budget_refuse_before_any_motion_or_heat_is_publish
     let mut limited = motion_controls(); limited.maximum_motion_trials = good.report().motion_trials - 1;
     assert!(matches!(pair.step_candidate(&thermal, 0.1, drive, limited, 0.8, &[0.0; 2], other, || false),
         Err(SlidingError::MotionBudget)));
-    assert!(matches!(pair.step_candidate(&thermal, 1.0, drive, motion_controls(), 0.8, &[0.0; 2], other, || false),
-        Err(SlidingError::Invalid(_))));
     let refused = pair.step_candidate(&thermal, 0.1, drive, motion_controls(), 0.8, &[0.0; 2], |state| {
         if state.temperature_k(CELLS[0]).unwrap() > 300.01 { return Err("thermal transport refused"); }
         Ok(StepCoefficients { sources_w: BTreeMap::new(), conductances_w_k: BTreeMap::new(), payload: () })
@@ -156,4 +164,128 @@ fn late_failures_stopping_and_budget_refuse_before_any_motion_or_heat_is_publish
     close(continued.pair().contact().accumulated_distance_m(), 0.08);
     close(continued.pair().contact().work().dissipated_work_j(), 0.16);
     close(continued.report().total_energy_residual_j, 0.0);
+}
+
+#[test]
+fn native_static_capacity_drives_rest_below_at_and_above_breakaway() {
+    use fs_tribo::FrictionRegime;
+    let (a, ca) = common::material(1.0, 2.0, 0.0);
+    let (b, cb) = common::material(1.0, 3.0, 0.0);
+    let cards = [a, b]; let curves = [ca, cb]; let point = context();
+    let card = interface_with_static(&cards, 0.4, "speed", SPEED, [(0.0, 0.2), (2.0, 0.2)], 2000.0);
+    let thermal = common::initial(&curves, 0.0, None);
+    let contact = MaterialSlidingContact::new(&thermal,
+        binding(&cards, &curves, &card, &point, HeatPartition::new(0.5, 0.5, 0.0).unwrap()),
+        10.0, 0.0, InputAuthority::SyntheticFixture).unwrap();
+    let pair = SlidingPair::new(&thermal, contact, [0.0; 2]).unwrap();
+    for force in [6.0, 8.0, 10.0] {
+        let next = pair.step_candidate(&thermal, 0.1,
+            MotionDrive { normal_load_n: 10.0, body_forces_n: [force, 0.0] },
+            motion_controls(), 0.3, &[0.0; 2], other, || false).unwrap();
+        let r = next.report();
+        let v = next.pair().velocities_mps();
+        if force <= 8.0 {
+            // Native static traction F/2 gives the common acceleration F/(mA+mB).
+            assert_eq!(r.sliding.friction.regime, FrictionRegime::Sticking);
+            assert_eq!(v[0], v[1]);
+            close(v[0], 0.05 * force);
+            close(r.sliding.friction.traction_n[0], force / 2.0);
+            assert_eq!(r.sliding.friction.slip_increment_m, [0.0; 2]);
+            assert_eq!(r.sliding.material.speed_mps, 0.0);
+            assert_eq!(r.sliding.deposited_heat_j, 0.0);
+            assert_eq!(next.pair().contact().accumulated_distance_m(), 0.0);
+            assert_eq!(next.thermal().cells(), thermal.cells());
+        } else {
+            assert_eq!(r.sliding.friction.regime, FrictionRegime::Sliding);
+            close(v[0], 0.8); close(v[1], 0.2);
+            close(r.sliding.friction.traction_n[0], 2.0);
+            close(r.sliding.friction.slip_increment_m[0], 0.06);
+            close(r.sliding.deposited_heat_j, 0.12);
+        }
+        assert!(r.body_momentum_residual_n_s.iter().all(|x| x.abs() < 1e-8));
+        assert!(r.source_motion_residual_n_s.abs() < 1e-8);
+        close(r.total_energy_residual_j, 0.0);
+    }
+}
+
+#[test]
+fn signed_source_speed_closes_against_the_native_solved_slip() {
+    let (a, ca) = common::material(1.0, 2.0, 0.0);
+    let (b, cb) = common::material(1.0, 3.0, 0.0);
+    let cards = [a, b]; let curves = [ca, cb]; let point = context();
+    let card = interface_with_static(&cards, 0.4, "speed", SPEED, [(0.0, 0.1), (2.0, 0.5)], 2000.0);
+    let thermal = common::initial(&curves, 0.0, None);
+    for sign in [1.0, -1.0] {
+        let contact = MaterialSlidingContact::new(&thermal,
+            binding(&cards, &curves, &card, &point, HeatPartition::new(0.5, 0.5, 0.0).unwrap()),
+            10.0, 1.0, InputAuthority::SyntheticFixture).unwrap();
+        let pair = SlidingPair::new(&thermal, contact, [sign, 0.0]).unwrap();
+        let next = pair.step_candidate(&thermal, 0.1,
+            MotionDrive { normal_load_n: 10.0, body_forces_n: [0.0; 2] },
+            motion_controls(), sign * 0.5, &[0.0; 2], other, || false).unwrap();
+        // s=1-2*(.1+.2*s), so |s|=4/7; querying released speed would differ.
+        let r = next.report();
+        close(next.pair().velocities_mps()[0] - next.pair().velocities_mps()[1], sign * 4.0 / 7.0);
+        close(r.sliding.material.speed_mps, 4.0 / 7.0);
+        close(r.sliding.friction.traction_n[0], sign * 15.0 / 7.0);
+        close(r.sliding.material.accumulated_distance_m, 0.1 * 4.0 / 7.0);
+        close(r.sliding.deposited_heat_j, 6.0 / 49.0);
+        close(r.total_energy_residual_j, 0.0);
+        assert!(r.source_motion_residual_n_s.abs() < 1e-8);
+    }
+}
+
+#[test]
+fn exact_native_stop_then_opposite_restart_retains_heat_and_signed_history() {
+    use fs_tribo::FrictionRegime;
+    let (a, ca) = common::material(1.0, 2.0, 0.0);
+    let (b, cb) = common::material(1.0, 3.0, 0.0);
+    let cards = [a, b]; let curves = [ca, cb]; let point = context();
+    let card = interface_with_static(&cards, 0.2, "speed", SPEED, [(0.0, 0.2), (2.0, 0.2)], 2000.0);
+    let thermal = common::initial(&curves, 0.0, None);
+    let contact = MaterialSlidingContact::new(&thermal,
+        binding(&cards, &curves, &card, &point, HeatPartition::new(0.5, 0.5, 0.0).unwrap()),
+        10.0, 1.0, InputAuthority::SyntheticFixture).unwrap();
+    let pair = SlidingPair::new(&thermal, contact, [1.0, 0.0]).unwrap();
+    let stopped = pair.step_candidate(&thermal, 0.25,
+        MotionDrive { normal_load_n: 10.0, body_forces_n: [0.0; 2] },
+        motion_controls(), 0.2, &[0.0; 2], other, || false).unwrap();
+    assert_eq!(stopped.report().sliding.friction.regime, FrictionRegime::Sticking);
+    assert_eq!(stopped.pair().velocities_mps(), [0.5; 2]);
+    assert_eq!(stopped.report().sliding.material.speed_mps, 0.0);
+    assert_eq!(stopped.report().sliding.deposited_heat_j, 0.0);
+    close(stopped.report().sliding.friction.traction_n[0], 2.0);
+    close(stopped.report().kinetic_energy_change_j, -0.25);
+    close(stopped.report().numerical_dissipation_j, 0.25);
+    close(stopped.report().total_energy_residual_j, 0.0);
+    // Endpoint stopping is BE numerical loss, not invented frictional heating.
+    assert_eq!(stopped.thermal().cells(), thermal.cells());
+    let (thermal, pair, _) = stopped.into_parts();
+    let reversed = pair.step_candidate(&thermal, 0.35,
+        MotionDrive { normal_load_n: 10.0, body_forces_n: [-10.0, 0.0] },
+        motion_controls(), -0.5, &[0.0; 2], other, || false).unwrap();
+    let r = reversed.report();
+    assert_eq!(r.sliding.friction.regime, FrictionRegime::Sliding);
+    close(reversed.pair().velocities_mps()[0], -0.3);
+    close(reversed.pair().velocities_mps()[1], 0.3);
+    close(r.sliding.friction.traction_n[0], -2.0);
+    close(r.sliding.friction.slip_increment_m[0], -0.06);
+    close(r.sliding.material.speed_mps, 0.6);
+    close(r.sliding.material.accumulated_distance_m, 0.06);
+    close(reversed.pair().contact().state().slip_m()[0], -0.06);
+    close(reversed.pair().contact().work().dissipated_work_j(), 0.12);
+    close(r.sliding.deposited_heat_j, 0.12);
+    close(r.total_energy_residual_j, 0.0);
+    // A zero-speed source limit is actually queried; no nonzero speed substitute.
+    let unsupported = interface_with_static(&cards, 0.2, "speed", SPEED,
+        [(0.1, 0.2), (2.0, 0.2)], 2000.0);
+    let contact = MaterialSlidingContact::new(&thermal,
+        binding(&cards, &curves, &unsupported, &point, HeatPartition::new(0.5, 0.5, 0.0).unwrap()),
+        10.0, 0.5, InputAuthority::SyntheticFixture).unwrap();
+    let bounded = SlidingPair::new(&thermal, contact, [0.5; 2]).unwrap();
+    assert!(matches!(bounded.step_candidate(&thermal, 0.35,
+        MotionDrive { normal_load_n: 10.0, body_forces_n: [0.0; 2] },
+        motion_controls(), 0.0, &[0.0; 2], other, || false), Err(SlidingError::Material(_))));
+    assert_eq!(bounded.velocities_mps(), [0.5; 2]);
+    assert_eq!(bounded.contact().work().dissipated_work_j(), 0.0);
 }
