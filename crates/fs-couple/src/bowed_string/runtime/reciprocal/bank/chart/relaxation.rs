@@ -24,15 +24,21 @@ impl MaterialStringBankSource {
                 1.0 / f64::from(self.options.sample_rate_hz))
                 .map_err(ReciprocalStringError::Material)?;
         }
+        if let Some(image) = &self.string_bending_relaxation {
+            image.validate_band(system.linear_frequency_upper_bound_rad_s(),
+                1.0 / f64::from(self.options.sample_rate_hz))?;
+        }
         Ok(())
     }
 
     // Reconstruct only the shared owner's coordinate embedding after a cold
-    // topology change. Body modes/material factors are NEVER resolved again.
+    // topology change. Body and string material factors are NEVER re-resolved.
+    // The stable history order is body first, then selected string channels.
     pub(in crate::bowed_string::runtime::reciprocal::bank) fn restore_body_memory(
         &self, mut system: FrictionModalSystem, memory: Option<Vec<f64>>, gate: &CancelGate,
     ) -> Result<FrictionModalSystem, ReciprocalStringError> {
         poll(gate)?;
+        let mut branches = Vec::new();
         if let Some(image) = &self.material_chart_relaxation {
             let body = self.strings.len();
             let component = system.components().get(body)
@@ -44,16 +50,23 @@ impl MaterialStringBankSource {
             let start: usize = system.components()[..body].iter().map(|c| c.modes().len()).sum();
             let dimension = system.mode_count().checked_mul(2)
                 .ok_or_else(|| invalid("body memory state embedding overflow"))?;
-            let branches = image.coupling_rows_per_s().iter().zip(image.relaxation_times_s())
+            branches.extend(image.coupling_rows_per_s().iter().zip(image.relaxation_times_s())
                 .map(|(row, &time)| {
                     let mut projection = vec![0.0; dimension];
                     for (i, &value) in row.iter().enumerate() { projection[2*(start+i)] = value; }
                     fs_phs::RelaxationBranch { projection, stiffness: 1.0, relaxation_time_s: time }
-                }).collect();
+                }));
+        }
+        if let Some(image) = &self.string_bending_relaxation {
+            branches.extend(image.branches(&system, gate)?);
+        }
+        if self.material_chart_relaxation.is_some() || self.string_bending_relaxation.is_some() {
             system = system.with_material_relaxation(branches, memory, gate)
                 .map_err(ReciprocalStringError::Friction)?;
             self.validate_body_memory_frequencies(&system, gate)?;
             self.validate_material_bridge_frequencies(&system, gate)?;
+        } else if memory.as_ref().is_some_and(|z| !z.is_empty()) {
+            return Err(invalid("cold rebuild cannot discard untracked material history"));
         }
         poll(gate)?;
         Ok(system)

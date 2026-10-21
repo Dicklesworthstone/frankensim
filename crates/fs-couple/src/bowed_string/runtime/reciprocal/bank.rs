@@ -127,6 +127,7 @@ pub struct MaterialStringBankSource {
     material_chart_basis: Option<crate::thin_plate::RetainedPlateBasis>,
     material_chart_viscosity: Option<crate::plate_viscosity::ViscousPlateImage>,
     material_chart_relaxation: Option<crate::plate_viscosity::relaxation::ModalPlateRelaxation>,
+    string_bending_relaxation: Option<relaxation::StringBankBendingRelaxation>,
     material_chart_bridges: Option<chart::PlateBridgeFootprints>,
     material_shell: Option<shell::SharedMaterialShellBody>,
     material_shell_image: Option<crate::shear_shell::MaterialShellImage>,
@@ -269,7 +270,7 @@ impl ReciprocalStringBank {
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_basis: None, material_chart_viscosity: None, material_chart_relaxation: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None }, cards, system })
+        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_basis: None, material_chart_viscosity: None, material_chart_relaxation: None, string_bending_relaxation: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None }, cards, system })
     }
 
     /// Select bounded cold exact propagation before playback or before adding
@@ -557,3 +558,6 @@ pub mod fluid;
 
 /// The same material sources in the existing nonlinear impact/contact owner.
 pub mod nonlinear;
+
+/// Source-bound bending memory in the same string/body/contact operator.
+pub mod relaxation;

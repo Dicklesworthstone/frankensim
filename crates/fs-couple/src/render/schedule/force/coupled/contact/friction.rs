@@ -192,6 +192,21 @@ impl FrictionModalSystem {
         Ok(self)
     }
 
+    /// Compose additional material participants in the same force response.
+    /// Preserve existing history, interfaces, nonlinear storage and observers;
+    /// refresh the bow compliance after the complete exact operator changes.
+    pub fn with_additional_material_relaxation(
+        mut self, branches: Vec<fs_phs::RelaxationBranch>, initial_memory: Option<Vec<f64>>,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalFrictionError> {
+        self.network = self.network.with_additional_material_relaxation(branches, initial_memory, gate)?;
+        self.compliance = effective_compliance(&self.network, &self.column, gate)?;
+        limit("complete initial material/nonlinear energy", self.total_energy_j()?,
+            self.network.config.maximum_total_energy_j)?;
+        poll(Some(gate))?;
+        Ok(self)
+    }
+
     /// Unmodified material projections and coefficients, in memory order.
     #[must_use]
     pub fn material_relaxation_branches(&self) -> &[fs_phs::RelaxationBranch] {
