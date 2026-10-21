@@ -218,3 +218,49 @@ fn flanged_load_bitwise_repeat() {
         a.re, a.im
     );
 }
+
+/// Measurement behind the cap (bead `frankensim-irp-v5-instrument-realism-pexfp.324`). The cap is a
+/// quadrature-design limit, not an edge of the model, so what matters is where the design stops
+/// resolving. This calls the cap-free seams above `FLANGED_MAX_KA`: the quadrature `Z_00` against the
+/// closed-form piston, the 16-mode load against the 24-mode load, and passivity. It records each
+/// `ka` (an error is recorded, not unwrapped) and asserts only that the cap itself is inside what
+/// it measures. Receipts: `IRPDUCT_FLANGED_ABOVE_CAP`.
+#[test]
+fn flanged_design_is_measured_above_the_cap() {
+    let gas = air();
+    let z0 = gas.density * gas.sound_speed / (PI * RADIUS * RADIUS);
+    let mut at_cap = None;
+    for ka in [FLANGED_MAX_KA, 20.5, 21.0, 22.0, 24.0, 26.0, 28.0, 30.0, 34.0, 38.0] {
+        let omega = omega_of(&gas, ka);
+        let (r, x) = fs_phs::baffled_piston_impedance(gas.density, gas.sound_speed, RADIUS, omega)
+            .expect("piston");
+        let closed = C64::new(r / z0, x / z0);
+        let quad = radiation_matrix(ka, 1).expect("matrix")[0];
+        let piston_rel = (quad - closed).abs() / closed.abs();
+        let l16 = flanged_load_uncached(&gas, RADIUS, omega, ka, FLANGED_MODES);
+        let l24 = flanged_load_uncached(&gas, RADIUS, omega, ka, FLANGED_MAX_MODES);
+        let line = match (&l16, &l24) {
+            (Ok(a), Ok(b)) => {
+                let ladder = (*a - *b).abs() / b.abs();
+                let refl = |z: &C64| {
+                    let num = C64::new(z.re - z0, z.im);
+                    let den = C64::new(z.re + z0, z.im);
+                    (num / den).abs()
+                };
+                format!(
+                    "modes16_vs_24={ladder:e} abs_R_16={:.12} abs_R_24={:.12} re_16={:e}",
+                    refl(a),
+                    refl(b),
+                    a.re / z0
+                )
+            }
+            (a, b) => format!("REFUSED 16: {:?} 24: {:?}", a.as_ref().err(), b.as_ref().err()),
+        };
+        eprintln!("IRPDUCT_FLANGED_ABOVE_CAP ka={ka} piston_rel={piston_rel:e} {line}");
+        if ka == FLANGED_MAX_KA {
+            at_cap = Some(piston_rel);
+        }
+        assert!(piston_rel.is_finite(), "quadrature Z_00 not finite at ka={ka}");
+    }
+    assert!(at_cap.expect("the cap is measured") < 1.0e-12, "the cap itself must hold the 1e-12 gate");
+}
