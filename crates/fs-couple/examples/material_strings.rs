@@ -12,6 +12,8 @@ mod stops;
 mod bow_interfaces;
 #[path = "material_strings/bridge_interfaces.rs"]
 mod bridge_interfaces;
+#[path = "material_strings/bending_memory.rs"]
+mod bending_memory;
 // Native entry points share one bounded source loader and phase policy.
 #[path = "../src/bin/music_render/thermochemical.rs"]
 mod thermochemical;
@@ -99,6 +101,9 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
     if !body && let LongitudinalMaterialLoss::KelvinVoigt { viscosity_property } = &spec.longitudinal_loss {
         requirements.push(Requirement::try_new(viscosity_property.as_str(),DynViscosity::DIMS,Admit::Finite)?);
     }
+    if !body && let Some(memory)=&spec.bending_memory {
+        memory.add_requirements(name,&spec.strings,&mut requirements)?;
+    }
     resolve_properties(name,catalog,loader,spec,&requirements)
 }
 fn resolve_properties(name:&str, catalog:&mut Catalog,
@@ -160,6 +165,7 @@ impl input::Spec {
         }
         let mut settings=options(&self,contacts[0],profile.is_some(),additional_body_connections)?;
         if let Some(body)=&profile { body.reserve_material_memory(&mut settings)?; }
+        if let Some(memory)=&self.bending_memory { memory.reserve_setup(&mut settings)?; }
         let bridge_interface_bytes = self.bridge_interfaces.pack_bytes()?;
         let interface_bytes = profile.as_ref().map(body::Profile::interface_pack_bytes)
             .transpose()?.unwrap_or(0).checked_add(self.friction.pack_bytes()?)
@@ -248,6 +254,10 @@ impl input::Spec {
         } else { bank };
         let bank = match &profile {
             Some(body) => body.bind_material_memory(bank, gate)?,
+            None => bank,
+        };
+        let bank = match &self.bending_memory {
+            Some(memory) => memory.bind(bank, gate)?,
             None => bank,
         };
         let joint=MultiFrictionConfig { max_ports:self.bow_contact_count(),max_sweeps:128,

@@ -68,6 +68,7 @@ pub struct Spec {
     pub geometric_stretching: Option<(f64, NonlinearModalConfig)>,
     pub longitudinal_waves: Option<(LongitudinalStringResolution, NonlinearModalConfig)>,
     pub longitudinal_loss: LongitudinalMaterialLoss,
+    pub bending_memory: Option<bending_memory::Input>,
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<StringForceProgram>,
     pub schedule: GestureSchedule,
@@ -281,6 +282,21 @@ impl Spec {
             row.end()?;
             loss
         } else { LongitudinalMaterialLoss::Elastic };
+        let bending_memory = if r.lines.clone().next()
+            .and_then(|line|line.split_ascii_whitespace().next()) == Some("bending-memory") {
+            let mut row=r.row("bending-memory")?;
+            let max_states=row.count(256)?; let selected=row.count(count)?; row.end()?;
+            let mut selections=Vec::with_capacity(selected);
+            for _ in 0..selected {
+                let mut row=r.row("string-memory")?;
+                let string=row.count(count-1)?; let terms=row.count(8)?;
+                let mut properties=Vec::with_capacity(terms);
+                for _ in 0..terms { properties.push((row.word()?.to_string(),row.word()?.to_string())); }
+                row.end()?;
+                selections.push(bending_memory::Selection {string,properties});
+            }
+            Some(bending_memory::Input::new(max_states,selections,&strings)?)
+        } else { None };
         let mut row = r.row("cavity")?;
         let cavity = match row.word()? {
             "none" => None,
@@ -460,7 +476,7 @@ impl Spec {
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, longitudinal_waves,
-            longitudinal_loss, cavity, friction, bow_ribbon, forces, schedule };
+            longitudinal_loss, bending_memory, cavity, friction, bow_ribbon, forces, schedule };
         spec.network_dimensions(false)?;
         Ok(spec)
     }
@@ -487,6 +503,7 @@ impl Spec {
     pub fn network_dimensions_with_body_connections(&self, tensor_body: bool,
         additional_body_connections: usize) -> Result<(usize, usize, usize)>
     {
+        if let Some(memory)=&self.bending_memory { memory.preflight(self)?; }
         let mut modes = self.body.modes.checked_add(usize::from(self.cavity.is_some()))
             .ok_or("complete mode count overflow")?;
         let mut transverse = 0usize;

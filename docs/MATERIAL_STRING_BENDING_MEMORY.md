@@ -30,8 +30,26 @@ let bank = bank.with_material_string_bending_relaxation(
 )?;
 ```
 
-This library API consumes source data; the existing `material_strings` file
-syntax does not yet expose this selection. No instrument preset is changed.
+The `material_strings` performance file exposes the same selection before its
+`cavity` record, after any longitudinal selection:
+
+```text
+bending-memory 16 1
+string-memory 0 1 bending_delta_e bending_tau
+```
+
+The first record declares the maximum new memory states and selected-string
+count. Each following record names an original zero-based string, a term count,
+then that many modulus/time property pairs. Every original layer of that string
+supplies its own values from its existing material pack. Unrelated packs and the
+body gain no new requirement. Shared packs resolve the union of explicitly
+selected properties once. The existing source cache and byte limits remain.
+
+Construction binds body memory first, then string memory, after gas and axial
+coordinates have been selected. New string memories start relaxed. All original
+schedules, bow interfaces, stops, pressure observation and PCM callbacks remain
+in the same performer. `prepared-linear` is incompatible and refuses before
+material loading. No instrument preset is changed.
 
 ## One energy and dynamics owner
 
@@ -77,6 +95,7 @@ Focused native regressions:
 ```sh
 cargo test -p fs-couple --test modal_material_composition
 cargo test -p fs-couple --test material_string_relaxation
+cargo test -p fs-couple --example material_strings bending_memory
 ```
 
 These Rust tests were added but not executed in the editing environment, which
