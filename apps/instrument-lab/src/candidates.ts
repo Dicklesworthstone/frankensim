@@ -17,7 +17,7 @@ interface Facts {
 interface Candidate {
   id: string; instrument: string; notes: string[]; dynamic: string; articulation: string; source_type: string; url: string; title: string; channel_or_author: string;
   licence: string; licence_evidence: string; start_s: number; end_s: number; conditions: string; sample_rate_hz: number; reason: string; render_coverage: { graded: string[]; reference_only: string[]; other: string[]; text: string | null };
-  creative_commons: boolean; audio: string; clip_duration_s: number; playback_gain_db: number; facts: Facts | null;
+  creative_commons: boolean; audio: string; clip_duration_s: number; playback_s: number; playback_gain_db: number; facts: Facts | null;
 }
 interface Looked { source: string; query_or_url: string; result: string; file?: string }
 interface Family {
@@ -47,7 +47,7 @@ function facts(c: Candidate): HTMLElement {
   return el("dl", { class: "ir-facts small" },
     row("Source", el("a", { href: c.url, rel: "noopener" }, c.title), ` — ${c.channel_or_author} (${SOURCE_NAME[c.source_type] ?? c.source_type})`),
     row("Licence", el("span", { class: c.creative_commons ? "ir-cc" : "ir-std" }, c.creative_commons ? "Creative Commons" : "Not Creative Commons"), ` ${c.licence}. Read from: ${c.licence_evidence}.`),
-    row("Where in the source", `${clock(c.start_s)}–${clock(c.end_s)} (${fmt(c.clip_duration_s)} s excerpt)`),
+    row("Where in the source", `${clock(c.start_s)}–${clock(c.end_s)} (${fmt(c.clip_duration_s)} s excerpt${c.playback_s < c.clip_duration_s ? `; this page plays only its first ${fmt(c.playback_s)} s` : ""})`),
     row("Clip", `${fmt(c.sample_rate_hz / 1000)} kHz${channels}${f.codec ? `, ${f.codec}` : ""}${lossy}`),
     row("Dynamic, articulation", `${c.dynamic}; ${c.articulation}`),
     row("Covers our render notes", covers),

@@ -41,6 +41,8 @@ OUT = APP / "public" / "data" / "candidates"
 SCHEMA = "frankensim.reference-candidates.v1"
 INDEX_SCHEMA = "frankensim.reference-candidates-index.v1"
 SOURCE_TYPES = ("open-library", "youtube", "freesound", "other")
+MAX_PLAY_S = 30.0         # the page plays at most the first 30 s of a clip
+LONG_CLIP_S = 45.0        # a record longer than this is a recording, not an excerpt: it ranks lower
 TARGET_RMS_DBFS = -26.0   # every clip is played at this RMS, so the owner is not judging loudness
 PEAK_LIMIT_DBFS = -1.0    # unless that would put its peak above this
 DURATION_SLACK_S = 0.3    # a record's end_s - start_s against the clip it names (an mp3 or a cut on a frame edge is not exact)
@@ -91,12 +93,14 @@ def playback_gain_db(x: np.ndarray) -> float:
     return round(min(TARGET_RMS_DBFS - 20 * math.log10(rms), PEAK_LIMIT_DBFS - 20 * math.log10(peak)), 2)
 
 
-def encode(src: Path, dst: Path, gain_db: float) -> None:
+def encode(src: Path, dst: Path, gain_db: float, seconds: float | None = None) -> None:
+    """The clip as AAC at the given gain; with `seconds`, only its first that many seconds."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_suffix(f".tmp{dst.suffix}")  # ffmpeg picks the muxer from the extension, so it must match the final name
     res = None
+    cut = [] if seconds is None else ["-t", f"{seconds:.3f}"]
     for codec in (["-c:a", "aac_at", "-b:a", "96k"], ["-c:a", "aac", "-b:a", "96k"]):
-        res = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-ac", "1", "-af", f"volume={gain_db}dB", *codec, str(tmp)], capture_output=True)
+        res = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), *cut, "-ac", "1", "-af", f"volume={gain_db}dB", *codec, str(tmp)], capture_output=True)
         if res.returncode == 0:
             tmp.replace(dst)
             return
@@ -226,18 +230,20 @@ def rank(rec: dict, facts: dict | None) -> float:
     All of it is measured or stated; none of it says anything about timbre."""
     steady = ((facts or {}).get("pitch") or {}).get("fraction_within_30_cents_of_median")
     sound = sum(n.get("clip_t1", 0) - n.get("clip_t0", 0) for n in (facts or {}).get("steady_notes_by_pitch_tracker", []) if isinstance(n, dict))
+    long_clip = number(rec.get("start_s")) and number(rec.get("end_s")) and rec["end_s"] - rec["start_s"] > LONG_CLIP_S  # an excerpt, not a whole recording
     return float(3 * min(len((coverage(rec.get("usable_for_render_notes")) or {"graded": []})["graded"]), 4) + (1 if rec["source_type"] == "open-library" else 0) + (1 if is_cc(rec["licence"]) else 0)
-                 + 2 * (steady if number(steady) else 0.0) + min(sound, 12.0) / 12.0)
+                 + 2 * (steady if number(steady) else 0.0) + min(sound, 12.0) / 12.0 - (2.0 if long_clip else 0.0))
 
 
 def build_candidate(rec: dict, facts: dict | None, base: Path, out_dir: Path) -> dict:
     x, sr = decode(base / rec["files"]["clip"])
-    gain = playback_gain_db(x)
-    encode(base / rec["files"]["clip"], out_dir / f"{rec['id']}.mp4", gain)
+    played = x[: int(MAX_PLAY_S * sr)]  # the page plays the first MAX_PLAY_S seconds of a longer clip (its card says so): the host limits the megabytes
+    gain = playback_gain_db(played)
+    encode(base / rec["files"]["clip"], out_dir / f"{rec['id']}.mp4", gain, MAX_PLAY_S if len(x) > len(played) else None)
     keep = ("id", "instrument", "notes", "dynamic", "articulation", "source_type", "url", "title", "channel_or_author", "licence", "licence_evidence", "start_s", "end_s",
             "conditions", "sample_rate_hz", "reason", "sha256_clip")
     return {**{k: rec.get(k) for k in keep}, "render_coverage": coverage(rec.get("usable_for_render_notes")), "creative_commons": is_cc(rec["licence"]), "audio": f"{out_dir.name}/{rec['id']}.mp4", "clip_duration_s": round(len(x) / sr, 3),
-            "playback_gain_db": gain, "facts": facts}
+            "playback_s": round(len(played) / sr, 3), "playback_gain_db": gain, "facts": facts}
 
 
 def main() -> int:

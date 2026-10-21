@@ -287,6 +287,25 @@ class Build(unittest.TestCase):
         self.assertGreater(C.rank(base, steady), C.rank(base, {"pitch": {"fraction_within_30_cents_of_median": 0.2}}))
         self.assertEqual(C.rank(base, {"steady_notes_by_pitch_tracker": [{"clip_t0": 0, "clip_t1": 40}]}), C.rank(base, {"steady_notes_by_pitch_tracker": [{"clip_t0": 0, "clip_t1": 12}]}), "capped")
 
+    def test_a_clip_longer_than_the_playback_limit_plays_only_its_first_part_and_says_so(self):
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / "c", Path(tmp) / "out"
+            write_doc(root, "violin", [record(root, cid="violin-yt-short", seconds=2.0), record(root, cid="violin-yt-long", seconds=40.0)])
+            code, err, index = build(root, out)
+            by_id = {c["id"]: c for c in family(index, "violin")["candidates"]}
+            self.assertEqual((by_id["violin-yt-short"]["playback_s"], by_id["violin-yt-short"]["clip_duration_s"]), (2.0, 2.0))
+            self.assertEqual((by_id["violin-yt-long"]["playback_s"], by_id["violin-yt-long"]["clip_duration_s"]), (C.MAX_PLAY_S, 40.0))
+            for cid, want in (("violin-yt-short", 2.0), ("violin-yt-long", C.MAX_PLAY_S)):
+                dur = float(sp.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(out / "violin" / f"{cid}.mp4")], capture_output=True, text=True).stdout)
+                self.assertAlmostEqual(dur, want, delta=0.2, msg=cid)
+
+    def test_a_recording_rather_than_an_excerpt_ranks_below_a_short_one(self):
+        short = {"source_type": "youtube", "licence": STANDARD, "start_s": 10.0, "end_s": 20.0}
+        long_ = {**short, "start_s": 0.0, "end_s": 238.0}
+        self.assertEqual(C.rank(short, None) - C.rank(long_, None), 2.0)
+        self.assertEqual(C.rank({**short, "end_s": 10.0 + C.LONG_CLIP_S}, None), C.rank(short, None), "45 s exactly is still an excerpt")
+
     def test_the_notes_our_renders_are_graded_on_are_passed_to_the_family(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, out = Path(tmp) / "c", Path(tmp) / "out"
