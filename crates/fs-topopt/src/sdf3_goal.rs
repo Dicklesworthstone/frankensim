@@ -169,13 +169,20 @@ impl ComplianceRefinement3 {
         dorfler3(&self.marking_mass, theta, max_marks, checkpoint)
     }
 }
+/// Internal retention for full load-basis assessments. Old callers allocate no
+/// retained family. Only a complete successful estimator call returns these.
+#[derive(Debug, Default)]
+pub(crate) struct EnrichedLoadFields3 {
+    pub forces: Vec<Vec<f64>>,
+    pub displacements: Vec<Vec<f64>>,
+}
 impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     /// Body-only compliance enrichment using the shared reference-load path.
     /// Each coarse field is revalidated; no partially solved family is returned.
     pub fn estimate_compliance_enrichment(&self, enriched: AdaptiveElasticity3,
         loads: &[GoalBodyLoad3<'_>], coarse_displacements: &[Vec<f64>], options: GoalRefinementOptions3,
         control: &mut SolveControl<'_>) -> Result<ComplianceRefinement3, GoalRefinementError3> {
-        self.estimate_load_family(enriched, &[], loads, coarse_displacements, options, control)
+        self.estimate_load_family(enriched, &[], loads, coarse_displacements, options, None, control)
     }
     /// Body-only enrichment with extra correction geometries BELOW the accepted
     /// grid. Extra levels are admitted only for the multilevel solve policy.
@@ -184,7 +191,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         coarser: &[&AdaptiveElasticity3], loads: &[GoalBodyLoad3<'_>], coarse_displacements: &[Vec<f64>],
         options: GoalRefinementOptions3, control: &mut SolveControl<'_>)
         -> Result<ComplianceRefinement3, GoalRefinementError3> {
-        self.estimate_load_family(enriched, coarser, loads, coarse_displacements, options, control)
+        self.estimate_load_family(enriched, coarser, loads, coarse_displacements, options, None, control)
     }
 
     /// Refine pressure-, traction-, body-, or mixed-loaded compliance studies.
@@ -202,7 +209,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     pub fn estimate_reference_compliance_enrichment(&self, enriched: AdaptiveElasticity3,
         loads: &[GoalReferenceLoad3<'_>], coarse_displacements: &[Vec<f64>], options: GoalRefinementOptions3,
         control: &mut SolveControl<'_>) -> Result<ComplianceRefinement3, GoalRefinementError3> {
-        self.estimate_load_family(enriched, &[], loads, coarse_displacements, options, control)
+        self.estimate_load_family(enriched, &[], loads, coarse_displacements, options, None, control)
     }
     /// Mixed reference-load enrichment with additional ordered coarse geometries.
     /// The accepted grid is always the first correction space. Additional levels
@@ -213,13 +220,21 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         coarser: &[&AdaptiveElasticity3], loads: &[GoalReferenceLoad3<'_>], coarse_displacements: &[Vec<f64>],
         options: GoalRefinementOptions3, control: &mut SolveControl<'_>)
         -> Result<ComplianceRefinement3, GoalRefinementError3> {
-        self.estimate_load_family(enriched, coarser, loads, coarse_displacements, options, control)
+        self.estimate_load_family(enriched, coarser, loads, coarse_displacements, options, None, control)
+    }
+
+    pub(crate) fn estimate_reference_compliance_with_fields(&self, enriched: AdaptiveElasticity3,
+        loads: &[GoalReferenceLoad3<'_>], coarse: &[Vec<f64>], options: GoalRefinementOptions3,
+        control: &mut SolveControl<'_>) -> Result<(ComplianceRefinement3, EnrichedLoadFields3), GoalRefinementError3> {
+        let mut fields = EnrichedLoadFields3::default();
+        let estimate = self.estimate_load_family(enriched, &[], loads, coarse, options, Some(&mut fields), control)?;
+        Ok((estimate, fields))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn estimate_load_family<L: GoalLaw3>(&self, mut enriched: AdaptiveElasticity3,
         coarser: &[&AdaptiveElasticity3], loads: &[L], coarse_displacements: &[Vec<f64>],
-        options: GoalRefinementOptions3, control: &mut SolveControl<'_>)
+        options: GoalRefinementOptions3, retained: Option<&mut EnrichedLoadFields3>, control: &mut SolveControl<'_>)
         -> Result<ComplianceRefinement3, GoalRefinementError3> {
         control.checkpoint("sdf3-goal-start")?;
         if loads.is_empty() || loads.len() > options.max_load_cases || loads.len() != coarse_displacements.len()
@@ -245,7 +260,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             let space = AdaptiveSolveSpace3::multilevel(enriched, &levels, hierarchy_options, || poll(control))?;
             let transfer = AdaptiveTransfer3::new(coarse_operator, space.elasticity(), options.max_transfer_terms, || poll(control))?;
             let prepared = space.prepare_elasticity(control)?;
-            return complete_family(&transfer, loads, coarse_displacements, options, &prepared, control);
+            return complete_family(&transfer, loads, coarse_displacements, options, &prepared, retained, control);
         }
         let transfer = AdaptiveTransfer3::new(coarse_operator, &enriched, options.max_transfer_terms, || poll(control))?;
         let prepared = match options.preconditioner {
@@ -272,13 +287,14 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             }
             GoalPreconditioner3::Multilevel { .. } => unreachable!("recursive branch returns above"),
         };
-        complete_family(&transfer, loads, coarse_displacements, options, &prepared, control)
+        complete_family(&transfer, loads, coarse_displacements, options, &prepared, retained, control)
     }
 }
 
 // All policies and load kinds share the actual independent-load/DWR path.
 fn complete_family<L: GoalLaw3>(transfer: &AdaptiveTransfer3<'_>, loads: &[L], coarse_displacements: &[Vec<f64>],
-    options: GoalRefinementOptions3, prepared: &impl Precond, control: &mut SolveControl<'_>)
+    options: GoalRefinementOptions3, prepared: &impl Precond, mut retained: Option<&mut EnrichedLoadFields3>,
+    control: &mut SolveControl<'_>)
     -> Result<ComplianceRefinement3, GoalRefinementError3> {
     let enriched = transfer.fine();
     let mut report = ComplianceRefinement3 { cases: Vec::with_capacity(loads.len()), weights: loads.iter().map(|l| l.weight()).collect(),
@@ -297,6 +313,10 @@ fn complete_family<L: GoalLaw3>(transfer: &AdaptiveTransfer3<'_>, loads: &[L], c
             *report.marking_mass.entry(cell).or_insert(0.0) += load.weight() * value.marking_mass;
         }
         report.cases.push(estimate);
+        if let Some(fields) = retained.as_deref_mut() {
+            fields.forces.push(rhs);
+            fields.displacements.push(fine);
+        }
     }
     if ![report.coarse_value, report.fine_value, report.correction].iter().all(|v| v.is_finite())
         || !report.marking_mass.values().all(|v| v.is_finite()) { return Err(GoalRefinementError3::Invalid("weighted goal overflow")); }

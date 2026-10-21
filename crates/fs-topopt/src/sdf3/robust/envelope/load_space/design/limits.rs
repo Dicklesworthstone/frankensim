@@ -2,6 +2,7 @@
 //! This is not a list of independent per-column compliance requirements.
 pub mod start;
 pub mod binary;
+pub mod refinement;
 use super::*;
 pub use crate::sdf3::robust::envelope::limits::ComplianceLimitedOptions3 as LoadSpaceLimitedOptions3;
 
