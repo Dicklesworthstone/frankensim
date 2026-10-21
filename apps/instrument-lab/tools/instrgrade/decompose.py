@@ -369,6 +369,22 @@ def modal_partials(y, f0, P, f, n_modes=N_PARTIALS):
 
 
 # ------------------------------------------------------------------------------------------- one note
+def flux_cells(S, sf):
+    """The cells the spectral flux is made of, for an STFT map `S` [dB] with bin frequencies `sf`: (positive dB step between
+    consecutive frames, whether the step is live, the rows of `S` that are in F_LO..F_HI). A step is live when the louder of
+    its two cells is within SHOW_DB of the map's peak."""
+    m = (sf > F_LO) & (sf < F_HI)
+    X = S[m]
+    live = np.maximum(X[:, 1:], X[:, :-1]) > X.max() - SHOW_DB
+    return np.where(live, np.maximum(np.diff(X, axis=1), 0.0), 0.0), live, m
+
+
+def flux_curve(S, sf):
+    """Spectral flux [dB] per frame (0 for the first): the RMS over the live cells of the positive frame-to-frame dB step."""
+    pos, live, _ = flux_cells(S, sf)
+    return np.concatenate([[0.0], np.sqrt(np.sum(pos ** 2, axis=0) / np.maximum(live.sum(axis=0), 1))])
+
+
 class Note:
     """Everything the decomposition needs from one aligned signal, computed once."""
 
@@ -458,12 +474,7 @@ class Note:
         sound = self.rms_db > self.rms_db.max() - 40
         self.sound = sound
         self.centroid_hz = np.where(sound, (fb * P).sum(axis=0) / (tot + 1e-30), np.nan)
-        m = (self.sf > F_LO) & (self.sf < F_HI)
-        pk = S[m].max()
-        D = np.diff(S[m], axis=1)
-        live = np.maximum(S[m][:, 1:], S[m][:, :-1]) > pk - SHOW_DB
-        pos = np.where(live, np.maximum(D, 0.0), 0.0)
-        self.flux_db = np.concatenate([[0.0], np.sqrt(np.sum(pos ** 2, axis=0) / np.maximum(live.sum(axis=0), 1))])
+        self.flux_db = flux_curve(S, self.sf)
 
     def scalars(self):
         d = self.desc

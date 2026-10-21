@@ -324,6 +324,19 @@ class OnsetRuleTests(unittest.TestCase):
             self.assertAlmostEqual(info["cut_onset_s"], dc.preroll_s(f0), delta=0.0015)
 
 
+class FluxTests(unittest.TestCase):
+    def test_flux_curve_is_what_the_old_inline_formula_gave_a_note(self):
+        n = note_of(tone(noise_db=-55))  # noise puts live cells between the partials, where the flux lives
+        S = n.S[:, : n.frames].astype(np.float64)
+        m = (n.sf > dc.F_LO) & (n.sf < dc.F_HI)
+        live = np.maximum(S[m][:, 1:], S[m][:, :-1]) > S[m].max() - dc.SHOW_DB
+        pos = np.where(live, np.maximum(np.diff(S[m], axis=1), 0.0), 0.0)
+        old = np.concatenate([[0.0], np.sqrt(np.sum(pos ** 2, axis=0) / np.maximum(live.sum(axis=0), 1))])
+        np.testing.assert_array_equal(n.flux_db, old)
+        np.testing.assert_array_equal(dc.flux_curve(S, n.sf), old)
+        self.assertGreater(n.flux_db[n.sound].mean(), 0.5)  # not a vacuous equality of zeros
+
+
 class FloorTests(unittest.TestCase):
     def test_block_wise_floor_matches_the_whole_file_floor_and_is_faster(self):
         import time
