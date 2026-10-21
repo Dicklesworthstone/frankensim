@@ -23,7 +23,11 @@
 # (Sec. 5.1); lip-hole area ~6e-6 to ~3.5e-6 m2 (Fig. 4) and height ~0.9 mm (Fig. 6) are read off
 # the plots; values between the two published endpoints are linear in log2(f). Never read from a
 # recording. Labium offset, jet angle, onset ramp (50 ms), mouth loss (0.02), the jet displacement
-# gain (90) and the tonal-interim jet card are UNKNOWN or interim: see unknowns.tsv and status.json.
+# gain (90) are UNKNOWN or authored: see unknowns.tsv and status.json. The jet card is an inline X-Est
+# lip-jet card, not the interim 2-D slot-jet card: theta/b 1.75 places the island's band peak (0.55 omega_c,
+# omega_c = U / 4 theta) at the published Strouhal number of maximum jet amplification, Str_h = 0.025 (de la
+# Cuadra 2008 Sec. 7), and the convection ratio is 0.4 (Auvray 2012; Terrien 2014; de la Cuadra: 0.3 to 0.5).
+# The binary must contain the jet-island phase fix (fs-couple 1718d79fb or later).
 #
 # References (grading only, never an input): UIowa MIS Flute.nonvib.mf.B3B4 (D4, G4) and
 # Flute.nonvib.mf.C5B5 (A5), ids uiowa-flute-flute-nonvib-mf-b3b4 / -c5b5 in references.json.
