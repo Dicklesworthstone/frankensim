@@ -525,6 +525,39 @@ trajectory against six independent material/damping finite-difference
 directions at two parameter points, and the fully prescribed zero-gradient,
 budget, cancellation and retry limits.
 
+`adjoint::support::reaction` supplies physical support-force observation
+pullbacks through `reaction_pullback`. The observed force is the force ON the
+solid, `R_c=(M*a+(eta*M+zeta*K)*v+K*q-fT-f_external)_c`, in fixed world
+Cartesian components. A caller supplies finite objective derivatives with
+respect to sorted unique fixed DOFs, typically from a recovered reaction
+residual. The result includes full motion seeds `(K' w,C' w,M' w)`, direct
+fixed-force rows `-w`, and direct material/Rayleigh terms `+w' dR` at fixed
+motion. The full canonical transpose and material contraction owners are
+reused; no global full matrix, new equilibrium solve or finite difference is
+introduced. `reaction_motion_pullback` on the prepared prescribed companion
+supplies the same motion seed without a primal-state tape.
+
+For a complete reaction objective, chain the motion seed through the existing
+initialization/step/trajectory reverse, then add the direct material and
+fixed-force terms. Fully prescribed motion has no implicit material derivative,
+but its physical reactions retain nonzero direct thermal, inertia and damping
+derivatives. The same `-w` applies independently to a full frozen thermal
+equivalent force. Stiffness-dependent thermal effects already present in the
+material term must not be counted again. The endpoint API supports stationary
+and driven restraints, keeps full consistent-mass and damping coupling, and
+checks independent full-DOF/element allowances before scratch allocation.
+Malformed rows, nonfinite arithmetic, refusal and cancellation publish no
+partial result and never change accepted motion. No moving-axis, shape,
+thermal-law, stress-observation, physical-work or acceptance-gate derivative
+is inferred.
+
+`tests/transient_reaction_adjoint3.rs` checks analytic direct and implicit
+initial reaction terms, the same observation seed on stationary and driven
+supports, three-step reaction-target finite differences in seven independent
+material/damping/support/free-force/fixed-force directions, fully prescribed
+nonzero direct material sensitivities, and malformed/budget/cancellation retry
+boundaries.
+
 `adjoint::support::trajectory` records complete prescribed-support simulations
 through `record_prescribed_controls`. For controls alone, its owning recorder
 retains only accepted interval times: the frozen linear motion Jacobian needs
