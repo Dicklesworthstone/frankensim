@@ -3336,6 +3336,31 @@ material substitution reaching support/neighbor motion, and source refusal.
 Rust syntax checks and an independent spatial quadrature check passed in the
 implementation environment; native Rust execution remains required.
 
+### Spatial closure on retained multimode material reeds
+
+`ModalAperture::with_plate_closure` uses the original plate displacement
+columns at every physical contact quadrature point and slit edge. Higher modes
+with zero mean opening still change partial closure and contact. The same
+triangle-area weights and transpose modal maps supply storage, force and work.
+The existing contact owner's stable power-law secants are cached per point and
+sample. Positive P1 gap integrals retain partially open edges; the shared
+viscous-slit owner supplies local flow when selected.
+
+The full modal Newton island uses the existing midpoint/full-viscosity or exact
+material-memory response. Trials do not advance accepted structural or material
+history. One or two blades share a matching planar mesh; their original
+pressure and swept-volume projections remain authoritative. Moving pressure
+footprints, nonmatching contact meshes and resolved moving-wall flow are absent.
+Initial states still pass the original constructor's effective-slit admission
+before the spatial closure is attached.
+
+The optional `closure spatial` material-modal performance record reaches the
+ordinary pressure renderer, music CLI and streamed PCM writer. Focused G0/G3
+regression sources cover partial opening, zero-mean contact, local work, full
+viscosity, regional material memory, source substitution, callback partitions,
+CLI PCM parity and rejected-step rollback. Parse-only Rust and whitespace checks
+passed; native execution and measured-instrument qualification remain open.
+
 `SupportedMaterialStrings::in_stationary_gas_with_longitudinal_waves` extends
 that same support owner with material-solid axial inertia and selected
 longitudinal sine modes. Actual 3D span endpoints, a declared transverse frame

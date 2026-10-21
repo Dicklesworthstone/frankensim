@@ -147,3 +147,6 @@ fn native_material_mimo_cli_matches_original_performer_and_preserves_source_auth
     assert!(!output.exists());
     assert!(!output.with_extension("provenance.json").exists());
 }
+
+#[path = "material_modal/spatial.rs"]
+mod spatial;

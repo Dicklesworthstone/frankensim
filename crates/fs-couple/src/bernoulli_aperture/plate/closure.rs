@@ -74,6 +74,33 @@ impl PlateApertureReduction {
     /// quadrature budget, contact-law admission or unrepresentable geometry.
     pub fn compile_closure(&self, spec: PlateClosureSpec) -> Result<PlateClosure, AcousticRealizeError> {
         let mesh = &self.chart().mesh;
+        let (weights, nodes) = contact_quadrature(mesh, &spec)?;
+        let blades = self.moving_blade_count() as f64;
+        let shape: Vec<_> = self.shape_per_opening().iter().map(|v| blades * v[0]).collect();
+        let h = self.options().rest_opening_m;
+        // Local TOTAL gap = g_i + shape_i*(y-H). Obstacle penetration b_i*y-c_i
+        // therefore uses b_i=-shape_i and c_i=g_i-shape_i*H. Each physical
+        // interface point contributes once, including for two moving blades.
+        let rows = nodes.iter().map(|&i| -shape[i]).collect();
+        let gaps = nodes.iter().map(|&i| spec.nodal_rest_gap_m[i]-shape[i]*h).collect();
+        let areas = nodes.iter().map(|&i| weights[i]).collect();
+        let law = Obstacle::new(rows,nodes.len(),1,gaps,areas,
+            spec.stiffness_pa_per_m_alpha,spec.alpha,spec.provenance.clone())
+            .and_then(|law| law.with_internal_loss(spec.internal_loss_s_per_m))
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        let edges = self.options().slit_edges.iter().map(|&edge| {
+            let [a,b] = edge.map(|i| mesh.nodes[i]);
+            (edge,(a.0-b.0).hypot(a.1-b.1))
+        }).collect();
+        Ok(PlateClosure { spec,law,rest_coordinate_m:h,shape,edges,nodes })
+    }
+}
+
+// One physical area quadrature for scalar, paired and multimode interfaces.
+// Modal adapters supply their original displacement columns separately.
+pub(crate) fn contact_quadrature(mesh: &fs_plate::PlateMesh, spec: &PlateClosureSpec)
+    -> Result<(Vec<f64>, Vec<usize>), AcousticRealizeError>
+{
         if spec.nodal_rest_gap_m.len() != mesh.node_count()
             || spec.nodal_rest_gap_m.iter().any(|x| !x.is_finite())
             || spec.lay_triangles.is_empty() || spec.lay_triangles.len() > mesh.tris.len()
@@ -96,25 +123,7 @@ impl PlateApertureReduction {
             || weights.iter().any(|w| !w.is_finite()) {
             return Err(invalid("plate lay exceeds its 4096-point contact budget or area overflowed"));
         }
-        let blades = self.moving_blade_count() as f64;
-        let shape: Vec<_> = self.shape_per_opening().iter().map(|v| blades * v[0]).collect();
-        let h = self.options().rest_opening_m;
-        // Local TOTAL gap = g_i + shape_i*(y-H). Obstacle penetration b_i*y-c_i
-        // therefore uses b_i=-shape_i and c_i=g_i-shape_i*H. Each physical
-        // interface point contributes once, including for two moving blades.
-        let rows = nodes.iter().map(|&i| -shape[i]).collect();
-        let gaps = nodes.iter().map(|&i| spec.nodal_rest_gap_m[i]-shape[i]*h).collect();
-        let areas = nodes.iter().map(|&i| weights[i]).collect();
-        let law = Obstacle::new(rows,nodes.len(),1,gaps,areas,
-            spec.stiffness_pa_per_m_alpha,spec.alpha,spec.provenance.clone())
-            .and_then(|law| law.with_internal_loss(spec.internal_loss_s_per_m))
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        let edges = self.options().slit_edges.iter().map(|&edge| {
-            let [a,b] = edge.map(|i| mesh.nodes[i]);
-            (edge,(a.0-b.0).hypot(a.1-b.1))
-        }).collect();
-        Ok(PlateClosure { spec,law,rest_coordinate_m:h,shape,edges,nodes })
-    }
+        Ok((weights, nodes))
 }
 impl PlateClosure {
     /// Original unmodified clearance/contact input, with no normalized weights.
@@ -207,7 +216,7 @@ impl PlateClosure {
 // Positive-part integral on a unit edge. Scaling avoids overflow in a-b for
 // opposite large finite endpoints. At a zero crossing the open part is a
 // triangle, not a trapezoid formed by clipping both endpoint samples first.
-fn positive_linear_mean(a: f64,b: f64) -> f64 {
+pub(crate) fn positive_linear_mean(a: f64,b: f64) -> f64 {
     if a >= 0.0 && b >= 0.0 { return 0.5*a+0.5*b; }
     if a <= 0.0 && b <= 0.0 { return 0.0; }
     let p = a.max(b);

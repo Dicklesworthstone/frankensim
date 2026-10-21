@@ -23,6 +23,7 @@ pub(super) struct ExactModes {
     modes: ModeMaps,
     pressure: Vec<f64>,
     contact: Vec<f64>,
+    force_response: Vec<f64>,
     arms: Vec<Vec<ExactArm>>,
 }
 
@@ -112,12 +113,14 @@ impl ExactModes {
         let n = spec.modes.len();
         let mut pressure = vec![0.0; n];
         let mut contact = vec![0.0; n];
+        let mut force_response = vec![0.0; n * n];
         match &modes {
             ModeMaps::Diagonal(blocks) => {
                 for (i, block) in blocks.iter().enumerate() {
                     let zero_memory = vec![0.0; arms.get(i).map_or(0, Vec::len)];
                     let (_, mobility) =
                         block.free_and_mobility(BladeState::default(), 0.0, dt, &zero_memory);
+                    force_response[n * i + i] = mobility;
                     pressure[i] = mobility * spec.modes[i].pressure_area_m2;
                     contact[i] = mobility * spec.modes[i].gap_projection;
                 }
@@ -129,13 +132,14 @@ impl ExactModes {
                             / block.root_stiffness[i]
                             / block.root_stiffness[j]
                             / dt;
+                        force_response[n * i + j] = mobility;
                         pressure[i] += mobility * spec.modes[j].pressure_area_m2;
                         contact[i] += mobility * spec.modes[j].gap_projection;
                     }
                 }
             }
         }
-        if pressure.iter().chain(&contact).any(|v| !v.is_finite()) {
+        if pressure.iter().chain(&contact).chain(&force_response).any(|v| !v.is_finite()) {
             return Err(invalid(
                 "exact modal pressure/contact response is unrepresentable",
             ));
@@ -144,6 +148,7 @@ impl ExactModes {
             modes,
             pressure,
             contact,
+            force_response,
             arms,
         })
     }
@@ -153,6 +158,14 @@ impl ExactModes {
     }
     pub(super) fn contact_response(&self) -> &[f64] {
         &self.contact
+    }
+
+    // Every spatial contact column uses the SAME cached full structural map,
+    // including off-diagonal viscosity and regional material-memory reactions.
+    pub(super) fn force_velocity(&self, force: &[f64], out: &mut [f64]) {
+        for (row, value) in self.force_response.chunks_exact(force.len()).zip(out) {
+            *value = row.iter().zip(force).map(|(b, f)| b * f).sum();
+        }
     }
 
     pub(super) fn free_velocity(

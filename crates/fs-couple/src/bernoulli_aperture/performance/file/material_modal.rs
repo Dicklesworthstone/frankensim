@@ -4,7 +4,7 @@
 //! original regional material chart, every requested signed mode, pressure
 //! traction and full selected viscosity matrix. Shared owners perform all
 //! geometry, flow, nonlinear contact, propagation, radiation and scheduling.
-//! Flat DKT walls and the effective uniform slit/contact remain approximations;
+//! Flat DKT walls and the selected finite-mode interface remain approximations;
 //! source provenance and matched baffled observation do not qualify a recording.
 //! An optional `propagator midpoint|exact-zoh` record after `audio` selects the
 //! structural clock image before material modes are admitted. Omission retains
@@ -19,6 +19,7 @@ mod boundaries;
 mod radiation;
 mod wall;
 mod forces;
+mod closure;
 
 use super::{PlateValveInputError, Reader, bad, checkpoint, gas,
     read_receiver, MAX_PLATE_VALVE_PERFORMANCE_BYTES, MAX_CONTROLS};
@@ -292,6 +293,7 @@ impl MaterialModalValvePerformance {
             plates.push((source, options));
         }
         let modes = states.len();
+        let closure = closure::read(&mut rows, gate)?;
         let boundaries = boundaries::Inputs::read(&mut rows)?;
         let forces = forces::read(&mut rows, blades, mechanical_samples, gate)?;
         let mut row = rows.row("compile_limits")?;
@@ -330,6 +332,9 @@ impl MaterialModalValvePerformance {
                     } else { valve.with_material_relaxation(&properties, initial, gate) })
             }
         }.map_err(PlateValveInputError::Physics)?;
+        if let Some(closure) = closure {
+            valve = valve.with_plate_closure(closure).map_err(PlateValveInputError::Physics)?;
+        }
         if let Some(length) = slit {
             valve.set_material_viscous_slit(length).map_err(PlateValveInputError::Physics)?;
         }

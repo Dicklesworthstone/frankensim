@@ -292,7 +292,7 @@ fn load_with_all_sources(
     }
     if bytes.starts_with(b"frankensim-material-modal-valve-v1\n") {
         if policy == ObservationPolicy::Acceptance {
-            return Err("material-modal files retain flat DKT walls and an effective uniform slit; matched baffled observation is not a measured instrument qualification".into());
+            return Err("material-modal files retain flat DKT walls and a finite modal interface; matched baffled observation is not a measured instrument qualification".into());
         }
         let p = fs_couple::bernoulli_aperture::performance::file::material_modal::MaterialModalValvePerformance::from_bytes_with_all_sources(
             bytes, block, &CancelGate::new(), sources, load_material, load_radiation).map_err(|e| e.to_string())?;
@@ -407,7 +407,10 @@ fn load_with_all_sources(
                fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream].into_iter()
                 .map(|side| p.renderer().pending_boundary_controls(side).len()).sum::<usize>()
             + (0..i.blades).map(|blade| p.renderer().pending_plate_force_controls(blade).len()).sum::<usize>();
-        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}{force_json}{relaxation_json}}}",
+        let closure_scope = if valve.plate_closure().is_some() {
+            "source-mesh distributed contact and positive-P1 slit flow on every retained mode"
+        } else { "effective uniform slit/contact" };
+        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; {closure_scope}; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}{force_json}{relaxation_json}}}",
             i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
             compiled_controls, valve.viscosity_matrix_n_s_m().is_some(),
             terminals);

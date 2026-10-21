@@ -22,6 +22,9 @@ use fs_phs::{
     NewtonSite, SolveBudget, SolveCertificate, admit_newton_iterate, arithmetic_rounding_floor,
 };
 mod exact;
+/// Source-bound nodal clearance, contact and physical slit flow.
+pub mod closure;
+mod spatial;
 /// Original regional material plates and same-basis spatial ports.
 pub mod material;
 /// Source-bound proportional Maxwell memory in the original modal basis.
@@ -77,7 +80,8 @@ pub struct ModalApertureFrame {
     pub modes: Vec<BladeState>,
     /// Same-sample pressure difference across the source [Pa].
     pub pressure_drop_pa: f64,
-    /// Single physical contact resultant [N]; generalized forces are g_i*F.
+    /// Sum of physical normal contact forces [N]. A uniform slit uses g_i*F;
+    /// spatial closure pulls each point reaction into its own original mode row.
     pub contact_force_n: f64,
     /// Independent force-balance residuals, in the original coordinates [N].
     pub momentum_residual_n: Vec<f64>,
@@ -95,6 +99,7 @@ pub struct ModalAperture {
     state: Vec<BladeState>,
     obstacle: Obstacle,
     contact_storage: ContactStorage,
+    closure: Option<closure::ModalPlateClosure>,
     samples: u64,
     material_plates: Vec<material::MaterialModalPlate>,
     material_gas: Option<fs_material::gas::GasState>,
@@ -230,6 +235,7 @@ impl ModalAperture {
             state,
             obstacle,
             contact_storage,
+            closure: None,
             samples: 0,
             material_plates: Vec::new(),
             material_gas: None,
@@ -318,6 +324,9 @@ impl ModalAperture {
         self.viscous_slit
     }
     fn gap(&self, state: &[BladeState]) -> f64 {
+        if let Some(closure) = &self.closure {
+            return closure.state_gap(state);
+        }
         self.spec.rest_opening_m
             + self
                 .spec
@@ -328,7 +337,9 @@ impl ModalAperture {
                 .sum::<f64>()
     }
     fn energy(&self, state: &[BladeState]) -> f64 {
-        self.contact_storage.hamiltonian(&[self.gap(state), 0.0])
+        self.closure.as_ref().map_or_else(
+            || self.contact_storage.hamiltonian(&[self.gap(state), 0.0]),
+            |closure| closure.energy(state))
             + self
                 .spec
                 .modes
@@ -363,7 +374,10 @@ impl ModalAperture {
             ));
         }
         for plate in &self.material_plates {
-            plate.validate_state(state)?;
+            plate.validate_state(state, self.closure.is_none())?;
+        }
+        if let Some(closure) = &self.closure {
+            closure.validate_state(state)?;
         }
         let energy = self.energy(state);
         if !self.gap(state).is_finite()
@@ -491,7 +505,17 @@ impl ModalAperture {
         }
         let gap = self.gap(&self.state);
         let z = self.spec.impedance_pa_s_m3;
-        let trial = if let Some(exact) = &self.exact {
+        let trial = if let Some(closure) = &self.closure {
+            if let Some(exact) = &self.exact {
+                exact.free_velocity(
+                    &self.state, &external[..n], dt,
+                    self.relaxation.as_ref().map(|r| r.states.as_slice()), &mut free[..n],
+                )?;
+            } else if let Some(c) = self.viscosity.as_ref().filter(|c| c.is_active()) {
+                c.solve_free(&mut free[..n])?;
+            }
+            self.solve_profiled(drive, &free[..n], &mobility[..n], &area[..n], closure)?
+        } else if let Some(exact) = &self.exact {
             exact.free_velocity(
                 &self.state,
                 &external[..n],
@@ -565,12 +589,21 @@ impl ModalAperture {
             .zip(&trial.velocity)
             .map(|(g, v)| g * v)
             .sum();
-        let contact = ApertureContactStep::new(&self.obstacle, gap)
-            .and_then(|c| c.response(next_gap, vm))
-            .map_err(nonlinear)?;
+        let contact = if let Some(closure) = &self.closure {
+            let before = closure::displacements(&self.state);
+            let after = closure::displacements(&next);
+            closure.response(&before[..n], &after[..n], &trial.velocity[..n])?
+        } else {
+            let contact = ApertureContactStep::new(&self.obstacle, gap)
+                .and_then(|c| c.response(next_gap, vm)).map_err(nonlinear)?;
+            let mut forces = [0.0; MAX_MODES];
+            for i in 0..n { forces[i] = shape[i] * contact.force; }
+            closure::ClosureResponse { forces_n: forces, normal_force_n: contact.force,
+                dissipated_power_w: contact.dissipated_power }
+        };
         let endpoint = self.exact.as_ref().map(|exact| {
             let held: Vec<_> = (0..n)
-                .map(|i| external[i] - area[i] * trial.dp + shape[i] * contact.force)
+                .map(|i| external[i] - area[i] * trial.dp + contact.forces_n[i])
                 .collect();
             exact.endpoint(
                 &self.state,
@@ -584,9 +617,18 @@ impl ModalAperture {
             next.copy_from_slice(&exact.state);
         }
         self.validate_state(&next)?;
-        let opening = f64::midpoint(gap, next_gap).max(0.0);
-        let jet = match self.viscous_slit {
-            Some(law) => {
+        let mut middle = [0.0; MAX_MODES];
+        for i in 0..n {
+            middle[i] = f64::midpoint(self.state[i].displacement_m, next[i].displacement_m);
+        }
+        let opening = match &self.closure {
+            Some(closure) => closure.open_area_m2(&middle[..n])? / self.spec.width_m,
+            None => f64::midpoint(gap, next_gap).max(0.0),
+        };
+        let jet = match (self.viscous_slit, &self.closure) {
+            (Some(law), Some(closure)) => closure.viscous_flow(
+                law, &middle[..n], self.spec.density_kg_m3, trial.dp)?.flow_m3_s,
+            (Some(law), None) => {
                 law.evaluate(
                     self.spec.width_m,
                     opening,
@@ -595,7 +637,7 @@ impl ModalAperture {
                 )?
                 .flow_m3_s
             }
-            None => super::moving::volume_flow(
+            (None, _) => super::moving::volume_flow(
                 self.spec.width_m,
                 opening,
                 trial.dp,
@@ -675,11 +717,11 @@ impl ModalAperture {
             storage_change_j: energy - self.stored_energy_j(),
             dissipated_energy_j: match &endpoint {
                 Some(exact) => {
-                    dt * (trial.dp * jet + contact.dissipated_power)
+                    dt * (trial.dp * jet + contact.dissipated_power_w)
                         + exact.viscous_loss_j
                         + relaxation_loss
                 }
-                None => dt * (trial.dp * jet + viscous + contact.dissipated_power),
+                None => dt * (trial.dp * jet + viscous + contact.dissipated_power_w),
             },
             pressure_work_j: dt * trial.dp * (wave - drive.body_flow_m3_s),
             mechanical_work_j: mechanical,
@@ -701,7 +743,7 @@ impl ModalAperture {
                     + m.damping_n_s_m * trial.velocity[i]
                     + endpoint.as_ref().map_or(0.0, |e| e.relaxation_force_n[i])
                     + area[i] * trial.dp
-                    - shape[i] * contact.force
+                    - contact.forces_n[i]
                     - external[i];
                 if self.viscosity.as_ref().is_some_and(|c| c.is_active()) {
                     residual + viscous_force[i]
@@ -761,7 +803,7 @@ impl ModalAperture {
             modes: next,
             pressure_drop_pa: trial.dp,
             port_transfers,
-            contact_force_n: contact.force,
+            contact_force_n: contact.normal_force_n,
             momentum_residual_n: momentum,
             work_certificate,
             flow_certificate,

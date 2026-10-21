@@ -261,3 +261,5 @@ fn g0_missing_material_coefficients_and_incomplete_physical_inputs_refuse() {
         &gate, None, |_| { requested = true; Ok(pack(900.0, false)) }).is_err());
     assert!(!requested);
 }
+
+mod spatial;

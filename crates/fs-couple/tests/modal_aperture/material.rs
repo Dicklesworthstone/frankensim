@@ -451,3 +451,5 @@ fn selected_reed_material_loss_refuses_authored_damping_and_out_of_band_modes() 
     let narrow = chart.with_region_material("blade", &source_in_band(900., 0.0, 100.)).unwrap();
     assert!(PlateApertureReduction::from_material_chart(narrow, one_mode_options(&options), &gate).is_err());
 }
+
+mod spatial;

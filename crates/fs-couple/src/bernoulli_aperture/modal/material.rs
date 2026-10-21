@@ -299,7 +299,7 @@ impl MaterialModalPlate {
         })
     }
 
-    pub(super) fn validate_state(&self, all: &[BladeState]) -> Result<(), AcousticRealizeError> {
+    pub(super) fn validate_state(&self, all: &[BladeState], uniform_slit: bool) -> Result<(), AcousticRealizeError> {
         let state = &all[self.mode_range()];
         let motion = |node: usize| {
             self.shapes[node]
@@ -315,7 +315,7 @@ impl MaterialModalPlate {
             .map(|(m, s)| m.gap_projection * s.displacement_m)
             .sum();
         for (node, &w) in self.slit_weights.iter().enumerate() {
-            if w > 0.0 && (motion(node) - mean).abs() > self.options.maximum_slit_deviation_m {
+            if uniform_slit && w > 0.0 && (motion(node) - mean).abs() > self.options.maximum_slit_deviation_m {
                 return Err(invalid(
                     "summed material blade motion exceeds the effective-slit deviation limit",
                 ));

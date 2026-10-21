@@ -36,6 +36,13 @@ The example explicitly selects `propagator exact-zoh`. The clock and retained
 mode bounds stay authored data; exact free structural propagation is not a
 reason to lower the clock without measuring nonlinear time error.
 
+`paired-spatial.performance` uses the same material packs and renderer with
+actual nodal clearances and distributed blade-to-blade contact. Every retained
+mode changes local opening, partial edge closure and the gas-dependent channel
+flow. Its interface is deliberately manufactured, with a 20–60 micrometre
+rest-gap profile; it is not a measured oboe reed. Render it by selecting that
+filename in the command above.
+
 `paired-keyed.performance` adds one material cantilever key on an explicitly
 declared downstream chimney. Supply `key.matpack` through the same normalizer,
 or copy the manufactured `blade.matpack` to that name for the integration
@@ -126,6 +133,7 @@ contact EFFECTIVE_STIFFNESS_N_PER_M_ALPHA EXPONENT INTERNAL_LOSS_S_PER_M
 loss tensor V11 V22 V66 V12 V16 V26 REFERENCE_RESISTANCE_N_S_M PROJECTION_TERMS
 blades COUNT
 BLADE_RECORDS
+OPTIONAL_SPATIAL_CLOSURE_RECORDS
 upstream_boundaries
 BOUNDARY_RECORDS
 downstream_boundaries
@@ -211,6 +219,51 @@ unsteady no-slip fixed passage; it is additional geometry, separate from the
 moving gap. The selected structural propagator and the original channel,
 network, nonlinear work and flow admissions all remain binding. This ingress
 neither changes the passage nor substitutes a static resistance for its state.
+
+### Spatial reed/lay or blade/blade closure
+
+After all blade records, before any boundary or source-force records, select:
+
+```text
+closure spatial PRESSURE_STIFFNESS_PA_PER_M_ALPHA EXPONENT INTERNAL_LOSS_S_PER_M MAX_PENETRATION_M SOURCE_TOKEN
+clearances NODE_COUNT
+gap TOTAL_REST_GAP_M
+...
+lay_triangles TRIANGLE_COUNT
+lay_triangle ORIGINAL_TRIANGLE_INDEX
+...
+```
+
+There must be one rest gap per original node, in original node order. Triangle
+IDs select the physical contact patch; its triangle areas are the quadrature
+weights. `SOURCE_TOKEN` identifies the explicitly supplied contact-pair law.
+The two-blade form requires identical planar node/triangle/slit indexing, while
+preserving each blade's independent material, support, thickness and mode basis.
+One blade uses a stationary lay; two blades share one contact interface.
+
+This selection replaces the earlier effective `contact` law in both dynamics
+and stored energy. It does not add a second contact force. Each local gap is the
+rest clearance plus every retained signed displacement contribution. Contact
+uses the existing pointwise nonadhesive discrete force, then projects reaction
+into every original mode, including modes with zero mean opening. Local
+Hunt–Crossley loss is applied before those reactions are summed. The same-time
+solve includes all modes, the original pressure/swept-volume faces and either
+full material viscosity or the selected exact Maxwell history.
+
+Slit flow integrates the positive part of the physical P1 edge gap, including
+partially closed edges. With `slit_length`, the existing laminar/Bernoulli law
+uses the actual local height and source gas viscosity; it does not replace the
+profile by a mean-height channel. Final states retain the original trace-slope
+and new local penetration bounds. The effective-slit deviation limit applies
+only to the uniform interface after attachment; original constructors still
+admit the supplied initial material state before this optional attachment.
+Omission or `closure none` retains the existing uniform path.
+
+This is a finite-mode, matching planar interface. Contact does not change the
+basis, mask the pressure face, introduce curved/nonmatching surfaces or resolve
+moving-wall fluid inertia. The supplied nonlinear evaluation budget includes
+all modal Jacobian probes and backtracks; failure publishes no new modal or
+material-memory state.
 
 ### Physical force on each original source plate
 
@@ -464,10 +517,10 @@ the complete distinct-source set at 64 MiB. Mechanical/output ratio is an intege
 ## Physical scope and verification
 
 This is a source/renderer integration over flat linear DKT plates, a finite
-declared mode basis, an effective uniform slit/contact, plane-wave duct graphs,
-and either compact independent or source-bound mutual infinite-baffle radiation.
-It does not supply distributed
-reed-surface collision, shell/solid wet-cane geometry, resolved moving-channel
+declared mode basis, either an effective uniform slit/contact or the selected
+source-mesh spatial interface, plane-wave duct graphs, and either compact
+independent or source-bound mutual infinite-baffle radiation. It does not supply
+curved/nonmatching reed-surface collision, shell/solid wet-cane geometry, resolved moving-channel
 flow, nonlinear jet separation, unbaffled bells, delayed broadband radiation, or live
 material/gas evolution. It does not qualify instrument recordings.
 
