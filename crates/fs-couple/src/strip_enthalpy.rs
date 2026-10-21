@@ -21,3 +21,6 @@ pub mod growth;
 
 /// Pinned material conductivity in the original self-heating residual.
 pub mod transport;
+
+/// Spatial cell/layer self-heating and gravity sag on the original bridge owner.
+pub mod bridge;
