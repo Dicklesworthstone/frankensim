@@ -15,12 +15,34 @@ use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objectiv
 use fs_conduction::bc::history::march::moving::MovingHeatSource;
 use fs_dfo::differential_evolution::{DifferentialEvolutionConfig, DifferentialEvolutionError,
     DifferentialEvolutionRunError, DifferentialEvolutionStop};
+use fs_dfo::differential_evolution::parallel::DifferentialEvolutionParallelError;
 use fs_dfo::differential_evolution::constrained::{ConstrainedDifferentialEvolutionPoint,
     ConstrainedDifferentialEvolutionReport, ConstrainedDifferentialEvolutionState,
     ConstrainedEvaluation, FeasibilityScore};
-use fs_exec::Cx;
+use fs_exec::{Cx, TilePool};
+use fs_alloc::OperationMemoryLease;
 
 pub type PopulationScanError = DifferentialEvolutionRunError<ScanSensitivityError>;
+
+/// Preserve admission and drained parallel execution failures separately.
+#[derive(Debug)]
+pub enum PopulationScanParallelError {
+    Admission(ScanSensitivityError),
+    Search(DifferentialEvolutionParallelError<ScanSensitivityError>),
+}
+impl std::fmt::Display for PopulationScanParallelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Admission(error) => write!(f, "parallel scan admission: {error}"),
+            Self::Search(error) => std::fmt::Display::fmt(error, f),
+        }
+    }
+}
+impl std::error::Error for PopulationScanParallelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self { Self::Admission(error) => Some(error), Self::Search(error) => Some(error) }
+    }
+}
 
 /// Search status and physical work are distinct; callback admission can fail
 /// before a physical reservation. Neither a pause nor budget exhaustion is a
@@ -61,9 +83,10 @@ impl PopulationScanReplay {
     }
 }
 
-/// Serial, in-process constrained search. The underlying DE worker also has a
-/// parallel API; this owner deliberately accepts the existing FnMut physical
-/// factory without pretending it is safe to share between workers.
+/// In-process constrained search with serial and explicitly shared execution.
+/// The serial API accepts the original FnMut physical factory. Parallel calls
+/// additionally require Fn + Sync and Sync observations: a mutable-only factory
+/// is never silently cloned or protected by a global physical-solver mutex.
 ///
 /// Search boxes use the study's optimizer coordinates, not automatically SI.
 /// For nonnegative-linear powers with reference_w=1 they are watts. Source
@@ -144,6 +167,43 @@ impl<F, O: ScanObservationSpec> PopulationScanStudy<F, O> {
             Ok::<_, ScanSensitivityError>(ConstrainedEvaluation { objective: physical.physical.value,
                 inequalities: constraints.residuals })
         })?;
+        Ok(PopulationScanReport { search, physical_evaluations: self.study.evaluations(),
+            physical_evaluation_limit: self.study.evaluation_limit(),
+            remaining_physical_search_evaluations: self.remaining_search_work() })
+    }
+
+    /// Evaluate bounded waves on the original TilePool with all physical
+    /// requirements attached. One borrowed batch keeps source controls, model,
+    /// observations and constraint scales fixed, while each worker constructs
+    /// its own run from its own Cx. Started physical reservations settle back
+    /// into the original study before success OR an error returns.
+    ///
+    /// Successful sibling scores remain in the DE cache on failure/cancellation;
+    /// either advance API can continue without repeating them. Target checks
+    /// occur between waves. The reserved serial replay is never dispatched.
+    /// The executor lease does not cap callback-owned physical heap allocations.
+    pub fn advance_parallel<'h, 'm, 'c>(&mut self, cx: &Cx<'_>, pool: &TilePool,
+        lease: &OperationMemoryLease, additional_evaluations: usize, max_wave: usize)
+        -> Result<PopulationScanReport, PopulationScanParallelError>
+    where F: Fn(&Cx<'_>, Vec<MovingHeatSource>)
+            -> Result<ScanningEnthalpyRun<'h, 'm, 'c>, ScanSensitivityError> + Sync,
+        O: Sync,
+    {
+        let allowance = additional_evaluations.min(self.remaining_search_work())
+            .min(self.search.evaluation_limit().saturating_sub(self.search.evaluations()));
+        let attempted = {
+            let batch = self.study.value_batch(cx, allowance)
+                .map_err(PopulationScanParallelError::Admission)?;
+            self.search.advance_parallel(cx, pool, lease, allowance, max_wave, &|worker, point| {
+                let (physical, constraints) = batch.evaluate_at(worker, point)?;
+                Ok::<_, ScanSensitivityError>(ConstrainedEvaluation {
+                    objective: physical.physical.value, inequalities: constraints.residuals,
+                })
+            })
+            // The pool has drained. Drop settles even failed reservations here,
+            // before the outer Result propagates and before another advance.
+        };
+        let search = attempted.map_err(PopulationScanParallelError::Search)?;
         Ok(PopulationScanReport { search, physical_evaluations: self.study.evaluations(),
             physical_evaluation_limit: self.study.evaluation_limit(),
             remaining_physical_search_evaluations: self.remaining_search_work() })

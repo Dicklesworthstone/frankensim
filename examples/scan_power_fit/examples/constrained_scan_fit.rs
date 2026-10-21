@@ -20,7 +20,8 @@ use fs_conduction::transient::enthalpy::heterogeneous::ReferenceEnthalpyMaterial
 use fs_conduction::{ConductionMesh, ConductivityModel, ScalarField, ThermalBc,
     ThermalBoundaryBuilder, LinearConfig, COMPONENT_POWER_DIMS};
 use fs_dfo::differential_evolution::{DifferentialEvolutionConfig, DifferentialEvolutionStop};
-use fs_exec::{Cx, Budget, CancelGate, ExecMode, StreamKey};
+use fs_exec::{Cx, Budget, CancelGate, ExecMode, StreamKey, TilePool};
+use fs_alloc::OperationMemoryLease;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EnthalpyPhaseKnot};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::scenario::Environment;
@@ -30,14 +31,29 @@ use fs_solver::NewtonKrylovConfig;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const TARGET: f64 = 1e-8;
 const TOLERANCE: f64 = 1e-9;
+const USAGE: &str = "constrained_scan_fit [--workers 1..128] [energy_cap_J [peak_fraction [search_attempts]]]";
 #[derive(Clone, Copy)]
-struct Options { energy_j: f64, peak_fraction: f64, attempts: usize }
+struct Options { energy_j: f64, peak_fraction: f64, attempts: usize, workers: Option<usize> }
 fn options(args: &[String]) -> Result<Options> {
-    if args.len() > 3 { return Err("constrained_scan_fit [energy_cap_J [peak_fraction [search_attempts]]]".into()); }
-    let energy_j = args.first().map(|s| s.parse()).transpose()?.unwrap_or(60.0);
-    let peak_fraction = args.get(1).map(|s| s.parse()).transpose()?.unwrap_or(0.5);
-    let attempts = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(2400);
-    let out = Options { energy_j, peak_fraction, attempts };
+    let mut values = Vec::new();
+    let mut workers = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--workers" if workers.is_none() => {
+                i += 1;
+                workers = Some(args.get(i).ok_or(USAGE)?.parse::<usize>()?);
+            }
+            value if !value.starts_with("--") => values.push(value),
+            _ => return Err(USAGE.into()),
+        }
+        i += 1;
+    }
+    if values.len() > 3 || workers.is_some_and(|n| !(1..=128).contains(&n)) { return Err(USAGE.into()); }
+    let energy_j = values.first().map(|s| s.parse()).transpose()?.unwrap_or(60.0);
+    let peak_fraction = values.get(1).map(|s| s.parse()).transpose()?.unwrap_or(0.5);
+    let attempts = values.get(2).map(|s| s.parse()).transpose()?.unwrap_or(2400);
+    let out = Options { energy_j, peak_fraction, attempts, workers };
     if !out.energy_j.is_finite() || out.energy_j < 0.0 || out.energy_j > 100.0
         || !out.peak_fraction.is_finite() || !(0.0..=1.0).contains(&out.peak_fraction)
         || !(32..=10_000).contains(&out.attempts)
@@ -108,13 +124,24 @@ fn fit(cx: &Cx<'_>, input: Options, partitioned: bool) -> Result<PopulationScanR
         max_evaluations:initial_cap, max_population_entries:48, target:Some(TARGET),
     }, TOLERANCE)?;
     assert_eq!(driver.physical_evaluations(), 0);
+    let pool = input.workers.map(|threads| TilePool::for_host(threads, 17));
+    // Executor bookkeeping is leased separately from the original physical
+    // solver's own spatial/work budgets; this is not a total RSS guarantee.
+    let lease = OperationMemoryLease::bounded(64 << 20);
     if partitioned {
-        let paused = driver.advance(cx, 7)?;
+        let paused = match &pool {
+            Some(pool) => driver.advance_parallel(cx, pool, &lease, 7, 24)?,
+            None => driver.advance(cx, 7)?,
+        };
         assert_eq!(paused.search.evaluations, 7);
         driver.extend_evaluation_budgets(input.attempts, input.attempts + 1)?;
     }
     loop {
-        let report = driver.advance(cx, if partitioned { 13 } else { input.attempts })?;
+        let additional = if partitioned { 13 } else { input.attempts };
+        let report = match &pool {
+            Some(pool) => driver.advance_parallel(cx, pool, &lease, additional, 24)?,
+            None => driver.advance(cx, additional)?,
+        };
         if report.physical_budget_exhausted() || report.search.stop != DifferentialEvolutionStop::Paused { break; }
     }
     let replay = driver.replay_best(cx)?;
@@ -137,6 +164,8 @@ fn main() -> Result<()> {
     let input = options(&std::env::args().skip(1).collect::<Vec<_>>())?;
     let result = with_cx(|_,cx| fit(cx, input, true))?;
     println!("# synthetic P1 specimen; feasibility-first DE; no optimality certificate");
+    println!("# evaluation_mode={}; requested_workers={}; maximum_wave=24",
+        if input.workers.is_some() { "parallel" } else { "serial" }, input.workers.unwrap_or(1));
     println!("# feasible={}; target_recovered={}; objective={:.17e}; max_scaled_violation={:.17e}",
         result.score.is_feasible(), result.target_recovered(), result.score.objective(),
         result.score.max_scaled_violation());
@@ -169,7 +198,7 @@ mod tests {
     }
     #[test]
     fn g1_tighter_energy_cap_returns_a_feasible_mismatch_not_a_false_recovery() {
-        let input = Options { energy_j:45., peak_fraction:0.5, attempts:2400 };
+        let input = Options { energy_j:45., peak_fraction:0.5, attempts:2400, workers:None };
         let result = with_cx(|_,cx| fit(cx, input, false)).unwrap();
         assert!(result.score.is_feasible());
         assert!(!result.target_recovered());
@@ -178,7 +207,7 @@ mod tests {
     }
     #[test]
     fn g5_pause_extension_replays_the_same_population_and_physical_result() {
-        let input = Options { energy_j:45., peak_fraction:0.5, attempts:80 };
+        let input = Options { energy_j:45., peak_fraction:0.5, attempts:80, workers:None };
         let a = with_cx(|_,cx| fit(cx, input, false)).unwrap();
         let b = with_cx(|_,cx| fit(cx, input, true)).unwrap();
         assert_eq!(a.coordinates, b.coordinates);
@@ -197,10 +226,45 @@ mod tests {
             assert!(fit(cx, options(&[])?, false).is_err());
             Ok(())
         }).unwrap();
-        let input = Options { energy_j:60., peak_fraction:0., attempts:32 };
+        let input = Options { energy_j:60., peak_fraction:0., attempts:32, workers:None };
         let result = with_cx(|_,cx| fit(cx, input, false)).unwrap();
         assert!(!result.score.is_feasible());
         assert!(!result.target_recovered());
         assert!(result.constraints.peak_values[0] > 0.);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn g5_worker_counts_and_pause_partitions_preserve_constrained_physics_at_fixed_work() {
+        // The target cannot be reached under this energy cap, so every mode
+        // spends the same prefix; between-wave target stopping is not compared.
+        let input = Options { energy_j:45., peak_fraction:0.5, attempts:80, workers:None };
+        let serial = with_cx(|_,cx| fit(cx, input, false)).unwrap();
+        for workers in [1,4] {
+            for partitioned in [false,true] {
+                let parallel = with_cx(|_,cx| fit(cx,
+                    Options { workers:Some(workers), ..input }, partitioned)).unwrap();
+                assert_eq!(parallel.coordinates, serial.coordinates);
+                assert_eq!(parallel.score, serial.score);
+                assert_eq!(parallel.constraints, serial.constraints);
+                assert_eq!(parallel.physical.physical.predictions, serial.physical.physical.predictions);
+                assert_eq!(parallel.search_evaluations, 80);
+                assert_eq!(parallel.physical_evaluations, 81);
+            }
+        }
+    }
+
+    #[test]
+    fn g0_worker_options_are_explicit_bounded_and_do_not_change_serial_defaults() {
+        assert_eq!(options(&[]).unwrap().workers, None);
+        let args = ["45", "--workers", "4", "0.5", "80"].map(str::to_string);
+        let parsed = options(&args).unwrap();
+        assert_eq!(parsed.workers, Some(4));
+        assert_eq!(parsed.energy_j, 45.);
+        assert_eq!(parsed.attempts, 80);
+        for args in [vec!["--workers"], vec!["--workers", "0"], vec!["--workers", "129"],
+            vec!["--workers", "2", "--workers", "4"], vec!["--worker", "4"]] {
+            assert!(options(&args.into_iter().map(str::to_string).collect::<Vec<_>>()).is_err());
+        }
     }
 }

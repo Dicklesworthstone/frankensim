@@ -165,3 +165,84 @@ fn g4_racing_workers_cannot_exceed_one_shared_physical_allowance() {
         assert_eq!(owner.evaluations(), 4);
     });
 }
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn g4_population_batch_retains_successful_siblings_and_retries_only_the_failed_physics() {
+    use fs_dfo::differential_evolution::DifferentialEvolutionConfig;
+    use scan_power_fit::population::{PopulationScanStudy, PopulationScanParallelError};
+    use fs_dfo::differential_evolution::parallel::DifferentialEvolutionParallelError;
+    let m = mesh(); let k = ConductivityModel::isotropic_declared(2.).unwrap(); let c = curve();
+    with_cx(|_, cx| {
+        let boundary = ThermalBoundaryHistory::new(cx, ThermalBoundaryBuilder::new(&m)
+            .adiabatic_remainder(), &Environment::earth_lab(), vec![], 0.).unwrap();
+        let config = |limit| DifferentialEvolutionConfig { population_size:8,
+            differential_weight:0.8, crossover_probability:0.9, seed:17,
+            max_evaluations:limit, max_population_entries:16, target:None };
+        let clean_flag = AtomicBool::new(false);
+        let failure_flag = AtomicBool::new(true);
+        let mut clean = PopulationScanStudy::new(cx,
+            study(cx, &m, &boundary, &k, &c, &clean_flag, 17), &[[0.,4.];2], config(16), 0.).unwrap();
+        clean.advance(cx, 16).unwrap();
+        let mut retry = PopulationScanStudy::new(cx,
+            study(cx, &m, &boundary, &k, &c, &failure_flag, 18), &[[0.,4.];2], config(17), 0.).unwrap();
+        let pool = fs_exec::TilePool::for_host(4, 17);
+        let lease = fs_alloc::OperationMemoryLease::bounded(64 << 20);
+        let failure = retry.advance_parallel(cx, &pool, &lease, 4, 4).unwrap_err();
+        assert!(matches!(failure, PopulationScanParallelError::Search(
+            DifferentialEvolutionParallelError::Evaluation { source: ScanSensitivityError::Source(
+                fs_conduction::ConductionError::Config { parameter: "injected batch factory failure", .. }), .. })));
+        assert_eq!(retry.physical_evaluations(), retry.search_evaluations());
+        assert!(retry.search_evaluations() >= 1 && retry.search_evaluations() <= 4);
+        retry.advance(cx, 17).unwrap();
+        assert_eq!(retry.search_evaluations(), 17);
+        assert_eq!(retry.physical_evaluations(), 17);
+        assert_eq!(retry.population(), clean.population());
+        assert_eq!(retry.best(), clean.best());
+        let replayed = retry.replay_best(cx).unwrap();
+        let expected = clean.replay_best(cx).unwrap();
+        assert_eq!(replayed.score, expected.score);
+        assert_eq!(replayed.constraints, expected.constraints);
+        assert_eq!(replayed.physical.physical.predictions, expected.physical.physical.predictions);
+        assert_eq!(replayed.physical_evaluations, 18);
+        let exhausted = retry.advance_parallel(cx, &pool, &lease, 20, 8).unwrap();
+        assert_eq!(exhausted.physical_evaluations, 18);
+        retry.extend_evaluation_budgets(25, 27).unwrap();
+        retry.advance_parallel(cx, &pool, &lease, 8, 4).unwrap();
+        assert_eq!(retry.physical_evaluations(), 26);
+        assert_eq!(retry.replay_best(cx).unwrap().physical_evaluations, 27);
+    });
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn g0_population_dispatch_refusal_and_pre_cancel_return_unused_reservations() {
+    use fs_dfo::differential_evolution::DifferentialEvolutionConfig;
+    use scan_power_fit::population::PopulationScanStudy;
+    let m = mesh(); let k = ConductivityModel::isotropic_declared(2.).unwrap(); let c = curve();
+    with_cx(|gate, cx| {
+        let boundary = ThermalBoundaryHistory::new(cx, ThermalBoundaryBuilder::new(&m)
+            .adiabatic_remainder(), &Environment::earth_lab(), vec![], 0.).unwrap();
+        let fail = AtomicBool::new(false);
+        let mut owner = PopulationScanStudy::new(cx,
+            study(cx, &m, &boundary, &k, &c, &fail, 17), &[[0.,4.];2],
+            DifferentialEvolutionConfig { population_size:8, differential_weight:0.8,
+                crossover_probability:0.9, seed:17, max_evaluations:16,
+                max_population_entries:16, target:None }, 0.).unwrap();
+        let pool = fs_exec::TilePool::for_host(2, 17);
+        let lease = fs_alloc::OperationMemoryLease::bounded(64 << 20);
+        assert!(owner.advance_parallel(cx, &pool, &lease, 6, 0).is_err());
+        assert_eq!(owner.physical_evaluations(), 0);
+        assert_eq!(owner.search_evaluations(), 0);
+        assert_eq!(owner.advance_parallel(cx, &pool, &lease, 0, 8).unwrap().physical_evaluations, 0);
+        gate.request();
+        assert!(owner.advance_parallel(cx, &pool, &lease, 8, 8).is_err());
+        assert_eq!(owner.physical_evaluations(), 0);
+        assert_eq!(owner.search_evaluations(), 0);
+        with_cx(|_, fresh| {
+            owner.advance_parallel(fresh, &pool, &lease, 8, 8).unwrap();
+            assert_eq!(owner.search_evaluations(), 8);
+            assert_eq!(owner.physical_evaluations(), 8);
+        });
+    });
+}
