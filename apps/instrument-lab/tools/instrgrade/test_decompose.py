@@ -85,6 +85,19 @@ class AlignmentTests(unittest.TestCase):
         first = dc.onset_times(y, -100.0, f0_hz=F0)
         self.assertAlmostEqual(max(ta, tb), max(first), delta=0.002)
 
+    def test_a_recording_that_begins_at_its_own_onset_aligns_only_from_the_file_start(self):
+        n = int(2.0 * SR)
+        tt = np.arange(n) / SR
+        x = 0.2 * np.exp(-tt * 2.0) * np.sin(2 * np.pi * 196 * tt)  # a plucked string: loudest at sample 0
+        floor = -90.0
+        cut, info = dc.align(x, 196.0, floor, anchor_s=0.02, at_start=True)
+        self.assertAlmostEqual(info["cut_onset_s"], dc.preroll_s(196.0), delta=0.0015)
+        self.assertLess(abs(info["onset_s"]), 0.01)  # in the time of the file: its first sample
+        with self.assertRaisesRegex(dc.OnsetMisaligned, "NO_QUIET_BEFORE_ONSET"):
+            dc.align(x, 196.0, floor, anchor_s=0.02, at_start=False)  # a window cut from the middle of a file: legato
+        render, rinfo = dc.align(x, 196.0, floor)  # a render that starts at sample 0 is the same note
+        self.assertAlmostEqual(rinfo["cut_onset_s"], dc.preroll_s(196.0), delta=0.0015)
+
     def test_silence_refuses(self):
         with self.assertRaises(dc.OnsetMisaligned):
             dc.onset_times(np.zeros(SR), -120.0)
@@ -224,7 +237,7 @@ class ContractTests(unittest.TestCase):
         import json
         base = Path(root) / family / note
         pj = json.loads((base / "pair.json").read_text())
-        problems = bi.validate_pair(pj, family, note, base, {"syn-mf": {}, "syn-ff": {}}) + bi.check_audio(base, pj)
+        problems = bi.validate_pair(pj, family, note, base, {"syn-mf": {"licence": "uiowa-mis"}, "syn-ff": {"licence": "uiowa-mis"}}) + bi.check_audio(base, pj)
         self.assertEqual(problems, [])
         return pj
 
@@ -311,6 +324,21 @@ class ContractTests(unittest.TestCase):
         self.assertEqual((stamps[0] / "ours.wav").read_bytes(), first)
         self.assertTrue((stamps[0] / "pair.json").exists())
         self.assertEqual(__import__("json").loads((d / "pair.json").read_text())["ours"]["git_sha"], "def")
+
+    def test_a_recording_outside_references_json_carries_its_own_source(self):
+        import json
+        refs = dc.Refs(self.tmp / "lib.json", self.tmp / "wav", self.tmp / "refs.json")
+        refs.external = dict(name="Set", url="https://example.org/set", licence="CC BY 4.0", licence_url="https://example.org/by", credit="Someone")
+        root = self.tmp / "external"
+        ref_e = refs.find("syn", 58, "mf")[0]
+        y, info = refs.aligned(ref_e)
+        pj = dc.write_pair(root, "voice", "Bb3", ref_e, refs, y, info)
+        self.assertEqual(pj["real"]["source"]["credit"], "Someone")
+        self.assertEqual(pj["real"]["source"]["id"], "syn-mf")
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        import build_instruments as bi
+        base = root / "voice" / "Bb3"
+        self.assertEqual(bi.validate_pair(json.loads((base / "pair.json").read_text()), "voice", "Bb3", base, {}), [])
 
     def test_a_refused_render_batch_job_writes_the_record(self):
         import json

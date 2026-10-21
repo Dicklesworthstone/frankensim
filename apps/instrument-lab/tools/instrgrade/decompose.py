@@ -93,7 +93,8 @@ def onset_times(y, floor_db, anchor_s=None, f0_hz=None, peak_db=None):
     With no anchor the first crossing is taken (a render, or a cut). With an anchor (a time inside the note, from
     the library's segmentation) the crossing is the one that precedes it: walk back from the anchor to where the
     level was last under the threshold. If B never was under it within the window, the note begins legato on the
-    previous one and has no level onset: refused, never guessed.
+    previous one and has no level onset: refused, never guessed (align() hands a recording that begins at its own
+    onset zeros to start from, so a plucked string is not mistaken for that).
     """
     e, t = env_rms_db(y, win=env_window(f0_hz))
     n = len(e)
@@ -136,15 +137,24 @@ def render_floor(y, f0_hz=None):
     return min(floor_of(y), float(e.max()) - 50.0)
 
 
-def align(raw, f0_hz, floor_db, anchor_s=None):
+def align(raw, f0_hz, floor_db, anchor_s=None, at_start=False):
     """High-pass with the note's corner, find the onset, cut `preroll_s` before it. Returns (y, info).
 
-    The peak that B is measured from is the peak of the cut itself (found by iterating), so that cutting at the
-    onset and detecting again finds the same crossing; that re-detection is the assertion.
+    A signal that begins at its own onset (a render, or a reference window that starts at the file's first sample:
+    `at_start`) is given silence to start from before detection, so that a plucked note's step edge is found by the
+    same detector, with the same window, on the signal and on its cut. A window that starts in the middle of a
+    file is not padded: a note that begins on the tail of the previous one is refused by onset_times.
+    The peak that B is measured from is the peak of the cut itself (found by iterating), so slow ramps stay
+    idempotent; re-detecting on the cut at the lead-in is the alignment assertion. Times in `info` are in the
+    time of `raw`.
     """
     y = highpass(raw, f0_hz)
     pre = preroll_s(f0_hz)
     win = env_window(f0_hz)
+    pad = int((pre + win / SR + 0.005) * SR) if (anchor_s is None or at_start) else 0
+    if pad:
+        y = np.concatenate([np.zeros(pad), y])
+        anchor_s = None if anchor_s is None else anchor_s + pad / SR
     pk = None
     for _ in range(4):
         ta, tb = onset_times(y, floor_db, anchor_s, f0_hz, pk)
@@ -162,9 +172,10 @@ def align(raw, f0_hz, floor_db, anchor_s=None):
     got = max(ra, rb)
     if abs(got - pre) * 1000 > ALIGN_TOL_MS:
         raise OnsetMisaligned(f"IRPDECOMP_ONSET_MISALIGNED: cut onset {got * 1000:.2f} ms, expected {pre * 1000:.1f} ms")
-    return cut, dict(onset_s=float(t_on), noise_criterion_s=float(ta), peak_criterion_s=float(tb),
+    off = pad / SR
+    return cut, dict(onset_s=float(t_on) - off, noise_criterion_s=float(ta) - off, peak_criterion_s=float(tb) - off,
                      criteria_spread_ms=float(abs(ta - tb) * 1000), floor_db=float(floor_db), cut_onset_s=float(got),
-                     cut_start_s=a_in / SR, preroll_s=pre)
+                     cut_start_s=a_in / SR - off, preroll_s=pre)
 
 
 # ------------------------------------------------------------------------------- time-frequency maps
@@ -534,9 +545,11 @@ class Refs:
     def __init__(self, lib_path, wav_dir, refs_json=None):
         self.lib = json.loads(Path(lib_path).read_text())
         self.wav_dir = Path(wav_dir)
-        self.meta = {}
+        self.meta, self.external = {}, None
         if refs_json:
-            for e in json.loads(Path(refs_json).read_text())["files"]:
+            manifest = json.loads(Path(refs_json).read_text())
+            self.external = manifest.get("external")  # a recording set that is not in references.json (VocalSet)
+            for e in manifest["files"]:
                 self.meta[Path(e["path"]).stem.replace(" ", "")] = dict(page=e["page"], chain=e["chain"], id=e["id"], name=Path(e["path"]).name)
         self._raw, self._floor, self._notes = OrderedDict(), {}, OrderedDict()
 
@@ -561,7 +574,7 @@ class Refs:
             self._floor[e["file"]] = floor_of(highpass(x, f0))
         a = max(0, int((e["start"] - 2.0) * SR))
         b = min(len(x), int(e["end"] * SR) + int(0.1 * SR))
-        y, info = align(x[a:b], f0, self._floor[e["file"]], anchor_s=e["start"] - a / SR)
+        y, info = align(x[a:b], f0, self._floor[e["file"]], anchor_s=e["start"] - a / SR, at_start=(a == 0))
         info = dict(info, source_onset_s=a / SR + info["onset_s"], source_cut_start_s=a / SR + info["cut_start_s"])
         return y, info
 
@@ -835,7 +848,8 @@ def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand
     pj = dict(
         schema="frankensim.instrument-pair.v1", family=family, note=note_name, dynamic=ref_e["dyn"], duration_s=round(dur, 4),
         real=dict(reference_id=refs.info_of(ref_e).get("id"), file=refs.info_of(ref_e).get("name"),
-                  segment_s=[round(ref_info["source_cut_start_s"], 4), round(ref_info["source_cut_start_s"] + dur, 4)]),
+                  segment_s=[round(ref_info["source_cut_start_s"], 4), round(ref_info["source_cut_start_s"] + dur, 4)],
+                  **({"source": dict(refs.external, id=refs.info_of(ref_e).get("id"))} if refs.external else {})),
         ours=dict(wav=str(ours_meta["wav"]), git_sha=ours_meta["git_sha"], observer=ours_meta["observer"], sample_rate=ours_meta["sample_rate"],
                   recipe=ours_meta["recipe"]) if ours else None,
         audio=dict(real="real.wav", ours="ours.wav" if ours else None,
