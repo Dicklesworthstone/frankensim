@@ -250,8 +250,12 @@ def validate_pair(pj: dict, family: str, note: str, base: Path, refs_by_id: dict
     if not isinstance(real, dict):
         problems.append("real is missing")
     elif real.get("reference_id") in refs_by_id:
-        if real["reference_id"] and refs_by_id[real["reference_id"]]["licence"] not in CREDITS:
-            problems.append(f"licence {refs_by_id[real['reference_id']]['licence']!r} has no credit line in CREDITS")
+        entry = refs_by_id[real["reference_id"]]
+        lic = entry.get("licence") if isinstance(entry, dict) else None
+        if lic not in CREDITS:
+            problems.append(f"reference {real['reference_id']!r} has licence {lic!r}, which has no credit line in CREDITS (a library entry needs a licence id that CREDITS knows)")
+        if not isinstance(entry, dict) or not isinstance(entry.get("url"), str) or not entry["url"]:
+            problems.append(f"reference {real['reference_id']!r} has no url to link the recording to")
     else:
         src = real.get("source")
         if not isinstance(src, dict):
@@ -408,9 +412,10 @@ def partials_view(parts: dict | None) -> dict | None:
 def real_source(real: dict, ref: dict | None, licences: dict) -> dict:
     """Who made the recording and on what terms, for the credit line: from references.json, else from the pair's own source."""
     if ref is not None:
-        lic = licences.get(ref["licence"], {})
-        return {"id": ref["id"], "name": LIBRARY_NAME.get(ref["licence"], ref["licence"]), "credit": CREDITS[ref["licence"]], "licence": lic.get("text", ref["licence"]),
-                "licence_url": lic.get("url"), "url": ref["url"], "external": False}
+        lid = ref.get("licence")
+        lic = licences.get(lid, {})
+        return {"id": ref.get("id") or real.get("reference_id"), "name": LIBRARY_NAME.get(lid, str(lid)), "credit": CREDITS.get(lid, ""), "licence": lic.get("text", str(lid)),
+                "licence_url": lic.get("url"), "url": ref.get("url"), "external": False}
     s = real["source"]
     return {"id": s["id"].strip(), "name": s["name"].strip(), "credit": s["credit"].strip(), "licence": s["licence"].strip(), "licence_url": s.get("licence_url"), "url": s["url"].strip(), "external": True}
 
@@ -440,13 +445,13 @@ def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: di
             else:
                 entry[side] = None
         figures[kind] = entry
-    chain = chains.get(ref["chain"], {}) if ref else {}
+    chain = chains.get(ref.get("chain"), {}) if ref else {}
     return {
         "note": note, "dynamic": pj["dynamic"], "duration_s": r(pj["duration_s"], 3),
         "real": {
-            "reference_id": ref["id"] if ref else source["id"], "file": pj["real"].get("file") or (Path(ref["path"]).name if ref else ""),
-            "segment_s": pj["real"].get("segment_s"), "url": source["url"], "sha256": ref["sha256"] if ref else None,
-            "licence": ref["licence"] if ref else source["licence"], "source": source,
+            "reference_id": source["id"], "file": pj["real"].get("file") or (Path(ref.get("path") or "").name if ref else ""),
+            "segment_s": pj["real"].get("segment_s"), "url": source["url"], "sha256": ref.get("sha256") if ref else None,
+            "licence": ref.get("licence") if ref else source["licence"], "source": source,
             "mic": chain.get("mic"), "pattern": chain.get("pattern"), "distance_m": chain.get("distance_m"), "distance_status": chain.get("distance_status"),
             "room": chain.get("room"), "format": chain.get("format"),
         },

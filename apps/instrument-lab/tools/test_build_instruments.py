@@ -215,6 +215,34 @@ class Credits(unittest.TestCase):
     def test_every_library_licence_has_a_credit(self):
         self.assertTrue({f["licence"] for f in REFS["files"]} <= set(B.CREDITS))
 
+    def test_a_library_entry_without_a_licence_is_a_problem_never_an_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pj = make_pair(root)
+            base = root / "clarinet" / "D3"
+            for entry in ({"id": REF_ID, "url": "https://x/y.aiff"}, {"id": REF_ID, "licence": None, "url": "https://x/y.aiff"}, {"id": REF_ID, "licence": "nobody-knows", "url": "https://x/y.aiff"}):
+                problems = B.validate_pair(pj, "clarinet", "D3", base, {REF_ID: entry})
+                self.assertTrue(any("no credit line in CREDITS" in p for p in problems), entry)
+
+    def test_a_library_entry_without_a_url_is_a_problem_never_an_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pj = make_pair(root)
+            problems = B.validate_pair(pj, "clarinet", "D3", root / "clarinet" / "D3", {REF_ID: {"licence": "uiowa-mis"}})
+            self.assertTrue(any("no url" in p for p in problems))
+
+    def test_a_minimal_library_entry_that_validates_also_builds(self):
+        # P2's contract tests give the generator synthetic references with only an id, a licence and a url.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pj = make_pair(root)
+            base = root / "clarinet" / "D3"
+            entry = {"id": REF_ID, "licence": "uiowa-mis", "url": "https://x/y.aiff"}
+            self.assertEqual(B.validate_pair(pj, "clarinet", "D3", base, {REF_ID: entry}), [])
+            pair = B.build_pair(pj, base, root / "out" / "clarinet" / "D3", {REF_ID: entry}, {}, {l["id"]: l for l in REFS["licences"]})
+            self.assertEqual(pair["real"]["source"]["credit"], "University of Iowa Electronic Music Studios")
+            self.assertIsNone(pair["real"]["sha256"])
+
     def test_a_recording_outside_the_library_is_accepted_with_its_own_source(self):
         self.assertEqual(self.check(lambda pj: self.external(pj)), [])
 
