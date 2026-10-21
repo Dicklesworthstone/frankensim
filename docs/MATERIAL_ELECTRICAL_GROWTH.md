@@ -94,9 +94,11 @@ and earlier appends. The returned interval report retains the actual interface
 heat destinations. No extra circuit step occurs during zero-duration births.
 
 The caller still supplies a complete successor network after topology changes.
-This API neither creates new circuit branches nor migrates contact-source pins
-across topology epochs. Interface area, partition and electrical topology remain
-fixed during each interval; this is not a moving-contact or impact model.
+For unchanged electrical branches and interfaces, use the contact network's
+`PreparedElectricalContactNetwork::extend_fixed_circuit` to retain both bulk and
+interface source selections. This does not create circuit branches or interfaces.
+Interface area, side order, heat partition and electrical topology remain fixed;
+this is not a moving-contact or impact model.
 
 Three further Rust regressions exercise original-owner replay, a late invalid
 birth after a valid append, and final cancellation/replay with real contact heat
@@ -113,3 +115,34 @@ continued finite-supply evolution now uses `extend_fixed_circuit` rather than
 reselecting all sources. These tests are authored but have not been run natively
 in the editing environment. No physical equations or solvers change in this
 source-binding extension.
+
+## Retaining electrical interfaces while thermal material grows
+
+```rust,ignore
+let continued = prepared_contacts.extend_fixed_circuit(
+    &successor_contact_network, born.thermal(), cancelled,
+)?;
+let (next, circuit, report) = born.step_electrical_with_contacts_candidate(
+    &accepted_circuit, &continued, &held_ports, target_s, gravity_m_s2,
+    &line_loads_n_m, electrical_controls, &energy_guesses_j, cancelled,
+)?;
+```
+
+The original bulk extension admits new thermal cells/links and preserves existing
+thermal and electrical claims. The original interface resolver re-evaluates the
+retained contact claims at actual endpoint temperatures and phase coordinates.
+A competing fit becoming eligible does not replace a retained source; an expired
+source refuses. Interface cards, ordered bulk identities, fixed context, branch
+assignments, electrical property bases and explicit heat fractions must agree.
+
+Prepared contact networks also retain their original contact endpoints and areas.
+Both ordinary resolution and extension refuse stale geometry, including changed
+area between otherwise identical materials. Authored thermal conductance may
+still change; it is not electrical contact area. A caller intentionally changing
+contact meaning must explicitly prepare/reconfigure it, not disguise that change
+as continuation. No physical history or coefficient is cached by this operation.
+
+Four additional integration tests cover actual contact-heated growth followed by
+further finite discharge and sag under competing fits, expired-source refusal,
+changed source/route/basis rejection, stale area, reordered bindings and final
+cancellation. Native execution remains unverified in the editing environment.

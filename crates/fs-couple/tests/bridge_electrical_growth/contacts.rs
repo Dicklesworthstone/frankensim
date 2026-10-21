@@ -11,6 +11,15 @@ use fs_material::thermal::interface::ThermalInterfacePoint;
 fn with_contact<R>(bad_last: bool,
     run: impl FnOnce(&[Material;2], &GrowingBridge<'_,'_>, &MaterialCircuit,
         &PreparedElectricalContactNetwork<'_,'_>) -> R) -> R {
+    with_selected_contact(bad_last,
+        |m| contact_source::card(&m[0].card,&m[1].card,1.0,0.005),
+        |m,t,c,p,_| run(m,t,c,p))
+}
+
+fn with_selected_contact<R>(bad_last: bool,
+    interface: impl FnOnce(&[Material;2]) -> fs_matdb::InterfaceSystemCard,
+    run: impl FnOnce(&[Material;2], &GrowingBridge<'_,'_>, &MaterialCircuit,
+        &PreparedElectricalContactNetwork<'_,'_>, &fs_matdb::InterfaceSystemCard) -> R) -> R {
     let m=materials();
     let mut passive=arrival(55,6,0.0,LENGTH,1);
     passive.time_s=0.0;
@@ -31,7 +40,7 @@ fn with_contact<R>(bad_last: bool,
     let resistors=resistors();
     let links=[ConductionLink {link:7,distance_a_m:0.0005,distance_b_m:0.0005}];
     let bulk=MaterialNetwork {cells:&bound,resistors:&resistors,links:&links};
-    let card=contact_source::card(&m[0].card,&m[1].card,1.0,0.005);
+    let card=interface(&m);
     let interface_context=contact_source::point();
     let contacts=[MaterialElectricalContact {link:7,branch:1,
         point:ThermalInterfacePoint {interface:&card,materials:[&m[0].card,&m[1].card],
@@ -46,7 +55,7 @@ fn with_contact<R>(bad_last: bool,
         (1,0,Branch::Capacitor {farads:CAP}),(1,0,Branch::Resistor {ohms:999.0})],transformers:vec![]},
         initial.bulk.resistors,vec![],vec![Q0],&[]).unwrap()
         .rebind_contacts_candidate(initial.contacts,&[]).unwrap();
-    run(&m,&old,&circuit,&prepared)
+    run(&m,&old,&circuit,&prepared,&card)
 }
 
 #[test]
@@ -115,3 +124,6 @@ fn final_contact_growth_cancellation_preserves_all_histories_and_replays() {
         assert_eq!(old.thermal().time_s(),0.0); assert_eq!(old.remaining_births(),1);
     });
 }
+
+#[path = "contact_sources.rs"]
+mod contact_sources;
