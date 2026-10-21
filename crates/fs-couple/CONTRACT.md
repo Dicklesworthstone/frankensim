@@ -59,6 +59,15 @@ native execution remains required for qualification. The internal same-trial
 friction callback allows other energy owners to share this original solve;
 compliant consumers must gate queried motion against the native solved slip.
 
+The `SlidingPair::from_material_bodies` constructor also binds the original
+`fs_mbd_material::ResolvedBody` objects to their ordered interface materials
+and finite caloric cells. It requires uniform same-card bodies with matching
+mass and total reference volume. Motion and kinetic storage consume the
+retained canonical body inertias; accepted candidates share those immutable
+sources. A density change at fixed geometry therefore changes both inertial
+response and the matching finite heat inventory through data resolution.
+Mismatched identities, masses or geometry refuse before motion advances.
+
 ### Material contact loads on a field actuator
 
 `tribothermal::field_motion` closes the existing dry-contact active-set/enthalpy

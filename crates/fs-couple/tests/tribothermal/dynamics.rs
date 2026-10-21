@@ -1,5 +1,10 @@
 //! Force-driven material contact, using the same source and finite heat fixtures.
 use super::*;
+use fs_ga::Vec3;
+use fs_material::phase::{HeatCapacitySourceQuery, SolidLiquidPhase};
+use fs_material::state_point::SPECIFIC_HEAT_CAPACITY_DIMS;
+use fs_mbd_material::{RegionBinding, ResolvedBody, VolumeMoments, resolve_body};
+use fs_qty::Density;
 use fs_couple::tribothermal::dynamics::*;
 use fs_thermal::enthalpy::{DepositionBudget, Event, MaterialId, StepConfig, ThermalLaw, TimedEvent};
 
@@ -20,11 +25,17 @@ fn motion_controls() -> MotionSolve {
 }
 
 fn inventory<'a>(curves: &'a [ResolvedHeatCapacityCurve; 2], mass: [f64; 2]) -> DepositionSimulation<'a> {
+    inventory_with_geometry(curves, mass, mass) // Existing fixtures have density 1 kg/m³.
+}
+
+fn inventory_with_geometry<'a>(
+    curves: &'a [ResolvedHeatCapacityCurve; 2], mass: [f64; 2], volume: [f64; 2],
+) -> DepositionSimulation<'a> {
     let base = common::initial(curves, 0.0, None);
-    let mut events: Vec<_> = CELLS.into_iter().zip(mass).map(|(id, mass_kg)| {
+    let mut events: Vec<_> = CELLS.into_iter().zip(mass).zip(volume).map(|((id, mass_kg), volume_m3)| {
         let mut cell = base.cells()[&id].clone();
         cell.mass_kg = mass_kg;
-        cell.geometry.volume_m3 = mass_kg; // Exact original sourced density is 1 kg/m³.
+        cell.geometry.volume_m3 = volume_m3;
         TimedEvent { time_s: 0.0, event: Event::Birth(cell) }
     }).collect();
     events.push(TimedEvent { time_s: 0.0, event: Event::Contact(base.links()[&7].clone()) });
@@ -288,4 +299,105 @@ fn exact_native_stop_then_opposite_restart_retains_heat_and_signed_history() {
         motion_controls(), 0.0, &[0.0; 2], other, || false), Err(SlidingError::Material(_))));
     assert_eq!(bounded.velocities_mps(), [0.5; 2]);
     assert_eq!(bounded.contact().work().dissipated_work_j(), 0.0);
+}
+
+// Synthetic density/Cp data; fixed unit-cube geometry uses the existing compiler.
+fn sourced_body(density: f64, cp: f64) -> (MaterialCard, ResolvedHeatCapacityCurve, ResolvedBody) {
+    let heat = PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS);
+    let rho = PropertyKey::new("density", Density::DIMS);
+    let mut claims = ClaimSet::new();
+    for (key, value) in [(heat.clone(), cp), (rho.clone(), density)] {
+        let dims = key.quantity().dims();
+        claims.insert_claim(PropertyClaim { key, value: PropertyValue::Curve {
+            abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
+            knots: vec![(200.0, value), (2000.0, value)], dims,
+        }, validity: ValidityDomain::unconstrained().with_quantity("T",
+            QuantitySpec::dimensional(Temperature::DIMS), 200.0, 2000.0).with("lot", 7.0, 7.0),
+            uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
+            observations: vec![], provenance: Provenance { source: "synthetic sourced sliding body".into(),
+                license: "CC0-1.0".into(), artifact: None },
+        }).unwrap();
+    }
+    let card = MaterialCard::assemble(MaterialStateId { chemistry: "synthetic".into(),
+        phase: "solid".into(), process: "authored test".into(), revision: 0 }, claims, vec![]).unwrap();
+    let caloric = ResolvedHeatCapacityCurve::try_new(&card, HeatCapacitySourceQuery {
+        heat_capacity: &heat, density: &rho, temperature_axis: "T", lower: &common::point(200.0),
+        upper: &common::point(2000.0), selection: SelectionPolicy::SingleClaimOnly,
+    }, SolidLiquidPhase::Solid, 0.0, 1e-6).unwrap();
+    let body = resolve_body(&[RegionBinding { key: "complete body",
+        geometry: VolumeMoments::cuboid(Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+        material: &card, point: &common::point(300.0),
+        selection: MaterialPropertySelection::SingleClaimOnly,
+    }], 1, || false).unwrap();
+    (card, caloric, body)
+}
+
+#[test]
+fn density_source_swap_changes_inertia_and_heating_at_unchanged_geometry() {
+    let mut outcomes = Vec::new();
+    for density in [1.0, 2.0] {
+        let (a, ca, ba) = sourced_body(density, 2.0);
+        let (b, cb, bb) = sourced_body(1.0, 3.0);
+        let cards = [a, b]; let curves = [ca, cb]; let bodies = [ba, bb]; let point = context();
+        let mass = bodies.each_ref().map(|body| body.inertia().mass());
+        let thermal = inventory_with_geometry(&curves, mass, [1.0; 2]);
+        let original_cells = thermal.cells().clone();
+        let card = interface_with_static(&cards, 0.2, "speed", SPEED, [(0.0, 0.2), (2.0, 0.2)], 2000.0);
+        let contact = MaterialSlidingContact::new(&thermal,
+            binding(&cards, &curves, &card, &point, HeatPartition::new(0.5, 0.5, 0.0).unwrap()),
+            10.0, 1.0, InputAuthority::SyntheticFixture).unwrap();
+        let pair = SlidingPair::from_material_bodies(&thermal, contact, bodies, [1.0, 0.0]).unwrap();
+        let next = pair.step_candidate(&thermal, 0.1,
+            MotionDrive { normal_load_n: 10.0, body_forces_n: [0.0; 2] },
+            motion_controls(), 0.8, &[0.0; 2], other, || false).unwrap();
+        let slip = 0.1 * (0.8 - 0.2 / density);
+        close(next.pair().masses_kg()[0], density);
+        close(next.pair().velocities_mps()[0], 1.0 - 0.2 / density);
+        close(next.pair().velocities_mps()[1], 0.2);
+        close(next.pair().contact().accumulated_distance_m(), slip);
+        close(next.report().sliding.deposited_heat_j, 2.0 * slip);
+        close(next.thermal().temperature_k(CELLS[0]).unwrap(), 300.0 + slip / (2.0 * density));
+        close(next.report().kinetic_energy_change_j, -0.18 + 0.02 / density);
+        close(next.report().numerical_dissipation_j, 0.02 + 0.02 / density);
+        close(next.pair().kinetic_energy_j().unwrap() - pair.kinetic_energy_j().unwrap(),
+            next.report().kinetic_energy_change_j);
+        assert!(next.report().total_energy_residual_j.abs() < 1e-6);
+        assert!(next.report().body_momentum_residual_n_s.iter().all(|r| r.abs() < 1e-8));
+        let retained = next.pair().material_bodies().unwrap();
+        assert_eq!(retained[0].regions()[0].material().card_identity(), cards[0].content_hash());
+        assert!(std::ptr::eq(pair.material_bodies().unwrap(), retained));
+        assert_eq!(thermal.cells(), &original_cells);
+        assert_eq!(pair.velocities_mps(), [1.0, 0.0]);
+        outcomes.push((next.pair().velocities_mps()[0], next.thermal().temperature_k(CELLS[0]).unwrap()));
+    }
+    assert!(outcomes[1].0 > outcomes[0].0);
+    assert!(outcomes[1].1 < outcomes[0].1);
+}
+
+#[test]
+fn sourced_motion_refuses_foreign_material_mass_and_volume_inventories() {
+    let (a, ca, ba) = sourced_body(2.0, 2.0);
+    let (b, cb, bb) = sourced_body(1.0, 3.0);
+    let cards = [a, b]; let curves = [ca, cb]; let bodies = [ba, bb]; let point = context();
+    let thermal = inventory_with_geometry(&curves, [2.0, 1.0], [1.0; 2]);
+    let original_cells = thermal.cells().clone();
+    let card = interface_with_static(&cards, 0.2, "speed", SPEED, [(0.0, 0.2), (2.0, 0.2)], 2000.0);
+    let contact = MaterialSlidingContact::new(&thermal,
+        binding(&cards, &curves, &card, &point, HeatPartition::new(0.5, 0.5, 0.0).unwrap()),
+        10.0, 1.0, InputAuthority::SyntheticFixture).unwrap();
+    // Equal source mass/volume cannot substitute a different original material.
+    let (_, _, foreign) = sourced_body(2.0, 4.0);
+    assert!(matches!(SlidingPair::from_material_bodies(&thermal, contact.clone(),
+        [foreign, bodies[1].clone()], [1.0, 0.0]), Err(SlidingError::Invalid(_))));
+    let wrong_mass = inventory_with_geometry(&curves, [3.0, 1.0], [1.0; 2]);
+    assert!(matches!(SlidingPair::from_material_bodies(&wrong_mass, contact.clone(),
+        bodies.clone(), [1.0, 0.0]), Err(SlidingError::Invalid(_))));
+    let wrong_volume = inventory_with_geometry(&curves, [2.0, 1.0], [2.0, 1.0]);
+    assert!(matches!(SlidingPair::from_material_bodies(&wrong_volume, contact.clone(),
+        bodies, [1.0, 0.0]), Err(SlidingError::Invalid(_))));
+    let authored = SlidingPair::new(&thermal, contact, [1.0, 0.0]).unwrap();
+    assert!(authored.material_bodies().is_none());
+    assert_eq!(authored.masses_kg(), [2.0, 1.0]);
+    assert_eq!(thermal.cells(), &original_cells);
+    assert_eq!(authored.contact().time_s(), 0.0);
 }

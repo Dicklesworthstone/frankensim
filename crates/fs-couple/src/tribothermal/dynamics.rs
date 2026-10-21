@@ -1,8 +1,9 @@
 //! Finite-body inertia closes the original dry-friction/enthalpy feedback.
 //!
 //! Two rigid translating bodies slide along the FIRST axis of the contact's
-//! unchanged tangent frame. Their inertial masses are the exact receiving
-//! thermal cells' masses; those cells represent each complete uniform body.
+//! unchanged tangent frame. Material-bound pairs use the original resolved-body
+//! inertias; each receiving thermal cell must contain that complete uniform
+//! body's material mass and volume.
 //! A held normal force maintains the fixed nominal patch without normal work.
 //! External tangent forces, rather than prescribed slip, now drive motion.
 //!
@@ -24,6 +25,8 @@
 
 use super::*;
 use fs_thermal::enthalpy::DepositedCell;
+use fs_mbd_material::ResolvedBody;
+use std::sync::Arc;
 use fs_tribo::FrictionRegime;
 
 /// Constant applied forces in the existing first tangent direction, in A/B order.
@@ -54,6 +57,7 @@ pub struct MotionSolve {
 pub struct SlidingPair<'a> {
     contact: MaterialSlidingContact<'a>,
     inventory: [DepositedCell; 2],
+    material_bodies: Option<Arc<[ResolvedBody; 2]>>,
     velocities_mps: [f64; 2],
 }
 
@@ -93,7 +97,8 @@ impl<'a, 't, S> MotionCandidate<'a, 't, S> {
 }
 
 impl<'a> SlidingPair<'a> {
-    /// Bind existing finite caloric masses, retaining original contact history.
+    /// Bind explicitly authored finite caloric masses, retaining contact history.
+    /// Use `from_material_bodies` to consume source-resolved density and geometry.
     /// Velocities are signed components along the FIRST original tangent axis.
     pub fn new(
         thermal: &DepositionSimulation<'_>,
@@ -114,17 +119,58 @@ impl<'a> SlidingPair<'a> {
             }
             cells.push(cell.clone());
         }
-        let pair = Self { contact, inventory: [cells.remove(0), cells.remove(0)], velocities_mps };
+        let pair = Self { contact, inventory: [cells.remove(0), cells.remove(0)], material_bodies: None, velocities_mps };
         pair.kinetic_energy_j()?;
         Ok(pair)
     }
+    /// Bind source-resolved rigid bodies to their ordered, complete caloric cells.
+    ///
+    /// Each body's regions must use the original surface material card. Total
+    /// source mass and volume must match the finite inventory to roundoff
+    /// (128 machine epsilons relative); this is not a material-uncertainty allowance.
+    /// The original immutable bodies and density receipts survive every step.
+    /// Heating preserves reference mass; it does not re-evaluate density at
+    /// unchanged geometry or recreate a live body's momentum.
+    pub fn from_material_bodies(
+        thermal: &DepositionSimulation<'_>,
+        contact: MaterialSlidingContact<'a>,
+        bodies: [ResolvedBody; 2],
+        velocities_mps: [f64; 2],
+    ) -> Result<Self, SlidingError> {
+        let mut pair = Self::new(thermal, contact, velocities_mps)?;
+        for (index, body) in bodies.iter().enumerate() {
+            let identity = pair.contact.binding().point.materials[index].content_hash();
+            if body.regions().iter().any(|r| r.material().card_identity() != identity) {
+                return Err(SlidingError::Invalid("moving body must retain its original ordered surface material"));
+            }
+            let volume = body.regions().iter().try_fold(0.0,
+                |sum, region| number::<Infallible>(sum + region.geometry().volume_m3()))?;
+            let cell = &pair.inventory[index];
+            if !same_inventory_quantity(body.inertia().mass(), cell.mass_kg)
+                || !same_inventory_quantity(volume, cell.geometry.volume_m3) {
+                return Err(SlidingError::Invalid("sourced body mass and volume must match its complete caloric cell"));
+            }
+        }
+        pair.material_bodies = Some(Arc::new(bodies));
+        pair.kinetic_energy_j()?;
+        Ok(pair)
+    }
+    /// Original density, geometry and material receipts, when source-bound.
+    pub fn material_bodies(&self) -> Option<&[ResolvedBody; 2]> {
+        self.material_bodies.as_deref()
+    }
     pub const fn contact(&self) -> &MaterialSlidingContact<'a> { &self.contact }
     pub const fn velocities_mps(&self) -> [f64; 2] { self.velocities_mps }
-    pub fn masses_kg(&self) -> [f64; 2] { self.inventory.each_ref().map(|c| c.mass_kg) }
+    pub fn masses_kg(&self) -> [f64; 2] {
+        match self.material_bodies.as_deref() {
+            Some(bodies) => bodies.each_ref().map(|body| body.inertia().mass()),
+            None => self.inventory.each_ref().map(|cell| cell.mass_kg),
+        }
+    }
     pub fn kinetic_energy_j(&self) -> Result<f64, SlidingError> {
         let mut total = 0.0;
-        for (cell, velocity) in self.inventory.iter().zip(self.velocities_mps) {
-            total = number(total + number(0.5 * cell.mass_kg * velocity * velocity)?)?;
+        for (mass, velocity) in self.masses_kg().into_iter().zip(self.velocities_mps) {
+            total = number(total + number(0.5 * mass * velocity * velocity)?)?;
         }
         Ok(total)
     }
@@ -278,7 +324,7 @@ impl<'a> SlidingPair<'a> {
         let inventory = self.inventory.each_ref().map(|old| thermal.cells()[&old.id].clone());
         checkpoint()?;
         Ok(MotionCandidate { thermal,
-            pair: Self { contact, inventory, velocities_mps: velocities },
+            pair: Self { contact, inventory, material_bodies: self.material_bodies.clone(), velocities_mps: velocities },
             report: MotionReport { sliding, nonlinear: result.report, motion_trials: trials.get(),
                 friction_trials: friction_trials.get(), body_displacements_m: displacement,
                 body_momentum_residual_n_s: residual, source_motion_residual_n_s: source_residual,
@@ -286,4 +332,8 @@ impl<'a> SlidingPair<'a> {
                 numerical_dissipation_j: numerical_loss, external_work_j: work,
                 total_energy_residual_j: total } })
     }
+}
+
+fn same_inventory_quantity(source: f64, inventory: f64) -> bool {
+    (source - inventory).abs() <= 128.0 * f64::EPSILON * source.abs().max(inventory.abs())
 }
