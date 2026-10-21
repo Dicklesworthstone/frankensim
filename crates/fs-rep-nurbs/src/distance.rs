@@ -18,7 +18,12 @@
 //! arithmetic primitives, not portable authority artifacts, signed fields,
 //! topology certificates, or executor lifecycle owners.
 
+mod segment;
 mod trimmed;
+pub use segment::{
+    SegmentDistance, SegmentDistanceBudget, SegmentDistanceRun, SegmentDistanceStop,
+    SegmentDistanceWitness, SegmentDistanceWork, SweptBallClearance,
+};
 use trimmed::TrimDomain;
 pub use trimmed::{
     TrimmedSurfaceDistance, TrimmedSurfaceDistanceRun, TrimmedSurfaceDistanceStop,

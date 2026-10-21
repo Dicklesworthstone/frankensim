@@ -291,6 +291,31 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   no total panic-free claim and publishes no result on that failure. It adds no
   sign, topology, portable certificate/checker, scene-field, or executor
   drain/finalize authority; the broader `.57.1` bead remains open.
+- `segment_distance_enclosure_with_cx` consumes the outward point-distance lane
+  to bound minimum clearance over **every point of a real affine segment**,
+  optionally against the exact trimmed target above (plan §7.4). Stored finite
+  binary endpoints define `P(t) = (1-t) A + t B`, `0 <= t <= 1`; ordinary rounded
+  interpolation does not redefine that path. Each segment cell subtracts an
+  outward whole-cell radius from a point-distance lower bound using distance's
+  unit Lipschitz property. Every upper bound is re-evaluated between an interval
+  affine point at an actual retained parameter and an actual kept surface
+  witness. The rounded point-query center is never substituted for that pair.
+  Results bind the surface, optional trim, endpoints, tolerance, and witness.
+  Zero-length segments and zero split allowances are supported. `Complete`
+  requires a finite width-closed interval and witness; `Unresolved` preserves
+  full coverage (possibly with +infinity upper and no witness); `Empty` requires
+  the nested exact empty-target proof. Strict radius comparison proves swept-ball
+  separation or witnessed proximity; equality stays undetermined. A positive
+  lower bound excludes intersection on this finite segment only. There is no
+  first hit, contact time, normal, signed-solid overlap, or infinite-ray claim.
+  `SegmentDistanceBudget` reserves the requested segment frontier and caps each
+  nested query by the remaining aggregate work and live memory allowance.
+  Nested calls prepay their allowance; only returned work receipts refund its
+  unused part. Refusals retain their diagnostic and full attempted allowance.
+  A parent cell stays live until both children succeed, so a refusal during the
+  second query cannot leave a hole. Trim-classifier refusal prevents completion;
+  the inherited i128 arithmetic boundary remains unchanged. Cancellation shares
+  the nested gate and final publication checkpoint and returns no partial result.
 - `boolean(op, policy)` — THE BOOLEAN POSITION: always a structured
   `BooleanRefusal` in v0. Default policy routes through SDF (convert →
   implicit CSG → re-fit); `DirectCertificateGated` refuses pending a

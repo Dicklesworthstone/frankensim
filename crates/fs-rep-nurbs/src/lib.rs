@@ -4,7 +4,8 @@
 //! tolerance while every intermediate remains representable), trimmed patches with CERTIFIED point
 //! classification (convex-hull winding with exact subdivision), measured
 //! closest-point bracket estimates, a feature-gated outward unsigned-distance
-//! enclosure for admitted surfaces with exact trim coupling, and the
+//! enclosure for admitted surfaces with exact trim coupling, continuous segment
+//! and swept-ball clearance against those surfaces, and the
 //! HONEST Boolean position: route through SDF by default, refuse direct
 //! B-rep Booleans without a certificate.
 //!
@@ -41,9 +42,11 @@ pub use curve::{
 };
 #[cfg(feature = "nurbs-sdf")]
 pub use distance::{
-    SurfaceDistanceBudget, SurfaceDistanceEnclosure, SurfaceDistanceRun, SurfaceDistanceStop,
-    SurfaceDistanceWork, TrimmedSurfaceDistance, TrimmedSurfaceDistanceRun,
-    TrimmedSurfaceDistanceStop, TrimmedSurfaceDistanceWork,
+    SegmentDistance, SegmentDistanceBudget, SegmentDistanceRun, SegmentDistanceStop,
+    SegmentDistanceWitness, SegmentDistanceWork, SurfaceDistanceBudget, SurfaceDistanceEnclosure,
+    SurfaceDistanceRun, SurfaceDistanceStop, SurfaceDistanceWork, SweptBallClearance,
+    TrimmedSurfaceDistance, TrimmedSurfaceDistanceRun, TrimmedSurfaceDistanceStop,
+    TrimmedSurfaceDistanceWork,
 };
 pub use rat::Rat;
 pub use surface::{
