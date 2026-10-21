@@ -5,6 +5,9 @@ use fs_lbm::conjugate::{
     ChtError, FluidProperties, ViscousHeatControls, creeping_flow_with_viscous_heat,
 };
 
+#[path = "viscous/forcing.rs"]
+mod forcing;
+
 fn driven_box() -> SimpleConfig {
     let mut faces = [FvBoundary::wall(); 6];
     faces[3] = FvBoundary::Wall {

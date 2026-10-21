@@ -37,6 +37,89 @@ fn thermal() -> StepConfig {
 }
 
 #[test]
+fn externally_stirred_mixture_melts_and_accelerates_on_its_latent_plateau() {
+    let card = card(claims(1.0, 100.0, false));
+    let liquid = liquid(&card);
+    let curve = phase_curve(&card, [1.0; 2]);
+    let domain = VoxelDomain::new(2, 2, 1, 1.0).unwrap();
+    let mut config = stokes();
+    config.faces[3] = FvBoundary::wall();
+    let gate = CancelGate::new();
+    let ids = [
+        Some(CellId(0)),
+        Some(CellId(1)),
+        Some(CellId(2)),
+        Some(CellId(3)),
+    ];
+    let old = initial(&domain, &curve, 0.0);
+    let mut velocities = Vec::new();
+    for permeability in [0.5, 2.0] {
+        let mobility = MushyPhaseLaw::try_new(&curve, 1.0, 1.0, permeability, 0.2).unwrap();
+        let observer = MaterialFlowFeedback::try_new(
+            &old,
+            &domain,
+            input(&ids, &curve),
+            &config,
+            (),
+            &gate,
+            20,
+            |_, _: &DepositedCell, t| {
+                liquid.at_temperature(Temperature::new(t)).map_err(|e| {
+                    fs_material::MaterialError::State {
+                        what: e.to_string(),
+                    }
+                })
+            },
+        )
+        .unwrap()
+        .with_body_force_heating(
+            vec![
+                [-100.0, 100.0, 0.0],
+                [-100.0, -100.0, 0.0],
+                [100.0, 100.0, 0.0],
+                [100.0, -100.0, 0.0],
+            ],
+            controls(),
+        )
+        .unwrap()
+        .with_mushy_mobility(&mobility)
+        .unwrap();
+        let a0 = 100.0 / (600.0 + 200.0 / permeability);
+        let (warm, first, _) = old
+            .advance_observed(&observer, 0.1, thermal(), || Ok(()))
+            .unwrap();
+        let h0 = 50.0 + 0.1 * 100.0 * a0;
+        let phi = h0 / 100.0;
+        let beta = 100.0 * (1.0 - phi).powi(2) / (permeability * phi.powi(3));
+        let a1 = 100.0 / (600.0 + beta);
+        let (next, second, audit) = warm
+            .advance_observed(&first, 0.2, thermal(), || Ok(()))
+            .unwrap();
+        let epoch = second.applied().unwrap();
+        near(epoch.flow.field.flux_x(1, 1, 0), a1);
+        assert!(a1 > a0);
+        let work = second.viscous_heating_audit().unwrap();
+        near(work.supplied_wall_work_j, 0.0);
+        near(work.supplied_body_work_j, 0.1 * 400.0 * a1);
+        near(work.darcy_heat_j, 0.1 * 4.0 * beta * a1 * a1);
+        near(work.generated_heat_j, work.supplied_body_work_j);
+        near(next.energy_j() - warm.energy_j(), work.generated_heat_j);
+        near(audit.external_heat_j, work.generated_heat_j);
+        near(next.mass_kg(), old.mass_kg());
+        for c in 0..4 {
+            near(next.temperature_k(CellId(c)).unwrap(), 500.0);
+            near(
+                next.cells()[&CellId(c)].specific_h_j_kg,
+                h0 + 0.1 * 100.0 * a1,
+            );
+            near(epoch.mushy_drag_pa_s_m2.as_ref().unwrap()[c as usize], beta);
+        }
+        velocities.push(a1);
+    }
+    assert!(velocities[1] > velocities[0]);
+}
+
+#[test]
 fn exact_stokes_darcy_work_uses_the_native_half_cells() {
     let domain = VoxelDomain::new(2, 2, 1, 1.0).unwrap();
     let fluid = FluidProperties {

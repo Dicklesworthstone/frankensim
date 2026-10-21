@@ -128,14 +128,16 @@ pub use radiation::{
     ExposedFace, RadiationConfig, RadiationReport, STEFAN_BOLTZMANN, SurfaceExchange,
     escape_factors, radiated_power, radiative_sinks, solve_energy_radiating,
 };
+pub use simple::viscous_heat::{
+    ViscousHeatControls, ViscousPower, creeping_flow_with_body_force_heat,
+    creeping_flow_with_darcy_heat, creeping_flow_with_viscous_heat,
+};
 pub use simple::{
     AMG_REBUILD_SWEEPS, FacePatch, FanCurve, FanInlet, FlowResistance, FvBoundary, FvFlow,
     InternalFan, PressureSolver, SimpleConfig, SimpleReport, TimeScheme, Turbulence, simple_flow,
     simple_flow_with_material_resistance, simple_flow_with_viscosity,
     simple_flow_with_viscosity_and_force,
 };
-pub use simple::viscous_heat::{ViscousHeatControls, ViscousPower,
-    creeping_flow_with_viscous_heat, creeping_flow_with_darcy_heat};
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 pub use unsteady::{
     Boussinesq, ConjugateMarch, FlowStepRecord, UnsteadyConfig, UnsteadyFlow, march_conjugate,

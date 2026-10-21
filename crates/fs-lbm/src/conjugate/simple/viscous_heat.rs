@@ -3,8 +3,9 @@
 //! This entry solves steady Stokes flow in a closed Cartesian box of flow-active
 //! voxels. Molecular viscosity may vary by cell; walls may move tangentially.
 //! A declared stationary linear Darcy frame may absorb work as local heat.
-//! Inertia, momentum convection, openings, obstacles, body forces, nonlinear
-//! resistance, turbulence and fans are excluded. Wall actuators supply all work.
+//! Inertia, momentum convection, openings, obstacles, nonlinear resistance,
+//! turbulence and fans are excluded. Walls and explicit body-force actuators
+//! supply work; neither pressure-constraint work nor momentum residual is heat.
 //! It has no kinetic-energy store and makes no Navier--Stokes energy claim.
 //!
 //! Normal stress uses `2 mu (du_a/dx_a)^2 V` at each cell. Each reciprocal MAC
@@ -50,9 +51,13 @@ pub struct ViscousPower {
     /// pressure reactions are not included and do no work in this fixed box.
     pub wall_tangential_force_n: [[f64; 3]; 6],
     pub supplied_wall_power_w: f64,
+    /// Signed external actuator work, partitioned with the original MAC half
+    /// cells. This is supply, not an additional heat source. None without forcing.
+    pub cell_body_power_w: Option<Vec<f64>>,
+    pub supplied_body_power_w: f64,
     /// Discrete sum p div(u) V [W]; independently required to be negligible.
     pub pressure_constraint_power_w: f64,
-    /// Wall supply plus pressure constraint minus physical heat [W].
+    /// Wall plus body-force supply plus pressure constraint minus heat [W].
     pub residual_w: f64,
     pub reynolds: f64,
 }
@@ -120,7 +125,16 @@ pub fn creeping_flow_with_viscous_heat(
     controls: ViscousHeatControls,
     gate: &CancelGate,
 ) -> Result<(FvFlow, ViscousPower), ChtError> {
-    creeping_material_heat(domain, fluid, viscosity_pa_s, None, config, controls, gate)
+    creeping_material_heat(
+        domain,
+        fluid,
+        viscosity_pa_s,
+        None,
+        None,
+        config,
+        controls,
+        gate,
+    )
 }
 
 /// The same native Stokes/stress owner with declared stationary Darcy drag.
@@ -146,17 +160,52 @@ pub fn creeping_flow_with_darcy_heat(
         fluid,
         viscosity_pa_s,
         Some(drag_pa_s_m2),
+        None,
         config,
         controls,
         gate,
     )
 }
 
+/// Externally driven Stokes flow and its actual molecular/Darcy heat.
+///
+/// Force density [N/m3] is held over this source epoch. Its work uses exactly
+/// the half-cell volumes and projected face velocities in native momentum.
+/// Negative body work is allowed: an actuator can absorb wall-supplied power.
+/// Only stress/Darcy dissipation heats cells; force work is never deposited a
+/// second time. Optional Darcy resistance retains the stationary-frame model.
+/// This does not debit a finite electrical source or gravitational potential;
+/// the caller must include the reported work in any larger accounting boundary.
+#[allow(clippy::too_many_arguments)]
+pub fn creeping_flow_with_body_force_heat(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    viscosity_pa_s: &[f64],
+    force_density_n_m3: &[[f64; 3]],
+    drag_pa_s_m2: Option<&[f64]>,
+    config: &SimpleConfig,
+    controls: ViscousHeatControls,
+    gate: &CancelGate,
+) -> Result<(FvFlow, ViscousPower), ChtError> {
+    creeping_material_heat(
+        domain,
+        fluid,
+        viscosity_pa_s,
+        drag_pa_s_m2,
+        Some(force_density_n_m3),
+        config,
+        controls,
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn creeping_material_heat(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
     viscosity_pa_s: &[f64],
     drag_pa_s_m2: Option<&[f64]>,
+    force_density_n_m3: Option<&[[f64; 3]]>,
     config: &SimpleConfig,
     controls: ViscousHeatControls,
     gate: &CancelGate,
@@ -167,7 +216,7 @@ fn creeping_material_heat(
         domain,
         fluid,
         viscosity_pa_s,
-        None,
+        force_density_n_m3,
         drag_pa_s_m2,
         config,
         gate,
@@ -180,7 +229,7 @@ fn creeping_material_heat(
         domain,
         fluid,
         viscosity_pa_s,
-        None,
+        force_density_n_m3,
         drag_pa_s_m2,
         config,
         gate,
@@ -383,6 +432,49 @@ impl Solver<'_> {
         };
         let heat_w = finite_value("viscous_heat.total", heat.iter().sum())?;
         let supplied_wall_power_w = finite_value("viscous_heat.supply", wall_power_w.iter().sum())?;
+        let (cell_body_power_w, supplied_body_power_w) = if self.force.is_empty() {
+            (None, 0.0)
+        } else {
+            let mut body_work = vec![0.0; domain.cell_count()];
+            for (c, work) in body_work.iter_mut().enumerate() {
+                poll(gate)?;
+                let at = domain.coords(c);
+                for a in 0..3 {
+                    for plus in [false, true] {
+                        add(
+                            work,
+                            0.5 * domain.volume(c)
+                                * self.force[c][a]
+                                * self.vel[a][self.cell_face(a, at, plus)],
+                        )?;
+                    }
+                }
+            }
+            // Independent work of the exact RHS assembled in momentum(), on
+            // the same unknown faces. Fixed normal walls have zero velocity.
+            let mut staggered_work = 0.0;
+            for a in 0..3 {
+                for &index in &self.comps[a].unknowns {
+                    poll(gate)?;
+                    let plus = self.comps[a].coords(index);
+                    let mut minus = plus;
+                    minus[a] -= 1;
+                    let fm = self.force[cell_of(self.n, minus)][a];
+                    let fp = self.force[cell_of(self.n, plus)][a];
+                    let force = self.comp_face_area(a, index)
+                        * (0.5 * domain.width(a, minus[a]))
+                            .mul_add(fm, 0.5 * domain.width(a, plus[a]) * fp);
+                    add(&mut staggered_work, force * self.vel[a][index])?;
+                }
+            }
+            let total = finite_value("viscous_heat.body_supply", body_work.iter().sum())?;
+            if (total - staggered_work).abs() > controls.power_tolerance_w {
+                return Err(invalid_power(
+                    "body-force work and original-cell partition disagree",
+                ));
+            }
+            (Some(body_work), staggered_work)
+        };
         let mut pressure_constraint_power_w = 0.0;
         for c in 0..domain.cell_count() {
             poll(gate)?;
@@ -394,7 +486,7 @@ impl Solver<'_> {
         }
         let residual_w = finite_value(
             "viscous_heat.residual",
-            supplied_wall_power_w + pressure_constraint_power_w - heat_w,
+            supplied_wall_power_w + supplied_body_power_w + pressure_constraint_power_w - heat_w,
         )?;
         let mut speed = self
             .vel
@@ -429,10 +521,11 @@ impl Solver<'_> {
             || (heat_w - molecular_heat_w - darcy_heat_w).abs() > controls.power_tolerance_w
             || pressure_constraint_power_w.abs() > controls.power_tolerance_w
             || residual_w.abs() > controls.power_tolerance_w
-            || (supplied_wall_power_w - heat_w).abs() > controls.power_tolerance_w
+            || (supplied_wall_power_w + supplied_body_power_w - heat_w).abs()
+                > controls.power_tolerance_w
         {
             return Err(invalid_power(
-                "independent wall work, constraint, molecular and Darcy power accounts do not close",
+                "independent wall/body work, constraint, molecular and Darcy power accounts do not close",
             ));
         }
         poll(gate)?;
@@ -445,6 +538,8 @@ impl Solver<'_> {
             wall_power_w,
             wall_tangential_force_n,
             supplied_wall_power_w,
+            cell_body_power_w,
+            supplied_body_power_w,
             pressure_constraint_power_w,
             residual_w,
             reynolds,

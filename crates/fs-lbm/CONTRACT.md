@@ -1925,3 +1925,30 @@ not subsequent native momentum/energy conservation. Tests include translating
 and spinning cubes with analytic inertia and grid-refined projection error,
 cut tetrahedra, material density similitude, an actual native step, budget and
 cancellation refusals. Native Cargo execution remains separately required.
+
+### Prescribed body work, material heat and latent feedback
+
+`conjugate::creeping_flow_with_body_force_heat` uses the original closed,
+all-fluid Stokes solver with one explicit force-density vector per voxel.
+The original MAC half-cell interpolation supplies both the momentum force and
+its signed work against the returned face velocities. An independent cell
+half-volume partition must agree. Negative body work represents an absorbing
+actuator. Only the original molecular and stationary Darcy dissipation enters
+heat; wall/body supply, pressure-constraint work and numerical residuals are
+separately accounted and never deposited again.
+
+`MaterialFlowFeedback::with_body_force_heating` retains this force field over
+an accepted advance. Every actual thermal substep reuses the same viscosity,
+phase/permeability, conservative advection and caloric owners. Source-data
+changes therefore alter actual velocities, dissipation and subsequent
+temperatures or latent fraction. Accepted-duration audits integrate body and
+wall work; source, endpoint or cancellation refusal preserves accepted state.
+
+The original closed creeping-domain, fixed-density and fixed-reference-mass
+restrictions remain. Force is prescribed external actuator data; this does not
+advance a finite electrical/mechanical source, gravitational potential, kinetic
+store, moving skeleton or free-surface energy. Any enclosing source must debit
+the reported work. Reynolds/power gates and thermal-step refinement still apply.
+Focused regressions cover wall/body/Darcy balance, absorbing and pressure-balanced
+forces, material substitution, thermal thinning, latent feedback and rollback.
+Their presence does not establish native execution or experimental validation.
