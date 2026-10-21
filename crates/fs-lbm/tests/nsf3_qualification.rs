@@ -15,7 +15,7 @@ use fs_lbm::d3q27::D3q27;
 use fs_lbm::nsf3::dispersion::{
     C64, GasPoint, linearized_modes, linearized_nsf_modes, longitudinal_eigenvector,
 };
-use fs_lbm::nsf3::{MAX_QUALIFIED_MACH, NsfGrid3, NsfSpec, THETA0, WallThermal};
+use fs_lbm::nsf3::{MAX_QUALIFIED_MACH, NsfGrid3, NsfLaw, NsfSpec, SourceFn, THETA0, WallThermal};
 use fs_material::gas::{GasSpec, GasState};
 use std::time::Instant;
 
@@ -1107,4 +1107,368 @@ fn edge_velocity_refusals() {
     );
     g.set_edge_velocity(1, true, [0.05 * c, 0.0, 0.0]).unwrap();
     g.step().unwrap();
+}
+
+/// Second-order forward-mode jet in (x, y, z, t): the value, gradient and Hessian of a manufactured field, exact to round-off.
+/// It writes the source terms of the manufactured solution without symbolic tooling and without differencing.
+#[derive(Clone, Copy)]
+struct Jet {
+    v: f64,
+    g: [f64; 4],
+    h: [[f64; 4]; 4],
+}
+
+impl Jet {
+    fn constant(v: f64) -> Jet {
+        Jet {
+            v,
+            g: [0.0; 4],
+            h: [[0.0; 4]; 4],
+        }
+    }
+    fn variable(v: f64, axis: usize) -> Jet {
+        let mut j = Jet::constant(v);
+        j.g[axis] = 1.0;
+        j
+    }
+    fn scale(self, c: f64) -> Jet {
+        let mut r = self;
+        r.v *= c;
+        for a in 0..4 {
+            r.g[a] *= c;
+            for b in 0..4 {
+                r.h[a][b] *= c;
+            }
+        }
+        r
+    }
+    /// `f(self)` from the value, first and second derivative of `f` at the value.
+    fn chain(self, f0: f64, f1: f64, f2: f64) -> Jet {
+        let mut r = Jet::constant(f0);
+        for a in 0..4 {
+            r.g[a] = f1 * self.g[a];
+            for b in 0..4 {
+                r.h[a][b] = f1 * self.h[a][b] + f2 * self.g[a] * self.g[b];
+            }
+        }
+        r
+    }
+    fn sin(self) -> Jet {
+        let (s, c) = self.v.sin_cos();
+        self.chain(s, c, -s)
+    }
+    fn cos(self) -> Jet {
+        let (s, c) = self.v.sin_cos();
+        self.chain(c, -s, -c)
+    }
+}
+
+impl core::ops::Add for Jet {
+    type Output = Jet;
+    fn add(self, o: Jet) -> Jet {
+        let mut r = self;
+        r.v += o.v;
+        for a in 0..4 {
+            r.g[a] += o.g[a];
+            for b in 0..4 {
+                r.h[a][b] += o.h[a][b];
+            }
+        }
+        r
+    }
+}
+
+impl core::ops::Mul for Jet {
+    type Output = Jet;
+    fn mul(self, o: Jet) -> Jet {
+        let mut r = Jet::constant(self.v * o.v);
+        for a in 0..4 {
+            r.g[a] = self.g[a] * o.v + self.v * o.g[a];
+            for b in 0..4 {
+                r.h[a][b] = self.h[a][b] * o.v
+                    + self.g[a] * o.g[b]
+                    + self.g[b] * o.g[a]
+                    + self.v * o.h[a][b];
+            }
+        }
+        r
+    }
+}
+
+/// The manufactured fields `(rho, u, theta)` in lattice units on a periodic box of `n` cells per side at lattice position `x`
+/// (cell centre) and time `t` (steps): wave numbers `2 pi m / n` per cell and frequencies `omega / n` per step, so that the
+/// physical fields do not depend on the rung (acoustic scaling). Five different oblique wave vectors make the solution
+/// three-dimensional; the amplitudes (2 % density, 0.03 lattice velocity = Mach 0.044, 1 % temperature) keep the flow weakly
+/// nonlinear.
+fn mms_fields(x: [f64; 3], t: f64, n: usize, amp: [f64; 3]) -> (Jet, [Jet; 3], Jet) {
+    let (jx, jy, jz, jt) = (
+        Jet::variable(x[0], 0),
+        Jet::variable(x[1], 1),
+        Jet::variable(x[2], 2),
+        Jet::variable(t, 3),
+    );
+    let tau = 2.0 * core::f64::consts::PI / n as f64;
+    let phase = |m: [f64; 3], omega: f64, phi: f64| {
+        jx.scale(tau * m[0])
+            + jy.scale(tau * m[1])
+            + jz.scale(tau * m[2])
+            + jt.scale(-omega / n as f64)
+            + Jet::constant(phi)
+    };
+    let rho = Jet::constant(1.0) + phase([1.0, 1.0, 0.0], 3.0, 0.3).sin().scale(0.1 * amp[0]);
+    let ux = phase([0.0, 1.0, 1.0], 2.0, 1.1).sin().scale(0.07 * amp[1]);
+    let uy = phase([1.0, 0.0, 1.0], 4.0, 0.7).cos().scale(0.05 * amp[1]);
+    let uz = phase([1.0, 1.0, 1.0], 2.5, 2.0).sin().scale(0.06 * amp[1]);
+    let theta = Jet::constant(THETA0)
+        + phase([1.0, 0.0, 1.0], 3.5, 0.4)
+            .sin()
+            .scale(0.1 * THETA0 * amp[2]);
+    (rho, [ux, uy, uz], theta)
+}
+
+/// Lattice transport of the source terms: `mu` and `kappa` are exactly linear in `theta` over the two-point table of the run.
+#[derive(Clone, Copy)]
+struct MmsGas {
+    mu0: f64,
+    mu_theta: f64,
+    kappa0: f64,
+    kappa_theta: f64,
+    ratio: f64,
+    cv: f64,
+}
+
+/// Source terms `(S_rho, S_m, S_E)` that make the manufactured fields an exact solution of
+/// `d rho/dt + div(rho u) = S_rho`, `d(rho u)/dt + div(rho u u + p I - sigma) = S_m`,
+/// `dE/dt + div((E + p) u - sigma . u - kappa grad theta) = S_E` with `p = rho theta`, `E = rho (c_v theta + |u|^2 / 2)`,
+/// `sigma_ij = mu (d_i u_j + d_j u_i - 2/3 delta_ij div u) + ratio mu delta_ij div u`. Written out by hand from the jets of the fields.
+fn mms_sources(gas: &MmsGas, x: [f64; 3], t: f64, n: usize, amp: [f64; 3]) -> (f64, [f64; 3], f64) {
+    let (rho, u, th) = mms_fields(x, t, n, amp);
+    let mu = gas.mu0 + gas.mu_theta * (th.v - THETA0);
+    let kappa = gas.kappa0 + gas.kappa_theta * (th.v - THETA0);
+    let du = |a: usize, b: usize| u[a].g[b]; // d_b u_a
+    let div = du(0, 0) + du(1, 1) + du(2, 2);
+    let grad_div = |i: usize| (0..3).map(|k| u[k].h[k][i]).sum::<f64>();
+    let mass = rho.g[3] + (0..3).map(|j| (rho * u[j]).g[j]).sum::<f64>();
+    let mut div_sigma = [0.0; 3];
+    let mut momentum = [0.0; 3];
+    for i in 0..3 {
+        let laplacian: f64 = (0..3).map(|j| u[i].h[j][j]).sum();
+        let symmetric: f64 = (0..3).map(|j| th.g[j] * (du(i, j) + du(j, i))).sum();
+        div_sigma[i] = gas.mu_theta * symmetric - (2.0 / 3.0) * gas.mu_theta * th.g[i] * div
+            + mu * (laplacian + grad_div(i) - (2.0 / 3.0) * grad_div(i))
+            + gas.ratio * gas.mu_theta * th.g[i] * div
+            + gas.ratio * mu * grad_div(i);
+        let advection: f64 = (0..3).map(|j| (rho * u[i] * u[j]).g[j]).sum();
+        momentum[i] = (rho * u[i]).g[3] + advection + (rho * th).g[i] - div_sigma[i];
+    }
+    let speed2 = u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
+    let energy = rho * (th.scale(gas.cv) + speed2.scale(0.5));
+    let enthalpy_flux: f64 = (0..3).map(|j| ((energy + rho * th) * u[j]).g[j]).sum();
+    let mut work = 0.0;
+    for i in 0..3 {
+        work += div_sigma[i] * u[i].v;
+        for j in 0..3 {
+            let delta = if i == j { 1.0 } else { 0.0 };
+            let sigma = mu * (du(i, j) + du(j, i) - delta * (2.0 / 3.0) * div)
+                + delta * gas.ratio * mu * div;
+            work += sigma * du(i, j);
+        }
+    }
+    let conduction = gas.kappa_theta * (0..3).map(|j| th.g[j] * th.g[j]).sum::<f64>()
+        + kappa * (0..3).map(|j| th.h[j][j]).sum::<f64>();
+    (
+        mass,
+        momentum,
+        energy.g[3] + enthalpy_flux - work - conduction,
+    )
+}
+
+/// The manufactured grid on `n` cells per side of a 3.2 mm box and the law it runs with.
+fn mms_grid(n: usize, with_sources: bool, amp: [f64; 3]) -> (NsfGrid3<D3q27>, NsfLaw) {
+    let mut s = spec([n, n, n], 3.2e-3 / n as f64);
+    s.workers = 4;
+    s.transport_points = 2; // mu(T) and kappa(T) exactly linear across the declared window
+    s.temperature_window_k = [250.0, 340.0];
+    let law = NsfGrid3::<D3q27>::new(s.clone(), |_| false, |_| (1.0, [0.0; 3], 293.15))
+        .unwrap()
+        .law()
+        .clone();
+    let d = 1e-3 * THETA0;
+    let gas = MmsGas {
+        mu0: law.mu_lattice(THETA0),
+        mu_theta: (law.mu_lattice(THETA0 + d) - law.mu_lattice(THETA0 - d)) / (2.0 * d),
+        kappa0: law.kappa_lattice(THETA0),
+        kappa_theta: (law.kappa_lattice(THETA0 + d) - law.kappa_lattice(THETA0 - d)) / (2.0 * d),
+        ratio: s.bulk_to_shear_ratio,
+        cv: 1.0 / (law.gamma - 1.0),
+    };
+    let centre = |x: [usize; 3]| [x[0] as f64 + 0.5, x[1] as f64 + 0.5, x[2] as f64 + 0.5];
+    let init_law = law.clone();
+    let initial = move |x: [usize; 3]| {
+        let (r, u, th) = mms_fields(centre(x), 0.0, n, amp);
+        (
+            r.v,
+            [u[0].v, u[1].v, u[2].v],
+            init_law.kelvin_of_theta(th.v),
+        )
+    };
+    let sources: Option<SourceFn> = if with_sources {
+        Some(Box::new(move |x, t| {
+            mms_sources(&gas, centre(x), t, n, amp)
+        }))
+    } else {
+        None
+    };
+    (
+        NsfGrid3::<D3q27>::new_with_sources(s, |_| false, initial, sources).unwrap(),
+        law,
+    )
+}
+
+/// Relative L2 errors `[rho, u, T]` of the grid after `step` steps against the manufactured solution; each error is over the L2
+/// norm of the fluctuation of that field (of the cell count when that field is switched off, for diagnostics).
+fn mms_measure(
+    g: &NsfGrid3<D3q27>,
+    law: &NsfLaw,
+    n: usize,
+    step: usize,
+    amp: [f64; 3],
+) -> [f64; 3] {
+    let centre = |x: [usize; 3]| [x[0] as f64 + 0.5, x[1] as f64 + 0.5, x[2] as f64 + 0.5];
+    let (mut err, mut norm) = ([0.0f64; 3], [0.0f64; 3]);
+    for k in 0..n {
+        for j in 0..n {
+            for i in 0..n {
+                let (rho, u, t_k) = g.cell([i, j, k]);
+                let (r, ue, th) = mms_fields(centre([i, j, k]), step as f64, n, amp);
+                let t_exact = law.kelvin_of_theta(th.v);
+                err[0] += (rho - r.v).powi(2);
+                norm[0] += (r.v - 1.0).powi(2);
+                for a in 0..3 {
+                    err[1] += (u[a] - ue[a].v).powi(2);
+                    norm[1] += ue[a].v.powi(2);
+                }
+                err[2] += (t_k - t_exact).powi(2);
+                norm[2] += (t_exact - law.temperature_ref_k).powi(2);
+            }
+        }
+    }
+    let cells = (n * n * n) as f64;
+    let norm_or_cells = |a: f64| if a > 0.0 { a } else { cells };
+    [
+        (err[0] / norm_or_cells(norm[0])).sqrt(),
+        (err[1] / norm_or_cells(norm[1])).sqrt(),
+        (err[2] / norm_or_cells(norm[2])).sqrt(),
+    ]
+}
+
+/// Errors against the manufactured solution after `3 n / 2` steps (about one acoustic transit of the box); `None` when the grid
+/// refused to continue (a run without its sources can leave the declared Mach bound).
+fn try_mms_errors(n: usize, with_sources: bool, amp: [f64; 3]) -> Option<[f64; 3]> {
+    let (mut g, law) = mms_grid(n, with_sources, amp);
+    let steps = 3 * n / 2;
+    for _ in 0..steps {
+        g.step().ok()?;
+    }
+    Some(mms_measure(&g, &law, n, steps, amp))
+}
+
+fn mms_errors(n: usize, with_sources: bool, amp: [f64; 3]) -> [f64; 3] {
+    try_mms_errors(n, with_sources, amp).expect("the manufactured run must not be refused")
+}
+
+/// Proposed band on the relative L2 error of every channel of the manufactured solution on the finest rung.
+const MMS_BAND: f64 = 2e-2;
+
+#[test]
+#[ignore = "heavy: run with --release -- --ignored (several minutes in release on a loaded host)"]
+fn mms_full_nsf_order() {
+    // G1 (b). A smooth three-dimensional solution of the full compressible Navier-Stokes-Fourier equations is manufactured with
+    // analytic source terms (hand-written from exact second-order jets of the fields: 10 % density and temperature variation,
+    // lattice velocity up to Mach 0.15, five different oblique wave vectors, transport linear in temperature across the window),
+    // injected through the grid's source hooks and followed for about one acoustic transit of a 3.2 mm periodic box on 12 / 24 / 48
+    // cells per side (acoustic scaling). The relative L2 error of density, velocity and temperature against the exact fields must
+    // shrink on every rung with observed order >= 1.8 between 24 and 48 and stay within the band on the finest. Mutation: without
+    // the sources the same run is wrong at order one (the check can fail).
+    let start = Instant::now();
+    let rungs = [12usize, 24, 48];
+    let errs: Vec<[f64; 3]> = rungs
+        .iter()
+        .map(|&n| mms_errors(n, true, [1.0; 3]))
+        .collect();
+    for (n, e) in rungs.iter().zip(&errs) {
+        println!(
+            "mms {n} cells per side: relative L2 error rho {:.4e}, u {:.4e}, T {:.4e}",
+            e[0], e[1], e[2]
+        );
+    }
+    let order = |c: usize, a: usize| (errs[a][c] / errs[a + 1][c]).log2();
+    let names = ["rho", "u", "T"];
+    for c in 0..3 {
+        println!(
+            "mms {}: observed order 12 -> 24 {:.2}, 24 -> 48 {:.2}",
+            names[c],
+            order(c, 0),
+            order(c, 1)
+        );
+        assert!(
+            errs.windows(2).all(|w| w[0][c] > w[1][c]),
+            "{} error must shrink: {errs:?}",
+            names[c]
+        );
+        assert!(
+            order(c, 1) >= 1.8,
+            "{} observed order {}",
+            names[c],
+            order(c, 1)
+        );
+        assert!(
+            errs[2][c] <= MMS_BAND,
+            "{} finest rung {}",
+            names[c],
+            errs[2][c]
+        );
+    }
+    let unforced = try_mms_errors(12, false, [1.0; 3]);
+    match unforced {
+        Some(e) => {
+            println!(
+                "mms without sources on 12 cells per side: rho {:.3e}, u {:.3e}, T {:.3e}",
+                e[0], e[1], e[2]
+            );
+            assert!(
+                e.iter().all(|&v| v > 0.5),
+                "the unforced run must be wrong: {e:?}"
+            );
+        }
+        None => println!(
+            "mms without sources on 12 cells per side: refused by the grid (left the declared Mach bound)"
+        ),
+    }
+    let unforced_json = unforced.map_or("null".to_string(), |e| {
+        format!("{{\"rho\":{:e},\"u\":{:e},\"T\":{:e}}}", e[0], e[1], e[2])
+    });
+    let gas = air();
+    let mach =
+        (0.07f64.powi(2) + 0.05f64.powi(2) + 0.06f64.powi(2)).sqrt() / (gas.gamma * THETA0).sqrt();
+    let worst: Vec<f64> = errs.iter().map(|e| e[0].max(e[1]).max(e[2])).collect();
+    receipt(
+        "mms",
+        mach,
+        3.2e-3,
+        mach * gas.sound_speed,
+        &ladder(&rungs, 3.2e-3, &worst),
+        Some(order(0, 1).min(order(1, 1)).min(order(2, 1))),
+        &format!(
+            "\"orders_24_48\":{{\"rho\":{:e},\"u\":{:e},\"T\":{:e}}},\"finest\":{{\"rho\":{:e},\"u\":{:e},\"T\":{:e}}},\"unforced_12\":{unforced_json}",
+            order(0, 1),
+            order(1, 1),
+            order(2, 1),
+            errs[2][0],
+            errs[2][1],
+            errs[2][2]
+        ),
+        MMS_BAND,
+        start,
+    );
 }

@@ -387,6 +387,13 @@ fn par_fill<T: Send>(out: &mut [T], workers: usize, f: &(impl Fn(usize) -> T + S
     });
 }
 
+/// Sources of the method of manufactured solutions, in lattice units, for the cell with integer index `x` at lattice time `t`
+/// (steps): `(S_rho, S_m, S_E)` of `d rho / dt + div(rho u) = S_rho`, `d(rho u) / dt + div(rho u u + p I - sigma) = S_m` and
+/// `dE / dt + div((E + p) u - sigma . u - kappa grad theta) = S_E`. The mass source is applied at the half step (added to the
+/// populations with the lattice weights, half before and half after the stream, so it carries no momentum), the momentum source joins the force at both time levels and
+/// the energy source enters the trapezoid with the flux divergence. A grid without sources is bitwise unchanged.
+pub type SourceFn = Box<dyn Fn([usize; 3], f64) -> (f64, [f64; 3], f64) + Send + Sync>;
+
 /// The hybrid grid. See the module documentation for the formulation and its conservation class.
 pub struct NsfGrid3<L: Lattice3<27>> {
     spec: NsfSpec,
@@ -405,6 +412,9 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     /// Velocity of the bounce-back wall at the low (index 0) and high (index 1) edge of each non-periodic axis.
     edge_velocity: [[[f64; 3]; 2]; 3],
     moving_walls: bool,
+    sources: Option<SourceFn>,
+    /// Sources at the current time level (empty without sources).
+    src_now: Vec<(f64, [f64; 3], f64)>,
     marker: core::marker::PhantomData<L>,
 }
 
@@ -418,6 +428,20 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         spec: NsfSpec,
         solid: impl Fn([usize; 3]) -> bool,
         initial: impl Fn([usize; 3]) -> (f64, [f64; 3], f64),
+    ) -> Result<Self, NsfError> {
+        Self::new_with_sources(spec, solid, initial, None)
+    }
+
+    /// As [`NsfGrid3::new`] with manufactured-solution sources ([`SourceFn`]); the momentum source of time 0 is part of the
+    /// initial force, so the half-force velocity of the initial state is the requested one.
+    ///
+    /// # Errors
+    /// [`NsfError`] for any refused input or state.
+    pub fn new_with_sources(
+        spec: NsfSpec,
+        solid: impl Fn([usize; 3]) -> bool,
+        initial: impl Fn([usize; 3]) -> (f64, [f64; 3], f64),
+        sources: Option<SourceFn>,
     ) -> Result<Self, NsfError> {
         let n = spec.dims.iter().try_fold(1usize, |a, &d| a.checked_mul(d)).ok_or(NsfError::Input("dimension overflow"))?;
         if spec.dims.contains(&0) {
@@ -514,9 +538,21 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             cumulative: EnergyLedger::default(),
             edge_velocity: [[[0.0; 3]; 2]; 3],
             moving_walls: false,
+            sources,
+            src_now: Vec::new(),
             marker: core::marker::PhantomData,
         };
         grid.force = grid.force_field(&rho, &grid.theta);
+        if grid.sources.is_some() {
+            grid.src_now = grid.source_field(0.0);
+            for i in 0..n {
+                if !grid.solid[i] {
+                    for a in 0..3 {
+                        grid.force[i][a] += grid.src_now[i].1[a];
+                    }
+                }
+            }
+        }
         // first moment sum c f = rho u - F/2 so that the half-force velocity equals the requested one
         for i in 0..n {
             grid.f[i] = if grid.solid[i] {
@@ -561,6 +597,18 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     }
     fn fluid_at(&self, x: [usize; 3], axis: usize, s: i64) -> Option<usize> {
         self.shifted(x, axis, s).filter(|&j| !self.solid[j])
+    }
+
+    /// The sources at lattice time `t` for every fluid cell (zero without sources).
+    fn source_field(&self, t: f64) -> Vec<(f64, [f64; 3], f64)> {
+        let mut out = vec![(0.0, [0.0; 3], 0.0); self.n];
+        if let Some(src) = &self.sources {
+            let solid = &self.solid;
+            par_fill(&mut out, self.spec.workers, &|i| {
+                if solid[i] { (0.0, [0.0; 3], 0.0) } else { src(self.at(i), t) }
+            });
+        }
+        out
     }
 
     /// Give the bounce-back wall at the low (`high = false`) or high edge of the non-periodic `axis` a velocity [lattice units,
@@ -826,12 +874,45 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 }
             });
         }
-        let next = self.stream(&post);
+        let have_sources = self.sources.is_some();
+        // The mass increment of the step is injected half before and half after the stream: the stream's pressure gradient then
+        // sees the mid-step density, as the momentum source (the average of the two levels) does. All of it before the stream
+        // would leave a first-order mismatch of half theta0 grad(S) in the momentum.
+        let mass_half = if have_sources { self.source_field(self.steps as f64 + 0.5) } else { Vec::new() };
+        if have_sources {
+            for i in 0..n {
+                if !self.solid[i] {
+                    for q in 0..Q {
+                        post[i][q] += 0.5 * L::W[q] * mass_half[i].0;
+                    }
+                }
+            }
+        }
+        let src_next = self.source_field(self.steps as f64 + 1.0);
+        let mut next = self.stream(&post);
+        if have_sources {
+            for i in 0..n {
+                if !self.solid[i] {
+                    for q in 0..Q {
+                        next[i][q] += 0.5 * L::W[q] * mass_half[i].0;
+                    }
+                }
+            }
+        }
         let (rho1, mom1) = self.macro_fields(&next);
         let mut th1 = self.theta.clone();
         let mut result = None;
         for _ in 0..COUPLING_PASSES {
-            let f1 = self.force_field(&rho1, &th1);
+            let mut f1 = self.force_field(&rho1, &th1);
+            if have_sources {
+                for i in 0..n {
+                    if !self.solid[i] {
+                        for a in 0..3 {
+                            f1[i][a] += src_next[i].1[a];
+                        }
+                    }
+                }
+            }
             let u1 = self.velocity_field(&rho1, &mom1, &f1);
             let et_trial: Vec<f64> = (0..n)
                 .map(|i| rho1[i] * (cv * th1[i] + 0.5 * (u1[i][0] * u1[i][0] + u1[i][1] * u1[i][1] + u1[i][2] * u1[i][2])))
@@ -845,6 +926,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     continue;
                 }
                 e1[i] = self.e[i] - 0.5 * (div1[i] + self.div[i]);
+                if have_sources {
+                    e1[i] += 0.5 * (src_next[i].2 + self.src_now[i].2);
+                }
                 let ke = 0.5 * rho1[i] * (u1[i][0] * u1[i][0] + u1[i][1] * u1[i][1] + u1[i][2] * u1[i][2]);
                 th_new[i] = (e1[i] - ke) / (rho1[i] * cv);
             }
@@ -899,6 +983,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         };
         self.f = next;
         self.e = e1;
+        if have_sources {
+            self.src_now = src_next;
+        }
         self.theta = th1;
         self.force = force1;
         self.div = div1;

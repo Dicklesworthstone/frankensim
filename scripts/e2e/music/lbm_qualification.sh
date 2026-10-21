@@ -6,7 +6,7 @@
 # Each lane retains the real test output and execution-stamped JSONL.
 # nsf-energy (M3.2-W3a) runs tests/nsf3_battery.rs whole and requires one passing receipt per physics stage.
 # nsf-qualification (M3.2-W3b) runs tests/nsf3_qualification.rs whole, including its ignored heavy tests, and requires one passing
-# receipt per stage (conduction, acoustic, shear, couette, mach-map).
+# receipt per stage (conduction, acoustic, shear, couette, mach-map, mms).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 LANE="" OUT="" RUNNER="native"
@@ -69,7 +69,7 @@ if lane=='nsf-energy':
     passed=(int(code)==0 and stages==['closed-box','sound-speed','viscous-heating','wall-heat'] and all(r['verdict']=='pass' for r in rows))
 elif lane=='nsf-qualification':
     stages=sorted(r.get('stage') for r in rows)
-    passed=(int(code)==0 and stages==['acoustic','conduction','couette','mach-map','shear'] and all(r['verdict']=='pass' for r in rows))
+    passed=(int(code)==0 and stages==['acoustic','conduction','couette','mach-map','mms','shear'] and all(r['verdict']=='pass' for r in rows))
 else:
     terminal=[r for r in rows if r.get('stage')=='terminal']
     expected=2 if lane=='dissipation-ladder' else 1

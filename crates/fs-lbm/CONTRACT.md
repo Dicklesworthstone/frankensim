@@ -869,6 +869,17 @@ the internal-energy budget, excludes that work: in a steady Couette flow the net
 so the ledger carries no heating information there and the physical check is the temperature profile
 (`couette_viscous_heating_profile`).
 
+**Manufactured-solution hooks.** `NsfGrid3::new_with_sources(spec, solid, initial, Some(source))` takes a `SourceFn`: for a cell
+index and a lattice time (steps) it returns `(S_rho, S_m, S_E)` in lattice units for `d rho/dt + div(rho u) = S_rho`,
+`d(rho u)/dt + div(rho u u + p I - sigma) = S_m` and `dE/dt + div((E + p) u - sigma . u - kappa grad theta) = S_E`. The momentum
+source joins the force at both time levels (so the Guo half-force velocity and the stress shift see it), the energy source enters
+the trapezoid with the flux divergences, and the mass source is added to the populations with the lattice weights (so it carries
+no momentum) HALF BEFORE AND HALF AFTER the stream: all of it before the stream leaves the stream's pressure gradient one source
+increment ahead of the momentum source and a first-order momentum error of `theta0 grad(S) / 2` per step (seen as a velocity
+error of that size after the first step and a density error that did not shrink with refinement). With the half/half split the
+residual per step is `theta0 laplacian(S) / 4`, which is second order globally under acoustic scaling. A grid without sources
+is bitwise unchanged. The hooks exist for the qualification (`mms_full_nsf_order`) and are not an instrument source API.
+
 **Ledger.** `EnergyLedger` reports internal, kinetic, pressure-work, viscous-heating and wall-heat terms of a step in joules
 and `residual_rel = |change of total energy - wall heat| / total energy`. `pressure_work_j = -integral(p div u) dV dt` is the
 reversible exchange (trapezoid in time, fourth-order divergence); `viscous_heating_j` is DEFINED as
