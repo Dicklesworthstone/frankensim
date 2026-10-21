@@ -152,7 +152,7 @@
    "era": "2011+",
    "mic": "Earthworks QTC-40",
    "pattern": "omni",
-   "mic_count": null,
+   "mic_count": 3,
    "distance_m": 1.524,
    "distance_status": "stated",
    "signal_chain": [
@@ -168,7 +168,7 @@
    ],
    "source_url": "https://theremin.music.uiowa.edu/MIS.html",
    "retrieved_utc": "2026-10-18T18:33:37Z",
-   "notes": "2013 percussion sessions publish stereo only; which microphones feed left and right is not stated on the page."
+   "notes": "2013 percussion sessions publish stereo only; which microphones feed left and right is not stated on the page. MISPost2012Intro.html (https://theremin.music.uiowa.edu/MISPost2012Intro.html, read 2026-10-21) says the percussion instruments were done between March and June 2013 at a 24-bit, 44.1 kHz format with 3 Earthworks QTC40 microphones in a Decca Tree configuration; the same page describes mid-side processing applied 'whenever possible' to widen the stereo field of the files it edits (it describes the ff files); this note does not claim the mf files graded here were so processed. MISxylophone.html (session of 10 June 2013, Earthworks QTC40, Metric Halo 2882, 24-bit 44.1 kHz stereo, 5 feet) has sections 'Hard Rubber Mallets' and 'Rosewood Mallets', so 'rosewood' in the file names xylophone.rosewood.* names the MALLETS; the page gives Model NA and states neither the bar material nor whether resonators were present."
   }
  ],
  "pages": [
