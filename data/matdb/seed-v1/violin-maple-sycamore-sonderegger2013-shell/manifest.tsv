@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	violin-maple-sycamore-sonderegger2013-shell
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; derived by the pack author from the committed packs maple-sycamore-sonderegger2013 and maple-sycamore-loss-lammlein2020 (whose own terms apply to the loss values: publisher copyright on the article, ETH Research Collection copy In Copyright - Non-Commercial Use Permitted)
+citation	Sonderegger W., Martienssen A., Nitsche C., Ozyhar T., Kaliske M., Niemz P. (2013), Eur J Wood Prod 71:91-99, doi:10.1007/s00107-012-0641-8; Laemmlein S.L., Van Damme B., Mannes D., Schwarze F.W.M.R., Burgert I. (2020), Holzforschung 74(8):765-776, doi:10.1515/hf-2019-0182; derived by the pack author
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
