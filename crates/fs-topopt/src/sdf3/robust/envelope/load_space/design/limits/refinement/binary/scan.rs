@@ -136,6 +136,46 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         report.work = control.work();
         Ok(report)
     }
+
+    /// Exhaustively search every distinct three-field binary mask state generated
+    /// by the retained gray design, then require the SAME two-grid gates as the
+    /// authored-schedule scan. A bounded source-projection prepass derives the
+    /// complete threshold set; if it exceeds max_candidates the call refuses
+    /// before any enriched geometry build or reference-load callback.
+    ///
+    /// The prepass itself is charged to control and temporarily installs the
+    /// explicit nominal params only while deriving projected fields. Candidate
+    /// evaluation still uses the existing fresh two-grid evaluator, so no
+    /// stiffness, displacement, spectrum or feasibility is inferred from the
+    /// prepass. This intentionally favors correctness over filter/build reuse.
+    #[allow(clippy::too_many_arguments)]
+    pub fn scan_all_binary_load_space_cap_enrichment(&mut self, rho: &[f64],
+        laws: &[ReferenceLoad3<'_>], params: SimpParams, cap: &LoadSpaceCap3,
+        options: BinaryRefinedScanOptions3, control: &mut SolveControl<'_>,
+        build: impl FnMut(&mut dyn FnMut() -> ControlFlow<()>) -> Result<AdaptiveElasticity3, GoalRefinementError3>,
+    ) -> Result<BinaryRefinedScan3, GoalRefinementError3> {
+        options.selection.validate(params, &[1.0]).map_err(binary_error)?;
+        options.selection.robustness.assert_valid(params);
+        let goal = options.enrichment;
+        if !options.change_tolerance.is_finite() || options.change_tolerance < 0.0
+            || laws.len() != cap.policy().dimension() || laws.len() > options.selection.max_load_cases
+            || laws.len() > goal.max_load_cases || goal.max_transfer_terms == 0
+            || ![goal.numerical.residual_tolerance,goal.numerical.identity_tolerance]
+                .iter().all(|t| t.is_finite() && *t > 0.0 && *t < 1.0)
+            || rho.len() != self.cells() || rho.iter().any(|r| !r.is_finite() || !(0.0..=1.0).contains(r)) {
+            return Err(invalid("invalid exhaustive refined binary model, load basis, raw controls or policy"));
+        }
+        let incoming = self.params;
+        self.params = params;
+        let source = self.binary_cap_source(rho, options.selection.robustness, control);
+        self.params = incoming;
+        let source = source?;
+        let thresholds = crate::sdf3::robust::envelope::limits::binary::critical_thresholds(
+            &source, options.selection.max_candidates).map_err(binary_error)?;
+        self.scan_binary_load_space_cap_enrichment(
+            rho, laws, params, cap, &thresholds, options, control, build)
+    }
+
 }
 
 #[cfg(test)]

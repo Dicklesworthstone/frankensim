@@ -119,3 +119,62 @@ fn g4_invalid_schedules_refuse_before_builds_and_shared_work_is_never_reset() {
     assert_eq!(stopped.work.linear_iterations,1);
     assert!(stopped.candidates.is_empty() && stopped.best.is_none());
 }
+
+
+#[test]
+fn g1_exhaustive_refined_scan_matches_every_distinct_source_state() {
+    let (tree,fine) = trees();
+    let mut study = CutDensityStudy3::new(build(&tree),0.15,SimpParams::default());
+    let raw: Vec<_> = (0..study.cells()).map(|i|0.31+0.052*i as f64).collect();
+    let cap = LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let mut p = policy(); p.selection.max_candidates = 128;
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut control = SolveControl::new(SolveBudget::default(),&mut poll);
+
+    let incoming = study.params();
+    study.params = params();
+    let source = study.binary_cap_source(&raw,p.selection.robustness,&mut control).unwrap();
+    study.params = incoming;
+    let expected = crate::sdf3::robust::envelope::limits::binary::critical_thresholds(
+        &source,p.selection.max_candidates).unwrap();
+
+    let mut builds = 0;
+    let report = study.scan_all_binary_load_space_cap_enrichment(
+        &raw,&laws(),params(),&cap,p,&mut control,|_| {
+            builds += 1; Ok(build(&fine))
+        }).unwrap();
+    assert_eq!(report.stop,BinaryLoadSpaceScanStop3::ScheduleComplete,"{report:?}");
+    assert_eq!(builds,expected.len());
+    assert_eq!(report.attempted_candidates,expected.len());
+    assert_eq!(report.candidates.iter().map(|c|c.threshold).collect::<Vec<_>>(),expected);
+    assert_eq!(expected.last(),Some(&1.0));
+    assert!(expected.windows(2).all(|w|w[0]<w[1]));
+    for row in &report.candidates {
+        let direct = study.estimate_binary_load_space_cap_enrichment(
+            build(&fine),&laws(),&raw,params(),&cap,p.selection.endpoint(row.threshold),
+            p.enrichment,&mut control).unwrap();
+        assert_eq!(row.coarse_worst_compliance,direct.coarse.worst_compliance);
+        assert_eq!(row.fine_worst_compliance,direct.fine.worst_compliance);
+        assert_eq!(row.normalized_gram_change,direct.normalized_gram_change);
+    }
+}
+
+#[test]
+fn g4_exhaustive_state_limit_refuses_before_any_enriched_build() {
+    let (tree,fine) = trees();
+    let mut study = CutDensityStudy3::new(build(&tree),0.15,params());
+    let raw: Vec<_> = (0..study.cells()).map(|i|0.31+0.052*i as f64).collect();
+    let cap = LoadSpaceCap3::new(2,1e9,0.02).unwrap();
+    let mut p = policy(); p.selection.max_candidates = 1;
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut control = SolveControl::new(SolveBudget::default(),&mut poll);
+    let before = control.work();
+    let result = study.scan_all_binary_load_space_cap_enrichment(
+        &raw,&laws(),params(),&cap,p,&mut control,|_| -> Result<AdaptiveElasticity3,GoalRefinementError3> {
+            panic!("over-budget exhaustive scan invoked enriched builder")
+        });
+    assert!(result.is_err());
+    assert_eq!(control.work().linear_solves,before.linear_solves+1,
+        "only the bounded source-projection filter may run before refusal");
+    let _ = fine; // keep fixture symmetry explicit
+}
