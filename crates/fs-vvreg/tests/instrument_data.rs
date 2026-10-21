@@ -232,7 +232,8 @@ fn decision_consistency_rules_refuse_each_violation() {
         vec![(10, "admit"), (7, "permission-required")],
         vec![(10, "admit"), (6, "unknown")],
         vec![(10, "admit-facts-only"), (7, "refused")],
-        vec![(9, "figure-digitized"), (7, "facts-only"), (8, "stated")],
+        // OD17 (owner, 2026-10-21): facts-only figure readings need a stated or bounded reading error.
+        vec![(9, "figure-digitized"), (7, "facts-only"), (8, "unstated")],
         vec![(10, "admit"), (9, "figure-digitized"), (8, "unstated")],
         vec![
             (10, "admit-facts-only"),
