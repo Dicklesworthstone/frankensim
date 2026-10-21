@@ -18,7 +18,7 @@ interface Side { level_db: (number | null)[]; cents: (number | null)[] }
 interface Track { n: number; ref_hz: number | null; real: Side | null; ours: Side | null }
 interface Pair {
   note: string; dynamic: string; duration_s: number;
-  real: { reference_id: string; file: string; segment_s: [number, number] | null; url: string; licence: string; mic: string | null; pattern: string | null; distance_m: number | null; distance_status: string | null; room: string | null; format: string | null };
+  real: { source: { name: string; credit: string; licence: string; licence_url: string | null; url: string; external: boolean }; reference_id: string; file: string; segment_s: [number, number] | null; url: string; licence: string; mic: string | null; pattern: string | null; distance_m: number | null; distance_status: string | null; room: string | null; format: string | null };
   ours: { wav: string; git_sha: string; observer: string; sample_rate: number; recipe: string } | null;
   audio: { real: string; ours: string | null }; level_match: string;
   alignment: { onset_real_s: number; onset_ours_s: number | null; highpass_hz: number; level_offset_db: number | null } | null;
@@ -28,7 +28,7 @@ interface Pair {
 }
 interface Card {
   family: string; title: string; built_utc: string;
-  reference: { instrument: string; files: number; by_dynamic: Record<string, number>; chains: string[]; licence: string } | null;
+  reference: { instrument: string; files: number; by_dynamic: Record<string, number>; chains: string[]; licence: string; licence_url: string | null; credit: string | null } | null;
   status: { badge: Badge; label: string; line: string; summary: string; blocked: string | null; physics_present: string[]; physics_missing: string[]; beads: string[]; described: boolean };
   pairs: Pair[]; refused: { note: string; kind?: "grader" | "site"; problems: string[]; reason?: string; render_sha?: string | null; time?: string | null }[];
 }
@@ -117,9 +117,20 @@ function physicsLists(c: Card): HTMLElement {
 }
 
 function referenceLine(c: Card): string {
-  if (!c.reference) return "The reference library has no recording of this instrument, so there is nothing to grade it against yet.";
+  if (!c.reference) {
+    const s = c.pairs[0]?.real.source;
+    if (s) return `Reference: ${s.name}. Credit: ${s.credit}. Licence: ${s.licence}`;
+    return "The reference library has no recording of this instrument, so there is nothing to grade it against yet.";
+  }
   const dyn = Object.entries(c.reference.by_dynamic).map(([k, v]) => `${v} ${k}`).join(", ");
-  return `Reference: the University of Iowa Musical Instrument Samples, ${c.reference.instrument} (${c.reference.files} recordings: ${dyn}). The library's licence, quoted: “${c.reference.licence}”`;
+  return `Reference: the University of Iowa Musical Instrument Samples, ${c.reference.instrument} (${c.reference.files} recordings: ${dyn}).${c.reference.credit ? ` Credit: ${c.reference.credit}.` : ""} The library's licence, quoted: “${c.reference.licence}”`;
+}
+
+/** The attribution that sits beside the clips: who recorded this note, and on what terms. */
+function creditLine(p: Pair): HTMLElement {
+  const s = p.real.source;
+  const quoted = s.licence.length > 30 ? `“${s.licence}”` : s.licence;
+  return el("p", { class: "small muted ir-credit" }, `Recording credit: ${s.credit}. Licence: ${quoted}`, s.licence_url ? " (" : null, s.licence_url ? el("a", { href: s.licence_url, rel: "noopener" }, "terms") : null, s.licence_url ? ")" : null, /[.”]$/.test(quoted) ? null : ".");
 }
 
 function sourceLines(p: Pair): HTMLElement {
@@ -176,6 +187,7 @@ function buildCard(c: Card, notes: Record<string, string>): HTMLElement {
   const blindBox = el("label", { class: "toggle" }, el("input", { type: "checkbox" }), "Blind test: hide which is which");
   const reveal = el("div", { class: "small vs-reveal", "aria-live": "polite" });
   const listenNote = el("p", { class: "small muted" });
+  const credit = el("div", {});
   const tabs = el("div", { class: "seg vs-tabs", role: "group", "aria-label": "Decomposition to show" });
   const figs = el("div", { class: "ir-figs" });
   const figLegend = el("p", { class: "small muted" });
@@ -302,6 +314,7 @@ function buildCard(c: Card, notes: Record<string, string>): HTMLElement {
   const key = (): string => `${c.family}/${pair.note}`;
   const render = (): void => {
     for (const b of seg.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset["note"] === pair.note));
+    credit.replaceChildren(creditLine(pair));
     listenNote.textContent = pair.ours ? `${pair.note}, ${pair.dynamic}. Switching keeps the playhead, so the two are heard at the same instant of the note.` : `${pair.note}, ${pair.dynamic}: only the real recording exists for this note. No render yet.`;
     drawFigures();
     drawPartials();
@@ -329,7 +342,7 @@ function buildCard(c: Card, notes: Record<string, string>): HTMLElement {
 
   root.append(
     el("h4", { class: "ir-h" }, "Listen"), seg, listenNote,
-    el("div", { class: "btn-row" }, playA, playB, stop, blindBox), reveal,
+    el("div", { class: "btn-row" }, playA, playB, stop, blindBox), credit, reveal,
     blindHidden,
     el("div", { class: "ir-analysis stack" },
       el("div", { class: "stack" }, el("h4", { class: "ir-h" }, "Look: the same note, decomposed"), tabs, figs, figLegend),

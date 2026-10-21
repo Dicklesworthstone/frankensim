@@ -29,7 +29,12 @@ A reference-only pair (no render yet) has "ours": null and no ours/diff files.
   duration_s      length of BOTH clips in audio, from the aligned onset
   real            {reference_id: an id in data/instruments/references.json files[],
                    file:        the library file name,
-                   segment_s:   [t0, t1] inside that file for this note, or null}
+                   segment_s:   [t0, t1] inside that file for this note, or null,
+                   source:      only when the recording is NOT in references.json (e.g. VocalSet):
+                                {id, name, credit, licence, url, licence_url?}, every string non-empty.
+                                credit is the attribution text shown beside the clip (CC BY requires it).}
+                  A library recording needs no source: its credit and licence come from references.json
+                  and CREDITS below.
   ours            null, or {wav: the render's path on trj, git_sha, observer: "baffled_outlet 0 0 0.5" | ...,
                             sample_rate, recipe: repo path of the render.sh that made it}
   audio           {real: "real.wav", ours: "ours.wav" | null, level_match: one sentence saying how loudness was matched}
@@ -91,6 +96,11 @@ REFERENCES = REPO / "data" / "instruments" / "references.json"
 DESCRIPTIONS = REPO / "data" / "instruments" / "descriptions"
 DEFAULT_ANALYSIS = Path.home() / ".local" / "share" / "wa-inst" / "analysis"
 TRJ_ANALYSIS = "trj:/data/tmp/wa-inst/analysis/"
+
+# Attribution line shown beside every clip, per references.json licence id (owner ruling 2026-10-20: the UIowa MIS
+# recordings are free to use without restriction; credit the Electronic Music Studios).
+CREDITS = {"uiowa-mis": "University of Iowa Electronic Music Studios"}
+LIBRARY_NAME = {"uiowa-mis": "University of Iowa Musical Instrument Samples"}
 
 PAIR_SCHEMA = "frankensim.instrument-pair.v1"
 STATUS_SCHEMA = "frankensim.instrument-status.v1"
@@ -237,8 +247,23 @@ def validate_pair(pj: dict, family: str, note: str, base: Path, refs_by_id: dict
     if not finite(pj.get("duration_s")) or pj["duration_s"] <= 0:
         problems.append("duration_s must be a positive number")
     real = pj.get("real")
-    if not isinstance(real, dict) or real.get("reference_id") not in refs_by_id:
-        problems.append(f"real.reference_id {None if not isinstance(real, dict) else real.get('reference_id')!r} is not in data/instruments/references.json")
+    if not isinstance(real, dict):
+        problems.append("real is missing")
+    elif real.get("reference_id") in refs_by_id:
+        if real["reference_id"] and refs_by_id[real["reference_id"]]["licence"] not in CREDITS:
+            problems.append(f"licence {refs_by_id[real['reference_id']]['licence']!r} has no credit line in CREDITS")
+    else:
+        src = real.get("source")
+        if not isinstance(src, dict):
+            problems.append(f"real.reference_id {real.get('reference_id')!r} is not in data/instruments/references.json and real.source {{id, name, credit, licence, url}} is missing")
+        else:
+            for key in ("id", "name", "credit", "licence", "url"):
+                if not isinstance(src.get(key), str) or not src[key].strip():
+                    problems.append(f"real.source.{key} must be a non-empty string")
+            if src.get("licence_url") is not None and not isinstance(src["licence_url"], str):
+                problems.append("real.source.licence_url must be a string")
+        if not isinstance(real.get("file"), str) or not real["file"]:
+            problems.append("real.file is required for a recording that is not in references.json")
     has_ours = pj.get("ours") is not None
     if has_ours:
         ours = pj["ours"]
@@ -380,10 +405,22 @@ def partials_view(parts: dict | None) -> dict | None:
     return {"t_s": [r(v, 4) for v in parts["t_s"]], "f0_hz": {k: r(num_or_none(v), 4) for k, v in (parts.get("f0_hz") or {}).items()}, "tracks": tracks}
 
 
-def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: dict) -> dict:
+def real_source(real: dict, ref: dict | None, licences: dict) -> dict:
+    """Who made the recording and on what terms, for the credit line: from references.json, else from the pair's own source."""
+    if ref is not None:
+        lic = licences.get(ref["licence"], {})
+        return {"id": ref["id"], "name": LIBRARY_NAME.get(ref["licence"], ref["licence"]), "credit": CREDITS[ref["licence"]], "licence": lic.get("text", ref["licence"]),
+                "licence_url": lic.get("url"), "url": ref["url"], "external": False}
+    s = real["source"]
+    return {"id": s["id"].strip(), "name": s["name"].strip(), "credit": s["credit"].strip(), "licence": s["licence"].strip(), "licence_url": s.get("licence_url"), "url": s["url"].strip(), "external": True}
+
+
+def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: dict, licences: dict) -> dict:
     has_ours = pj.get("ours") is not None
     note = pj["note"]
     rel = f"{out_dir.parent.name}/{out_dir.name}"
+    ref = refs_by_id.get(pj["real"]["reference_id"])
+    source = real_source(pj["real"], ref, licences)
     audio = {}
     for side in ("real", "ours"):
         if pj["audio"].get(side):
@@ -403,13 +440,13 @@ def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: di
             else:
                 entry[side] = None
         figures[kind] = entry
-    ref = refs_by_id[pj["real"]["reference_id"]]
-    chain = chains.get(ref["chain"], {})
+    chain = chains.get(ref["chain"], {}) if ref else {}
     return {
         "note": note, "dynamic": pj["dynamic"], "duration_s": r(pj["duration_s"], 3),
         "real": {
-            "reference_id": ref["id"], "file": pj["real"].get("file") or Path(ref["path"]).name, "segment_s": pj["real"].get("segment_s"),
-            "url": ref["url"], "sha256": ref["sha256"], "licence": ref["licence"],
+            "reference_id": ref["id"] if ref else source["id"], "file": pj["real"].get("file") or (Path(ref["path"]).name if ref else ""),
+            "segment_s": pj["real"].get("segment_s"), "url": source["url"], "sha256": ref["sha256"] if ref else None,
+            "licence": ref["licence"] if ref else source["licence"], "source": source,
             "mic": chain.get("mic"), "pattern": chain.get("pattern"), "distance_m": chain.get("distance_m"), "distance_status": chain.get("distance_status"),
             "room": chain.get("room"), "format": chain.get("format"),
         },
@@ -485,7 +522,10 @@ def library_summary(refs: dict, instrument: str) -> dict:
     for f in files:
         by_dyn[f["dynamic"] or "unlabelled"] = by_dyn.get(f["dynamic"] or "unlabelled", 0) + 1
     chains = sorted({f["chain"] for f in files})
-    return {"instrument": instrument, "files": len(files), "by_dynamic": by_dyn, "chains": chains}
+    licence_id = files[0]["licence"] if files else None
+    lic = {l["id"]: l for l in refs["licences"]}.get(licence_id, {})
+    return {"instrument": instrument, "files": len(files), "by_dynamic": by_dyn, "chains": chains,
+            "licence": lic.get("text", licence_id), "licence_url": lic.get("url"), "credit": CREDITS.get(licence_id)}
 
 
 def main() -> int:
@@ -503,7 +543,7 @@ def main() -> int:
     refs = json.loads(REFERENCES.read_text())
     refs_by_id = {f["id"]: f for f in refs["files"]}
     chains = {c["id"]: c for c in refs["chains"]}
-    licence = refs["licences"][0]["text"]
+    licences = {l["id"]: l for l in refs["licences"]}
 
     known = {fid for fid, _, _ in FAMILIES}
     extra = sorted(p.parent.name for p in args.descriptions.glob("*/status.json") if p.parent.name not in known) if args.descriptions.is_dir() else []
@@ -531,7 +571,7 @@ def main() -> int:
                     problems = check_audio(base, pj)
                 if problems:
                     raise Refused(problems)
-                pair = build_pair(pj, base, args.out / fid / note, refs_by_id, chains)
+                pair = build_pair(pj, base, args.out / fid / note, refs_by_id, chains, licences)
                 pair["source_sha256"] = sha256(pj_path)
                 pairs.append(pair)
             except (Refused, json.JSONDecodeError) as e:
@@ -544,7 +584,7 @@ def main() -> int:
         card = {
             "schema": "frankensim.instrument-card.v1", "family": fid, "title": (status or {}).get("title", title),
             "built_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "reference": (library_summary(refs, ref_instrument) | {"licence": licence}) if ref_instrument else None,
+            "reference": library_summary(refs, ref_instrument) if ref_instrument in {f["instrument"] for f in refs["files"]} else None,
             "status": {
                 **verdict, "summary": (status or {}).get("summary", ""), "blocked": (status or {}).get("blocked"),
                 "physics_present": (status or {}).get("physics_present", []), "physics_missing": (status or {}).get("physics_missing", []),
@@ -555,7 +595,7 @@ def main() -> int:
         (args.out / fid).mkdir(parents=True, exist_ok=True)
         (args.out / fid / "card.json").write_text(json.dumps(card, ensure_ascii=False, separators=(",", ":")))
         index.append({
-            "id": fid, "title": card["title"], "reference": ref_instrument, "badge": verdict["badge"], "label": verdict["label"],
+            "id": fid, "title": card["title"], "reference": card["reference"]["instrument"] if card["reference"] else None, "badge": verdict["badge"], "label": verdict["label"],
             "line": verdict["line"], "counts": verdict["counts"], "notes": [{"note": p["note"], "dynamic": p["dynamic"], "render": p["ours"] is not None} for p in pairs],
             "refused": len(refused),
         })

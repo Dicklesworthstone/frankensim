@@ -187,6 +187,66 @@ def write_refusal(root: Path, family: str, note: str, **extra) -> None:
     (d / "pair.json").write_text(json.dumps({"schema": B.PAIR_SCHEMA, "ours": None, "refused": {"reason": "reference measures -113 cents from the named note", "render_sha": "99f76b610", "time": "2026-10-20T23:40:00Z"}, **extra}))
 
 
+VOCAL_SOURCE = {"id": "vocalset-m10-long-forte-a", "name": "VocalSet", "credit": "TEST CREDIT: Wilkins et al. 2018, Zenodo 1193957", "licence": "CC BY 4.0",
+                "licence_url": "https://creativecommons.org/licenses/by/4.0/", "url": "https://zenodo.org/record/1193957"}
+
+
+class Credits(unittest.TestCase):
+    def check(self, mutate=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pj = make_pair(root)
+            if mutate:
+                mutate(pj)
+            return B.validate_pair(pj, "clarinet", "D3", root / "clarinet" / "D3", {f["id"]: f for f in REFS["files"]})
+
+    def external(self, pj, **over):
+        pj["real"] = {"reference_id": "vocalset-m10-long-forte-a", "file": "m10_long_forte_a.wav", "segment_s": None, "source": {**VOCAL_SOURCE, **over}}
+
+    def test_a_library_recording_is_credited_to_the_electronic_music_studios(self):
+        ref = next(f for f in REFS["files"] if f["id"] == REF_ID)
+        lic = {l["id"]: l for l in REFS["licences"]}
+        s = B.real_source({"reference_id": REF_ID}, ref, lic)
+        self.assertEqual(s["credit"], "University of Iowa Electronic Music Studios")
+        self.assertFalse(s["external"])
+        self.assertTrue(s["licence_url"].startswith("https://theremin.music.uiowa.edu"))
+        self.assertIn("without restrictions", s["licence"])
+
+    def test_every_library_licence_has_a_credit(self):
+        self.assertTrue({f["licence"] for f in REFS["files"]} <= set(B.CREDITS))
+
+    def test_a_recording_outside_the_library_is_accepted_with_its_own_source(self):
+        self.assertEqual(self.check(lambda pj: self.external(pj)), [])
+
+    def test_attribution_is_mandatory_for_an_outside_recording(self):
+        for key in ("credit", "licence", "name", "url", "id"):
+            self.assertTrue(any(f"real.source.{key}" in p for p in self.check(lambda pj: self.external(pj, **{key: "  "}))), key)
+
+    def test_an_unknown_recording_with_no_source_is_refused(self):
+        self.assertTrue(any("real.source" in p for p in self.check(lambda pj: pj["real"].update(reference_id="nope"))))
+
+    def test_the_card_carries_the_source_and_never_claims_a_library_reference_for_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out, desc = Path(tmp) / "analysis", Path(tmp) / "out", Path(tmp) / "desc"
+            pj = make_pair(root, with_ours=True)
+            pj["family"] = "voice"
+            self.external(pj)
+            d = root / "clarinet" / "D3"
+            (root / "voice").mkdir()
+            d.rename(root / "voice" / "D3")
+            (root / "voice" / "D3" / "pair.json").write_text(json.dumps({**pj, "note": "D3"}))
+            (desc / "voice").mkdir(parents=True)
+            (desc / "voice" / "status.json").write_text(json.dumps({"schema": B.STATUS_SCHEMA, "family": "voice", "title": "Voice", "reference_instrument": "adult male voice (not in the library)", "summary": "", "physics_present": [], "physics_missing": [], "blocked": None, "beads": []}))
+            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out), "--descriptions", str(desc)]):
+                self.assertEqual(B.main(), 0)
+            card = json.loads((out / "voice" / "card.json").read_text())
+            self.assertIsNone(card["reference"], "a reference that is not in the library must not be described as library recordings")
+            src = card["pairs"][0]["real"]["source"]
+            self.assertEqual((src["credit"], src["external"], src["licence"]), (VOCAL_SOURCE["credit"], True, "CC BY 4.0"))
+            index = json.loads((out / "index.json").read_text())
+            self.assertIsNone(next(f for f in index["families"] if f["id"] == "voice")["reference"])
+
+
 class GraderRefusals(unittest.TestCase):
     def run_main(self, root: Path, out: Path) -> int:
         with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out), "--descriptions", str(root / "none")]):
