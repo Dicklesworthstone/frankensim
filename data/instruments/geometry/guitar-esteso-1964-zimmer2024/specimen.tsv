@@ -1,0 +1,18 @@
+frankensim.specimen.v1
+key	value
+specimen_id	guitar-esteso-1964-zimmer2024
+maker	Sobrinos de Domingo Esteso, Madrid, Gravina 7 (plan header and the label photograph printed on the plan); the Zenodo record title names Faustino Conde: the two are recorded as found and NOT resolved (u-specimen-identity)
+model	unstated; the Zenodo description calls it a flamenca negra (rosewood back and sides) that Felipe Conde now believes was built as a classical guitar with some set-up changes
+serial	unstated
+year	1964 (plan header; the label photograph on the plan reads AÑO 1964)
+system	six-string classical-type guitar, nylon strings assumed from the type (not stated), scale length 650 mm (plan header), fan-braced spruce top, Rio rosewood back and sides, cedar neck, ebony fingerboard
+holder	not named on the plan; the Zenodo record is by Stefan Zimmer and Robert Mores, HAW Hamburg (documentation and reverse-engineered construction plan, 2024)
+reference_state	assembled
+environment	unstated
+source_ids	zimmer-mores-2024-esteso1964-plan;zimmer-mores-2024-esteso1964-plan-positions
+target_relation	ONE REAL classical-type guitar for pexfp.203 by owner ruling (mail 5189). It is NOT the UIowa Raimundo 118 of the recordings (that guitar's own dimensions stay UNKNOWN); the card must say the specimen differs from the recording's guitar
+doi	10.5281/zenodo.11383935
+licence	CC-BY-4.0 (Zenodo record, Zimmer and Mores 2024); attribution: Stefan Zimmer and Robert Mores, HAW Hamburg
+plan_file	1_construction_plan.pdf (AutoCAD plot, 3370 x 4768 pt = 1189 x 1682 mm; drawing and measurement by Stefan Zimmer, 2024; contact luthier@stefan-zimmer.info); photographs on the record (top and back bracing, inside toward the lower block, total views) are not used here
+view_scales	top view and side view are plotted 1:1 (checked: the vector outline height 1040.4 pt = 367.03 mm against the printed 367,02); the back view is NOT 1:1: 812.9 pt over the printed 495 mm = 1.6422 pt/mm; the layout and detail views carry no stated scale
+string_state	not stated; the plan prints deformation of the top (about 1.5 mm inwards) and of the back (about 2 mm outwards) in detail A

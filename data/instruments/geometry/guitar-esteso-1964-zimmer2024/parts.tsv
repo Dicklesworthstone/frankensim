@@ -1,0 +1,12 @@
+frankensim.specimen-parts.v1
+part	material	state	joins	note
+top	spruce (plan woods list; species of spruce unstated)	assembled	top-braces;ribs;linings;bridge;neck	soundboard with a sound hole; thickness sampled at the printed points in top-thickness.tsv; two-piece, glued along the line the plan labels glued top line; a repaired crack is drawn near the neck end
+top-braces	spruce (plan woods list)	assembled	top	fan and transverse bars drawn as hidden (dashed) outlines on the front view with printed widths and heights h:; which printed value belongs to which bar is only partly assigned (u-brace-assignment)
+back	Rio rosewood (plan woods list: back and sides)	assembled	back-braces;ribs;linings	back plate thickness sampled at the printed points in back-thickness.tsv; arch labels printed as arch 7 mm and arch 4 mm; six small patches of 6 x 15 mm and a repaired crack are drawn
+back-braces	cedar (plan woods list)	assembled	back	four transverse bars, a central strip and patches on the back view
+ribs	Rio rosewood (plan woods list: back and sides)	assembled	top;back;linings	side thickness sampled at nine printed points in side-thickness.tsv
+linings	spruce/beech (plan woods list); top lining individual blocks, back lining continuous (printed)	assembled	top;back;ribs	cross-sections drawn in detail view with printed 9, 13, 12 and 3 mm
+bridge	unstated (the plan woods list names no bridge wood)	assembled	top	detail view: 182.8 x 28 mm plan, 8.7 mm high, six string holes, string-hole span 58.5 mm
+neck	cedar (plan woods list)	assembled	top;fingerboard;headstock	neck and heel drawn in the side view; neck width 60 mm at the body edge
+fingerboard	ebony (plan woods list)	assembled	neck	fret lines are drawn without printed positions (u-fret-positions); nut-end width 51 mm printed
+headstock	cedar neck with rosewood veneer (plan woods list: head veneer rosewood)	assembled	neck	slotted headstock, printed 130 x 74 mm, three tuner stations at 35 mm spacing

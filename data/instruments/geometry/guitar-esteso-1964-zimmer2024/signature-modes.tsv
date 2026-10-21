@@ -1,0 +1,8 @@
+frankensim.specimen-signature-modes.v1
+mode	frequency_hz	description	source_id
+A0	98	Fundamental air resonance in the flexible resonance box	zimmer-mores-2024-esteso1964-signature-modes
+T1	200	Top plate (1,1) and back plate (1,1) couple in common phase motion, moving in the same direction, including the contained air	zimmer-mores-2024-esteso1964-signature-modes
+T2	240	Top plate (1,1) and back plate (1,1) couple in antiphase motion, a breathing mode; see Fig. 5 for the skewed mode shape	zimmer-mores-2024-esteso1964-signature-modes
+T3	277	Cross mode (2,1) of the top, however, strongly coupled with the back plate; see Fig. 5 for the skewed mode shape	zimmer-mores-2024-esteso1964-signature-modes
+T4	317	(1,3) mode of the top plate, bridge rotating around its longitudinal axis	zimmer-mores-2024-esteso1964-signature-modes
+A1	408	(1,2) air resonance	zimmer-mores-2024-esteso1964-signature-modes

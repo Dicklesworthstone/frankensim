@@ -1,0 +1,73 @@
+frankensim.specimen-dimensions.v1
+part	feature	quantity	value_si	unit	sigma_si	route	source_id	note
+top	outline	lower-bout-width	0.36702	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, vertical dimension printed 367,02 across the lower bout (the vector outline height is 367.03 mm at 1:1)
+top	outline	upper-bout-width	0.280	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, vertical dimension printed 280 across the upper bout
+top	outline	waist-width	0.240	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, vertical dimension printed 240 at the waist
+top	soundhole	radius	0.0435	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, radius label printed R43,5 on the thick circle (the hole edge); the printed text is split into R4 and 3,5 in the PDF text layer
+top	soundhole	centre-distance-from-upper-edge	0.151	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, horizontal dimension printed 151 from the upper edge of the body outline to the sound hole centre
+top	soundhole-annulus	inner-radius	0.046	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, thin circle concentric with the sound hole, printed R46; the author does not name this circle (a rosette zone in the drawing) and its role is not stated
+top	soundhole-annulus	outer-radius	0.063	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, outer concentric circle printed R63
+top	soundhole-annulus	width	0.017	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, radial dimension printed 17 between the R46 and R63 circles
+top	soundhole-annulus	annotated-height	0.004	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, label printed h: 4,0 with an arrow to the annulus; what is 4.0 mm high there is not stated
+top	repaired-crack-patch	width	0.0075	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, printed 7,5 on the small patch the author marks repaired crack, near the neck end
+top	repaired-crack-patch	length	0.014	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, printed 14 on the repaired crack patch
+top	deformation	inward-at-detail-a	0.0015	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	detail A, red label deformation in front about 1,5mm inwards (the author's estimate)
+top-braces	bar-neck-side	width	0.013	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, the wide dashed transverse bar nearest the neck end, dimension printed 13; assignment of the printed value to the bar is by P7's reading of the drawing
+top-braces	bar-neck-side	annotated-height	0.003	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, label h: 3,0 with an arrow into the same bar
+top-braces	bar-hole-neck-side	width	0.0085	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, the transverse bar between the neck-side bar and the sound hole, printed 8,5; assignment by P7's reading
+top-braces	bar-hole-neck-side	annotated-height	0.012	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, label h: 12 with an arrow to the same bar
+top-braces	bar-diagonal	width	0.0085	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, the long slanted bar crossing the plate at about 69 degrees to the axis, printed 8,5 near its bass-side end; assignment by P7's reading
+top-braces	bar-diagonal	annotated-height	0.012	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, label h: 12 with an arrow to the slanted bar; assignment by P7's reading
+top-braces	layout-angle-treble-fan	angle-to-transverse-line	1.4486	rad	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	layout view, angle printed 83 degrees between a straight fan line and the transverse construction line at the neck side of the hole (83 deg = 1.4486 rad)
+top-braces	layout-angle-bass-fan	angle-to-transverse-line	1.4312	rad	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	layout view, angle printed 82 degrees on the bass side of the same construction (82 deg = 1.4312 rad)
+top-braces	layout-angle-diagonal	angle-to-axis	1.2043	rad	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	layout view, angle printed 69 degrees between the slanted line and the glued top line (69 deg = 1.2043 rad)
+bridge	outline	length	0.1828	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	bridge detail frame, overall length printed 182,8
+bridge	outline	width	0.028	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	bridge detail frame, width printed 28
+bridge	outline	height	0.0087	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	bridge detail frame, height printed 8,7 (printed twice, in the elevation and the end view)
+bridge	string-holes	span-of-outer-holes	0.0585	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	bridge detail frame, dimension printed 58,5 between the outer two of the six string holes drawn (one fifth of this is the string spacing, 11.7 mm, a derived value not printed)
+bridge	central-section	length	0.0808	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	bridge detail frame, the raised central section, printed 80,8; the author does not name it
+bridge	end-scoop	depth	0.006	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	bridge detail frame, printed 6 at each curved end (also printed 6 in the end view)
+bridge	patch-under-bridge	length	0.204	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, long light rectangle at the bridge position, vertical dimension printed 204; whether this is a bridge patch or the bridge footprint is P7's reading
+bridge	patch-under-bridge	width	0.030	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, horizontal dimension printed 30 across the same rectangle
+back	outline	overall-length	0.495	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, dimension printed 495 along the full outline (this fixes the scale of the back view, 1.6422 pt/mm)
+back	first-brace	distance-from-neck-end	0.091	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, dimension printed 91 from the leftmost outline point to the first transverse bar
+back	arch	annotated-lengthwise	0.007	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, green label arch 7 mm pointing at the curved line along the central strip; the author does not define the reference plane
+back	arch	annotated-near-last-brace	0.004	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, green label arch 4 mm pointing at the curved line along the last transverse bar
+back	patches	width	0.006	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, six small patches drawn near the repaired crack, width printed 6
+back	patches	length	0.015	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, same patches, length printed 15
+back	deformation	outward-at-detail-a	0.002	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	detail A, red label deformation behind about 2mm outwards (the author's estimate)
+back-braces	central-strip	width	0.00985	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, strip along the axis, width printed 9,85
+back-braces	central-strip	annotated-height	0.0015	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, label h: 1,5 on the strip
+back-braces	brace-1	width	0.0075	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, first transverse bar from the neck end, printed 7,5
+back-braces	brace-1	annotated-height	0.017	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, label h: 17 on the first bar
+back-braces	brace-2	width	0.0075	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, second bar, printed 7,5
+back-braces	brace-2	annotated-height	0.017	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, label h: 17 on the second bar
+back-braces	brace-3	width	0.0075	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, third bar, printed 7,5
+back-braces	brace-3	annotated-height	0.017	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, label h: 17 on the third bar
+back-braces	brace-4	width	0.0075	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, fourth bar, printed 7,5
+back-braces	brace-4	annotated-height	0.017	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, label h: 17 on the fourth bar
+back-braces	brace-1-to-2	spacing-treble-side	0.106	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, top dimension printed 106 between the first and second bars (the bars are not perpendicular to the axis, so the two sides differ)
+back-braces	brace-1-to-2	spacing-bass-side	0.1075	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, bottom dimension printed 107,5 between the same two bars
+back-braces	brace-2-to-3	spacing-treble-side	0.088	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, top dimension printed 88 between the second and third bars
+back-braces	brace-2-to-3	spacing-bass-side	0.0855	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, bottom dimension printed 85,5 between the same two bars
+back-braces	brace-3-to-4	spacing-treble-side	0.085	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, top dimension printed 85 between the third and fourth bars
+back-braces	brace-3-to-4	spacing-bass-side	0.083	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	back view, bottom dimension printed 83 between the same two bars
+ribs	depth	at-upper-edge	0.094	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	side view, vertical dimension printed 94 at the neck end of the body
+ribs	depth	at-lower-bout-start	0.101	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	side view, vertical dimension printed 101 at about 179 mm from the upper edge (station read from the label position, plus or minus 5 mm)
+ribs	depth	at-tail-end	0.099	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	side view, vertical dimension printed 99 at the tail end of the body
+linings	top-lining	width	0.009	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	lining detail frame, top lining (labelled individual blogs, sic), horizontal dimension printed 9; assignment of the printed values to dimension lines is by P7's reading
+linings	top-lining	height	0.013	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	lining detail frame, top lining, vertical dimension printed 13
+linings	back-lining	width	0.003	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	lining detail frame, back lining (labelled continuous), horizontal dimension printed 3; assignment by P7's reading
+linings	back-lining	height	0.012	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	lining detail frame, back lining, vertical dimension printed 12
+neck	scale-length	length	0.650	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	plan header and a label on the front view, printed scale lenght 650 mm
+neck	at-body-edge	width	0.060	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	front view, vertical dimension printed 60 across the neck where it meets the body outline
+neck	headstock-break	angle	0.31416	rad	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	side view, angle printed 18 degrees between the neck and the headstock face (18 deg = 0.31416 rad)
+neck	neck-joint	annotated-inclination	0.0022	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	side view, red label inclination 2.2mm with an arrow at the neck to body junction; the reference of the inclination is not stated
+neck	thickness-station-1	thickness	0.023	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	side view, vertical dimension printed 23 at about 294 mm before the body edge (station from the label position, plus or minus 5 mm)
+neck	thickness-station-2	thickness	0.026	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	side view, vertical dimension printed 26 at about 70 mm before the body edge (station from the label position, plus or minus 5 mm)
+fingerboard	nut-end	width	0.051	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	headstock and neck view, dimension printed 51 across the nut end of the fingerboard
+headstock	outline	length	0.130	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	headstock view, top dimension printed 130
+headstock	outline	width	0.074	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	headstock view, vertical dimension printed 74
+headstock	slots	length	0.108	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	headstock view, dimension printed 108 along one of the two slots
+headstock	slots	slot-width	0.014	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	headstock view, vertical dimension printed 14 across a slot
+headstock	tuner-stations	spacing	0.035	m	unstated	published-measured	zimmer-mores-2024-esteso1964-plan	headstock view, two dimensions each printed 35 between the three tuner station lines

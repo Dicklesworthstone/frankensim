@@ -1,0 +1,12 @@
+frankensim.specimen-frames.v1
+part	origin	axis_x	axis_y	axis_z	note
+top	the point of the top outline farthest toward the neck, on the glued top line (PDF x 1647.0 pt, y 2893.65 pt of the plan)	+x along the glued top line toward the tail	+y toward the top of the drawing; the layout and back views label that side Treble, the front view carries no label (u-front-view-orientation)	unstated (plate normal)	front view, 1:1; SI metres after dividing PDF points by 72/25.4 pt per mm
+top-braces	same frame as top	+x along the glued top line toward the tail	+y toward the top of the drawing	unstated	braces drawn on the same front view
+back	the leftmost point of the back outline in the back view (PDF x 2220.5 pt), axis at PDF y 1878 pt	+x along the back axis toward the tail end as drawn	+y toward the top of the drawing, labelled Treble	unstated (plate normal)	back view at 1.6422 pt/mm (not 1:1), scale from the printed overall length 495 mm
+back-braces	same frame as back	+x along the back axis	+y toward the top of the drawing	unstated	back view
+ribs	side view origin: the upper edge of the body at PDF x 1647.0 pt; depth measured below the top plane line at PDF y 3577 pt	+x along the body toward the tail	unstated	+z downward (depth below the top plane) in the side view as drawn	side view, 1:1
+linings	detail view without stated frame	unstated	unstated	unstated	detail drawing, scale not stated
+bridge	detail view without stated frame	+x along the bridge length as drawn	unstated	unstated	detail drawing, dimensions printed
+neck	side and front views without a stated origin	+x along the neck toward the body	unstated	unstated	printed dimensions only
+fingerboard	nut end as drawn	+x toward the body	unstated	unstated	printed dimensions only
+headstock	headstock view without stated origin	unstated	unstated	unstated	printed dimensions only
