@@ -298,7 +298,14 @@ fn g1_field_and_temperature_feedback_close_the_same_finite_circuit_and_heat_stor
     assert!(report.electrical.iterations > 1);
     for (i, actual) in report.electrical.evaluated.iter().enumerate() {
         near(
-            actual.conductor.material().state_coordinate("T").unwrap(),
+            actual
+                .conductor
+                .material()
+                .query()
+                .axes()
+                .get("T")
+                .copied()
+                .unwrap(),
             result
                 .thermal()
                 .temperature_k(DESTINATIONS[i].cell)
@@ -306,12 +313,27 @@ fn g1_field_and_temperature_feedback_close_the_same_finite_circuit_and_heat_stor
         );
         if i == 0 {
             near(
-                actual.conductor.material().state_coordinate("E").unwrap(),
+                actual
+                    .conductor
+                    .material()
+                    .query()
+                    .axes()
+                    .get("E")
+                    .copied()
+                    .unwrap(),
                 actual.point.electric_field_v_m.abs(),
             );
         } else {
             // A thermal-only member needs no fictitious electrical source axis.
-            assert!(actual.conductor.material().state_coordinate("E").is_none());
+            assert!(
+                actual
+                    .conductor
+                    .material()
+                    .query()
+                    .axes()
+                    .get("E")
+                    .is_none()
+            );
         }
         near(
             report.source[i].temperature_k(),
@@ -833,7 +855,10 @@ fn g3_solved_field_and_current_heat_transport_close_data_only_feedback_and_conti
                     report.electrical.evaluated[0]
                         .conductor
                         .material()
-                        .state_coordinate(axis.name)
+                        .query()
+                        .axes()
+                        .get(axis.name)
+                        .copied()
                         .unwrap(),
                     coordinate,
                 );
@@ -975,8 +1000,8 @@ fn g3_two_coordinate_material_surfaces_close_electrical_and_thermal_feedback() {
             let bundle = evaluated.conductor.material();
             near(evaluated.point.current_a, current);
             near(evaluated.point.electric_field_v_m.abs(), field);
-            near(bundle.state_coordinate("T").unwrap(), ta);
-            near(bundle.state_coordinate("E").unwrap(), field);
+            near(bundle.query().axes().get("T").copied().unwrap(), ta);
+            near(bundle.query().axes().get("E").copied().unwrap(), field);
             assert_eq!(
                 bundle.axis_quantities().get("T"),
                 Some(&QuantitySpec::dimensional(Temperature::DIMS))

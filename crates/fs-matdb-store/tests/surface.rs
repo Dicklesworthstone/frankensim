@@ -1,14 +1,31 @@
 //! Discovery respects source patches and delegates every value to fs-matdb.
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
-    ClaimSet, InterpolationPolicy, NormalizedPack, PropertyClaim, PropertyKey, PropertyValue,
-    Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
+    ClaimSet, InterpolationPolicy, NormalizedPack, ObservationDataset, PropertyClaim, PropertyKey,
+    PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
 use fs_matdb_store::{CatalogPack, MaterialStore};
 use fs_qty::{Dims, QuantitySpec};
 
 fn pack(name: &str, interpolation: InterpolationPolicy) -> NormalizedPack {
+    let source_artifact = fs_blake3::hash_bytes(
+        b"synthetic disconnected patches\nx,y,response\n0,0,10\n1,0,20\n0,1,10\n3,0,40\n4,0,50\n3,1,40\ntriangles\n0,1,2\n3,4,5\n",
+    );
+    let provenance = Provenance {
+        source: "manufactured disconnected source patches; not measured material data".into(),
+        license: "test-only".into(),
+        artifact: Some(source_artifact),
+    };
     let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "two independent dimensionless source patches".into(),
+            method: "authored sample table with explicit triangle connectivity".into(),
+            artifact: source_artifact,
+            caveats: "deterministic synthetic fixture; no experimental uncertainty claim".into(),
+            provenance: provenance.clone(),
+        })
+        .unwrap();
     claims
         .insert_claim(PropertyClaim {
             key: PropertyKey::new("surface_response", Dims::NONE),
@@ -31,18 +48,14 @@ fn pack(name: &str, interpolation: InterpolationPolicy) -> NormalizedPack {
                 .with_quantity("y", QuantitySpec::dimensional(Dims::NONE), 0.0, 1.0),
             uncertainty: UncertaintyModel::Unstated,
             interpolation,
-            observations: vec![],
-            provenance: Provenance {
-                source: "synthetic disconnected patches".into(),
-                license: "test-only".into(),
-                artifact: None,
-            },
+            observations: vec![observation],
+            provenance,
         })
         .unwrap();
     NormalizedPack::new(
         name,
         "store-surface-test",
-        fs_blake3::hash_bytes(name.as_bytes()),
+        source_artifact,
         "synthetic redistribution permitted for tests",
         claims,
         vec![],
