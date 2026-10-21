@@ -3,17 +3,23 @@
   "family": "trumpet",
   "title": "Trumpet",
   "reference_instrument": "University of Iowa MIS Bb trumpet (Bach 180S37 Stradivarius, 1987, per MISBbtrumpet.html)",
-  "summary": "Not rendered. The generic lip-valve performer that renders the tenor trombone (music_render lip, fs-couple brass_loop::performance) would drive a trumpet the moment a real bore is supplied, but no numeric bore profile of the Bach 180S37, or of any identified whole Bb trumpet, was found in the open literature this lane could open. Inventing one, or assembling one from unrelated specimens, is not allowed, so the family stays blocked on geometry rather than render something that only looks like a trumpet.",
+  "summary": "A Bb trumpet with the valves up, played by a lip valve whose pitch is never an input: the note is the lock the loop finds between the lip and the bore, and only the open harmonics of the instrument are valid. The bore is the 34-station profile (mouthpiece cup and throat, backbore, leadpipe, cylinder, bell) published with Tournemenne and Chabassier (2019), copied digit for digit from the openwind example file; its valves are straightened, so the valve loops, slides and ports are absent. The lip is the outward-striking mode of the artificial latex lips Cullen (2000) measured on a trombone-size mouthpiece, because no trumpeter's lip is published. The graded sound is the radiated pressure of the actual bell disk at a baffled point 1.524 m away, not the mouthpiece pressure. Nothing was fitted to the Iowa recordings, and the lip setting that gives each note is read from the render, not set from a pitch. It is a population stand-in (a different trumpet from the recorded Bach 180S37), and that the stations were measured from a real commercial trumpet is as reported and not verified by this lane.",
   "physics_present": [
-    "the generic lip-valve performer, outlet observer and file format used for the tenor trombone (no instrument-specific code path): it accepts any list of cylinders, cones and Bessel horns, any measured lip, a cup volume and a microphone"
+    "fs-couple brass_loop: a one-degree-of-freedom outward-striking lip island advanced by exact held-force propagation, a Bernoulli aperture solved implicitly with the mouthpiece junction, closing on the bore's reflectance",
+    "fs-duct multimodal transfer-matrix bore with exact Bessel viscothermal loss, realized as a passive causal line by a convergence ladder over the line length, terminated in the flanged-piston radiation load; the mouthpiece cup and throat are geometry in the bore, not a lumped volume",
+    "an outlet observer built from the same duct: the mouth volume flow per incident wave from the same transfer-matrix chain, differentiated and delayed by the Rayleigh integral over the real 0.061 m bell disk to a baffled receiver, so the graded sound is radiated pressure, not mouthpiece pressure",
+    "a lip tension gesture (pre-stress) and a blowing-pressure gesture on the shared canonical schedule format, with held-note, tension-sweep and pressure-ramp recipes in render.sh (the ramps measure the oscillation threshold, extinction pressure and hysteresis of this model)"
   ],
   "physics_missing": [
-    "the bore: leadpipe, tuning slide, valve block with its slides and ports, and bell flare of the Bach 180S37 are all UNKNOWN as numbers; the National Music Museum records for Bach Stradivarius trumpets, which may list bore points, answered every request with an access refusal, so they were not read",
-    "what was found and not used: a published Bach 7C backbore table (Frost 2014, University of Washington thesis; its orientation is inferred, and its cup profile, cup volume and shank taper are not given), a caliper table of one unidentified trumpet (Kipp 2015, whose segment lengths cover only part of the instrument), and figure-only bore plots (Bilbao and Chick 2013; Sharp 1996; Myers 1998)",
-    "valve and slide tubing lengths for the valve combinations: UNKNOWN",
-    "a same-specimen or same-model impedance pair: no published impedance of a Bach 180S37 was found",
-    "everything the trombone lacks that also applies here (breath-warmed gas, wall vibration, nonlinear propagation at forte, a resolved radiation observer across the trumpet band, a human lip)"
+    "the valves: the bore file is straightened, so the valve loops, tuning slide, valve slides and ports are absent, and only the open-valve harmonic series (concert Bb3, F4, Bb4, D5) is valid; valve combinations are not rendered",
+    "the recorded trumpet: the Iowa instrument is a Bach 180S37 and no numeric bore of it was found, so this is a population stand-in; the measured-from-a-real-trumpet origin of the stations is as reported, the paper text could not be opened (HAL bot challenge) and the file states no maker, method or uncertainty",
+    "a trumpet player's lips: the lip is an artificial latex lip pair measured on a trombone-size mouthpiece, only its outward-striking mode, with a channel width and rest gap that are not a trumpeter's; no trumpet-player lip mass, width or rest gap is published",
+    "the mouthpiece as a separate measured part: the cup and throat come from the same station table, and their agreement with a Bach 7C or any named mouthpiece is not established",
+    "a clock that reaches the bell's radiation ceiling: the flanged radiation load is admitted only to ka 20, so the render runs on a 32 kHz clock (not 48 kHz) and everything above the receiver's resolved band (6.9 kHz) is unmodelled",
+    "the mouth-flow radiation transfer is the plane-mode image of the duct, not the multimodal one the reflectance line uses; and the microphone is an on-axis point: the player's bell orientation, the cardioid KM 84 directivity and any room are not modelled",
+    "breath-warmed and humidified bore gas, wall vibration, nonlinear propagation and shock formation at forte (the source of brassiness), mutes, and the player's tonguing and vibrato",
+    "a same-specimen or same-model impedance pair, so the passive chain is checked only against published population data"
   ],
-  "blocked": "No numeric bore profile of the Bach 180S37 or of any identified whole Bb trumpet found in open literature; needs an owner measurement (plan OD4) or access to museum bore records.",
+  "blocked": null,
   "beads": ["pexfp.254"]
 }

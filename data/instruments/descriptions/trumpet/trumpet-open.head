@@ -1,0 +1,87 @@
+# Bb trumpet, valves up, one held note: bore (mouthpiece cup to bell), lip, microphone.
+# render.sh prepends the schema and audio records and appends the schedule record plus a canonical
+# gesture track, so one description serves every open-valve note.
+#
+# Every number carries its source. UNKNOWN marks what no source this lane could open gives; none of it is
+# fitted to a recording.
+#
+# --- ambient ----------------------------------------------------------------------------------
+# 293.15 K, 101325 Pa, dry: a standard laboratory state. UNKNOWN: the temperature and humidity of the
+# Iowa anechoic chamber (MIS.html does not state them) and the bore gas temperature while played.
+full_scale_pa 20
+ambient moist_air 293.15 101325 0
+#
+# --- lip --------------------------------------------------------------------------------------
+# NO TRUMPET-PLAYER LIP IS PUBLISHED. This is the artificial latex lip pair of J. S. Cullen (2000), PhD
+# thesis, University of Edinburgh, Table A.2 p.253 embouchure 7 (fL1 204.5 Hz, QL1 7.0, 1/muL1 0.063
+# m^2/kg, b 12 mm, H0 0.53 mm), measured on a TROMBONE-size mouthpiece. It is used here only because it is
+# the one measured outward-striking lip with a complete (f, Q, 1/mu, width, rest gap) set; its channel
+# width and rest gap are not a trumpeter's. The lip pre-stress (the player's tension) is the free player
+# input; it scales the resonance. See trombone/tenor-trombone.head for the full caveats.
+lip_response 204.5 7.0 0.063 0.012 0.00053 1.0e-4
+lip_source Cullen (2000) PhD Edinburgh Table A.2 p.253 embouchure 7: fL1 204.5 Hz, QL1 7.0, 1/muL1 0.063 m2/kg, b 12 mm, H0 0.53 mm; artificial latex lips on a trombone-size mouthpiece, outward-striking mode only, NOT a trumpet player; face area 1e-4 m2 is a normalization that cancels
+#
+# --- mouthpiece cup -----------------------------------------------------------------------------
+# The cup and throat are GEOMETRY in the bore below (stations 0 to 17.7 mm: rim radius 8.4 mm falling to a
+# 1.825 mm throat). Adding a lumped cup volume would count it twice, so the lumped volume is set to the
+# smallest value the file format admits (1 mm^3, about 0.1 percent of the real cup); it is a format floor,
+# not a measurement.
+cup_volume_m3 1e-9
+termination flanged
+modes 3 1
+#
+# --- bore -------------------------------------------------------------------------------------
+# 34 stations (position x, radius r) in metres, copied digit for digit from the data file
+# examples/Tournemenne-Chabassier_ACTA2019/Tr_co_MP of the openwind 0.12.4 release (INRIA, GPL-3; the bore
+# numbers are used as published facts with attribution). The directory name attributes it to R. Tournemenne
+# and J. Chabassier, Acta Acustica united with Acustica 105 (2019) (DOI 10.3813/AAA.919364 as reported to
+# this lane; HAL record hal-01963674). THIS LANE COULD NOT OPEN THE PAPER (HAL answers bots with a
+# challenge page), so the claim that the stations are measured from a real commercial trumpet is as
+# reported, UNVERIFIED here; the file itself states no maker, model, measurement method or uncertainty.
+# The recorded trumpet is a Bach 180S37 (MISBbtrumpet.html): this is a population stand-in.
+# Each consecutive pair of stations is one segment (cylinder when the two radii are equal, otherwise a
+# cone). Two pairs repeat their position (x = 0.083704052 m and x = 0.79870405 m): they are radius steps
+# (4.2 -> 4.64 mm and 5.82 -> 5.825 mm) and appear as the jump between adjacent records. Total length
+# 1.4187041 m.
+# The valves are STRAIGHTENED in this file: the straight path is the air path with all valves up, so only
+# OPEN-valve notes (the harmonic series of the open instrument) are valid. The valve loops, slides and
+# ports are ABSENT.
+cylinder 8.4000000e-03 2.0000000e-03
+cone 8.4000000e-03 6.6262909e-03 4.0000000e-03
+cone 6.6262909e-03 3.1069360e-03 4.0000000e-03
+cone 3.1069360e-03 1.9895242e-03 4.0000000e-03
+cone 1.9895242e-03 1.8250000e-03 3.7340520e-03
+cone 1.8250000e-03 4.2000000e-03 6.5970000e-02
+cone 4.6400000e-03 5.0000000e-03 5.4999998e-02
+cone 5.0000000e-03 5.5000000e-03 5.5000000e-02
+cone 5.5000000e-03 5.7000000e-03 5.5000000e-02
+cone 5.7000000e-03 5.8200000e-03 5.5000000e-02
+cylinder 5.8200000e-03 4.9500000e-01
+cone 5.8250000e-03 6.1250000e-03 2.0000000e-02
+cone 6.1250000e-03 6.1000000e-03 1.9000000e-02
+cone 6.1000000e-03 5.9850000e-03 3.0000000e-02
+cone 5.9850000e-03 6.2050000e-03 3.5000000e-02
+cone 6.2050000e-03 6.3250000e-03 3.0000000e-02
+cone 6.3250000e-03 6.6500000e-03 2.9000000e-02
+cone 6.6500000e-03 6.9700000e-03 3.0000000e-02
+cone 6.9700000e-03 7.3900000e-03 3.1000050e-02
+cone 7.3900000e-03 8.4500000e-03 3.0000000e-02
+cone 8.4500000e-03 8.6800000e-03 6.1000000e-02
+cone 8.6800000e-03 9.2500000e-03 3.0000000e-02
+cone 9.2500000e-03 9.8450000e-03 3.1000000e-02
+cone 9.8450000e-03 1.0645000e-02 3.2000000e-02
+cone 1.0645000e-02 1.1550000e-02 3.0000000e-02
+cone 1.1550000e-02 1.2750000e-02 2.5000000e-02
+cone 1.2750000e-02 1.4375000e-02 3.6000000e-02
+cone 1.4375000e-02 1.6700000e-02 3.0000000e-02
+cone 1.6700000e-02 2.2500000e-02 3.4000000e-02
+cone 2.2500000e-02 3.4700000e-02 2.9000000e-02
+cone 3.4700000e-02 6.1000000e-02 2.8000000e-02
+bore_source Tournemenne and Chabassier (2019) Acta Acust. united Acust. 105, via openwind 0.12.4 examples/Tournemenne-Chabassier_ACTA2019/Tr_co_MP: 34 (x, r) stations, 1.4187041 m, valves straightened; measured-from-a-real-trumpet claim is as reported and unverified by this lane; population stand-in for the Bach 180S37; valve loops absent so open-valve notes only
+#
+# --- microphone ---------------------------------------------------------------------------------
+# UIowa MIS pages: 'Distance 5 feet' = 1.524 m, anechoic chamber, Neumann KM 84 cardioid
+# (MISBbtrumpet.html). On the bell axis in the baffle frame; UNKNOWN: the player's bell-to-microphone
+# orientation and the KM 84 directivity are not modelled. The 0.061 m bell with the receiver's maximum
+# quadrature (128 rings x 512 points) resolves c/(8 cell) = 6.98 kHz, so 6900 Hz is declared.
+microphone 0 0 1.524 128 512 6900
