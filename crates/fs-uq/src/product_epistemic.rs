@@ -22,6 +22,9 @@ pub struct EpistemicConfig {
 pub enum EpistemicStatus {
     Paused,
     Complete,
+    /// A requested upper-limit decision is established, not extrema convergence.
+    /// Ordinary `advance` may resume the same paid work to refine the extrema.
+    DecisionReached,
     EvaluationLimit,
     CellLimit,
     ParameterResolution,
@@ -30,7 +33,24 @@ pub enum EpistemicStatus {
 }
 impl EpistemicStatus {
     fn terminal(self) -> bool {
-        !matches!(self, Self::Paused | Self::Cancelled)
+        !matches!(self, Self::Paused | Self::Cancelled | Self::DecisionReached)
+    }
+}
+
+/// Upper-limit decisions conditional on the model's whole-box enclosures.
+/// These refer to the declared Cartesian domain, not a probability or an
+/// unrepresented jointly feasible set. Equality satisfies the upper limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpistemicCompliance {
+    NotRequested,
+    Undetermined,
+    AllCompliant,
+    AllViolating,
+    WitnessedViolation,
+}
+impl EpistemicCompliance {
+    fn decided(self) -> bool {
+        matches!(self, Self::AllCompliant | Self::AllViolating | Self::WitnessedViolation)
     }
 }
 
@@ -53,7 +73,11 @@ pub struct EpistemicReport {
     pub evaluations_planned: usize,
     pub evaluations_attempted: usize,
     pub evaluations_accepted: usize,
+    /// All covered leaves, including retired interior domains.
     pub covered_cells: usize,
+    pub live_cells: usize,
+    /// Cells whose entire ranges lie between accepted extremum witnesses.
+    pub retired_cells: usize,
     pub pending_split: bool,
     pub output_range: Option<[f64; 2]>,
     /// Encloses the infimum; no continuity or attainment is assumed.
@@ -62,6 +86,7 @@ pub struct EpistemicReport {
     pub maximum: Option<[f64; 2]>,
     pub minimizing_witness: Option<EpistemicWitness>,
     pub maximizing_witness: Option<EpistemicWitness>,
+    pub compliance: EpistemicCompliance,
     pub rejection_reason: Option<String>,
 }
 
@@ -107,6 +132,8 @@ pub struct EpistemicExecution {
     plan: UqPlan,
     config: EpistemicConfig,
     cells: Vec<Cell>,
+    retired_range: Option<[f64; 2]>,
+    retired: usize,
     pending: Option<Batch>,
     smallest: Option<EpistemicWitness>,
     largest: Option<EpistemicWitness>,
@@ -152,7 +179,7 @@ impl EpistemicExecution {
             .map_err(|_| "epistemic frontier allocation refused")?;
         let root = Draft { depth: vec![0; domain.len()], domain, range: None };
         Ok(Self {
-            plan: plan.clone(), config, cells,
+            plan: plan.clone(), config, cells, retired_range: None, retired: 0,
             pending: Some(Batch { parent: None, children: vec![root], next: 0 }),
             smallest: None, largest: None, attempted: 0, accepted: 0,
             status: EpistemicStatus::Paused, failure: None,
@@ -169,12 +196,14 @@ impl EpistemicExecution {
             qoi_name: self.plan.target_qoi.clone(), status: self.status,
             evaluations_planned: self.plan.budget_max_samples,
             evaluations_attempted: self.attempted, evaluations_accepted: self.accepted,
-            covered_cells: self.cells.len().max(usize::from(extrema.is_some())),
+            covered_cells: (self.cells.len() + self.retired).max(usize::from(extrema.is_some())),
+            live_cells: self.cells.len(), retired_cells: self.retired,
             pending_split: self.pending.as_ref().is_some_and(|p| p.parent.is_some()),
             output_range: extrema.map(|(minimum, maximum)| [minimum[0], maximum[1]]),
             minimum: extrema.map(|e| e.0), maximum: extrema.map(|e| e.1),
             minimizing_witness: if self.failure.is_none() { self.smallest.clone() } else { None },
             maximizing_witness: if self.failure.is_none() { self.largest.clone() } else { None },
+            compliance: self.compliance(),
             rejection_reason: self.failure.clone(),
         }
     }
@@ -190,7 +219,36 @@ impl EpistemicExecution {
     /// remain. Errors, nonfinite/reversed bounds and detected inconsistency
     /// refuse permanently. Panics propagate; side effects must tolerate retries.
     pub fn advance_interruptible<F, E, C>(&mut self, allowance: usize,
-        mut cancelled: C, mut enclose: F) -> EpistemicReport
+        cancelled: C, enclose: F) -> EpistemicReport
+    where F: FnMut(&[[f64; 2]]) -> Result<Option<[f64; 2]>, E>,
+        E: Display, C: FnMut() -> bool {
+        self.advance_for(allowance, cancelled, enclose, false)
+    }
+
+    /// Stop as soon as the upper compliance limit is established for the whole
+    /// domain or contradicted by a point witness. This may need only the root
+    /// enclosure, without solving either extremum to the requested tolerance.
+    /// Missing threshold returns an error without mutating the execution.
+    pub fn advance_until_compliance<F, E, C>(&mut self, allowance: usize,
+        cancelled: C, mut enclose: F) -> Result<EpistemicReport, &'static str>
+    where F: FnMut(&[[f64; 2]]) -> Result<[f64; 2], E>, E: Display, C: FnMut() -> bool {
+        self.advance_until_compliance_interruptible(allowance, cancelled,
+            |domain| enclose(domain).map(Some))
+    }
+
+    /// Interruptible decision-driven variant; all paid calls remain resumable.
+    pub fn advance_until_compliance_interruptible<F, E, C>(&mut self, allowance: usize,
+        cancelled: C, enclose: F) -> Result<EpistemicReport, &'static str>
+    where F: FnMut(&[[f64; 2]]) -> Result<Option<[f64; 2]>, E>,
+        E: Display, C: FnMut() -> bool {
+        if self.plan.compliance_threshold.is_none() {
+            return Err("decision-driven epistemic execution needs a compliance threshold");
+        }
+        Ok(self.advance_for(allowance, cancelled, enclose, true))
+    }
+
+    fn advance_for<F, E, C>(&mut self, allowance: usize,
+        mut cancelled: C, mut enclose: F, stop_on_decision: bool) -> EpistemicReport
     where F: FnMut(&[[f64; 2]]) -> Result<Option<[f64; 2]>, E>,
         E: Display, C: FnMut() -> bool {
         if allowance == 0 || self.status.terminal() { return self.report(); }
@@ -198,6 +256,9 @@ impl EpistemicExecution {
         self.status = EpistemicStatus::Paused;
         loop {
             if cancelled() { self.status = EpistemicStatus::Cancelled; break; }
+            if stop_on_decision && self.compliance().decided() {
+                self.status = EpistemicStatus::DecisionReached; break;
+            }
             if self.pending.is_none() {
                 let extrema = match self.extrema() {
                     Ok(Some(value)) => value,
@@ -215,6 +276,8 @@ impl EpistemicExecution {
             if self.pending.is_none() {
                 match self.start_split(&mut cancelled) {
                     Ok(()) => {},
+                    Err(EpistemicStatus::Refused) =>
+                        return self.fail("epistemic coverage invariant failed".into()),
                     Err(status) => { self.status = status; break; }
                 }
             }
@@ -245,7 +308,7 @@ impl EpistemicExecution {
     }
 
     fn extrema(&self) -> Result<Option<([f64; 2], [f64; 2])>, &'static str> {
-        let mut hull: Option<[f64; 2]> = None;
+        let mut hull = self.retired_range;
         for cell in &self.cells { include(&mut hull, cell.range); }
         if self.cells.is_empty() {
             if let Some(batch) = &self.pending {
@@ -262,6 +325,7 @@ impl EpistemicExecution {
 
     fn start_split(&mut self, cancelled: &mut impl FnMut() -> bool)
         -> Result<(), EpistemicStatus> {
+        self.retire_interior(cancelled)?;
         let (minimum, maximum) = self.extrema().ok().flatten().ok_or(EpistemicStatus::Refused)?;
         let mut chosen: Option<(usize, usize, f64)> = None;
         for (index, cell) in self.cells.iter().enumerate() {
@@ -287,6 +351,44 @@ impl EpistemicExecution {
         left.depth[axis] += 1;
         right.depth[axis] += 1;
         self.pending = Some(Batch { parent: Some(parent), children: vec![left, right], next: 0 });
+        Ok(())
+    }
+
+    fn compliance(&self) -> EpistemicCompliance {
+        let Some(threshold) = self.plan.compliance_threshold else {
+            return EpistemicCompliance::NotRequested;
+        };
+        if self.failure.is_some() { return EpistemicCompliance::Undetermined; }
+        let Ok(Some((minimum, maximum))) = self.extrema() else {
+            return EpistemicCompliance::Undetermined;
+        };
+        if maximum[1] <= threshold { EpistemicCompliance::AllCompliant }
+        else if minimum[0] > threshold { EpistemicCompliance::AllViolating }
+        else if self.largest.as_ref().is_some_and(|w| w.value[0] > threshold) {
+            EpistemicCompliance::WitnessedViolation
+        } else { EpistemicCompliance::Undetermined }
+    }
+
+    fn retire_interior(&mut self, cancelled: &mut impl FnMut() -> bool)
+        -> Result<(), EpistemicStatus> {
+        let (Some(smallest), Some(largest)) = (&self.smallest, &self.largest) else {
+            return Ok(());
+        };
+        let floor = smallest.value[1];
+        let ceiling = largest.value[0];
+        let mut index = 0;
+        while index < self.cells.len() {
+            if cancelled() { return Err(EpistemicStatus::Cancelled); }
+            let range = self.cells[index].range;
+            if range[0] >= floor && range[1] <= ceiling {
+                // Preserve an aggregate inclusion of every retired subdomain.
+                // Its endpoints cannot bind either extremum beyond the current
+                // witnesses; subsequent better witnesses only strengthen that.
+                include(&mut self.retired_range, range);
+                self.retired += 1;
+                self.cells.swap_remove(index);
+            } else { index += 1; }
+        }
         Ok(())
     }
 

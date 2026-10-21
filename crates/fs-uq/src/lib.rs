@@ -45,7 +45,8 @@ pub use product_control_variate::{LinearControlEstimate, LinearControlVariate, U
 pub use product_copula::GaussianCopulaExecution;
 pub use product_copula_qmc::GaussianCopulaQmcExecution;
 pub use product_epistemic::{
-    EpistemicConfig, EpistemicExecution, EpistemicReport, EpistemicStatus, EpistemicWitness,
+    EpistemicCompliance, EpistemicConfig, EpistemicExecution, EpistemicReport,
+    EpistemicStatus, EpistemicWitness,
 };
 pub use product_execution::UqExecution;
 pub use product_importance::{

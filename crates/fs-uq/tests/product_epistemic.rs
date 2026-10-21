@@ -206,3 +206,107 @@ fn probability_laws_and_malformed_domains_refuse_before_callbacks() {
         }).is_err());
     }
 }
+
+#[test]
+fn whole_domain_compliance_stops_after_one_call_and_extrema_resume_without_replay() {
+    use fs_uq::EpistemicCompliance;
+    let mut p = plan(4096);
+    p.compliance_threshold = Some(1.0);
+    let mut baseline = EpistemicExecution::new(&p, config()).unwrap();
+    let expected = baseline.advance(usize::MAX, || false, |b| Ok::<_, &str>(b[0]));
+    let mut run = EpistemicExecution::new(&p, config()).unwrap();
+    let decision = run.advance_until_compliance(100, || false, |b| Ok::<_, &str>(b[0])).unwrap();
+    assert_eq!(decision.status, EpistemicStatus::DecisionReached);
+    assert_eq!(decision.compliance, EpistemicCompliance::AllCompliant);
+    assert_eq!(decision.evaluations_attempted, 1);
+    assert!(decision.maximizing_witness.is_none());
+    let resumed = run.advance(usize::MAX, || false, |b| Ok::<_, &str>(b[0]));
+    assert_eq!(resumed, expected);
+    for (threshold, outcome, calls) in [
+        (-2.0, EpistemicCompliance::AllViolating, 1),
+        (-1.0, EpistemicCompliance::WitnessedViolation, 2),
+    ] {
+        p.compliance_threshold = Some(threshold);
+        let mut run = EpistemicExecution::new(&p, config()).unwrap();
+        let result = run.advance_until_compliance(100, || false, |b| Ok::<_, &str>(b[0])).unwrap();
+        assert_eq!(result.compliance, outcome);
+        assert_eq!(result.evaluations_attempted, calls);
+    }
+}
+
+#[test]
+fn interior_violation_needs_a_point_enclosure_not_a_loose_upper_bound() {
+    use fs_uq::EpistemicCompliance;
+    let mut p = plan(16); p.compliance_threshold = Some(0.9);
+    let mut run = EpistemicExecution::new(&p, config()).unwrap();
+    let covered = run.advance_until_compliance(1, || false, peak).unwrap();
+    assert_eq!(covered.compliance, EpistemicCompliance::Undetermined);
+    let violated = run.advance_until_compliance(1, || false, peak).unwrap();
+    assert_eq!(violated.status, EpistemicStatus::DecisionReached);
+    assert_eq!(violated.compliance, EpistemicCompliance::WitnessedViolation);
+    let witness = violated.maximizing_witness.unwrap();
+    assert_eq!(witness.parameters, vec![0.0]);
+    assert!(witness.value[0] > 0.9);
+    let mut uncertain = EpistemicExecution::new(&p, config()).unwrap();
+    let result = uncertain.advance_until_compliance(2, || false, |_| Ok::<_, &str>([-1.0, 1.0])).unwrap();
+    assert_eq!(result.compliance, EpistemicCompliance::Undetermined);
+    assert_eq!(result.status, EpistemicStatus::Paused);
+}
+
+#[test]
+fn pruning_interior_domains_frees_live_capacity_without_losing_coverage() {
+    let mut run = EpistemicExecution::new(&plan(4096), EpistemicConfig {
+        absolute_tolerance: 1e-8, maximum_cells: 8,
+    }).unwrap();
+    let result = run.advance(usize::MAX, || false, peak);
+    assert_eq!(result.status, EpistemicStatus::Complete);
+    assert!(result.retired_cells > 8);
+    assert!(result.live_cells <= 8);
+    assert_eq!(result.covered_cells, result.live_cells + result.retired_cells);
+    contains(result.minimum.unwrap(), 0.0); contains(result.maximum.unwrap(), 1.0);
+    assert!(result.minimum.unwrap()[1] - result.minimum.unwrap()[0] <= 1e-8);
+}
+
+#[test]
+fn cancellation_precedes_decision_publication_and_missing_threshold_preserves_state() {
+    use fs_uq::EpistemicCompliance;
+    let mut unrequested = EpistemicExecution::new(&plan(16), config()).unwrap();
+    let before = unrequested.report();
+    assert!(unrequested.advance_until_compliance(1, || panic!("no threshold"),
+        |_| -> Result<[f64; 2], &str> { panic!("no threshold") }).is_err());
+    assert_eq!(unrequested.report(), before);
+    let mut p = plan(16); p.compliance_threshold = Some(1.0);
+    let mut run = EpistemicExecution::new(&p, config()).unwrap();
+    let mut polls = 0;
+    let paused = run.advance_until_compliance(16, || { polls += 1; polls == 2 },
+        |b| Ok::<_, &str>(b[0])).unwrap();
+    assert_eq!(paused.status, EpistemicStatus::Cancelled);
+    assert_eq!(paused.evaluations_attempted, 1);
+    assert_eq!(paused.compliance, EpistemicCompliance::AllCompliant);
+    let decided = run.advance_until_compliance(16, || false,
+        |_| -> Result<[f64; 2], &str> { panic!("paid root already decides") }).unwrap();
+    assert_eq!(decided.status, EpistemicStatus::DecisionReached);
+    assert_eq!(decided.evaluations_attempted, 1);
+}
+
+#[test]
+fn cancellation_inside_pruning_resumes_the_identical_physical_requests() {
+    let mut full = EpistemicExecution::new(&plan(512), config()).unwrap();
+    let mut polls = 0;
+    let mut requests = Vec::new();
+    let expected = full.advance(512, || { polls += 1; false },
+        |b| { requests.push(b.to_vec()); peak(b) });
+    assert_eq!(expected.status, EpistemicStatus::Complete);
+    for boundary in [1, 2, polls / 3, polls / 2, polls - 1, polls] {
+        let mut run = EpistemicExecution::new(&plan(512), config()).unwrap();
+        let mut visited = 0;
+        let mut paid = Vec::new();
+        let partial = run.advance(512, || { visited += 1; visited == boundary },
+            |b| { paid.push(b.to_vec()); peak(b) });
+        assert_eq!(partial.status, EpistemicStatus::Cancelled);
+        if let Some(range) = partial.output_range { contains(range, 0.0); contains(range, 1.0); }
+        let result = run.advance(512, || false, |b| { paid.push(b.to_vec()); peak(b) });
+        assert_eq!(result, expected, "checkpoint {boundary}");
+        assert_eq!(paid, requests, "checkpoint {boundary}");
+    }
+}

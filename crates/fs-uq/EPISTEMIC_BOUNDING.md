@@ -48,6 +48,15 @@ their midpoint observations are accepted. Thus a partial split cannot remove
 unvisited possible extrema. Reported outer ranges never widen under a sound
 fixed evaluator. Disjoint nested enclosures refuse explicitly.
 
+Cells whose entire output ranges lie between the best minimum witness upper
+bound and maximum witness lower bound cannot improve either extremum. They are
+retired before requesting more live-cell storage. An aggregate hull retains
+their complete inclusion, so pruning frees parameter-box storage without
+discarding domain coverage. `live_cells` counts retained boxes; `retired_cells`
+counts these resolved interior domains; `covered_cells` includes both. Witness
+improvements can only strengthen the retirement criterion. Cancellation during
+pruning preserves the accumulated coverage and deterministic continuation.
+
 The lifetime plan budget counts both box and singleton calls, capped at 65536.
 Storage holds at most 4096 live leaves over at most 64 parameters, plus two
 prospective children and two witnesses. Zero-width axes are admitted; adjacent
@@ -68,6 +77,31 @@ and calls on terminal executions do nothing. A callback error or malformed
 interval is terminal and never becomes a zero response or a skipped subdomain.
 There is no durable checkpoint codec, portable certificate, derivative-based
 contraction, or implicit numerical-model verification.
+
+## Decision-driven upper-limit screening
+
+With `plan.compliance_threshold` set, every report distinguishes:
+
+- `AllCompliant`: the full-domain output upper bound is at or below the limit.
+- `AllViolating`: the full-domain output lower bound is strictly above it.
+- `WitnessedViolation`: an actual parameter witness has its entire response
+  enclosure strictly above the limit, while a universal verdict is unavailable.
+- `Undetermined`: none of those implications is established; a loose upper bound
+  above the limit is not by itself a violation.
+
+`advance_until_compliance` and its interruptible counterpart stop immediately
+when one of the first three decisions is established. A broad but sufficient
+root enclosure may decide compliance after one call, without an unnecessary
+midpoint call or tolerance-level extremum search. Equality is compliant for the
+declared `QoI <= threshold` convention. No frequency or probability is inferred.
+
+The status is `DecisionReached`, distinct from `Complete`. Ordinary `advance`
+can resume that exact paid state to refine both extrema; it does not restart
+the root or repeat a completed half-split. A missing threshold returns an error
+without altering the execution. Cancellation precedes decision publication;
+the cancelled report may still carry the earlier valid bounds and their logical
+decision. Resumption can publish that decision without repeating physical work.
+Conversely, tolerance completion can leave a near-threshold decision unresolved.
 
 ## Example
 
