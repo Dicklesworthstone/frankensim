@@ -1,0 +1,10 @@
+frankensim.specimen-unknowns.v1
+id	what	bound	correlation_group	blocks	route
+u-tube-lengths	no published table of measured tube lengths and bores of a siku or zampona was reachable (the Auvray, Fabre, Meneses, de la Cuadra and Lagree 2016 JASA paper is behind a paywall); lengths here are computed from the cited note set with L = c/(4 f) - 0.6133 a and a from Fletcher's regression	unbounded	tubes	any claim that the geometry is a real instrument's	measured tube lengths and diameters of a siku or zampona
+u-tube-regularity	the Andean tubes are much less regular than the regression (Fletcher 2005): bore, taper, septum position, rim bevel and cane roughness are unknown	unbounded	tubes	pitch and timbre of individual tubes	measurement of a real instrument
+u-lip-aperture-width	width of the lip aperture; the recipe takes the tube diameter (the jet cannot be wider than the tube)	(0, d] m	jet	mouth coupling strength	player data
+u-jet-spreading	the jet half-width grows to about twice its initial value across the top (Fletcher 2005) but the generic flue input keeps a constant half-width; the offset ratio is applied to that constant half-width	unbounded	jet	even-harmonic level and the onset pressure	a jet model with spreading
+u-jet-card	no jet card for a lip jet at the pan pipes' jet length to height ratio of 5; the lip-jet card is an estimate and the island's early-tap correction is only just out of range there	unbounded	jet	register selection and onset	measured jet transfer function
+u-turbulent-jet	Andean players use short bursts at high pressure so that the jet becomes turbulent (Fletcher 2005 Sec. V); the recipe is the laminar jet of the normal playing style	not modelled	jet	the percussive playing style	turbulent jet card
+u-humidity	humidity and pressure of any measurement; the recipe uses dry air at 20 C	unstated	environment	absolute pitch to a few cents	none
+u-tube-coupling	neighbouring tubes are not coupled; their open tops are not modelled as an array	not modelled	tubes	radiation pattern	array radiation model

@@ -1,0 +1,4 @@
+frankensim.specimen-parts.v1
+part	material	state	joins	note
+tubes	cane (bamboo) in real instruments; the recipe has rigid walls with generic viscothermal loss	played	jet	stopped cylinders: closed at the far end by a septum, open at the top; tube lengths and bores are computed from the note set by the published rules (route DERIVED, see unknowns)
+jet	air	played	tubes	a single planar lip jet with the controls of the table; the generic flue island applies

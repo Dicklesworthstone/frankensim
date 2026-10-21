@@ -1,0 +1,10 @@
+frankensim.specimen-unknowns.v1
+id	what	bound	correlation_group	blocks	route
+u-labium-offset	offset of the jet axis from the wedge tip and the jet angle; the paper gives the wedge angle and the free jet length but not where the jet meets the tip. Zero in the recipe only because the generic input needs a number	unbounded	embouchure	even-harmonic content and timbre claims	measurement of the mouthpiece or a maker drawing
+u-pocket-shape	shape of the closed pocket behind the flue exit (8 mm long, section falling to zero); the recipe uses a cylinder of the bore radius, which is an upper bound on its volume	[0.0, 1.0] of the cylinder volume	embouchure	pitch of the passive resonator to better than a few percent	mouthpiece drawing
+u-flue-taper	flue depth profile between 2 mm at entry and 1.48 mm at exit; the viscous windway law is applied with the exit depth over the whole length, an upper bound on the viscous pressure drop	[0.0, 1.0] of the exit-depth value	embouchure	mouth pressure for a given flow rate	mouthpiece drawing
+u-jet-profile	velocity profile at the flue exit (developing channel flow, Re about 800 to 2600): the island's convection speed ratio and band parameters belong to a slot jet of unknown profile	unbounded	jet	any claim about the register ladder or onset	measured jet profile or a validated windway flow solution
+u-humidity	humidity and static pressure of the measurement; the recipe uses dry air at 101325 Pa	unstated	environment	absolute pitch within a few cents	paper authors
+u-hole-chimney	hole length: the wall is 0.3 mm thick but a finger hole shorter than one propagation step of the mechanics clock is refused, so the recipe uses 1.5 mm	[0.0003, 0.0015] m	tone-holes	pitch of the notes with open holes	a finer mechanics clock or a hole model without a chimney section
+u-hole-azimuth	angular position of the holes around the bore	unstated	tone-holes	none in the plane-wave model	mouthpiece drawing
+u-wall-loss	wall material loss (brass) and the thin-wall unflanged radiation: the recipe uses the generic baffled compact load	unbounded	environment	end correction to a few cents	tube material card

@@ -1,0 +1,4 @@
+frankensim.specimen-frames.v1
+part	origin	axis_x	axis_y	axis_z	note
+tubes	centre of the open top of each tube on its axis	+x along the tube axis toward the closed end	unstated	unstated	every tube is described alone; their arrangement in two rows is not modelled (no tube coupling)
+jet	lip aperture centre on the tube axis plane	+x across the tube top toward the far rim (the edge the jet strikes)	unstated	unstated	the jet length is the distance from the lip aperture to that rim

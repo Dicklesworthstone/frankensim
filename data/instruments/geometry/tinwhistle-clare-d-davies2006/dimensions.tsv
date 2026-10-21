@@ -1,0 +1,38 @@
+frankensim.specimen-dimensions.v1
+part	feature	quantity	value_si	unit	sigma_si	route	source_id	note
+bore	main-tube	diameter	0.0122	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: on average just under 12.2 mm bore; the tube was not perfectly round
+bore	main-tube	outer-diameter	0.0128	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: outer diameter just over 12.8 mm
+bore	main-tube	wall-thickness	0.0003	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: wall thickness just over 0.3 mm (brass); also the hole length of every finger hole
+bore	main-tube	length	0.259	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: brass tube 259 mm long
+bore	main-tube	inserted-length	0.0245	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: inserted 24.5 mm into the plastic mouthpiece
+mouthpiece	body	length	0.059	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: plastic mouthpiece 59 mm long
+bore	resonator	length-window-centre-to-open-end	0.2673	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: total resonator length 267.3 mm from the window centre to the open end
+bore	resonator	length-window-centre-to-hole-06	0.12	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: the window centre is a further 120 mm from the centre of the 6th hole (rounded in the paper; 267.3 - 147.0 = 120.3 mm)
+tone-holes	hole-01	diameter	0.00661	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: average diameter of hole 1 counted from the open end (the holes were not quite round)
+tone-holes	hole-01	axial-position-from-open-end	0.0377	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: first hole drilled 37.7 mm from the open end
+tone-holes	hole-02	diameter	0.0066	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: average diameter of hole 2 counted from the open end (the holes were not quite round)
+tone-holes	hole-02	axial-position-from-open-end	0.0627	m	unstated	published-measured	isvr-davies-2006-tin-whistle	DERIVED, not stated: cumulative sum of the paper's centre spacings, 25.0 mm after hole 1
+tone-holes	hole-02	spacing-from-previous-hole	0.025	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: centre spacing between hole 1 and hole 2
+tone-holes	hole-03	diameter	0.00497	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: average diameter of hole 3 counted from the open end (the holes were not quite round)
+tone-holes	hole-03	axial-position-from-open-end	0.0812	m	unstated	published-measured	isvr-davies-2006-tin-whistle	DERIVED, not stated: cumulative sum of the paper's centre spacings, 18.5 mm after hole 2
+tone-holes	hole-03	spacing-from-previous-hole	0.0185	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: centre spacing between hole 2 and hole 3
+tone-holes	hole-04	diameter	0.00545	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: average diameter of hole 4 counted from the open end (the holes were not quite round)
+tone-holes	hole-04	axial-position-from-open-end	0.1042	m	unstated	published-measured	isvr-davies-2006-tin-whistle	DERIVED, not stated: cumulative sum of the paper's centre spacings, 23.0 mm after hole 3
+tone-holes	hole-04	spacing-from-previous-hole	0.023	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: centre spacing between hole 3 and hole 4
+tone-holes	hole-05	diameter	0.00603	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: average diameter of hole 5 counted from the open end (the holes were not quite round)
+tone-holes	hole-05	axial-position-from-open-end	0.1273	m	unstated	published-measured	isvr-davies-2006-tin-whistle	DERIVED, not stated: cumulative sum of the paper's centre spacings, 23.1 mm after hole 4
+tone-holes	hole-05	spacing-from-previous-hole	0.0231	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: centre spacing between hole 4 and hole 5
+tone-holes	hole-06	diameter	0.00494	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: average diameter of hole 6 counted from the open end (the holes were not quite round)
+tone-holes	hole-06	axial-position-from-open-end	0.147	m	unstated	published-measured	isvr-davies-2006-tin-whistle	DERIVED, not stated: cumulative sum of the paper's centre spacings, 19.7 mm after hole 5
+tone-holes	hole-06	spacing-from-previous-hole	0.0197	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: centre spacing between hole 5 and hole 6
+mouthpiece	flue	width	0.008	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: rectangular flue channel 8 mm wide
+mouthpiece	flue	depth-entry	0.002	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: tapering from 2 mm deep ...
+mouthpiece	flue	depth-exit	0.00148	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: ... to 1.48 mm deep
+mouthpiece	flue	length	0.02455	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: flue channel 24.55 mm long
+mouthpiece	window	length	0.0053	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: the jet flows across the 5.3 mm long mouth (the free jet length before the wedge; the cut-up of the flue model)
+mouthpiece	window	width	0.008	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: 8 mm wide mouth
+mouthpiece	window	wall-thickness	0.0024	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: local wall thickness of 2.4 mm at the rectangular opening
+mouthpiece	wedge	width	0.008	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: 8 mm wide wedge
+mouthpiece	wedge	upper-surface-length	0.011	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: the upper surface of the wedge was 11 mm long
+mouthpiece	wedge	angle-to-axis	0.436332313	rad	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: at an angle of about 25 degrees to the axis (25 degrees converted)
+mouthpiece	pocket	length-beyond-flue	0.008	m	unstated	published-measured	isvr-davies-2006-tin-whistle	paper Sec. 3: the bore continues 8 mm under the flue channel beyond its end with a rapid but smooth reduction of section to zero (its shape is not described: u-pocket-shape)
