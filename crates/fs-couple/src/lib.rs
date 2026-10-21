@@ -44,6 +44,8 @@ pub mod cavity_modal;
 pub mod cinematic_stem;
 /// Finite electrical storage and per-resistor heating on the shared thermal network.
 pub mod circuit_enthalpy;
+/// Original hereditary material history coupled to inertia and finite self-heating.
+pub mod thermovisco_dynamics;
 pub mod description;
 pub mod driving_point;
 pub mod flue_loop;
