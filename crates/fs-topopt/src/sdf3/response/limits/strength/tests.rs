@@ -53,7 +53,7 @@ fn same(a: &ResponseStressEvaluation3, b: &ResponseStressEvaluation3) {
 }
 
 #[test]
-fn g3_composition_matches_standalone_physics_and_charges_both_preparations() {
+fn g3_composition_matches_standalone_physics_with_one_preparation() {
     let (mut s,f,q)=fixture(true);let rho=raw(&s);let limits=limits(&q);
     let cases=[ResponseLimitCase3 { force:&f,prescribed:Some(&motion),limits:&limits }];
     let options=ResponseStressOptions3::default();let before=s.operator.scales().to_vec();
@@ -61,7 +61,7 @@ fn g3_composition_matches_standalone_physics_and_charges_both_preparations() {
     let mut p=|s:SolveProgress| { if s.stage=="sdf3-preconditioner-start" {preparations+=1;} ControlFlow::Continue(()) };
     let mut c=SolveControl::new(SolveBudget::default(),&mut p);
     let joint=s.evaluate_response_stress_limits(&rho,&cases,options,&mut c).unwrap();
-    let spent=c.work();drop(c);assert_eq!(preparations,2);
+    let spent=c.work();drop(c);assert_eq!(preparations,1);
     let mut p=|_|ControlFlow::Continue(());let mut c=SolveControl::new(SolveBudget::default(),&mut p);
     let r=s.evaluate_response_limits(&rho,&cases,options.response,&mut c).unwrap();
     let t=s.evaluate_stress_with_prescribed_motion(&rho,&[LoadCase{force:&f,weight:1.0}],&[Some(&motion)],
@@ -71,7 +71,10 @@ fn g3_composition_matches_standalone_physics_and_charges_both_preparations() {
     let mut residuals:Vec<_>=r.residuals.iter().flatten().copied().collect();residuals.push(t.aggregate/options.stress_limit-1.0);
     let direct=aggregate(&residuals,options.response.sharpness).unwrap().0;
     assert!((joint.constraint-direct).abs()<1e-12*direct.abs().max(1.0));
-    assert_eq!(spent,c.work());assert_eq!(s.operator.scales(),before);
+    assert_eq!(spent.linear_solves,3*cases.len()+4);
+    assert_eq!(spent.linear_solves+cases.len()+2,c.work().linear_solves);
+    assert!(spent.linear_iterations<c.work().linear_iterations);
+    assert_eq!(s.operator.scales(),before);
 }
 
 #[test]
@@ -127,7 +130,8 @@ fn g4_second_phase_failure_cancellation_and_budget_keep_the_original_material() 
     let (mut s,f,q)=fixture(true);let rho=raw(&s);let a=limits(&q);
     let cases=[ResponseLimitCase3{force:&f,prescribed:Some(&motion),limits:&a}];
     let before=s.operator.scales().to_vec();
-    for stage in ["response-stress-between","sdf3-stress-motion-pullback","response-stress-publish"] {
+    for stage in ["response-stress-between","sdf3-stress-reuse-primal",
+        "sdf3-stress-motion-pullback","response-stress-publish"] {
         let mut p=|s:SolveProgress| if s.stage==stage {ControlFlow::Break(())} else {ControlFlow::Continue(())};
         let mut c=SolveControl::new(SolveBudget::default(),&mut p);
         assert!(matches!(s.evaluate_response_stress_limits(&rho,&cases,Default::default(),&mut c),
@@ -171,3 +175,102 @@ fn g3_both_components_honor_the_same_protected_material_regions() {
 }
 
 mod design;
+
+#[test]
+fn g3_shared_primals_keep_independent_loads_component_adjoints_and_work_exact() {
+    let (mut s,f,q)=fixture(true);let neg:Vec<_>=f.iter().map(|v|-0.4*v).collect();
+    let a=limits(&q);
+    let cases=[ResponseLimitCase3{force:&f,prescribed:Some(&motion),limits:&a},
+        ResponseLimitCase3{force:&neg,prescribed:None,limits:&a}];
+    let loads=[LoadCase{force:&f,weight:1.0},LoadCase{force:&neg,weight:1.0}];
+    let motions: &stress_owner::StressMotions3<'_>=&[Some(&motion),None];
+    let options=ResponseStressOptions3::default();let incoming=s.operator.scales().to_vec();
+    for shift in [0.0,0.03] {
+        let rho:Vec<_>=raw(&s).iter().map(|r|r+shift).collect();
+        let (mut starts,mut reuse,mut duplicate)=(0,0,0);
+        let mut p=|w:SolveProgress| {
+            if w.stage=="sdf3-preconditioner-start" {starts+=1;}
+            if w.stage=="sdf3-stress-reuse-primal" {reuse+=1;}
+            if w.stage=="sdf3-stress-primal" {duplicate+=1;}
+            ControlFlow::Continue(())
+        };
+        let mut c=SolveControl::new(SolveBudget::default(),&mut p);
+        let joint=s.evaluate_response_stress_limits(&rho,&cases,options,&mut c).unwrap();
+        let spent=c.work();drop(c);
+        assert_eq!((starts,reuse,duplicate),(1,2,0));assert_eq!(spent.linear_solves,10);
+        let mut p=|_|ControlFlow::Continue(());let mut c=SolveControl::new(SolveBudget::default(),&mut p);
+        let r=s.evaluate_response_limits(&rho,&cases,options.response,&mut c).unwrap();
+        let t=s.evaluate_stress_with_prescribed_motion(&rho,&loads,motions,options.stress,
+            StressMeasure3::SampledPeakBound,&mut c).unwrap();
+        assert_eq!(c.work().linear_solves,14);
+        assert!(spent.linear_iterations<c.work().linear_iterations);
+        assert_ne!(r.displacements[0],r.displacements[1]);
+        assert_eq!(joint.response.displacements,r.displacements);
+        assert_eq!(joint.stress.displacements,r.displacements);
+        assert_eq!(joint.stress.displacements,t.displacements);
+        assert_eq!(joint.response.adjoints,r.adjoints);assert_eq!(joint.stress.adjoints,t.adjoints);
+        assert_eq!(joint.response.constraint_gradient,r.constraint_gradient);
+        assert_eq!(joint.stress.gradient,t.gradient);assert_eq!(joint.stress.aggregate,t.aggregate);
+        assert_eq!(joint.stress.case_compliances,t.case_compliances);
+        assert_eq!(joint.stress.cell_relaxed_max,t.cell_relaxed_max);
+        assert_eq!(joint.stress.sampled_physical_max,t.sampled_physical_max);
+        assert_eq!(joint.stress.point_count,t.point_count);
+        assert_eq!(joint.stress.volume_gradient,t.volume_gradient);
+        assert_eq!(joint.stress.volume_gradient,r.volume_gradient);
+        assert_eq!(joint.work,spent);assert_eq!(s.operator.scales(),incoming);
+    }
+}
+
+#[test]
+fn g4_shared_solve_fits_a_budget_that_cannot_pay_for_duplicate_equilibria() {
+    let (mut s,f,q)=fixture(true);let rho=raw(&s);let a=limits(&q);
+    let cases=[ResponseLimitCase3{force:&f,prescribed:Some(&motion),limits:&a}];
+    let options=ResponseStressOptions3::default();let incoming=s.operator.scales().to_vec();
+    let mut p=|_|ControlFlow::Continue(());let mut c=SolveControl::new(SolveBudget::default(),&mut p);
+    let expected=s.evaluate_response_stress_limits(&rho,&cases,options,&mut c).unwrap();
+    let exact=c.work().linear_iterations;
+    let mut p=|_|ControlFlow::Continue(());
+    let mut c=SolveControl::new(SolveBudget{total_iterations:exact,..Default::default()},&mut p);
+    let again=s.evaluate_response_stress_limits(&rho,&cases,options,&mut c).unwrap();
+    same(&expected,&again);assert_eq!(c.work().linear_iterations,exact);
+    let mut p=|_|ControlFlow::Continue(());
+    let mut c=SolveControl::new(SolveBudget{total_iterations:exact,..Default::default()},&mut p);
+    s.evaluate_response_limits(&rho,&cases,options.response,&mut c).unwrap();
+    assert!(matches!(s.evaluate_stress_with_prescribed_motion(&rho,&[LoadCase{force:&f,weight:1.0}],
+        &[Some(&motion)],options.stress,StressMeasure3::SampledPeakBound,&mut c),
+        Err(StressError3::Evaluation(EvaluationStop::TotalBudget{..}))));
+    assert_eq!(c.work().linear_iterations,exact);assert_eq!(s.operator.scales(),incoming);
+}
+
+#[test]
+fn g3_joint_two_level_and_recursive_setups_are_paid_once_per_density() {
+    for recursive in [false,true] {
+        let (s,f,q)=fixture(true);let params=s.params();let fine=s.operator.into_elasticity();
+        let (coarse,_,_)=fixture(false);let coarse=coarse.operator.into_elasticity();
+        let op=if recursive {
+            AdaptiveSolveSpace3::multilevel(fine,&[&coarse],Default::default(),||ControlFlow::Continue(())).unwrap()
+        } else {
+            AdaptiveSolveSpace3::two_level(fine,&coarse,Default::default(),||ControlFlow::Continue(())).unwrap()
+        };
+        let mut s=CutDensityStudy3::new(op,0.15,params);let a=limits(&q);
+        let cases=[ResponseLimitCase3{force:&f,prescribed:Some(&motion),limits:&a}];
+        let incoming=s.operator.scales().to_vec();let mut previous=None;
+        for stage in 0..2 {
+            let rho:Vec<_>=raw(&s).iter().map(|r|r+0.02*stage as f64).collect();
+            let mut starts=0;
+            let mut p=|w:SolveProgress| {if w.stage=="sdf3-preconditioner-start" {starts+=1;}ControlFlow::Continue(())};
+            let mut c=SolveControl::new(SolveBudget::default(),&mut p);
+            let result=s.evaluate_response_stress_limits(&rho,&cases,Default::default(),&mut c).unwrap();
+            let work=c.work();drop(c);assert_eq!(starts,1);
+            assert_eq!(s.operator.scales(),incoming);
+            s.operator.set_scales(&result.response.scales).unwrap();
+            let exact=s.operator.prepare_with_work(|_|ControlFlow::Continue(())).unwrap().setup_work();
+            s.operator.set_scales(&incoming).unwrap();
+            assert_eq!(work.preconditioner_operator_applications,exact.operator_applications);
+            assert_eq!(work.preconditioner_galerkin_products,exact.galerkin_products);
+            if recursive {assert!(exact.galerkin_products>0);} else {assert!(exact.operator_applications>0);}
+            if let Some(old)=previous {assert_ne!(result.response.displacements,old);}
+            previous=Some(result.response.displacements);
+        }
+    }
+}

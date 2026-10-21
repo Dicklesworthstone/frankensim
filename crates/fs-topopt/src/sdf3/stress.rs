@@ -31,6 +31,17 @@ use fs_cutfem::elastic3::adaptive::dirichlet::PrescribedMotion3;
 /// Strong box clamps remain homogeneous even when embedded motion is supplied.
 pub type StressMotions3<'a> = [Option<&'a PrescribedMotion3<'a>>];
 
+// Same-transaction fields from the joint owner, not user-supplied cached
+// equilibria. Its immutable operator borrow spans both components. These must
+// belong to the SAME ordered loads, motions and density map as this stress call.
+// Retaining separate component outputs still requires copying their vectors;
+// only duplicate solves and numerical preparation are eliminated.
+#[derive(Clone, Copy)]
+pub(in crate::sdf3) struct SharedStressFields3<'a> {
+    pub(in crate::sdf3) displacements: &'a [Vec<f64>],
+    pub(in crate::sdf3) volume_gradient: &'a [f64],
+}
+
 #[path = "stress/measure.rs"]
 mod measure;
 pub use measure::StressMeasure3;
@@ -289,6 +300,29 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         self.operator.set_scales(&design.scales)?;
         let outcome = (|| {
             let prepared = self.operator.prepare_elasticity(control)?;
+            self.stress_prepared(rho, loads, motions, options, measure, &design, &prepared, None, control)
+        })();
+        self.operator
+            .set_scales(&previous)
+            .expect("incoming stress scales remain valid");
+        outcome
+    }
+
+    // The caller owns admission, density installation and rollback. Keep the
+    // original stress kernel shared by standalone and joint evaluations, and
+    // borrow the same immutable operator/preparation for the whole family.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::sdf3) fn stress_prepared(&self, rho: &[f64], loads: &[LoadCase<'_>],
+        motions: Option<&StressMotions3<'_>>, options: StressOptions3,
+        measure: StressMeasure3, design: &crate::sdf3::Design3,
+        prepared: &impl fs_sparse::precond::Precond, shared: Option<SharedStressFields3<'_>>,
+        control: &mut SolveControl<'_>)
+        -> Result<StressEvaluation3, StressError3> {
+            if shared.is_some_and(|fields| fields.displacements.len() != loads.len()
+                || fields.displacements.iter().any(|u| u.len() != self.operator.n())
+                || fields.volume_gradient.len() != self.cells()) {
+                return Err(StressError3::Invalid("shared stress field shape mismatch"));
+            }
             let weight_scale = loads.iter().map(|l| l.weight).fold(0.0_f64, f64::max);
             let total_weight: f64 = loads.iter().map(|l| l.weight / weight_scale).sum();
             let weights: Vec<f64> = loads
@@ -326,7 +360,8 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             let mut normalization = 0.0_f64;
             let mut nonzero_weighted_force = false;
             for (case, load) in loads.iter().enumerate() {
-                control.checkpoint("sdf3-stress-primal")?;
+                control.checkpoint(if shared.is_some() { "sdf3-stress-reuse-primal" }
+                    else { "sdf3-stress-primal" })?;
                 let mut rhs: Vec<f64> = load
                     .force
                     .iter()
@@ -343,14 +378,17 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                     }
                 }
                 nonzero_weighted_force |= measure.includes(weights[case]) && rhs.iter().any(|f| *f != 0.0);
-                let u = checked_solve_preconditioned(
+                let u = match shared {
+                    Some(fields) => fields.displacements[case].clone(),
+                    None => checked_solve_preconditioned(
                     &self.operator,
-                    &prepared,
+                    prepared,
                     &rhs,
                     1e-11,
                     "sdf3-stress-primal",
                     control,
-                )?;
+                    )?,
+                };
                 let compliance = if motion.is_some() {
                     // b_g^T u is not external work or an actuator-energy law.
                     finite(load.force.iter().zip(&u).enumerate().map(|(i, (f, u))|
@@ -462,7 +500,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                     .reference_bulk_stress_pullback(&derivatives, || poll(control))?;
                 let z = checked_solve_preconditioned(
                     &self.operator,
-                    &prepared,
+                    prepared,
                     &rhs,
                     1e-11,
                     "sdf3-stress-adjoint",
@@ -493,18 +531,23 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                 *value = finite(*value * slope)?;
             }
             let gradient = self.pullback(&local, control)?;
-            let local_volume: Vec<f64> = self
-                .mass
-                .iter()
-                .zip(&design.slope)
-                .map(|(m, s)| m * s)
-                .collect();
-            let volume_gradient = self.pullback(&local_volume, control)?;
+            let volume_gradient = match shared {
+                Some(fields) => fields.volume_gradient.to_vec(),
+                None => {
+                    let local_volume: Vec<f64> = self
+                        .mass
+                        .iter()
+                        .zip(&design.slope)
+                        .map(|(m, s)| m * s)
+                        .collect();
+                    self.pullback(&local_volume, control)?
+                }
+            };
             control.checkpoint("sdf3-stress-publish")?;
             Ok(StressEvaluation3 {
                 rho: rho.to_vec(),
-                projected_rho: design.projected,
-                scales: design.scales,
+                projected_rho: design.projected.clone(),
+                scales: design.scales.clone(),
                 aggregate,
                 gradient,
                 sampled_relaxed_max: maximum,
@@ -521,11 +564,6 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                 point_count,
                 work: control.work(),
             })
-        })();
-        self.operator
-            .set_scales(&previous)
-            .expect("incoming stress scales remain valid");
-        outcome
     }
 }
 

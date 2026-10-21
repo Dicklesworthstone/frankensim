@@ -43,14 +43,31 @@ SIMP pullback. The stress p-norm and outer log-sum-exp are conservative smooth
 approximations of their finite sets; a narrow feasible window may be excluded
 by smoothing. None of these bounds is a continuum stress guarantee.
 
-The reference implementation intentionally calls both existing evaluators.
-That means two material preparations and two primal families, plus their
-component adjoints. This is not a fused solve or a performance improvement.
-All setup, filter, primal and adjoint work uses ONE caller-owned control,
-including completed response work before failed stress evaluation. Both phases
-restore incoming scales on success and returned errors. No partial combined
-result is published; callbacks must be pure reference laws and panics are not
-caught. The retained component adjoints are not mislabeled as joint adjoints.
+The joint path uses the same component kernels under ONE density transaction
+and ONE material preparation. It computes the filter/projection once, solves
+each experiment once, and shares those fresh primal fields and the volume
+gradient with the stress kernel. Primal fields must pass the original explicit
+equilibrium-residual check first. No field or factor is cached across density
+trials, and there is no public API accepting arbitrary cached equilibria.
+
+Response and stress retain their distinct adjoints and material gradients.
+Prescribed-motion lifting is still reintegrated for stress RHS admission and
+its derivative; it is not replaced by a frozen force. Both component field
+families remain independently owned in the result, so this does not claim
+zero-copy or reduced peak-memory operation. Neither component is skipped when
+its outer softmax weight is small.
+
+For N experiments the number of linear solves is 3*N+4, rather than 4*N+6:
+N primal, 2*N component adjoint, one density filter, two constraint pullbacks
+and one volume pullback. Two experiments therefore start 10 solves instead of
+14. Only one preparation's Galerkin work is charged. These are algorithmic
+counts, not native timings, total arithmetic or a measured wall-clock speedup.
+
+All setup and solve work uses ONE caller-owned control, including completed
+response work before failed stress evaluation. The joint owner restores
+incoming scales on success and returned errors. No partial combined result is
+published; callbacks must be pure reference laws and panics are not caught.
+Component adjoints remain component adjoints, not relabeled joint adjoints.
 
 ## Joint material search
 
@@ -98,3 +115,13 @@ over nine cases (maximum relative discrepancy 9.17e-8). A separate SLSQP solve
 reduced volume fraction 0.69125 to 0.40846 while satisfying all original signed
 limits and the sampled-stress aggregate. That is not execution of Rust, 3-D
 CutFEM or the repository optimizer, and provides no performance evidence.
+
+Three additional regressions check exact shared-versus-standalone fields and
+gradients for mixed actuator/force experiments, a strict solve allowance that
+cannot pay for duplicate equilibria, and once-per-density two-level/recursive
+setup accounting. The existing parity and cancellation tests also exercise
+the shared path. All existing optimizer consumers use this path without a new
+mode or changed stopping policy. Native execution of these new tests remains
+unverified: DSR (including its documented absolute path), RCH and Cargo are
+unavailable in the editing environment. Source comparisons verify that the
+component arithmetic was preserved; they are not Rust compilation evidence.

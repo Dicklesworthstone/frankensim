@@ -109,14 +109,18 @@ fn admit<O: AdaptiveSdf3Elasticity>(study: &CutDensityStudy3<O>, rho: &[f64],
     Ok(())
 }
 impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
-    /// Compose the original reaction/response and motion-aware stress evaluators.
-    /// Each independently solves the SAME experiment family, with every case
-    /// present in the stress cap. Pure reference laws are mandatory. The two
-    /// evaluators deliberately retain their own preparations and primal solves:
-    /// this reference integration is not a fused or reduced-work implementation.
+    /// Evaluate the original response and stress functionals under one material
+    /// transaction. The density map and numerical preparation are built once
+    /// and borrowed by both components. Stress reuses the just-solved primal
+    /// fields and volume derivative, not a previous-density cache. Every primal
+    /// passes the existing true-residual gate before either component uses it.
+    /// Distinct response and stress adjoints/gradients remain independently
+    /// computed and retained. Every experiment remains in the stress cap; pure
+    /// reference laws are mandatory. For N cases, linear solves fall from
+    /// 4*N+6 to 3*N+4; this count is not a wall-clock or memory-speedup claim.
     /// All work, including a successful first phase before a failed second phase,
-    /// remains charged to the caller's ONE SolveControl. Both phases restore
-    /// incoming scales on every returned result; no partial joint result escapes.
+    /// remains charged to the caller's ONE SolveControl. Incoming scales are
+    /// restored on every returned result; no partial joint result escapes.
     ///
     /// The exact material derivative contains reaction direct terms, stress
     /// direct terms, changes of stiffness AND prescribed-motion lifting, then
@@ -127,12 +131,24 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         control: &mut SolveControl<'_>) -> Result<ResponseStressEvaluation3, ResponseStressError3> {
         control.checkpoint("response-stress-start")?;
         admit(self, rho, cases, options)?;
-        let response = self.evaluate_response_limits(rho, cases, options.response, control)?;
-        control.checkpoint("response-stress-between")?;
         let loads: Vec<_> = cases.iter().map(|c| LoadCase { force: c.force, weight: 1.0 }).collect();
         let motions: Vec<_> = cases.iter().map(|c| c.prescribed).collect();
-        let stress = self.evaluate_stress_with_prescribed_motion(rho, &loads, &motions,
-            options.stress, StressMeasure3::SampledPeakBound, control)?;
+        control.checkpoint("response-limits-start")?;
+        let design = self.design(rho, control)?;
+        let previous = self.operator.scales().to_vec();
+        self.operator.set_scales(&design.scales).map_err(ResponseError3::from)?;
+        let result = (|| {
+        // This borrow spans both components and ends before rollback. Only the
+        // physical owner installs density; neither kernel can invalidate it.
+        let prepared = self.operator.prepare_elasticity(control)?;
+        let response = self.response_limits_prepared(rho, cases, options.response,
+            &design, &prepared, control)?;
+        control.checkpoint("response-stress-between")?;
+        control.checkpoint("sdf3-stress-evaluation")?;
+        let stress = self.stress_prepared(rho, &loads, Some(&motions), options.stress,
+            StressMeasure3::SampledPeakBound, &design, &prepared,
+            Some(stress_owner::SharedStressFields3 { displacements: &response.displacements,
+                volume_gradient: &response.volume_gradient }), control)?;
         if response.rho != stress.rho || response.projected_rho != stress.projected_rho
             || response.scales != stress.scales || response.volume_fraction != stress.volume_fraction
             || response.volume_gradient != stress.volume_gradient {
@@ -153,6 +169,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             component_weights: [weights[0], weights[1]], stress_limit: options.stress_limit,
             stress_residual, sampled_relaxed_residual, sampled_physical_residual, worst_residual,
             work: control.work() })
+        })();
+        self.operator.set_scales(&previous).expect("incoming joint material remains valid");
+        result
     }
 }
 

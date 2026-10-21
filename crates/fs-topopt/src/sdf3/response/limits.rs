@@ -175,9 +175,24 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         self.operator.set_scales(&design.scales)?;
         let result = (|| {
             let prepared = self.operator.prepare_elasticity(control)?;
+            self.response_limits_prepared(rho, cases, options, &design, &prepared, control)
+        })();
+        self.operator.set_scales(&previous).expect("previous admitted scales remain valid");
+        result
+    }
+
+    // Shared with the joint response/stress owner. The caller has admitted the
+    // complete family and owns the current-density transaction. An immutable
+    // borrow keeps this material and its prepared action fixed through the
+    // component solves; there is no public cached-field admission shortcut.
+    #[allow(clippy::too_many_arguments)]
+    fn response_limits_prepared(&self, rho: &[f64], cases: &[ResponseLimitCase3<'_>],
+        options: ResponseLimitOptions3, design: &crate::sdf3::Design3,
+        prepared: &impl fs_sparse::precond::Precond, control: &mut SolveControl<'_>)
+        -> Result<ResponseLimitEvaluation3, ResponseError3> {
             let op = self.operator.adaptive();
             let physical::LimitPrimals3 { displacements, measurements, residuals, all } =
-                self.response_limit_primals(cases, &prepared, control)?;
+                self.response_limit_primals(cases, prepared, control)?;
             control.checkpoint("response-limits-aggregate")?;
             let (constraint, worst_residual, weights) = aggregate(&all, options.sharpness)?;
             let mut local = vec![0.0; self.cells()];
@@ -207,7 +222,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                         }
                     }
                 }
-                let z = checked_solve_preconditioned(&self.operator, &prepared, &rhs, 1e-11,
+                let z = checked_solve_preconditioned(&self.operator, prepared, &rhs, 1e-11,
                     "response-limits-adjoint", control)?;
                 let stiffness = op.scale_bilinear_forms(&z, u, || poll(control))?;
                 let lifting = match case.prescribed {
@@ -227,13 +242,10 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             let dv: Vec<_> = self.mass.iter().zip(&design.slope).map(|(m,s)| m*s).collect();
             let volume_gradient = self.pullback(&dv, control)?;
             control.checkpoint("response-limits-publish")?;
-            Ok(ResponseLimitEvaluation3 { rho: rho.to_vec(), projected_rho: design.projected,
-                scales: design.scales, volume_fraction: design.volume, volume_gradient,
+            Ok(ResponseLimitEvaluation3 { rho: rho.to_vec(), projected_rho: design.projected.clone(),
+                scales: design.scales.clone(), volume_fraction: design.volume, volume_gradient,
                 constraint, constraint_gradient, worst_residual, measurements, residuals,
                 displacements, adjoints, work: control.work() })
-        })();
-        self.operator.set_scales(&previous).expect("previous admitted scales remain valid");
-        result
     }
 }
 
