@@ -1,6 +1,10 @@
 //! Cooperative cancellation for the existing deterministic complex LU owner.
 use super::{C64, LuComplex};
 
+/// Registered capsule: the factor and solve bodies below recompiled with
+/// native fused multiply-add on x86-64 CPUs that have it.
+mod fma;
+
 /// A cancelled operation is distinct from a numerically singular factorization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LuComplexError {
@@ -26,32 +30,31 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), LuComplexError> {
     if cancelled() { Err(LuComplexError::Cancelled) } else { Ok(()) }
 }
 
-/// Factor a row-major complex matrix with cooperative cancellation.
-///
-/// Uses the same magnitude pivots, lowest-index tie breaks, and scalar operation
-/// order as [`super::lu_complex`]. Polls before copying input, at every pivot,
-/// before each elimination row, and before publishing the factor. Between
-/// elimination polls at most one O(n) row is updated, not an O(n^2) pivot block.
-/// Allocation/copy latency and OS scheduling are not wall-time bounded here.
-///
-/// The immutable input is unchanged on every outcome. No partial factor escapes.
-/// The callback can borrow a caller's cancellation gate; no executor or thread
-/// identity is introduced into the numerical result.
-///
-/// # Errors
-/// [`LuComplexError::Cancelled`] or [`LuComplexError::Singular`].
-/// # Panics
-/// If n*n overflows or `a` does not contain exactly n*n entries.
-pub fn lu_complex_with_cancel(
-    a: &[C64], n: usize, mut cancelled: impl FnMut() -> bool,
-) -> Result<LuComplex, LuComplexError> {
-    let entries = n.checked_mul(n).expect("complex matrix extent overflow");
-    assert_eq!(a.len(), entries, "a must be n*n = {entries}");
-    poll(&mut cancelled)?;
-    let mut m = a.to_vec();
-    let mut perm: Vec<usize> = (0..n).collect();
+/// The complex product exactly as `C64`'s `Mul` forms it (two fused
+/// multiply-adds, same operands and order). `C64`'s operator is not inlined
+/// across crates, so the FMA capsule would otherwise keep a per-product call.
+#[inline(always)]
+#[allow(clippy::inline_always)] // must inline INTO the fma capsule's target_feature fns
+fn product(a: C64, b: C64) -> C64 {
+    C64::new(a.re.mul_add(b.re, -(a.im * b.im)), a.re.mul_add(b.im, a.im * b.re))
+}
+
+/// `C64`'s `Sub`, inlined for the same reason.
+#[inline(always)]
+#[allow(clippy::inline_always)] // must inline INTO the fma capsule's target_feature fns
+fn difference(a: C64, b: C64) -> C64 {
+    C64::new(a.re - b.re, a.im - b.im)
+}
+
+/// Elimination shared by the portable and the FMA-compiled paths: the original
+/// magnitude pivots, lowest-index ties, operation order and poll points.
+#[inline(always)]
+#[allow(clippy::inline_always)] // must inline INTO the fma capsule's target_feature fns
+fn factor_body(
+    m: &mut [C64], perm: &mut [usize], n: usize, cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), LuComplexError> {
     for k in 0..n {
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         let (mut best, mut best_i) = (m[k * n + k].abs(), k);
         for i in k + 1..n {
             let v = m[i * n + k].abs();
@@ -71,15 +74,73 @@ pub fn lu_complex_with_cancel(
         }
         let piv = m[k * n + k];
         for i in k + 1..n {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let f = m[i * n + k] / piv;
             m[i * n + k] = f;
-            for c in k + 1..n {
-                let sub = f * m[k * n + c];
-                m[i * n + c] = m[i * n + c] - sub;
+            let (upper, lower) = m.split_at_mut(i * n);
+            let pivot_row = &upper[k * n + k + 1..k * n + n];
+            for (target, &source) in lower[k + 1..n].iter_mut().zip(pivot_row) {
+                *target = difference(*target, product(f, source));
             }
         }
     }
+    Ok(())
+}
+
+/// Forward and backward substitution shared by both paths, polling per row.
+#[inline(always)]
+#[allow(clippy::inline_always)] // must inline INTO the fma capsule's target_feature fns
+fn solve_body(
+    lu: &LuComplex, b: &[C64], cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<C64>, LuComplexError> {
+    let n = lu.n;
+    let mut x: Vec<C64> = lu.perm.iter().map(|&p| b[p]).collect();
+    for i in 0..n {
+        poll(cancelled)?;
+        let mut v = x[i];
+        for (k, &bk) in x.iter().enumerate().take(i) {
+            v = difference(v, product(lu.data[i * n + k], bk));
+        }
+        x[i] = v;
+    }
+    for i in (0..n).rev() {
+        poll(cancelled)?;
+        let mut v = x[i];
+        for (k, &bk) in x.iter().enumerate().take(n).skip(i + 1) {
+            v = difference(v, product(lu.data[i * n + k], bk));
+        }
+        x[i] = v / lu.data[i * n + i];
+    }
+    Ok(x)
+}
+
+/// Factor a row-major complex matrix with cooperative cancellation.
+///
+/// Uses the same magnitude pivots, lowest-index tie breaks, and scalar operation
+/// order as [`super::lu_complex`]. Polls before copying input, at every pivot,
+/// before each elimination row, and before publishing the factor. Between
+/// elimination polls at most one O(n) row is updated, not an O(n^2) pivot block.
+/// Allocation/copy latency and OS scheduling are not wall-time bounded here.
+/// On x86-64 CPUs with FMA the elimination runs with native fused instructions;
+/// the result is bit-identical (each product is the same correctly rounded fma).
+///
+/// The immutable input is unchanged on every outcome. No partial factor escapes.
+/// The callback can borrow a caller's cancellation gate; no executor or thread
+/// identity is introduced into the numerical result.
+///
+/// # Errors
+/// [`LuComplexError::Cancelled`] or [`LuComplexError::Singular`].
+/// # Panics
+/// If n*n overflows or `a` does not contain exactly n*n entries.
+pub fn lu_complex_with_cancel(
+    a: &[C64], n: usize, mut cancelled: impl FnMut() -> bool,
+) -> Result<LuComplex, LuComplexError> {
+    let entries = n.checked_mul(n).expect("complex matrix extent overflow");
+    assert_eq!(a.len(), entries, "a must be n*n = {entries}");
+    poll(&mut cancelled)?;
+    let mut m = a.to_vec();
+    let mut perm: Vec<usize> = (0..n).collect();
+    fma::factor(&mut m, &mut perm, n, &mut cancelled)?;
     poll(&mut cancelled)?;
     Ok(LuComplex { n, data: m, perm })
 }
@@ -100,28 +161,9 @@ impl LuComplex {
     pub fn solve_with_cancel(
         &self, b: &mut [C64], mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), LuComplexError> {
-        let n = self.n;
-        assert_eq!(b.len(), n, "b must have length {n}");
+        assert_eq!(b.len(), self.n, "b must have length {}", self.n);
         poll(&mut cancelled)?;
-        let mut x: Vec<C64> = self.perm.iter().map(|&p| b[p]).collect();
-        for i in 0..n {
-            poll(&mut cancelled)?;
-            let mut v = x[i];
-            for (k, &bk) in x.iter().enumerate().take(i) {
-                let sub = self.data[i * n + k] * bk;
-                v = v - sub;
-            }
-            x[i] = v;
-        }
-        for i in (0..n).rev() {
-            poll(&mut cancelled)?;
-            let mut v = x[i];
-            for (k, &bk) in x.iter().enumerate().take(n).skip(i + 1) {
-                let sub = self.data[i * n + k] * bk;
-                v = v - sub;
-            }
-            x[i] = v / self.data[i * n + i];
-        }
+        let x = fma::solve(self, b, &mut cancelled)?;
         poll(&mut cancelled)?;
         b.copy_from_slice(&x);
         Ok(())

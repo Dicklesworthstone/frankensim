@@ -28,6 +28,7 @@
 {"crate": "fs-simd", "module": "crates/fs-simd/src/x86/gemm.rs", "safety_md": "crates/fs-simd/src/x86/SAFETY.md"},
 {"crate": "fs-simd", "module": "crates/fs-simd/src/x86/btile.rs", "safety_md": "crates/fs-simd/src/x86/SAFETY.md"},
 {"crate": "fs-exec", "module": "crates/fs-exec/src/crew.rs", "safety_md": "crates/fs-exec/src/SAFETY.md"},
-{"crate": "fs-cheb", "module": "crates/fs-cheb/src/fma/mod.rs", "safety_md": "crates/fs-cheb/src/fma/SAFETY.md"}
+{"crate": "fs-cheb", "module": "crates/fs-cheb/src/fma/mod.rs", "safety_md": "crates/fs-cheb/src/fma/SAFETY.md"},
+{"crate": "fs-la", "module": "crates/fs-la/src/eigen_complex/cancellable/fma/mod.rs", "safety_md": "crates/fs-la/src/eigen_complex/cancellable/fma/SAFETY.md"}
 ]
 }

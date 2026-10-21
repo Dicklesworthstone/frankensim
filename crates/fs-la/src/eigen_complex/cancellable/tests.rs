@@ -153,3 +153,56 @@ fn singularity_retains_its_pivot_index_and_is_not_reported_as_cancellation() {
     assert_eq!(lu_complex(&a, 2).unwrap_err().window_hi, 1);
     assert_eq!(lu_complex_with_cancel(&a, 2, || true).unwrap_err(), LuComplexError::Cancelled);
 }
+
+/// Deterministic complex entries in [-1, 1) from a 64-bit LCG.
+fn random(len: usize, seed: u64) -> Vec<C64> {
+    let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut next = || {
+        s = s.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (s >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+    };
+    (0..len).map(|_| C64::new(next(), next())).collect()
+}
+
+/// A collocation-like exterior Helmholtz matrix: e^{ikr}/(4 pi r) between
+/// points on a helix, a dominant complex diagonal, k r up to about 20.
+fn bem_like(n: usize) -> Vec<C64> {
+    let p: Vec<[f64; 3]> = (0..n)
+        .map(|i| {
+            let t = i as f64 * 0.37;
+            [t.cos() * 0.1, t.sin() * 0.1, i as f64 * 0.004]
+        })
+        .collect();
+    let k = 30.0;
+    (0..n * n)
+        .map(|e| {
+            let (i, j) = (e / n, e % n);
+            if i == j {
+                return C64::new(0.5, 0.05);
+            }
+            let r = ((p[i][0] - p[j][0]).powi(2) + (p[i][1] - p[j][1]).powi(2) + (p[i][2] - p[j][2]).powi(2)).sqrt();
+            let g = 0.01 / (4.0 * core::f64::consts::PI * r);
+            C64::new(g * (k * r).cos(), g * (k * r).sin())
+        })
+        .collect()
+}
+
+#[test]
+fn fma_capsule_is_bitwise_the_original_operation_graph() {
+    // On an x86-64 FMA host the dispatcher takes the capsule; this compares it
+    // with the frozen baseline graph. Elsewhere it re-checks the portable body.
+    #[cfg(target_arch = "x86_64")]
+    assert_eq!(super::fma::accelerated(), std::arch::is_x86_feature_detected!("fma"));
+    for (n, a) in [(64, random(64 * 64, 1)), (200, random(200 * 200, 2)), (150, bem_like(150))] {
+        let original = reference_factor(&a, n).unwrap();
+        let factor = lu_complex_with_cancel(&a, n, || false).unwrap();
+        assert_eq!(factor.perm, original.perm, "n = {n}");
+        assert_eq!(bits(&factor.data), bits(&original.data), "n = {n}");
+        let rhs = random(n, 3);
+        let mut expected = rhs.clone();
+        original.reference_solve(&mut expected);
+        let mut actual = rhs;
+        factor.solve_with_cancel(&mut actual, || false).unwrap();
+        assert_eq!(bits(&actual), bits(&expected), "n = {n}");
+    }
+}
