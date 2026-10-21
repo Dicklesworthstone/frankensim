@@ -659,12 +659,227 @@ fn replay(args: &[String]) -> Res<()> {
     Ok(())
 }
 
+/// Read an aperture-flow file: mechanics rate, tapped node names in data order,
+/// and the frames as one row of flows per mechanical frame.
+fn read_flows(path: &str) -> Res<(f64, Vec<String>, Vec<f64>)> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_to_end(&mut bytes))
+        .map_err(|e| format!("{path}: {e}"))?;
+    let (header, start) = split_header(&bytes, "flows")?;
+    let mut lines = header.lines();
+    if lines.next() != Some(FLOWS_SCHEMA) {
+        return Err("flows: wrong schema".into());
+    }
+    let (mut rate, mut nodes) = (0.0, Vec::new());
+    for line in lines {
+        let f: Vec<&str> = line.split(' ').collect();
+        match f[0] {
+            "mechanics_rate_hz" => rate = num(f[1], "mechanics rate")?,
+            "aperture" => nodes.push(f[3].to_string()),
+            _ => {}
+        }
+    }
+    let data: Vec<f64> = bytes[start..]
+        .chunks_exact(8)
+        .map(|b| f64::from_le_bytes(b.try_into().expect("8 bytes")))
+        .collect();
+    if nodes.is_empty() || data.len() % nodes.len() != 0 || !(rate > 0.0) {
+        return Err("flows: payload is not whole frames".into());
+    }
+    Ok((rate, nodes, data))
+}
+
+/// Steady-state partials only: the complex amplitude of every bound aperture's
+/// flow at each harmonic of the tone, and the exterior pressure those flows
+/// radiate to every receiver through the closed body, solved by the same dense
+/// Burton-Miller owner as `bake` but at the partial frequencies alone.
+fn harmonics(args: &[String]) -> Res<()> {
+    let [body_path, receivers_path, flows_path, bind_path, out] =
+        [&args[0], &args[1], &args[2], &args[3], &args[4]];
+    let nominal = num(flag(args, "--f0-nominal")?, "--f0-nominal")?;
+    let band = num(flag(args, "--band")?, "--band")?;
+    let window: Vec<f64> = flag(args, "--window")?
+        .split(',')
+        .map(|v| num(v, "--window"))
+        .collect::<Res<_>>()?;
+    let clearance = num(flag(args, "--clearance")?, "--clearance")?;
+    let threads: usize = flag(args, "--threads")?.parse().map_err(|_| "--threads")?;
+    let body_text = read_text(body_path)?;
+    let body = parse_body(&body_text)?;
+    let receivers = parse_receivers(&read_text(receivers_path)?)?;
+    let mesh = lathed_aperture_body(&body.spec).map_err(|e| format!("mesh: {e}"))?;
+    let (rate, nodes, data) = read_flows(flows_path)?;
+    let width = nodes.len();
+    // Bound apertures are the sources, in BIND order; the rest stays rigid.
+    let mut bound = Vec::new();
+    for line in read_text(bind_path)?
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+    {
+        let f = fields(line);
+        if f.len() != 3 || f[0] != "bind" {
+            return Err(format!("bind: malformed row {line:?}"));
+        }
+        let column = nodes
+            .iter()
+            .position(|n| n == f[1])
+            .ok_or_else(|| format!("bind: node {} is not in the flow file", f[1]))?;
+        let aperture = mesh
+            .names
+            .iter()
+            .position(|n| n == f[2])
+            .ok_or_else(|| format!("bind: aperture {} is not in the body", f[2]))?;
+        bound.push((column, aperture));
+    }
+    if bound.len() != width {
+        return Err("bind: every tapped aperture must be bound exactly once".into());
+    }
+    let sources: Vec<SourceId> = bound
+        .iter()
+        .map(|&(_, a)| SourceId::ApertureVolumeFlow(mesh.names[a].clone()))
+        .collect();
+    let traces: Vec<Vec<f64>> = bound.iter().map(|&(_, a)| mesh.traces[a].clone()).collect();
+    let obs = BemObservation::new(
+        &mesh.surface,
+        body.medium,
+        &sources,
+        &traces,
+        &receivers,
+        clearance,
+    )
+    .map_err(|e| format!("observation: {e}"))?;
+    // Hann-windowed DFT over the steady window, normalised to peak amplitude.
+    let (n0, n1) = ((window[0] * rate) as usize, (window[1] * rate) as usize);
+    let frames = data.len() / width;
+    if !(window.len() == 2 && n0 < n1 && n1 <= frames) {
+        return Err("--window must be two increasing times inside the flow record".into());
+    }
+    let len = n1 - n0;
+    let hann: Vec<f64> = (0..len)
+        .map(|i| 0.5 - 0.5 * fs_math::det::cos(core::f64::consts::TAU * i as f64 / len as f64))
+        .collect();
+    let gain = 2.0 / hann.iter().sum::<f64>();
+    // e^{-i w n} by rotation, re-synchronised exactly every 4096 samples.
+    let dft = |column: usize, f: f64| {
+        let w = core::f64::consts::TAU * f / rate;
+        let step = C64::new(fs_math::det::cos(w), -fs_math::det::sin(w));
+        let mut sum = C64::ZERO;
+        let mut rot = C64::ZERO;
+        for (i, h) in hann.iter().enumerate() {
+            let n = n0 + i;
+            if i % 4096 == 0 {
+                let phase = w * n as f64;
+                rot = C64::new(fs_math::det::cos(phase), -fs_math::det::sin(phase));
+            }
+            sum = sum + rot * C64::new(data[n * width + column] * h, 0.0);
+            rot = rot * step;
+        }
+        C64::new(sum.re * gain, sum.im * gain)
+    };
+    let energy = |f: f64| (0..width).map(|c| dft(c, f).norm_sq()).sum::<f64>();
+    let peak = |lo: f64, hi: f64, steps: usize| {
+        (0..=steps)
+            .map(|i| lo + (hi - lo) * i as f64 / steps as f64)
+            .map(|f| (f, energy(f)))
+            .fold((lo, -1.0), |best, x| if x.1 > best.1 { x } else { best })
+            .0
+    };
+    let coarse = peak(0.8 * nominal, 1.25 * nominal, 450);
+    let step = 0.45 * nominal / 450.0;
+    let f0 = peak(coarse - step, coarse + step, 200);
+    // Each partial at its own energy peak within +-0.3 % of k f0.
+    let mut partials = Vec::new();
+    for k in 1.. {
+        let guess = k as f64 * f0;
+        if guess > band {
+            break;
+        }
+        partials.push((k, peak(0.997 * guess, 1.003 * guess, 60)));
+    }
+    eprintln!(
+        "panels {} sources {width} receivers {} f0 {f0:.4} Hz partials {}",
+        mesh.surface.areas().len(),
+        receivers.len(),
+        partials.len()
+    );
+    let t0 = Instant::now();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let solved: Vec<(usize, Res<Vec<C64>>)> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads.max(1))
+            .map(|_| {
+                s.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&(k, f)) = partials.get(i) else {
+                            break;
+                        };
+                        let row = obs
+                            .frequency_sample(core::f64::consts::TAU * f)
+                            .map_err(|e| format!("solve: {e}"));
+                        eprintln!("partial {k} done at {:.0} s", t0.elapsed().as_secs_f64());
+                        done.push((i, row));
+                    }
+                    done
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().expect("solver thread"))
+            .collect()
+    });
+    let mut rows = vec![None; partials.len()];
+    for (i, row) in solved {
+        rows[i] = Some(row?);
+    }
+    // exp(-i w t) phasors: a real flow q(t) = Re(Q e^{-i w t}) has Q = conj(DFT).
+    let mut text = format!(
+        "frankensim-aperture-harmonics-v1\n# body {body_path} ({} panels), receivers {receivers_path}, flows {flows_path}, bind {bind_path}\n# operator_blake3 {}\n# window_s {} {}; partial amplitudes are peak values of exp(-i w t) phasors; p_rms_pa = |P| / sqrt(2)\nf0_hz\t{f0:?}\nkind\tpartial\tf_hz\tname\tmagnitude\tphase_rad\n",
+        mesh.surface.areas().len(),
+        obs.operator_hash().to_hex(),
+        window[0],
+        window[1]
+    );
+    for (i, &(k, f)) in partials.iter().enumerate() {
+        let row = rows[i].as_ref().ok_or("missing solve")?;
+        let q: Vec<C64> = bound.iter().map(|&(c, _)| dft(c, f).conj()).collect();
+        for (s, &(_, a)) in bound.iter().enumerate() {
+            text += &format!(
+                "flow\t{k}\t{f:?}\t{}\t{:?}\t{:?}\n",
+                mesh.names[a],
+                q[s].norm_sq().sqrt(),
+                fs_math::det::atan2(q[s].im, q[s].re)
+            );
+        }
+        for (r, receiver) in receivers.iter().enumerate() {
+            let mut p = C64::ZERO;
+            for (s, qs) in q.iter().enumerate() {
+                p = p + row[(s * receivers.len() + r) * 4] * *qs;
+            }
+            text += &format!(
+                "pressure\t{k}\t{f:?}\t{}\t{:?}\t{:?}\n",
+                receiver.id,
+                p.norm_sq().sqrt() / core::f64::consts::SQRT_2,
+                fs_math::det::atan2(p.im, p.re)
+            );
+        }
+    }
+    create(out)?
+        .write_all(text.as_bytes())
+        .map_err(|e| format!("{out}: {e}"))?;
+    eprintln!("wrote {out} in {:.0} s", t0.elapsed().as_secs_f64());
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("bake") if args.len() >= 4 => bake(&args[1..]),
         Some("replay") if args.len() == 5 => replay(&args[1..]),
-        _ => Err("usage: reobserve_apertures bake BODY RECEIVERS OUT --fs HZ --pass HZ --stop HZ --latency N --fft N1,N2,N3,N4 --clearance M --threads N [--samples CACHE] [--only NAME,...]\n       reobserve_apertures replay KERNELS FLOWS BIND OUTDIR".into()),
+        Some("harmonics") if args.len() >= 6 => harmonics(&args[1..]),
+        _ => Err("usage: reobserve_apertures bake BODY RECEIVERS OUT --fs HZ --pass HZ --stop HZ --latency N --fft N1,N2,N3,N4 --clearance M --threads N [--samples CACHE] [--only NAME,...]\n       reobserve_apertures replay KERNELS FLOWS BIND OUTDIR\n       reobserve_apertures harmonics BODY RECEIVERS FLOWS BIND OUT.tsv --f0-nominal HZ --band HZ --window S0,S1 --clearance M --threads N".into()),
     };
     if let Err(e) = result {
         eprintln!("reobserve_apertures: {e}");
