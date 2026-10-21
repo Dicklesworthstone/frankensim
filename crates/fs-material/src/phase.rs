@@ -17,7 +17,7 @@ use core::fmt;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
-    ClaimSelection, ClaimSet, MaterialCard, PropertyKey, PropertyUsageReceipt, PropertyValue,
+    ClaimSelection, ClaimSet, MaterialCard, PropertyKey, PropertyUsageReceipt,
     QueryPoint, SelectionPolicy,
 };
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
@@ -126,7 +126,9 @@ pub struct ResolvedHeatCapacityCurve {
 
 impl ResolvedHeatCapacityCurve {
     /// Resolve continuously supported Cp and density from one immutable card.
-    /// Both source grids are retained before integrating piecewise-linear Cp.
+    /// Every source breakpoint along the fixed-context temperature line is
+    /// retained before integrating piecewise-linear Cp, including crossed
+    /// cells of an explicitly supported two-coordinate source surface.
     /// The reference enthalpy is declared at the lower endpoint. Phase is an
     /// explicit caller assumption: this does not discover phase boundaries.
     /// The interpolation-only error limit has the same meaning as
@@ -270,9 +272,10 @@ fn heat_capacity_source_temperatures(
 ) -> Result<Vec<f64>, PhaseStateError> {
     let mut temperatures = endpoints.to_vec();
     for key in [query.heat_capacity, query.density] {
-        let support = claims
-            .query_envelope_typed(
+        let slice = claims
+            .query_line_typed(
                 key,
+                query.temperature_axis,
                 query.lower,
                 query.upper,
                 ClaimSelection::Policy(query.selection),
@@ -281,33 +284,36 @@ fn heat_capacity_source_temperatures(
                 property: key.name().to_owned(),
                 reason: format!("continuous support required: {error:?}"),
             })?;
+        let selected = slice.knots[0].1.receipt.selected;
         let claim = claims
-            .claim(support.lower.receipt.selected)
-            .expect("envelope selected an immutable claim");
-        if let PropertyValue::Curve {
-            abscissa, knots, ..
-        } = &claim.value
-            && abscissa == query.temperature_axis
-        {
-            for &(t, _) in knots {
-                if t > endpoints[0] && t < endpoints[1] {
-                    if temperatures.len() == MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
-                        temperatures.sort_by(f64::total_cmp);
-                        temperatures.dedup();
-                        if temperatures
-                            .binary_search_by(|value| value.total_cmp(&t))
-                            .is_ok()
-                        {
-                            continue;
-                        }
-                        if temperatures.len() == MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
-                            return Err(PhaseStateError::InvalidCurve {
-                                what: "combined source temperature grid exceeds the knot budget",
-                            });
-                        }
+            .claim(selected)
+            .expect("canonical source line selected an immutable claim");
+        if claim.value.axes().any(|(axis, dims)| {
+            axis == query.temperature_axis && dims != fs_qty::Temperature::DIMS
+        }) {
+            return Err(PhaseStateError::SourceQuery {
+                property: key.name().to_owned(),
+                reason: "source temperature coordinate must have temperature dimensions".into(),
+            });
+        }
+        for (t, _) in slice.knots {
+            if t > endpoints[0] && t < endpoints[1] {
+                if temperatures.len() == MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
+                    temperatures.sort_by(f64::total_cmp);
+                    temperatures.dedup();
+                    if temperatures
+                        .binary_search_by(|value| value.total_cmp(&t))
+                        .is_ok()
+                    {
+                        continue;
                     }
-                    temperatures.push(t);
+                    if temperatures.len() == MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
+                        return Err(PhaseStateError::InvalidCurve {
+                            what: "combined source temperature grid exceeds the knot budget",
+                        });
+                    }
                 }
+                temperatures.push(t);
             }
         }
     }

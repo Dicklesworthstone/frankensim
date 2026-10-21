@@ -34,6 +34,9 @@ use crate::{
     UncertaintyModel,
 };
 
+mod line;
+pub use line::{MAX_PROPERTY_LINE_KNOTS, PropertyLineSlice};
+
 /// Semantic version of the portable property-usage receipt identity.
 ///
 /// Version 2 replaces the historical unframed v1 preimage. V1 did not bind
@@ -1556,6 +1559,21 @@ impl ClaimSet {
         upper: &QueryPoint,
         selection: ClaimSelection,
     ) -> Result<EnvelopeAnswer, PropertySupportError> {
+        self.query_envelope_selected_with_line(property, key, lower, upper, selection, None)
+            .map(|(answer, _)| answer)
+    }
+
+    // A fixed-context line has its own source-cell continuity proof. Ordinary
+    // box queries never acquire that authority from corner samples alone.
+    fn query_envelope_selected_with_line(
+        &self,
+        property: &str,
+        key: Option<&PropertyKey>,
+        lower: &QueryPoint,
+        upper: &QueryPoint,
+        selection: ClaimSelection,
+        line_axis: Option<&str>,
+    ) -> Result<(EnvelopeAnswer, Vec<f64>), PropertySupportError> {
         if lower.axes.keys().ne(upper.axes.keys())
             || lower.axis_quantities != upper.axis_quantities
             || lower.axes.iter().any(|(axis, lo)| *lo > upper.axes[axis])
@@ -1589,17 +1607,48 @@ impl ClaimSet {
             Ok(answer)
         };
         let high = check_selection(upper)?;
+        let mut line_knots = Vec::new();
         for (id, claim) in self.claims_for(property) {
             if id == selected {
-                if let PropertyValue::Surface2D { axes, .. } = &claim.value
+                if let PropertyValue::Surface2D {
+                    axes,
+                    samples,
+                    triangles,
+                    ..
+                } = &claim.value
                     && axes.iter().any(|axis| lower.axes[axis] < upper.axes[axis])
                 {
-                    return Err(PropertySupportError::Evaluation {
+                    let Some(axis) = line_axis else {
+                        return Err(PropertySupportError::Evaluation {
+                            point: lower.clone(),
+                            error: Box::new(MatDbError::UnsupportedEvaluation {
+                                reason: "surface corner queries do not prove continuous box coverage across source cells or holes",
+                            }),
+                        });
+                    };
+                    if claim.interpolation == InterpolationPolicy::TabulatedOnly {
+                        return Err(PropertySupportError::DiscreteSupport {
+                            axis: axis.to_owned(),
+                            lower: lower.axes[axis],
+                            upper: upper.axes[axis],
+                            claim: id,
+                        });
+                    }
+                    let varying = axes
+                        .iter()
+                        .position(|name| name == axis)
+                        .expect("a surface coordinate varies along the admitted line");
+                    line_knots = crate::surface::line_knots(
+                        samples,
+                        triangles,
+                        varying,
+                        [lower.axes[&axes[0]], lower.axes[&axes[1]]],
+                        upper.axes[axis],
+                    )
+                    .map_err(|error| PropertySupportError::Evaluation {
                         point: lower.clone(),
-                        error: Box::new(MatDbError::UnsupportedEvaluation {
-                            reason: "surface corner queries do not prove continuous box coverage across source cells or holes",
-                        }),
-                    });
+                        error: Box::new(error),
+                    })?;
                 }
                 // Scalar policy and linear knot-span coverage were checked by
                 // both corner queries. Exact-only curves cover only knots.
@@ -1649,10 +1698,13 @@ impl ClaimSet {
                 check_selection(&witness)?;
             }
         }
-        Ok(EnvelopeAnswer {
-            lower: low,
-            upper: high,
-        })
+        Ok((
+            EnvelopeAnswer {
+                lower: low,
+                upper: high,
+            },
+            line_knots,
+        ))
     }
 
     /// Answer a property query at a point under an explicit selection

@@ -296,11 +296,24 @@ The receipt identifies the exact sample or source cell used.
 Affine interpolation is the source's declared model, not an additional
 measurement, numerical enclosure, or inferred covariance. Stated uncertainty
 is retained. Sample covariance is transported, but propagation to an
-interpolated query is not claimed. Derivatives and line integrals remain
+interpolated query is not claimed. Derivatives and integral uncertainty remain
 unsupported. Envelope requests varying either surface coordinate refuse:
 corner evaluations cannot prove continuous coverage across cells or holes.
 G0/G1/G3 tests in `tests/surface.rs` exercise a manufactured simultaneous
 temperature/shear law, explicit support, and portable replay.
+
+`ClaimSet::query_line_typed` supplies a distinct fixed-context path boundary:
+only one ordered coordinate varies, with all other coordinates and quantity
+descriptors retained exactly. It returns at most 4096 sorted canonical point
+answers at endpoints and every crossed source-cell edge. Declared cells must
+connect along that same line through shared source vertices or edges; rounded
+cut proximity never joins disconnected patches. Unresolved or collapsed cuts,
+nonzero exact-only spans, source changes, and holes refuse. Scalar/curve paths
+reuse existing support and selection semantics. Zero spans still require the
+ordinary point query. Physical consumers own integration and its error model;
+this path does not certify a two-dimensional box, extrapolate, or propagate
+statistical uncertainty. Existing surface tests cover slope changes, shared
+vertices, a one-ULP-wide source gap, and explicit pins against competing claims.
 
 ## Invariants
 

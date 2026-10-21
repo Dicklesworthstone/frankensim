@@ -89,9 +89,12 @@ homogenization, the P2 milestone.
   through the original matdb evaluator. `ResolvedScalarProperty::source_axes`
   retains every declared dependence even at an exact vertex; a surface cannot
   masquerade as a constant or temperature-only coefficient. Sparse source holes
-  remain refusals during complete-bundle refresh. Existing exact thermal-
-  expansion and Seebeck path integrators explicitly refuse surface payloads;
-  endpoint support alone cannot authorize integration across cells or holes.
+  remain refusals during complete-bundle refresh. Fixed-context temperature
+  paths use the canonical `ClaimSet::query_line_typed` seam to retain every
+  crossed source-cell breakpoint and prove continuous support. Caloric,
+  thermal-expansion and Seebeck consumers integrate those same source slices
+  with their existing physics owners. Endpoint support alone never authorizes
+  integration across a source hole or nonzero discrete-only span.
 - `conductor::resolve_uniform_conductor` binds exactly one sourced
   `electrical_resistivity` claim in ohm-metre dimensions to caller-owned
   positive uniform length and cross-sectional area, retaining the resolved
@@ -128,7 +131,8 @@ homogenization, the P2 milestone.
   frequency- or field-restricted sources require another storage model.
   Invalid geometry, ambiguous sources and unrepresentable coefficients/energy
   refuse. These reductions introduce no circuit solver, hysteresis or loss law.
-- `thermoelectric::ResolvedSeebeckSpan` resolves one source-owned scalar or linear-inside curve
+- `thermoelectric::ResolvedSeebeckSpan` resolves one source-owned scalar, linear-inside curve
+  or fixed-context two-coordinate surface slice of
   `absolute_seebeck_coefficient` [V/K] at both ends of a fixed-context temperature
   span and at its actual bulk temperature, preserving original receipts and the
   same selected claim. Joule-heated bulk states cannot escape source support
@@ -145,8 +149,11 @@ homogenization, the P2 milestone.
   source. Spatial refinement is required to resolve that distribution. A
   constant scalar retains the original zero-bulk-heat Kelvin law. Isothermal
   edges use the actual sourced S; signed integral cancellation is permitted.
-  Relative thermopower, tabulated-only points, other curve axes and extrapolation
-  refuse. All three temperatures must remain within the SAME selected claim.
+  Source-cell breakpoints are retained before integration; curves on a fixed
+  non-temperature axis contribute their evaluated constant coefficient.
+  Relative thermopower, nonzero tabulated-only spans, source holes and
+  extrapolation refuse. The entire temperature path, including the actual
+  bulk state, must remain supported by the SAME selected claim.
   Original conductor, Fourier and caloric owners supply all
   dissipative transport and storage. This module supplies no independent circuit
   or thermal integrator and no tensor, magnetic-field or phase-change model.
@@ -210,9 +217,12 @@ homogenization, the P2 milestone.
   is a coefficient, not a total strain: a coupled driver must integrate it over
   the admitted temperature path before solid mechanics use.
   `integrate_isotropic_thermal_expansion` performs that integration exactly for
-  scalar and piecewise-linear material claims, requires every other state axis
-  to remain fixed, pins both endpoints to one selected claim, and identity-binds
-  the complete path and signed `integral(alpha(T) dT)` result.
+  scalar, piecewise-linear curve and fixed-context surface claims. It requires
+  absolute temperature (including legacy kelvin `T`), keeps every other state
+  axis fixed, proves continuous support through the canonical source line,
+  and pins the complete path to one selected claim. Crossed source-cell
+  breakpoints preserve changes in interpolation slope. The complete path and
+  signed `integral(alpha(T) dT)` result are identity-bound.
   `resolve_mean_thermal_expansion_strain` separately resolves source-declared
   interval means as engineering strain `mean_alpha * (T_end - T_reference)`.
   Both positive absolute-temperature coordinates must be typed and constrained
@@ -338,8 +348,9 @@ homogenization, the P2 milestone.
   `ResolvedHeatCapacityCurve::try_new` admits that chart directly from one
   immutable material card using explicit Cp/density keys and complete typed
   endpoint queries. Both properties require continuous support over the same
-  fixed-context temperature span. The union of their source knots is retained
-  (at most 4096 distinct temperatures), including density-only knots. Ordered
+  fixed-context temperature span through `ClaimSet::query_line_typed`.
+  The union of their curve knots and crossed surface-cell breakpoints is
+  retained (at most 4096 distinct temperatures), including density-only knots. Ordered
   Cp/density receipts remain accessible and are bound into the curve identity.
   Wrong dimensions, changing non-temperature conditions, unsupported spans and
   discrete-only data refuse. The reference enthalpy and single-phase choice

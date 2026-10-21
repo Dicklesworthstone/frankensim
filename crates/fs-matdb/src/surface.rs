@@ -4,7 +4,7 @@
 //! support. Exact predicates own membership and topology; floating arithmetic
 //! evaluates the admitted affine law without claiming a numerical enclosure.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fs_ivl::{Sign, orient2d};
 
@@ -205,6 +205,140 @@ fn contains(triangle: [[f64; 2]; 3], point: [f64; 2]) -> bool {
         let sign = orient2d(triangle[edge], triangle[(edge + 1) % 3], point);
         sign == Sign::Zero || sign == winding
     })
+}
+
+/// Source-cell continuity on a fixed-coordinate line. Only an already admitted
+/// claim enters here. Connectivity is combinatorial: two cut cells join only
+/// at their SAME declared vertex/edge intersecting the line. Thus rounding two
+/// unrelated cuts to nearby numbers cannot fill a real source-support hole.
+pub(crate) fn line_knots(
+    samples: &[([f64; 2], f64)],
+    triangles: &[[u32; 3]],
+    varying: usize,
+    lower: [f64; 2],
+    upper_coordinate: f64,
+) -> Result<Vec<f64>, MatDbError> {
+    let fixed = 1 - varying;
+    let level = lower[fixed];
+    let mut upper = lower;
+    upper[varying] = upper_coordinate;
+    let refusal = |reason| MatDbError::UnsupportedEvaluation { reason };
+    let active: Vec<_> = triangles
+        .iter()
+        .map(|triangle| {
+            triangle
+                .iter()
+                .any(|&i| samples[i as usize].0[fixed] <= level)
+                && triangle
+                    .iter()
+                    .any(|&i| samples[i as usize].0[fixed] >= level)
+        })
+        .collect();
+    let mut visited = vec![false; triangles.len()];
+    let mut pending = Vec::new();
+    for (index, &triangle) in triangles.iter().enumerate() {
+        if active[index] && contains(vertices(samples, triangle), lower) {
+            visited[index] = true;
+            pending.push(index);
+        }
+    }
+    while let Some(index) = pending.pop() {
+        for (other, triangle) in triangles.iter().enumerate() {
+            if visited[other] || !active[other] {
+                continue;
+            }
+            let mut shared = [0_u32; 2];
+            let mut count = 0;
+            for &vertex in &triangles[index] {
+                if triangle.contains(&vertex) {
+                    // Duplicate cells were refused at source admission.
+                    shared[count] = vertex;
+                    count += 1;
+                }
+            }
+            let touches = match count {
+                1 => samples[shared[0] as usize].0[fixed] == level,
+                2 => {
+                    let a = samples[shared[0] as usize].0[fixed];
+                    let b = samples[shared[1] as usize].0[fixed];
+                    a.min(b) <= level && level <= a.max(b)
+                }
+                _ => false,
+            };
+            if touches {
+                visited[other] = true;
+                pending.push(other);
+            }
+        }
+    }
+    if !triangles
+        .iter()
+        .enumerate()
+        .any(|(index, &triangle)| visited[index] && contains(vertices(samples, triangle), upper))
+    {
+        return Err(refusal(
+            "declared surface cells do not continuously cover the requested fixed-coordinate line",
+        ));
+    }
+
+    // A vertex cut uses (i,i); an interior edge cut uses sorted vertex ids.
+    // Shared cuts are computed once in that canonical orientation. Distinct
+    // cuts collapsing to the same float refuse; no proximity tolerance exists.
+    let mut cuts = BTreeMap::new();
+    for (index, triangle) in triangles.iter().enumerate() {
+        if !visited[index] {
+            continue;
+        }
+        for edge in 0..3 {
+            let i = triangle[edge].min(triangle[(edge + 1) % 3]);
+            let j = triangle[edge].max(triangle[(edge + 1) % 3]);
+            let a = samples[i as usize].0;
+            let b = samples[j as usize].0;
+            for (vertex, at) in [(i, a), (j, b)] {
+                if at[fixed] == level
+                    && lower[varying] <= at[varying]
+                    && at[varying] <= upper_coordinate
+                {
+                    cuts.insert((vertex, vertex), at[varying]);
+                }
+            }
+            if !(a[fixed].min(b[fixed]) < level && level < a[fixed].max(b[fixed]))
+                || cuts.contains_key(&(i, j))
+            {
+                continue;
+            }
+            let fraction = (level - a[fixed]) / (b[fixed] - a[fixed]);
+            let x = (b[varying] - a[varying]).mul_add(fraction, a[varying]);
+            if !coordinate_admitted(x)
+                || x < a[varying].min(b[varying])
+                || x > a[varying].max(b[varying])
+            {
+                return Err(refusal(
+                    "surface line intersection is numerically unresolved",
+                ));
+            }
+            if x < lower[varying] || x > upper_coordinate {
+                continue;
+            }
+            if (x == lower[varying] && orient2d(a, b, lower) != Sign::Zero)
+                || (x == upper_coordinate && orient2d(a, b, upper) != Sign::Zero)
+            {
+                return Err(refusal(
+                    "surface line intersection collapses onto a distinct endpoint",
+                ));
+            }
+            cuts.insert((i, j), x);
+        }
+    }
+    let mut ordered: Vec<_> = cuts.into_values().collect();
+    ordered.sort_by(f64::total_cmp);
+    if ordered.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(refusal(
+            "distinct source line intersections collapse to one coordinate",
+        ));
+    }
+    ordered.retain(|x| lower[varying] < *x && *x < upper_coordinate);
+    Ok(ordered)
 }
 
 pub(crate) fn evaluate(

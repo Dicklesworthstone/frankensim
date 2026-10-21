@@ -117,6 +117,232 @@ fn g1_one_source_law_changes_with_both_temperature_and_shear() {
 }
 
 #[test]
+fn g1_fixed_context_line_retains_cell_crossings_and_canonical_receipts() {
+    let mut source = claim();
+    if let PropertyValue::Surface2D { samples, .. } = &mut source.value {
+        samples[3].1 += 1.0;
+    }
+    let mut claims = ClaimSet::new();
+    let id = claims.insert_claim(source).unwrap();
+    let key = PropertyKey::new("dynamic_viscosity", VISCOSITY);
+    let slice = claims
+        .query_line_typed(
+            &key,
+            "T",
+            &point(300.0, 50.0),
+            &point(400.0, 50.0),
+            ClaimSelection::Pinned(id),
+        )
+        .unwrap();
+    assert_eq!(slice.axis, "T");
+    assert_eq!(
+        slice.knots.iter().map(|(x, _)| *x).collect::<Vec<_>>(),
+        [300.0, 350.0, 400.0]
+    );
+    for ((t, answer), expected) in slice.knots.iter().zip([3.75, 3.25, 3.25]) {
+        assert_close(answer.evidence.value.value, expected);
+        assert_eq!(
+            *answer,
+            claims
+                .query_pinned_typed(&key, &point(*t, 50.0), id)
+                .unwrap()
+        );
+        claims.verify_receipt(&answer.receipt).unwrap();
+    }
+    // Only the path has support authority; diagonal box corners are unchanged.
+    assert!(
+        claims
+            .query_envelope_typed(
+                &key,
+                &point(300.0, 0.0),
+                &point(400.0, 100.0),
+                ClaimSelection::Pinned(id)
+            )
+            .is_err()
+    );
+    assert!(
+        claims
+            .query_line_typed(
+                &key,
+                "T",
+                &point(300.0, 0.0),
+                &point(400.0, 100.0),
+                ClaimSelection::Pinned(id)
+            )
+            .is_err()
+    );
+    assert!(
+        claims
+            .query_line_typed(
+                &key,
+                "T",
+                &point(400.0, 50.0),
+                &point(300.0, 50.0),
+                ClaimSelection::Pinned(id)
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn g0_line_support_does_not_bridge_even_a_sub_tolerance_source_gap() {
+    let mut source = claim();
+    if let PropertyValue::Surface2D {
+        samples, triangles, ..
+    } = &mut source.value
+    {
+        let right_start = f64::from_bits(350_f64.to_bits() + 1);
+        *samples = [
+            [300.0, 0.0],
+            [350.0, 0.0],
+            [300.0, 100.0],
+            [350.0, 100.0],
+            [right_start, 0.0],
+            [400.0, 0.0],
+            [right_start, 100.0],
+            [400.0, 100.0],
+        ]
+        .map(|p| (p, law(p[0], p[1])))
+        .to_vec();
+        *triangles = vec![[0, 1, 2], [1, 3, 2], [4, 5, 6], [5, 7, 6]];
+    }
+    let mut claims = ClaimSet::new();
+    let id = claims.insert_claim(source).unwrap();
+    let key = PropertyKey::new("dynamic_viscosity", VISCOSITY);
+    for t in [300.0, 350.0, f64::from_bits(350_f64.to_bits() + 1), 400.0] {
+        claims
+            .query_pinned_typed(&key, &point(t, 50.0), id)
+            .unwrap();
+    }
+    assert!(
+        claims
+            .query_line_typed(
+                &key,
+                "T",
+                &point(300.0, 50.0),
+                &point(400.0, 50.0),
+                ClaimSelection::Pinned(id)
+            )
+            .is_err()
+    );
+    claims
+        .query_line_typed(
+            &key,
+            "T",
+            &point(300.0, 50.0),
+            &point(350.0, 50.0),
+            ClaimSelection::Pinned(id),
+        )
+        .unwrap();
+}
+
+#[test]
+fn g3_line_support_joins_real_shared_vertices_and_respects_discrete_policy() {
+    let mut source = claim();
+    if let PropertyValue::Surface2D {
+        samples, triangles, ..
+    } = &mut source.value
+    {
+        *samples = [
+            [300.0, 0.0],
+            [300.0, 100.0],
+            [350.0, 50.0],
+            [400.0, 0.0],
+            [400.0, 100.0],
+        ]
+        .map(|p| (p, law(p[0], p[1])))
+        .to_vec();
+        *triangles = vec![[0, 2, 1], [2, 3, 4]];
+    }
+    let key = PropertyKey::new("dynamic_viscosity", VISCOSITY);
+    let mut claims = ClaimSet::new();
+    let id = claims.insert_claim(source.clone()).unwrap();
+    let line = claims
+        .query_line_typed(
+            &key,
+            "T",
+            &point(300.0, 50.0),
+            &point(400.0, 50.0),
+            ClaimSelection::Pinned(id),
+        )
+        .unwrap();
+    assert_eq!(
+        line.knots.iter().map(|(x, _)| *x).collect::<Vec<_>>(),
+        [300.0, 350.0, 400.0]
+    );
+    source.interpolation = InterpolationPolicy::TabulatedOnly;
+    let mut discrete = ClaimSet::new();
+    let id = discrete.insert_claim(source).unwrap();
+    let vertex = point(350.0, 50.0);
+    assert_eq!(
+        discrete
+            .query_line_typed(&key, "T", &vertex, &vertex, ClaimSelection::Pinned(id))
+            .unwrap()
+            .knots
+            .len(),
+        1
+    );
+    assert!(
+        discrete
+            .query_line_typed(
+                &key,
+                "T",
+                &point(300.0, 0.0),
+                &point(400.0, 0.0),
+                ClaimSelection::Pinned(id)
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn g0_line_selection_cannot_cross_a_competing_claim_unless_explicitly_pinned() {
+    let mut claims = ClaimSet::new();
+    let id = claims.insert_claim(claim()).unwrap();
+    let mut competitor = claim();
+    competitor.value = PropertyValue::Scalar {
+        value: 9.0,
+        dims: VISCOSITY,
+    };
+    competitor.interpolation = InterpolationPolicy::ConstantWithinValidity;
+    competitor.validity = competitor
+        .validity
+        .with_quantity("T", temperature(), 340.0, 360.0);
+    claims.insert_claim(competitor).unwrap();
+    let key = PropertyKey::new("dynamic_viscosity", VISCOSITY);
+    assert!(
+        claims
+            .query_line_typed(
+                &key,
+                "T",
+                &point(300.0, 50.0),
+                &point(400.0, 50.0),
+                ClaimSelection::Policy(fs_matdb::SelectionPolicy::SingleClaimOnly)
+            )
+            .is_err()
+    );
+    claims
+        .query_line_typed(
+            &key,
+            "T",
+            &point(300.0, 50.0),
+            &point(400.0, 50.0),
+            ClaimSelection::Pinned(id),
+        )
+        .unwrap();
+    let wrong = QueryPoint::new()
+        .with_quantity("T", QuantitySpec::dimensional(RATE), 300.0)
+        .unwrap()
+        .with_quantity("shear_rate", QuantitySpec::dimensional(RATE), 50.0)
+        .unwrap();
+    assert!(
+        claims
+            .query_line_typed(&key, "T", &wrong, &wrong, ClaimSelection::Pinned(id))
+            .is_err()
+    );
+}
+
+#[test]
 fn g0_box_and_convex_hull_do_not_fill_source_support_holes() {
     let mut one_triangle = claim();
     if let PropertyValue::Surface2D { triangles, .. } = &mut one_triangle.value {

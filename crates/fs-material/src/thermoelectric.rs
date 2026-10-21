@@ -6,13 +6,13 @@
 //! Electrical resistance, Fourier conduction and caloric storage retain their
 //! existing owners. This module supplies only the reversible cross terms.
 
-use fs_matdb::{InterpolationPolicy, MaterialCard, PropertyValue, QueryPoint};
+use fs_matdb::{MaterialCard, PropertyValue, QueryPoint};
 use fs_qty::{Dims, QuantitySpec, Temperature};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
 use crate::state_point::{MaterialPropertySelection, MaterialStatePointError,
     ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
-    integrate_piecewise_linear, resolve_material_state_point};
+    integrate_piecewise_linear, pinned_temperature_line, resolve_material_state_point};
 
 /// Absolute scalar Seebeck coefficient under the convention in this module.
 pub const ABSOLUTE_SEEBECK_PROPERTY: &str = "absolute_seebeck_coefficient";
@@ -39,7 +39,7 @@ impl std::error::Error for ThermoelectricError {}
 
 /// One source claim, admitted throughout the temperature span at fixed context.
 /// Complete endpoint and bulk receipts remain available. Constant scalar or
-/// piecewise-linear temperature claims supply exact integrals on the two
+/// supported piecewise-linear temperature paths supply exact integrals on the two
 /// thermal edges a-to-bulk and bulk-to-b. Their integral means define a discrete
 /// Kelvin pair: energy and entropy transfer close for all three thermal stores.
 /// This is a spatial reduction; endpoint Peltier flux and distributed Thomson
@@ -75,10 +75,11 @@ impl ResolvedSeebeckSpan {
     /// AND at the bulk temperature in `context` (which can be hotter through
     /// Joule heating). All three actual material states must remain supported.
     /// Only the named temperature coordinate changes; all external coordinates
-    /// and their quantity descriptors are retained. Rectangular source validity
-    /// then covers the full fixed-context path through the bulk. Tabulated-only
-    /// points cannot establish an integral; extrapolation and non-temperature
-    /// curves refuse. No coefficient is sampled and frozen at a nominal state.
+    /// and their quantity descriptors are retained. The canonical line query
+    /// checks continuous source support through the entire path, including a
+    /// fixed-context slice through a two-coordinate law. Every crossed cell
+    /// breakpoint is integrated; unsupported gaps and discrete-only spans
+    /// refuse even when the three endpoint queries individually succeed.
     pub fn resolve(
         card: &MaterialCard, context: &QueryPoint, temperature_axis: &str,
         temperature_k: [f64; 2], selection: MaterialPropertySelection,
@@ -114,23 +115,21 @@ impl ResolvedSeebeckSpan {
         let selected = property.answer().receipt.selected;
         let claim = card.claims().claim(selected)
             .ok_or(invalid("selected absolute Seebeck claim is absent"))?;
-        match (&claim.value, &claim.interpolation) {
-            (PropertyValue::Scalar { .. }, InterpolationPolicy::ConstantWithinValidity) => {}
-            (PropertyValue::Curve { abscissa, abscissa_dims, .. }, InterpolationPolicy::LinearInside)
-                if abscissa == temperature_axis && *abscissa_dims == Temperature::DIMS => {}
-            _ => return Err(invalid("Seebeck span needs a constant scalar or a piecewise-linear absolute-temperature claim")),
-        }
         let pinned = MaterialPropertySelection::PinnedByProperty(vec![
             (ABSOLUTE_SEEBECK_PROPERTY.to_owned(), selected)]);
         let bulk_material = resolve_material_state_point(card, context,
             std::slice::from_ref(&requirement), pinned.clone())?;
         let b = resolve_material_state_point(card, &point(temperature_k[1])?, &[requirement], pinned)?;
         let bulk_temperature_k = context.axes()[temperature_axis];
+        let lower = temperature_k[0].min(temperature_k[1]).min(bulk_temperature_k);
+        let upper = temperature_k[0].max(temperature_k[1]).max(bulk_temperature_k);
+        let path = pinned_temperature_line(card, &claim.key, temperature_axis,
+            &point(lower)?, &point(upper)?, selected)?;
         let average = |start: f64, end: f64, at_start: f64| -> Result<f64, ThermoelectricError> {
             let value = if start == end { at_start } else {
                 match &claim.value {
                     PropertyValue::Scalar { value, .. } => *value,
-                    PropertyValue::Curve { knots, .. } => {
+                    PropertyValue::Curve { abscissa, knots, .. } if abscissa == temperature_axis => {
                         let integral = integrate_piecewise_linear(knots, start, end)?;
                         let mean = integral / (end - start);
                         if integral != 0.0 && mean == 0.0 {
@@ -138,8 +137,13 @@ impl ResolvedSeebeckSpan {
                         }
                         mean
                     }
-                    PropertyValue::Surface2D { .. } => {
-                        return Err(invalid("Seebeck surface requires supported path integration"));
+                    PropertyValue::Curve { .. } | PropertyValue::Surface2D { .. } => {
+                        let integral = integrate_piecewise_linear(&path, start, end)?;
+                        let mean = integral / (end - start);
+                        if integral != 0.0 && mean == 0.0 {
+                            return Err(invalid("Seebeck integral mean is not representable"));
+                        }
+                        mean
                     }
                 }
             };

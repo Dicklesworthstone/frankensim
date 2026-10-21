@@ -38,7 +38,8 @@ pub struct ThermoelectricLeg {
     /// areas must equal the conductor area and bulk distances must sum to L.
     pub thermal_links: [u64; 2],
     /// Absolute Seebeck source choice on the resistor's original card.
-    /// Constant scalars and supported piecewise-linear S(T) claims are admitted.
+    /// Constant scalars and supported piecewise-linear temperature paths,
+    /// including fixed-context slices through two-coordinate sources, are admitted.
     pub selection: MaterialPropertySelection,
 }
 
@@ -225,7 +226,8 @@ fn span(
 /// Material cards supply rho_e or sigma, k, caloric storage and ABSOLUTE S(T).
 /// Transport and Seebeck claim choices are pinned before nonlinear trials.
 /// S may be a validity-wide scalar or a supported piecewise-linear temperature
-/// curve. Its integrals on junction-to-bulk thermal edges drive the SAME native
+/// path through curve or surface data at fixed external conditions. Its
+/// integrals on junction-to-bulk thermal edges drive the SAME native
 /// circuit current and reversible heat into all three original caloric cells.
 /// Each edge conserves electrical/thermal energy and transfers zero net entropy.
 /// For variable S, the bulk receives an interior Thomson contribution; the edge

@@ -1,4 +1,10 @@
 //! Synthetic source support and complete-bundle propagation, not measured data.
+#[path = "material_surface/path_physics.rs"]
+mod path_physics;
+
+#[path = "material_surface/caloric.rs"]
+mod caloric;
+
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,

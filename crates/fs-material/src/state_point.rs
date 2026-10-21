@@ -1375,11 +1375,13 @@ impl IntegratedIsotropicThermalExpansion {
 
 /// Integrate one selected isotropic expansion claim exactly over temperature.
 ///
-/// Scalar claims use `alpha * delta_T`; piecewise-linear `alpha(T)` claims are
-/// integrated segment by segment without quadrature error. Every non-temperature
-/// coordinate must be identical at the two endpoints. The reference selection
-/// chooses one claim and the current endpoint is then pinned to that exact claim,
-/// preventing a path from silently switching evidence sources.
+/// Scalar claims use `alpha * delta_T`; piecewise-linear temperature paths,
+/// including fixed-context slices through two-coordinate source surfaces, are
+/// integrated segment by segment without quadrature error. Every other
+/// coordinate and its quantity descriptor must be identical at both endpoints.
+/// The canonical source owner checks the complete path, including every crossed
+/// cell and any unsupported gap. Both endpoints and the path stay pinned to the
+/// reference claim; valid endpoints alone do not establish continuous support.
 pub fn integrate_isotropic_thermal_expansion(
     card: &MaterialCard,
     reference_point: &QueryPoint,
@@ -1411,6 +1413,14 @@ pub fn integrate_isotropic_thermal_expansion(
             .ok_or(MaterialStatePointError::InvalidDerived {
                 quantity: "selected thermal-expansion claim",
             })?;
+    let path = pinned_temperature_line(
+        card,
+        &claim.key,
+        "T",
+        reference_point,
+        current_point,
+        selected_claim,
+    )?;
     let free_linear_strain = match &claim.value {
         fs_matdb::PropertyValue::Scalar { value, .. } => {
             value * (current_temperature_k - reference_temperature_k)
@@ -1420,15 +1430,8 @@ pub fn integrate_isotropic_thermal_expansion(
         } if abscissa == "T" => {
             integrate_piecewise_linear(knots, reference_temperature_k, current_temperature_k)?
         }
-        fs_matdb::PropertyValue::Curve { .. } => {
-            return Err(MaterialStatePointError::InvalidDerived {
-                quantity: "thermal-expansion curve abscissa must be T",
-            });
-        }
-        fs_matdb::PropertyValue::Surface2D { .. } => {
-            return Err(MaterialStatePointError::InvalidDerived {
-                quantity: "thermal-expansion surface requires supported path integration",
-            });
+        fs_matdb::PropertyValue::Curve { .. } | fs_matdb::PropertyValue::Surface2D { .. } => {
+            integrate_piecewise_linear(&path, reference_temperature_k, current_temperature_k)?
         }
     };
     if !free_linear_strain.is_finite() {
@@ -1459,6 +1462,20 @@ fn matching_temperature_path(
     if reference.axes().len() != current.axes().len() {
         return Err(MaterialStatePointError::InvalidDerived {
             quantity: "thermal path coordinate set",
+        });
+    }
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    if [reference, current].iter().any(|point| {
+        point.axis_quantities().get("T").is_some_and(|quantity| {
+            *quantity != QuantitySpec::dimensional(fs_qty::Temperature::DIMS)
+                && *quantity != absolute
+        })
+    }) {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "thermal path coordinate must be an absolute temperature",
         });
     }
     for (axis, reference_value) in reference.axes() {
@@ -1495,6 +1512,64 @@ fn matching_temperature_path(
         });
     }
     Ok((reference_temperature_k, current_temperature_k))
+}
+
+// One canonical continuous-support check serves the material path consumers.
+// Ordering the endpoints does not change their signed physical integration.
+// A legacy untyped query cannot erase a source's declared coordinate dimension.
+pub(crate) fn pinned_temperature_line(
+    card: &MaterialCard,
+    property: &PropertyKey,
+    axis: &str,
+    from: &QueryPoint,
+    to: &QueryPoint,
+    selected: ClaimId,
+) -> Result<Vec<(f64, f64)>, MaterialStatePointError> {
+    if card.claims().claim(selected).is_some_and(|claim| {
+        claim
+            .value
+            .axes()
+            .any(|(source_axis, dims)| source_axis == axis && dims != fs_qty::Temperature::DIMS)
+    }) {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "temperature path source coordinate must have temperature dimensions",
+        });
+    }
+    let from_value = from
+        .axes()
+        .get(axis)
+        .ok_or(MaterialStatePointError::InvalidDerived {
+            quantity: "property path start coordinate",
+        })?;
+    let to_value = to
+        .axes()
+        .get(axis)
+        .ok_or(MaterialStatePointError::InvalidDerived {
+            quantity: "property path end coordinate",
+        })?;
+    let (lower, upper) = if from_value <= to_value {
+        (from, to)
+    } else {
+        (to, from)
+    };
+    let path = card
+        .claims()
+        .query_line_typed(
+            property,
+            axis,
+            lower,
+            upper,
+            fs_matdb::ClaimSelection::Pinned(selected),
+        )
+        .map_err(|source| MaterialStatePointError::Support {
+            property: property.name().to_owned(),
+            source: Box::new(source),
+        })?;
+    Ok(path
+        .knots
+        .into_iter()
+        .map(|(coordinate, answer)| (coordinate, answer.evidence.value.value))
+        .collect())
 }
 
 pub(crate) fn integrate_piecewise_linear(
@@ -2583,6 +2658,13 @@ pub enum MaterialStatePointError {
         property: String,
         /// Exact matdb refusal, including out-of-domain and ambiguity cases.
         source: MatDbError,
+    },
+    /// The selected property does not continuously support a physical path.
+    Support {
+        /// Property whose path was requested.
+        property: String,
+        /// Original source-domain, interpolation, coordinate or selection refusal.
+        source: Box<fs_matdb::PropertySupportError>,
     },
     /// The selected claim has different dimensions from the consuming operator.
     DimensionMismatch {
