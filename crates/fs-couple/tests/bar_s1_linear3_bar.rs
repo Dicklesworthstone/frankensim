@@ -80,6 +80,12 @@ const AFRICAN: &str =
 const WALNUT: &str =
     include_str!("../../../data/matdb/seed-v1/walnut-black-fpl-gtr282/properties.tsv");
 
+/// Measured rosewood-bar loss constants, one `scalar` row each (Chaigne and
+/// Doutaut 1997, JASA 101(1) 539, Table I and Eqs. 18-19).
+const ROSEWOOD_LOSS: &str = include_str!(
+    "../../../data/instruments/descriptions/bars/rosewood-loss-chaigne-doutaut1997.tsv"
+);
+
 fn scalar(pack: &str, property: &str) -> f64 {
     let row = pack.lines().find_map(|line| {
         let fields: Vec<_> = line.split('\t').collect();
@@ -87,6 +93,19 @@ fn scalar(pack: &str, property: &str) -> f64 {
             .then(|| fields[4].parse::<f64>().expect("source scalar"))
     });
     row.unwrap_or_else(|| panic!("required source property missing: {property}"))
+}
+
+/// Chaigne and Doutaut measured the free decay of rosewood-bar partials with a
+/// laser vibrometer and fitted the amplitude decay rate 1/tau_d = a0 + a2 f^2
+/// (Eq. 18), with a0 = gamma_B / 2 and a2 = 2 pi^2 eta (Eq. 19). For a partial
+/// of angular frequency w the equivalent modal damping ratio is
+/// zeta = (a0 + a2 f^2) / w. The constants belong to THEIR bar (E 21.3 GPa,
+/// 1015 kg/m3), so applying them to this one is a declared scenario.
+fn modal_damping_ratio(f_hz: f64) -> f64 {
+    let pi = core::f64::consts::PI;
+    let a0 = scalar(ROSEWOOD_LOSS, "fluid_damping_gamma_b") / 2.0;
+    let a2 = 2.0 * pi * pi * scalar(ROSEWOOD_LOSS, "viscoelastic_constant_eta");
+    (a0 + a2 * f_hz * f_hz) / (TAU * f_hz)
 }
 
 fn young() -> f64 {
@@ -932,6 +951,23 @@ fn mode_window_cap_is_live() {
 /// fundamental, so the converged bar sounded about 330 cents under Db5.
 const DESIGN_GRID: [usize; 3] = [72, 6, 3];
 
+/// A design solved by an earlier run of the bisection below, as
+/// `depth=<f64>` and `scale=<f64>` lines in the file named by
+/// BAR_S1_DESIGN_CACHE. Never trusted unchecked: see `tune_design`.
+fn cached_design() -> Option<(f64, f64)> {
+    let path = std::env::var_os("BAR_S1_DESIGN_CACHE")?;
+    let text = std::fs::read_to_string(path).expect("readable design cache");
+    let value = |key: &str| -> f64 {
+        text.lines()
+            .find_map(|line| line.strip_prefix(key))
+            .unwrap_or_else(|| panic!("design cache lacks {key}"))
+            .trim()
+            .parse()
+            .expect("design cache number")
+    };
+    Some((value("depth="), value("scale=")))
+}
+
 fn tune_design() -> Design {
     with_cx(|cx| {
         let mat = material(HONDURAS);
@@ -946,6 +982,30 @@ fn tune_design() -> Design {
                 hz(&report.modes[ids[0]]),
             )
         };
+        if let Some((depth, scale)) = cached_design() {
+            // Accepted only after ONE fresh TET10 solve reproduces the 1:3
+            // ratio and the Db5 fundamental that fixed `scale`.
+            let started = Instant::now();
+            let (ratio, fundamental) = evaluate(depth);
+            assert!(
+                (ratio / 3.0 - 1.0).abs() < 1e-4,
+                "cached design no longer gives 1:3: {ratio}"
+            );
+            assert!(
+                (fundamental / ET_DB5_HZ / scale - 1.0).abs() < 1e-9,
+                "cached scale no longer reproduces the Db5 fundamental: {fundamental}"
+            );
+            row(
+                "synthetic-undercut-construction",
+                "cut-depth",
+                "pass",
+                &format!(
+                    "{{\"bar_id\":\"B-undercut\",\"depth_fraction\":{depth},\"uniform_scale\":{scale},\"design_cache\":\"reused; re-verified by one TET10 solve\",\"achieved_design_grid_ratio\":{ratio},\"design_grid\":{DESIGN_GRID:?},\"same_specimen\":false}}"
+                ),
+                started,
+            );
+            return Design { depth, scale };
+        }
         let (mut lo, mut hi) = (0.0, 0.85);
         let left = evaluate(lo).0 - 3.0;
         let right = evaluate(hi).0 - 3.0;
@@ -1481,12 +1541,29 @@ fn render(
     substeps: u32,
     local_compliance_ratio: f64,
 ) -> (Vec<f64>, f64) {
+    render_with(ladder, transfer, substeps, local_compliance_ratio, false)
+}
+
+/// `rosewood_loss` selects the measured rosewood-bar decay law for the five
+/// elastic modes; `false` is the explicit lossless scenario.
+fn render_with(
+    ladder: &Ladder,
+    transfer: [C64; 5],
+    substeps: u32,
+    local_compliance_ratio: f64,
+    rosewood_loss: bool,
+) -> (Vec<f64>, f64) {
     let mut modes: Vec<_> = (0..5)
         .map(|mode| ModalAcousticMode {
             angular_frequency_rad_s: TAU * ladder.rungs[3].frequencies[mode],
-            // Explicit lossless scenario because wood and head loss are UNKNOWN.
-            // Do not promote this zero to measured damping or qualified decay.
-            damping_ratio: 0.0,
+            // Lossless unless the caller selects the sourced rosewood law; head
+            // loss stays UNKNOWN either way. Do not promote the zero to measured
+            // damping or qualified decay.
+            damping_ratio: if rosewood_loss {
+                modal_damping_ratio(ladder.rungs[3].frequencies[mode])
+            } else {
+                0.0
+            },
             pressure_per_modal_velocity: transfer[mode],
         })
         .collect();
@@ -1732,5 +1809,87 @@ fn bar_s1_material_strike_radiated_render_replays_and_time_axis_is_live() {
             "{{\"substeps\":{SUBSTEPS:?},\"relative_l2_differences\":{differences:?},\"observed_orders\":{orders:?},\"formal_order\":1,\"order_band\":[0.7,1.3],\"tolerance_relative_l2\":0.01,\"replay_bits_equal\":true,\"contact_time_s\":{contact},\"acceptance\":false}}"
         ),
         started,
+    );
+}
+
+/// Same strike, same radiation, but the five elastic modes decay by the
+/// measured rosewood law. Float32 output only: the bar radiates at a few LSB of
+/// the fixed PCM16 scale used by the lossless render.
+#[test]
+fn bar_s1_rosewood_loss_scenario_render_replays_and_decays() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let started = Instant::now();
+    let ladder = undercut();
+    let transfer = *radiation().pressures.last().unwrap();
+    let finest = *SUBSTEPS.last().unwrap();
+    let (signal, contact) = render_with(ladder, transfer, finest, 0.0, true);
+    let (replay, replay_contact) = render_with(ladder, transfer, finest, 0.0, true);
+    let (coarser, _) = render_with(ladder, transfer, SUBSTEPS[2], 0.0, true);
+    let energy: f64 = signal.iter().map(|p| p * p).sum();
+    let change: f64 = signal
+        .iter()
+        .zip(&coarser)
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum();
+    let time_axis = (change / energy).sqrt();
+    let rate = RATE as usize;
+    let rms = |from: usize, to: usize| {
+        (signal[from..to].iter().map(|p| p * p).sum::<f64>() / (to - from) as f64).sqrt()
+    };
+    let (early, late) = (rms(0, rate / 4), rms(rate, signal.len()));
+    let frequencies = ladder.rungs[3].frequencies;
+    let zetas: Vec<f64> = frequencies
+        .iter()
+        .map(|&f| modal_damping_ratio(f))
+        .collect();
+    let rates: Vec<f64> = frequencies
+        .iter()
+        .zip(&zetas)
+        .map(|(&f, &zeta)| zeta * TAU * f)
+        .collect();
+    if let Some(out) = artifact_dir() {
+        std::fs::create_dir_all(&out).unwrap();
+        let wav = fs_couple::pcm_wav::high_resolution::encode_pressure_wav(
+            &signal,
+            RATE,
+            1,
+            FULL_SCALE_PA,
+            fs_couple::pcm_wav::high_resolution::Encoding::Float32,
+        )
+        .unwrap();
+        let hash = fs_blake3::hash_domain("org.frankensim.music-render.wav.v1", &wav).to_hex();
+        std::fs::write(out.join("bar-s1-loss-f32.wav"), wav).unwrap();
+        let cache =
+            std::env::var("BAR_S1_DESIGN_CACHE").map_or("null".to_owned(), |p| format!("\"{p}\""));
+        let metadata = format!(
+            "{{\"bar_id\":\"B-undercut\",\"f_modes_hz\":{frequencies:?},\"damping_ratio\":{zetas:?},\"amplitude_decay_rate_per_s\":{rates:?},\"loss_law\":\"1/tau_d = a0 + a2 f^2, a0 = gamma_B/2, a2 = 2 pi^2 eta; Chaigne and Doutaut 1997 JASA 101(1) 539 Table I rosewood bar, Eqs. 18-19\",\"loss_is_scenario\":\"constants measured on another rosewood bar (E 21.3 GPa, 1015 kg/m3); mallet head loss unknown\",\"design_depth\":{},\"design_scale\":{},\"design_cache\":{cache},\"contact_time_s\":{contact},\"time_axis_relative_l2_substeps_8_to_16\":{time_axis},\"early_rms_pa_first_quarter_s\":{early},\"late_rms_pa_after_1_s\":{late},\"wav_blake3\":\"{hash}\",\"sample_rate_hz\":{RATE},\"full_scale_pa\":{FULL_SCALE_PA},\"encoding\":\"float32\",\"receiver_m\":{RECEIVER:?},\"observer\":\"narrow-band modal transfer at five retained elastic poles, Burton-Miller\",\"supports\":false,\"resonator\":false,\"same_specimen\":false,\"acceptance\":false}}\n",
+            ladder.design.depth, ladder.design.scale
+        );
+        std::fs::write(out.join("bar-s1-loss-render.json"), metadata).unwrap();
+    }
+    row(
+        "rosewood-loss-scenario-render",
+        "loss",
+        "pass",
+        &format!(
+            "{{\"damping_ratio\":{zetas:?},\"amplitude_decay_rate_per_s\":{rates:?},\"time_axis_relative_l2\":{time_axis},\"early_rms_pa\":{early},\"late_rms_pa\":{late},\"contact_time_s\":{contact},\"acceptance\":false}}"
+        ),
+        started,
+    );
+    assert_eq!(contact.to_bits(), replay_contact.to_bits());
+    assert!(
+        signal
+            .iter()
+            .zip(&replay)
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "same-host exact replay"
+    );
+    assert!(
+        time_axis < 0.01,
+        "strike time step needs refinement: {time_axis}"
+    );
+    assert!(
+        early > 0.0 && late < 1e-3 * early,
+        "loss law must damp the note"
     );
 }
