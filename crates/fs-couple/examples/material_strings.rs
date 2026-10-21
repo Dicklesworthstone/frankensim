@@ -208,7 +208,7 @@ impl input::Spec {
         // its connected linear block. No record means the ordinary owner.
         // A shell body bank is already built on this record (it cannot exist without it); binding it again refuses.
         let bank = match self.prepared_linear {
-            Some(budget) if bank.prepared_linear_budget().is_none() =>
+            Some(budget) if bank.source().prepared_linear_budget().is_none() =>
                 bank.with_prepared_linear_propagation(budget, gate)?,
             _ => bank,
         };
