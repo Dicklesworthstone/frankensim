@@ -13,6 +13,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.first().is_some_and(|s| s == "--binary-material") { return material::run_binary(&args[1..]); }
     if args.first().is_some_and(|s| s == "--refine-material") { return refinement::run(&args[1..]); }
     if args.first().is_some_and(|s| s == "--adapt-material") { return refinement::run_adaptive(&args[1..]); }
+    if args.first().is_some_and(|s| s == "--binary-refined") { return refinement::run_binary(&args[1..]); }
     if args.len() > 2 { return Err("usage: worst_load_sdf3 --load-space [UPDATES [TOTAL_KRYLOV_ITERATIONS]]".into()); }
     let updates = args.first().map_or(Ok(200), |s| s.parse::<usize>())?;
     let iterations = args.get(1).map_or(Ok(250_000), |s| s.parse::<usize>())?;
