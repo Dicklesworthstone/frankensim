@@ -95,3 +95,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> LoadSpaceLimitedDesign3<'a, 'callback, O>
         Ok(Some(LoadSpaceDesignPoint3 { rho: best.rho.clone(), evaluation }))
     }
 }
+
+#[cfg(test)]
+#[path = "limits_tests.rs"]
+mod tests;
