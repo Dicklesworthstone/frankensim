@@ -3163,6 +3163,29 @@ eliminates the coupled field and temperature laws and two-cell enthalpy
 equations; regressions cover data-only substitutions, energy balance, replay
 and atomic refusal. Equation checks do not substitute for native test execution.
 
+## Prepared material networks for nonlinear conductivity
+
+`MaterialNetwork::prepare_conductivity` binds explicit electrical property
+bases and typed field/current coordinates to the existing cell-resistor data.
+`PreparedMaterialNetwork::resolve_conductivity_seeds` initializes the original
+circuit from complete thermal/electrical material bundles.
+`PreparedMaterialNetwork::conductivity_candidate` then advances the original
+joint conduction/enthalpy owner without a caller-written material callback.
+Cards, geometry, destinations, caloric instances and selected source claims
+come from the same retained network; accepted continuation preserves those
+pins while re-evaluating the actual thermal and electrical state.
+
+The shared static-property admission admits extra physical axes only for the
+explicitly bound electrical property. Ordinary thermal-only resolution stays
+strict. Thermal conductivity curves depending on electrical field/current
+refuse: the present outer thermal network does not refresh link coefficients
+inside the inner electrical iteration. Missing, duplicate or incorrectly typed
+electrical axis plans also refuse rather than holding a curve at its seed.
+Regression sources cover data-only law substitution, independent coupled
+equations, complete-bundle initialization, continued discharge/heating,
+selection continuity and atomic source-domain/admission failures. Native
+execution remains pending.
+
 ## Reciprocal material electric and magnetic gap motion
 
 `material_circuit::motion::MaterialFieldMotion` composes the existing source-bound

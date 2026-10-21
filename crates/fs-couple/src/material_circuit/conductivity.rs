@@ -31,7 +31,7 @@ pub enum ConductionCoordinate {
     CurrentDensityMagnitude,
 }
 impl ConductionCoordinate {
-    fn dimensions(self) -> Dims {
+    pub(crate) fn dimensions(self) -> Dims {
         match self {
             Self::ElectricField | Self::ElectricFieldMagnitude => Dims([1, 1, -3, 0, -1, 0]),
             Self::CurrentDensity | Self::CurrentDensityMagnitude => Dims([-2, 0, 0, 0, 1, 0]),
