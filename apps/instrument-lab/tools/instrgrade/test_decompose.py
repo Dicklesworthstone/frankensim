@@ -257,6 +257,31 @@ class FloorTests(unittest.TestCase):
         self.assertLess(t_blocks, t_whole * 1.5)  # small files are not a speed test; the point is it never costs more
 
 
+class PartialGateTests(unittest.TestCase):
+    def test_noise_peaks_far_below_the_real_partials_do_not_make_inharmonicity_or_frequency_gaps(self):
+        def two_partials(junk):
+            n = int(2.6 * SR)
+            tt = np.arange(n) / SR
+            x = np.sin(2 * np.pi * 220 * tt) + 0.5 * np.sin(2 * np.pi * 440 * tt) + 0.3 * np.sin(2 * np.pi * 660 * tt)
+            if junk:  # spectral lines nowhere near the harmonic series, 70 dB down: what a render's numerical floor looks like
+                for f in (890.0, 1118.0, 1345.0, 1565.0, 1790.0, 2010.0):  # just off harmonics 4-9: inside the tracker's search windows
+                    x = x + 3e-4 * np.sin(2 * np.pi * f * tt)
+            x = 0.2 * x / np.abs(x).max() * (0.5 - 0.5 * np.cos(np.pi * np.clip((tt - 0.3) / 0.05, 0, 1)))
+            return x
+        clean, noisy = note_of(two_partials(False)), note_of(two_partials(True))
+        old_gate, dc.STRONG_DB = dc.STRONG_DB, 1000.0  # the gate switched off: every tracked peak counts
+        try:
+            ungated = dc.compare(note_of(two_partials(True)), note_of(two_partials(False)))
+            self.assertGreater(ungated["partial_freq_cents"][0], 8.0)  # the artifact is real without the gate
+        finally:
+            dc.STRONG_DB = old_gate
+        g = dc.compare(noisy, clean)
+        self.assertLess(g["partial_freq_cents"][0], 5.0)
+        self.assertLess(g["inharmonicity_B"][0], 2e-5)
+        self.assertLess(noisy.B, 2e-5)
+        self.assertEqual(int(noisy.strong.sum()), 3)  # exactly the three real partials count
+
+
 class ContractTests(unittest.TestCase):
     """write_pair against P8's validator (tools/build_instruments.py) on a synthetic library."""
 

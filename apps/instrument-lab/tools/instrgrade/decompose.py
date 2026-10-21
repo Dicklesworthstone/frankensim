@@ -39,7 +39,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
-from descriptors import GraderRefusalError, track_partials  # noqa: E402
+from descriptors import GraderRefusalError, fit_stiff_string_law, track_partials  # noqa: E402
 from instrgrade import GRADER_VERSION, SR, describe, distance, highpass, hz_of, load, midi_of, name_of, write_wav  # noqa: E402
 
 DECOMPOSE_VERSION = "decompose-1"
@@ -50,6 +50,7 @@ HOP = SR // 100  # 10 ms: STFT hop and the grid of every curve
 F_LO, F_HI = 40.0, 16000.0
 SHOW_DB = 60.0  # cells within this many dB of the reference peak count in a spectrogram distance
 N_PARTIALS = 12
+STRONG_DB = 40.0  # a partial this far under the strongest is not a measurement of its own frequency
 
 
 class OnsetMisaligned(ValueError):
@@ -389,6 +390,8 @@ class Note:
             self.pdev = np.zeros(len(modes))
             self.pfreq_t = [np.full(self.frames, m) for m in modes]
             self.decay = np.array([_decay_db_s(self.t, p) for p in self.pl]) if self.kind == "decaying" else None
+            self.strong = np.ones(len(modes), bool)
+            self.B = float(d["inharmonicity_B"])
             return
         t0, t1 = d["windows"]["sustain"]
         ps = track_partials(self.y, self.f0, kmax=min(40, int(15000 // self.f0)), fit_inharmonicity=True, t_window=(t0, t1), f0_fixed=self.f0)
@@ -400,6 +403,16 @@ class Note:
         self.pdev = 1200 * np.log2(self.pf / (self.pk * self.f0)) if len(ps) else np.array([])
         self.pfreq_t = [np.interp(self.t, p.t_s, p.f_hz) for p in ps]
         self.decay = np.array([_decay_db_s(self.t, self.pl[i]) for i in range(len(ps))]) if self.kind == "decaying" else None
+        # A partial's frequency is a measurement only if the partial is there: within STRONG_DB of the strongest. Below
+        # that the tracker is reporting whichever noise peak lies in its search window (a render with two real
+        # partials has "partials" 4-12 at -60 to -90 dB), and a stiff-string fit or a frequency gap built on them is
+        # an artifact. B is fitted on the strong partials only (f0 held), and is 0 with fewer than three of them.
+        self.strong = self.pmean > self.pmean.max() - STRONG_DB if len(self.pmean) else np.zeros(0, bool)
+        if self.strong.sum() >= 3:
+            w = 10 ** ((self.pmean[self.strong] - self.pmean.max()) / 20.0)
+            self.B = float(fit_stiff_string_law(self.pk[self.strong].astype(float), self.pf[self.strong], w, f0_fixed=self.f0)[1])
+        else:
+            self.B = 0.0
 
     def _curves(self):
         S = self.S[:, : self.frames].astype(np.float64)
@@ -420,7 +433,7 @@ class Note:
 
     def scalars(self):
         d = self.desc
-        out = dict(f0_hz=self.f0, inharmonicity_B=d["inharmonicity_B"], odd_even_db=d["odd_even_db"], hnr_db=d["hnr_db"],
+        out = dict(f0_hz=self.f0, inharmonicity_B=self.B, odd_even_db=d["odd_even_db"], hnr_db=d["hnr_db"],
                    attack_ms=d["attack_ms"], centroid_rel=d["centroid_rel"], hi_share_db=d["hi_share_db"],
                    f0_sd_cents=d["f0_sd_cents"], level_db=self.level_db, duration_s=self.dur,
                    mean_centroid_hz=float(np.nanmean(self.centroid_hz)) if self.sound.any() else None,
@@ -538,12 +551,14 @@ def compare(a: Note, b: Note):
         if ia < 8 and live.sum() >= 5 and b.pmean[ib] > b.pmean.max() - 50:
             d = (la[live] - la[live].mean()) - (lb[live] - lb[live].mean())
             traj.append(float(np.sqrt(np.mean(d * d))))
-        cents.append(1200 * math.log2(a.ratios[ia] / b.ratios[ib]) if (a.inharmonic or b.inharmonic) else float(a.pdev[ia] - b.pdev[ib]))
+        if a.strong[ia] and b.strong[ib]:
+            cents.append(1200 * math.log2(a.ratios[ia] / b.ratios[ib]) if (a.inharmonic or b.inharmonic) else float(a.pdev[ia] - b.pdev[ib]))
     g["partial_traj_db"] = (float(np.median(traj)) if traj else None, None)
     g["partial_freq_cents"] = (float(np.sqrt(np.mean(np.square(cents)))) if cents else None, float(np.mean(cents)) if cents else None)
     sc = 1200 * math.log2(a.f0 / b.f0)
     g["f0_cents"] = (abs(sc), sc)
-    for k in ("inharmonicity_B", "odd_even_db", "hnr_db"):
+    g["inharmonicity_B"] = (abs(a.B - b.B), a.B - b.B)
+    for k in ("odd_even_db", "hnr_db"):
         g[k] = (abs(a.desc[k] - b.desc[k]), a.desc[k] - b.desc[k])
     r = math.log2(max(a.desc["attack_ms"], 0.02) / max(b.desc["attack_ms"], 0.02))
     g["attack_log2"] = (abs(r), r)
