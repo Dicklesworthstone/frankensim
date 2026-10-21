@@ -198,6 +198,10 @@ class PitchTests(unittest.TestCase):
             note_of(self.weak_fundamental(55.0, 90.0), 55.0)
 
 
+# the keys the page generator reads from a references.json entry: id, licence (a CREDITS key) and the url of the recording
+REFERENCE_ENTRIES = {i: dict(id=i, licence="uiowa-mis", url=f"https://theremin.music.uiowa.edu/{i}.aiff") for i in ("syn-mf", "syn-ff")}
+
+
 class ContractTests(unittest.TestCase):
     """write_pair against P8's validator (tools/build_instruments.py) on a synthetic library."""
 
@@ -237,7 +241,7 @@ class ContractTests(unittest.TestCase):
         import json
         base = Path(root) / family / note
         pj = json.loads((base / "pair.json").read_text())
-        problems = bi.validate_pair(pj, family, note, base, {"syn-mf": {"licence": "uiowa-mis"}, "syn-ff": {"licence": "uiowa-mis"}}) + bi.check_audio(base, pj)
+        problems = bi.validate_pair(pj, family, note, base, REFERENCE_ENTRIES) + bi.check_audio(base, pj)
         self.assertEqual(problems, [])
         return pj
 
