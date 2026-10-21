@@ -340,7 +340,11 @@ class EndToEnd(unittest.TestCase):
             index = json.loads((out / "index.json").read_text())
             self.assertEqual(len(index["families"]), len(B.FAMILIES) + len([p for p in B.DESCRIPTIONS.glob("*/status.json") if p.parent.name not in {f[0] for f in B.FAMILIES}]))
             by_id = {f["id"]: f for f in index["families"]}
-            self.assertEqual(by_id["oboe"]["badge"], "none")
+            # No oboe has been rendered here, so its badge is whatever its own status card says: blocked once a family lane
+            # writes a `blocked` reason, none while it has no status at all.
+            oboe = B.DESCRIPTIONS / "oboe" / "status.json"
+            blocked = oboe.is_file() and bool(json.loads(oboe.read_text()).get("blocked"))
+            self.assertEqual(by_id["oboe"]["badge"], "blocked" if blocked else "none")
             self.assertEqual(by_id["clarinet"]["badge"], "mixed")
             card = json.loads((out / "clarinet" / "card.json").read_text())
             p = card["pairs"][0]
