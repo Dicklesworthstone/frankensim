@@ -202,6 +202,24 @@ class PitchTests(unittest.TestCase):
 REFERENCE_ENTRIES = {i: dict(id=i, licence="uiowa-mis", url=f"https://theremin.music.uiowa.edu/{i}.aiff") for i in ("syn-mf", "syn-ff")}
 
 
+class FloorTests(unittest.TestCase):
+    def test_block_wise_floor_matches_the_whole_file_floor_and_is_faster(self):
+        import time
+        rng = np.random.default_rng(3)
+        parts = []
+        for k in range(14):  # a range file: notes of 2.2 s with 0.6 s gaps of room noise
+            parts += [tone(f0=F0 * 2 ** (k / 12), dur=2.2, lead=0.0, attack=0.05, noise_db=-70, seed=k), 10 ** (-72 / 20) * rng.standard_normal(int(0.6 * SR))]
+        x = np.concatenate(parts)
+        t = time.time()
+        whole = dc.floor_of(dc.highpass(x, F0))
+        t_whole = time.time() - t
+        t = time.time()
+        blocks = dc.floor_of_file(x, F0, block=1 << 17)
+        t_blocks = time.time() - t
+        self.assertLess(abs(whole - blocks), 2.0, f"{whole} vs {blocks}")
+        self.assertLess(t_blocks, t_whole * 1.5)  # small files are not a speed test; the point is it never costs more
+
+
 class ContractTests(unittest.TestCase):
     """write_pair against P8's validator (tools/build_instruments.py) on a synthetic library."""
 

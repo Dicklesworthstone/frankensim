@@ -86,6 +86,18 @@ def floor_of(y):
     return float(max(-120.0, 10 * np.log10(np.percentile(ms, 5) + 1e-18)))
 
 
+def floor_of_file(x, f0_hz, block=1 << 18):
+    """The noise floor of a long recording: floor_of() of its high-passed signal, high-passed in blocks.
+
+    One FFT high-pass over a 100 MB range file costs a minute and a gigabyte; the floor is a 5th percentile of
+    20 ms frame levels, which a block-wise high-pass (a ringing frame at a block edge is loud, never quiet) gives
+    to within a dB or so for a hundredth of the work.
+    """
+    if len(x) <= 2 * block:
+        return floor_of(highpass(x, f0_hz))
+    return floor_of(np.concatenate([highpass(x[i:i + block], f0_hz) for i in range(0, len(x), block)]))
+
+
 def onset_times(y, floor_db, anchor_s=None, f0_hz=None, peak_db=None):
     """(noise-floor crossing, peak-relative crossing) in seconds from the start of y; the onset is the later of the two.
 
@@ -590,7 +602,7 @@ class Refs:
         x = self.raw(e["file"])
         fkey = (e["file"], self.band_hz)
         if fkey not in self._floor:
-            self._floor[fkey] = floor_of(highpass(x, f0))
+            self._floor[fkey] = floor_of_file(x, f0)
         a = max(0, int((e["start"] - 2.0) * SR))
         b = min(len(x), int(e["end"] * SR) + int(0.1 * SR))
         y, info = align(x[a:b], f0, self._floor[fkey], anchor_s=e["start"] - a / SR, at_start=(a == 0))
