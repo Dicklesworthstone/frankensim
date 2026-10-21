@@ -1,0 +1,302 @@
+frankensim.matdb-source.v1
+observation	firth87-olive-g	Pirastro Olive violin G string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: no floss count printed, braiding 10/16; metal wrap of wire section in Ag, 3 wires	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-olive-g	firth87-olive-g	outer_diameter_olive_g	0.00081	m	constant
+uncertainty	outer-diameter-olive-g	unstated	-	-	-	-
+validity	outer-diameter-olive-g	temperature_known	0	0	1
+scalar	core-plus-underwrap-diameter-olive-g	firth87-olive-g	core_with_underwrap_diameter_olive_g	0.00061	m	constant
+uncertainty	core-plus-underwrap-diameter-olive-g	unstated	-	-	-	-
+validity	core-plus-underwrap-diameter-olive-g	temperature_known	0	0	1
+scalar	core-diameter-olive-g	firth87-olive-g	core_diameter_olive_g	0.00055	m	constant
+uncertainty	core-diameter-olive-g	unstated	-	-	-	-
+validity	core-diameter-olive-g	temperature_known	0	0	1
+scalar	core-twist-pitch-olive-g	firth87-olive-g	core_twist_pitch_olive_g	0.006	m	constant
+uncertainty	core-twist-pitch-olive-g	unstated	-	-	-	-
+validity	core-twist-pitch-olive-g	temperature_known	0	0	1
+scalar	wrap-wire-diameter-olive-g	firth87-olive-g	wrap_wire_diameter_olive_g	0.00012	m	constant
+uncertainty	wrap-wire-diameter-olive-g	unstated	-	-	-	-
+validity	wrap-wire-diameter-olive-g	temperature_known	0	0	1
+scalar	wrap-wire-count-olive-g	firth87-olive-g	wrap_wire_count_olive_g	3	1	constant
+uncertainty	wrap-wire-count-olive-g	unstated	-	-	-	-
+validity	wrap-wire-count-olive-g	temperature_known	0	0	1
+observation	firth87-green-g	Pirastro Green violin G string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: no floss count printed, braiding 10/16; metal wrap of wire section in Ag, 2 wires (the wrap-diameter cell of this row is degraded in the scan; .12 is read, as the other three G labels print)	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-green-g	firth87-green-g	outer_diameter_green_g	0.00081	m	constant
+uncertainty	outer-diameter-green-g	unstated	-	-	-	-
+validity	outer-diameter-green-g	temperature_known	0	0	1
+scalar	core-plus-underwrap-diameter-green-g	firth87-green-g	core_with_underwrap_diameter_green_g	0.00063	m	constant
+uncertainty	core-plus-underwrap-diameter-green-g	unstated	-	-	-	-
+validity	core-plus-underwrap-diameter-green-g	temperature_known	0	0	1
+scalar	core-diameter-green-g	firth87-green-g	core_diameter_green_g	0.00056	m	constant
+uncertainty	core-diameter-green-g	unstated	-	-	-	-
+validity	core-diameter-green-g	temperature_known	0	0	1
+scalar	core-twist-pitch-green-g	firth87-green-g	core_twist_pitch_green_g	0.005	m	constant
+uncertainty	core-twist-pitch-green-g	unstated	-	-	-	-
+validity	core-twist-pitch-green-g	temperature_known	0	0	1
+scalar	wrap-wire-diameter-green-g	firth87-green-g	wrap_wire_diameter_green_g	0.00012	m	constant
+uncertainty	wrap-wire-diameter-green-g	unstated	-	-	-	-
+validity	wrap-wire-diameter-green-g	temperature_known	0	0	1
+scalar	wrap-wire-count-green-g	firth87-green-g	wrap_wire_count_green_g	2	1	constant
+uncertainty	wrap-wire-count-green-g	unstated	-	-	-	-
+validity	wrap-wire-count-green-g	temperature_known	0	0	1
+observation	firth87-gold-g	Pirastro Gold violin G string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: circular floss of 10 fibres; metal wrap of wire section in Ag, 2 wires	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-gold-g	firth87-gold-g	outer_diameter_gold_g	0.00082	m	constant
+uncertainty	outer-diameter-gold-g	unstated	-	-	-	-
+validity	outer-diameter-gold-g	temperature_known	0	0	1
+scalar	core-plus-underwrap-diameter-gold-g	firth87-gold-g	core_with_underwrap_diameter_gold_g	0.00064	m	constant
+uncertainty	core-plus-underwrap-diameter-gold-g	unstated	-	-	-	-
+validity	core-plus-underwrap-diameter-gold-g	temperature_known	0	0	1
+scalar	core-diameter-gold-g	firth87-gold-g	core_diameter_gold_g	0.00061	m	constant
+uncertainty	core-diameter-gold-g	unstated	-	-	-	-
+validity	core-diameter-gold-g	temperature_known	0	0	1
+scalar	core-twist-pitch-gold-g	firth87-gold-g	core_twist_pitch_gold_g	0.0055	m	constant
+uncertainty	core-twist-pitch-gold-g	unstated	-	-	-	-
+validity	core-twist-pitch-gold-g	temperature_known	0	0	1
+scalar	floss-fibre-count-gold-g	firth87-gold-g	circular_floss_fibre_count_gold_g	10	1	constant
+uncertainty	floss-fibre-count-gold-g	unstated	-	-	-	-
+validity	floss-fibre-count-gold-g	temperature_known	0	0	1
+scalar	wrap-wire-diameter-gold-g	firth87-gold-g	wrap_wire_diameter_gold_g	0.00012	m	constant
+uncertainty	wrap-wire-diameter-gold-g	unstated	-	-	-	-
+validity	wrap-wire-diameter-gold-g	temperature_known	0	0	1
+scalar	wrap-wire-count-gold-g	firth87-gold-g	wrap_wire_count_gold_g	2	1	constant
+uncertainty	wrap-wire-count-gold-g	unstated	-	-	-	-
+validity	wrap-wire-count-gold-g	temperature_known	0	0	1
+observation	firth87-black-g	Pirastro Black violin G string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: circular floss of 10 fibres; metal wrap of wire section in Ag, 2 wires	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-black-g	firth87-black-g	outer_diameter_black_g	0.00085	m	constant
+uncertainty	outer-diameter-black-g	unstated	-	-	-	-
+validity	outer-diameter-black-g	temperature_known	0	0	1
+scalar	core-plus-underwrap-diameter-black-g	firth87-black-g	core_with_underwrap_diameter_black_g	0.00063	m	constant
+uncertainty	core-plus-underwrap-diameter-black-g	unstated	-	-	-	-
+validity	core-plus-underwrap-diameter-black-g	temperature_known	0	0	1
+scalar	core-diameter-black-g	firth87-black-g	core_diameter_black_g	0.00061	m	constant
+uncertainty	core-diameter-black-g	unstated	-	-	-	-
+validity	core-diameter-black-g	temperature_known	0	0	1
+scalar	core-twist-pitch-black-g	firth87-black-g	core_twist_pitch_black_g	0.0051	m	constant
+uncertainty	core-twist-pitch-black-g	unstated	-	-	-	-
+validity	core-twist-pitch-black-g	temperature_known	0	0	1
+scalar	floss-fibre-count-black-g	firth87-black-g	circular_floss_fibre_count_black_g	10	1	constant
+uncertainty	floss-fibre-count-black-g	unstated	-	-	-	-
+validity	floss-fibre-count-black-g	temperature_known	0	0	1
+scalar	wrap-wire-diameter-black-g	firth87-black-g	wrap_wire_diameter_black_g	0.00012	m	constant
+uncertainty	wrap-wire-diameter-black-g	unstated	-	-	-	-
+validity	wrap-wire-diameter-black-g	temperature_known	0	0	1
+scalar	wrap-wire-count-black-g	firth87-black-g	wrap_wire_count_black_g	2	1	constant
+uncertainty	wrap-wire-count-black-g	unstated	-	-	-	-
+validity	wrap-wire-count-black-g	temperature_known	0	0	1
+observation	firth87-olive-d	Pirastro Olive violin D string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: no floss count printed, braiding 7 x 12; metal wrap of wire section in Al, Ag, Al, 3 wires	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-olive-d	firth87-olive-d	outer_diameter_olive_d	0.00085	m	constant
+uncertainty	outer-diameter-olive-d	unstated	-	-	-	-
+validity	outer-diameter-olive-d	temperature_known	0	0	1
+scalar	core-plus-underwrap-diameter-olive-d	firth87-olive-d	core_with_underwrap_diameter_olive_d	0.00067	m	constant
+uncertainty	core-plus-underwrap-diameter-olive-d	unstated	-	-	-	-
+validity	core-plus-underwrap-diameter-olive-d	temperature_known	0	0	1
+scalar	core-diameter-olive-d	firth87-olive-d	core_diameter_olive_d	0.00061	m	constant
+uncertainty	core-diameter-olive-d	unstated	-	-	-	-
+validity	core-diameter-olive-d	temperature_known	0	0	1
+scalar	core-twist-pitch-olive-d	firth87-olive-d	core_twist_pitch_olive_d	0.006	m	constant
+uncertainty	core-twist-pitch-olive-d	unstated	-	-	-	-
+validity	core-twist-pitch-olive-d	temperature_known	0	0	1
+scalar	wrap-wire-diameter-olive-d	firth87-olive-d	wrap_wire_diameter_olive_d	0.00011	m	constant
+uncertainty	wrap-wire-diameter-olive-d	unstated	-	-	-	-
+validity	wrap-wire-diameter-olive-d	temperature_known	0	0	1
+scalar	wrap-wire-count-olive-d	firth87-olive-d	wrap_wire_count_olive_d	3	1	constant
+uncertainty	wrap-wire-count-olive-d	unstated	-	-	-	-
+validity	wrap-wire-count-olive-d	temperature_known	0	0	1
+observation	firth87-gold-d	Pirastro Gold violin D string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: circular floss of 10 fibres; metal wrap of wire section in Al, 2 wires	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-gold-d	firth87-gold-d	outer_diameter_gold_d	0.00087	m	constant
+uncertainty	outer-diameter-gold-d	unstated	-	-	-	-
+validity	outer-diameter-gold-d	temperature_known	0	0	1
+scalar	core-plus-underwrap-diameter-gold-d	firth87-gold-d	core_with_underwrap_diameter_gold_d	0.00063	m	constant
+uncertainty	core-plus-underwrap-diameter-gold-d	unstated	-	-	-	-
+validity	core-plus-underwrap-diameter-gold-d	temperature_known	0	0	1
+scalar	core-diameter-gold-d	firth87-gold-d	core_diameter_gold_d	0.00063	m	constant
+uncertainty	core-diameter-gold-d	unstated	-	-	-	-
+validity	core-diameter-gold-d	temperature_known	0	0	1
+scalar	core-twist-pitch-gold-d	firth87-gold-d	core_twist_pitch_gold_d	0.005	m	constant
+uncertainty	core-twist-pitch-gold-d	unstated	-	-	-	-
+validity	core-twist-pitch-gold-d	temperature_known	0	0	1
+scalar	floss-fibre-count-gold-d	firth87-gold-d	circular_floss_fibre_count_gold_d	10	1	constant
+uncertainty	floss-fibre-count-gold-d	unstated	-	-	-	-
+validity	floss-fibre-count-gold-d	temperature_known	0	0	1
+scalar	wrap-wire-diameter-gold-d	firth87-gold-d	wrap_wire_diameter_gold_d	0.00015	m	constant
+uncertainty	wrap-wire-diameter-gold-d	unstated	-	-	-	-
+validity	wrap-wire-diameter-gold-d	temperature_known	0	0	1
+scalar	wrap-wire-count-gold-d	firth87-gold-d	wrap_wire_count_gold_d	2	1	constant
+uncertainty	wrap-wire-count-gold-d	unstated	-	-	-	-
+validity	wrap-wire-count-gold-d	temperature_known	0	0	1
+observation	firth87-black-d	Pirastro Black violin D string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: circular floss of 10 fibres; metal wrap of wire section in Al, 2 wires	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-black-d	firth87-black-d	outer_diameter_black_d	0.00086	m	constant
+uncertainty	outer-diameter-black-d	unstated	-	-	-	-
+validity	outer-diameter-black-d	temperature_known	0	0	1
+scalar	core-plus-underwrap-diameter-black-d	firth87-black-d	core_with_underwrap_diameter_black_d	0.00063	m	constant
+uncertainty	core-plus-underwrap-diameter-black-d	unstated	-	-	-	-
+validity	core-plus-underwrap-diameter-black-d	temperature_known	0	0	1
+scalar	core-diameter-black-d	firth87-black-d	core_diameter_black_d	0.0006	m	constant
+uncertainty	core-diameter-black-d	unstated	-	-	-	-
+validity	core-diameter-black-d	temperature_known	0	0	1
+scalar	core-twist-pitch-black-d	firth87-black-d	core_twist_pitch_black_d	0.005	m	constant
+uncertainty	core-twist-pitch-black-d	unstated	-	-	-	-
+validity	core-twist-pitch-black-d	temperature_known	0	0	1
+scalar	floss-fibre-count-black-d	firth87-black-d	circular_floss_fibre_count_black_d	10	1	constant
+uncertainty	floss-fibre-count-black-d	unstated	-	-	-	-
+validity	floss-fibre-count-black-d	temperature_known	0	0	1
+scalar	wrap-wire-diameter-black-d	firth87-black-d	wrap_wire_diameter_black_d	0.00014	m	constant
+uncertainty	wrap-wire-diameter-black-d	unstated	-	-	-	-
+validity	wrap-wire-diameter-black-d	temperature_known	0	0	1
+scalar	wrap-wire-count-black-d	firth87-black-d	wrap_wire_count_black_d	2	1	constant
+uncertainty	wrap-wire-count-black-d	unstated	-	-	-	-
+validity	wrap-wire-count-black-d	temperature_known	0	0	1
+observation	firth87-olive-a	Pirastro Olive violin A string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: no floss count printed, braiding NIL; metal wrap of rectangular section in Al, 1 wire	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-olive-a	firth87-olive-a	outer_diameter_olive_a	0.00062	m	constant
+uncertainty	outer-diameter-olive-a	unstated	-	-	-	-
+validity	outer-diameter-olive-a	temperature_known	0	0	1
+scalar	core-plus-underwrap-diameter-olive-a	firth87-olive-a	core_with_underwrap_diameter_olive_a	0.00054	m	constant
+uncertainty	core-plus-underwrap-diameter-olive-a	unstated	-	-	-	-
+validity	core-plus-underwrap-diameter-olive-a	temperature_known	0	0	1
+scalar	core-diameter-olive-a	firth87-olive-a	core_diameter_olive_a	0.00054	m	constant
+uncertainty	core-diameter-olive-a	unstated	-	-	-	-
+validity	core-diameter-olive-a	temperature_known	0	0	1
+scalar	core-twist-pitch-olive-a	firth87-olive-a	core_twist_pitch_olive_a	0.0065	m	constant
+uncertainty	core-twist-pitch-olive-a	unstated	-	-	-	-
+validity	core-twist-pitch-olive-a	temperature_known	0	0	1
+scalar	wrap-wire-diameter-olive-a	firth87-olive-a	wrap_wire_diameter_olive_a	7e-05	m	constant
+uncertainty	wrap-wire-diameter-olive-a	unstated	-	-	-	-
+validity	wrap-wire-diameter-olive-a	temperature_known	0	0	1
+scalar	wrap-wire-count-olive-a	firth87-olive-a	wrap_wire_count_olive_a	1	1	constant
+uncertainty	wrap-wire-count-olive-a	unstated	-	-	-	-
+validity	wrap-wire-count-olive-a	temperature_known	0	0	1
+observation	firth87-green-a	Pirastro Green violin A string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: circular floss of 10 fibres; metal wrap of rectangular section in Al, 1 wire	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-green-a	firth87-green-a	outer_diameter_green_a	0.00066	m	constant
+uncertainty	outer-diameter-green-a	unstated	-	-	-	-
+validity	outer-diameter-green-a	temperature_known	0	0	1
+scalar	core-plus-underwrap-diameter-green-a	firth87-green-a	core_with_underwrap_diameter_green_a	0.00056	m	constant
+uncertainty	core-plus-underwrap-diameter-green-a	unstated	-	-	-	-
+validity	core-plus-underwrap-diameter-green-a	temperature_known	0	0	1
+scalar	core-diameter-green-a	firth87-green-a	core_diameter_green_a	0.00049	m	constant
+uncertainty	core-diameter-green-a	unstated	-	-	-	-
+validity	core-diameter-green-a	temperature_known	0	0	1
+scalar	core-twist-pitch-green-a	firth87-green-a	core_twist_pitch_green_a	0.0065	m	constant
+uncertainty	core-twist-pitch-green-a	unstated	-	-	-	-
+validity	core-twist-pitch-green-a	temperature_known	0	0	1
+scalar	floss-fibre-count-green-a	firth87-green-a	circular_floss_fibre_count_green_a	10	1	constant
+uncertainty	floss-fibre-count-green-a	unstated	-	-	-	-
+validity	floss-fibre-count-green-a	temperature_known	0	0	1
+scalar	wrap-wire-diameter-green-a	firth87-green-a	wrap_wire_diameter_green_a	7e-05	m	constant
+uncertainty	wrap-wire-diameter-green-a	unstated	-	-	-	-
+validity	wrap-wire-diameter-green-a	temperature_known	0	0	1
+scalar	wrap-wire-count-green-a	firth87-green-a	wrap_wire_count_green_a	1	1	constant
+uncertainty	wrap-wire-count-green-a	unstated	-	-	-	-
+validity	wrap-wire-count-green-a	temperature_known	0	0	1
+observation	firth87-gold-a	Pirastro Gold violin A string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: no floss count printed, braiding NIL; metal wrap of round section in Al, 2 wires	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-gold-a	firth87-gold-a	outer_diameter_gold_a	0.00069	m	constant
+uncertainty	outer-diameter-gold-a	unstated	-	-	-	-
+validity	outer-diameter-gold-a	temperature_known	0	0	1
+scalar	core-plus-underwrap-diameter-gold-a	firth87-gold-a	core_with_underwrap_diameter_gold_a	0.00054	m	constant
+uncertainty	core-plus-underwrap-diameter-gold-a	unstated	-	-	-	-
+validity	core-plus-underwrap-diameter-gold-a	temperature_known	0	0	1
+scalar	core-diameter-gold-a	firth87-gold-a	core_diameter_gold_a	0.00054	m	constant
+uncertainty	core-diameter-gold-a	unstated	-	-	-	-
+validity	core-diameter-gold-a	temperature_known	0	0	1
+scalar	core-twist-pitch-gold-a	firth87-gold-a	core_twist_pitch_gold_a	0.0065	m	constant
+uncertainty	core-twist-pitch-gold-a	unstated	-	-	-	-
+validity	core-twist-pitch-gold-a	temperature_known	0	0	1
+scalar	wrap-wire-diameter-gold-a	firth87-gold-a	wrap_wire_diameter_gold_a	9e-05	m	constant
+uncertainty	wrap-wire-diameter-gold-a	unstated	-	-	-	-
+validity	wrap-wire-diameter-gold-a	temperature_known	0	0	1
+scalar	wrap-wire-count-gold-a	firth87-gold-a	wrap_wire_count_gold_a	2	1	constant
+uncertainty	wrap-wire-count-gold-a	unstated	-	-	-	-
+validity	wrap-wire-count-gold-a	temperature_known	0	0	1
+observation	firth87-black-a	Pirastro Black violin A string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: no floss count printed, braiding NIL; metal wrap of round section in Al, 2 wires	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-black-a	firth87-black-a	outer_diameter_black_a	0.00069	m	constant
+uncertainty	outer-diameter-black-a	unstated	-	-	-	-
+validity	outer-diameter-black-a	temperature_known	0	0	1
+scalar	core-plus-underwrap-diameter-black-a	firth87-black-a	core_with_underwrap_diameter_black_a	0.00053	m	constant
+uncertainty	core-plus-underwrap-diameter-black-a	unstated	-	-	-	-
+validity	core-plus-underwrap-diameter-black-a	temperature_known	0	0	1
+scalar	core-diameter-black-a	firth87-black-a	core_diameter_black_a	0.00053	m	constant
+uncertainty	core-diameter-black-a	unstated	-	-	-	-
+validity	core-diameter-black-a	temperature_known	0	0	1
+scalar	core-twist-pitch-black-a	firth87-black-a	core_twist_pitch_black_a	0.0065	m	constant
+uncertainty	core-twist-pitch-black-a	unstated	-	-	-	-
+validity	core-twist-pitch-black-a	temperature_known	0	0	1
+scalar	wrap-wire-diameter-black-a	firth87-black-a	wrap_wire_diameter_black_a	9e-05	m	constant
+uncertainty	wrap-wire-diameter-black-a	unstated	-	-	-	-
+validity	wrap-wire-diameter-black-a	temperature_known	0	0	1
+scalar	wrap-wire-count-black-a	firth87-black-a	wrap_wire_count_black_a	2	1	constant
+uncertainty	wrap-wire-count-black-a	unstated	-	-	-	-
+validity	wrap-wire-count-black-a	temperature_known	0	0	1
+observation	firth87-flexocor-a	Pirastro Flexocor violin A string; core of steel strands, 7 of 0.07 mm; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: no floss count printed, braiding 7 x 12 lengthwise; metal wrap of rectangular section in Al, 1 wire	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-flexocor-a	firth87-flexocor-a	outer_diameter_flexocor_a	0.00048	m	constant
+uncertainty	outer-diameter-flexocor-a	unstated	-	-	-	-
+validity	outer-diameter-flexocor-a	temperature_known	0	0	1
+scalar	core-diameter-flexocor-a	firth87-flexocor-a	core_diameter_flexocor_a	0.00024	m	constant
+uncertainty	core-diameter-flexocor-a	unstated	-	-	-	-
+validity	core-diameter-flexocor-a	temperature_known	0	0	1
+scalar	core-twist-pitch-flexocor-a	firth87-flexocor-a	core_twist_pitch_flexocor_a	0.0024	m	constant
+uncertainty	core-twist-pitch-flexocor-a	unstated	-	-	-	-
+validity	core-twist-pitch-flexocor-a	temperature_known	0	0	1
+scalar	wrap-wire-diameter-flexocor-a	firth87-flexocor-a	wrap_wire_diameter_flexocor_a	6e-05	m	constant
+uncertainty	wrap-wire-diameter-flexocor-a	unstated	-	-	-	-
+validity	wrap-wire-diameter-flexocor-a	temperature_known	0	0	1
+scalar	wrap-wire-count-flexocor-a	firth87-flexocor-a	wrap_wire_count_flexocor_a	1	1	constant
+uncertainty	wrap-wire-count-flexocor-a	unstated	-	-	-	-
+validity	wrap-wire-count-flexocor-a	temperature_known	0	0	1
+observation	firth87-perfection-g	Pirastro Perfection violin G string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: no floss count printed; metal wrap of round section in Ag, 2 wires	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-perfection-g	firth87-perfection-g	outer_diameter_perfection_g	0.00081	m	constant
+uncertainty	outer-diameter-perfection-g	unstated	-	-	-	-
+validity	outer-diameter-perfection-g	temperature_known	0	0	1
+scalar	core-plus-underwrap-diameter-perfection-g	firth87-perfection-g	core_with_underwrap_diameter_perfection_g	0.00065	m	constant
+uncertainty	core-plus-underwrap-diameter-perfection-g	unstated	-	-	-	-
+validity	core-plus-underwrap-diameter-perfection-g	temperature_known	0	0	1
+scalar	core-diameter-perfection-g	firth87-perfection-g	core_diameter_perfection_g	0.0006	m	constant
+uncertainty	core-diameter-perfection-g	unstated	-	-	-	-
+validity	core-diameter-perfection-g	temperature_known	0	0	1
+scalar	wrap-wire-diameter-perfection-g	firth87-perfection-g	wrap_wire_diameter_perfection_g	0.00012	m	constant
+uncertainty	wrap-wire-diameter-perfection-g	unstated	-	-	-	-
+validity	wrap-wire-diameter-perfection-g	temperature_known	0	0	1
+scalar	wrap-wire-count-perfection-g	firth87-perfection-g	wrap_wire_count_perfection_g	2	1	constant
+uncertainty	wrap-wire-count-perfection-g	unstated	-	-	-	-
+validity	wrap-wire-count-perfection-g	temperature_known	0	0	1
+observation	firth87-perfection-d	Pirastro Perfection violin D string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: no floss count printed; metal wrap of round section in Ag, 2 wires	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-perfection-d	firth87-perfection-d	outer_diameter_perfection_d	0.00086	m	constant
+uncertainty	outer-diameter-perfection-d	unstated	-	-	-	-
+validity	outer-diameter-perfection-d	temperature_known	0	0	1
+scalar	core-plus-underwrap-diameter-perfection-d	firth87-perfection-d	core_with_underwrap_diameter_perfection_d	0.00065	m	constant
+uncertainty	core-plus-underwrap-diameter-perfection-d	unstated	-	-	-	-
+validity	core-plus-underwrap-diameter-perfection-d	temperature_known	0	0	1
+scalar	core-diameter-perfection-d	firth87-perfection-d	core_diameter_perfection_d	0.0006	m	constant
+uncertainty	core-diameter-perfection-d	unstated	-	-	-	-
+validity	core-diameter-perfection-d	temperature_known	0	0	1
+scalar	wrap-wire-diameter-perfection-d	firth87-perfection-d	wrap_wire_diameter_perfection_d	0.00015	m	constant
+uncertainty	wrap-wire-diameter-perfection-d	unstated	-	-	-	-
+validity	wrap-wire-diameter-perfection-d	temperature_known	0	0	1
+scalar	wrap-wire-count-perfection-d	firth87-perfection-d	wrap_wire_count_perfection_d	2	1	constant
+uncertainty	wrap-wire-count-perfection-d	unstated	-	-	-	-
+validity	wrap-wire-count-perfection-d	temperature_known	0	0	1
+observation	firth87-perfection-a	Pirastro Perfection violin A string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: no floss count printed; metal wrap of round section in Al, 2 wires	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-perfection-a	firth87-perfection-a	outer_diameter_perfection_a	0.00067	m	constant
+uncertainty	outer-diameter-perfection-a	unstated	-	-	-	-
+validity	outer-diameter-perfection-a	temperature_known	0	0	1
+scalar	core-diameter-perfection-a	firth87-perfection-a	core_diameter_perfection_a	0.00055	m	constant
+uncertainty	core-diameter-perfection-a	unstated	-	-	-	-
+validity	core-diameter-perfection-a	temperature_known	0	0	1
+scalar	wrap-wire-diameter-perfection-a	firth87-perfection-a	wrap_wire_diameter_perfection_a	8e-05	m	constant
+uncertainty	wrap-wire-diameter-perfection-a	unstated	-	-	-	-
+validity	wrap-wire-diameter-perfection-a	temperature_known	0	0	1
+scalar	wrap-wire-count-perfection-a	firth87-perfection-a	wrap_wire_count_perfection_a	2	1	constant
+uncertainty	wrap-wire-count-perfection-a	unstated	-	-	-	-
+validity	wrap-wire-count-perfection-a	temperature_known	0	0	1
+observation	firth87-wonderton-d	Pirastro Pirastro Wonderton violin D string; core of gut; intermediate wrapping of nylon or similar very thin monofilament of 18 micrometre fibres: no floss count printed; metal wrap of round section in Al, June, 2 wires	SEM photographs with a calibrated marker line for the dimensions of the gut core, nylon underwrap and wrapping wire (wire diameters checked with a micrometer); the twist pitch of the gut from the photographs; linear density by weighing a known length (not in the table)	New strings of the 1980s; strings of the Olive, Green (Eudoxa), Gold and Black labels; four new G strings of each label were measured for inharmonicity (a figure, not in this pack); the paper says the table's tension and tensile stress are for a violin at pitch and are plotted in its Figure 2 (not in this pack)
+scalar	outer-diameter-wonderton-d	firth87-wonderton-d	outer_diameter_wonderton_d	0.00086	m	constant
+uncertainty	outer-diameter-wonderton-d	unstated	-	-	-	-
+validity	outer-diameter-wonderton-d	temperature_known	0	0	1
+scalar	core-plus-underwrap-diameter-wonderton-d	firth87-wonderton-d	core_with_underwrap_diameter_wonderton_d	0.00061	m	constant
+uncertainty	core-plus-underwrap-diameter-wonderton-d	unstated	-	-	-	-
+validity	core-plus-underwrap-diameter-wonderton-d	temperature_known	0	0	1
+scalar	core-diameter-wonderton-d	firth87-wonderton-d	core_diameter_wonderton_d	0.00061	m	constant
+uncertainty	core-diameter-wonderton-d	unstated	-	-	-	-
+validity	core-diameter-wonderton-d	temperature_known	0	0	1
+scalar	wrap-wire-diameter-wonderton-d	firth87-wonderton-d	wrap_wire_diameter_wonderton_d	0.00015	m	constant
+uncertainty	wrap-wire-diameter-wonderton-d	unstated	-	-	-	-
+validity	wrap-wire-diameter-wonderton-d	temperature_known	0	0	1
+scalar	wrap-wire-count-wonderton-d	firth87-wonderton-d	wrap_wire_count_wonderton_d	2	1	constant
+uncertainty	wrap-wire-count-wonderton-d	unstated	-	-	-	-
+validity	wrap-wire-count-wonderton-d	temperature_known	0	0	1
