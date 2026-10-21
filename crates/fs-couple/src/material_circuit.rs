@@ -57,6 +57,8 @@ pub enum MaterialCircuitError {
     Conductor(ConductorError),
     /// Source-derived electric/magnetic storage or field-energy refusal.
     Storage(fs_material::field_storage::FieldStorageError),
+    /// Original source-bound mechanical section or layer-strain refusal.
+    Material(fs_material::state_point::MaterialStatePointError),
     /// Independent branch heat or total electrical balance did not close.
     Balance(&'static str),
     /// Cancellation before publication.
@@ -70,6 +72,9 @@ impl From<ConductorError> for MaterialCircuitError {
 }
 impl From<fs_material::field_storage::FieldStorageError> for MaterialCircuitError {
     fn from(e: fs_material::field_storage::FieldStorageError) -> Self { Self::Storage(e) }
+}
+impl From<fs_material::state_point::MaterialStatePointError> for MaterialCircuitError {
+    fn from(e: fs_material::state_point::MaterialStatePointError) -> Self { Self::Material(e) }
 }
 impl core::fmt::Display for MaterialCircuitError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

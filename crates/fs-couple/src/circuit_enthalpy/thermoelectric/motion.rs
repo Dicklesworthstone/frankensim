@@ -61,7 +61,8 @@ impl<'m> ThermoelectricMotionCandidate<'m> {
 ///
 /// `ports` follows the original circuit order and has zero placeholders for
 /// internal Seebeck ports. External force is positive toward increasing gap.
-/// Full balance includes field storage, kinetic energy, thermal storage, held
+/// Full balance includes field storage, body/support kinetic and elastic energy,
+/// thermal storage, held
 /// force work, remaining electrical ports and external heat before publication.
 /// Refusal or cancellation returns no endpoint and preserves every input.
 ///
@@ -90,6 +91,7 @@ pub fn step_candidate<'m>(
     let external_heat_j = finite(coupled.non_electrical_heat_j - coupled.source.reversible_heat_j)?;
     let total_energy_residual_j = finite(field.electrical_energy_j[1]-field.electrical_energy_j[0]
         + field.kinetic_energy_j[1]-field.kinetic_energy_j[0]
+        + field.elastic_energy_j[1]-field.elastic_energy_j[0]
         + coupled.thermal.stored_energy_change_j
         - external_electrical_work_j - external_mechanical_work_j - external_heat_j)?;
     if total_energy_residual_j.abs() > controls.total_energy_tolerance_j {

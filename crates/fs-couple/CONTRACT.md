@@ -30,6 +30,26 @@ without conversion or duplicate types. That lower boundary depends only on
 
 ## Public types and semantics
 
+### Material-driven finite-body sliding
+
+`tribothermal::dynamics::SlidingPair` adds force-driven tangent inertia to the
+original material sliding contact and finite enthalpy network. Each complete
+uniform body's original thermal-cell mass also supplies its inertial mass.
+Centre-of-mass momentum and one Newton--Krylov relative-speed residual determine
+both velocities; every trial restarts the original contact/thermal candidate,
+including its actual endpoint temperature, pressure, speed and slip-history
+source queries. Separate impulse and whole-system energy gates precede joint
+publication of velocities, original slip/work history and finite temperatures.
+Original friction work is an internal transfer; external force work is measured
+on each body's endpoint displacement. Physical friction alone is partitioned
+as heat, while backward-Euler kinetic loss remains an explicit numerical account.
+The fixed patch/normal-load reduction admits positive sliding along the first
+original tangent axis. Stopping/reversal trials refuse without a velocity floor
+or invented sticking reaction. It adds no normal/rotational/contact-geometry
+evolution. Source-backed synthetic regressions cover unequal masses, coupled
+heat-capacity/force response, continuation, replay and atomic refusal; native
+execution remains required for qualification.
+
 ### Typed gesture consumer bindings
 
 `gesture_path::bind_paths` binds each description-validated parameter path to
@@ -3053,15 +3073,31 @@ The moving element's original quadratic term is replaced exactly once by
 q²d/(2 epsilon A) or lambda²d/(2 mu N²A), with lambda the winding flux linkage.
 All other C/L storage and original J/R/G topology are retained. The same descriptor
 solve advances charge, flux linkage, gap and momentum. Terminal effort and
-attractive force come from the same energy; mass comes only from `ResolvedBody`.
+attractive force come from the same energy; body mass comes only from `ResolvedBody`.
 Changing supported gap-medium or moving-body material data changes the coupled
 motion and electrical history without changing a physics law.
+
+`new_with_support` adds an optional layered axial return member to those SAME
+gap/momentum coordinates. `motion::support::AxialSupport` delegates force,
+elastic storage and per-layer strain admission to the original
+`ConcentricThermoelasticSection`; reference length and gap map displacement to
+axial strain. Canonical section density supplies consistent member inertia
+sum(rho A) L/3 for the declared linear displacement shape, added to body mass.
+Changing support layers changes return force, preload, motion and electrical
+back-reaction. Elastic storage participates in the native descriptor, ordinary
+enthalpy driver and thermoelectric-motion balance; it is never heat. Modulus and
+density require validity-wide constant claims. Temperatures/eigenstrains remain
+frozen; support damping, heating, live attachment, waves and buckling are outside
+this conservative reduction. `material_field_support` covers both field types
+against independent midpoint solutions, source substitutions through actual
+charge/Joule/finite-enthalpy evolution, and atomic source/strain/cancellation
+refusal. These regressions are added but native execution remains pending.
 
 Original electrical ports keep their order and an external force port appends.
 Bulk conductor and electrical contact losses reuse the existing native-effort
 accounting and remain separately sourced heat destinations. Explicit refreshed
 contacts must retain their IDs/branch assignments. Their losses are counted once.
-The combined field/kinetic storage, original source work, force times actual
+The combined field/kinetic/elastic storage, original source work, force times actual
 displacement, and heat must close before any joint candidate is returned.
 
 The endpoint retains exact proposed charge/flux and rechecks the original circuit
