@@ -698,9 +698,9 @@ fn main() -> Result<()> {
     }
     let (order, vectors) = (open_order, open_vectors);
     if let Some(path) = shapes {
-        // Displacement along the nodal director of the top and back plate nodes for the first twelve air-coupled modes.
+        // Displacement along the nodal director of the top and back plate nodes for the first 36 air-coupled modes.
         let mut out = fs::File::create(&path)?;
-        let wanted: Vec<usize> = order.iter().copied().take(12).collect();
+        let wanted: Vec<usize> = order.iter().copied().take(36).collect();
         write!(out, "part\tnode\tx_m\ty_m\tz_m")?;
         for rank in 0..wanted.len() {
             write!(out, "\tmode{}", rank + 1)?;
