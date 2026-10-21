@@ -68,6 +68,34 @@ fn g3_multiaffine_ranges_and_derivatives_cover_interior_values() {
     }
 }
 
+
+#[test]
+fn g0_surface_aligned_subbox_tightens_roundoff_without_hiding_a_real_sliver() {
+    let sampled = field([3; 3], [0.0; 3], [0.5; 3], |p| {
+        let roof = 0.625 + if p[0] == 0.5 && p[1] == 0.5 { 0.125 } else { 0.0 };
+        p[2] - roof
+    });
+    let lo = [0.25, 0.25, 0.75];
+    let hi = [0.5, 0.5, 1.0];
+    let range = sampled.enclose(lo, hi);
+    assert_eq!(range.lo(), 0.0, "surface contact must not invent negative material: {range:?}");
+    assert!(range.hi() > 0.0);
+    let mut callback = |_| ControlFlow::Continue(());
+    let mut control = QuadratureControl3::new(QuadratureOptions3::default(), &mut callback).unwrap();
+    let rules = cut_cell_rules3(&sampled, HexCell::try_new(lo, hi).unwrap(), &mut control).unwrap();
+    assert!(rules.bulk().is_empty());
+    assert_eq!(rules.cut_boxes(), 0);
+
+    let sliver = field([2; 3], [0.0; 3], [1.0; 3], |p| p[2] - 0.750_000_1);
+    let range = sliver.enclose([0.0, 0.0, 0.75], [1.0, 1.0, 1.0]);
+    assert!(range.lo() < 0.0, "exact sign tightening must retain a genuine negative sliver: {range:?}");
+    let mut callback = |_| ControlFlow::Continue(());
+    let mut control = QuadratureControl3::new(QuadratureOptions3::default(), &mut callback).unwrap();
+    let rules = cut_cell_rules3(&sliver,
+        HexCell::try_new([0.0, 0.0, 0.75], [1.0, 1.0, 1.0]).unwrap(), &mut control).unwrap();
+    assert!(rules.volume() > 0.0);
+}
+
 #[test]
 fn g0_seam_queries_include_both_one_sided_slopes() {
     let sampled = field([3, 2, 2], [0.0; 3], [1.0; 3], |p| {

@@ -12,6 +12,8 @@
 
 use crate::{CutSdf3, HeightAxis};
 use fs_ivl::Interval;
+use fs_ivl::expansion::{diff_expansion, expansion_product, expansion_sign,
+    fast_expansion_sum_zeroelim, scale_expansion_zeroelim};
 use std::ops::ControlFlow;
 
 /// Admission limit on retained scalar samples, before any internal allocation.
@@ -173,6 +175,68 @@ impl SampledSdf3 {
         values[0]
     }
 
+    /// Exact sign of the mathematical trilinear interpolant at one covered
+    /// point, when expansion products stay in a comfortably finite range.
+    /// The common positive cell-volume denominator is omitted: only its
+    /// numerator sign matters. Returning None keeps the ordinary interval
+    /// enclosure unchanged; it never weakens a certificate.
+    fn exact_point_sign(&self, cell: [usize; 3], p: [f64; 3]) -> Option<i32> {
+        let samples = self.corners(cell);
+        let mut sum = Vec::new();
+        for (corner, &sample) in samples.iter().enumerate() {
+            let mut weight = vec![1.0];
+            let mut approximate = 1.0_f64;
+            for axis in 0..3 {
+                let lo = self.axes[axis][cell[axis]];
+                let hi = self.axes[axis][cell[axis] + 1];
+                let (a, b) = if corner & (1 << axis) == 0 { (hi, p[axis]) } else { (p[axis], lo) };
+                let rounded = a - b;
+                if rounded < 0.0 || !rounded.is_finite() { return None; }
+                if rounded == 0.0 { weight.clear(); break; }
+                if !rounded.is_normal() || approximate > f64::MAX / rounded { return None; }
+                approximate *= rounded;
+                if !approximate.is_normal() { return None; }
+                let factor = diff_expansion(a, b);
+                weight = expansion_product(&weight, &factor);
+            }
+            if weight.is_empty() || sample == 0.0 { continue; }
+            let term_scale = approximate.abs() * sample.abs();
+            if !term_scale.is_finite() || !term_scale.is_normal()
+                || term_scale > f64::MAX / 16.0 { return None; }
+            let term = scale_expansion_zeroelim(&weight, sample);
+            sum = fast_expansion_sum_zeroelim(&sum, &term);
+        }
+        Some(expansion_sign(&sum))
+    }
+
+    /// A multi-affine function reaches its extrema at the vertices of every
+    /// clipped source cell. Exact expansion signs can therefore remove only
+    /// interval-rounding sign fuzz: true negative/positive slivers survive.
+    fn exact_box_sign(&self, first: [usize; 3], last: [usize; 3],
+        lo: [f64; 3], hi: [f64; 3]) -> Option<(bool, bool)> {
+        let (mut nonnegative, mut nonpositive) = (true, true);
+        for z in first[2]..=last[2] {
+            for y in first[1]..=last[1] {
+                for x in first[0]..=last[0] {
+                    let cell = [x, y, z];
+                    let left: [f64; 3] = std::array::from_fn(|a| lo[a].max(self.axes[a][cell[a]]));
+                    let right: [f64; 3] = std::array::from_fn(|a| hi[a].min(self.axes[a][cell[a] + 1]));
+                    for corner in 0..8 {
+                        if (0..3).any(|a| corner & (1 << a) != 0 && left[a] == right[a]) { continue; }
+                        let p = std::array::from_fn(|a| if corner & (1 << a) == 0 { left[a] } else { right[a] });
+                        match self.exact_point_sign(cell, p)? {
+                            sign if sign < 0 => nonnegative = false,
+                            sign if sign > 0 => nonpositive = false,
+                            _ => {}
+                        }
+                        if !nonnegative && !nonpositive { return Some((false, false)); }
+                    }
+                }
+            }
+        }
+        Some((nonnegative, nonpositive))
+    }
+
     fn range(&self, lo: [f64; 3], hi: [f64; 3], derivative: Option<usize>) -> Interval {
         if !self.covered(lo, hi) { return whole(); }
         // Include BOTH adjacent cells for exact-knot endpoints. In particular,
@@ -204,8 +268,15 @@ impl SampledSdf3 {
             }
         }
         let result = result.unwrap_or(global);
-        let lower = result.lo().max(global.lo());
-        let upper = result.hi().min(global.hi());
+        let mut lower = result.lo().max(global.lo());
+        let mut upper = result.hi().min(global.hi());
+        if derivative.is_none() && lower <= 0.0 && upper >= 0.0
+            && (lower < 0.0 || upper > 0.0) {
+            if let Some((nonnegative, nonpositive)) = self.exact_box_sign(first, last, lo, hi) {
+                if nonnegative { lower = lower.max(0.0); }
+                if nonpositive { upper = upper.min(0.0); }
+            }
+        }
         if lower <= upper { Interval::new(lower, upper) } else { global }
     }
 }
