@@ -23,6 +23,8 @@
 pub mod parallel;
 /// Portable byte transport for quiescent search states, including cached waves.
 pub mod snapshot;
+/// Feasibility-first selection without a weighted penalty objective.
+pub mod constrained;
 
 use fs_exec::Cx;
 use fs_rand::{Stream, StreamKey};
@@ -94,18 +96,18 @@ impl<E: std::error::Error + 'static> std::error::Error for DifferentialEvolution
 
 /// A finite observation in the coordinates actually supplied to the callback.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DifferentialEvolutionPoint {
+pub struct DifferentialEvolutionPoint<S = f64> {
     pub coordinates: Vec<f64>,
-    pub value: f64,
+    pub value: S,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DifferentialEvolutionStop { TargetReached, EvaluationLimit, Paused }
 #[derive(Debug, Clone, PartialEq)]
-pub struct DifferentialEvolutionReport {
+pub struct DifferentialEvolutionReport<S = f64> {
     pub stop: DifferentialEvolutionStop,
     /// Best consumed observation, including unfinished generations.
     /// Exact equal scores preserve the earliest best observation.
-    pub best: Option<DifferentialEvolutionPoint>,
+    pub best: Option<DifferentialEvolutionPoint<S>>,
     pub evaluations: usize,
     /// Complete evolutionary generations, excluding initialization.
     pub generations: usize,
@@ -114,28 +116,58 @@ pub struct DifferentialEvolutionReport {
 }
 
 #[derive(Debug)]
-struct Pending { coordinates: Vec<f64>, value: Option<f64> }
+struct Pending<S = f64> { coordinates: Vec<f64>, value: Option<S> }
+
+// Keep the public scalar API and its snapshot format source-compatible. Both
+// score types run ONE candidate/cache/budget/publication implementation.
+/// Original scalar DE search. Its numerical policy and checkpoint bytes are unchanged.
+pub type DifferentialEvolutionState = RankedDifferentialEvolutionState<f64>;
+
+mod score_sealed {
+    pub trait Sealed {}
+    impl Sealed for f64 {}
+    impl Sealed for super::constrained::FeasibilityScore {}
+}
+
+/// Internal, sealed score algebra for the shared serial/parallel DE worker.
+/// Use DifferentialEvolutionState or ConstrainedDifferentialEvolutionState;
+/// user-defined orderings cannot bypass the finite-score or target rules.
+#[doc(hidden)]
+pub trait DifferentialEvolutionScore: score_sealed::Sealed + Copy + fmt::Debug + PartialEq + Send + Sync {
+    fn checked(self) -> Result<Self, DifferentialEvolutionError>;
+    fn rank(self, other: Self) -> std::cmp::Ordering;
+    fn accepts(self, parent: Self) -> bool;
+    fn reaches(self, target: f64) -> bool;
+}
+impl DifferentialEvolutionScore for f64 {
+    fn checked(self) -> Result<Self, DifferentialEvolutionError> { finite(self) }
+    fn rank(self, other: Self) -> std::cmp::Ordering { self.total_cmp(&other) }
+    // Preserve the original scalar replacement semantics, including signed zero.
+    fn accepts(self, parent: Self) -> bool { self <= parent }
+    fn reaches(self, target: f64) -> bool { self <= target }
+}
 
 /// Reports are not search state. Snapshots retain the work spent at capture;
 /// replaying an older snapshot cannot account for work done after that capture.
+#[doc(hidden)]
 #[derive(Debug)]
-pub struct DifferentialEvolutionState {
+pub struct RankedDifferentialEvolutionState<S: DifferentialEvolutionScore> {
     bounds: Vec<[f64; 2]>,
     initial: Option<Vec<f64>>,
     config: DifferentialEvolutionConfig,
-    population: Vec<DifferentialEvolutionPoint>,
-    next: Vec<DifferentialEvolutionPoint>,
-    pending: Option<Pending>,
+    population: Vec<DifferentialEvolutionPoint<S>>,
+    next: Vec<DifferentialEvolutionPoint<S>>,
+    pending: Option<Pending<S>>,
     // Future members of the SAME frozen generation. Successful parallel scores
     // survive cancellation; the serial path can also drain/retry this queue.
-    queued: VecDeque<Pending>,
-    best: Option<DifferentialEvolutionPoint>,
+    queued: VecDeque<Pending<S>>,
+    best: Option<DifferentialEvolutionPoint<S>>,
     evaluations: usize,
     generations: usize,
     random_stride: u64,
 }
 
-impl DifferentialEvolutionState {
+impl<S: DifferentialEvolutionScore> RankedDifferentialEvolutionState<S> {
     /// Admit strictly ordered finite bounds without invoking a callback. A
     /// supplied initial point is evaluated exactly as supplied as member zero;
     /// remaining members sample the whole box. Remove fixed variables upstream.
@@ -184,10 +216,10 @@ impl DifferentialEvolutionState {
     pub const fn evaluations(&self) -> usize { self.evaluations }
     pub const fn evaluation_limit(&self) -> usize { self.config.max_evaluations }
     pub const fn generations(&self) -> usize { self.generations }
-    pub fn best(&self) -> Option<&DifferentialEvolutionPoint> { self.best.as_ref() }
+    pub fn best(&self) -> Option<&DifferentialEvolutionPoint<S>> { self.best.as_ref() }
     /// Completed initialization members or the last complete generation.
     /// Partial next-generation results never alter this slice.
-    pub fn population(&self) -> &[DifferentialEvolutionPoint] { &self.population }
+    pub fn population(&self) -> &[DifferentialEvolutionPoint<S>] { &self.population }
     pub fn extend_evaluation_budget(&mut self, total: usize) -> Result<(), DifferentialEvolutionError> {
         if total <= self.config.max_evaluations { return Err(invalid("DE evaluation allowance must increase")); }
         self.config.max_evaluations = total;
@@ -200,13 +232,13 @@ impl DifferentialEvolutionState {
     /// attempt. Only complete generations replace parents. Callback side
     /// effects or panics cannot be rolled back.
     pub fn advance<E>(&mut self, cx: &Cx<'_>, additional_evaluations: usize,
-        evaluate: &mut impl FnMut(&[f64]) -> Result<f64, E>)
-        -> Result<DifferentialEvolutionReport, DifferentialEvolutionRunError<E>>
+        evaluate: &mut impl FnMut(&[f64]) -> Result<S, E>)
+        -> Result<DifferentialEvolutionReport<S>, DifferentialEvolutionRunError<E>>
     { self.advance_with(additional_evaluations, evaluate, &mut || cx.checkpoint().is_ok()) }
 
     fn advance_with<E>(&mut self, additional: usize,
-        evaluate: &mut impl FnMut(&[f64]) -> Result<f64, E>, poll: &mut impl FnMut() -> bool)
-        -> Result<DifferentialEvolutionReport, DifferentialEvolutionRunError<E>>
+        evaluate: &mut impl FnMut(&[f64]) -> Result<S, E>, poll: &mut impl FnMut() -> bool)
+        -> Result<DifferentialEvolutionReport<S>, DifferentialEvolutionRunError<E>>
     {
         let mut spent = 0;
         loop {
@@ -216,7 +248,7 @@ impl DifferentialEvolutionState {
                 self.consume(poll)?;
                 continue;
             }
-            let stop = if self.best.as_ref().is_some_and(|p| self.config.target.is_some_and(|t| p.value <= t)) {
+            let stop = if self.best.as_ref().is_some_and(|p| self.config.target.is_some_and(|t| p.value.reaches(t))) {
                 Some(DifferentialEvolutionStop::TargetReached)
             } else if self.evaluations >= self.config.max_evaluations {
                 Some(DifferentialEvolutionStop::EvaluationLimit)
@@ -231,7 +263,7 @@ impl DifferentialEvolutionState {
             spent += 1;
             let value = evaluate(&self.pending.as_ref().expect("prepared DE candidate").coordinates)
                 .map_err(DifferentialEvolutionRunError::Evaluation)?;
-            finite(value)?;
+            let value = value.checked()?;
             self.pending.as_mut().expect("retained DE candidate").value = Some(value);
         }
     }
@@ -290,10 +322,10 @@ impl DifferentialEvolutionState {
         let next_generation = if !initializing && self.next.len()+1 == self.config.population_size {
             Some(self.generations.checked_add(1).ok_or_else(|| invalid("DE generation count overflow"))?)
         } else { None };
-        let replacement = if !initializing && value > self.population[self.next.len()].value {
+        let replacement = if !initializing && !value.accepts(self.population[self.next.len()].value) {
             Some(copy_point(&self.population[self.next.len()], poll)?)
         } else { None };
-        let best = if self.best.as_ref().is_none_or(|p| value.total_cmp(&p.value).is_lt()) {
+        let best = if self.best.as_ref().is_none_or(|p| value.rank(p.value).is_lt()) {
             Some(DifferentialEvolutionPoint { coordinates: copied(&pending.coordinates, poll)?, value })
         } else { None };
         checkpoint(poll)?;
@@ -311,7 +343,7 @@ impl DifferentialEvolutionState {
     }
 
     fn report(&self, stop: DifferentialEvolutionStop, poll: &mut impl FnMut() -> bool)
-        -> Result<DifferentialEvolutionReport, DifferentialEvolutionError>
+        -> Result<DifferentialEvolutionReport<S>, DifferentialEvolutionError>
     {
         Ok(DifferentialEvolutionReport { stop,
             best: self.best.as_ref().map(|p| copy_point(p, poll)).transpose()?,
@@ -364,8 +396,8 @@ fn interpolate(lo: f64, hi: f64, unit: f64) -> Result<f64, DifferentialEvolution
     // Last-bit interpolation rounding may reach an endpoint but not leave the box.
     Ok(finite(unit.mul_add(hi-lo, lo))?.clamp(lo, hi))
 }
-fn copy_point(point: &DifferentialEvolutionPoint, poll: &mut impl FnMut() -> bool)
-    -> Result<DifferentialEvolutionPoint, DifferentialEvolutionError>
+fn copy_point<S: DifferentialEvolutionScore>(point: &DifferentialEvolutionPoint<S>, poll: &mut impl FnMut() -> bool)
+    -> Result<DifferentialEvolutionPoint<S>, DifferentialEvolutionError>
 { Ok(DifferentialEvolutionPoint { coordinates: copied(&point.coordinates, poll)?, value: point.value }) }
 fn copied(input: &[f64], poll: &mut impl FnMut() -> bool) -> Result<Vec<f64>, DifferentialEvolutionError> {
     let mut out = reserved(input.len())?;
