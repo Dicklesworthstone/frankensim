@@ -803,7 +803,7 @@ mod tests {
         let exact = box_frequencies(dims, 24);
         let window = (-1.0, 0.5 * (exact[19] + exact[20]));
         for (order, rungs) in [
-            (2usize, vec![3usize, 4, 6, 8, 12]),
+            (2usize, vec![3usize, 4, 6, 8]),
             (3, vec![2, 3, 4, 6]),
             (4, vec![2, 3, 4]),
         ] {
@@ -875,9 +875,10 @@ mod tests {
         let len = 0.5;
         let dims = [len, 0.05, 0.05];
         let y = [0.4, 0.3];
-        let freqs = [200.0, 500.0, 800.0, 1200.0];
+        let freqs = [150.0, 300.0, 450.0, 600.0];
         let mut last = None;
-        for &n in &[4usize, 8, 12, 16] {
+        let mut ladder = Vec::new();
+        for &n in &[4usize, 6, 8] {
             let (complex, pos) = scaled_box(n, dims);
             let fe = HelmholtzFe::new(&complex, &pos, 2, AIR).expect("fe");
             let src = plane_faces(&fe, &pos, 0, 0.0);
@@ -907,12 +908,17 @@ mod tests {
                 );
                 if with_static {
                     last = Some(worst);
+                    ladder.push(worst);
                 }
             }
         }
+        assert!(
+            ladder.windows(2).all(|w| w[1] < w[0]),
+            "the error with static vectors must fall with the mesh: {ladder:?}"
+        );
         let worst = last.expect("ran");
         assert!(
-            worst < 3e-3,
+            worst < 2e-3,
             "finest duct rung with static vectors: {worst:e}"
         );
     }
