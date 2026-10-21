@@ -18,6 +18,10 @@ use super::{BodyPotential, ImpactBody, ImpactError, MAX_IMPACT_MODES, invalid};
 use super::linear::wire::{LineContact, WireSpan};
 use super::string::{StringObservation, StringPotential, StringStretching};
 
+pub mod longitudinal;
+use longitudinal::{LongitudinalPotential, LongitudinalSupportModes, LongitudinalSupportObservation,
+    StringSupportGeometry};
+
 /// One physical rail/bridge. Its selected wire endpoints share this transverse
 /// displacement, mapped into each wire's declared transverse frame.
 #[derive(Clone, Copy, Debug)]
@@ -58,7 +62,7 @@ pub struct SupportObservation {
 }
 
 /// Endpoints that follow the common support. Unselected endpoints stay fixed.
-/// This is transverse motion; span length and axial support positions are fixed.
+/// The same lift applies to transverse and, when retained, axial displacement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StringEndMotion {
     /// Both ends translate equally: the original rail image, h(s)=1.
@@ -95,16 +99,23 @@ pub enum StringTransverseMotion {
     /// Both components in one orthonormal transverse frame. The supplied unit
     /// vector maps the common support translation into that frame, verbatim.
     TwoPlanes { support_direction: [f64; 2] },
+    /// Both transverse planes and the axial projection of one actual spatial
+    /// support direction. Requires explicit longitudinal modes at construction.
+    Spatial { geometry: StringSupportGeometry },
 }
 impl StringTransverseMotion {
     fn planes(self) -> usize {
-        match self { Self::OnePlane => 1, Self::TwoPlanes { .. } => 2 }
+        match self { Self::OnePlane => 1, Self::TwoPlanes { .. } | Self::Spatial { .. } => 2 }
     }
     fn direction(self) -> [f64; 2] {
-        match self { Self::OnePlane => [1.0, 0.0], Self::TwoPlanes { support_direction } => support_direction }
+        match self { Self::OnePlane => [1.0, 0.0], Self::TwoPlanes { support_direction } => support_direction,
+            Self::Spatial { geometry } => [geometry.components()[0],geometry.components()[1]] }
+    }
+    fn axial_direction(self) -> f64 {
+        match self { Self::Spatial { geometry } => geometry.components()[2], _ => 0.0 }
     }
     fn validate(self) -> Result<(), ImpactError> {
-        validate_direction(self.direction())
+        match self { Self::Spatial { .. } => Ok(()), _ => validate_direction(self.direction()) }
     }
 }
 fn validate_direction(direction: [f64; 2]) -> Result<(), ImpactError> {
@@ -133,8 +144,10 @@ pub struct AbsoluteStringDrag {
 struct Data {
     support: TranslatingSupport,
     wires: Vec<WireSpan>,
-    potentials: Vec<StringPotential>,
+    potentials: Vec<SupportedPotential>,
     ranges: Vec<Range<usize>>,
+    storage_ranges: Vec<Range<usize>>,
+    axial_ranges: Vec<Option<Range<usize>>>,
     translation: Vec<f64>,
     damping: Vec<f64>,
     end_motion: Vec<StringEndMotion>,
@@ -148,6 +161,25 @@ struct Data {
     clock_bounds: Vec<f64>,
 }
 
+#[derive(Clone, Debug)]
+enum SupportedPotential {
+    Transverse(StringPotential),
+    Longitudinal(LongitudinalPotential),
+}
+impl SupportedPotential {
+    fn endpoint_argument(&self, ends: StringEndMotion) -> bool {
+        matches!(self,Self::Longitudinal(_)) || ends.affine()
+    }
+    fn potential(&self,q:&[f64]) -> f64 {match self {
+        Self::Transverse(p)=>p.potential(q),Self::Longitudinal(p)=>p.potential(q)}}
+    fn gradient(&self,q:&[f64],out:&mut[f64]) {match self {
+        Self::Transverse(p)=>p.gradient(q,out),Self::Longitudinal(p)=>p.gradient(q,out)}}
+    fn hessian_vector(&self,q:&[f64],d:&[f64],out:&mut[f64]) {match self {
+        Self::Transverse(p)=>p.hessian_vector(q,d,out),Self::Longitudinal(p)=>p.hessian_vector(q,d,out)}}
+    fn observe(&self,q:&[f64]) -> Result<StringObservation,ImpactError> {match self {
+        Self::Transverse(p)=>p.observe(q),Self::Longitudinal(p)=>p.observe(q).map(|v|v.0)}}
+}
+
 /// Immutable shared reduction. Relative string coordinates come first, followed
 /// by exactly one support coordinate. Only the physical string laws are reused;
 /// no additional string mass, tension spring, prescribed motion or reset.
@@ -158,7 +190,7 @@ impl SupportedStrings {
         -> Result<Self, ImpactError>
     {
         Self::prepare(wires, support, |_| stretching, |_| StringEndMotion::Both,
-            |_| StringTransverseMotion::OnePlane)
+            |_| StringTransverseMotion::OnePlane, |_| None)
     }
 
     /// Use one independent stretching law per wire, in original wire order.
@@ -173,7 +205,7 @@ impl SupportedStrings {
             return Err(invalid("each supported wire requires its own explicit stretching selection"));
         }
         Self::prepare(wires, support, |i| stretching[i], |_| StringEndMotion::Both,
-            |_| StringTransverseMotion::OnePlane)
+            |_| StringTransverseMotion::OnePlane, |_| None)
     }
 
     /// Bind actual endpoint kinematics, including fixed-nut/moving-bridge spans.
@@ -188,7 +220,7 @@ impl SupportedStrings {
             return Err(invalid("each supported wire requires explicit stretching and endpoint kinematics"));
         }
         Self::prepare(wires, support, |i| stretching[i], |i| motion[i],
-            |_| StringTransverseMotion::OnePlane)
+            |_| StringTransverseMotion::OnePlane, |_| None)
     }
 
     /// Retain one or both physical transverse components on the SAME support.
@@ -205,22 +237,42 @@ impl SupportedStrings {
         if stretching.len()!=wires.len() || motion.len()!=wires.len() || transverse.len()!=wires.len() {
             return Err(invalid("each supported wire requires complete stretching, endpoint and transverse data"));
         }
-        Self::prepare(wires, support, |i| stretching[i], |i| motion[i], |i| transverse[i])
+        Self::prepare(wires, support, |i| stretching[i], |i| motion[i], |i| transverse[i], |_| None)
     }
 
-    fn prepare(wires: &[WireSpan], support: TranslatingSupport,
+    /// Exact kinetic coupling of both transverse planes AND retained axial
+    /// waves to one oblique translating termination. Geometry supplies every
+    /// projection. The solid axial mass and the unresolved affine lift are
+    /// counted once; positive finite-strain storage supplies its own reaction.
+    /// The reference is already strung and statically balanced. Axial waves are
+    /// conservative; no axial material or gas damping is inferred.
+    pub fn with_longitudinal_motion(wires:&[WireSpan], stretching:&[Option<StringStretching>],
+        motion:&[StringEndMotion], geometry:&[StringSupportGeometry],
+        axial:&[LongitudinalSupportModes], support:TranslatingSupport) -> Result<Self,ImpactError> {
+        if [stretching.len(),motion.len(),geometry.len(),axial.len()].iter().any(|&n|n!=wires.len()) {
+            return Err(invalid("each spatially supported wire requires its full geometry and axial selection"));
+        }
+        Self::prepare(wires,support,|i|stretching[i],|i|motion[i],
+            |i|StringTransverseMotion::Spatial {geometry:geometry[i]},|i|Some(&axial[i]))
+    }
+
+    fn prepare<'a>(wires: &[WireSpan], support: TranslatingSupport,
         stretching: impl Fn(usize) -> Option<StringStretching>,
         motion: impl Fn(usize) -> StringEndMotion,
-        transverse: impl Fn(usize) -> StringTransverseMotion) -> Result<Self, ImpactError>
+        transverse: impl Fn(usize) -> StringTransverseMotion,
+        longitudinal: impl Fn(usize) -> Option<&'a LongitudinalSupportModes>) -> Result<Self, ImpactError>
     {
         support.validate()?;
         let count=wires.iter().enumerate().try_fold(0usize,|n,(i,w)|
-            w.damping_per_s.len().checked_mul(transverse(i).planes()).and_then(|m| n.checked_add(m)))
+            w.damping_per_s.len().checked_mul(transverse(i).planes())
+                .and_then(|m|m.checked_add(longitudinal(i).map_or(0,|a|a.modes.len())))
+                .and_then(|m| n.checked_add(m)))
             .ok_or_else(||invalid("supported wire mode count overflow"))?;
         if wires.is_empty() || wires.len()>32 || count==0 || count>=MAX_IMPACT_MODES {
             return Err(invalid("supported wires exceed the bounded complete mechanical basis"));
         }
         let mut potentials=Vec::with_capacity(wires.len());let mut ranges=Vec::with_capacity(wires.len());
+        let mut storage_ranges=Vec::with_capacity(wires.len());let mut axial_ranges=Vec::with_capacity(wires.len());
         let mut translation=Vec::with_capacity(count);let mut damping=Vec::with_capacity(count);
         let mut end_motion=Vec::with_capacity(wires.len());let mut remainder_mass=Vec::with_capacity(wires.len());
         let mut transverse_motion=Vec::with_capacity(wires.len());
@@ -236,16 +288,32 @@ impl SupportedStrings {
             };
             let transverse=transverse(index);
             transverse.validate()?;
+            let axial=longitudinal(index);
+            if axial.is_some()!=matches!(transverse,StringTransverseMotion::Spatial {..}) {
+                return Err(invalid("spatial support projection and axial inertia must be selected together"));
+            }
+            if let Some(selection)=axial {selection.validate()?;}
             let per_plane=wire.damping_per_s.len();
             let n=per_plane*transverse.planes();
             let initial=vec![ModalAcousticState::default();n];
+            let transverse_law=if axial.is_some() {StringStretching {axial_rigidity_n:0.0,..law}} else {law};
             let body=if transverse.planes()==2 {
-                wire.stretching_body_two_planes(initial,law)?
-            } else { wire.stretching_body(initial,law)? };
+                wire.stretching_body_two_planes(initial,transverse_law)?
+            } else { wire.stretching_body(initial,transverse_law)? };
             let BodyPotential::String(potential)=body.potential else {return Err(invalid("wire preparation changed its storage image"));};
             let ends=motion(index);
-            let potential=if ends.affine() {potential.with_affine_endpoint(wire.length_m())?} else {potential};
-            if ends.affine() {endpoint_stiffness+=potential.omegas()[n].powi(2);}
+            frequencies.extend_from_slice(potential.omegas());
+            let potential=if let Some(selection)=axial {
+                let StringTransverseMotion::Spatial {geometry}=transverse else {unreachable!()};
+                let p=LongitudinalPotential::new(wire,law,selection,geometry,ends,potential.omegas().to_vec())?;
+                endpoint_stiffness+=p.endpoint_stiffness();
+                frequencies.extend_from_slice(p.axial_omegas());
+                SupportedPotential::Longitudinal(p)
+            } else {
+                let p=if ends.affine() {potential.with_affine_endpoint(wire.length_m())?} else {potential};
+                if ends.affine() {endpoint_stiffness+=p.omegas()[n].powi(2);}
+                SupportedPotential::Transverse(p)
+            };
             end_motion.push(ends);
             transverse_motion.push(transverse);
             let mass=wire.linear_density_kg_m*wire.length_m();
@@ -256,16 +324,35 @@ impl SupportedStrings {
                     represented+=c*c;translation.push(c);
                 }
             }
-            let remainder=mass*ends.mass_fraction()-represented;
-            if !mass.is_finite() || mass<=0.0 || !remainder.is_finite() || remainder<=0.0 {
+            let direction=transverse.direction();
+            let transverse_fraction=if axial.is_some() {direction[0]*direction[0]+direction[1]*direction[1]} else {1.0};
+            let remainder=mass*transverse_fraction*ends.mass_fraction()-represented;
+            if !mass.is_finite() || mass<=0.0 || !remainder.is_finite() || remainder<0.0
+                || (transverse_fraction>0.0 && remainder==0.0) {
                 return Err(invalid("supported wire translation mass is unrepresentable"));
             }
             // Keep the full lift inertia, including its unresolved sine tail.
             // A single moving endpoint contributes mu*L/3, not mu*L or zero.
             remainder_mass.push(remainder);
-            residual_mass+=remainder;total_mass+=mass;ranges.push(start..start+n);
-            frequencies.extend_from_slice(&potential.omegas()[..n]);potentials.push(potential);
+            residual_mass+=remainder;total_mass+=mass*transverse_fraction;ranges.push(start..start+n);
+            potentials.push(potential);
             for _ in 0..transverse.planes() { damping.extend_from_slice(&wire.damping_per_s); }
+            if let Some(selection)=axial {
+                let mass=selection.solid_linear_density_kg_m*wire.length_m();
+                let axis=transverse.axial_direction();let mut represented=0.0;
+                let first=translation.len();
+                for &mode in &selection.modes {
+                    let c=ends.participation(mode,mass)*axis;represented+=c*c;
+                    translation.push(c);damping.push(0.0);
+                }
+                let remainder=mass*axis*axis*ends.mass_fraction()-represented;
+                if !remainder.is_finite() || remainder<0.0 || (axis!=0.0 && remainder==0.0) {
+                    return Err(invalid("supported axial lift mass is unrepresentable"));
+                }
+                residual_mass+=remainder;total_mass+=mass*axis*axis;
+                axial_ranges.push(Some(first..translation.len()));
+            } else {axial_ranges.push(None);}
+            storage_ranges.push(start..translation.len());
         }
         let weight=1.0/det::sqrt(residual_mass);
         if !total_mass.is_finite() || !weight.is_finite() || weight<=0.0 {
@@ -286,10 +373,14 @@ impl SupportedStrings {
                 let a=c*weight;let omega=frequencies[r.start+mode];let k=omega*omega;
                 bound=bound.max(k*(1.0+a.abs()));support_row+=k*(a*a+a.abs());
             }
+            if let Some(axial)=&axial_ranges[index] {for mode in axial.clone() {
+                let a=translation[mode]*weight;let k=frequencies[mode]*frequencies[mode];
+                bound=bound.max(k*(1.0+a.abs()));support_row+=k*(a*a+a.abs());
+            }}
         }
         bound=bound.max(support_row);
         if !bound.is_finite() {return Err(invalid("moving support linear clock bound overflow"));}
-        let result=Self(Rc::new(Data {support,wires:wires.to_vec(),potentials,ranges,translation,damping,
+        let result=Self(Rc::new(Data {support,wires:wires.to_vec(),potentials,ranges,storage_ranges,axial_ranges,translation,damping,
             end_motion,remainder_mass,absolute_drag:None,transverse:transverse_motion,weight,
             total_mass_kg:total_mass,clock_bounds:vec![det::sqrt(bound);count+1]}));
         // Check initial energy/motion representation before returning an adapter.
@@ -301,12 +392,23 @@ impl SupportedStrings {
     pub fn support_coordinate(&self)->usize {self.mode_count()-1}
     /// Generalized force is F * this weight, applied ONLY at support_coordinate.
     pub fn force_weight(&self)->f64 {self.0.weight}
-    /// Total physical mass, not the effective one-end lift inertia.
+    /// Full effective translating mass in the support direction, not the
+    /// one-end lift inertia. Spatial axial/transverse components do not
+    /// duplicate the solid mass; transverse added mass stays directional.
     pub fn total_mass_kg(&self)->f64 {self.0.total_mass_kg}
     /// Original endpoint choice, in wire order.
     pub fn endpoint_motion(&self)->&[StringEndMotion] {&self.0.end_motion}
     /// Physical support directions and retained plane counts, in source order.
     pub fn transverse_motion(&self)->&[StringTransverseMotion] {&self.0.transverse}
+    /// Retained axial coordinate ranges in original string order.
+    pub fn axial_ranges(&self)->&[Option<Range<usize>>] {&self.0.axial_ranges}
+    /// Material axial angular frequencies, before endpoint kinetic coupling.
+    pub fn axial_angular_frequencies(&self,wire:usize)->Result<&[f64],ImpactError> {
+        match self.0.potentials.get(wire) {
+            Some(SupportedPotential::Longitudinal(p))=>Ok(p.axial_omegas()),
+            _=>Err(invalid("wire has no retained supported axial modes")),
+        }
+    }
     /// Original absolute-velocity loss declaration; absent on the legacy path.
     pub fn absolute_drag(&self)->Option<&[AbsoluteStringDrag]> {self.0.absolute_drag.as_deref()}
 
@@ -353,7 +455,7 @@ impl SupportedStrings {
     }
     /// Initialize independent relative string motion without dropping the rail's
     /// declared translation or velocity. Input order is wire order, then each
-    /// wire's original mass-normalized modes. This is a cold coordinate change,
+    /// wire's transverse planes then its selected axial modes. This is a cold coordinate change,
     /// not a state reset, equilibrium solve or running-history transfer.
     /// Kinetic cross terms are kept by z_i=q_i+c_i*X and their velocity analogue.
     /// The host still owns time integration and the complete energy ceiling.
@@ -434,6 +536,27 @@ impl SupportedStrings {
         Ok(row)
     }
 
+    /// Absolute axial point displacement/force row, including the SAME moving
+    /// support reaction. Sparse axial selections retain their actual indices.
+    pub fn absolute_axial_shape(&self,wire:usize,station_fraction:f64)->Result<Vec<f64>,ImpactError> {
+        let Some(SupportedPotential::Longitudinal(p))=self.0.potentials.get(wire) else {
+            return Err(invalid("axial point motion requires retained longitudinal inertia"));
+        };
+        if !station_fraction.is_finite() || !(0.0..=1.0).contains(&station_fraction) {
+            return Err(invalid("supported axial station must lie on its physical span"));
+        }
+        let range=self.0.axial_ranges[wire].as_ref().ok_or_else(||invalid("missing supported axial basis"))?;
+        let mut row=vec![0.0;self.mode_count()];
+        if station_fraction!=0.0 && station_fraction!=1.0 {
+            row[range.clone()].copy_from_slice(&p.axial_shape(station_fraction,self.0.wires[wire].length_m()));
+        }
+        let cross=row[range.clone()].iter().zip(&self.0.translation[range.clone()]).map(|(b,c)|b*c).sum::<f64>();
+        row[self.support_coordinate()]=(self.0.transverse[wire].axial_direction()
+            *self.0.end_motion[wire].lift(station_fraction)-cross)*self.force_weight();
+        if row.iter().any(|v|!v.is_finite()) {return Err(invalid("supported axial point projection overflows"));}
+        Ok(row)
+    }
+
     fn relative(&self,z:&[f64],q:&mut[f64])->bool {
         if z.len()!=self.mode_count() || q.len()!=self.support_coordinate()
             || z.iter().any(|v|!v.is_finite()) {return false;}
@@ -446,9 +569,9 @@ impl SupportedStrings {
     // duplicated body or an added kinetic-energy degree of freedom.
     fn local_coordinates(&self, wire: usize, q: &[f64], x: f64,
         out: &mut [f64; MAX_IMPACT_MODES]) -> usize {
-        let range=&self.0.ranges[wire];let n=range.len();
+        let range=&self.0.storage_ranges[wire];let n=range.len();
         out[..n].copy_from_slice(&q[range.clone()]);
-        if self.0.end_motion[wire].affine() {out[n]=x;n+1} else {n}
+        if self.0.potentials[wire].endpoint_argument(self.0.end_motion[wire]) {out[n]=x;n+1} else {n}
     }
     pub(super) fn potential(&self,z:&[f64])->f64 {
         let mut q=[0.0;MAX_IMPACT_MODES];let n=self.support_coordinate();
@@ -467,11 +590,11 @@ impl SupportedStrings {
         if out.len()!=self.mode_count() || !self.relative(z,&mut q[..n]) {out.fill(f64::NAN);return;}
         let (mut local,mut g)=([0.0;MAX_IMPACT_MODES],[0.0;MAX_IMPACT_MODES]);
         let mut endpoint=0.0;
-        for (i,(p,r)) in self.0.potentials.iter().zip(&self.0.ranges).enumerate() {
+        for (i,(p,r)) in self.0.potentials.iter().zip(&self.0.storage_ranges).enumerate() {
             let count=self.local_coordinates(i,&q,z[n]*self.0.weight,&mut local);
             p.gradient(&local[..count],&mut g[..count]);
             out[r.clone()].copy_from_slice(&g[..r.len()]);
-            if self.0.end_motion[i].affine() {endpoint+=g[r.len()];}
+            if p.endpoint_argument(self.0.end_motion[i]) {endpoint+=g[r.len()];}
         }
         out[n]=self.0.support.stiffness_n_m*z[n]*self.0.weight*self.0.weight
             -self.0.weight*self.0.translation.iter().zip(&out[..n]).map(|(c,g)|c*g).sum::<f64>();
@@ -484,12 +607,12 @@ impl SupportedStrings {
         }
         let (mut local,mut direction,mut hv)=([0.0;MAX_IMPACT_MODES],[0.0;MAX_IMPACT_MODES],[0.0;MAX_IMPACT_MODES]);
         let mut endpoint=0.0;
-        for (i,(p,r)) in self.0.potentials.iter().zip(&self.0.ranges).enumerate() {
+        for (i,(p,r)) in self.0.potentials.iter().zip(&self.0.storage_ranges).enumerate() {
             let count=self.local_coordinates(i,&q,z[n]*self.0.weight,&mut local);
             self.local_coordinates(i,&v,d[n]*self.0.weight,&mut direction);
             p.hessian_vector(&local[..count],&direction[..count],&mut hv[..count]);
             out[r.clone()].copy_from_slice(&hv[..r.len()]);
-            if self.0.end_motion[i].affine() {endpoint+=hv[r.len()];}
+            if p.endpoint_argument(self.0.end_motion[i]) {endpoint+=hv[r.len()];}
         }
         out[n]=self.0.support.stiffness_n_m*d[n]*self.0.weight*self.0.weight
             -self.0.weight*self.0.translation.iter().zip(&out[..n]).map(|(c,g)|c*g).sum::<f64>();
@@ -571,6 +694,18 @@ impl SupportedStrings {
         let count=self.local_coordinates(wire,&q,z[self.support_coordinate()]*self.0.weight,&mut local);
         self.0.potentials[wire].observe(&local[..count])
     }
+    /// Continuous-span strain and tension bounds, including actual endpoint
+    /// extension and the retained propagating axial strains.
+    pub fn longitudinal_observation(&self,wire:usize,z:&[f64])->Result<LongitudinalSupportObservation,ImpactError> {
+        let Some(SupportedPotential::Longitudinal(p))=self.0.potentials.get(wire) else {
+            return Err(invalid("wire has no supported longitudinal strain image"));
+        };
+        let mut q=[0.0;MAX_IMPACT_MODES];
+        if !self.relative(z,&mut q[..self.support_coordinate()]) {return Err(invalid("invalid supported axial state"));}
+        let mut local=[0.0;MAX_IMPACT_MODES];
+        let count=self.local_coordinates(wire,&q,z[self.support_coordinate()]*self.0.weight,&mut local);
+        p.observe(&local[..count]).map(|v|v.1)
+    }
     pub fn observe_interleaved(&self,state:&[f64],first:usize)->Result<SupportObservation,ImpactError> {
         let end=first.checked_add(self.mode_count()).and_then(|n|n.checked_mul(2))
             .ok_or_else(||invalid("supported observation address overflow"))?;
@@ -586,9 +721,12 @@ impl SupportedStrings {
         let mut local=[0.0;MAX_IMPACT_MODES];
         for (i,p) in self.0.potentials.iter().enumerate() {
             let count=self.local_coordinates(i,&q,x,&mut local);
-            let observation=p.observe(&local[..count])?;
+            let (observation,maximum_tension)=match p {
+                SupportedPotential::Transverse(p)=>{let o=p.observe(&local[..count])?;(o,o.tension_n)},
+                SupportedPotential::Longitudinal(p)=>{let (o,b)=p.observe(&local[..count])?;(o,b.maximum_tension_n)},
+            };
             result.maximum_wire_slope=result.maximum_wire_slope.max(observation.slope_bound);
-            result.maximum_wire_tension_n=result.maximum_wire_tension_n.max(observation.tension_n);
+            result.maximum_wire_tension_n=result.maximum_wire_tension_n.max(maximum_tension);
             result.wire_stretching_energy_j+=observation.stretching_energy_j;
         }
         if !result.wire_stretching_energy_j.is_finite() {return Err(invalid("supported wire energy overflow"));}
@@ -607,3 +745,7 @@ mod heterogeneous_tests;
 #[cfg(test)]
 #[path = "supported_bridge_tests.rs"]
 mod bridge_tests;
+
+#[cfg(test)]
+#[path = "supported_longitudinal_tests.rs"]
+mod longitudinal_tests;

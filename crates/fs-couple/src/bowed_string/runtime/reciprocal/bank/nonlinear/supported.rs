@@ -21,6 +21,8 @@ use crate::bowed_string::runtime::reciprocal::bank::{MaterialStringSource,
 use fs_exec::CancelGate;
 
 mod stationary;
+pub mod longitudinal;
+use longitudinal::MaterialLongitudinalSupport;
 
 /// Explicit physical frame and approximation used for string/gas resistance.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,7 +41,8 @@ pub enum SupportGasFrame {
 }
 
 /// Immutable source geometry/materials and their complete coupled initial image.
-/// Body zero contains every bending coordinate followed by the rail coordinate.
+/// Body zero contains each string's bending and selected axial coordinates,
+/// followed by the rail coordinate.
 /// Requested torsion bodies follow in original string order. Linear torsional
 /// inertia is independent of a translating, nonrotating rail; it is not dropped.
 #[derive(Clone, Debug)]
@@ -52,6 +55,7 @@ pub struct SupportedMaterialStrings {
     mode_count: usize,
     sample_rate_hz: u32,
     gas_frame: SupportGasFrame,
+    longitudinal: Option<Vec<MaterialLongitudinalSupport>>,
 }
 fn poll(gate: &CancelGate) -> Result<(), ImpactError> {
     if gate.is_requested() { Err(ImpactError::Cancelled) } else { Ok(()) }
@@ -75,7 +79,7 @@ impl SupportedMaterialStrings {
     pub fn in_comoving_gas(sources: Vec<NonlinearMaterialString>, support: TranslatingSupport,
         gate: &CancelGate) -> Result<Self, ImpactError>
     {
-        Self::build(sources, support, None, SupportGasFrame::CoMoving, gate)
+        Self::build(sources, support, None, SupportGasFrame::CoMoving, None, gate)
     }
 
     /// Source-defined strings with selected moving ends in a stationary gas.
@@ -105,11 +109,12 @@ impl SupportedMaterialStrings {
         -> Result<Self, ImpactError>
     {
         Self::build(sources, support, Some(&motion),
-            SupportGasFrame::StationaryModal { remainder_frequency_hz }, gate)
+            SupportGasFrame::StationaryModal { remainder_frequency_hz }, None, gate)
     }
 
     fn build(sources: Vec<NonlinearMaterialString>, support: TranslatingSupport,
-        motion: Option<&[StringEndMotion]>, gas_frame: SupportGasFrame, gate: &CancelGate)
+        motion: Option<&[StringEndMotion]>, gas_frame: SupportGasFrame,
+        longitudinal:Option<&[MaterialLongitudinalSupport]>, gate: &CancelGate)
         -> Result<Self, ImpactError>
     {
         poll(gate)?;
@@ -119,7 +124,8 @@ impl SupportedMaterialStrings {
         }
         let sample_rate_hz = sources[0].sample_rate_hz();
         let gas = *sources[0].gas();
-        if motion.is_some_and(|m| m.len()!=sources.len()) {
+        if motion.is_some_and(|m| m.len()!=sources.len())
+            || longitudinal.is_some_and(|l|l.len()!=sources.len()) {
             return Err(invalid("material support requires an endpoint declaration for each string"));
         }
         if let SupportGasFrame::StationaryModal { remainder_frequency_hz } = gas_frame {
@@ -128,7 +134,8 @@ impl SupportedMaterialStrings {
                 return Err(invalid("stationary string gas requires an explicit positive sub-Nyquist remainder frequency"));
             }
         }
-        let mode_count = sources.iter().try_fold(1usize, |n,s| n.checked_add(s.mode_count()))
+        let mode_count = sources.iter().enumerate().try_fold(1usize, |n,(i,s)|
+            n.checked_add(s.mode_count()).and_then(|n|n.checked_add(longitudinal.map_or(0,|a|a[i].resolution.axial_modes.len()))))
             .filter(|&n| n <= MAX_IMPACT_MODES)
             .ok_or_else(|| invalid("material strings plus support exceed the complete mode budget"))?;
         let mut wires = Vec::with_capacity(sources.len());
@@ -136,7 +143,8 @@ impl SupportedMaterialStrings {
         let mut relative = Vec::with_capacity(mode_count - 1);
         let mut drag = Vec::with_capacity(sources.len());
         let mut transverse = Vec::with_capacity(sources.len());
-        for source in &sources {
+        let mut axial=Vec::new();let mut bands=Vec::new();let mut geometry=Vec::new();
+        for (index,source) in sources.iter().enumerate() {
             poll(gate)?;
             if source.sample_rate_hz() != sample_rate_hz || *source.gas() != gas {
                 return Err(invalid("supported material strings require the same clock and complete common gas"));
@@ -167,12 +175,27 @@ impl SupportedMaterialStrings {
                 }
             }
             laws.push(Some(StringStretching { axial_rigidity_n: source.axial_rigidity_n(),
-                maximum_slope: potential.slope_limit() }));
+                maximum_slope: longitudinal.map_or(potential.slope_limit(),|a|
+                    potential.slope_limit().min(a[index].resolution.maximum_slope)) }));
             relative.extend_from_slice(&bending.initial);
+            if let Some(attachments)=longitudinal {
+                let (selection,band)=attachments[index].lower(source)?;
+                axial.push(selection);bands.push(band);geometry.push(attachments[index].geometry);
+                relative.extend_from_slice(&attachments[index].initial_axial);
+            }
         }
         let default_ends=vec![StringEndMotion::Both;sources.len()];
-        let supported=SupportedStrings::with_transverse_motion(&wires,&laws,
-            motion.unwrap_or(&default_ends),&transverse,support)?;
+        let supported=if longitudinal.is_some() {
+            SupportedStrings::with_longitudinal_motion(&wires,&laws,motion.unwrap_or(&default_ends),
+                &geometry,&axial,support)?
+        } else {SupportedStrings::with_transverse_motion(&wires,&laws,
+            motion.unwrap_or(&default_ends),&transverse,support)?};
+        for (index,band) in bands.iter().enumerate() {
+            if supported.axial_angular_frequencies(index)?.iter().any(|&omega|
+                band.is_some_and(|(lo,hi)|omega<lo || omega>hi)) {
+                return Err(invalid("supported axial mode exceeds original material elasticity/density applicability"));
+            }
+        }
         let supported=if matches!(gas_frame,SupportGasFrame::StationaryModal {..}) {
             supported.with_absolute_drag(drag)?
         } else { supported };
@@ -188,7 +211,8 @@ impl SupportedMaterialStrings {
         }
         if at != mode_count { return Err(invalid("supported material basis lost source coordinates")); }
         poll(gate)?;
-        Ok(Self { sources, support, supported, bodies, torsion, mode_count, sample_rate_hz, gas_frame })
+        Ok(Self { sources, support, supported, bodies, torsion, mode_count, sample_rate_hz, gas_frame,
+            longitudinal:longitudinal.map(|a|a.to_vec()) })
     }
 
     /// Physical gas frame and the explicit unresolved-field approximation.

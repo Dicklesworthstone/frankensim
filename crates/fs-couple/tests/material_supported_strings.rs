@@ -222,3 +222,63 @@ fn g0_two_plane_moving_support_preserves_torsional_surface_work_and_source_order
         assert!(surface_run.system().state()[10..].iter().any(|v|v.abs()>0.0));
     });
 }
+
+#[test]
+fn g3_material_axial_waves_exchange_work_with_an_oblique_support_and_preserve_gas_and_twist() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::TransverseDirections;
+    use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::{
+        longitudinal::LongitudinalStringResolution,supported::longitudinal::MaterialLongitudinalSupport,
+    };
+    use fs_couple::render::plate::impact::supported::{StringEndMotion,longitudinal::StringSupportGeometry};
+    use fs_couple::modal_acoustic_time::ModalAcousticState;
+    const RATE:u32=1_536_000;
+    with_cx(|cx,gate| {
+        let mut histories=Vec::new();let mut frequencies=Vec::new();
+        for (young,pressure) in [(200e9,101325.0),(50e9,101325.0),(200e9,55000.0)] {
+            let medium=GasState::try_new(&GasSpec::dry_air_ussa1976(),293.15,pressure).unwrap();
+            let directions=TransverseDirections::try_new([0.6,0.8],[1.0,0.0]).unwrap();
+            let mut first_initial=initial(3,0.0002);first_initial[2].velocity_m_sqrt_kg_per_s=0.001;
+            let first=source(7800.0,young,1).with_torsion("G","eta_s",1).unwrap()
+                .with_transverse_polarizations(directions).unwrap()
+                .into_nonlinear(cx,medium,RATE,0.2,first_initial,gate).unwrap();
+            let second=source(7800.0,200e9,1).with_transverse_polarizations(directions).unwrap()
+                .into_nonlinear(cx,medium,RATE,0.2,initial(2,0.0),gate).unwrap();
+            let twist=first.bodies()[1].clone();
+            let geometry=StringSupportGeometry::try_new([[0.0;3],[0.5,0.0,0.0]],
+                [0.0,1.0,0.0],[0.6,0.8,0.0]).unwrap();
+            let attachments:Vec<_>=[StringEndMotion::Second,StringEndMotion::First].into_iter().enumerate()
+                .map(|(i,moving_end)|MaterialLongitudinalSupport {moving_end,geometry,
+                    resolution:LongitudinalStringResolution {axial_modes:vec![1,2],maximum_slope:0.2,maximum_strain:0.01},
+                    initial_axial:vec![ModalAcousticState {displacement_m_sqrt_kg:if i==0 {1e-8} else {0.0},
+                        velocity_m_sqrt_kg_per_s:0.0},ModalAcousticState::default()],
+                }).collect();
+            let image=SupportedMaterialStrings::in_stationary_gas_with_longitudinal_waves(vec![first,second],
+                TranslatingSupport {initial_position_m:0.0,initial_velocity_m_s:0.0,..rail()},attachments,300.0,gate).unwrap();
+            assert_eq!(image.mode_count(),10);assert_eq!(image.torsion_ranges(),&[Some(9..10),None]);
+            assert_eq!(image.bodies()[1].initial,twist.initial);assert_eq!(image.bodies()[1].damping_per_s,twist.damping_per_s);
+            assert_eq!(image.longitudinal_supports().unwrap()[0].geometry,geometry);
+            assert_eq!(image.supported().axial_ranges(),&[Some(2..4),Some(6..8)]);
+            assert!(image.supported().absolute_drag().unwrap().iter().all(|d|d.modal_per_s.len()==2));
+            frequencies.push(image.supported().axial_angular_frequencies(0).unwrap()[0]);
+            let end=image.axial_shape(0,1.0).unwrap();let support=image.support_shape();
+            for (a,b) in end.iter().zip(&support) {assert!((a-0.6*b).abs()<1e-14);}
+            let row=image.surface_shape(0,0.27).unwrap();assert!(row[9]!=0.0);
+            let support_index=image.supported().support_coordinate();
+            let mut run=image.prepare(config_at(RATE),gate).unwrap();let before=run.system().stored_energy_j();
+            let (mut work,mut loss,mut bridge,mut neighbor)=(0.0,0.0,0.0_f64,0.0_f64);
+            for step in 0..256 {
+                let force:Vec<_>=row.iter().map(|b|b*if step<16 {1e-4} else {0.0}).collect();
+                let frame=run.step(&force,gate).unwrap();work+=frame.supplied_work_j;loss+=frame.dissipated_energy_j;
+                assert!((frame.stored_energy_j+loss-before-work).abs()<1e-9);
+                let state=run.system().state();bridge=bridge.max(state[2*support_index].abs());
+                neighbor=neighbor.max(state[12].abs());
+            }
+            assert!(bridge>1e-14 && neighbor>1e-16,"material axial force must reach the support and neighbor");
+            histories.push(run.system().state().to_vec());
+        }
+        assert!((frequencies[1]/frequencies[0]-0.5).abs()<1e-14);
+        assert_eq!(frequencies[0],frequencies[2]); // Gas is not invented axial solid inertia.
+        assert_ne!(histories[0][16],histories[1][16]);
+        assert_ne!(histories[0],histories[2]);
+    });
+}

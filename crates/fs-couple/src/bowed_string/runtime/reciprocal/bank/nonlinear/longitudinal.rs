@@ -260,7 +260,7 @@ fn elastic_source(
     Ok(())
 }
 impl MaterialStringSource {
-    fn longitudinal_material(&self, band: &mut Option<(f64, f64)>) -> Result<f64, ImpactError> {
+    pub(super) fn longitudinal_material(&self, band: &mut Option<(f64, f64)>) -> Result<f64, ImpactError> {
         match self {
             Self::WithPolarizations(p) => p.source().longitudinal_material(band),
             Self::WithTorsion(t) => t.bending().longitudinal_material(band),

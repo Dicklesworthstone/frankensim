@@ -3280,6 +3280,26 @@ check the source binding. This is one bridge translation, not a six-DOF bridge,
 resolved winding slip, dynamic longitudinal inertia or measured instrument
 qualification.
 
+`SupportedMaterialStrings::in_stationary_gas_with_longitudinal_waves` extends
+that same support owner with material-solid axial inertia and selected
+longitudinal sine modes. Actual 3D span endpoints, a declared transverse frame
+and support direction determine every axial and transverse projection. The
+exact triangular kinetic transform retains each directional affine-lift mass
+once. `fs_nlmodal::LongitudinalString` supplies positive strain storage and its
+derivatives, including actual moving-end extension; transposed forces drive
+the same support and neighboring spans. Original transverse material/gas loss,
+torsion and source states remain. The reference is already strung and
+equilibrated, so initial static tension reactions are not reapplied. Axial
+modes are conservative; axial viscosity and gas drag are not inferred.
+
+This extension still has one translating support, without a full 6-DOF bridge,
+moving torsional endpoints, winding slip or an exact linear propagation
+upgrade. Existing `ImpactSystem` owns admission, stepping and work balance.
+Independent spatial mass/strain/gas quadrature, gradient/Hessian,
+support/neighbor work and material/gas/torsion regressions are authored. Syntax
+and whitespace checks pass; native compilation and execution remain required.
+No measured instrument realism is claimed.
+
 `ReciprocalStringBank::with_longitudinal_waves` selects the existing
 `fs_nlmodal::LongitudinalString` energy on the playable material bank. Original
 homogeneous/bonded material supplies EA and SOLID axial mass; retained
