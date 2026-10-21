@@ -1,0 +1,67 @@
+frankensim.matdb-source.v1
+observation	wh-sitka-shell	Sitka spruce (Picea sitchensis) clear straight-grained wood, soundboard stand-in	FPL-GTR-282 chapter 5: Table 5-3a bending MOE 10800 MPa times 1.10 (the chapter's shear-deflection correction) gives E_L = 11880 MPa; Table 5-1 ratios E_R/E_L 0.078, G_LR/E_L 0.064, G_LT/E_L 0.061, G_RT/E_L 0.003; Table 5-2 nu_LR 0.372; Table 5-3a SG 0.40 gives density = 1000 x 0.40 x 1.12 = 448 kg/m3. The absolute E_R, G_LR, G_LT and G_RT are those ratios times E_L (arithmetic done by the pack author from the committed spruce-sitka-fpl-gtr282 pack)	The species of the Esteso 1964 top is UNKNOWN (the plan says only spruce); Sitka is the FPL species with a full orthotropic set, not a claim about the specimen. Axis convention: material axis 1 = L (grain), axis 2 = R (across the growth rings, in the plane of a quartersawn plate), thickness = T, so shear_modulus_12 = G_LR, shear_modulus_13 = G_LT and shear_modulus_23 = G_RT, poisson_ratio_12 = nu_LR (strain along R per strain along L under stress along L). Moduli are static or quasi-static handbook values at about 12 percent moisture content, used here at audio frequency; the validity band omega 0 to 2 pi 2000 rad/s and T 280 to 320 K is the band in which this use is DECLARED by the pack author, not a measured band (wood storage moduli typically rise a few percent per decade of frequency). Loss: the nine viscosities are Kelvin-Voigt values V = eta x stiffness / omega_ref with omega_ref = 2 pi 200 rad/s (1256.64 rad/s), built from the directional loss factors named in the observation as V = D^(1/2) Q D^(1/2) / omega_ref (Q the reduced plane-stress stiffness, D = diag(eta_L, eta_R, eta_LR); the L-R coupling uses the geometric mean of eta_L and eta_R; the 16 and 26 entries are zero by the orthotropic axes; the through-thickness shear viscosities are eta x G / omega_ref). A Kelvin-Voigt viscosity makes the loss factor proportional to frequency; wood's loss factor is nearly constant, so a consumer must rescale per mode by omega_ref/omega (guitar_body_modes does). The loss factors are measured on other specimens and are NOT a measurement of the Esteso guitar.
+observation	qiu-bremaud-loss	Sitka spruce loss factors (Qiu et al. 2026) with the directional loss ratios of resonance spruce (Bremaud, Gril and Thibaut 2011 Table 4)	eta_L = mean of the committed Qiu pack's loss_factor_longitudinal 0.01424 (beam mode 1, 62.36 Hz) and loss_factor_longitudinal_mode5 0.01134 (beam mode 5, about 830 Hz for a 500 x 25 x 3 mm free-free beam) = 0.01279; directional ratios from the resonance-spruce median row: eta_R/eta_L = 2.92, eta_LR/eta_L = 2.22, eta_LT/eta_L = 2.32; eta_RT is not given by either source and is taken equal to eta_LT	SURROGATE for the Esteso top: the loss factors are Sitka beams cut along the grain at 12 percent moisture, the ratios belong to a different spruce set. Bremaud's median resonance-spruce eta_L is 0.0068, half of Qiu's: report Q with both.
+scalar	density	wh-sitka-shell	density	448	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	12566.37	rad/s
+scalar	young_modulus_1	wh-sitka-shell	young_modulus_1	1.188e+10	Pa	constant
+uncertainty	young_modulus_1	unstated	-	-	-	-
+validity	young_modulus_1	T	280	320	K
+validity	young_modulus_1	omega	0	12566.37	rad/s
+scalar	young_modulus_2	wh-sitka-shell	young_modulus_2	926640000	Pa	constant
+uncertainty	young_modulus_2	unstated	-	-	-	-
+validity	young_modulus_2	T	280	320	K
+validity	young_modulus_2	omega	0	12566.37	rad/s
+scalar	poisson_ratio_12	wh-sitka-shell	poisson_ratio_12	0.372	1	constant
+uncertainty	poisson_ratio_12	unstated	-	-	-	-
+validity	poisson_ratio_12	T	280	320	K
+validity	poisson_ratio_12	omega	0	12566.37	rad/s
+scalar	shear_modulus_12	wh-sitka-shell	shear_modulus_12	760320000	Pa	constant
+uncertainty	shear_modulus_12	unstated	-	-	-	-
+validity	shear_modulus_12	T	280	320	K
+validity	shear_modulus_12	omega	0	12566.37	rad/s
+scalar	shear_modulus_13	wh-sitka-shell	shear_modulus_13	724680000	Pa	constant
+uncertainty	shear_modulus_13	unstated	-	-	-	-
+validity	shear_modulus_13	T	280	320	K
+validity	shear_modulus_13	omega	0	12566.37	rad/s
+scalar	shear_modulus_23	wh-sitka-shell	shear_modulus_23	35640000	Pa	constant
+uncertainty	shear_modulus_23	unstated	-	-	-	-
+validity	shear_modulus_23	T	280	320	K
+validity	shear_modulus_23	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_11	qiu-bremaud-loss	plane_stress_viscosity_11	122233.531	Pa*s	constant
+uncertainty	plane_stress_viscosity_11	unstated	-	-	-	-
+validity	plane_stress_viscosity_11	T	280	320	K
+validity	plane_stress_viscosity_11	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_22	qiu-bremaud-loss	plane_stress_viscosity_22	27839.9091	Pa*s	constant
+uncertainty	plane_stress_viscosity_22	unstated	-	-	-	-
+validity	plane_stress_viscosity_22	T	280	320	K
+validity	plane_stress_viscosity_22	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_66	qiu-bremaud-loss	plane_stress_viscosity_66	17179.4822	Pa*s	constant
+uncertainty	plane_stress_viscosity_66	unstated	-	-	-	-
+validity	plane_stress_viscosity_66	T	280	320	K
+validity	plane_stress_viscosity_66	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_12	qiu-bremaud-loss	plane_stress_viscosity_12	6060.6517	Pa*s	constant
+uncertainty	plane_stress_viscosity_12	unstated	-	-	-	-
+validity	plane_stress_viscosity_12	T	280	320	K
+validity	plane_stress_viscosity_12	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_16	qiu-bremaud-loss	plane_stress_viscosity_16	0	Pa*s	constant
+uncertainty	plane_stress_viscosity_16	unstated	-	-	-	-
+validity	plane_stress_viscosity_16	T	280	320	K
+validity	plane_stress_viscosity_16	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_26	qiu-bremaud-loss	plane_stress_viscosity_26	0	Pa*s	constant
+uncertainty	plane_stress_viscosity_26	unstated	-	-	-	-
+validity	plane_stress_viscosity_26	T	280	320	K
+validity	plane_stress_viscosity_26	omega	0	12566.37	rad/s
+scalar	transverse_shear_viscosity_13	qiu-bremaud-loss	transverse_shear_viscosity_13	17111.7703	Pa*s	constant
+uncertainty	transverse_shear_viscosity_13	unstated	-	-	-	-
+validity	transverse_shear_viscosity_13	T	280	320	K
+validity	transverse_shear_viscosity_13	omega	0	12566.37	rad/s
+scalar	transverse_shear_viscosity_23	qiu-bremaud-loss	transverse_shear_viscosity_23	841.562472	Pa*s	constant
+uncertainty	transverse_shear_viscosity_23	unstated	-	-	-	-
+validity	transverse_shear_viscosity_23	T	280	320	K
+validity	transverse_shear_viscosity_23	omega	0	12566.37	rad/s
+scalar	transverse_shear_viscosity_13_23	qiu-bremaud-loss	transverse_shear_viscosity_13_23	0	Pa*s	constant
+uncertainty	transverse_shear_viscosity_13_23	unstated	-	-	-	-
+validity	transverse_shear_viscosity_13_23	T	280	320	K
+validity	transverse_shear_viscosity_13_23	omega	0	12566.37	rad/s

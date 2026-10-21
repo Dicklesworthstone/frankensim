@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	guitar-rosewood-brazilian-fpl-gtr282-bremaud2011-shell
+redistribution	permitted	Published scientific facts (numbers) with attribution retained: Wood Handbook FPL-GTR-282 is a United States Government work, public domain in the United States; Bremaud, Gril and Thibaut (2011) ratios are transcribed facts; retain the citations
+citation	Forest Products Laboratory (2021) Wood Handbook FPL-GTR-282 Tables 4-3b and 5-5a, and Bremaud I, Gril J, Thibaut B (2011) Anisotropy of wood vibrational properties: dependence on grain angle and review of literature data, Wood Science and Technology 45(4):735-754, doi:10.1007/s00226-010-0393-8, Table 4 (African padauk row); https://hal.science/hal-00804242
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

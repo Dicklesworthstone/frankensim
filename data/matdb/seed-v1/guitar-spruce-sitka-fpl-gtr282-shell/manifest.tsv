@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	guitar-spruce-sitka-fpl-gtr282-shell
+redistribution	permitted	United States Government work (USDA Forest Service Forest Products Laboratory) and published scientific facts with attribution retained (Bremaud, Gril and Thibaut 2011 ratios; Qiu et al. 2026 loss factors, CC BY 4.0); retain the report number, chapter, table numbers, and URL
+citation	Forest Products Laboratory (2021), Wood Handbook, FPL-GTR-282, Chapter 5 Mechanical Properties of Wood, Tables 5-1, 5-2 and 5-3a; https://research.fs.usda.gov/treesearch/62200; Qiu et al. (2026) doi:10.3390/f17060669 (committed pack spruce-sitka-loss-qiu2026); Bremaud, Gril and Thibaut (2011) doi:10.1007/s00226-010-0393-8 Table 4; derived by the pack author
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

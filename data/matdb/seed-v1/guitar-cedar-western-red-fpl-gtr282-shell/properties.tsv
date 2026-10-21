@@ -1,0 +1,67 @@
+frankensim.matdb-source.v1
+observation	wh-cedar-shell	Western redcedar (Thuja plicata) clear straight-grained wood, stand-in for the plan's unnamed cedar	FPL-GTR-282 chapter 5: Table 5-3a bending MOE 7700 MPa times 1.10 gives E_L = 8470 MPa; Table 5-1 ratios E_R/E_L 0.081, G_LR/E_L 0.087, G_LT/E_L 0.086, G_RT/E_L 0.005; Table 5-2 nu_LR 0.378; Table 5-3a SG 0.32 gives density = 1000 x 0.32 x 1.12 = 358.4 kg/m3. Absolute values are those ratios times E_L	The plan names cedar for the back bars and the neck without a species; Spanish cedar (Cedrela odorata) is the usual guitar cedar and is not in the Wood Handbook's elastic tables, so western redcedar is a SURROGATE of lower density. Axis convention: material axis 1 = L (grain), axis 2 = R (across the growth rings, in the plane of a quartersawn plate), thickness = T, so shear_modulus_12 = G_LR, shear_modulus_13 = G_LT and shear_modulus_23 = G_RT, poisson_ratio_12 = nu_LR (strain along R per strain along L under stress along L). Moduli are static or quasi-static handbook values at about 12 percent moisture content, used here at audio frequency; the validity band omega 0 to 2 pi 2000 rad/s and T 280 to 320 K is the band in which this use is DECLARED by the pack author, not a measured band (wood storage moduli typically rise a few percent per decade of frequency). Loss: the nine viscosities are Kelvin-Voigt values V = eta x stiffness / omega_ref with omega_ref = 2 pi 200 rad/s (1256.64 rad/s), built from the directional loss factors named in the observation as V = D^(1/2) Q D^(1/2) / omega_ref (Q the reduced plane-stress stiffness, D = diag(eta_L, eta_R, eta_LR); the L-R coupling uses the geometric mean of eta_L and eta_R; the 16 and 26 entries are zero by the orthotropic axes; the through-thickness shear viscosities are eta x G / omega_ref). A Kelvin-Voigt viscosity makes the loss factor proportional to frequency; wood's loss factor is nearly constant, so a consumer must rescale per mode by omega_ref/omega (guitar_body_modes does). The loss factors are measured on other specimens and are NOT a measurement of the Esteso guitar.
+observation	bremaud-softwood-loss	mean softwoods (Bremaud, Gril and Thibaut 2011 Table 4) as the loss surrogate for cedar	median softwood row: tan delta_L 7.1 (units of 1e-3), tan dG23/tan d3 = 2.14, tan d2/tan d3 = 3.08, tan dG13/tan d3 = 2.16, tan d1/tan d3 = 2.90: eta_L = 0.0071, eta_R = 0.02059, eta_LR = 0.015336, eta_LT = 0.015194; eta_RT taken equal to eta_LT	SURROGATE: no cedar loss measurement is used.
+scalar	density	wh-cedar-shell	density	358.4	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	12566.37	rad/s
+scalar	young_modulus_1	wh-cedar-shell	young_modulus_1	8.47e+09	Pa	constant
+uncertainty	young_modulus_1	unstated	-	-	-	-
+validity	young_modulus_1	T	280	320	K
+validity	young_modulus_1	omega	0	12566.37	rad/s
+scalar	young_modulus_2	wh-cedar-shell	young_modulus_2	686070000	Pa	constant
+uncertainty	young_modulus_2	unstated	-	-	-	-
+validity	young_modulus_2	T	280	320	K
+validity	young_modulus_2	omega	0	12566.37	rad/s
+scalar	poisson_ratio_12	wh-cedar-shell	poisson_ratio_12	0.378	1	constant
+uncertainty	poisson_ratio_12	unstated	-	-	-	-
+validity	poisson_ratio_12	T	280	320	K
+validity	poisson_ratio_12	omega	0	12566.37	rad/s
+scalar	shear_modulus_12	wh-cedar-shell	shear_modulus_12	736890000	Pa	constant
+uncertainty	shear_modulus_12	unstated	-	-	-	-
+validity	shear_modulus_12	T	280	320	K
+validity	shear_modulus_12	omega	0	12566.37	rad/s
+scalar	shear_modulus_13	wh-cedar-shell	shear_modulus_13	728420000	Pa	constant
+uncertainty	shear_modulus_13	unstated	-	-	-	-
+validity	shear_modulus_13	T	280	320	K
+validity	shear_modulus_13	omega	0	12566.37	rad/s
+scalar	shear_modulus_23	wh-cedar-shell	shear_modulus_23	42350000	Pa	constant
+uncertainty	shear_modulus_23	unstated	-	-	-	-
+validity	shear_modulus_23	T	280	320	K
+validity	shear_modulus_23	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_11	bremaud-softwood-loss	plane_stress_viscosity_11	48415.8499	Pa*s	constant
+uncertainty	plane_stress_viscosity_11	unstated	-	-	-	-
+validity	plane_stress_viscosity_11	T	280	320	K
+validity	plane_stress_viscosity_11	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_22	bremaud-softwood-loss	plane_stress_viscosity_22	11372.8832	Pa*s	constant
+uncertainty	plane_stress_viscosity_22	unstated	-	-	-	-
+validity	plane_stress_viscosity_22	T	280	320	K
+validity	plane_stress_viscosity_22	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_66	bremaud-softwood-loss	plane_stress_viscosity_66	8993.00632	Pa*s	constant
+uncertainty	plane_stress_viscosity_66	unstated	-	-	-	-
+validity	plane_stress_viscosity_66	T	280	320	K
+validity	plane_stress_viscosity_66	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_12	bremaud-softwood-loss	plane_stress_viscosity_12	2524.43026	Pa*s	constant
+uncertainty	plane_stress_viscosity_12	unstated	-	-	-	-
+validity	plane_stress_viscosity_12	T	280	320	K
+validity	plane_stress_viscosity_12	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_16	bremaud-softwood-loss	plane_stress_viscosity_16	0	Pa*s	constant
+uncertainty	plane_stress_viscosity_16	unstated	-	-	-	-
+validity	plane_stress_viscosity_16	T	280	320	K
+validity	plane_stress_viscosity_16	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_26	bremaud-softwood-loss	plane_stress_viscosity_26	0	Pa*s	constant
+uncertainty	plane_stress_viscosity_26	unstated	-	-	-	-
+validity	plane_stress_viscosity_26	T	280	320	K
+validity	plane_stress_viscosity_26	omega	0	12566.37	rad/s
+scalar	transverse_shear_viscosity_13	bremaud-softwood-loss	transverse_shear_viscosity_13	8807.32697	Pa*s	constant
+uncertainty	transverse_shear_viscosity_13	unstated	-	-	-	-
+validity	transverse_shear_viscosity_13	T	280	320	K
+validity	transverse_shear_viscosity_13	omega	0	12566.37	rad/s
+scalar	transverse_shear_viscosity_23	bremaud-softwood-loss	transverse_shear_viscosity_23	512.053893	Pa*s	constant
+uncertainty	transverse_shear_viscosity_23	unstated	-	-	-	-
+validity	transverse_shear_viscosity_23	T	280	320	K
+validity	transverse_shear_viscosity_23	omega	0	12566.37	rad/s
+scalar	transverse_shear_viscosity_13_23	bremaud-softwood-loss	transverse_shear_viscosity_13_23	0	Pa*s	constant
+uncertainty	transverse_shear_viscosity_13_23	unstated	-	-	-	-
+validity	transverse_shear_viscosity_13_23	T	280	320	K
+validity	transverse_shear_viscosity_13_23	omega	0	12566.37	rad/s

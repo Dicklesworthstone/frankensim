@@ -1,0 +1,51 @@
+frankensim.measured-body-modes.v1
+table	guitar	driven_at	sound_hole	mode_label	identification	frequency_hz	effective_mass_kg	q
+5.1	BR2	bridge saddle at the low E string position (velocity response)	sealed with a polystyrene plug	T(1,1)	yes	165	0.062	36
+5.1	BR2	bridge saddle at the low E string position (velocity response)	sealed with a polystyrene plug	T(2,1)	yes	204	0.201	66
+5.1	BR2	bridge saddle at the low E string position (velocity response)	sealed with a polystyrene plug	B(1,2)	yes	293	1.920	50
+5.1	BR2	bridge saddle at the low E string position (velocity response)	sealed with a polystyrene plug	T(1,2)1	yes	364	11.374	84
+5.1	BR2	bridge saddle at the low E string position (velocity response)	sealed with a polystyrene plug	T(1,2)2	questioned	391	0.612	60
+5.1	BR2	bridge saddle at the low E string position (velocity response)	sealed with a polystyrene plug	T(3,1)	yes	432	0.726	51
+5.1	BR2	bridge saddle at the low E string position (velocity response)	sealed with a polystyrene plug	T(4,1)	questioned	474	0.830	66
+5.1	BR2	bridge saddle at the low E string position (velocity response)	sealed with a polystyrene plug	T(4,1)	questioned	497	1.001	21
+5.1	BR2	bridge saddle at the low E string position (velocity response)	sealed with a polystyrene plug	T(2,2)1	yes	523	0.451	57
+5.1	BR2	bridge saddle at the low E string position (velocity response)	sealed with a polystyrene plug	T(2,2)2	yes	607	0.209	25
+5.1	BR2	bridge saddle at the low E string position (velocity response)	sealed with a polystyrene plug	T(5,1)	yes	688	0.197	28
+5.1	BR2	bridge saddle at the low E string position (velocity response)	sealed with a polystyrene plug	unidentified	no	806	0.096	12
+5.1	BR2	bridge saddle at the low E string position (velocity response)	sealed with a polystyrene plug	T(4,2)	questioned	882	0.263	49
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	T(1,1)	yes	165	0.062	41
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	B(1,2)	yes	296	1.254	24
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	T(1,2)1	yes	345	23.153	74
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	T(1,2)2	yes	390	0.457	55
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	T(3,1)	yes	430	0.623	58
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	T(4,1)	yes	487	0.571	19
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	T(2,2)	questioned	547	0.240	6
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	T(2,2)	questioned	613	0.857	28
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	unidentified	no	670	0.567	16
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	T(5,1)	yes	693	0.721	96
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	unidentified	no	816	8.383	127
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	T(4,2)	yes	864	0.439	17
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	unidentified	no	904	0.614	22
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	T(5,2)	yes	1000	0.443	21
+5.2	BR2	bridge saddle at the G string position (velocity response)	sealed with a polystyrene plug	unidentified	no	1085	0.075	13
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	T(1,1)	yes	163	0.054	37
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	T(2,1)	yes	203	0.394	59
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	B(1,2)	yes	294	3.664	80
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	T(1,2)1	yes	348	10.875	62
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	unidentified	no	364	3.888	25
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	T(1,2)2	yes	390	0.446	33
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	T(3,1)	yes	426	0.678	26
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	T(4,1)	questioned	470	0.339	35
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	T(4,1)	questioned	492	1.006	40
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	T(2,2)	questioned	504	1.343	58
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	T(2,2)	questioned	516	0.636	57
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	T(2,2)	questioned	567	0.395	17
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	T(2,2)	questioned	595	0.582	27
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	T(2,2)	questioned	615	0.849	49
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	unidentified	no	659	1.334	20
+5.3	BR2	bridge saddle at the top E string position (velocity response)	sealed with a polystyrene plug	unidentified	no	679	1.351	67
+5.8	BR2	centre of the back plate (pressure response)	sealed	B(1,1)	yes	207	0.051	40
+5.8	BR2	centre of the back plate (pressure response)	sealed	B(1,2)	yes	277	0.446	13
+5.7	BR1	centre of the back plate (pressure response)	sealed	B(1,1)	yes	221	0.071	31
+5.7	BR1	centre of the back plate (pressure response)	sealed	B(1,2)	yes	310	0.370	18
+5.7	BR1	centre of the back plate (pressure response)	sealed	B(?,?)	questioned	412	0.310	42

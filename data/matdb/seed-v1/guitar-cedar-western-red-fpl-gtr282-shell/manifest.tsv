@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	guitar-cedar-western-red-fpl-gtr282-shell
+redistribution	permitted	United States Government work (USDA Forest Service Forest Products Laboratory) and published scientific facts with attribution retained (Bremaud, Gril and Thibaut 2011 ratios; Qiu et al. 2026 loss factors, CC BY 4.0); retain the report number, chapter, table numbers, and URL
+citation	Forest Products Laboratory (2021), Wood Handbook, FPL-GTR-282, Chapter 5, Tables 5-1, 5-2 and 5-3a; https://research.fs.usda.gov/treesearch/62200; Bremaud, Gril and Thibaut (2011) Table 4 softwoods row; derived by the pack author
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
