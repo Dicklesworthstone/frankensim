@@ -178,6 +178,13 @@ class Records(unittest.TestCase):
         self.assertIn("title must be a non-empty string", self.problems(lambda r, d: r.update(title=" ")))
         self.assertEqual(self.problems(lambda r, d: r.pop("usable_for_render_notes")), "")  # optional
 
+    def test_grader_reference_is_optional_and_must_be_true_or_false_when_present(self):
+        for good in (True, False):
+            self.assertEqual(self.problems(lambda r, d, good=good: r.update(grader_reference=good)), "", good)
+        self.assertEqual(self.problems(lambda r, d: r.update(grader_reference=None)), "")
+        for bad in ("yes", 1, [], {"G3": True}):
+            self.assertIn("grader_reference must be true or false", self.problems(lambda r, d, bad=bad: r.update(grader_reference=bad)), bad)
+
 
 class Build(unittest.TestCase):
     def test_a_candidate_is_built_with_its_clip_gain_licence_class_and_facts(self):
@@ -286,6 +293,27 @@ class Build(unittest.TestCase):
         steady = {"pitch": {"fraction_within_30_cents_of_median": 1.0}}
         self.assertGreater(C.rank(base, steady), C.rank(base, {"pitch": {"fraction_within_30_cents_of_median": 0.2}}))
         self.assertEqual(C.rank(base, {"steady_notes_by_pitch_tracker": [{"clip_t0": 0, "clip_t1": 40}]}), C.rank(base, {"steady_notes_by_pitch_tracker": [{"clip_t0": 0, "clip_t1": 12}]}), "capped")
+
+    def test_a_recording_our_grader_used_ranks_above_everything_else_and_survives_the_cap(self):
+        base = {"source_type": "youtube", "licence": STANDARD, "usable_for_render_notes": []}
+        best_other = {**base, "source_type": "open-library", "licence": CC, "usable_for_render_notes": ["G3", "D4", "A4", "E5"]}
+        steady = {"pitch": {"fraction_within_30_cents_of_median": 1.0}, "steady_notes_by_pitch_tracker": [{"clip_t0": 0, "clip_t1": 12}]}
+        self.assertGreater(C.rank({**base, "grader_reference": True}, None), C.rank(best_other, steady))
+        self.assertEqual(C.rank({**base, "grader_reference": False}, None), C.rank(base, None))
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / "c", Path(tmp) / "out"
+            lib = record(root, cid="violin-lib-g3", source_type="open-library", licence="CC BY 4.0", usable=("G3", "D4"))
+            ref = record(root, cid="violin-yt-ref", usable=())
+            ref["grader_reference"] = True
+            other = record(root, cid="violin-yt-other", usable=("G3",))
+            write_doc(root, "violin", [other, lib, ref])
+            code, err, index = build(root, out, "--max-per-family", "1")
+            f = family(index, "violin")
+            self.assertEqual(([c["id"] for c in f["candidates"]], sorted(f["omitted"])), (["violin-yt-ref"], ["violin-lib-g3", "violin-yt-other"]))
+            self.assertIs(f["candidates"][0]["grader_reference"], True)
+            code, err, index = build(root, Path(tmp) / "out2")
+            self.assertEqual({c["id"]: c["grader_reference"] for c in family(index, "violin")["candidates"]},
+                             {"violin-yt-ref": True, "violin-lib-g3": False, "violin-yt-other": False})
 
     def test_a_clip_longer_than_the_playback_limit_plays_only_its_first_part_and_says_so(self):
         import subprocess as sp

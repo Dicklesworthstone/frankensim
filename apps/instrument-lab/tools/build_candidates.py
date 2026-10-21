@@ -165,6 +165,8 @@ def validate(rec, family: str, base: Path) -> tuple[list[str], dict | None]:
         p.append("sample_rate_hz must be a whole number of hertz")
     if coverage(rec.get("usable_for_render_notes")) is None:
         p.append("usable_for_render_notes must be a list of note names, a note -> category map, or a sentence")
+    if rec.get("grader_reference") is not None and not isinstance(rec["grader_reference"], bool):
+        p.append("grader_reference must be true or false")
     files = rec.get("files")
     facts = None
     if not (isinstance(files, dict) and text(files.get("clip"))):
@@ -225,13 +227,14 @@ def read_family_files(fam_dir: Path, fid: str) -> tuple[list[dict], list[dict], 
 
 
 def rank(rec: dict, facts: dict | None) -> float:
-    """Which candidates to keep when the host's file limit forces a choice: coverage of the notes our renders are graded on counts most, then
-    an open library (known provenance), a Creative Commons licence, how steady the measured pitch is and how much steady sound there is.
-    All of it is measured or stated; none of it says anything about timbre."""
+    """Which candidates to keep when the host's file limit forces a choice. A recording our grader has used as the reference of a graded note
+    (grader_reference) always comes first: every grade so far was measured against it and the owner has not yet been asked about it. Then
+    coverage of the notes our renders are graded on, an open library (known provenance), a Creative Commons licence, how steady the
+    measured pitch is and how much steady sound there is. All of it is measured or stated; none of it says anything about timbre."""
     steady = ((facts or {}).get("pitch") or {}).get("fraction_within_30_cents_of_median")
     sound = sum(n.get("clip_t1", 0) - n.get("clip_t0", 0) for n in (facts or {}).get("steady_notes_by_pitch_tracker", []) if isinstance(n, dict))
     long_clip = number(rec.get("start_s")) and number(rec.get("end_s")) and rec["end_s"] - rec["start_s"] > LONG_CLIP_S  # an excerpt, not a whole recording
-    return float(3 * min(len((coverage(rec.get("usable_for_render_notes")) or {"graded": []})["graded"]), 4) + (1 if rec["source_type"] == "open-library" else 0) + (1 if is_cc(rec["licence"]) else 0)
+    return float((20 if rec.get("grader_reference") is True else 0) + 3 * min(len((coverage(rec.get("usable_for_render_notes")) or {"graded": []})["graded"]), 4) + (1 if rec["source_type"] == "open-library" else 0) + (1 if is_cc(rec["licence"]) else 0)
                  + 2 * (steady if number(steady) else 0.0) + min(sound, 12.0) / 12.0 - (2.0 if long_clip else 0.0))
 
 
@@ -242,7 +245,7 @@ def build_candidate(rec: dict, facts: dict | None, base: Path, out_dir: Path) ->
     encode(base / rec["files"]["clip"], out_dir / f"{rec['id']}.mp4", gain, MAX_PLAY_S if len(x) > len(played) else None)
     keep = ("id", "instrument", "notes", "dynamic", "articulation", "source_type", "url", "title", "channel_or_author", "licence", "licence_evidence", "start_s", "end_s",
             "conditions", "sample_rate_hz", "reason", "sha256_clip")
-    return {**{k: rec.get(k) for k in keep}, "render_coverage": coverage(rec.get("usable_for_render_notes")), "creative_commons": is_cc(rec["licence"]), "audio": f"{out_dir.name}/{rec['id']}.mp4", "clip_duration_s": round(len(x) / sr, 3),
+    return {**{k: rec.get(k) for k in keep}, "render_coverage": coverage(rec.get("usable_for_render_notes")), "grader_reference": rec.get("grader_reference") is True, "creative_commons": is_cc(rec["licence"]), "audio": f"{out_dir.name}/{rec['id']}.mp4", "clip_duration_s": round(len(x) / sr, 3),
             "playback_s": round(len(played) / sr, 3), "playback_gain_db": gain, "facts": facts}
 
 

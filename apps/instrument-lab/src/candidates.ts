@@ -17,7 +17,7 @@ interface Facts {
 interface Candidate {
   id: string; instrument: string; notes: string[]; dynamic: string; articulation: string; source_type: string; url: string; title: string; channel_or_author: string;
   licence: string; licence_evidence: string; start_s: number; end_s: number; conditions: string; sample_rate_hz: number; reason: string; render_coverage: { graded: string[]; reference_only: string[]; other: string[]; text: string | null };
-  creative_commons: boolean; audio: string; clip_duration_s: number; playback_s: number; playback_gain_db: number; facts: Facts | null;
+  creative_commons: boolean; grader_reference: boolean; audio: string; clip_duration_s: number; playback_s: number; playback_gain_db: number; facts: Facts | null;
 }
 interface Looked { source: string; query_or_url: string; result: string; file?: string }
 interface Family {
@@ -91,7 +91,7 @@ function candidateCard(c: Candidate, refresh: () => void): HTMLElement {
   comment.addEventListener("input", () => store(withComment(notes[key], comment.value)));
   const names = c.notes.length > 10 ? `${c.notes.slice(0, 10).join(" ")} +${c.notes.length - 10} more` : c.notes.join(" ");
   root.append(
-    el("div", { class: "panel-head" }, el("h4", {}, c.instrument), el("div", { class: "tags" }, el("span", { class: "tag plain" }, names), el("span", { class: `tag ${c.creative_commons ? "offline" : "plain"}` }, c.creative_commons ? "Creative Commons" : "not Creative Commons"))),
+    el("div", { class: "panel-head" }, el("h4", {}, c.instrument), el("div", { class: "tags" }, c.grader_reference ? el("span", { class: "tag offline", "data-grader-reference": "1" }, "our grader's reference") : null, el("span", { class: "tag plain" }, names), el("span", { class: `tag ${c.creative_commons ? "offline" : "plain"}` }, c.creative_commons ? "Creative Commons" : "not Creative Commons"))),
     el("p", { class: "small muted" }, c.reason),
     el("div", { class: "btn-row" }, play, valid, invalid, clear, state),
     facts(c),
@@ -140,6 +140,8 @@ export async function mountCandidates(root: HTMLElement): Promise<void> {
     const parts: HTMLElement[] = [];
     const rn = f.render_notes;
     if (rn) parts.push(el("p", { class: "small muted" }, `Our renders of this family are graded on ${rn.rendered_and_graded.length ? rn.rendered_and_graded.join(" ") : "no note yet"}; the reference library has recordings of ${rn.reference_only.length ? rn.reference_only.join(" ") : "no other note"}. A candidate that covers the graded notes is the most useful.`));
+    const graderRefs = f.candidates.filter((c) => c.grader_reference).length;
+    if (graderRefs) parts.push(el("p", { class: "small muted", "data-grader-reference-line": "1" }, `${plural(graderRefs, "recording")} below ${graderRefs === 1 ? "is" : "are"} the reference our grader has used for a graded note of this family. Every grade so far was measured against ${graderRefs === 1 ? "it" : "them"}, and none has been confirmed by the owner yet.`));
     if (f.refused.length) parts.push(el("div", { class: "ir-refused small", role: "status" }, el("b", {}, `${plural(f.refused.length, "record")} refused, not shown: `), ...f.refused.map((r) => el("div", {}, `${r.id}${r.file ? ` (${r.file})` : ""}: ${r.problems.join("; ")}`))));
     if (f.candidates.length) parts.push(...f.candidates.map((c) => candidateCard(c, refresh)));
     else if (f.none_found) parts.push(el("div", { class: "ir-empty" }, el("h4", {}, `None found for ${f.title.toLowerCase()}`), el("p", {}, f.none_found.reason), f.none_found.looked_summary ? el("p", { class: "small muted" }, f.none_found.looked_summary) : null));
