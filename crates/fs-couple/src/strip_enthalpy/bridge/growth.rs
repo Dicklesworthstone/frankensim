@@ -9,6 +9,9 @@ use fs_solid::bridge::growth::{BirthReport, CellBirth};
 use fs_thermal::enthalpy::{CellId, DepositionObserver, Event, StepConfig};
 use super::*;
 
+/// Finite electrical storage and material births accepted in one transaction.
+pub mod electrical;
+
 /// One future thermal birth and its explicit unstrained projected axial length.
 #[derive(Clone, Copy, Debug)]
 pub struct TipBirth<'m> {
