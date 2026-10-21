@@ -133,3 +133,5 @@ fn selective_endpoints_continue_through_the_original_heat_work_and_load_paths() 
     near(stored_change(&a, trial.left()) + stored_change(&b, motion.endpoint())
         + motion.step().work_by_gas_j, 3.0, 1e-8);
 }
+
+mod network;

@@ -6,6 +6,11 @@
 //! No rate law, membrane work, diffusion model or entropy guarantee is implied by
 //! prescribed fluxes. The physical transport owner must provide those separately.
 
+/// Source-backed multicomponent molecular mixing and conservative pair advancement.
+pub mod diffusion;
+/// Shared-snapshot selective transport on branching and cyclic volume networks.
+pub mod network;
+
 use super::{ClosedGasParcel, Composition, CompositionBasis, GasEnergyError, GasEnergySolve,
     GasMassTransferSolve, SpeciesId, ThermochemicalGasModel, MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1,
     endpoint, invalid, inventory, mixed_model_from_portions, poll, positive, source_error, stored_change};
@@ -126,6 +131,17 @@ fn model_for_inventory(
     catalog.with_composition(composition).map_err(GasEnergyError::from)
 }
 
+// Shared by pair and network exchange: selective transport carries partial h_i,
+// not the mixture-average enthalpy. The original NASA-9 owner supplies the law.
+fn source_enthalpy(source: &ClosedGasParcel, id: &SpeciesId) -> Result<f64, GasEnergyError> {
+    let species = source.model().thermodynamics().components().iter()
+        .find(|s| s.species() == id).ok_or(invalid("species absent from its declared upstream"))?;
+    let evaluated = species.evaluate(Temperature::new(source.state().state().temperature)).map_err(source_error)?;
+    let h = evaluated.properties().h().value() / species.molar_mass().value();
+    if !h.is_finite() { return Err(invalid("source species enthalpy is unrepresentable")); }
+    Ok(h)
+}
+
 impl ClosedGasParcel {
     /// Apply all prescribed selective species transfers to the SAME pair snapshot.
     /// Duplicate/unknown species, vanished increments, depleted donors, conflicting
@@ -188,10 +204,7 @@ impl ClosedGasParcel {
                 targets[side].insert(id.clone(), next);
             }
             let source = [self, right][donor];
-            let species = source.model().thermodynamics().components().iter()
-                .find(|s| s.species() == id).ok_or(invalid("species absent from its declared upstream"))?;
-            let evaluated = species.evaluate(Temperature::new(source.state().state().temperature)).map_err(source_error)?;
-            let h = evaluated.properties().h().value() / species.molar_mass().value();
+            let h = source_enthalpy(source, id)?;
             let carried = dm * h;
             mass.add(dm)?; energy.add(carried)?;
             relative[0].add(-dm * (h - self.state().specific_internal_energy_j_kg()))?;
