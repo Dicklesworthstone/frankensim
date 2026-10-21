@@ -1066,7 +1066,6 @@ impl FlueVoice {
             let u = self.jet_speed_m_s();
             let q_max = u * self.geometry.flue_height_m * self.geometry.flue_width_m;
             let transit = if u > 0.0 { self.transit_s() } else { f64::INFINITY };
-            let delay_samples = if transit.is_finite() { transit / dt } else { 0.0 };
             let seed_scale = self.island.seed_amplitude_rel * u;
             let reynolds = self.reynolds();
             reynolds_min = reynolds_min.min(reynolds);
@@ -1078,6 +1077,26 @@ impl FlueVoice {
             let omega_h = 0.5 * omega_c;
             let hp_alpha = 1.0 / (1.0 + omega_h * dt);
             let leak_rate = omega_c / 100.0;
+            // The jet's spatial growth exp(alpha_i W) is a MAGNITUDE; its phase is the convective
+            // delay W / c_p alone (Fabre 1996; Auvray 2012; the card's own stage law, phase
+            // stage + 1/4 cycles, is a pure delay). The causal band filters above are only a
+            // magnitude model, but they add phase: two poles at omega_c lag 2/omega_c at low
+            // frequency, the high-pass followed by the receptivity integral lags 1/omega_h.
+            // That is 16 theta / U of extra loop delay (about 70 percent of the transit for a
+            // lip jet), which moved the first-register phase window to Str_W near 0.3 while
+            // flutists play it at 0.1 to 0.25 (de la Cuadra 2008, octave jump near 0.1). Tap the
+            // mouth-velocity history early by that lag so the low-frequency loop delay is the
+            // convective transit. A transit already under one sample, or one that would fall
+            // under one sample, keeps its sub-sample current-feedback treatment unchanged.
+            let band_lag_s = if u > 0.0 { 2.0 / omega_c + 1.0 / omega_h } else { 0.0 };
+            let delay_samples = if transit.is_finite() {
+                let transit_samples = transit / dt;
+                if transit_samples >= 1.0 {
+                    (transit_samples - band_lag_s / dt).max(1.0)
+                } else {
+                    transit_samples
+                }
+            } else { 0.0 };
             // The unsteady channel keeps its original spatial transport. The
             // quasi-steady history is sampled at THIS time minus the physical
             // transit, including a current-mouth term when transit < dt.
