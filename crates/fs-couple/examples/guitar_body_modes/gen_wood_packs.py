@@ -77,7 +77,9 @@ def viscosities(E1, E2, nu12, G12, G13, G23, eta):
         "plane_stress_viscosity_11": eta["L"] * q11 / w,
         "plane_stress_viscosity_22": eta["R"] * q22 / w,
         "plane_stress_viscosity_66": eta["LR"] * q66 / w,
-        "plane_stress_viscosity_12": math.sqrt(eta["L"] * eta["R"]) * q12 / w,
+        # arithmetic mean of the two in-plane loss factors on the Poisson cross term: the Adams-Bacon split of the stiffness by loss channel
+        # (the constant-loss-factor shell path), so the Kelvin-Voigt and constant-eta realisations of one pack agree on every entry
+        "plane_stress_viscosity_12": 0.5 * (eta["L"] + eta["R"]) * q12 / w,
         "plane_stress_viscosity_16": 0.0,
         "plane_stress_viscosity_26": 0.0,
         "transverse_shear_viscosity_13": eta["LT"] * G13 / w,
@@ -87,9 +89,10 @@ def viscosities(E1, E2, nu12, G12, G13, G23, eta):
 
 
 LOSS_NOTE = (
-    "Loss: the nine viscosities are Kelvin-Voigt values V = eta x stiffness / omega_ref with omega_ref = 2 pi 200 rad/s (1256.64 rad/s), built from the directional loss factors named in the observation as V = D^(1/2) Q D^(1/2) / omega_ref "
-    "(Q the reduced plane-stress stiffness, D = diag(eta_L, eta_R, eta_LR); the L-R coupling uses the geometric mean of eta_L and eta_R; the 16 and 26 entries are zero by the orthotropic axes; the through-thickness shear viscosities are eta x G / omega_ref). "
-    "A Kelvin-Voigt viscosity makes the loss factor proportional to frequency; wood's loss factor is nearly constant, so a consumer must rescale per mode by omega_ref/omega (guitar_body_modes does). "
+    "Loss: five dimensionless loss factors loss_factor_1 (L), loss_factor_2 (R), loss_factor_12 (L-R shear), loss_factor_13 (L-T shear) and loss_factor_23 (R-T shear) in the material axes, valid for 2 pi 50 to 2 pi 1000 rad/s (a band declared by the pack author, not measured), for the constant-loss-factor shell path; "
+    "and the nine Kelvin-Voigt viscosities built from the same loss factors as eta x stiffness / omega_ref with omega_ref = 2 pi 200 rad/s (1256.64 rad/s): plane_stress_viscosity_11, _22, _66 and the through-thickness shears are eta_L, eta_R, eta_LR, eta_LT, eta_RT times the corresponding stiffness over omega_ref, "
+    "the Poisson cross term _12 uses the ARITHMETIC mean of eta_L and eta_R times Q12 / omega_ref (the Adams-Bacon split of the stiffness by loss channel, so both realisations agree on every entry), and the 16 and 26 entries are zero by the orthotropic axes. "
+    "A Kelvin-Voigt viscosity makes the loss factor proportional to frequency; wood's loss factor is nearly constant, so a consumer of the viscosity rows must rescale per mode by omega_ref/omega (guitar_body_modes does) or use the loss_factor rows. "
     "The loss factors are measured on other specimens and are NOT a measurement of the Esteso guitar."
 )
 
@@ -124,7 +127,10 @@ def write_pack(pack_id, obs_main, rows, citation, extra_obs=(), fpl_only=True):
         lines.append("\t".join(["scalar", pid, obs, name, fmt(value), unit, "constant"]))
         lines.append("\t".join(["uncertainty", pid, "unstated", "-", "-", "-", "-"]))
         lines.append("\t".join(["validity", pid, "T", "280", "320", "K"]))
-        lines.append("\t".join(["validity", pid, "omega", "0", fmt(OMEGA_MAX), "rad/s"]))
+        if name.startswith("loss_factor_"):
+            lines.append("\t".join(["validity", pid, "omega", fmt(LOSS_BAND[0]), fmt(LOSS_BAND[1]), "rad/s"]))
+        else:
+            lines.append("\t".join(["validity", pid, "omega", "0", fmt(OMEGA_MAX), "rad/s"]))
     open(d + "/properties.tsv", "w", encoding="utf-8").write("\n".join(lines) + "\n")
     man = [
         "frankensim.matdb-manifest.v1",
@@ -140,11 +146,18 @@ def write_pack(pack_id, obs_main, rows, citation, extra_obs=(), fpl_only=True):
         print("   %-34s %s %s" % (r[2], fmt(r[3]), r[4]))
 
 
-def rows_for(obs, vals, visc):
+LOSS_FACTOR_ROWS = [("loss_factor_1", "L"), ("loss_factor_2", "R"), ("loss_factor_12", "LR"), ("loss_factor_13", "LT"), ("loss_factor_23", "RT")]
+LOSS_BAND = (2.0 * math.pi * 50.0, 2.0 * math.pi * 1000.0)  # rad/s: declared by the pack author, not a measured band
+
+
+def rows_for(obs, vals, visc, eta):
     base = [("density", "kg/m^3"), ("young_modulus_1", "Pa"), ("young_modulus_2", "Pa"), ("poisson_ratio_12", "1"),
             ("shear_modulus_12", "Pa"), ("shear_modulus_13", "Pa"), ("shear_modulus_23", "Pa")]
     out = [(k, obs[k] if isinstance(obs, dict) else obs, k, vals[k], u) for k, u in base]
     out += [(k, obs[k] if isinstance(obs, dict) else obs, k, visc[k], "Pa*s") for k in VISC_ORDER]
+    # dimensionless loss factors in the material axes for the constant-loss-factor shell path (same source observation as the viscosities)
+    loss_obs = obs[VISC_ORDER[0]] if isinstance(obs, dict) else obs
+    out += [(k, loss_obs, k, eta[axis], "1") for k, axis in LOSS_FACTOR_ROWS]
     return out
 
 
@@ -162,7 +175,7 @@ write_pack(
     ("wh-sitka-shell", "Sitka spruce (Picea sitchensis) clear straight-grained wood, soundboard stand-in",
      "FPL-GTR-282 chapter 5: Table 5-3a bending MOE 10800 MPa times 1.10 (the chapter's shear-deflection correction) gives E_L = 11880 MPa; Table 5-1 ratios E_R/E_L 0.078, G_LR/E_L 0.064, G_LT/E_L 0.061, G_RT/E_L 0.003; Table 5-2 nu_LR 0.372; Table 5-3a SG 0.40 gives density = 1000 x 0.40 x 1.12 = 448 kg/m3. The absolute E_R, G_LR, G_LT and G_RT are those ratios times E_L (arithmetic done by the pack author from the committed spruce-sitka-fpl-gtr282 pack)",
      "The species of the Esteso 1964 top is UNKNOWN (the plan says only spruce); Sitka is the FPL species with a full orthotropic set, not a claim about the specimen. " + COMMON),
-    rows_for(obs_sp, sv, vis_sp),
+    rows_for(obs_sp, sv, vis_sp, e_sp),
     "Forest Products Laboratory (2021), Wood Handbook, FPL-GTR-282, Chapter 5 Mechanical Properties of Wood, Tables 5-1, 5-2 and 5-3a; https://research.fs.usda.gov/treesearch/62200; Qiu et al. (2026) doi:10.3390/f17060669 (committed pack spruce-sitka-loss-qiu2026); Bremaud, Gril and Thibaut (2011) doi:10.1007/s00226-010-0393-8 Table 4; derived by the pack author",
     extra_obs=[("qiu-bremaud-loss", "Sitka spruce loss factors (Qiu et al. 2026) with the directional loss ratios of resonance spruce (Bremaud, Gril and Thibaut 2011 Table 4)",
                 "eta_L = mean of the committed Qiu pack's loss_factor_longitudinal %.5f (beam mode 1, 62.36 Hz) and loss_factor_longitudinal_mode5 %.5f (beam mode 5, about 830 Hz for a 500 x 25 x 3 mm free-free beam) = %.5f; directional ratios from the resonance-spruce median row: eta_R/eta_L = 2.92, eta_LR/eta_L = 2.22, eta_LT/eta_L = 2.32; eta_RT is not given by either source and is taken equal to eta_LT" % (qiu["loss_factor_longitudinal"], qiu["loss_factor_longitudinal_mode5"], eta_L_spruce),
@@ -186,7 +199,7 @@ write_pack(
     ("wh-rosewood-el", "Brazilian rosewood (Dalbergia nigra), the Rio rosewood of the plan's back and sides",
      "FPL-GTR-282 Table 5-5a, 12 percent moisture: bending MOE 13000 MPa times 1.10 gives E_L = 14300 MPa",
      "E_L only. The Wood Handbook prints no elastic ratios for any rosewood. " + COMMON),
-    rows_for(obs_ro, rv, vis_ro),
+    rows_for(obs_ro, rv, vis_ro, e_ro),
     "Forest Products Laboratory (2021) Wood Handbook FPL-GTR-282 Tables 4-3b and 5-5a, and Bremaud I, Gril J, Thibaut B (2011) Anisotropy of wood vibrational properties: dependence on grain angle and review of literature data, Wood Science and Technology 45(4):735-754, doi:10.1007/s00226-010-0393-8, Table 4 (African padauk row); https://hal.science/hal-00804242",
     extra_obs=[
         ("wh-rosewood-density", "Brazilian rosewood (Dalbergia nigra)",
@@ -219,7 +232,7 @@ write_pack(
     ("wh-cedar-shell", "Western redcedar (Thuja plicata) clear straight-grained wood, stand-in for the plan's unnamed cedar",
      "FPL-GTR-282 chapter 5: Table 5-3a bending MOE 7700 MPa times 1.10 gives E_L = 8470 MPa; Table 5-1 ratios E_R/E_L 0.081, G_LR/E_L 0.087, G_LT/E_L 0.086, G_RT/E_L 0.005; Table 5-2 nu_LR 0.378; Table 5-3a SG 0.32 gives density = 1000 x 0.32 x 1.12 = 358.4 kg/m3. Absolute values are those ratios times E_L",
      "The plan names cedar for the back bars and the neck without a species; Spanish cedar (Cedrela odorata) is the usual guitar cedar and is not in the Wood Handbook's elastic tables, so western redcedar is a SURROGATE of lower density. " + COMMON),
-    rows_for(obs_ce, cv, vis_ce),
+    rows_for(obs_ce, cv, vis_ce, e_ce),
     "Forest Products Laboratory (2021), Wood Handbook, FPL-GTR-282, Chapter 5, Tables 5-1, 5-2 and 5-3a; https://research.fs.usda.gov/treesearch/62200; Bremaud, Gril and Thibaut (2011) Table 4 softwoods row; derived by the pack author",
     extra_obs=[("bremaud-softwood-loss", "mean softwoods (Bremaud, Gril and Thibaut 2011 Table 4) as the loss surrogate for cedar",
                 "median softwood row: tan delta_L 7.1 (units of 1e-3), tan dG23/tan d3 = 2.14, tan d2/tan d3 = 3.08, tan dG13/tan d3 = 2.16, tan d1/tan d3 = 2.90: eta_L = 0.0071, eta_R = 0.02059, eta_LR = 0.015336, eta_LT = 0.015194; eta_RT taken equal to eta_LT",
