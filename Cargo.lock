@@ -1560,6 +1560,7 @@ name = "fs-feec"
 version = "0.0.1"
 dependencies = [
  "fs-blake3",
+ "fs-io",
  "fs-ivl",
  "fs-la",
  "fs-math",
