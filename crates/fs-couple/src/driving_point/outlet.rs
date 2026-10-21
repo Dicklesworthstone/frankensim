@@ -356,9 +356,9 @@ mod tests {
         )
         .expect("chart admitted");
         let rate = description.output_rate_hz * description.mechanics_per_output;
-        let zc = description.gas.density * description.gas.sound_speed
-            / description.sections[0].area_m2;
-        (chart.to_duct(), description.gas, rate, zc, description.wall)
+        let gas = *description.ambient_gas();
+        let zc = gas.density * gas.sound_speed / description.sections[0].area_m2;
+        (chart.to_duct(), gas, rate, zc, description.wall)
     }
 
     #[test]

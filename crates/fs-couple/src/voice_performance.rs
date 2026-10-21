@@ -23,6 +23,8 @@
 //! audio <output_rate_hz> <samples> <mechanics_per_output>
 //! full_scale_pa <pa>
 //! ambient moist_air <temperature_k> <pressure_pa> <relative_humidity>
+//! ambient mixture <temperature_k> <pressure_pa> <mole|mass> <count> <species fraction>...
+//! ambient thermochemical <temperature_k> <pressure_pa> <mole|mass> <count> <id fraction>...
 //! fold <two_mass|one_dof> <m_lower_kg> <m_upper_kg> <k_lower_n_m> <k_upper_n_m>
 //!      <k_couple_n_m> <damping_ratio> <rest_gap_m> <fold_length_m> <thickness_m>
 //! tract_wall <surface_density_kg_m2> <stiffness_n_m3> <resistance_pa_s_m>   (optional)
@@ -44,6 +46,7 @@ use crate::render::RenderError;
 use crate::tract::{TractChart, TractSection};
 use fs_duct::Termination;
 use fs_material::gas::GasState;
+use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas_record};
 use fs_phs::WallPin;
 use fs_vfit::discretize::DelayedFilter;
 
@@ -67,8 +70,8 @@ pub struct VoiceDescription {
     pub mechanics_per_output: u32,
     /// Pascals mapped to PCM full scale by the command output.
     pub full_scale_pa: f64,
-    /// Gas filling the tract and the exterior.
-    pub gas: GasState,
+    /// One immutable gas record fills the tract and the exterior.
+    gas: GasRecord,
     /// `true` for the two-mass fold, `false` for the one-mass image.
     pub two_mass: bool,
     /// Lumped fold parameters.
@@ -132,6 +135,21 @@ impl VoiceDescription {
     /// Oversize or non-UTF-8 input, an unknown or repeated key, a malformed or
     /// non-finite field, or any non-physical value, each named.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        Self::from_bytes_with_gas_sources(bytes, None)
+    }
+
+    /// Admit legacy air, named mixtures or source-backed NASA-9 gas records.
+    /// All tract, fold-flow and radiation consumers borrow the same state;
+    /// source receipts are retained without changing its coefficients.
+    /// The medium is stationary; this does not model species transport.
+    ///
+    /// # Errors
+    /// Ordinary file refusals plus missing, ambiguous or out-of-domain gas
+    /// sources. NASA-9 records never fall back to fixed heat capacities.
+    pub fn from_bytes_with_gas_sources(
+        bytes: &[u8],
+        sources: Option<&ThermochemicalSources<'_>>,
+    ) -> Result<Self, String> {
         if bytes.len() > MAX_VOICE_PERFORMANCE_BYTES {
             return Err("voice performance file exceeds its size limit".into());
         }
@@ -181,17 +199,17 @@ impl VoiceDescription {
                     once(&mut full_scale, pa, key)?;
                 }
                 "ambient" => {
-                    arity(&rest, 4, key)?;
-                    if rest[0] != "moist_air" {
-                        return Err("ambient supports `moist_air` only".into());
+                    let record_text = rest.join(" ");
+                    let mut fields = record_text.split_ascii_whitespace();
+                    if fields.clone().next() == Some("moist_air") {
+                        fields.next();
                     }
-                    let state = GasState::try_new_moist_air(
-                        field(&rest, 1, "temperature")?,
-                        field(&rest, 2, "pressure")?,
-                        field(&rest, 3, "relative humidity")?,
-                    )
-                    .map_err(|e| format!("ambient gas refused: {e:?}"))?;
-                    once(&mut gas, state, key)?;
+                    let record = read_gas_record(&mut fields, None, sources)
+                        .map_err(|e| format!("ambient gas refused: {e}"))?;
+                    if fields.next().is_some() {
+                        return Err("ambient gas contains extra fields".into());
+                    }
+                    once(&mut gas, record, key)?;
                 }
                 "fold" => {
                     arity(&rest, 10, key)?;
@@ -316,12 +334,25 @@ impl VoiceDescription {
         })
     }
 
+    /// The exact shared state filling the tract and the exterior.
+    #[must_use]
+    pub fn ambient_gas(&self) -> &GasState {
+        self.gas.state()
+    }
+
+    /// Original source receipts remain attached to the numerical gas view.
+    #[must_use]
+    pub const fn gas_record(&self) -> &GasRecord {
+        &self.gas
+    }
+
     /// Realize the island, the tract's mouth-flow line and the microphone.
     ///
     /// # Errors
     /// Any owner's refusal: the chart licence check, the fold card, a line
     /// that does not converge or is not passive, or an under-resolved band.
     pub fn build(&self) -> Result<VoicePerformance, String> {
+        let gas = self.ambient_gas();
         let chart = TractChart::try_new(
             self.sections.clone(),
             &self.tract_source,
@@ -334,7 +365,7 @@ impl VoiceDescription {
             self.fold,
             self.two_mass,
             &duct,
-            &self.gas,
+            gas,
             self.termination,
             mechanics_rate,
             self.wall.as_ref(),
@@ -342,7 +373,7 @@ impl VoiceDescription {
         .map_err(|e| format!("glottal island refused: {e:?}"))?;
         let (mouth, receipt) = mouth_flow_line(
             &duct,
-            &self.gas,
+            gas,
             self.termination,
             mechanics_rate,
             island.port_impedance(),
@@ -353,8 +384,8 @@ impl VoiceDescription {
         let mouth_area = self.sections.last().map_or(0.0, |s| s.area_m2);
         let mouth_radius_m = (mouth_area / core::f64::consts::PI).sqrt();
         let medium = RayleighMedium {
-            density: self.gas.density,
-            sound_speed: self.gas.sound_speed,
+            density: gas.density,
+            sound_speed: gas.sound_speed,
         };
         let receiver = BaffledPressure::circular_outlet_multirate_differentiating(
             mouth_radius_m,
@@ -364,7 +395,7 @@ impl VoiceDescription {
             medium,
         )?;
         let passive_formants_hz = chart
-            .tmm_formants_terminated(&self.gas, self.wall.as_ref(), self.termination, 4)
+            .tmm_formants_terminated(gas, self.wall.as_ref(), self.termination, 4)
             .map_err(|e| format!("{e:?}"));
         let info = VoiceInfo {
             output_rate_hz: self.output_rate_hz,
@@ -376,7 +407,7 @@ impl VoiceDescription {
             tract_length_m: self.sections.iter().map(|s| s.length_m).sum(),
             glottal_radius_m: (self.sections[0].area_m2 / core::f64::consts::PI).sqrt(),
             mouth_radius_m,
-            sound_speed_m_s: self.gas.sound_speed,
+            sound_speed_m_s: gas.sound_speed,
             has_wall: self.wall.is_some(),
             mouth_flow_taps: receipt.n_fft,
             mouth_flow_rungs: receipt.rungs.len(),
@@ -601,6 +632,10 @@ impl PressureRenderer for VoicePerformance {
 }
 
 #[cfg(test)]
+#[path = "render/schedule/reed/field_input/tests/support.rs"]
+mod gas_test_support;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -625,6 +660,109 @@ mod tests {
         }
         text.push_str(extra);
         text
+    }
+
+    fn with_gas(record: &str) -> String {
+        fixture("").replace("moist_air 310.15 101325 1.0", record)
+    }
+
+    fn pressure(description: &VoiceDescription) -> Vec<f64> {
+        let mut performance = description.build().expect("gas reaches all physics owners");
+        assert_eq!(
+            performance.info().sound_speed_m_s,
+            description.ambient_gas().sound_speed
+        );
+        let mut result = vec![0.0; 1200];
+        for block in result.chunks_mut(37) {
+            performance.block(block).expect("physical pressure");
+        }
+        assert!(result.iter().all(|value| value.is_finite()));
+        assert!(result.iter().any(|value| value.abs() > 1e-12));
+        result
+    }
+
+    #[test]
+    fn g3_shared_mixture_composition_and_pressure_change_the_radiated_voice() {
+        let legacy = VoiceDescription::from_bytes(fixture("").as_bytes()).unwrap();
+        assert_eq!(
+            *legacy.ambient_gas(),
+            GasState::try_new_moist_air(310.15, 101325.0, 1.0).unwrap()
+        );
+        let records = [
+            "mixture 310.15 101325 mole 2 N2 0.8 O2 0.2",
+            "mixture 310.15 101325 mole 2 N2 0.8 CO2 0.2",
+            "mixture 310.15 80000 mole 2 N2 0.8 O2 0.2",
+        ];
+        let mut rendered = Vec::new();
+        for record in records {
+            let description = VoiceDescription::from_bytes(with_gas(record).as_bytes()).unwrap();
+            let expected =
+                read_gas_record(&mut record.split_ascii_whitespace(), None, None).unwrap();
+            assert_eq!(description.gas_record(), &expected);
+            rendered.push(pressure(&description));
+        }
+        assert_ne!(
+            rendered[0], rendered[1],
+            "composition must reach the audible loop"
+        );
+        assert_ne!(
+            rendered[0], rendered[2],
+            "pressure must reach flow and radiation"
+        );
+    }
+
+    #[test]
+    fn g3_nasa9_source_swap_changes_voice_pressure_and_retains_the_original_packs() {
+        use fs_material::gas_species::input::ThermochemicalPhase;
+        let record = "thermochemical 310.15 101325 mole 1 specimen-gas 1";
+        let text = with_gas(record);
+        assert!(
+            VoiceDescription::from_bytes(text.as_bytes())
+                .unwrap_err()
+                .contains("explicit source registry")
+        );
+        let mut rendered = Vec::new();
+        for cp_r in [3.5, 4.5] {
+            let packs = gas_test_support::packs("specimen-gas", 0.028, cp_r, 200.0);
+            let bindings = [packs.binding()];
+            let sources = ThermochemicalSources {
+                species: &bindings,
+                water_species: None,
+                phase: ThermochemicalPhase::FrozenGas,
+            };
+            let description =
+                VoiceDescription::from_bytes_with_gas_sources(text.as_bytes(), Some(&sources))
+                    .unwrap();
+            let expected =
+                read_gas_record(&mut record.split_ascii_whitespace(), None, Some(&sources))
+                    .unwrap();
+            assert_eq!(description.gas_record(), &expected);
+            let GasRecord::Thermochemical(gas) = description.gas_record() else {
+                panic!("retained source");
+            };
+            assert_eq!(gas.source_packs()[0].nasa9_pack, packs.nasa9.content_hash());
+            rendered.push(pressure(&description));
+        }
+        assert_ne!(
+            rendered[0], rendered[1],
+            "data-only heat-capacity swap must reach sound"
+        );
+    }
+
+    #[test]
+    fn gas_refusals_keep_source_admission_strict() {
+        for record in [
+            "mixture 310.15 101325 mole 2 N2 0.7 O2 0.2",
+            "mixture 310.15 101325 mole 1 unavailable 1",
+            "mixture 310.15 101325 mole 1 N2 1 extra",
+            "moist_air 310.15 101325 1 extra",
+            "thermochemical 310.15 101325 mole 1 specimen-gas 1",
+        ] {
+            assert!(
+                VoiceDescription::from_bytes(with_gas(record).as_bytes()).is_err(),
+                "{record}"
+            );
+        }
     }
 
     #[test]

@@ -1,12 +1,13 @@
 //! Glottal-source plus tract-area-function command; reuses the streaming output owner.
 
-use std::io::{Read, Write};
-use std::path::Path;
+use super::{RATE, create_outputs, json_string, stream_output};
 use fs_blake3::DomainHasher;
 use fs_couple::voice_performance::{
     MAX_VOICE_PERFORMANCE_BYTES, VOICE_PERFORMANCE_SCHEMA, VoiceDescription,
 };
-use super::{RATE, create_outputs, json_string, stream_output};
+use fs_material::gas_species::input::ThermochemicalSources;
+use std::io::{Read, Write};
+use std::path::Path;
 
 const INPUT_HASH_DOMAIN: &str = "org.frankensim.fs-couple.voice-performance.v1";
 
@@ -34,7 +35,10 @@ fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
     Ok((*input, *output, block.unwrap_or(512)))
 }
 
-pub(super) fn run(args: &[String]) -> Result<(), String> {
+pub(super) fn run_with_gas_sources(
+    args: &[String],
+    sources: Option<&ThermochemicalSources<'_>>,
+) -> Result<(), String> {
     let (input, output, block) = options(args)?;
     let output = Path::new(output);
     let sidecar = output.with_extension("provenance.json");
@@ -45,7 +49,7 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     let mut bytes = Vec::new();
     file.take((MAX_VOICE_PERFORMANCE_BYTES + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("voice input read failed: {e}"))?;
-    let description = VoiceDescription::from_bytes(&bytes)?;
+    let description = VoiceDescription::from_bytes_with_gas_sources(&bytes, sources)?;
     if description.output_rate_hz != RATE {
         return Err("music_render requires an explicitly declared 48000 Hz output clock; no implicit resampling".into());
     }
@@ -62,6 +66,8 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     let info = performance.info();
     let stats = performance.stats();
     let mic = description.microphone.position_m;
+    let gas_sources =
+        super::thermochemical::provenance(core::slice::from_ref(description.gas_record()));
     // Rigid-end limit of this tract, mouth load and wall; see VoiceInfo::passive_formants_hz.
     let passive = match &info.passive_formants_hz {
         Ok(formants) => format!(
@@ -83,7 +89,7 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
          \"microphone_m\":[{:e},{:e},{:e}],\"mouth_flow_taps\":{},\"mouth_flow_rungs\":{},\
          \"passive_tract_formants_hz\":{passive},\
          \"peak_glottal_flow_m3_s\":{:e},\"closed_fraction\":{:e},\
-         \"model_scope\":\"lumped fold pHS on a plane-wave series tract with TMM viscothermal loss and a declared radiation load; mouth flow radiated through an infinite-baffle circular opening, no head diffraction, nasal branch or side cavity; the supraglottal pressure is never the output\"}}}}",
+         \"model_scope\":\"lumped fold pHS on a plane-wave series tract with TMM viscothermal loss and a declared radiation load; mouth flow radiated through an infinite-baffle circular opening, no head diffraction, nasal branch or side cavity; the supraglottal pressure is never the output\"}}{gas_sources}}}",
         description.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.mechanics_rate_hz, info.two_mass, info.sections, info.tract_length_m,
         info.glottal_radius_m, info.mouth_radius_m, info.sound_speed_m_s,
