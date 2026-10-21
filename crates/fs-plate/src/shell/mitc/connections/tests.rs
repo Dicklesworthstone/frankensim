@@ -103,3 +103,18 @@ fn connection_refusals_do_not_publish_partial_stiffness() {
     assert!(model.with_connections(&[connection], budget(), || false).is_err());
     assert_eq!(original, model.pencil.k.row(0).1);
 }
+
+#[test]
+fn projection_admits_exactly_the_mode_ceiling_and_refuses_one_more() {
+    let model = model();
+    let modes = |n: usize| vec![vec![0.0; 18]; n];
+    // The former 64-mode limit still passes, so do 65 and the ceiling; one more, or none, refuses.
+    for n in [1, 64, 65, MAX_CONNECTION_MODES] {
+        let rows = model.project_connections(&[link()], &modes(n), budget(), || false).unwrap();
+        assert_eq!(rows[0].len(), n);
+    }
+    assert!(model.project_connections(&[link()], &modes(MAX_CONNECTION_MODES + 1), budget(), || false).is_err());
+    assert!(model.project_connections(&[link()], &modes(0), budget(), || false).is_err());
+    assert!(connection_modes_admitted(MAX_CONNECTION_MODES));
+    assert!(!connection_modes_admitted(MAX_CONNECTION_MODES + 1));
+}

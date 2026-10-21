@@ -16,6 +16,9 @@ use fs_plate::shell::{modes_shell, mitc::{assemble_mitc3p, MitcBudget, NodalDire
 /// the caller's `max_projection_terms`, which is the cost governor, and the mesh must actually hold
 /// that many modes inside its eigenvalue window.
 pub const MAX_SHELL_MODES: usize = 256;
+// The shell connection projection inside fs-plate admits at most this many physical modes; a larger ceiling here
+// would pass the check below and fail deep inside the eigen reduction.
+const _: () = assert!(MAX_SHELL_MODES <= fs_plate::shell::mitc::connections::MAX_CONNECTION_MODES);
 
 /// Whether `n` retained modes fit a declared `max_modes` that is itself within
 /// `1..=`[`MAX_SHELL_MODES`]. Shared by the single-body and the assembly reductions.
