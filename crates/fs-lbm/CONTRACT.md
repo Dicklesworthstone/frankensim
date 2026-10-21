@@ -787,12 +787,23 @@ scheme) and the third-order non-equilibrium part rebuilt recursively from the de
 `F = -grad p'` in conservative face form with the half-force velocity `u = (sum c f + F/2) / rho`; the first-moment
 non-equilibrium `-F/2` that the regularised projection drops is added back so that the momentum receives exactly `F`.
 Total energy `E = rho (c_v theta + |u|^2 / 2)` is a conservative finite-volume field on the same cells with the face flux
-`(E + p) u - sigma . u - kappa grad T` (`sigma` from the same non-equilibrium moments; fourth-order face values away from
-walls, two-point beside walls). **Conservation class: total-energy conservative.** Interior face fluxes are single-valued,
+`(E + p) u - sigma . u - kappa grad T` (`sigma` from the second moment of the pre-collision populations about `feq`, shifted by
+Guo's `(F u + u F) / 2` as described below; fourth-order face values away from walls, two-point beside walls). **Conservation class: total-energy conservative.** Interior face fluxes are single-valued,
 so the sum of `E` over the fluid cells changes only by the wall heat flux, to round-off, in a closed adiabatic box; mass and
 momentum are the lattice's. The temperature is `(E - KE) / (rho c_v)` and feeds back only through the force.
 Coupling in time: trapezoid on the flux divergences of the two levels with `COUPLING_PASSES` fixed
 predictor-corrector passes. `NSF3_BIT_SEMANTICS_VERSION` moves with any change of order, coefficient or coupling.
+
+**Stress of the energy flux (found by the Mach map; `NSF3_BIT_SEMANTICS_VERSION` 3).** Guo's scheme stores the populations half a
+force source behind the physical ones (`f = f_phys - S / 2`, and the source has second moment `F u + u F`), so the viscous
+stress that enters `sigma . u` is `-(1 - w_s / 2)` times the deviatoric part (and `-(1 - w_b / 2)` times the third of the trace)
+of `Pi_neq + (F u + u F) / 2`. The first version took `Pi_neq` from `f - feq` alone, so the thermal-pressure force `F` acting on a
+flow `u` appeared as a spurious viscous stress: an entropy wave advected at Mach 0.2 decayed slower than the quiescent wave by
+-2.2e-2 (-0.57 Mach^2, equal to `-gamma (gamma - 1) Mach^2`, and unchanged from 32 to 64 points per wavelength, so not a
+truncation error); with the shift the defect is +2.3e-3 on 32 points and +8.8e-4 on 64. Removing `sigma . u` altogether gave
++9.8e-4, which located the term. The momentum equation was never affected (the lattice collision carries its own stress); the
+Taylor-Green numbers of the battery did not move (kinetic-energy decay rate over `4 nu k^2` 0.99945 on 16 and 0.99964 on 32
+points; accumulated heating +1.388e-2 and +1.138e-2).
 
 **Why not a temperature-corrected equilibrium (measured).** The first formulation put `theta - theta0` into the equilibrium
 (Hermite through third order). Its Bloch-linearised one-step matrix (28 x 28: 27 populations and the energy) about a
@@ -838,12 +849,25 @@ and -4.656e-3 per step for the same six viscosities. No range is refused beyond 
 refused); a temperature outside the declared run window; more cells than `maximum_cells` (cap admitted, cap + 1
 refused); a local Mach number `|u| / sqrt(gamma theta)` above `maximum_mach`; `|theta / theta0 - 1|` above
 `maximum_temperature_ratio`; non-finite or non-positive density, energy or temperature; malformed bounds, bulk rate
-empty citation or non-positive ratio, a lattice viscosity above the verified envelope (above), zero workers. A failed `step` leaves the published state unchanged.
+empty citation or non-positive ratio, a lattice viscosity above the verified envelope (above), zero workers; a declared
+`maximum_mach` above `MAX_QUALIFIED_MACH` = 0.2 (`NsfError::MachBound`: 0.2 admitted, 0.2 x (1 + 1e-9) refused; the bound is the
+largest Mach number of the Galilean-invariance map in `tests/nsf3_qualification.rs` and nothing is claimed above it); a wall
+velocity on a periodic axis, non-finite, wall-normal or above the Mach bound (`set_edge_velocity`). A failed `step` leaves the published state unchanged.
 
 **Determinism.** Every cell pass is a pure function of read-only arrays written by `par_fill` over fixed contiguous
 chunks; every reduction is serial in cell order. The result is bitwise independent of `NsfSpec::workers`
 (`nsf3_bitwise_worker_count_invariance`: 1, 2, 3 and 7 workers). No transcendental function is evaluated in the module
 (the receipts use the repository's `det` functions). No wasm32 build or golden hash is claimed.
+
+**Moving walls.** `set_edge_velocity(axis, high, u)` gives the bounce-back wall at the low or high edge of a non-periodic axis a
+tangential velocity: each link that crosses it gains the momentum `2 w_q rho (c_q . u_w) / theta0` (Ladd), and the energy flux
+through the wall face gains the viscous work `-sigma_{a b} u_{w b}` with `sigma` of the cell beside the wall (exact for a uniform
+stress, first order in `dx` for a developing flow). Solid cells inside the domain stay at rest, a velocity with a wall-normal
+component is refused (no mass crosses a wall), and the speed is held to the declared Mach bound. With a moving wall
+`wall_heat_j` is the net energy through the wall faces (heat plus work), and `viscous_heating_j`, defined as the remainder of
+the internal-energy budget, excludes that work: in a steady Couette flow the net wall energy vanishes (work in equals heat out),
+so the ledger carries no heating information there and the physical check is the temperature profile
+(`couette_viscous_heating_profile`).
 
 **Ledger.** `EnergyLedger` reports internal, kinetic, pressure-work, viscous-heating and wall-heat terms of a step in joules
 and `residual_rel = |change of total energy - wall heat| / total energy`. `pressure_work_j = -integral(p div u) dV dt` is the
@@ -853,7 +877,8 @@ round-off. THAT IDENTITY IS BOOKKEEPING. The physical content (the heating is th
 Taylor-Green kinetic-energy decay rate in the battery.
 
 **Conformance (`tests/nsf3_battery.rs`).** `equilibrium_recovers_conserved_moments` (G0: mass, momentum, the second moment
-and every third moment the lattice can represent, 1e-13), `refusals_cap_and_cap_plus_one` (G0, including the viscosity envelope and the anonymous ratio),
+and every third moment the lattice can represent, 1e-13), `refusals_cap_and_cap_plus_one` (G0, including the viscosity envelope, the anonymous ratio and the Mach-bound refusal; the
+spec declares `MAX_QUALIFIED_MACH`),
 `closed_box_energy_budget_closes` (G0: random velocity + temperature state, six bounce-back walls, 1e4 steps at the
 viscosity of dx 50 um, total energy <= 1e-11 relative), `viscous_heating_equals_kinetic_loss` (G0 identity <= 1e-13 of
 the total energy per step; G1: kinetic-energy decay rate within 5e-3 of `4 nu k^2` and accumulated heating within 2e-2,
@@ -868,7 +893,8 @@ one passing receipt per stage (closed-box, viscous-heating, wall-heat, sound-spe
 
 **No-claim boundaries (`nsf3`).** The sound-speed band of 1e-4 is met at 288 points per wavelength, NOT at 32:
 dispersion is second order (observed order 2.00 between 192 and 288), and the athermal D3Q27 scheme alone is already
-about -1.8e-4 at 32 points. Not turbulence-resolved, not shock-capturing, no open or moving boundary, no entropic or
+about -1.8e-4 at 32 points. Not turbulence-resolved, not shock-capturing, no open boundary and no moving boundary other than a
+tangential velocity of a non-periodic domain edge, no entropic or
 energy-population thermal LBM (the thermal pressure is a force), no temperature-dependent equilibrium. The force-coupled
 lattice resolves the sound speed `sqrt(gamma theta)` only while it stays below the lattice speed: the Mach and
 temperature-ratio bounds are refusals, not tuning. The bulk-to-shear ratio is a cited input, not a module result; its

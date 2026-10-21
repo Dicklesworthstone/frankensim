@@ -3,7 +3,7 @@
 //! Gauntlet tiers are named per test. The heavy rungs (1e4-step closed box, the 192-point acoustic rung) are
 //! release-lane runs; every number asserted here is the bead's band or an observed order, never a tuned value.
 use fs_lbm::d3q27::D3q27;
-use fs_lbm::nsf3::{equilibrium, EnergyLedger, NsfError, NsfGrid3, NsfSpec, WallThermal, THETA0};
+use fs_lbm::nsf3::{equilibrium, EnergyLedger, NsfError, NsfGrid3, NsfSpec, WallThermal, MAX_QUALIFIED_MACH, THETA0};
 use fs_material::gas::{GasSpec, GasState};
 use std::time::Instant;
 
@@ -16,7 +16,7 @@ fn spec(dims: [usize; 3], periodic: [bool; 3], wall: WallThermal, dx_m: f64) -> 
         pressure_pa: 101_325.0,
         dx_m,
         temperature_window_k: [273.15, 333.15],
-        maximum_mach: 0.3,
+        maximum_mach: MAX_QUALIFIED_MACH,
         maximum_temperature_ratio: 0.2,
         bulk_to_shear_ratio: 0.73,
         bulk_ratio_source: "Cramer 2012, Phys. Fluids 24, 066102: mu_b = 0.73 mu for N2 at 293 K",
@@ -134,6 +134,10 @@ fn refusals_cap_and_cap_plus_one() {
     let at = |scale: f64| move |_x: [usize; 3]| (1.0, [mach * c * scale, 0.0, 0.0], 293.15);
     assert!(NsfGrid3::<D3q27>::new(base(), free, at(1.0 - 1e-12)).is_ok());
     assert!(matches!(NsfGrid3::<D3q27>::new(base(), free, at(1.0 + 1e-9)), Err(NsfError::Mach { .. })));
+    // the declared bound itself is limited to the qualified Mach number: the qualified value admitted, a hair above refused
+    let mut s = base();
+    s.maximum_mach = MAX_QUALIFIED_MACH * (1.0 + 1e-9);
+    assert!(matches!(NsfGrid3::<D3q27>::new(s, free, rest), Err(NsfError::MachBound { .. })));
     // temperature ratio of the corrected equilibrium and the declared window
     let ratio = base().maximum_temperature_ratio;
     let t_hi = 293.15 * (1.0 + ratio * (1.0 + 1e-9));

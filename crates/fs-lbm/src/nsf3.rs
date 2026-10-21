@@ -52,8 +52,14 @@ pub const COUPLING_PASSES: usize = 3;
 /// stable at the sourced bulk ratio (|lambda| <= 1.0000 on eight oblique modes for 1e-5 <= nu <= 0.03; 1.146 at nu = 0.1). A
 /// larger one is refused, not adjusted.
 pub const MAX_VERIFIED_LATTICE_VISCOSITY: f64 = 0.03;
-/// Version of the arithmetic order, coefficients and coupling (bump on any change that moves bits).
-pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 2;
+/// Largest Mach number `|u| / sqrt(gamma theta)` the formulation is qualified for: the Galilean-invariance map of
+/// `tests/nsf3_qualification.rs` (advected entropy and shear waves at Mach 0.05, 0.1 and 0.2) keeps every Mach-dependent defect
+/// of a decay rate below 5e-3 of the quiescent rate up to this value, and nothing was measured above it. A larger declared
+/// `maximum_mach` is refused ([`NsfError::MachBound`]), not extrapolated.
+pub const MAX_QUALIFIED_MACH: f64 = 0.2;
+/// Version of the arithmetic order, coefficients and coupling (bump on any change that moves bits). 3: the stress of the
+/// energy flux carries the Guo half-force shift.
+pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 3;
 
 /// Refusals of the NSF grid. A failed step leaves the published state unchanged.
 #[derive(Clone, Debug, PartialEq)]
@@ -79,6 +85,13 @@ pub enum NsfError {
         requested: usize,
         /// Cap.
         maximum: usize,
+    },
+    /// A declared Mach bound above [`MAX_QUALIFIED_MACH`].
+    MachBound {
+        /// Requested bound.
+        requested: f64,
+        /// `MAX_QUALIFIED_MACH`.
+        qualified: f64,
     },
     /// Local Mach number above the declared bound.
     Mach {
@@ -329,12 +342,22 @@ fn collide<L: Lattice3<27>>(f: &[f64; Q], force: [f64; 3], ws: f64, wb: f64) -> 
     out
 }
 
-/// Viscous stress `sigma_ab = -(1 - ws/2) dev(Pi_neq) - (1 - wb/2) (tr/3) delta`: `[xx, yy, zz, xy, xz, yz]`.
+/// Viscous stress `sigma_ab = -(1 - ws/2) dev(Pi_neq) - (1 - wb/2) (tr/3) delta`: `[xx, yy, zz, xy, xz, yz]`, with `Pi_neq` the
+/// second moment of the pre-collision populations about `feq` PLUS `(F u + u F) / 2`: Guo's scheme stores the populations
+/// half a force source behind the physical ones (`f = f_phys - S/2`, and `S` has second moment `F u + u F`), so without the
+/// shift a thermal-pressure force `F` acting on a flow `u` would appear as a viscous stress. Measured on an entropy wave advected
+/// at Mach 0.2: the shift takes the decay-rate defect from -2.2e-2 to +2.3e-3 relative to the quiescent wave.
 fn stress<L: Lattice3<27>>(f: &[f64; Q], force: [f64; 3], ws: f64, wb: f64) -> [f64; 6] {
     let (rho, mom) = raw_moments::<L>(f);
     let u = half_force_velocity(rho, mom, force);
     let feq = equilibrium::<L>(rho, u, THETA0);
-    let p = neq_second::<L>(f, &feq);
+    let mut p = neq_second::<L>(f, &feq);
+    p[0] += force[0] * u[0];
+    p[1] += force[1] * u[1];
+    p[2] += force[2] * u[2];
+    p[3] += 0.5 * (force[0] * u[1] + force[1] * u[0]);
+    p[4] += 0.5 * (force[0] * u[2] + force[2] * u[0]);
+    p[5] += 0.5 * (force[1] * u[2] + force[2] * u[1]);
     let tr = p[0] + p[1] + p[2];
     let a = 1.0 - ws / 2.0;
     let b = (1.0 - wb / 2.0) * tr / 3.0;
@@ -379,6 +402,9 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     wall_out: f64,
     steps: usize,
     cumulative: EnergyLedger,
+    /// Velocity of the bounce-back wall at the low (index 0) and high (index 1) edge of each non-periodic axis.
+    edge_velocity: [[[f64; 3]; 2]; 3],
+    moving_walls: bool,
     marker: core::marker::PhantomData<L>,
 }
 
@@ -405,6 +431,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             && spec.bulk_to_shear_ratio.is_finite() && spec.bulk_to_shear_ratio > 0.0 && !spec.bulk_ratio_source.is_empty()
             && spec.workers >= 1 && spec.transport_points >= 2
             && spec.temperature_window_k[0] < spec.temperature_window_k[1];
+        if spec.maximum_mach.is_finite() && spec.maximum_mach > MAX_QUALIFIED_MACH {
+            return Err(NsfError::MachBound { requested: spec.maximum_mach, qualified: MAX_QUALIFIED_MACH });
+        }
         if !ok {
             return Err(NsfError::Input("dx, Mach and temperature bounds, a cited positive bulk-to-shear ratio, workers, table points, window"));
         }
@@ -483,6 +512,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             wall_out: 0.0,
             steps: 0,
             cumulative: EnergyLedger::default(),
+            edge_velocity: [[[0.0; 3]; 2]; 3],
+            moving_walls: false,
             marker: core::marker::PhantomData,
         };
         grid.force = grid.force_field(&rho, &grid.theta);
@@ -530,6 +561,36 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     }
     fn fluid_at(&self, x: [usize; 3], axis: usize, s: i64) -> Option<usize> {
         self.shifted(x, axis, s).filter(|&j| !self.solid[j])
+    }
+
+    /// Give the bounce-back wall at the low (`high = false`) or high edge of the non-periodic `axis` a velocity [lattice units,
+    /// tangential to the wall]. A link that crosses the wall gains the momentum `2 w_q rho (c_q . u_w) / theta0` (Ladd), and
+    /// the energy flux through the wall face gains the viscous work `-sigma_{a b} u_{w b}` with `sigma` of the cell beside the
+    /// wall (first order in dx for a developing flow, exact for a uniform stress). Solid cells inside the domain stay at
+    /// rest. The flux history is restarted at the current state.
+    ///
+    /// # Errors
+    /// [`NsfError::Input`] for a periodic axis, a non-finite or wall-normal velocity, or a speed above the declared Mach bound.
+    pub fn set_edge_velocity(&mut self, axis: usize, high: bool, velocity: [f64; 3]) -> Result<(), NsfError> {
+        if axis >= 3 || self.spec.periodic[axis] {
+            return Err(NsfError::Input("an edge wall exists only on a non-periodic axis"));
+        }
+        if !velocity.iter().all(|v| v.is_finite()) || velocity[axis] != 0.0 {
+            return Err(NsfError::Input("a wall velocity must be finite and tangential to the wall"));
+        }
+        let speed = (velocity[0] * velocity[0] + velocity[1] * velocity[1] + velocity[2] * velocity[2]).sqrt();
+        if speed / (self.law.gamma * THETA0).sqrt() > self.spec.maximum_mach {
+            return Err(NsfError::Input("wall speed above the declared Mach bound"));
+        }
+        self.edge_velocity[axis][usize::from(high)] = velocity;
+        self.moving_walls = self.edge_velocity.iter().flatten().any(|u| u.iter().any(|&v| v != 0.0));
+        let (rho, mom) = self.macro_fields(&self.f);
+        let u = self.velocity_field(&rho, &mom, &self.force);
+        let sig = self.stress_field(&self.f, &self.force, &rho, &self.theta);
+        let (div, wall) = self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig);
+        self.div = div;
+        self.wall_out = wall;
+        Ok(())
     }
 
     fn macro_fields(&self, f: &[[f64; Q]]) -> (Vec<f64>, Vec<[f64; 3]>) {
@@ -639,15 +700,27 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             }
             [face(i, 0).unwrap_or(0.0), face(i, 1).unwrap_or(0.0), face(i, 2).unwrap_or(0.0)]
         });
-        // wall face: flux in the +axis direction (heat only; u = 0 at a bounce-back wall)
-        let wall_flux = |i: usize, s: i64| -> f64 {
-            match wall_theta {
+        // wall face: flux in the +axis direction. Heat through the half cell; the viscous work `-sigma_{a b} u_{w b}` of a moving
+        // edge wall (zero normal velocity, so no convective part; solid cells and still walls do no work).
+        let wall_flux = |i: usize, a: usize, s: i64| -> f64 {
+            let heat = match wall_theta {
                 None => 0.0,
                 Some(tw) => {
                     let kf = self.law.kappa_lattice(0.5 * (theta[i] + tw));
                     if s > 0 { -kf * (tw - theta[i]) / 0.5 } else { -kf * (theta[i] - tw) / 0.5 }
                 }
+            };
+            if !self.moving_walls || self.shifted(self.at(i), a, s).is_some() {
+                return heat;
             }
+            let uw = self.edge_velocity[a][usize::from(s > 0)];
+            let sg = sig[i];
+            let row = match a {
+                0 => [sg[0], sg[3], sg[4]],
+                1 => [sg[3], sg[1], sg[5]],
+                _ => [sg[4], sg[5], sg[2]],
+            };
+            heat - (row[0] * uw[0] + row[1] * uw[1] + row[2] * uw[2])
         };
         let mut div = vec![0.0; n];
         par_fill(&mut div, self.spec.workers, &|i| {
@@ -659,11 +732,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             for a in 0..3 {
                 d += match self.fluid_at(x, a, 1) {
                     Some(_) => plus[i][a],
-                    None => wall_flux(i, 1),
+                    None => wall_flux(i, a, 1),
                 };
                 d -= match self.fluid_at(x, a, -1) {
                     Some(m) => plus[m][a],
-                    None => wall_flux(i, -1),
+                    None => wall_flux(i, a, -1),
                 };
             }
             d
@@ -676,10 +749,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             let x = self.at(i);
             for a in 0..3 {
                 if self.fluid_at(x, a, 1).is_none() {
-                    out += wall_flux(i, 1);
+                    out += wall_flux(i, a, 1);
                 }
                 if self.fluid_at(x, a, -1).is_none() {
-                    out -= wall_flux(i, -1);
+                    out -= wall_flux(i, a, -1);
                 }
             }
         }
@@ -697,15 +770,29 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             let mut out = [0.0; Q];
             for q in 0..Q {
                 let c = L::E[q];
-                let mut y = Some(x);
+                let mut y = x;
+                // the first axis whose step leaves a non-periodic domain: the edge wall that the link bounces from
+                let mut edge: Option<(usize, usize)> = None;
                 for a in 0..3 {
-                    if c[a] != 0 {
-                        y = y.and_then(|yy| self.shifted(yy, a, -i64::from(c[a])).map(|j| self.at(j)));
+                    if c[a] != 0 && edge.is_none() {
+                        match self.shifted(y, a, -i64::from(c[a])) {
+                            Some(j) => y = self.at(j),
+                            None => edge = Some((a, usize::from(c[a] < 0))),
+                        }
                     }
                 }
-                out[q] = match y.map(|yy| self.index(yy)) {
-                    Some(j) if !self.solid[j] => post[j][q],
-                    _ => post[i][L::OPP[q]],
+                out[q] = match edge {
+                    None if !self.solid[self.index(y)] => post[self.index(y)][q],
+                    _ => {
+                        let mut v = post[i][L::OPP[q]];
+                        if let (true, Some((a, side))) = (self.moving_walls, edge) {
+                            let uw = self.edge_velocity[a][side];
+                            let cu = f64::from(c[0]) * uw[0] + f64::from(c[1]) * uw[1] + f64::from(c[2]) * uw[2];
+                            let rho: f64 = post[i].iter().sum();
+                            v += 2.0 * L::W[q] * rho * cu / THETA0;
+                        }
+                        v
+                    }
                 };
             }
             out

@@ -4,16 +4,18 @@
 //! isothermal-mutation check (G0), the declared fit-window refusals, `quiescent_conduction_fourier` (G1: entropy-mode decay
 //! against the exact linearized rate on a three-rung ladder at a fixed physical wavelength, i.e. acoustic scaling with `dt`
 //! proportional to `dx`) and `linear_modes_match_linearized_nsf` (G1: phase speed and attenuation of a travelling acoustic wave at
-//! the 10 kHz campaign resolution, and shear-mode decay). Not yet landed: the manufactured solution, the Couette case, the
-//! Mach-defect map and the typed Mach refusal. Nothing here is tuned; bands are proposals.
+//! the 10 kHz campaign resolution, and shear-mode decay), `couette_viscous_heating_profile` (G1: compressible Couette flow
+//! between isothermal walls, one of them moving) and `finite_mach_and_lattice_defects_map` (G2: Galilean invariance of the
+//! thermal and viscous channels at Mach 0.05, 0.1 and 0.2, which sets `MAX_QUALIFIED_MACH`). Not yet landed: the manufactured
+//! solution. Nothing here is tuned; bands are proposals.
 //!
-//! The two acoustic tests are `#[ignore]`d because a debug build is far too slow for them: run them as
+//! The heavy tests (acoustic, Couette, Mach map) are `#[ignore]`d because a debug build is far too slow for them: run them as
 //! `cargo test --release -p fs-lbm --test nsf3_qualification -- --include-ignored`.
 use fs_lbm::d3q27::D3q27;
 use fs_lbm::nsf3::dispersion::{
     C64, GasPoint, linearized_modes, linearized_nsf_modes, longitudinal_eigenvector,
 };
-use fs_lbm::nsf3::{NsfGrid3, NsfSpec, WallThermal};
+use fs_lbm::nsf3::{MAX_QUALIFIED_MACH, NsfGrid3, NsfSpec, THETA0, WallThermal};
 use fs_material::gas::{GasSpec, GasState};
 
 fn air() -> GasState {
@@ -41,7 +43,7 @@ fn spec(dims: [usize; 3], dx_m: f64) -> NsfSpec {
         pressure_pa: 101_325.0,
         dx_m,
         temperature_window_k: [273.15, 333.15],
-        maximum_mach: 0.3,
+        maximum_mach: MAX_QUALIFIED_MACH,
         maximum_temperature_ratio: 0.2,
         bulk_to_shear_ratio: 0.73,
         bulk_ratio_source: "Cramer 2012, Phys. Fluids 24, 066102: mu_b = 0.73 mu for N2 at 293 K",
@@ -504,6 +506,39 @@ fn acoustic_fit(
     }
 }
 
+#[test]
+fn transverse_extent_does_not_matter() {
+    // G0. A field uniform across the box gives the same result on a 2 x 2 and a 4 x 4 transverse section (the 2 x 2 box is what the
+    // ladders below use to stay affordable): same decay-rate error to 1e-9 relative on the 16-point rung.
+    let a = entropy_decay_error(16, 1.2e-3, 2);
+    let b = entropy_decay_error(16, 1.2e-3, 4);
+    println!("transverse 2x2: {a:+.9e}, 4x4: {b:+.9e}");
+    assert!((a - b).abs() <= 1e-9 * a.abs().max(1e-3), "{a} vs {b}");
+}
+
+#[test]
+fn quiescent_conduction_fourier() {
+    // G1. A small isobaric temperature wave in a quiescent periodic box decays as the entropy mode of the exact linearized NSF
+    // (Fourier conduction at constant pressure, kappa k^2 / (rho c_p) to leading order), on a 16 / 32 / 64 points-per-wavelength
+    // ladder at a fixed physical wavelength of 1.2 mm (2 x 2 transverse section, fit window 0.02 to 0.35 e-folds); observed order >= 1.8 and the finest rung within 1e-3.
+    let lambda_m = 1.2e-3;
+    let errs: Vec<f64> = [16usize, 32, 64]
+        .iter()
+        .map(|&n| entropy_decay_error(n, lambda_m, 2))
+        .collect();
+    for (n, e) in [16usize, 32, 64].iter().zip(&errs) {
+        println!("conduction {n} points per wavelength: decay rate / exact - 1 = {e:+.4e}");
+    }
+    let order = (errs[1].abs() / errs[2].abs()).log2();
+    println!("observed order between 32 and 64: {order:.2}");
+    assert!(
+        errs.windows(2).all(|w| w[0].abs() > w[1].abs()),
+        "error must shrink: {errs:?}"
+    );
+    assert!(order >= 1.8, "observed order {order}");
+    assert!(errs[2].abs() <= 1e-3, "finest rung {}", errs[2]);
+}
+
 /// Wavelength of the acoustic ladder: 34.4 mm = 688 cells of 50 um (the campaign grid), i.e. 9.98 kHz in air at 293.15 K; the
 /// declared upper band edge is 10 kHz and the nearest whole-cell wavelength is used.
 const ACOUSTIC_LAMBDA_M: f64 = 34.4e-3;
@@ -607,4 +642,291 @@ fn linear_modes_match_linearized_nsf() {
         order(&shear),
         shear[2]
     );
+}
+
+/// The two diffusive modes whose Galilean invariance is mapped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Diffusive {
+    /// Isobaric temperature wave (entropy mode, thermal conduction).
+    Entropy,
+    /// Transverse velocity wave (shear mode, viscosity).
+    Shear,
+}
+
+/// Defects of a diffusive wave advected along x at Mach `mach` (uniform velocity, uniform pressure) against the exact solution,
+/// which is the quiescent mode translated at the flow speed: the fitted decay rate over the quiescent exact rate, minus 1, and the
+/// fitted translation speed over `0.999 * mach * c` (the mean flow actually imposed), minus 1 (zero for `mach = 0`). Same window as
+/// the quiescent cases.
+fn advected_wave(
+    ppw: usize,
+    lambda_m: f64,
+    mach: f64,
+    mode: Diffusive,
+    transverse: usize,
+) -> (f64, f64) {
+    let a = match mode {
+        Diffusive::Entropy => 5.0e-4,
+        Diffusive::Shear => 1.0e-3,
+    };
+    let dx = lambda_m / ppw as f64;
+    let k_lat = 2.0 * core::f64::consts::PI / ppw as f64;
+    let gas = air();
+    // c / (dx / dt) = sqrt(gamma / 3). The mean flow is 0.1 % below the nominal Mach number so that the local Mach number, which
+    // follows the wave's own temperature and velocity fluctuations, stays within the declared bound at the top of the map.
+    let u_lat = mach * (1.0 - 1.0e-3) * (gas.gamma / 3.0).sqrt();
+    let mut g = NsfGrid3::<D3q27>::new(
+        spec([ppw, transverse, transverse], dx),
+        |_| false,
+        move |x| {
+            let w = (k_lat * x[0] as f64).sin();
+            match mode {
+                Diffusive::Entropy => (
+                    1.0 / (1.0 + a * w),
+                    [u_lat, 0.0, 0.0],
+                    293.15 * (1.0 + a * w),
+                ),
+                Diffusive::Shear => (1.0, [u_lat, a * w, 0.0], 293.15),
+            }
+        },
+    )
+    .unwrap();
+    let law = g.law().clone();
+    let k_m = 2.0 * core::f64::consts::PI / lambda_m;
+    let index = if mode == Diffusive::Entropy { 2 } else { 3 };
+    let exact = -linearized_nsf_modes(&law, k_m).unwrap()[index].re * law.dt_s;
+    let efold = 1.0 / exact;
+    let (t_start, t_end) = (0.02 * efold, 0.35 * efold);
+    admit_decay_window((t_end - t_start) / efold).unwrap();
+    let sample_every = ((efold / 200.0) as usize).max(1);
+    let (mut ts, mut logs, mut phases) = (Vec::new(), Vec::new(), Vec::new());
+    let mut step = 0usize;
+    while (step as f64) < t_end {
+        if (step as f64) >= t_start && step % sample_every == 0 {
+            let (mut re, mut im) = (0.0, 0.0);
+            for x in 0..ppw {
+                let (rho, u, t_k) = g.cell([x, 0, 0]);
+                let s = match mode {
+                    Diffusive::Entropy => {
+                        (t_k - law.temperature_ref_k) / law.temperature_ref_k
+                            - (law.gamma - 1.0) * (rho - 1.0)
+                    }
+                    Diffusive::Shear => u[1],
+                };
+                re += s * (k_lat * x as f64).cos();
+                im += s * (k_lat * x as f64).sin();
+            }
+            let (re, im) = (2.0 * re / ppw as f64, 2.0 * im / ppw as f64); // A = re - i im
+            let theta = k_lat * u_lat * step as f64;
+            ts.push(step as f64);
+            logs.push(re.hypot(im));
+            // arg(A exp(i theta)): the phase of the translated wave relative to the exact translation
+            phases.push(
+                (re * theta.sin() - im * theta.cos()).atan2(re * theta.cos() + im * theta.sin()),
+            );
+        }
+        g.step().unwrap();
+        step += 1;
+    }
+    let decay = -log_slope(&ts, &logs) / exact - 1.0;
+    let speed = if mach == 0.0 {
+        0.0
+    } else {
+        slope(&ts, &phases) / (k_lat * u_lat)
+    };
+    (decay, speed)
+}
+
+/// Compressible Couette flow between isothermal walls at the reference temperature, the bottom wall at rest and the top wall
+/// moving at `mach` times the sound speed: `n` cells across a gap of `gap_m`. The grid starts from the exact steady profiles
+/// (linear velocity, `T = T_w + mu U^2 y (h - y) / (2 kappa h^2)`, uniform pressure) and runs `thermal_times` thermal
+/// relaxation times `h^2 / (pi^2 alpha)` so that the lattice settles onto its own steady state. Returns the L-infinity error of
+/// the temperature over the centre-line rise `mu U^2 / (8 kappa)` and of the velocity over `U`.
+fn couette_errors(n: usize, gap_m: f64, mach: f64, thermal_times: f64) -> (f64, f64) {
+    let gas = air();
+    let dx = gap_m / n as f64;
+    let wall_speed = mach * gas.sound_speed;
+    let (mu, kappa) = (gas.dynamic_viscosity, gas.thermal_conductivity);
+    let heating =
+        |y: f64| mu * wall_speed * wall_speed * y * (gap_m - y) / (2.0 * kappa * gap_m * gap_m);
+    let mut s = spec([2, n, 2], dx);
+    s.periodic = [true, false, true];
+    s.wall = WallThermal::Isothermal(293.15);
+    let u_unit = (gas.gamma / 3.0).sqrt() / gas.sound_speed; // lattice velocity per m/s
+    let mut g = NsfGrid3::<D3q27>::new(
+        s,
+        |_| false,
+        move |x| {
+            let y = (x[1] as f64 + 0.5) * dx;
+            let t_k = 293.15 + heating(y);
+            (
+                293.15 / t_k,
+                [wall_speed * y / gap_m * u_unit, 0.0, 0.0],
+                t_k,
+            )
+        },
+    )
+    .unwrap();
+    g.set_edge_velocity(1, true, [wall_speed * u_unit, 0.0, 0.0])
+        .unwrap();
+    let law = g.law().clone();
+    let alpha = kappa / (gas.density * gas.specific_heat_cp);
+    let tau = gap_m * gap_m / (core::f64::consts::PI.powi(2) * alpha);
+    let steps = (thermal_times * tau / law.dt_s).ceil() as usize;
+    for _ in 0..steps {
+        g.step().unwrap();
+    }
+    let rise = mu * wall_speed * wall_speed / (8.0 * kappa);
+    let (mut t_err, mut u_err) = (0.0f64, 0.0f64);
+    for j in 0..n {
+        let y = (j as f64 + 0.5) * dx;
+        let (_rho, u, t_k) = g.cell([0, j, 0]);
+        t_err = t_err.max((t_k - 293.15 - heating(y)).abs() / rise);
+        u_err = u_err.max((u[0] / u_unit - wall_speed * y / gap_m).abs() / wall_speed);
+    }
+    (t_err, u_err)
+}
+
+#[test]
+#[ignore = "heavy: run with --release -- --ignored (several minutes in release on a loaded host)"]
+fn couette_viscous_heating_profile() {
+    // G1. Compressible Couette flow between isothermal walls at the reference temperature, the top wall moving at Mach 0.05 (centre
+    // line 26 mK warmer), gap 0.2 mm, 20 / 40 / 80 cells across (acoustic scaling), started from the exact profiles and run for six
+    // thermal times: the temperature must follow T(y) = T_w + mu U^2 y (h - y) / (2 kappa h^2). The error is the L-infinity norm
+    // over the centre-line rise mu U^2 / (8 kappa); a gas that is not heated at all would score 1. The reference holds the gas
+    // properties constant, so a floor of order (dln kappa / dln T) * (rise / T) is expected at larger Mach numbers; the Mach
+    // dependence on the coarse rung is printed, not asserted.
+    let rungs = [20usize, 40, 80];
+    let errs: Vec<(f64, f64)> = rungs
+        .iter()
+        .map(|&n| couette_errors(n, 2.0e-4, 0.05, 6.0))
+        .collect();
+    for (n, (t, u)) in rungs.iter().zip(&errs) {
+        println!("couette {n} cells: temperature L-inf / rise {t:.4e}, velocity L-inf / U {u:.4e}");
+    }
+    for ma in [0.1, MAX_QUALIFIED_MACH] {
+        println!(
+            "couette 20 cells at Ma {ma}: temperature L-inf / rise {:.4e}",
+            couette_errors(20, 2.0e-4, ma, 6.0).0
+        );
+    }
+    let t: Vec<f64> = errs.iter().map(|e| e.0).collect();
+    let order = (t[1] / t[2]).log2();
+    println!("observed order between 40 and 80 cells: {order:.2}");
+    assert!(
+        t.windows(2).all(|w| w[0] > w[1]),
+        "error must shrink: {t:?}"
+    );
+    assert!(order >= 1.8, "observed order {order}");
+    assert!(t[2] <= 1e-3, "finest rung {}", t[2]);
+    assert!(
+        errs.iter().all(|e| e.1 <= 1e-3),
+        "velocity profile {errs:?}"
+    );
+}
+
+/// Mach numbers of the defect map; the translation speed of a wave is undefined at rest, so its defect is taken against the run
+/// at `MACH_REFERENCE`.
+const MACH_MAP: [f64; 3] = [0.05, 0.1, 0.2];
+const MACH_REFERENCE: f64 = 0.025;
+/// Proposed bands on the Mach-dependent part of the decay rate (relative to the quiescent rate) and of the translation speed.
+const GALILEAN_DECAY_BAND: f64 = 5e-3;
+const GALILEAN_SPEED_BAND: f64 = 5e-4;
+
+/// Scaling exponent of a defect with Mach number: the least-squares slope of `ln |d|` against `ln Ma` over `MACH_MAP`.
+fn mach_exponent(defects: &[f64]) -> f64 {
+    let x: Vec<f64> = MACH_MAP.iter().map(|m| m.ln()).collect();
+    slope(
+        &x,
+        &defects.iter().map(|d| d.abs().ln()).collect::<Vec<_>>(),
+    )
+}
+
+#[test]
+#[ignore = "heavy: run with --release -- --ignored (a few minutes in release on a loaded host)"]
+fn finite_mach_and_lattice_defects_map() {
+    // G2. Galilean invariance of the two diffusive channels: a thermal (entropy) wave and a shear wave advected at Mach 0.05,
+    // 0.1 and 0.2 must decay at the quiescent rate and travel at exactly M c. The defect is the Mach-dependent part of the error
+    // at 32 cells per wavelength (the decay error minus the quiescent one; the speed error minus that at Mach 0.025). Every
+    // defect must stay within its band over the map; the scaling exponent of each is printed, as is the 64-cell value at the
+    // largest Mach number. `MAX_QUALIFIED_MACH` is the largest Mach number of the map and the formulation refuses a larger bound.
+    assert_eq!(*MACH_MAP.last().unwrap(), MAX_QUALIFIED_MACH);
+    let (ppw, lambda_m) = (32usize, 1.2e-3);
+    for mode in [Diffusive::Entropy, Diffusive::Shear] {
+        let base = advected_wave(ppw, lambda_m, 0.0, mode, 2).0;
+        let reference_speed = advected_wave(ppw, lambda_m, MACH_REFERENCE, mode, 2).1;
+        let (mut decay, mut speed) = (Vec::new(), Vec::new());
+        for ma in MACH_MAP {
+            let (d, s) = advected_wave(ppw, lambda_m, ma, mode, 2);
+            println!(
+                "{mode:?} Ma {ma}: decay defect {:+.4e}, speed defect {:+.4e}",
+                d - base,
+                s - reference_speed
+            );
+            decay.push(d - base);
+            speed.push(s - reference_speed);
+        }
+        println!(
+            "{mode:?}: scaling exponent with Mach number: decay {:.2}, speed {:.2}",
+            mach_exponent(&decay),
+            mach_exponent(&speed)
+        );
+        let fine_base = advected_wave(2 * ppw, lambda_m, 0.0, mode, 2).0;
+        let fine = advected_wave(2 * ppw, lambda_m, MAX_QUALIFIED_MACH, mode, 2).0 - fine_base;
+        println!(
+            "{mode:?}: decay defect at Ma {MAX_QUALIFIED_MACH}: {:+.4e} on 32 cells, {fine:+.4e} on 64 cells",
+            decay[2]
+        );
+        assert!(
+            decay.iter().all(|d| d.abs() <= GALILEAN_DECAY_BAND),
+            "{mode:?} decay defects {decay:?}"
+        );
+        assert!(
+            speed.iter().all(|d| d.abs() <= GALILEAN_SPEED_BAND),
+            "{mode:?} speed defects {speed:?}"
+        );
+        assert!(
+            decay.windows(2).all(|w| w[0].abs() < w[1].abs()),
+            "{mode:?} decay defect must grow with Mach number: {decay:?}"
+        );
+    }
+}
+
+#[test]
+fn edge_velocity_refusals() {
+    // G0. A wall velocity must sit on a non-periodic axis, be finite and tangential, and respect the Mach bound.
+    let mut s = spec([2, 4, 2], 5.0e-5);
+    s.periodic = [true, false, true];
+    let mut g = NsfGrid3::<D3q27>::new(s, |_| false, |_| (1.0, [0.0; 3], 293.15)).unwrap();
+    let c = (g.law().gamma * THETA0).sqrt();
+    assert!(
+        g.set_edge_velocity(0, true, [0.0; 3]).is_err(),
+        "periodic axis"
+    );
+    assert!(
+        g.set_edge_velocity(3, true, [0.0; 3]).is_err(),
+        "no such axis"
+    );
+    assert!(
+        g.set_edge_velocity(1, true, [0.0, 0.01, 0.0]).is_err(),
+        "wall-normal velocity"
+    );
+    assert!(
+        g.set_edge_velocity(1, true, [f64::NAN, 0.0, 0.0]).is_err(),
+        "non-finite velocity"
+    );
+    assert!(
+        g.set_edge_velocity(1, true, [MAX_QUALIFIED_MACH * c * (1.0 + 1e-9), 0.0, 0.0])
+            .is_err(),
+        "above the Mach bound"
+    );
+    assert!(
+        g.set_edge_velocity(1, true, [MAX_QUALIFIED_MACH * c * (1.0 - 1e-12), 0.0, 0.0])
+            .is_ok()
+    );
+    assert!(
+        g.set_edge_velocity(1, false, [0.0, 0.0, 0.1 * c]).is_ok(),
+        "the other wall may move along z"
+    );
+    g.set_edge_velocity(1, true, [0.05 * c, 0.0, 0.0]).unwrap();
+    g.step().unwrap();
 }
