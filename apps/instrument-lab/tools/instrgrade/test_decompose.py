@@ -715,6 +715,19 @@ class ContractTests(unittest.TestCase):
         man.write_text(json.dumps({"files": [dict(entry, licence="uiowa-mis")]}))  # the UIowa set needs none
         self.assertIsNone(dc.Refs(self.tmp / "lib.json", self.tmp / "wav", man).external)
 
+    def test_refs_can_be_asked_for_exact_notes(self):
+        import argparse, io, contextlib, json
+        root = self.tmp / "exact"
+        args = argparse.Namespace(lib=str(self.tmp / "lib.json"), wav_dir=str(self.tmp / "wav"), refs_json=str(self.tmp / "refs.json"), out=str(root),
+                                  family=["syn"], all=False, notes="Bb3", jobs=1, review=False, since=None)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit) as cm:
+            dc.cmd_refs(args)
+        self.assertEqual(cm.exception.code, 0)
+        rows = [json.loads(l) for l in buf.getvalue().splitlines()]
+        self.assertEqual([r["note"] for r in rows], ["Bb3"])  # exactly the note asked for
+        self.assertTrue((root / "syn" / "Bb3" / "pair.json").exists())
+
     def test_a_refused_render_batch_job_writes_the_record(self):
         import json
         root = self.tmp / "refbatch"

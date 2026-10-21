@@ -1203,8 +1203,12 @@ def cmd_refs(a):
         es = [e for e in refs.lib if e["inst"] == inst and e["dyn"] == "mf"]
         art = canon_art({e["art"] for e in es})
         notes = sorted({e["note"] for e in es if e["art"] == art})
-        centres = list(range(len(notes))) if a.all else sorted({min(len(notes) - 1, int(q * len(notes))) for q in (0.1, 0.35, 0.6, 0.85)})
-        reach = 0 if a.all else min(4, max(1, len(notes) // 8))
+        if a.notes:  # exactly these notes (names, comma-separated), no fallback to a neighbour
+            want = {midi_of(n) for n in a.notes.split(",")}
+            centres = [k for k, m in enumerate(notes) if m in want]
+        else:
+            centres = list(range(len(notes))) if a.all else sorted({min(len(notes) - 1, int(q * len(notes))) for q in (0.1, 0.35, 0.6, 0.85)})
+        reach = 0 if (a.all or a.notes) else min(4, max(1, len(notes) // 8))
         for ci in centres:
             order = [ci] + [ci + d * s_ for d in range(1, reach + 1) for s_ in (1, -1)]
             order = [k for k in order if 0 <= k < len(notes)]
@@ -1395,6 +1399,7 @@ def main():
     common(p)
     p.add_argument("--family", action="append")
     p.add_argument("--all", action="store_true", help="every mf note, not four spread ones")
+    p.add_argument("--notes", help="only these notes, e.g. G5,C4 (with --family); no fallback to a neighbouring note")
     p.add_argument("--since", type=float, help="epoch seconds: skip notes whose reference-only pair.json is at least this new (resume a run)")
     p.add_argument("--jobs", type=int, default=1)
     p.set_defaults(fn=cmd_refs)
