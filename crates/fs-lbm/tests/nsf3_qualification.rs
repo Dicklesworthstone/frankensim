@@ -925,7 +925,8 @@ fn couette_viscous_heating_profile() {
     for (n, (t, u)) in rungs.iter().zip(&errs) {
         println!("couette {n} cells: temperature L-inf / rise {t:.4e}, velocity L-inf / U {u:.4e}");
     }
-    for ma in [0.1, MAX_QUALIFIED_MACH] {
+    // a wall at exactly the Mach bound is refused by rounding, so the top of the sweep is 0.1 % below it
+    for ma in [0.1, 0.999 * MAX_QUALIFIED_MACH] {
         println!(
             "couette 20 cells at Ma {ma}: temperature L-inf / rise {:.4e}",
             couette_errors(20, 2.0e-4, ma, 6.0).0
