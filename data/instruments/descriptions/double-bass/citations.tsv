@@ -2,6 +2,7 @@ frankensim.description-citations.v1
 citation_id	citation
 frankensim-baseline-body	crates/fs-couple/examples/bowed-string.performance body record (the existing one-mode baseline; no published source; UNKNOWN true value)
 frankensim-baseline-numerics	crates/fs-couple/examples/bowed-string.performance (subsamples, ambient, listener, compile_limits records; numerical/admission choices, not measured quantities)
+frankensim-card-sweep	bowed_card_sweep (crates/fs-couple/src/bin/bowed_card_sweep.rs, landed 601e374fc, built at 6f2e42ec7dfe on trj): the library's own constant-gesture bowed run on a bow-force ladder with a rigid bridge, classified by the gate detector; per-card receipts under data/instruments/grades/<family>/bowed-card-sweep-6f2e42ec7.jsonl
 guettler2002	Guettler, K. 'On the creation of the Helmholtz motion in bowed strings', Acta Acustica united with Acustica 88 (2002) 970-985
 guettler2012-typical	Guettler, K. 'Some typical properties of bowed strings' (table: tuning, vibrating length, mass per unit length, propagation speed, transverse impedance, tension for violin, viola, cello, double bass; values contributed by D'Addario and Corelli/Savarez per the document). knutsacoustics.com/files/Typical-string-properties.pdf (PDF metadata: author K. Guettler, created 2012-04-15)
 schoonderwaldt2008	Schoonderwaldt, E., Guettler, K., Askenfelt, A. 'An empirical investigation of bow-force limits in the Schelleng diagram', Acta Acustica united with Acustica 94 (2008) 604-622, DOI 10.3813/AAA.918070
