@@ -12,14 +12,31 @@ full_scale_pa 20
 ambient moist_air 293.15 101325 0
 #
 # --- lip --------------------------------------------------------------------------------------
-# NO TRUMPET-PLAYER LIP IS PUBLISHED. This is the artificial latex lip pair of J. S. Cullen (2000), PhD
-# thesis, University of Edinburgh, Table A.2 p.253 embouchure 7 (fL1 204.5 Hz, QL1 7.0, 1/muL1 0.063
-# m^2/kg, b 12 mm, H0 0.53 mm), measured on a TROMBONE-size mouthpiece. It is used here only because it is
-# the one measured outward-striking lip with a complete (f, Q, 1/mu, width, rest gap) set; its channel
-# width and rest gap are not a trumpeter's. The lip pre-stress (the player's tension) is the free player
-# input; it scales the resonance. See trombone/tenor-trombone.head for the full caveats.
-lip_response 204.5 7.0 0.063 0.012 0.00053 1.0e-4
-lip_source Cullen (2000) PhD Edinburgh Table A.2 p.253 embouchure 7: fL1 204.5 Hz, QL1 7.0, 1/muL1 0.063 m2/kg, b 12 mm, H0 0.53 mm; artificial latex lips on a trombone-size mouthpiece, outward-striking mode only, NOT a trumpet player; face area 1e-4 m2 is a normalization that cancels
+# NO TRUMPET-PLAYER LIP IS PUBLISHED (none found by this lane; Yoshikawa 1995, Richards 2003 and the
+# Stevenson and Campbell work were looked for and none gives a complete (f, Q, 1/mu, width, rest gap) set).
+# This is the artificial latex lip pair of J. S. Cullen (2000), PhD thesis, University of Edinburgh, measured
+# on a TROMBONE-size mouthpiece (rig cup diameter 25.5 mm, Fig 3.5 p.41), Table A.2 p.253 embouchure 19,
+# the tightest of her 20 embouchures: fL1 237.0 Hz, QL1 12.0, 1/muL1 0.072 m^2/kg, b 9 mm, H0 0.25 mm
+# (standard font = measured, read on the page image). The lip is a trombone-rig artificial lip, not a
+# trumpeter's, and PLAYABILITY ENTERED THE CHOICE, so it is disclosed here and on the status card.
+#
+# Why row 19 and not row 7 (which the trombone uses): (1) the trumpet cup rim is 16.8 mm across (station 0
+# below), against the rig's 25.5 mm. Row 7's 12 mm channel fills 47 percent of the rig cup but would fill
+# 71 percent of this cup; scaling that 47 percent to this cup gives about 8 mm, nearer row 19's 9 mm
+# (54 percent). (2) Playability: with row 7 the loop starts the upper open notes only at 19 to 27.5 kPa
+# (a 45 kPa ramp at pre-stress 2.5, the D5 setting: onset 27.5 kPa, extinction 20.8 kPa; the 21 kPa D5 hold
+# sat on the extinction edge and fell silent), against the 4 to 13 kPa pp to ff that Bouhuys measured on
+# high notes (as quoted by Fletcher and Tarnopolsky 1999, JASA 105:874); row 19 at the same lip frequency
+# (511 Hz) starts at 8.4 kPa and stops at 5.6 kPa, and speaks all four open notes at 14 kPa. The same
+# diagnostic sweeps speak a Bb4 window and a D5 window with row 7 at 25 kPa, so the bore supports the note:
+# the failure was not a lip-versus-bore misalignment but the single loose lip row (see the status card).
+#
+# The lip pre-stress (the player's tension) is the free player input; it scales the resonance (stiffness
+# goes as the square of it, damping as it, the mass is fixed). The four hold tensions in render.sh were
+# set from the emergent pitch of a first render against equal temperament, which is what a player does
+# with an embouchure and is a player-input choice, not a model input; the pitch is never an input.
+lip_response 237.0 12.0 0.072 0.009 0.00025 1.0e-4
+lip_source Cullen (2000) PhD Edinburgh Table A.2 p.253 embouchure 19 (tightest of 20): fL1 237.0 Hz, QL1 12.0, 1/muL1 0.072 m2/kg, b 9 mm, H0 0.25 mm; artificial latex lips on a trombone-size mouthpiece (cup 25.5 mm), outward-striking mode only, NOT a trumpet player; chosen over embouchure 7 for the 16.8 mm trumpet cup and for playability (disclosed); face area 1e-4 m2 is a normalization that cancels
 #
 # --- mouthpiece cup -----------------------------------------------------------------------------
 # The cup and throat are GEOMETRY in the bore below (stations 0 to 17.7 mm: rim radius 8.4 mm falling to a

@@ -9,7 +9,7 @@
 # bore file is straightened, so only the open harmonics are valid. There is no pitch, note or frequency
 # anywhere in an input: the note is the lock the loop finds between the lip and the bore.
 #
-#  * sweep-pNNN: lip pre-stress ramps 0.7 -> 3.5 at a held mouth pressure (default 8 kPa). A diagnostic, not a note: it records
+#  * sweep-pNNN: lip pre-stress ramps 0.7 -> 3.5 at a held mouth pressure (default 14 kPa). A diagnostic, not a note: it records
 #    which regime the bore + lip speaks as the lip tightens.
 #  * pramp-tNNN: mouth pressure ramps 0 -> 25 kPa -> 0 at a fixed lip pre-stress. The pressure at which
 #    the note starts on the way up and stops on the way down is the oscillation threshold and the
@@ -19,10 +19,14 @@
 #
 # Mouth pressure: threshold p0 = K f with K of 4 to 8 Pa/Hz for three trumpeters (Fletcher and
 # Tarnopolsky 1999, JASA 105:874, p.877), and 4 to 13 kPa pp to ff on high notes (Bouhuys, as quoted
-# there); per-note mf tables are UNKNOWN. The first trombone renders with this same lip never started at
-# 1.5 kPa (nor to 4 kPa), and the trumpet notes above Bb3 start only at 19 to 25 kPa, so the ramps go up to
-# 25 kPa (the highest blowing pressure measured in a professional trumpeter, Fletcher and Tarnopolsky
-# p.875) and measure the threshold of THIS model directly; holds are placed above the measured threshold.
+# there); per-note mf tables are UNKNOWN. The ramps go up to 25 kPa (the highest blowing pressure measured
+# in a professional trumpeter, Fletcher and Tarnopolsky p.875) and measure the threshold of THIS model
+# directly; holds are placed above the measured threshold. The lip is Cullen (2000) embouchure 19 (see the
+# head for why, and for the disclosure that playability entered the choice): the first renders used
+# embouchure 7, whose upper open notes started only at 19 to 27.5 kPa and sat on the extinction edge at
+# 21 kPa (the D5 hold fell silent). The 14 kPa below is still at the top of Bouhuys's 4 to 13 kPa pp to ff
+# for high notes, and the internal mouthpiece level it gives is 6 to 12 dB over the 166.9 to 167.2 dB
+# (rms, shank, forte) of Resch et al. (arXiv 1611.01025); see the status card.
 #
 # Needs a music_render with the DC-bin fix of the mouth-flow line (bin da31fbd67ee9 or later): without it the
 # default mouth-flow ladder cannot converge on this bore (see the head).
@@ -49,15 +53,19 @@ RAMP_PEAK=${RAMP_PEAK:-2.5e4}
 # Held notes use an attack: mouth pressure rises to an ATTACK pressure in 50 ms (above the onset the pressure
 # ramps measured at that pre-stress), stays there for ATTACK_SECONDS, then relaxes over 0.5 s to a SUSTAIN
 # pressure (inside the hysteresis band: above the extinction pressure, below the onset). Each hold is
-# "pre-stress:attack-Pa:sustain-Pa". The numbers come from the model's own threshold map (the 25 kPa ramps of
-# the first native renders: pre-stress 1.0 starts near 11 kPa and stops near 4 kPa; 1.5 starts near 19 and
-# stops near 8; 2.0 near 22 and 15; 2.5 near 25 and 19), not from a recording and not from a published mf
-# pressure. 25 kPa is the highest blowing pressure measured in a professional trumpeter (Fletcher and
-# Tarnopolsky 1999, JASA 105:874, p.875).
+# "pre-stress:attack-Pa:sustain-Pa". With embouchure 19 the four holds are a CONSTANT 14 kPa (attack equal to
+# sustain): the model's own threshold map for this lip (a diagnostic 45 kPa ramp at lip frequency 511 Hz:
+# onset 8.4 kPa, extinction 5.6 kPa) puts 14 kPa above the onset of every open note, not from a recording and
+# not from a published mf pressure. The pre-stress of each hold was set from the emergent pitch of a first
+# render against equal temperament (a player tuning an embouchure; pitch is never an input): first guesses
+# 0.9, 1.38, 1.86, 2.38 gave Bb3 33 cents flat, F4 26, Bb4 21, D5 21 cents flat; 0.95, 1.42, 1.9, 2.42 gave
+# Bb3 +20, F4 +5, Bb4 +2, D5 -1 cents; Bb3 at 0.92 gave -16 and at 0.93 -5 cents (steady-state, 2 to 4 s).
+# The emergent pitches are the bore's: its passive impedance peaks (music_render lip --impedance) lie 41 to
+# 62 cents flat of the equal-tempered open series for partials 3 to 6, which the lip pulls toward the note.
 ATTACK_SECONDS=${ATTACK_SECONDS:-8e-1}
 HOLD_SECONDS=${HOLD_SECONDS:-4}
-HOLDS=${HOLDS-"1e0:1.2e4:6e3 1.5e0:2.5e4:1.2e4 2e0:2.5e4:1.8e4 2.5e0:2.5e4:2.1e4"}
-SWEEP_PRESSURE=${SWEEP_PRESSURE:-8e3}
+HOLDS=${HOLDS-"9.3e-1:1.4e4:1.4e4 1.42e0:1.4e4:1.4e4 1.9e0:1.4e4:1.4e4 2.42e0:1.4e4:1.4e4"}
+SWEEP_PRESSURE=${SWEEP_PRESSURE:-1.4e4}
 
 cd "$SNAP"
 mkdir -p "$OUT"
