@@ -27,6 +27,7 @@
 //! ambient thermochemical <temperature_k> <pressure_pa> <mole|mass> <count> <id fraction>...
 //! fold <two_mass|one_dof> <m_lower_kg> <m_upper_kg> <k_lower_n_m> <k_upper_n_m>
 //!      <k_couple_n_m> <damping_ratio> <rest_gap_m> <fold_length_m> <thickness_m>
+//!      [<thickness_upper_m>]      (the second viscous section; default 0.05 cm)
 //! tract_wall <surface_density_kg_m2> <stiffness_n_m3> <resistance_pa_s_m>   (optional)
 //! termination <flanged|unflanged|ideal_open>
 //! tract_source <identifier without spaces>
@@ -212,7 +213,11 @@ impl VoiceDescription {
                     once(&mut gas, record, key)?;
                 }
                 "fold" => {
-                    arity(&rest, 10, key)?;
+                    // Ten fields; an optional eleventh sets the upper-section thickness of the
+                    // viscous channel (default: Ishizaka-Flanagan's 0.05 cm, `FoldCard`).
+                    if rest.len() != 11 {
+                        arity(&rest, 10, key)?;
+                    }
                     let two_mass = match rest[0] {
                         "two_mass" => true,
                         "one_dof" => false,
@@ -228,6 +233,11 @@ impl VoiceDescription {
                         rest_gap_m: field(&rest, 7, "rest gap")?,
                         fold_length_m: field(&rest, 8, "fold length")?,
                         thickness_m: field(&rest, 9, "thickness")?,
+                        thickness_upper_m: if rest.len() == 11 {
+                            field(&rest, 10, "upper thickness")?
+                        } else {
+                            FoldCard::two_mass_standard().thickness_upper_m
+                        },
                         // Per-field provenance lives in the file's comments.
                         source: FoldCardSource::AuthoredEstimate,
                     };
