@@ -445,11 +445,23 @@ fn load_with_all_sources(
                 loss.gas().density, loss.gas().sound_speed),
             None => ",\"mouth_contraction\":null".to_string(),
         };
+        let mouth_reaction = renderer.voice().mouth_radiation_load();
         let mouth_radiation_json = match renderer.mouth_radiation() {
-            Some(mouth) => format!(",\"mouth_radiation\":{{\"shape\":\"rectangle\",\"center_m\":[{:e},{:e}],\"size_m\":[{:e},{:e}],\"cells\":[{},{}],\"source\":\"signed outward inlet volume flow\",\"reaction_added\":false}}",
+            Some(mouth) => format!(",\"mouth_radiation\":{{\"shape\":\"rectangle\",\"center_m\":[{:e},{:e}],\"size_m\":[{:e},{:e}],\"cells\":[{},{}],\"source\":\"signed outward inlet volume flow\",\"reaction_added\":{}}}",
                 mouth.center_m[0], mouth.center_m[1], geometry.flue_width_m, geometry.cut_up_m,
-                mouth.cells[0], mouth.cells[1]),
+                mouth.cells[0], mouth.cells[1], mouth_reaction.is_some()),
             None => ",\"mouth_radiation\":null".to_string(),
+        };
+        let mouth_reaction_json = match mouth_reaction {
+            Some(load) => {
+                let spec = load.load();
+                let term = spec.terms()[0];
+                format!(",\"mouth_reaction\":{{\"model\":\"compact-rectangular-baffled-v1\",\"legacy_load_replaced\":true,\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"maximum_frequency_hz\":{:e},\"resistance_pa_s_m3\":{:e},\"rate_per_s\":{:e},\"static_quadrature_relative_error\":{:e},\"max_complex_relative_error\":{:e},\"max_resistance_relative_error\":{:e},\"memory\":\"shared passive midpoint relaxation\",\"mutual_mouth_terminal_reaction\":false}}",
+                    load.exterior().density, load.exterior().sound_speed, load.maximum_frequency_hz(),
+                    term.resistance_pa_s_m3, term.rate_per_s, load.static_quadrature_relative_error(),
+                    load.max_complex_relative_error(), load.max_resistance_relative_error())
+            }
+            None => ",\"mouth_reaction\":null".to_string(),
         };
         let (phase, details) = network.fractional_sections().expect("file selects fractional travel");
         let actual_length: f64 = details.iter().map(|s|s.realized_dc_length_m).sum();
@@ -467,7 +479,8 @@ fn load_with_all_sources(
                 format!(",\"mimo_radiation\":{}", super::duct_metadata::mimo_radiation_provenance(record)))
         };
         let mutual = p.mimo_radiation_record().is_some() || p.computed_radiation_record().is_some();
-        let reaction = !p.radiation_bindings().is_empty() || mutual;
+        let terminal_reaction = !p.radiation_bindings().is_empty() || mutual;
+        let reaction = terminal_reaction || mouth_reaction.is_some();
         let radiation_json = p.radiation_bindings().iter().map(|binding| format!(
             "{{\"node\":{},\"original_reflection\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e}{}}}",
             binding.opening().node,binding.previous_reflection(),binding.load().density_kg_m3(),
@@ -477,12 +490,15 @@ fn load_with_all_sources(
             "in-loop geometry/gas-derived mutual baffled terminal reaction and matched-medium ordered outlet pressure"
         } else if p.mimo_radiation_record().is_some() {
             "in-loop source-bound mutual baffled terminal reaction and matched-medium ordered outlet pressure"
-        } else if reaction {
+        } else if terminal_reaction {
             "in-loop independent compact baffled terminal reaction and matched-medium outlet pressure"
         } else { "one-way infinite-baffle outlet pressure; supplied passive loads" };
         let radiation_exclusion = if mutual { "broadband unbaffled radiation" }
             else { "broadband unbaffled or mutual radiation" };
-        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; optional rectangular mouth is observation only; wall image separately declared; no full shell dynamics, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{duct_json}{wall_json}{boundary_json}{mimo_json}}}",
+        let mouth_scope = if mouth_reaction.is_some() {
+            "same-sample compact rectangular mouth reaction and matched exterior observation"
+        } else { "optional rectangular mouth is observation only" };
+        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; {mouth_scope}; wall image separately declared; no full shell dynamics, mouth-to-terminal mutual reaction, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{mouth_reaction_json}{duct_json}{wall_json}{boundary_json}{mimo_json}}}",
             i.jet_card_source,i.jet_card_hash,p.card().claim.kind(),p.card().authority.label(),i.compiled_controls,
             geometry.flue_width_m,geometry.flue_height_m,geometry.cut_up_m,geometry.labium_offset_m,
             geometry.jet_angle_rad,geometry.mouth_loss_rel,island.displacement_gain,island.seed_amplitude_rel,

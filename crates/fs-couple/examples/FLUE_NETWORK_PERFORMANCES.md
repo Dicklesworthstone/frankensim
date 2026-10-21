@@ -235,6 +235,61 @@ mutual radiation or new reaction load. Existing mouth resistance and duct
 termination laws still determine the simulated motion. Omitting the record
 retains the original terminal-only output.
 
+## Compact reaction from the actual mouth and exterior gas
+
+`flue-mouth-reaction.performance` connects the rectangular mouth's radiation
+pressure to the source mechanics. It retains the original network, regional
+gases, unsteady windway, jet excitation, separation and receiver. The mouth's
+physical self reaction replaces the equivalent-circle end correction and
+authored linear mouth loss. After the mouth observation record, select:
+
+```text
+flue 0.010 0.001 0.004 0 0 0
+... existing windway, jet, network and receiver records ...
+mouth_radiation -0.3 0 8 4
+mouth_reaction compact-baffled
+```
+
+The exact static Rayleigh integral of the actual width by cut-up determines
+near-field inertance `M`. The exterior gas determines both `M` and the exact
+compact resistance coefficient `C = density / (2*pi*sound_speed)`. Those two
+leading physical terms determine the passive impedance `R*s/(s+p)`, with
+`p=M/C` and `R=M*p`; no measured note, equivalent mouth radius, fitted gain or
+authored damping multiplier enters that load. The existing `fs-vfit` midpoint
+relaxation owner supplies its state, near-field storage and escaped energy.
+Its current-flow pressure and retained history enter the original simultaneous
+jet/mouth/duct solve, including sub-sample jet feedback and optional separation.
+No extra source is added to the output.
+
+Changing just `exterior` to a supported gas mixture changes the physical mouth
+motion and returning bore waves, as well as outgoing propagation. For example:
+
+```text
+exterior mixture 293.15 101325 mole 2 N2 0.5 CO2 0.5
+```
+
+Reaction and observation retain the same rectangular cells. Cold construction
+allows at most 1024 cells, requires `k*mouth_diagonal <= 0.5` and
+`dt*fmax <= 0.1`, and compares the finite-cell static inertia with the exact
+rectangular integral. Coarse quadrature exceeding 5% refuses and requests
+refinement. At 32 frequencies across the declared band, both analogue and
+actual bilinear responses must also agree with the shared Rayleigh surface
+within 5%, independently for complex impedance and weak radiation resistance.
+Those finite checks retain finite-frequency quadrature error and do not
+establish broadband transient accuracy or a measured flute claim. The band
+is not an output low-pass filter. Mouth-to-terminal mutual loading, free-field
+body scattering and resolved jet turbulence remain outside this selection.
+The existing outlet MIMO option still covers its declared terminal ports only.
+
+`mouth_reaction none` and omission preserve the original mouth mechanics.
+Enabling reaction requires the actual `mouth_radiation` receiver, zero legacy
+`mouth_loss_rel`, one cold attachment and matching static pressure. An explicit
+`mouth_loss contraction ...` remains a separate physical separated-flow loss.
+The block ledger records returned/stored near-field energy separately from
+nonnegative radiation loss; the replaced backward-Euler mouth inertance no
+longer contributes numerical dissipation. CLI metadata records the actual gas,
+passive coefficients, checked band and both response discrepancies.
+
 ## Mouth separation from the actual geometry and gas
 
 After the optional `windway` row and before `jet_card`, select:

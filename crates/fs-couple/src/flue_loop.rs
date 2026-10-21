@@ -65,10 +65,12 @@
 //!   + radiation loss + work into the pipe, closure reported per block.
 //!   Optional explicit mouth contraction adds its own same-sample pressure drop
 //!   and separate nonnegative separation loss; it is never an output effect.
+//!   An explicitly selected rectangular exterior load replaces the legacy
+//!   mouth inertance/loss with passive near-field memory and radiation loss.
 //!
 //! Honesty ladder: [`JetIsland::provenance`] states which numbers are
 //! card-backed (convection ratio, profile ratio, validity, claim class)
-//! and which are authored (spatial gain, mouth radiation resistance,
+//! and which are authored (spatial gain, legacy mouth radiation resistance,
 //! onset seed amplitude); with authored gain the loop is Estimate.
 //! Noise injection follows the card: the tonal interim card carries no
 //! NoiseTable rows, so no noise SHAPE is injected; the onset seed is
@@ -89,6 +91,9 @@ use network::FlueResonator;
 
 /// Optional geometry/gas-bound separation loss in the same-sample mouth solve.
 pub mod mouth_loss;
+
+/// Rectangular exterior-gas reaction sharing the physical mouth receiver.
+pub mod mouth_radiation;
 
 /// Refinable unsteady no-slip source channel and spatial jet feedback transport.
 pub mod windway;
@@ -360,7 +365,7 @@ impl JetIsland {
             displacement_gain,
             seed_amplitude_rel,
             provenance: format!(
-                "card-backed: claim class {} (stage {stage} lock St {:.5} at h/delta {:.1} -> c_p/U {:.4}), theta/b {:.4} (amplification band omega_c = U/(4 theta), Michalke tanh neutral), Re band [{:.1}, {:.1}], {} receipts; authored: displacement gain {displacement_gain}, onset seed {seed_amplitude_rel} x U, mouth radiation resistance; medium and geometry from the chart",
+                "card-backed: claim class {} (stage {stage} lock St {:.5} at h/delta {:.1} -> c_p/U {:.4}), theta/b {:.4} (amplification band omega_c = U/(4 theta), Michalke tanh neutral), Re band [{:.1}, {:.1}], {} receipts; authored: displacement gain {displacement_gain}, onset seed {seed_amplitude_rel} x U, legacy mouth radiation resistance (unless a geometry/gas load is selected); medium and geometry from the chart",
                 card.claim.kind(),
                 feedback.locked_strouhal,
                 card.validity.h_over_delta,
@@ -392,7 +397,8 @@ pub struct FlueGeometry {
     /// Pipe bore area at the mouth [m^2] (the wind line's `zc` basis).
     pub bore_area_m2: f64,
     /// AUTHORED: mouth radiation resistance as a fraction of the mouth's
-    /// characteristic impedance `rho c / S_m`.
+    /// characteristic impedance `rho c / S_m`. Must be zero when selecting
+    /// physical rectangular reaction; the two loads cannot be superimposed.
     pub mouth_loss_rel: f64,
 }
 
@@ -496,12 +502,14 @@ pub struct FlueBlockDiag {
     pub source_work_j: f64,
     /// Work delivered into the pipe [J].
     pub pipe_work_j: f64,
-    /// Radiation loss at the mouth [J].
+    /// Radiation loss at the mouth [J]. With a rectangular load this is escaped
+    /// branch energy, separate from its retained near-field storage.
     pub radiation_loss_j: f64,
     /// Irreversible quasi-steady separated-flow loss [J], not radiation.
     /// Zero when the optional mouth contraction is absent.
     pub separation_loss_j: f64,
-    /// Change of stored mouth inertance energy [J].
+    /// Change of stored mouth energy [J]: legacy inertance or the selected
+    /// rectangular load's retained near-field state.
     pub stored_delta_j: f64,
     /// Numerical dissipation of the implicit mouth step [J].
     pub numerical_dissipation_j: f64,
@@ -529,6 +537,7 @@ pub struct FlueVoice {
     line: FlueResonator,
     gas: GasState,
     mouth_contraction: Option<crate::bernoulli_aperture::contraction::ContractionLoss>,
+    mouth_radiation: Option<mouth_radiation::MouthRadiation>,
     viscous_windway: Option<crate::bernoulli_aperture::viscous::ViscousSlit>,
     unsteady_windway: Option<windway::UnsteadyWindway>,
     rho: f64,
@@ -655,6 +664,7 @@ impl FlueVoice {
             line,
             gas: *gas,
             mouth_contraction: None,
+            mouth_radiation: None,
             viscous_windway: None,
             unsteady_windway: None,
             rho,
@@ -950,12 +960,14 @@ impl FlueVoice {
     fn solve_jet_mouth(&self, boundary: WindBoundary, delayed: RetardedVelocity,
         seed: f64, c: JetStepCoefficients) -> Result<(MouthStep, JetTrial, f64), FlueError>
     {
-        let (l, r, zc, dt) = (self.inertance, self.resistance, self.zc, self.dt);
+        let (radiation_direct, radiation_history) = self.mouth_radiation.as_ref()
+            .map_or((0.0, 0.0), mouth_radiation::MouthRadiation::affine_pressure);
+        let (l, r, zc, dt) = (self.inertance, self.resistance + radiation_direct, self.zc, self.dt);
         let area = self.geometry.mouth_area_m2();
         let jet = |q: f64| self.jet_trial(delayed.past_m_s+delayed.current_weight*q/area, seed, c);
         let mouth = |source| match &self.mouth_contraction {
-            Some(loss) => mouth_loss::solve(boundary, source, self.q_prev, l, r, zc, dt, loss),
-            None => Ok((solve_mouth_port(boundary, source, self.q_prev, l, r, zc, dt)?, 0.0)),
+            Some(loss) => mouth_loss::solve(boundary, source-radiation_history, self.q_prev, l, r, zc, dt, loss),
+            None => Ok((solve_mouth_port(boundary, source-radiation_history, self.q_prev, l, r, zc, dt)?, 0.0)),
         };
         // Spatial windway transport and delays >= dt have no current-sample
         // coefficient. A closed wave boundary instead fixes q independently.
@@ -984,7 +996,7 @@ impl FlueVoice {
         // The cut jet lies between zero and Qmax. The lossless responses at
         // those extremes, extended to zero, bracket every passive-loss root.
         let linear = |flow| solve_mouth_port(boundary,
-            self.source_coeff*(flow-self.flow_prev)/dt, self.q_prev, l, r, zc, dt);
+            self.source_coeff*(flow-self.flow_prev)/dt-radiation_history, self.q_prev, l, r, zc, dt);
         let mut lo = linear(0.0)?.flow_m3_s.min(0.0);
         let mut hi = linear(c.q_max)?.flow_m3_s.max(0.0);
         if let Some(loss) = &self.mouth_contraction {
@@ -1014,7 +1026,7 @@ impl FlueVoice {
                 }
                 None => (0.0, 0.0),
             };
-            let step = solve_mouth_port(boundary, trial.source_pa-drop,
+            let step = solve_mouth_port(boundary, trial.source_pa-drop-radiation_history,
                 self.q_prev, l, r, zc, dt)?;
             let residual = q-step.flow_m3_s;
             if !residual.is_finite() {
@@ -1206,6 +1218,8 @@ impl FlueVoice {
             if ![eta, flow, p_source, q, p_plus, p_in].iter().all(|x| x.is_finite()) {
                 return Err(FlueError::Invalid { what: "flue trial left the finite physical domain" });
             }
+            let radiation_candidate = self.mouth_radiation.as_ref()
+                .map(|load| load.candidate(q)).transpose()?;
             let committed = self.line.push(p_plus)?;
             if matches!(&self.line, FlueResonator::Tmm(_))
                 && committed.to_bits() != mouth.incoming_pa.to_bits() {
@@ -1222,6 +1236,11 @@ impl FlueVoice {
             radiation += r * q * q * dt;
             stored_delta += 0.5 * l * (q * q - self.q_prev * self.q_prev);
             numerical += 0.5 * l * (q - self.q_prev) * (q - self.q_prev);
+            if let Some((next, frame)) = radiation_candidate {
+                radiation += frame.port.dissipated_energy_j;
+                stored_delta += frame.port.storage_change_j;
+                self.mouth_radiation = Some(next);
+            }
             self.q_prev = q;
             // Mouth transverse velocity into the history ring.
             self.history[self.head] = q / s_m;

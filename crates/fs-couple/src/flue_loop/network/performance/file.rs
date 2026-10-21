@@ -164,6 +164,14 @@ impl FlueFilePerformance {
     /// outlet records also observes the solved outward source-mouth flow. Its
     /// rectangular size is the actual flue width by cut-up; all apertures share
     /// the declared exterior and rigid baffle. No extra source load is inferred.
+    /// Immediately following it, optional `mouth_reaction compact-baffled`
+    /// replaces the old mouth end correction and linear loss with the same
+    /// rectangle/exterior's checked compact self reaction. The last `flue`
+    /// field (`mouth_loss_rel`) must then be zero. An explicit
+    /// `mouth_reaction none` or omission preserves the original source load.
+    /// The declared receiver band must satisfy `k*mouth_diagonal <= 0.5`,
+    /// `dt*fmax <= 0.1` and the fixed 5% sampled response checks. Reaction and
+    /// observation share the supplied mouth cells (at most 1024 in total).
     ///
     /// After the duct records, optional `walls COUNT FMIN_HZ FMAX_HZ` introduces
     /// COUNT rows `wall NODE isotropic PACK T_K OMEGA_RAD_S THICKNESS_M AXIAL LOSS`.
@@ -446,6 +454,19 @@ impl FlueFilePerformance {
             row.end()?;
             Some(input)
         } else { None };
+        let mouth_reaction = if rows.next_is("mouth_reaction") {
+            let mut row = rows.row("mouth_reaction")?;
+            let enabled = match row.fields.next() {
+                Some("none") => false,
+                Some("compact-baffled") => true,
+                _ => return Err(bad(rows.line, "mouth_reaction requires none or compact-baffled")),
+            };
+            row.end()?;
+            if enabled && mouth_radiation.is_none() {
+                return Err(bad(rows.line, "mouth reaction requires an explicit mouth_radiation rectangle"));
+            }
+            enabled
+        } else { false };
         let control_source = boundary::read_control_source(&mut rows)?;
         let mut row = rows.row("controls")?;
         let max_controls: usize = row.number()?;
@@ -552,6 +573,9 @@ impl FlueFilePerformance {
             .map_err(FlueInputError::Performance)?;
         if let Some(mouth) = mouth_radiation {
             renderer = renderer.with_mouth_radiation(mouth).map_err(FlueInputError::Performance)?;
+        }
+        if mouth_reaction {
+            renderer = renderer.with_mouth_reaction(gate).map_err(FlueInputError::Performance)?;
         }
         poll(gate)?;
         let info = FluePerformanceInfo { input_hash: hash_domain("org.frankensim.fs-couple.flue-performance.v1",bytes),

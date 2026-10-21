@@ -3,6 +3,8 @@ use super::*;
 use fs_couple::bernoulli_aperture::network::NetworkNode;
 use fs_couple::flue_loop::{FlueVoice, network::performance::FlueOutletPerformance};
 
+mod mouth_reaction;
+
 const NETWORK: &str = include_str!("../../../examples/flue-network.performance");
 fn source() -> String {
     let head = NETWORK.split_once("\ngesture\n").unwrap().0

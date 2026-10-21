@@ -286,8 +286,9 @@ impl FlueOutletPerformance {
     /// Include actual mouth volume flow in the same external microphone signal.
     /// Mouth and terminal pressures superpose with their signs and distinct
     /// travel times; each retains all mechanical samples and antialias history.
-    /// The mouth's prescribed resistance remains the source's existing load:
-    /// this adds no radiation feedback, pressure normalization or jet-noise term.
+    /// This selection alone retains the existing source load. Calling
+    /// `with_mouth_reaction` explicitly replaces it with the same rectangle's
+    /// compact exterior-gas reaction before any sample is rendered.
     ///
     /// This explicitly describes a coplanar baffled assembly. It does not claim
     /// the free-field geometry of an orchestral flute. Mouth and outlet openings
@@ -329,6 +330,40 @@ impl FlueOutletPerformance {
         }.map_err(|e| GestureCompileError::Render(RenderError::Voice(AcousticRealizeError::Nonlinear(e))))?;
         self.mouth = Some(MouthPressure { input, inlet_node, receiver,
             trace: vec![0.0; self.mechanics_per_output], filled: 0 });
+        Ok(self)
+    }
+
+    /// Replace the legacy mouth end correction and authored linear loss with
+    /// compact self reaction from the SAME rectangle, exterior and source clock
+    /// as the attached receiver. The load participates in the current jet/duct
+    /// solve; it adds no signal or downstream pressure gain.
+    ///
+    /// Requires `mouth_radiation` and zero legacy `mouth_loss_rel`. The shared
+    /// passive relaxation owner retains near-field storage separately from
+    /// escaped energy; an independent separation law can remain attached.
+    /// The checked compact band and quadrature limits belong to
+    /// [`crate::flue_loop::mouth_radiation::RectangularMouthLoad`]. Mutual loading
+    /// between mouth and terminal openings and free-field body scattering remain
+    /// outside this independent self-load construction.
+    ///
+    /// # Errors
+    /// Missing mouth observation, late/repeated attachment, nonzero legacy loss,
+    /// mismatched source pressure or any original physical load refusal.
+    pub fn with_mouth_reaction(mut self, gate: &fs_exec::CancelGate)
+        -> Result<Self, GestureCompileError>
+    {
+        if self.poisoned || self.voice.samples_rendered() != 0 {
+            return Err(invalid("mouth reaction requires a fresh performance"));
+        }
+        let mouth = self.mouth.as_ref()
+            .ok_or_else(|| invalid("mouth reaction requires the actual rectangular mouth receiver"))?;
+        let load = crate::flue_loop::mouth_radiation::RectangularMouthLoad::new(
+            [self.voice.geometry.flue_width_m, self.voice.geometry.cut_up_m], mouth.input.cells,
+            *self.receiver.exterior_gas(), self.voice.sample_period_s(),
+            self.config.receiver.maximum_frequency_hz, gate)
+            .map_err(|e| GestureCompileError::Render(source_error(e)))?;
+        self.voice.attach_mouth_radiation(load)
+            .map_err(|e| GestureCompileError::Render(source_error(e)))?;
         Ok(self)
     }
 

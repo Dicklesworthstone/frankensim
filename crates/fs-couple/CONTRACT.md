@@ -2112,7 +2112,8 @@ None.
   `c_p/U = St (h/delta) / (stage + 1/4)` from the stage-I lock, the
   profile ratio `theta/b`, the Reynolds validity band, the claim class;
   authored and labeled: the spatial deflection gain, the onset seed,
-  the mouth radiation resistance. PITCH IS NEVER ASSIGNED: blowing
+  the legacy mouth radiation resistance (unless physical reaction is selected).
+  PITCH IS NEVER ASSIGNED: blowing
   pressure and geometry gestures (cut-up, labium offset, jet angle)
   are the controls. Model: Bernoulli jet speed; receptivity = the
   leaky INTEGRAL of the delayed mouth velocity (its 1/omega cancels the
@@ -2186,6 +2187,27 @@ None.
   adds data access to existing physics; it does not add finger-pad mechanics,
   junction end corrections, mutual radiation feedback, gas evolution or
   measured-instrument authority. See `examples/FLUE_NETWORK_PERFORMANCES.md`.
+
+  `FlueOutletPerformance::with_mouth_reaction` selects compact self reaction of
+  the actual rectangular mouth in the same exterior gas and area basis as its
+  pressure receiver. The exact rectangular static Rayleigh integral and compact
+  monopole resistance determine one positive-real `R*s/(s+p)` branch in the
+  existing `fs-vfit` midpoint owner. Current-flow pressure and retained history
+  enter the original same-sample jet/mouth/duct solve. Original windway, jet
+  feedback, gas sources and separately declared contraction loss remain. The
+  branch replaces the legacy end correction and authored linear resistance;
+  near-field storage and escaped radiation energy have separate ledger terms.
+  The file selection is `mouth_reaction compact-baffled` immediately after
+  `mouth_radiation`, with zero `mouth_loss_rel`.
+
+  Construction bounds cell work, requires matched static pressure and a compact
+  band, checks static quadrature against the exact rectangle, and checks both
+  analogue and realized complex impedance and resistance within 5% at 32
+  frequencies. These sampled checks are not a continuum or broadband
+  certificate. Mouth-to-terminal mutual reaction, free-field body scattering,
+  resolved turbulence and measured flute qualification remain outside this
+  selection. Physical storage/work and source-to-PCM regressions are authored;
+  syntax checks pass, while native compilation and execution remain required.
 
 - `wind_line` module (bead 3ez8g.6.3): the wind articulation runtime —
   `WindLineBank` holds per-fingering exact-FIR characteristic lines
