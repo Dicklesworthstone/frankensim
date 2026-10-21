@@ -1,0 +1,31 @@
+frankensim.reed-thickness.v1
+reed	kind	quantity	x_from_tip_m	y_from_centre_m	value	unit	location	formula_mm
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.000	0.000	0.000074	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.000	0.004	0.000080	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.000	0.006	0.000042	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.005	0.000	0.000343	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.005	0.004	0.000293	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.005	0.006	0.000197	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.010	0.000	0.000648	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.010	0.004	0.000542	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.010	0.006	0.000377	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.015	0.000	0.001047	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.015	0.004	0.000847	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.015	0.006	0.000571	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.020	0.000	0.001451	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.020	0.004	0.001135	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.020	0.006	0.000745	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.025	0.000	0.001926	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.025	0.004	0.001527	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.025	0.006	0.001078	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.030	0.000	0.002540	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.030	0.004	0.002084	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.030	0.006	0.001589	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.035	0.000	0.003351	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.035	0.004	0.002817	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	measured-network	vamp_thickness	0.035	0.006	0.002256	m	Table 8 p.25 (arXiv 1202.2114v2) = Table A2 p.568	-
+vandoren-v12-reference-reed	recipe	vamp_interpolation	-	-	-	-	Appendix B p.25	cubic splines s0(x), s1(x), s2(x) through each column; vamp(x,y) = p0 + p1 y^2 + p2 y^4 with p0 = s0, p1 = (-65 s0 + 81 s1 - 16 s2)/720, p2 = (5 s0 - 9 s1 + 4 s2)/2880
+vandoren-v12-reference-reed	recipe	heel	-	-	-	-	Appendix B p.25	heel(y) = -14.1 + sqrt(17.4^2 - y^2)
+vandoren-v12-reference-reed	recipe	contour_half_width	-	-	-	-	Appendix B p.26	contour(x) = 0 for x < 0 or x >= 67.5; sqrt((24.4 - x) x) for x < 1.13196; 4.08044 + sqrt(-5.31 + 6.8 x - x^2) for x < 2.94661; 263/40 - (11/900) x for x < 67.5
+vandoren-v12-reference-reed	recipe	thickness	-	-	-	-	Appendix B p.26	thickness(x,y) = min[heel(y), vamp(x,y)] if |y| < contour(x), else 0
+vandoren-v12-reference-reed	printed	maximum_thickness	-	-	0.0033	m	Sec. 4.3.2 p.14 (equals heel(0) = 3.3 mm)	-

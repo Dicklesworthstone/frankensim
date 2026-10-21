@@ -1,0 +1,42 @@
+frankensim.validation-printed-values.v1
+item	setup	quantity	value	low	high	unit	location	uncertainty	note
+table1-h0	typical	reed_opening_at_rest	-	0.4	1.0	mm	Table 1 (manuscript p.41, titled Tableau des constantes et valeurs typiques)	accuracy 10 percent (Sec. 4.5 pp.20-21)	typical range, not a confidence interval
+table1-pm	typical	beating_pressure	-	40	100	mbar	Table 1 (manuscript p.41, titled Tableau des constantes et valeurs typiques)	accuracy 2 percent in some cases (Sec. 4.5 pp.20-21)	typical range
+table1-k	typical	reed_surfacic_stiffness	-	80	130	mbar/mm	Table 1 (manuscript p.41, titled Tableau des constantes et valeurs typiques)	accuracy 10 percent (Sec. 4.5 pp.20-21)	typical range
+table1-alpha-w	typical	jet_effective_width	-	12	18	mm	Table 1 (manuscript p.41, titled Tableau des constantes et valeurs typiques)	same range as H0 (Sec. 4.5 pp.20-21)	typical range
+table1-umax	typical	maximum_flow	-	200	600	cm3/s	Table 1 (manuscript p.41, titled Tableau des constantes et valeurs typiques)	unstated	typical range
+text-h0-free	typical	reed_opening_at_rest_without_lip	1	-	-	mm	Sec. 4.5 pp.20-21	approximate (printed as approximately 1 mm)	reed free, lips not pressing
+text-h0-tight	typical	reed_opening_at_rest_tight_embouchure	0.4	-	-	mm	Sec. 4.5 pp.20-21	printed as probably not much under 0.4 mm	rather tight embouchure
+text-pm-loose	typical	beating_pressure_loose_embouchure	80	-	-	mbar	Sec. 4.5 pp.20-21	printed as around 80 mbar	
+text-pm-tight	typical	beating_pressure_tight_embouchure	60	-	-	mbar	Sec. 4.5 pp.20-21	printed as around 60 mbar	
+text-k-range	all	reed_surfacic_stiffness_variation_across_measurements	-	-	0.5	1	Sec. 4.5 pp.20-21	unstated	did not vary more than 50 percent in all the measurements
+fig7-h0	selmer-c80-plasticover-3-h0-0.6mm	reed_opening_at_rest	0.6	-	-	mm	Sec. 4.1 p.14	accuracy 10 percent (Sec. 4.5 pp.20-21)	Selmer C80, Plasticover reed strength 3
+fig7-k	selmer-c80-plasticover-3-h0-0.6mm	reed_surfacic_stiffness_from_fig7b_slope	107	-	-	mbar/mm	Sec. 4.3 p.18	accuracy 10 percent (Sec. 4.5 pp.20-21)	
+fig7-rest-shift	selmer-c80-plasticover-3-h0-0.6mm	rest_position_difference_rising_vs_falling	0.04	-	-	1	Sec. 4.1 p.15	unstated	only the rest position differs between the two straight lines of Fig 7b
+fig7-residual-flow	selmer-c80-plasticover-3-h0-0.6mm	pressure_beyond_which_a_weak_residual_flow_remains	60	-	-	mbar	Sec. 4.1 p.15	unstated	closing is never total
+fig7c-alpha	selmer-c80-plasticover-3-h0-0.6mm	contraction_coefficient	1.2	-	-	1	Sec. 4.4 p.19	printed as approximately 1.2	from Fig 7c
+fig8-h0	vandoren-b40-plasticover-3-h0-0.6mm	reed_opening_at_rest	0.6	-	-	mm	Sec. 4.3 p.17	accuracy 10 percent (Sec. 4.5 pp.20-21)	Vandoren B40, Plasticover reed n 3
+fig8-k-slope	vandoren-b40-plasticover-3-h0-0.6mm	reed_surfacic_stiffness_from_fig8b_slope	116	-	-	mbar/mm	Sec. 4.3 p.18	accuracy 10 percent (Sec. 4.5 pp.20-21)	
+fig8-k-pm	vandoren-b40-plasticover-3-h0-0.6mm	reed_surfacic_stiffness_pm_over_h0	122	-	-	mbar/mm	Sec. 4.3 p.18	derived by the authors from PM and H0	
+fig8-pm	vandoren-b40-plasticover-3-h0-0.6mm	beating_pressure_from_flow_maximum	73	-	-	mbar	Sec. 4.3 p.18	accuracy 2 percent in some cases (Sec. 4.5 pp.20-21)	
+fig8-nonlinear-onset	vandoren-b40-plasticover-3-h0-0.6mm	pressure_above_which_opening_leaves_linearity	40	-	-	mbar	Sec. 4.3 p.18	printed as approximately 40 mbar	stiffness rises above this, attributed to contact with the lay
+fig9-alpha	vandoren-b40-plasticover-3-h0-0.6mm	contraction_coefficient	0.95	-	-	1	Sec. 4.4 p.19	printed as approximately 0.95	for 0.2 < H < 0.65 mm with w = 14 mm
+fig9-w	vandoren-b40-plasticover-3-h0-0.6mm	external_width_of_mouthpiece_inlet	14	-	-	mm	Sec. 4.4 p.19	unstated	the w used in alpha = U/(wH sqrt(2 dP/rho))
+fig9-h-floor	vandoren-b40-plasticover-3-h0-0.6mm	opening_below_which_optics_are_not_relevant	0.15	-	-	mm	Sec. 4.4 p.19	unstated	
+alpha-range	all	contraction_coefficient_range_over_embouchures	-	0.85	1.30	1	Sec. 4.4 pp.19-20	unstated	every embouchure tested
+visco-instant	all	recovered_opening_fraction_instantaneous	0.93	-	-	1	Sec. 4.2 p.16	unstated	after closing then quickly releasing
+visco-tau1	all	recovery_time_constant_1	8	-	-	s	Sec. 4.2 p.16	printed as approximately 8 s	reaches 0.97 of the maximum opening
+visco-tau1-end	all	recovered_opening_fraction_after_tau1_phase	0.97	-	-	1	Sec. 4.2 p.16	unstated	
+visco-tau2	all	recovery_time_constant_2	900	-	-	s	Sec. 4.2 p.16	printed as approximately 900 s	quasi-plastic
+diaphragm-cd	rig	diaphragm_vena_contracta_coefficient	1	-	-	1	Sec. 3.3 p.12	within 1 percent, except 0.97 for the 3.5 mm diaphragm	chamfered diaphragms calibrated with a gas volume meter
+lip	rig	artificial_lip_balloon_diameter	10	-	-	mm	Sec. 3.1 p.10	unstated	latex balloon with water-saturated foam inside
+sampling	rig	sampling_frequency	100	-	-	Hz	Sec. 3.5 p.14	unstated	runs of 50 to 100 s
+line-7b-a	selmer-c80-plasticover-3-h0-0.6mm	fitted_line_intercept_and_end	0.6103	-	-	mm	Fig 7b dashed line (vector read)	read error 0.0006 mm	from (0 mbar, 0.6103 mm) to (36.02 mbar, 0.2739 mm): slope 107.1 mbar/mm (derived)
+line-7b-b	selmer-c80-plasticover-3-h0-0.6mm	fitted_line_intercept_and_end	0.5864	-	-	mm	Fig 7b dashed line (vector read)	read error 0.0006 mm	from (0 mbar, 0.5864 mm) to (33.54 mbar, 0.2739 mm): slope 107.3 mbar/mm (derived)
+line-8-h	vandoren-b40-plasticover-3-h0-0.6mm	fitted_line_intercept	0.6336	-	-	mm	Fig 8 bottom dashed line (vector read)	read error 0.003 mm	to zero at 72.99 mbar: 115.2 mbar/mm (derived)
+line-8-markers	vandoren-b40-plasticover-3-h0-0.6mm	vertical_dashed_lines	-	38.98	72.99	mbar	Fig 8 (vector read)	read error 0.07 mbar	the printed 40 mbar and PM = 73 mbar
+line-7c	selmer-c80-plasticover-3-h0-0.6mm	jet_section_line_through_zero_at_h_0.6mm	9.883	-	-	mm2	Fig 7c (vector read)	read error 0.017 mm2	alpha*w = 16.47 mm; alpha = 1.18 with w = 14 mm (derived)
+line-9	vandoren-b40-plasticover-3-h0-0.6mm	contraction_coefficient_dashed_line	0.948	-	-	1	Fig 9 (vector read)	read error 0.002	
+theory-7a-a	selmer-c80-plasticover-3-h0-0.6mm	authors_theory_curve_maximum_and_zero	411.6	-	69.50	cm3/s;mbar	Fig 7a (vector read)	read error 0.61 cm3/s, 0.11 mbar	Eq 5 curve A: maximum 411.6 cm3/s, U = 0 at 69.50 mbar
+theory-7a-b	selmer-c80-plasticover-3-h0-0.6mm	authors_theory_curve_maximum_and_zero	385.2	66.51	66.73	cm3/s;mbar	Fig 7a (vector read)	read error 0.61 cm3/s, 0.11 mbar	Eq 5 curve B: maximum 385.2 cm3/s; U reaches 0 between 66.51 and 66.73 mbar (sparse vertices)
+theory-8	vandoren-b40-plasticover-3-h0-0.6mm	authors_theory_curve_maximum_and_zero	355.3	72.61	72.99	cm3/s;mbar	Fig 8 (vector read)	read error 1.3 cm3/s, 0.07 mbar	maximum 355.3 cm3/s; U reaches 0 between 72.61 and 72.99 mbar

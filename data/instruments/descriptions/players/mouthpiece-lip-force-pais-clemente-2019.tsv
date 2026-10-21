@@ -1,0 +1,22 @@
+frankensim.player-lower-lip-force-per-player.v1
+table	instrument	player	measure	value_g	note
+T1	clarinet	C.F.	maximum	25	printed in g (gram-force from the weight calibration); mean of nine trials
+T1	clarinet	C.F.	medium	16	printed as Medium values; the Results text calls them median values
+T1	clarinet	D.S.	maximum	59	printed in g (gram-force from the weight calibration); mean of nine trials
+T1	clarinet	D.S.	medium	42	printed as Medium values; the Results text calls them median values
+T1	clarinet	J.V.	maximum	51	printed in g (gram-force from the weight calibration); mean of nine trials
+T1	clarinet	J.V.	medium	33	printed as Medium values; the Results text calls them median values
+T1	clarinet	L.M	maximum	129	printed in g (gram-force from the weight calibration); mean of nine trials
+T1	clarinet	L.M	medium	83	printed as Medium values; the Results text calls them median values
+T1	clarinet	R.L.	maximum	226	printed in g (gram-force from the weight calibration); mean of nine trials
+T1	clarinet	R.L.	medium	120	printed as Medium values; the Results text calls them median values
+T2	saxophone	C.F.	maximum	80	printed in g (gram-force from the weight calibration); mean of nine trials
+T2	saxophone	C.F.	medium	42	printed as Medium values; the Results text calls them median values
+T2	saxophone	D.R.	maximum	22	printed in g (gram-force from the weight calibration); mean of nine trials
+T2	saxophone	D.R.	medium	5	printed as Medium values; the Results text calls them median values
+T2	saxophone	G.S.	maximum	320	printed in g (gram-force from the weight calibration); mean of nine trials
+T2	saxophone	G.S.	medium	169	printed as Medium values; the Results text calls them median values
+T2	saxophone	J.O.	maximum	220	printed in g (gram-force from the weight calibration); mean of nine trials
+T2	saxophone	J.O.	medium	127	printed as Medium values; the Results text calls them median values
+T2	saxophone	J.P.G.	maximum	60	printed in g (gram-force from the weight calibration); mean of nine trials
+T2	saxophone	J.P.G.	medium	27	printed as Medium values; the Results text calls them median values

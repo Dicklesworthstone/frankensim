@@ -1,0 +1,32 @@
+frankensim.reed-resonance-statistics.v1
+series	mode	n_reeds_identified	mean_hz	sd_hz	min_hz	max_hz	location	note
+A	F1	55	1996	77	1838	2154	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	about 20 C, reeds not moistened; 25-cent frequency step; SD is reed-to-reed spread
+A	T1	55	3377	132	3091	3676	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	about 20 C, reeds not moistened; 25-cent frequency step; SD is reed-to-reed spread
+A	F2	55	5130	161	4767	5669	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	about 20 C, reeds not moistened; 25-cent frequency step; SD is reed-to-reed spread
+A	T2	55	6108	261	5587	6939	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	about 20 C, reeds not moistened; 25-cent frequency step; SD is reed-to-reed spread
+A	X1	55	6869	198	6455	7458	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	about 20 C, reeds not moistened; 25-cent frequency step; SD is reed-to-reed spread
+A	T3	55	9571	500	8617	11014	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	about 20 C, reeds not moistened; 25-cent frequency step; SD is reed-to-reed spread
+A	F3	55	10146	419	9262	10857	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	about 20 C, reeds not moistened; 25-cent frequency step; SD is reed-to-reed spread
+A	X2	55	11521	387	10701	12187	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	about 20 C, reeds not moistened; 25-cent frequency step; SD is reed-to-reed spread
+A	X3	55	12294	368	11502	13482	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	about 20 C, reeds not moistened; 25-cent frequency step; SD is reed-to-reed spread
+A	T4	53	14011	756	12186	16503	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	about 20 C, reeds not moistened; 25-cent frequency step; SD is reed-to-reed spread
+A	F4	45	16784	552	15803	18524	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	about 20 C, reeds not moistened; 25-cent frequency step; SD is reed-to-reed spread
+A	X6	41	16984	972	15133	18793	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	about 20 C, reeds not moistened; 25-cent frequency step; SD is reed-to-reed spread
+A	X4	24	18497	518	17234	19067	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	about 20 C, reeds not moistened; 25-cent frequency step; SD is reed-to-reed spread
+B	F1	55	1960	66	1812	2093	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+B	T1	55	3436	129	3136	3729	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+B	F2	55	4856	189	4435	5351	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+B	T2	55	6193	247	5669	7040	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+B	X1	45	6801	217	6363	7458	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+B	T3	54	9590	458	8742	11014	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+B	F3	55	9213	414	8372	10396	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+B	X2	54	11688	379	10857	13098	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+B	X3	11	12290	471	11839	13482	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+B	T4	54	14111	763	12186	16503	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+B	F4	54	15363	663	14079	17484	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+B	X6	30	16888	734	15577	18258	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+B	X4	23	17544	772	16033	19911	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+B	X5	54	18896	501	17484	19911	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+B	T5	14	19668	329	19067	19911	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	23-25 C after an overnight exposure that removed 2-4 percent of reed mass; 25-cent step
+A	X5	0	-	-	-	-	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	not identified in series A
+A	T5	0	-	-	-	-	Table 7 p.24 (arXiv 1202.2114v2) = Table A1 p.568	not identified in series A

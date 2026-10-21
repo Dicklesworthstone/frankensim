@@ -1,0 +1,12 @@
+frankensim.reed-lip-force-machine.v1
+table	set	n_reeds	quantity	mean	sd	unit	note
+T1	one-reed-mounted-10-times	1	section_at_rest_S00	12.21	0.18	mm2	repeatability (Table 1 p.5)
+T1	one-reed-mounted-10-times	1	linear_reed_closing_force_FM	3.05	0.06	N	x-intercept of the linear part of S(F)
+T1	one-reed-mounted-10-times	1	nonlinear_force_range_C	1.52	0.06	unit-not-printed	
+T1	one-reed-mounted-10-times	1	leak_L	0.15	0.01	mm2	
+T2	vandoren-v12-strength-3	50	section_at_rest_S00	12.18	0.71	mm2	spread over 50 reeds (Table 2 p.5)
+T2	vandoren-v12-strength-3	50	linear_reed_closing_force_FM	3.36	0.26	N	x-intercept of the linear part of S(F); not the force at actual closure
+T2	vandoren-v12-strength-3	50	nonlinear_force_range_C	1.55	0.29	unit-not-printed	
+T2	vandoren-v12-strength-3	50	leak_L	0.21	0.13	mm2	not kept for analysis by the authors
+rig	vandoren-bd4-silicone-lip	-	artificial_lip_dimensions	30 x 10 x 7	-	mm	rectangular silicone lip on a force sensor (Sec. 2.2 p.3)
+rig	vandoren-bd4-silicone-lip	-	lip_step	0.4	-	mm	from no lip force to complete closure
