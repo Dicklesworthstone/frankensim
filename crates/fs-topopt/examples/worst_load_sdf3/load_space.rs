@@ -1,8 +1,11 @@
 //! Optimize simultaneous combinations, not a finite list of exclusive cases.
+#[path = "load_space/material.rs"]
+mod material;
 use super::*;
 use fs_topopt::sdf3::robust::envelope::load_space::{LoadSpace3, design::LoadSpaceDesignStudy3};
 
 pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.first().is_some_and(|s| s == "--minimum-material") { return material::run(&args[1..]); }
     if args.len() > 2 { return Err("usage: worst_load_sdf3 --load-space [UPDATES [TOTAL_KRYLOV_ITERATIONS]]".into()); }
     let updates = args.first().map_or(Ok(200), |s| s.parse::<usize>())?;
     let iterations = args.get(1).map_or(Ok(250_000), |s| s.parse::<usize>())?;
