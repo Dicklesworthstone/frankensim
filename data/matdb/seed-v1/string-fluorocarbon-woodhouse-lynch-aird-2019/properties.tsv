@@ -1,0 +1,17 @@
+frankensim.matdb-source.v1
+observation	wla-2019-fluorocarbon	Commercial monofilament "fluorocarbon" instrument strings; the polymer is not identified in the paper (the manufacturers would not give the composition), and the density is the value representative of the thinner strings tested	Best-fitted complex Young's modulus E = E' + iE'' from pluck-response damping and bending-stiffness measurements of earlier studies: E' (kHz range) is a straight line in stress, E'' is constant, and the bulk density is representative of the thinner monofilament strings (the thicker wound strings were denser)	The measurement temperature and humidity are NOT stated in this paper; strings were settled at each tuning; a calibrated design-chart fit, not a constitutive law; the stress range of the fit is not printed as numbers in this paper; the frequency validity bands are the kHz range the paper names for E' and the plotted 100-10000 Hz band of its loss-factor figures
+scalar	density	wla-2019-fluorocarbon	density	1800	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	frequency	100	10000	Hz
+scalar	storage-modulus-intercept	wla-2019-fluorocarbon	young_modulus_storage_intercept	3200000000	Pa	constant
+uncertainty	storage-modulus-intercept	unstated	-	-	-	-
+validity	storage-modulus-intercept	frequency	1000	10000	Hz
+scalar	storage-modulus-per-gpa-stress	wla-2019-fluorocarbon	young_modulus_storage_per_gpa_stress	41	1	constant
+uncertainty	storage-modulus-per-gpa-stress	unstated	-	-	-	-
+validity	storage-modulus-per-gpa-stress	frequency	1000	10000	Hz
+scalar	loss-modulus	wla-2019-fluorocarbon	young_modulus_loss	180000000	Pa	constant
+uncertainty	loss-modulus	unstated	-	-	-	-
+validity	loss-modulus	frequency	100	10000	Hz
+scalar	loss-factor-low-stress	wla-2019-fluorocarbon	loss_factor_at_low_stress	0.04	1	constant
+uncertainty	loss-factor-low-stress	unstated	-	-	-	-
+validity	loss-factor-low-stress	frequency	100	10000	Hz

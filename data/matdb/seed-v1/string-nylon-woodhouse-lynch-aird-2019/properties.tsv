@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+observation	wla-2019-nylon	Commercial monofilament "nylon" instrument strings; the nylon grade is unknown (the manufacturers would not say), and the density is the value representative of the thinner strings tested	Best-fitted complex Young's modulus E = E' + iE'' from pluck-response damping and bending-stiffness measurements of earlier studies: E' (kHz range) is a straight line in stress, E'' is constant, and the bulk density is representative of the thinner strings	The measurement temperature and humidity are NOT stated in this paper; strings were settled (plastic response levelled off) at each tuning; E' rises with stress and depends on stress history; a calibrated design-chart fit, not a constitutive law; the stress range of the fit is not printed as numbers in this paper; the frequency validity bands are the kHz range the paper names for E' and the plotted 100-10000 Hz band of its loss-factor figures
+scalar	density	wla-2019-nylon	density	1070	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	frequency	100	10000	Hz
+scalar	storage-modulus-intercept	wla-2019-nylon	young_modulus_storage_intercept	4500000000	Pa	constant
+uncertainty	storage-modulus-intercept	unstated	-	-	-	-
+validity	storage-modulus-intercept	frequency	1000	10000	Hz
+scalar	storage-modulus-per-gpa-stress	wla-2019-nylon	young_modulus_storage_per_gpa_stress	39	1	constant
+uncertainty	storage-modulus-per-gpa-stress	unstated	-	-	-	-
+validity	storage-modulus-per-gpa-stress	frequency	1000	10000	Hz
+scalar	loss-modulus	wla-2019-nylon	young_modulus_loss	250000000	Pa	constant
+uncertainty	loss-modulus	unstated	-	-	-	-
+validity	loss-modulus	frequency	100	10000	Hz
+scalar	loss-factor-low-stress	wla-2019-nylon	loss_factor_at_low_stress	0.04	1	constant
+uncertainty	loss-factor-low-stress	unstated	-	-	-	-
+validity	loss-factor-low-stress	frequency	100	10000	Hz
+scalar	loss-factor-highest-tested-stress	wla-2019-nylon	loss_factor_at_highest_tested_stress	0.02	1	constant
+uncertainty	loss-factor-highest-tested-stress	unstated	-	-	-	-
+validity	loss-factor-highest-tested-stress	frequency	100	10000	Hz

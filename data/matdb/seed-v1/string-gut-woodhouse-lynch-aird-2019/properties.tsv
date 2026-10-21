@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	wla-2019-gut	Commercial natural gut monofilament instrument strings	Fitted complex Young's modulus E = E' + iE'' from pluck-response damping measurements of earlier studies: E' (kHz range) is a fixed value, E'' is fixed, eta_E = E''/E' = 0.04, and the bulk density is representative of the measured values	The measurement temperature and humidity are NOT stated in this paper and no humidity dependence is in this pack; gut results scatter more than nylon or fluorocarbon, which the authors attribute to the hand twisting and polishing of each string; a calibrated design-chart fit, not a constitutive law; the frequency validity bands are the kHz range the paper names for E' and the plotted 100-10000 Hz band of its loss-factor figures
+scalar	density	wla-2019-gut	density	1320	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	frequency	100	10000	Hz
+scalar	storage-modulus	wla-2019-gut	young_modulus_storage	6000000000	Pa	constant
+uncertainty	storage-modulus	unstated	-	-	-	-
+validity	storage-modulus	frequency	1000	10000	Hz
+scalar	loss-modulus	wla-2019-gut	young_modulus_loss	240000000	Pa	constant
+uncertainty	loss-modulus	unstated	-	-	-	-
+validity	loss-modulus	frequency	100	10000	Hz
+scalar	loss-factor	wla-2019-gut	loss_factor	0.04	1	constant
+uncertainty	loss-factor	unstated	-	-	-	-
+validity	loss-factor	frequency	100	10000	Hz
