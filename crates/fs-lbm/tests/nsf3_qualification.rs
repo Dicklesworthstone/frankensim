@@ -17,9 +17,85 @@ use fs_lbm::nsf3::dispersion::{
 };
 use fs_lbm::nsf3::{MAX_QUALIFIED_MACH, NsfGrid3, NsfSpec, THETA0, WallThermal};
 use fs_material::gas::{GasSpec, GasState};
+use std::time::Instant;
 
 fn air() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap()
+}
+
+/// One rung of a receipt: cell size, cells per characteristic length, and the error of the case's observable.
+struct Rung {
+    dx_m: f64,
+    ppw: f64,
+    err: f64,
+}
+
+/// Rungs of a ladder over a fixed length (a wavelength or a gap): `dx = length / n`.
+fn ladder(cells: &[usize], length_m: f64, errs: &[f64]) -> Vec<Rung> {
+    cells
+        .iter()
+        .zip(errs)
+        .map(|(&n, &err)| Rung {
+            dx_m: length_m / n as f64,
+            ppw: n as f64,
+            err,
+        })
+        .collect()
+}
+
+/// Execution receipt of the nsf-qualification lane: one JSON line per physics stage, printed only after the stage's assertions
+/// passed and parsed by `scripts/e2e/music/lbm_qualification.sh` (which adds git sha, host and command). `Re` is
+/// `speed * length / nu` of the stage's reference flow, `observed` holds the stage's own observables as JSON members.
+#[allow(clippy::too_many_arguments)]
+fn receipt(
+    stage: &str,
+    mach: f64,
+    length_m: f64,
+    speed_m_s: f64,
+    rungs: &[Rung],
+    observed_order: Option<f64>,
+    observed: &str,
+    tolerance: f64,
+    start: Instant,
+) {
+    let gas = air();
+    let bytes: Vec<u8> = [
+        gas.temperature,
+        gas.pressure,
+        gas.density,
+        gas.dynamic_viscosity,
+        gas.thermal_conductivity,
+        gas.gamma,
+        gas.specific_gas_constant,
+    ]
+    .into_iter()
+    .flat_map(|v| v.to_bits().to_le_bytes())
+    .collect();
+    let blake3 = fs_blake3::hash_domain("org.frankensim.lbm.gas-fixture.v1", &bytes).to_hex();
+    let lattice_speed = (3.0 * gas.specific_gas_constant * gas.temperature).sqrt(); // dx / dt
+    let rungs_json: Vec<String> = rungs
+        .iter()
+        .map(|r| {
+            format!(
+                "{{\"dx_m\":{:e},\"dt_s\":{:e},\"ppw\":{:e},\"err\":{:e}}}",
+                r.dx_m,
+                r.dx_m / lattice_speed,
+                r.ppw,
+                r.err
+            )
+        })
+        .collect();
+    let reynolds = speed_m_s * length_m * gas.density / gas.dynamic_viscosity;
+    let prandtl = gas.dynamic_viscosity * gas.specific_heat_cp / gas.thermal_conductivity;
+    let order = observed_order.map_or("null".to_string(), |o| format!("{o:e}"));
+    println!(
+        "{{\"suite\":\"fs-lbm/nsf3\",\"lane\":\"nsf-qualification\",\"stage\":\"{stage}\",\"verdict\":\"pass\",\"formulation\":\"isothermal D3Q27 LBM + thermal-pressure body force + conservative FV total energy\",\"gas\":{{\"spec\":\"dry_air_ussa1976\",\"T_K\":{},\"p_Pa\":{},\"blake3\":\"{blake3}\"}},\"Re\":{reynolds:e},\"Ma\":{mach:e},\"Pr\":{prandtl:e},\"rungs\":[{}],\"observed_order\":{order},\"observed\":{{{observed}}},\"ma_bound\":{:e},\"tolerance\":{tolerance:e},\"elapsed_s\":{:e}}}",
+        gas.temperature,
+        gas.pressure,
+        rungs_json.join(","),
+        MAX_QUALIFIED_MACH,
+        start.elapsed().as_secs_f64()
+    );
 }
 
 fn point_of(g: &GasState, mu_bulk: f64) -> GasPoint {
@@ -521,6 +597,7 @@ fn quiescent_conduction_fourier() {
     // G1. A small isobaric temperature wave in a quiescent periodic box decays as the entropy mode of the exact linearized NSF
     // (Fourier conduction at constant pressure, kappa k^2 / (rho c_p) to leading order), on a 16 / 32 / 64 points-per-wavelength
     // ladder at a fixed physical wavelength of 1.2 mm (2 x 2 transverse section, fit window 0.02 to 0.35 e-folds); observed order >= 1.8 and the finest rung within 1e-3.
+    let start = Instant::now();
     let lambda_m = 1.2e-3;
     let errs: Vec<f64> = [16usize, 32, 64]
         .iter()
@@ -537,6 +614,18 @@ fn quiescent_conduction_fourier() {
     );
     assert!(order >= 1.8, "observed order {order}");
     assert!(errs[2].abs() <= 1e-3, "finest rung {}", errs[2]);
+    let gas = air();
+    receipt(
+        "conduction",
+        0.0,
+        lambda_m,
+        gas.sound_speed,
+        &ladder(&[16, 32, 64], lambda_m, &errs),
+        Some(order),
+        &format!("\"entropy_decay_rel_err_finest\":{:e}", errs[2]),
+        1e-3,
+        start,
+    );
 }
 
 /// Wavelength of the acoustic ladder: 34.4 mm = 688 cells of 50 um (the campaign grid), i.e. 9.98 kHz in air at 293.15 K; the
@@ -579,6 +668,7 @@ fn linear_modes_match_linearized_nsf() {
     // (dx 200 / 100 / 50 um, acoustic scaling), against the exact linearized-NSF mode with the declared bulk viscosity; the
     // excess attenuation is judged against the Stokes-Kirchhoff rate. Shear-mode decay on a 16 / 32 / 64 ladder at 1.2 mm. The
     // entropy mode is `quiescent_conduction_fourier`.
+    let start = Instant::now();
     let mut phase = Vec::new();
     let mut excess = Vec::new();
     for ppw in [172usize, 344, 688] {
@@ -641,6 +731,37 @@ fn linear_modes_match_linearized_nsf() {
         "shear: order {} finest {}",
         order(&shear),
         shear[2]
+    );
+    let gas = air();
+    receipt(
+        "acoustic",
+        0.0,
+        ACOUSTIC_LAMBDA_M,
+        gas.sound_speed,
+        &ladder(&[172, 344, 688], ACOUSTIC_LAMBDA_M, &phase),
+        Some(order(&phase)),
+        &format!(
+            "\"c_rel_err\":{:e},\"atten_excess_ratio\":{:e},\"atten_excess_order\":{:e},\"atten_excess_by_rung\":[{:e},{:e},{:e}],\"atten_tolerance\":0.1,\"amplitude\":{ACOUSTIC_AMPLITUDE:e}",
+            phase[2],
+            excess[2],
+            order(&excess),
+            excess[0],
+            excess[1],
+            excess[2]
+        ),
+        6e-5,
+        start,
+    );
+    receipt(
+        "shear",
+        0.0,
+        1.2e-3,
+        gas.sound_speed,
+        &ladder(&[16, 32, 64], 1.2e-3, &shear),
+        Some(order(&shear)),
+        &format!("\"shear_decay_rel_err_finest\":{:e}", shear[2]),
+        1e-3,
+        start,
     );
 }
 
@@ -795,6 +916,7 @@ fn couette_viscous_heating_profile() {
     // over the centre-line rise mu U^2 / (8 kappa); a gas that is not heated at all would score 1. The reference holds the gas
     // properties constant, so a floor of order (dln kappa / dln T) * (rise / T) is expected at larger Mach numbers; the Mach
     // dependence on the coarse rung is printed, not asserted.
+    let start = Instant::now();
     let rungs = [20usize, 40, 80];
     let errs: Vec<(f64, f64)> = rungs
         .iter()
@@ -821,6 +943,21 @@ fn couette_viscous_heating_profile() {
     assert!(
         errs.iter().all(|e| e.1 <= 1e-3),
         "velocity profile {errs:?}"
+    );
+    let gas = air();
+    receipt(
+        "couette",
+        0.05,
+        2.0e-4,
+        0.05 * gas.sound_speed,
+        &ladder(&rungs, 2.0e-4, &t),
+        Some(order),
+        &format!(
+            "\"couette_linf\":{:e},\"velocity_linf\":{:e}",
+            t[2], errs[2].1
+        ),
+        1e-3,
+        start,
     );
 }
 
@@ -850,7 +987,9 @@ fn finite_mach_and_lattice_defects_map() {
     // defect must stay within its band over the map; the scaling exponent of each is printed, as is the 64-cell value at the
     // largest Mach number. `MAX_QUALIFIED_MACH` is the largest Mach number of the map and the formulation refuses a larger bound.
     assert_eq!(*MACH_MAP.last().unwrap(), MAX_QUALIFIED_MACH);
+    let start = Instant::now();
     let (ppw, lambda_m) = (32usize, 1.2e-3);
+    let (mut exponents, mut defects_json, mut worst) = (Vec::new(), Vec::new(), (0.0f64, 0.0f64));
     for mode in [Diffusive::Entropy, Diffusive::Shear] {
         let base = advected_wave(ppw, lambda_m, 0.0, mode, 2).0;
         let reference_speed = advected_wave(ppw, lambda_m, MACH_REFERENCE, mode, 2).1;
@@ -865,10 +1004,9 @@ fn finite_mach_and_lattice_defects_map() {
             decay.push(d - base);
             speed.push(s - reference_speed);
         }
+        let (p_decay, p_speed) = (mach_exponent(&decay), mach_exponent(&speed));
         println!(
-            "{mode:?}: scaling exponent with Mach number: decay {:.2}, speed {:.2}",
-            mach_exponent(&decay),
-            mach_exponent(&speed)
+            "{mode:?}: scaling exponent with Mach number: decay {p_decay:.2}, speed {p_speed:.2}"
         );
         let fine_base = advected_wave(2 * ppw, lambda_m, 0.0, mode, 2).0;
         let fine = advected_wave(2 * ppw, lambda_m, MAX_QUALIFIED_MACH, mode, 2).0 - fine_base;
@@ -888,7 +1026,47 @@ fn finite_mach_and_lattice_defects_map() {
             decay.windows(2).all(|w| w[0].abs() < w[1].abs()),
             "{mode:?} decay defect must grow with Mach number: {decay:?}"
         );
+        let name = format!("{mode:?}").to_lowercase();
+        exponents.push(format!(
+            "\"{name}_decay\":{p_decay:e},\"{name}_speed\":{p_speed:e}"
+        ));
+        defects_json.push(format!(
+            "\"{name}\":{{\"decay_32\":[{:e},{:e},{:e}],\"speed_32\":[{:e},{:e},{:e}],\"decay_64_at_bound\":{fine:e}}}",
+            decay[0], decay[1], decay[2], speed[0], speed[1], speed[2]
+        ));
+        worst = (worst.0.max(decay[2].abs()), worst.1.max(fine.abs()));
     }
+    let gas = air();
+    let rungs = [
+        Rung {
+            dx_m: lambda_m / ppw as f64,
+            ppw: ppw as f64,
+            err: worst.0,
+        },
+        Rung {
+            dx_m: lambda_m / (2 * ppw) as f64,
+            ppw: (2 * ppw) as f64,
+            err: worst.1,
+        },
+    ];
+    receipt(
+        "mach-map",
+        MAX_QUALIFIED_MACH,
+        lambda_m,
+        MAX_QUALIFIED_MACH * gas.sound_speed,
+        &rungs,
+        None,
+        &format!(
+            "\"defect_exponents\":{{\"ma\":[{:e},{:e},{:e}],\"galilean\":{{{}}}}},\"defects\":{{{}}},\"decay_band\":{GALILEAN_DECAY_BAND:e},\"speed_band\":{GALILEAN_SPEED_BAND:e}",
+            MACH_MAP[0],
+            MACH_MAP[1],
+            MACH_MAP[2],
+            exponents.join(","),
+            defects_json.join(",")
+        ),
+        GALILEAN_DECAY_BAND,
+        start,
+    );
 }
 
 #[test]

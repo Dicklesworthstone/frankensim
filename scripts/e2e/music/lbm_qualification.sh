@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # IRP M3.2-W1: central release qualification, no Mac builds.
-# Usage: lbm_qualification.sh --lane d3q27-invariance|dissipation-ladder|nsf-energy \
+# Usage: lbm_qualification.sh --lane d3q27-invariance|dissipation-ladder|nsf-energy|nsf-qualification \
 #        --out DIR [--runner native|rch]
 # The optional rch runner is for central Linux scheduling, never this Mac.
 # Each lane retains the real test output and execution-stamped JSONL.
 # nsf-energy (M3.2-W3a) runs tests/nsf3_battery.rs whole and requires one passing receipt per physics stage.
+# nsf-qualification (M3.2-W3b) runs tests/nsf3_qualification.rs whole, including its ignored heavy tests, and requires one passing
+# receipt per stage (conduction, acoustic, shear, couette, mach-map).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 LANE="" OUT="" RUNNER="native"
@@ -13,14 +15,15 @@ while (($#)); do
     --lane) LANE="${2:?missing lane}"; shift 2 ;;
     --out|--out-dir) OUT="${2:?missing output directory}"; shift 2 ;;
     --runner) RUNNER="${2:?missing runner}"; shift 2 ;;
-    *) echo "usage: $0 --lane d3q27-invariance|dissipation-ladder|nsf-energy --out DIR [--runner native|rch]" >&2; exit 2 ;;
+    *) echo "usage: $0 --lane d3q27-invariance|dissipation-ladder|nsf-energy|nsf-qualification --out DIR [--runner native|rch]" >&2; exit 2 ;;
   esac
 done
-BIN=d3q27_battery SUITE=fs-lbm/d3q27 EXACT=(--exact)
+BIN=d3q27_battery SUITE=fs-lbm/d3q27 EXACT=(--exact) EXTRA=()
 case "$LANE" in
   d3q27-invariance) TEST=rotational_invariance_d3q27_vs_d3q19_control ;;
   dissipation-ladder) TEST=collision_dissipation_ladder ;;
   nsf-energy) TEST="" BIN=nsf3_battery SUITE=fs-lbm/nsf3 EXACT=() ;;
+  nsf-qualification) TEST="" BIN=nsf3_qualification SUITE=fs-lbm/nsf3 EXACT=() EXTRA=(--include-ignored) ;;
   *) echo "LBM qualification: declare one supported --lane" >&2; exit 2 ;;
 esac
 [[ -n "$OUT" ]] || { echo "LBM qualification: --out required" >&2; exit 2; }
@@ -30,7 +33,7 @@ case "$RUNNER" in native|rch) ;; *) echo "unknown runner: $RUNNER" >&2; exit 2 ;
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 cd "$ROOT"
-CMD=(env CARGO_BUILD_JOBS=12 cargo test --release --locked -p fs-lbm --test "$BIN" ${TEST:+"$TEST"} -- "${EXACT[@]}" --nocapture)
+CMD=(env CARGO_BUILD_JOBS=12 cargo test --release --locked -p fs-lbm --test "$BIN" ${TEST:+"$TEST"} -- "${EXACT[@]}" "${EXTRA[@]}" --nocapture)
 if [[ "$RUNNER" == rch ]]; then
   export RCH_REQUIRE_REMOTE=1
   CMD=(rch exec -- "${CMD[@]}")
@@ -64,6 +67,9 @@ for line in (out/'native.log').read_text().splitlines():
 if lane=='nsf-energy':
     stages=sorted(r.get('stage') for r in rows)
     passed=(int(code)==0 and stages==['closed-box','sound-speed','viscous-heating','wall-heat'] and all(r['verdict']=='pass' for r in rows))
+elif lane=='nsf-qualification':
+    stages=sorted(r.get('stage') for r in rows)
+    passed=(int(code)==0 and stages==['acoustic','conduction','couette','mach-map','shear'] and all(r['verdict']=='pass' for r in rows))
 else:
     terminal=[r for r in rows if r.get('stage')=='terminal']
     expected=2 if lane=='dissipation-ladder' else 1
