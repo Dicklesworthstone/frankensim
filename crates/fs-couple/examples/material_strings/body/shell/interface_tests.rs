@@ -172,7 +172,8 @@ fn interface_geometry_and_complete_allowances_precede_source_io_and_paths_cache_
     assert!(Profile::parse(text.replace(&format!("supports 16\n{supports}"), "supports 0\n").as_bytes()).is_ok());
     scoped(|_, gate| {
         let mut over = shell_spec();
-        over.strings[0].bending_modes = input::MAX_MODES;
+        // More modal coordinates than the whole instrument admits, so the reservation refuses before any pack I/O.
+        over.strings[0].bending_modes = input::MAX_TOTAL_MODES;
         let mut reads = 0;
         assert!(held_profile().load_interfaces(&over, gate, |_| {
             reads += 1; Ok(holding_pack(1e8, 2e4, "body.fsmatpk", 200_000.0))

@@ -182,6 +182,10 @@ impl input::Spec {
         let bank=if let Some(body_profile)=&profile {
             body_profile.compile(&self,sources,&mut catalog,&mut loader,settings.clone(),cx,gate)?
         } else {
+            if self.body.modes > input::MAX_PLATE_BODY_MODES {
+                return Err(format!("flat plate bodies admit 1..={} retained body modes",
+                    input::MAX_PLATE_BODY_MODES).into());
+            }
             let material=resolve(&self.body.pack,&mut catalog,&mut loader,&self,true,false)?;
             let body=SharedMaterialPlateBody {
                 specimen:with_uniform_plate_material_state(ThinPlate { length_m:self.body.length,width_m:self.body.width,

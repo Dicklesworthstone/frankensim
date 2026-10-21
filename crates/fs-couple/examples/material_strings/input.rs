@@ -9,6 +9,12 @@ pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
 pub const MAX_TOTAL_PACK_BYTES: usize = 64 * 1_048_576;
 pub const MAX_MODES: usize = 128;
+/// Retained body modes a `body` record may request. Flat plate bodies keep [`MAX_PLATE_BODY_MODES`].
+pub const MAX_BODY_MODES: usize = 128;
+pub const MAX_PLATE_BODY_MODES: usize = 16;
+/// Modal coordinates of one complete instrument (strings, twist, body, cavity, gas memory). The network
+/// setup work `modes * (links + 1)^2` still has to fit [`MAX_WORK`].
+pub const MAX_TOTAL_MODES: usize = 1024;
 pub const MAX_EVENTS: usize = 16_384;
 pub const MAX_CONTROLS: usize = 262_144;
 pub const MAX_WORK: u64 = 16_777_216;
@@ -98,7 +104,7 @@ impl Spec {
         let gas = *gas_record.state();
         let mut row = r.row("body")?;
         let body = Body { pack: row.path()?, length: row.positive()?, width: row.positive()?,
-            thickness: row.positive()?, modes: row.count(16)?, listener: row.positive()? };
+            thickness: row.positive()?, modes: row.count(MAX_BODY_MODES)?, listener: row.positive()? };
         row.end()?;
         let mut row = r.row("strings")?; let count = row.count(8)?; row.end()?;
         if count == 0 || body.modes == 0 { return Err("nonempty material strings and body modes required".into()); }
@@ -494,8 +500,8 @@ impl Spec {
                 return Err("complete instrument exceeds the explicit prepared mode budget".into());
             }
         }
-        if modes == 0 || modes > MAX_MODES {
-            return Err("complete instrument, including gas memory, exceeds 128 modes".into());
+        if modes == 0 || modes > MAX_TOTAL_MODES {
+            return Err(format!("complete instrument, including gas memory, exceeds {MAX_TOTAL_MODES} modes").into());
         }
         if links > MAX_MODAL_CONNECTIONS {
             return Err("complete instrument exceeds the shared modal connection ceiling".into());

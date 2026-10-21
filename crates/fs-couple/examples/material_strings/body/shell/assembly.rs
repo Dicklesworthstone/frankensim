@@ -9,8 +9,9 @@ use fs_plate::shell::junction::{
 };
 
 const MAX_COMPONENTS: usize = 8;
-const MAX_TOTAL_NODES: usize = 512;
-const MAX_TOTAL_TRIANGLES: usize = 1024;
+// Totals across every component of one assembled body: four components at the per-component ceiling.
+const MAX_TOTAL_NODES: usize = 4 * MAX_NODES;
+const MAX_TOTAL_TRIANGLES: usize = 4 * MAX_TRIANGLES;
 const MAX_TIES: usize = 64;
 
 #[derive(Clone, Debug)]
@@ -59,9 +60,10 @@ impl Spec {
             nodes += shell.nodes.len();
             triangles += shell.triangles.len();
             if nodes > MAX_TOTAL_NODES || triangles > MAX_TOTAL_TRIANGLES {
-                return Err(
-                    "assembled body exceeds 512 total nodes or 1024 total triangles".into(),
-                );
+                return Err(format!(
+                    "assembled body exceeds {MAX_TOTAL_NODES} total nodes or {MAX_TOTAL_TRIANGLES} total triangles"
+                )
+                .into());
             }
             r.row("end-component", 0)?;
             components.push(Component {
@@ -191,7 +193,7 @@ impl Spec {
             return Err("assembled body requires one physical bridge per actual string".into());
         }
         if !(1..=MAX_MODES).contains(&spec.body.modes) {
-            return Err("assembled body admits 1..=16 retained global body modes".into());
+            return Err(format!("assembled body admits 1..={MAX_MODES} retained global body modes").into());
         }
         spec.network_dimensions_with_body_connections(true, self.additional_body_connections())?;
         for component in &self.components {

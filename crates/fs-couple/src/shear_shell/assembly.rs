@@ -10,6 +10,7 @@
 
 use super::{
     AcousticRealizeError, ResolvedShearShell, ShellProjectionBudget, invalid, owner, poll,
+    shell_mode_budget_admits,
 };
 use crate::plate_viscosity::ModalPlateViscosity;
 use crate::render::schedule::force::coupled::{ModalAttachment, ModalConnection};
@@ -217,9 +218,7 @@ impl MaterialShellAssembly {
         let budget = options.projection_budget;
         if self.components.is_empty()
             || self.components.len() > 64
-            || n == 0
-            || n > budget.max_modes
-            || !(1..=64).contains(&budget.max_modes)
+            || !shell_mode_budget_admits(n, budget.max_modes)
             || !budget.reference_resistance_n_s_m.is_finite()
             || budget.reference_resistance_n_s_m <= 0.0
             || !options.eigenvalue_window.0.is_finite()

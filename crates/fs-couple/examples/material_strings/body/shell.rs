@@ -21,10 +21,17 @@ mod pressure;
 #[path = "shell/assembly.rs"]
 pub(super) mod assembly;
 
-const MAX_NODES: usize = 128;
-const MAX_TRIANGLES: usize = 256;
-const MAX_MODES: usize = 16;
+// Per-component ceilings of one shell profile. A violin top resolved at about 10 mm is roughly 600
+// nodes, so these leave room for a top, back or rib set at that resolution.
+pub(super) const MAX_NODES: usize = 2048;
+pub(super) const MAX_TRIANGLES: usize = 4096;
+pub(super) const MAX_MODES: usize = input::MAX_BODY_MODES;
+const _: () = assert!(MAX_MODES <= fs_couple::shear_shell::MAX_SHELL_MODES);
+// Interface bindings keep their own allowance.
 const MAX_PROJECTION_WORK: usize = 268_435_456;
+// The shell projection work is `triangles * (10^6 + 324 modes^2) + 6 nodes modes` plus force and pressure
+// projections (about 2.6e10 for MAX_TRIANGLES triangles and MAX_MODES modes). 2^35 on 64-bit hosts.
+pub(super) const MAX_SHELL_PROJECTION_WORK: usize = if (1u64 << 35) > usize::MAX as u64 { usize::MAX } else { (1u64 << 35) as usize };
 
 #[derive(Clone, Debug)]
 struct Node {
@@ -192,7 +199,7 @@ impl Spec {
             return Err("shell profile requires one physical bridge per actual string".into());
         }
         if spec.body.modes == 0 || spec.body.modes > MAX_MODES {
-            return Err("shell body profile admits 1..=16 retained body modes".into());
+            return Err(format!("shell body profile admits 1..={MAX_MODES} retained body modes").into());
         }
         self.geometry(spec)?;
         self.interfaces.preflight(self, spec)?;
@@ -322,7 +329,7 @@ fn read_window(r: &mut Records<'_>) -> Result<((f64, f64), usize)> {
     if window.0 < 0.0 || window.1 <= window.0 {
         return Err("shell eigenvalue window must be nonnegative and increasing".into());
     }
-    let work = count(r.row("projection-work", 1)?[0], 1, MAX_PROJECTION_WORK)?;
+    let work = count(r.row("projection-work", 1)?[0], 1, MAX_SHELL_PROJECTION_WORK)?;
     Ok((window, work))
 }
 
