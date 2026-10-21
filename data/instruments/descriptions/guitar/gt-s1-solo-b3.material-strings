@@ -4,14 +4,14 @@ state 293.15 1000
 gas mixture 293.15 101325 mole 2 N2 0.7905 O2 0.2095
 body cedar-top.fsmatpk 0.47 0.37 0.0025 16 1.0
 strings 1
-string nylon-b3.fsmatpk 0.680 0.00040894 tension 58.583 12 0 0.955882 100000 0
+string nylon-b3.fsmatpk 0.680 0.00040894 tension 57.368 12 0 0.955882 100000 0
 section homogeneous
 polarizations two 0.7071067811865476 0.7071067811865476 1 0
 prepared-linear 64 67108864 200000000000
 cavity physical-neck 0.0115 0.043 0.0025 flanged flanged 1.0
 friction stribeck 0.8 0.4 0.1 0
 forces preload 1 1
-port 0 0.720588 along 0.7071067811865476 0.7071067811865476 0.9714
+port 0 0.720588 along 0.7071067811865476 0.7071067811865476 0.9512
 force 0 0 0
 schedule
 frankensim-gesture-schedule-v1
