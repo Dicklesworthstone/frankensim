@@ -94,7 +94,7 @@ fn validate_options(params: SimpParams, options: BinaryComplianceOptions3) -> Re
     }
     Ok(())
 }
-fn admit<O: Sdf3Elasticity>(study: &CutDensityStudy3<O>, rho: &[f64], forces: &[&[f64]],
+pub(in crate::sdf3::robust::envelope) fn admit<O: Sdf3Elasticity>(study: &CutDensityStudy3<O>, rho: &[f64], forces: &[&[f64]],
     caps: &ComplianceCaps3, options: BinaryComplianceOptions3) -> Result<(), BinaryComplianceError3> {
     validate_options(study.params(), options)?;
     if forces.len() != caps.caps().len() || forces.len() > options.max_load_cases
@@ -139,7 +139,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         self.binary_caps_from_source(&source, forces, caps, options, control)
     }
 
-    fn binary_cap_source(&self, rho: &[f64], robustness: RobustOptions3, control: &mut SolveControl<'_>)
+    pub(in crate::sdf3::robust::envelope) fn binary_cap_source(&self, rho: &[f64], robustness: RobustOptions3, control: &mut SolveControl<'_>)
         -> Result<[Design3; 3], EvaluationStop> {
         control.checkpoint("sdf3-binary-cap-start")?;
         let filtered = self.filter_apply(rho, control)?;
@@ -150,7 +150,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         ])
     }
 
-    fn binary_caps_from_source(&mut self, source: &[Design3; 3], forces: &[&[f64]],
+    pub(in crate::sdf3::robust::envelope) fn binary_caps_from_source(&mut self, source: &[Design3; 3], forces: &[&[f64]],
         caps: &ComplianceCaps3, options: BinaryComplianceOptions3, control: &mut SolveControl<'_>)
         -> Result<BinaryComplianceEvaluation3, BinaryComplianceError3> {
         let eroded = material(&source[0], &self.mass, options.threshold, control)?;

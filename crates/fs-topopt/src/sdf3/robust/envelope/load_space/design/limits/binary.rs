@@ -1,6 +1,9 @@
 //! Recheck a solid/void endpoint against the ENTIRE simultaneous-load set.
 //! The gray maximizing direction and separately passing basis cases are not
 //! substitutes for the spectrum of the freshly solved binary material.
+mod scan;
+pub use scan::{BinaryLoadSpaceCandidate3, BinaryLoadSpaceScan3,
+    BinaryLoadSpaceScanOptions3, BinaryLoadSpaceScanStop3};
 use super::LoadSpaceCap3;
 use super::super::super::{LoadSpaceSpectrum3, SPECTRAL_TOLERANCE, spectrum};
 use crate::sdf3::robust::envelope::limits::{ComplianceCaps3,
@@ -38,6 +41,14 @@ impl BinaryLoadSpaceEvaluation3 {
     }
 }
 
+fn basis_caps(cap: &LoadSpaceCap3, count: usize) -> Result<ComplianceCaps3, BinaryComplianceError3> {
+    if count != cap.policy().dimension() {
+        return Err(BinaryComplianceError3::Invalid("binary load-space basis count differs from its cap"));
+    }
+    ComplianceCaps3::new(vec![cap.cap(); count], cap.policy().temperature(), count)
+        .map_err(BinaryComplianceError3::Invalid)
+}
+
 impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     /// Filter/project/threshold once using the existing binary material owner,
     /// solve EVERY basis column on the actual binary eroded stiffness, then
@@ -58,17 +69,21 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     pub fn evaluate_binary_load_space_cap(&mut self, rho: &[f64], basis: &[&[f64]],
         cap: &LoadSpaceCap3, options: BinaryComplianceOptions3, control: &mut SolveControl<'_>)
         -> Result<BinaryLoadSpaceEvaluation3, BinaryComplianceError3> {
-        let policy = cap.policy();
-        let n = policy.dimension();
-        if basis.len() != n {
-            return Err(BinaryComplianceError3::Invalid("binary load-space basis count differs from its cap"));
-        }
+        let cases = basis_caps(cap, basis.len())?;
         // These original per-column caps let the existing owner perform the
         // actual binary solves. Their finite-case feasibility is never promoted
         // to a pass for the continuous set; the spectrum below owns that check.
-        let cases = ComplianceCaps3::new(vec![cap.cap(); n], policy.temperature(), n)
-            .map_err(BinaryComplianceError3::Invalid)?;
         let physical = self.evaluate_binary_compliance_caps(rho, basis, &cases, options, control)?;
+        self.binary_load_space_from_physical(physical, basis, cap, control)
+    }
+
+    // Shared by the single endpoint and scanner. Only already-admitted,
+    // freshly solved binary fields enter here; there is no public cache ingress.
+    fn binary_load_space_from_physical(&self, physical: BinaryComplianceEvaluation3,
+        basis: &[&[f64]], cap: &LoadSpaceCap3, control: &mut SolveControl<'_>)
+        -> Result<BinaryLoadSpaceEvaluation3, BinaryComplianceError3> {
+        let policy = cap.policy();
+        let n = policy.dimension();
         let states = &physical.displacements;
         let dofs = self.operator().n();
         let fixed = self.operator().fixed();

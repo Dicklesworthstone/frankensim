@@ -20,7 +20,19 @@ impl Default for BinaryComplianceScanOptions3 {
     }
 }
 impl BinaryComplianceScanOptions3 {
-    fn endpoint(self, threshold: f64) -> BinaryComplianceOptions3 {
+    // Shared admission for independent-case and continuous-load scans. This
+    // does not choose their feasibility rule; each result owns that decision.
+    pub(in crate::sdf3::robust::envelope) fn validate(self, params: SimpParams,
+        thresholds: &[f64]) -> Result<(), BinaryComplianceError3> {
+        if thresholds.is_empty() || thresholds.len() > self.max_candidates
+            || !self.dilated_volume_limit.is_finite() || !(0.0..=1.0).contains(&self.dilated_volume_limit)
+            || !self.smooth_tolerance.is_finite() || !(0.0..1.0).contains(&self.smooth_tolerance) {
+            return Err(invalid("invalid binary candidate schedule, material limit or smooth tolerance"));
+        }
+        for &threshold in thresholds { validate_options(params, self.endpoint(threshold))?; }
+        Ok(())
+    }
+    pub(in crate::sdf3::robust::envelope) fn endpoint(self, threshold: f64) -> BinaryComplianceOptions3 {
         BinaryComplianceOptions3 { threshold, robustness: self.robustness,
             void_stiffness: self.void_stiffness, max_load_cases: self.max_load_cases }
     }
@@ -68,12 +80,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     pub fn scan_binary_compliance_caps(&mut self, rho: &[f64], forces: &[&[f64]], caps: &ComplianceCaps3,
         thresholds: &[f64], options: BinaryComplianceScanOptions3, control: &mut SolveControl<'_>)
         -> Result<BinaryComplianceScan3, BinaryComplianceError3> {
-        if thresholds.is_empty() || thresholds.len() > options.max_candidates
-            || !options.dilated_volume_limit.is_finite() || !(0.0..=1.0).contains(&options.dilated_volume_limit)
-            || !options.smooth_tolerance.is_finite() || !(0.0..1.0).contains(&options.smooth_tolerance) {
-            return Err(invalid("invalid binary candidate schedule, material limit or smooth tolerance"));
-        }
-        for &threshold in thresholds { validate_options(self.params(), options.endpoint(threshold))?; }
+        options.validate(self.params(), thresholds)?;
         admit(self, rho, forces, caps, options.endpoint(thresholds[0]))?;
         let mut report = BinaryComplianceScan3 { options, candidates: Vec::new(), best: None,
             selected_index: None, stop: BinaryComplianceScanStop3::ScheduleComplete,
