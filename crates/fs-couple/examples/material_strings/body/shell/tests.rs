@@ -244,3 +244,59 @@ fn shell_profile_admits_exactly_the_projection_work_ceiling_and_refuses_one_more
     let cost = fs_plate::shell::mitc::viscosity::projection_terms(MAX_NODES, MAX_TRIANGLES, MAX_MODES).unwrap();
     assert!(cost < MAX_SHELL_PROJECTION_WORK, "{cost} terms");
 }
+
+/// A flat clamped `nx * ny` plate in the layout of `arched.body`, with one bridge at its centre node.
+/// Unlike `grid_body` this is a complete, geometrically valid shell: every boundary node is clamped.
+fn clamped_plate_body(nx: usize, ny: usize, window: &str, work: usize) -> String {
+    let mut text: String = shell_text().lines().take(8).map(|l| format!("{l}\n")).collect();
+    text = text.replace("window 1 100000000", window)
+        .replace("projection-work 67108864", &format!("projection-work {work}"));
+    text.push_str(&format!("nodes {}\n", nx * ny));
+    for j in 0..ny {
+        for i in 0..nx {
+            text.push_str(&format!("node {} {} 0 0 0 1\n",
+                i as f64 / (nx - 1) as f64, j as f64 / (ny - 1) as f64));
+        }
+    }
+    let mut triangles = Vec::new();
+    for j in 0..ny - 1 {
+        for i in 0..nx - 1 {
+            let n = j * nx + i;
+            triangles.push([n, n + 1, n + nx + 1]);
+            triangles.push([n, n + nx + 1, n + nx]);
+        }
+    }
+    text.push_str(&format!("triangles {}\n", triangles.len()));
+    for t in &triangles { text.push_str(&format!("triangle {} {} {} body\n", t[0], t[1], t[2])); }
+    let clamped: Vec<usize> = (0..nx * ny)
+        .filter(|n| { let (i, j) = (n % nx, n / nx); i == 0 || j == 0 || i == nx - 1 || j == ny - 1 }).collect();
+    text.push_str(&format!("supports {}\n", clamped.len()));
+    for n in &clamped { text.push_str(&format!("support {n} 111111\n")); }
+    text.push_str(&format!("bridges 1\nbridge {} 0 0 1\n", (ny / 2) * nx + nx / 2));
+    text
+}
+
+#[test]
+fn a_mesh_and_mode_count_beyond_every_former_ceiling_run_through_the_whole_pipeline() {
+    // 15 x 11 = 165 nodes (former ceiling 128), 280 triangles (256), 70 retained modes (16), and a projection
+    // allowance of 2e9 terms (268,435,456). The window holds well over 70 bending modes of the fixture plate.
+    let (nx, ny) = (15, 11);
+    let text = clamped_plate_body(nx, ny, "window 1 400000000", 2_000_000_000);
+    let profile = Profile::parse(text.as_bytes()).unwrap();
+    let mut spec = shell_spec();
+    spec.body.modes = 70;
+    scoped(|cx, gate| {
+        let mut r = spec.compile_with_body(cx, gate, Some(profile), |name| Ok(if name == "body.fsmatpk" {
+            pack_with_shear(name, 1.0, 1.0, None) } else { pack(name, 1.0, None) })).unwrap();
+        let source = r.performance.bank().source().bank();
+        let image = source.material_shell_image().unwrap();
+        assert_eq!(source.material_shell().unwrap().specimen.mesh().nodes.len(), nx * ny);
+        assert_eq!(source.material_shell().unwrap().specimen.mesh().tris.len(), 2 * (nx - 1) * (ny - 1));
+        assert_eq!(image.physical_modes().len(), 70);
+        assert!(image.physical_modes().iter().all(|v| v.len() == 6 * nx * ny));
+        assert_eq!(image.damping().mode_count(), 70);
+        let samples = pressure(&mut r, 7);
+        assert!(samples.iter().all(|p| p.is_finite()));
+        assert!(samples.iter().any(|p| p.abs() > 1e-14), "the body radiated nothing");
+    });
+}
