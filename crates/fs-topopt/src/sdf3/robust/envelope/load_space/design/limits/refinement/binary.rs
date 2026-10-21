@@ -1,4 +1,5 @@
 //! Two-grid verification of the same binary-eroded physical material.
+pub mod scan;
 use super::*;
 use crate::sdf3::robust::envelope::limits::{ComplianceCaps3, binary::{
     BinaryComplianceOptions3, BinaryComplianceEvaluation3, BinaryComplianceError3,
