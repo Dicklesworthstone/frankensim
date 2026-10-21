@@ -1,0 +1,218 @@
+frankensim.matdb-source.v1
+observation	a-ligament	Vocal ligament (intermediate and deep layers of the lamina propria), contralateral to the cover specimen; excised cadaveric human larynx, subject A, male, 45 y, 18 h postmortem, no known laryngeal disease or smoking; dissected from the vocalis muscle and held in PBS; specimen mid-membranous length L0 5.71 mm, diameter D0 2.5 mm	Longitudinal: uniaxial cyclic tension, 1 Hz sinusoidal displacement of 4-8 mm amplitude, 180 cycles, 0.01-0.02 N preload, strain from digital image correlation of two surface points, E_L = mean of the loading and unloading slopes over the linear small-stretch region (stretch about 1.05) of a representative cycle. Transverse: after at least 75 min rest in PBS, medial-to-lateral cyclic indentation at 1 Hz, 1.0 mm radius ABS indenter, applied depth about 30 percent of the initial diameter, 60 cycles, force low-pass filtered at 10 Hz; E_T and G_L by inverse fit of a transversely isotropic (Barnett-Lothe) contact model to the initial linear force-depth response, E_L taken from the tension test, nu_LT 0.45 and nu_TT 0.95 assumed	Preliminary study of six geriatric subjects. Time-dependent response with no steady state, so constants come from one representative cycle. 1 Hz loading, far below the 100-250 Hz phonatory rate (the authors expect a stiffer response there). E_T and G_L are inverse-analysis estimates and strongly coupled: in the authors' sensitivity study (subject A) varying G_L by 10 percent moved the fitted E_T by 30 percent, varying E_L by 10 percent moved each by about 5 percent. Cross-section taken as circular (a result of dissection, not in vivo geometry). Test temperature not stated. Per-value uncertainty not stated; only the fit R2 is printed
+scalar	a-ligament-el	a-ligament	young_modulus_longitudinal_ligament_subject_a	28.2	kPa	constant
+uncertainty	a-ligament-el	unstated	-	-	-	-
+validity	a-ligament-el	loading_frequency	1	1	Hz
+validity	a-ligament-el	stretch_ratio	1	1.05	1
+scalar	a-ligament-et	a-ligament	young_modulus_transverse_ligament_subject_a	2.53	kPa	constant
+uncertainty	a-ligament-et	unstated	-	-	-	-
+validity	a-ligament-et	loading_frequency	1	1	Hz
+validity	a-ligament-et	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	a-ligament-gl	a-ligament	shear_modulus_longitudinal_ligament_subject_a	0.91	kPa	constant
+uncertainty	a-ligament-gl	unstated	-	-	-	-
+validity	a-ligament-gl	loading_frequency	1	1	Hz
+validity	a-ligament-gl	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	a-ligament-r2	a-ligament	contact_fit_r2_ligament_subject_a	1	1	constant
+uncertainty	a-ligament-r2	unstated	-	-	-	-
+validity	a-ligament-r2	loading_frequency	1	1	Hz
+validity	a-ligament-r2	indentation_depth_over_initial_diameter	0.3	0.3	1
+observation	a-cover	Vocal fold cover (epithelium and superficial layer of the lamina propria); excised cadaveric human larynx, subject A, male, 45 y, 18 h postmortem, no known laryngeal disease or smoking; dissected from the vocalis muscle and held in PBS; specimen mid-membranous length L0 6.32 mm, diameter D0 1.5 mm	Longitudinal: uniaxial cyclic tension, 1 Hz sinusoidal displacement of 4-8 mm amplitude, 180 cycles, 0.01-0.02 N preload, strain from digital image correlation of two surface points, E_L = mean of the loading and unloading slopes over the linear small-stretch region (stretch about 1.05) of a representative cycle. Transverse: after at least 75 min rest in PBS, medial-to-lateral cyclic indentation at 1 Hz, 1.0 mm radius ABS indenter, applied depth about 30 percent of the initial diameter, 60 cycles, force low-pass filtered at 10 Hz; E_T and G_L by inverse fit of a transversely isotropic (Barnett-Lothe) contact model to the initial linear force-depth response, E_L taken from the tension test, nu_LT 0.45 and nu_TT 0.95 assumed	Preliminary study of six geriatric subjects. Time-dependent response with no steady state, so constants come from one representative cycle. 1 Hz loading, far below the 100-250 Hz phonatory rate (the authors expect a stiffer response there). E_T and G_L are inverse-analysis estimates and strongly coupled: in the authors' sensitivity study (subject A) varying G_L by 10 percent moved the fitted E_T by 30 percent, varying E_L by 10 percent moved each by about 5 percent. Cross-section taken as circular (a result of dissection, not in vivo geometry). Test temperature not stated. Per-value uncertainty not stated; only the fit R2 is printed
+scalar	a-cover-el	a-cover	young_modulus_longitudinal_cover_subject_a	196.4	kPa	constant
+uncertainty	a-cover-el	unstated	-	-	-	-
+validity	a-cover-el	loading_frequency	1	1	Hz
+validity	a-cover-el	stretch_ratio	1	1.05	1
+scalar	a-cover-et	a-cover	young_modulus_transverse_cover_subject_a	5.18	kPa	constant
+uncertainty	a-cover-et	unstated	-	-	-	-
+validity	a-cover-et	loading_frequency	1	1	Hz
+validity	a-cover-et	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	a-cover-gl	a-cover	shear_modulus_longitudinal_cover_subject_a	4.18	kPa	constant
+uncertainty	a-cover-gl	unstated	-	-	-	-
+validity	a-cover-gl	loading_frequency	1	1	Hz
+validity	a-cover-gl	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	a-cover-r2	a-cover	contact_fit_r2_cover_subject_a	0.997	1	constant
+uncertainty	a-cover-r2	unstated	-	-	-	-
+validity	a-cover-r2	loading_frequency	1	1	Hz
+validity	a-cover-r2	indentation_depth_over_initial_diameter	0.3	0.3	1
+observation	b-ligament	Vocal ligament (intermediate and deep layers of the lamina propria), contralateral to the cover specimen; excised cadaveric human larynx, subject B, male, 64 y, 19 h postmortem, no known laryngeal disease or smoking; dissected from the vocalis muscle and held in PBS; specimen mid-membranous length L0 4.86 mm, diameter D0 2.7 mm	Longitudinal: uniaxial cyclic tension, 1 Hz sinusoidal displacement of 4-8 mm amplitude, 180 cycles, 0.01-0.02 N preload, strain from digital image correlation of two surface points, E_L = mean of the loading and unloading slopes over the linear small-stretch region (stretch about 1.05) of a representative cycle. Transverse: after at least 75 min rest in PBS, medial-to-lateral cyclic indentation at 1 Hz, 1.0 mm radius ABS indenter, applied depth about 30 percent of the initial diameter, 60 cycles, force low-pass filtered at 10 Hz; E_T and G_L by inverse fit of a transversely isotropic (Barnett-Lothe) contact model to the initial linear force-depth response, E_L taken from the tension test, nu_LT 0.45 and nu_TT 0.95 assumed	Preliminary study of six geriatric subjects. Time-dependent response with no steady state, so constants come from one representative cycle. 1 Hz loading, far below the 100-250 Hz phonatory rate (the authors expect a stiffer response there). E_T and G_L are inverse-analysis estimates and strongly coupled: in the authors' sensitivity study (subject A) varying G_L by 10 percent moved the fitted E_T by 30 percent, varying E_L by 10 percent moved each by about 5 percent. Cross-section taken as circular (a result of dissection, not in vivo geometry). Test temperature not stated. Per-value uncertainty not stated; only the fit R2 is printed
+scalar	b-ligament-el	b-ligament	young_modulus_longitudinal_ligament_subject_b	29.95	kPa	constant
+uncertainty	b-ligament-el	unstated	-	-	-	-
+validity	b-ligament-el	loading_frequency	1	1	Hz
+validity	b-ligament-el	stretch_ratio	1	1.05	1
+scalar	b-ligament-et	b-ligament	young_modulus_transverse_ligament_subject_b	1.18	kPa	constant
+uncertainty	b-ligament-et	unstated	-	-	-	-
+validity	b-ligament-et	loading_frequency	1	1	Hz
+validity	b-ligament-et	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	b-ligament-gl	b-ligament	shear_modulus_longitudinal_ligament_subject_b	0.89	kPa	constant
+uncertainty	b-ligament-gl	unstated	-	-	-	-
+validity	b-ligament-gl	loading_frequency	1	1	Hz
+validity	b-ligament-gl	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	b-ligament-r2	b-ligament	contact_fit_r2_ligament_subject_b	0.997	1	constant
+uncertainty	b-ligament-r2	unstated	-	-	-	-
+validity	b-ligament-r2	loading_frequency	1	1	Hz
+validity	b-ligament-r2	indentation_depth_over_initial_diameter	0.3	0.3	1
+observation	b-cover	Vocal fold cover (epithelium and superficial layer of the lamina propria); excised cadaveric human larynx, subject B, male, 64 y, 19 h postmortem, no known laryngeal disease or smoking; dissected from the vocalis muscle and held in PBS; specimen mid-membranous length L0 4.27 mm, diameter D0 1.1 mm	Longitudinal: uniaxial cyclic tension, 1 Hz sinusoidal displacement of 4-8 mm amplitude, 180 cycles, 0.01-0.02 N preload, strain from digital image correlation of two surface points, E_L = mean of the loading and unloading slopes over the linear small-stretch region (stretch about 1.05) of a representative cycle. Transverse: after at least 75 min rest in PBS, medial-to-lateral cyclic indentation at 1 Hz, 1.0 mm radius ABS indenter, applied depth about 30 percent of the initial diameter, 60 cycles, force low-pass filtered at 10 Hz; E_T and G_L by inverse fit of a transversely isotropic (Barnett-Lothe) contact model to the initial linear force-depth response, E_L taken from the tension test, nu_LT 0.45 and nu_TT 0.95 assumed	Preliminary study of six geriatric subjects. Time-dependent response with no steady state, so constants come from one representative cycle. 1 Hz loading, far below the 100-250 Hz phonatory rate (the authors expect a stiffer response there). E_T and G_L are inverse-analysis estimates and strongly coupled: in the authors' sensitivity study (subject A) varying G_L by 10 percent moved the fitted E_T by 30 percent, varying E_L by 10 percent moved each by about 5 percent. Cross-section taken as circular (a result of dissection, not in vivo geometry). Test temperature not stated. Per-value uncertainty not stated; only the fit R2 is printed
+scalar	b-cover-el	b-cover	young_modulus_longitudinal_cover_subject_b	579.2	kPa	constant
+uncertainty	b-cover-el	unstated	-	-	-	-
+validity	b-cover-el	loading_frequency	1	1	Hz
+validity	b-cover-el	stretch_ratio	1	1.05	1
+scalar	b-cover-et	b-cover	young_modulus_transverse_cover_subject_b	7.17	kPa	constant
+uncertainty	b-cover-et	unstated	-	-	-	-
+validity	b-cover-et	loading_frequency	1	1	Hz
+validity	b-cover-et	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	b-cover-gl	b-cover	shear_modulus_longitudinal_cover_subject_b	6.01	kPa	constant
+uncertainty	b-cover-gl	unstated	-	-	-	-
+validity	b-cover-gl	loading_frequency	1	1	Hz
+validity	b-cover-gl	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	b-cover-r2	b-cover	contact_fit_r2_cover_subject_b	0.978	1	constant
+uncertainty	b-cover-r2	unstated	-	-	-	-
+validity	b-cover-r2	loading_frequency	1	1	Hz
+validity	b-cover-r2	indentation_depth_over_initial_diameter	0.3	0.3	1
+observation	c-ligament	Vocal ligament (intermediate and deep layers of the lamina propria), contralateral to the cover specimen; excised cadaveric human larynx, subject C, male, 57 y, 44 h postmortem, no known laryngeal disease or smoking; dissected from the vocalis muscle and held in PBS; specimen mid-membranous length L0 4.86 mm, diameter D0 2.7 mm	Longitudinal: uniaxial cyclic tension, 1 Hz sinusoidal displacement of 4-8 mm amplitude, 180 cycles, 0.01-0.02 N preload, strain from digital image correlation of two surface points, E_L = mean of the loading and unloading slopes over the linear small-stretch region (stretch about 1.05) of a representative cycle. Transverse: after at least 75 min rest in PBS, medial-to-lateral cyclic indentation at 1 Hz, 1.0 mm radius ABS indenter, applied depth about 30 percent of the initial diameter, 60 cycles, force low-pass filtered at 10 Hz; E_T and G_L by inverse fit of a transversely isotropic (Barnett-Lothe) contact model to the initial linear force-depth response, E_L taken from the tension test, nu_LT 0.45 and nu_TT 0.95 assumed	Preliminary study of six geriatric subjects. Time-dependent response with no steady state, so constants come from one representative cycle. 1 Hz loading, far below the 100-250 Hz phonatory rate (the authors expect a stiffer response there). E_T and G_L are inverse-analysis estimates and strongly coupled: in the authors' sensitivity study (subject A) varying G_L by 10 percent moved the fitted E_T by 30 percent, varying E_L by 10 percent moved each by about 5 percent. Cross-section taken as circular (a result of dissection, not in vivo geometry). Test temperature not stated. Per-value uncertainty not stated; only the fit R2 is printed
+scalar	c-ligament-el	c-ligament	young_modulus_longitudinal_ligament_subject_c	24.32	kPa	constant
+uncertainty	c-ligament-el	unstated	-	-	-	-
+validity	c-ligament-el	loading_frequency	1	1	Hz
+validity	c-ligament-el	stretch_ratio	1	1.05	1
+scalar	c-ligament-et	c-ligament	young_modulus_transverse_ligament_subject_c	1.48	kPa	constant
+uncertainty	c-ligament-et	unstated	-	-	-	-
+validity	c-ligament-et	loading_frequency	1	1	Hz
+validity	c-ligament-et	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	c-ligament-gl	c-ligament	shear_modulus_longitudinal_ligament_subject_c	0.77	kPa	constant
+uncertainty	c-ligament-gl	unstated	-	-	-	-
+validity	c-ligament-gl	loading_frequency	1	1	Hz
+validity	c-ligament-gl	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	c-ligament-r2	c-ligament	contact_fit_r2_ligament_subject_c	0.997	1	constant
+uncertainty	c-ligament-r2	unstated	-	-	-	-
+validity	c-ligament-r2	loading_frequency	1	1	Hz
+validity	c-ligament-r2	indentation_depth_over_initial_diameter	0.3	0.3	1
+observation	c-cover	Vocal fold cover (epithelium and superficial layer of the lamina propria); excised cadaveric human larynx, subject C, male, 57 y, 44 h postmortem, no known laryngeal disease or smoking; dissected from the vocalis muscle and held in PBS; specimen mid-membranous length L0 4.04 mm, diameter D0 0.9 mm	Longitudinal: uniaxial cyclic tension, 1 Hz sinusoidal displacement of 4-8 mm amplitude, 180 cycles, 0.01-0.02 N preload, strain from digital image correlation of two surface points, E_L = mean of the loading and unloading slopes over the linear small-stretch region (stretch about 1.05) of a representative cycle. Transverse: after at least 75 min rest in PBS, medial-to-lateral cyclic indentation at 1 Hz, 1.0 mm radius ABS indenter, applied depth about 30 percent of the initial diameter, 60 cycles, force low-pass filtered at 10 Hz; E_T and G_L by inverse fit of a transversely isotropic (Barnett-Lothe) contact model to the initial linear force-depth response, E_L taken from the tension test, nu_LT 0.45 and nu_TT 0.95 assumed	Preliminary study of six geriatric subjects. Time-dependent response with no steady state, so constants come from one representative cycle. 1 Hz loading, far below the 100-250 Hz phonatory rate (the authors expect a stiffer response there). E_T and G_L are inverse-analysis estimates and strongly coupled: in the authors' sensitivity study (subject A) varying G_L by 10 percent moved the fitted E_T by 30 percent, varying E_L by 10 percent moved each by about 5 percent. Cross-section taken as circular (a result of dissection, not in vivo geometry). Test temperature not stated. Per-value uncertainty not stated; only the fit R2 is printed
+scalar	c-cover-el	c-cover	young_modulus_longitudinal_cover_subject_c	268.2	kPa	constant
+uncertainty	c-cover-el	unstated	-	-	-	-
+validity	c-cover-el	loading_frequency	1	1	Hz
+validity	c-cover-el	stretch_ratio	1	1.05	1
+scalar	c-cover-et	c-cover	young_modulus_transverse_cover_subject_c	8.25	kPa	constant
+uncertainty	c-cover-et	unstated	-	-	-	-
+validity	c-cover-et	loading_frequency	1	1	Hz
+validity	c-cover-et	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	c-cover-gl	c-cover	shear_modulus_longitudinal_cover_subject_c	7.5	kPa	constant
+uncertainty	c-cover-gl	unstated	-	-	-	-
+validity	c-cover-gl	loading_frequency	1	1	Hz
+validity	c-cover-gl	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	c-cover-r2	c-cover	contact_fit_r2_cover_subject_c	0.976	1	constant
+uncertainty	c-cover-r2	unstated	-	-	-	-
+validity	c-cover-r2	loading_frequency	1	1	Hz
+validity	c-cover-r2	indentation_depth_over_initial_diameter	0.3	0.3	1
+observation	d-ligament	Vocal ligament (intermediate and deep layers of the lamina propria), contralateral to the cover specimen; excised cadaveric human larynx, subject D, female, 73 y, 76 h postmortem, no known laryngeal disease or smoking; dissected from the vocalis muscle and held in PBS; specimen mid-membranous length L0 3.76 mm, diameter D0 1.8 mm	Longitudinal: uniaxial cyclic tension, 1 Hz sinusoidal displacement of 4-8 mm amplitude, 180 cycles, 0.01-0.02 N preload, strain from digital image correlation of two surface points, E_L = mean of the loading and unloading slopes over the linear small-stretch region (stretch about 1.05) of a representative cycle. Transverse: after at least 75 min rest in PBS, medial-to-lateral cyclic indentation at 1 Hz, 1.0 mm radius ABS indenter, applied depth about 30 percent of the initial diameter, 60 cycles, force low-pass filtered at 10 Hz; E_T and G_L by inverse fit of a transversely isotropic (Barnett-Lothe) contact model to the initial linear force-depth response, E_L taken from the tension test, nu_LT 0.45 and nu_TT 0.95 assumed	Preliminary study of six geriatric subjects. Time-dependent response with no steady state, so constants come from one representative cycle. 1 Hz loading, far below the 100-250 Hz phonatory rate (the authors expect a stiffer response there). E_T and G_L are inverse-analysis estimates and strongly coupled: in the authors' sensitivity study (subject A) varying G_L by 10 percent moved the fitted E_T by 30 percent, varying E_L by 10 percent moved each by about 5 percent. Cross-section taken as circular (a result of dissection, not in vivo geometry). Test temperature not stated. Per-value uncertainty not stated; only the fit R2 is printed
+scalar	d-ligament-el	d-ligament	young_modulus_longitudinal_ligament_subject_d	25.82	kPa	constant
+uncertainty	d-ligament-el	unstated	-	-	-	-
+validity	d-ligament-el	loading_frequency	1	1	Hz
+validity	d-ligament-el	stretch_ratio	1	1.05	1
+scalar	d-ligament-et	d-ligament	young_modulus_transverse_ligament_subject_d	1.51	kPa	constant
+uncertainty	d-ligament-et	unstated	-	-	-	-
+validity	d-ligament-et	loading_frequency	1	1	Hz
+validity	d-ligament-et	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	d-ligament-gl	d-ligament	shear_modulus_longitudinal_ligament_subject_d	0.78	kPa	constant
+uncertainty	d-ligament-gl	unstated	-	-	-	-
+validity	d-ligament-gl	loading_frequency	1	1	Hz
+validity	d-ligament-gl	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	d-ligament-r2	d-ligament	contact_fit_r2_ligament_subject_d	0.996	1	constant
+uncertainty	d-ligament-r2	unstated	-	-	-	-
+validity	d-ligament-r2	loading_frequency	1	1	Hz
+validity	d-ligament-r2	indentation_depth_over_initial_diameter	0.3	0.3	1
+observation	d-cover	Vocal fold cover (epithelium and superficial layer of the lamina propria); excised cadaveric human larynx, subject D, female, 73 y, 76 h postmortem, no known laryngeal disease or smoking; dissected from the vocalis muscle and held in PBS; specimen mid-membranous length L0 3.71 mm, diameter D0 0.8 mm	Longitudinal: uniaxial cyclic tension, 1 Hz sinusoidal displacement of 4-8 mm amplitude, 180 cycles, 0.01-0.02 N preload, strain from digital image correlation of two surface points, E_L = mean of the loading and unloading slopes over the linear small-stretch region (stretch about 1.05) of a representative cycle. Transverse: after at least 75 min rest in PBS, medial-to-lateral cyclic indentation at 1 Hz, 1.0 mm radius ABS indenter, applied depth about 30 percent of the initial diameter, 60 cycles, force low-pass filtered at 10 Hz; E_T and G_L by inverse fit of a transversely isotropic (Barnett-Lothe) contact model to the initial linear force-depth response, E_L taken from the tension test, nu_LT 0.45 and nu_TT 0.95 assumed	Preliminary study of six geriatric subjects. Time-dependent response with no steady state, so constants come from one representative cycle. 1 Hz loading, far below the 100-250 Hz phonatory rate (the authors expect a stiffer response there). E_T and G_L are inverse-analysis estimates and strongly coupled: in the authors' sensitivity study (subject A) varying G_L by 10 percent moved the fitted E_T by 30 percent, varying E_L by 10 percent moved each by about 5 percent. Cross-section taken as circular (a result of dissection, not in vivo geometry). Test temperature not stated. Per-value uncertainty not stated; only the fit R2 is printed
+scalar	d-cover-el	d-cover	young_modulus_longitudinal_cover_subject_d	302.25	kPa	constant
+uncertainty	d-cover-el	unstated	-	-	-	-
+validity	d-cover-el	loading_frequency	1	1	Hz
+validity	d-cover-el	stretch_ratio	1	1.05	1
+scalar	d-cover-et	d-cover	young_modulus_transverse_cover_subject_d	14.35	kPa	constant
+uncertainty	d-cover-et	unstated	-	-	-	-
+validity	d-cover-et	loading_frequency	1	1	Hz
+validity	d-cover-et	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	d-cover-gl	d-cover	shear_modulus_longitudinal_cover_subject_d	6.42	kPa	constant
+uncertainty	d-cover-gl	unstated	-	-	-	-
+validity	d-cover-gl	loading_frequency	1	1	Hz
+validity	d-cover-gl	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	d-cover-r2	d-cover	contact_fit_r2_cover_subject_d	0.999	1	constant
+uncertainty	d-cover-r2	unstated	-	-	-	-
+validity	d-cover-r2	loading_frequency	1	1	Hz
+validity	d-cover-r2	indentation_depth_over_initial_diameter	0.3	0.3	1
+observation	e-ligament	Vocal ligament (intermediate and deep layers of the lamina propria), contralateral to the cover specimen; excised cadaveric human larynx, subject E, female, 70 y, 65 h postmortem, no known laryngeal disease or smoking; dissected from the vocalis muscle and held in PBS; specimen mid-membranous length L0 3.51 mm, diameter D0 1.7 mm	Longitudinal: uniaxial cyclic tension, 1 Hz sinusoidal displacement of 4-8 mm amplitude, 180 cycles, 0.01-0.02 N preload, strain from digital image correlation of two surface points, E_L = mean of the loading and unloading slopes over the linear small-stretch region (stretch about 1.05) of a representative cycle. Transverse: after at least 75 min rest in PBS, medial-to-lateral cyclic indentation at 1 Hz, 1.0 mm radius ABS indenter, applied depth about 30 percent of the initial diameter, 60 cycles, force low-pass filtered at 10 Hz; E_T and G_L by inverse fit of a transversely isotropic (Barnett-Lothe) contact model to the initial linear force-depth response, E_L taken from the tension test, nu_LT 0.45 and nu_TT 0.95 assumed	Preliminary study of six geriatric subjects. Time-dependent response with no steady state, so constants come from one representative cycle. 1 Hz loading, far below the 100-250 Hz phonatory rate (the authors expect a stiffer response there). E_T and G_L are inverse-analysis estimates and strongly coupled: in the authors' sensitivity study (subject A) varying G_L by 10 percent moved the fitted E_T by 30 percent, varying E_L by 10 percent moved each by about 5 percent. Cross-section taken as circular (a result of dissection, not in vivo geometry). Test temperature not stated. Per-value uncertainty not stated; only the fit R2 is printed
+scalar	e-ligament-el	e-ligament	young_modulus_longitudinal_ligament_subject_e	38.56	kPa	constant
+uncertainty	e-ligament-el	unstated	-	-	-	-
+validity	e-ligament-el	loading_frequency	1	1	Hz
+validity	e-ligament-el	stretch_ratio	1	1.05	1
+scalar	e-ligament-et	e-ligament	young_modulus_transverse_ligament_subject_e	5.06	kPa	constant
+uncertainty	e-ligament-et	unstated	-	-	-	-
+validity	e-ligament-et	loading_frequency	1	1	Hz
+validity	e-ligament-et	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	e-ligament-gl	e-ligament	shear_modulus_longitudinal_ligament_subject_e	1.59	kPa	constant
+uncertainty	e-ligament-gl	unstated	-	-	-	-
+validity	e-ligament-gl	loading_frequency	1	1	Hz
+validity	e-ligament-gl	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	e-ligament-r2	e-ligament	contact_fit_r2_ligament_subject_e	0.999	1	constant
+uncertainty	e-ligament-r2	unstated	-	-	-	-
+validity	e-ligament-r2	loading_frequency	1	1	Hz
+validity	e-ligament-r2	indentation_depth_over_initial_diameter	0.3	0.3	1
+observation	e-cover	Vocal fold cover (epithelium and superficial layer of the lamina propria); excised cadaveric human larynx, subject E, female, 70 y, 65 h postmortem, no known laryngeal disease or smoking; dissected from the vocalis muscle and held in PBS; specimen mid-membranous length L0 3.84 mm, diameter D0 0.8 mm	Longitudinal: uniaxial cyclic tension, 1 Hz sinusoidal displacement of 4-8 mm amplitude, 180 cycles, 0.01-0.02 N preload, strain from digital image correlation of two surface points, E_L = mean of the loading and unloading slopes over the linear small-stretch region (stretch about 1.05) of a representative cycle. Transverse: after at least 75 min rest in PBS, medial-to-lateral cyclic indentation at 1 Hz, 1.0 mm radius ABS indenter, applied depth about 30 percent of the initial diameter, 60 cycles, force low-pass filtered at 10 Hz; E_T and G_L by inverse fit of a transversely isotropic (Barnett-Lothe) contact model to the initial linear force-depth response, E_L taken from the tension test, nu_LT 0.45 and nu_TT 0.95 assumed	Preliminary study of six geriatric subjects. Time-dependent response with no steady state, so constants come from one representative cycle. 1 Hz loading, far below the 100-250 Hz phonatory rate (the authors expect a stiffer response there). E_T and G_L are inverse-analysis estimates and strongly coupled: in the authors' sensitivity study (subject A) varying G_L by 10 percent moved the fitted E_T by 30 percent, varying E_L by 10 percent moved each by about 5 percent. Cross-section taken as circular (a result of dissection, not in vivo geometry). Test temperature not stated. Per-value uncertainty not stated; only the fit R2 is printed
+scalar	e-cover-el	e-cover	young_modulus_longitudinal_cover_subject_e	199.8	kPa	constant
+uncertainty	e-cover-el	unstated	-	-	-	-
+validity	e-cover-el	loading_frequency	1	1	Hz
+validity	e-cover-el	stretch_ratio	1	1.05	1
+scalar	e-cover-et	e-cover	young_modulus_transverse_cover_subject_e	4.8	kPa	constant
+uncertainty	e-cover-et	unstated	-	-	-	-
+validity	e-cover-et	loading_frequency	1	1	Hz
+validity	e-cover-et	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	e-cover-gl	e-cover	shear_modulus_longitudinal_cover_subject_e	3.24	kPa	constant
+uncertainty	e-cover-gl	unstated	-	-	-	-
+validity	e-cover-gl	loading_frequency	1	1	Hz
+validity	e-cover-gl	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	e-cover-r2	e-cover	contact_fit_r2_cover_subject_e	0.976	1	constant
+uncertainty	e-cover-r2	unstated	-	-	-	-
+validity	e-cover-r2	loading_frequency	1	1	Hz
+validity	e-cover-r2	indentation_depth_over_initial_diameter	0.3	0.3	1
+observation	f-ligament	Vocal ligament (intermediate and deep layers of the lamina propria), contralateral to the cover specimen; excised cadaveric human larynx, subject F, female, 97 y, 59 h postmortem, no known laryngeal disease or smoking; dissected from the vocalis muscle and held in PBS; specimen mid-membranous length L0 3.3 mm, diameter D0 2.3 mm	Longitudinal: uniaxial cyclic tension, 1 Hz sinusoidal displacement of 4-8 mm amplitude, 180 cycles, 0.01-0.02 N preload, strain from digital image correlation of two surface points, E_L = mean of the loading and unloading slopes over the linear small-stretch region (stretch about 1.05) of a representative cycle. Transverse: after at least 75 min rest in PBS, medial-to-lateral cyclic indentation at 1 Hz, 1.0 mm radius ABS indenter, applied depth about 30 percent of the initial diameter, 60 cycles, force low-pass filtered at 10 Hz; E_T and G_L by inverse fit of a transversely isotropic (Barnett-Lothe) contact model to the initial linear force-depth response, E_L taken from the tension test, nu_LT 0.45 and nu_TT 0.95 assumed	Preliminary study of six geriatric subjects. Time-dependent response with no steady state, so constants come from one representative cycle. 1 Hz loading, far below the 100-250 Hz phonatory rate (the authors expect a stiffer response there). E_T and G_L are inverse-analysis estimates and strongly coupled: in the authors' sensitivity study (subject A) varying G_L by 10 percent moved the fitted E_T by 30 percent, varying E_L by 10 percent moved each by about 5 percent. Cross-section taken as circular (a result of dissection, not in vivo geometry). Test temperature not stated. Per-value uncertainty not stated; only the fit R2 is printed
+scalar	f-ligament-el	f-ligament	young_modulus_longitudinal_ligament_subject_f	14.11	kPa	constant
+uncertainty	f-ligament-el	unstated	-	-	-	-
+validity	f-ligament-el	loading_frequency	1	1	Hz
+validity	f-ligament-el	stretch_ratio	1	1.05	1
+scalar	f-ligament-et	f-ligament	young_modulus_transverse_ligament_subject_f	3.08	kPa	constant
+uncertainty	f-ligament-et	unstated	-	-	-	-
+validity	f-ligament-et	loading_frequency	1	1	Hz
+validity	f-ligament-et	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	f-ligament-gl	f-ligament	shear_modulus_longitudinal_ligament_subject_f	1.03	kPa	constant
+uncertainty	f-ligament-gl	unstated	-	-	-	-
+validity	f-ligament-gl	loading_frequency	1	1	Hz
+validity	f-ligament-gl	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	f-ligament-r2	f-ligament	contact_fit_r2_ligament_subject_f	0.999	1	constant
+uncertainty	f-ligament-r2	unstated	-	-	-	-
+validity	f-ligament-r2	loading_frequency	1	1	Hz
+validity	f-ligament-r2	indentation_depth_over_initial_diameter	0.3	0.3	1
+observation	f-cover	Vocal fold cover (epithelium and superficial layer of the lamina propria); excised cadaveric human larynx, subject F, female, 97 y, 59 h postmortem, no known laryngeal disease or smoking; dissected from the vocalis muscle and held in PBS; specimen mid-membranous length L0 3.11 mm, diameter D0 0.6 mm	Longitudinal: uniaxial cyclic tension, 1 Hz sinusoidal displacement of 4-8 mm amplitude, 180 cycles, 0.01-0.02 N preload, strain from digital image correlation of two surface points, E_L = mean of the loading and unloading slopes over the linear small-stretch region (stretch about 1.05) of a representative cycle. Transverse: after at least 75 min rest in PBS, medial-to-lateral cyclic indentation at 1 Hz, 1.0 mm radius ABS indenter, applied depth about 30 percent of the initial diameter, 60 cycles, force low-pass filtered at 10 Hz; E_T and G_L by inverse fit of a transversely isotropic (Barnett-Lothe) contact model to the initial linear force-depth response, E_L taken from the tension test, nu_LT 0.45 and nu_TT 0.95 assumed	Preliminary study of six geriatric subjects. Time-dependent response with no steady state, so constants come from one representative cycle. 1 Hz loading, far below the 100-250 Hz phonatory rate (the authors expect a stiffer response there). E_T and G_L are inverse-analysis estimates and strongly coupled: in the authors' sensitivity study (subject A) varying G_L by 10 percent moved the fitted E_T by 30 percent, varying E_L by 10 percent moved each by about 5 percent. Cross-section taken as circular (a result of dissection, not in vivo geometry). Test temperature not stated. Per-value uncertainty not stated; only the fit R2 is printed
+scalar	f-cover-el	f-cover	young_modulus_longitudinal_cover_subject_f	253.85	kPa	constant
+uncertainty	f-cover-el	unstated	-	-	-	-
+validity	f-cover-el	loading_frequency	1	1	Hz
+validity	f-cover-el	stretch_ratio	1	1.05	1
+scalar	f-cover-et	f-cover	young_modulus_transverse_cover_subject_f	11.93	kPa	constant
+uncertainty	f-cover-et	unstated	-	-	-	-
+validity	f-cover-et	loading_frequency	1	1	Hz
+validity	f-cover-et	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	f-cover-gl	f-cover	shear_modulus_longitudinal_cover_subject_f	7.62	kPa	constant
+uncertainty	f-cover-gl	unstated	-	-	-	-
+validity	f-cover-gl	loading_frequency	1	1	Hz
+validity	f-cover-gl	indentation_depth_over_initial_diameter	0.3	0.3	1
+scalar	f-cover-r2	f-cover	contact_fit_r2_cover_subject_f	0.988	1	constant
+uncertainty	f-cover-r2	unstated	-	-	-	-
+validity	f-cover-r2	loading_frequency	1	1	Hz
+validity	f-cover-r2	indentation_depth_over_initial_diameter	0.3	0.3	1
+observation	ratios-six-subjects	Six subjects (three male, three female), cover and ligament specimens as above; each ratio computed within one specimen, then averaged over subjects	Means and standard deviations of E_L/E_T and E_L/G_L as printed in the Results text	Mean +- standard deviation over six specimens; the standard deviation is recorded here as a 0.68-coverage absolute uncertainty only because the source prints it as a spread, not as a measurement error
+scalar	ratio-e-l-over-e-t-ligament	ratios-six-subjects	ratio_e_l_over_e_t_ligament_mean	14	1	constant
+uncertainty	ratio-e-l-over-e-t-ligament	absolute	8	1	0.68	1
+validity	ratio-e-l-over-e-t-ligament	loading_frequency	1	1	Hz
+scalar	ratio-e-l-over-e-t-cover	ratios-six-subjects	ratio_e_l_over_e_t_cover_mean	39	1	constant
+uncertainty	ratio-e-l-over-e-t-cover	absolute	22	1	0.68	1
+validity	ratio-e-l-over-e-t-cover	loading_frequency	1	1	Hz
+scalar	ratio-e-l-over-g-l-ligament	ratios-six-subjects	ratio_e_l_over_g_l_ligament_mean	28	1	constant
+uncertainty	ratio-e-l-over-g-l-ligament	absolute	8	1	0.68	1
+validity	ratio-e-l-over-g-l-ligament	loading_frequency	1	1	Hz
+scalar	ratio-e-l-over-g-l-cover	ratios-six-subjects	ratio_e_l_over_g_l_cover_mean	54	1	constant
+uncertainty	ratio-e-l-over-g-l-cover	absolute	23	1	0.68	1
+validity	ratio-e-l-over-g-l-cover	loading_frequency	1	1	Hz

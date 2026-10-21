@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	vocalfold-human-elastic-set-alipour-jvoice-pmc3508138
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Alipour F., Vigmostad S. (2012), Measurement of vocal folds elastic properties for continuum modeling, Journal of Voice 26(6):816.e21-816.e29; https://doi.org/10.1016/j.jvoice.2012.04.010 (PMC3508138); Table 1 and Methods/Results text
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

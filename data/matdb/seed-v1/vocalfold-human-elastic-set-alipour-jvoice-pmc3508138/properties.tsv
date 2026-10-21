@@ -1,0 +1,43 @@
+frankensim.matdb-source.v1
+observation	tf-longitudinal	Human true vocal fold lamina propria strips (including ligament), cadaveric, N=8, donors aged 53-82 y	Strips 3-4 mm wide of lamina propria below the superior edge (typically including ligament), with cartilaginous ends kept; 1 Hz sinusoidal stretch and release to about 40 percent elongation for 10 s on an ergometer, preconditioned (about 10 cycles), last three to four loops averaged, engineering stress and strain from the initial area (from mass, in situ length and density) and length; Young's modulus from the low-strain slope	Geriatric donors (53-82 y), larynges quick-frozen and stored 3-4 years, thawed overnight in saline in a refrigerator. Cyclic 1 Hz loading, far below the phonatory rate. Strongly nonlinear (low-strain and high-strain slopes differ by 10-15 times), so a single modulus is a low-strain tangent at 1 Hz and not a constitutive law. Mean and standard deviation over N samples as printed in Table 1 (the standard deviation is a between-sample spread). Test temperature not stated
+scalar	tf-el	tf-longitudinal	young_modulus_longitudinal_low_strain_true_fold	30	kPa	constant
+uncertainty	tf-el	absolute	13.4	kPa	0.68	1
+validity	tf-el	loading_frequency	1	1	Hz
+observation	tf-transverse	Human true vocal fold lamina propria, cadaveric, N=5, transverse direction after the longitudinal test	Plastic brackets glued to the sides of the sample along the anterior-posterior direction, mounted and stretched at 1 Hz as for the longitudinal test	Geriatric donors (53-82 y), larynges quick-frozen and stored 3-4 years, thawed overnight in saline in a refrigerator. Cyclic 1 Hz loading, far below the phonatory rate. Strongly nonlinear (low-strain and high-strain slopes differ by 10-15 times), so a single modulus is a low-strain tangent at 1 Hz and not a constitutive law. Mean and standard deviation over N samples as printed in Table 1 (the standard deviation is a between-sample spread). Test temperature not stated
+scalar	tf-et	tf-transverse	young_modulus_transverse_low_strain_true_fold	1	kPa	constant
+uncertainty	tf-et	absolute	0.5	kPa	0.68	1
+validity	tf-et	loading_frequency	1	1	Hz
+observation	ff-longitudinal	Human false vocal fold strips 3-4 mm wide above the ventricle, cadaveric, N=8 (glandular and connective tissue expected; structure not studied histologically by the authors)	As for the true fold but elongated to about 30 percent because of the longer sample and the ergometer limit	Geriatric donors (53-82 y), larynges quick-frozen and stored 3-4 years, thawed overnight in saline in a refrigerator. Cyclic 1 Hz loading, far below the phonatory rate. Strongly nonlinear (low-strain and high-strain slopes differ by 10-15 times), so a single modulus is a low-strain tangent at 1 Hz and not a constitutive law. Mean and standard deviation over N samples as printed in Table 1 (the standard deviation is a between-sample spread). Test temperature not stated
+scalar	ff-el	ff-longitudinal	young_modulus_longitudinal_low_strain_false_fold	13.9	kPa	constant
+uncertainty	ff-el	absolute	7.6	kPa	0.68	1
+validity	ff-el	loading_frequency	1	1	Hz
+observation	tf-shear	Human true vocal fold, cadaveric, N=9, sample cut free of the underlying muscle	Sample sheared between two metal plates (about 7 x 20 mm, 0.6 mm thick) glued to the medial surface and the opposite side, 1 Hz for 10 s on the ergometer, shear strain from plate displacement over plate distance, shear stress from force over plate area, modulus from the slope; called the longitudinal shear modulus G' by the authors	Geriatric donors (53-82 y), larynges quick-frozen and stored 3-4 years, thawed overnight in saline in a refrigerator. Cyclic 1 Hz loading, far below the phonatory rate. Strongly nonlinear (low-strain and high-strain slopes differ by 10-15 times), so a single modulus is a low-strain tangent at 1 Hz and not a constitutive law. Mean and standard deviation over N samples as printed in Table 1 (the standard deviation is a between-sample spread). Test temperature not stated
+scalar	tf-gl	tf-shear	shear_modulus_longitudinal_true_fold	0.67	kPa	constant
+uncertainty	tf-gl	absolute	0.31	kPa	0.68	1
+validity	tf-gl	loading_frequency	1	1	Hz
+observation	tf-poisson	Human true vocal fold, cadaveric, N=8, sample 6-7 mm wide with a diamond-shaped ink mark	Optical: 125 frames/s for 10 s during 1 Hz stretch and release, major and minor axes of the mark, nu = -(transverse strain)/(axial strain)	Geriatric donors (53-82 y), larynges quick-frozen and stored 3-4 years, thawed overnight in saline in a refrigerator. Cyclic 1 Hz loading, far below the phonatory rate. Strongly nonlinear (low-strain and high-strain slopes differ by 10-15 times), so a single modulus is a low-strain tangent at 1 Hz and not a constitutive law. Mean and standard deviation over N samples as printed in Table 1 (the standard deviation is a between-sample spread). Test temperature not stated
+scalar	tf-nu	tf-poisson	poisson_ratio_true_fold	0.57	1	constant
+uncertainty	tf-nu	absolute	0.17	1	0.68	1
+validity	tf-nu	loading_frequency	1	1	Hz
+observation	tissue-density	Human true vocal fold (N=10) and false vocal fold (N=10) tissue samples, cadaveric, frozen-stored as above	Archimedes: sample weighed in air (balance resolution 0.1 mg, cartilage removed, blotted) and immersed in distilled water with a Mettler density kit	A MEASURED density of the same tissue, stated as g/mL in the source and converted exactly to kg/m3 here (x1000). Ex vivo, stored frozen, geriatric donors; mean and standard deviation over N=10 per tissue
+scalar	tf-rho	tissue-density	density_measured_true_fold	1029.9	kg/m3	constant
+uncertainty	tf-rho	absolute	5.1	kg/m3	0.68	1
+validity	tf-rho	measured_ex_vivo_frozen_stored	1	1	1
+scalar	ff-rho	tissue-density	density_measured_false_fold	1019.3	kg/m3	constant
+uncertainty	ff-rho	absolute	4.6	kg/m3	0.68	1
+validity	ff-rho	measured_ex_vivo_frozen_stored	1	1	1
+observation	nonlinearity	Human true vocal fold lamina propria, cadaveric (abstract statement and one typical sample described in the Results)	Tangent modulus from the stress-strain loop of the 1 Hz protocol; low-strain portion below strain 0.15 taken as linear, high-strain portion above 0.3 for the typical sample	The ratio is printed in the abstract as a range ('10-15 times'); the two typical-sample slopes are ONE sample, not a population statistic
+scalar	stiffening-low	nonlinearity	strain_stiffening_slope_ratio_printed_range_low	10	1	constant
+uncertainty	stiffening-low	unstated	-	-	-	-
+validity	stiffening-low	loading_frequency	1	1	Hz
+scalar	stiffening-high	nonlinearity	strain_stiffening_slope_ratio_printed_range_high	15	1	constant
+uncertainty	stiffening-high	unstated	-	-	-	-
+validity	stiffening-high	loading_frequency	1	1	Hz
+scalar	typical-low	nonlinearity	typical_sample_low_strain_modulus	28	kPa	constant
+uncertainty	typical-low	unstated	-	-	-	-
+validity	typical-low	loading_frequency	1	1	Hz
+validity	typical-low	engineering_strain	0	0.15	1
+scalar	typical-high	nonlinearity	typical_sample_high_strain_modulus	390	kPa	constant
+uncertainty	typical-high	unstated	-	-	-	-
+validity	typical-high	loading_frequency	1	1	Hz
+validity	typical-high	engineering_strain	0.3	0.4	1

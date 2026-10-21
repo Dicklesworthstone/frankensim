@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	vocalfold-human-layers-kelleher-bmmb-pmc3745772
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Kelleher J.E., Siegmund T., Du M., Naseri E., Chan R.W. (2013), Empirical measurements of biomechanical anisotropy of the human vocal fold lamina propria, Biomechanics and Modeling in Mechanobiology 12:555-567; https://doi.org/10.1007/s10237-012-0425-4 (PMC3745772); Tables 1 and 2 and Results text
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
