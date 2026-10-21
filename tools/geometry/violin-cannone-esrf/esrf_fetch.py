@@ -1,12 +1,12 @@
 """esrf_fetch.py LIST OUTDIR : fetch the listed files of the public ESRF il Cannone data collection (DOI 10.15151/ESRF-DC-2413577471, CC BY 4.0) through the portal's own
 unauthenticated route /ids/data/download?datafileIds=<id>. LIST lines are `<datafile id> <size> <path in the dataset>` (paths may contain spaces). Each file is written to
-OUTDIR/<id>_<basename with spaces as underscores>; its size must equal the listed size or it is reported and kept as .partial. Refuses a file of 1.5 GB or more. Existing files are skipped."""
+OUTDIR/<id>_<basename with spaces as underscores>; its size must equal the listed size or it is reported and kept as .partial. Refuses a file of ESRF_FETCH_MAX bytes (default 1.5 GB) or more. Existing files are skipped."""
 import os
 import sys
 import urllib.request
 
 UA = "FrankenSim-geometry-fetch/1.0 (open-source acoustics project; github.com/Dicklesworthstone/frankensim; one-off CC BY data collection fetch)"
-MAX = 1_500_000_000
+MAX = int(os.environ.get("ESRF_FETCH_MAX", "1500000000"))  # bytes; larger files are refused unless the caller raises it for one named file
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

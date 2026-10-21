@@ -1,5 +1,5 @@
-"""assemble.py OUT_TABLES_DIR FINAL_DIR : builds the repo directory data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/ from the tables written by build_tables.py,
-build_tables2.py and string_kinks.py: the six standard specimen tables (specimen, frames, dimensions, parts, unknowns; fingerings do not apply) with the dimension values computed
+"""assemble.py OUT_TABLES_DIR FINAL_DIR : builds the repo directory data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/ from the tables written by build_plate_and_bar_tables.py,
+build_section_tables.py and string_kinks.py: the six standard specimen tables (specimen, frames, dimensions, parts, unknowns; fingerings do not apply) with the dimension values computed
 from the data tables, and every data table under its own schema line. Everything numeric is computed here from the tables; nothing is typed in except the text of the identity,
 parts and unknowns tables."""
 import os

@@ -1,4 +1,4 @@
-"""build_tables.py OUTDIR : turns the il Cannone plate height maps and the bass bar, soundpost and bridge meshes into the data tables of the repo description (TSV, mm, the frame
+"""build_plate_and_bar_tables.py OUTDIR : turns the il Cannone plate height maps and the bass bar, soundpost and bridge meshes into the data tables of the repo description (TSV, mm, the frame
 of the source files: x across the body, y vertical (top plate at negative y, back at positive y), z along the body (tail end at negative z)). Reads only the files fetched from
 the public ESRF data collection (DOI 10.15151/ESRF-DC-2413577471, CC BY 4.0). Nothing is fitted or smoothed except where a column header says so."""
 import os

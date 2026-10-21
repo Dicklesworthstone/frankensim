@@ -1,5 +1,5 @@
-"""build_tables2.py OUTDIR : second set of il Cannone tables: rib and lining cross-sections around the body (planes through the vertical axis every 2 degrees), the four strings,
-the neck, the fingerboard and the heel block (sections along z), and the volume of every part. Same frame, units and source as build_tables.py."""
+"""build_section_tables.py OUTDIR : il Cannone tables of rib and lining cross-sections around the body (planes through the vertical axis every 2 degrees), the four strings,
+the neck, the fingerboard and the heel block (sections along z), and the volume of every part. Same frame, units and source as build_plate_and_bar_tables.py."""
 import os
 import sys
 

@@ -1,6 +1,6 @@
-"""plate_maps2.py GLB OUT.npz OUTER_SIGN : like plate_maps.py but rasterises the SURFACE, not only its vertices: every triangle is sampled on a barycentric lattice whose spacing
-is at most STEP mm (so a triangle larger than a cell still reaches every (x, z) cell it covers), and the extreme Y per cell is kept. Frame, cell size and saved fields as in
-plate_maps.py (outer = smallest Y for OUTER_SIGN -1, largest for +1). Adds `samples` (number of surface samples per cell)."""
+"""plate_maps.py GLB OUT.npz OUTER_SIGN : height maps of a closed plate mesh on a 0.5 mm (x, z) grid, rasterising the SURFACE, not only its vertices: every triangle is sampled on a barycentric lattice
+whose spacing is at most STEP mm (so a triangle larger than a cell still reaches every (x, z) cell it covers), and the extreme Y per cell is kept on each side (outer = smallest Y for OUTER_SIGN -1,
+largest for +1). Saves x0, z0, cell, nx, nz, outer, inner, count (surface samples per cell), bbox_lo, bbox_hi, source and step."""
 import os
 import sys
 import time
