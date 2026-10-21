@@ -67,18 +67,41 @@ compose() {
   } > "$file"
 }
 
+# compose_pressure_ramp <file> <seconds-up> <peak-pressure-pa> <pre-stress>: mouth pressure ramps
+# 0 -> peak over <seconds-up>, then back to 0 over the same time, at a fixed lip pre-stress. The
+# pressure at which the note starts on the way up and stops on the way down is the oscillation
+# threshold and the extinction pressure; the gap between them is the hysteresis.
+compose_pressure_ramp() {
+  local file=$1 up=$2 peak=$3 tension=$4
+  {
+    printf 'frankensim-lip-performance-v1\naudio %d %d\n' "$RATE" $((RATE * up * 2))
+    sed -E "s/^(bessel .* )16\$/\1$PIECES/" "$DIR/tenor-trombone.head"
+    printf 'schedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t2\n'
+    printf 'track\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\n'
+    printf 'event\t0e0\t%se0\tpressure-pa\t%s\n' "$up" "$peak"
+    printf 'event\t%se0\t%se0\tpressure-pa\t0e0\n' "$up" "$up"
+    printf 'track\tlip\tpre-stress\ninitial\tmultiplier\t%s\nevents\t0\n' "$tension"
+  } > "$file"
+}
+
+# At most 8 renders at once (lane budget on the shared trj host).
+MAX_JOBS=8
 render() {
   local name=$1
-  "$BIN" lip "$OUT/$name.performance" "$OUT/$name.wav" > "$OUT/$name.log" 2>&1 \
-    && echo "rendered $name" || echo "FAILED $name (see $OUT/$name.log)"
+  while [ "$(jobs -rp | wc -l)" -ge "$MAX_JOBS" ]; do wait -n || true; done
+  { "$BIN" lip "$OUT/$name.performance" "$OUT/$name.wav" > "$OUT/$name.log" 2>&1 \
+      && echo "rendered $name" || echo "FAILED $name (see $OUT/$name.log)"; } &
 }
 
 compose "$OUT/sweep-p1500.performance" 8 "$PRESSURE" 5e-1 2e0
-render sweep-p1500 &
+render sweep-p1500
+# Threshold and extinction pressure at the mid pre-stress (up to 4 kPa, 8 s each way).
+compose_pressure_ramp "$OUT/pramp-t1e0.performance" 8 4e3 1e0
+render pramp-t1e0
 for tension in $HOLD_TENSIONS; do
   name="hold-t${tension}-p1500"
   compose "$OUT/$name.performance" 3 "$PRESSURE" "$tension"
-  render "$name" &
+  render "$name"
 done
 wait
 ls -l "$OUT"/*.wav
