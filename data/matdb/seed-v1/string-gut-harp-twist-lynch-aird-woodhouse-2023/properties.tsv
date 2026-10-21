@@ -1,0 +1,32 @@
+frankensim.matdb-source.v1
+observation	law2023-gut	Bowbrand natural gut harp strings (cow gut, washed and twisted), a bespoke twist-angle series T1-T4 (twist angles 23.5 to 36.2 degrees) and a surface-finish series (ground, unground, varnished, unvarnished; twist angles 25.7 to 58.3 degrees); diameters 1.328 to 1.990 mm	Unstretched diameter and bulk density measured before testing (Table 1, 25 string sections); stretched density from the linear density at 20 C; breaking tests on a materials-testing machine at several strain rates	The ranges below are the extremes of the paper's Table 1 and its statements in the text; breaking stress is referred to the unstretched diameter and the authors estimate it would be around 10 to 15 percent higher on the actual diameter; humidity sensitivity of gut is not captured here
+scalar	density-table-low	law2023-gut	bulk_density_unstretched_table_range_low	1283	kg/m^3	constant
+uncertainty	density-table-low	unstated	-	-	-	-
+validity	density-table-low	temperature_known	0	0	1
+scalar	density-table-high	law2023-gut	bulk_density_unstretched_table_range_high	1329	kg/m^3	constant
+uncertainty	density-table-high	unstated	-	-	-	-
+validity	density-table-high	temperature_known	0	0	1
+scalar	twist-angle-table-low	law2023-gut	twist_angle_degrees_table_range_low	23.5	1	constant
+uncertainty	twist-angle-table-low	unstated	-	-	-	-
+validity	twist-angle-table-low	temperature_known	0	0	1
+scalar	twist-angle-table-high	law2023-gut	twist_angle_degrees_table_range_high	58.3	1	constant
+uncertainty	twist-angle-table-high	unstated	-	-	-	-
+validity	twist-angle-table-high	temperature_known	0	0	1
+scalar	diameter-table-low	law2023-gut	unstretched_diameter_table_range_low	0.001328	m	constant
+uncertainty	diameter-table-low	unstated	-	-	-	-
+validity	diameter-table-low	temperature_known	0	0	1
+scalar	diameter-table-high	law2023-gut	unstretched_diameter_table_range_high	0.00199	m	constant
+uncertainty	diameter-table-high	unstated	-	-	-	-
+validity	diameter-table-high	temperature_known	0	0	1
+scalar	stretched-density-fraction-low	law2023-gut	stretched_density_fraction_of_unstretched_low	0.97	1	constant
+uncertainty	stretched-density-fraction-low	unstated	-	-	-	-
+validity	stretched-density-fraction-low	temperature_known	0	0	1
+scalar	stretched-density-fraction-high	law2023-gut	stretched_density_fraction_of_unstretched_high	0.98	1	constant
+uncertainty	stretched-density-fraction-high	unstated	-	-	-	-
+validity	stretched-density-fraction-high	temperature_known	0	0	1
+scalar	breaking-strain-low	law2023-gut	breaking_strain_typical_low	0.15	1	constant
+uncertainty	breaking-strain-low	unstated	-	-	-	-
+validity	breaking-strain-low	temperature_known	0	0	1
+scalar	breaking-strain-high	law2023-gut	breaking_strain_typical_high	0.28	1	constant
+uncertainty	breaking-strain-high	unstated	-	-	-	-
+validity	breaking-strain-high	temperature_known	0	0	1

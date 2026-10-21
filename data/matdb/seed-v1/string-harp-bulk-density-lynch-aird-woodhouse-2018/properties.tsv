@@ -1,0 +1,86 @@
+frankensim.matdb-source.v1
+observation	law2018-table-1	Harp strings: the nylon strings are from Bowbrand's Pedal Nylon range (tested in the authors' previous study), the four fluorocarbon strings from the Savarez Alliance range for harps (the thinner ones monofilaments, the fatter ones thin filaments wound around a central core of the same material), the gut strings Bowbrand pedal-harp strings (two of them tested again on a second section); the nylon strings fall into two distinct density groups which the authors say presumably reflects a difference in chemical make-up that they could not trace because the strings came through a normal retail outlet	Unstretched diameter measured with a manual micrometer of 0.01 mm resolution, averaged over multiple measurements along each string; bulk density measured before testing	Temperature and humidity of the measurements are not stated in the table; the diameter resolution is 0.01 mm; intended harp use (piano note and harp string number in brackets) and construction are as the paper's Table 1 lists them (N8: N8 nylon monofilament, intended piano note A6 (harp string 5), lower-density group; N14: N14 nylon monofilament, A5 (12), lower-density group; N5: N5 nylon monofilament, A4 (19), lower-density group; N23A: N23a nylon, A3 (26), higher-density group; N29: N29 nylon, E3 (29), higher-density group; C1: C1 fluorocarbon monofilament, A6 (5); C3: C3 fluorocarbon monofilament, A5 (12); C5B: C5b fluorocarbon, wound construction, A4 (19); C7A: C7a fluorocarbon, wound construction, A3 (26); G2B: G2b natural gut (Bowbrand cow gut), A5 (12); G3B: G3b natural gut, A4 (19); G3C: G3c natural gut, A4 (19), tested 2017; G5B: G5b natural gut, A3 (26); G5C: G5c natural gut, A3 (26), tested 2017-2018)
+scalar	diameter-n8	law2018-table-1	unstretched_diameter_n8	0.000658	m	constant
+uncertainty	diameter-n8	unstated	-	-	-	-
+validity	diameter-n8	temperature_known	0	0	1
+scalar	density-n8	law2018-table-1	bulk_density_n8	1097	kg/m^3	constant
+uncertainty	density-n8	unstated	-	-	-	-
+validity	density-n8	temperature_known	0	0	1
+scalar	diameter-n14	law2018-table-1	unstretched_diameter_n14	0.000841	m	constant
+uncertainty	diameter-n14	unstated	-	-	-	-
+validity	diameter-n14	temperature_known	0	0	1
+scalar	density-n14	law2018-table-1	bulk_density_n14	1072	kg/m^3	constant
+uncertainty	density-n14	unstated	-	-	-	-
+validity	density-n14	temperature_known	0	0	1
+scalar	diameter-n5	law2018-table-1	unstretched_diameter_n5	0.001196	m	constant
+uncertainty	diameter-n5	unstated	-	-	-	-
+validity	diameter-n5	temperature_known	0	0	1
+scalar	density-n5	law2018-table-1	bulk_density_n5	1076	kg/m^3	constant
+uncertainty	density-n5	unstated	-	-	-	-
+validity	density-n5	temperature_known	0	0	1
+scalar	diameter-n23a	law2018-table-1	unstretched_diameter_n23a	0.00168	m	constant
+uncertainty	diameter-n23a	unstated	-	-	-	-
+validity	diameter-n23a	temperature_known	0	0	1
+scalar	density-n23a	law2018-table-1	bulk_density_n23a	1151	kg/m^3	constant
+uncertainty	density-n23a	unstated	-	-	-	-
+validity	density-n23a	temperature_known	0	0	1
+scalar	diameter-n29	law2018-table-1	unstretched_diameter_n29	0.001894	m	constant
+uncertainty	diameter-n29	unstated	-	-	-	-
+validity	diameter-n29	temperature_known	0	0	1
+scalar	density-n29	law2018-table-1	bulk_density_n29	1159	kg/m^3	constant
+uncertainty	density-n29	unstated	-	-	-	-
+validity	density-n29	temperature_known	0	0	1
+scalar	diameter-c1	law2018-table-1	unstretched_diameter_c1	0.000578	m	constant
+uncertainty	diameter-c1	unstated	-	-	-	-
+validity	diameter-c1	temperature_known	0	0	1
+scalar	density-c1	law2018-table-1	bulk_density_c1	1819	kg/m^3	constant
+uncertainty	density-c1	unstated	-	-	-	-
+validity	density-c1	temperature_known	0	0	1
+scalar	diameter-c3	law2018-table-1	unstretched_diameter_c3	0.000819	m	constant
+uncertainty	diameter-c3	unstated	-	-	-	-
+validity	diameter-c3	temperature_known	0	0	1
+scalar	density-c3	law2018-table-1	bulk_density_c3	1812	kg/m^3	constant
+uncertainty	density-c3	unstated	-	-	-	-
+validity	density-c3	temperature_known	0	0	1
+scalar	diameter-c5b	law2018-table-1	unstretched_diameter_c5b	0.001031	m	constant
+uncertainty	diameter-c5b	unstated	-	-	-	-
+validity	diameter-c5b	temperature_known	0	0	1
+scalar	density-c5b	law2018-table-1	bulk_density_c5b	1736	kg/m^3	constant
+uncertainty	density-c5b	unstated	-	-	-	-
+validity	density-c5b	temperature_known	0	0	1
+scalar	diameter-c7a	law2018-table-1	unstretched_diameter_c7a	0.001495	m	constant
+uncertainty	diameter-c7a	unstated	-	-	-	-
+validity	diameter-c7a	temperature_known	0	0	1
+scalar	density-c7a	law2018-table-1	bulk_density_c7a	1729	kg/m^3	constant
+uncertainty	density-c7a	unstated	-	-	-	-
+validity	density-c7a	temperature_known	0	0	1
+scalar	diameter-g2b	law2018-table-1	unstretched_diameter_g2b	0.000844	m	constant
+uncertainty	diameter-g2b	unstated	-	-	-	-
+validity	diameter-g2b	temperature_known	0	0	1
+scalar	density-g2b	law2018-table-1	bulk_density_g2b	1320	kg/m^3	constant
+uncertainty	density-g2b	unstated	-	-	-	-
+validity	density-g2b	temperature_known	0	0	1
+scalar	diameter-g3b	law2018-table-1	unstretched_diameter_g3b	0.001167	m	constant
+uncertainty	diameter-g3b	unstated	-	-	-	-
+validity	diameter-g3b	temperature_known	0	0	1
+scalar	density-g3b	law2018-table-1	bulk_density_g3b	1325	kg/m^3	constant
+uncertainty	density-g3b	unstated	-	-	-	-
+validity	density-g3b	temperature_known	0	0	1
+scalar	diameter-g3c	law2018-table-1	unstretched_diameter_g3c	0.001167	m	constant
+uncertainty	diameter-g3c	unstated	-	-	-	-
+validity	diameter-g3c	temperature_known	0	0	1
+scalar	density-g3c	law2018-table-1	bulk_density_g3c	1325	kg/m^3	constant
+uncertainty	density-g3c	unstated	-	-	-	-
+validity	density-g3c	temperature_known	0	0	1
+scalar	diameter-g5b	law2018-table-1	unstretched_diameter_g5b	0.001629	m	constant
+uncertainty	diameter-g5b	unstated	-	-	-	-
+validity	diameter-g5b	temperature_known	0	0	1
+scalar	density-g5b	law2018-table-1	bulk_density_g5b	1320	kg/m^3	constant
+uncertainty	density-g5b	unstated	-	-	-	-
+validity	density-g5b	temperature_known	0	0	1
+scalar	diameter-g5c	law2018-table-1	unstretched_diameter_g5c	0.001629	m	constant
+uncertainty	diameter-g5c	unstated	-	-	-	-
+validity	diameter-g5c	temperature_known	0	0	1
+scalar	density-g5c	law2018-table-1	bulk_density_g5c	1320	kg/m^3	constant
+uncertainty	density-g5c	unstated	-	-	-	-
+validity	density-g5c	temperature_known	0	0	1

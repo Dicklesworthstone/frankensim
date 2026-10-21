@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	string-gut-harp-twist-lynch-aird-woodhouse-2023
+redistribution	permitted	Creative Commons Attribution License (CC BY 4.0, the article's open-access licence on the publisher and PubMed Central pages); retain author list, journal, DOI
+citation	Lynch-Aird N., Woodhouse J. (2023), Effects of Twisting and Surface Finish on the Mechanical Properties of Natural Gut Harp Strings, Materials 16(15):5444; https://doi.org/10.3390/ma16155444 (PMC10419811); Table 1 and Sections 3.1-3.2 (density range, twist angles, stretched-density fraction, breaking strain)
+license	CC-BY-4.0
+source	primary	properties.tsv	material-tsv-v1

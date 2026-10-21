@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	string-harp-bulk-density-lynch-aird-woodhouse-2018
+redistribution	permitted	Creative Commons Attribution License (CC BY 4.0, the article's open-access licence on the publisher and PubMed Central pages); retain author list, journal, DOI
+citation	Lynch-Aird N., Woodhouse J. (2018), Comparison of Mechanical Properties of Natural Gut and Synthetic Polymer Harp Strings, Materials 11(11):2160; https://doi.org/10.3390/ma11112160 (PMC6266393); Table 1 (unstretched diameter and bulk density of each tested string)
+license	CC-BY-4.0
+source	primary	properties.tsv	material-tsv-v1
