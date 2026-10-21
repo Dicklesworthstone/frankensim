@@ -8,10 +8,12 @@
     "Each string is a convergent modal beam in two transverse polarizations, with nylon density and bending modulus from Lynch-Aird and Woodhouse 2017 (harp-string proxy) and gauges from the D'Addario EJ45 specification",
     "Tension is set per string by the setup protocol on the model fundamental (stiff-string fit of the tracked partials), never from a recording",
     "The string couples through a bridge spring to a plane-stress orthotropic cedar plate chart (FPL-GTR-282 constants, viscous loss scenario) and a Helmholtz cavity with a flanged sound hole",
-    "Pressure is observed through the compact baffled body and neck monopole at an assumed distance of 1 m"
+    "Pressure is observed through the compact baffled body and neck monopole at an assumed distance of 1 m",
+    "Nylon viscoelastic bending loss from Woodhouse and Lynch-Aird 2019 (Kelvin-Voigt equivalent at 2 kHz)"
   ],
   "physics_missing": [
     "The six-string network: the three-string files are refused at construction because the bank is built before the prepared propagator is selected, so only the plucked string is rendered and sympathetic strings are absent",
+    "String air drag: the published unsteady-Stokes operator exists but its 113-coordinate network is too slow to render with the current propagator, so the only string loss is nylon viscoelastic bending loss, which barely touches the lowest partials; decay is therefore slower than the real strings",
     "Only 12 bending modes per polarization are kept, so partials above a few kHz are absent",
     "The body is a flat unbraced rectangle with a handful of low modes, not a fan-braced arched guitar top with thickness map, back, ribs and neck; the authored plate size places a mode near B3 that pulls its first partial",
     "Wound bass strings: the multifilament core and silver-plated winding dimensions are unknown",
