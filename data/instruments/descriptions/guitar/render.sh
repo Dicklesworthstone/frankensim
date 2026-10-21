@@ -25,7 +25,10 @@ for pack in nylon-g3 nylon-b3 nylon-e4 cedar-top; do
   (cd "${SNAP}" && "${XTASK}" matdb-pack --manifest "${OUT}/${pack}-manifest.tsv" --out "${OUT}/${pack}.fsmatpk")
 done
 cp "${D}"/gt-s1-solo-*.material-strings "${D}"/gt-s1-solo-*.body .
+# The three notes are independent single-core renders (about 5 min each without the cavity).
 for note in g3 b3 e4; do
   nice -n 10 "${BIN}/material_strings" "gt-s1-solo-${note}.material-strings" "${OUT}/gt-s1-solo-${note}.wav" \
-    --body-profile "gt-s1-solo-${note}.body" 2>&1 | tee "gt-s1-solo-${note}.log"
+    --body-profile "gt-s1-solo-${note}.body" > "gt-s1-solo-${note}.log" 2>&1 &
 done
+wait
+tail -n 2 gt-s1-solo-*.log
