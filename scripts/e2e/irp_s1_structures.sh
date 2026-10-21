@@ -11,6 +11,8 @@ readonly -a EXPECTED_TESTS=(
   g1_free_free_bar_eigen_ladder
 )
 readonly REDUCE_TEST='reduce::reduce_tests::rl_005_tet10_cantilever_card'
+# M1.1-W1a (modal ZOH core moved to fs-modal::time): the cap test and the bitwise witnesses it must not move.
+readonly MODAL_TIME_TEST='g0_mode_cap_4096_admitted_4097_refused'
 readonly -a ND_TESTS=(
   g0_nd_is_a_permutation_and_separators_separate
   g0_nd_deterministic_repeat_bitwise
@@ -59,6 +61,11 @@ list() {
   for test in "${ARCHING_TESTS[@]}"; do printf 'fs-plate:arched_outline_shell::%s\n' "$test"; done
   for test in "${ND_TESTS[@]}" g1_nd_fill_beats_amd_on_3d_grids; do printf 'fs-sparse:nested_dissection::%s\n' "$test"; done
   for test in "${WINDOW_TESTS[@]}" g2_million_dof_window_timing_receipt report_elastic_p1_tet10_fill; do printf 'fs-modal:parallel_windows::%s\n' "$test"; done
+  printf 'fs-modal:lib::time::tests::%s\n' "$MODAL_TIME_TEST"
+  printf 'fs-couple:bakeoff_string::string_bakeoff_receipt_is_reproduced_and_golden_pinned\n'
+  printf 'fs-couple:bakeoff_dispersion::committed_dispersion_receipt_decides_and_modal_rows_are_untouched\n'
+  printf 'engine-piano:clone::a_copy_renders_what_the_original_would\n'
+  printf 'engine-piano:audio_rate::factor_one_retains_the_original_pressure_and_float_bits\n'
 }
 
 check() {
@@ -89,6 +96,11 @@ check() {
   for test in "${ARCHING_TESTS[@]}"; do
     grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-plate/tests/arched_outline_shell.rs" || return 1
   done
+  grep -Fq "fn ${MODAL_TIME_TEST}(" "${REPO_ROOT}/crates/fs-modal/src/time.rs" || { printf 'missing test: %s\n' "$MODAL_TIME_TEST" >&2; return 1; }
+  grep -Fq 'fn string_bakeoff_receipt_is_reproduced_and_golden_pinned(' "${REPO_ROOT}/crates/fs-couple/tests/bakeoff_string.rs" || return 1
+  grep -Fq 'fn committed_dispersion_receipt_decides_and_modal_rows_are_untouched(' "${REPO_ROOT}/crates/fs-couple/tests/bakeoff_dispersion.rs" || return 1
+  grep -Fq 'fn a_copy_renders_what_the_original_would(' "${REPO_ROOT}/apps/instrument-lab/engine-piano/tests/clone.rs" || return 1
+  grep -Fq 'fn factor_one_retains_the_original_pressure_and_float_bits(' "${REPO_ROOT}/apps/instrument-lab/engine-piano/tests/audio_rate.rs" || return 1
   printf 'IRP S1: solid, shell, outline and arching cases present\n'
 }
 
@@ -217,6 +229,63 @@ sys.exit(0 if passed else 1)
 PY
 }
 
+# M1.1-W1a lift-parity stage. Runs each declared render command from binaries built at ONE commit and prints one JSON line per
+# fixture. Run it at the parent export and at the change commit on the same host, then compare with --compare.
+#   IRP_S1_MUSIC_RENDER_BIN  music_render        IRP_S1_GRAND_PIANO_BIN  grand_piano example
+#   IRP_S1_PIANO_RENDER_BIN  engine-piano render example
+renders() {
+  local out="${1:?usage: $0 --renders OUT.jsonl}"
+  [[ "$(uname -s)" != Darwin ]] || { echo 'IRP S1 --renders belongs to the central Linux verification host' >&2; return 2; }
+  local music="${IRP_S1_MUSIC_RENDER_BIN:?set IRP_S1_MUSIC_RENDER_BIN}" piano="${IRP_S1_GRAND_PIANO_BIN:?set IRP_S1_GRAND_PIANO_BIN}"
+  local live="${IRP_S1_PIANO_RENDER_BIN:?set IRP_S1_PIANO_RENDER_BIN}" work head host
+  work="$(mktemp -d "${IRP_S1_RECEIPT_BASE:-${TMPDIR:-/tmp}}/frankensim-irp-s1-renders.XXXXXX")"
+  head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  host="$(uname -n)"
+  : >"$out"
+  printf '0,note_on,60,2.5\n192000,note_off,60,0\n' >"$work/c4_held.csv"
+  emit() {
+    local fixture="$1" wav="$2" started="$3"; shift 3
+    python3 -I - "$fixture" "$wav" "$started" "$head" "$host" "$*" >>"$out" <<'PY'
+import hashlib, json, os, sys, time
+fixture, wav, started, head, host, command = sys.argv[1:7]
+data = open(wav, 'rb').read() if os.path.exists(wav) else b''
+row = dict(suite='irp-s1', bead='M1.1-W1a', fixture=fixture, command=command, wav_sha256=hashlib.sha256(data).hexdigest(),
+           bytes=len(data), seconds=round(time.time() - float(started), 3), host=host, git_head=head)
+side = os.path.splitext(wav)[0] + '.provenance.json'
+if os.path.exists(side):
+    row['wav_blake3'] = json.load(open(side)).get('wav_blake3')
+print(json.dumps(row, allow_nan=False))
+PY
+  }
+  local t
+  t="$(date +%s.%N)"; "$music" string "$work/string.wav" --seconds 0.25 >/dev/null; emit music-string "$work/string.wav" "$t" "$music" string --seconds 0.25
+  t="$(date +%s.%N)"; "$piano" --note 69 --duration 0.1 --modes 12 --render "$work/piano-smoke.wav" >/dev/null; emit piano-smoke "$work/piano-smoke.wav" "$t" "$piano" --note 69 --duration 0.1 --modes 12
+  t="$(date +%s.%N)"; "$live" "$work/c4_held.csv" 5 "$work/c4_held.wav" >/dev/null; emit c4_held-r32 "$work/c4_held.wav" "$t" "$live" c4_held.csv 5
+}
+
+# Compares two --renders outputs fixture by fixture: identical or drifted. Any drift (or a missing fixture) fails; it is never re-baselined.
+compare() {
+  python3 -I - "${1:?usage: $0 --compare BEFORE.jsonl AFTER.jsonl}" "${2:?usage: $0 --compare BEFORE.jsonl AFTER.jsonl}" <<'PY'
+import json, sys
+def load(path):
+    rows = {}
+    for line in open(path):
+        line = line.strip()
+        if line:
+            row = json.loads(line)
+            rows[row['fixture']] = row
+    return rows
+before, after = load(sys.argv[1]), load(sys.argv[2])
+bad = 0
+for fixture in sorted(set(before) | set(after)):
+    a, b = before.get(fixture), after.get(fixture)
+    same = bool(a and b and a['wav_sha256'] == b['wav_sha256'] and a.get('wav_blake3') == b.get('wav_blake3') and a['bytes'] == b['bytes'] and a['bytes'] > 0)
+    bad += not same
+    print(json.dumps(dict(fixture=fixture, before=a and a['wav_sha256'], after=b and b['wav_sha256'], verdict='identical' if same else 'drifted')))
+sys.exit(1 if bad else 0)
+PY
+}
+
 run_eigen_scale() {
   [[ "$(uname -s)" != Darwin ]] || { echo 'IRP .67 scale belongs to ts1, no Mac builds' >&2; return 2; }
   cd "$REPO_ROOT"
@@ -249,5 +318,7 @@ case "${1:---check}" in
   --check) check ;;
   --run) run ;;
   --run-eigen-scale) run_eigen_scale ;;
-  *) printf 'usage: %s [--list|--check|--run|--run-eigen-scale]\n' "$0" >&2; exit 2 ;;
+  --renders) renders "${2:-}" ;;
+  --compare) compare "${2:-}" "${3:-}" ;;
+  *) printf 'usage: %s [--list|--check|--run|--run-eigen-scale|--renders OUT.jsonl|--compare BEFORE.jsonl AFTER.jsonl]\n' "$0" >&2; exit 2 ;;
 esac

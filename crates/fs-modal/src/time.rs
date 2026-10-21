@@ -1729,6 +1729,33 @@ mod tests {
     }
 
     #[test]
+    fn g0_mode_cap_4096_admitted_4097_refused() {
+        // 192 kHz keeps every mode below the Nyquist guard (0.9 * 96 kHz), so only the mode-count cap is exercised.
+        let ladder = |count: usize| -> Vec<ModalAcousticMode> {
+            (0..count)
+                .map(|k| ModalAcousticMode {
+                    angular_frequency_rad_s: 2.0 * core::f64::consts::PI * (100.0 + 10.0 * k as f64),
+                    damping_ratio: 0.01,
+                    pressure_per_modal_velocity: C64::from_re(1.0),
+                })
+                .collect()
+        };
+        assert_eq!(MAX_TIME_DOMAIN_ACOUSTIC_MODES, 4_096);
+        let admitted = ModalAcousticTimeModel::try_new(192_000, ladder(4_096), budget())
+            .expect("exactly the cap is admitted");
+        assert_eq!(admitted.modes().len(), 4_096);
+        let refused = ModalAcousticTimeError::InvalidInput { what: "mode count must be in 1..=4096" };
+        assert_eq!(
+            ModalAcousticTimeModel::try_new(192_000, ladder(4_097), budget()).err(),
+            Some(refused.clone())
+        );
+        assert_eq!(
+            ModalAcousticTimeModel::try_new(192_000, Vec::new(), budget()).err(),
+            Some(refused)
+        );
+    }
+
+    #[test]
     fn transactional_budget_refusal_leaves_state_unchanged() {
         let mode = ModalAcousticMode {
             angular_frequency_rad_s: 2.0 * core::f64::consts::PI * 1_000.0,
