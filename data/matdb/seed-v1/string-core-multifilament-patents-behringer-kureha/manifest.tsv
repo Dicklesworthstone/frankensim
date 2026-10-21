@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	string-core-multifilament-patents-behringer-kureha
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Behringer W., String for stringed instruments and method of making same, United States patent 3,610,084 (granted 5 October 1971), abstract and specification; Ueba H., Ohashi K., Sunaga Y. (Kureha Corp), Core material of string for instruments and string for instruments using the same, United States patent 5,427,008 (granted 27 June 1995), Examples 1-3, Tables 1 and 2 (page 8 read on a page image)
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

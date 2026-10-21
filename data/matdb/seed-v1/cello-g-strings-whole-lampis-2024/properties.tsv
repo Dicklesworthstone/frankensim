@@ -1,0 +1,96 @@
+frankensim.matdb-source.v1
+observation	lampis-jasael-2024	Four commercial cello G2 strings (nominal 98 Hz): D'Addario Prelude, D'Addario Helicore, Thomastik-Infeld Dominant Cello and D'Addario Kaplan; the paper says other information on how they are made is unavailable because of manufacturer confidentiality	Rigid monochord with a playing length of 0.70 m; linear density l = T/(2 L f0)^2 from the measured tension and fundamental; bending stiffness B from a fit of f_n/n = f0 + c n^2 to the inharmonic spacing of the natural frequencies of breaking-wire pluck responses, B = 2 c T L^2/(f0 pi^2), points beyond a z-score of 3 excluded; the mean quality factor over the first 30 modes from the pluck decays (fits with R^2 below 0.98 excluded); 12-15 plucks per string	The printed +- are the standard deviation of repeated measurements of the string through the experiment (the string was not retuned during the bowing measurements); Q as a function of mode number is a figure and is not in this pack; the Dominant's own paper (Acta Acustica 2024) says it has a synthetic core and chrome winding
+observation	lampis-acta-2024	A Thomastik-Infeld Dominant medium-gauge cello G string, which the paper says has a synthetic core and chrome winding, mounted on rigid supports	Tension and fundamental frequency measured right after the first measurement session, scale length and diameter measured, linear density l = T/(2 L f0)^2, impedance Z = sqrt(l T); bending stiffness from three plucked-string signals by the wire-breaking method after the session	Another session of the same string type as the JASA Express Letters table (116.1 N here against 116.3 +- 0.7 N there); the printed +- of B is as the paper gives it and its basis is not restated in the table
+scalar	diameter-prelude	lampis-jasael-2024	diameter_prelude	0.001092	m	constant
+uncertainty	diameter-prelude	unstated	-	-	-	-
+validity	diameter-prelude	temperature_known	0	0	1
+scalar	tension-prelude	lampis-jasael-2024	tension_prelude	149.6	N	constant
+uncertainty	tension-prelude	absolute	1.3	N	0.68	1
+validity	tension-prelude	temperature_known	0	0	1
+scalar	linear-density-prelude	lampis-jasael-2024	linear_density_prelude	0.00794	kg/m	constant
+uncertainty	linear-density-prelude	absolute	7e-05	kg/m	0.68	1
+validity	linear-density-prelude	temperature_known	0	0	1
+scalar	wave-impedance-prelude	lampis-jasael-2024	wave_impedance_prelude	1.09	kg/s	constant
+uncertainty	wave-impedance-prelude	absolute	0.01	kg/s	0.68	1
+validity	wave-impedance-prelude	temperature_known	0	0	1
+scalar	bending-stiffness-prelude	lampis-jasael-2024	bending_stiffness_prelude	0.000685	N*m^2	constant
+uncertainty	bending-stiffness-prelude	absolute	1.4e-05	N*m^2	0.68	1
+validity	bending-stiffness-prelude	temperature_known	0	0	1
+scalar	mean-q-factor-prelude	lampis-jasael-2024	mean_quality_factor_first_30_modes_prelude	419	1	constant
+uncertainty	mean-q-factor-prelude	unstated	-	-	-	-
+validity	mean-q-factor-prelude	temperature_known	0	0	1
+scalar	diameter-helicore	lampis-jasael-2024	diameter_helicore	0.000877	m	constant
+uncertainty	diameter-helicore	unstated	-	-	-	-
+validity	diameter-helicore	temperature_known	0	0	1
+scalar	tension-helicore	lampis-jasael-2024	tension_helicore	153.2	N	constant
+uncertainty	tension-helicore	absolute	0.8	N	0.68	1
+validity	tension-helicore	temperature_known	0	0	1
+scalar	linear-density-helicore	lampis-jasael-2024	linear_density_helicore	0.00814	kg/m	constant
+uncertainty	linear-density-helicore	absolute	3e-05	kg/m	0.68	1
+validity	linear-density-helicore	temperature_known	0	0	1
+scalar	wave-impedance-helicore	lampis-jasael-2024	wave_impedance_helicore	1.12	kg/s	constant
+uncertainty	wave-impedance-helicore	absolute	0.005	kg/s	0.68	1
+validity	wave-impedance-helicore	temperature_known	0	0	1
+scalar	bending-stiffness-helicore	lampis-jasael-2024	bending_stiffness_helicore	0.000432	N*m^2	constant
+uncertainty	bending-stiffness-helicore	absolute	1.6e-05	N*m^2	0.68	1
+validity	bending-stiffness-helicore	temperature_known	0	0	1
+scalar	mean-q-factor-helicore	lampis-jasael-2024	mean_quality_factor_first_30_modes_helicore	503	1	constant
+uncertainty	mean-q-factor-helicore	unstated	-	-	-	-
+validity	mean-q-factor-helicore	temperature_known	0	0	1
+scalar	diameter-dominant	lampis-jasael-2024	diameter_dominant	0.00115	m	constant
+uncertainty	diameter-dominant	unstated	-	-	-	-
+validity	diameter-dominant	temperature_known	0	0	1
+scalar	tension-dominant	lampis-jasael-2024	tension_dominant	116.3	N	constant
+uncertainty	tension-dominant	absolute	0.7	N	0.68	1
+validity	tension-dominant	temperature_known	0	0	1
+scalar	linear-density-dominant	lampis-jasael-2024	linear_density_dominant	0.0062	kg/m	constant
+uncertainty	linear-density-dominant	absolute	6e-05	kg/m	0.68	1
+validity	linear-density-dominant	temperature_known	0	0	1
+scalar	wave-impedance-dominant	lampis-jasael-2024	wave_impedance_dominant	0.85	kg/s	constant
+uncertainty	wave-impedance-dominant	absolute	0.007	kg/s	0.68	1
+validity	wave-impedance-dominant	temperature_known	0	0	1
+scalar	bending-stiffness-dominant	lampis-jasael-2024	bending_stiffness_dominant	0.000303	N*m^2	constant
+uncertainty	bending-stiffness-dominant	absolute	7e-06	N*m^2	0.68	1
+validity	bending-stiffness-dominant	temperature_known	0	0	1
+scalar	mean-q-factor-dominant	lampis-jasael-2024	mean_quality_factor_first_30_modes_dominant	1064	1	constant
+uncertainty	mean-q-factor-dominant	unstated	-	-	-	-
+validity	mean-q-factor-dominant	temperature_known	0	0	1
+scalar	diameter-kaplan	lampis-jasael-2024	diameter_kaplan	0.000895	m	constant
+uncertainty	diameter-kaplan	unstated	-	-	-	-
+validity	diameter-kaplan	temperature_known	0	0	1
+scalar	tension-kaplan	lampis-jasael-2024	tension_kaplan	153.5	N	constant
+uncertainty	tension-kaplan	absolute	0.9	N	0.68	1
+validity	tension-kaplan	temperature_known	0	0	1
+scalar	linear-density-kaplan	lampis-jasael-2024	linear_density_kaplan	0.0082	kg/m	constant
+uncertainty	linear-density-kaplan	absolute	4e-05	kg/m	0.68	1
+validity	linear-density-kaplan	temperature_known	0	0	1
+scalar	wave-impedance-kaplan	lampis-jasael-2024	wave_impedance_kaplan	1.13	kg/s	constant
+uncertainty	wave-impedance-kaplan	absolute	0.005	kg/s	0.68	1
+validity	wave-impedance-kaplan	temperature_known	0	0	1
+scalar	bending-stiffness-kaplan	lampis-jasael-2024	bending_stiffness_kaplan	0.00031	N*m^2	constant
+uncertainty	bending-stiffness-kaplan	absolute	4.2e-05	N*m^2	0.68	1
+validity	bending-stiffness-kaplan	temperature_known	0	0	1
+scalar	mean-q-factor-kaplan	lampis-jasael-2024	mean_quality_factor_first_30_modes_kaplan	521	1	constant
+uncertainty	mean-q-factor-kaplan	unstated	-	-	-	-
+validity	mean-q-factor-kaplan	temperature_known	0	0	1
+scalar	playing-length	lampis-jasael-2024	playing_length	0.7	m	constant
+uncertainty	playing-length	unstated	-	-	-	-
+validity	playing-length	temperature_known	0	0	1
+scalar	acta-dominant-tension	lampis-acta-2024	tension_dominant_acta_session	116.1	N	constant
+uncertainty	acta-dominant-tension	unstated	-	-	-	-
+validity	acta-dominant-tension	temperature_known	0	0	1
+scalar	acta-dominant-fundamental	lampis-acta-2024	fundamental_frequency_dominant_acta_session	97.86	Hz	constant
+uncertainty	acta-dominant-fundamental	unstated	-	-	-	-
+validity	acta-dominant-fundamental	temperature_known	0	0	1
+scalar	acta-dominant-diameter	lampis-acta-2024	diameter_dominant_acta_session	0.00115	m	constant
+uncertainty	acta-dominant-diameter	unstated	-	-	-	-
+validity	acta-dominant-diameter	temperature_known	0	0	1
+scalar	acta-dominant-linear-density	lampis-acta-2024	linear_density_dominant_acta_session	0.0062	kg/m	constant
+uncertainty	acta-dominant-linear-density	unstated	-	-	-	-
+validity	acta-dominant-linear-density	temperature_known	0	0	1
+scalar	acta-dominant-impedance	lampis-acta-2024	wave_impedance_dominant_acta_session	0.849	kg/s	constant
+uncertainty	acta-dominant-impedance	unstated	-	-	-	-
+validity	acta-dominant-impedance	temperature_known	0	0	1
+scalar	acta-dominant-bending-stiffness	lampis-acta-2024	bending_stiffness_dominant_acta_session	0.000303	N*m^2	constant
+uncertainty	acta-dominant-bending-stiffness	absolute	1.5e-06	N*m^2	0.68	1
+validity	acta-dominant-bending-stiffness	temperature_known	0	0	1

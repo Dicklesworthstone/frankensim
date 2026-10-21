@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+observation	us6348646	Windings and cores unwound from used commercial guitar strings: a 0.0175 inch phosphor bronze wire from a D'Addario EJ16 light acoustic E string; the nickel plated metal winding (0.0125 inch) of an Ernie Ball Super Slinky 0.042 inch electric string; the windings and tin coated hexagonal steel cores of John Pearse medium phosphor bronze strings	Densities stated as measured or as the wire's density in the patent text (method not described); 1 lb/in^3 = 27679.9 kg/m^3; 1 inch = 0.0254 m	Patent text, not a laboratory report: the method, the temperature and the number of specimens are not stated; the steel core density printed (0.300 lb/in^3) is above the density of plain steel and is kept as printed
+scalar	phosphor-bronze-winding-density	us6348646	phosphor_bronze_winding_wire_density_ej16_e_string	8857.569504	kg/m^3	constant
+uncertainty	phosphor-bronze-winding-density	unstated	-	-	-	-
+validity	phosphor-bronze-winding-density	temperature_known	0	0	1
+scalar	phosphor-bronze-winding-diameter	us6348646	phosphor_bronze_winding_wire_diameter_ej16_e_string	0.0004445	m	constant
+uncertainty	phosphor-bronze-winding-diameter	unstated	-	-	-	-
+validity	phosphor-bronze-winding-diameter	temperature_known	0	0	1
+scalar	nickel-plated-winding-density	us6348646	nickel_plated_winding_density_super_slinky	7611.973792	kg/m^3	constant
+uncertainty	nickel-plated-winding-density	unstated	-	-	-	-
+validity	nickel-plated-winding-density	temperature_known	0	0	1
+scalar	nickel-plated-winding-diameter	us6348646	nickel_plated_winding_diameter_super_slinky	0.0003175	m	constant
+uncertainty	nickel-plated-winding-diameter	unstated	-	-	-	-
+validity	nickel-plated-winding-diameter	temperature_known	0	0	1
+scalar	pearse-winding-density	us6348646	winding_density_john_pearse_medium_measured	8912.929313	kg/m^3	constant
+uncertainty	pearse-winding-density	unstated	-	-	-	-
+validity	pearse-winding-density	temperature_known	0	0	1
+scalar	pearse-core-density	us6348646	core_density_john_pearse_medium_measured	8303.97141	kg/m^3	constant
+uncertainty	pearse-core-density	unstated	-	-	-	-
+validity	pearse-core-density	temperature_known	0	0	1

@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	string-wound-bass-guitar-bavu-smith-wolfe-2005
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Bavu E., Smith J., Wolfe J. (2005), Torsional waves in a bowed string, arXiv:physics/0505059v1 (University of New South Wales); Section 1 (Materials and Methods) and the paragraph on tuning the string
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

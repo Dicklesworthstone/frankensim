@@ -1,0 +1,199 @@
+frankensim.matdb-source.v1
+observation	us3610084	Violin-string core of endless nylon 6 (polyamide) filaments in the invention of W. Behringer (1968 priority); the example core of the E string has a total denier of 1435 and consists of 7 individual endless filaments of 205 denier each; covering strands of round wire 0.03 to 0.35 mm (violin to contrabass) or flat bands of aluminium alloy, chromium-nickel steel, nickel, silver or copper	Statements of the patent specification and abstract: the core threads have a breaking elongation of 9 to 15 percent, a tensile strength of 80 to 110 kg/mm^2 and a modulus of elasticity of 1150 to 1350 kg/mm^2 (kilogram-force; converted here with 9.80665 N per kgf), about 30 to 50 complete twists per metre; a finished thin violin E string is about 0.54 mm in diameter and a bass string may be as large as 3.9 mm	These are the ranges the specification requires of the core threads, not measurements of a named commercial string; the patent states no temperature or humidity
+observation	us5427008-core	Multifilament core of vinylidene fluoride resin (PVDF) for string instruments in the invention of Ueba, Ohashi and Sunaga (Kureha): monofilament 32 micrometre diameter, specific gravity 1.78, birefringence 38e-3; multifilament 300 d (24 filaments), S twist 0.9 per inch; the core of Example 1 is eight such yarns folded and twisted (Z, twice per inch) and heat-set for 1 h at 140 C, that of Example 2 six yarns	Measurements printed in the examples: core diameter, elongation, tensile strength, creep elongation (24 h after a load of 20 percent of the tensile strength) and Young's modulus from the gradient between the points of 0.1 and 3 percent elongation at the maximum load; kg/mm^2 is kilogram-force per square millimetre (9.80665e6 Pa)	Temperature and humidity of the tests are not stated; the claim requires a Young's modulus of at least 200 kg/mm^2 and the description prefers 400 to 600
+observation	us5427008-strings	Violin strings compared in the patent's Table 2: commercial gut strings (trade name Eudoxa), the invention's strings (a PVDF core wound with 2 turns of a fine flat phosphor bronze wire of thickness 0.05, 0.07 and 0.10 mm for the A, D and G string on cores of 8, 8 and 6 yarns of 300 d) and commercial nylon strings (trade name Thomastik/Dominant), as unwound core and as finished string	Diameter of the string and METSUKE (the table's word for weight per unit length, g/m) of the core material and of the whole string; open-string pitches A 440, D 294 and G 196 Hz	The patent does not say how many strings of each kind were measured or how the core was separated; values as printed
+scalar	behringer-elongation-low	us3610084	behringer_core_breaking_elongation_range_low	0.09	1	constant
+uncertainty	behringer-elongation-low	unstated	-	-	-	-
+validity	behringer-elongation-low	temperature_known	0	0	1
+scalar	behringer-elongation-high	us3610084	behringer_core_breaking_elongation_range_high	0.15	1	constant
+uncertainty	behringer-elongation-high	unstated	-	-	-	-
+validity	behringer-elongation-high	temperature_known	0	0	1
+scalar	behringer-strength-low	us3610084	behringer_core_tensile_strength_range_low	784532000	Pa	constant
+uncertainty	behringer-strength-low	unstated	-	-	-	-
+validity	behringer-strength-low	temperature_known	0	0	1
+scalar	behringer-strength-high	us3610084	behringer_core_tensile_strength_range_high	1078731500	Pa	constant
+uncertainty	behringer-strength-high	unstated	-	-	-	-
+validity	behringer-strength-high	temperature_known	0	0	1
+scalar	behringer-modulus-low	us3610084	behringer_core_young_modulus_range_low	1.12776475e+10	Pa	constant
+uncertainty	behringer-modulus-low	unstated	-	-	-	-
+validity	behringer-modulus-low	temperature_known	0	0	1
+scalar	behringer-modulus-high	us3610084	behringer_core_young_modulus_range_high	1.32389775e+10	Pa	constant
+uncertainty	behringer-modulus-high	unstated	-	-	-	-
+validity	behringer-modulus-high	temperature_known	0	0	1
+scalar	behringer-core-total-linear-density	us3610084	behringer_violin_e_core_total_linear_density	0.0001594444444	kg/m	constant
+uncertainty	behringer-core-total-linear-density	unstated	-	-	-	-
+validity	behringer-core-total-linear-density	temperature_known	0	0	1
+scalar	behringer-core-filament-linear-density	us3610084	behringer_violin_e_core_filament_linear_density	2.277777778e-05	kg/m	constant
+uncertainty	behringer-core-filament-linear-density	unstated	-	-	-	-
+validity	behringer-core-filament-linear-density	temperature_known	0	0	1
+scalar	behringer-core-filament-count	us3610084	behringer_violin_e_core_filament_count	7	1	constant
+uncertainty	behringer-core-filament-count	unstated	-	-	-	-
+validity	behringer-core-filament-count	temperature_known	0	0	1
+scalar	behringer-twists-low	us3610084	behringer_core_twists_per_metre_range_low	30	1	constant
+uncertainty	behringer-twists-low	unstated	-	-	-	-
+validity	behringer-twists-low	temperature_known	0	0	1
+scalar	behringer-twists-high	us3610084	behringer_core_twists_per_metre_range_high	50	1	constant
+uncertainty	behringer-twists-high	unstated	-	-	-	-
+validity	behringer-twists-high	temperature_known	0	0	1
+scalar	behringer-covering-wire-low	us3610084	behringer_covering_round_wire_diameter_range_low	3e-05	m	constant
+uncertainty	behringer-covering-wire-low	unstated	-	-	-	-
+validity	behringer-covering-wire-low	temperature_known	0	0	1
+scalar	behringer-covering-wire-high	us3610084	behringer_covering_round_wire_diameter_range_high	0.00035	m	constant
+uncertainty	behringer-covering-wire-high	unstated	-	-	-	-
+validity	behringer-covering-wire-high	temperature_known	0	0	1
+scalar	behringer-violin-e-string-diameter	us3610084	behringer_finished_violin_e_string_diameter_about	0.00054	m	constant
+uncertainty	behringer-violin-e-string-diameter	unstated	-	-	-	-
+validity	behringer-violin-e-string-diameter	temperature_known	0	0	1
+scalar	behringer-bass-string-diameter	us3610084	behringer_bass_string_diameter_up_to	0.0039	m	constant
+uncertainty	behringer-bass-string-diameter	unstated	-	-	-	-
+validity	behringer-bass-string-diameter	temperature_known	0	0	1
+scalar	kureha-monofilament-diameter	us5427008-core	kureha_pvdf_monofilament_diameter	3.2e-05	m	constant
+uncertainty	kureha-monofilament-diameter	unstated	-	-	-	-
+validity	kureha-monofilament-diameter	temperature_known	0	0	1
+scalar	kureha-monofilament-specific-gravity	us5427008-core	kureha_pvdf_monofilament_specific_gravity_printed	1.78	1	constant
+uncertainty	kureha-monofilament-specific-gravity	unstated	-	-	-	-
+validity	kureha-monofilament-specific-gravity	temperature_known	0	0	1
+scalar	kureha-yarn-linear-density	us5427008-core	kureha_pvdf_multifilament_yarn_linear_density	3.333333333e-05	kg/m	constant
+uncertainty	kureha-yarn-linear-density	unstated	-	-	-	-
+validity	kureha-yarn-linear-density	temperature_known	0	0	1
+scalar	kureha-yarn-filament-count	us5427008-core	kureha_pvdf_multifilament_yarn_filament_count	24	1	constant
+uncertainty	kureha-yarn-filament-count	unstated	-	-	-	-
+validity	kureha-yarn-filament-count	temperature_known	0	0	1
+scalar	kureha-example1-8-yarns-yarn-count	us5427008-core	kureha_example1_8_yarns_yarn_count	8	1	constant
+uncertainty	kureha-example1-8-yarns-yarn-count	unstated	-	-	-	-
+validity	kureha-example1-8-yarns-yarn-count	temperature_known	0	0	1
+scalar	kureha-example1-8-yarns-diameter	us5427008-core	kureha_example1_8_yarns_core_diameter	0.00052	m	constant
+uncertainty	kureha-example1-8-yarns-diameter	unstated	-	-	-	-
+validity	kureha-example1-8-yarns-diameter	temperature_known	0	0	1
+scalar	kureha-example1-8-yarns-elongation	us5427008-core	kureha_example1_8_yarns_elongation	0.138	1	constant
+uncertainty	kureha-example1-8-yarns-elongation	unstated	-	-	-	-
+validity	kureha-example1-8-yarns-elongation	temperature_known	0	0	1
+scalar	kureha-example1-8-yarns-strength	us5427008-core	kureha_example1_8_yarns_tensile_strength	735498750	Pa	constant
+uncertainty	kureha-example1-8-yarns-strength	unstated	-	-	-	-
+validity	kureha-example1-8-yarns-strength	temperature_known	0	0	1
+scalar	kureha-example1-8-yarns-creep	us5427008-core	kureha_example1_8_yarns_creep_elongation_24h	0.039	1	constant
+uncertainty	kureha-example1-8-yarns-creep	unstated	-	-	-	-
+validity	kureha-example1-8-yarns-creep	temperature_known	0	0	1
+scalar	kureha-example1-8-yarns-modulus	us5427008-core	kureha_example1_8_yarns_young_modulus	2902768400	Pa	constant
+uncertainty	kureha-example1-8-yarns-modulus	unstated	-	-	-	-
+validity	kureha-example1-8-yarns-modulus	temperature_known	0	0	1
+scalar	kureha-example2-6-yarns-yarn-count	us5427008-core	kureha_example2_6_yarns_yarn_count	6	1	constant
+uncertainty	kureha-example2-6-yarns-yarn-count	unstated	-	-	-	-
+validity	kureha-example2-6-yarns-yarn-count	temperature_known	0	0	1
+scalar	kureha-example2-6-yarns-diameter	us5427008-core	kureha_example2_6_yarns_core_diameter	0.00045	m	constant
+uncertainty	kureha-example2-6-yarns-diameter	unstated	-	-	-	-
+validity	kureha-example2-6-yarns-diameter	temperature_known	0	0	1
+scalar	kureha-example2-6-yarns-elongation	us5427008-core	kureha_example2_6_yarns_elongation	0.13	1	constant
+uncertainty	kureha-example2-6-yarns-elongation	unstated	-	-	-	-
+validity	kureha-example2-6-yarns-elongation	temperature_known	0	0	1
+scalar	kureha-example2-6-yarns-strength	us5427008-core	kureha_example2_6_yarns_tensile_strength	758054045	Pa	constant
+uncertainty	kureha-example2-6-yarns-strength	unstated	-	-	-	-
+validity	kureha-example2-6-yarns-strength	temperature_known	0	0	1
+scalar	kureha-example2-6-yarns-creep	us5427008-core	kureha_example2_6_yarns_creep_elongation_24h	0.035	1	constant
+uncertainty	kureha-example2-6-yarns-creep	unstated	-	-	-	-
+validity	kureha-example2-6-yarns-creep	temperature_known	0	0	1
+scalar	kureha-example2-6-yarns-modulus	us5427008-core	kureha_example2_6_yarns_young_modulus	2991028250	Pa	constant
+uncertainty	kureha-example2-6-yarns-modulus	unstated	-	-	-	-
+validity	kureha-example2-6-yarns-modulus	temperature_known	0	0	1
+scalar	kureha-claim-modulus-minimum	us5427008-core	kureha_claimed_young_modulus_minimum	1961330000	Pa	constant
+uncertainty	kureha-claim-modulus-minimum	unstated	-	-	-	-
+validity	kureha-claim-modulus-minimum	temperature_known	0	0	1
+scalar	kureha-table2-gut-eudoxa-a-diameter	us5427008-strings	kureha_table2_gut_eudoxa_a_string_diameter	0.00068	m	constant
+uncertainty	kureha-table2-gut-eudoxa-a-diameter	unstated	-	-	-	-
+validity	kureha-table2-gut-eudoxa-a-diameter	temperature_known	0	0	1
+scalar	kureha-table2-gut-eudoxa-a-core-linear-density	us5427008-strings	kureha_table2_gut_eudoxa_a_core_linear_density	0.00034	kg/m	constant
+uncertainty	kureha-table2-gut-eudoxa-a-core-linear-density	unstated	-	-	-	-
+validity	kureha-table2-gut-eudoxa-a-core-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-gut-eudoxa-a-string-linear-density	us5427008-strings	kureha_table2_gut_eudoxa_a_string_linear_density	0.00059	kg/m	constant
+uncertainty	kureha-table2-gut-eudoxa-a-string-linear-density	unstated	-	-	-	-
+validity	kureha-table2-gut-eudoxa-a-string-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-gut-eudoxa-d-diameter	us5427008-strings	kureha_table2_gut_eudoxa_d_string_diameter	0.00083	m	constant
+uncertainty	kureha-table2-gut-eudoxa-d-diameter	unstated	-	-	-	-
+validity	kureha-table2-gut-eudoxa-d-diameter	temperature_known	0	0	1
+scalar	kureha-table2-gut-eudoxa-d-core-linear-density	us5427008-strings	kureha_table2_gut_eudoxa_d_core_linear_density	0.0004	kg/m	constant
+uncertainty	kureha-table2-gut-eudoxa-d-core-linear-density	unstated	-	-	-	-
+validity	kureha-table2-gut-eudoxa-d-core-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-gut-eudoxa-d-string-linear-density	us5427008-strings	kureha_table2_gut_eudoxa_d_string_linear_density	0.00097	kg/m	constant
+uncertainty	kureha-table2-gut-eudoxa-d-string-linear-density	unstated	-	-	-	-
+validity	kureha-table2-gut-eudoxa-d-string-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-gut-eudoxa-g-diameter	us5427008-strings	kureha_table2_gut_eudoxa_g_string_diameter	0.0008	m	constant
+uncertainty	kureha-table2-gut-eudoxa-g-diameter	unstated	-	-	-	-
+validity	kureha-table2-gut-eudoxa-g-diameter	temperature_known	0	0	1
+scalar	kureha-table2-gut-eudoxa-g-core-linear-density	us5427008-strings	kureha_table2_gut_eudoxa_g_core_linear_density	0.00039	kg/m	constant
+uncertainty	kureha-table2-gut-eudoxa-g-core-linear-density	unstated	-	-	-	-
+validity	kureha-table2-gut-eudoxa-g-core-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-gut-eudoxa-g-string-linear-density	us5427008-strings	kureha_table2_gut_eudoxa_g_string_linear_density	0.00241	kg/m	constant
+uncertainty	kureha-table2-gut-eudoxa-g-string-linear-density	unstated	-	-	-	-
+validity	kureha-table2-gut-eudoxa-g-string-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-invention-pvdf-a-diameter	us5427008-strings	kureha_table2_invention_pvdf_a_string_diameter	0.00065	m	constant
+uncertainty	kureha-table2-invention-pvdf-a-diameter	unstated	-	-	-	-
+validity	kureha-table2-invention-pvdf-a-diameter	temperature_known	0	0	1
+scalar	kureha-table2-invention-pvdf-a-core-linear-density	us5427008-strings	kureha_table2_invention_pvdf_a_core_linear_density	0.00027	kg/m	constant
+uncertainty	kureha-table2-invention-pvdf-a-core-linear-density	unstated	-	-	-	-
+validity	kureha-table2-invention-pvdf-a-core-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-invention-pvdf-a-string-linear-density	us5427008-strings	kureha_table2_invention_pvdf_a_string_linear_density	0.00066	kg/m	constant
+uncertainty	kureha-table2-invention-pvdf-a-string-linear-density	unstated	-	-	-	-
+validity	kureha-table2-invention-pvdf-a-string-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-invention-pvdf-d-diameter	us5427008-strings	kureha_table2_invention_pvdf_d_string_diameter	0.00068	m	constant
+uncertainty	kureha-table2-invention-pvdf-d-diameter	unstated	-	-	-	-
+validity	kureha-table2-invention-pvdf-d-diameter	temperature_known	0	0	1
+scalar	kureha-table2-invention-pvdf-d-core-linear-density	us5427008-strings	kureha_table2_invention_pvdf_d_core_linear_density	0.00027	kg/m	constant
+uncertainty	kureha-table2-invention-pvdf-d-core-linear-density	unstated	-	-	-	-
+validity	kureha-table2-invention-pvdf-d-core-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-invention-pvdf-d-string-linear-density	us5427008-strings	kureha_table2_invention_pvdf_d_string_linear_density	0.00123	kg/m	constant
+uncertainty	kureha-table2-invention-pvdf-d-string-linear-density	unstated	-	-	-	-
+validity	kureha-table2-invention-pvdf-d-string-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-invention-pvdf-g-diameter	us5427008-strings	kureha_table2_invention_pvdf_g_string_diameter	0.00077	m	constant
+uncertainty	kureha-table2-invention-pvdf-g-diameter	unstated	-	-	-	-
+validity	kureha-table2-invention-pvdf-g-diameter	temperature_known	0	0	1
+scalar	kureha-table2-invention-pvdf-g-core-linear-density	us5427008-strings	kureha_table2_invention_pvdf_g_core_linear_density	0.00019	kg/m	constant
+uncertainty	kureha-table2-invention-pvdf-g-core-linear-density	unstated	-	-	-	-
+validity	kureha-table2-invention-pvdf-g-core-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-invention-pvdf-g-string-linear-density	us5427008-strings	kureha_table2_invention_pvdf_g_string_linear_density	0.00292	kg/m	constant
+uncertainty	kureha-table2-invention-pvdf-g-string-linear-density	unstated	-	-	-	-
+validity	kureha-table2-invention-pvdf-g-string-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-nylon-dominant-a-diameter	us5427008-strings	kureha_table2_nylon_dominant_a_string_diameter	0.00068	m	constant
+uncertainty	kureha-table2-nylon-dominant-a-diameter	unstated	-	-	-	-
+validity	kureha-table2-nylon-dominant-a-diameter	temperature_known	0	0	1
+scalar	kureha-table2-nylon-dominant-a-core-linear-density	us5427008-strings	kureha_table2_nylon_dominant_a_core_linear_density	0.00019	kg/m	constant
+uncertainty	kureha-table2-nylon-dominant-a-core-linear-density	unstated	-	-	-	-
+validity	kureha-table2-nylon-dominant-a-core-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-nylon-dominant-a-string-linear-density	us5427008-strings	kureha_table2_nylon_dominant_a_string_linear_density	0.00069	kg/m	constant
+uncertainty	kureha-table2-nylon-dominant-a-string-linear-density	unstated	-	-	-	-
+validity	kureha-table2-nylon-dominant-a-string-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-nylon-dominant-d-diameter	us5427008-strings	kureha_table2_nylon_dominant_d_string_diameter	0.00081	m	constant
+uncertainty	kureha-table2-nylon-dominant-d-diameter	unstated	-	-	-	-
+validity	kureha-table2-nylon-dominant-d-diameter	temperature_known	0	0	1
+scalar	kureha-table2-nylon-dominant-d-core-linear-density	us5427008-strings	kureha_table2_nylon_dominant_d_core_linear_density	0.00015	kg/m	constant
+uncertainty	kureha-table2-nylon-dominant-d-core-linear-density	unstated	-	-	-	-
+validity	kureha-table2-nylon-dominant-d-core-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-nylon-dominant-d-string-linear-density	us5427008-strings	kureha_table2_nylon_dominant_d_string_linear_density	0.00111	kg/m	constant
+uncertainty	kureha-table2-nylon-dominant-d-string-linear-density	unstated	-	-	-	-
+validity	kureha-table2-nylon-dominant-d-string-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-nylon-dominant-g-diameter	us5427008-strings	kureha_table2_nylon_dominant_g_string_diameter	0.00079	m	constant
+uncertainty	kureha-table2-nylon-dominant-g-diameter	unstated	-	-	-	-
+validity	kureha-table2-nylon-dominant-g-diameter	temperature_known	0	0	1
+scalar	kureha-table2-nylon-dominant-g-core-linear-density	us5427008-strings	kureha_table2_nylon_dominant_g_core_linear_density	0.0002	kg/m	constant
+uncertainty	kureha-table2-nylon-dominant-g-core-linear-density	unstated	-	-	-	-
+validity	kureha-table2-nylon-dominant-g-core-linear-density	temperature_known	0	0	1
+scalar	kureha-table2-nylon-dominant-g-string-linear-density	us5427008-strings	kureha_table2_nylon_dominant_g_string_linear_density	0.00276	kg/m	constant
+uncertainty	kureha-table2-nylon-dominant-g-string-linear-density	unstated	-	-	-	-
+validity	kureha-table2-nylon-dominant-g-string-linear-density	temperature_known	0	0	1
+scalar	kureha-flat-wire-a-thickness	us5427008-strings	kureha_phosphor_bronze_flat_wire_thickness_a_string	5e-05	m	constant
+uncertainty	kureha-flat-wire-a-thickness	unstated	-	-	-	-
+validity	kureha-flat-wire-a-thickness	temperature_known	0	0	1
+scalar	kureha-flat-wire-a-turns	us5427008-strings	kureha_phosphor_bronze_flat_wire_turns_a_string	2	1	constant
+uncertainty	kureha-flat-wire-a-turns	unstated	-	-	-	-
+validity	kureha-flat-wire-a-turns	temperature_known	0	0	1
+scalar	kureha-flat-wire-d-thickness	us5427008-strings	kureha_phosphor_bronze_flat_wire_thickness_d_string	7e-05	m	constant
+uncertainty	kureha-flat-wire-d-thickness	unstated	-	-	-	-
+validity	kureha-flat-wire-d-thickness	temperature_known	0	0	1
+scalar	kureha-flat-wire-d-turns	us5427008-strings	kureha_phosphor_bronze_flat_wire_turns_d_string	2	1	constant
+uncertainty	kureha-flat-wire-d-turns	unstated	-	-	-	-
+validity	kureha-flat-wire-d-turns	temperature_known	0	0	1
+scalar	kureha-flat-wire-g-thickness	us5427008-strings	kureha_phosphor_bronze_flat_wire_thickness_g_string	0.0001	m	constant
+uncertainty	kureha-flat-wire-g-thickness	unstated	-	-	-	-
+validity	kureha-flat-wire-g-thickness	temperature_known	0	0	1
+scalar	kureha-flat-wire-g-turns	us5427008-strings	kureha_phosphor_bronze_flat_wire_turns_g_string	2	1	constant
+uncertainty	kureha-flat-wire-g-turns	unstated	-	-	-	-
+validity	kureha-flat-wire-g-turns	temperature_known	0	0	1

@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	guitar-string-winding-densities-parker-rohrbacher-us6348646
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Parker A., Rohrbacher P.J., Musical instrument strings and method for making the same, United States patent 6,348,646 B1 (filed 28 August 2000, granted 19 February 2002), the examples that unwind commercial strings to measure winding and core density
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

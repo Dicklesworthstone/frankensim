@@ -1,0 +1,32 @@
+frankensim.matdb-source.v1
+observation	bsw05	A string designed to play E1 (41 Hz) on a bass guitar, steel cored with three steel windings; make not named	Stretched between two heavy rigid bridges 750 mm apart on a monochord; tension varied so that the transverse fundamental took 13 values from 30 to 60 Hz; flexural rigidity measured for static loads; torsional stiffness measured in situ at normal tension with a torsional pendulum; the first two torsional resonances measured in separate experiments at two tensions	The paper says the flexural rigidity may increase with frequency; it attributes the tension dependence of the torsional frequencies possibly to forces between the windings and notes a little hysteresis related to windings slipping over the bridge; no temperature or humidity stated
+scalar	linear-density	bsw05	linear_density	0.02	kg/m	constant
+uncertainty	linear-density	unstated	-	-	-	-
+validity	linear-density	temperature_known	0	0	1
+scalar	scale-length	bsw05	bridge_separation	0.75	m	constant
+uncertainty	scale-length	unstated	-	-	-	-
+validity	scale-length	temperature_known	0	0	1
+scalar	flexural-rigidity	bsw05	flexural_rigidity_static	0.0015	N*m^2	constant
+uncertainty	flexural-rigidity	unstated	-	-	-	-
+validity	flexural-rigidity	temperature_known	0	0	1
+scalar	torsional-stiffness	bsw05	torsional_stiffness_in_situ	0.0031	N*m^2	constant
+uncertainty	torsional-stiffness	unstated	-	-	-	-
+validity	torsional-stiffness	temperature_known	0	0	1
+scalar	transverse-fundamental-a	bsw05	transverse_fundamental_case_a	40	Hz	constant
+uncertainty	transverse-fundamental-a	unstated	-	-	-	-
+validity	transverse-fundamental-a	temperature_known	0	0	1
+scalar	torsional-1-case-a	bsw05	first_torsional_resonance_case_a	240	Hz	constant
+uncertainty	torsional-1-case-a	absolute	2	Hz	0.68	1
+validity	torsional-1-case-a	temperature_known	0	0	1
+scalar	torsional-2-case-a	bsw05	second_torsional_resonance_case_a	472	Hz	constant
+uncertainty	torsional-2-case-a	absolute	3	Hz	0.68	1
+validity	torsional-2-case-a	temperature_known	0	0	1
+scalar	transverse-fundamental-b	bsw05	transverse_fundamental_case_b	50	Hz	constant
+uncertainty	transverse-fundamental-b	unstated	-	-	-	-
+validity	transverse-fundamental-b	temperature_known	0	0	1
+scalar	torsional-1-case-b	bsw05	first_torsional_resonance_case_b	222	Hz	constant
+uncertainty	torsional-1-case-b	absolute	2	Hz	0.68	1
+validity	torsional-1-case-b	temperature_known	0	0	1
+scalar	torsional-2-case-b	bsw05	second_torsional_resonance_case_b	438	Hz	constant
+uncertainty	torsional-2-case-b	absolute	3	Hz	0.68	1
+validity	torsional-2-case-b	temperature_known	0	0	1
