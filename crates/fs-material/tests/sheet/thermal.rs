@@ -39,7 +39,7 @@ fn integrates_selected_cp_and_retains_complete_sheet_and_sample_context() {
     assert_eq!(caloric.sheet(),&original);
     assert_eq!(caloric.heat_capacity_samples().len(),3);
     for s in caloric.heat_capacity_samples() {
-        assert_eq!(s.card_identity(),c.content_hash());assert_eq!(s.query_point()["specimen"],7.0);
+        assert_eq!(s.card_identity(),c.content_hash());assert_eq!(s.query_point().iter().find(|(name,_)| name=="specimen").map(|(_,v)| *v),Some(7.0));
     }
     // Exact source integral: 10*(1000+1200)/2 + 10*(1200+1300)/2.
     let a=caloric.state_at_temperature(290.0).unwrap();let b=caloric.state_at_temperature(310.0).unwrap();
@@ -48,7 +48,7 @@ fn integrates_selected_cp_and_retains_complete_sheet_and_sample_context() {
     assert!(caloric.state_at_temperature(310.1).is_err());
     let k=conductivity_at_temperature(&original,&c,claim(&c,K,THERMAL_CONDUCTIVITY_DIMS),305.0).unwrap();
     close(k.property(K).unwrap().value_si(),0.07);
-    assert_eq!(k.query_point()["specimen"],7.0);
+    assert_eq!(k.query_point().iter().find(|(name,_)| name=="specimen").map(|(_,v)| *v),Some(7.0));
 }
 #[test]
 fn exact_knots_do_not_authorize_transient_interpolation_or_other_specimens() {
