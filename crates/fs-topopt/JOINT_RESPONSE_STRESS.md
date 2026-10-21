@@ -125,3 +125,30 @@ component arithmetic was preserved; they are not Rust compilation evidence.
 
 
 Three focused checkpoint regressions cover resumed trajectory equivalence with charged endpoint reconstruction, changed-requirement rollback, and malformed feasible-incumbent metadata. They are authored source evidence until the native Rust target runs.
+
+
+## Joint two-grid assessment
+
+`strength::refinement::ResponseStressRefinement3` rechecks a retained joint
+design on an enriched active space before treating fixed-grid feasibility as
+numerically stable. It reuses the existing per-limit affine DWR estimator for
+every original force/displacement bound. That estimator now retains its already
+solved enriched operator internally; the joint assessor samples stress from
+those same fine primal fields instead of solving another fine equilibrium family.
+
+The fine stress functional is exactly the retained `SampledPeakBound`: the
+unweighted p-norm includes both relaxed and physical von Mises stress at every
+retained fine bulk point in every experiment. Stress-policy provenance
+(`measure`, relaxation exponent and aggregation exponent) is stored in
+`StressEvaluation3` and must match the requested assessment. The coarse stress
+is re-sampled under the retained material and compared to the saved stress
+aggregate/maxima before the fine result is accepted.
+
+The report exposes coarse/fine joint constraints, stress residuals, sampled
+relaxed/physical maxima, every fine response residual, numerical volume, and
+the maximum normalized two-grid change. `fine_feasible` requires all of them
+to pass independently. Response DWR marking remains available through the
+nested response report, but a stress-only failure is NOT falsely localized by
+that response estimator; stress-specific DWR localization/refit remains future
+work. This assessment is still finite-grid numerical evidence, not a continuum
+stress certificate.

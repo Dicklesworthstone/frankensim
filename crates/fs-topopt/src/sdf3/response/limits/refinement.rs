@@ -94,6 +94,8 @@ pub struct ResponseLimitRefinement3 {
     /// Parent-inherited projected density integrated against each grid's measures.
     pub coarse_volume_fraction: f64,
     pub fine_volume_fraction: f64,
+    /// Parent-inherited projected density in the enriched operator's exact cell order.
+    pub fine_projected_rho: Vec<f64>,
     /// Sum of normalized absolute cell masses over ALL limits, including those
     /// inactive in the coarse smooth maximum. Bound offsets do not localize.
     pub marking_mass: BTreeMap<Octant3, f64>,
@@ -165,10 +167,22 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     /// The probe is consumed; no partial result family escapes. Pure laws and
     /// unchanged geometry/supports/material are caller obligations. This does
     /// not assume nonlinear aggregate differences are a linear DWR sum.
-    pub fn estimate_response_limit_enrichment<F: AdaptiveSdf3Elasticity>(&mut self, mut enriched: F,
+    pub fn estimate_response_limit_enrichment<F: AdaptiveSdf3Elasticity>(&mut self, enriched: F,
         accepted: &ResponseLimitEvaluation3, cases: &[ReferenceResponseLimitCase3<'_>],
         options: ResponseLimitRefinementOptions3, control: &mut SolveControl<'_>)
         -> Result<ResponseLimitRefinement3, GoalRefinementError3> {
+        self.estimate_response_limit_enrichment_retaining(enriched, accepted, cases, options, control)
+            .map(|(report, _)| report)
+    }
+
+    /// Internal joint-design seam: retain the already-solved enriched operator
+    /// so another diagnostic can reuse its fresh primal fields without another
+    /// equilibrium family. The public response-only API still consumes it.
+    pub(in crate::sdf3) fn estimate_response_limit_enrichment_retaining<F: AdaptiveSdf3Elasticity>(
+        &mut self, mut enriched: F, accepted: &ResponseLimitEvaluation3,
+        cases: &[ReferenceResponseLimitCase3<'_>], options: ResponseLimitRefinementOptions3,
+        control: &mut SolveControl<'_>)
+        -> Result<(ResponseLimitRefinement3, F), GoalRefinementError3> {
         control.checkpoint("response-limit-goal-start")?;
         admit_reference_limits(self, cases, options.limits).map_err(|_| invalid("invalid reference response-limit family"))?;
         if options.max_transfer_terms == 0 || cases.len() != accepted.displacements.len()
@@ -226,14 +240,16 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             }
             let volumes = enriched.volumes(); let total = number(volumes.iter().sum())?;
             if total <= 0.0 { return Err(invalid("nonpositive enriched cut volume")); }
-            let fine_volume = number(volumes.iter().zip(transfer.parents())
-                .map(|(v, &p)| (v/total)*design.projected[p]).sum())?;
+            let fine_projected_rho: Vec<f64> = transfer.parents().iter()
+                .map(|&p| design.projected[p]).collect();
+            let fine_volume = number(volumes.iter().zip(&fine_projected_rho)
+                .map(|(v, r)| (v/total)*r).sum())?;
             let pc = self.operator.prepare_elasticity(control)?;
             let pf = enriched.prepare_elasticity(control)?;
             let mut report = ResponseLimitRefinement3 { cases: Vec::with_capacity(cases.len()),
                 coarse_constraint: cg, coarse_worst_residual: cm, fine_constraint: 0.0, fine_worst_residual: 0.0,
                 coarse_volume_fraction: design.volume, fine_volume_fraction: fine_volume,
-                marking_mass: BTreeMap::new(), work: control.work() };
+                fine_projected_rho, marking_mass: BTreeMap::new(), work: control.work() };
             let mut all_fine = Vec::new();
             for (i, case) in cases.iter().enumerate() {
                 let rhs = enriched.adaptive().reference_load_with_motion(case.load, case.prescribed, || poll(control))?;
@@ -271,6 +287,6 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             report.work = control.work(); Ok(report)
         })();
         self.operator.set_scales(&previous).expect("previous admitted scales remain valid");
-        result
+        result.map(|report| (report, enriched))
     }
 }

@@ -105,6 +105,10 @@ pub struct StressEvaluation3 {
     pub rho: Vec<f64>,
     pub projected_rho: Vec<f64>,
     pub scales: Vec<f64>,
+    /// Stress functional and powers that produced this evidence.
+    pub measure: StressMeasure3,
+    pub relaxation_power: f64,
+    pub aggregation_power: f64,
     pub aggregate: f64,
     pub gradient: Vec<f64>,
     /// Maximum over positive-weight cases for the normalized measure, or ALL
@@ -548,6 +552,9 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                 rho: rho.to_vec(),
                 projected_rho: design.projected.clone(),
                 scales: design.scales.clone(),
+                measure,
+                relaxation_power: options.relaxation_power,
+                aggregation_power: options.aggregation_power,
                 aggregate,
                 gradient,
                 sampled_relaxed_max: maximum,

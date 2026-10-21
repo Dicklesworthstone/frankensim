@@ -11,6 +11,7 @@ use crate::sdf3::stress::{self as stress_owner, StressError3, StressEvaluation3,
     StressMeasure3, StressOptions3};
 
 pub mod design;
+pub mod refinement;
 
 /// Explicit reference-model policy. Stress always uses SampledPeakBound,
 /// including every declared experiment; a normalized average is NOT a cap on
