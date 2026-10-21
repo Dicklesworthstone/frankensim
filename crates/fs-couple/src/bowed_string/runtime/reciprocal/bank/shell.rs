@@ -82,6 +82,23 @@ impl ReciprocalStringBank {
         body: SharedMaterialShellAssemblyBody, cavity: Option<MaterialBodyCavity>,
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
+        Self::from_material_shell_assembly_prepared(cx, sources, gas, body, cavity, None, law, options, gate)
+    }
+
+    /// `from_material_shell_assembly` on the explicit prepared exact propagation `prepared` (None is the ordinary owner).
+    /// An assembled body whose modes, cavity, string planes and gas memory exceed the ordinary dense block (42 modal
+    /// coordinates) is refused by its own constructor, so the record has to be present at construction. The budget is
+    /// kept in the bank's source for every later rebuild and must not be bound again.
+    ///
+    /// # Errors
+    /// Those of `from_material_shell_assembly`, plus a prepared budget the complete network does not fit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_material_shell_assembly_prepared(
+        cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
+        body: SharedMaterialShellAssemblyBody, cavity: Option<MaterialBodyCavity>,
+        prepared: Option<PreparedModalBudget>,
+        law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
         let string_modes = material_body_preflight(&sources, &body.bridges,
             body.reduction.n_modes, cavity.as_ref(), &options, gate)?;
@@ -118,7 +135,7 @@ impl ReciprocalStringBank {
         image.body_connections.extend(projected.damping().connections(0));
         image.body_connections.extend(projected.interface_damping_connections(0));
         let mut bank = finish_material_body_with_ports(cx, sources, &body.bridges,
-            string_modes, gas, image, Some(projected.force_ports()), law, options, gate)?;
+            string_modes, gas, image, Some(projected.force_ports()), prepared, law, options, gate)?;
         bank.source.material_shell_assembly = Some(body);
         bank.source.material_shell_assembly_image = Some(projected);
         bank.source.material_cavity = cavity;
@@ -148,6 +165,23 @@ impl ReciprocalStringBank {
     pub fn from_material_shear_shell(
         cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
         body: SharedMaterialShellBody, cavity: Option<MaterialBodyCavity>,
+        law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        Self::from_material_shear_shell_prepared(cx, sources, gas, body, cavity, None, law, options, gate)
+    }
+
+    /// `from_material_shear_shell` on the explicit prepared exact propagation `prepared` (None is the ordinary owner).
+    /// A shell body whose retained modes, cavity, string planes and gas memory exceed the ordinary dense block (42
+    /// modal coordinates) is refused by its own constructor, so the record has to be present at construction. The
+    /// budget is kept in the bank's source for every later rebuild and must not be bound again.
+    ///
+    /// # Errors
+    /// Those of `from_material_shear_shell`, plus a prepared budget the complete network does not fit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_material_shear_shell_prepared(
+        cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
+        body: SharedMaterialShellBody, cavity: Option<MaterialBodyCavity>,
+        prepared: Option<PreparedModalBudget>,
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
@@ -185,7 +219,7 @@ impl ReciprocalStringBank {
         image.body_connections.extend(projected.damping().connections(0));
         image.body_connections.extend(projected.interface_damping_connections(0));
         let mut bank=finish_material_body_with_ports(cx,sources,&body.bridges,string_modes,
-            gas,image,Some(projected.force_ports()),law,options,gate)?;
+            gas,image,Some(projected.force_ports()),prepared,law,options,gate)?;
         bank.source.material_shell=Some(body);
         bank.source.material_shell_image=Some(projected);
         bank.source.material_cavity=cavity;

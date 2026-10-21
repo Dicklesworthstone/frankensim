@@ -340,12 +340,13 @@ impl Spec {
             modal_budget: modal_budget(),
             listener_m: spec.body.listener,
         };
-        Ok(ReciprocalStringBank::from_material_shell_assembly(
+        Ok(ReciprocalStringBank::from_material_shell_assembly_prepared(
             cx,
             sources,
             spec.gas,
             body,
             spec.cavity.clone(),
+            spec.prepared_linear,
             spec.bow_law(0)?.clone(),
             settings,
             gate,

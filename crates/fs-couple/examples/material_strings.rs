@@ -206,9 +206,12 @@ impl input::Spec {
         };
         // Select the active prepared owner before either attachment can enlarge
         // its connected linear block. No record means the ordinary owner.
-        let bank = if let Some(budget) = self.prepared_linear {
-            bank.with_prepared_linear_propagation(budget, gate)?
-        } else { bank };
+        // A shell body bank is already built on this record (it cannot exist without it); binding it again refuses.
+        let bank = match self.prepared_linear {
+            Some(budget) if bank.prepared_linear_budget().is_none() =>
+                bank.with_prepared_linear_propagation(budget, gate)?,
+            _ => bank,
+        };
         let bank = if self.rotational_bridges.is_empty() { bank } else {
             let mut joints = Vec::with_capacity(self.rotational_bridges.len());
             for (joint, &separation_m) in self.rotational_bridges.iter().zip(&baselines) {

@@ -273,8 +273,10 @@ impl Spec {
                 max_projection_terms: self.projection_work, reference_resistance_n_s_m: 1.0 },
             modal_budget: modal_budget(), listener_m: spec.body.listener,
         };
-        Ok(ReciprocalStringBank::from_material_shear_shell(cx, sources, spec.gas, body,
-            spec.cavity.clone(), spec.bow_law(0)?.clone(), settings, gate)?)
+        // The prepared record, when the data declares one, must reach the constructor: a body above the ordinary
+        // 42-coordinate block cannot be built without it.
+        Ok(ReciprocalStringBank::from_material_shear_shell_prepared(cx, sources, spec.gas, body,
+            spec.cavity.clone(), spec.prepared_linear, spec.bow_law(0)?.clone(), settings, gate)?)
     }
 
     fn resolve_component(&self, name: &str, spec: &input::Spec,

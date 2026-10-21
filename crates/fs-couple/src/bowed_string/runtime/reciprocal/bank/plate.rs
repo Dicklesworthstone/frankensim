@@ -147,7 +147,7 @@ pub(super) fn finish_material_body(
     options: StringBankOptions, gate: &CancelGate,
 ) -> Result<ReciprocalStringBank, ReciprocalStringError> {
     finish_material_body_with_ports(cx, sources, bridges, string_modes, gas, image,
-        None, law, options, gate)
+        None, None, law, options, gate)
 }
 
 // Common and spatial bridge inputs differ only in the physical attachment map.
@@ -156,7 +156,7 @@ pub(super) fn finish_material_body(
 pub(super) fn finish_material_body_with_ports(
     cx: &Cx<'_>, sources: Vec<MaterialStringSource>, bridges: &[SharedPlateBridge],
     string_modes: usize, gas: GasState, image: MaterialBodyImage,
-    ports: Option<&[Vec<f64>]>, law: FrictionLaw,
+    ports: Option<&[Vec<f64>]>, prepared: Option<PreparedModalBudget>, law: FrictionLaw,
     options: StringBankOptions, gate: &CancelGate,
 ) -> Result<ReciprocalStringBank, ReciprocalStringError> {
     poll(gate)?;
@@ -176,8 +176,8 @@ pub(super) fn finish_material_body_with_ports(
     }).collect();
     let mut pressure = vec![0.0; string_modes];
     pressure.extend(image.pressure);
-    let mut bank = ReciprocalStringBank::with_body_connections(cx, strings, gas, image.bodies,
-        image.body_connections, law, options, gate)?;
+    let mut bank = ReciprocalStringBank::with_body_connections_prepared(cx, strings, gas, image.bodies,
+        image.body_connections, prepared, law, options, gate)?;
     bank.system = bank.system.with_acceleration_pressure(pressure)
         .map_err(ReciprocalStringError::Friction)?;
     poll(gate)?;

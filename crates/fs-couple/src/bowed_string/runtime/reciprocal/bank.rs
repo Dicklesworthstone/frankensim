@@ -237,6 +237,23 @@ impl ReciprocalStringBank {
         bodies: Vec<ModalAcousticTimeModel>, body_connections: Vec<ModalConnection>,
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
+        Self::with_body_connections_prepared(cx, strings, gas, bodies, body_connections, None, law, options, gate)
+    }
+
+    /// `with_body_connections` on the explicit prepared exact propagation `prepared` (None is the ordinary owner).
+    /// A connected network above the ordinary dense block (42 coordinates) is refused by its own constructor, so the
+    /// record has to be present at construction; `with_prepared_linear_propagation` afterwards cannot rescue it.
+    /// The budget is kept in the bank's source for every later fluid/torsion rebuild, and must not be bound again.
+    ///
+    /// # Errors
+    /// Those of `with_body_connections`, plus a prepared budget the complete network does not fit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_body_connections_prepared(
+        cx: &Cx<'_>, strings: Vec<MaterialStringMember>, gas: GasState,
+        bodies: Vec<ModalAcousticTimeModel>, body_connections: Vec<ModalConnection>,
+        prepared: Option<PreparedModalBudget>,
+        law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
         preflight(&strings, &bodies, &options, body_connections.len())?;
         let mut cards = Vec::with_capacity(strings.len());
@@ -246,11 +263,11 @@ impl ReciprocalStringBank {
         }
         let connections: Vec<&[InteriorStringConnection]> = strings.iter()
             .map(|member| member.connections.as_slice()).collect();
-        let system = assemble_sources(&cards, Some(&strings), bodies, &connections, &body_connections, &[], None, None, law, &options, gate)?;
+        let system = assemble_sources(&cards, Some(&strings), bodies, &connections, &body_connections, &[], None, prepared, law, &options, gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: None, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None }, cards, system })
+        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None }, cards, system })
     }
 
     /// Select bounded cold exact propagation before playback or before adding
