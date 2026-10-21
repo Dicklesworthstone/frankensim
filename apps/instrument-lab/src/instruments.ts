@@ -2,6 +2,7 @@
 // Every number on a card comes from that data; this file only lays it out. A family with no render says so.
 import "./instruments.css";
 import { GroupPlayer } from "./audio";
+import { blindLine, blindOrder, type Order } from "./blind";
 import { LineChart, type Series } from "./chart";
 import { asset, el, fmt, json, onVisible } from "./util";
 
@@ -227,7 +228,8 @@ function buildCard(c: Card, notes: Record<string, string>): HTMLElement {
   let pair = c.pairs[0]!;
   let view: "spectrogram" | "scalogram" = "spectrogram";
   let blind = false;
-  let order: ("real" | "ours")[] = ["real", "ours"];
+  let order: Order = ["real", "ours"]; // [which clip plays as X, which as Y]: seeded per note (blind.ts), so a note reopens in the same order
+  const shuffles = new Map<string, number>(); // how many times each note was re-shuffled in this session
   let allPartials = false;
   let player: GroupPlayer | null = null;
   const listening = (): boolean => pair.real === null; // a render with no reference recording: only our sound and our pictures
@@ -291,22 +293,31 @@ function buildCard(c: Card, notes: Record<string, string>): HTMLElement {
   playB.addEventListener("click", () => playSlot(1));
   stop.addEventListener("click", () => player?.pause());
 
+  // Blind A/B: X and Y play the level-matched recording and render in an order seeded by the note; he picks the real one, the
+  // page reveals it and adds "blind: picked X, real was Y" to his notes for the note. It records his guess and scores nothing.
   const askBlind = (): void => {
-    order = Math.random() < 0.5 ? ["real", "ours"] : ["ours", "real"];
+    order = blindOrder(key(), shuffles.get(key()) ?? 0);
     reveal.replaceChildren();
-    if (!blind || !pair.ours) return;
+    if (!blind || !pair.ours || listening()) return;
     const ask = el("div", { class: "btn-row" }, el("span", {}, `Which one is the real ${c.title.toLowerCase()}?`));
     const guesses: HTMLButtonElement[] = [];
     for (const slot of [0, 1] as const) {
       const b = el("button", { class: "btn sm", type: "button" }, `Sound ${slot === 0 ? "X" : "Y"}`);
       b.addEventListener("click", () => {
         for (const g of guesses) g.disabled = true;
-        reveal.append(el("p", { style: "margin-top: 8px" }, which(slot) === "real" ? "Correct: that was the recording. " : "That one was FrankenSim's render. ",
-          `X was ${which(0) === "real" ? "the recording" : "FrankenSim"}, Y was ${which(1) === "real" ? "the recording" : "FrankenSim"}. Your answer stays in this browser. Pick another note to try again.`));
+        const line = blindLine(order, slot);
+        notes[key()] = `${(notes[key()] ?? "").trimEnd()}${(notes[key()] ?? "").trim() ? "\n" : ""}${line}`;
+        save(notes);
+        feedback.value = notes[key()]!;
+        const is = (clip: "real" | "ours"): string => (clip === "real" ? "the recording" : "FrankenSim");
+        reveal.append(el("p", { style: "margin-top: 8px" }, `You picked ${slot === 0 ? "X" : "Y"}. X was ${is(order[0])}, Y was ${is(order[1])}. Added to your notes for this note: “${line}”.`));
       });
       guesses.push(b);
       ask.append(b);
     }
+    const again = el("button", { class: "btn ghost sm", type: "button" }, "Shuffle again");
+    again.addEventListener("click", () => { shuffles.set(key(), (shuffles.get(key()) ?? 0) + 1); player?.pause(); askBlind(); labelButtons(); });
+    ask.append(again);
     reveal.append(ask);
   };
   blindBox.querySelector("input")!.addEventListener("change", (e) => {
