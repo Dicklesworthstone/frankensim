@@ -114,6 +114,21 @@ pub fn step_candidate(
     endpoints: &BTreeMap<u64, GasEnergySolve>, controls: GasSnapshotSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<SnapshotNozzleCandidate, Error> {
+    let (transfers, reports) = sample_transfers(parcels, links, duration_s, endpoints, &mut cancelled)?;
+    let candidate = snapshot::transfer_candidate(parcels, &transfers, endpoints, controls, &mut cancelled)
+        .map_err(|error| if error == GasSnapshotError::Cancelled { Error::Cancelled } else { Error::Transfer(error) })?;
+    admit_pressures(candidate.parcels(), &reports, &mut cancelled)?;
+    check(&mut cancelled)?;
+    let (parcels, exchange) = candidate.into_parts();
+    Ok(SnapshotNozzleCandidate { parcels, step: SnapshotNozzleStep { duration_s, links: reports, exchange } })
+}
+
+// Shared by the nozzle-only and combined transport paths. This evaluates rates
+// on the original snapshot but performs NO inventory or endpoint update.
+pub(crate) fn sample_transfers(
+    parcels: &BTreeMap<u64, ClosedGasParcel>, links: &[SnapshotNozzleLink], duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>, mut cancelled: impl FnMut() -> bool,
+) -> Result<(Vec<GasSnapshotTransfer>, Vec<SnapshotNozzleLinkStep>), Error> {
     check(&mut cancelled)?;
     if !duration_s.is_finite() || duration_s <= 0.0 || parcels.is_empty()
         || parcels.len() > MAX_SNAPSHOT_PARCELS || links.len() > MAX_SNAPSHOT_TRANSFERS
@@ -146,19 +161,23 @@ pub fn step_candidate(
         transfers.push(GasSnapshotTransfer { donor, receiver, mass_kg: mass });
         reports.push(SnapshotNozzleLinkStep { id, donor, receiver, flow, transferred_mass_kg: mass });
     }
-    let candidate = snapshot::transfer_candidate(parcels, &transfers, endpoints, controls, &mut cancelled)
-        .map_err(|error| if error == GasSnapshotError::Cancelled { Error::Cancelled } else { Error::Transfer(error) })?;
-    for report in &reports {
+    Ok((transfers, reports))
+}
+
+// The same pressure-order admission is applied to the JOINT transport endpoint.
+pub(crate) fn admit_pressures(
+    parcels: &BTreeMap<u64, ClosedGasParcel>, reports: &[SnapshotNozzleLinkStep],
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(), Error> {
+    for report in reports {
         check(&mut cancelled)?;
         if report.transferred_mass_kg > 0.0
-            && candidate.parcels()[&report.donor].state().state().pressure
-                < candidate.parcels()[&report.receiver].state().state().pressure {
+            && parcels[&report.donor].state().state().pressure
+                < parcels[&report.receiver].state().state().pressure {
             return Err(Error::EquilibriumCrossed { id: report.id });
         }
     }
-    check(&mut cancelled)?;
-    let (parcels, exchange) = candidate.into_parts();
-    Ok(SnapshotNozzleCandidate { parcels, step: SnapshotNozzleStep { duration_s, links: reports, exchange } })
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,6 +1,9 @@
 //! Simultaneous selective transport on a graph of original material inventories.
 //! All edges use original donor enthalpy; combine every flux before rebuilding
 //! an endpoint. No newly received species can leave again within this interval.
+/// Pressure restrictions and molecular mixing share one inventory update.
+pub mod transport;
+
 use std::collections::{BTreeMap, BTreeSet};
 use super::{ClosedGasParcel, GasEnergyError, GasEnergySolve, SpeciesId, Sum,
     endpoint, inventory, mixed_model_from_portions, model_for_inventory, positive,

@@ -95,6 +95,23 @@ pub fn step_candidate(
     endpoints:&BTreeMap<u64,GasEnergySolve>, controls:DiffusionNetworkSolve,
     mut cancelled:impl FnMut()->bool,
 ) -> Result<DiffusionNetworkCandidate,Error> {
+    let (transfers, reports) = sample_transfers(parcels, links, duration_s, endpoints, controls, &mut cancelled)?;
+    let candidate=network::exchange_candidate(parcels,&transfers,endpoints,controls.exchange,&mut cancelled)
+        .map_err(|error|if error==SpeciesNetworkError::Cancelled {Error::Cancelled} else {Error::Exchange(error)})?;
+    let entropy_change_j_k = admit_entropy(parcels, candidate.parcels(), controls.entropy_tolerance_j_k, &mut cancelled)?;
+    check(&mut cancelled)?;
+    let (parcels,exchange)=candidate.into_parts();
+    Ok(DiffusionNetworkCandidate {parcels,step:DiffusionNetworkStep {duration_s,links:reports,
+        exchange,entropy_change_j_k}})
+}
+
+// One face sampler serves both diffusion-only and mixed-path transport. It
+// resolves original sources without spending any accepted species inventory.
+pub(crate) fn sample_transfers(
+    parcels: &BTreeMap<u64, ClosedGasParcel>, links: &[DiffusionNetworkLink<'_>], duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>, controls: DiffusionNetworkSolve,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(Vec<SpeciesNetworkTransfer>, Vec<DiffusionNetworkLinkStep>), Error> {
     check(&mut cancelled)?;
     if !positive(duration_s) || !positive(controls.entropy_tolerance_j_k) || parcels.is_empty()
         || parcels.len()>MAX_SNAPSHOT_PARCELS || links.len()>MAX_SNAPSHOT_TRANSFERS
@@ -142,22 +159,25 @@ pub fn step_candidate(
         }
         reports.push(DiffusionNetworkLinkStep {id,parcels:link.parcels,flux});
     }
-    let candidate=network::exchange_candidate(parcels,&transfers,endpoints,controls.exchange,&mut cancelled)
-        .map_err(|error|if error==SpeciesNetworkError::Cancelled {Error::Cancelled} else {Error::Exchange(error)})?;
+    Ok((transfers, reports))
+}
+
+// Evaluate actual extensive endpoint entropy, including changes in total mass.
+pub(crate) fn admit_entropy(
+    parcels: &BTreeMap<u64, ClosedGasParcel>, next_parcels: &BTreeMap<u64, ClosedGasParcel>,
+    tolerance_j_k: f64, mut cancelled: impl FnMut() -> bool,
+) -> Result<f64, Error> {
     let mut entropy=Sum::default();
     for (&id,old) in parcels {
         check(&mut cancelled)?;
         let map=|error|Error::Parcel {id,error};
-        let next=&candidate.parcels()[&id];
+        let next=&next_parcels[&id];
         let before=old.state().specific_entropy_j_kg_k().map_err(GasEnergyError::from).map_err(map)?;
         let after=next.state().specific_entropy_j_kg_k().map_err(GasEnergyError::from).map_err(map)?;
         entropy.add(next.mass_kg()*(after-before)+(next.mass_kg()-old.mass_kg())*before).map_err(map)?;
     }
-    if entropy.value < -controls.entropy_tolerance_j_k {
+    if entropy.value < -tolerance_j_k {
         return Err(Error::Invalid("diffusion network entropy decreased; refine the physical interval"));
     }
-    check(&mut cancelled)?;
-    let (parcels,exchange)=candidate.into_parts();
-    Ok(DiffusionNetworkCandidate {parcels,step:DiffusionNetworkStep {duration_s,links:reports,
-        exchange,entropy_change_j_k:entropy.value}})
+    Ok(entropy.value)
 }

@@ -1,0 +1,159 @@
+//! Pressure restrictions and molecular mixing on one original material snapshot.
+//!
+//! Sample the existing nozzle and Maxwell-Stefan laws without changing any gas.
+//! Lower bulk outflow to its original species masses, combine it with selective
+//! fluxes, then invoke the ONE conservative species/enthalpy update. No inlet can
+//! replenish an outgoing allowance or forward arrivals in this explicit step.
+//!
+//! The two connection lists declare separate physical paths, not two models of
+//! the same aperture. In particular, a molar-average diffusion velocity is not
+//! silently equated to a nozzle's bulk velocity. This is not a spatial CFD
+//! advection-diffusion discretization, pressure diffusion, or jet momentum law.
+
+use std::collections::BTreeMap;
+use super::{ClosedGasParcel, GasEnergySolve, SpeciesNetworkError, SpeciesNetworkSolve,
+    SpeciesNetworkStep, SpeciesNetworkTransfer, MAX_SNAPSHOT_TRANSFERS, inventory};
+use super::super::diffusion::network::{self as molecular, DiffusionNetworkError,
+    DiffusionNetworkLink, DiffusionNetworkLinkStep, DiffusionNetworkSolve};
+use super::super::super::nozzle::network::snapshot::{self as pressure,
+    SnapshotNozzleError, SnapshotNozzleLink, SnapshotNozzleLinkStep};
+
+/// One aggregate allowance for all original species, irrespective of mechanism.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GasTransportSolve {
+    /// Original species owner checks gross withdrawal, local/global mass and energy.
+    pub exchange: SpeciesNetworkSolve,
+    /// Allowed rounding decrease in total closed-network endpoint entropy [J/K].
+    pub entropy_tolerance_j_k: f64,
+}
+
+/// Sampling, reconstruction or combined endpoint refusal; inputs are immutable.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GasTransportError {
+    Invalid(&'static str),
+    Nozzle(SnapshotNozzleError),
+    Diffusion(DiffusionNetworkError),
+    Exchange(SpeciesNetworkError),
+    Cancelled,
+}
+impl core::fmt::Display for GasTransportError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "combined material gas transport: {self:?}")
+    }
+}
+impl std::error::Error for GasTransportError {}
+impl From<SnapshotNozzleError> for GasTransportError {
+    fn from(error: SnapshotNozzleError) -> Self {
+        match error { SnapshotNozzleError::Cancelled => Self::Cancelled, other => Self::Nozzle(other) }
+    }
+}
+impl From<DiffusionNetworkError> for GasTransportError {
+    fn from(error: DiffusionNetworkError) -> Self {
+        match error { DiffusionNetworkError::Cancelled => Self::Cancelled, other => Self::Diffusion(other) }
+    }
+}
+impl From<SpeciesNetworkError> for GasTransportError {
+    fn from(error: SpeciesNetworkError) -> Self {
+        match error { SpeciesNetworkError::Cancelled => Self::Cancelled, other => Self::Exchange(other) }
+    }
+}
+
+/// Original source-bearing rates plus the single accepted inventory accounting.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GasTransportStep {
+    pub duration_s: f64,
+    /// Nozzle IDs are unique within this list; they do not order updates.
+    pub nozzles: Vec<SnapshotNozzleLinkStep>,
+    /// Diffusion IDs are unique within this list; they do not order updates.
+    pub diffusion: Vec<DiffusionNetworkLinkStep>,
+    /// Partial enthalpies, including formation references, are transported once.
+    pub exchange: SpeciesNetworkStep,
+    /// Actual extensive entropy change, not a stability/accuracy certificate.
+    pub entropy_change_j_k: f64,
+}
+
+/// All proposed material states and their common balances, or no endpoint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GasTransportCandidate {
+    parcels: BTreeMap<u64, ClosedGasParcel>,
+    step: GasTransportStep,
+}
+impl GasTransportCandidate {
+    pub fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> { &self.parcels }
+    pub const fn step(&self) -> &GasTransportStep { &self.step }
+    pub fn into_parts(self) -> (BTreeMap<u64, ClosedGasParcel>, GasTransportStep) {
+        (self.parcels, self.step)
+    }
+}
+use GasTransportError as Error;
+fn check(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
+    if cancelled() { Err(Error::Cancelled) } else { Ok(()) }
+}
+
+/// Advance explicitly declared pressure-driven AND diffusive connections once.
+///
+/// All laws sample the same unchanged volumes, compositions, temperatures and
+/// pressures. Existing samplers retain their source-domain, throat and face
+/// admission. The selective owner enforces one GROSS withdrawal allowance per
+/// original species across BOTH mechanisms before one reconstruction per volume.
+/// Thus individually safe paths may be refused together; neither incoming flux
+/// nor an opposite transfer can conceal excessive gross withdrawal.
+///
+/// The combined endpoints must retain every initially active nozzle's pressure
+/// ordering and satisfy the existing extensive entropy gate. Diffusion remains
+/// near-isothermal/isobaric in the molar-average frame on its own declared paths;
+/// adjacent nozzle pressure drops do not relax those assumptions. Parallel paths
+/// between the same volumes are allowed only as distinct authored mechanisms.
+/// There is no extra flow work, chemical heat, inferred diffusivity or volume
+/// update. Caller-controlled timestep refinement remains required (first order).
+///
+/// Empty lists close that mechanism. Both empty preserve all gases exactly.
+/// No previously received species can leave another connection in this step.
+pub fn step_candidate(
+    parcels: &BTreeMap<u64, ClosedGasParcel>, nozzles: &[SnapshotNozzleLink],
+    diffusion: &[DiffusionNetworkLink<'_>], duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>, controls: GasTransportSolve,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<GasTransportCandidate, Error> {
+    check(&mut cancelled)?;
+    if nozzles.len().checked_add(diffusion.len()).is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS) {
+        return Err(Error::Invalid("combined connection count exceeds the shared transport bound"));
+    }
+    let (bulk, nozzle_reports) = pressure::sample_transfers(
+        parcels, nozzles, duration_s, endpoints, &mut cancelled)?;
+    let (mut transfers, diffusion_reports) = molecular::sample_transfers(
+        parcels, diffusion, duration_s, endpoints,
+        DiffusionNetworkSolve { exchange: controls.exchange,
+            entropy_tolerance_j_k: controls.entropy_tolerance_j_k }, &mut cancelled)?;
+    for row in bulk {
+        check(&mut cancelled)?;
+        if row.mass_kg == 0.0 { continue; }
+        // The original composition owner converts mole fractions to mass.
+        // Summing dm_i*h_i is exactly the bulk upstream dm*h mixture law;
+        // the shared species owner evaluates h_i with original source references.
+        let parts = inventory(parcels[&row.donor].model(), row.mass_kg)
+            .map_err(|error| super::material(row.donor, error))?;
+        for (species, mass_kg) in parts {
+            check(&mut cancelled)?;
+            if transfers.len() == MAX_SNAPSHOT_TRANSFERS {
+                return Err(Error::Invalid("combined species flux count exceeds the shared work bound"));
+            }
+            transfers.push(SpeciesNetworkTransfer { donor: row.donor,
+                receiver: row.receiver, species, mass_kg });
+        }
+    }
+    let proposal = super::exchange_candidate(parcels, &transfers, endpoints,
+        controls.exchange, &mut cancelled)?;
+    // Evaluate pressure crossing on the FINAL combined inventory, not on either
+    // mechanism in isolation. Neither failed proposal publishes a subset.
+    pressure::admit_pressures(proposal.parcels(), &nozzle_reports, &mut cancelled)?;
+    let entropy_change_j_k = molecular::admit_entropy(parcels, proposal.parcels(),
+        controls.entropy_tolerance_j_k, &mut cancelled)?;
+    check(&mut cancelled)?;
+    let (parcels, exchange) = proposal.into_parts();
+    Ok(GasTransportCandidate { parcels, step: GasTransportStep { duration_s,
+        nozzles: nozzle_reports, diffusion: diffusion_reports, exchange, entropy_change_j_k } })
+}
+
+#[cfg(test)]
+mod tests;
