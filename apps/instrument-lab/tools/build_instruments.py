@@ -13,7 +13,8 @@ and the output (all under public/data/instruments/, which is gitignored like the
 
      index.json                      every family with its badge and counts (the overview)
      <family>/card.json              one family's card
-     <family>/<note>/{real,ours}.m4a                       the A/B clips (AAC, like every other clip on the page)
+     <family>/<note>/{real,ours}.m4a                       the A/B clips (AAC, like every other clip on the page);
+                                     .mp4 with --audio-ext mp4 (same AAC, for a host that serves no .m4a)
      <family>/<note>/{spectrogram,scalogram}-{real,ours,diff}.webp
 
 The default analysis directory is ~/.local/share/wa-inst/analysis (a mirror of trj:/data/tmp/wa-inst/analysis);
@@ -184,7 +185,7 @@ def encode(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
         return
-    tmp = dst.with_suffix(".tmp.m4a")
+    tmp = dst.with_suffix(f".tmp{dst.suffix}")  # ffmpeg picks the muxer from the extension, so it must match the final name
     for codec in (["-c:a", "aac_at", "-b:a", "256k"], ["-c:a", "aac", "-b:a", "256k"]):
         res = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-ac", "1", *codec, str(tmp)], capture_output=True)
         if res.returncode == 0:
@@ -418,7 +419,7 @@ def real_source(real: dict, ref: dict | None, licences: dict) -> dict:
     return {"id": s["id"].strip(), "name": s["name"].strip(), "credit": s["credit"].strip(), "licence": s["licence"].strip(), "licence_url": s.get("licence_url"), "url": s["url"].strip(), "external": True}
 
 
-def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: dict, licences: dict) -> dict:
+def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: dict, licences: dict, audio_ext: str = "m4a") -> dict:
     has_ours = pj.get("ours") is not None
     note = pj["note"]
     rel = f"{out_dir.parent.name}/{out_dir.name}"
@@ -427,8 +428,8 @@ def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: di
     audio = {}
     for side in ("real", "ours"):
         if pj["audio"].get(side):
-            encode(base / pj["audio"][side], out_dir / f"{side}.m4a")
-            audio[side] = f"{rel}/{side}.m4a"
+            encode(base / pj["audio"][side], out_dir / f"{side}.{audio_ext}")
+            audio[side] = f"{rel}/{side}.{audio_ext}"
         else:
             audio[side] = None
     figures = {}
@@ -537,6 +538,7 @@ def main() -> int:
     ap.add_argument("--pull", action="store_true", help=f"rsync {TRJ_ANALYSIS} into --analysis first")
     ap.add_argument("--out", type=Path, default=OUT)
     ap.add_argument("--descriptions", type=Path, default=DESCRIPTIONS, help="where <family>/status.json live")
+    ap.add_argument("--audio-ext", choices=("m4a", "mp4"), default="m4a", help="extension of the A/B clips; the codec is AAC either way (mp4 for a host that serves no .m4a)")
     args = ap.parse_args()
 
     if args.pull:
@@ -574,7 +576,7 @@ def main() -> int:
                     problems = check_audio(base, pj)
                 if problems:
                     raise Refused(problems)
-                pair = build_pair(pj, base, args.out / fid / note, refs_by_id, chains, licences)
+                pair = build_pair(pj, base, args.out / fid / note, refs_by_id, chains, licences, args.audio_ext)
                 pair["source_sha256"] = sha256(pj_path)
                 pairs.append(pair)
             except (Refused, json.JSONDecodeError) as e:

@@ -6,6 +6,7 @@ The pairs below are throwaway inputs to the generator, written to a temp directo
 import copy
 import json
 import math
+import subprocess
 import tempfile
 import unittest
 import wave
@@ -351,6 +352,24 @@ class EndToEnd(unittest.TestCase):
             for path in (p["audio"]["real"], p["audio"]["ours"], p["figures"]["spectrogram"]["diff"], p["figures"]["scalogram"]["real"]):
                 self.assertTrue((out / path).is_file(), path)
             self.assertEqual(p["real"]["reference_id"], REF_ID)
+
+    def test_audio_ext_names_the_clips_and_the_card_agrees_with_the_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "analysis"
+            make_pair(root)
+            for ext, argv in (("m4a", []), ("mp4", ["--audio-ext", "mp4"])):
+                out = Path(tmp) / f"out-{ext}"
+                with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out), *argv]):
+                    self.assertEqual(B.main(), 0)
+                p = json.loads((out / "clarinet" / "card.json").read_text())["pairs"][0]
+                for side in ("real", "ours"):
+                    self.assertRegex(p["audio"][side], rf"/{side}\.{ext}$")
+                    self.assertTrue((out / p["audio"][side]).is_file())
+                    codec = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0",
+                                            str(out / p["audio"][side])], capture_output=True, text=True).stdout.strip()
+                    self.assertEqual(codec, "aac")
+                other = "mp4" if ext == "m4a" else "m4a"
+                self.assertEqual(list(out.rglob(f"*.{other}")), [], f"no .{other} clip beside the .{ext} ones")
 
     def test_a_refused_pair_is_listed_and_the_exit_code_says_so(self):
         with tempfile.TemporaryDirectory() as tmp:
