@@ -27,6 +27,7 @@ BAR_ON = opts.get("bar", "1") == "1"
 POST_ON = opts.get("post", "1") == "1"
 BRIDGE_ON = opts.get("bridge", "1") == "1"
 EDGE = float(opts.get("edge", "0.45"))  # spacing of the outline and attachment-ring vertices in units of H: a fine ring keeps the ring band narrow
+FANFIX = opts.get("fanfix", "0") == "1"  # repairs for meshes that leave a vertex with several fans in one component (needed by some of the scaled sensitivity meshes; the base table does not need them)
 MIN_PATCH = int(opts.get("min_patch", "24"))  # interior zone patches smaller than this many triangles are merged into their neighbour
 ZSTEP = dict(top=float(opts.get("zone_step_top_mm", "0.2")), back=float(opts.get("zone_step_back_mm", "0.4")))
 CENTRE = np.array([0.0, -87.0])  # plan-view centre of the body (x, z) for the declared scale
@@ -336,6 +337,17 @@ def quad_strip(comp, rows, closed_cols=False, region=0):
                 comp.tris += [(a, b, e, region), (b, c, e, region)]
 
 
+def add_ring_ties(master, slave, side, master_nodes, slave_nodes):
+    """A tie along a closed ring: the owner refuses a node twice in one tie and a slave node in two ties, so the ring is cut into two chains that share no node; the two segments between
+    the chains are left to their tied end nodes (the linear fields of the two surfaces agree along them)."""
+    assert len(master_nodes) == len(slave_nodes)
+    if master_nodes[0] == master_nodes[-1] and slave_nodes[0] == slave_nodes[-1]:
+        master_nodes, slave_nodes = master_nodes[:-1], slave_nodes[:-1]
+    h = len(master_nodes) // 2
+    for a_, b_ in ((0, h), (h, len(master_nodes))):
+        ties.append((master, slave, side, list(master_nodes[a_:b_]), list(slave_nodes[a_:b_])))
+
+
 def chains_from_edges(edges):
     """Ordered vertex chains of a set of undirected edges: paths end at degree != 2 vertices, closed loops repeat their first vertex."""
     adj = defaultdict(set)
@@ -486,25 +498,47 @@ def zone_components(prefix, fld, V, T, chains, ring, feature_chains, circles, pa
     for t_i, tri in enumerate(T):
         for v in tri:
             vert_tris[int(v)].append(t_i)
-    patch = np.full(nT, -1, int)
-    npatch = 0
-    for s in range(nT):
-        if patch[s] >= 0:
-            continue
-        patch[s] = npatch
-        dq = deque([s])
-        while dq:
-            t_i = dq.popleft()
-            a, b, c = T[t_i]
-            if zone[s] < 0:  # ring and feature bands: triangles touching at a vertex belong together (a chain vertex must not be shared by two components)
-                near = [o for v in (a, b, c) for o in vert_tris[int(v)]]
-            else:
-                near = [o for u, v in ((a, b), (b, c), (c, a)) for o in edge_tris[(min(u, v), max(u, v))]]
-            for o in near:
-                if patch[o] < 0 and zone[o] == zone[s]:
-                    patch[o] = npatch
-                    dq.append(o)
-        npatch += 1
+
+    def edge_patches():
+        patch_ = np.full(nT, -1, int)
+        count = 0
+        for s_ in range(nT):
+            if patch_[s_] >= 0:
+                continue
+            patch_[s_] = count
+            dq = deque([s_])
+            while dq:
+                t_i = dq.popleft()
+                a, b, c = T[t_i]
+                for u, v in ((a, b), (b, c), (c, a)):
+                    for o in edge_tris[(min(u, v), max(u, v))]:
+                        if patch_[o] < 0 and zone[o] == zone[s_]:
+                            patch_[o] = count
+                            dq.append(o)
+            count += 1
+        return patch_, count
+
+    # a component must be edge-connected: where two edge-connected pieces of a ring or feature zone touch at one vertex (a pinch), every triangle round that vertex joins the zone
+    absorbed = 0
+    for _ in range(8):
+        patch, npatch = edge_patches()
+        changed = False
+        for v, ts in vert_tris.items():
+            for label in (-2, -3):
+                mine = [t_i for t_i in ts if zone[t_i] == label]
+                if len({patch[t_i] for t_i in mine}) > 1:
+                    for t_i in ts:
+                        if zone[t_i] == -5 - label or zone[t_i] in (-2, -3) and zone[t_i] != label:
+                            raise AssertionError("pinch between the ring zone and a feature zone at vertex %d" % v)
+                        if zone[t_i] != label:
+                            zone[t_i] = label
+                            absorbed += 1
+                            changed = True
+        if not changed:
+            break
+    patch, npatch = edge_patches()
+    if absorbed:
+        meta("pinch_fix_" + prefix, "%d interior triangles joined the ring or feature zones so that every component is edge-connected" % absorbed)
     # merge interior patches smaller than MIN_PATCH triangles into the neighbouring patch sharing the most edges
     for _ in range(6):
         sizes = np.bincount(patch, minlength=patch.max() + 1)
@@ -527,6 +561,93 @@ def zone_components(prefix, fld, V, T, chains, ring, feature_chains, circles, pa
                 changed = True
         if not changed:
             break
+    if FANFIX:
+        # a component's triangles round every vertex must form one fan: where a patch meets itself at a vertex (a loop of the patch round another zone touching itself there), the smaller
+        # fans of an interior-zone patch go to the neighbouring patch with which they share the most edges, and the patches are recomputed (a detached piece becomes a patch of its own)
+        reassigned = 0
+        for _ in range(30):
+            patch, npatch = edge_patches()
+            moved_any = False
+            for v, ts in vert_tris.items():
+                by_patch = defaultdict(list)
+                for t_i in ts:
+                    by_patch[patch[t_i]].append(t_i)
+                for p_, mine in by_patch.items():
+                    if len(mine) < 2 or zone[mine[0]] < 0 and zone[mine[0]] in (-2, -3):
+                        continue
+                    par = {t_i: t_i for t_i in mine}
+
+                    def fnd(a_):
+                        while par[a_] != a_:
+                            par[a_] = par[par[a_]]
+                            a_ = par[a_]
+                        return a_
+
+                    for x_ in mine:
+                        for y_ in mine:
+                            if x_ < y_ and len(set(T[x_].tolist()) & set(T[y_].tolist())) >= 2:  # they share an edge, which contains v since both contain v
+                                par[fnd(x_)] = fnd(y_)
+                    groups = defaultdict(list)
+                    for t_i in mine:
+                        groups[fnd(t_i)].append(t_i)
+                    if len(groups) > 1 and zone[mine[0]] >= 0:
+                        keep = max(groups.values(), key=len)
+                        for g in groups.values():
+                            if g is keep:
+                                continue
+                            votes = defaultdict(int)
+                            for t_i in g:
+                                a, b, c = T[t_i]
+                                for u, w_ in ((a, b), (b, c), (c, a)):
+                                    for o in edge_tris[(min(u, w_), max(u, w_))]:
+                                        if patch[o] != p_ and zone[o] >= 0:
+                                            votes[o] += 1
+                            if votes:
+                                tgt = max(votes, key=votes.get)
+                                for t_i in g:
+                                    zone[t_i] = zone[tgt]
+                                reassigned += len(g)
+                                moved_any = True
+            if not moved_any:
+                break
+        patch, npatch = edge_patches()
+        if reassigned:
+            meta("fan_fix_" + prefix, "%d triangles moved to a neighbouring interior zone so that every component has one fan at every vertex" % reassigned)
+    if FANFIX:
+        # ring and feature zones: wherever their triangles round a vertex form several fans, every triangle round that vertex joins the zone
+        extra = 0
+        for _ in range(8):
+            changed = False
+            for v, ts in vert_tris.items():
+                for label in (-2, -3):
+                    mine = [t_i for t_i in ts if zone[t_i] == label]
+                    if len(mine) < 2:
+                        continue
+                    par = {t_i: t_i for t_i in mine}
+
+                    def fnd2(a_):
+                        while par[a_] != a_:
+                            par[a_] = par[par[a_]]
+                            a_ = par[a_]
+                        return a_
+
+                    for x_ in mine:
+                        for y_ in mine:
+                            if x_ < y_ and len(set(T[x_].tolist()) & set(T[y_].tolist())) >= 2:
+                                par[fnd2(x_)] = fnd2(y_)
+                    if len({fnd2(t_i) for t_i in mine}) > 1:
+                        for t_i in ts:
+                            if zone[t_i] != label:
+                                if zone[t_i] in (-2, -3):
+                                    raise AssertionError("fan fix would take a triangle of another special zone at vertex %d" % v)
+                                zone[t_i] = label
+                                extra += 1
+                                changed = True
+            if not changed:
+                break
+        patch, npatch = edge_patches()
+        if extra:
+            meta("fan_fix_special_" + prefix, "%d interior triangles joined the ring or feature zones so that their components have one fan at every vertex" % extra)
     ids = sorted(set(patch.tolist()))
     comps, local = [], {}
     P3 = fld.xyz(V)
@@ -568,9 +689,32 @@ def zone_components(prefix, fld, V, T, chains, ring, feature_chains, circles, pa
     for e, ts in edge_tris.items():
         if len(ts) == 2 and owner[ts[0]] != owner[ts[1]]:
             pair_edges[tuple(sorted((owner[ts[0]], owner[ts[1]])))].append(e)
+    # cross points: a vertex shared by several components is tied once, every other component's node as the slave of the node of the first component (the owner refuses a node that is a
+    # slave in one tie and a master in another); a chain keeps only the vertices whose master is its own master component and is cut where another master takes over (along an edge
+    # both ends of which are tied, the linear fields of the two components are equal)
+    order = {c.name: k for k, c in enumerate(comps)}
+    members = defaultdict(list)
+    for c in comps:
+        for v in local[c.name]:
+            members[v].append(c.name)
+    first = {v: min(ns, key=order.get) for v, ns in members.items()}
+    lonely = 0
     for (ma, sb), es in sorted(pair_edges.items()):
         for ch in chains_from_edges(es):
-            ties.append((ma, sb, 0, [local[ma][v] for v in ch], [local[sb][v] for v in ch]))
+            if len(ch) > 2 and ch[0] == ch[-1]:
+                ch = ch[:-1]  # a closed loop: the owner refuses a node twice in one tie, so the closing segment is left to its two tied end nodes
+            run = []
+            for v in list(ch) + [None]:
+                if v is not None and first[v] == ma:
+                    run.append(v)
+                    continue
+                if len(run) >= 2:
+                    ties.append((ma, sb, 0, [local[ma][u] for u in run], [local[sb][u] for u in run]))
+                elif len(run) == 1:
+                    lonely += 1
+                run = []
+    if lonely:
+        meta("lonely_tie_vertices_" + prefix, "%d zone-interface vertices sit alone between cross points, where no chain of two nodes can be made: the two components are not welded at that vertex (their neighbours on both sides are)" % lonely)
     meta("zones_" + prefix, "%d components (%s); thickness of each = cube root of the area-weighted mean cube of the smoothed normal-thickness map over its triangles (equal bending stiffness), %s; zone step %.2f mm; %d interface chains tied at the midsurface" % (
         len(comps), ", ".join("%s %.3f mm" % (c.name, c.t) for c in comps), "shifted by %.3f mm" % T_SHIFT if T_SHIFT else "no shift", level_step, sum(1 for t in ties if t[2] == 0 and t[0].startswith(prefix) and t[1].startswith(prefix))))
     return comps, local, patch, owner, P3, N3
@@ -698,7 +842,7 @@ def main():
                 y = float(fld.y(P)[0] + (0.5 if name == "top" else -0.5) * float(fld.t(P)[0]))
             foot[name] = (P, y)
         post = dict(ax=ax, az=az, r=r_post, t=t_post, r_c=r_c, foot=foot)
-        n_c = 8
+        n_c = 16  # the owner refuses neighbouring facets whose normals differ by more than 25.8 degrees: an octagon (45 degrees) is refused, a 16-gon (22.5) is not
         ang = 2 * math.pi * np.arange(n_c) / n_c
         for name, extra, circles in (("top", extra_top, circles_top), ("back", extra_back, circles_back)):
             c = foot[name][0]
@@ -766,8 +910,8 @@ def main():
     orient_tris(rib)
     components.append(rib)
     lt, lb = meshes["top"]["local"][ctop.name], meshes["back"]["local"][cback.name]
-    ties.append((ctop.name, "rib", -1, [lt[v] for v in ids_t] + [lt[ids_t[0]]], rows[0] + [rows[0][0]]))
-    ties.append((cback.name, "rib", -1, [lb[v] for v in ids_b] + [lb[ids_b[0]]], rows[K] + [rows[K][0]]))
+    add_ring_ties(ctop.name, "rib", -1, [lt[v] for v in ids_t], list(rows[0]))
+    add_ring_ties(cback.name, "rib", -1, [lb[v] for v in ids_b], list(rows[K]))
     meta("ribs", "one closed strip along the attachment ring (%d vertices), %d layers, thickness %.2f mm = 10th percentile of the section mean widths (a radial section overstates the wall where it is oblique), grain along the local tangent in %d sectors, top edge on the lower skin of the top ring zone (%.2f mm) and bottom edge on the inner skin of the back ring zone (%.2f mm), height %.1f to %.1f mm; linings and corner blocks are not modelled" % (n, K, t_rib, nsec, ctop.t, cback.t, height.min(), height.max()))
 
     # --- bass bar wall on the lower skin of the top
@@ -827,7 +971,7 @@ def main():
         components.append(tube)
         for name, row in (("top", tube_rows[0]), ("back", tube_rows[K])):
             cp, ids, _ = ends[name]
-            ties.append((cp.name, "soundpost", -1, [meshes[name]["local"][cp.name][v] for v in ids] + [meshes[name]["local"][cp.name][ids[0]]], row + [row[0]]))
+            add_ring_ties(cp.name, "soundpost", -1, [meshes[name]["local"][cp.name][v] for v in ids], list(row))
         meta("soundpost_tube", "length %.1f mm between the inner skins, %d layers, %d nodes per ring" % (np.linalg.norm(axis), K, nc))
 
     # --- bridge shell standing on the outer skin of the top at the two feet

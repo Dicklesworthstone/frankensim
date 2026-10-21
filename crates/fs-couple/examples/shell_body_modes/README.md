@@ -27,10 +27,15 @@ Tools next to this file (Python; run with `uv run --python 3.12 --with triangle 
 
 - `gen_violin_shell_assembly.py SPECIMEN_DIR OUT.tsv H_MM [key=value ...]` writes the table from the specimen
   tables (options: `scale_xz`, `thickness_shift_mm` as declared sensitivities; `bar`, `post`, `bridge` = 0 or 1;
-  `zone_step_top_mm`, `zone_step_back_mm`, `min_patch`, `edge`). Every choice that is not a table number is a
+  `zone_step_top_mm`, `zone_step_back_mm`, `min_patch`, `edge`; `fanfix=1` repairs the vertices where a component meets itself,
+  which some scaled meshes need and the base table does not). Every choice that is not a table number is a
   `meta` row of the output.
 - `check_shell_assembly.py TABLE name=kg/m3 ...` prints per component the facet-against-director alignment,
-  triangle quality and mass, every tie's gap (about 1e-9 m when the generator is right) and the cavity volume.
+  triangle quality and mass, every tie's gap (about 1e-9 m when the generator is right) and the cavity volume, and
+  refuses (as the owner's code does) a component that is not edge-connected, a vertex with several fans, or neighbouring
+  facets whose normals differ by more than 0.9 in cosine.
+- `classify_violin_modes.py TABLE OUTPUT.txt SHAPES.tsv` applies the identification rules of `body-mode-preregistration.tsv`
+  to a run and prints each named mode against its band.
 - `gen_violin_maple_pack.py REPO_ROOT OUT_ROOT` writes the shell-ready maple pack from the committed
   Sonderegger 2013 and Laemmlein 2020 packs.
 
@@ -39,3 +44,7 @@ Modelled: top plate with its two f-holes, back plate, one rib strip, bass bar (w
 f-holes as one neck of their conductance. Not modelled: neck and upper block, tail block, tailpiece, strings,
 chinrest, linings and corner blocks, purfling, varnish, glue compliance (named in the table's `omitted` row and
 in `body-mode-preregistration.tsv`).
+
+The owner's code refuses, before any frequency: neighbouring facets or a facet and its director more than about 26 degrees apart (the post is a 16-gon),
+a component that is not one edge-connected body with one fan at every vertex, a node that is a slave in one tie and a master in another, a node twice in one tie
+(rings are cut into two chains) and a table of 72 components (63 and 61 were accepted; the exact bound is not stated here, and the scaled variants are merged to fit).
