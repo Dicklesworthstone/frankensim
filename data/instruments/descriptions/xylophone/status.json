@@ -3,7 +3,7 @@
   "family": "xylophone",
   "title": "Xylophone",
   "reference_instrument": "Iowa MIS rosewood xylophone",
-  "summary": "Bar-S1 slice: one three-dimensional rosewood bar with a designed undercut (tuned from its own modes so the second mode is three times the first, scaled to the Db5 fundamental, never from a recording), struck by a Hertz silicone sphere and heard at a modal Burton-Miller receiver one metre away. The first render is lossless and only a diagnostic; a second render damps the five elastic modes with a rosewood decay law measured on another bar. There is no resonator, no cord suspension and no marimba or vibraphone yet.",
+  "summary": "Bar-S1 slice: one three-dimensional rosewood bar with a designed undercut (tuned from its own modes so the second mode is three times the first, scaled to the Db5 fundamental, never from a recording), struck by a Hertz silicone sphere and heard at a modal Burton-Miller receiver one metre away. The first render is lossless and only a diagnostic; a second render damps the five elastic modes with a rosewood decay law measured on another bar. There is no resonator, no cord suspension, and no marimba or vibraphone.",
   "physics_present": [
     "Quadratic tetrahedral elasticity of the bar with an orthotropic wood scenario, modal analysis of the free-free body and six rigid modes",
     "Burton-Miller boundary-element radiation transfer of the five retained elastic modes to a receiver at one metre",
@@ -17,7 +17,7 @@
     "The cord suspension and the bar supports",
     "A tubular resonator below the bar, which a marimba needs and which also changes a xylophone",
     "Only five elastic modes are retained, so partials above a few kHz are absent",
-    "Marimba and vibraphone bars: the marimba has a geometry scenario only (a home-built padouk instrument, not the Iowa marimba) and the vibraphone has no recording to compare with"
+    "Marimba: blocked. The only tabulated instrument found (a home-built padouk marimba by La Favre) gives each bar's arch length and centre thickness but not the arch curve, and a pre-registered check failed: a parabolic arch does not reproduce the 1:4 and 1:10 tuning that the builder states for three of four bars. The Iowa marimba is a rosewood instrument, a different species and maker. The vibraphone has no recording to compare with"
   ],
   "blocked": null,
   "beads": [
