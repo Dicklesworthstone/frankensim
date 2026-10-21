@@ -239,6 +239,61 @@ class ScalogramTests(unittest.TestCase):
         self.assertLess(t_new, t_ref)
 
 
+class OnsetRuleTests(unittest.TestCase):
+    """The onset is where the envelope first reaches 20 dB under the signal's OWN steady level, for any signal."""
+
+    def step_then_growth(self, f0=233.08, noise_db=None, lead=2.0, seed=2):
+        # digital silence, a priming step 26 dB under the final level held 70 ms, then growth over 0.25 s to a steady note
+        n = int((lead + 3.0) * SR)
+        tt = np.arange(n) / SR
+        env = np.zeros(n)
+        t0 = lead
+        env[(tt >= t0) & (tt < t0 + 0.07)] = 0.05
+        g = (tt >= t0 + 0.07) & (tt < t0 + 0.32)
+        env[g] = 0.05 + 0.75 * ((tt[g] - t0 - 0.07) / 0.25) ** 2
+        env[tt >= t0 + 0.32] = 0.8
+        x = env * (np.sin(2 * np.pi * f0 * tt) + 0.4 * np.sin(2 * np.pi * 2 * f0 * tt))
+        if noise_db is not None:
+            x = x + np.random.default_rng(seed).standard_normal(n) * 10 ** (noise_db / 20)
+        return x, t0
+
+    def test_a_low_priming_step_does_not_count_as_the_onset(self):
+        f0 = 233.08
+        x, t0 = self.step_then_growth(f0)
+        y = dc.highpass(x, f0)
+        e, tms = dc.env_rms_db(y, win=dc.env_window(f0))
+        old_rule_onset = float(tms[np.flatnonzero(e > e.max() - 30.0)[0]])  # the previous rule: peak - 30 dB
+        self.assertLess(old_rule_onset, t0 + 0.07, "the old rule latches onto the priming step: the test discriminates")
+        cut, info = dc.align(x, f0, dc.render_floor(y, f0))  # raises if the 1.5 ms re-detection fails
+        self.assertGreater(info["onset_s"], t0 + 0.07)  # after the step, in the growth
+        self.assertLess(info["onset_s"], t0 + 0.30)
+        self.assertAlmostEqual(info["cut_onset_s"], dc.preroll_s(f0), delta=0.0015)
+
+    def test_a_recording_of_the_same_note_gets_the_same_onset_through_the_reference_path(self):
+        f0 = 233.08
+        render, t0 = self.step_then_growth(f0)
+        recording, _ = self.step_then_growth(f0, noise_db=-62.0)  # a room: noise floor 50+ dB under the steady level
+        _, ri = dc.align(render, f0, dc.render_floor(dc.highpass(render, f0), f0))
+        floor = dc.floor_of_file(recording, f0)
+        _, qi = dc.align(recording, f0, floor, anchor_s=t0 + 0.3, at_start=False)  # as the library gives it: an anchor inside the note
+        self.assertLess(abs(ri["onset_s"] - qi["onset_s"]), 0.003)  # the same instant, found by the same rule on both
+
+    def test_a_steep_onset_re_detects_after_the_cut_even_with_an_overshoot_and_noise(self):
+        # A guard for the class of failure that refused a UIowa clarinet note (a steep 40 dB rise, a wandering steady level, noise
+        # on the peak). This synthetic signal passes under the old rule too: the real recording (BbClar.mf.C4B4 @ Bb4, which is not
+        # in the repository) is what reproduced it, refused with a cut onset of 8.14 ms before and aligned after.
+        f0 = 466.16
+        n = int(5.0 * SR)
+        tt = np.arange(n) / SR
+        env = np.clip((tt - 2.0) / 0.05, 0, 1) ** 2 * (1.0 + 0.35 * np.exp(-(tt - 2.0) / 0.08)) * (1.0 + 0.2 * np.sin(2 * np.pi * 0.7 * tt))  # overshoot, steady, a slow +-1.6 dB wander
+        x = env * np.sin(2 * np.pi * f0 * tt)
+        x = x + np.random.default_rng(5).standard_normal(n) * 10 ** (-55 / 20)
+        floor = dc.floor_of_file(x, f0)
+        for shift in (0.0, 0.0007, 0.0013, 0.0021):  # the window slides by a few ms, which moved a max-based threshold
+            _, info = dc.align(x[int(shift * SR):], f0, floor, anchor_s=2.03 - shift, at_start=False)
+            self.assertAlmostEqual(info["cut_onset_s"], dc.preroll_s(f0), delta=0.0015)
+
+
 class FloorTests(unittest.TestCase):
     def test_block_wise_floor_matches_the_whole_file_floor_and_is_faster(self):
         import time

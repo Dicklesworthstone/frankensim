@@ -100,12 +100,31 @@ def floor_of_file(x, f0_hz, block=1 << 18):
     return floor_of(np.concatenate([highpass(x[i:i + block], f0_hz) for i in range(0, len(x), block)]))
 
 
-def onset_times(y, floor_db, anchor_s=None, f0_hz=None, peak_db=None):
-    """(noise-floor crossing, peak-relative crossing) in seconds from the start of y; the onset is the later of the two.
+STEADY_DROP_DB = 20.0  # the onset is where the envelope first reaches this far under the note's own steady level
+STEADY_FRAMES_DB = 40.0  # "sounding" frames for the steady level: within this of the loudest
 
-    A: the 2 ms envelope crosses floor + 12 dB.  B: it crosses peak - 30 dB.  Both are absolute levels, so cutting
-    the signal at the onset and detecting again finds the same crossing. A alone fires on dust in a digital-silence
-    render; B alone on the skirt of a slow bowed attack in a noisy recording.
+
+def steady_level_db(e):
+    """The note's own steady level [dB]: the MEDIAN of the sounding frames (those within STEADY_FRAMES_DB of the loudest).
+
+    A median, not a maximum: a maximum moves by a dB or two when the window slides by a few milliseconds (a noise peak,
+    an overshoot), and on a steep onset that is milliseconds of onset. An overshoot or a priming step lasting a small
+    part of the note does not move the median; a decaying note's median sits part-way down its decay, which only moves
+    the threshold lower on an onset that is steep anyway.
+    """
+    e = np.asarray(e)
+    top = float(e.max())
+    return float(np.median(e[e > top - STEADY_FRAMES_DB]))
+
+
+def onset_times(y, floor_db, anchor_s=None, f0_hz=None, steady_db=None):
+    """(noise-floor crossing, steady-relative crossing) in seconds from the start of y; the onset is the later of the two.
+
+    A: the envelope crosses floor + 12 dB.  B: it crosses (the signal's own steady level) - 20 dB, so a low priming
+    step, a click or the skirt of a slow attack does not count and the same rule applies to a render and to a
+    recording. Both are absolute levels, so cutting the signal at the onset and detecting again finds the same
+    crossing. A alone fires on dust in a digital-silence render; B alone on a recording whose steady level is
+    barely above its noise.
 
     With no anchor the first crossing is taken (a render, or a cut). With an anchor (a time inside the note, from
     the library's segmentation) the crossing is the one that precedes it: walk back from the anchor to where the
@@ -118,9 +137,9 @@ def onset_times(y, floor_db, anchor_s=None, f0_hz=None, peak_db=None):
     if not n:
         raise OnsetMisaligned("IRPDECOMP_NO_SIGNAL: empty signal")
     j0 = 0 if anchor_s is None else min(n - 1, int(anchor_s * 1000))
-    pk = float(e[j0: j0 + int((MAX_S + 1.0) * 1000)].max()) if peak_db is None else float(peak_db)
+    pk = steady_level_db(e[j0: j0 + int((MAX_S + 1.0) * 1000)]) if steady_db is None else float(steady_db)
     if pk < floor_db + 20:
-        raise OnsetMisaligned(f"IRPDECOMP_NO_SIGNAL: peak {pk:.1f} dB is under floor {floor_db:.1f} dB + 20")
+        raise OnsetMisaligned(f"IRPDECOMP_NO_SIGNAL: steady level {pk:.1f} dB is under floor {floor_db:.1f} dB + 20")
 
     def crossing(th, strict):
         above = e > th
@@ -141,10 +160,10 @@ def onset_times(y, floor_db, anchor_s=None, f0_hz=None, peak_db=None):
             return None
         return float(t[i])
 
-    tb = crossing(pk - 30.0, True)
+    tb = crossing(pk - STEADY_DROP_DB, True)
     ta = crossing(floor_db + 12.0, False)
     if tb is None:
-        raise OnsetMisaligned("IRPDECOMP_NO_SIGNAL: the note never reaches its own peak window")
+        raise OnsetMisaligned("IRPDECOMP_NO_SIGNAL: the note never reaches its own steady window")
     return (tb if ta is None else ta), tb
 
 
@@ -161,7 +180,7 @@ def align(raw, f0_hz, floor_db, anchor_s=None, at_start=False):
     `at_start`) is given silence to start from before detection, so that a plucked note's step edge is found by the
     same detector, with the same window, on the signal and on its cut. A window that starts in the middle of a
     file is not padded: a note that begins on the tail of the previous one is refused by onset_times.
-    The peak that B is measured from is the peak of the cut itself (found by iterating), so slow ramps stay
+    The steady level that B is measured from is that of the cut itself (found by iterating), so slow ramps stay
     idempotent; re-detecting on the cut at the lead-in is the alignment assertion. Times in `info` are in the
     time of `raw`.
     """
@@ -181,7 +200,7 @@ def align(raw, f0_hz, floor_db, anchor_s=None, at_start=False):
         if a < 0:
             ypad, a = np.concatenate([np.zeros(-a), y]), 0
         cut = ypad[a:a + int(MAX_S * SR)]
-        pk_cut = float(env_rms_db(cut, win=win)[0].max())
+        pk_cut = steady_level_db(env_rms_db(cut, win=win)[0][: int((MAX_S + 1.0) * 1000)])
         if pk is not None and abs(pk_cut - pk) < 0.01:
             break
         pk = pk_cut
