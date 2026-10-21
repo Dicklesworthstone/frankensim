@@ -35,6 +35,9 @@ done
 wait
 
 BAND=(--fs 48000 --pass 10000 --stop 12000 --latency 64 --fft 256,512,1024,2048 --clearance 0.05)
+# Only the openings that D4, G4 or A5 opens are sources (the others stay meshed as rigid wall): 18 sources x 64
+# receivers x 4 components x 1025 bins exceeds the 4194304-entry observation cap, 12 sources do not.
+BAND+=(--only embouchure,foot,hole-07,hole-08,hole-09,hole-10,hole-11,hole-12,hole-13,hole-14,hole-15,hole-16)
 for rung in coarse fine; do
   if [ ! -e "$OUT/$rung.kernels" ]; then
     nice -n 10 "$BIN/reobserve_apertures" bake "$EXT/body-$rung.tsv" "$EXT/receivers.tsv" "$OUT/$rung" \

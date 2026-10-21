@@ -236,7 +236,27 @@ fn bake(args: &[String]) -> Res<()> {
     let body = parse_body(&body_text)?;
     let receivers = parse_receivers(&read_text(receivers_path)?)?;
     let t0 = Instant::now();
-    let mesh = lathed_aperture_body(&body.spec).map_err(|e| format!("mesh: {e}"))?;
+    let mut mesh = lathed_aperture_body(&body.spec).map_err(|e| format!("mesh: {e}"))?;
+    // --only keeps the named apertures as sources; every other aperture stays
+    // meshed (and refined) but rigid, exactly like the rest of the wall.
+    if let Some(i) = args.iter().position(|a| a == "--only") {
+        let keep: Vec<&str> = args
+            .get(i + 1)
+            .ok_or("--only needs a comma-separated aperture list")?
+            .split(',')
+            .collect();
+        for name in &keep {
+            if !mesh.names.iter().any(|n| n == name) {
+                return Err(format!("--only: no aperture {name:?} in the body"));
+            }
+        }
+        let kept: Vec<usize> = (0..mesh.names.len())
+            .filter(|&a| keep.contains(&mesh.names[a].as_str()))
+            .collect();
+        mesh.names = kept.iter().map(|&a| mesh.names[a].clone()).collect();
+        mesh.traces = kept.iter().map(|&a| mesh.traces[a].clone()).collect();
+        mesh.patch_areas_m2 = kept.iter().map(|&a| mesh.patch_areas_m2[a]).collect();
+    }
     let sources: Vec<SourceId> = mesh
         .names
         .iter()
@@ -644,7 +664,7 @@ fn main() {
     let result = match args.first().map(String::as_str) {
         Some("bake") if args.len() >= 4 => bake(&args[1..]),
         Some("replay") if args.len() == 5 => replay(&args[1..]),
-        _ => Err("usage: reobserve_apertures bake BODY RECEIVERS OUT --fs HZ --pass HZ --stop HZ --latency N --fft N1,N2,N3,N4 --clearance M --threads N [--samples CACHE]\n       reobserve_apertures replay KERNELS FLOWS BIND OUTDIR".into()),
+        _ => Err("usage: reobserve_apertures bake BODY RECEIVERS OUT --fs HZ --pass HZ --stop HZ --latency N --fft N1,N2,N3,N4 --clearance M --threads N [--samples CACHE] [--only NAME,...]\n       reobserve_apertures replay KERNELS FLOWS BIND OUTDIR".into()),
     };
     if let Err(e) = result {
         eprintln!("reobserve_apertures: {e}");
