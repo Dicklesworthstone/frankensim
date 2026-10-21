@@ -1,0 +1,146 @@
+frankensim.matdb-source.v1
+observation	ob96-t5-untreated	Arundo donax clarinet-reed cane, 60 specimens 100 (L) x 10 (T) x 1 (R) mm, steamed 12 h at 60 C and 100 percent RH to remove collapse, untreated	Free-free flexural vibration (method of Sec. 5.2), dynamic Young modulus E prime from E prime/gamma and loss tangent from the decay, at 20 C and 60 percent RH (Table 5, p.57)	Mean with SD over 60 specimens; SD is specimen-to-specimen spread, entered as the absolute uncertainty following the cane-arundo-reedblank-mdpi-ma18122759 convention; specific gravity at the test condition as printed; Table 5 frequency not printed (Sec. 5 states 200-400 Hz for its own specimens); the extractives raise tan delta by 134.4 percent (SD 36.4) and E prime by 9.21 percent (SD 3.23) relative to the extracted state (Table 6)
+observation	ob96-t5-extracted	Arundo donax clarinet-reed cane, 60 specimens 100 (L) x 10 (T) x 1 (R) mm, steamed 12 h at 60 C and 100 percent RH to remove collapse, water-extracted	Free-free flexural vibration (method of Sec. 5.2), dynamic Young modulus E prime from E prime/gamma and loss tangent from the decay, at 20 C and 60 percent RH (Table 5, p.57)	Mean with SD over 60 specimens; SD is specimen-to-specimen spread, entered as the absolute uncertainty following the cane-arundo-reedblank-mdpi-ma18122759 convention; specific gravity at the test condition as printed; Table 5 frequency not printed (Sec. 5 states 200-400 Hz for its own specimens); the extractives raise tan delta by 134.4 percent (SD 36.4) and E prime by 9.21 percent (SD 3.23) relative to the extracted state (Table 6)
+observation	ob96-fig-untreated	Arundo donax two-year-old cane from Antibes (France) selected for clarinet reeds, six specimens 1 (R) x 10 (T) x 100 (L) mm from the inner layer of one internode, measured before and after 4 days of water extraction (extractive content 18 percent; air-dry specific gravity 0.52 and 0.42), steam-treated to recover collapse, untreated	Free-free flexural vibration, first mode, 200-400 Hz, at 25 C after 10-20 days conditioning over saturated salt solutions (Sec. 5, pp.52-56); values read off Figs 25 and 27	GRAPH-READ by eye on 220 dpi renders of the scan: reading bound +-0.1 GPa for E prime, +-0.0002 for tan delta and +-0.5 percent for moisture content; no error bars are drawn, so runtime uncertainty stays unstated; these six specimens differ from the 60 of Table 5; untreated tan delta peaks near 7-8 percent moisture content; soaked rows have no printed moisture content
+observation	ob96-fig-extracted	Arundo donax two-year-old cane from Antibes (France) selected for clarinet reeds, six specimens 1 (R) x 10 (T) x 100 (L) mm from the inner layer of one internode, measured before and after 4 days of water extraction (extractive content 18 percent; air-dry specific gravity 0.52 and 0.42), steam-treated to recover collapse, water-extracted	Free-free flexural vibration, first mode, 200-400 Hz, at 25 C after 10-20 days conditioning over saturated salt solutions (Sec. 5, pp.52-56); values read off Figs 25 and 27	GRAPH-READ by eye on 220 dpi renders of the scan: reading bound +-0.1 GPa for E prime, +-0.0002 for tan delta and +-0.5 percent for moisture content; no error bars are drawn, so runtime uncertainty stays unstated; these six specimens differ from the 60 of Table 5; untreated tan delta peaks near 7-8 percent moisture content; soaked rows have no printed moisture content
+observation	ob96-t6-extractives	The 60 specimens of Table 5, untreated relative to water-extracted	Table 6 p.57, at 20 C and 60 percent RH	Mean and SD over 60 specimens of the relative effect of the water-soluble extractives; SD is specimen spread entered as absolute uncertainty
+scalar	mc-t5-untreated	ob96-t5-untreated	equilibrium_moisture_content_at_60_percent_rh	8.2	%	constant
+uncertainty	mc-t5-untreated	absolute	0.37	%	0.68	1
+validity	mc-t5-untreated	temperature	293.15	293.15	K
+scalar	sg-t5-untreated	ob96-t5-untreated	specific_gravity	0.461	1	constant
+uncertainty	sg-t5-untreated	absolute	0.038	1	0.68	1
+validity	sg-t5-untreated	temperature	293.15	293.15	K
+validity	sg-t5-untreated	moisture_content	8.2	8.2	%
+validity	sg-t5-untreated	frequency_known	0	0	1
+scalar	e-l-t5-untreated	ob96-t5-untreated	young_modulus_longitudinal_storage	6.77e+09	Pa	constant
+uncertainty	e-l-t5-untreated	absolute	1.12e+09	Pa	0.68	1
+validity	e-l-t5-untreated	temperature	293.15	293.15	K
+validity	e-l-t5-untreated	moisture_content	8.2	8.2	%
+validity	e-l-t5-untreated	frequency_known	0	0	1
+scalar	eta-l-t5-untreated	ob96-t5-untreated	loss_factor_longitudinal	0.0181	1	constant
+uncertainty	eta-l-t5-untreated	absolute	0.0031	1	0.68	1
+validity	eta-l-t5-untreated	temperature	293.15	293.15	K
+validity	eta-l-t5-untreated	moisture_content	8.2	8.2	%
+validity	eta-l-t5-untreated	frequency_known	0	0	1
+scalar	mc-t5-extracted	ob96-t5-extracted	equilibrium_moisture_content_at_60_percent_rh	7.8	%	constant
+uncertainty	mc-t5-extracted	absolute	0.28	%	0.68	1
+validity	mc-t5-extracted	temperature	293.15	293.15	K
+scalar	sg-t5-extracted	ob96-t5-extracted	specific_gravity	0.388	1	constant
+uncertainty	sg-t5-extracted	absolute	0.043	1	0.68	1
+validity	sg-t5-extracted	temperature	293.15	293.15	K
+validity	sg-t5-extracted	moisture_content	7.8	7.8	%
+validity	sg-t5-extracted	frequency_known	0	0	1
+scalar	e-l-t5-extracted	ob96-t5-extracted	young_modulus_longitudinal_storage	6.21e+09	Pa	constant
+uncertainty	e-l-t5-extracted	absolute	1.1e+09	Pa	0.68	1
+validity	e-l-t5-extracted	temperature	293.15	293.15	K
+validity	e-l-t5-extracted	moisture_content	7.8	7.8	%
+validity	e-l-t5-extracted	frequency_known	0	0	1
+scalar	eta-l-t5-extracted	ob96-t5-extracted	loss_factor_longitudinal	0.0077	1	constant
+uncertainty	eta-l-t5-extracted	absolute	0.0005	1	0.68	1
+validity	eta-l-t5-extracted	temperature	293.15	293.15	K
+validity	eta-l-t5-extracted	moisture_content	7.8	7.8	%
+validity	eta-l-t5-extracted	frequency_known	0	0	1
+scalar	e-l-fig-untreated-mc0	ob96-fig-untreated	young_modulus_longitudinal_storage	9.65e+09	Pa	constant
+uncertainty	e-l-fig-untreated-mc0	unstated	-	-	-	-
+validity	e-l-fig-untreated-mc0	temperature	298.15	298.15	K
+validity	e-l-fig-untreated-mc0	moisture_content	0	0	%
+validity	e-l-fig-untreated-mc0	frequency	200	400	Hz
+scalar	e-l-fig-untreated-mc7p2	ob96-fig-untreated	young_modulus_longitudinal_storage	8.83e+09	Pa	constant
+uncertainty	e-l-fig-untreated-mc7p2	unstated	-	-	-	-
+validity	e-l-fig-untreated-mc7p2	temperature	298.15	298.15	K
+validity	e-l-fig-untreated-mc7p2	moisture_content	7.2	7.2	%
+validity	e-l-fig-untreated-mc7p2	frequency	200	400	Hz
+scalar	e-l-fig-untreated-mc19p0	ob96-fig-untreated	young_modulus_longitudinal_storage	7.45e+09	Pa	constant
+uncertainty	e-l-fig-untreated-mc19p0	unstated	-	-	-	-
+validity	e-l-fig-untreated-mc19p0	temperature	298.15	298.15	K
+validity	e-l-fig-untreated-mc19p0	moisture_content	19.0	19.0	%
+validity	e-l-fig-untreated-mc19p0	frequency	200	400	Hz
+scalar	e-l-fig-untreated-soaked	ob96-fig-untreated	young_modulus_longitudinal_storage	7.42e+09	Pa	constant
+uncertainty	e-l-fig-untreated-soaked	unstated	-	-	-	-
+validity	e-l-fig-untreated-soaked	temperature	298.15	298.15	K
+validity	e-l-fig-untreated-soaked	water_soaked	1	1	1
+validity	e-l-fig-untreated-soaked	moisture_content_known	0	0	1
+validity	e-l-fig-untreated-soaked	frequency	200	400	Hz
+scalar	e-l-fig-extracted-mc0	ob96-fig-extracted	young_modulus_longitudinal_storage	7.93e+09	Pa	constant
+uncertainty	e-l-fig-extracted-mc0	unstated	-	-	-	-
+validity	e-l-fig-extracted-mc0	temperature	298.15	298.15	K
+validity	e-l-fig-extracted-mc0	moisture_content	0	0	%
+validity	e-l-fig-extracted-mc0	frequency	200	400	Hz
+scalar	e-l-fig-extracted-mc7p1	ob96-fig-extracted	young_modulus_longitudinal_storage	7.85e+09	Pa	constant
+uncertainty	e-l-fig-extracted-mc7p1	unstated	-	-	-	-
+validity	e-l-fig-extracted-mc7p1	temperature	298.15	298.15	K
+validity	e-l-fig-extracted-mc7p1	moisture_content	7.1	7.1	%
+validity	e-l-fig-extracted-mc7p1	frequency	200	400	Hz
+scalar	e-l-fig-extracted-mc20p5	ob96-fig-extracted	young_modulus_longitudinal_storage	7.3e+09	Pa	constant
+uncertainty	e-l-fig-extracted-mc20p5	unstated	-	-	-	-
+validity	e-l-fig-extracted-mc20p5	temperature	298.15	298.15	K
+validity	e-l-fig-extracted-mc20p5	moisture_content	20.5	20.5	%
+validity	e-l-fig-extracted-mc20p5	frequency	200	400	Hz
+scalar	e-l-fig-extracted-soaked	ob96-fig-extracted	young_modulus_longitudinal_storage	7.3e+09	Pa	constant
+uncertainty	e-l-fig-extracted-soaked	unstated	-	-	-	-
+validity	e-l-fig-extracted-soaked	temperature	298.15	298.15	K
+validity	e-l-fig-extracted-soaked	water_soaked	1	1	1
+validity	e-l-fig-extracted-soaked	moisture_content_known	0	0	1
+validity	e-l-fig-extracted-soaked	frequency	200	400	Hz
+scalar	eta-l-fig-untreated-mc0	ob96-fig-untreated	loss_factor_longitudinal	0.0066	1	constant
+uncertainty	eta-l-fig-untreated-mc0	unstated	-	-	-	-
+validity	eta-l-fig-untreated-mc0	temperature	298.15	298.15	K
+validity	eta-l-fig-untreated-mc0	moisture_content	0	0	%
+validity	eta-l-fig-untreated-mc0	frequency	200	400	Hz
+scalar	eta-l-fig-untreated-mc7p1	ob96-fig-untreated	loss_factor_longitudinal	0.0142	1	constant
+uncertainty	eta-l-fig-untreated-mc7p1	unstated	-	-	-	-
+validity	eta-l-fig-untreated-mc7p1	temperature	298.15	298.15	K
+validity	eta-l-fig-untreated-mc7p1	moisture_content	7.1	7.1	%
+validity	eta-l-fig-untreated-mc7p1	frequency	200	400	Hz
+scalar	eta-l-fig-untreated-mc19p0	ob96-fig-untreated	loss_factor_longitudinal	0.0078	1	constant
+uncertainty	eta-l-fig-untreated-mc19p0	unstated	-	-	-	-
+validity	eta-l-fig-untreated-mc19p0	temperature	298.15	298.15	K
+validity	eta-l-fig-untreated-mc19p0	moisture_content	19.0	19.0	%
+validity	eta-l-fig-untreated-mc19p0	frequency	200	400	Hz
+scalar	eta-l-fig-untreated-soaked	ob96-fig-untreated	loss_factor_longitudinal	0.0073	1	constant
+uncertainty	eta-l-fig-untreated-soaked	unstated	-	-	-	-
+validity	eta-l-fig-untreated-soaked	temperature	298.15	298.15	K
+validity	eta-l-fig-untreated-soaked	water_soaked	1	1	1
+validity	eta-l-fig-untreated-soaked	moisture_content_known	0	0	1
+validity	eta-l-fig-untreated-soaked	frequency	200	400	Hz
+scalar	eta-l-fig-extracted-mc0	ob96-fig-extracted	loss_factor_longitudinal	0.007	1	constant
+uncertainty	eta-l-fig-extracted-mc0	unstated	-	-	-	-
+validity	eta-l-fig-extracted-mc0	temperature	298.15	298.15	K
+validity	eta-l-fig-extracted-mc0	moisture_content	0	0	%
+validity	eta-l-fig-extracted-mc0	frequency	200	400	Hz
+scalar	eta-l-fig-extracted-mc5p3	ob96-fig-extracted	loss_factor_longitudinal	0.0056	1	constant
+uncertainty	eta-l-fig-extracted-mc5p3	unstated	-	-	-	-
+validity	eta-l-fig-extracted-mc5p3	temperature	298.15	298.15	K
+validity	eta-l-fig-extracted-mc5p3	moisture_content	5.3	5.3	%
+validity	eta-l-fig-extracted-mc5p3	frequency	200	400	Hz
+scalar	eta-l-fig-extracted-mc20p5	ob96-fig-extracted	loss_factor_longitudinal	0.0075	1	constant
+uncertainty	eta-l-fig-extracted-mc20p5	unstated	-	-	-	-
+validity	eta-l-fig-extracted-mc20p5	temperature	298.15	298.15	K
+validity	eta-l-fig-extracted-mc20p5	moisture_content	20.5	20.5	%
+validity	eta-l-fig-extracted-mc20p5	frequency	200	400	Hz
+scalar	eta-l-fig-extracted-soaked	ob96-fig-extracted	loss_factor_longitudinal	0.0075	1	constant
+uncertainty	eta-l-fig-extracted-soaked	unstated	-	-	-	-
+validity	eta-l-fig-extracted-soaked	temperature	298.15	298.15	K
+validity	eta-l-fig-extracted-soaked	water_soaked	1	1	1
+validity	eta-l-fig-extracted-soaked	moisture_content_known	0	0	1
+validity	eta-l-fig-extracted-soaked	frequency	200	400	Hz
+scalar	t6-mass-gain	ob96-t6-extractives	extractive_mass_gain_relative	0.18	1	constant
+uncertainty	t6-mass-gain	absolute	0.0474	1	0.68	1
+validity	t6-mass-gain	temperature	293.15	293.15	K
+validity	t6-mass-gain	relative_humidity	60	60	%
+scalar	t6-swelling	ob96-t6-extractives	extractive_oven_dry_volumetric_swelling_relative	0.0218	1	constant
+uncertainty	t6-swelling	absolute	0.0082	1	0.68	1
+validity	t6-swelling	temperature	293.15	293.15	K
+validity	t6-swelling	relative_humidity	60	60	%
+scalar	t6-swelling-per-sg	ob96-t6-extractives	extractive_oven_dry_volumetric_swelling_per_specific_gravity_relative	0.0558	1	constant
+uncertainty	t6-swelling-per-sg	absolute	0.0207	1	0.68	1
+validity	t6-swelling-per-sg	temperature	293.15	293.15	K
+validity	t6-swelling-per-sg	relative_humidity	60	60	%
+scalar	t6-storage-modulus	ob96-t6-extractives	extractive_effect_on_storage_modulus_relative	0.0921	1	constant
+uncertainty	t6-storage-modulus	absolute	0.0323	1	0.68	1
+validity	t6-storage-modulus	temperature	293.15	293.15	K
+validity	t6-storage-modulus	relative_humidity	60	60	%
+scalar	t6-loss-factor	ob96-t6-extractives	extractive_effect_on_loss_factor_relative	1.344	1	constant
+uncertainty	t6-loss-factor	absolute	0.364	1	0.68	1
+validity	t6-loss-factor	temperature	293.15	293.15	K
+validity	t6-loss-factor	relative_humidity	60	60	%

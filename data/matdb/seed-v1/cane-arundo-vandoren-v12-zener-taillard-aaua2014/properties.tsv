@@ -1,0 +1,165 @@
+frankensim.matdb-source.v1
+observation	ta14-h4-a	55 Vandoren V12 clarinet reeds of nominal strength 3, 3.5, 4 and 4.5 (12, 12, 20, 11), not moistened, mounted on a mouthpiece with a strictly flat lay and a plastic wedge up to the ligature; series A, about 20 C	Resonance frequencies of up to 15 modes per reed by sideband digital heterodyne holography, 1.4-20 kHz in 25-cent steps, inverted through an FEM metamodel (Eq. 1, Table 9) to a Zener model E*(omega) = E1 + E2 - E2^2/(E2 + j omega E3) for E_L and likewise for G_LT, E3 and G3 held constant; hypothesis H4	INVERSE-MODEL FIT, not a direct material test: the density is ASSUMED 520 kg/m3 and the authors judge it probably somewhat too high, which biases the moduli high; valid only between 2 and 18 kHz and only for ambient-dry reeds; SD is reed-to-reed spread over 55 reeds, entered as the absolute uncertainty following the cane-arundo-reedblank-mdpi-ma18122759 convention; H4 is the chosen 9-coefficient model, H5 is called probably less biased (footnote p.22); typical dashpots E3 0.28 and G3 0.02 printed without units
+observation	ta14-h5-a	55 Vandoren V12 clarinet reeds of nominal strength 3, 3.5, 4 and 4.5 (12, 12, 20, 11), not moistened, mounted on a mouthpiece with a strictly flat lay and a plastic wedge up to the ligature; series A, about 20 C	Resonance frequencies of up to 15 modes per reed by sideband digital heterodyne holography, 1.4-20 kHz in 25-cent steps, inverted through an FEM metamodel (Eq. 1, Table 9) to a Zener model E*(omega) = E1 + E2 - E2^2/(E2 + j omega E3) for E_L and likewise for G_LT, E3 and G3 held constant; hypothesis H5	INVERSE-MODEL FIT, not a direct material test: the density is ASSUMED 520 kg/m3 and the authors judge it probably somewhat too high, which biases the moduli high; valid only between 2 and 18 kHz and only for ambient-dry reeds; SD is reed-to-reed spread over 55 reeds, entered as the absolute uncertainty following the cane-arundo-reedblank-mdpi-ma18122759 convention; H4 is the chosen 9-coefficient model, H5 is called probably less biased (footnote p.22); typical dashpots E3 0.28 and G3 0.02 printed without units
+observation	ta14-h4-b	55 Vandoren V12 clarinet reeds of nominal strength 3, 3.5, 4 and 4.5 (12, 12, 20, 11), not moistened, mounted on a mouthpiece with a strictly flat lay and a plastic wedge up to the ligature; series B, 23-25 C, after an accidental overnight exposure to dry warm air that removed 2-4 percent of reed mass	Resonance frequencies of up to 15 modes per reed by sideband digital heterodyne holography, 1.4-20 kHz in 25-cent steps, inverted through an FEM metamodel (Eq. 1, Table 9) to a Zener model E*(omega) = E1 + E2 - E2^2/(E2 + j omega E3) for E_L and likewise for G_LT, E3 and G3 held constant; hypothesis H4	INVERSE-MODEL FIT, not a direct material test: the density is ASSUMED 520 kg/m3 and the authors judge it probably somewhat too high, which biases the moduli high; valid only between 2 and 18 kHz and only for ambient-dry reeds; SD is reed-to-reed spread over 55 reeds, entered as the absolute uncertainty following the cane-arundo-reedblank-mdpi-ma18122759 convention; H4 is the chosen 9-coefficient model, H5 is called probably less biased (footnote p.22); typical dashpots E3 0.28 and G3 0.02 printed without units
+observation	ta14-h5-b	55 Vandoren V12 clarinet reeds of nominal strength 3, 3.5, 4 and 4.5 (12, 12, 20, 11), not moistened, mounted on a mouthpiece with a strictly flat lay and a plastic wedge up to the ligature; series B, 23-25 C, after an accidental overnight exposure to dry warm air that removed 2-4 percent of reed mass	Resonance frequencies of up to 15 modes per reed by sideband digital heterodyne holography, 1.4-20 kHz in 25-cent steps, inverted through an FEM metamodel (Eq. 1, Table 9) to a Zener model E*(omega) = E1 + E2 - E2^2/(E2 + j omega E3) for E_L and likewise for G_LT, E3 and G3 held constant; hypothesis H5	INVERSE-MODEL FIT, not a direct material test: the density is ASSUMED 520 kg/m3 and the authors judge it probably somewhat too high, which biases the moduli high; valid only between 2 and 18 kHz and only for ambient-dry reeds; SD is reed-to-reed spread over 55 reeds, entered as the absolute uncertainty following the cane-arundo-reedblank-mdpi-ma18122759 convention; H4 is the chosen 9-coefficient model, H5 is called probably less biased (footnote p.22); typical dashpots E3 0.28 and G3 0.02 printed without units
+scalar	zener-e1-h4-a	ta14-h4-a	zener_young_modulus_longitudinal_e1	1.03e+10	Pa	constant
+uncertainty	zener-e1-h4-a	absolute	9.06e+08	Pa	0.68	1
+validity	zener-e1-h4-a	frequency	2000	18000	Hz
+validity	zener-e1-h4-a	temperature	293.15	293.15	K
+validity	zener-e1-h4-a	moisture_content_known	0	0	1
+scalar	zener-e2-h4-a	ta14-h4-a	zener_young_modulus_longitudinal_e2	7.309e+09	Pa	constant
+uncertainty	zener-e2-h4-a	absolute	1.432e+09	Pa	0.68	1
+validity	zener-e2-h4-a	frequency	2000	18000	Hz
+validity	zener-e2-h4-a	temperature	293.15	293.15	K
+validity	zener-e2-h4-a	moisture_content_known	0	0	1
+scalar	zener-fr-e-h4-a	ta14-h4-a	zener_relaxation_frequency_longitudinal	4123	Hz	constant
+uncertainty	zener-fr-e-h4-a	absolute	808	Hz	0.68	1
+validity	zener-fr-e-h4-a	frequency	2000	18000	Hz
+validity	zener-fr-e-h4-a	temperature	293.15	293.15	K
+validity	zener-fr-e-h4-a	moisture_content_known	0	0	1
+scalar	e-l-storage-4khz-h4-a	ta14-h4-a	young_modulus_longitudinal_storage_at_4khz	1.3781e+10	Pa	constant
+uncertainty	e-l-storage-4khz-h4-a	absolute	8.97e+08	Pa	0.68	1
+validity	e-l-storage-4khz-h4-a	frequency	2000	18000	Hz
+validity	e-l-storage-4khz-h4-a	temperature	293.15	293.15	K
+validity	e-l-storage-4khz-h4-a	moisture_content_known	0	0	1
+scalar	zener-g1-h4-a	ta14-h4-a	zener_shear_modulus_longitudinal_tangential_g1	6.94e+08	Pa	constant
+uncertainty	zener-g1-h4-a	absolute	1.16e+08	Pa	0.68	1
+validity	zener-g1-h4-a	frequency	2000	18000	Hz
+validity	zener-g1-h4-a	temperature	293.15	293.15	K
+validity	zener-g1-h4-a	moisture_content_known	0	0	1
+scalar	zener-g2-h4-a	ta14-h4-a	zener_shear_modulus_longitudinal_tangential_g2	6.94e+08	Pa	constant
+uncertainty	zener-g2-h4-a	absolute	3.27e+08	Pa	0.68	1
+validity	zener-g2-h4-a	frequency	2000	18000	Hz
+validity	zener-g2-h4-a	temperature	293.15	293.15	K
+validity	zener-g2-h4-a	moisture_content_known	0	0	1
+scalar	zener-fr-g-h4-a	ta14-h4-a	zener_relaxation_frequency_shear_longitudinal_tangential	5420	Hz	constant
+uncertainty	zener-fr-g-h4-a	absolute	2555	Hz	0.68	1
+validity	zener-fr-g-h4-a	frequency	2000	18000	Hz
+validity	zener-fr-g-h4-a	temperature	293.15	293.15	K
+validity	zener-fr-g-h4-a	moisture_content_known	0	0	1
+scalar	g-lt-storage-4khz-h4-a	ta14-h4-a	shear_modulus_longitudinal_tangential_storage_at_4khz	9.26e+08	Pa	constant
+uncertainty	g-lt-storage-4khz-h4-a	absolute	1.02e+08	Pa	0.68	1
+validity	g-lt-storage-4khz-h4-a	frequency	2000	18000	Hz
+validity	g-lt-storage-4khz-h4-a	temperature	293.15	293.15	K
+validity	g-lt-storage-4khz-h4-a	moisture_content_known	0	0	1
+scalar	zener-e1-h5-a	ta14-h5-a	zener_young_modulus_longitudinal_e1	9.377e+09	Pa	constant
+uncertainty	zener-e1-h5-a	absolute	8.44e+08	Pa	0.68	1
+validity	zener-e1-h5-a	frequency	2000	18000	Hz
+validity	zener-e1-h5-a	temperature	293.15	293.15	K
+validity	zener-e1-h5-a	moisture_content_known	0	0	1
+scalar	zener-e2-h5-a	ta14-h5-a	zener_young_modulus_longitudinal_e2	8.336e+09	Pa	constant
+uncertainty	zener-e2-h5-a	absolute	1.552e+09	Pa	0.68	1
+validity	zener-e2-h5-a	frequency	2000	18000	Hz
+validity	zener-e2-h5-a	temperature	293.15	293.15	K
+validity	zener-e2-h5-a	moisture_content_known	0	0	1
+scalar	zener-fr-e-h5-a	ta14-h5-a	zener_relaxation_frequency_longitudinal	4027	Hz	constant
+uncertainty	zener-fr-e-h5-a	absolute	750	Hz	0.68	1
+validity	zener-fr-e-h5-a	frequency	2000	18000	Hz
+validity	zener-fr-e-h5-a	temperature	293.15	293.15	K
+validity	zener-fr-e-h5-a	moisture_content_known	0	0	1
+scalar	e-l-storage-4khz-h5-a	ta14-h5-a	young_modulus_longitudinal_storage_at_4khz	1.3449e+10	Pa	constant
+uncertainty	e-l-storage-4khz-h5-a	absolute	8.39e+08	Pa	0.68	1
+validity	e-l-storage-4khz-h5-a	frequency	2000	18000	Hz
+validity	e-l-storage-4khz-h5-a	temperature	293.15	293.15	K
+validity	e-l-storage-4khz-h5-a	moisture_content_known	0	0	1
+scalar	zener-g1-h5-a	ta14-h5-a	zener_shear_modulus_longitudinal_tangential_g1	7.52e+08	Pa	constant
+uncertainty	zener-g1-h5-a	absolute	1.19e+08	Pa	0.68	1
+validity	zener-g1-h5-a	frequency	2000	18000	Hz
+validity	zener-g1-h5-a	temperature	293.15	293.15	K
+validity	zener-g1-h5-a	moisture_content_known	0	0	1
+scalar	zener-g2-h5-a	ta14-h5-a	zener_shear_modulus_longitudinal_tangential_g2	6.28e+08	Pa	constant
+uncertainty	zener-g2-h5-a	absolute	3.28e+08	Pa	0.68	1
+validity	zener-g2-h5-a	frequency	2000	18000	Hz
+validity	zener-g2-h5-a	temperature	293.15	293.15	K
+validity	zener-g2-h5-a	moisture_content_known	0	0	1
+scalar	zener-fr-g-h5-a	ta14-h5-a	zener_relaxation_frequency_shear_longitudinal_tangential	6310	Hz	constant
+uncertainty	zener-fr-g-h5-a	absolute	3296	Hz	0.68	1
+validity	zener-fr-g-h5-a	frequency	2000	18000	Hz
+validity	zener-fr-g-h5-a	temperature	293.15	293.15	K
+validity	zener-fr-g-h5-a	moisture_content_known	0	0	1
+scalar	g-lt-storage-4khz-h5-a	ta14-h5-a	shear_modulus_longitudinal_tangential_storage_at_4khz	9.24e+08	Pa	constant
+uncertainty	g-lt-storage-4khz-h5-a	absolute	1.05e+08	Pa	0.68	1
+validity	g-lt-storage-4khz-h5-a	frequency	2000	18000	Hz
+validity	g-lt-storage-4khz-h5-a	temperature	293.15	293.15	K
+validity	g-lt-storage-4khz-h5-a	moisture_content_known	0	0	1
+scalar	zener-e1-h4-b	ta14-h4-b	zener_young_modulus_longitudinal_e1	9.423e+09	Pa	constant
+uncertainty	zener-e1-h4-b	absolute	7.84e+08	Pa	0.68	1
+validity	zener-e1-h4-b	frequency	2000	18000	Hz
+validity	zener-e1-h4-b	temperature	296.15	298.15	K
+validity	zener-e1-h4-b	moisture_content_known	0	0	1
+scalar	zener-e2-h4-b	ta14-h4-b	zener_young_modulus_longitudinal_e2	3.964e+09	Pa	constant
+uncertainty	zener-e2-h4-b	absolute	1.109e+09	Pa	0.68	1
+validity	zener-e2-h4-b	frequency	2000	18000	Hz
+validity	zener-e2-h4-b	temperature	296.15	298.15	K
+validity	zener-e2-h4-b	moisture_content_known	0	0	1
+scalar	zener-fr-e-h4-b	ta14-h4-b	zener_relaxation_frequency_longitudinal	2236	Hz	constant
+uncertainty	zener-fr-e-h4-b	absolute	626	Hz	0.68	1
+validity	zener-fr-e-h4-b	frequency	2000	18000	Hz
+validity	zener-fr-e-h4-b	temperature	296.15	298.15	K
+validity	zener-fr-e-h4-b	moisture_content_known	0	0	1
+scalar	e-l-storage-4khz-h4-b	ta14-h4-b	young_modulus_longitudinal_storage_at_4khz	1.2338e+10	Pa	constant
+uncertainty	e-l-storage-4khz-h4-b	absolute	8.85e+08	Pa	0.68	1
+validity	e-l-storage-4khz-h4-b	frequency	2000	18000	Hz
+validity	e-l-storage-4khz-h4-b	temperature	296.15	298.15	K
+validity	e-l-storage-4khz-h4-b	moisture_content_known	0	0	1
+scalar	zener-g1-h4-b	ta14-h4-b	zener_shear_modulus_longitudinal_tangential_g1	8.11e+08	Pa	constant
+uncertainty	zener-g1-h4-b	absolute	1.16e+08	Pa	0.68	1
+validity	zener-g1-h4-b	frequency	2000	18000	Hz
+validity	zener-g1-h4-b	temperature	296.15	298.15	K
+validity	zener-g1-h4-b	moisture_content_known	0	0	1
+scalar	zener-g2-h4-b	ta14-h4-b	zener_shear_modulus_longitudinal_tangential_g2	7.36e+08	Pa	constant
+uncertainty	zener-g2-h4-b	absolute	3.27e+08	Pa	0.68	1
+validity	zener-g2-h4-b	frequency	2000	18000	Hz
+validity	zener-g2-h4-b	temperature	296.15	298.15	K
+validity	zener-g2-h4-b	moisture_content_known	0	0	1
+scalar	zener-fr-g-h4-b	ta14-h4-b	zener_relaxation_frequency_shear_longitudinal_tangential	5749	Hz	constant
+uncertainty	zener-fr-g-h4-b	absolute	2555	Hz	0.68	1
+validity	zener-fr-g-h4-b	frequency	2000	18000	Hz
+validity	zener-fr-g-h4-b	temperature	296.15	298.15	K
+validity	zener-fr-g-h4-b	moisture_content_known	0	0	1
+scalar	g-lt-storage-4khz-h4-b	ta14-h4-b	shear_modulus_longitudinal_tangential_storage_at_4khz	1.042e+09	Pa	constant
+uncertainty	g-lt-storage-4khz-h4-b	absolute	9.9e+07	Pa	0.68	1
+validity	g-lt-storage-4khz-h4-b	frequency	2000	18000	Hz
+validity	g-lt-storage-4khz-h4-b	temperature	296.15	298.15	K
+validity	g-lt-storage-4khz-h4-b	moisture_content_known	0	0	1
+scalar	zener-e1-h5-b	ta14-h5-b	zener_young_modulus_longitudinal_e1	7.844e+09	Pa	constant
+uncertainty	zener-e1-h5-b	absolute	7.53e+08	Pa	0.68	1
+validity	zener-e1-h5-b	frequency	2000	18000	Hz
+validity	zener-e1-h5-b	temperature	296.15	298.15	K
+validity	zener-e1-h5-b	moisture_content_known	0	0	1
+scalar	zener-e2-h5-b	ta14-h5-b	zener_young_modulus_longitudinal_e2	5.459e+09	Pa	constant
+uncertainty	zener-e2-h5-b	absolute	1.217e+09	Pa	0.68	1
+validity	zener-e2-h5-b	frequency	2000	18000	Hz
+validity	zener-e2-h5-b	temperature	296.15	298.15	K
+validity	zener-e2-h5-b	moisture_content_known	0	0	1
+scalar	zener-fr-e-h5-b	ta14-h5-b	zener_relaxation_frequency_longitudinal	1947	Hz	constant
+uncertainty	zener-fr-e-h5-b	absolute	434	Hz	0.68	1
+validity	zener-fr-e-h5-b	frequency	2000	18000	Hz
+validity	zener-fr-e-h5-b	temperature	296.15	298.15	K
+validity	zener-fr-e-h5-b	moisture_content_known	0	0	1
+scalar	e-l-storage-4khz-h5-b	ta14-h5-b	young_modulus_longitudinal_storage_at_4khz	1.2168e+10	Pa	constant
+uncertainty	e-l-storage-4khz-h5-b	absolute	8.82e+08	Pa	0.68	1
+validity	e-l-storage-4khz-h5-b	frequency	2000	18000	Hz
+validity	e-l-storage-4khz-h5-b	temperature	296.15	298.15	K
+validity	e-l-storage-4khz-h5-b	moisture_content_known	0	0	1
+scalar	zener-g1-h5-b	ta14-h5-b	zener_shear_modulus_longitudinal_tangential_g1	7.74e+08	Pa	constant
+uncertainty	zener-g1-h5-b	absolute	1.19e+08	Pa	0.68	1
+validity	zener-g1-h5-b	frequency	2000	18000	Hz
+validity	zener-g1-h5-b	temperature	296.15	298.15	K
+validity	zener-g1-h5-b	moisture_content_known	0	0	1
+scalar	zener-g2-h5-b	ta14-h5-b	zener_shear_modulus_longitudinal_tangential_g2	7.69e+08	Pa	constant
+uncertainty	zener-g2-h5-b	absolute	3.28e+08	Pa	0.68	1
+validity	zener-g2-h5-b	frequency	2000	18000	Hz
+validity	zener-g2-h5-b	temperature	296.15	298.15	K
+validity	zener-g2-h5-b	moisture_content_known	0	0	1
+scalar	zener-fr-g-h5-b	ta14-h5-b	zener_relaxation_frequency_shear_longitudinal_tangential	5622	Hz	constant
+uncertainty	zener-fr-g-h5-b	absolute	2401	Hz	0.68	1
+validity	zener-fr-g-h5-b	frequency	2000	18000	Hz
+validity	zener-fr-g-h5-b	temperature	296.15	298.15	K
+validity	zener-fr-g-h5-b	moisture_content_known	0	0	1
+scalar	g-lt-storage-4khz-h5-b	ta14-h5-b	shear_modulus_longitudinal_tangential_storage_at_4khz	1.022e+09	Pa	constant
+uncertainty	g-lt-storage-4khz-h5-b	absolute	1.03e+08	Pa	0.68	1
+validity	g-lt-storage-4khz-h5-b	frequency	2000	18000	Hz
+validity	g-lt-storage-4khz-h5-b	temperature	296.15	298.15	K
+validity	g-lt-storage-4khz-h5-b	moisture_content_known	0	0	1

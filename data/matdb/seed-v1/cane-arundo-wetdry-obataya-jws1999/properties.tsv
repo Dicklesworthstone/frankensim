@@ -1,0 +1,105 @@
+frankensim.matdb-source.v1
+observation	ob99-untreated-airdry	Arundo donax cane harvested for clarinet reeds (Antibes, France); specimens 100 (L) x 10 (T) x 1 (R) mm from the inner part of the internodes, sixty internodes, untreated, conditioned at 25 C and 60 percent RH (moisture content 8.8 percent, Table 1)	E and tan delta_L along L by free-free flexural vibration; G and tan delta_s in the LT plane by torsional vibration (p.107); measured at 25 C and 60 percent RH, wet specimens tested quickly after soaking	No SD is printed (Tables 2 and 3 give single values); the measurement frequency is not printed; tan delta is the loss factor; axis convention L longitudinal, T tangential, R radial; specimens are inner-wall cane strips, not finished reeds; extracted = soaked 4 days, air-dried, steamed 12 h at 60 C and 100 percent RH (weight loss 12.8 percent of oven-dry weight, Table 1); the split of thirty extracted and thirty untreated specimens is read from the text, not printed as a table
+observation	ob99-extracted-airdry	Arundo donax cane harvested for clarinet reeds (Antibes, France); specimens 100 (L) x 10 (T) x 1 (R) mm from the inner part of the internodes, sixty internodes, water-extracted, conditioned at 25 C and 60 percent RH (moisture content 8.0 percent, Table 1)	E and tan delta_L along L by free-free flexural vibration; G and tan delta_s in the LT plane by torsional vibration (p.107); measured at 25 C and 60 percent RH, wet specimens tested quickly after soaking	No SD is printed (Tables 2 and 3 give single values); the measurement frequency is not printed; tan delta is the loss factor; axis convention L longitudinal, T tangential, R radial; specimens are inner-wall cane strips, not finished reeds; extracted = soaked 4 days, air-dried, steamed 12 h at 60 C and 100 percent RH (weight loss 12.8 percent of oven-dry weight, Table 1); the split of thirty extracted and thirty untreated specimens is read from the text, not printed as a table
+observation	ob99-untreated-wet	Arundo donax cane harvested for clarinet reeds (Antibes, France); specimens 100 (L) x 10 (T) x 1 (R) mm from the inner part of the internodes, sixty internodes, untreated, soaked in water for one week (moisture content 189 percent, Table 1)	E and tan delta_L along L by free-free flexural vibration; G and tan delta_s in the LT plane by torsional vibration (p.107); measured at 25 C and 60 percent RH, wet specimens tested quickly after soaking	No SD is printed (Tables 2 and 3 give single values); the measurement frequency is not printed; tan delta is the loss factor; axis convention L longitudinal, T tangential, R radial; specimens are inner-wall cane strips, not finished reeds; extracted = soaked 4 days, air-dried, steamed 12 h at 60 C and 100 percent RH (weight loss 12.8 percent of oven-dry weight, Table 1); the split of thirty extracted and thirty untreated specimens is read from the text, not printed as a table; WET means soaked a week, which also leaches the water-soluble extractives (the paper explains the lower wet tan delta_L this way), and the density includes absorbed water
+observation	ob99-extracted-wet	Arundo donax cane harvested for clarinet reeds (Antibes, France); specimens 100 (L) x 10 (T) x 1 (R) mm from the inner part of the internodes, sixty internodes, water-extracted, soaked in water for one week (moisture content 232 percent, Table 1)	E and tan delta_L along L by free-free flexural vibration; G and tan delta_s in the LT plane by torsional vibration (p.107); measured at 25 C and 60 percent RH, wet specimens tested quickly after soaking	No SD is printed (Tables 2 and 3 give single values); the measurement frequency is not printed; tan delta is the loss factor; axis convention L longitudinal, T tangential, R radial; specimens are inner-wall cane strips, not finished reeds; extracted = soaked 4 days, air-dried, steamed 12 h at 60 C and 100 percent RH (weight loss 12.8 percent of oven-dry weight, Table 1); the split of thirty extracted and thirty untreated specimens is read from the text, not printed as a table; WET means soaked a week; the density includes absorbed water
+scalar	density-untreated-airdry	ob99-untreated-airdry	density	439	kg/m^3	constant
+uncertainty	density-untreated-airdry	unstated	-	-	-	-
+validity	density-untreated-airdry	temperature	298.15	298.15	K
+validity	density-untreated-airdry	moisture_content	8.8	8.8	%
+validity	density-untreated-airdry	frequency_known	0	0	1
+scalar	e-l-untreated-airdry	ob99-untreated-airdry	young_modulus_longitudinal	6.92e+09	Pa	constant
+uncertainty	e-l-untreated-airdry	unstated	-	-	-	-
+validity	e-l-untreated-airdry	temperature	298.15	298.15	K
+validity	e-l-untreated-airdry	moisture_content	8.8	8.8	%
+validity	e-l-untreated-airdry	frequency_known	0	0	1
+scalar	eta-l-untreated-airdry	ob99-untreated-airdry	loss_factor_longitudinal	0.0148	1	constant
+uncertainty	eta-l-untreated-airdry	unstated	-	-	-	-
+validity	eta-l-untreated-airdry	temperature	298.15	298.15	K
+validity	eta-l-untreated-airdry	moisture_content	8.8	8.8	%
+validity	eta-l-untreated-airdry	frequency_known	0	0	1
+scalar	g-lt-untreated-airdry	ob99-untreated-airdry	shear_modulus_longitudinal_tangential	7.4e+08	Pa	constant
+uncertainty	g-lt-untreated-airdry	unstated	-	-	-	-
+validity	g-lt-untreated-airdry	temperature	298.15	298.15	K
+validity	g-lt-untreated-airdry	moisture_content	8.8	8.8	%
+validity	g-lt-untreated-airdry	frequency_known	0	0	1
+scalar	eta-lt-untreated-airdry	ob99-untreated-airdry	loss_factor_shear_longitudinal_tangential	0.0265	1	constant
+uncertainty	eta-lt-untreated-airdry	unstated	-	-	-	-
+validity	eta-lt-untreated-airdry	temperature	298.15	298.15	K
+validity	eta-lt-untreated-airdry	moisture_content	8.8	8.8	%
+validity	eta-lt-untreated-airdry	frequency_known	0	0	1
+scalar	density-extracted-airdry	ob99-extracted-airdry	density	371	kg/m^3	constant
+uncertainty	density-extracted-airdry	unstated	-	-	-	-
+validity	density-extracted-airdry	temperature	298.15	298.15	K
+validity	density-extracted-airdry	moisture_content	8.0	8.0	%
+validity	density-extracted-airdry	frequency_known	0	0	1
+scalar	e-l-extracted-airdry	ob99-extracted-airdry	young_modulus_longitudinal	6.32e+09	Pa	constant
+uncertainty	e-l-extracted-airdry	unstated	-	-	-	-
+validity	e-l-extracted-airdry	temperature	298.15	298.15	K
+validity	e-l-extracted-airdry	moisture_content	8.0	8.0	%
+validity	e-l-extracted-airdry	frequency_known	0	0	1
+scalar	eta-l-extracted-airdry	ob99-extracted-airdry	loss_factor_longitudinal	0.0074	1	constant
+uncertainty	eta-l-extracted-airdry	unstated	-	-	-	-
+validity	eta-l-extracted-airdry	temperature	298.15	298.15	K
+validity	eta-l-extracted-airdry	moisture_content	8.0	8.0	%
+validity	eta-l-extracted-airdry	frequency_known	0	0	1
+scalar	g-lt-extracted-airdry	ob99-extracted-airdry	shear_modulus_longitudinal_tangential	7.6e+08	Pa	constant
+uncertainty	g-lt-extracted-airdry	unstated	-	-	-	-
+validity	g-lt-extracted-airdry	temperature	298.15	298.15	K
+validity	g-lt-extracted-airdry	moisture_content	8.0	8.0	%
+validity	g-lt-extracted-airdry	frequency_known	0	0	1
+scalar	eta-lt-extracted-airdry	ob99-extracted-airdry	loss_factor_shear_longitudinal_tangential	0.015	1	constant
+uncertainty	eta-lt-extracted-airdry	unstated	-	-	-	-
+validity	eta-lt-extracted-airdry	temperature	298.15	298.15	K
+validity	eta-lt-extracted-airdry	moisture_content	8.0	8.0	%
+validity	eta-lt-extracted-airdry	frequency_known	0	0	1
+scalar	density-untreated-wet	ob99-untreated-wet	density	1078	kg/m^3	constant
+uncertainty	density-untreated-wet	unstated	-	-	-	-
+validity	density-untreated-wet	temperature	298.15	298.15	K
+validity	density-untreated-wet	moisture_content	189	189	%
+validity	density-untreated-wet	frequency_known	0	0	1
+scalar	e-l-untreated-wet	ob99-untreated-wet	young_modulus_longitudinal	5.82e+09	Pa	constant
+uncertainty	e-l-untreated-wet	unstated	-	-	-	-
+validity	e-l-untreated-wet	temperature	298.15	298.15	K
+validity	e-l-untreated-wet	moisture_content	189	189	%
+validity	e-l-untreated-wet	frequency_known	0	0	1
+scalar	eta-l-untreated-wet	ob99-untreated-wet	loss_factor_longitudinal	0.0084	1	constant
+uncertainty	eta-l-untreated-wet	unstated	-	-	-	-
+validity	eta-l-untreated-wet	temperature	298.15	298.15	K
+validity	eta-l-untreated-wet	moisture_content	189	189	%
+validity	eta-l-untreated-wet	frequency_known	0	0	1
+scalar	g-lt-untreated-wet	ob99-untreated-wet	shear_modulus_longitudinal_tangential	5.9e+08	Pa	constant
+uncertainty	g-lt-untreated-wet	unstated	-	-	-	-
+validity	g-lt-untreated-wet	temperature	298.15	298.15	K
+validity	g-lt-untreated-wet	moisture_content	189	189	%
+validity	g-lt-untreated-wet	frequency_known	0	0	1
+scalar	eta-lt-untreated-wet	ob99-untreated-wet	loss_factor_shear_longitudinal_tangential	0.0227	1	constant
+uncertainty	eta-lt-untreated-wet	unstated	-	-	-	-
+validity	eta-lt-untreated-wet	temperature	298.15	298.15	K
+validity	eta-lt-untreated-wet	moisture_content	189	189	%
+validity	eta-lt-untreated-wet	frequency_known	0	0	1
+scalar	density-extracted-wet	ob99-extracted-wet	density	1076	kg/m^3	constant
+uncertainty	density-extracted-wet	unstated	-	-	-	-
+validity	density-extracted-wet	temperature	298.15	298.15	K
+validity	density-extracted-wet	moisture_content	232	232	%
+validity	density-extracted-wet	frequency_known	0	0	1
+scalar	e-l-extracted-wet	ob99-extracted-wet	young_modulus_longitudinal	5.74e+09	Pa	constant
+uncertainty	e-l-extracted-wet	unstated	-	-	-	-
+validity	e-l-extracted-wet	temperature	298.15	298.15	K
+validity	e-l-extracted-wet	moisture_content	232	232	%
+validity	e-l-extracted-wet	frequency_known	0	0	1
+scalar	eta-l-extracted-wet	ob99-extracted-wet	loss_factor_longitudinal	0.009	1	constant
+uncertainty	eta-l-extracted-wet	unstated	-	-	-	-
+validity	eta-l-extracted-wet	temperature	298.15	298.15	K
+validity	eta-l-extracted-wet	moisture_content	232	232	%
+validity	eta-l-extracted-wet	frequency_known	0	0	1
+scalar	g-lt-extracted-wet	ob99-extracted-wet	shear_modulus_longitudinal_tangential	5.7e+08	Pa	constant
+uncertainty	g-lt-extracted-wet	unstated	-	-	-	-
+validity	g-lt-extracted-wet	temperature	298.15	298.15	K
+validity	g-lt-extracted-wet	moisture_content	232	232	%
+validity	g-lt-extracted-wet	frequency_known	0	0	1
+scalar	eta-lt-extracted-wet	ob99-extracted-wet	loss_factor_shear_longitudinal_tangential	0.0207	1	constant
+uncertainty	eta-lt-extracted-wet	unstated	-	-	-	-
+validity	eta-lt-extracted-wet	temperature	298.15	298.15	K
+validity	eta-lt-extracted-wet	moisture_content	232	232	%
+validity	eta-lt-extracted-wet	frequency_known	0	0	1
