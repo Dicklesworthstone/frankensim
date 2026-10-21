@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	lip-resonance-human-video-newton-thesis2009
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Newton M.J. (2009), Experimental Mechanical and Fluid Mechanical Investigations of the Brass Instrument Lip-reed and the Human Vocal Folds, PhD thesis, University of Edinburgh; https://era.ed.ac.uk/handle/1842/3140; Sections 4.4.1 to 4.4.3 and Table 4.2 (published in part as Newton, Campbell and Gilbert, J. Acoust. Soc. Am. 123(1), 2008)
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

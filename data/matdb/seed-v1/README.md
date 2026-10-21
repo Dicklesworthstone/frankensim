@@ -2063,3 +2063,25 @@ service life is admitted. The cracked Test 3 housing and locally breached,
 leaking Test 6 trochoid prevent any universal durability claim. Redistribution
 of source text does not grant patent-practice, trademark, or application-
 qualification rights.
+
+## Lip and perioral tranche, October 2026 (pexfp.194, M8-W2d, lane P5)
+
+`lip-resonance-human-video-newton-thesis2009`, `lip-lower-aspiration-luboz-abme2014` and
+`perioral-stiffness-chu-barlow-jslhr2009` hold the only measured mechanical numbers this
+program has found for the human lip, and every one of them is an **apparatus response**, not a
+constitutive property of a tissue layer. Property names end in `_apparatus_effective` and
+observation ids start with `apparatus-`, so none resolves as an intrinsic modulus.
+Newton's thesis (Sec. 4.4, Table 4.2) gives the resonance frequencies and Q factors of two
+trombonists' whole embouchures, measured by frontal video under an acoustic sweep: an outward-
+striking resonance at 32 to 60 Hz with Q 1.5 to 2.4 and a second resonance, for target notes
+Bb1 to F3; the printed second-resonance range in Table 4.2 (70 to 100 Hz) disagrees with the
+text of the same section (140 to 200 Hz) and both are kept. Luboz et al. give an initial
+Young's modulus of the lower lip, 33.7 +- 7.3 kPa, from an aspiration device and a
+Neo-Hookean inverse analysis on 16 young subjects (abstract values; the statistic behind the
++- is not named there). Chu, Barlow and colleagues give the lateral stiffness of relaxed mouth
+corners, 0.073 N/mm on average and a quadratic regression on a 24 mm stretch, with the unit of
+the regression variable inferred, not printed. The Takemoto upper-lip pack remains the
+teeth-backed indentation it always was. No layered lip constitutive law, no loss tangent, no
+orbicularis oris active stress and no lip mass or density has a measured value here: they are
+UNKNOWN, and the ledger rows of this tranche record what was read and what was not (one lip-tissue
+source sits behind a paywall and is a `pending-permission` row).

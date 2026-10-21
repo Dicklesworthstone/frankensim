@@ -1,0 +1,26 @@
+frankensim.matdb-source.v1
+observation	apparatus-luboz-aspiration	16 young subjects, in vivo; four sites: cheek, cheekbone, forehead and lower lip (the abstract gives no ages, sex or posture)	A specifically designed aspiration device applies a set of negative pressures to the skin surface and the resulting tissue deformation is measured; the initial Young's modulus is estimated by an inverse analysis with a Neo-Hookean model	An effective value of an aspiration apparatus acting on a layered face (skin, fat, muscle and, at the lip, mucosa and orbicularis oris), not an intrinsic modulus of any layer, so it is apparatus-effective (stored under apparatus names). Only the abstract (publisher copy) was read; the abstract does not say whether the printed +- is a standard deviation or a standard error, so it is stored as its own row beside an unstated uncertainty. The abstract reports significant intra-subject differences and, for some sites, large inter-subject variability
+scalar	lower-lip	apparatus-luboz-aspiration	young_modulus_initial_lower_lip_apparatus_effective	33.7	kPa	constant
+uncertainty	lower-lip	unstated	-	-	-	-
+validity	lower-lip	in_vivo_aspiration_young_adults	1	1	1
+scalar	lower-lip-pm	apparatus-luboz-aspiration	young_modulus_initial_lower_lip_printed_plus_minus_apparatus_effective	7.3	kPa	constant
+uncertainty	lower-lip-pm	unstated	-	-	-	-
+validity	lower-lip-pm	in_vivo_aspiration_young_adults	1	1	1
+scalar	cheek	apparatus-luboz-aspiration	young_modulus_initial_cheek_apparatus_effective	31.0	kPa	constant
+uncertainty	cheek	unstated	-	-	-	-
+validity	cheek	in_vivo_aspiration_young_adults	1	1	1
+scalar	cheek-pm	apparatus-luboz-aspiration	young_modulus_initial_cheek_printed_plus_minus_apparatus_effective	4.6	kPa	constant
+uncertainty	cheek-pm	unstated	-	-	-	-
+validity	cheek-pm	in_vivo_aspiration_young_adults	1	1	1
+scalar	cheekbone	apparatus-luboz-aspiration	young_modulus_initial_cheekbone_apparatus_effective	34.9	kPa	constant
+uncertainty	cheekbone	unstated	-	-	-	-
+validity	cheekbone	in_vivo_aspiration_young_adults	1	1	1
+scalar	cheekbone-pm	apparatus-luboz-aspiration	young_modulus_initial_cheekbone_printed_plus_minus_apparatus_effective	6.6	kPa	constant
+uncertainty	cheekbone-pm	unstated	-	-	-	-
+validity	cheekbone-pm	in_vivo_aspiration_young_adults	1	1	1
+scalar	forehead	apparatus-luboz-aspiration	young_modulus_initial_forehead_apparatus_effective	17.3	kPa	constant
+uncertainty	forehead	unstated	-	-	-	-
+validity	forehead	in_vivo_aspiration_young_adults	1	1	1
+scalar	forehead-pm	apparatus-luboz-aspiration	young_modulus_initial_forehead_printed_plus_minus_apparatus_effective	4.1	kPa	constant
+uncertainty	forehead-pm	unstated	-	-	-	-
+validity	forehead-pm	in_vivo_aspiration_young_adults	1	1	1

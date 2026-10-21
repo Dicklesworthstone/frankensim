@@ -1,0 +1,30 @@
+frankensim.matdb-source.v1
+observation	apparatus-chu-2009-male	20 healthy males aged 21 to 31 (mean 25.1, SD 2.8), in vivo, non-participatory (relaxed) lips; upper and lower lip EMG at rest, mean RMS 19.14 and 17.57 microvolts, slope against span not significant	A linear-motor servo stretches the mouth corners (interangle span) in eight steps of about 3 mm (about 24 mm in all), 3 s per step, 100 ms transitions, five blocks per subject; stiffness = change in force over change in interangle displacement between consecutive steps, evaluated over the last second of each step (N/mm); multilevel quadratic regression on the stiffness coefficients	A lateral stiffness of the perioral system at the mouth corners (skin, mucosa, orbicularis oris and the buccinator and zygomatic fields together), not the transverse stiffness of the vibrating lip, so it is apparatus-effective. N/mm values are converted exactly (x1000) to N/m. The unit and origin of the regression variable Interangle_Span are not stated in the sentence that defines it; the printed step variances imply stiffness scores of about 0.03 to 0.3 N/mm, so this lane reads the span as mm of stretch from rest (an inference, not a printed statement). The female equation is quoted by this paper from Seibel and Barlow 2007 (8 females, age 25.19, SD 2.54). R-squared is the only fit statistic stored
+observation	apparatus-chu-2010-orostiff	20 healthy adults (10 male, 10 female), in vivo, non-participatory (relaxed) lips, face-referenced OroSTIFF device (no head restraint)	Five interangle stretch trials per participant; stiffness coefficient = force change over a 1 mm change during the phase of elastic recoil (N/mm); multilevel null model for the mean	Perioral lateral stiffness of the mouth corners, apparatus-effective; the 0.073 N/mm is the estimated mean over all trials and participants (SE 0.002 N/mm), converted exactly (x1000) to N/m. The variance split printed there puts almost all of the variability within participants
+scalar	m-const	apparatus-chu-2009-male	interangle_stiffness_male_regression_constant_apparatus_effective	76.7	N/m	constant
+uncertainty	m-const	unstated	-	-	-	-
+validity	m-const	interangle_stretch_from_rest	0	24	mm
+scalar	m-lin-abs	apparatus-chu-2009-male	interangle_stiffness_male_regression_linear_coefficient_magnitude_negative_apparatus_effective	3	N/m/mm	constant
+uncertainty	m-lin-abs	unstated	-	-	-	-
+validity	m-lin-abs	interangle_stretch_from_rest	0	24	mm
+scalar	m-quad	apparatus-chu-2009-male	interangle_stiffness_male_regression_quadratic_coefficient_apparatus_effective	0.5	N/m/mm/mm	constant
+uncertainty	m-quad	unstated	-	-	-	-
+validity	m-quad	interangle_stretch_from_rest	0	24	mm
+scalar	m-r2	apparatus-chu-2009-male	interangle_stiffness_male_regression_r_squared_apparatus_effective	0.58	1	constant
+uncertainty	m-r2	unstated	-	-	-	-
+validity	m-r2	interangle_stretch_from_rest	0	24	mm
+scalar	f-const	apparatus-chu-2009-male	interangle_stiffness_female_regression_constant_apparatus_effective	94.5	N/m	constant
+uncertainty	f-const	unstated	-	-	-	-
+validity	f-const	interangle_stretch_from_rest	0	24	mm
+scalar	f-lin-abs	apparatus-chu-2009-male	interangle_stiffness_female_regression_linear_coefficient_magnitude_negative_apparatus_effective	5.5	N/m/mm	constant
+uncertainty	f-lin-abs	unstated	-	-	-	-
+validity	f-lin-abs	interangle_stretch_from_rest	0	24	mm
+scalar	f-quad	apparatus-chu-2009-male	interangle_stiffness_female_regression_quadratic_coefficient_apparatus_effective	0.5	N/m/mm/mm	constant
+uncertainty	f-quad	unstated	-	-	-	-
+validity	f-quad	interangle_stretch_from_rest	0	24	mm
+scalar	f-r2	apparatus-chu-2009-male	interangle_stiffness_female_regression_r_squared_apparatus_effective	0.77	1	constant
+uncertainty	f-r2	unstated	-	-	-	-
+validity	f-r2	interangle_stretch_from_rest	0	24	mm
+scalar	orostiff-mean	apparatus-chu-2010-orostiff	interangle_stiffness_mean_all_trials_apparatus_effective	73	N/m	constant
+uncertainty	orostiff-mean	absolute	2	N/m	0.68	1
+validity	orostiff-mean	interangle_stretch_from_rest	0	24	mm

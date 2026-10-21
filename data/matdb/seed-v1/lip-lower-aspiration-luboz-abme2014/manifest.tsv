@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	lip-lower-aspiration-luboz-abme2014
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Luboz V., Promayon E., Payan Y. (2014), Linear elastic properties of the facial soft tissues using an aspiration device: towards patient specific characterization, Annals of Biomedical Engineering 42(11):2369-2378; https://doi.org/10.1007/s10439-014-1098-1 (PMID 25186433); abstract
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

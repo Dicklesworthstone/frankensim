@@ -868,3 +868,338 @@ fn g2_human_indentation_pack_pins_the_rows_and_records_the_source_inconsistency(
         mean("ta-muscle")
     );
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// LIP / perioral packs of music bead `frankensim-irp-v5-instrument-realism-pexfp.194` (M8-W2d), the P5 half: the
+// in vivo mechanical response of trombonists' lips (Newton 2009 thesis), the lower-lip aspiration modulus (Luboz,
+// Promayon and Payan 2014) and the perioral mouth-corner stiffness (Chu, Barlow and colleagues 2009 and 2010).
+// Every value here is an APPARATUS response (a whole embouchure, an aspiration device acting on a layered face, a
+// mouth-corner stretch): the bead's rule is that such a response is stored under a `*_apparatus_effective` property
+// name with an `apparatus-*` observation id and is used only through a forward model of that apparatus. The gates
+// pin the typed values to the printed ones, refuse any value without that marking, and run the one cross-check the
+// sources allow (the unit of the perioral regression variable is not printed; the OroSTIFF mean must lie inside the
+// range of the regression over 0 to 24 mm of stretch, which it does only if the variable is a stretch in mm).
+// ---------------------------------------------------------------------------------------------------------------
+
+struct LipPack {
+    manifest: String,
+    /// claim id -> (property, value, unit, observation id)
+    scalar: BTreeMap<String, (String, f64, String, String)>,
+    /// claim id -> uncertainty kind
+    uncertainty: BTreeMap<String, String>,
+    /// claim id -> number of validity rows
+    validity: BTreeMap<String, usize>,
+    /// observation id -> specimen, method and caveats joined
+    observation: BTreeMap<String, String>,
+}
+
+impl LipPack {
+    fn value(&self, claim: &str) -> f64 {
+        self.scalar
+            .get(claim)
+            .unwrap_or_else(|| panic!("claim {claim} missing"))
+            .1
+    }
+
+    fn unit(&self, claim: &str) -> &str {
+        &self
+            .scalar
+            .get(claim)
+            .unwrap_or_else(|| panic!("claim {claim} missing"))
+            .2
+    }
+}
+
+fn load_lip_pack(dir: &str) -> LipPack {
+    let root = repo_root();
+    let manifest =
+        std::fs::read_to_string(root.join(format!("data/matdb/seed-v1/{dir}/manifest.tsv")))
+            .expect("manifest");
+    assert!(manifest.starts_with("frankensim.matdb-manifest.v1"));
+    assert!(
+        manifest.contains("Published-Scientific-Facts-Attribution-Retained"),
+        "{dir}: facts-only licence token"
+    );
+    assert!(manifest.contains("https://"), "{dir}: a locator is required");
+    let text =
+        std::fs::read_to_string(root.join(format!("data/matdb/seed-v1/{dir}/properties.tsv")))
+            .expect("properties");
+    assert!(text.starts_with("frankensim.matdb-source.v1"));
+    let mut pack = LipPack {
+        manifest,
+        scalar: BTreeMap::new(),
+        uncertainty: BTreeMap::new(),
+        validity: BTreeMap::new(),
+        observation: BTreeMap::new(),
+    };
+    for line in text.lines().skip(1) {
+        let cols: Vec<&str> = line.split('\t').collect();
+        match cols[0] {
+            "scalar" => {
+                assert_eq!(cols.len(), 7, "{dir}: scalar arity");
+                let value: f64 = cols[4].parse().expect("scalar value");
+                assert!(value.is_finite(), "{dir}: {} finite", cols[1]);
+                let previous = pack.scalar.insert(
+                    cols[1].to_string(),
+                    (
+                        cols[3].to_string(),
+                        value,
+                        cols[5].to_string(),
+                        cols[2].to_string(),
+                    ),
+                );
+                assert!(previous.is_none(), "{dir}: duplicate claim {}", cols[1]);
+            }
+            "uncertainty" => {
+                assert_eq!(cols.len(), 7, "{dir}: uncertainty arity");
+                assert!(
+                    cols[2] == "unstated" || cols[2] == "absolute",
+                    "{dir}: unexpected uncertainty kind {}",
+                    cols[2]
+                );
+                pack.uncertainty
+                    .insert(cols[1].to_string(), cols[2].to_string());
+            }
+            "validity" => {
+                assert_eq!(cols.len(), 6, "{dir}: validity arity");
+                *pack.validity.entry(cols[1].to_string()).or_insert(0) += 1;
+            }
+            "observation" => {
+                assert_eq!(cols.len(), 5, "{dir}: observation arity");
+                pack.observation.insert(
+                    cols[1].to_string(),
+                    format!("{} {} {}", cols[2], cols[3], cols[4]),
+                );
+            }
+            other => panic!("unknown row kind {other}"),
+        }
+    }
+    for (id, (_, _, _, obs)) in &pack.scalar {
+        assert!(
+            pack.uncertainty.contains_key(id),
+            "{dir}: {id} lacks an uncertainty row"
+        );
+        assert!(
+            pack.validity.contains_key(id),
+            "{dir}: {id} lacks a validity row"
+        );
+        assert!(
+            pack.observation.contains_key(obs),
+            "{dir}: {id} names missing observation {obs}"
+        );
+    }
+    pack
+}
+
+const LIP_APPARATUS_PACKS: [&str; 3] = [
+    "lip-resonance-human-video-newton-thesis2009",
+    "lip-lower-aspiration-luboz-abme2014",
+    "perioral-stiffness-chu-barlow-jslhr2009",
+];
+
+#[test]
+fn g2_lip_packs_mark_every_value_as_an_apparatus_response() {
+    let mut claims = 0usize;
+    for dir in LIP_APPARATUS_PACKS {
+        let pack = load_lip_pack(dir);
+        assert!(!pack.scalar.is_empty(), "{dir}: no scalar rows");
+        for (id, (property, _, _, obs)) in &pack.scalar {
+            assert!(
+                property.ends_with("_apparatus_effective"),
+                "{dir}: {id} property {property} must end with _apparatus_effective"
+            );
+            assert!(
+                obs.starts_with("apparatus-"),
+                "{dir}: {id} observation {obs} must start with apparatus-"
+            );
+            claims += 1;
+        }
+        for (obs, text) in &pack.observation {
+            assert!(
+                obs.starts_with("apparatus-"),
+                "{dir}: observation id {obs}"
+            );
+            assert!(
+                text.contains("apparatus-effective"),
+                "{dir}: {obs} must state that its values are apparatus responses"
+            );
+        }
+    }
+    println!(
+        "{{\"suite\":\"fs-material\",\"case\":\"g2-lip-apparatus-marking\",\"verdict\":\"pass\",\
+         \"packs\":{},\"claims\":{claims}}}",
+        LIP_APPARATUS_PACKS.len()
+    );
+}
+
+#[test]
+fn g2_newton_human_lip_pack_pins_the_printed_values() {
+    let pack = load_lip_pack("lip-resonance-human-video-newton-thesis2009");
+    assert!(pack.manifest.contains("era.ed.ac.uk/handle/1842/3140"));
+    // (claim id, printed value, unit): the thesis' own sentences (Sec. 4.4.1 and 4.4.2) and Table 4.2, human row.
+    let printed: [(&str, f64, &str); 34] = [
+        ("aj-bb1-f-out", 38.0, "Hz"),
+        ("aj-bb1-f-out-pm", 3.0, "Hz"),
+        ("aj-bb1-q-out-low", 1.5, "1"),
+        ("aj-bb1-q-out-high", 2.4, "1"),
+        ("aj-bb1-q-out-mean", 1.8, "1"),
+        ("aj-bb1-q-in-low", 2.0, "1"),
+        ("aj-bb1-q-in-high", 2.5, "1"),
+        ("aj-bb2-q-out", 1.7, "1"),
+        ("aj-bb2-q-in", 5.0, "1"),
+        ("aj-bb2-f-in", 140.0, "Hz"),
+        ("tj-bb2-f-out-low", 55.0, "Hz"),
+        ("tj-bb2-f-out-high", 58.0, "Hz"),
+        ("tj-bb2-q-out-low", 1.6, "1"),
+        ("tj-bb2-q-out-high", 2.4, "1"),
+        ("tj-bb2-f-second-low", 165.0, "Hz"),
+        ("tj-bb2-f-second-high", 173.0, "Hz"),
+        ("tj-bb2-q-second-low", 2.8, "1"),
+        ("tj-bb2-q-second-high", 5.0, "1"),
+        ("tj-f3-f-out", 100.0, "Hz"),
+        ("tj-f3-q-out", 1.7, "1"),
+        ("tj-f3-f-in", 200.0, "Hz"),
+        ("tj-f3-q-in-low", 4.0, "1"),
+        ("tj-f3-q-in-high", 5.0, "1"),
+        ("tj-f3-f-played", 170.0, "Hz"),
+        ("t42-fi-low", 32.0, "Hz"),
+        ("t42-fi-high", 60.0, "Hz"),
+        ("t42-qi-low", 1.5, "1"),
+        ("t42-qi-high", 2.4, "1"),
+        ("t42-fj-low", 70.0, "Hz"),
+        ("t42-fj-high", 100.0, "Hz"),
+        ("t42-qj-low", 1.2, "1"),
+        ("t42-qj-high", 5.0, "1"),
+        ("t42-f0-low", 50.0, "Hz"),
+        ("t42-f0-high", 80.0, "Hz"),
+    ];
+    for (id, want, unit) in printed {
+        assert!(
+            near(pack.value(id), want),
+            "{id}: typed {} against printed {want}",
+            pack.value(id)
+        );
+        assert_eq!(pack.unit(id), unit, "{id}: unit");
+    }
+    // Every printed range is stored as a low and a high row, never averaged: low < high, and the printed mean sits inside its range.
+    for stem in [
+        "aj-bb1-q-out",
+        "aj-bb1-q-in",
+        "tj-bb2-f-out",
+        "tj-bb2-q-out",
+        "tj-bb2-f-second",
+        "tj-bb2-q-second",
+        "tj-f3-q-in",
+        "t42-fi",
+        "t42-qi",
+        "t42-fj",
+        "t42-qj",
+        "t42-f0",
+    ] {
+        let (lo, hi) = (
+            pack.value(&format!("{stem}-low")),
+            pack.value(&format!("{stem}-high")),
+        );
+        assert!(lo < hi, "{stem}: low {lo} must be below high {hi}");
+    }
+    let (mean, lo, hi) = (
+        pack.value("aj-bb1-q-out-mean"),
+        pack.value("aj-bb1-q-out-low"),
+        pack.value("aj-bb1-q-out-high"),
+    );
+    assert!(lo < mean && mean < hi, "printed mean Q {mean} inside {lo}..{hi}");
+    // The thesis' own statement for these data: the playing frequency of the target lies above the outward resonance.
+    assert!(pack.value("aj-bb1-f-out") < 58.0);
+    assert!(pack.value("tj-bb2-f-out-high") < 116.0);
+    assert!(pack.value("tj-f3-f-out") < pack.value("tj-f3-f-played"));
+    // The pack must say that the Table 4.2 second-resonance range and the text disagree, and that nothing is averaged.
+    let table = &pack.observation["apparatus-human-table-4-2"];
+    assert!(table.contains("never averaged") && table.contains("does not match"));
+    println!(
+        "{{\"suite\":\"fs-material\",\"case\":\"g2-newton-human-lip\",\"verdict\":\"pass\",\
+         \"claims\":{},\"outward_hz_aj_bb1\":{}}}",
+        printed.len(),
+        pack.value("aj-bb1-f-out")
+    );
+}
+
+#[test]
+fn g2_lower_lip_aspiration_and_perioral_stiffness_pin_the_printed_values() {
+    let luboz = load_lip_pack("lip-lower-aspiration-luboz-abme2014");
+    for (id, want, unit) in [
+        ("lower-lip", 33.7, "kPa"),
+        ("lower-lip-pm", 7.3, "kPa"),
+        ("cheek", 31.0, "kPa"),
+        ("cheek-pm", 4.6, "kPa"),
+        ("cheekbone", 34.9, "kPa"),
+        ("cheekbone-pm", 6.6, "kPa"),
+        ("forehead", 17.3, "kPa"),
+        ("forehead-pm", 4.1, "kPa"),
+    ] {
+        assert!(near(luboz.value(id), want), "{id}: typed {}", luboz.value(id));
+        assert_eq!(luboz.unit(id), unit, "{id}: unit");
+    }
+    assert!(
+        luboz.observation["apparatus-luboz-aspiration"]
+            .contains("standard deviation or a standard error"),
+        "the unnamed +- statistic must be recorded as unknown"
+    );
+    // The abstract's own ordering: the forehead is the softest site, and the lip sits within the +- of the cheeks.
+    assert!(luboz.value("forehead") < luboz.value("cheek"));
+    assert!((luboz.value("lower-lip") - luboz.value("cheek")).abs() < luboz.value("lower-lip-pm"));
+
+    let chu = load_lip_pack("perioral-stiffness-chu-barlow-jslhr2009");
+    // The printed polynomials, N/mm in the paper, typed exactly (x1000) in N/m with the span in mm.
+    for (id, want, unit) in [
+        ("m-const", 76.7, "N/m"),
+        ("m-lin-abs", 3.0, "N/m/mm"),
+        ("m-quad", 0.5, "N/m/mm/mm"),
+        ("m-r2", 0.58, "1"),
+        ("f-const", 94.5, "N/m"),
+        ("f-lin-abs", 5.5, "N/m/mm"),
+        ("f-quad", 0.5, "N/m/mm/mm"),
+        ("f-r2", 0.77, "1"),
+        ("orostiff-mean", 73.0, "N/m"),
+    ] {
+        assert!(near(chu.value(id), want), "{id}: typed {}", chu.value(id));
+        assert_eq!(chu.unit(id), unit, "{id}: unit");
+    }
+    let male = |span: f64| {
+        chu.value("m-const") - chu.value("m-lin-abs") * span + chu.value("m-quad") * span * span
+    };
+    let female = |span: f64| {
+        chu.value("f-const") - chu.value("f-lin-abs") * span + chu.value("f-quad") * span * span
+    };
+    // Recomputed from the typed coefficients against the printed equation 0.0767 - 0.0030 S + 0.0005 S^2 (N/mm).
+    for span in [0.0, 3.0, 12.0, 24.0] {
+        let printed_n_per_mm = 0.0767 - 0.0030 * span + 0.0005 * span * span;
+        assert!(
+            (male(span) - 1000.0 * printed_n_per_mm).abs() < 1e-9,
+            "male polynomial at {span}"
+        );
+        let printed_female = 0.0945 - 0.0055 * span + 0.0005 * span * span;
+        assert!(
+            (female(span) - 1000.0 * printed_female).abs() < 1e-9,
+            "female polynomial at {span}"
+        );
+    }
+    // The unit cross-check: the OroSTIFF mean over all trials lies inside the male regression over 0 to 24 mm of
+    // stretch (its minimum is at S = 3 mm, 72.2 N/m; its value at 24 mm is 292.7 N/m). If the variable were an
+    // absolute span of about 40 to 70 mm the polynomial would exceed 1 N/mm and this would fail.
+    let (lo, hi) = (male(3.0), male(24.0));
+    assert!(lo < male(0.0) && lo < male(12.0), "S = 3 is the minimum");
+    assert!(
+        (lo..=hi).contains(&chu.value("orostiff-mean")),
+        "OroSTIFF mean {} outside the regression range {lo}..{hi}",
+        chu.value("orostiff-mean")
+    );
+    assert!(
+        chu.observation["apparatus-chu-2009-male"].contains("an inference"),
+        "the unit reading of the span must be recorded as an inference"
+    );
+    println!(
+        "{{\"suite\":\"fs-material\",\"case\":\"g2-lip-aspiration-and-perioral\",\"verdict\":\"pass\",\
+         \"lower_lip_kpa\":{},\"male_n_per_m_at_24mm\":{hi}}}",
+        luboz.value("lower-lip")
+    );
+}

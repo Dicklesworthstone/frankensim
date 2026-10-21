@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	perioral-stiffness-chu-barlow-jslhr2009
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Chu S.-Y., Barlow S.M., Lee J. (2009), Perioral stiffness in healthy young adult males, Journal of Speech, Language, and Hearing Research (PMC2784917, author manuscript), Eqs. 2 and 3, Fig 4 and Tables 1 and 2; and Chu S.-Y., Barlow S.M., Kieweg D., Lee J. (2010), OroSTIFF: face-referenced measurement of perioral stiffness in health and disease, Journal of Biomechanics (PMC2866840), Results; https://pmc.ncbi.nlm.nih.gov/articles/PMC2784917 and https://pmc.ncbi.nlm.nih.gov/articles/PMC2866840
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

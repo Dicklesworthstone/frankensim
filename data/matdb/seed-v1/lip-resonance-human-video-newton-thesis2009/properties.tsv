@@ -1,0 +1,115 @@
+frankensim.matdb-source.v1
+observation	apparatus-aj-bb1	Player AJ, experienced trombonist (several years in semi-professional orchestras); in vivo; lips formed into the embouchure for the pedal note Bb1 (58 Hz) on a trombone mouthpiece	Frontal high-speed video (2000 frames/s) of the lip opening area while the lips are driven acoustically by a calibrated sine sweep; the mechanical response magnitude and phase give each resonance and its character (outward striking near -90 degrees, inward striking near +90 degrees); Q by a least-squares fit of a damped-oscillator response (thesis Eq. 4.1) around the peak; drive sweep 25 to 100 Hz over about 4 s; five takes of the same target embouchure	A whole-embouchure response (the player's lips, the mouthpiece, the acoustic drive), not a tissue property, so every name here is apparatus-effective and it is used only through a forward model of that apparatus. Values are the thesis' printed sentences and table; no figure was read. Printed repeatability about 10 percent in resonance frequency; human resonances are asymmetric, which lowers the accuracy of the damped-oscillator fit relative to artificial lips. Peak-frequency spread: two pairs of -90 degree crossings 15 Hz apart. The playing frequency of the target note lies above the outward resonance. The second (inward) resonance appears in one take only (thesis Fig 4.10) and its frequency is not printed in the text
+observation	apparatus-aj-bb2	Player AJ, experienced trombonist (several years in semi-professional orchestras); in vivo; lips formed into the embouchure for Bb2 (116 Hz), an octave above the Bb1 target, on a trombone mouthpiece	Frontal high-speed video (2000 frames/s) of the lip opening area while the lips are driven acoustically by a calibrated sine sweep; the mechanical response magnitude and phase give each resonance and its character (outward striking near -90 degrees, inward striking near +90 degrees); Q by a least-squares fit of a damped-oscillator response (thesis Eq. 4.1) around the peak; the sweep range for this target is not stated in the text	A whole-embouchure response (the player's lips, the mouthpiece, the acoustic drive), not a tissue property, so every name here is apparatus-effective and it is used only through a forward model of that apparatus. Values are the thesis' printed sentences and table; no figure was read. Printed repeatability about 10 percent in resonance frequency; human resonances are asymmetric, which lowers the accuracy of the damped-oscillator fit relative to artificial lips. Takes 18 and 20 of thesis Fig 4.11: take 18 shows an unexpectedly strong upper inward-striking resonance; take 20 a smooth +90 degree crossing with a gentle magnitude peak at 140 Hz; the playing frequency fell between the two resonances
+observation	apparatus-tj-bb2	Player TJ, experienced trombonist (several years in semi-professional orchestras); in vivo; lips formed into the embouchure for Bb2 (116 Hz) on a trombone mouthpiece	Frontal high-speed video (2000 frames/s) of the lip opening area while the lips are driven acoustically by a calibrated sine sweep; the mechanical response magnitude and phase give each resonance and its character (outward striking near -90 degrees, inward striking near +90 degrees); Q by a least-squares fit of a damped-oscillator response (thesis Eq. 4.1) around the peak; sweep limited to about 180 Hz	A whole-embouchure response (the player's lips, the mouthpiece, the acoustic drive), not a tissue property, so every name here is apparatus-effective and it is used only through a forward model of that apparatus. Values are the thesis' printed sentences and table; no figure was read. Printed repeatability about 10 percent in resonance frequency; human resonances are asymmetric, which lowers the accuracy of the damped-oscillator fit relative to artificial lips. The dominant resonance repeated to about 5 percent; the second resonance is the outward-inward pair of the same measurement (one take comes very close to the +90 degree phase angle, the other trends toward it at the 180 Hz limit of the sweep); the playing frequency fell between the two
+observation	apparatus-tj-f3	Player TJ, experienced trombonist (several years in semi-professional orchestras); in vivo; lips formed into the embouchure for F3 (174 Hz expected, played at 170 Hz because of the larger cup of the double-shanked mouthpiece, thesis Sec. 3.3.4)	Frontal high-speed video (2000 frames/s) of the lip opening area while the lips are driven acoustically by a calibrated sine sweep; the mechanical response magnitude and phase give each resonance and its character (outward striking near -90 degrees, inward striking near +90 degrees); Q by a least-squares fit of a damped-oscillator response (thesis Eq. 4.1) around the peak	A whole-embouchure response (the player's lips, the mouthpiece, the acoustic drive), not a tissue property, so every name here is apparatus-effective and it is used only through a forward model of that apparatus. Values are the thesis' printed sentences and table; no figure was read. Printed repeatability about 10 percent in resonance frequency; human resonances are asymmetric, which lowers the accuracy of the damped-oscillator fit relative to artificial lips. A third peak at about 175 Hz lies close to the measured playing frequency and is attributed by the thesis to the lips destabilising into self-sustained oscillation during the sweep (the player expelled a small steady stream of air)
+observation	apparatus-human-table-4-2	Human lips, video method: the printed summary row of thesis Table 4.2 over the embouchures of Sec. 4.4 (two players; target notes Bb1 to F3, 58 to 174 Hz)	Summary of the resonance frequencies and Q factors extracted by the video method (rows of other studies in the same table are not retained)	A whole-embouchure response (the player's lips, the mouthpiece, the acoustic drive), not a tissue property, so every name here is apparatus-effective and it is used only through a forward model of that apparatus. Values are the thesis' printed sentences and table; no figure was read. Printed repeatability about 10 percent in resonance frequency; human resonances are asymmetric, which lowers the accuracy of the damped-oscillator fit relative to artificial lips. Printed ranges are stored as low and high rows and never averaged. The printed f_j range 70 to 100 Hz does not match the second resonances printed in the text for other takes (140 to 200 Hz); both are retained as printed
+scalar	aj-bb1-f-out	apparatus-aj-bb1	lip_embouchure_outward_resonance_frequency_apparatus_effective	38	Hz	constant
+uncertainty	aj-bb1-f-out	unstated	-	-	-	-
+validity	aj-bb1-f-out	target_note_frequency	58	58	Hz
+validity	aj-bb1-f-out	drive_sweep_frequency	25	100	Hz
+scalar	aj-bb1-f-out-pm	apparatus-aj-bb1	lip_embouchure_outward_resonance_frequency_printed_plus_minus_apparatus_effective	3	Hz	constant
+uncertainty	aj-bb1-f-out-pm	unstated	-	-	-	-
+validity	aj-bb1-f-out-pm	target_note_frequency	58	58	Hz
+validity	aj-bb1-f-out-pm	drive_sweep_frequency	25	100	Hz
+scalar	aj-bb1-q-out-low	apparatus-aj-bb1	lip_embouchure_outward_resonance_q_printed_range_low_apparatus_effective	1.5	1	constant
+uncertainty	aj-bb1-q-out-low	unstated	-	-	-	-
+validity	aj-bb1-q-out-low	target_note_frequency	58	58	Hz
+validity	aj-bb1-q-out-low	drive_sweep_frequency	25	100	Hz
+scalar	aj-bb1-q-out-high	apparatus-aj-bb1	lip_embouchure_outward_resonance_q_printed_range_high_apparatus_effective	2.4	1	constant
+uncertainty	aj-bb1-q-out-high	unstated	-	-	-	-
+validity	aj-bb1-q-out-high	target_note_frequency	58	58	Hz
+validity	aj-bb1-q-out-high	drive_sweep_frequency	25	100	Hz
+scalar	aj-bb1-q-out-mean	apparatus-aj-bb1	lip_embouchure_outward_resonance_q_printed_mean_apparatus_effective	1.8	1	constant
+uncertainty	aj-bb1-q-out-mean	unstated	-	-	-	-
+validity	aj-bb1-q-out-mean	target_note_frequency	58	58	Hz
+validity	aj-bb1-q-out-mean	drive_sweep_frequency	25	100	Hz
+scalar	aj-bb1-q-in-low	apparatus-aj-bb1	lip_embouchure_inward_resonance_q_printed_range_low_apparatus_effective	2	1	constant
+uncertainty	aj-bb1-q-in-low	unstated	-	-	-	-
+validity	aj-bb1-q-in-low	target_note_frequency	58	58	Hz
+validity	aj-bb1-q-in-low	drive_sweep_frequency	25	100	Hz
+scalar	aj-bb1-q-in-high	apparatus-aj-bb1	lip_embouchure_inward_resonance_q_printed_range_high_apparatus_effective	2.5	1	constant
+uncertainty	aj-bb1-q-in-high	unstated	-	-	-	-
+validity	aj-bb1-q-in-high	target_note_frequency	58	58	Hz
+validity	aj-bb1-q-in-high	drive_sweep_frequency	25	100	Hz
+scalar	aj-bb2-q-out	apparatus-aj-bb2	lip_embouchure_outward_resonance_q_printed_apparatus_effective	1.7	1	constant
+uncertainty	aj-bb2-q-out	unstated	-	-	-	-
+validity	aj-bb2-q-out	target_note_frequency	116	116	Hz
+scalar	aj-bb2-q-in	apparatus-aj-bb2	lip_embouchure_inward_resonance_q_printed_apparatus_effective	5	1	constant
+uncertainty	aj-bb2-q-in	unstated	-	-	-	-
+validity	aj-bb2-q-in	target_note_frequency	116	116	Hz
+scalar	aj-bb2-f-in	apparatus-aj-bb2	lip_embouchure_inward_resonance_frequency_apparatus_effective	140	Hz	constant
+uncertainty	aj-bb2-f-in	unstated	-	-	-	-
+validity	aj-bb2-f-in	target_note_frequency	116	116	Hz
+scalar	tj-bb2-f-out-low	apparatus-tj-bb2	lip_embouchure_outward_resonance_frequency_printed_range_low_apparatus_effective	55	Hz	constant
+uncertainty	tj-bb2-f-out-low	unstated	-	-	-	-
+validity	tj-bb2-f-out-low	target_note_frequency	116	116	Hz
+scalar	tj-bb2-f-out-high	apparatus-tj-bb2	lip_embouchure_outward_resonance_frequency_printed_range_high_apparatus_effective	58	Hz	constant
+uncertainty	tj-bb2-f-out-high	unstated	-	-	-	-
+validity	tj-bb2-f-out-high	target_note_frequency	116	116	Hz
+scalar	tj-bb2-q-out-low	apparatus-tj-bb2	lip_embouchure_outward_resonance_q_printed_range_low_apparatus_effective	1.6	1	constant
+uncertainty	tj-bb2-q-out-low	unstated	-	-	-	-
+validity	tj-bb2-q-out-low	target_note_frequency	116	116	Hz
+scalar	tj-bb2-q-out-high	apparatus-tj-bb2	lip_embouchure_outward_resonance_q_printed_range_high_apparatus_effective	2.4	1	constant
+uncertainty	tj-bb2-q-out-high	unstated	-	-	-	-
+validity	tj-bb2-q-out-high	target_note_frequency	116	116	Hz
+scalar	tj-bb2-f-second-low	apparatus-tj-bb2	lip_embouchure_second_resonance_frequency_printed_range_low_apparatus_effective	165	Hz	constant
+uncertainty	tj-bb2-f-second-low	unstated	-	-	-	-
+validity	tj-bb2-f-second-low	target_note_frequency	116	116	Hz
+scalar	tj-bb2-f-second-high	apparatus-tj-bb2	lip_embouchure_second_resonance_frequency_printed_range_high_apparatus_effective	173	Hz	constant
+uncertainty	tj-bb2-f-second-high	unstated	-	-	-	-
+validity	tj-bb2-f-second-high	target_note_frequency	116	116	Hz
+scalar	tj-bb2-q-second-low	apparatus-tj-bb2	lip_embouchure_second_resonance_q_printed_range_low_apparatus_effective	2.8	1	constant
+uncertainty	tj-bb2-q-second-low	unstated	-	-	-	-
+validity	tj-bb2-q-second-low	target_note_frequency	116	116	Hz
+scalar	tj-bb2-q-second-high	apparatus-tj-bb2	lip_embouchure_second_resonance_q_printed_range_high_apparatus_effective	5	1	constant
+uncertainty	tj-bb2-q-second-high	unstated	-	-	-	-
+validity	tj-bb2-q-second-high	target_note_frequency	116	116	Hz
+scalar	tj-f3-f-out	apparatus-tj-f3	lip_embouchure_outward_resonance_frequency_apparatus_effective	100	Hz	constant
+uncertainty	tj-f3-f-out	unstated	-	-	-	-
+validity	tj-f3-f-out	target_note_frequency	174	174	Hz
+scalar	tj-f3-q-out	apparatus-tj-f3	lip_embouchure_outward_resonance_q_printed_apparatus_effective	1.7	1	constant
+uncertainty	tj-f3-q-out	unstated	-	-	-	-
+validity	tj-f3-q-out	target_note_frequency	174	174	Hz
+scalar	tj-f3-f-in	apparatus-tj-f3	lip_embouchure_inward_resonance_frequency_apparatus_effective	200	Hz	constant
+uncertainty	tj-f3-f-in	unstated	-	-	-	-
+validity	tj-f3-f-in	target_note_frequency	174	174	Hz
+scalar	tj-f3-q-in-low	apparatus-tj-f3	lip_embouchure_inward_resonance_q_printed_range_low_apparatus_effective	4	1	constant
+uncertainty	tj-f3-q-in-low	unstated	-	-	-	-
+validity	tj-f3-q-in-low	target_note_frequency	174	174	Hz
+scalar	tj-f3-q-in-high	apparatus-tj-f3	lip_embouchure_inward_resonance_q_printed_range_high_apparatus_effective	5	1	constant
+uncertainty	tj-f3-q-in-high	unstated	-	-	-	-
+validity	tj-f3-q-in-high	target_note_frequency	174	174	Hz
+scalar	tj-f3-f-played	apparatus-tj-f3	lip_embouchure_played_frequency_apparatus_effective	170	Hz	constant
+uncertainty	tj-f3-f-played	unstated	-	-	-	-
+validity	tj-f3-f-played	target_note_frequency	174	174	Hz
+scalar	t42-fi-low	apparatus-human-table-4-2	lip_embouchure_first_resonance_frequency_table_4_2_range_low_apparatus_effective	32	Hz	constant
+uncertainty	t42-fi-low	unstated	-	-	-	-
+validity	t42-fi-low	target_note_frequency	58	174	Hz
+scalar	t42-fi-high	apparatus-human-table-4-2	lip_embouchure_first_resonance_frequency_table_4_2_range_high_apparatus_effective	60	Hz	constant
+uncertainty	t42-fi-high	unstated	-	-	-	-
+validity	t42-fi-high	target_note_frequency	58	174	Hz
+scalar	t42-qi-low	apparatus-human-table-4-2	lip_embouchure_first_resonance_q_table_4_2_range_low_apparatus_effective	1.5	1	constant
+uncertainty	t42-qi-low	unstated	-	-	-	-
+validity	t42-qi-low	target_note_frequency	58	174	Hz
+scalar	t42-qi-high	apparatus-human-table-4-2	lip_embouchure_first_resonance_q_table_4_2_range_high_apparatus_effective	2.4	1	constant
+uncertainty	t42-qi-high	unstated	-	-	-	-
+validity	t42-qi-high	target_note_frequency	58	174	Hz
+scalar	t42-fj-low	apparatus-human-table-4-2	lip_embouchure_second_resonance_frequency_table_4_2_range_low_apparatus_effective	70	Hz	constant
+uncertainty	t42-fj-low	unstated	-	-	-	-
+validity	t42-fj-low	target_note_frequency	58	174	Hz
+scalar	t42-fj-high	apparatus-human-table-4-2	lip_embouchure_second_resonance_frequency_table_4_2_range_high_apparatus_effective	100	Hz	constant
+uncertainty	t42-fj-high	unstated	-	-	-	-
+validity	t42-fj-high	target_note_frequency	58	174	Hz
+scalar	t42-qj-low	apparatus-human-table-4-2	lip_embouchure_second_resonance_q_table_4_2_range_low_apparatus_effective	1.2	1	constant
+uncertainty	t42-qj-low	unstated	-	-	-	-
+validity	t42-qj-low	target_note_frequency	58	174	Hz
+scalar	t42-qj-high	apparatus-human-table-4-2	lip_embouchure_second_resonance_q_table_4_2_range_high_apparatus_effective	5	1	constant
+uncertainty	t42-qj-high	unstated	-	-	-	-
+validity	t42-qj-high	target_note_frequency	58	174	Hz
+scalar	t42-f0-low	apparatus-human-table-4-2	lip_embouchure_playing_frequency_approximate_table_4_2_range_low_apparatus_effective	50	Hz	constant
+uncertainty	t42-f0-low	unstated	-	-	-	-
+validity	t42-f0-low	target_note_frequency	58	174	Hz
+scalar	t42-f0-high	apparatus-human-table-4-2	lip_embouchure_playing_frequency_approximate_table_4_2_range_high_apparatus_effective	80	Hz	constant
+uncertainty	t42-f0-high	unstated	-	-	-	-
+validity	t42-f0-high	target_note_frequency	58	174	Hz
