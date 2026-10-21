@@ -16,7 +16,7 @@ Each file is {schema: frankensim.reference-candidates.v1, family, made_by, made_
 none_found: null | {reason, looked_summary}, candidates: [...]}; a candidate has id, family, instrument, notes, dynamic, articulation,
 source_type (open-library | youtube | freesound | other), url, title, channel_or_author, licence, licence_evidence, start_s, end_s,
 conditions (what the source says and what was measured, and that it was not listened to), sample_rate_hz, reason, files {clip, facts},
-sha256_clip, and optionally usable_for_render_notes. A record that fails a check is refused and listed, never shown as if it were fine.
+sha256_clip, and optionally usable_for_render_notes (a list, a note -> category map or a sentence: read by coverage()). A record that fails a check is refused and listed, never shown as if it were fine.
 
 Output (public/data/candidates/): index.json, and <family>/<id>.mp4 (AAC; every clip at the same loudness so no candidate is louder
 than another, the gain applied is in its record and the measured levels of the original are kept as measured).
@@ -108,6 +108,30 @@ def is_cc(licence: str) -> bool:
     return licence.strip().lower().startswith(("creative commons", "cc ", "cc-", "cc0"))
 
 
+NOTE_NAME = re.compile(r"\b[A-G](?:b|#)?\d\b")
+
+
+def coverage(v) -> dict | None:
+    """Which of the notes our renders are graded on a clip covers, whatever shape the hunter wrote (the field is optional and loosely
+    described): a list of notes, a note -> category map (families.json's categories), or a sentence such as "graded notes covered: A3, D4".
+    Returns {graded, reference_only, other, text}, or None for a shape that is none of these."""
+    out = {"graded": [], "reference_only": [], "other": [], "text": None}
+    if v is None:
+        return out
+    if isinstance(v, list) and all(isinstance(n, str) for n in v):
+        out["graded"] = [n.strip() for n in v if n.strip()]
+    elif isinstance(v, dict) and all(isinstance(k, str) and isinstance(x, str) for k, x in v.items()):
+        for note, kind in v.items():
+            out["graded" if kind == "rendered_and_graded" else "reference_only" if kind == "reference_only" else "other"].append(note)
+    elif isinstance(v, str):
+        m = re.match(r"\s*graded notes covered:\s*([^;(]*)", v, re.I)
+        out["graded"] = NOTE_NAME.findall(m.group(1)) if m else []
+        out["text"] = v.strip()
+    else:
+        return None
+    return out
+
+
 def validate(rec, family: str, base: Path) -> tuple[list[str], dict | None]:
     """Every check a record must pass before the owner is asked about it. Returns the problems and the clip's facts.json (or None)."""
     if not isinstance(rec, dict):
@@ -135,8 +159,8 @@ def validate(rec, family: str, base: Path) -> tuple[list[str], dict | None]:
         p.append("conditions must say what the source states, what was measured, and that it was NOT LISTENED TO (nobody who found a candidate could hear it)")
     if not (isinstance(rec.get("sample_rate_hz"), int) and rec["sample_rate_hz"] > 0):
         p.append("sample_rate_hz must be a whole number of hertz")
-    if rec.get("usable_for_render_notes") is not None and not (isinstance(rec["usable_for_render_notes"], list) and all(text(n) for n in rec["usable_for_render_notes"])):
-        p.append("usable_for_render_notes must be a list of note names")
+    if coverage(rec.get("usable_for_render_notes")) is None:
+        p.append("usable_for_render_notes must be a list of note names, a note -> category map, or a sentence")
     files = rec.get("files")
     facts = None
     if not (isinstance(files, dict) and text(files.get("clip"))):
@@ -202,7 +226,7 @@ def rank(rec: dict, facts: dict | None) -> float:
     All of it is measured or stated; none of it says anything about timbre."""
     steady = ((facts or {}).get("pitch") or {}).get("fraction_within_30_cents_of_median")
     sound = sum(n.get("clip_t1", 0) - n.get("clip_t0", 0) for n in (facts or {}).get("steady_notes_by_pitch_tracker", []) if isinstance(n, dict))
-    return float(3 * min(len(rec.get("usable_for_render_notes") or []), 4) + (1 if rec["source_type"] == "open-library" else 0) + (1 if is_cc(rec["licence"]) else 0)
+    return float(3 * min(len((coverage(rec.get("usable_for_render_notes")) or {"graded": []})["graded"]), 4) + (1 if rec["source_type"] == "open-library" else 0) + (1 if is_cc(rec["licence"]) else 0)
                  + 2 * (steady if number(steady) else 0.0) + min(sound, 12.0) / 12.0)
 
 
@@ -211,8 +235,8 @@ def build_candidate(rec: dict, facts: dict | None, base: Path, out_dir: Path) ->
     gain = playback_gain_db(x)
     encode(base / rec["files"]["clip"], out_dir / f"{rec['id']}.mp4", gain)
     keep = ("id", "instrument", "notes", "dynamic", "articulation", "source_type", "url", "title", "channel_or_author", "licence", "licence_evidence", "start_s", "end_s",
-            "conditions", "sample_rate_hz", "reason", "usable_for_render_notes", "sha256_clip")
-    return {**{k: rec.get(k) for k in keep}, "creative_commons": is_cc(rec["licence"]), "audio": f"{out_dir.name}/{rec['id']}.mp4", "clip_duration_s": round(len(x) / sr, 3),
+            "conditions", "sample_rate_hz", "reason", "sha256_clip")
+    return {**{k: rec.get(k) for k in keep}, "render_coverage": coverage(rec.get("usable_for_render_notes")), "creative_commons": is_cc(rec["licence"]), "audio": f"{out_dir.name}/{rec['id']}.mp4", "clip_duration_s": round(len(x) / sr, 3),
             "playback_gain_db": gain, "facts": facts}
 
 

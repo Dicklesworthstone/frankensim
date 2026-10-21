@@ -89,6 +89,32 @@ class Loudness(unittest.TestCase):
             C.playback_gain_db(np.zeros(100))
 
 
+class Coverage(unittest.TestCase):
+    """usable_for_render_notes is optional and the hunters wrote it four ways: all four are read, none is refused for its shape."""
+
+    def test_a_list_of_notes_is_the_graded_notes(self):
+        self.assertEqual(C.coverage(["B3", " D4 ", ""])["graded"], ["B3", "D4"])
+        self.assertEqual(C.coverage([])["graded"], [])
+        self.assertEqual(C.coverage(None), {"graded": [], "reference_only": [], "other": [], "text": None})
+
+    def test_a_map_from_note_to_category_is_split_by_category(self):
+        c = C.coverage({"A3": "rendered_and_graded", "B5": "reference_only", "X": "listening_only_or_refused", "Y": "something else"})
+        self.assertEqual((c["graded"], c["reference_only"], c["other"]), (["A3"], ["B5"], ["X", "Y"]))
+
+    def test_a_sentence_is_kept_and_its_graded_notes_are_read_from_it(self):
+        c = C.coverage("graded notes covered: G2, D3, A3; reference-only notes cover B5")
+        self.assertEqual((c["graded"], c["text"]), (["G2", "D3", "A3"], "graded notes covered: G2, D3, A3; reference-only notes cover B5"))
+        self.assertEqual(C.coverage("graded notes covered: C2, G2 (partly)")["graded"], ["C2", "G2"])
+        self.assertEqual(C.coverage("graded notes covered: Bb4 and Ab3")["graded"], ["Bb4", "Ab3"])
+        none = C.coverage("none of the notes in families.json for this family (extra pitches)")
+        self.assertEqual((none["graded"], none["text"].startswith("none of the notes")), ([], True))
+        self.assertEqual(C.coverage("reference-only notes covered: B5")["graded"], [], "a sentence that does not say graded is not read as graded")
+
+    def test_any_other_shape_is_refused(self):
+        for bad in (7, 1.5, True, ["G3", 4], {"G3": 1}, {1: "reference_only"}):
+            self.assertIsNone(C.coverage(bad), bad)
+
+
 class Licence(unittest.TestCase):
     def test_creative_commons_is_read_from_the_start_of_the_licence_never_searched_for(self):
         self.assertTrue(C.is_cc(CC))
@@ -146,7 +172,9 @@ class Records(unittest.TestCase):
         self.assertIn("notes must be", self.problems(lambda r, d: r.update(notes=[])))
         self.assertIn("notes must be", self.problems(lambda r, d: r.update(notes="G3")))
         self.assertIn("sample_rate_hz must be a whole number", self.problems(lambda r, d: r.update(sample_rate_hz=44100.5)))
-        self.assertIn("usable_for_render_notes", self.problems(lambda r, d: r.update(usable_for_render_notes="G3")))
+        self.assertIn("usable_for_render_notes", self.problems(lambda r, d: r.update(usable_for_render_notes=7)))
+        self.assertIn("usable_for_render_notes", self.problems(lambda r, d: r.update(usable_for_render_notes=["G3", 4])))
+        self.assertIn("usable_for_render_notes", self.problems(lambda r, d: r.update(usable_for_render_notes={"G3": 1})))
         self.assertIn("title must be a non-empty string", self.problems(lambda r, d: r.update(title=" ")))
         self.assertEqual(self.problems(lambda r, d: r.pop("usable_for_render_notes")), "")  # optional
 
@@ -167,7 +195,7 @@ class Build(unittest.TestCase):
             self.assertEqual(c["playback_gain_db"], C.playback_gain_db(C.decode(root / "violin" / "violin-yt-aaa" / "clip.wav")[0]))
             self.assertAlmostEqual(c["clip_duration_s"], 1.0, places=2)
             self.assertEqual(c["facts"]["pitch"]["nearest_note"], "G3")
-            self.assertEqual((c["usable_for_render_notes"], c["source_type"], c["licence_evidence"]), (["G3"], "youtube", "yt-dlp license field of the watch page"))
+            self.assertEqual((c["render_coverage"]["graded"], c["source_type"], c["licence_evidence"]), (["G3"], "youtube", "yt-dlp license field of the watch page"))
             self.assertEqual(family(index, "violin")["looked"][0]["query_or_url"], "violin open strings")
             self.assertEqual(family(index, "violin")["made_by"], ["test"])
 

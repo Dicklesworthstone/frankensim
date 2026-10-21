@@ -16,7 +16,7 @@ interface Facts {
 }
 interface Candidate {
   id: string; instrument: string; notes: string[]; dynamic: string; articulation: string; source_type: string; url: string; title: string; channel_or_author: string;
-  licence: string; licence_evidence: string; start_s: number; end_s: number; conditions: string; sample_rate_hz: number; reason: string; usable_for_render_notes?: string[] | null;
+  licence: string; licence_evidence: string; start_s: number; end_s: number; conditions: string; sample_rate_hz: number; reason: string; render_coverage: { graded: string[]; reference_only: string[]; other: string[]; text: string | null };
   creative_commons: boolean; audio: string; clip_duration_s: number; playback_gain_db: number; facts: Facts | null;
 }
 interface Looked { source: string; query_or_url: string; result: string; file?: string }
@@ -41,7 +41,9 @@ function facts(c: Candidate): HTMLElement {
   const channels = f.channels_in_file === undefined ? "" : f.channels_in_file === 1 ? ", mono" : `, ${f.channels_in_file} channels`;
   const p = f.pitch;
   const steady = f.steady_notes_by_pitch_tracker ?? [];
-  const covers = c.usable_for_render_notes?.length ? c.usable_for_render_notes.join(" ") : "none of the notes our renders are graded on";
+  const cov = c.render_coverage;
+  const covers = [cov.graded.length ? `graded: ${cov.graded.join(" ")}` : "", cov.reference_only.length ? `reference-only notes: ${cov.reference_only.join(" ")}` : "", cov.text && !cov.graded.length ? cov.text : ""].filter(Boolean).join("; ")
+    || "none of the notes our renders are graded on";
   return el("dl", { class: "ir-facts small" },
     row("Source", el("a", { href: c.url, rel: "noopener" }, c.title), ` — ${c.channel_or_author} (${SOURCE_NAME[c.source_type] ?? c.source_type})`),
     row("Licence", el("span", { class: c.creative_commons ? "ir-cc" : "ir-std" }, c.creative_commons ? "Creative Commons" : "Not Creative Commons"), ` ${c.licence}. Read from: ${c.licence_evidence}.`),
