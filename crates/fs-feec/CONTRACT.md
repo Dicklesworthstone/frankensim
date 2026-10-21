@@ -1028,3 +1028,30 @@ cancellation polls through final publication are covered.
 - Integer inverse matrices prove unimodularity only for the retained exact
   transform. They do not prove that a caller's complex, basis, cut, relabel,
   refinement, remesh, or topology event has the claimed physical semantics.
+
+## Interior Helmholtz acoustics (`acoustics::helmholtz`, bead pexfp.93 M2.4-W1a, first slice)
+
+Home: this crate, as M2.4-W0 prefers (the dependency `fs-feec -> fs-modal` is L3 -> L1; fs-modal's own dev-dependency chain reaches
+fs-feec, a dev-only cycle that cargo allows and the layer check exempts).
+
+- `HelmholtzFe::new(complex, positions, order, Medium)`: the hierarchical H1 space of `highorder::SimplexSpace` at order
+  `1..=MAX_ORDER` (4), straight-sided tets, stiffness `K` and mass `M`, with typed refusals (invalid medium, order cap and cap + 1,
+  bad position table, degenerate tet). `boundary_faces`, `boundary_mass` (`C = int phi_i phi_j dS`) and `boundary_load`
+  (`b = int phi_i dS`, area) take boundary faces as sorted or unsorted vertex triples and refuse a face that is not a boundary face of
+  the complex. Face quadrature is the collapsed Gauss-Legendre map, exact to degree `2r + 1`.
+- `modes(window_hz, opts)`: rigid-wall (Neumann) eigenpairs of `(K, M)` by `fs_modal::slice_window`, so the in-window count is
+  inertia-certified and each mode carries its certified residual; a negative low end includes the constant mode; a window holding more
+  than `MAX_MODES` (512) refuses instead of truncating.
+- `ReducedHelmholtz`: a Galerkin reduction of the driven problem `(K - k^2 M + j k sum_b y_b C_b) p = j k rho c v_in b_src`
+  (time convention `e^{+j w t}`; `y_b = rho c / Z_b` the dimensionless specific admittance of a locally reacting boundary; a source port is a
+  prescribed inward particle velocity; every other face is rigid) onto the modes plus one M-orthonormalized static vector `(K + M)^-1 b_port`
+  per port. Without the static vectors a boundary-forced modal expansion converges only like `1/N`; the test logs both. A frequency is one
+  dense complex solve of the reduced dimension (at most `MAX_REDUCED_DIM`, 640). `response` returns the outward volume flow and mean
+  pressure of every port; `transfer_to` is the volume-velocity transfer function (outward flow over inflow).
+- Tests (in-module, `cargo test -p fs-feec --lib acoustics`): `helmholtz_rigid_box_modes` (20 modes of a 1.0 x 0.7 x 0.4 m box to
+  1e-4 at the finest rung, certified count 21 with the constant mode, observed order of the lowest eigenvalue over the last two rungs for
+  r = 2 and 3), `helmholtz_duct_driven_transfer_matches_plane_wave_theory` (exact 1-D duct with an impedance end, a ladder over mesh and over
+  static vectors), `helmholtz_refusals`, `helmholtz_modes_repeat_bitwise`.
+- Not claimed: isoparametric (curved) walls, the closed-cylinder and resonator tests, the p-ladder, viscothermal boundary-layer admittance
+  (M2.4-W1b), a radiation solve (the admittance is an input law), multiport extraction, a direct complex solve for cross-checking the
+  reduction at large size. The bead stays open.

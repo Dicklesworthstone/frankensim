@@ -17,6 +17,7 @@
 //! through fs-la's batched small-dense kernels — the layout consumer
 //! those kernels were built for.
 
+pub mod acoustics;
 pub mod assembly;
 pub mod betti;
 pub mod cochain;

@@ -1563,6 +1563,7 @@ dependencies = [
  "fs-ivl",
  "fs-la",
  "fs-math",
+ "fs-modal",
  "fs-obs",
  "fs-ports",
  "fs-propcheck",
