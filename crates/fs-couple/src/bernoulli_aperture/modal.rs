@@ -8,7 +8,8 @@
 //! full passive viscosity matrix retains cross-mode loss in the SAME solve.
 //! ExactZoh advances the original structural pencil with held pressure/contact
 //! forces and integrated material dissipation; nonlinear slit/contact time error
-//! still needs refinement. Distributed closure and hereditary material remain separate.
+//! still needs refinement. Proportional source-material Maxwell spectra retain
+//! every mode and their actual histories in that same exact solve.
 
 use super::dynamic::{ApertureDrive, ApertureFrame, ApertureState};
 use super::paired::{BladePropagator, BladeState, PairedApertureLimits};
@@ -23,6 +24,8 @@ use fs_phs::{
 mod exact;
 /// Original regional material plates and same-basis spatial ports.
 pub mod material;
+/// Source-bound proportional Maxwell memory in the original modal basis.
+pub mod relaxation;
 mod viscosity;
 
 /// One fixed-basis mode, in a physical metre-valued coordinate.
@@ -30,7 +33,8 @@ mod viscosity;
 pub struct ApertureMode {
     /// Positive generalized mass [kg].
     pub mass_kg: f64,
-    /// Positive generalized restoring stiffness [N/m].
+    /// Positive generalized restoring stiffness [N/m]; the equilibrium
+    /// stiffness when source-bound Maxwell branches are selected.
     pub stiffness_n_m: f64,
     /// Explicit nonnegative diagonal viscous loss [N s/m].
     pub damping_n_s_m: f64,
@@ -67,7 +71,7 @@ pub struct ModalApertureSpec {
 /// Completely accepted mechanics and original pressure/flow work account.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModalApertureFrame {
-    /// Common slit, fluid and complete mechanical/contact energy observation.
+    /// Common slit, fluid and complete mechanical/contact/material energy observation.
     pub aperture: ApertureFrame,
     /// Independent endpoint coordinates in the original basis order.
     pub modes: Vec<BladeState>,
@@ -82,6 +86,7 @@ pub struct ModalApertureFrame {
     /// Observed flow closure and its declared volume-flow budget [m^3/s].
     pub flow_certificate: SolveCertificate,
     port_transfers: [crate::port_adoption::PortTransfer; 4],
+    memory: Option<Vec<Vec<f64>>>,
 }
 
 /// A complete modal state; no acoustic network or filter is duplicated here.
@@ -96,6 +101,7 @@ pub struct ModalAperture {
     viscous_slit: Option<super::viscous::ViscousSlit>,
     viscosity: Option<viscosity::ApertureViscosity>,
     exact: Option<exact::ExactModes>,
+    relaxation: Option<relaxation::ModalRelaxation>,
     ports: crate::port_adoption::ModulePorts,
 }
 
@@ -121,7 +127,8 @@ impl ModalAperture {
     /// scaling belong to the supplied projections, including the force ports.
     /// A successful construction does not validate omitted modes or mean-gap
     /// closure. Select full viscosity explicitly with `with_viscosity`;
-    /// hereditary laws require a different material-history image.
+    /// source-bound proportional hereditary laws use `with_material_relaxation`
+    /// after choosing the exact structural propagator.
     pub fn new(
         spec: ModalApertureSpec,
         state: Vec<BladeState>,
@@ -229,6 +236,7 @@ impl ModalAperture {
             viscous_slit: None,
             viscosity: None,
             exact,
+            relaxation: None,
             ports,
         };
         model.admit_linear_clock()?;
@@ -332,10 +340,15 @@ impl ModalAperture {
                 })
                 .sum::<f64>()
     }
-    /// Actual mechanical and contact energy [J], not accumulated input work.
+    /// Mechanical, contact and selected material-memory energy [J], evaluated
+    /// from the accepted state rather than accumulated input work.
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
         self.energy(&self.state)
+            + self
+                .relaxation
+                .as_ref()
+                .map_or(0.0, |r| r.energy(&self.state, &r.states))
     }
     fn validate_state(&self, state: &[BladeState]) -> Result<(), AcousticRealizeError> {
         let l = self.spec.limits;
@@ -416,6 +429,9 @@ impl ModalAperture {
             frame.port_transfers,
         );
         self.state.copy_from_slice(&frame.modes);
+        if let (Some(relaxation), Some(states)) = (&mut self.relaxation, &frame.memory) {
+            relaxation.states.clone_from(states);
+        }
         self.samples = frame.aperture.step;
     }
     pub(super) fn preview(
@@ -476,7 +492,13 @@ impl ModalAperture {
         let gap = self.gap(&self.state);
         let z = self.spec.impedance_pa_s_m3;
         let trial = if let Some(exact) = &self.exact {
-            exact.free_velocity(&self.state, &external[..n], dt, &mut free[..n])?;
+            exact.free_velocity(
+                &self.state,
+                &external[..n],
+                dt,
+                self.relaxation.as_ref().map(|r| r.states.as_slice()),
+                &mut free[..n],
+            )?;
             uniform::solve_response(
                 &free[..n],
                 exact.pressure_response(),
@@ -550,7 +572,13 @@ impl ModalAperture {
             let held: Vec<_> = (0..n)
                 .map(|i| external[i] - area[i] * trial.dp + shape[i] * contact.force)
                 .collect();
-            exact.endpoint(&self.state, &held, &trial.velocity[..n], dt)
+            exact.endpoint(
+                &self.state,
+                &held,
+                &trial.velocity[..n],
+                dt,
+                self.relaxation.as_ref().map(|r| r.states.as_slice()),
+            )
         });
         if let Some(exact) = &endpoint {
             next.copy_from_slice(&exact.state);
@@ -605,7 +633,26 @@ impl ModalAperture {
             .zip(&trial.velocity)
             .map(|(f, v)| dt * f * v)
             .sum();
-        let energy = self.energy(&next);
+        let relaxation_energy = self.relaxation.as_ref().map_or(0.0, |r| {
+            r.energy(
+                &next,
+                &endpoint
+                    .as_ref()
+                    .expect("material memory has an exact owner")
+                    .memory,
+            )
+        });
+        let energy = self.energy(&next) + relaxation_energy;
+        let relaxation_loss = endpoint.as_ref().map_or(0.0, |e| e.relaxation_loss_j);
+        if !relaxation_energy.is_finite()
+            || !relaxation_loss.is_finite()
+            || !energy.is_finite()
+            || energy > self.spec.limits.maximum_energy_j
+        {
+            return Err(invalid(
+                "modal material memory exceeds the finite energy domain",
+            ));
+        }
         let aperture = ApertureFrame {
             step: self.samples + 1,
             time_s: (self.samples + 1) as f64 * dt,
@@ -628,14 +675,16 @@ impl ModalAperture {
             storage_change_j: energy - self.stored_energy_j(),
             dissipated_energy_j: match &endpoint {
                 Some(exact) => {
-                    dt * (trial.dp * jet + contact.dissipated_power) + exact.viscous_loss_j
+                    dt * (trial.dp * jet + contact.dissipated_power)
+                        + exact.viscous_loss_j
+                        + relaxation_loss
                 }
                 None => dt * (trial.dp * jet + viscous + contact.dissipated_power),
             },
             pressure_work_j: dt * trial.dp * (wave - drive.body_flow_m3_s),
             mechanical_work_j: mechanical,
-            relaxation_energy_j: 0.0,
-            relaxation_loss_j: 0.0,
+            relaxation_energy_j: relaxation_energy,
+            relaxation_loss_j: relaxation_loss,
         };
         let momentum: Vec<_> = self
             .spec
@@ -650,6 +699,7 @@ impl ModalAperture {
                 let residual = m.mass_kg * (next[i].velocity_m_s - self.state[i].velocity_m_s) / dt
                     + m.stiffness_n_m * mean_displacement
                     + m.damping_n_s_m * trial.velocity[i]
+                    + endpoint.as_ref().map_or(0.0, |e| e.relaxation_force_n[i])
                     + area[i] * trial.dp
                     - shape[i] * contact.force
                     - external[i];
@@ -715,6 +765,10 @@ impl ModalAperture {
             momentum_residual_n: momentum,
             work_certificate,
             flow_certificate,
+            memory: self
+                .relaxation
+                .as_ref()
+                .map(|_| endpoint.expect("exact material endpoint").memory),
         })
     }
 

@@ -7,7 +7,7 @@
 //! from a midpoint identity. No contact potential or channel law lives here.
 
 use super::{AcousticRealizeError, BladeState, ModalApertureSpec, invalid};
-use crate::bernoulli_aperture::paired::ExactBlade;
+use crate::bernoulli_aperture::paired::{ExactArm, ExactBlade};
 use fs_math::det;
 use fs_phs::linear_exact::exponential;
 
@@ -15,6 +15,7 @@ pub(super) struct ExactModes {
     modes: ModeMaps,
     pressure: Vec<f64>,
     contact: Vec<f64>,
+    arms: Vec<Vec<ExactArm>>,
 }
 
 enum ModeMaps {
@@ -26,6 +27,9 @@ pub(super) struct ExactEndpoint {
     pub state: Vec<BladeState>,
     pub mean_displacement: Vec<f64>,
     pub viscous_loss_j: f64,
+    pub memory: Vec<Vec<f64>>,
+    pub relaxation_loss_j: f64,
+    pub relaxation_force_n: Vec<f64>,
 }
 
 impl ExactModes {
@@ -47,14 +51,49 @@ impl ExactModes {
                     .collect::<Result<_, _>>()?,
             ),
         };
+        Self::from_maps(spec, modes, Vec::new())
+    }
+
+    pub(super) fn with_arms(
+        spec: &ModalApertureSpec,
+        arms: Vec<Vec<ExactArm>>,
+    ) -> Result<Self, AcousticRealizeError> {
+        if arms.len() != spec.modes.len() {
+            return Err(invalid("modal relaxation must cover every retained mode"));
+        }
+        let modes = ModeMaps::Diagonal(
+            spec.modes
+                .iter()
+                .zip(&arms)
+                .map(|(m, arms)| {
+                    ExactBlade::with_arms(
+                        m.mass_kg,
+                        m.damping_n_s_m,
+                        m.stiffness_n_m,
+                        arms,
+                        spec.time_step_s,
+                    )
+                })
+                .collect::<Result<_, _>>()?,
+        );
+        Self::from_maps(spec, modes, arms)
+    }
+
+    fn from_maps(
+        spec: &ModalApertureSpec,
+        modes: ModeMaps,
+        arms: Vec<Vec<ExactArm>>,
+    ) -> Result<Self, AcousticRealizeError> {
+        let dt = spec.time_step_s;
         let n = spec.modes.len();
         let mut pressure = vec![0.0; n];
         let mut contact = vec![0.0; n];
         match &modes {
             ModeMaps::Diagonal(blocks) => {
                 for (i, block) in blocks.iter().enumerate() {
+                    let zero_memory = vec![0.0; arms.get(i).map_or(0, Vec::len)];
                     let (_, mobility) =
-                        block.free_and_mobility(BladeState::default(), 0.0, dt, &[]);
+                        block.free_and_mobility(BladeState::default(), 0.0, dt, &zero_memory);
                     pressure[i] = mobility * spec.modes[i].pressure_area_m2;
                     contact[i] = mobility * spec.modes[i].gap_projection;
                 }
@@ -81,6 +120,7 @@ impl ExactModes {
             modes,
             pressure,
             contact,
+            arms,
         })
     }
 
@@ -96,12 +136,14 @@ impl ExactModes {
         state: &[BladeState],
         external: &[f64],
         dt: f64,
+        memory: Option<&[Vec<f64>]>,
         out: &mut [f64],
     ) -> Result<(), AcousticRealizeError> {
         match &self.modes {
             ModeMaps::Diagonal(blocks) => {
                 for (i, block) in blocks.iter().enumerate() {
-                    out[i] = block.free_and_mobility(state[i], external[i], dt, &[]).0;
+                    let memory = memory.map_or(&[][..], |states| states[i].as_slice());
+                    out[i] = block.free_and_mobility(state[i], external[i], dt, memory).0;
                 }
             }
             ModeMaps::Coupled(block) => {
@@ -124,19 +166,39 @@ impl ExactModes {
         held: &[f64],
         mean_velocity: &[f64],
         dt: f64,
+        memory: Option<&[Vec<f64>]>,
     ) -> ExactEndpoint {
         let mut state = Vec::with_capacity(old.len());
         let mut mean_displacement = Vec::with_capacity(old.len());
         let mut viscous_loss_j = 0.0;
+        let mut next_memory = Vec::new();
+        let mut relaxation_loss_j = 0.0;
+        let mut relaxation_force_n = vec![0.0; old.len()];
         match &self.modes {
             ModeMaps::Diagonal(blocks) => {
                 for (i, block) in blocks.iter().enumerate() {
+                    let memory = memory.map_or(&[][..], |states| states[i].as_slice());
                     state.push(BladeState {
                         displacement_m: old[i].displacement_m + dt * mean_velocity[i],
-                        velocity_m_s: block.end_velocity(old[i], held[i], &[]),
+                        velocity_m_s: block.end_velocity(old[i], held[i], memory),
                     });
-                    mean_displacement.push(block.mean_displacement(old[i], held[i], dt, &[]));
-                    viscous_loss_j += block.viscous_loss_j(old[i], held[i], &[]);
+                    mean_displacement.push(block.mean_displacement(old[i], held[i], dt, memory));
+                    viscous_loss_j += block.viscous_loss_j(old[i], held[i], memory);
+                    if !self.arms.is_empty() {
+                        let next = block.end_memory(old[i], held[i], memory);
+                        relaxation_loss_j += block.arm_loss_j(old[i], held[i], memory);
+                        // dz/dt=(c*q-z)/tau: the independently integrated arm
+                        // force is c*tau*Delta(z)/dt, never an energy remainder.
+                        relaxation_force_n[i] = self.arms[i]
+                            .iter()
+                            .zip(memory)
+                            .zip(&next)
+                            .map(|((arm, old), next)| {
+                                arm.coupling * arm.relaxation_time_s * (next - old) / dt
+                            })
+                            .sum();
+                        next_memory.push(next);
+                    }
                 }
             }
             ModeMaps::Coupled(block) => {
@@ -162,6 +224,9 @@ impl ExactModes {
             state,
             mean_displacement,
             viscous_loss_j,
+            memory: next_memory,
+            relaxation_loss_j,
+            relaxation_force_n,
         }
     }
 }

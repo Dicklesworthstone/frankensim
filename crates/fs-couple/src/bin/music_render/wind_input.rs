@@ -330,8 +330,24 @@ fn load_with_all_sources(
             fs_couple::bernoulli_aperture::paired::BladePropagator::Midpoint =>
                 ("midpoint", "original material structure with loaded one-cent midpoint admission"),
             fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh =>
-                ("exact-zoh", "original M/K/full C; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"),
+                ("exact-zoh", "original M/K and selected full C or proportional Maxwell internal strains; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"),
         };
+        let relaxation_json = valve.material_relaxation().map_or_else(String::new, |memory| {
+            let initial = match memory.initial_memory() {
+                fs_couple::bernoulli_aperture::modal::relaxation::InitialModalMemory::Relaxed => "relaxed",
+                fs_couple::bernoulli_aperture::modal::relaxation::InitialModalMemory::Unrelaxed => "unrelaxed",
+            };
+            let spectra = memory.material_spectra().iter().enumerate().flat_map(|(blade, regions)| {
+                regions.iter().enumerate().map(move |(section, law)| {
+                    let terms = law.terms.iter().map(|(modulus, time)| format!(
+                        "{{\"modulus_pa\":{modulus:e},\"relaxation_time_s\":{time:e}}}"))
+                        .collect::<Vec<_>>().join(",");
+                    format!("{{\"blade\":{blade},\"section\":{section},\"equilibrium_young_modulus_pa\":{:e},\"terms\":[{terms}]}}", law.e_inf)
+                })
+            }).collect::<Vec<_>>().join(",");
+            let arms: usize = memory.memory_sqrt_j().iter().map(Vec::len).sum();
+            format!(",\"proportional_material_relaxation\":{{\"initial_memory\":\"{initial}\",\"live_arms\":{arms},\"regional_spectra\":[{spectra}]}}")
+        });
         let (radiation_scope, mimo_json) = if p.mimo_radiation_records().is_empty()
             && p.computed_radiation_records().is_empty() {
             ("compact independent baffled reaction and shared exterior pressure", String::new())
@@ -375,7 +391,7 @@ fn load_with_all_sources(
                fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream].into_iter()
                 .map(|side| p.renderer().pending_boundary_controls(side).len()).sum::<usize>()
             + (0..i.blades).map(|blade| p.renderer().pending_plate_force_controls(blade).len()).sum::<usize>();
-        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}{force_json}}}",
+        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; effective uniform slit/contact; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}{force_json}{relaxation_json}}}",
             i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
             compiled_controls, valve.viscosity_matrix_n_s_m().is_some(),
             terminals);

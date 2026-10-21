@@ -3,7 +3,7 @@
 This input path makes the existing multimode material-wall solver available to
 `music_render wind`. One or two independently declared plates load both a tract
 and a bore. Original regional material cards determine density, stiffness and
-the complete selected viscous tensor. Every requested signed mode, slit trace,
+the selected viscous tensor or proportional hereditary spectrum. Every requested signed mode, slit trace,
 pressure traction and swept-volume projection stays in the same coupled system.
 A shared exterior declaration drives both selected radiation reaction and the
 microphone; pressure is never replaced by an internal bore signal.
@@ -396,6 +396,41 @@ The shared source adapter admits passivity, fixed-state applicability and actual
 retained frequency support, then projects the full matrix in the same basis as
 pressure and displacement. No damping matrix is copied from a replaced material.
 
+`loss proportional-maxwell relaxed COUNT MODULUS TIME ...` selects a sourced
+generalized Maxwell solid with one to eight modulus/time pairs. Use
+`unrelaxed` instead of `relaxed` to start each viscous strain at zero; `relaxed`
+equilibrates the arms at the explicitly supplied initial displacement. The
+ordinary Young modulus is the equilibrium modulus. Every additional modulus
+is in pascals and every relaxation time is in seconds. For example, replace
+the `loss tensor ...` row in `paired.performance` with:
+
+```text
+loss proportional-maxwell relaxed 1 maxwell_modulus maxwell_time
+```
+
+The supplied `blade.tsv` includes these manufactured coefficients. Normalize
+it with the same command above, then render the changed file through the same
+wind command. Changing only the modulus/time claims changes every retained
+mode's restoring history and loss, the returning duct pressure, and the actual
+exterior microphone. No modal damping ratios or output filters are fitted.
+
+This selector requires `propagator exact-zoh` and zero plate pretension. Each
+blade's regions must share the same normalized spectrum `(E_j/E_inf, tau_j)`;
+its regions may still have different geometry, density, thickness, equilibrium
+moduli and orientation. For orthotropic plates, the declared axis-1 Young
+modulus sets the ratios that scale the whole original elastic tensor. This
+proportional law makes branch stiffness diagonal in the original plate basis;
+nonproportional spectra require full matrix projection and are refused. Every
+mode retains its own internal strains, storage and independently integrated
+dissipation in the same pressure/contact solve. Full tensor viscosity and
+Maxwell relaxation are alternative explicit material laws.
+
+The highest instantaneous elastic frequency must satisfy the original blade's
+angular-step cap and every source coefficient's frequency validity. Positive
+branches also require `dt/tau <= 2`. Neither exact free propagation nor the
+source law establishes convergence of nonlinear contact or acoustic coupling.
+These are fixed-temperature manufactured inputs, not wet-cane measurements.
+
 The shared limit is 32 total modes across one or two blades, with at most 512
 nodes and 2048 triangles per blade. Each normalized pack is capped at 8 MiB and
 the complete distinct-source set at 64 MiB. Mechanical/output ratio is an integer
@@ -420,6 +455,10 @@ regressions preserve omission/explicit-midpoint parity, exercise full-tensor and
 elastic exact material sources at a coarser clock, and retain material changes
 in the actual microphone signal. Native compilation and
 execution remain required; committed tests are not evidence of a passed run.
+Hereditary regressions separately check modal memory storage and work, positive
+material loss, unchanged accepted histories after a refused step, the exact
+elastic limit, data-only spectral changes at the microphone, callback identity,
+and refusal of nonproportional or unresolved source laws.
 Native MIMO regressions additionally retain source byte hashes and declared
 bake identities separately, preserve all material/gas/loss/supply owners,
 exercise off-diagonal feedback and PCM partition parity, reject stale

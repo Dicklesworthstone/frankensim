@@ -252,9 +252,9 @@ impl ModalAperture {
         matrix_n_s_m: Vec<f64>,
         gate: &CancelGate,
     ) -> Result<Self, AcousticRealizeError> {
-        if self.samples != 0 || self.viscosity.is_some() {
+        if self.samples != 0 || self.viscosity.is_some() || self.relaxation.is_some() {
             return Err(invalid(
-                "full modal viscosity requires one unadvanced attachment",
+                "full modal viscosity requires one unadvanced attachment without a separate material spectrum",
             ));
         }
         self.viscosity = Some(ApertureViscosity::new(&self.spec, matrix_n_s_m, gate)?);

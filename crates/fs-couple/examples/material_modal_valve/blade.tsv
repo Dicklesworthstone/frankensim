@@ -1,5 +1,5 @@
 frankensim.matdb-source.v1
-observation	synthetic	Synthetic flat valve wall	Manufactured positive-definite viscous tensor and elastic coefficients	Not measurements; no wet-cane, clarinet, oboe or natural-material authority
+observation	synthetic	Synthetic flat valve wall	Manufactured elastic, positive-definite viscous-tensor and Maxwell coefficients	Not measurements; no wet-cane, clarinet, oboe or natural-material authority
 scalar	density	synthetic	density	900	kg/m^3	constant
 uncertainty	density	unstated	-	-	-	-
 validity	density	T	280	320	K
@@ -36,3 +36,11 @@ scalar	eta26	synthetic	eta26	-1500	Pa*s	constant
 uncertainty	eta26	unstated	-	-	-	-
 validity	eta26	T	280	320	K
 validity	eta26	omega	0	100000	rad/s
+scalar	maxwell_modulus	synthetic	maxwell_modulus	100000000	Pa	constant
+uncertainty	maxwell_modulus	unstated	-	-	-	-
+validity	maxwell_modulus	T	280	320	K
+validity	maxwell_modulus	omega	0	100000	rad/s
+scalar	maxwell_time	synthetic	maxwell_time	0.001	s	constant
+uncertainty	maxwell_time	unstated	-	-	-	-
+validity	maxwell_time	T	280	320	K
+validity	maxwell_time	omega	0	100000	rad/s

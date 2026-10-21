@@ -1,6 +1,7 @@
 //! Original regional material sources and meshes for the common modal valve.
 use super::{PlateValveInputError, Reader, bad, checkpoint};
 use crate::bernoulli_aperture::modal::material::ModalPlateOptions;
+use crate::bernoulli_aperture::modal::relaxation::InitialModalMemory;
 use crate::bernoulli_aperture::paired::BladeState;
 use crate::thin_plate::{PlateChartRadiation, PlateMaterialModel, PlateRegionMaterial,
     PlateThicknessConstraint, ResolvedPlateChart, compile_plate_material_chart};
@@ -39,6 +40,7 @@ impl ModalValveMaterialRecord {
 pub(super) enum LossSelection {
     Elastic,
     Tensor { properties: [String; 6], limits: PlateViscosityLimits },
+    Maxwell { properties: Vec<(String, String)>, initial: InitialModalMemory },
 }
 impl LossSelection {
     pub fn read(rows: &mut Reader<'_>) -> Result<Self, PlateValveInputError> {
@@ -58,7 +60,26 @@ impl LossSelection {
                     max_modes: 32, max_projection_terms, reference_resistance_n_s_m,
                 } }
             }
-            _ => return Err(bad(row.line, "loss must be elastic or tensor V11 V22 V66 V12 V16 V26 RESISTANCE PROJECTION_TERMS")),
+            "proportional-maxwell" => {
+                let initial = match row.word()? {
+                    "relaxed" => InitialModalMemory::Relaxed,
+                    "unrelaxed" => InitialModalMemory::Unrelaxed,
+                    _ => return Err(bad(row.line, "Maxwell initial memory must be relaxed or unrelaxed")),
+                };
+                let count = row.count(8)?;
+                if count == 0 { return Err(bad(row.line, "Maxwell material needs 1..=8 explicit source terms")); }
+                let mut properties = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let modulus = row.word()?.to_string();
+                    let time = row.word()?.to_string();
+                    if modulus.len() > 128 || time.len() > 128 {
+                        return Err(bad(row.line, "Maxwell property name exceeds 128 bytes"));
+                    }
+                    properties.push((modulus, time));
+                }
+                Self::Maxwell { properties, initial }
+            }
+            _ => return Err(bad(row.line, "loss requires elastic, tensor properties/limits, or proportional-maxwell INITIAL COUNT MODULUS TIME ...")),
         };
         row.finish()?;
         Ok(selected)
@@ -171,6 +192,19 @@ pub(super) fn read(
             if let LossSelection::Tensor { properties, .. } = loss {
                 for key in properties {
                     required.push(Requirement::try_new(key, DynViscosity::DIMS, Admit::Finite)?);
+                }
+            }
+            if let LossSelection::Maxwell { properties, .. } = loss {
+                for (modulus, time) in properties {
+                    // Several arms may intentionally share a source time or
+                    // modulus. Resolve each claim once; the law still checks
+                    // every use's dimensions and retains each separate arm.
+                    if !required.iter().any(|r| r.name() == modulus) {
+                        required.push(Requirement::try_new(modulus, Pressure::DIMS, Admit::NonNegative)?);
+                    }
+                    if !required.iter().any(|r| r.name() == time) {
+                        required.push(Requirement::try_new(time, Dims([0, 0, 1, 0, 0, 0]), Admit::StrictlyPositive)?);
+                    }
                 }
             }
             resolve_material_state_point(pack.card(), &point, &required, MaterialPropertySelection::SingleClaimOnly)

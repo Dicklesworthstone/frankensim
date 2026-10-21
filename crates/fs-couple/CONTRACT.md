@@ -3086,6 +3086,28 @@ model checks, not experimental actuator or ferromagnetic-material validation.
 Native execution is pending; source review and independent numerical oracles
 are not a Rust test pass.
 
+### Material modal reed relaxation
+
+`ModalAperture::with_material_relaxation` binds generalized-Maxwell spectra from
+the original regional plate materials to every retained reed mode. Equal
+normalized spectra within each blade project exactly onto its original modal
+basis, including oriented, tapered or heterogeneous equilibrium plates. Each
+mode carries separate internal strains; the existing `ExactBlade` exponential
+and independent loss quadratures supply storage, dissipation and restoring
+force to the same pressure/contact/acoustic transaction. Rejected trials leave
+material histories unchanged. Source substitution reaches returning ducts and
+exterior PCM through the existing wind file and CLI, selected with
+`loss proportional-maxwell relaxed|unrelaxed COUNT MODULUS TIME ...`.
+
+The owner requires exact propagation, zero prestress, no separate material
+viscosity, source coverage of equilibrium and instantaneous frequencies, the
+original angular-step cap and `dt/tau <= 2`. Nonproportional regional spectra
+require a full-matrix memory projection and refuse here. Source data remain
+frozen during playback. Manufactured material regressions check stored energy,
+independent force work, momentum, positive loss, trial rollback, data-only
+substitution and PCM callback identity; they do not establish measured cane
+behavior or complete clarinet/oboe fidelity.
+
 ### Material two-plane nonlinear string composition
 
 `MaterialStringSource::into_nonlinear` admits both transverse planes to one existing fs-nlmodal Kirchhoff–Carrier stress channel, with one source-derived EA, elongation, live tension and cross-plane stretching work. Original EI, prestress, mass, material/gas loss, torsion and directional centreline/surface/torque maps retain their ordering. `NonlinearMaterialString::prepare` retains that source while composing explicitly supplied receiver/contact/felt/volume participants in the original `PreparedImpactSystem`; `MaterialStringRun` implements the existing `ImpactSource` for the existing causal pressure renderer. The continuous vector-slope bound is invariant to transverse basis rotation. This is a frozen, moderate-slope reference model. Full rod/longitudinal dynamics, transfer from a nonlinear bow-friction bank, acoustic reaction, full instrument validation and exact-linear/SAV bandwidth work remain open for this impact route.

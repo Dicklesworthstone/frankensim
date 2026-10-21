@@ -53,6 +53,9 @@ fn pack() -> NormalizedMaterialCardPack {
     pack_with_density(900.0)
 }
 fn pack_with_density(density: f64) -> NormalizedMaterialCardPack {
+    pack_with_relaxation(density, 1e8, 0.001)
+}
+fn pack_with_relaxation(density: f64, modulus: f64, time: f64) -> NormalizedMaterialCardPack {
     let mut claims = ClaimSet::new();
     let artifact = fs_blake3::hash_domain("org.frankensim.test.material-modal-cli", b"manufactured-data");
     let provenance = Provenance { source: "manufactured material-modal CLI regression".into(),
@@ -67,6 +70,8 @@ fn pack_with_density(density: f64) -> NormalizedMaterialCardPack {
         ("eta22", 35000.0, DynViscosity::DIMS), ("eta66", 11000.0, DynViscosity::DIMS),
         ("eta12", 4500.0, DynViscosity::DIMS), ("eta16", 1000.0, DynViscosity::DIMS),
         ("eta26", -1500.0, DynViscosity::DIMS),
+        ("maxwell_modulus", modulus, Pressure::DIMS),
+        ("maxwell_time", time, Dims([0, 0, 1, 0, 0, 0])),
     ] {
         claims.insert_claim(PropertyClaim { key: PropertyKey::new(name, dims),
             value: PropertyValue::Scalar { value, dims },
@@ -85,6 +90,7 @@ fn pack_with_density(density: f64) -> NormalizedMaterialCardPack {
 
 mod keyed;
 mod forces;
+mod relaxation;
 
 #[test]
 fn native_material_mimo_cli_matches_original_performer_and_preserves_source_authority() {

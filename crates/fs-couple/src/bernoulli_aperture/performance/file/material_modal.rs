@@ -10,6 +10,10 @@
 //! structural clock image before material modes are admitted. Omission retains
 //! midpoint. ExactZoh keeps the original material M/K/full C, with pressure and
 //! contact held per mechanical sample; it does not certify nonlinear time error.
+//! `loss proportional-maxwell relaxed|unrelaxed COUNT MODULUS TIME ...`
+//! selects additional Young-modulus/time claims from every original material
+//! card. It requires exact-zoh, zero prestress and a proportional spectrum per
+//! blade; every retained mode keeps separate material memory and physical loss.
 mod plate;
 mod boundaries;
 mod radiation;
@@ -316,6 +320,12 @@ impl MaterialModalValvePerformance {
                 ModalAperture::from_viscous_material_plates_with_propagator(
                     viscous, rest_opening, inlet, impedance, dt, mechanical_samples,
                     limits, states, contact, propagator, gate)
+            }
+            LossSelection::Maxwell { properties, initial } => {
+                ModalAperture::from_material_plates_with_propagator(
+                    plates, rest_opening, inlet, impedance, dt, mechanical_samples,
+                    limits, states, contact, propagator, gate)
+                    .and_then(|valve| valve.with_material_relaxation(&properties, initial, gate))
             }
         }.map_err(PlateValveInputError::Physics)?;
         if let Some(length) = slit {

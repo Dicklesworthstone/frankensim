@@ -14,10 +14,15 @@ mod boundaries;
 mod keyed;
 mod walls;
 mod forces;
+mod relaxation;
 
 fn pack(rho: f64, missing: bool) -> NormalizedMaterialCardPack {
+    pack_with_relaxation(rho, missing, 1e8, 0.001)
+}
+fn pack_with_relaxation(rho: f64, missing: bool, modulus: f64, time: f64) -> NormalizedMaterialCardPack {
     let mut claims = ClaimSet::new();
-    let artifact = hash_domain("org.frankensim.test.material-modal", &rho.to_le_bytes());
+    let identity = [rho.to_le_bytes(), modulus.to_le_bytes(), time.to_le_bytes()].concat();
+    let artifact = hash_domain("org.frankensim.test.material-modal", &identity);
     let observation = claims.register_observation(ObservationDataset {
         specimen: "manufactured material-modal reed".into(),
         method: "manufactured physical regression".into(), artifact,
@@ -35,8 +40,10 @@ fn pack(rho: f64, missing: bool) -> NormalizedMaterialCardPack {
         ("eta12", 4500.0, DynViscosity::DIMS),
         ("eta16", 1000.0, DynViscosity::DIMS),
         ("eta26", -1500.0, DynViscosity::DIMS),
-        ("boundary_modulus", 1e8, Pressure::DIMS),
-        ("boundary_time", 0.001, Dims([0, 0, 1, 0, 0, 0])),
+        ("boundary_modulus", modulus, Pressure::DIMS),
+        ("boundary_time", time, Dims([0, 0, 1, 0, 0, 0])),
+        ("fast_modulus", 3e7, Pressure::DIMS),
+        ("fast_time", 0.0001, Dims([0, 0, 1, 0, 0, 0])),
     ] {
         if missing && name == "eta26" { continue; }
         claims.insert_claim(PropertyClaim {
