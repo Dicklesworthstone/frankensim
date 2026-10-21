@@ -1,0 +1,13 @@
+# a5: outlet lines of data/instruments/descriptions/flute/flute-a5.performance; node 39 is the foot
+bind	39	foot
+bind	20	hole-07
+bind	22	hole-08
+bind	24	hole-09
+bind	26	hole-10
+bind	28	hole-11
+bind	30	hole-12
+bind	32	hole-13
+bind	34	hole-14
+bind	36	hole-15
+bind	38	hole-16
+bind	MOUTH	embouchure

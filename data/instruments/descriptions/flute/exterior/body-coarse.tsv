@@ -1,0 +1,35 @@
+frankensim-lathed-aperture-body-v1
+# Exterior body of the published-Boehm flute (Boehm 1871 as recomputed by Miller 1922, Table II, A=440 Schema rule;
+# PF-661 riser area from Wolfe et al. 2001): data/instruments/geometry/flute-boehm-silver-bfoot-boehm1871.
+# Body frame: x from the cork face toward the foot, the opening azimuth from +y toward +z.
+# Declared simplifications (each an UNKNOWN of that set or a modelling choice):
+# - rigid straight tube of outer radius 9.78 mm over its whole length (head-joint outer profile not given);
+# - crown 20 mm beyond the cork (u: head end length not given);
+# - every opening flush with the tube surface at azimuth pi/2 (u-hole azimuth, frames.tsv): no chimney (3.28 mm),
+#   no riser (5 mm), no lip plate (u-lip-plate), no key cups or pads over open holes (u-pad-geometry);
+# - embouchure as the equal-area circle of the 90 mm2 PF-661 area (Wolfe 2001; the cone gives 117 mm2);
+# - foot end as a disc of the 9.5 mm bore radius on the end cap; no player.
+medium	1.1757953309050027	347.1476312415137
+around	14
+axial_step_m	0.0045
+aperture_step_m	0.0045
+profile	-0.02	0.00978
+profile	0.6554936363636363	0.00978
+wall	embouchure	0.017	1.5707963267948966	0.005352372348458314
+wall	hole-01	0.2132568181818182	1.5707963267948966	0.0038
+wall	hole-02	0.23016249999999996	1.5707963267948966	0.0038
+wall	hole-03	0.25003409090909096	1.5707963267948966	0.0033
+wall	hole-04	0.2796931818181818	1.5707963267948966	0.0066
+wall	hole-05	0.2993868181818182	1.5707963267948966	0.0066
+wall	hole-06	0.32024704545454546	1.5707963267948966	0.0066
+wall	hole-07	0.34235295454545456	1.5707963267948966	0.0066
+wall	hole-08	0.36577375	1.5707963267948966	0.0066
+wall	hole-09	0.39058852272727274	1.5707963267948966	0.0066
+wall	hole-10	0.41687636363636366	1.5707963267948966	0.0066
+wall	hole-11	0.44472625	1.5707963267948966	0.0066
+wall	hole-12	0.4742370454545454	1.5707963267948966	0.0066
+wall	hole-13	0.5054977272727272	1.5707963267948966	0.0066
+wall	hole-14	0.5386170454545454	1.5707963267948966	0.0066
+wall	hole-15	0.5737136363636364	1.5707963267948966	0.0066
+wall	hole-16	0.6108863636363636	1.5707963267948966	0.0066
+end	foot	0.0095

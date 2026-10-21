@@ -1,0 +1,6 @@
+# d4: outlet lines of data/instruments/descriptions/flute/flute-d4.performance; node 39 is the foot
+bind	39	foot
+bind	34	hole-14
+bind	36	hole-15
+bind	38	hole-16
+bind	MOUTH	embouchure

@@ -142,6 +142,84 @@ fn flag<'a>(args: &'a [String], name: &str) -> Res<&'a str> {
         .ok_or_else(|| format!("{name} needs a value"))
 }
 
+const SAMPLES_SCHEMA: &str = "frankensim-observation-samples-v1";
+
+fn write_samples(
+    path: &str,
+    operator: &str,
+    fs_hz: f64,
+    finest: usize,
+    cache: &BTreeMap<usize, Vec<C64>>,
+) -> Res<()> {
+    let channels = cache.values().next().map_or(0, Vec::len);
+    let mut bytes = format!(
+        "{SAMPLES_SCHEMA}\noperator {operator}\nfs_hz {fs_hz:e}\nfinest {finest}\nchannels {channels}\nbins {}\ndata\n",
+        cache.len()
+    )
+    .into_bytes();
+    for (key, row) in cache {
+        if row.len() != channels {
+            return Err("samples: ragged rows".into());
+        }
+        bytes.extend_from_slice(&(*key as u64).to_le_bytes());
+        for z in row {
+            bytes.extend_from_slice(&z.re.to_le_bytes());
+            bytes.extend_from_slice(&z.im.to_le_bytes());
+        }
+    }
+    create(path)?
+        .write_all(&bytes)
+        .map_err(|e| format!("{path}: {e}"))
+}
+
+fn read_samples(
+    path: &str,
+    operator: &str,
+    fs_hz: f64,
+    finest: usize,
+) -> Res<BTreeMap<usize, Vec<C64>>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_to_end(&mut bytes))
+        .map_err(|e| format!("{path}: {e}"))?;
+    let (header, mut at) = split_header(&bytes, "samples")?;
+    let mut lines = header.lines();
+    if lines.next() != Some(SAMPLES_SCHEMA) {
+        return Err("samples: wrong schema".into());
+    }
+    let (mut op, mut fs, mut fin, mut channels, mut bins) = (String::new(), 0.0, 0, 0, 0);
+    for line in lines {
+        let f: Vec<&str> = line.split(' ').collect();
+        match f[0] {
+            "operator" => op = f[1].to_string(),
+            "fs_hz" => fs = num(f[1], "fs_hz")?,
+            "finest" => fin = f[1].parse().map_err(|_| "samples: finest")?,
+            "channels" => channels = f[1].parse().map_err(|_| "samples: channels")?,
+            "bins" => bins = f[1].parse().map_err(|_| "samples: bins")?,
+            _ => {}
+        }
+    }
+    if op != operator || fs.to_bits() != fs_hz.to_bits() || fin != finest {
+        return Err(format!("samples {path}: bound to another operator or grid"));
+    }
+    let mut cache = BTreeMap::new();
+    for _ in 0..bins {
+        let key = u64_at(&bytes, &mut at)? as usize;
+        let row = (0..channels)
+            .map(|_| {
+                let re = f64::from_bits(u64_at(&bytes, &mut at)?);
+                let im = f64::from_bits(u64_at(&bytes, &mut at)?);
+                Ok(C64::new(re, im))
+            })
+            .collect::<Res<Vec<C64>>>()?;
+        cache.insert(key, row);
+    }
+    if at != bytes.len() {
+        return Err("samples: trailing bytes".into());
+    }
+    Ok(cache)
+}
+
 fn bake(args: &[String]) -> Res<()> {
     let [body_path, receivers_path, out] = [&args[0], &args[1], &args[2]];
     let fs_hz = num(flag(args, "--fs")?, "--fs")?;
@@ -203,6 +281,27 @@ fn bake(args: &[String]) -> Res<()> {
         receivers.len(),
         keys.len()
     );
+    // Optional on-disk cache of the solved samples, bound to this operator and
+    // grid, so a refused bake (band, latency, ladder) never repeats the solves.
+    let samples_path = args
+        .iter()
+        .position(|a| a == "--samples")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    let operator_hex = obs.operator_hash().to_hex();
+    let mut cache = match &samples_path {
+        Some(path) if std::path::Path::new(path).exists() => {
+            read_samples(path, &operator_hex, fs_hz, finest)?
+        }
+        _ => BTreeMap::new(),
+    };
+    let loaded = cache.len();
+    let todo: Vec<usize> = keys
+        .iter()
+        .copied()
+        .filter(|k| !cache.contains_key(k))
+        .collect();
+    eprintln!("cached samples {loaded}, to solve {}", todo.len());
     let next = std::sync::atomic::AtomicUsize::new(0);
     let samples: Vec<(usize, Res<Vec<C64>>)> = std::thread::scope(|s| {
         let workers: Vec<_> = (0..threads.max(1))
@@ -211,7 +310,7 @@ fn bake(args: &[String]) -> Res<()> {
                     let mut done = Vec::new();
                     loop {
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some(&key) = keys.get(i) else { break };
+                        let Some(&key) = todo.get(i) else { break };
                         let omega = core::f64::consts::TAU * fs_hz * key as f64 / finest as f64;
                         let row = obs
                             .frequency_sample(omega)
@@ -228,9 +327,19 @@ fn bake(args: &[String]) -> Res<()> {
             .flat_map(|w| w.join().expect("solver thread"))
             .collect()
     });
-    let mut cache = BTreeMap::new();
+    let solved = samples.len();
     for (key, row) in samples {
         cache.insert(key, row?);
+    }
+    if let Some(path) = &samples_path
+        && solved > 0
+    {
+        let target = if loaded > 0 {
+            format!("{path}.extended")
+        } else {
+            path.clone()
+        };
+        write_samples(&target, &operator_hex, fs_hz, finest, &cache)?;
     }
     let baked = bake_observation_transfers(
         |omega| {
@@ -535,7 +644,7 @@ fn main() {
     let result = match args.first().map(String::as_str) {
         Some("bake") if args.len() >= 4 => bake(&args[1..]),
         Some("replay") if args.len() == 5 => replay(&args[1..]),
-        _ => Err("usage: reobserve_apertures bake BODY RECEIVERS OUT --fs HZ --pass HZ --stop HZ --latency N --fft N1,N2,N3,N4 --clearance M --threads N\n       reobserve_apertures replay KERNELS FLOWS BIND OUTDIR".into()),
+        _ => Err("usage: reobserve_apertures bake BODY RECEIVERS OUT --fs HZ --pass HZ --stop HZ --latency N --fft N1,N2,N3,N4 --clearance M --threads N [--samples CACHE]\n       reobserve_apertures replay KERNELS FLOWS BIND OUTDIR".into()),
     };
     if let Err(e) = result {
         eprintln!("reobserve_apertures: {e}");
