@@ -1,0 +1,14 @@
+frankensim.specimen-brace-strips.v2
+strip	feature	x0_mm	y0_mm	x1_mm	y1_mm	length_mm	angle_deg	width_mm	printed_width_match_mm	annotated_height_mm	note
+S00	bar-7-bass-upper	193.70	-87.30	410.89	-83.40	217.2	1.03	7.00	7.0	4.0	7 mm bar on the bass side; label h: 4,0
+S01	axis-strip-neck-side	227.78	0.26	312.90	1.50	85.1	0.84	10.96	11.0	3.4	11 mm strip on the axis between the hole and the bridge; label h: 3,4
+S02	bar-7-bass-lower	260.22	-129.72	409.40	-126.58	149.2	1.21	7.00	7.0	2.0	7 mm bar on the bass side nearest the tail; label h: 2,0
+S03	bar-7-treble	261.94	87.84	411.97	88.43	150.0	0.23	7.00	7.0	4.0	7 mm bar on the treble side; label h: 4,0
+S04	axis-strip-tail-side	356.18	0.56	469.24	1.81	113.1	0.63	11.01	11.0	3.1	11 mm strip on the axis behind the bridge; label h: 3,1
+S05	bar-v-bass	93.86	-83.19	448.36	-34.32	357.9	7.85	5.00	5.0	4.7	long 5 mm bar on the bass side at 7.8 degrees through the bridge zone; label h: 4,7
+S06	bar-diagonal	171.86	-116.45	231.66	36.67	164.4	68.67	8.50	8.5	12.0	lower part of the slanted bar (68.7 degrees); label h: 12; collinear with S07, the gap between them is not drawn dashed
+S07	bar-diagonal	243.32	66.53	279.19	158.38	98.6	68.67	8.50	8.5	12.0	upper part of the same slanted bar
+S08	bar-neck-side	51.40	-99.57	50.83	98.41	198.0	90.16	13.00	13.0	3.0	wide vertical bar nearest the neck end; label h: 3,0
+S09	bar-hole-neck-side	89.39	-136.60	88.81	137.88	274.5	90.12	8.50	8.5	12.0	vertical bar between the neck-side bar and the sound hole; label h: 12
+S10	bar-v-treble	454.50	36.71	93.50	81.56	363.8	172.92	5.00	5.0	4.7	long 5 mm bar on the treble side at 172.9 degrees (-7.1), the mirror partner; label h: 4,7
+S11	bar-8-top	394.82	132.38	279.69	133.09	115.1	179.65	8.00	8.0	2.8	8 mm bar on the treble side nearest the tail; label h: 2,8

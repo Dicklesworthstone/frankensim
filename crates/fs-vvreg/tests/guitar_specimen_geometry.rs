@@ -222,6 +222,50 @@ fn vector_reads_agree_with_the_printed_numbers() {
 }
 
 #[test]
+fn brace_strips_read_from_vectors_match_the_printed_widths_and_heights() {
+    let dims = load().dimensions;
+    let strips = points(
+        "top-braces-vector.tsv",
+        "strip\tfeature\tx0_mm\ty0_mm\tx1_mm\ty1_mm\tlength_mm\tangle_deg\twidth_mm\tprinted_width_match_mm\tannotated_height_mm\tnote",
+        12,
+    );
+    assert_eq!(strips.len(), 12);
+    let mut features = std::collections::BTreeSet::new();
+    for row in &strips {
+        let width: f64 = row[8].parse().expect("width");
+        // Every vector strip width equals one of the printed widths to 0.05 mm.
+        let printed: f64 = row[9].parse().expect("a printed width matched");
+        assert!(
+            (width - printed).abs() < 0.05,
+            "{}: {width} vs {printed}",
+            row[0]
+        );
+        let height: f64 = row[10].parse().expect("height");
+        let feature = row[1].as_str();
+        features.insert(feature.to_owned());
+        // The dimension table carries the same printed numbers for the same feature.
+        let w = 1000.0 * value(&dims, "top-braces", feature, "width");
+        let h = 1000.0 * value(&dims, "top-braces", feature, "annotated-height");
+        assert!(
+            (w - printed).abs() < 1e-6,
+            "{feature}: width {w} vs {printed}"
+        );
+        assert!(
+            (h - height).abs() < 1e-6,
+            "{feature}: height {h} vs {height}"
+        );
+    }
+    // Eleven bars; the slanted bar is read as two collinear runs, so twelve strips.
+    assert_eq!(features.len(), 11);
+    let lines = points(
+        "top-dashed-lines-vector.tsv",
+        "line\tx0_mm\ty0_mm\tx1_mm\ty1_mm\tlength_mm\tangle_deg\tmax_deviation_mm\tdashes",
+        9,
+    );
+    assert_eq!(lines.len(), 35);
+}
+
+#[test]
 fn signature_modes_and_annotations_are_well_formed() {
     let modes = points(
         "signature-modes.tsv",
