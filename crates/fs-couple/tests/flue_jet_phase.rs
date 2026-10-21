@@ -7,6 +7,9 @@
 //! Montgermont and Chafe 2008, Acta Acustica 94(5), Secs. 5.1-5.2: first register at 0.1 to 0.25,
 //! octave jumps near 0.1) and must not do so by seed filtering.
 //!
+//! RATE LADDER: every assertion runs at 48, 96 and 192 kHz and the lock and level must agree across
+//! the rungs; the mirror agrees to a few percent, and a rung that disagrees is a numerical artifact.
+//!
 //! NOT ASSERTED, open: the published octave jump. A Python mirror of the island (not native) holds
 //! the first register down to Str_W 0.05 with only isolated higher-register points, and the point
 //! moves with the sample rate, so no threshold is claimed. The strong-jet lock is logged below.
@@ -24,7 +27,9 @@ use fs_couple::flue_loop::{FlueControl, FlueGeometry, FlueVoice};
 use fs_exec::CancelGate;
 use fs_material::gas::{GasSpec, GasState};
 
-const RATE: u32 = 48_000;
+/// Mechanics rates of the convergence ladder. A first register that exists at one step count only
+/// is a numerical artifact (a gate certifies one step count), so every assertion below runs at all.
+const RATES: [u32; 3] = [48_000, 96_000, 192_000];
 const BLOCK: usize = 4096;
 const PIPE_M: f64 = 0.30;
 const BORE_R: f64 = 0.006;
@@ -67,7 +72,7 @@ fn air() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air")
 }
 
-fn voice(card: &JetCard, seed_rel: f64, seed: u64) -> FlueVoice {
+fn voice(card: &JetCard, rate: u32, seed_rel: f64, seed: u64) -> FlueVoice {
     let gas = air();
     let geometry = FlueGeometry {
         flue_width_m: 0.010,
@@ -105,7 +110,7 @@ fn voice(card: &JetCard, seed_rel: f64, seed: u64) -> FlueVoice {
         seed_rel,
         geometry,
         source,
-        RATE,
+        rate,
         seed,
         0,
         &CancelGate::new_clock_free(),
@@ -113,44 +118,52 @@ fn voice(card: &JetCard, seed_rel: f64, seed: u64) -> FlueVoice {
     .expect("voice")
 }
 
-/// Goertzel magnitude at `hz` over `x` (Hann windowed).
-fn tone(x: &[f64], hz: f64) -> f64 {
+/// Dominant tone [Hz] of `x` between 150 Hz and 6 kHz: Goertzel on a Hann-windowed copy, 4 Hz grid.
+fn dominant_hz(x: &[f64], rate: u32) -> f64 {
     let n = x.len() as f64;
-    let w = core::f64::consts::TAU * hz / f64::from(RATE);
-    let (mut s1, mut s2) = (0.0, 0.0);
-    for (i, v) in x.iter().enumerate() {
-        let hann = 0.5 - 0.5 * (core::f64::consts::TAU * i as f64 / (n - 1.0)).cos();
-        let s0 = v * hann + 2.0 * w.cos() * s1 - s2;
-        s2 = s1;
-        s1 = s0;
-    }
-    (s1 * s1 + s2 * s2 - 2.0 * w.cos() * s1 * s2).sqrt()
-}
-
-/// Settle at one blowing pressure; return (dominant tone [Hz], RMS [Pa]) of the last two blocks.
-fn settle(v: &mut FlueVoice, blow_pa: f64) -> (f64, f64) {
-    v.apply(FlueControl::SetBlowingPressure(blow_pa))
-        .expect("pressure admits");
-    let mut tail = Vec::new();
-    for block in 0..6 {
-        let mut out = vec![0.0; BLOCK];
-        v.step_block(&mut out).expect("block steps");
-        if block >= 4 {
-            tail.extend_from_slice(&out);
-        }
-    }
-    let rms = (tail.iter().map(|p| p * p).sum::<f64>() / tail.len() as f64).sqrt();
+    let windowed: Vec<f64> = x
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v * (0.5 - 0.5 * (core::f64::consts::TAU * i as f64 / (n - 1.0)).cos()))
+        .collect();
     let (mut best, mut best_hz) = (0.0, 0.0);
     let mut hz = 150.0;
     while hz <= 6000.0 {
-        let m = tone(&tail, hz);
+        let w = core::f64::consts::TAU * hz / f64::from(rate);
+        let c = w.cos();
+        let (mut s1, mut s2) = (0.0, 0.0);
+        for v in &windowed {
+            let s0 = v + 2.0 * c * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        let m = s1 * s1 + s2 * s2 - 2.0 * c * s1 * s2;
         if m > best {
             best = m;
             best_hz = hz;
         }
         hz += 4.0;
     }
-    (best_hz, rms)
+    best_hz
+}
+
+/// Settle at one blowing pressure for the same physical time at every rate (0.51 s; the last
+/// 0.17 s is analysed); return (dominant tone [Hz], RMS [Pa]).
+fn settle(v: &mut FlueVoice, rate: u32, blow_pa: f64) -> (f64, f64) {
+    v.apply(FlueControl::SetBlowingPressure(blow_pa))
+        .expect("pressure admits");
+    let scale = (rate / 48_000) as usize;
+    let blocks = 6 * scale;
+    let mut tail = Vec::new();
+    for block in 0..blocks {
+        let mut out = vec![0.0; BLOCK];
+        v.step_block(&mut out).expect("block steps");
+        if block + 2 * scale >= blocks {
+            tail.extend_from_slice(&out);
+        }
+    }
+    let rms = (tail.iter().map(|p| p * p).sum::<f64>() / tail.len() as f64).sqrt();
+    (dominant_hz(&tail, rate), rms)
 }
 
 fn f1_ref_hz() -> f64 {
@@ -158,7 +171,8 @@ fn f1_ref_hz() -> f64 {
 }
 
 /// The published first register at the flutist's Str_W, from a limit cycle that does not depend on
-/// the onset seed. The overblowing threshold is logged, not asserted (see the module note).
+/// the onset seed, at every rung of the rate ladder. The overblowing threshold is logged, not
+/// asserted (see the module note).
 #[test]
 fn fj_001_lip_jet_speaks_the_first_register_and_ignores_the_seed() {
     let card = lip_card();
@@ -166,48 +180,82 @@ fn fj_001_lip_jet_speaks_the_first_register_and_ignores_the_seed() {
     let u_of = |p: f64| (2.0 * p / air().density).sqrt();
     // Str_W = f1 W / U for the pressures asserted: 0.19, 0.15, 0.12.
     let first_register = [250.0, 400.0, 600.0];
-    let mut seen = Vec::new();
-    for &p in &first_register {
-        let strw = f1 * CUT_UP / u_of(p);
-        assert!(
-            (0.1..0.25).contains(&strw),
-            "fixture Str_W {strw} must sit in the published first-register range"
-        );
-        let mut v = voice(&card, SEED_REL, 3);
-        let (hz, rms) = settle(&mut v, p);
+    // (rate, pressure) -> (lock, rms), compared across rates below.
+    let mut ladder: Vec<(u32, f64, f64, f64)> = Vec::new();
+    for &rate in &RATES {
+        for &p in &first_register {
+            let strw = f1 * CUT_UP / u_of(p);
+            assert!(
+                (0.1..0.25).contains(&strw),
+                "fixture Str_W {strw} must sit in the published first-register range"
+            );
+            let (hz, rms) = settle(&mut voice(&card, rate, SEED_REL, 3), rate, p);
+            println!(
+                "{{\"fixture\":\"fj-001\",\"rate\":{rate},\"blow_pa\":{p},\"str_w\":{strw:.3},\"lock_hz\":{hz},\"ratio\":{:.3},\"rms_pa\":{rms}}}",
+                hz / f1
+            );
+            assert!(
+                rms > 1.0,
+                "the loop must self-sustain at {p} Pa, {rate} Hz: rms {rms}"
+            );
+            assert!(
+                (0.85..1.15).contains(&(hz / f1)),
+                "{p} Pa (Str_W {strw:.3}) at {rate} Hz must speak the first register: {hz} Hz vs f1 {f1}"
+            );
+            ladder.push((rate, p, hz, rms));
+        }
+        // A strong jet (Str_W under 0.09, U above about 40 m/s): logged, not asserted, that it moves up.
+        let (hz_hi, rms_hi) = settle(&mut voice(&card, rate, SEED_REL, 3), rate, 1500.0);
         println!(
-            "{{\"fixture\":\"fj-001\",\"blow_pa\":{p},\"str_w\":{strw:.3},\"lock_hz\":{hz},\"ratio\":{:.3},\"rms_pa\":{rms}}}",
-            hz / f1
+            "{{\"fixture\":\"fj-001\",\"rate\":{rate},\"blow_pa\":1500,\"str_w\":{:.3},\"lock_hz\":{hz_hi},\"ratio\":{:.3},\"rms_pa\":{rms_hi}}}",
+            f1 * CUT_UP / u_of(1500.0),
+            hz_hi / f1
         );
-        seen.push((p, hz, rms));
-        assert!(rms > 1.0, "the loop must self-sustain at {p} Pa: rms {rms}");
         assert!(
-            (0.85..1.15).contains(&(hz / f1)),
-            "{p} Pa (Str_W {strw:.3}) must speak the first register: {hz} Hz vs f1 {f1}"
+            rms_hi > 1.0,
+            "the strong jet must still sound at {rate} Hz: rms {rms_hi}"
+        );
+
+        // SELF-SUSTAINED, not seed-filtered: a limit cycle does not scale with the onset seed and the
+        // lock does not depend on the seed stream. Ten times smaller seed, another stream.
+        let (_, p, hz, rms) = *ladder
+            .iter()
+            .find(|(r, p, _, _)| *r == rate && *p == 400.0)
+            .expect("the 400 Pa point ran");
+        let (hz_q, rms_q) = settle(&mut voice(&card, rate, SEED_REL / 10.0, 11), rate, p);
+        assert!(
+            (rms_q / rms - 1.0).abs() < 0.2,
+            "a limit cycle does not scale with the seed at {rate} Hz: {rms} vs {rms_q}"
+        );
+        assert!(
+            (hz_q / hz - 1.0).abs() < 0.03,
+            "the lock does not depend on the seed at {rate} Hz: {hz} vs {hz_q}"
         );
     }
-    // A strong jet (Str_W under 0.09, U above about 40 m/s): logged, not asserted, that it moves up.
-    let (hz_hi, rms_hi) = settle(&mut voice(&card, SEED_REL, 3), 1500.0);
-    println!(
-        "{{\"fixture\":\"fj-001\",\"blow_pa\":1500,\"str_w\":{:.3},\"lock_hz\":{hz_hi},\"ratio\":{:.3},\"rms_pa\":{rms_hi}}}",
-        f1 * CUT_UP / u_of(1500.0),
-        hz_hi / f1
-    );
-    assert!(
-        rms_hi > 1.0,
-        "the strong jet must still sound: rms {rms_hi}"
-    );
 
-    // SELF-SUSTAINED, not seed-filtered: a limit cycle does not scale with the onset seed and the
-    // lock does not depend on the seed stream. Ten times smaller seed, another stream.
-    let (p, hz, rms) = seen[1];
-    let (hz_q, rms_q) = settle(&mut voice(&card, SEED_REL / 10.0, 11), p);
-    assert!(
-        (rms_q / rms - 1.0).abs() < 0.2,
-        "a limit cycle does not scale with the seed: {rms} vs {rms_q}"
-    );
-    assert!(
-        (hz_q / hz - 1.0).abs() < 0.03,
-        "the lock does not depend on the seed: {hz} vs {hz_q}"
-    );
+    // CONVERGENCE: the same physical state must come out at every rung. A first register that is
+    // only an artifact of one step count would show here even if each rung alone passed.
+    for &p in &first_register {
+        let at = |rate: u32| {
+            let (_, _, hz, rms) = *ladder
+                .iter()
+                .find(|(r, q, _, _)| *r == rate && *q == p)
+                .expect("ladder point");
+            (hz, rms)
+        };
+        let (hz0, rms0) = at(RATES[0]);
+        for &rate in &RATES[1..] {
+            let (hz, rms) = at(rate);
+            assert!(
+                (hz / hz0 - 1.0).abs() < 0.03,
+                "{p} Pa: lock moved with the step count, {hz0} Hz at {} vs {hz} Hz at {rate}",
+                RATES[0]
+            );
+            assert!(
+                (rms / rms0 - 1.0).abs() < 0.15,
+                "{p} Pa: level moved with the step count, {rms0} Pa at {} vs {rms} Pa at {rate}",
+                RATES[0]
+            );
+        }
+    }
 }
