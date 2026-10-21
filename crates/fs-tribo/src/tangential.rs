@@ -177,6 +177,7 @@ impl TangentialLaw for FrictionLaw {
             Self::Coulomb { .. } => "dry-coulomb-set-valued",
             Self::Stribeck { .. } => "dry-stribeck-set-valued-benchmark",
             Self::VelocityDependent { .. } => "dry-velocity-dependent-set-valued-benchmark",
+            Self::Hyperbolic { .. } => "dry-hyperbolic-set-valued-benchmark",
         }
     }
 
@@ -359,11 +360,7 @@ fn solve_magnitude(
     let evaluate = |magnitude: f64| -> Result<(f64, f64), TriboError> {
         let slip = finite(distance - compliance * magnitude, "resolved_slip_m")?.max(0.0);
         let mu = if slip == 0.0 {
-            match *law {
-                FrictionLaw::Coulomb { kinetic_mu, .. } => kinetic_mu,
-                FrictionLaw::Stribeck { static_mu, .. } => static_mu,
-                FrictionLaw::VelocityDependent { mu_zero, .. } => mu_zero,
-            }
+            law.zero_speed_kinetic_coefficient()?
         } else {
             law.kinetic_coefficient(finite(slip / x.dt_s, "slip_speed_mps")?)?
         };

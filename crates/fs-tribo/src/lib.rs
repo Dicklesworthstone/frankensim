@@ -277,7 +277,7 @@ impl InterfaceSystemRef {
     }
     /// Caller source and authority ceiling.
     #[must_use]
-    pub fn provenance(&self) -> &InputProvenance {
+    pub const fn provenance(&self) -> &InputProvenance {
         &self.provenance
     }
     /// Declared medium.
@@ -483,6 +483,18 @@ pub enum FrictionLaw {
         /// Additional viscous traction growth per unit sliding speed.
         viscous_per_speed: f64,
     },
+    /// Memoryless hyperbolic velocity weakening:
+    /// `mu(v) = kinetic_mu + (static_mu-kinetic_mu)/(1+|v|/v0)`.
+    /// Equivalently `mu_d + K/(|v|+v0)`, with `K=(mu_s-mu_d)*v0`.
+    /// This steady sliding law does not supply thermal/third-body hysteresis.
+    Hyperbolic {
+        /// Static capacity and one-sided zero-speed sliding coefficient.
+        static_mu: f64,
+        /// Asymptotic sliding coefficient at high speed.
+        kinetic_mu: f64,
+        /// Physical weakening speed v0 [m/s], NOT an ODE regularization scale.
+        characteristic_speed: f64,
+    },
 }
 
 impl FrictionLaw {
@@ -536,6 +548,11 @@ impl FrictionLaw {
                 static_mu,
                 kinetic_mu,
                 ..
+            }
+            | Self::Hyperbolic {
+                static_mu,
+                kinetic_mu,
+                ..
             } => (static_mu, kinetic_mu),
             Self::VelocityDependent {
                 static_mu,
@@ -567,6 +584,9 @@ impl FrictionLaw {
             positive_finite(characteristic_speed, "characteristic_speed")?;
             nonnegative_finite(viscous_per_speed, "viscous_per_speed")?;
         }
+        if let Self::Hyperbolic { characteristic_speed, .. } = *self {
+            positive_finite(characteristic_speed, "characteristic_speed")?;
+        }
         Ok(())
     }
 
@@ -574,12 +594,43 @@ impl FrictionLaw {
         match *self {
             Self::Coulomb { static_mu, .. }
             | Self::VelocityDependent { static_mu, .. }
-            | Self::Stribeck { static_mu, .. } => static_mu,
+            | Self::Stribeck { static_mu, .. }
+            | Self::Hyperbolic { static_mu, .. } => static_mu,
         }
     }
+
+    /// Dimensionless static capacity; the mechanics owns the actual reaction.
+    pub fn static_coefficient(&self) -> Result<f64, TriboError> {
+        self.validate()?;
+        Ok(self.static_mu())
+    }
+
+    /// Right-hand sliding limit as speed tends to zero. This is NOT a stick
+    /// reaction. Implicit solvers use it at their kinetic bracket endpoint;
+    /// selecting a new law must not require a second constitutive match there.
+    pub fn zero_speed_kinetic_coefficient(&self) -> Result<f64, TriboError> {
+        self.validate()?;
+        Ok(match *self {
+            Self::Coulomb { kinetic_mu, .. } => kinetic_mu,
+            Self::VelocityDependent { mu_zero, .. } => mu_zero,
+            Self::Stribeck { static_mu, .. } | Self::Hyperbolic { static_mu, .. } => static_mu,
+        })
+    }
+
     fn kinetic_mu(&self, speed: f64) -> Result<f64, TriboError> {
         let candidate = match *self {
             Self::Coulomb { kinetic_mu, .. } => kinetic_mu,
+            Self::Hyperbolic { static_mu, kinetic_mu, characteristic_speed } => {
+                // Keep both quotients <= 1 instead of overflowing v/v0 or
+                // v+v0. No clipping, fitted tail, or numerical speed is used.
+                let fraction = if speed <= characteristic_speed {
+                    1.0 / (1.0 + speed / characteristic_speed)
+                } else {
+                    let inverse = characteristic_speed / speed;
+                    inverse / (1.0 + inverse)
+                };
+                kinetic_mu + (static_mu - kinetic_mu) * fraction
+            }
             Self::VelocityDependent {
                 mu_zero,
                 slope_per_speed,

@@ -45,10 +45,7 @@ pub(super) fn solve(law: &FrictionLaw, config: ModalFrictionConfig, compliance: 
     -> Result<(f64, ModalFrictionRegime, usize), ModalFrictionError>
 {
     if normal == 0.0 { return Ok((0.0, ModalFrictionRegime::Released, 0)); }
-    let static_mu = match *law {
-        FrictionLaw::Coulomb { static_mu, .. } | FrictionLaw::Stribeck { static_mu, .. }
-            | FrictionLaw::VelocityDependent { static_mu, .. } => static_mu,
-    };
+    let static_mu = law.static_coefficient()?;
     let cap = finite(static_mu*normal)?;
     let required = finite(free_slip/compliance)?;
     if required.abs() <= cap {
@@ -62,11 +59,7 @@ pub(super) fn solve(law: &FrictionLaw, config: ModalFrictionConfig, compliance: 
         // Use the one-sided kinetic limit at the sticking endpoint; never
         // feed zero into the owner's strictly-positive kinetic query.
         let mu = if slip == 0.0 {
-            match *law {
-                FrictionLaw::Coulomb { kinetic_mu, .. } => kinetic_mu,
-                FrictionLaw::Stribeck { static_mu, .. } => static_mu,
-                FrictionLaw::VelocityDependent { mu_zero, .. } => mu_zero,
-            }
+            law.zero_speed_kinetic_coefficient()?
         } else { law.kinetic_coefficient(finite(slip/dt)?)? };
         let expected = finite(mu*normal)?;
         Ok((finite(magnitude-expected)?, force_tolerance(config, magnitude, expected)?))
@@ -157,6 +150,11 @@ mod trait_tests {
                 kinetic_mu: 0.4,
                 characteristic_speed: 0.04,
                 viscous_per_speed: 0.0,
+            },
+            FrictionLaw::Hyperbolic {
+                static_mu: 0.8,
+                kinetic_mu: 0.4,
+                characteristic_speed: 0.04,
             },
         ] {
             for normal in [0.0, 0.1, 1.0] {
