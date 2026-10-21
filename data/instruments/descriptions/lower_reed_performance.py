@@ -218,16 +218,34 @@ def gesture(desc, pressure):
     )
 
 
+def reed_record(desc, pressure):
+    """The `reed` header values: literal keys, or per-area quantities with a lip-force rule.
+
+    Per-area mode (reed.stiffness_per_area_pa_m present): the closing pressure is the blowing
+    pressure over the published operating ratio p_m / (K_a y_m), the stiffness is the closing
+    pressure times the effective area over y_m (the reed owner's face rule k H = P_c A), the
+    mass is the mass per area times the effective area, and the damping ratio follows from the
+    damping rate g as g / (2 omega) with omega = sqrt(k / m).
+    """
+    height = need(desc, "reed.rest_opening_m")
+    width = need(desc, "reed.width_m")
+    if "reed.stiffness_per_area_pa_m" not in desc:
+        keys = ("reed.closing_pressure_pa", "reed.mass_kg", "reed.stiffness_n_m", "reed.damping_ratio")
+        return " ".join([height, width] + [need(desc, key) for key in keys])
+    h = float(height)
+    area = float(need(desc, "reed.effective_area_m2"))
+    ratio = float(need(desc, "reed.operating_blowing_pa")) / (float(need(desc, "reed.stiffness_per_area_pa_m")) * h)
+    closing = pressure / ratio
+    stiffness = closing * area / h
+    mass = float(need(desc, "reed.mass_per_area_kg_m2")) * area
+    zeta = float(need(desc, "reed.damping_rate_1_s")) / (2.0 * math.sqrt(stiffness / mass))
+    return f"{height} {width} {num(closing)} {mass!r} {stiffness!r} {zeta!r}"
+
+
 def performance(desc, records, pressure):
     rate = int(need(desc, "audio.rate_hz"))
     samples = round(float(need(desc, "audio.duration_s")) * rate)
-    reed = " ".join(
-        need(desc, key)
-        for key in (
-            "reed.rest_opening_m", "reed.width_m", "reed.closing_pressure_pa",
-            "reed.mass_kg", "reed.stiffness_n_m", "reed.damping_ratio",
-        )
-    )
+    reed = reed_record(desc, pressure)
     ambient = " ".join(
         need(desc, key)
         for key in ("ambient.temperature_k", "ambient.pressure_pa", "ambient.relative_humidity")
