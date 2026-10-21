@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	tungsten-rod-nasa-tnd6794-1972
+redistribution	permitted	Work of the U.S. Government (National Bureau of Standards; NASA Lewis Research Center); retain the citation
+citation	Harrigill W.T. Jr., Krsek A. Jr., Method for measuring static Young's modulus of tungsten to 1900 K, NASA Technical Note D-6794 (Lewis Research Center, April 1972), the room-temperature results, the check by strain gages and the conclusions
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

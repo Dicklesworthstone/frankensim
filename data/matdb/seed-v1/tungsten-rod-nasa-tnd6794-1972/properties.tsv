@@ -1,0 +1,23 @@
+frankensim.matdb-source.v1
+observation	nasa6794	Swaged unalloyed tungsten rods made by powder metallurgy, 4 mm diameter and 39 mm active length (rods, not drawn wire)	Static Young's modulus by a tensile machine with a noncontacting extensometer on a load cell calibrator: over 100 tests on three specimens at room temperature; strain gages on the same specimens as a check; the technique extended to 1900 K	The report states the precision of a single observation (1 sigma) 4 percent at room temperature, strain-gage uncertainty about 3/4 percent, and 5 percent (precision and, by estimate, accuracy) at 1900 K; the static values are higher than earlier static determinations and below dynamic ones; tungsten rod is not the winding wire of a string (see string-cores-windings-hunt)
+scalar	modulus-extensometer	nasa6794	young_modulus_tungsten_room_temperature_extensometer	3.92e+11	Pa	constant
+uncertainty	modulus-extensometer	unstated	-	-	-	-
+validity	modulus-extensometer	temperature_known	0	0	1
+scalar	modulus-strain-gage	nasa6794	young_modulus_tungsten_room_temperature_strain_gages	3.97e+11	Pa	constant
+uncertainty	modulus-strain-gage	unstated	-	-	-	-
+validity	modulus-strain-gage	temperature_known	0	0	1
+scalar	modulus-conclusion-room	nasa6794	young_modulus_tungsten_room_temperature_conclusion	3.95e+11	Pa	constant
+uncertainty	modulus-conclusion-room	unstated	-	-	-	-
+validity	modulus-conclusion-room	temperature_known	0	0	1
+scalar	modulus-1900k	nasa6794	young_modulus_tungsten_1900_k	2.24e+11	Pa	constant
+uncertainty	modulus-1900k	unstated	-	-	-	-
+validity	modulus-1900k	T	1900	1900	K
+scalar	single-observation-precision	nasa6794	single_observation_precision_one_sigma_relative	0.04	1	constant
+uncertainty	single-observation-precision	unstated	-	-	-	-
+validity	single-observation-precision	temperature_known	0	0	1
+scalar	strain-gage-uncertainty	nasa6794	strain_gage_uncertainty_relative_about	0.0075	1	constant
+uncertainty	strain-gage-uncertainty	unstated	-	-	-	-
+validity	strain-gage-uncertainty	temperature_known	0	0	1
+scalar	precision-1900k	nasa6794	precision_one_sigma_relative_at_1900_k	0.05	1	constant
+uncertainty	precision-1900k	unstated	-	-	-	-
+validity	precision-1900k	T	1900	1900	K

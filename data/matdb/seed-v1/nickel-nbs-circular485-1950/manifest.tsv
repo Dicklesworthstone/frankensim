@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	nickel-nbs-circular485-1950
+redistribution	permitted	Work of the U.S. Government (National Bureau of Standards; NASA Lewis Research Center); retain the citation
+citation	National Bureau of Standards Circular 485, Nickel and Its Alloys (U.S. Department of Commerce, issued March 22, 1950), the passages on density and on elastic properties (Young's modulus and Poisson's ratio) read in the document text
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

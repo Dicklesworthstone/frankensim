@@ -1,0 +1,30 @@
+frankensim.matdb-source.v1
+observation	nbs485-density	Nickel: high-purity (99.94 percent) nickel in the as-cast, cold-swaged and annealed forms (determinations at the Bureau), and commercial malleable nickel	Density as the circular reports it from the Bureau's own determinations and from the literature	The circular says the highest density, 8.907 g/cm^3 at 23 C, was obtained from cast metal; commercial malleable nickel has about 8.89 g/cm^3; the circular is a 1950 review of reported values and states no uncertainty
+observation	nbs485-elastic	Nickel, commercial grades: annealed and sand-cast 'A' nickel, cold-drawn nickel wire, 'Z-B' wire; annealed (99.2 percent) and unannealed nickel for the shear modulus	Young's modulus and modulus of rigidity as reported from the literature in lb/in^2 (1 lb/in^2 = 6894.757 Pa); Poisson's ratio reported	The circular says an average value for Young's modulus is about 30,000,000 lb/in^2; the modulus in compression is the same as in tension; the wire values are Kenyon's averages; temperature and method of each value are not restated in the passage
+scalar	density-cast	nbs485-density	density_high_purity_cast_nickel	8907	kg/m^3	constant
+uncertainty	density-cast	unstated	-	-	-	-
+validity	density-cast	T	296.15	296.15	K
+scalar	density-commercial	nbs485-density	density_commercial_malleable_nickel_about	8890	kg/m^3	constant
+uncertainty	density-commercial	unstated	-	-	-	-
+validity	density-commercial	temperature_known	0	0	1
+scalar	average	nbs485-elastic	young_modulus_nickel_average_about	2.068427188e+11	Pa	constant
+uncertainty	average	unstated	-	-	-	-
+validity	average	temperature_known	0	0	1
+scalar	cold-drawn-wire	nbs485-elastic	young_modulus_cold_drawn_nickel_wire	2.151164275e+11	Pa	constant
+uncertainty	cold-drawn-wire	unstated	-	-	-	-
+validity	cold-drawn-wire	temperature_known	0	0	1
+scalar	z-b-wire	nbs485-elastic	young_modulus_z_b_nickel_wire	2.34421748e+11	Pa	constant
+uncertainty	z-b-wire	unstated	-	-	-	-
+validity	z-b-wire	temperature_known	0	0	1
+scalar	a-sand-cast	nbs485-elastic	young_modulus_a_nickel_sand_cast	1.482372818e+11	Pa	constant
+uncertainty	a-sand-cast	unstated	-	-	-	-
+validity	a-sand-cast	temperature_known	0	0	1
+scalar	shear-annealed	nbs485-elastic	shear_modulus_annealed_nickel_99_2_percent	8.270261373e+10	Pa	constant
+uncertainty	shear-annealed	unstated	-	-	-	-
+validity	shear-annealed	temperature_known	0	0	1
+scalar	shear-unannealed	nbs485-elastic	shear_modulus_unannealed_nickel	8.000124782e+10	Pa	constant
+uncertainty	shear-unannealed	unstated	-	-	-	-
+validity	shear-unannealed	temperature_known	0	0	1
+scalar	poisson	nbs485-elastic	poisson_ratio_nickel	0.31	1	constant
+uncertainty	poisson	unstated	-	-	-	-
+validity	poisson	temperature_known	0	0	1
