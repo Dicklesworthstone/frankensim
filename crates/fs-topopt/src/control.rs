@@ -96,7 +96,20 @@ impl<'a> SolveControl<'a> {
     #[must_use]
     pub fn work(&self) -> SolveWork { self.work }
 
-    pub(crate) fn checkpoint(&mut self, stage: &'static str) -> Result<(), EvaluationStop> {
+    /// Poll the original cancellation/wall-time callback between public pipeline
+    /// phases, including caller-owned geometry construction. This does not run a
+    /// solve, consume Krylov iterations, reset work, or extend any solve budget.
+    /// The callback receives the supplied stage and current cumulative work.
+    ///
+    /// ```
+    /// use std::ops::ControlFlow;
+    /// use fs_topopt::{EvaluationStop, SolveBudget, SolveControl, SolveProgress};
+    /// let mut stop = |_: SolveProgress| ControlFlow::Break(());
+    /// let mut control = SolveControl::new(SolveBudget::default(), &mut stop);
+    /// assert_eq!(control.checkpoint("before-geometry"), Err(EvaluationStop::Cancelled));
+    /// assert_eq!(control.work().linear_solves, 0);
+    /// ```
+    pub fn checkpoint(&mut self, stage: &'static str) -> Result<(), EvaluationStop> {
         self.poll(stage, 0)
     }
 
@@ -273,6 +286,30 @@ mod tests {
         assert_eq!(control.record_preconditioner_applications(3), Err(EvaluationStop::Cancelled));
         assert_eq!(control.work().preconditioner_operator_applications, 3);
         assert_eq!(control.work().linear_iterations, 0);
+    }
+
+    #[test]
+    fn phase_checkpoints_preserve_spent_work_and_cannot_renew_the_solve_budget() {
+        let op = operator();
+        let mut seen = Vec::new();
+        let mut callback = |progress: SolveProgress| {
+            seen.push((progress.stage, progress.solve_iterations, progress.work));
+            if progress.stage == "pause" { ControlFlow::Break(()) }
+            else { ControlFlow::Continue(()) }
+        };
+        let mut control = SolveControl::new(SolveBudget { total_iterations: 7,
+            ..Default::default() }, &mut callback);
+        control.solve(&op, &[1.0;7], 1e-12, 100, "first").unwrap();
+        let spent = control.work();
+        control.checkpoint("phase").unwrap();
+        assert_eq!(control.checkpoint("pause"), Err(EvaluationStop::Cancelled));
+        control.checkpoint("phase").unwrap();
+        assert_eq!(control.work(), spent);
+        assert_eq!(control.solve(&op, &[1.0;7], 1e-12, 100, "unfunded"),
+            Err(EvaluationStop::TotalBudget { stage: "unfunded" }));
+        drop(control);
+        let phases: Vec<_> = seen.into_iter().filter(|(s,_,_)| *s == "phase" || *s == "pause").collect();
+        assert_eq!(phases, vec![("phase",0,spent),("pause",0,spent),("phase",0,spent)]);
     }
 
 }
