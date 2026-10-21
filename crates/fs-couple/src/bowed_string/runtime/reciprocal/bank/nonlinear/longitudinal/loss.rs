@@ -16,7 +16,7 @@ pub enum LongitudinalMaterialLoss {
     },
 }
 impl LongitudinalMaterialLoss {
-    pub(super) fn bind(&self, source: &MaterialStringSource)
+    pub(in crate::bowed_string::runtime::reciprocal::bank::nonlinear) fn bind(&self, source: &MaterialStringSource)
         -> Result<Option<ConcentricAxialViscosity>, ImpactError>
     {
         let Self::KelvinVoigt { viscosity_property } = self else { return Ok(None); };

@@ -83,6 +83,69 @@ pub struct LongitudinalSupportObservation {
     pub strain_energy_j: f64,
 }
 
+impl SupportedStrings {
+    /// Bind explicit small-strain axial viscous rigidity C_a [N s] once, in
+    /// original string order. The source owner must admit its material bands.
+    ///
+    /// For u=h*d_axial*X+sum(phi_n*q_n), cosine orthogonality gives
+    /// integral(C_a*u_xt^2 dx) = sum(C_a/EA*omega_n^2*qdot_n^2)
+    /// + C_a*L*(h_x*d_axial)^2*Xdot^2. The original kinetic pullback retains
+    /// every qdot_n = zdot_n-c_n*Xdot cross term; the affine endpoint term is
+    /// essential when one end moves. Equal endpoint translation has no strain
+    /// and therefore contributes no extra endpoint resistance.
+    ///
+    /// This is the same linear axial Kelvin--Voigt approximation as the fixed
+    /// endpoint bank. Geometric y_x*y_xt loss, heat and axial gas drag are not
+    /// supplied. Zero is explicit lossless data; a missing string is an error.
+    /// No state, mass, elastic force, transverse or torsional loss is replaced.
+    pub fn with_axial_viscosity(mut self, viscous_rigidity_n_s: Vec<f64>)
+        -> Result<Self, ImpactError>
+    {
+        if self.0.axial_viscosity_n_s.is_some()
+            || viscous_rigidity_n_s.len()!=self.wire_count()
+            || viscous_rigidity_n_s.iter().any(|v|!v.is_finite() || *v<0.0) {
+            return Err(invalid("axial viscosity needs one cold finite nonnegative rigidity per supported string"));
+        }
+        let mut damping=self.0.damping.clone();
+        let mut endpoint_damping=0.0;
+        for (index,&rigidity) in viscous_rigidity_n_s.iter().enumerate() {
+            let (Some(range),SupportedPotential::Longitudinal(potential))=
+                (&self.0.axial_ranges[index],&self.0.potentials[index]) else {
+                    return Err(invalid("axial viscosity requires the original longitudinal support coordinates"));
+                };
+            let ratio=rigidity/potential.ea;
+            for (index,&omega) in range.clone().zip(potential.axial_omegas()) {
+                let rate=ratio*omega*omega;
+                if !rate.is_finite() || (rigidity>0.0 && rate==0.0) {
+                    return Err(invalid("supported axial viscous rate is unrepresentable"));
+                }
+                damping[index]=rate;
+            }
+            let chord=potential.chord[2];
+            let resistance=rigidity*self.0.wires[index].length_m()*chord*chord;
+            if !resistance.is_finite() || (rigidity>0.0 && chord!=0.0 && resistance==0.0) {
+                return Err(invalid("supported axial endpoint resistance is unrepresentable"));
+            }
+            endpoint_damping+=resistance;
+        }
+        let normalized=endpoint_damping*self.0.weight*self.0.weight;
+        if !normalized.is_finite() || (endpoint_damping>0.0 && normalized==0.0) {
+            return Err(invalid("supported axial resistance normalization is unrepresentable"));
+        }
+        let data=Rc::make_mut(&mut self.0);
+        data.damping=damping;
+        data.axial_endpoint_damping_n_s_m=endpoint_damping;
+        data.axial_viscosity_n_s=Some(viscous_rigidity_n_s);
+        Ok(self)
+    }
+
+    /// Original per-string axial viscous rigidities [N s], without folding
+    /// them into the independent support's ground resistance or gas drag.
+    pub fn axial_viscosity_n_s(&self) -> Option<&[f64]> {
+        self.0.axial_viscosity_n_s.as_deref()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct LongitudinalPotential {
     model: LongitudinalString,

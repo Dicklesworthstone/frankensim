@@ -120,3 +120,63 @@ fn g3_axial_waves_move_the_common_support_and_unplayed_span_with_closed_work() {
     assert!(SupportedStrings::with_transverse_motion(&[wire(1)],&[law()],&[StringEndMotion::Second],
         &[StringTransverseMotion::Spatial {geometry:geometry([1.0,0.0,0.0])}],rail()).is_err());
 }
+
+#[test]
+fn g1_axial_viscous_power_is_the_spatial_strain_rate_integral_with_endpoint_work() {
+    for ends in [StringEndMotion::First,StringEndMotion::Second,StringEndMotion::Both] {
+        let w=wire(2);let l=w.length_m();let viscosity=0.06;let support_speed=0.03;
+        let base=SupportedStrings::with_longitudinal_motion(&[w.clone()],&[law()],&[ends],
+            &[geometry([0.6,0.8,0.0])],&[axial(vec![1,3])],
+            TranslatingSupport {initial_velocity_m_s:support_speed,..rail()}).unwrap();
+        let loaded=base.clone().with_axial_viscosity(vec![viscosity]).unwrap();
+        assert_eq!(loaded.axial_viscosity_n_s(),Some(&[viscosity][..]));
+        assert_eq!(loaded.total_mass_kg(),base.total_mass_kg());
+        assert_eq!(loaded.clock_bounds(),base.clock_bounds());
+        let n=base.mode_count();let dim=2*n;
+        let (mut original,mut damped)=(vec![0.0;dim*dim],vec![0.0;dim*dim]);
+        base.add_resistance(0,dim,&mut original).unwrap();
+        loaded.add_resistance(0,dim,&mut damped).unwrap();
+        for i in 0..dim {for j in 0..dim {assert_eq!(damped[i*dim+j],damped[j*dim+i]);}}
+        for moving_internal in [false,true] {
+            let mut relative=vec![ModalAcousticState::default();n-1];
+            if moving_internal {
+                // Arbitrary nonzero transverse velocity must not be reused as
+                // small-strain axial viscosity. Solid and gas-loaded masses differ.
+                for (i,state) in relative.iter_mut().enumerate() {
+                    state.velocity_m_sqrt_kg_per_s=0.001*(i as f64-2.3);
+                }
+            }
+            let body=loaded.body_with_relative_states(&relative).unwrap();
+            let velocity:Vec<_>=body.initial.iter().map(|q|q.velocity_m_sqrt_kg_per_s).collect();
+            let power: f64=(0..n).map(|i|(0..n).map(|j|velocity[i]
+                *(damped[(2*i+1)*dim+2*j+1]-original[(2*i+1)*dim+2*j+1])*velocity[j]).sum::<f64>()).sum();
+            let sign=match ends {StringEndMotion::First=>-1.0,StringEndMotion::Second=>1.0,StringEndMotion::Both=>0.0};
+            let solid_normalization=(2.0/(0.01*l)).sqrt();
+            let cells=4096;let mut spatial=0.0;
+            for cell in 0..cells {
+                let x=l*(cell as f64+0.5)/cells as f64;
+                let mut strain_rate=sign*0.6*support_speed/l;
+                for (local,mode) in [1,3].into_iter().enumerate() {
+                    let k=mode as f64*core::f64::consts::PI/l;
+                    strain_rate+=solid_normalization*k*relative[4+local].velocity_m_sqrt_kg_per_s*(k*x).cos();
+                }
+                spatial+=viscosity*strain_rate*strain_rate*l/cells as f64;
+            }
+            let scale=spatial.max(viscosity*support_speed*support_speed/l);
+            assert!((power-spatial).abs()<2e-12*scale,"{power} != {spatial}");
+            if !moving_internal {
+                near(spatial,viscosity/l*(sign*0.6*support_speed).powi(2),2e-13);
+            }
+        }
+        let zero=base.clone().with_axial_viscosity(vec![0.0]).unwrap();
+        let mut zero_resistance=vec![0.0;dim*dim];
+        zero.add_resistance(0,dim,&mut zero_resistance).unwrap();
+        assert_eq!(original,zero_resistance,"explicit zero preserves the elastic operator");
+        assert!(loaded.with_axial_viscosity(vec![viscosity]).is_err());
+        for bad in [vec![],vec![-1.0],vec![f64::NAN],vec![f64::MAX]] {
+            assert!(base.clone().with_axial_viscosity(bad).is_err());
+        }
+    }
+    let transverse=SupportedStrings::new(&[wire(1)],law(),rail()).unwrap();
+    assert!(transverse.with_axial_viscosity(vec![1.0]).is_err());
+}

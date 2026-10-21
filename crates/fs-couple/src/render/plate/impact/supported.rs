@@ -150,6 +150,8 @@ struct Data {
     axial_ranges: Vec<Option<Range<usize>>>,
     translation: Vec<f64>,
     damping: Vec<f64>,
+    axial_viscosity_n_s: Option<Vec<f64>>,
+    axial_endpoint_damping_n_s_m: f64,
     end_motion: Vec<StringEndMotion>,
     remainder_mass: Vec<f64>,
     absolute_drag: Option<Vec<AbsoluteStringDrag>>,
@@ -245,7 +247,8 @@ impl SupportedStrings {
     /// projection. The solid axial mass and the unresolved affine lift are
     /// counted once; positive finite-strain storage supplies its own reaction.
     /// The reference is already strung and statically balanced. Axial waves are
-    /// conservative; no axial material or gas damping is inferred.
+    /// conservative until explicit axial viscosity is bound with
+    /// `with_axial_viscosity`; no axial gas damping is inferred.
     pub fn with_longitudinal_motion(wires:&[WireSpan], stretching:&[Option<StringStretching>],
         motion:&[StringEndMotion], geometry:&[StringSupportGeometry],
         axial:&[LongitudinalSupportModes], support:TranslatingSupport) -> Result<Self,ImpactError> {
@@ -381,6 +384,7 @@ impl SupportedStrings {
         bound=bound.max(support_row);
         if !bound.is_finite() {return Err(invalid("moving support linear clock bound overflow"));}
         let result=Self(Rc::new(Data {support,wires:wires.to_vec(),potentials,ranges,storage_ranges,axial_ranges,translation,damping,
+            axial_viscosity_n_s:None,axial_endpoint_damping_n_s_m:0.0,
             end_motion,remainder_mass,absolute_drag:None,transverse:transverse_motion,weight,
             total_mass_kg:total_mass,clock_bounds:vec![det::sqrt(bound);count+1]}));
         // Check initial energy/motion representation before returning an adapter.
@@ -676,6 +680,9 @@ impl SupportedStrings {
             r[j*dim+j]+=drag;r[j*dim+p]-=drag*a;r[p*dim+j]-=drag*a;r[p*dim+p]+=drag*a*a;
         }
         r[p*dim+p]+=self.0.support.damping_n_s_m*self.0.weight*self.0.weight;
+        if self.0.axial_endpoint_damping_n_s_m!=0.0 {
+            r[p*dim+p]+=self.0.axial_endpoint_damping_n_s_m*self.0.weight*self.0.weight;
+        }
         if let Some(drag)=&self.0.absolute_drag {
             for ((law,range),mass) in drag.iter().zip(&self.0.ranges).zip(&self.0.remainder_mass) {
                 for (i,rate) in range.clone().zip(&law.modal_per_s) {

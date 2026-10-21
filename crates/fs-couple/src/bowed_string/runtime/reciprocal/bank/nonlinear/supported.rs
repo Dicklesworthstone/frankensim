@@ -56,6 +56,7 @@ pub struct SupportedMaterialStrings {
     sample_rate_hz: u32,
     gas_frame: SupportGasFrame,
     longitudinal: Option<Vec<MaterialLongitudinalSupport>>,
+    axial_material_loss: Option<Vec<fs_material::section::axial::ConcentricAxialViscosity>>,
 }
 fn poll(gate: &CancelGate) -> Result<(), ImpactError> {
     if gate.is_requested() { Err(ImpactError::Cancelled) } else { Ok(()) }
@@ -212,7 +213,7 @@ impl SupportedMaterialStrings {
         if at != mode_count { return Err(invalid("supported material basis lost source coordinates")); }
         poll(gate)?;
         Ok(Self { sources, support, supported, bodies, torsion, mode_count, sample_rate_hz, gas_frame,
-            longitudinal:longitudinal.map(|a|a.to_vec()) })
+            longitudinal:longitudinal.map(|a|a.to_vec()),axial_material_loss:None })
     }
 
     /// Physical gas frame and the explicit unresolved-field approximation.

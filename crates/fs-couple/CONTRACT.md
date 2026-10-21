@@ -3313,6 +3313,29 @@ check the source binding. This is one bridge translation, not a six-DOF bridge,
 resolved winding slip, dynamic longitudinal inertia or measured instrument
 qualification.
 
+### Source-bound axial loss at moving string terminations
+
+`SupportedMaterialStrings::in_stationary_gas_with_longitudinal_waves_and_loss`
+uses the same `LongitudinalMaterialLoss` and per-layer
+`ConcentricAxialViscosity` as the reciprocal fixed-end bank. The original
+supported dynamics retain both the relative axial resistance and the affine
+endpoint-strain resistance. The existing exact kinetic pullback supplies their
+support cross terms; no separate damping step or transverse/gas viscosity is
+substituted. Equal endpoint translation has no affine axial strain loss.
+
+Every original layer receipt remains available, including explicit zero loss.
+The source band must cover DC through the complete coupled small-signal clock
+bound. The linear uniaxial strain-rate law excludes finite-slope viscous terms,
+heat evolution and axial fluid drag. Solid axial mass stays distinct from the
+gas-loaded transverse mass. Existing states, support reactions and stationary
+gas channels are retained in the original physical owner.
+
+Focused G0/G3 regression sources cover the independent spatial strain-rate
+power, both moving endpoints, rigid translation, explicit-zero parity, layered
+material substitution reaching support/neighbor motion, and source refusal.
+Rust syntax checks and an independent spatial quadrature check passed in the
+implementation environment; native Rust execution remains required.
+
 `SupportedMaterialStrings::in_stationary_gas_with_longitudinal_waves` extends
 that same support owner with material-solid axial inertia and selected
 longitudinal sine modes. Actual 3D span endpoints, a declared transverse frame
