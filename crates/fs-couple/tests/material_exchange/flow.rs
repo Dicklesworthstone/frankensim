@@ -3,6 +3,8 @@
 mod snapshot_tests;
 #[path = "flow/diffusion.rs"]
 mod diffusion_tests;
+#[path = "flow/transport.rs"]
+mod transport_tests;
 
 use super::*;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::state::flow::*;

@@ -5,6 +5,8 @@
 pub mod snapshot;
 /// Source-backed molecular diffusion on the same complete physical assembly.
 pub mod diffusion;
+/// Joint nozzle and molecular transport with one shared species budget.
+pub mod transport;
 
 use super::*;
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::network::{
@@ -18,6 +20,7 @@ pub enum MaterialFlowError {
     Flow(GasNetworkError),
     SnapshotFlow(network::snapshot::SnapshotNozzleError),
     Diffusion(fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::DiffusionNetworkError),
+    Transport(fs_material::thermochemical_gas::energy::parcel::transfer::species::network::transport::GasTransportError),
     Exchange(ReactiveExchangeError),
     Gas { chamber: u64, error: fs_material::MaterialError },
     Cancelled,
