@@ -55,6 +55,11 @@ pub use product_importance::{
     ImportanceConfig, ImportanceEstimate, ImportanceExecution, ImportanceObservation,
     ImportanceReport,
 };
+pub use product_importance::proposal::{ImportanceFitConfig, ImportanceFitError, ImportanceProposalFit};
+pub use product_importance::proposal::execution::{
+    ImportancePilotRound, PilotImportanceConfig, PilotImportanceExecution,
+    PilotImportanceReport, PilotImportanceStage,
+};
 pub use product_lhs::{LhsEstimate, LhsExecution, LhsPlan, LhsReport};
 pub use product_mlmc::{MlmcEstimate, MlmcExecution, MlmcExecutionReport, MlmcLevelReport};
 pub use product_mlmc_allocation::{

@@ -4,6 +4,8 @@
 //! law: mu_hat = sum_i (p/q)_i 1_elite(i) z_i / sum_i (p/q)_i 1_elite(i).
 //! The ranking threshold is a pilot heuristic, not a probability estimate.
 //! Subsequent production must use a fresh key and must not include pilot data.
+pub mod execution;
+
 use super::{ImportanceConfig, ImportanceExecution};
 use crate::product_sensitivity::Sum;
 use crate::UqStatus;
