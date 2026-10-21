@@ -6,6 +6,7 @@ against how far REAL recordings differ from one another.
            each metric with its real-vs-real ruler (other dynamics, other takes, neighbouring notes)
   pair     one render against the library's recording of the same note: the same, plus ours and the difference
   batch    pair for each candidate in a CANDIDATES.json (list of the pair arguments)
+  listen   a render with no recording to compare it with: audio, maps and the reason, no gaps
   report   print every graded pair as a table, the worst gap against its real-vs-real ruler first
   diff     for every re-graded note, what moved against the ruler since the grading kept in superseded/
 
@@ -875,19 +876,20 @@ def metric_rows(gaps, real: Note, ours: Note | None, ruler):
     return rows
 
 
-def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand_y=None, cand_info=None, ours_meta=None, review=False):
-    """Write <root>/<family>/<note>/pair.json and the files it names (the P8 site contract).
-
-    Everything is built in a staging directory inside the note's directory and swapped in only when complete, so a
-    note never sits without its pair while the slow ruler is computed, and a failure leaves the earlier grading in
-    place. A failed attempt's partial files are moved to superseded/aborted-<UTC>-<pid>/, never deleted.
-    """
-    final = Path(root) / family / note_name
+def staged(final, build):
+    """Run build(stage) with a fresh staging directory inside note directory `final`; when it returns, swap the staged
+    files in whole (the earlier files move to superseded/, nothing is deleted or overwritten). If it raises, the
+    partial files move to superseded/aborted-<UTC>-<pid>-<n>/ and the earlier grading stays in place."""
     final.mkdir(parents=True, exist_ok=True)
     stage = final / f".staging-{os.getpid()}-{time.time_ns()}"
     stage.mkdir()
     try:
-        return _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, review)
+        result = build(stage)
+        supersede_existing(final)
+        for p in sorted(stage.iterdir()):
+            p.rename(final / p.name)
+        stage.rmdir()
+        return result
     except BaseException:
         if stage.exists():
             if any(stage.iterdir()):
@@ -897,6 +899,18 @@ def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand
             else:
                 stage.rmdir()
         raise
+
+
+def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand_y=None, cand_info=None, ours_meta=None, review=False):
+    """Write <root>/<family>/<note>/pair.json and the files it names (the P8 site contract).
+
+    Everything is built in a staging directory inside the note's directory and swapped in only when complete, so a
+    note never sits without its pair while the slow ruler is computed, and a failure leaves the earlier grading in
+    place. A failed attempt's partial files are moved to superseded/aborted-<UTC>-<pid>/, never deleted.
+    """
+    final = Path(root) / family / note_name
+    return staged(final, lambda stage: _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_info,
+                                                          cand_y, cand_info, ours_meta, review))
 
 
 def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, review):
@@ -954,12 +968,66 @@ def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_
     (out / "pair.json").write_text(json.dumps(clean(pj), indent=1, allow_nan=False))
     if review and ours:
         fig_review(ours, real, off, out / "review.png")
-    # the swap: the earlier files move aside (never overwritten) and the staged ones move up, with no slow work in between
-    supersede_existing(final)
-    for p in sorted(out.iterdir()):
-        p.rename(final / p.name)
-    out.rmdir()
     return pj
+
+
+def single_map_image(kind, M, f, nf, out, f_lo, f_hi, span_db=80.0):
+    """A bare spectrogram/scalogram of one signal, same axes, colours and span as map_images, normalised to its own peak."""
+    M = M[:, :nf].astype(np.float64)
+    pk = M[(f > f_lo) & (f < f_hi)].max()
+    stack = log_rows(M - pk, f, f_lo, f_hi)
+    v = np.clip((stack + span_db) / span_db, 0, 1)
+    name = f"{kind}-ours.webp"
+    save_map(_lut("magma")[(v * 255).astype(int)], out / name, nf * 4)
+    return dict(real=None, ours=name, diff=None, f_lo_hz=f_lo, f_hi_hz=f_hi, span_db=span_db)
+
+
+def write_listening(root, family, slot, y, info, meta, reason, dyn="mf", band_hz=None):
+    """A render with no recording to compare it with (an instrument with no licensed reference): audio, its two maps,
+    and the reason there is no reference, in the contract P8 accepts (real null, no_reference.reason, alignment null,
+    partials null, metrics []). No gap, no ruler, no claim."""
+    if not reason or not str(reason).strip():
+        raise ValueError("IRPDECOMP_LISTEN_REASON: a listening-only pair states why there is no reference")
+    final = Path(root) / family / slot
+
+    def build(stage):
+        n = 8192 if hz_of(midi_of(meta["note"])) < 80 else 4096
+        S, sf = stft_db(y, n)
+        C, cf = cwt_db(y)
+        nf = min(S.shape[1], C.shape[1], max(1, (len(y) - n // 2) // HOP))
+        top = float(band_hz) if band_hz else F_HI
+        figs = dict(spectrogram=single_map_image("spectrogram", S, sf, nf, stage, F_LO, top),
+                    scalogram=single_map_image("scalogram", C, cf, nf, stage, 60.0, top))
+        dur = nf * HOP / SR
+        yo = y[: int(round(dur * SR))]
+        g = 0.7 / max(float(np.abs(yo).max()), 1e-12)
+        write_wav(stage / "ours.wav", yo * g)
+        pj = dict(schema="frankensim.instrument-pair.v1", family=family, note=slot, dynamic=dyn, duration_s=round(dur, 4), real=None,
+                  no_reference=dict(reason=str(reason).strip()),
+                  ours=dict(wav=str(meta["wav"]), git_sha=meta["git_sha"], observer=meta["observer"], sample_rate=meta["sample_rate"], recipe=meta["recipe"]),
+                  audio=dict(real=None, ours="ours.wav",
+                             level_match=((f"The clip is low-passed at {band_hz:.0f} Hz (the render is valid only below it). " if band_hz else "")
+                                          + f"The peak is set to 0.70 of full scale ({20 * math.log10(g):+.1f} dB); there is no recording to match it to.")),
+                  alignment=None, figures=figs, partials=None, metrics=[],
+                  decompose=dict(version=DECOMPOSE_VERSION, grader=GRADER_VERSION, mode="listening-only", onset_s=info["onset_s"]))
+        (stage / "pair.json").write_text(json.dumps(clean(pj), indent=1, allow_nan=False))
+        return pj
+
+    return staged(final, build)
+
+
+def run_listening(c, root):
+    """The listening-only twin of run_pair: no reference note is looked up and nothing is compared."""
+    f0 = hz_of(midi_of(c["note"]))  # only the high-pass corner and the analysis window length use the nominal pitch
+    try:
+        raw = load(Path(c["wav"]))
+    except OSError as e:
+        raise GraderRefusalError(f"IRPDECOMP_RENDER_UNREADABLE: {c['wav']}: {e}") from None
+    if c.get("band_hz"):
+        raw = lowpass(raw, c["band_hz"])
+    y, info = _labelled("render", align, raw, f0, render_floor(highpass(raw, f0), f0))
+    meta = dict(wav=c["wav"], git_sha=c["git_sha"], observer=c["observer"], recipe=c["recipe"], sample_rate=wav_sample_rate(c["wav"]), note=c["note"])
+    return write_listening(root, c["family"], c.get("slot") or c["note"], y, info, meta, c.get("reason"), c.get("dyn", "mf"), c.get("band_hz"))
 
 
 DEFAULTS = dict(lib="/data/tmp/wa-inst/p2-grade/grade/library-v6-light.json", wav_dir="/data/tmp/wa-inst/refs-wav48",
@@ -1154,13 +1222,24 @@ def cmd_pair(a):
 def _batch_job(args):
     c, root = args
     try:
-        pj = run_pair(_REFS, c, root)
+        pj = run_listening(c, root) if c.get("listening_only") else run_pair(_REFS, c, root)
         return dict(family=c["family"], note=c.get("slot") or c["note"], wav=c["wav"], ok=True, metrics=len(pj["metrics"]))
     except REFUSALS as e:
         refuse_pair(root, c["family"], c.get("slot") or c["note"], e, c.get("git_sha"), c.get("wav"), c.get("dyn"))
         return dict(family=c["family"], note=c.get("slot") or c["note"], wav=c["wav"], ok=False, error=str(e))
     except OSError as e:  # the run's own trouble: reported here, never recorded as a refusal, the note's pair untouched
         return dict(family=c["family"], note=c.get("slot") or c["note"], wav=c["wav"], ok=False, error=f"I/O error, not a refusal: {e}")
+
+
+def cmd_listen(a):
+    c = dict(family=a.family, note=a.note, slot=a.slot, dyn=a.dyn, wav=a.render, git_sha=a.git_sha, observer=a.observer, recipe=a.recipe,
+             reason=a.reason, band_hz=a.band_hz)
+    try:
+        pj = run_listening({k: v for k, v in c.items() if v is not None}, a.out)
+    except REFUSALS as e:
+        refuse_pair(a.out, a.family, a.slot or a.note, e, a.git_sha, a.render, a.dyn)
+        raise SystemExit(f"{e}\n(recorded as a refusal in {a.out}/{a.family}/{a.slot or a.note}/pair.json)")
+    print(f'listening-only pair written: {a.family}/{pj["note"]}  {pj["duration_s"]} s  ({pj["no_reference"]["reason"]})')
 
 
 def cmd_batch(a):
@@ -1273,6 +1352,19 @@ def main():
     p.add_argument("--observer")
     p.add_argument("--recipe")
     p.set_defaults(fn=cmd_pair)
+    p = sub.add_parser("listen", help="a render with no recording to compare it with: audio, maps and the reason, no gaps")
+    p.add_argument("--render", required=True)
+    p.add_argument("--family", required=True)
+    p.add_argument("--note", required=True, help="nominal note name (sets the high-pass corner only); nothing is compared with it")
+    p.add_argument("--slot", help="directory and note id of the pair when it differs from --note")
+    p.add_argument("--dyn", default="mf")
+    p.add_argument("--git-sha", required=True)
+    p.add_argument("--observer", required=True)
+    p.add_argument("--recipe", required=True)
+    p.add_argument("--reason", required=True, help="one sentence: why there is no recording to compare with")
+    p.add_argument("--band-hz", type=float)
+    p.add_argument("--out", default=DEFAULTS["out"])
+    p.set_defaults(fn=cmd_listen)
     p = sub.add_parser("batch")
     common(p)
     p.add_argument("candidates")

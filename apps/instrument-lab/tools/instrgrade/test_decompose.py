@@ -298,6 +298,70 @@ class GlideTests(unittest.TestCase):
         self.assertLess(note.B, 1e-5)
 
 
+class ListeningOnlyTests(unittest.TestCase):
+    """The listening-only pair obeys every rule P8's generator enforces for a render with no reference."""
+
+    def make(self, root, **kw):
+        from instrgrade import write_wav
+        wav = Path(tempfile.mkdtemp()) / "r.wav"
+        write_wav(wav, 0.3 * tone(f0=523.25, dur=2.4, lead=0.2, noise_db=-80))
+        c = dict(family="pan-pipes", note="C5", dyn="mf", wav=str(wav), git_sha="abc", observer="receiver 1 m", recipe="r.sh",
+                 reason="No licensed recording of this instrument exists in the library.", listening_only=True)
+        c.update(kw)
+        dc._REFS = None
+        return dc._batch_job((c, root)), c
+
+    def test_the_pair_has_exactly_the_shape_p8_accepts(self):
+        import json
+        from instrgrade import load
+        root = Path(tempfile.mkdtemp())
+        res, c = self.make(root)
+        self.assertTrue(res["ok"], res)
+        d = root / "pan-pipes" / "C5"
+        pj = json.loads((d / "pair.json").read_text())
+        self.assertIsNone(pj["real"])
+        self.assertTrue(pj["no_reference"]["reason"].strip())
+        self.assertIsNone(pj["alignment"])
+        self.assertIsNone(pj["partials"])
+        self.assertEqual(pj["metrics"], [])
+        self.assertIsNone(pj["audio"]["real"])
+        self.assertEqual(pj["audio"]["ours"], "ours.wav")
+        for kind in ("spectrogram", "scalogram"):
+            f = pj["figures"][kind]
+            self.assertIsNone(f["real"])
+            self.assertIsNone(f["diff"])
+            self.assertTrue((d / f["ours"]).stat().st_size > 1000)
+            self.assertEqual((f["f_lo_hz"], f["f_hi_hz"], f["span_db"]), ((40.0 if kind == "spectrogram" else 60.0), dc.F_HI, 80.0))
+        x = load(d / "ours.wav")
+        self.assertAlmostEqual(len(x) / SR, pj["duration_s"], delta=0.05)
+        self.assertLess(float(np.abs(x).max()), 0.999)
+        self.assertGreater(float(np.abs(x).max()), 0.5)
+        self.assertEqual(pj["ours"]["git_sha"], "abc")
+        self.assertEqual(sorted(p.name for p in d.iterdir()), sorted(["pair.json", "ours.wav", "spectrogram-ours.webp", "scalogram-ours.webp"]))
+
+    def test_a_second_render_moves_the_first_aside_and_a_missing_reason_is_a_refusal_record(self):
+        import json
+        root = Path(tempfile.mkdtemp())
+        self.assertTrue(self.make(root)[0]["ok"])
+        self.assertTrue(self.make(root, git_sha="def")[0]["ok"])
+        d = root / "pan-pipes" / "C5"
+        self.assertEqual(len(list((d / "superseded").iterdir())), 1)
+        self.assertEqual(json.loads((d / "pair.json").read_text())["ours"]["git_sha"], "def")
+        res, _ = self.make(root, reason="  ", git_sha="ghi")
+        self.assertFalse(res["ok"])
+        self.assertIn("LISTEN_REASON", res["error"])
+        self.assertIn("LISTEN_REASON", json.loads((d / "pair.json").read_text())["refused"]["reason"])
+
+    def test_a_band_cap_is_stated_and_cuts_the_figures(self):
+        import json
+        root = Path(tempfile.mkdtemp())
+        res, _ = self.make(root, band_hz=3900.0)
+        self.assertTrue(res["ok"], res)
+        pj = json.loads((root / "pan-pipes" / "C5" / "pair.json").read_text())
+        self.assertEqual(pj["figures"]["spectrogram"]["f_hi_hz"], 3900.0)
+        self.assertIn("low-passed at 3900 Hz", pj["audio"]["level_match"])
+
+
 class ContractTests(unittest.TestCase):
     """write_pair against P8's validator (tools/build_instruments.py) on a synthetic library."""
 
