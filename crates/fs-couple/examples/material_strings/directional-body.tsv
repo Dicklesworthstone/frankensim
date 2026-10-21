@@ -64,3 +64,11 @@ scalar	transverse_shear_viscosity_13_23	synthetic	transverse_shear_viscosity_13_
 uncertainty	transverse_shear_viscosity_13_23	unstated	-	-	-	-
 validity	transverse_shear_viscosity_13_23	T	280	320	K
 validity	transverse_shear_viscosity_13_23	omega	0	200000	rad/s
+scalar	maxwell_modulus	synthetic	maxwell_modulus	4000000000	Pa	constant
+uncertainty	maxwell_modulus	unstated	-	-	-	-
+validity	maxwell_modulus	T	280	320	K
+validity	maxwell_modulus	omega	0	200000	rad/s
+scalar	maxwell_time	synthetic	maxwell_time	0.002	s	constant
+uncertainty	maxwell_time	unstated	-	-	-	-
+validity	maxwell_time	T	280	320	K
+validity	maxwell_time	omega	0	200000	rad/s

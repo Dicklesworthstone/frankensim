@@ -467,6 +467,8 @@ impl ReciprocalStringBank {
             .and_then(|system| system.with_mapped_nonlinear_potentials(bindings, config, gate))
             .map_err(|e| ImpactError::Owner(e.to_string()))?;
         self.source.longitudinal_waves = Some(StringBankLongitudinal { strings, config });
+        self.source.validate_body_memory_frequencies(&self.system, gate)
+            .map_err(|e| ImpactError::Owner(e.to_string()))?;
         if gate.is_requested() {
             return Err(ImpactError::Cancelled);
         }

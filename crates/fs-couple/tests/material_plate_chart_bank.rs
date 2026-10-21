@@ -269,3 +269,6 @@ fn cancelled_step_leaves_source_and_every_mechanical_component_unchanged() {
 
 #[path = "material_plate_chart_bank/multiple.rs"]
 mod multiple;
+
+#[path = "material_plate_chart_bank/relaxation.rs"]
+mod relaxation;

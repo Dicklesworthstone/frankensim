@@ -15,13 +15,15 @@
 
 /// Independent spatial body contacts through the same material assembly.
 pub mod spatial;
+/// Material strain histories coupled to every string through the original body.
+pub mod relaxation;
 pub use spatial::PlateBridgeFootprints;
 
 use super::*;
 use crate::plate_viscosity::{PlateViscosity, PlateViscosityLimits};
 use super::plate::SharedPlateBridge;
 use super::super::plate::{MaterialBodyCavity, reduce_radiating_body, validate_body_medium};
-use crate::thin_plate::{PlateChartRadiation, ResolvedPlateChart, certified_material_chart_radiators};
+use crate::thin_plate::{PlateChartRadiation, ResolvedPlateChart};
 
 /// Frozen regional plate sources and the actual bridge/observer geometry.
 #[derive(Clone, Debug)]
@@ -143,26 +145,21 @@ impl ReciprocalStringBank {
         }
         // Force maps, full material damping and pressure maps must come from
         // ONE eigenbasis, including mode signs and any degenerate eigenspace.
-        let mut ports = Vec::new();
-        let viscous = tensor.as_ref().map(|(v, limits)| {
-            if let Some(input) = &footprints {
-                let (image, projected) = body.specimen.certified_viscous_radiators_with_force_ports(
-                    r, &input.weights, input.max_projection_terms, v, *limits, gate)?;
-                ports = projected;
-                Ok(image)
-            } else { body.specimen.certified_viscous_radiators(r, v, *limits, gate) }
-        }).transpose().map_err(ReciprocalStringError::Material)?;
-        let radiators = if viscous.is_none() {
-            if let Some(input) = &footprints {
-                let (radiators, projected) = body.specimen.certified_radiators_with_force_ports(
-                    r, &input.weights, input.max_projection_terms)
-                    .map_err(ReciprocalStringError::Material)?;
-                ports = projected;
-                radiators
-            } else {
-                certified_material_chart_radiators(&body.specimen, r).map_err(ReciprocalStringError::Material)?
-            }
-        } else { Vec::new() };
+        // Retain the original complete DKT vectors, including rotations, so
+        // later source-bound memory never repeats an eigensolve or reconstructs
+        // curvature from a transverse nodal trace. The original mesh/mode
+        // budgets bound this extra retained image.
+        let basis_terms = dofs.checked_mul(r.n_modes)
+            .ok_or_else(|| invalid("retained body constitutive basis size overflow"))?;
+        let projection_terms = footprints.as_ref().map_or(basis_terms,
+            |p| p.max_projection_terms);
+        let (radiators, ports, damping, basis) = body.specimen.material_radiators_with_basis_and_force_ports(
+            r, footprints.as_ref().map_or(&[][..], |p| p.weights.as_slice()),
+            projection_terms, tensor.as_ref().map(|(v,l)| (v,*l,gate)), gate)
+            .map_err(ReciprocalStringError::Material)?;
+        let viscous = tensor.map(|(source,_)| crate::plate_viscosity::ViscousPlateImage {
+            source, radiators: radiators.clone(), damping: damping.expect("selected original tensor is projected"),
+        });
         poll(gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
@@ -173,6 +170,7 @@ impl ReciprocalStringBank {
         let mut bank = super::plate::finish_material_body_with_ports(cx, sources, &body.bridges,
             string_modes, gas, image, footprints.as_ref().map(|_| ports.as_slice()), None, law, options, gate)?;
         bank.source.material_chart = Some(body);
+        bank.source.material_chart_basis = Some(basis);
         bank.source.material_chart_viscosity = viscous;
         bank.source.material_chart_bridges = footprints;
         bank.source.material_cavity = cavity;

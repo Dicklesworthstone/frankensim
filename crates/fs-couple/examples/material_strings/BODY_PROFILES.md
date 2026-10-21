@@ -8,7 +8,9 @@ The performance's `body` record still supplies its pack, dimensions, thickness,
 mode count and observer distance. String layers, support prescriptions, torsion,
 loads, plucks, bow tracks, shared gas and optional cavity are unchanged.
 
-The rectangular profiles use `from_viscous_material_plate_chart`; the curved
+The rectangular profiles normally use `from_viscous_material_plate_chart`; an
+explicit regional-Maxwell selection uses the original elastic chart plus the
+shared coupled material-memory owner described below. The curved
 profile uses `from_material_shear_shell` and the shared MITC3+ shell owner.
 The assembled profile uses `from_material_shell_assembly` and the original
 work-conjugate mortar ties. All project material tensors on the SAME eigenbasis as bridge displacement,
@@ -70,13 +72,58 @@ usual mesh, mode-count and time-step refinement.
 
 Every selected body pack supplies `density` and either `young_modulus` plus
 `poisson_ratio`, or `young_modulus_1`, `young_modulus_2`, `poisson_ratio_12` and
-`shear_modulus_12`. It also supplies ALL six reduced in-plane viscosities in Pa s:
+`shear_modulus_12`. The default tensor loss also requires ALL six reduced in-plane viscosities in Pa s:
 `plane_stress_viscosity_11`, `_22`, `_66`, `_12`, `_16`, `_26`. The engineering
 shear convention is the original shared material owner's convention. Signed
 couplings and explicit zero entries are preserved; the tensor must be positive
 definite or explicitly all zero. Missing entries never mean zero. The legacy
 `kelvin_voigt_bending_viscosity` cannot substitute for this complete tensor.
 All original state, units, source-band, coefficient and matrix checks apply.
+
+### Source-driven material memory in a rectangular body
+
+After the last `bridge` row of either a v1 or v2 profile, an optional loss row
+selects the body's constitutive law. An absent row or `loss tensor` keeps the
+existing full Kelvin–Voigt tensor. A Maxwell selection is:
+
+```text
+loss regional-maxwell relaxed 32 1000000 1 maxwell_modulus maxwell_time
+```
+
+The fields are initial history (`relaxed` or `unrelaxed`), maximum internal
+material states (`0..=256`), maximum cold projection work, branch count (`1..=8`),
+then exactly one excess-modulus property and relaxation-time property per branch.
+Every region resolves those keys from its own original pack, in Pa and s. This
+selection replaces the tensor-viscosity requirements; unselected viscosity data
+are not applied in parallel. A zero excess modulus is explicit lossless material
+data. A missing property, incompatible units, unresolved relaxation time,
+insufficient budget or unsupported source band refuses construction.
+
+The actual region bending forms, including cross-mode terms, use the same DKT
+eigenbasis as all bridge and pressure maps. Within each region each excess
+modulus scales that region's equilibrium tensor. Regions may have different
+spectra and time constants; this is not a general three-dimensional tensor Prony
+reduction. Original conservative prestress does not relax. Every material state
+contributes storage, loss and reaction through the common string/body solver.
+Gas memory, longitudinal waves, torsion and the cavity are constructed before
+this attachment, and the original bow/force/PCM pipeline retains it afterward.
+
+Use `regional-relaxing.body` with the same commands and directional pack above
+to exercise this path. Its two added `maxwell_modulus` and `maxwell_time` source
+properties are deliberately synthetic, just like the other fixture coefficients.
+Changing a region's source values changes the coupled response without changing
+physics code. The complete source band must cover the coupled small-signal
+frequency range, including its instantaneous elastic bound. A full general
+memory model for v3/v4 shells and the mechanical-only `prepared-linear` backend
+is not supplied by this selector; an explicitly selected prepared backend
+refuses before reading material files. Existing exact-state capacity and spatial,
+modal and time refinement requirements still apply.
+
+Native regression sources cover regional material substitution reaching the
+string/bridge/PCM output, partition-independent histories, zero-law parity and
+composition with bonded strings, both transverse planes, torsion, gas memory,
+cavity and axial waves. Syntax checks passed in the implementation environment;
+these new native regressions still require execution.
 
 Profile input is bounded to 64 KiB; the original source-pack and complete-network
 limits remain. Viscous projection is capped at 16,777,216 operations and 16 body

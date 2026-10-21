@@ -17,6 +17,9 @@ use fs_material::plane_stress_viscosity::{MaterialPlane, PlaneStressViscosity};
 use fs_blake3::ContentHash;
 use fs_plate::PlateModel;
 
+/// Source-bound hereditary bending on the same original plate basis.
+pub mod relaxation;
+
 fn invalid(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
 }

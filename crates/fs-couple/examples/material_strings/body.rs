@@ -1,4 +1,4 @@
-//! Source/data adapter for directional body elasticity and full viscous coupling.
+//! Source/data adapter for directional elasticity, viscosity and material memory.
 //! Every physical operator, tensor rotation, mode, bridge and pressure projection
 //! remains in the existing plate/shell/material/reciprocal owners.
 use super::*;
@@ -16,6 +16,9 @@ const MAX_GRID: usize = 12;
 
 #[path = "body/shell.rs"]
 mod shell;
+#[path = "body/relaxation.rs"]
+mod relaxation;
+use relaxation::PlateLoss;
 
 /// An optional complete body-model selection; the performance still owns its
 /// material pack, physical dimensions, thickness, mode count and listener.
@@ -49,7 +52,7 @@ impl Profile {
         match &self.model {
             BodyModel::Plate(_) if spec.body.modes > input::MAX_PLATE_BODY_MODES => Err(format!(
                 "flat plate body profiles admit 1..={} retained body modes", input::MAX_PLATE_BODY_MODES).into()),
-            BodyModel::Plate(_) => Ok(()),
+            BodyModel::Plate(plate) => plate.loss.preflight(spec),
             BodyModel::Shell(shell) => shell.preflight(spec),
             BodyModel::Assembly(assembly) => assembly.preflight(spec),
         }
@@ -100,6 +103,22 @@ impl Profile {
             BodyModel::Assembly(assembly) => assembly.compile(spec, sources, catalog, loader, settings, cx, gate),
         }
     }
+    /// Include actual internal material coordinates in the existing cold
+    /// setup allowance, before any material-pack I/O or modal construction.
+    pub fn reserve_material_memory(&self, settings: &mut StringBankOptions) -> Result<()> {
+        if let BodyModel::Plate(plate) = &self.model { plate.loss.reserve_setup(settings)?; }
+        Ok(())
+    }
+    /// All solid/gas/axial coordinates are now fixed; memory enters the SAME
+    /// coupled mechanical owner before conversion to multiple bows and PCM.
+    pub fn bind_material_memory(&self, bank: ReciprocalStringBank, gate: &CancelGate)
+        -> Result<ReciprocalStringBank>
+    {
+        match &self.model {
+            BodyModel::Plate(plate) => plate.loss.bind(bank, gate),
+            _ => Ok(bank),
+        }
+    }
 }
 #[derive(Clone, Debug)]
 struct PlateProfile {
@@ -108,6 +127,7 @@ struct PlateProfile {
     support: EdgeSupport,
     pretension_n_m: f64,
     window: (f64, f64),
+    loss: PlateLoss,
 }
 #[derive(Clone, Debug)]
 enum Layout {
@@ -153,8 +173,9 @@ impl PlateProfile {
         let layout=if let Some((model,grain_rad))=uniform {
             Layout::Uniform { model,grain_rad,bridge:read_bridge(&mut input,nx,ny)? }
         } else { read_regions(&mut input,nx,ny)? };
+        let loss = PlateLoss::parse(input.lines.next())?;
         if input.lines.next().is_some() { return Err("unconsumed body profile record".into()); }
-        Ok(Self { nx,ny,layout,support,pretension_n_m,window })
+        Ok(Self { nx,ny,layout,support,pretension_n_m,window,loss })
     }
 
     /// Actual length of the ordered point-footprint chord [m]. Its order sets
@@ -177,8 +198,9 @@ impl PlateProfile {
         Ok(separation)
     }
 
-    /// Reduce one sourced tensor on the same elastic basis as every physical
-    /// bridge/radiation map; no scalar damping is added to these body modes.
+    /// Build the same original elastic basis for every bridge/radiation map.
+    /// Tensor viscosity is projected here; selected material memory is attached
+    /// after the complete mechanical coordinates are fixed. No scalar loss is added.
     pub fn compile(&self, spec:&input::Spec, sources:Vec<MaterialStringSource>,
         catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<NormalizedPack>,
         settings:StringBankOptions, cx:&Cx<'_>, gate:&CancelGate) -> Result<ReciprocalStringBank>
@@ -205,7 +227,7 @@ impl PlateProfile {
         for region in inputs {
             poll(gate)?;
             let pack=if region.pack=="@body" { &spec.body.pack } else { &region.pack };
-            let material=resolve_properties(pack,catalog,loader,spec,&requirements(region.model)?)?;
+            let material=resolve_properties(pack,catalog,loader,spec,&self.loss.requirements(region.model)?)?;
             let thickness=spec.body.thickness*region.thickness_ratio;
             if !thickness.is_finite() || thickness<=0.0 { return Err("regional body thickness is unrepresentable".into()); }
             regions.push(PlateRegionMaterial {
@@ -215,7 +237,9 @@ impl PlateProfile {
             });
         }
         let specimen=compile_plate_material_chart(mesh,PlateMesh::rectangle_boundary(self.nx,self.ny),regions)?;
-        let viscosity = PlateViscosity::from_chart(&specimen,VISCOSITY,gate)?;
+        let viscosity = if self.loss.is_tensor() {
+            Some(PlateViscosity::from_chart(&specimen,VISCOSITY,gate)?)
+        } else { None };
         let body = SharedMaterialPlateChartBody {
             specimen,reduction:PlateChartRadiation {
                 assembly:AssemblyOptions { pretension:self.pretension_n_m,support:self.support },
@@ -227,12 +251,19 @@ impl PlateProfile {
         };
         let limits=PlateViscosityLimits { max_modes:16,max_projection_terms:input::MAX_WORK as usize,
             reference_resistance_n_s_m:1.0 };
-        Ok(if let Some(footprints)=spatial {
-            ReciprocalStringBank::from_viscous_material_plate_chart_with_force_ports(cx,sources,spec.gas,
-                body,footprints,viscosity,limits,spec.cavity.clone(),spec.bow_law(0)?.clone(),settings,gate)?
-        } else {
-            ReciprocalStringBank::from_viscous_material_plate_chart(cx,sources,spec.gas,body,viscosity,
-                limits,spec.cavity.clone(),spec.bow_law(0)?.clone(),settings,gate)?
+        Ok(match (spatial, viscosity) {
+            (Some(footprints), Some(viscosity)) =>
+                ReciprocalStringBank::from_viscous_material_plate_chart_with_force_ports(cx,sources,spec.gas,
+                    body,footprints,viscosity,limits,spec.cavity.clone(),spec.bow_law(0)?.clone(),settings,gate)?,
+            (None, Some(viscosity)) =>
+                ReciprocalStringBank::from_viscous_material_plate_chart(cx,sources,spec.gas,body,viscosity,
+                    limits,spec.cavity.clone(),spec.bow_law(0)?.clone(),settings,gate)?,
+            (Some(footprints), None) =>
+                ReciprocalStringBank::from_material_plate_chart_with_force_ports(cx,sources,spec.gas,
+                    body,footprints,spec.cavity.clone(),spec.bow_law(0)?.clone(),settings,gate)?,
+            (None, None) =>
+                ReciprocalStringBank::from_material_plate_chart(cx,sources,spec.gas,body,
+                    spec.cavity.clone(),spec.bow_law(0)?.clone(),settings,gate)?,
         })
     }
     fn footprint(&self,node:(usize,usize))->Vec<f64> {
@@ -295,6 +326,11 @@ fn read_regions(input:&mut Records<'_>,nx:usize,ny:usize)->Result<Layout> {
 }
 
 fn requirements(model:PlateMaterialModel) -> Result<Vec<Requirement>> {
+    let mut r = elastic_requirements(model)?;
+    for key in VISCOSITY { r.push(Requirement::try_new(key,DynViscosity::DIMS,Admit::Finite)?); }
+    Ok(r)
+}
+fn elastic_requirements(model:PlateMaterialModel) -> Result<Vec<Requirement>> {
     let mut r = vec![Requirement::try_new("density",Density::DIMS,Admit::StrictlyPositive)?];
     let elastic: &[(&str,Dims)] = match model {
         PlateMaterialModel::Isotropic => &[("young_modulus",Pressure::DIMS),("poisson_ratio",Dims::NONE)],
@@ -302,7 +338,6 @@ fn requirements(model:PlateMaterialModel) -> Result<Vec<Requirement>> {
             ("poisson_ratio_12",Dims::NONE),("shear_modulus_12",Pressure::DIMS)],
     };
     for &(key,dims) in elastic { r.push(Requirement::try_new(key,dims,Admit::Finite)?); }
-    for key in VISCOSITY { r.push(Requirement::try_new(key,DynViscosity::DIMS,Admit::Finite)?); }
     Ok(r)
 }
 fn model(value:&str) -> Result<PlateMaterialModel> {

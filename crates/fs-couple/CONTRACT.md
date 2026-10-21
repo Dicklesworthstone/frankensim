@@ -3388,6 +3388,47 @@ initial history, force response, friction, component extension and rollback.
 Rust parse checks and an independent analytic/matrix-exponential oracle passed;
 native Rust execution and general continuum/modal accuracy remain unqualified.
 
+### Regional body-material memory through the original string performer
+
+`ReciprocalStringBank::with_material_plate_relaxation` binds selected excess
+modulus/time property pairs on every original plate-chart material region. The
+chart constructor retains its complete DKT displacement/rotation eigenvectors
+from the same solve as the bridge and pressure maps. `PlateBendingRelaxation`
+projects each region's actual rotated equilibrium bending form into that basis;
+all cross-mode terms and independently sourced regional histories survive. The
+shared positive factor is also used by regional material reeds. A region's
+excess modulus scales its existing tensor; prestress remains conservative. This
+is fixed-state regional proportional bending memory, not a general tensor-Prony
+plane-stress reduction or an assembled/carved-shell memory model.
+
+The existing exact coupled owner advances each real internal strain alongside
+strings, body, cavity, contact and friction. Restoring loads change both emitted
+pressure and reciprocal bridge reactions on neighboring strings. Cold cylinder
+gas and torsion rebuilds preserve the original body basis, source image and
+accepted histories; internal axial-component extension preserves and extends
+the same projections. Scalar/tensor body viscosity and authored body decay are
+mutually exclusive with this selection. Source support covers DC through the
+complete instantaneous coupled frequency bound, with positive-arm `dt/tau <= 2`.
+Original exact-state, retained-mode and projection-work limits remain binding;
+singular nonzero strain forms refuse without rank truncation.
+
+The ordinary `material_strings --body-profile` v1/v2 plate route accepts
+`loss regional-maxwell relaxed|unrelaxed MAX_STATES MAX_PROJECTION_TERMS COUNT
+MODULUS TIME ...`. It resolves only the chosen material properties and attaches
+the law after selected gas/torsion/axial construction, before the existing
+multibow performer and PCM writer. An omitted record keeps the prior tensor
+selection. Source bytes and identities remain inspectable. The mechanical-only
+prepared backend refuses this selection before material-pack I/O, and augmented
+setup work is reserved in the original budget. `regional-relaxing.body` is an
+explicitly synthetic runnable example, not a measured instrument calibration.
+
+Focused G0/G3 regression sources check regional data-only substitutions reaching
+actual pressure, PCM and sympathetic-string motion; unchanged equilibrium
+modes; gas/axial attachment-order equality; torsion/cavity composition; explicit
+zero parity; callback partitions; source/budget refusals; and cancellation
+rollback. Rust parsing and scoped whitespace checks passed. Native compilation
+and execution remain required; no measured violin/cello/bass fidelity is claimed.
+
 `SupportedMaterialStrings::in_stationary_gas_with_longitudinal_waves` extends
 that same support owner with material-solid axial inertia and selected
 longitudinal sine modes. Actual 3D span endpoints, a declared transverse frame

@@ -2,6 +2,7 @@
 use super::*;
 use crate::bernoulli_aperture::modal::exact::{CoupledArm, ExactModes};
 use fs_phs::linear_exact::MAX_LINEAR_EXPONENTIAL_BLOCK_DIM;
+use crate::plate_viscosity::relaxation::factor;
 
 fn poll(gate: &CancelGate) -> Result<(), AcousticRealizeError> {
     if gate.is_requested() {
@@ -9,67 +10,6 @@ fn poll(gate: &CancelGate) -> Result<(), AcousticRealizeError> {
     } else {
         Ok(())
     }
-}
-
-/// Positive factors of the complete regional form. Exact zero rows carry no
-/// strain energy; an unresolved singular nonzero subspace refuses. No eigenvalue
-/// clipping, diagonal replacement or rank cutoff changes the supplied material.
-fn factor(
-    form: &[f64],
-    n: usize,
-    gate: &CancelGate,
-) -> Result<Vec<Vec<f64>>, AcousticRealizeError> {
-    let active: Vec<_> = (0..n)
-        .filter(|&i| form[n * i..n * (i + 1)].iter().any(|v| *v != 0.0))
-        .collect();
-    let size = active.len();
-    if size == 0 {
-        return Ok(Vec::new());
-    }
-    let scales: Vec<_> = active.iter().map(|&i| det::sqrt(form[n * i + i])).collect();
-    if scales.iter().any(|s| !s.is_finite() || *s <= 0.0) {
-        return Err(invalid(
-            "regional bending memory needs a resolved positive strain subspace",
-        ));
-    }
-    let normalized: Vec<_> = (0..size * size)
-        .map(|i| {
-            form[n * active[i / size] + active[i % size]] / scales[i / size] / scales[i % size]
-        })
-        .collect();
-    let root = fs_la::factor::cholesky(&normalized, size).map_err(|_| {
-        invalid("regional bending memory cannot discard singular nonzero strain channels")
-    })?;
-    let mut rows = Vec::with_capacity(size);
-    for channel in 0..size {
-        poll(gate)?;
-        let mut row = vec![0.0; n];
-        for (i, &mode) in active.iter().enumerate() {
-            row[mode] = scales[i] * root.l(i, channel);
-        }
-        if row.iter().any(|v| !v.is_finite()) || row[active[channel]] == 0.0 {
-            return Err(invalid(
-                "regional material strain factor is unrepresentable",
-            ));
-        }
-        rows.push(row);
-    }
-    for i in 0..n {
-        for j in 0..n {
-            poll(gate)?;
-            let actual: f64 = rows.iter().map(|row| row[i] * row[j]).sum();
-            let scale = det::sqrt(form[n * i + i]) * det::sqrt(form[n * j + j]);
-            if !actual.is_finite()
-                || !scale.is_finite()
-                || (actual - form[n * i + j]).abs() > 1e-10 * scale
-            {
-                return Err(invalid(
-                    "regional material channels do not reconstruct the original bending form",
-                ));
-            }
-        }
-    }
-    Ok(rows)
 }
 
 impl ModalAperture {

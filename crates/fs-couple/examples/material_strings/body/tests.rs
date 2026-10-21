@@ -281,3 +281,6 @@ mod shell_input;
 
 #[path = "shell/assembly_tests.rs"]
 mod assembly_input;
+
+#[path = "relaxation_tests.rs"]
+mod material_memory;

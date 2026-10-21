@@ -152,6 +152,14 @@ impl input::Spec {
             let body = profile.as_ref().ok_or("rotational bridges require --body-profile with distinct physical bridge footprints")?;
             baselines.push(body.bridge_separation_m(&self, joint.positive_bridge_string, joint.negative_bridge_string)?);
         }
+        let mut contacts=Vec::with_capacity(self.schedule.tracks().len());
+        for track in self.schedule.tracks() {
+            let GestureTarget::BowStroke { string }=track.target else { return Err("non-bow track".into()); };
+            let GestureValue::Bow { station,.. }=track.initial else { return Err("non-bow value".into()); };
+            contacts.push(StringBowLocation { string:usize::from(string),station_fraction:station });
+        }
+        let mut settings=options(&self,contacts[0],profile.is_some(),additional_body_connections)?;
+        if let Some(body)=&profile { body.reserve_material_memory(&mut settings)?; }
         let bridge_interface_bytes = self.bridge_interfaces.pack_bytes()?;
         let interface_bytes = profile.as_ref().map(body::Profile::interface_pack_bytes)
             .transpose()?.unwrap_or(0).checked_add(self.friction.pack_bytes()?)
@@ -179,13 +187,6 @@ impl input::Spec {
             sources.push(wire.resolve_source(&mut catalog, &mut loader, &self, gate)?);
         }
         self.friction.validate_surfaces(&self, &catalog)?;
-        let mut contacts=Vec::with_capacity(self.schedule.tracks().len());
-        for track in self.schedule.tracks() {
-            let GestureTarget::BowStroke { string }=track.target else { return Err("non-bow track".into()); };
-            let GestureValue::Bow { station,.. }=track.initial else { return Err("non-bow value".into()); };
-            contacts.push(StringBowLocation { string:usize::from(string),station_fraction:station });
-        }
-        let settings=options(&self,contacts[0],profile.is_some(),additional_body_connections)?;
         let bank=if let Some(body_profile)=&profile {
             body_profile.compile(&self,sources,&mut catalog,&mut loader,settings.clone(),cx,gate)?
         } else {
@@ -245,6 +246,10 @@ impl input::Spec {
             bank.with_longitudinal_waves_and_loss(vec![resolution.clone(); self.strings.len()],
                 self.longitudinal_loss.clone(), *config, gate)?
         } else { bank };
+        let bank = match &profile {
+            Some(body) => body.bind_material_memory(bank, gate)?,
+            None => bank,
+        };
         let joint=MultiFrictionConfig { max_ports:self.bow_contact_count(),max_sweeps:128,
             max_setup_terms:1_048_576 };
         let mut bank=if let Some((width,cells))=self.bow_ribbon {

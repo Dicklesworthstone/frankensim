@@ -124,7 +124,9 @@ pub struct MaterialStringBankSource {
     prepared_linear: Option<PreparedModalBudget>,
     material_plate: Option<plate::SharedMaterialPlateBody>,
     material_chart: Option<chart::SharedMaterialPlateChartBody>,
+    material_chart_basis: Option<crate::thin_plate::RetainedPlateBasis>,
     material_chart_viscosity: Option<crate::plate_viscosity::ViscousPlateImage>,
+    material_chart_relaxation: Option<crate::plate_viscosity::relaxation::ModalPlateRelaxation>,
     material_chart_bridges: Option<chart::PlateBridgeFootprints>,
     material_shell: Option<shell::SharedMaterialShellBody>,
     material_shell_image: Option<crate::shear_shell::MaterialShellImage>,
@@ -267,7 +269,7 @@ impl ReciprocalStringBank {
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None }, cards, system })
+        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_basis: None, material_chart_viscosity: None, material_chart_relaxation: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None }, cards, system })
     }
 
     /// Select bounded cold exact propagation before playback or before adding
