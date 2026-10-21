@@ -5,6 +5,9 @@
 //! failures still propagate. A successful simulation or exhausted optimizer is
 //! not a feasible optimum: inspect the returned KKT residuals and physical rows.
 
+/// Physical constraint checks without requiring a differentiable trajectory.
+pub mod value;
+
 use super::{ScanGeometryControl,ScanPowerStudy,ScanPowerEvaluation,ScanSensitivityError,
     MovingHeatSource,ScanningEnthalpyRun,ScanObservation,ScanObservationSpec,finite,invalid,poll};
 use crate::{SqpState,SqpSample,SqpError,SqpRunReport};
@@ -98,6 +101,11 @@ impl ScanConstraintEvaluation {
 }
 
 struct EnergyRow { cap: ScanEnergyCap, fixed_j: f64, power_weights_s: Vec<f64> }
+#[derive(Clone, Copy)]
+enum LimitAdmission {
+    Differentiated(usize),
+    Values { max_rows: usize, max_energy_weights: usize },
+}
 struct Limits { bounds: Vec<ScanControlBound>, energy: Vec<EnergyRow>,
     states: Vec<ScanStateBound>, peaks: Vec<ScanPeakBound>, max_peak_samples: usize,
     response_budget: ScanResponseBudget, rows: usize }
@@ -251,6 +259,18 @@ impl Limits {
         response_budget: ScanResponseBudget, max_peak_samples: usize, maximum: usize)
         -> Result<Self,ScanSensitivityError>
     {
+        Self::compile(cx, study, bounds, caps, states, peaks, response_budget,
+            max_peak_samples, LimitAdmission::Differentiated(maximum))
+    }
+
+    // Value and derivative consumers share the exact physical bounds and
+    // authored-energy weights. Only derivative work/matrix admission differs.
+    #[allow(clippy::too_many_arguments)]
+    fn compile<F, O: ScanObservationSpec>(cx: &Cx<'_>, study: &ScanPowerStudy<F, O>, bounds: Vec<ScanControlBound>,
+        caps: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>, peaks: Vec<ScanPeakBound>,
+        response_budget: ScanResponseBudget, max_peak_samples: usize, admission: LimitAdmission)
+        -> Result<Self,ScanSensitivityError>
+    {
         poll(cx)?;
         let n=study.initial.len();
         let mut rows=caps.len().checked_add(if study.has_nonnegative_powers() {study.controls.len()} else {0})
@@ -270,8 +290,10 @@ impl Limits {
             { return Err(invalid("state bounds require an existing endpoint, finite ordered limits and a positive physical scale")); }
             rows=rows.checked_add(usize::from(state.lower.is_some())+usize::from(state.upper.is_some()))
                 .ok_or_else(||invalid("state constraint count overflow"))?;
-            response_solves=response_solves.checked_add(state.response.endpoint+1)
-                .ok_or_else(||invalid("state response work count overflow"))?;
+            if matches!(admission, LimitAdmission::Differentiated(_)) {
+                response_solves=response_solves.checked_add(state.response.endpoint+1)
+                    .ok_or_else(||invalid("state response work count overflow"))?;
+            }
         }
         let mut peak_samples=0usize;
         for peak in &peaks {
@@ -284,10 +306,13 @@ impl Limits {
             peak_samples+=peak.response.validate(cx,study.objective.endpoints_s.len(),
                 usize::MAX,max_peak_samples-peak_samples)?;
             rows=rows.checked_add(1).ok_or_else(||invalid("scan peak row count overflow"))?;
-            response_solves=response_solves.checked_add(peak.response.last_endpoint+1)
-                .ok_or_else(||invalid("scan peak response work count overflow"))?;
+            if matches!(admission, LimitAdmission::Differentiated(_)) {
+                response_solves=response_solves.checked_add(peak.response.last_endpoint+1)
+                    .ok_or_else(||invalid("scan peak response work overflow"))?;
+            }
         }
-        if (!states.is_empty() || !peaks.is_empty()) && response_solves>response_budget.max_transpose_solves {
+        if matches!(admission, LimitAdmission::Differentiated(_))
+            && (!states.is_empty() || !peaks.is_empty()) && response_solves>response_budget.max_transpose_solves {
             return Err(invalid("state bounds and objective exceed their transpose allowance"));
         }
         for bound in &bounds {
@@ -311,9 +336,20 @@ impl Limits {
             rows=rows.checked_add(usize::from(bound.lower.is_some())+usize::from(bound.upper.is_some()))
                 .ok_or_else(||invalid("scan constraint count overflow"))?;
         }
-        let dim=n.checked_add(rows).filter(|&d|d<=maximum)
-            .ok_or_else(||invalid("scan constraints exceed their explicit dense KKT dimension allowance"))?;
-        if rows==0 || dim.checked_mul(dim).is_none() {return Err(invalid("constrained scan needs bounded nonempty constraints"));}
+        if rows == 0 { return Err(invalid("constrained scan needs nonempty constraints")); }
+        match admission {
+            LimitAdmission::Differentiated(maximum) => {
+                let dim=n.checked_add(rows).filter(|&d|d<=maximum)
+                    .ok_or_else(||invalid("scan constraints exceed their explicit dense KKT dimension allowance"))?;
+                if dim.checked_mul(dim).is_none() { return Err(invalid("scan KKT shape overflow")); }
+            }
+            LimitAdmission::Values { max_rows, max_energy_weights } => {
+                if rows > max_rows { return Err(invalid("scan constraints exceed their value-row allowance")); }
+                if caps.len().checked_mul(study.controls.len()).is_none_or(|n| n > max_energy_weights) {
+                    return Err(invalid("scan energy weights exceed their value-only storage allowance"));
+                }
+            }
+        }
         let selected: BTreeMap<_,_>=study.controls.iter().enumerate().map(|(i,c)|((c.source,c.value),i)).collect();
         let mut energy=Vec::with_capacity(caps.len());
         for cap in caps {
@@ -344,13 +380,18 @@ impl Limits {
 
     fn at<F, O: ScanObservationSpec>(&self,cx: &Cx<'_>,study: &ScanPowerStudy<F, O>,point: &[f64])
         -> Result<ScanConstraintEvaluation,ScanSensitivityError>
+    { self.at_impl(cx, study, point, true) }
+
+    fn at_impl<F, O: ScanObservationSpec>(&self,cx: &Cx<'_>,study: &ScanPowerStudy<F, O>,point: &[f64],
+        derivatives: bool) -> Result<ScanConstraintEvaluation,ScanSensitivityError>
     {
         poll(cx)?;
         let powers=study.powers_at(point)?;let geometry=study.geometry_at(point)?;let n=point.len();
         let mut out=ScanConstraintEvaluation {nonnegative_power_values_w:Vec::new(),
             bound_values:Vec::with_capacity(self.bounds.len()),
             absorbed_energy_j:Vec::with_capacity(self.energy.len()),residuals:Vec::with_capacity(self.rows),
-            state_values:Vec::with_capacity(self.states.len()),jacobian:vec![0.0;self.rows*n],
+            state_values:Vec::with_capacity(self.states.len()),
+            jacobian:if derivatives {vec![0.0;self.rows*n]} else {Vec::new()},
             peak_values:Vec::with_capacity(self.peaks.len()),sampled_peak_values:Vec::with_capacity(self.peaks.len()),
             peak_smoothing_gaps:Vec::with_capacity(self.peaks.len()),
             state_transpose_iterations:0,max_state_transpose_relative_residual:0.0};
@@ -358,7 +399,7 @@ impl Limits {
             out.nonnegative_power_values_w = powers.clone();
             for (i, &x) in point[..powers.len()].iter().enumerate() {
                 if i % 256 == 0 { poll(cx)?; }
-                out.jacobian[out.residuals.len()*n+i] = -1.0;
+                if derivatives { out.jacobian[out.residuals.len()*n+i] = -1.0; }
                 out.residuals.push(-x);
             }
         }
@@ -373,19 +414,21 @@ impl Limits {
             out.bound_values.push(value);
             for (limit,sign) in [(b.lower,-1.0),(b.upper,1.0)] {
                 if let Some(limit)=limit {
-                    out.jacobian[out.residuals.len()*n+b.coordinate]=finite(sign*(chain/b.scale))?;
+                    if derivatives { out.jacobian[out.residuals.len()*n+b.coordinate]=finite(sign*(chain/b.scale))?; }
                     out.residuals.push(finite(sign*finite(value-limit)?/b.scale)?);
                 }
             }
         }
         for row in &self.energy {
             poll(cx)?;
-            let mut joules=row.fixed_j;let offset=out.residuals.len()*n;
+            let mut joules=row.fixed_j;
             for (i,(&weight,&power)) in row.power_weights_s.iter().zip(&powers).enumerate() {
                 if i%256==0 {poll(cx)?;}
                 let term=finite(weight*power)?;
                 joules=finite(joules+term)?;
-                out.jacobian[offset+i]=finite(finite(weight*study.power_derivative(i,power))?/row.cap.scale_j)?;
+                if derivatives {
+                    out.jacobian[out.residuals.len()*n+i]=finite(finite(weight*study.power_derivative(i,power))?/row.cap.scale_j)?;
+                }
             }
             out.absorbed_energy_j.push(joules);
             out.residuals.push(finite(finite(joules-row.cap.maximum_j)?/row.cap.scale_j)?);

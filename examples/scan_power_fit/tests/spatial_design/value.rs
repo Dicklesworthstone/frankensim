@@ -3,6 +3,8 @@ use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objectiv
     ScanObservationWithLoss, ScanResidualLoss};
 use fs_ascent::scan_design::value::ScanValueResponseBudget;
 
+mod feasibility;
+
 #[test]
 fn g3_value_only_matches_physical_scores_and_preserves_shared_work_accounting() {
     let m = mesh(); let k = ConductivityModel::isotropic_declared(2.).unwrap(); let c = curve();
