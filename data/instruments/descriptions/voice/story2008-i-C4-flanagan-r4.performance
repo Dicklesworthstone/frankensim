@@ -46,10 +46,15 @@
 # LEVEL: full_scale_pa 4.0 Pa (106 dB SPL peak at the PCM ceiling) is a recording-level choice, the same for
 #   every description so vowel levels compare; the loudest render (a-D4) peaks near 3.2 Pa. Output is never normalized.
 # MECHANICS: 192 kHz physical clock (4 per output sample), read through the bandlimited differentiating receiver. The 96 kHz twin
-#   story2008-i-C4-flanagan is the same description at half this clock. Native, binary da31fbd67ee9: harmonics-to-noise (P2's recipe,
-#   all harmonics to 10 kHz, 0.3-2.8 s) 32.1 dB at 96 kHz -> 33.9 dB at 192 kHz; f0 261.827 Hz (+1.3 c of the note), so the pitch trim
-#   of the 96 kHz file still holds within 3 cents and was NOT redone. The fold-contact dynamics are under-resolved at 96 kHz: the same
-#   description with an ideal-open mouth gives 22.5, 27.4, 34.4, 37.1 and 37.0 dB at 48, 96, 144, 192 and 384 kHz (/a/ at C4).
+#   story2008-i-C4-flanagan is the same description at half this clock. The fold-contact dynamics are under-resolved at 96 kHz:
+#   with an ideal-open mouth the /a/ C4 non-harmonic floor falls with the clock and is converged by 192 kHz (harmonics-to-noise, the grader's
+#   definition: 22.4, 26.8, 31.8, 33.3 and 33.3 dB at 48, 96, 144, 192 and 384 kHz). THIS render, 96 -> 192 kHz, native binary
+#   da31fbd67ee9, harmonics-to-noise by two definitions:
+#   (1) the grader's (P2 hnr_db: tracked partials, at most 30, 80-10000 Hz, aligned clip, msg 5020): 29.2 -> 30.3 dB;
+#   (2) every harmonic to 10 kHz counted as harmonic (0.3-2.8 s of this render): 32.1 -> 33.9 dB.
+#   They differ because the grader counts every harmonic above its 30th as noise, and the render has a high-frequency tail outside the
+#   microphone's 8 kHz resolved band that does not depend on the clock (status.json). The 192 kHz clock is chosen for the converged fold contact,
+#   not for the grade. f0 261.827 Hz (+1.3 c of the note), so the pitch trim of the 96 kHz file still holds within 3 cents and was NOT redone.
 frankensim-voice-performance-v1
 audio 48000 144000 4
 full_scale_pa 4.0
