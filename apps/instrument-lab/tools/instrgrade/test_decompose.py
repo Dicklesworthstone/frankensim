@@ -490,6 +490,20 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(json.loads((d / "pair.json").read_text())["ours"]["git_sha"], "third")
         self.assertFalse([p for p in d.iterdir() if p.name.startswith(".staging")])  # nothing left staged
 
+    def test_an_io_error_in_a_reference_run_is_not_written_into_the_data_as_a_refusal(self):
+        from unittest import mock
+        root = self.tmp / "ioerr"
+        dc._REFS = self.refs
+        ref_e = self.refs.find("syn", 58, "mf")[0]
+        y, info = self.refs.aligned(ref_e)
+        dc.write_pair(root, "syn", "Bb3", ref_e, self.refs, y, info)
+        before = (root / "syn" / "Bb3" / "pair.json").read_bytes()
+        with mock.patch.object(dc, "run_pair", side_effect=OSError("disk went away")):
+            res = dc._ref_job((dict(family="syn", art="", dyn="mf", notes=["Bb3"], review=False), root))
+        self.assertFalse(res["ok"])
+        self.assertIn("I/O error", res["refused"][0]["reason"])
+        self.assertEqual((root / "syn" / "Bb3" / "pair.json").read_bytes(), before)  # the earlier pair is untouched
+
     def test_a_refused_render_batch_job_writes_the_record(self):
         import json
         root = self.tmp / "refbatch"

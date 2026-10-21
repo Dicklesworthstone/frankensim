@@ -391,7 +391,7 @@ class Note:
             self.decay = np.array([_decay_db_s(self.t, p) for p in self.pl]) if self.kind == "decaying" else None
             return
         t0, t1 = d["windows"]["sustain"]
-        ps = track_partials(self.y, self.f0, kmax=min(40, int(15000 // self.f0)), fit_inharmonicity=True, t_window=(t0, t1))
+        ps = track_partials(self.y, self.f0, kmax=min(40, int(15000 // self.f0)), fit_inharmonicity=True, t_window=(t0, t1), f0_fixed=self.f0)
         self.pk = np.array([p.k for p in ps], int)
         self.pf = np.array([p.mean_f_hz for p in ps])
         self.pmean = np.array([p.mean_level_db for p in ps])
@@ -995,6 +995,7 @@ def _init(lib, wav, refs_json):
 
 
 REFUSALS = (OnsetMisaligned, GraderRefusalError, SystemExit, ValueError, IndexError, KeyError, OSError)
+NOTE_REFUSALS = REFUSALS[:-1]  # what is a fact about a note; an OSError in a run is not (a missing render file is: _batch_job)
 
 
 def supersede_existing(d):
@@ -1064,10 +1065,12 @@ def _ref_job(args):
         try:
             pj = run_pair(_REFS, dict(c, note=name), root)
             return dict(family=c["family"], art=c["art"], note=name, ok=True, metrics=len(pj["metrics"]), refused=refused)
-        except REFUSALS as e:
+        except NOTE_REFUSALS as e:
             refused.append(dict(note=name, reason=str(e)))
             if (Path(root) / c["family"] / name / "pair.json").exists():  # an older pair of this note is stale: supersede it
                 refuse_pair(root, c["family"], name, e, dyn=c.get("dyn"))
+        except OSError as e:  # the run's own trouble (disk, a moved directory): reported, never written into the data as a refusal
+            refused.append(dict(note=name, reason=f"I/O error, not a refusal: {e}"))
     return dict(family=c["family"], art=c["art"], ok=False, refused=refused)
 
 
