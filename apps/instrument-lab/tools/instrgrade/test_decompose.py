@@ -278,6 +278,36 @@ class OnsetRuleTests(unittest.TestCase):
         _, qi = dc.align(recording, f0, floor, anchor_s=t0 + 0.3, at_start=False)  # as the library gives it: an anchor inside the note
         self.assertLess(abs(ri["onset_s"] - qi["onset_s"]), 0.003)  # the same instant, found by the same rule on both
 
+    def pluck_with_early_touch(self, f0=233.08, noise_db=None, lead=2.0, seed=3):
+        # a plucked note (a step to full level, then a 0.4 s decay) preceded by a 20 ms touch of the string 24 dB under it and a 20 ms gap:
+        # the envelope crosses steady - 20 dB at the touch, drops back under it, and crosses again at the pluck
+        n = int((lead + 3.0) * SR)
+        tt = np.arange(n) / SR
+        env = np.zeros(n)
+        env[(tt >= lead - 0.040) & (tt < lead - 0.020)] = 0.05
+        k = tt >= lead
+        env[k] = 0.8 * np.exp(-(tt[k] - lead) / 0.4)
+        x = env * np.sin(2 * np.pi * f0 * tt)
+        if noise_db is not None:
+            x = x + np.random.default_rng(seed).standard_normal(n) * 10 ** (noise_db / 20)
+        return x, lead
+
+    def test_an_early_touch_under_the_steady_level_does_not_make_a_reference_unalignable(self):
+        # the failure of the regrade: guitar Gb4/F5 and violin B5 references were refused (cut onset 1.4-2.7 ms against 10 ms) because the
+        # anchored detection took the last dip under the threshold before the note and the re-detection on the cut took the FIRST crossing
+        f0 = 233.08
+        recording, t0 = self.pluck_with_early_touch(f0, noise_db=-62.0)
+        y = dc.highpass(recording, f0)
+        e, tms = dc.env_rms_db(y, win=dc.env_window(f0))
+        thr = dc.steady_level_db(e[int((t0 - 0.1) * 1000): int((t0 + 3.0) * 1000)]) - dc.STEADY_DROP_DB
+        self.assertLess(float(tms[np.flatnonzero(e > thr)[0]]), t0 - 0.015, "the setup has an early crossing: the test discriminates")
+        _, qi = dc.align(recording, f0, dc.floor_of_file(recording, f0), anchor_s=t0 + 0.3, at_start=False)  # raised ONSET_MISALIGNED (4.28 ms)
+        self.assertAlmostEqual(qi["cut_onset_s"], dc.preroll_s(f0), delta=0.0015)
+        # the pluck, not the touch: the touch ended 20 ms before the pluck and the envelope is back under the threshold from 15.7 ms before it;
+        # the zero-phase high-pass rings ahead of a step edge, so the final rise starts a few ms before t0 (12.7 ms in the noise-free signal)
+        self.assertGreater(qi["onset_s"], t0 - 0.0157)
+        self.assertLess(qi["onset_s"], t0 + 0.005)
+
     def test_a_steep_onset_re_detects_after_the_cut_even_with_an_overshoot_and_noise(self):
         # A guard for the class of failure that refused a UIowa clarinet note (a steep 40 dB rise, a wandering steady level, noise
         # on the peak). This synthetic signal passes under the old rule too: the real recording (BbClar.mf.C4B4 @ Bb4, which is not

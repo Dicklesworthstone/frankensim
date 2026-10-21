@@ -126,11 +126,12 @@ def onset_times(y, floor_db, anchor_s=None, f0_hz=None, steady_db=None):
     crossing. A alone fires on dust in a digital-silence render; B alone on a recording whose steady level is
     barely above its noise.
 
-    With no anchor the first crossing is taken (a render, or a cut). With an anchor (a time inside the note, from
-    the library's segmentation) the crossing is the one that precedes it: walk back from the anchor to where the
-    level was last under the threshold. If B never was under it within the window, the note begins legato on the
-    previous one and has no level onset: refused, never guessed (align() hands a recording that begins at its own
-    onset zeros to start from, so a plucked string is not mistaken for that).
+    With no anchor the first crossing is taken (a render). With an anchor (a time inside the note, from
+    the library's segmentation, or the expected onset in a cut of such a recording) the crossing is the one that
+    precedes it: walk back from the anchor to where the level was last under the threshold. If B never was under it
+    within the window, the note begins legato on the previous one and has no level onset: refused, never guessed
+    (align() hands a recording that begins at its own onset zeros to start from, so a plucked string is not mistaken
+    for that).
     """
     e, t = env_rms_db(y, win=env_window(f0_hz))
     n = len(e)
@@ -206,6 +207,17 @@ def align(raw, f0_hz, floor_db, anchor_s=None, at_start=False):
         pk = pk_cut
     ra, rb = onset_times(cut, floor_db, None, f0_hz)
     got = max(ra, rb)
+    if anchor_s is not None and abs(got - pre) * 1000 > ALIGN_TOL_MS:
+        # A recording's onset was found by walking back from the note to the last dip under the threshold. The first crossing of its cut
+        # can be earlier: a touch, a click or a fret noise that reached the threshold, dropped back under it and was followed by the note
+        # lies inside the lead-in (guitar Gb4/F5 and violin B5 were refused for it). Re-detect the way the onset was found, on the cut
+        # given silence to start from (as above), and accept it only if that lands on the lead-in to the same tolerance.
+        padc = int((pre + win / SR + 0.005) * SR)
+        try:
+            ra, rb = onset_times(np.concatenate([np.zeros(padc), cut]), floor_db, padc / SR + pre, f0_hz, pk_cut)
+            got = max(ra, rb) - padc / SR
+        except OnsetMisaligned:
+            pass  # no better: the first-crossing miss below stands
     if abs(got - pre) * 1000 > ALIGN_TOL_MS:
         raise OnsetMisaligned(f"IRPDECOMP_ONSET_MISALIGNED: cut onset {got * 1000:.2f} ms, expected {pre * 1000:.1f} ms")
     off = pad / SR
