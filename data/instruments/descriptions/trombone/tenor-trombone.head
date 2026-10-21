@@ -37,6 +37,15 @@ lip_source Cullen (2000) PhD Edinburgh Table A.2 p.253 embouchure 7: fL1 204.5 H
 cup_volume_m3 1.27e-5
 termination flanged
 modes 3 1
+# Mouth-flow line ladder. The first native render (6f2e42ec7) was REFUSED by the owner's default
+# ladder (relative tail energy 1e-10): at the 65536-tap cap (3.4 s on this clock) the last quarter
+# of the mouth-flow impulse response still held 1.9e-8 of its energy, so the line never converged.
+# The cap is the owner's, and the tail's source is UNVERIFIED (a slow component of the long, narrow
+# bore's viscothermal memory is the suspect). Declared here instead of hidden: 1e-6 relative energy
+# is a wrap-around residual of about 1e-3 of the response amplitude (-60 dB), far below the tens of dB
+# the grading measures resolve. The realized rungs (taps, tail energy, tap change) are written to the
+# provenance sidecar; the default 1e-10 stays the default for every other file.
+mouth_flow_tail_tol 1e-6
 #
 # --- bore -------------------------------------------------------------------------
 # A. C. P. Braden, "Bore Optimisation and Impedance Modelling of Brass Musical

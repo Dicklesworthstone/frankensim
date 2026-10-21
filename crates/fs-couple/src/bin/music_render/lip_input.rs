@@ -136,6 +136,18 @@ fn number(x: f64) -> String {
 }
 
 fn input_json(i: &LipInfo) -> String {
+    let ladder = i
+        .mouth_flow_ladder
+        .iter()
+        .map(|(taps, tail, change)| {
+            format!(
+                "{{\"taps\":{taps},\"tail_energy\":{},\"tap_change\":{}}}",
+                number(*tail),
+                number(*change)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     let lip = &i.lip;
     let mic = &i.microphone;
     let line = &i.line;
@@ -144,7 +156,7 @@ fn input_json(i: &LipInfo) -> String {
          \"lip\":{{\"mass_kg\":{},\"stiffness_n_m\":{},\"damping_n_s_m\":{},\"width_m\":{},\"rest_gap_m\":{},\"face_area_m2\":{},\"source\":{}}},\
          \"cup_volume_m3\":{},\"control_rate_hz\":{},\"lip_tension_track\":{},\
          \"reflectance_line\":{{\"taps\":{},\"round_trip_samples\":{},\"peak_reflectance\":{},\"rungs_tried\":{},\"tail_energy\":{},\"peak_shift_cents\":{}}},\
-         \"mouth_flow_line\":{{\"taps\":{},\"rungs\":{}}},\
+         \"mouth_flow_line\":{{\"taps\":{},\"rungs\":{},\"tail_tol\":{},\"ladder\":[{}]}},\
          \"microphone\":{{\"position_m\":[{},{},{}],\"radial_rings\":{},\"angular_points\":{},\"resolved_band_hz\":{}}},\
          \"model_scope\":\"one held bore; 1-DOF outward-striking lip island; plane-mode multimodal reflectance line; plane-mode mouth-flow transfer; baffled-disk Rayleigh radiation at the declared point; no valve or slide motion, no bore wall vibration, no breath heating, no nonlinear propagation; the declared band is the resolved band of the radiation quadrature and the clock's flanged-radiation ceiling\"}}",
         fs_couple::brass_loop::performance::LIP_PERFORMANCE_SCHEMA,
@@ -173,6 +185,8 @@ fn input_json(i: &LipInfo) -> String {
         number(line.peak_shift_cents),
         i.mouth_flow_taps,
         i.mouth_flow_rungs,
+        number(i.mouth_flow_tail_tol),
+        ladder,
         number(mic.position_m[0]),
         number(mic.position_m[1]),
         number(mic.position_m[2]),

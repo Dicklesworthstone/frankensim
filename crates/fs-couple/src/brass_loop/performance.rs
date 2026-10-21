@@ -23,6 +23,7 @@
 //! cup_volume_m3 <volume>
 //! termination <flanged|unflanged|ideal_open>
 //! modes <n_modes> <extra_slices>
+//! mouth_flow_tail_tol <relative_energy>      optional; default 1e-10 (the line ladder's own)
 //! cylinder <radius_m> <length_m>             bore records, mouthpiece to bell
 //! cone <inlet_radius_m> <outlet_radius_m> <length_m>
 //! bessel <inlet_radius_m> <outlet_radius_m> <length_m> <flare> <pieces>
@@ -107,6 +108,7 @@ pub struct LipDescription {
     extra_slices: usize,
     duct: Duct,
     microphone: CircularOutletReceiver,
+    mouth_flow_tail_tol: f64,
     schedule: GestureSchedule,
     blow_track: String,
     tension_track: Option<String>,
@@ -300,6 +302,7 @@ impl LipDescription {
         let mut termination: Option<Termination> = None;
         let mut modes: Option<(usize, usize)> = None;
         let mut microphone: Option<CircularOutletReceiver> = None;
+        let mut mouth_flow_tail_tol: Option<f64> = None;
         let mut segments: Vec<Segment> = Vec::new();
         for (index, raw) in lines {
             let line = index + 1;
@@ -438,6 +441,14 @@ impl LipDescription {
                         .map_err(|e| format!("line {line}: bessel: {e}"))?;
                     f.finish()?;
                 }
+                "mouth_flow_tail_tol" => {
+                    let value = f.positive()?;
+                    if value >= 1.0 {
+                        return f.err("a relative tail energy must be below 1");
+                    }
+                    once(&mut mouth_flow_tail_tol, value, &f)?;
+                    f.finish()?;
+                }
                 "microphone" => {
                     let position = [f.number()?, f.number()?, f.number()?];
                     let rings = f.count(128)? as usize;
@@ -532,6 +543,7 @@ impl LipDescription {
             extra_slices,
             duct: Duct { segments },
             microphone: microphone.ok_or_else(|| missing("microphone"))?,
+            mouth_flow_tail_tol: mouth_flow_tail_tol.unwrap_or(LineLadder::default().tail_tol),
             schedule,
             blow_track,
             tension_track,
@@ -574,7 +586,10 @@ impl LipDescription {
             self.rate_hz,
             voice.port_impedance(),
             None,
-            &LineLadder::default(),
+            &LineLadder {
+                tail_tol: self.mouth_flow_tail_tol,
+                ..LineLadder::default()
+            },
         )
         .map_err(|e| format!("mouth-flow line refused: {e}"))?;
         let mouth_radius_m = self
@@ -612,6 +627,12 @@ impl LipDescription {
             line,
             mouth_flow_taps: mouth_receipt.n_fft,
             mouth_flow_rungs: mouth_receipt.rungs.len(),
+            mouth_flow_tail_tol: self.mouth_flow_tail_tol,
+            mouth_flow_ladder: mouth_receipt
+                .rungs
+                .iter()
+                .map(|r| (r.n_fft, r.tail_energy, r.tap_change))
+                .collect(),
             control_rate_hz: self.schedule.control_rate_hz,
             has_lip_tension_track: self.tension_track.is_some(),
         };
@@ -671,6 +692,11 @@ pub struct LipInfo {
     pub mouth_flow_taps: usize,
     /// Ladder rungs the mouth-flow line traversed.
     pub mouth_flow_rungs: usize,
+    /// Relative tail energy the mouth-flow ladder was asked to reach (the
+    /// owner's default unless the file declares `mouth_flow_tail_tol`).
+    pub mouth_flow_tail_tol: f64,
+    /// Every mouth-flow rung: `(taps, tail energy, tap change vs the previous rung)`.
+    pub mouth_flow_ladder: Vec<(usize, f64, f64)>,
     /// Control clock of the pressure phrase [Hz].
     pub control_rate_hz: u32,
     /// Whether a pre-stress (lip tension) track drives the lip.
@@ -921,6 +947,15 @@ mod tests {
     }
 
     #[test]
+    fn the_mouth_flow_tail_tolerance_defaults_to_the_ladders_own_and_is_declarable() {
+        let default = LipDescription::from_bytes(fixture("").as_bytes()).expect("parses");
+        assert_eq!(default.mouth_flow_tail_tol, LineLadder::default().tail_tol);
+        let declared = LipDescription::from_bytes(fixture("mouth_flow_tail_tol 1e-6\n").as_bytes())
+            .expect("parses");
+        assert_eq!(declared.mouth_flow_tail_tol, 1.0e-6);
+    }
+
+    #[test]
     fn control_ticks_apply_at_the_ceiling_of_their_start() {
         let (control, rate) = (700, 19_200);
         assert_eq!(tick_at(0, control, rate), 0);
@@ -950,6 +985,12 @@ mod tests {
                 "damping must be nonnegative",
             ),
             ("modes 0 1\n", "outside its admitted range"),
+            ("mouth_flow_tail_tol 1\n", "below 1"),
+            ("mouth_flow_tail_tol 0\n", "positive"),
+            (
+                "mouth_flow_tail_tol 1e-6\nmouth_flow_tail_tol 1e-6\n",
+                "only appear once",
+            ),
             ("bessel 0.01 0.02 0.1 1 0\n", "outside its admitted range"),
         ] {
             let error = LipDescription::from_bytes(fixture(extra).as_bytes()).expect_err(extra);
