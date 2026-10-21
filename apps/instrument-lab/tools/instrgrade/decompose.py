@@ -961,11 +961,13 @@ def refuse_pair(root, family, note, reason, render_sha=None, render_wav=None, dy
 
 
 def has_render(root, family, note):
-    """True if <root>/<family>/<note>/pair.json already holds a render (ours filled in): a reference-only run never replaces it."""
+    """True if <root>/<family>/<note>/pair.json already speaks for a render: ours filled in, or a refusal record that
+    names the render it refused. A reference-only run leaves both alone."""
     try:
-        return json.loads((Path(root) / family / note / "pair.json").read_text()).get("ours") is not None
+        j = json.loads((Path(root) / family / note / "pair.json").read_text())
     except (OSError, ValueError):
         return False
+    return j.get("ours") is not None or bool((j.get("refused") or {}).get("render_sha"))
 
 
 def _ref_job(args):
@@ -974,7 +976,7 @@ def _ref_job(args):
     refused = []
     for name in c["notes"]:
         if has_render(root, c["family"], name):
-            return dict(family=c["family"], art=c["art"], note=name, ok=True, kept="graded render pair left untouched", refused=refused)
+            return dict(family=c["family"], art=c["art"], note=name, ok=True, kept="a graded or refused render pair is left untouched", refused=refused)
         try:
             pj = run_pair(_REFS, dict(c, note=name), root)
             return dict(family=c["family"], art=c["art"], note=name, ok=True, metrics=len(pj["metrics"]), refused=refused)

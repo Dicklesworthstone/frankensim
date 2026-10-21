@@ -288,6 +288,13 @@ class ContractTests(unittest.TestCase):
         self.assertIn("untouched", res["kept"])
         self.assertIsNotNone(__import__("json").loads((root / "syn" / "Bb3" / "pair.json").read_text())["ours"])
 
+    def test_reference_only_run_leaves_a_refusal_record_of_a_render_alone(self):
+        root = self.tmp / "keeprefusal"
+        dc.refuse_pair(root, "syn", "Bb3", "IRPDECOMP_NOT_THE_NAMED_NOTE: test", render_sha="zz", render_wav="r.wav", dyn="mf")
+        self.assertTrue(dc.has_render(root, "syn", "Bb3"))
+        dc.refuse_pair(root, "syn", "A3", "stale pair superseded")  # no render_sha: it names no render
+        self.assertFalse(dc.has_render(root, "syn", "A3"))
+
     def test_reference_only_run_falls_back_to_the_next_verifying_note(self):
         root = self.tmp / "fallback"
         dc._REFS = self.refs
