@@ -86,6 +86,18 @@ const ROSEWOOD_LOSS: &str = include_str!(
     "../../../data/instruments/descriptions/bars/rosewood-loss-chaigne-doutaut1997.tsv"
 );
 
+/// The one measured wooden mallet head (Doutaut and Chaigne 1994, J. Phys. IV C5-613): a boxwood
+/// head striking a rosewood bar. Its Hertz contact card and equivalent mass are a declared SURROGATE
+/// for the rosewood mallets of the graded recording (`xylophone.rosewood.mf`), whose heads are not
+/// described anywhere open.
+const BOXWOOD_CONTACT_PACK: &str = "contact-boxwood-mallet-on-rosewood-bar-doutaut-chaigne1994";
+const BOXWOOD_CONTACT: &str = include_str!(
+    "../../../data/matdb/seed-v1/contact-boxwood-mallet-on-rosewood-bar-doutaut-chaigne1994/contact.tsv"
+);
+const BOXWOOD_MALLET: &str = include_str!(
+    "../../../data/matdb/seed-v1/mallet-boxwood-rosewood-bar-doutaut-chaigne-jp4-1994/properties.tsv"
+);
+
 fn scalar(pack: &str, property: &str) -> f64 {
     let row = pack.lines().find_map(|line| {
         let fields: Vec<_> = line.split('\t').collect();
@@ -1553,6 +1565,38 @@ fn render_with(
     local_compliance_ratio: f64,
     rosewood_loss: bool,
 ) -> (Vec<f64>, f64) {
+    let mut law = hertz_law(HEAD_E, HEAD_NU);
+    law.reduced_modulus /= 1.0 + local_compliance_ratio;
+    let interface = hertz_interface();
+    let silicone = |overlap: f64| force(law, &interface, overlap);
+    let stroke = Stroke {
+        mass: HEAD_MASS,
+        speed: STROKE,
+        force: &silicone,
+    };
+    let (samples, contact_time, _) =
+        render_stroke(ladder, transfer, substeps, rosewood_loss, &stroke);
+    (samples, contact_time)
+}
+
+/// One strike: the head's equivalent mass, its approach speed, and the normal
+/// contact force as a function of head-bar overlap (zero when apart).
+struct Stroke<'a> {
+    mass: f64,
+    speed: f64,
+    force: &'a dyn Fn(f64) -> f64,
+}
+
+/// The strike shared by every head: point-mass head, contact at the strike
+/// node, five elastic modes plus the six rigid ones. Returns the pressure
+/// history, the first separation time and the peak contact force.
+fn render_stroke(
+    ladder: &Ladder,
+    transfer: [C64; 5],
+    substeps: u32,
+    rosewood_loss: bool,
+    stroke: &Stroke<'_>,
+) -> (Vec<f64>, f64, f64) {
     let mut modes: Vec<_> = (0..5)
         .map(|mode| ModalAcousticMode {
             angular_frequency_rad_s: TAU * ladder.rungs[3].frequencies[mode],
@@ -1582,13 +1626,11 @@ fn render_with(
     phi.extend_from_slice(&ladder.rigid_projectors);
     let mut workspace = ModalAcousticWorkspace::new(&body);
     let mut forces = vec![0.0; phi.len()];
-    let mut law = hertz_law(HEAD_E, HEAD_NU);
-    law.reduced_modulus /= 1.0 + local_compliance_ratio;
-    let interface = hertz_interface();
     let h = 1.0 / f64::from(RATE * substeps);
-    let (mut position, mut speed) = (0.0, STROKE);
+    let (mut position, mut speed) = (0.0, stroke.speed);
     let mut detached = false;
     let mut contact_time = 0.0;
+    let mut peak_force: f64 = 0.0;
     let mut samples = Vec::with_capacity(6 * RATE as usize);
     for sample in 0..6 * RATE as usize {
         let mut pressure = 0.0;
@@ -1607,8 +1649,9 @@ fn render_with(
             let load = if detached {
                 0.0
             } else {
-                force(law, &interface, overlap)
+                (stroke.force)(overlap)
             };
+            peak_force = peak_force.max(load);
             for (f, p) in forces.iter_mut().zip(&phi) {
                 *f = p * load;
             }
@@ -1616,13 +1659,13 @@ fn render_with(
                 .step_into(&forces, &mut workspace)
                 .expect("material strike on 3-D modes");
             pressure = frame.observer_pressure_pa;
-            speed -= h * load / HEAD_MASS;
+            speed -= h * load / stroke.mass;
             position += h * speed;
         }
         samples.push(pressure);
     }
     assert!(detached && contact_time > 0.0);
-    (samples, contact_time)
+    (samples, contact_time, peak_force)
 }
 
 fn artifact_dir() -> Option<PathBuf> {
@@ -1892,4 +1935,200 @@ fn bar_s1_rosewood_loss_scenario_render_replays_and_decays() {
         early > 0.0 && late < 1e-3 * early,
         "loss law must damp the note"
     );
+}
+
+/// Player strike speeds of the boxwood-surrogate renders. No open source
+/// measures the strike speed of an mf xylophone stroke (hunt
+/// corpus/hunt/bars-mallets.md section 3); the one measured mallet impact is
+/// 2.1 m/s (Doutaut and Chaigne 1994, p. C5-615, dynamic not stated). The
+/// declared range spans it downward and stays inside the contact card's
+/// velocity validity. It is a PLAYER input, never chosen against the recording.
+const PLAYER_SPEEDS_M_S: [f64; 3] = [0.5, 1.0, 2.1];
+/// Fixed before any grade: the nominal render uses the one measured speed.
+const NOMINAL_SPEED_M_S: f64 = 2.1;
+/// One-at-a-time factors on K and on the head mass at the nominal speed.
+const SENSITIVITY: [f64; 2] = [0.5, 2.0];
+/// A 0.16 ms contact spans about eight output samples: finer substeps than the
+/// 3 ms silicone strike needed.
+const BOXWOOD_SUBSTEPS: [u32; 3] = [16, 32, 64];
+
+/// The silicone head is replaced by the measured boxwood head as a SURROGATE
+/// for the recording's rosewood mallets: power law F = K delta^alpha from the
+/// contact card, the card's equivalent mass, the sourced rosewood loss law,
+/// a declared player-speed sweep and one-at-a-time K and mass sensitivity.
+/// The bar keeps five shape-selected modes below 3.2 kHz, so a strike click
+/// above them cannot appear yet; that is the next step, not this one.
+#[test]
+fn bar_s1_boxwood_mallet_surrogate_renders_speed_and_sensitivity_sweeps() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let started = Instant::now();
+    let card = fs_matdb::ContactLawCard::parse(BOXWOOD_CONTACT_PACK, BOXWOOD_CONTACT)
+        .expect("boxwood contact card");
+    let mass = scalar(BOXWOOD_MALLET, "mallet_equivalent_mass");
+    let ladder = undercut();
+    let transfer = *radiation().pressures.last().unwrap();
+    let strike = |k: f64, m: f64, v: f64, substeps: u32| {
+        let law = |overlap: f64| {
+            if overlap > 0.0 {
+                k * det::pow(overlap, card.alpha)
+            } else {
+                0.0
+            }
+        };
+        let stroke = Stroke {
+            mass: m,
+            speed: v,
+            force: &law,
+        };
+        render_stroke(ladder, transfer, substeps, true, &stroke)
+    };
+    // Doutaut and Chaigne Eq. 3 against an immovable target (reduced mass = head).
+    let rigid_contact = |k: f64, m: f64, v: f64| 3.21 * det::pow(m * m / (k * k * v), 0.2);
+    let relative = |a: &[f64], b: &[f64]| {
+        (a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f64>()
+            / b.iter().map(|y| y * y).sum::<f64>())
+        .sqrt()
+    };
+    let k = card.k_n_per_m_alpha;
+
+    // Time axis at the nominal stroke, then same-host replay.
+    let ladder_renders: Vec<_> = BOXWOOD_SUBSTEPS
+        .iter()
+        .map(|&s| strike(k, mass, NOMINAL_SPEED_M_S, s))
+        .collect();
+    let differences: Vec<f64> = ladder_renders
+        .windows(2)
+        .map(|w| relative(&w[0].0, &w[1].0))
+        .collect();
+    let finest = *BOXWOOD_SUBSTEPS.last().unwrap();
+    let (nominal, nominal_contact, nominal_peak) = ladder_renders.last().unwrap().clone();
+    let (replay, replay_contact, _) = strike(k, mass, NOMINAL_SPEED_M_S, finest);
+    assert_eq!(nominal_contact.to_bits(), replay_contact.to_bits());
+    assert!(
+        nominal
+            .iter()
+            .zip(&replay)
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "same-host exact replay"
+    );
+    assert!(
+        differences.windows(2).all(|d| d[1] < d[0]) && *differences.last().unwrap() < 0.01,
+        "boxwood strike time ladder needs refinement: {differences:?}"
+    );
+    row(
+        "boxwood-surrogate-time-ladder",
+        "time-substep",
+        "pass",
+        &format!(
+            "{{\"substeps\":{BOXWOOD_SUBSTEPS:?},\"relative_l2_differences\":{differences:?},\"tolerance_relative_l2\":0.01,\"replay_bits_equal\":true,\"contact_time_s\":{nominal_contact},\"acceptance\":false}}"
+        ),
+        started,
+    );
+
+    // Player-speed sweep: every stroke must lie inside the card's identified regime.
+    let mut sweep = Vec::new();
+    for v in PLAYER_SPEEDS_M_S {
+        let (signal, contact, peak) = if v.to_bits() == NOMINAL_SPEED_M_S.to_bits() {
+            (nominal.clone(), nominal_contact, nominal_peak)
+        } else {
+            strike(k, mass, v, finest)
+        };
+        card.lookup(peak, v)
+            .expect("player stroke inside the boxwood card's validity");
+        let rigid = rigid_contact(k, mass, v);
+        row(
+            "boxwood-surrogate-speed",
+            "player-speed",
+            "pass",
+            &format!(
+                "{{\"speed_m_s\":{v},\"contact_time_s\":{contact},\"rigid_target_eq3_contact_time_s\":{rigid},\"peak_force_n\":{peak},\"k_n_per_m_alpha\":{k},\"alpha\":{},\"mass_kg\":{mass},\"acceptance\":false}}",
+                card.alpha
+            ),
+            started,
+        );
+        sweep.push((v, signal, contact, peak, rigid));
+    }
+    // Hertz scaling: faster strokes are shorter and harder.
+    assert!(
+        sweep.windows(2).all(|w| w[1].2 < w[0].2 && w[1].3 > w[0].3),
+        "contact time must fall and peak force rise with speed"
+    );
+    assert!(
+        nominal_contact > 0.0 && nominal_contact < 1e-3,
+        "a hard wooden head separates in well under a millisecond: {nominal_contact}"
+    );
+
+    // One-at-a-time sensitivity at the nominal speed (hypothetical heads, not cards).
+    let mut sensitivity = Vec::new();
+    for factor in SENSITIVITY {
+        for (input, kk, mm) in [("k", k * factor, mass), ("mass", k, mass * factor)] {
+            let (signal, contact, peak) = strike(kk, mm, NOMINAL_SPEED_M_S, finest);
+            let change = relative(&signal, &nominal);
+            row(
+                "boxwood-surrogate-sensitivity",
+                input,
+                "pass",
+                &format!(
+                    "{{\"factor\":{factor},\"k_n_per_m_alpha\":{kk},\"mass_kg\":{mm},\"contact_time_s\":{contact},\"peak_force_n\":{peak},\"receiver_relative_l2_change\":{change},\"inside_card_validity\":{},\"acceptance\":false}}",
+                    card.lookup(peak, NOMINAL_SPEED_M_S).is_ok()
+                ),
+                started,
+            );
+            sensitivity.push((input, factor, signal, contact, peak, change));
+        }
+    }
+    // Liveness of both inputs: a stiffer head is shorter, a heavier head longer.
+    let contact_of = |input: &str, factor: f64| {
+        sensitivity
+            .iter()
+            .find(|s| s.0 == input && s.1.to_bits() == factor.to_bits())
+            .map(|s| s.3)
+            .unwrap()
+    };
+    assert!(contact_of("k", 2.0) < nominal_contact && nominal_contact < contact_of("k", 0.5));
+    assert!(contact_of("mass", 0.5) < nominal_contact && nominal_contact < contact_of("mass", 2.0));
+
+    if let Some(out) = artifact_dir() {
+        std::fs::create_dir_all(&out).unwrap();
+        let write = |name: &str, signal: &[f64], detail: String| {
+            let wav = fs_couple::pcm_wav::high_resolution::encode_pressure_wav(
+                signal,
+                RATE,
+                1,
+                FULL_SCALE_PA,
+                fs_couple::pcm_wav::high_resolution::Encoding::Float32,
+            )
+            .unwrap();
+            let hash = fs_blake3::hash_domain("org.frankensim.music-render.wav.v1", &wav).to_hex();
+            std::fs::write(out.join(format!("{name}-f32.wav")), wav).unwrap();
+            let metadata = format!(
+                "{{\"render\":\"{name}\",{detail},\"head\":\"SURROGATE: boxwood head of Doutaut and Chaigne 1994 (J. Phys. IV C5-613) for the recording's rosewood mallets\",\"contact_card\":\"{BOXWOOD_CONTACT_PACK}\",\"alpha\":{},\"loss_law\":\"Chaigne and Doutaut 1997 rosewood-bar law, a scenario (another bar)\",\"modes\":\"five shape-selected elastic modes below 3.2 kHz plus six rigid\",\"observer\":\"narrow-band modal transfer at the five elastic poles, Burton-Miller\",\"design_depth\":{},\"design_scale\":{},\"wav_blake3\":\"{hash}\",\"sample_rate_hz\":{RATE},\"full_scale_pa\":{FULL_SCALE_PA},\"encoding\":\"float32\",\"receiver_m\":{RECEIVER:?},\"supports\":false,\"resonator\":false,\"same_specimen\":false,\"acceptance\":false}}\n",
+                card.alpha, ladder.design.depth, ladder.design.scale
+            );
+            std::fs::write(out.join(format!("{name}-render.json")), metadata).unwrap();
+        };
+        for (v, signal, contact, peak, rigid) in &sweep {
+            let role = if v.to_bits() == NOMINAL_SPEED_M_S.to_bits() {
+                "nominal"
+            } else {
+                "speed-sweep"
+            };
+            write(
+                &format!("bar-s1-boxwood-v{v}"),
+                signal,
+                format!(
+                    "\"role\":\"{role}\",\"speed_m_s\":{v},\"speed_authority\":\"player input; 2.1 m/s measured by Doutaut and Chaigne 1994, the rest a declared range\",\"k_n_per_m_alpha\":{k},\"mass_kg\":{mass},\"contact_time_s\":{contact},\"rigid_target_eq3_contact_time_s\":{rigid},\"peak_force_n\":{peak}"
+                ),
+            );
+        }
+        for (input, factor, signal, contact, peak, change) in &sensitivity {
+            write(
+                &format!("bar-s1-boxwood-sens-{input}-x{factor}"),
+                signal,
+                format!(
+                    "\"role\":\"sensitivity\",\"input\":\"{input}\",\"factor\":{factor},\"speed_m_s\":{NOMINAL_SPEED_M_S},\"contact_time_s\":{contact},\"peak_force_n\":{peak},\"receiver_relative_l2_change_vs_nominal\":{change}"
+                ),
+            );
+        }
+    }
 }
