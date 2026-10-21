@@ -38,7 +38,8 @@ uv run --with numpy --with pillow python tools/build_instruments.py --analysis "
 if [ -n "${REVIEW_CANDIDATES:-}" ]; then
   [ -d "$REVIEW_CANDIDATES" ] || { echo "no candidates directory $REVIEW_CANDIDATES" >&2; exit 64; }
   cstatus=0
-  uv run --with numpy python tools/build_candidates.py --candidates "$REVIEW_CANDIDATES" --out "$STAGE/data/candidates" || cstatus=$?
+  # REVIEW_CAND_MAX: how many candidates of a family to show (the best ranked; the rest are listed as omitted), to fit the host's file limit.
+  uv run --with numpy python tools/build_candidates.py --candidates "$REVIEW_CANDIDATES" --out "$STAGE/data/candidates" --max-per-family "${REVIEW_CAND_MAX:-5}" || cstatus=$?
   [ "$cstatus" -eq 0 ] || [ "$cstatus" -eq 2 ] || { echo "build_candidates.py failed ($cstatus)" >&2; exit "$cstatus"; }
   [ "$status" -ne 0 ] || status="$cstatus"
 fi
