@@ -16,6 +16,9 @@ use fs_exec::Cx;
 /// Shared authored designs evaluated under multiple physical operating cases.
 pub mod scenarios;
 
+/// Borrow the same physical study for constrained adjoint-based local refinement.
+pub mod polish;
+
 /// Explicit retained scalar/selection limits, with no irrelevant KKT allowance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanValueConstraintBudget {

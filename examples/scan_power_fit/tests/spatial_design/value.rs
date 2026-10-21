@@ -5,6 +5,7 @@ use fs_ascent::scan_design::value::ScanValueResponseBudget;
 
 mod feasibility;
 mod batch;
+mod polish;
 
 #[test]
 fn g3_value_only_matches_physical_scores_and_preserves_shared_work_accounting() {
