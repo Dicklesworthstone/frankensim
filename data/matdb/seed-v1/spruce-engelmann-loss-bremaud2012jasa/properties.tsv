@@ -1,0 +1,6 @@
+frankensim.matdb-source.v1
+observation	bremaud2012jasa-engelmann	Engelmann spruce (Picea engelmannii), 2 specimens partially selected for instrument making, from 2 literature sources	SECOND-HAND compilation of free-free flexural vibration data from Aizawa 1998, Bucur 2006, Fukada 1950, Haines 2000, Hori et al. 2002, Norimoto et al. 1984, Yano et al. 1990/1992 and the author's work; which source supplies the Engelmann specimens is not stated	Table II mean +/- SD: density 0.4 +/- 0.09 g/cm3, E'_L/rho 28.5 +/- 0.7 MPa m3/kg, tan delta_L 6.3 +/- 0.0 x1e-3; the same table prints Picea abies 7.1 +/- 1.2 (1065 specimens) and Picea sitchensis 7.7 +/- 1.5 (718 specimens); compiled data mostly obtained at 20-25 C and ca. 65 percent RH over 200-1500 Hz (p.808); MC not printed; two specimens only; the source prints specimen scatter without confidence semantics, so runtime uncertainty stays Unstated; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+scalar	loss-factor-longitudinal	bremaud2012jasa-engelmann	loss_factor_longitudinal	0.0063	1	constant
+uncertainty	loss-factor-longitudinal	unstated	-	-	-	-
+validity	loss-factor-longitudinal	frequency	200	1500	Hz
+validity	loss-factor-longitudinal	source_moisture_condition_known	0	0	1

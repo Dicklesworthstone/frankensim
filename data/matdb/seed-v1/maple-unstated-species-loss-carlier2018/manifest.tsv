@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	maple-unstated-species-loss-carlier2018
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; source terms: arXiv non-exclusive distribution licence 1.0, no Creative Commons licence
+citation	Carlier C., Alkadri A., Gril J., Bremaud I. (2018), Revisiting the notion of resonance wood choice: a decompartementalised approach from violin makers' opinion and perception to characterization of material properties' variability, in Wooden Musical Instruments - Different Forms of Knowledge (Book of end of WoodMusICK COST Action FP1302) pp.119-141; arXiv:1902.10977, doi:10.48550/arXiv.1902.10977; Table 1 (arXiv p.7)
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

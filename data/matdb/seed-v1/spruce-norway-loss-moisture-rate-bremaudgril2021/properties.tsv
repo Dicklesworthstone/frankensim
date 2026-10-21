@@ -1,0 +1,10 @@
+frankensim.matdb-source.v1
+observation	bremaudgril2021-spruce-ads	Norway spruce (Picea abies [L.] Karst.), six boards pre-selected for violin making	Free-free first bending mode of slender beams (L specimens resonating at 500-700 Hz, R specimens at 100-300 Hz), tan delta by bandwidth; full adsorption from oven-dry (ADS) at 35, 50, 65 and 85 percent RH; 8 specimens per group; repeatability CV 1 percent	Text p.8: rate of change of tan delta_R +9.9 and of tan delta_L +2.4 in adsorption (dimensionless: percent relative change per 1 percent absolute change in EMC); Table 2: adsorption EMC 5.5 percent at 35 percent RH to 17.4 percent at 85 percent RH; the damping minimum lies at about 5.6 percent EMC (pp.8-9), below which damping rises again; no uncertainty is printed for the rates, so runtime uncertainty stays Unstated; absolute tan delta values are in Fig. 6 only; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+scalar	loss-factor-longitudinal-moisture-rate	bremaudgril2021-spruce-ads	loss_factor_longitudinal_relative_change_per_emc_percent	2.4	1	constant
+uncertainty	loss-factor-longitudinal-moisture-rate	unstated	-	-	-	-
+validity	loss-factor-longitudinal-moisture-rate	moisture_content	5.5	17.4	%
+validity	loss-factor-longitudinal-moisture-rate	frequency	500	700	Hz
+scalar	loss-factor-radial-moisture-rate	bremaudgril2021-spruce-ads	loss_factor_radial_relative_change_per_emc_percent	9.9	1	constant
+uncertainty	loss-factor-radial-moisture-rate	unstated	-	-	-	-
+validity	loss-factor-radial-moisture-rate	moisture_content	5.5	17.4	%
+validity	loss-factor-radial-moisture-rate	frequency	100	300	Hz

@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	maple-sycamore-loss-lammlein2020
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; source terms: ETH Research Collection copy marked In Copyright - Non-Commercial Use Permitted (rightsstatements.org InC-NC 1.0); publisher copyright on the article
+citation	Laemmlein S.L., Van Damme B., Mannes D., Schwarze F.W.M.R., Burgert I. (2020), Violin varnish induced changes in the vibro-mechanical properties of spruce and maple wood, Holzforschung 74(8):765-776, doi:10.1515/hf-2019-0182; Table 3 p.770, method pp.766-767; ETH Research Collection doi:10.3929/ethz-b-000438550
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

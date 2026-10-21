@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	spruce-sitka-loss-obataya2001
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; source terms: J-STAGE free access, copyright 2001 Acoustical Society of Japan, no open licence
+citation	Obataya E., Ohno Y., Norimoto M., Tomita B. (2001), Effects of oriental lacquer (urushi) coating on the vibrational properties of wood used for the soundboards of musical instruments, Acoustical Science and Technology 22(1):27-34, doi:10.1250/ast.22.27; Table 1 p.29, method p.28
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	viala2020-plates-quarters	European spruce (Picea abies) tonewood from one seller: 20 guitar plates (about 560 x 200 x 3.5 mm) and 10 violin quarters (about 426 x 131 x 28 mm wedges), grades 1.S to 2nd	Loudspeaker excitation (10-2000 Hz plates, 100-5000 Hz quarters), scanning laser vibrometry, PolyMAX modal analysis and finite element model updating; eta_L, eta_R and eta_LR are twice the modal damping of modes 2, 4 and 1 (pure L bending, pure R bending, torsion); conditioned at 50 percent RH and 21 C, tested at 23 C and 45 percent RH	Table 2 means over all 30 specimens: eta_L 0.73 percent (RSD 12, range 0.55-1), eta_R 1.7 percent (RSD 10, 1.35-2.2), eta_LR 1.2 percent (RSD 17, 0.7-1.6); per-specimen values in Tables 3-4; values are those of the author preprint; MC 9-11 percent from sorption isotherms; the mode frequencies are in a data-in-brief document not found, so the measurement frequency is UNKNOWN; same-specimen eta_R/eta_L 2.33 and eta_LR/eta_L 1.64 (derived by the pack author); a 2024 paper by the same group re-identifies quarters 1-10 with slightly different values (never pool the two); the source prints specimen scatter without confidence semantics, so runtime uncertainty stays Unstated; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+scalar	loss-factor-longitudinal	viala2020-plates-quarters	loss_factor_longitudinal	0.0073	1	constant
+uncertainty	loss-factor-longitudinal	unstated	-	-	-	-
+validity	loss-factor-longitudinal	moisture_content	9	11	%
+validity	loss-factor-longitudinal	source_frequency_known	0	0	1
+scalar	loss-factor-radial	viala2020-plates-quarters	loss_factor_radial	0.017	1	constant
+uncertainty	loss-factor-radial	unstated	-	-	-	-
+validity	loss-factor-radial	moisture_content	9	11	%
+validity	loss-factor-radial	source_frequency_known	0	0	1
+scalar	loss-factor-shear-lr	viala2020-plates-quarters	loss_factor_shear_lr	0.012	1	constant
+uncertainty	loss-factor-shear-lr	unstated	-	-	-	-
+validity	loss-factor-shear-lr	moisture_content	9	11	%
+validity	loss-factor-shear-lr	source_frequency_known	0	0	1

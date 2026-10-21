@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	ono1996-sitka-board1	Sitka spruce (Picea sitchensis) stringed-instrument top-plate wood, board 1 of two	Square boards 105 x 105 x 2 mm with one side parallel to the grain; free-free flexural vibration at the first mode along L and along R for E and Q^-1; first torsional mode about the L axis for G_LR and the torsional Q_t^-1 in the LR plane; half-value width; 20-25 C, 50-60 percent RH	Table 1 row Sitka spruce 1: Q_L^-1 0.00667 (f_L1 1049.4 Hz), Q_R^-1 0.0194 (f_R1 231.7 Hz), Q_t^-1 0.0153 (f_t 241.0 Hz); single board, no SD; MC not printed; the torsional loss is the LR-plane shear loss of the board as the source reports it; L, R and LR from the same board; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+observation	ono1996-sitka-board2	Sitka spruce (Picea sitchensis) stringed-instrument top-plate wood, board 2 of two	Square boards 105 x 105 x 2 mm with one side parallel to the grain; free-free flexural vibration at the first mode along L and along R for E and Q^-1; first torsional mode about the L axis for G_LR and the torsional Q_t^-1 in the LR plane; half-value width; 20-25 C, 50-60 percent RH	Table 1 row Sitka spruce 2: Q_L^-1 0.00733 (f_L1 1022.7 Hz), Q_R^-1 0.0182 (f_R1 269.0 Hz), Q_t^-1 0.0157 (f_t 240.7 Hz); single board, no SD; MC not printed; the torsional loss is the LR-plane shear loss of the board as the source reports it; L, R and LR from the same board; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+scalar	loss-factor-longitudinal-board1	ono1996-sitka-board1	loss_factor_longitudinal	0.00667	1	constant
+uncertainty	loss-factor-longitudinal-board1	unstated	-	-	-	-
+validity	loss-factor-longitudinal-board1	frequency	1049.4	1049.4	Hz
+validity	loss-factor-longitudinal-board1	source_moisture_condition_known	0	0	1
+scalar	loss-factor-radial-board1	ono1996-sitka-board1	loss_factor_radial	0.0194	1	constant
+uncertainty	loss-factor-radial-board1	unstated	-	-	-	-
+validity	loss-factor-radial-board1	frequency	231.7	231.7	Hz
+validity	loss-factor-radial-board1	source_moisture_condition_known	0	0	1
+scalar	loss-factor-shear-lr-board1	ono1996-sitka-board1	loss_factor_shear_lr	0.0153	1	constant
+uncertainty	loss-factor-shear-lr-board1	unstated	-	-	-	-
+validity	loss-factor-shear-lr-board1	frequency	241.0	241.0	Hz
+validity	loss-factor-shear-lr-board1	source_moisture_condition_known	0	0	1
+scalar	loss-factor-longitudinal-board2	ono1996-sitka-board2	loss_factor_longitudinal	0.00733	1	constant
+uncertainty	loss-factor-longitudinal-board2	unstated	-	-	-	-
+validity	loss-factor-longitudinal-board2	frequency	1022.7	1022.7	Hz
+validity	loss-factor-longitudinal-board2	source_moisture_condition_known	0	0	1
+scalar	loss-factor-radial-board2	ono1996-sitka-board2	loss_factor_radial	0.0182	1	constant
+uncertainty	loss-factor-radial-board2	unstated	-	-	-	-
+validity	loss-factor-radial-board2	frequency	269.0	269.0	Hz
+validity	loss-factor-radial-board2	source_moisture_condition_known	0	0	1
+scalar	loss-factor-shear-lr-board2	ono1996-sitka-board2	loss_factor_shear_lr	0.0157	1	constant
+uncertainty	loss-factor-shear-lr-board2	unstated	-	-	-	-
+validity	loss-factor-shear-lr-board2	frequency	240.7	240.7	Hz
+validity	loss-factor-shear-lr-board2	source_moisture_condition_known	0	0	1

@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	spruce-sitka-loss-ono1993
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; source terms: J-STAGE free access, copyright Acoustical Society of Japan, no open licence
+citation	Ono T. (1993), Effects of varnishing on acoustical characteristics of wood used for musical instrument soundboards, Journal of the Acoustical Society of Japan (E) 14(6):397-407, doi:10.1250/ast.14.397; Table 1 p.400 (uncoated S rows), method pp.398-399
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

@@ -1,0 +1,18 @@
+frankensim.matdb-source.v1
+observation	bremaud2012-table3	Sitka spruce (Picea sitchensis (Bong.) Carr.) normal heartwood, 5 specimens from 1 stock	Free-free first bending mode of 150 L x 12 R x 2 T mm beams in non-contact forced-released vibration, default scan 150-750 Hz; E'/gamma by Euler-Bernoulli, tan delta by half-power bandwidth or logarithmic decrement; conditioned >= 3 weeks at 20 C and 60-65 percent RH; EMC 6 to 12 percent depending on species (per-species value not printed)	Table III mean (cv percent): specific gravity 0.47 (1), E'/gamma 32.2 GPa (2), tan delta 0.0059 (2); experimental error on tan delta 0-15.2 percent (mean 3.2 percent) over all specimens; dynamic_young_modulus_longitudinal = printed E'/gamma (GPa) x printed gamma, multiplied by the pack author; longitudinal only; the source prints specimen scatter without confidence semantics, so runtime uncertainty stays Unstated; same table and conventions as the four packs of the other species (cedar-western-red-bremaud2012 and others); axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+scalar	specific-gravity	bremaud2012-table3	specific_gravity	0.47	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+validity	specific-gravity	moisture_content	6	12	%
+validity	specific-gravity	frequency	150	750	Hz
+scalar	specific-dynamic-modulus-longitudinal	bremaud2012-table3	specific_dynamic_modulus_longitudinal_gpa	32.2	1	constant
+uncertainty	specific-dynamic-modulus-longitudinal	unstated	-	-	-	-
+validity	specific-dynamic-modulus-longitudinal	moisture_content	6	12	%
+validity	specific-dynamic-modulus-longitudinal	frequency	150	750	Hz
+scalar	dynamic-young-modulus-longitudinal	bremaud2012-table3	dynamic_young_modulus_longitudinal	15134.0	MPa	constant
+uncertainty	dynamic-young-modulus-longitudinal	unstated	-	-	-	-
+validity	dynamic-young-modulus-longitudinal	moisture_content	6	12	%
+validity	dynamic-young-modulus-longitudinal	frequency	150	750	Hz
+scalar	loss-factor-longitudinal	bremaud2012-table3	loss_factor_longitudinal	0.0059	1	constant
+uncertainty	loss-factor-longitudinal	unstated	-	-	-	-
+validity	loss-factor-longitudinal	moisture_content	6	12	%
+validity	loss-factor-longitudinal	frequency	150	750	Hz

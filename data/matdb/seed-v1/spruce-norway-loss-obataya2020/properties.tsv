@@ -1,0 +1,6 @@
+frankensim.matdb-source.v1
+observation	obataya2020-s4-abies	Norway spruce (Picea abies) lumber cut 1995, seasoned 23 years (row S4), 20 specimens	Free-free flexural vibration, first-mode resonance 300-800 Hz; measured at 20 C and 60 percent RH before the moistening treatment (V0)	Table II row S4 mean +/- SD: MC 10.9 +/- 0.2 percent, density 486 +/- 13 kg/m3, E_L' 11.5 +/- 0.7 GPa, Q_L^-1 6.2 +/- 0.3 x1e-3; the table prints 16 rows (seasoning 0-318 years, Q_L^-1 5.9-7.7 x1e-3 at MC 10.7-12.0 percent); the source prints specimen scatter without confidence semantics, so runtime uncertainty stays Unstated; longitudinal only; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+scalar	loss-factor-longitudinal	obataya2020-s4-abies	loss_factor_longitudinal	0.0062	1	constant
+uncertainty	loss-factor-longitudinal	unstated	-	-	-	-
+validity	loss-factor-longitudinal	moisture_content	10.9	10.9	%
+validity	loss-factor-longitudinal	frequency	300	800	Hz

@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	spruce-norway-loss-bremaud2012
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; source terms: HAL preprint under the HAL deposit authorisation only, no Creative Commons licence; publisher copyright INRA/Springer
+citation	Bremaud I., El Kaim Y., Guibal D., Minato K., Thibaut B., Gril J. (2012), Characterisation and categorisation of the diversity in viscoelastic vibrational properties between 98 wood types, Annals of Forest Science 69:373-386, doi:10.1007/s13595-011-0166-z; Table III, read on the HAL preprint https://hal.science/hal-00808242 (licence field Autorisation HAL)
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

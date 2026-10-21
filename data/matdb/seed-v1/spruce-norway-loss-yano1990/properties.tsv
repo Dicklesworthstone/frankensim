@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	yano1990-longitudinal	German spruce (Picea abies), offcuts adjacent to guitar top plates, quarter-sawn (ring angle 0-10 deg to the thickness); longitudinal specimens 120 x 12 x 3 mm (L x R x T), n=179	Free-free flexural vibration, first mode; tan delta from the logarithmic decrement of the free decay; E/gamma by Euler-Bernoulli (text p.1208); dried 24 h at 50 C over P2O5 under reduced pressure, then conditioned >= 1 week at 20 C and 65 percent RH; longitudinal specimens resonated at 700-1000 Hz	Table I mean (S.D.): specific gravity 0.426 (0.041), E/gamma 26.0 (3.4) GPa per unit specific gravity (printed in dyn/cm2 x1e11), tan delta 0.00686 (0.00076); the table also prints sqrt(E/gamma^3)/tan delta = 1.77 x 1e8 (cgs), a mean of per-specimen ratios; MC at measurement about 10.2 percent (text p.1208); the text states E and tan delta do not depend on frequency in this band (its ref. 5); the source prints specimen scatter without confidence semantics, so runtime uncertainty stays Unstated; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+observation	yano1990-radial	German spruce (Picea abies), offcuts adjacent to guitar top plates, quarter-sawn (ring angle 0-10 deg to the thickness); radial specimens 80 x 12 x 3 mm (R x L x T), n=30	Free-free flexural vibration, first mode; tan delta from the logarithmic decrement of the free decay; E/gamma by Euler-Bernoulli (text p.1208); dried 24 h at 50 C over P2O5 under reduced pressure, then conditioned >= 1 week at 20 C and 65 percent RH; radial specimens resonated at 200-300 Hz	Table I mean (S.D.): specific gravity 0.409 (0.027), E/gamma 1.78 (0.40) GPa per unit specific gravity (printed in dyn/cm2 x1e10), tan delta 0.0180 (0.0012); the table also prints sqrt(E/gamma^3)/tan delta = 1.83 x 1e7 (cgs), a mean of per-specimen ratios; MC at measurement about 10.2 percent (text p.1208); the text states E and tan delta do not depend on frequency in this band (its ref. 5); the source prints specimen scatter without confidence semantics, so runtime uncertainty stays Unstated; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv; same-source anisotropy tan delta_R/tan delta_L = 2.62 (derived by the pack author from the two printed means)
+scalar	loss-factor-longitudinal	yano1990-longitudinal	loss_factor_longitudinal	0.00686	1	constant
+uncertainty	loss-factor-longitudinal	unstated	-	-	-	-
+validity	loss-factor-longitudinal	moisture_content	10.2	10.2	%
+validity	loss-factor-longitudinal	frequency	700	1000	Hz
+scalar	specific-gravity-longitudinal-specimens	yano1990-longitudinal	specific_gravity	0.426	1	constant
+uncertainty	specific-gravity-longitudinal-specimens	unstated	-	-	-	-
+validity	specific-gravity-longitudinal-specimens	moisture_content	10.2	10.2	%
+validity	specific-gravity-longitudinal-specimens	frequency	700	1000	Hz
+scalar	specific-dynamic-modulus-longitudinal	yano1990-longitudinal	specific_dynamic_modulus_longitudinal_gpa	26.0	1	constant
+uncertainty	specific-dynamic-modulus-longitudinal	unstated	-	-	-	-
+validity	specific-dynamic-modulus-longitudinal	moisture_content	10.2	10.2	%
+validity	specific-dynamic-modulus-longitudinal	frequency	700	1000	Hz
+scalar	loss-factor-radial	yano1990-radial	loss_factor_radial	0.0180	1	constant
+uncertainty	loss-factor-radial	unstated	-	-	-	-
+validity	loss-factor-radial	moisture_content	10.2	10.2	%
+validity	loss-factor-radial	frequency	200	300	Hz
+scalar	specific-gravity-radial-specimens	yano1990-radial	specific_gravity	0.409	1	constant
+uncertainty	specific-gravity-radial-specimens	unstated	-	-	-	-
+validity	specific-gravity-radial-specimens	moisture_content	10.2	10.2	%
+validity	specific-gravity-radial-specimens	frequency	200	300	Hz
+scalar	specific-dynamic-modulus-radial	yano1990-radial	specific_dynamic_modulus_radial_gpa	1.78	1	constant
+uncertainty	specific-dynamic-modulus-radial	unstated	-	-	-	-
+validity	specific-dynamic-modulus-radial	moisture_content	10.2	10.2	%
+validity	specific-dynamic-modulus-radial	frequency	200	300	Hz

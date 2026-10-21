@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	spruce-norway-loss-moisture-rate-bremaudgril2021
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; source terms: HAL author file under the HAL deposit authorisation only, no Creative Commons licence; publisher copyright De Gruyter
+citation	Bremaud I., Gril J. (2021), Moisture content dependence of anisotropic vibrational properties of wood at quasi equilibrium: analytical review and multi-trajectories experiments, Holzforschung 75(4), doi:10.1515/hf-2020-0028; Section 3.3 and Table 2 p.8, read on https://hal.science/hal-02981684 (licence field Autorisation HAL)
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

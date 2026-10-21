@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	spruce-norway-loss-viala2020
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; source terms: author preprint hosted by FEMTO-ST, no licence stated; publisher copyright on the article
+citation	Viala R., Placet V., Cogan S. (2020), Simultaneous non-destructive identification of multiple elastic and damping properties of spruce tonewood to improve grading, Journal of Cultural Heritage 42:108-116, doi:10.1016/j.culher.2019.09.004; Table 2 (author preprint submitted 11 Oct 2019, p.8), https://publiweb.femto-st.fr/tntnet/entries/16117/documents/author/data
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	ono1996-maple-board	Maple (Acer saccharum, hard or sugar maple, NOT sycamore) violin-back wood, one board	Square boards 105 x 105 x 2 mm with one side parallel to the grain; free-free flexural vibration at the first mode along L and along R for E and Q^-1; first torsional mode about the L axis for G_LR and the torsional Q_t^-1 in the LR plane; half-value width; 20-25 C, 50-60 percent RH	Table 1 row Maple: Q_L^-1 0.0109 (f_L1 616.6 Hz), Q_R^-1 0.0199 (f_R1 231.2 Hz), Q_t^-1 0.0153 (f_t 229.7 Hz); single board, no SD; MC not printed; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+scalar	loss-factor-longitudinal	ono1996-maple-board	loss_factor_longitudinal	0.0109	1	constant
+uncertainty	loss-factor-longitudinal	unstated	-	-	-	-
+validity	loss-factor-longitudinal	frequency	616.6	616.6	Hz
+validity	loss-factor-longitudinal	source_moisture_condition_known	0	0	1
+scalar	loss-factor-radial	ono1996-maple-board	loss_factor_radial	0.0199	1	constant
+uncertainty	loss-factor-radial	unstated	-	-	-	-
+validity	loss-factor-radial	frequency	231.2	231.2	Hz
+validity	loss-factor-radial	source_moisture_condition_known	0	0	1
+scalar	loss-factor-shear-lr	ono1996-maple-board	loss_factor_shear_lr	0.0153	1	constant
+uncertainty	loss-factor-shear-lr	unstated	-	-	-	-
+validity	loss-factor-shear-lr	frequency	229.7	229.7	Hz
+validity	loss-factor-shear-lr	source_moisture_condition_known	0	0	1

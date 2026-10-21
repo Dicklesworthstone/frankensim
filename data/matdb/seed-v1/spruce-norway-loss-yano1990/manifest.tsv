@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	spruce-norway-loss-yano1990
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; source terms: J-STAGE free access, copyright Society of Materials Science, Japan, no open licence
+citation	Yano H., Mukudai J., Onishi K. (1990), Acoustic properties of wood for the top plate of guitar (Japanese, English tables), Journal of the Society of Materials Science, Japan 39(444):1207-1212, doi:10.2472/jsms.39.1207; Table I p.1208 and text p.1208, read on the J-STAGE PDF https://www.jstage.jst.go.jp/article/jsms1963/39/444/39_444_1207/_pdf/-char/ja
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

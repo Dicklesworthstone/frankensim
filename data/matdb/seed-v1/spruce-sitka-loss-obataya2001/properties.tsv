@@ -1,0 +1,11 @@
+frankensim.matdb-source.v1
+observation	obataya2001-longitudinal	Sitka spruce (Picea sitchensis) piano-soundboard wood, uncoated, L specimens 3 (T) x 15 (R) x 150 (L) mm	Free-free flexural vibration, first mode, Q^-1 from the peak width of the resonance curve; closed box at 25 C and 60 percent RH after storage at 25 C and 60 percent RH for over a month; L resonance 650-850 Hz	Table 1 uncoated, L mean (SD): density 0.442 (0.035) g/cm3, E 14.3 (1.18) GPa, Q^-1 0.0068 (0.0005); number of specimens and MC not printed; the source prints specimen scatter without confidence semantics, so runtime uncertainty stays Unstated; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+observation	obataya2001-radial	Sitka spruce (Picea sitchensis) piano-soundboard wood, uncoated, R specimens 3 (T) x 15 (L) x 100 (R) mm	Free-free flexural vibration, first mode, Q^-1 from the peak width of the resonance curve; closed box at 25 C and 60 percent RH after storage at 25 C and 60 percent RH for over a month; R resonance 450-650 Hz	Table 1 uncoated, R mean (SD): density 0.436 (0.036) g/cm3, E 0.936 (0.230) GPa, Q^-1 0.0206 (0.0021); number of specimens and MC not printed; same wood stock as the L specimens; tan delta_R/tan delta_L = 3.03 (derived by the pack author); the source prints specimen scatter without confidence semantics, so runtime uncertainty stays Unstated; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+scalar	loss-factor-longitudinal	obataya2001-longitudinal	loss_factor_longitudinal	0.0068	1	constant
+uncertainty	loss-factor-longitudinal	unstated	-	-	-	-
+validity	loss-factor-longitudinal	frequency	650	850	Hz
+validity	loss-factor-longitudinal	source_moisture_condition_known	0	0	1
+scalar	loss-factor-radial	obataya2001-radial	loss_factor_radial	0.0206	1	constant
+uncertainty	loss-factor-radial	unstated	-	-	-	-
+validity	loss-factor-radial	frequency	450	650	Hz
+validity	loss-factor-radial	source_moisture_condition_known	0	0	1

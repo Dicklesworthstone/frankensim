@@ -1,0 +1,19 @@
+frankensim.figure-extraction.v1
+source_url	https://doi.org/10.1007/s00226-007-0170-5 (copy read: https://www.dora.lib4ri.ch/empa/dload/empa:2081/PDF/view)
+source_sha256	5a00c202533d5fa3abfb82fdeff6c8e22b731deabca25cd8fd71eeb9a37ae712
+source_pages	11 (one-based PDF); printed 335; Fig. 4
+authority	fixture-only; extraction bounds only; experimental scatter and model discrepancy unstated; no confidence probability
+method	Automated pixel reads by script (no manual clicking): pass A on the embedded 1890x1260 one-bit 600 ppi CCITT image extracted with pdfimages (ink = 0); passes B and C on Poppler gray renders of the figure region at 300 and 240 dpi (ink = gray < 128); origin top-left, zero-based pixels
+calibration	log10 axes linear in pixels: x0_pixel and x1_pixel are the left and right frame lines (100 Hz and 10000 Hz); y0_pixel and y1_pixel are the top and bottom frame lines (0.10 and 0.01); printed tick labels
+read_rule	read_x = centre of the vertical error-bar column; read_y = centre of the horizontal error-bar row through a triangle marker (spruce) or midpoint of a square marker's outer top and bottom edges (sycamore)
+bound_rule	x_radius = half bar width + half frame-line width + 1 px; y_radius = half |marker midpoint - bar row| + 1 px + half frame-line width; nominal +/- half_width encloses delta(read_y +/- y_radius) of passes A, B and C
+claim	pass	dpi	x0_pixel	x1_pixel	read_x	x_radius	y0_pixel	y1_pixel	read_y	y_radius	nominal	half_width
+log-decrement-longitudinal-point1	A	600	211.5	1797.0	795.0	6.0	92.0	1107.0	561.0	3.5	0.03449	0.00046
+log-decrement-longitudinal-point1	B	300	133.0	926.5	424.5	3.0	45.5	553.5	279.5	2.0	0.03449	0.00046
+log-decrement-longitudinal-point1	C	240	106.5	741.5	340.5	3.0	36.5	443.5	225.0	2.0	0.03449	0.00046
+log-decrement-longitudinal-point2	A	600	211.5	1797.0	1142.0	6.0	92.0	1107.0	538.0	3.5	0.03627	0.00046
+log-decrement-longitudinal-point2	B	300	133.0	926.5	598.5	3.0	45.5	553.5	268.5	2.0	0.03627	0.00046
+log-decrement-longitudinal-point2	C	240	106.5	741.5	479.5	3.0	36.5	443.5	216.0	2.0	0.03627	0.00046
+log-decrement-longitudinal-point3	A	600	211.5	1797.0	1377.5	8.0	92.0	1107.0	525.0	3.5	0.03748	0.00043
+log-decrement-longitudinal-point3	B	300	133.0	926.5	716.5	3.5	45.5	553.5	261.5	2.0	0.03748	0.00043
+log-decrement-longitudinal-point3	C	240	106.5	741.5	573.5	4.0	36.5	443.5	210.0	2.0	0.03748	0.00043

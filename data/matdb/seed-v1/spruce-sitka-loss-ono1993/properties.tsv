@@ -1,0 +1,28 @@
+frankensim.matdb-source.v1
+observation	ono1993-board1-uncoated	Sitka spruce (Picea sitchensis) piano-soundboard wood from a piano maker, long board 1: uncoated 105 x 105 x about 2 mm squares 12S 14S 16S	Free-free flexural vibration, first mode along L and along R of the square board, Q^-1 from the half-value width of the resonance curve; boards stored about half a year at about 23 C and 55-65 percent RH; measured at 20-25 C and 50-60 percent RH	Table 1 row 1S Av. (mean of three uncoated boards; per-board rows are printed too): Q_L^-1 0.0079 at f_L 918.2 Hz, Q_R^-1 0.0178 at f_R 217.3 Hz, printed Q_R^-1/Q_L^-1 2.25; MC not printed; no SD printed for the averages; the varnished V boards are coated wood and are not used; L and R come from the same boards, so the ratio is a same-specimen anisotropy; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+observation	ono1993-board2-uncoated	Sitka spruce (Picea sitchensis) piano-soundboard wood from a piano maker, long board 2: uncoated 105 x 105 x about 2 mm squares 22S 24S 26S	Free-free flexural vibration, first mode along L and along R of the square board, Q^-1 from the half-value width of the resonance curve; boards stored about half a year at about 23 C and 55-65 percent RH; measured at 20-25 C and 50-60 percent RH	Table 1 row 2S Av. (mean of three uncoated boards; per-board rows are printed too): Q_L^-1 0.0083 at f_L 877.5 Hz, Q_R^-1 0.0168 at f_R 237.6 Hz, printed Q_R^-1/Q_L^-1 2.03; MC not printed; no SD printed for the averages; the varnished V boards are coated wood and are not used; L and R come from the same boards, so the ratio is a same-specimen anisotropy; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+observation	ono1993-board3-uncoated	Sitka spruce (Picea sitchensis) piano-soundboard wood from a piano maker, long board 3: uncoated 105 x 105 x about 2 mm squares 32S 34S 36S	Free-free flexural vibration, first mode along L and along R of the square board, Q^-1 from the half-value width of the resonance curve; boards stored about half a year at about 23 C and 55-65 percent RH; measured at 20-25 C and 50-60 percent RH	Table 1 row 3S Av. (mean of three uncoated boards; per-board rows are printed too): Q_L^-1 0.0078 at f_L 933.7 Hz, Q_R^-1 0.0165 at f_R 260.6 Hz, printed Q_R^-1/Q_L^-1 2.12; MC not printed; no SD printed for the averages; the varnished V boards are coated wood and are not used; L and R come from the same boards, so the ratio is a same-specimen anisotropy; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+scalar	loss-factor-longitudinal-board1	ono1993-board1-uncoated	loss_factor_longitudinal	0.0079	1	constant
+uncertainty	loss-factor-longitudinal-board1	unstated	-	-	-	-
+validity	loss-factor-longitudinal-board1	frequency	918.2	918.2	Hz
+validity	loss-factor-longitudinal-board1	source_moisture_condition_known	0	0	1
+scalar	loss-factor-radial-board1	ono1993-board1-uncoated	loss_factor_radial	0.0178	1	constant
+uncertainty	loss-factor-radial-board1	unstated	-	-	-	-
+validity	loss-factor-radial-board1	frequency	217.3	217.3	Hz
+validity	loss-factor-radial-board1	source_moisture_condition_known	0	0	1
+scalar	loss-factor-longitudinal-board2	ono1993-board2-uncoated	loss_factor_longitudinal	0.0083	1	constant
+uncertainty	loss-factor-longitudinal-board2	unstated	-	-	-	-
+validity	loss-factor-longitudinal-board2	frequency	877.5	877.5	Hz
+validity	loss-factor-longitudinal-board2	source_moisture_condition_known	0	0	1
+scalar	loss-factor-radial-board2	ono1993-board2-uncoated	loss_factor_radial	0.0168	1	constant
+uncertainty	loss-factor-radial-board2	unstated	-	-	-	-
+validity	loss-factor-radial-board2	frequency	237.6	237.6	Hz
+validity	loss-factor-radial-board2	source_moisture_condition_known	0	0	1
+scalar	loss-factor-longitudinal-board3	ono1993-board3-uncoated	loss_factor_longitudinal	0.0078	1	constant
+uncertainty	loss-factor-longitudinal-board3	unstated	-	-	-	-
+validity	loss-factor-longitudinal-board3	frequency	933.7	933.7	Hz
+validity	loss-factor-longitudinal-board3	source_moisture_condition_known	0	0	1
+scalar	loss-factor-radial-board3	ono1993-board3-uncoated	loss_factor_radial	0.0165	1	constant
+uncertainty	loss-factor-radial-board3	unstated	-	-	-	-
+validity	loss-factor-radial-board3	frequency	260.6	260.6	Hz
+validity	loss-factor-radial-board3	source_moisture_condition_known	0	0	1

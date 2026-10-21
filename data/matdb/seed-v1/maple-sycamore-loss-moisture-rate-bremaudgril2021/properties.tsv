@@ -1,0 +1,10 @@
+frankensim.matdb-source.v1
+observation	bremaudgril2021-maple-ads	Sycamore maple (Acer pseudoplatanus L.), straight-grained	Free-free first bending mode of slender beams (L specimens resonating at 500-700 Hz, R specimens at 100-300 Hz), tan delta by bandwidth; full adsorption from oven-dry (ADS) at 35, 50, 65 and 85 percent RH; 8 specimens per group; repeatability CV 1 percent	Text p.8: rate of change of tan delta_R +7.0 and of tan delta_L +1.7 in adsorption (dimensionless: percent relative change per 1 percent absolute change in EMC); Table 2: adsorption EMC 5.6 percent at 35 percent RH to 17.3 percent at 85 percent RH; the damping minimum lies at about 5.6 percent EMC (pp.8-9), below which damping rises again; no uncertainty is printed for the rates, so runtime uncertainty stays Unstated; absolute tan delta values are in Fig. 6 only; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+scalar	loss-factor-longitudinal-moisture-rate	bremaudgril2021-maple-ads	loss_factor_longitudinal_relative_change_per_emc_percent	1.7	1	constant
+uncertainty	loss-factor-longitudinal-moisture-rate	unstated	-	-	-	-
+validity	loss-factor-longitudinal-moisture-rate	moisture_content	5.6	17.3	%
+validity	loss-factor-longitudinal-moisture-rate	frequency	500	700	Hz
+scalar	loss-factor-radial-moisture-rate	bremaudgril2021-maple-ads	loss_factor_radial_relative_change_per_emc_percent	7.0	1	constant
+uncertainty	loss-factor-radial-moisture-rate	unstated	-	-	-	-
+validity	loss-factor-radial-moisture-rate	moisture_content	5.6	17.3	%
+validity	loss-factor-radial-moisture-rate	frequency	100	300	Hz

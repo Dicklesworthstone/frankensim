@@ -1,0 +1,18 @@
+frankensim.matdb-source.v1
+observation	alkadri2018-wavy-plates	Sycamore maple (Acer pseudoplatanus) violin-back plates A-L from Romania, Bosnia and France, mostly wavy figure; L specimens 150 x 12 x 2 mm, R specimens 120 x 12 x 2 mm	Free-free first bending mode found by a 150-750 Hz (L) or 80-500 Hz (R) scan, then a 0.98-1.02 fR sweep; tan delta in the frequency and time domains; conditioned >= 2 weeks at 20 C and 65 percent RH	Table 1 plate means x1e-3, mean (sigma) [n]: tan delta_R A 22.1 (0.4) [5], B 22.4 (0.6) [5], C 24.0 (0.6) [4], D 23.1 (0.4) [4], E 24.1 (0.8) [5], F 23.0 (0.5) [5], G 23.0 (0.5) [5], H 20.8 (0.3) [5], I 20.9 (0.7) [4], J 25.5 (2.7) [4], K 21.7 (1.5) [4], L 21.5 (1.0) [4]; tan delta_L A 10.1 (1.8) [8], B 11.0 (0.7) [10], C 13.8 (2.2) [8], D 10.5 (1.1) [8], E 11.0 (0.8) [8], F 9.6 (0.9) [9], G 8.3 (0.5) [9], H 9.1 (0.6) [9], I 9.5 (0.6) [9], J 11.7 (0.4) [8], K 9.2 (0.7) [8], L 11.2 (0.7) [7]; printed per-plate tan delta(R/L) 1.74-2.77; the claims keep the printed range low/high, never averaged across plates; the text (HAL PDF p.16) gives 0.0085-0.0156 and 0.022-0.026, which disagree with the table; MC not printed; figured maple, not plain sycamore; the source prints specimen scatter without confidence semantics, so runtime uncertainty stays Unstated; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+scalar	loss-factor-longitudinal-low	alkadri2018-wavy-plates	loss_factor_longitudinal_printed_range_low	0.0083	1	constant
+uncertainty	loss-factor-longitudinal-low	unstated	-	-	-	-
+validity	loss-factor-longitudinal-low	frequency	150	750	Hz
+validity	loss-factor-longitudinal-low	source_moisture_condition_known	0	0	1
+scalar	loss-factor-longitudinal-high	alkadri2018-wavy-plates	loss_factor_longitudinal_printed_range_high	0.0138	1	constant
+uncertainty	loss-factor-longitudinal-high	unstated	-	-	-	-
+validity	loss-factor-longitudinal-high	frequency	150	750	Hz
+validity	loss-factor-longitudinal-high	source_moisture_condition_known	0	0	1
+scalar	loss-factor-radial-low	alkadri2018-wavy-plates	loss_factor_radial_printed_range_low	0.0208	1	constant
+uncertainty	loss-factor-radial-low	unstated	-	-	-	-
+validity	loss-factor-radial-low	frequency	80	500	Hz
+validity	loss-factor-radial-low	source_moisture_condition_known	0	0	1
+scalar	loss-factor-radial-high	alkadri2018-wavy-plates	loss_factor_radial_printed_range_high	0.0255	1	constant
+uncertainty	loss-factor-radial-high	unstated	-	-	-	-
+validity	loss-factor-radial-high	frequency	80	500	Hz
+validity	loss-factor-radial-high	source_moisture_condition_known	0	0	1

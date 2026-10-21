@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	maple-sycamore-loss-frequency-spycher2008
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; source terms: ETH Research Collection copy marked In Copyright - Non-Commercial Use Permitted (rightsstatements.org InC-NC 1.0); publisher copyright on the article
+citation	Spycher M., Schwarze F.W.M.R., Steiger R. (2008), Assessment of resonance wood quality by comparing its physical and histological properties, Wood Science and Technology 42:325-342, doi:10.1007/s00226-007-0170-5; Fig. 4 p.335, eq. 4 p.332, damping text p.335; read on the publisher PDF hosted by Empa DORA (https://www.dora.lib4ri.ch/empa/dload/empa:2081/PDF/view; ETH Research Collection doi:10.3929/ethz-b-000103219)
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

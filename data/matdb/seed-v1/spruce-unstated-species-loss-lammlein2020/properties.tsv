@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	laemmlein2020-spruce-plates	Spruce violin-top wood (the species of the specimens is not named by the source), 50 quarter-sawn twin plates 140 x 100 x 2.9 mm (L x R x T), unvarnished	Plates preconditioned and measured at 20 C and 65 percent RH; contact-free loudspeaker sine sweep 150-10000 Hz, PSV-500 scanning laser vibrometer, modal fit; eta = 2 zeta (the source's eq. 2); the source maps plate mode (0,2) to L, (2,0) to R and (1,1) to LR (p.767)	Table 3 mean (std): zeta_L 0.30 (0.02) percent, zeta_R 1.6 (0.4) percent, zeta(2,2) 0.54 (0.03) percent; the authors write that the radial value was probably estimated higher due to the close presence of a second vibration mode; mode (2,2) also depends on longitudinal damping, so it is not a pure shear loss; mode frequencies are in the source's Supplementary 1-2 (not obtained), so frequency is UNKNOWN; MC not printed; the source prints specimen scatter without confidence semantics, so runtime uncertainty stays Unstated; axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+scalar	loss-factor-longitudinal	laemmlein2020-spruce-plates	loss_factor_longitudinal	0.0060	1	constant
+uncertainty	loss-factor-longitudinal	unstated	-	-	-	-
+validity	loss-factor-longitudinal	source_moisture_condition_known	0	0	1
+validity	loss-factor-longitudinal	source_frequency_known	0	0	1
+scalar	loss-factor-radial	laemmlein2020-spruce-plates	loss_factor_radial	0.032	1	constant
+uncertainty	loss-factor-radial	unstated	-	-	-	-
+validity	loss-factor-radial	source_moisture_condition_known	0	0	1
+validity	loss-factor-radial	source_frequency_known	0	0	1
+scalar	loss-factor-plate-mode-2-2	laemmlein2020-spruce-plates	loss_factor_plate_mode_2_2	0.0108	1	constant
+uncertainty	loss-factor-plate-mode-2-2	unstated	-	-	-	-
+validity	loss-factor-plate-mode-2-2	source_moisture_condition_known	0	0	1
+validity	loss-factor-plate-mode-2-2	source_frequency_known	0	0	1
