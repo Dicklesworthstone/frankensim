@@ -9,8 +9,10 @@
 # pitch factor q. C3, C4 and F4 are the notes VocalSet's singers sang (the only notes with a same-note reference).
 # F4 exists for /a/ /e/ /o/ rigid and /a/ /o/ with the wall only (no stable F4 was found for the others).
 # The -flanagan-r4 files are the same descriptions at a 192 kHz mechanics clock (ratio 4): the 96 kHz clock leaves the fold contact
-# under-resolved (harmonics-to-noise rises toward the singers' level as the clock is refined). /a/ has none: the flanged mouth load
-# is refused at 192 kHz for it (ka 20.005 against a bound of 20).
+# under-resolved (with an ideal-open mouth the /a/ C4 non-harmonic floor is converged by 192 kHz). The graded harmonics-to-noise barely
+# moves (mean +0.6 dB over nine slots), so the clock is chosen for the converged fold contact, not for the grade. /a/ has none: the
+# flanged mouth bound was lifted (ka 20 to 24) and /a/ was measured at 192 kHz, but C3 and C4 do not change (21.50 to 21.52 and
+# 26.59 to 26.42 dB) and F4 gains 5 dB with its f0 outside the 3-cent trim, so /a/ stays at 96 kHz (status.json).
 set -euo pipefail
 BIN=${1:?path to the music_render binary}
 OUT=${2:?output directory}
