@@ -10,11 +10,11 @@ meta	bridge	silhouette from the 0.25 mm raster rows (bridge-silhouette.tsv), pla
 meta	soundpost	straight axis through the section centroids (linear fits x(y), z(y)), diameter 6.35 mm, modelled as a tube shell of midsurface radius 2.38 mm and thickness 1.59 mm (outer radius = the post radius; its area is 75 percent of the solid post, which is still far stiffer axially than either plate), grain along the axis, feet = 16-gon rings tied to the inner skins of the plates at the foot positions top [  15.7 -114.5] (y -18.8 mm) and back [  17.5 -114.1] (y 32.2 mm)
 meta	mesh_top	1868 vertices, 3378 triangles, minimum angle 19.6 deg, mean of the per-triangle minimum angles 44.7 deg
 meta	pinch_fix_top	18 interior triangles joined the ring or feature zones so that every component is edge-connected
-meta	lonely_tie_vertices_top	3 zone-interface vertices sit alone between cross points, where no chain of two nodes can be made: the two components are not welded at that vertex (their neighbours on both sides are)
-meta	zones_top	20 components (top-ring1 3.388 mm, top-z1 3.098 mm, top-z2 3.118 mm, top-z3 3.219 mm, top-z4 2.907 mm, top-z5 2.743 mm, top-z6 3.127 mm, top-band1 3.320 mm, top-z7 3.131 mm, top-band2 3.143 mm, top-z8 2.970 mm, top-z9 3.361 mm, top-z10 3.183 mm, top-z11 3.115 mm, top-z12 3.521 mm, top-z13 3.315 mm, top-z14 3.341 mm, top-z15 2.956 mm, top-z16 2.916 mm, top-z17 3.447 mm); thickness of each = cube root of the area-weighted mean cube of the smoothed normal-thickness map over its triangles (equal bending stiffness), no shift; zone step 0.20 mm; 36 interface chains tied at the midsurface
+meta	unwelded_vertices_top	4 vertices where two components meet and no second vertex of the pair exists to make a chain: not welded there
+meta	zones_top	20 components (top-ring1 3.388 mm, top-z1 3.098 mm, top-z2 3.118 mm, top-z3 3.219 mm, top-z4 2.907 mm, top-z5 2.743 mm, top-z6 3.127 mm, top-band1 3.320 mm, top-z7 3.131 mm, top-band2 3.143 mm, top-z8 2.970 mm, top-z9 3.361 mm, top-z10 3.183 mm, top-z11 3.115 mm, top-z12 3.521 mm, top-z13 3.315 mm, top-z14 3.341 mm, top-z15 2.956 mm, top-z16 2.916 mm, top-z17 3.447 mm); thickness of each = cube root of the area-weighted mean cube of the smoothed normal-thickness map over its triangles (equal bending stiffness), no shift; zone step 0.20 mm; 49 interface chains tied at the midsurface
 meta	mesh_back	1858 vertices, 3425 triangles, minimum angle 16.0 deg, mean of the per-triangle minimum angles 44.3 deg
-meta	lonely_tie_vertices_back	2 zone-interface vertices sit alone between cross points, where no chain of two nodes can be made: the two components are not welded at that vertex (their neighbours on both sides are)
-meta	zones_back	24 components (back-ring1 3.644 mm, back-z1 3.107 mm, back-z2 3.416 mm, back-z3 3.478 mm, back-z4 3.873 mm, back-z5 5.845 mm, back-z6 6.190 mm, back-z7 5.223 mm, back-z8 4.225 mm, back-band1 5.862 mm, back-z9 3.360 mm, back-z10 2.763 mm, back-z11 3.525 mm, back-z12 4.093 mm, back-z13 4.299 mm, back-z14 5.297 mm, back-z15 3.423 mm, back-z16 3.279 mm, back-z17 5.179 mm, back-z18 4.342 mm, back-z19 5.301 mm, back-z20 4.686 mm, back-z21 5.486 mm, back-z22 5.068 mm); thickness of each = cube root of the area-weighted mean cube of the smoothed normal-thickness map over its triangles (equal bending stiffness), no shift; zone step 0.40 mm; 34 interface chains tied at the midsurface
+meta	unwelded_vertices_back	3 vertices where two components meet and no second vertex of the pair exists to make a chain: not welded there
+meta	zones_back	24 components (back-ring1 3.644 mm, back-z1 3.107 mm, back-z2 3.416 mm, back-z3 3.478 mm, back-z4 3.873 mm, back-z5 5.845 mm, back-z6 6.190 mm, back-z7 5.223 mm, back-z8 4.225 mm, back-band1 5.862 mm, back-z9 3.360 mm, back-z10 2.763 mm, back-z11 3.525 mm, back-z12 4.093 mm, back-z13 4.299 mm, back-z14 5.297 mm, back-z15 3.423 mm, back-z16 3.279 mm, back-z17 5.179 mm, back-z18 4.342 mm, back-z19 5.301 mm, back-z20 4.686 mm, back-z21 5.486 mm, back-z22 5.068 mm); thickness of each = cube root of the area-weighted mean cube of the smoothed normal-thickness map over its triangles (equal bending stiffness), no shift; zone step 0.40 mm; 59 interface chains tied at the midsurface
 meta	ribs	one closed strip along the attachment ring (272 vertices), 5 layers, thickness 1.50 mm = 10th percentile of the section mean widths (a radial section overstates the wall where it is oblique), grain along the local tangent in 16 sectors, top edge on the lower skin of the top ring zone (3.39 mm) and bottom edge on the inner skin of the back ring zone (3.64 mm), height 30.5 to 32.6 mm; linings and corner blocks are not modelled
 meta	bass_bar_wall	wall on the lower skin of the top band zone top-band1 (3.320 mm), 39 chain vertices, 2 layers
 meta	soundpost_tube	length 51.0 mm between the inner skins, 7 layers, 16 nodes per ring
@@ -26,7 +26,7 @@ meta	neck	one circular neck of the conductance of the two f-holes: per hole the 
 meta	scale_and_shift	plan-view scale 1.0000 (declared sensitivity u-inplane-scale), thickness shift 0.000 mm (declared sensitivity u-segmentation-error)
 meta	packs	back=maple, bar=spruce, bridge=maple, post=spruce, rib=maple, top=spruce
 meta	omitted	neck and upper block, tail block, tailpiece, strings, chinrest, linings and corner blocks, purfling, varnish, glue compliance, the button and tail-end notch features of the plates (end rows narrower than 10 mm)
-meta	totals	48 components, 7042 nodes, 10192 triangles, 81 ties
+meta	totals	48 components, 7042 nodes, 10192 triangles, 119 ties
 component	top-ring1	spruce	0.003388009	1	718	993	1	1
 region	0.000000000	0.000000000	1.000000000
 node	0.030981683	-0.010522689	-0.263548049	0.020217307498	-0.999752664325	0.009266641963
@@ -17372,48 +17372,12 @@ tri	198	150	177	0
 tri	170	198	159	0
 tri	91	199	141	0
 tri	185	199	148	0
-tie	top-band1	top-z12	0	12	12
-master	69 107 54 88 75 87 58 86 74 85 80 97
-slave	11 21 5 18 13 17 6 16 12 15 14 19
-tie	top-band1	top-z13	0	2	2
-master	120 69
-slave	21 3
-tie	top-band1	top-z17	0	9	9
-master	71 81 98 76 89 61 90 77 91
-slave	5 8 12 6 9 3 10 7 11
-tie	top-band1	top-z9	0	8	8
-master	71 70 56 55 42 45 121 97
-slave	32 31 27 26 6 11 104 36
-tie	top-band1	top-z9	0	6	6
-master	91 92 100 67 109 122
-slave	34 35 37 29 51 105
-tie	top-band2	top-z9	0	4	4
-master	46 40 48 52
-slave	3 1 7 22
 tie	top-ring1	top-z1	0	12	12
 master	581 559 578 653 579 654 584 585 582 657 583 658
 slave	5 0 3 14 4 15 8 9 6 16 7 17
 tie	top-ring1	top-z1	0	4	4
 master	594 595 596 675
 slave	10 11 12 18
-tie	top-ring1	top-z10	0	3	3
-master	561 589 659
-slave	0 2 3
-tie	top-ring1	top-z11	0	10	10
-master	621 683 622 569 619 681 620 682 688 625
-slave	3 8 4 0 1 6 2 7 9 5
-tie	top-ring1	top-z14	0	8	8
-master	636 694 714 696 641 695 640 674
-slave	2 7 10 9 5 8 3 6
-tie	top-ring1	top-z15	0	6	6
-master	616 679 711 680 684 621
-slave	1 8 13 9 10 3
-tie	top-ring1	top-z15	0	6	6
-master	624 685 623 626 687 625
-slave	5 11 4 7 12 6
-tie	top-ring1	top-z16	0	6	6
-master	648 689 634 635 571 715
-slave	3 4 1 2 0 5
 tie	top-ring1	top-z2	0	11	11
 master	567 673 610 652 577 558 557 717 716 556 575
 slave	38 66 49 65 48 35 33 307 306 32 47
@@ -17447,63 +17411,117 @@ slave	3 7 1 5 2 6 4
 tie	top-ring1	top-z9	0	4	4
 master	675 676 614 677
 slave	14 15 13 16
+tie	top-ring1	top-z10	0	3	3
+master	561 589 659
+slave	0 2 3
+tie	top-ring1	top-z11	0	10	10
+master	621 683 622 569 619 681 620 682 688 625
+slave	3 8 4 0 1 6 2 7 9 5
+tie	top-ring1	top-z14	0	8	8
+master	636 694 714 696 641 695 640 674
+slave	2 7 10 9 5 8 3 6
+tie	top-ring1	top-z15	0	6	6
+master	616 679 711 680 684 621
+slave	1 8 13 9 10 3
+tie	top-ring1	top-z15	0	6	6
+master	624 685 623 626 687 625
+slave	5 11 4 7 12 6
+tie	top-ring1	top-z16	0	6	6
+master	648 689 634 635 571 715
+slave	3 4 1 2 0 5
 tie	top-z1	top-z3	0	15	15
-master	37 25 31 41 38 78 70 82 72 68 81 80 24 74 30
-slave	106 84 104 110 108 164 152 173 153 151 172 170 81 163 98
+master	30 74 24 80 81 68 72 82 70 78 38 41 31 25 37
+slave	98 163 81 170 172 151 153 173 152 164 108 110 104 84 106
+tie	top-z1	top-band1	0	2	2
+master	30 39
+slave	99 110
 tie	top-z1	top-z8	0	23	23
-master	20 47 43 45 29 73 62 79 61 76 67 65 64 66 52 60 22 58 32 59 49 23 19
-slave	9 17 14 15 12 38 33 40 29 39 37 35 34 36 20 28 10 25 13 26 19 11 8
+master	19 23 49 59 32 58 22 60 52 66 64 65 67 76 61 79 62 73 29 45 43 47 20
+slave	8 11 19 26 13 25 10 28 20 36 34 35 37 39 29 40 33 38 12 15 14 17 9
 tie	top-z1	top-z9	0	10	10
 master	13 21 57 56 55 40 36 44 42 39
 slave	12 17 108 107 106 54 46 98 96 52
-tie	top-z11	top-z15	0	10	10
-master	10 19 27 25 24 26 16 13 14 17
-slave	15 29 39 36 35 38 26 19 21 28
-tie	top-z12	top-z13	0	13	13
-master	25 26 24 28 31 27 37 40 38 41 48 51 45
-slave	5 7 4 9 10 8 13 17 14 18 29 34 20
-tie	top-z2	top-z3	0	3	3
-master	0 303 97
-slave	5 118 69
+tie	top-z2	top-z3	0	4	4
+master	0 303 97 15
+slave	5 118 69 6
 tie	top-z2	top-z4	0	23	23
 master	167 88 235 234 139 131 206 284 202 205 203 198 232 338 170 114 228 250 155 184 183 164 187
 slave	47 28 67 65 41 38 61 70 58 60 59 56 63 71 49 36 62 68 45 52 51 46 53
 tie	top-z2	top-z6	0	2	2
 master	29 83
 slave	1 36
+tie	top-z2	top-band1	0	34	34
+master	97 37 85 117 80 118 311 410 34 310 109 313 127 315 128 316 129 317 130 178 146 161 156 160 222 165 157 141 150 132 149 140 148 137
+slave	48 44 47 52 46 53 113 125 43 112 49 116 62 117 63 118 64 119 65 108 93 104 101 103 111 105 102 79 96 66 95 78 94 68
+tie	top-z2	top-band2	0	5	5
+master	83 304 95 305 93
+slave	49 53 51 54 50
+tie	top-z2	top-z12	0	3	3
+master	93 82 389
+slave	1 0 50
+tie	top-z2	top-z13	0	16	16
+master	137 320 407 364 374 375 267 266 233 279 280 287 45 391 390 389
+slave	2 22 33 25 26 28 12 11 6 15 16 19 0 32 31 30
+tie	top-z2	top-z14	0	21	21
+master	102 41 143 321 189 119 190 323 333 322 324 326 327 393 258 185 186 221 159 409 187
+slave	12 0 17 31 23 14 24 38 47 35 44 45 46 55 27 20 21 26 18 56 22
+tie	top-z2	top-z16	0	43	43
+master	145 176 120 181 214 212 213 352 347 351 349 345 348 346 354 368 334 379 384 336 398 394 397 362 370 400 355 371 344 350 356 360 237 373 365 376 265 380 253 290 289 288 318
+slave	10 13 7 16 25 22 23 47 42 46 44 40 43 41 48 56 37 64 66 38 69 67 68 54 57 70 49 58 39 45 51 52 27 59 55 61 32 65 29 35 34 33 36
+tie	top-z3	top-band1	0	15	15
+master	90 93 82 95 91 94 87 135 88 149 137 146 79 80 103
+slave	72 82 57 84 73 83 59 114 60 124 115 123 50 51 106
+tie	top-z3	top-z10	0	16	16
+master	39 86 97 107 112 109 114 132 129 125 126 124 128 150 102 72
+slave	1 6 7 9 13 12 14 22 21 17 18 16 20 23 8 4
 tie	top-z5	top-z7	0	4	4
-master	54 26 22 17
-slave	45 38 37 34
+master	17 22 26 54
+slave	34 37 38 45
+tie	top-z5	top-z15	0	21	21
+master	14 21 16 23 24 30 57 31 29 45 44 50 48 53 52 43 40 39 47 60 17
+slave	20 30 24 33 34 61 87 62 53 68 67 71 70 76 73 66 65 64 69 90 25
 tie	top-z6	top-z7	0	2	2
 master	0 56
 slave	0 36
+tie	top-z6	top-band2	0	11	11
+master	13 16 12 8 11 15 9 14 10 21 18
+slave	32 37 27 19 26 36 22 34 24 45 42
 tie	top-z6	top-z9	0	31	31
 master	13 19 23 25 26 67 66 60 116 111 109 107 108 102 104 105 92 93 122 91 82 89 86 90 62 70 50 55 54 39 44
 slave	0 2 4 5 9 62 61 57 126 125 122 120 121 110 111 112 74 76 128 73 68 70 69 72 58 63 42 50 49 18 24
+tie	top-z6	top-z15	0	24	24
+master	40 46 72 76 47 63 74 75 73 96 83 79 84 85 123 81 99 101 119 117 58 65 64 56
+slave	17 18 45 49 22 41 47 48 46 85 80 72 82 84 104 77 92 93 103 102 37 43 42 31
+tie	top-band1	top-z9	0	8	8
+master	71 70 56 55 42 45 121 97
+slave	32 31 27 26 6 11 104 36
+tie	top-band1	top-z9	0	6	6
+master	91 92 100 67 109 122
+slave	34 35 37 29 51 105
+tie	top-band1	top-z12	0	12	12
+master	69 107 54 88 75 87 58 86 74 85 80 97
+slave	11 21 5 18 13 17 6 16 12 15 14 19
+tie	top-band1	top-z13	0	2	2
+master	69 120
+slave	3 21
+tie	top-band1	top-z17	0	9	9
+master	71 81 98 76 89 61 90 77 91
+slave	5 8 12 6 9 3 10 7 11
+tie	top-band2	top-z9	0	4	4
+master	46 40 48 52
+slave	3 1 7 22
+tie	top-z9	top-z17	0	12	12
+master	28 56 48 124 64 67 109 119 118 77 87 81
+slave	1 14 13 30 17 21 25 29 28 22 24 23
+tie	top-z11	top-z15	0	10	10
+master	10 19 27 25 24 26 16 13 14 17
+slave	15 29 39 36 35 38 26 19 21 28
+tie	top-z12	top-z13	0	13	13
+master	25 26 24 28 31 27 37 40 38 41 48 51 45
+slave	5 7 4 9 10 8 13 17 14 18 29 34 20
 tie	back-ring1	back-z1	0	23	23
 master	584 585 565 586 637 587 638 699 723 692 724 693 694 631 632 580 581 582 633 583 634 695 635
 slave	6 7 1 8 16 9 17 22 23 18 24 19 20 11 12 2 3 4 13 5 14 21 15
-tie	back-ring1	back-z10	0	18	18
-master	572 598 597 655 654 728 709 686 625 685 624 627 626 690 687 689 721 688
-slave	0 3 2 10 9 19 17 12 5 11 4 8 7 16 13 15 18 14
-tie	back-ring1	back-z11	0	3	3
-master	640 639 726
-slave	2 1 4
-tie	back-ring1	back-z12	0	5	5
-master	608 609 671 697 636
-slave	1 2 4 5 3
-tie	back-ring1	back-z13	0	6	6
-master	666 715 667 725 731 726
-slave	1 4 2 5 7 6
-tie	back-ring1	back-z15	0	4	4
-master	600 601 602 666
-slave	4 5 6 17
-tie	back-ring1	back-z15	0	20	20
-master	663 714 659 661 660 713 711 658 710 657 656 735 712 730 729 669 668 603 574 732
-slave	16 25 13 15 14 24 21 11 20 10 9 76 22 27 26 19 18 7 1 31
-tie	back-ring1	back-z16	0	5	5
-master	600 665 662 664 663
-slave	1 5 2 4 3
 tie	back-ring1	back-z2	0	11	11
 master	572 599 630 691 579 672 611 610 628 629 683
 slave	1 11 16 25 5 22 13 12 14 15 23
@@ -17525,33 +17543,30 @@ slave	4 6 1 2 0 3 5 7 8
 tie	back-ring1	back-z9	0	21	21
 master	619 618 682 591 590 589 648 645 647 704 646 703 642 588 644 643 702 701 641 700 640
 slave	8 7 18 6 5 4 17 14 16 23 15 22 11 2 13 12 21 20 10 19 9
+tie	back-ring1	back-z10	0	18	18
+master	572 598 597 655 654 728 709 686 625 685 624 627 626 690 687 689 721 688
+slave	0 3 2 10 9 19 17 12 5 11 4 8 7 16 13 15 18 14
+tie	back-ring1	back-z11	0	3	3
+master	640 639 726
+slave	2 1 4
+tie	back-ring1	back-z12	0	5	5
+master	608 609 671 697 636
+slave	1 2 4 5 3
+tie	back-ring1	back-z13	0	6	6
+master	666 715 667 725 731 726
+slave	1 4 2 5 7 6
+tie	back-ring1	back-z15	0	4	4
+master	600 601 602 666
+slave	4 5 6 17
+tie	back-ring1	back-z15	0	20	20
+master	663 714 659 661 660 713 711 658 710 657 656 735 712 730 729 669 668 603 574 732
+slave	16 25 13 15 14 24 21 11 20 10 9 76 22 27 26 19 18 7 1 31
+tie	back-ring1	back-z16	0	5	5
+master	600 665 662 664 663
+slave	1 5 2 4 3
 tie	back-z1	back-z3	0	19	19
-master	68 28 56 48 71 74 72 75 73 79 82 78 81 66 65 63 46 36 35
-slave	90 36 67 57 113 134 132 135 133 169 177 163 175 82 81 73 55 48 45
-tie	back-z11	back-z13	0	8	8
-master	3 7 13 10 17 20 23 24
-slave	3 12 18 14 30 38 50 54
-tie	back-z12	back-z18	0	37	37
-master	72 73 70 130 103 138 57 124 123 98 97 99 100 52 50 45 41 18 19 31 69 68 77 37 139 132 135 134 140 141 145 142 81 79 82 49 54
-slave	30 31 28 67 52 79 23 65 64 43 42 45 47 20 18 15 14 0 1 3 26 25 35 13 80 70 74 72 81 83 88 85 39 37 40 17 21
-tie	back-z13	back-z14	0	8	8
-master	56 61 77 67 66 68 70 71
-slave	3 13 33 19 18 20 24 28
-tie	back-z13	back-z15	0	10	10
-master	8 15 13 10 79 22 78 52 81 75
-slave	33 51 42 36 93 61 92 75 101 87
-tie	back-z15	back-z16	0	15	15
-master	41 44 45 53 83 60 67 94 58 56 64 59 47 43 30
-slave	9 11 12 15 23 19 21 24 17 16 20 18 13 10 7
-tie	back-z18	back-z20	0	24	24
-master	27 29 32 33 22 66 78 44 50 46 48 49 7 9 5 11 10 69 71 82 63 86 87 76
-slave	10 11 13 15 8 35 55 24 28 25 26 27 1 2 0 4 3 46 47 57 34 58 59 51
-tie	back-z18	back-z22	0	5	5
-master	59 62 60 84 76
-slave	12 15 13 41 36
-tie	back-z2	back-z22	0	2	2
-master	116 125
-slave	0 1
+master	35 36 46 63 65 66 81 78 82 79 73 75 72 74 71 48 56 28 68
+slave	45 48 55 73 81 82 175 163 177 169 133 135 132 134 113 57 67 36 90
 tie	back-z2	back-z3	0	29	29
 master	114 37 32 3 50 36 108 109 133 67 118 64 78 77 53 87 80 72 81 82 141 135 112 111 106 110 107 136 142
 slave	108 41 35 1 52 40 98 99 127 59 114 58 70 68 53 78 74 61 75 76 171 142 106 102 92 101 96 143 173
@@ -17561,18 +17576,36 @@ slave	43 113
 tie	back-z2	back-z7	0	8	8
 master	74 73 117 33 90 123 92 101
 slave	24 23 32 20 28 33 29 30
-tie	back-z20	back-z22	0	15	15
-master	9 14 42 12 43 45 44 39 37 50 41 54 53 52 49
-slave	3 8 23 7 24 26 25 18 17 35 20 40 39 37 34
-tie	back-z21	back-z22	0	12	12
-master	6 7 8 15 14 25 24 21 22 23 19 26
-slave	4 5 9 22 21 33 31 28 29 30 27 42
+tie	back-z2	back-z10	0	19	19
+master	41 54 85 121 84 131 103 104 89 102 130 79 128 88 138 98 127 56 55
+slave	26 33 51 70 50 75 64 65 54 63 74 47 72 53 76 55 71 36 35
+tie	back-z2	back-z12	0	2	2
+master	139 142
+slave	104 131
+tie	back-z2	back-z17	0	3	3
+master	31 49 101
+slave	1 3 13
+tie	back-z2	back-z18	0	2	2
+master	116 139
+slave	24 53
+tie	back-z2	back-z22	0	2	2
+master	116 125
+slave	0 1
+tie	back-z3	back-z12	0	51	51
+master	111 86 89 112 83 77 85 104 95 88 138 137 167 179 161 160 157 158 156 150 148 153 121 149 155 166 129 44 66 50 63 62 56 94 93 103 100 115 116 140 141 87 145 126 147 97 105 91 172 118 117
+slave	59 35 39 62 32 26 34 53 46 38 94 93 128 146 120 119 117 118 116 112 109 113 75 110 115 125 84 7 20 9 17 16 12 44 42 51 48 65 66 95 96 36 105 76 106 47 55 40 129 74 71
 tie	back-z4	back-z5	0	5	5
 master	43 34 39 26 45
 slave	52 41 44 26 57
 tie	back-z4	back-z9	0	11	11
 master	20 5 21 36 59 65 44 41 62 40 63
 slave	24 1 25 62 98 111 74 71 108 68 110
+tie	back-z4	back-z12	0	5	5
+master	4 61 31 42 43
+slave	0 63 15 27 28
+tie	back-z4	back-z19	0	8	8
+master	45 46 35 51 53 56 54 63
+slave	3 4 1 13 15 19 16 29
 tie	back-z5	back-z6	0	25	25
 master	1 12 22 30 27 138 109 37 195 29 179 191 149 190 38 39 40 177 33 136 32 23 11 14 6
 slave	0 4 9 22 16 37 35 25 45 20 41 43 39 42 28 30 32 40 24 36 23 11 3 5 1
@@ -17582,6 +17615,87 @@ slave	1 11 7 17 25 21 27
 tie	back-z5	back-z7	0	5	5
 master	5 18 21 25 114
 slave	3 10 13 19 34
+tie	back-z5	back-band1	0	4	4
+master	1 7 10 2
+slave	19 30 35 20
+tie	back-z5	back-band1	0	7	7
+master	5 9 4 0 3 8 6
+slave	27 34 25 17 24 33 28
+tie	back-z5	back-z12	0	8	8
+master	47 54 148 187 188 137 164 153
+slave	23 30 101 136 137 92 122 121
+tie	back-z5	back-z14	0	10	10
+master	83 122 82 86 117 116 118 151 176 175
+slave	14 34 12 16 26 21 29 36 38 37
+tie	back-z5	back-z17	0	15	15
+master	49 42 62 55 61 74 69 59 100 79 193 128 130 129 175
+slave	8 6 26 12 25 34 30 22 39 38 49 41 43 42 46
+tie	back-z5	back-z18	0	2	2
+master	153 154
+slave	58 61
+tie	back-z5	back-z19	0	11	11
+master	56 66 88 90 94 92 124 171 169 87 83
+slave	2 5 21 25 27 26 30 36 34 12 9
+tie	back-z5	back-z21	0	13	13
+master	115 36 102 35 104 181 150 103 185 184 156 158 157
+slave	5 1 2 0 4 16 9 3 20 18 10 12 11
+tie	back-z5	back-z22	0	4	4
+master	154 152 157 115
+slave	14 11 16 2
+tie	back-z7	back-band1	0	4	4
+master	0 2 5 4
+slave	18 26 36 31
+tie	back-z8	back-z13	0	5	5
+master	41 58 29 48 63
+slave	72 80 43 74 82
+tie	back-z8	back-z14	0	4	4
+master	41 43 61 54
+slave	30 31 39 35
+tie	back-z8	back-z15	0	14	14
+master	38 13 25 22 23 17 20 21 47 55 56 57 18 63
+slave	77 38 74 72 73 57 68 70 86 97 98 99 65 102
+tie	back-z8	back-z17	0	13	13
+master	15 16 9 27 28 33 31 36 37 34 50 62 54
+slave	4 5 0 16 17 29 20 35 36 32 44 48 45
+tie	back-z9	back-z11	0	9	9
+master	29 34 63 78 81 102 45 79 75
+slave	5 8 14 19 22 25 9 21 18
+tie	back-z9	back-z13	0	2	2
+master	75 87
+slave	37 53
+tie	back-z9	back-z14	0	6	6
+master	87 90 92 95 91 96
+slave	1 2 5 8 4 11
+tie	back-z9	back-z19	0	3	3
+master	96 97 109
+slave	7 8 28
+tie	back-z11	back-z13	0	8	8
+master	3 7 13 10 17 20 23 24
+slave	3 12 18 14 30 38 50 54
+tie	back-z12	back-z18	0	37	37
+master	54 49 82 79 81 142 145 141 140 134 135 132 139 37 77 68 69 31 19 18 41 45 50 52 100 99 97 98 123 124 57 138 103 130 70 73 72
+slave	21 17 40 37 39 85 88 83 81 72 74 70 80 13 35 25 26 3 1 0 14 15 18 20 47 45 42 43 64 65 23 79 52 67 28 31 30
+tie	back-z13	back-z14	0	8	8
+master	56 61 77 67 66 68 70 71
+slave	3 13 33 19 18 20 24 28
+tie	back-z13	back-z15	0	10	10
+master	8 15 13 10 79 22 78 52 81 75
+slave	33 51 42 36 93 61 92 75 101 87
+tie	back-z15	back-z16	0	15	15
+master	30 43 47 59 64 56 58 94 67 60 83 53 45 44 41
+slave	7 10 13 18 20 16 17 24 21 19 23 15 12 11 9
+tie	back-z18	back-z20	0	24	24
+master	27 29 32 33 22 66 78 44 50 46 48 49 7 9 5 11 10 69 71 82 63 86 87 76
+slave	10 11 13 15 8 35 55 24 28 25 26 27 1 2 0 4 3 46 47 57 34 58 59 51
+tie	back-z18	back-z22	0	6	6
+master	59 62 60 84 76 27
+slave	12 15 13 41 36 6
+tie	back-z20	back-z22	0	15	15
+master	9 14 42 12 43 45 44 39 37 50 41 54 53 52 49
+slave	3 8 23 7 24 26 25 18 17 35 20 40 39 37 34
+tie	back-z21	back-z22	0	12	12
+master	6 7 8 15 14 25 24 21 22 23 19 26
+slave	4 5 9 22 21 33 31 28 29 30 27 42
 tie	top-ring1	rib	-1	136	136
 master	284 285 286 287 288 289 290 291 292 293 294 295 296 297 298 299 300 301 302 303 304 305 306 307 308 309 310 311 312 313 314 315 316 317 318 319 320 321 322 323 324 325 326 327 328 329 330 331 332 333 334 335 336 337 338 339 340 341 342 343 344 345 346 347 348 349 350 351 352 353 354 355 356 357 358 359 360 361 362 363 364 365 366 367 368 369 370 371 372 373 374 375 376 377 378 379 380 381 382 383 384 385 386 387 388 389 390 391 392 393 394 395 396 397 398 399 400 401 402 403 404 405 406 407 408 409 410 411 412 413 414 415 416 417 418 419
 slave	0 6 12 18 24 30 36 42 48 54 60 66 72 78 84 90 96 102 108 114 120 126 132 138 144 150 156 162 168 174 180 186 192 198 204 210 216 222 228 234 240 246 252 258 264 270 276 282 288 294 300 306 312 318 324 330 336 342 348 354 360 366 372 378 384 390 396 402 408 414 420 426 432 438 444 450 456 462 468 474 480 486 492 498 504 510 516 522 528 534 540 546 552 558 564 570 576 582 588 594 600 606 612 618 624 630 636 642 648 654 660 666 672 678 684 690 696 702 708 714 720 726 732 738 744 750 756 762 768 774 780 786 792 798 804 810

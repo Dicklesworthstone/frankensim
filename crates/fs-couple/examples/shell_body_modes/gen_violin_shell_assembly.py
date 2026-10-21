@@ -27,6 +27,7 @@ BAR_ON = opts.get("bar", "1") == "1"
 POST_ON = opts.get("post", "1") == "1"
 BRIDGE_ON = opts.get("bridge", "1") == "1"
 EDGE = float(opts.get("edge", "0.45"))  # spacing of the outline and attachment-ring vertices in units of H: a fine ring keeps the ring band narrow
+ONLY = opts.get("only", "")  # diagnostic: "top" or "back" builds that plate alone (with bar=0 post=0 bridge=0), free in space, to read its modes without the box
 FANFIX = opts.get("fanfix", "0") == "1"  # repairs for meshes that leave a vertex with several fans in one component (needed by some of the scaled sensitivity meshes; the base table does not need them)
 MIN_PATCH = int(opts.get("min_patch", "24"))  # interior zone patches smaller than this many triangles are merged into their neighbour
 ZSTEP = dict(top=float(opts.get("zone_step_top_mm", "0.2")), back=float(opts.get("zone_step_back_mm", "0.4")))
@@ -689,32 +690,47 @@ def zone_components(prefix, fld, V, T, chains, ring, feature_chains, circles, pa
     for e, ts in edge_tris.items():
         if len(ts) == 2 and owner[ts[0]] != owner[ts[1]]:
             pair_edges[tuple(sorted((owner[ts[0]], owner[ts[1]])))].append(e)
-    # cross points: a vertex shared by several components is tied once, every other component's node as the slave of the node of the first component (the owner refuses a node that is a
-    # slave in one tie and a master in another); a chain keeps only the vertices whose master is its own master component and is cut where another master takes over (along an edge
-    # both ends of which are tied, the linear fields of the two components are equal)
+    # a vertex shared by several components is welded once: the node of the first component (creation order) is the master and every other component's node there a slave (the owner refuses
+    # a node that is a slave in one tie and a master in another). For each (master, slave) pair the vertices form chains along their interface edges where consecutive vertices are both
+    # in the pair's vertex set; vertices left over (their neighbours have another master, or the two components meet there only) are chained to their nearest leftover vertex: the two
+    # chords are the same segment on both sides, so the gap is zero, and every slave node is in exactly one tie
     order = {c.name: k for k, c in enumerate(comps)}
     members = defaultdict(list)
     for c in comps:
         for v in local[c.name]:
             members[v].append(c.name)
-    first = {v: min(ns, key=order.get) for v, ns in members.items()}
-    lonely = 0
-    for (ma, sb), es in sorted(pair_edges.items()):
+    pair_vertices = defaultdict(list)
+    for v, ns in members.items():
+        if len(ns) > 1:
+            m_ = min(ns, key=order.get)
+            for x_ in ns:
+                if x_ != m_:
+                    pair_vertices[(m_, x_)].append(v)
+    unwelded = 0
+    for (ma, sb), vs in sorted(pair_vertices.items(), key=lambda kv: (order[kv[0][0]], order[kv[0][1]])):
+        vset = set(vs)
+        es = [e for e in pair_edges.get(tuple(sorted((ma, sb))), []) if e[0] in vset and e[1] in vset]
+        covered, chains_ = set(), []
         for ch in chains_from_edges(es):
             if len(ch) > 2 and ch[0] == ch[-1]:
-                ch = ch[:-1]  # a closed loop: the owner refuses a node twice in one tie, so the closing segment is left to its two tied end nodes
-            run = []
-            for v in list(ch) + [None]:
-                if v is not None and first[v] == ma:
-                    run.append(v)
-                    continue
-                if len(run) >= 2:
-                    ties.append((ma, sb, 0, [local[ma][u] for u in run], [local[sb][u] for u in run]))
-                elif len(run) == 1:
-                    lonely += 1
-                run = []
-    if lonely:
-        meta("lonely_tie_vertices_" + prefix, "%d zone-interface vertices sit alone between cross points, where no chain of two nodes can be made: the two components are not welded at that vertex (their neighbours on both sides are)" % lonely)
+                ch = ch[:-1]  # a closed loop: the owner refuses a node twice in one tie
+            if len(ch) >= 2:
+                chains_.append(list(ch))
+                covered.update(ch)
+        left = [v for v in vs if v not in covered]
+        while len(left) >= 2:
+            v0 = left.pop(0)
+            j = min(range(len(left)), key=lambda k: float(np.hypot(*(V[left[k]] - V[v0]))))
+            chains_.append([v0, left.pop(j)])
+        if left:  # one vertex alone: join the nearest chain of this pair if there is one, else it stays unwelded
+            if chains_:
+                chains_[-1].append(left[0])
+            else:
+                unwelded += 1
+        for ch in chains_:
+            ties.append((ma, sb, 0, [local[ma][u] for u in ch], [local[sb][u] for u in ch]))
+    if unwelded:
+        meta("unwelded_vertices_" + prefix, "%d vertices where two components meet and no second vertex of the pair exists to make a chain: not welded there" % unwelded)
     meta("zones_" + prefix, "%d components (%s); thickness of each = cube root of the area-weighted mean cube of the smoothed normal-thickness map over its triangles (equal bending stiffness), %s; zone step %.2f mm; %d interface chains tied at the midsurface" % (
         len(comps), ", ".join("%s %.3f mm" % (c.name, c.t) for c in comps), "shifted by %.3f mm" % T_SHIFT if T_SHIFT else "no shift", level_step, sum(1 for t in ties if t[2] == 0 and t[0].startswith(prefix) and t[1].startswith(prefix))))
     return comps, local, patch, owner, P3, N3
@@ -855,6 +871,8 @@ def main():
     meshes = {}
     for name, fld, outline, extra, circles, feats, step in (("top", top_fld, top_outline, extra_top, circles_top, feature_top, ZSTEP["top"]),
                                                             ("back", back_fld, back_outline, extra_back, circles_back, ["post"] if POST_ON else [], ZSTEP["back"])):
+        if ONLY and name != ONLY:
+            continue
         V, T, chains = mesh_plate(name, fld, outline, ring, extra)
         comps, local, patch, owner, P3, N3 = zone_components(name, fld, V, T, chains, ring, feats, circles, PACKS[name], step)
         components.extend(comps)
@@ -868,51 +886,52 @@ def main():
                 return c
         raise AssertionError("chain %s of %s is not inside one component: %s" % (chain_name, name, {c.name: (sum(1 for v in ids if v in m["local"][c.name]), c.zone_kind, round(c.area)) for c in m["comps"]}))
 
-    # --- ribs: one closed strip along the attachment ring, from the lower skin of the top to the inner skin of the back
-    _, rr = ntable("ribs-sections.tsv")
-    t_rib = float(np.percentile(rr[:, 8], 10))
-    ctop, cback = comp_of_chain("top", "ring", "ring"), comp_of_chain("back", "ring", "ring")
-    ids_t, ids_b = meshes["top"]["chains"]["ring"][:-1], meshes["back"]["chains"]["ring"][:-1]
-    n = len(ids_t)
-    assert n == len(ids_b)
-    Pt, Nt, Pb, Nb = meshes["top"]["P3"], meshes["top"]["N3"], meshes["back"]["P3"], meshes["back"]["N3"]
-    top_end = np.array([Pt[v] - 0.5 * ctop.t * Nt[v] for v in ids_t])
-    bot_end = np.array([Pb[v] - 0.5 * cback.t * Nb[v] for v in ids_b])
-    height = np.linalg.norm(bot_end - top_end, axis=1)
-    K = max(2, int(math.ceil(height.max() / (0.9 * H))))
-    rib = Comp("rib", PACKS["rib"], t_rib, True, True)
-    ccw = poly_area(ring) > 0
-    rows = [[] for _ in range(K + 1)]
-    tang = []
-    nsec = 16
-    for i in range(n):
-        tv = ring[(i + 1) % n] - ring[i - 1]
-        tv = tv / np.hypot(*tv)
-        tang.append(tv)
-        out = np.array([tv[1], 0.0, -tv[0]]) if ccw else np.array([-tv[1], 0.0, tv[0]])
-        for k in range(K + 1):
-            rows[k].append(rib.add(top_end[i] + (bot_end[i] - top_end[i]) * k / K, out))
-    rib.regions = []
-    sec = lambda i: min(nsec - 1, i * nsec // n)
-    for s_ in range(nsec):
-        m = np.mean([tang[i] for i in range(n) if sec(i) == s_], axis=0)
-        m /= np.hypot(*m)
-        rib.regions.append((m[0], 0.0, m[1]))
-    for k in range(K):
+    if not ONLY:
+        # --- ribs: one closed strip along the attachment ring, from the lower skin of the top to the inner skin of the back
+        _, rr = ntable("ribs-sections.tsv")
+        t_rib = float(np.percentile(rr[:, 8], 10))
+        ctop, cback = comp_of_chain("top", "ring", "ring"), comp_of_chain("back", "ring", "ring")
+        ids_t, ids_b = meshes["top"]["chains"]["ring"][:-1], meshes["back"]["chains"]["ring"][:-1]
+        n = len(ids_t)
+        assert n == len(ids_b)
+        Pt, Nt, Pb, Nb = meshes["top"]["P3"], meshes["top"]["N3"], meshes["back"]["P3"], meshes["back"]["N3"]
+        top_end = np.array([Pt[v] - 0.5 * ctop.t * Nt[v] for v in ids_t])
+        bot_end = np.array([Pb[v] - 0.5 * cback.t * Nb[v] for v in ids_b])
+        height = np.linalg.norm(bot_end - top_end, axis=1)
+        K = max(2, int(math.ceil(height.max() / (0.9 * H))))
+        rib = Comp("rib", PACKS["rib"], t_rib, True, True)
+        ccw = poly_area(ring) > 0
+        rows = [[] for _ in range(K + 1)]
+        tang = []
+        nsec = 16
         for i in range(n):
-            i2 = (i + 1) % n
-            a_, b_, c_, e_ = rows[k][i], rows[k][i2], rows[k + 1][i2], rows[k + 1][i]
-            g = sec(i)
-            if (i + k) % 2 == 0:
-                rib.tris += [(a_, b_, c_, g), (a_, c_, e_, g)]
-            else:
-                rib.tris += [(a_, b_, e_, g), (b_, c_, e_, g)]
-    orient_tris(rib)
-    components.append(rib)
-    lt, lb = meshes["top"]["local"][ctop.name], meshes["back"]["local"][cback.name]
-    add_ring_ties(ctop.name, "rib", -1, [lt[v] for v in ids_t], list(rows[0]))
-    add_ring_ties(cback.name, "rib", -1, [lb[v] for v in ids_b], list(rows[K]))
-    meta("ribs", "one closed strip along the attachment ring (%d vertices), %d layers, thickness %.2f mm = 10th percentile of the section mean widths (a radial section overstates the wall where it is oblique), grain along the local tangent in %d sectors, top edge on the lower skin of the top ring zone (%.2f mm) and bottom edge on the inner skin of the back ring zone (%.2f mm), height %.1f to %.1f mm; linings and corner blocks are not modelled" % (n, K, t_rib, nsec, ctop.t, cback.t, height.min(), height.max()))
+            tv = ring[(i + 1) % n] - ring[i - 1]
+            tv = tv / np.hypot(*tv)
+            tang.append(tv)
+            out = np.array([tv[1], 0.0, -tv[0]]) if ccw else np.array([-tv[1], 0.0, tv[0]])
+            for k in range(K + 1):
+                rows[k].append(rib.add(top_end[i] + (bot_end[i] - top_end[i]) * k / K, out))
+        rib.regions = []
+        sec = lambda i: min(nsec - 1, i * nsec // n)
+        for s_ in range(nsec):
+            m = np.mean([tang[i] for i in range(n) if sec(i) == s_], axis=0)
+            m /= np.hypot(*m)
+            rib.regions.append((m[0], 0.0, m[1]))
+        for k in range(K):
+            for i in range(n):
+                i2 = (i + 1) % n
+                a_, b_, c_, e_ = rows[k][i], rows[k][i2], rows[k + 1][i2], rows[k + 1][i]
+                g = sec(i)
+                if (i + k) % 2 == 0:
+                    rib.tris += [(a_, b_, c_, g), (a_, c_, e_, g)]
+                else:
+                    rib.tris += [(a_, b_, e_, g), (b_, c_, e_, g)]
+        orient_tris(rib)
+        components.append(rib)
+        lt, lb = meshes["top"]["local"][ctop.name], meshes["back"]["local"][cback.name]
+        add_ring_ties(ctop.name, "rib", -1, [lt[v] for v in ids_t], list(rows[0]))
+        add_ring_ties(cback.name, "rib", -1, [lb[v] for v in ids_b], list(rows[K]))
+        meta("ribs", "one closed strip along the attachment ring (%d vertices), %d layers, thickness %.2f mm = 10th percentile of the section mean widths (a radial section overstates the wall where it is oblique), grain along the local tangent in %d sectors, top edge on the lower skin of the top ring zone (%.2f mm) and bottom edge on the inner skin of the back ring zone (%.2f mm), height %.1f to %.1f mm; linings and corner blocks are not modelled" % (n, K, t_rib, nsec, ctop.t, cback.t, height.min(), height.max()))
 
     # --- bass bar wall on the lower skin of the top
     if bar is not None:
@@ -1143,6 +1162,9 @@ def write(vol_inner_mm3, r_eq_mm, neck_len_mm):
             f.write("master\t%s\n" % " ".join(map(str, mn)))
             f.write("slave\t%s\n" % " ".join(map(str, sn)))
         f.write("cavity\t%.9f\t%.9f\t%.9f\n" % (vol_inner_mm3 / 1e9, r_eq_mm / 1000.0, neck_len_mm / 1000.0))
+        if ONLY:
+            first = next(c for c in components if c.name.startswith(ONLY + "-z"))
+            f.write("drive\tdiagnostic centre, along the director\t%s\t0.0\t%.6f\t-0.1\t0\t1\t0\n" % (first.name, first.nodes[0][1]))
         if BRIDGE_ON:
             contact = {(r[0], r[1]): r for r in table("string-contacts.tsv")[1]}  # string, contact, z, x, y, slopes
             for label, key in (("bass string (G) at the bridge, along x", ("g", "bridge")), ("treble string (E) at the bridge, along x", ("e", "bridge"))):
