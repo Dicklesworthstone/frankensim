@@ -7,6 +7,7 @@ pub use fs_tribo::resistive_film::isothermal::{AmbientGas, GasObservation};
 use fs_tribo::resistive_film::{ResistiveFilm, MAX_CELLS};
 use fs_tribo::resistive_film::isothermal::IsothermalFilm;
 use fs_phs::Storage;
+use fs_material::gas_species::input::GasRecord;
 use std::rc::Rc;
 use super::{ImpactError, ImpactSystem, MAX_IMPACT_MODES, invalid};
 
@@ -14,6 +15,7 @@ pub(super) struct Memory {
     pub(super) base_dim: usize,
     modes: usize,
     law: IsothermalFilm,
+    source: Option<GasRecord>,
 }
 impl Memory {
     fn end(&self) -> usize { self.base_dim + self.law.cell_count() }
@@ -100,8 +102,40 @@ impl ImpactSystem {
     /// and 1024 total scalar states are admitted; no cell is dropped to fit.
     /// Simultaneous resistance-only and compressible images refuse rather than
     /// double-counting the same interface. No attachment after time has advanced.
-    pub fn with_compressible_squeeze_film(mut self, geometry:ResistiveFilm, gas:AmbientGas)
+    pub fn with_compressible_squeeze_film(self, geometry:ResistiveFilm, gas:AmbientGas)
         -> Result<Self,ImpactError>
+    {
+        self.bind_compressible_squeeze_film(geometry,gas,None)
+    }
+
+    /// Bind one complete material gas to the original compressible gap owner.
+    ///
+    /// Pressure, temperature, specific gas constant and EVERY channel viscosity
+    /// come from this same checked state. The supplied graph contributes only
+    /// geometry/validity limits: its old viscosity is replaced, so changing the
+    /// gas cannot retain a stale independently authored drainage coefficient.
+    /// The actual runtime keeps the original GasRecord and thermochemical pack
+    /// identities, including after prepared execution takes ownership.
+    ///
+    /// Composition and temperature remain fixed during the isothermal step;
+    /// gas mass and pressure evolve with the shared mechanical state. This is
+    /// a frozen-transport reduction at the admitted reference state; pressure
+    /// dependence of viscosity is not evolved during compression. It assumes
+    /// ideal-gas, no-slip, laminar thin-gap flow, without gas inertia or thermal
+    /// evolution. These assumptions are independent of source-data admission.
+    pub fn with_material_compressible_squeeze_film(self, geometry:ResistiveFilm, source:GasRecord)
+        -> Result<Self,ImpactError>
+    {
+        let state=source.state();
+        state.validate_coherence().map_err(|e|ImpactError::Owner(e.to_string()))?;
+        let geometry=geometry.with_viscosity(state.dynamic_viscosity).map_err(|e|invalid(e.0))?;
+        let gas=AmbientGas { pressure_pa:state.pressure,temperature_k:state.temperature,
+            specific_gas_constant_j_kg_k:state.specific_gas_constant };
+        self.bind_compressible_squeeze_film(geometry,gas,Some(source))
+    }
+
+    fn bind_compressible_squeeze_film(mut self, geometry:ResistiveFilm, gas:AmbientGas,
+        source:Option<GasRecord>) -> Result<Self,ImpactError>
     {
         if self.sample!=0 || self.gas_film.is_some() || !self.squeeze_films.is_empty()
             || geometry.port_count()!=self.modes {
@@ -112,7 +146,7 @@ impl ImpactSystem {
         if dim>1024 {return Err(invalid("gas film exceeds joint 1024-state work ceiling"));}
         let mut q=[0.0;MAX_IMPACT_MODES];for i in 0..self.modes {q[i]=self.x[2*i];}
         let law=IsothermalFilm::at_ambient(geometry,&q[..self.modes],gas).map_err(|e|invalid(e.0))?;
-        let memory=Rc::new(Memory{base_dim,modes:self.modes,law});
+        let memory=Rc::new(Memory{base_dim,modes:self.modes,law,source});
         let storage_memory=Rc::clone(&memory);
         self.system=self.system.with_appended_storage(memory.law.cell_count(),move |base,_|
             Box::new(WithGas{base,gas:storage_memory})).map_err(ImpactError::PreparedSolve)?;
@@ -127,6 +161,11 @@ impl ImpactSystem {
     /// Observation neither solves pressure nor advances a separate gas history.
     pub fn gas_film_observation(&self)->Result<Option<GasObservation>,ImpactError> {
         self.gas_film.as_ref().map(|gas|gas.observe(&self.x)).transpose()
+    }
+    /// Original material gas used by storage and drainage, when source-bound.
+    /// A legacy explicit-coefficient attachment has no material-source claim.
+    pub fn gas_film_source(&self)->Option<&GasRecord> {
+        self.gas_film.as_ref().and_then(|gas|gas.source.as_ref())
     }
 }
 

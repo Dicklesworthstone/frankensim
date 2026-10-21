@@ -5,6 +5,47 @@ fn spec()->Spec {Spec::parse(include_str!("estimated-hihat.fshh")).unwrap()}
 fn shell()->specimen::Specimen {let mut s=specimen::Specimen::reference();s.azimuths=8;s}
 fn stroke()->Stroke {Stroke{speed_m_s:0.0,position_m:None}}
 
+fn material_input(record:&str)->String {
+    GAS.replace("viscosity_pa_s,0.000018\n","")
+        .replace("isothermal,100000,293.15,287.05",&format!("gas,{record}"))
+}
+
+#[test]
+fn canonical_gas_owns_paired_skin_storage_and_rejects_conflicting_coefficients() {
+    let input=material_input("mixture 293.15 100000 mole 2 N2 0.8 O2 0.2");
+    let c=squeeze::Config::parse(&input).unwrap();let source=c.material_gas().unwrap();
+    let a=shell();let pair=build_with_squeeze(&spec(),&a,&a,stroke(),None,4,2e-6,false,Some(&c)).unwrap();
+    if let Mechanics::Reference(system)=pair.experiment.system {
+        assert_eq!(system.gas_film_source(),Some(source));
+        assert_eq!(system.gas_film_observation().unwrap().unwrap().minimum_pressure_pa,source.state().pressure);
+    }else{panic!("source-bound gas must enter original impact owner");}
+    for text in [format!("{input}viscosity_pa_s,0.000018\n"),
+        format!("{input}isothermal,100000,293.15,287.05\n"),format!("{input}gas,293.15 100000 0\n"),
+        input.replace("gas,mixture", "viscosity_pa_s,0.000018\ngas,mixture"),
+        input.replace("gas,mixture", "isothermal,100000,293.15,287.05\ngas,mixture"),
+        input.replace("O2 0.2","O2 0.2 ignored"),input.replace("N2 0.8","N2 -0.8"),
+        input.replace("gas,mixture","gas,thermochemical")] {
+        assert!(squeeze::Config::parse(&text).is_err(),"accepted {text}");
+    }
+    assert!(squeeze::Config::parse(&material_input("293.15 100000 0.5")).unwrap().material_gas().is_some());
+}
+
+#[test]
+fn material_pressure_changes_actual_paired_skin_motion() {
+    let a=shell();let gate=CancelGate::new_clock_free();let mut endpoints=Vec::new();
+    for pressure in [50000,200000] {
+        let c=squeeze::Config::parse(&material_input(&format!("mixture 293.15 {pressure} mole 1 N2 1"))).unwrap();
+        let pair=build_with_squeeze(&spec(),&a,&a,stroke(),None,128,2e-6,false,Some(&c)).unwrap();
+        let coordinate=pair.upper_modes.start;let mut e=pair.experiment;
+        let mut force=vec![0.0;e.force.len()];force[coordinate]=-5.0;
+        e.system=e.system.into_analytic_nonlinear().unwrap().with_impact_substeps(
+            ImpactSubstepConfig{max_depth:8,max_attempts:511}).unwrap();
+        for _ in 0..128 {e.system.step(&force,&gate).unwrap();}
+        endpoints.push(e.system.state()[2*coordinate]);
+    }
+    assert_ne!(endpoints[0],endpoints[1],"atmosphere must act on shell motion before any receiver");
+}
+
 #[test]
 fn explicit_gas_selects_storage_and_admits_seals_without_weakening_old_inputs() {
     let c=squeeze::Config::parse(GAS).unwrap();assert!(c.gas().is_some());

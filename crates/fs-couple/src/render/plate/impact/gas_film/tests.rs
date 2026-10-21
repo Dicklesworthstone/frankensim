@@ -21,6 +21,70 @@ fn base()->ImpactSystem {
 }
 fn pair(drained:bool)->ImpactSystem {base().with_compressible_squeeze_film(graph(drained),ambient()).unwrap()}
 
+fn source(text:&str)->GasRecord {
+    let mut fields=text.split_ascii_whitespace();
+    let source=fs_material::gas_species::input::read_gas_record(&mut fields,None,None).unwrap();
+    assert!(fields.next().is_none());source
+}
+
+#[test]
+fn complete_material_gas_replaces_stale_transport_and_survives_preparation() {
+    for record in ["293.15 100000 0.5","mixture 293.15 100000 mole 2 N2 0.8 O2 0.2",
+        "mixture 293.15 100000 mass 1 Ar 1"] {
+        let source=source(record);let gas=*source.state();
+        let material=base().with_material_compressible_squeeze_film(
+            graph(true).with_viscosity(gas.dynamic_viscosity*1000.0).unwrap(),source.clone()).unwrap();
+        let expected_mass=gas.density*0.002*0.001;
+        assert!((material.gas_film_observation().unwrap().unwrap().mass_kg/expected_mass-1.0).abs()<1e-14);
+        let explicit=base().with_compressible_squeeze_film(
+            graph(true).with_viscosity(gas.dynamic_viscosity).unwrap(),AmbientGas {
+                pressure_pa:gas.pressure,temperature_k:gas.temperature,
+                specific_gas_constant_j_kg_k:gas.specific_gas_constant }).unwrap();
+        assert!(explicit.gas_film_source().is_none());
+        let mut material=material.prepare_analytic().unwrap();
+        let mut explicit=explicit.prepare_analytic().unwrap();
+        let gate=CancelGate::new_clock_free();
+        for _ in 0..64 {
+            material.step(&[0.0;2],&gate).unwrap();explicit.step(&[0.0;2],&gate).unwrap();
+            assert_eq!(material.state(),explicit.state());
+            assert_eq!(material.gas_film_source(),Some(&source));
+        }
+    }
+}
+
+#[test]
+fn material_pressure_changes_rebound_while_sealed_mixture_invariance_is_retained() {
+    let gate=CancelGate::new_clock_free();
+    let run=|record:&str,drained| {
+        let mut system=base().with_material_compressible_squeeze_film(graph(drained),source(record))
+            .unwrap().prepare_analytic().unwrap();
+        let initial=system.stored_energy_j();let mut loss=0.0;
+        for _ in 0..64 {loss+=system.step(&[0.0;2],&gate).unwrap().dissipated_energy_j;}
+        assert!((system.stored_energy_j()+loss-initial).abs()<1e-8);
+        (system.state().to_vec(),system.gas_film_observation().unwrap().unwrap())
+    };
+    let (low,a)=run("mixture 293.15 50000 mole 1 N2 1",false);
+    let (high,b)=run("mixture 293.15 200000 mole 1 N2 1",false);
+    let relative=|x:&[f64]|x[1]/0.2_f64.sqrt()-x[3]/0.4_f64.sqrt();
+    assert!(relative(&high)<relative(&low),"higher pressure must resist actual closing motion");
+    assert!((b.mass_kg/a.mass_kg-4.0).abs()<1e-12);
+    let (nitrogen,n)=run("mixture 293.15 100000 mole 1 N2 1",false);
+    let (argon,ar)=run("mixture 293.15 100000 mole 1 Ar 1",false);
+    assert_eq!(nitrogen,argon,"sealed isothermal force at fixed pressure has no molar-mass dependence");
+    assert!(ar.mass_kg>n.mass_kg,"different density must change retained physical mass");
+    let (nitrogen,_)=run("mixture 293.15 100000 mole 1 N2 1",true);
+    let (argon,_)=run("mixture 293.15 100000 mole 1 Ar 1",true);
+    assert!((relative(&nitrogen)-relative(&argon)).abs()>1e-10,
+        "mixture viscosity must change draining resistance and mechanical motion");
+}
+
+#[test]
+fn incoherent_material_gas_cannot_enter_the_joint_state() {
+    let mut gas=*source("293.15 100000 0").state();gas.density*=2.0;
+    assert!(base().with_material_compressible_squeeze_film(graph(true),GasRecord::Legacy(gas)).is_err());
+    assert!(pair(false).with_material_compressible_squeeze_film(graph(true),source("293.15 100000 0")).is_err());
+}
+
 #[test]
 fn sealed_gas_compresses_and_rebounds_in_the_actual_mechanical_equation() {
     let s=pair(false);let initial=s.stored_energy_j();let mass=s.gas_film_observation().unwrap().unwrap().mass_kg;

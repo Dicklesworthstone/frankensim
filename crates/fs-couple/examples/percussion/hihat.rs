@@ -276,6 +276,7 @@ fn build_with_rocking(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
     // Compile before moving either basis; cell/face gaps use both real skins.
     // Stick and pedal columns are zero: pressure loads the shells reciprocally.
     let gas=film.and_then(squeeze::Config::gas);
+    let material_gas=film.and_then(squeeze::Config::material_gas).cloned();
     let film=film.map(|f|f.compile(spec,&upper,&lower,hi.start,lo.start,total)).transpose()?;
     let upper_omega=upper.reduction.omegas().to_vec();let lower_omega=lower.reduction.omegas().to_vec();
     let mut up=zero_body(BodyPotential::Shell(upper.reduction),&upper_omega);
@@ -294,10 +295,11 @@ fn build_with_rocking(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
     bodies.append(&mut shaft.elastic);
     let flexible_sticks=shaft.ports;
     let system=ImpactSystem::new(bodies,contacts,pads,vec![],config(steps,dt))?;
-    let system=match (film,gas) {
-        (Some(film),Some(gas))=>system.with_compressible_squeeze_film(film,gas)?,
-        (Some(film),None)=>system.with_squeeze_film(film)?,
-        (None,_)=>system,
+    let system=match (film,material_gas,gas) {
+        (Some(film),Some(source),_)=>system.with_material_compressible_squeeze_film(film,source)?,
+        (Some(film),None,Some(gas))=>system.with_compressible_squeeze_film(film,gas)?,
+        (Some(film),None,None)=>system.with_squeeze_film(film)?,
+        (None,_,_)=>system,
     };
     let system=match material {Some(material)=>material.attach(system)?,None=>system};
     Ok(Pair{experiment:Experiment{flexible_sticks:flexible_sticks.clone(),mute,system:Mechanics::Reference(system),force:vec![0.;total],

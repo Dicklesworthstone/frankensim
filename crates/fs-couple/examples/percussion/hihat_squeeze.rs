@@ -6,6 +6,7 @@ use fs_couple::render::plate::impact::squeeze::{
     FilmCell, FilmChannel, FilmLimits, GapPort, ResistiveFilm,
 };
 use fs_couple::render::plate::impact::gas_film::AmbientGas;
+use fs_material::gas_species::input::{GasRecord,read_gas_record};
 use std::io::Read;
 use std::path::Path;
 
@@ -21,6 +22,7 @@ pub(super) struct Config {
     outer_open: bool,
     limits: FilmLimits,
     gas: Option<AmbientGas>,
+    material_gas: Option<GasRecord>,
 }
 
 pub(super) fn option(args: &mut Vec<String>) -> Result<Option<Config>, Error> {
@@ -43,6 +45,7 @@ impl Config {
         let (mut header, mut annulus, mut viscosity, mut limits, mut boundary) =
             (false, None, None, None, None);
         let mut gas=None;
+        let mut material_gas=None;
         for (line, raw) in text.lines().enumerate() {
             let row = raw.split('#').next().unwrap_or("").trim();
             if row.is_empty() { continue; }
@@ -71,6 +74,16 @@ impl Config {
                 "isothermal" if f.len() == 4 && gas.is_none() => gas=Some(AmbientGas {
                     pressure_pa:number(1)?,temperature_k:number(2)?,specific_gas_constant_j_kg_k:number(3)?,
                 }),
+                "gas" if f.len() == 2 && gas.is_none() && viscosity.is_none() => {
+                    let mut fields=f[1].split_ascii_whitespace();
+                    let source=read_gas_record(&mut fields,None,None)?;
+                    if fields.next().is_some() { return Err(bad()); }
+                    let state=source.state();
+                    viscosity=Some(state.dynamic_viscosity);
+                    gas=Some(AmbientGas { pressure_pa:state.pressure,temperature_k:state.temperature,
+                        specific_gas_constant_j_kg_k:state.specific_gas_constant });
+                    material_gas=Some(source);
+                }
                 "boundary" if f.len() == 3 && boundary.is_none() => {
                     let open = |s: &str| match s { "open" => Ok(true), "sealed" => Ok(false), _ => Err(bad()) };
                     boundary = Some((open(f[1])?, open(f[2])?));
@@ -81,7 +94,8 @@ impl Config {
         let (inner_m, outer_m, radial, azimuths) = annulus.ok_or("missing film annulus")?;
         let (inner_open, outer_open) = boundary.ok_or("missing inner/outer film boundary conditions")?;
         let out = Self { inner_m, outer_m, radial, azimuths, inner_open, outer_open,
-            viscosity_pa_s: viscosity.ok_or("missing film viscosity")?, limits: limits.ok_or("missing film limits")?, gas };
+            viscosity_pa_s: viscosity.ok_or("missing film viscosity or gas source")?,
+            limits: limits.ok_or("missing film limits")?, gas,material_gas };
         out.validate()?;
         Ok(out)
     }
@@ -106,6 +120,7 @@ impl Config {
         Ok(())
     }
     pub(super) fn gas(&self)->Option<AmbientGas> {self.gas}
+    pub(super) fn material_gas(&self)->Option<&GasRecord> {self.material_gas.as_ref()}
     pub(super) fn label(&self)->&'static str {
         if self.gas.is_some(){"compressible isothermal Reynolds with retained gas mass"}
         else{"quasistatic incompressible Reynolds, declared validity limits"}

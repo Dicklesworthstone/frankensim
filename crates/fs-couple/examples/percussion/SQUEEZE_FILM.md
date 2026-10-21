@@ -29,6 +29,28 @@ limits,0.000001,0.002,1000
 boundary,open,open
 ```
 
+For a complete material atmosphere, replace both `viscosity_pa_s` and any
+`isothermal` record with one shared gas declaration:
+
+```text
+gas,mixture 293.15 100000 mole 2 N2 0.8 O2 0.2
+```
+
+The shared material reader also accepts `gas,293.15 100000 0.5` for moist air
+(T, absolute pressure, relative humidity) and `mass`-basis species fractions.
+The same admitted gas supplies viscosity, pressure, temperature and specific
+gas constant. Composition changes drainage resistance and retained gas mass;
+pressure changes the restoring force of sealed pockets. These changes enter
+the joint shell/contact equations before sound observation. A sealed,
+isothermal pocket at fixed pressure has the same pressure-volume response
+across gas species; this model does not invent a density-dependent inertia.
+Source gas records are retained by the mechanical runtime. Additional viscosity
+or `isothermal` records in either order refuse, including matching duplicates.
+The native file route accepts the shared built-in gas declarations; external
+thermochemical source registries are available through the library's
+`with_material_compressible_squeeze_film` API with an already resolved
+`GasRecord`. The exterior acoustic region remains separately specified.
+
 These are **synthetic test inputs**, not measured specimen data or a guarantee
 that the included hi-hat fits this gap domain. Choose compatible geometry,
 physical boundaries and validity limits; the program will not widen a limit
