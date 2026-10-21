@@ -416,6 +416,25 @@ class ContractTests(unittest.TestCase):
         self.assertIn("low-passed at 3900 Hz", narrow["audio"]["level_match"])
         self.assertIsNone(wide["alignment"]["band_hz"])
 
+    def test_a_failed_regrade_leaves_the_notes_earlier_pair_in_place(self):
+        import json
+        from unittest import mock
+        root = self.tmp / "atomic"
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="first", observer="o", recipe="r.sh")
+        dc.run_pair(self.refs, c, root)
+        d = root / "syn" / "Bb3"
+        before = (d / "pair.json").read_bytes()
+        with mock.patch.object(self.refs, "ruler", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                dc.run_pair(self.refs, dict(c, git_sha="second"), root)
+        self.assertEqual((d / "pair.json").read_bytes(), before)  # the old grading is still there, untouched, mid-failure
+        aborted = list((d / "superseded").glob("aborted-*"))  # the failed attempt's partial files are kept aside, not deleted
+        self.assertEqual(len(aborted), 1)
+        self.assertTrue(any(aborted[0].iterdir()))
+        dc.run_pair(self.refs, dict(c, git_sha="third"), root)
+        self.assertEqual(json.loads((d / "pair.json").read_text())["ours"]["git_sha"], "third")
+        self.assertFalse([p for p in d.iterdir() if p.name.startswith(".staging")])  # nothing left staged
+
     def test_a_refused_render_batch_job_writes_the_record(self):
         import json
         root = self.tmp / "refbatch"

@@ -28,7 +28,9 @@ import argparse
 import json
 import math
 import multiprocessing
+import os
 import sys
+import time
 from datetime import datetime, timezone
 from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor
@@ -827,7 +829,30 @@ def metric_rows(gaps, real: Note, ours: Note | None, ruler):
 
 
 def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand_y=None, cand_info=None, ours_meta=None, review=False):
-    """Write <root>/<family>/<note>/pair.json and the files it names (the P8 site contract)."""
+    """Write <root>/<family>/<note>/pair.json and the files it names (the P8 site contract).
+
+    Everything is built in a staging directory inside the note's directory and swapped in only when complete, so a
+    note never sits without its pair while the slow ruler is computed, and a failure leaves the earlier grading in
+    place. A failed attempt's partial files are moved to superseded/aborted-<UTC>-<pid>/, never deleted.
+    """
+    final = Path(root) / family / note_name
+    final.mkdir(parents=True, exist_ok=True)
+    stage = final / f".staging-{os.getpid()}-{time.time_ns()}"
+    stage.mkdir()
+    try:
+        return _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, review)
+    except BaseException:
+        if stage.exists():
+            if any(stage.iterdir()):
+                aside = final / "superseded" / f"aborted-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}-{time.time_ns() % 10**6}"
+                aside.parent.mkdir(parents=True, exist_ok=True)
+                stage.rename(aside)
+            else:
+                stage.rmdir()
+        raise
+
+
+def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, review):
     f0 = hz_of(ref_e["note"])
     inh = ref_e["inst"] in ("xylophone", "marimba")
     n = len(ref_y) if cand_y is None else min(len(ref_y), len(cand_y))
@@ -840,9 +865,7 @@ def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand
     nf = min(real.frames, ours.frames) if ours else real.frames
     dur = nf * HOP / SR
     off = real.level_db - ours.level_db if ours else 0.0
-    out = Path(root) / family / note_name
-    out.mkdir(parents=True, exist_ok=True)
-    supersede_existing(out)  # a regrade moves the earlier files aside; it never overwrites them
+    out = stage
     ns = int(round(dur * SR))
     yr, yo = ref_y[:ns], (cand_y[:ns] * 10 ** (off / 20) if ours else None)
     peak = max(np.abs(yr).max(), np.abs(yo).max() if yo is not None else 0.0)
@@ -884,6 +907,11 @@ def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand
     (out / "pair.json").write_text(json.dumps(clean(pj), indent=1, allow_nan=False))
     if review and ours:
         fig_review(ours, real, off, out / "review.png")
+    # the swap: the earlier files move aside (never overwritten) and the staged ones move up, with no slow work in between
+    supersede_existing(final)
+    for p in sorted(out.iterdir()):
+        p.rename(final / p.name)
+    out.rmdir()
     return pj
 
 
@@ -948,7 +976,7 @@ REFUSALS = (OnsetMisaligned, GraderRefusalError, SystemExit, ValueError, IndexEr
 def supersede_existing(d):
     """Move everything in note directory `d` (bar a superseded/ folder) into superseded/<UTC>/; nothing is deleted or
     overwritten. Returns the folder it moved into, or None if there was nothing to move."""
-    old = [p for p in Path(d).iterdir() if p.name != "superseded"] if Path(d).is_dir() else []
+    old = [p for p in Path(d).iterdir() if p.name != "superseded" and not p.name.startswith(".staging")] if Path(d).is_dir() else []
     if not old:
         return None
     stamp, k = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"), 1
