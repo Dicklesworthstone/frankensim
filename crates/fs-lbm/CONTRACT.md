@@ -765,6 +765,80 @@ high-Re stability/performance, cross-ISA identity or instrument acceptance.
 M3.2-W2a/W3a and M1.1-W8 must consume the explicit API and qualify their own
 physics. Historical D3Q19 arithmetic and semantic/golden versions are unchanged.
 
+## Compressible Navier-Stokes-Fourier hybrid (IRP M3.2-W3a, `nsf3`)
+
+`nsf3::NsfGrid3<L: Lattice3<27>>` advances density, momentum and total energy of an ideal gas on the D3Q27 lattice.
+The formulation and its conservation class are stated here because the bead requires the choice to be disclosed.
+
+**Formulation.** Mass and momentum are carried by the populations of an ISOTHERMAL lattice: equilibrium at the lattice
+reference `theta0 = 1/3` (`THETA0`, the lattice `c_s^2`), a regularised collision whose shear rate is
+`1 / (mu(T) / (rho theta0) + 1/2)`, a DECLARED trace (bulk) rate (`NsfSpec::bulk_rate`; bulk viscosity
+`(2/3) theta0 (1/w - 1/2)` per density) and the third-order non-equilibrium part rebuilt recursively from the deviatoric
+stress. The thermodynamic pressure difference `p' = rho (theta - theta0)` of `p = rho theta` enters as the Guo body force
+`F = -grad p'` in conservative face form with the half-force velocity `u = (sum c f + F/2) / rho`; the first-moment
+non-equilibrium `-F/2` that the regularised projection drops is added back so that the momentum receives exactly `F`.
+Total energy `E = rho (c_v theta + |u|^2 / 2)` is a conservative finite-volume field on the same cells with the face flux
+`(E + p) u - sigma . u - kappa grad T` (`sigma` from the same non-equilibrium moments; fourth-order face values away from
+walls, two-point beside walls). **Conservation class: total-energy conservative.** Interior face fluxes are single-valued,
+so the sum of `E` over the fluid cells changes only by the wall heat flux, to round-off, in a closed adiabatic box; mass and
+momentum are the lattice's. The temperature is `(E - KE) / (rho c_v)` and feeds back only through the force.
+Coupling in time: trapezoid on the flux divergences of the two levels with `COUPLING_PASSES` fixed
+predictor-corrector passes. `NSF3_BIT_SEMANTICS_VERSION` moves with any change of order, coefficient or coupling.
+
+**Why not a temperature-corrected equilibrium (measured).** The first formulation put `theta - theta0` into the equilibrium
+(Hermite through third order). Its Bloch-linearised one-step matrix (28 x 28: 27 populations and the energy) about a
+quiescent uniform state has a REAL eigenvalue of 1.4 to 2.0 at oblique wavevectors near the Nyquist limit at air
+viscosity (dx 20 um): Taylor-Green at Mach 0.03 left the temperature window in 55 to 110 steps and a quiescent gas with
+1e-5 noise in under 20, while one-axis acoustic tests were stable. Its eigenvector is the rest population and the
+energy: at fixed `E`, `p = (gamma - 1)(E - KE)` does not depend on `rho`, so a density perturbation enters the
+equilibrium with +2.5 on the rest population and -2 on the corners and the trace relaxation amplifies it. The eigenvalue
+grew with the bulk rate (the physical bulk viscosity of air needs the largest rate) and was not removed by the flux order,
+upwind dissipation, Adams-Moulton order, 1 to 8 coupling passes, the time level of the collision temperature, constant
+viscosity, an internal-energy equation or dropping the viscous work. The energy-free equilibrium used here has
+`|lambda| < 1` on the same scan (worst 0.9977 at the physical bulk rate).
+
+**Units and receipts.** `theta = T / (3 T0)`; `dt = dx / sqrt(3 R T0)`; lattice density 1 is the reference density of
+`GasState::try_new(gas, T0, p0)`; `mu(T)` and `kappa(T)` are tabulated from `GasState` receipts across the DECLARED
+temperature window (`transport_points`, linear interpolation) and converted with `mu_lat = mu dt / (rho0 dx^2)`,
+`kappa_lat = kappa dt / (R rho0 dx^2)`. No transport value is a literal. `NsfLaw::energy_unit_j()` converts lattice
+energy to joules; the API reports joules.
+
+**Refusals.** `new` and `step` refuse: a gas state outside the receipt window (T in [50, 2000] K: 50 K admitted, 49.999 K
+refused); a temperature outside the declared run window; more cells than `maximum_cells` (cap admitted, cap + 1
+refused); a local Mach number `|u| / sqrt(gamma theta)` above `maximum_mach`; `|theta / theta0 - 1|` above
+`maximum_temperature_ratio`; non-finite or non-positive density, energy or temperature; malformed bounds, bulk rate
+outside (0, 2), zero workers. A failed `step` leaves the published state unchanged.
+
+**Determinism.** Every cell pass is a pure function of read-only arrays written by `par_fill` over fixed contiguous
+chunks; every reduction is serial in cell order. The result is bitwise independent of `NsfSpec::workers`
+(`nsf3_bitwise_worker_count_invariance`: 1, 2, 3 and 7 workers). No transcendental function is evaluated in the module
+(the receipts use the repository's `det` functions). No wasm32 build or golden hash is claimed.
+
+**Ledger.** `EnergyLedger` reports internal, kinetic, pressure-work, viscous-heating and wall-heat terms of a step in joules
+and `residual_rel = |change of total energy - wall heat| / total energy`. `pressure_work_j = -integral(p div u) dV dt` is the
+reversible exchange (trapezoid in time, fourth-order divergence); `viscous_heating_j` is DEFINED as
+`internal change - wall heat - pressure work`, so it equals the kinetic energy loss net of pressure work term by term to
+round-off. THAT IDENTITY IS BOOKKEEPING. The physical content (the heating is the continuum dissipation) is the
+Taylor-Green kinetic-energy decay rate in the battery.
+
+**Conformance (`tests/nsf3_battery.rs`).** `equilibrium_recovers_conserved_moments` (G0: mass, momentum, the second moment
+and every third moment the lattice can represent, 1e-13), `refusals_cap_and_cap_plus_one` (G0),
+`closed_box_energy_budget_closes` (G0: random velocity + temperature state, six bounce-back walls, 1e4 steps at the
+viscosity of dx 50 um, total energy <= 1e-11 relative), `viscous_heating_equals_kinetic_loss` (G0 identity <= 1e-13 of
+the total energy per step; G1: kinetic-energy decay rate within 5e-3 of `4 nu k^2` and accumulated heating within 2e-2,
+shrinking with refinement), `isothermal_wall_heat_ledger` (G0: wall heat equals the energy change to 1e-11),
+`adiabatic_sound_speed` (G1: 48 / 96 / 192 / 288 points per wavelength, relative error <= 1e-4 at the finest rung,
+second order observed >= 1.8, and the isothermal speed fails; the 32-point value is printed, not asserted),
+`nsf3_bitwise_worker_count_invariance` (G5).
+
+**No-claim boundaries (`nsf3`).** The sound-speed band of 1e-4 is met at 288 points per wavelength, NOT at 32:
+dispersion is second order (observed order 2.00 between 192 and 288), and the athermal D3Q27 scheme alone is already
+about -1.8e-4 at 32 points. Not turbulence-resolved, not shock-capturing, no open or moving boundary, no entropic or
+energy-population thermal LBM (the thermal pressure is a force), no temperature-dependent equilibrium. The force-coupled
+lattice resolves the sound speed `sqrt(gamma theta)` only while it stays below the lattice speed: the Mach and
+temperature-ratio bounds are refusals, not tuning. The bulk rate is a declared input; the physical bulk viscosity of air
+is not asserted by the module. No recording, graded or instrument claim.
+
 ## No-claim boundaries
 
 - D3Q19 grids remain BGK + Guo on a dense set of aligned SoA tiles. The

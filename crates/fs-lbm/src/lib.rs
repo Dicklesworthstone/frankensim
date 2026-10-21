@@ -7,6 +7,8 @@
 //! LATTICE-SCALING ASSISTANT.
 //! [`d3q27`] adds checked full central/cumulant collisions; [`lattice3`]
 //! supplies their explicit acoustic scaling and shared reference tile grid.
+//! [`nsf3`] adds a compressible Navier-Stokes-Fourier grid: isothermal D3Q27 mass and momentum, the thermal
+//! pressure as a body force and a conservative total-energy field.
 //!
 //! The scaling assistant ([`ScalingPlan`]) automates the `dx`/`dt`/`τ`/`Mach`
 //! bookkeeping that is a chronic source of human LBM error: given a Reynolds
@@ -24,6 +26,7 @@ pub mod d3q27;
 pub mod freesurface;
 pub mod lattice3;
 pub mod material;
+pub mod nsf3;
 pub mod perf;
 pub mod refine;
 pub mod rheology;
