@@ -622,10 +622,27 @@ frozen-material thermal-force cotangent. Parameter-dependent external loads and
 direct objective terms remain caller-owned chains. Refusal/cancellation returns
 no partial combined gradient and leaves the tape reusable.
 
+`reverse_design_with_stress` adds sparse element-stress observations at any
+recorded endpoint to those motion objectives. `ElementStressObservation3`
+contains objective/Pa seeds in mesh-frame Mandel `[xx,yy,zz,xy,yz,zx]`; duplicate
+element/state rows add in caller order, and callers include quadrature weights.
+The same reverse sweep accumulates full `B' C' w` displacement seeds, direct
+`w' sigma` stiffness terms, and implicit trajectory material/load/support terms,
+including initialization. No additional equilibrium solves or stress tape are
+needed. The combined motion/stress row cap and existing element/full-motion
+budgets apply. Every state with stress rows obeys the finite positive total and
+elastic strain ceiling, even when its seeds cancel to zero. Thermal strain,
+geometry, frames, restraint axes and accepted times remain fixed. The smooth
+`von_mises_limit` seed composes with this path for strength objectives; it does
+not add plasticity or infer material failure limits. The three regressions in
+`tests/transient_stress_trajectory3.rs` cover six material/damping/support/load
+directions for mixed stress/strength/motion objectives, fully prescribed
+intermediate-state controls, and observation-budget/strain/cancellation retries.
+
 Callers supply actual residual/quadrature weights for their motion objectives
 and chain returned world-component controls through authored waveforms. This
 does not infer derivatives of frame transforms, knot/step times, interpolation,
-geometry, direct control costs, reaction/work observations or acceptance.
+geometry, direct control costs, physical work reports or acceptance.
 `tests/transient_support_trajectory3.rs` supplies a multi-step least-squares
 objective checked against all twelve independent initial/force/support control
 directions, an analytical typed fully-prescribed ramp-amplitude chain rule,

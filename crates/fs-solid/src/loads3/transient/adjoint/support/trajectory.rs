@@ -3,7 +3,7 @@
 //! The linear motion Jacobian depends on the interval and frozen operators,
 //! not on the primal state. Control recording therefore retains O(steps) times.
 //! Material design optionally retains bounded full endpoint motion. Sparse
-//! motion and support-reaction observations seed any accepted endpoint; one
+//! motion, support-reaction and stress observations seed accepted endpoints; one
 //! reverse sweep returns material, force and support-displacement derivatives.
 use super::super::material::{MaterialGradientBudget3, MaterialScaleGradient3};
 use super::super::trajectory::{ControlForceKind3, ForceCotangent3};
@@ -13,6 +13,9 @@ use crate::loads3::TetLoadCase3;
 use crate::loads3::transient::{TetTransientRun3, TransientStep3};
 use fs_exec::Cx;
 
+mod stress;
+pub use stress::ElementStressObservation3;
+
 /// Bounds on the accepted schedule, returned gradients and sparse observations.
 #[derive(Debug, Clone, Copy)]
 pub struct PrescribedRecordingBudget3 {
@@ -20,7 +23,7 @@ pub struct PrescribedRecordingBudget3 {
     /// All returned q/v/a, force, displacement-control and thermal scalars.
     /// Times and vector metadata are instead bounded by `maximum_steps`.
     pub maximum_gradient_values: usize,
-    /// Total caller-owned motion and reaction observation rows per reverse sweep.
+    /// Total caller-owned motion, reaction or stress rows per reverse sweep.
     pub maximum_observations: usize,
 }
 impl Default for PrescribedRecordingBudget3 {
@@ -176,8 +179,8 @@ pub struct RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
 impl<'g, 'm, 'p, 's> TetTransientRun3<'g, 'm, 'p, 's> {
     /// Record a prescribed-support trajectory before its first finite step.
     /// The original primal and transpose policies remain independent. This
-    /// derives fixed-grid motion and reaction objectives, not event times,
-    /// stresses, physical work reports or derivatives of acceptance decisions.
+    /// derives fixed-grid motion, reaction and stress objectives. Event times,
+    /// physical work reports and acceptance decisions require other pullbacks.
     pub fn record_prescribed_controls(
         self,
         budget: PrescribedRecordingBudget3,
