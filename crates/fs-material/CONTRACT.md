@@ -797,8 +797,12 @@ bitwise determinism.
   and their derived residuals rather than changing the law or widening gates.
   Treloar observations retrieved/digitized by Bucchi & Hearn (2013, Appendix A)
   are diagnostic only: source uncertainty, redistribution licence and fit band
-  are unstated. The M8-W1 ledger row and direct original Ogden source check
-  remain unqualified; literature coefficients are not a calibrated tissue card.
+  are unstated. The M8-W1 ledger rows `ogden-1972-treloar-three-term-parameters`,
+  `treloar-1944-points-bucchi-hearn-2013` (fixture-only) and
+  `hgo-2000-fig14-media-parameters` record the provenance. The original Ogden
+  (1972) paper was not opened: its coefficients were read from an open reproduction
+  (Twizell and Ogden 1981, Table I, no unit printed). Literature coefficients are
+  not a calibrated tissue card.
 - **Mander cyclic rules are the simplified elastic-unload variant**
   (declared on the card): no cyclic stiffness degradation beyond the
   residual-strain rule, no tension stiffening. Full Mander cyclic rules

@@ -276,7 +276,7 @@ fn g0_reference_state_and_coalescent_stretches() {
     fd_tangent(&fibre, diag([1.2, 1.1, 1.1]));
     fd_tangent(&fibre, diag([0.8, 1.1, 1.1]));
     println!(
-        "{{\"suite\":\"irp-s0-materials\",\"bead\":\"M0.3-W1a\",\"test\":\"g0_reference_state_and_coalescent_stretches\",\"tier\":\"G0\",\"inputs\":{{\"parameter_set\":\"ogden1972-treloar\",\"citation\":\"10.1098/rspa.1972.0026\",\"kappa_over_mu\":20}},\"provenance\":{{\"source_ids\":[\"ogden1972\"],\"M8_W1_ledger_row\":null}},\"rungs\":{{\"states\":4}},\"observed\":{{\"max_reference_tangent_relative_error\":{max_reference_error},\"max_fd_relative_error\":{max_fd_error}}},\"tolerance\":{{\"reference\":1e-10,\"fd\":1e-6}},\"verdict\":\"pass\",\"elapsed_s\":{}}}",
+        "{{\"suite\":\"irp-s0-materials\",\"bead\":\"M0.3-W1a\",\"test\":\"g0_reference_state_and_coalescent_stretches\",\"tier\":\"G0\",\"inputs\":{{\"parameter_set\":\"ogden1972-treloar\",\"citation\":\"10.1098/rspa.1972.0026\",\"kappa_over_mu\":20}},\"provenance\":{{\"source_ids\":[\"ogden1972\"],\"M8_W1_ledger_row\":\"ogden-1972-treloar-three-term-parameters\"}},\"rungs\":{{\"states\":4}},\"observed\":{{\"max_reference_tangent_relative_error\":{max_reference_error},\"max_fd_relative_error\":{max_fd_error}}},\"tolerance\":{{\"reference\":1e-10,\"fd\":1e-6}},\"verdict\":\"pass\",\"elapsed_s\":{}}}",
         started.elapsed().as_secs_f64()
     );
 }
@@ -360,7 +360,7 @@ fn g1_hgo_fibre_uniaxial_analytic() {
                 }
             }
             println!(
-                "{{\"suite\":\"irp-s0-materials\",\"bead\":\"M0.3-W1a\",\"test\":\"g1_hgo_fibre_uniaxial_analytic\",\"tier\":\"G1\",\"inputs\":{{\"parameter_set\":\"hgo2000-media\",\"citation\":\"10.1023/A:1010835316564\",\"kappa_over_c10\":1e5,\"families\":{families},\"invariants\":\"{invariants:?}\",\"kinematics\":\"J=1 with lateral-pressure projection\"}},\"provenance\":{{\"source_ids\":[\"hgo2000-fig14\"],\"M8_W1_ledger_row\":null}},\"rungs\":{{\"stretch_count\":181,\"min\":0.7,\"max\":1.6}},\"observed\":{{\"max_relative_error\":{worst}}},\"tolerance\":1e-6,\"verdict\":\"pass\",\"elapsed_s\":{}}}",
+                "{{\"suite\":\"irp-s0-materials\",\"bead\":\"M0.3-W1a\",\"test\":\"g1_hgo_fibre_uniaxial_analytic\",\"tier\":\"G1\",\"inputs\":{{\"parameter_set\":\"hgo2000-media\",\"citation\":\"10.1023/A:1010835316564\",\"kappa_over_c10\":1e5,\"families\":{families},\"invariants\":\"{invariants:?}\",\"kinematics\":\"J=1 with lateral-pressure projection\"}},\"provenance\":{{\"source_ids\":[\"hgo2000-fig14\"],\"M8_W1_ledger_row\":\"hgo-2000-fig14-media-parameters\"}},\"rungs\":{{\"stretch_count\":181,\"min\":0.7,\"max\":1.6}},\"observed\":{{\"max_relative_error\":{worst}}},\"tolerance\":1e-6,\"verdict\":\"pass\",\"elapsed_s\":{}}}",
                 started.elapsed().as_secs_f64()
             );
         }
@@ -463,7 +463,7 @@ fn g2_treloar_ogden1972_reference_curves() {
             }
         }
         println!(
-            "{{\"suite\":\"irp-s0-materials\",\"bead\":\"M0.3-W1a\",\"test\":\"g2_treloar_ogden1972_reference_curves\",\"tier\":\"G2\",\"inputs\":{{\"parameter_set\":\"ogden1972-treloar\",\"citation\":\"10.1098/rspa.1972.0026\",\"kappa_over_mu\":1e4,\"kinematics\":\"J=1 with lateral-pressure projection\"}},\"provenance\":{{\"source_ids\":[\"ogden1972\",\"treloar1944\"],\"M8_W1_ledger_row\":null}},\"rungs\":{{\"stretch_counts\":[33,65,129],\"min\":1,\"max\":{}}},\"mode\":\"{mode:?}\",\"observed\":{{\"max_relative_error\":{worst}}},\"tolerance\":1e-3,\"verdict\":\"pass\",\"elapsed_s\":{}}}",
+            "{{\"suite\":\"irp-s0-materials\",\"bead\":\"M0.3-W1a\",\"test\":\"g2_treloar_ogden1972_reference_curves\",\"tier\":\"G2\",\"inputs\":{{\"parameter_set\":\"ogden1972-treloar\",\"citation\":\"10.1098/rspa.1972.0026\",\"kappa_over_mu\":1e4,\"kinematics\":\"J=1 with lateral-pressure projection\"}},\"provenance\":{{\"source_ids\":[\"ogden1972\",\"treloar1944\"],\"M8_W1_ledger_row\":\"ogden-1972-treloar-three-term-parameters\"}},\"rungs\":{{\"stretch_counts\":[33,65,129],\"min\":1,\"max\":{}}},\"mode\":\"{mode:?}\",\"observed\":{{\"max_relative_error\":{worst}}},\"tolerance\":1e-3,\"verdict\":\"pass\",\"elapsed_s\":{}}}",
             mode.max(),
             started.elapsed().as_secs_f64()
         );
@@ -667,7 +667,7 @@ fn log_treloar_points(law: &Hyperelastic) {
             let p = law.piola(&diag(s)).unwrap();
             let nominal = p[0] - p[4 * k] * s[k] / s[0];
             println!(
-                "{{\"suite\":\"irp-s0-materials\",\"bead\":\"M0.3-W1a\",\"test\":\"g2_treloar_ogden1972_reference_curves\",\"tier\":\"G2\",\"mode\":\"{mode:?}\",\"inputs\":{{\"parameter_set\":\"ogden1972-treloar\",\"citation\":\"10.1098/rspa.1972.0026\",\"kappa_over_mu\":1e4}},\"provenance\":{{\"source_ids\":[\"Bucchi-Hearn-2013-Appendix-A-Treloar-1944\"],\"M8_W1_ledger_row\":null,\"uncertainty\":\"unstated\",\"redistribution_license\":\"unstated\"}},\"rungs\":{{\"stretch\":{l}}},\"observed\":{{\"nominal_pa\":{observed},\"computed_nominal_pa\":{nominal},\"relative_deviation\":{}}},\"tolerance\":null,\"verdict\":\"diagnostic-only-unpinned-source-band\",\"elapsed_s\":{}}}",
+                "{{\"suite\":\"irp-s0-materials\",\"bead\":\"M0.3-W1a\",\"test\":\"g2_treloar_ogden1972_reference_curves\",\"tier\":\"G2\",\"mode\":\"{mode:?}\",\"inputs\":{{\"parameter_set\":\"ogden1972-treloar\",\"citation\":\"10.1098/rspa.1972.0026\",\"kappa_over_mu\":1e4}},\"provenance\":{{\"source_ids\":[\"Bucchi-Hearn-2013-Appendix-A-Treloar-1944\"],\"M8_W1_ledger_row\":\"treloar-1944-points-bucchi-hearn-2013\",\"uncertainty\":\"unstated\",\"redistribution_license\":\"unstated\"}},\"rungs\":{{\"stretch\":{l}}},\"observed\":{{\"nominal_pa\":{observed},\"computed_nominal_pa\":{nominal},\"relative_deviation\":{}}},\"tolerance\":null,\"verdict\":\"diagnostic-only-unpinned-source-band\",\"elapsed_s\":{}}}",
                 (nominal - observed) / observed,
                 started.elapsed().as_secs_f64()
             );
