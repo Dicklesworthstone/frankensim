@@ -1595,6 +1595,17 @@ fn render_with(
     (samples, contact_time)
 }
 
+/// The audible reference ceilings except the displacement one. The bar has no
+/// supports, so after a hard stroke its six free coordinates drift without
+/// bound over a six-second render (about 0.2 m sqrt(kg)/s after 2.1 m/s). The
+/// drift does not radiate (rigid transfers are zero) and the contact has ended.
+fn strike_budget() -> ModalAcousticTimeBudget {
+    ModalAcousticTimeBudget {
+        maximum_abs_displacement_m_sqrt_kg: 100.0,
+        ..ModalAcousticTimeBudget::audible_reference()
+    }
+}
+
 /// One strike: the head's equivalent mass, its approach speed, and the normal
 /// contact force as a function of head-bar overlap (zero when apart).
 struct Stroke<'a> {
@@ -1635,7 +1646,7 @@ fn render_stroke(
     let mut body = ModalAcousticTimeModel::try_new_with_free_coordinates(
         RATE * substeps,
         modes,
-        ModalAcousticTimeBudget::audible_reference(),
+        strike_budget(),
     )
     .unwrap();
     let mut phi = projector(ladder);
@@ -2179,7 +2190,7 @@ fn strike_energies(
     let mut body = ModalAcousticTimeModel::try_new_with_free_coordinates(
         RATE * CHECK_SUBSTEPS,
         modes,
-        ModalAcousticTimeBudget::audible_reference(),
+        strike_budget(),
     )
     .unwrap();
     let mut workspace = ModalAcousticWorkspace::new(&body);
@@ -2357,7 +2368,9 @@ fn band_options() -> SliceOptions {
     let mut o = options();
     // A window holds a few modes: a bounded Krylov budget per window.
     o.max_lanczos = 512;
-    o.ldlt.max_factor_bytes = Some(8 << 30);
+    // The window plan admits every window's factor at this cap: 1 GiB each (the finest
+    // rung's factor is 248 MB), so eight windows stay inside the 64 GiB plan.
+    o.ldlt.max_factor_bytes = Some(1 << 30);
     o
 }
 
@@ -2661,12 +2674,7 @@ fn band_body(b: &BandModes, rate: u32) -> ModalAcousticTimeModel {
         damping_ratio: 0.0,
         pressure_per_modal_velocity: C64::ZERO,
     }));
-    ModalAcousticTimeModel::try_new_with_free_coordinates(
-        rate,
-        modes,
-        ModalAcousticTimeBudget::audible_reference(),
-    )
-    .unwrap()
+    ModalAcousticTimeModel::try_new_with_free_coordinates(rate, modes, strike_budget()).unwrap()
 }
 
 /// The strike of [`render_stroke`] on the band body, heard through the broadband
