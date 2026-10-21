@@ -1,0 +1,28 @@
+frankensim.description-sources.v1
+quantity	scope	value	unit	route	citation_id	locator	note
+string_length	all	0.325	m	published-measured	schoonderwaldt2008	sec. 2.1: monochord 'string length 325 mm'	rigid duraluminium monochord copied from a modern violin; tape at nut and bridge
+friction_mu_static	all	0.8	1	published-assumed	schoonderwaldt2008	sec. 3.3: K = 8 cm/s, mu_d = 0.4, z0 = 20 cm/s	values quoted as commonly used in violin simulations, not fitted to these strings (same as the instrument cards)
+friction_mu_dynamic	all	0.4	1	published-assumed	schoonderwaldt2008	sec. 3.3	
+friction_speed	all	0.240224	m/s	derived-from-published	schoonderwaldt2008	Gaussian width matching the half-excess of the hyperbolic rosin curve, as in descriptions/violin/sources.tsv	family mismatch: the published law is hyperbolic, the solver's is Gaussian
+bow_speed	all	0.1	m/s	published-measured	schoonderwaldt2008	bowing machine velocities 5, 10, 15 and 20 cm/s; Table VII is at 10 cm/s	
+bow_station_beta	all	1/16;1/11;1/8	1	published-measured	schoonderwaldt2008	Fig. 4/7 axis: beta = 1/30, 1/22, 1/16, 1/11, 1/8, 1/6	three of the six machine positions swept
+bridge_termination	all	rigid	-	numerical	frankensim-card-sweep	sweep Termination::Rigid	the monochord bridge is rigid; its loss is inside the decay of the fundamental (Table VI), carried by the damping ratio
+schedule	all	constant bow 0.1 m/s, 0.3 N, beta 1/11, no events	-	numerical	-	gesture record of each card	only so that the card renders with music_render; bowed_card_sweep ignores the schedule and body records (placeholders)
+linear_density	D	0.00129	kg/m	published-measured	schoonderwaldt2008	sec. 2.1: D wound steel, OD 0.70 mm, rho_L 1.29 g/m	measured by weighing the speaking length
+tuning_frequency	D	293	Hz	published-measured	schoonderwaldt2008	sec. 2.1: 'tuned to nominal pitch: D4 = 293 Hz and E5 = 660 Hz'	
+characteristic_impedance	D	0.25	kg/s	published-measured	schoonderwaldt2008	sec. 2.1: Z0 = 2 rho_L L f1	check: 2 rho_L L f1 = 0.2457 kg/s
+tension	D	46.789851	N	derived-from-published	schoonderwaldt2008	T = 4 L^2 f1^2 rho_L, so that the card's fundamental equals the printed tuning	not printed in the paper
+modal_damping_ratio	D	0.0010416667	1	published-measured	schoonderwaldt2008	Table VI monochord D (tau1 0.521 s, Q1 480)	zeta = 1/(2 Q1) applied to every mode; mode dependence UNKNOWN
+measured_c_upper	D	86	mN	published-measured	schoonderwaldt2008	Table VII at 10 cm/s	+- 8 mN (standard error); F_max(beta) = c_upper / beta
+measured_c_lower	D	0.47	mN	published-measured	schoonderwaldt2008	Table VII at 10 cm/s	+- 0.04 mN (standard error); F_min(beta) = c_lower / beta^2; Table I-VII fits of the observed Helmholtz boundaries
+linear_density	E	0.00041	kg/m	published-measured	schoonderwaldt2008	sec. 2.1: E plain steel, d 0.26 mm, rho_L 0.41 g/m	measured by weighing the speaking length
+tuning_frequency	E	660	Hz	published-measured	schoonderwaldt2008	sec. 2.1: 'tuned to nominal pitch: D4 = 293 Hz and E5 = 660 Hz'	
+characteristic_impedance	E	0.18	kg/s	published-measured	schoonderwaldt2008	sec. 2.1: Z0 = 2 rho_L L f1	check: 2 rho_L L f1 = 0.1759 kg/s
+tension	E	75.45681	N	derived-from-published	schoonderwaldt2008	T = 4 L^2 f1^2 rho_L, so that the card's fundamental equals the printed tuning	not printed in the paper
+modal_damping_ratio	E	0.00052910053	1	published-measured	schoonderwaldt2008	Table VI monochord E (tau1 0.457 s, Q1 945)	zeta = 1/(2 Q1) applied to every mode; mode dependence UNKNOWN
+measured_c_upper	E	70	mN	published-measured	schoonderwaldt2008	Table VII at 10 cm/s	+- 2.3 mN (standard error); F_max(beta) = c_upper / beta
+measured_c_lower	E	0.17	mN	published-measured	schoonderwaldt2008	Table VII at 10 cm/s	+- 0.02 mN (standard error); F_min(beta) = c_lower / beta^2; Table I-VII fits of the observed Helmholtz boundaries
+bending_stiffness	D	0	N m^2	placeholder-unknown	-	string record field 4	wound string; the core diameter is not printed (UNKNOWN)
+bending_stiffness	E ei0	0	N m^2	placeholder-unknown	-	string record field 4	flexible-string variant for comparison
+bending_stiffness	E eisteel	4.4863514e-05	N m^2	derived-from-published	schoonderwaldt2008	EI = E_steel pi d^4 / 64 with d = 0.26 mm printed	E_steel = 200 GPa is an ASSUMED textbook value: the repo matdb music-wire pack carries density and tensile strength only; density check: 7827.8 kg/m3 * pi d^2 / 4 = 0.4156 g/m against the printed 0.41 g/m
+torsion	all	absent	-	placeholder-unknown	schoonderwaldt2008	sec. 1.1, 3.7: Z_R/Z0 about 2 (D) and 3.5 (solid steel E)	the solver has no torsion; the paper says it lowers F_max by about 16 to 22 percent
