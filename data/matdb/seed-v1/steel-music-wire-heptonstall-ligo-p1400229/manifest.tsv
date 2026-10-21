@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	steel-music-wire-heptonstall-ligo-p1400229
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Heptonstall A., Waller M., Robertson N.A., Investigation of mechanical properties of cryogenically treated music wire, LIGO document P1400229 / arXiv:1506.03778 (California Institute of Technology and University of Glasgow); Tables 2-4 and the strength-test and conclusion paragraphs, read on page images
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

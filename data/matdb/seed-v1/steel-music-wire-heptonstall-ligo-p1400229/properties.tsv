@@ -1,0 +1,54 @@
+frankensim.matdb-source.v1
+observation	hl-static	High-carbon steel music wire from California Fine Wire Company, 20 to 1100 micrometre diameter, 0.5 m long; 43 untreated and 7 cryogenically treated wires	Destructive tensile tests on a commercial Instron machine, wire clamped at both ends with wedge clamps, uniform extension rate; Young's modulus from the initial linear force-extension region	Temperature and humidity not stated; the page prints 2.12 +- 0.01 x 10^11 Pa untreated and 2.00 +- 0.12 x 10^11 Pa cryogenically treated and calls both consistent with previous measurements; the confidence of the +- is not stated, so the half-widths are their own scalars
+observation	hl-ringdown	Four wires clamped at one end and hung in a vacuum chamber: wire 1 465 micrometre untreated (498 mm), wire 2 457 micrometre cryogenically treated (497 mm), wire 3 197 micrometre untreated (473 mm), wire 4 197 micrometre cryogenically treated (481 mm)	Electrostatic excitation of the wire's resonant modes, ringdown amplitude by HeNe laser and split photodiode, loss angle from the fitted time constant of each resonant mode (the 8 to 3000 Hz validity band is the span of the plotted modes, read off the axes of the paper's Figures 6 and 7); the measured loss is fitted with a thermoelastic damping peak plus a frequency-independent material loss, and the Table 4 'mechanical loss' is that fitted material loss	Measured in vacuum, so there is no air damping in these numbers; the wires are far thinner than bulk pieces and the authors find their material properties differ from literature bulk values; the density 7800 kg/m^3 and Young's modulus are the literature values the authors say they know to be correct (their Table 3, a set of inputs used to predict thermal noise of wire suspended optics in Advanced LIGO); the cryogenic treatment made no significant difference within the errors
+scalar	young-modulus-untreated	hl-static	young_modulus_untreated	212000000000	Pa	constant
+uncertainty	young-modulus-untreated	unstated	-	-	-	-
+validity	young-modulus-untreated	frequency	0	0	Hz
+scalar	young-modulus-untreated-half-width	hl-static	young_modulus_untreated_printed_half_width	1000000000	Pa	constant
+uncertainty	young-modulus-untreated-half-width	unstated	-	-	-	-
+validity	young-modulus-untreated-half-width	frequency	0	0	Hz
+scalar	young-modulus-cryo	hl-static	young_modulus_cryo_treated	200000000000	Pa	constant
+uncertainty	young-modulus-cryo	unstated	-	-	-	-
+validity	young-modulus-cryo	frequency	0	0	Hz
+scalar	young-modulus-cryo-half-width	hl-static	young_modulus_cryo_treated_printed_half_width	12000000000	Pa	constant
+uncertainty	young-modulus-cryo-half-width	unstated	-	-	-	-
+validity	young-modulus-cryo-half-width	frequency	0	0	Hz
+scalar	density	hl-ringdown	density_literature_value_used	7800	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature_known	0	0	1
+scalar	loss-465-untreated	hl-ringdown	material_loss_angle_465um_untreated	1.4e-4	1	constant
+uncertainty	loss-465-untreated	unstated	-	-	-	-
+validity	loss-465-untreated	frequency	8	3000	Hz
+scalar	loss-465-untreated-half-width	hl-ringdown	material_loss_angle_465um_untreated_half_width	0.6e-4	1	constant
+uncertainty	loss-465-untreated-half-width	unstated	-	-	-	-
+validity	loss-465-untreated-half-width	frequency	8	3000	Hz
+scalar	loss-457-cryo	hl-ringdown	material_loss_angle_457um_cryo_treated	0.6e-4	1	constant
+uncertainty	loss-457-cryo	unstated	-	-	-	-
+validity	loss-457-cryo	frequency	8	3000	Hz
+scalar	loss-457-cryo-half-width	hl-ringdown	material_loss_angle_457um_cryo_treated_half_width	0.2e-4	1	constant
+uncertainty	loss-457-cryo-half-width	unstated	-	-	-	-
+validity	loss-457-cryo-half-width	frequency	8	3000	Hz
+scalar	loss-197-untreated	hl-ringdown	material_loss_angle_197um_untreated	1.4e-4	1	constant
+uncertainty	loss-197-untreated	unstated	-	-	-	-
+validity	loss-197-untreated	frequency	8	3000	Hz
+scalar	loss-197-untreated-half-width	hl-ringdown	material_loss_angle_197um_untreated_half_width	0.4e-4	1	constant
+uncertainty	loss-197-untreated-half-width	unstated	-	-	-	-
+validity	loss-197-untreated-half-width	frequency	8	3000	Hz
+scalar	loss-197-cryo	hl-ringdown	material_loss_angle_197um_cryo_treated	0.8e-4	1	constant
+uncertainty	loss-197-cryo	unstated	-	-	-	-
+validity	loss-197-cryo	frequency	8	3000	Hz
+scalar	loss-197-cryo-half-width	hl-ringdown	material_loss_angle_197um_cryo_treated_half_width	0.4e-4	1	constant
+uncertainty	loss-197-cryo-half-width	unstated	-	-	-	-
+validity	loss-197-cryo-half-width	frequency	8	3000	Hz
+scalar	loss-mean-all	hl-ringdown	material_loss_angle_mean_of_all_wires_printed	1.1e-4	1	constant
+uncertainty	loss-mean-all	unstated	-	-	-	-
+validity	loss-mean-all	frequency	8	3000	Hz
+scalar	loss-mean-all-half-width	hl-ringdown	material_loss_angle_mean_of_all_wires_printed_half_width	0.2e-4	1	constant
+uncertainty	loss-mean-all-half-width	unstated	-	-	-	-
+validity	loss-mean-all-half-width	frequency	8	3000	Hz
+scalar	loss-cagnoli	hl-ringdown	material_loss_angle_quoted_from_cagnoli_et_al	1.9e-4	1	constant
+uncertainty	loss-cagnoli	unstated	-	-	-	-
+validity	loss-cagnoli	frequency	8	3000	Hz
+scalar	loss-cagnoli-half-width	hl-ringdown	material_loss_angle_quoted_from_cagnoli_et_al_half_width	0.1e-4	1	constant
+uncertainty	loss-cagnoli-half-width	unstated	-	-	-	-
+validity	loss-cagnoli-half-width	frequency	8	3000	Hz
