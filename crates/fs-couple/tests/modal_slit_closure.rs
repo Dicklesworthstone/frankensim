@@ -3,9 +3,16 @@
 //! the zero-gap slit lay's discrete contact force. A reed held shut by a steady pressure takes tiny gap steps, so that
 //! force is evaluated as a potential secant over a tiny increment in deep contact.
 //!
+//! Native evidence at b1941bce6 (trj, test lane): the refusal is sample 358 of the 2 kPa phase, with the reed 45.6 um
+//! into the lay and nearly at rest (gap velocity 2.4e-5 m/s, contact force 0.208 N). There the zero-gap lay's secant,
+//! formed by subtracting endpoint energies, left the exact secant by up to 6.3e-4 relative at tiny steps (3.7e-3 at
+//! 10 um), so the bisection residual was noise far above its 1e-13 m/s tolerance, while the rest of the residual
+//! rounds at 1e-16 m/s. The defect was the owner's (the contact step), not the scenario or the tolerance.
+//!
 //! The first test pins the property the solve needs: at every step size, including the 1e-14 |q| threshold where the
-//! discrete gradient drops its correction, the secant stays the force of the midpoint penetration. The second replays
-//! the closure scenario and reports the state, gap velocity and contact force of any step the solve refuses.
+//! discrete gradient drops its correction, the secant is the exact secant of the power-law potential. The second
+//! replays the closure scenario and reports the state, gap velocity and contact force of any refused step. The third
+//! steps the reported sample-358 state and closes its work account.
 use fs_couple::bernoulli_aperture::dynamic::ApertureDrive;
 use fs_couple::bernoulli_aperture::modal::{ApertureMode, ModalAperture, ModalApertureSpec};
 use fs_couple::bernoulli_aperture::paired::{BladePropagator, BladeState, PairedApertureLimits};
@@ -31,7 +38,8 @@ fn contact() -> Obstacle {
     .unwrap()
 }
 
-/// Largest |secant - midpoint force| / midpoint force over the step sizes a resting closed reed takes.
+/// Largest |secant - exact secant| / exact secant over the step sizes a resting closed reed takes. For alpha = 2 the
+/// potential is K p^3 / 3 at penetration p = -opening, whose exact secant is K (p0^2 + p0 p1 + p1^2) / 3.
 fn worst_secant_error(lay: &Obstacle, opening: f64) -> (f64, f64) {
     let mut worst = (0.0_f64, 0.0_f64);
     for exponent in 8..=20 {
@@ -40,8 +48,9 @@ fn worst_secant_error(lay: &Obstacle, opening: f64) -> (f64, f64) {
                 let dx = sign * mantissa * 10f64.powi(-exponent);
                 let (elastic, _) = slit_contact_discrete_coefficients(lay, opening, opening + dx)
                     .expect("contact coefficients");
-                let midpoint = K * (-(opening + 0.5 * dx)).powf(ALPHA);
-                let error = (elastic - midpoint).abs() / midpoint;
+                let (p0, p1) = (-opening, -(opening + dx));
+                let exact = K * (p0 * p0 + p0 * p1 + p1 * p1) / 3.0;
+                let error = (elastic - exact).abs() / exact;
                 if error > worst.0 {
                     worst = (error, dx);
                 }
@@ -52,15 +61,17 @@ fn worst_secant_error(lay: &Obstacle, opening: f64) -> (f64, f64) {
 }
 
 #[test]
-fn zero_gap_slit_lay_secant_is_the_midpoint_force_at_tiny_steps() {
-    // Penetrations of a reed held shut by 0.1-1 N on the fixture's K = 1e8 N/m^2, alpha = 2 lay.
+fn zero_gap_slit_lay_secant_is_the_exact_secant_at_tiny_steps() {
+    assert_eq!(ALPHA, 2.0, "the closed-form secant below is for alpha = 2");
+    // Penetrations of a reed held shut by 0.1-1 N on the fixture's K = 1e8 N/m^2, alpha = 2 lay. The bound 1e-10 is
+    // five orders above the rounding of a few operations and six below the 6.3e-4 defect measured at b1941bce6.
     let lay = contact();
     for opening in [-1.0e-5, -3.2e-5, -5.0e-5, -1.0e-4] {
         let (error, dx) = worst_secant_error(&lay, opening);
         eprintln!("opening {opening:e}: worst relative secant error {error:e} at dx {dx:e}");
         assert!(
-            error <= 1e-8,
-            "opening {opening:e}: the secant leaves the midpoint force by {error:e} at dx {dx:e}"
+            error <= 1e-10,
+            "opening {opening:e}: the secant leaves the exact secant by {error:e} at dx {dx:e}"
         );
     }
 }
@@ -167,4 +178,55 @@ fn closure_scenario_reports_any_refused_step() {
             }
         }
     }
+}
+
+#[test]
+fn sample_358_of_the_closure_scenario_steps_and_closes_its_work_account() {
+    // Modal state before sample 358 as reported at b1941bce6: pressed shut by 2 kPa, nearly at rest.
+    let state = vec![
+        BladeState {
+            displacement_m: -8.253981461494914e-5,
+            velocity_m_s: 2.168353623606453e-5,
+        },
+        BladeState {
+            displacement_m: 1.5177194691353634e-5,
+            velocity_m_s: -1.1587641860864778e-5,
+        },
+        BladeState {
+            displacement_m: -2.328829047242166e-5,
+            velocity_m_s: 5.667907608737036e-5,
+        },
+    ];
+    let mut a = closure_model(state.clone());
+    let forces = [0.001, -0.0003];
+    let f = a
+        .step(drive(2_000.0), forces)
+        .expect("the pressed-shut reed step resolves");
+    assert!(
+        f.aperture.state.opening_m < 0.0,
+        "the reed stays in contact"
+    );
+    let spec = closure_spec();
+    let increments: Vec<_> = state
+        .iter()
+        .zip(&f.modes)
+        .map(|(x, y)| y.displacement_m - x.displacement_m)
+        .collect();
+    let swept = -spec
+        .modes
+        .iter()
+        .zip(&increments)
+        .map(|(m, q)| m.pressure_area_m2 * q)
+        .sum::<f64>();
+    assert!((spec.time_step_s * f.aperture.swept_flow_m3_s - swept).abs() < 1e-21);
+    let work: f64 = spec
+        .modes
+        .iter()
+        .zip(&increments)
+        .map(|(m, q)| (m.force_projection[0] * forces[0] + m.force_projection[1] * forces[1]) * q)
+        .sum();
+    assert!((f.aperture.mechanical_work_j - work).abs() < 1e-21);
+    assert!(f.momentum_residual_n.iter().all(|r| r.abs() < 1e-8));
+    assert!(f.work_certificate.residual <= f.work_certificate.effective_budget);
+    assert!(f.flow_certificate.residual <= f.flow_certificate.effective_budget);
 }

@@ -175,9 +175,9 @@ pub fn slit_contact_discrete_coefficients(
 /// Retain one contact storage across all trials of an implicit step.
 pub(crate) struct SlitContactStep {
     storage: ContactStorage,
-    /// Opening at the start of the step, measured from the lay's onset for a curved lay.
+    /// Opening at the start of the step, measured from the lay's onset.
     opening_before_m: f64,
-    /// Opening at which a curved lay starts to touch the reed; zero for the original slit lay.
+    /// Opening at which the lay starts to touch the reed (minus its gap); zero for the original slit lay.
     onset_m: f64,
     internal_loss: f64,
 }
@@ -190,22 +190,22 @@ impl SlitContactStep {
             });
         }
         slit_contact_coefficients(obstacle, opening_before_m)?;
-        // A lay that starts before the slit closes (negative gap) holds the reed in deep contact at its
-        // working point. Two things then break the momentum balance of the implicit reed step at the
-        // turning points of the reed (tiny steps dx, where the discrete gradient drops its correction
-        // below dx = 1e-14 |q|): the default endpoint-energy subtraction has force noise eps V / dx
-        // (1e-3 of the force at the cited stiffness), and a penetration formed as (onset - q) carries
-        // a rounding mismatch of one ulp of the onset against dx, which the remainder's affine term
-        // turns into 1e-2 of the force. Both are removed by evaluating the same power law about the
-        // onset (penetration = -(q - onset), a negation with no rounding, one shared increment) with an
-        // inner storage that states its zero remainder so fs-dcontact's cancellation-stable remainder
-        // is used. The zero-gap lay keeps its original arithmetic bit for bit.
-        let onset_m = match obstacle.gaps().first() {
-            Some(gap) if *gap < 0.0 => -*gap,
-            _ => 0.0,
-        };
-        if onset_m > 0.0 {
-            let shifted = Obstacle::new(
+        // A reed held in contact (a lay that starts before the slit closes, or a reed pressed shut on
+        // the zero-gap lay) takes tiny steps dx at its turning points and while it rests, where the
+        // discrete gradient drops its correction below dx = 1e-14 |q|. Two things then break the
+        // momentum balance of the implicit reed step: the default endpoint-energy subtraction has
+        // force noise eps V / dx (1e-3 of the force at the cited stiffness near that threshold), and a
+        // penetration formed as (onset - q) carries a rounding mismatch of one ulp of the onset
+        // against dx, which the remainder's affine term turns into 1e-2 of the force. Both are removed
+        // by evaluating the same power law about the onset (penetration = -(q - onset), a negation
+        // with no rounding, one shared increment) with an inner storage that states its zero
+        // remainder, so fs-dcontact's cancellation-stable remainder is used for every lay. A zero
+        // gap needs no shift (frankensim-0ll17: the modal slit pressed shut by 2 kPa refused).
+        let onset_m = obstacle.gaps().first().map_or(0.0, |gap| -*gap);
+        let shifted = if onset_m == 0.0 {
+            obstacle.clone()
+        } else {
+            Obstacle::new(
                 vec![-1.0],
                 1,
                 1,
@@ -215,17 +215,11 @@ impl SlitContactStep {
                 obstacle.alpha(),
                 "slit-lay-about-onset".to_string(),
             )?
-            .with_internal_loss(obstacle.internal_loss())?;
-            return Ok(Self {
-                storage: ContactStorage::new(Box::new(CompleteZeroStorage), 1, vec![shifted])?,
-                opening_before_m: opening_before_m - onset_m,
-                onset_m,
-                internal_loss: obstacle.internal_loss(),
-            });
-        }
+            .with_internal_loss(obstacle.internal_loss())?
+        };
         Ok(Self {
-            storage: ContactStorage::new(Box::new(ZeroStorage), 1, vec![obstacle.clone()])?,
-            opening_before_m,
+            storage: ContactStorage::new(Box::new(CompleteZeroStorage), 1, vec![shifted])?,
+            opening_before_m: opening_before_m - onset_m,
             onset_m,
             internal_loss: obstacle.internal_loss(),
         })
