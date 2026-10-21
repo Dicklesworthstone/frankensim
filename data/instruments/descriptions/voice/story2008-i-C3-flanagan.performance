@@ -15,11 +15,20 @@
 #   the CC-BY model-card pack twomass-if72-standard-plos-pone0187486 (see crates/fs-couple/src/glottis.rs).
 #   Rest half-gap 3.57e-4 m = Steinecke-Herzel rest area 0.05 cm^2 / 1.4 cm. Damping ratio 0.1 is AUTHORED ESTIMATE
 #   (source would be tissue-loss measurements; Q1 sweeps it). Collision law and mucosal delay are fixed in glottis.rs.
-#   PITCH CONTROL (model-only objective): the three fold stiffnesses are the pack values x q = 0.507996. q was found by
+#   FLOW LAW: the kinetic (Bernoulli) drop plus a Poiseuille viscous drop 12 mu d l^2 U / a^3 per channel section (a = l h), d = 0.25 cm
+#   (lower) and 0.05 cm (upper), mu from the ambient gas: Ishizaka & Flanagan (1972); the section drops are printed as P12 and P21 in
+#   Assaneo & Trevisan, arXiv:1312.2950, which also gives the 0.05 cm. The 0.05 cm is the card default (an optional eleventh `fold`
+#   field would override it). Without the viscous term the flow has a corner at closure and the radiated harmonics fall at only
+#   6 dB/octave. Forces on the masses keep the Steinecke-Herzel form (a stated simplification). Added in glottis.rs e2dd8616d.
+#   PITCH CONTROL (model-only objective): the three fold stiffnesses are the pack values x q = 0.515122. q was found by
 #   rendering and measuring the EMERGENT f0 of the radiated pressure (autocorrelation over 0.5-1.5 s of a 1.5 s trial render, then
 #   re-measured on the full 3 s render) and iterating q until it was
 #   within 3 cents of the target note C3 = 130.81 Hz (equal temperament, A4 = 440 Hz). No recording enters. Trace on the
 #   sibling description:
+#     q 0.507996: f0 129.90 Hz (-12.1 c) -> q 0.515122: f0 130.80 Hz (-0.2 c)
+#   That trace is the RE-TRIM for the viscous flow law (music_render af6cee4e7dfb): it starts from the q the Bernoulli-only law had
+#   settled on, rendered under the new law, 1.5 s trials. The earlier, Bernoulli-only trim of the same card (the pack model was then
+#   unchanged) was:
 #     q 0.491009: f0 128.61 Hz (-29.4 c) -> q 0.507996: f0 130.75 Hz (-0.8 c)
 #   The first rule tried (set the isolated in-phase mode f = sqrt((k1+k2)/(m1+m2))/2pi to the note) phonated 550-815 cents
 #   sharp: the pair oscillates nearer its second eigenmode (200.5 Hz at q = 1, pack values) than its in-phase mode (120.4 Hz).
@@ -50,15 +59,15 @@ frankensim-voice-performance-v1
 audio 48000 144000 2
 full_scale_pa 4.0
 ambient moist_air 310.15 101325 1.0
-fold two_mass 0.000125 2.5e-05 40.6397 4.06397 12.6999 0.1 3.57e-4 1.4e-2 2.5e-3
+fold two_mass 0.000125 2.5e-05 41.2097 4.12097 12.878 0.1 3.57e-4 1.4e-2 2.5e-3
 termination flanged
 tract_wall 15 1.48e+06 1.6e4
 tract_source story-2008-jasa-123-327-table-I-i
 tract_licence published measurements transcribed with citation (Story 2008 Table I); redistribution terms unconfirmed, owner to decide
 microphone 0.212132 0 0.212132 16 64 8000
 subglottal 0 0
-subglottal 0.06 457.196
-subglottal 2.85 457.196
+subglottal 0.06 463.609
+subglottal 2.85 463.609
 subglottal 3 0
 section 0.51e-4 0.384e-2
 section 0.59e-4 0.384e-2

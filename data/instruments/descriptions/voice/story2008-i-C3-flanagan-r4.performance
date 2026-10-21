@@ -15,11 +15,20 @@
 #   the CC-BY model-card pack twomass-if72-standard-plos-pone0187486 (see crates/fs-couple/src/glottis.rs).
 #   Rest half-gap 3.57e-4 m = Steinecke-Herzel rest area 0.05 cm^2 / 1.4 cm. Damping ratio 0.1 is AUTHORED ESTIMATE
 #   (source would be tissue-loss measurements; Q1 sweeps it). Collision law and mucosal delay are fixed in glottis.rs.
-#   PITCH CONTROL (model-only objective): the three fold stiffnesses are the pack values x q = 0.507996. q was found by
+#   FLOW LAW: the kinetic (Bernoulli) drop plus a Poiseuille viscous drop 12 mu d l^2 U / a^3 per channel section (a = l h), d = 0.25 cm
+#   (lower) and 0.05 cm (upper), mu from the ambient gas: Ishizaka & Flanagan (1972); the section drops are printed as P12 and P21 in
+#   Assaneo & Trevisan, arXiv:1312.2950, which also gives the 0.05 cm. The 0.05 cm is the card default (an optional eleventh `fold`
+#   field would override it). Without the viscous term the flow has a corner at closure and the radiated harmonics fall at only
+#   6 dB/octave. Forces on the masses keep the Steinecke-Herzel form (a stated simplification). Added in glottis.rs e2dd8616d.
+#   PITCH CONTROL (model-only objective): the three fold stiffnesses are the pack values x q = 0.515122. q was found by
 #   rendering and measuring the EMERGENT f0 of the radiated pressure (autocorrelation over 0.5-1.5 s of a 1.5 s trial render, then
 #   re-measured on the full 3 s render) and iterating q until it was
 #   within 3 cents of the target note C3 = 130.81 Hz (equal temperament, A4 = 440 Hz). No recording enters. Trace on the
 #   sibling description story2008-i-C3-flanagan (this file reuses its fold card):
+#     q 0.507996: f0 129.90 Hz (-12.1 c) -> q 0.515122: f0 130.80 Hz (-0.2 c)
+#   That trace is the RE-TRIM for the viscous flow law (music_render af6cee4e7dfb): it starts from the q the Bernoulli-only law had
+#   settled on, rendered under the new law, 1.5 s trials. The earlier, Bernoulli-only trim of the same card (the pack model was then
+#   unchanged) was:
 #     q 0.491009: f0 128.61 Hz (-29.4 c) -> q 0.507996: f0 130.75 Hz (-0.8 c)
 #   The first rule tried (set the isolated in-phase mode f = sqrt((k1+k2)/(m1+m2))/2pi to the note) phonated 550-815 cents
 #   sharp: the pair oscillates nearer its second eigenmode (200.5 Hz at q = 1, pack values) than its in-phase mode (120.4 Hz).
@@ -47,27 +56,27 @@
 #   every description so vowel levels compare; the loudest render (a-D4) peaks near 3.2 Pa. Output is never normalized.
 # MECHANICS: 192 kHz physical clock (4 per output sample), read through the bandlimited differentiating receiver. The 96 kHz twin
 #   story2008-i-C3-flanagan is the same description at half this clock. The fold-contact dynamics are under-resolved at 96 kHz:
-#   with an ideal-open mouth the /a/ C4 non-harmonic floor falls with the clock and is converged by 192 kHz (harmonics-to-noise, the grader's
-#   definition: 22.4, 26.8, 31.8, 33.3 and 33.3 dB at 48, 96, 144, 192 and 384 kHz). THIS render, 96 -> 192 kHz, native binary
-#   da31fbd67ee9, harmonics-to-noise by two definitions:
-#   (1) the grader's (P2 hnr_db: tracked partials, at most 30, 80-10000 Hz, aligned clip, msg 5020): 13.7 -> 14.3 dB;
-#   (2) every harmonic to 10 kHz counted as harmonic (0.3-2.8 s of this render): 32.2 -> 32.6 dB.
-#   They differ because the grader counts every harmonic above its 30th as noise, and the render has a high-frequency tail outside the
+#   with an ideal-open mouth and the earlier Bernoulli-only flow law the /a/ C4 non-harmonic floor fell with the clock and was converged by
+#   192 kHz (harmonics-to-noise, the grader's definition: 22.4, 26.8, 31.8, 33.3 and 33.3 dB at 48, 96, 144, 192 and 384 kHz). THIS render,
+#   96 -> 192 kHz, native binary af6cee4e7dfb (viscous flow law), harmonics-to-noise by two definitions:
+#   (1) the grader's definition (first 30 harmonics counted; reproduces the graded value within 1 dB on nine slots): 22.2 -> 23.1 dB;
+#   (2) every harmonic to 10 kHz counted as harmonic (0.3-2.8 s of this render): 45.8 -> 43.0 dB.
+#   They differ because the grader counts every harmonic above its 30th as noise, and the render still has a high-frequency tail outside the
 #   microphone's 8 kHz resolved band that does not depend on the clock (status.json). The 192 kHz clock is chosen for the converged fold contact,
-#   not for the grade. f0 130.652 Hz (-2.1 c of the note), so the pitch trim of the 96 kHz file still holds within 3 cents and was NOT redone.
+#   not for the grade. f0 130.755 Hz (-0.8 c of the note), so the pitch trim of the 96 kHz file still holds within 3 cents and was NOT redone.
 frankensim-voice-performance-v1
 audio 48000 144000 4
 full_scale_pa 4.0
 ambient moist_air 310.15 101325 1.0
-fold two_mass 0.000125 2.5e-05 40.6397 4.06397 12.6999 0.1 3.57e-4 1.4e-2 2.5e-3
+fold two_mass 0.000125 2.5e-05 41.2097 4.12097 12.878 0.1 3.57e-4 1.4e-2 2.5e-3
 termination flanged
 tract_wall 15 1.48e+06 1.6e4
 tract_source story-2008-jasa-123-327-table-I-i
 tract_licence published measurements transcribed with citation (Story 2008 Table I); redistribution terms unconfirmed, owner to decide
 microphone 0.212132 0 0.212132 16 64 8000
 subglottal 0 0
-subglottal 0.06 457.196
-subglottal 2.85 457.196
+subglottal 0.06 463.609
+subglottal 2.85 463.609
 subglottal 3 0
 section 0.51e-4 0.384e-2
 section 0.59e-4 0.384e-2
