@@ -40,10 +40,10 @@ def tone(f0=F0, dur=2.6, attack=0.04, lead=0.3, delay=0.0, odd_only=False, cents
     return x
 
 
-def note_of(x, f0=F0, kind="sustained"):
+def note_of(x, f0=F0, kind="sustained", max_cents=50.0):
     floor = dc.render_floor(dc.highpass(x, f0), f0)
     y, info = dc.align(x, f0, floor)
-    return Note(y, f0, kind, False, "synthetic", info)
+    return Note(y, f0, kind, False, "synthetic", info, max_cents=max_cents)
 
 
 class AlignmentTests(unittest.TestCase):
@@ -141,6 +141,50 @@ class GapTests(unittest.TestCase):
         self.assertGreater(g["partial_freq_cents"][0], 3.0)
 
 
+class PitchTests(unittest.TestCase):
+    def weak_fundamental(self, f0, cents=0.0):
+        n = int(2.6 * SR)
+        t = np.arange(n) / SR
+        f = f0 * 2 ** (cents / 1200)
+        amps = {1: 0.35, 2: 1.0, 3: 0.2, 4: 0.12, 5: 0.06}  # the second partial dominates, as in a bowed bass
+        x = sum(a * np.sin(2 * np.pi * k * f * t + k) for k, a in amps.items())
+        return 0.2 * x / np.abs(x).max() * (0.5 - 0.5 * np.cos(np.pi * np.clip((t - 0.3) / 0.05, 0, 1)))
+
+    def test_comb_finds_the_fundamental_when_the_second_partial_dominates(self):
+        for cents in (0.0, 4.0, -30.0, 120.0):
+            x = self.weak_fundamental(55.0, cents)
+            y = dc.highpass(x, 55.0)
+            cut, _ = dc.align(y, 55.0, dc.render_floor(y, 55.0))
+            f = dc.f0_comb(cut, 55.0)
+            self.assertAlmostEqual(1200 * math.log2(f / (55.0 * 2 ** (cents / 1200))), 0.0, delta=1.0, msg=str(cents))
+
+    def test_note_pitch_gap_is_the_true_detune_not_an_estimator_artifact(self):
+        ref = note_of(self.weak_fundamental(55.0), 55.0)
+        for cents in (4.0, 150.0):
+            ours = note_of(self.weak_fundamental(55.0, cents), 55.0, max_cents=400.0)
+            self.assertAlmostEqual(dc.compare(ours, ref)["f0_cents"][1], cents, delta=2.0)
+
+    def test_a_tone_with_nothing_at_its_fundamental_is_refused(self):
+        n = int(2.6 * SR)
+        tt = np.arange(n) / SR
+        env = 0.5 - 0.5 * np.cos(np.pi * np.clip((tt - 0.3) / 0.05, 0, 1))
+        for f in (1558.2, 2047.3):  # the flute lock-on tones against a D4 / G4 name
+            x = 0.2 * env * (np.sin(2 * np.pi * f * tt) + 0.2 * np.sin(2 * np.pi * 3 * f * tt))
+            with self.assertRaisesRegex(dc.GraderRefusalError, "NOT_THE_NAMED_NOTE|PITCH_MISMATCH"):
+                note_of(x, 293.66 if f < 2000 else 392.0, max_cents=400.0)
+
+    def test_a_stretched_harmonic_note_passes_the_fundamental_check(self):
+        n = int(2.6 * SR)
+        tt = np.arange(n) / SR
+        x = sum(np.sin(2 * np.pi * k * 110.0 * math.sqrt(1 + 6e-4 * k * k) * tt) / k for k in range(1, 16))
+        x = 0.2 * x * (0.5 - 0.5 * np.cos(np.pi * np.clip((tt - 0.3) / 0.05, 0, 1))) / np.abs(x).max()
+        note_of(x, 110.0)
+
+    def test_a_reference_more_than_fifty_cents_off_its_name_is_refused(self):
+        with self.assertRaisesRegex(dc.GraderRefusalError, "PITCH_MISMATCH"):
+            note_of(self.weak_fundamental(55.0, 90.0), 55.0)
+
+
 class ContractTests(unittest.TestCase):
     """write_pair against P8's validator (tools/build_instruments.py) on a synthetic library."""
 
@@ -215,6 +259,67 @@ class ContractTests(unittest.TestCase):
         meta = dict(wav="r.wav", git_sha="x", observer="o", sample_rate=48000, recipe="r.sh")
         with self.assertRaises(dc.OnsetMisaligned):
             dc.write_pair(self.tmp / "bad", "syn", "Bb3", ref_e, self.refs, y, info, cy, ci, meta)
+
+    def test_reference_only_run_never_replaces_a_graded_pair(self):
+        root = self.tmp / "keep"
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="abc", observer="test", recipe="r.sh")
+        dc.run_pair(self.refs, c, root)
+        self.assertTrue(dc.has_render(root, "syn", "Bb3"))
+        self.assertFalse(dc.has_render(root, "syn", "A3"))
+        dc._REFS = self.refs
+        res = dc._ref_job((dict(family="syn", art="", dyn="mf", notes=["Bb3"], review=False), root))
+        self.assertIn("untouched", res["kept"])
+        self.assertIsNotNone(__import__("json").loads((root / "syn" / "Bb3" / "pair.json").read_text())["ours"])
+
+    def test_reference_only_run_falls_back_to_the_next_verifying_note(self):
+        root = self.tmp / "fallback"
+        dc._REFS = self.refs
+        res = dc._ref_job((dict(family="syn", art="", dyn="mf", notes=["C9", "Bb3"], review=False), root))
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["note"], "Bb3")
+        self.assertEqual([r["note"] for r in res["refused"]], ["C9"])
+
+    def test_refusal_supersedes_by_moving_and_never_deletes(self):
+        import json
+        root = self.tmp / "refuse"
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="abc", observer="test", recipe="r.sh")
+        dc.run_pair(self.refs, c, root)
+        before = {p.name for p in (root / "syn" / "Bb3").iterdir()}
+        self.assertIn("ours.wav", before)
+        dc.refuse_pair(root, "syn", "Bb3", "IRPDECOMP_PITCH_MISMATCH: test", "abc", self.render, "mf")
+        d = root / "syn" / "Bb3"
+        rec = json.loads((d / "pair.json").read_text())
+        self.assertIsNone(rec["ours"])
+        self.assertEqual(rec["refused"]["render_sha"], "abc")
+        self.assertIn("PITCH_MISMATCH", rec["refused"]["reason"])
+        stamps = list((d / "superseded").iterdir())
+        self.assertEqual(len(stamps), 1)
+        self.assertEqual({p.name for p in stamps[0].iterdir()}, before)  # everything moved, including the old pair.json
+        self.assertEqual({p.name for p in d.iterdir()}, {"pair.json", "superseded"})
+        dc.refuse_pair(root, "syn", "Bb3", "again")  # a second refusal moves only the first record, keeping the first stamp
+        self.assertEqual(len(list((d / "superseded").iterdir())), 2)
+
+    def test_a_regrade_moves_the_earlier_files_aside_instead_of_overwriting(self):
+        root = self.tmp / "regrade"
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="abc", observer="test", recipe="r.sh")
+        dc.run_pair(self.refs, c, root)
+        first = (root / "syn" / "Bb3" / "ours.wav").read_bytes()
+        dc.run_pair(self.refs, dict(c, git_sha="def"), root)
+        d = root / "syn" / "Bb3"
+        stamps = list((d / "superseded").iterdir())
+        self.assertEqual(len(stamps), 1)
+        self.assertEqual((stamps[0] / "ours.wav").read_bytes(), first)
+        self.assertTrue((stamps[0] / "pair.json").exists())
+        self.assertEqual(__import__("json").loads((d / "pair.json").read_text())["ours"]["git_sha"], "def")
+
+    def test_a_refused_render_batch_job_writes_the_record(self):
+        import json
+        root = self.tmp / "refbatch"
+        dc._REFS = self.refs
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.tmp / "nonexistent.wav"), git_sha="zz", observer="o", recipe="r.sh")
+        res = dc._batch_job((c, root))
+        self.assertFalse(res["ok"])
+        self.assertEqual(json.loads((root / "syn" / "Bb3" / "pair.json").read_text())["refused"]["render_sha"], "zz")
 
     def test_json_has_no_nan(self):
         import json

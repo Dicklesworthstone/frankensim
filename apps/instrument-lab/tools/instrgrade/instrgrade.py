@@ -457,6 +457,7 @@ def describe(
     band_split_hz=None,
     allow_unended_decay=False,
     _skip_q3_heavy=False,
+    f0_override=None,
 ):
     """x is onset-aligned. Returns a dict of descriptors (all dB values relative, not absolute)."""
     x = np.asarray(x, dtype=np.float64)
@@ -467,7 +468,9 @@ def describe(
     tr = yin_track(x[int(t0 * SR):int(t1 * SR)], fmin=30.0, fmax=2400.0)
     good = tr[(tr[:, 2] > 0.7) & np.isfinite(tr[:, 1])] if len(tr) else tr
     f0 = float(np.median(good[:, 1])) if len(good) else (f0_hint or float("nan"))
-    if f0_hint and not chord:  # trust the spectrum within +-7 semitones of the target note
+    if f0_override:  # a caller that measured f0 more carefully (decompose.f0_comb) says so; nothing is estimated here
+        f0 = float(f0_override)
+    elif f0_hint and not chord:  # trust the spectrum within +-7 semitones of the target note
         fs_, ss_ = spectrum(x, t0, t1)
         f0 = f0_spectral(fs_, ss_, f0_hint * 2 ** (-7 / 12), f0_hint * 2 ** (7 / 12))
     if f0 is None or not np.isfinite(f0):
@@ -486,6 +489,7 @@ def describe(
         sr=SR,
         fit_inharmonicity=not (chord or inharmonic),
         t_window=(t0, t1),
+        f0_fixed=f0_override,
     )
     if partials and not (chord or inharmonic):
         ks_arr = np.array([p.k for p in partials], dtype=np.float64)
@@ -494,7 +498,7 @@ def describe(
         hi_snr = lv_arr >= (float(np.max(lv_arr)) - 55.0)
         if int(hi_snr.sum()) >= 3:
             w_arr = 10.0 ** ((lv_arr[hi_snr] - float(np.max(lv_arr))) / 20.0)
-            f0r, b_fit = fit_stiff_string_law(ks_arr[hi_snr], fs_arr[hi_snr], w_arr)
+            f0r, b_fit = fit_stiff_string_law(ks_arr[hi_snr], fs_arr[hi_snr], w_arr, f0_fixed=f0_override)
         else:
             f0r, b_fit = float(f0), 0.0
         harm = np.array([p.mean_level_db for p in partials], dtype=np.float64)

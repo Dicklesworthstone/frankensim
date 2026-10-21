@@ -314,6 +314,7 @@ def track_partials(
     sr: int = SR,
     fit_inharmonicity: bool = True,
     t_window: tuple[float, float] | None = None,
+    f0_fixed: float | None = None,
 ) -> list[Partial]:
     x = np.asarray(x, dtype=np.float64)
     if f0 is None or not math.isfinite(f0) or f0 <= 0 or len(x) < 64:
@@ -371,7 +372,7 @@ def track_partials(
             ks_g = np.array([found_k[i] for i in good], dtype=np.float64)
             fs_g = np.array([found_f[i] for i in good], dtype=np.float64)
             ws_g = np.array([math.log10(max(found_snr[i], 10.0)) for i in good], dtype=np.float64)
-            f0_curr, b_curr = fit_stiff_string_law(ks_g, fs_g, ws_g)
+            f0_curr, b_curr = fit_stiff_string_law(ks_g, fs_g, ws_g, f0_fixed=f0_fixed)
 
     # Short-time tracking for f_hz(t), level_db(t), and narrowband onset_s
     n_stft = min(4096, max(256, 1 << int(math.floor(math.log2(max(256, len(x) // 4))))))

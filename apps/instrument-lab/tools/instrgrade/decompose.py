@@ -28,6 +28,7 @@ import json
 import math
 import multiprocessing
 import sys
+from datetime import datetime, timezone
 from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -196,6 +197,65 @@ def cwt_db(y, per_oct=24, f_lo=60.0, f_hi=F_HI, w0=20.0):
     return (10 * np.log10(out + 1e-20)).astype(np.float32), fc
 
 
+def f0_comb(y, hint_hz, kind="sustained", max_cents=400.0, nh=8):
+    """Fundamental of a harmonic note near `hint_hz` [Hz] by a harmonic sum of the AMPLITUDE spectrum.
+
+    Candidates lie on a 1-cent grid within +-max_cents of the hint, so an octave or twelfth error is out of
+    range by construction; each scores the sum of the spectral amplitudes at k f, k = 1..nh. Amplitude (not log)
+    sums are dominated by the real peaks, which is what a bowed bass with a weak fundamental needs. The winner
+    is refined by an amplitude-weighted least-squares fit of f_k / k over the peaks found within 1.2% of k f.
+    """
+    t0, t1 = (0.05, 0.6) if kind == "decaying" else (0.15, 1.5)
+    seg = y[int(t0 * SR):int(t1 * SR)]
+    if len(seg) < SR // 10:
+        seg = y
+    n = 1 << 19
+    A = np.abs(np.fft.rfft(seg * np.hanning(len(seg)), n))
+    fr = np.fft.rfftfreq(n, 1 / SR)
+    grid = hint_hz * 2 ** (np.arange(-int(max_cents), int(max_cents) + 1) / 1200)
+    score = sum(np.interp(k * grid, fr, A) for k in range(1, nh + 1) if k * grid[0] < 0.45 * SR)
+    f = float(grid[int(np.argmax(score))])
+    num = den = 0.0
+    for k in range(1, nh + 1):
+        if k * f > 0.45 * SR:
+            break
+        m = (fr > k * f * 0.988) & (fr < k * f * 1.012)
+        i = int(np.argmax(A * m))
+        if m[i] and A[i] > 0.02 * A.max():
+            w = A[i]
+            num += w * k * fr[i]
+            den += w * k * k
+    return num / den if den else f
+
+
+FUNDAMENTAL_FLOOR_DB = -50.0
+
+
+def check_fundamental(y, f0, kind, label):
+    """Refuse a note that has no energy at its own measured fundamental.
+
+    A pitched note carries its fundamental within 50 dB of its strongest spectral line (a bowed bass or a
+    clarinet's even harmonics are weaker, not absent). A render that locks onto one high-order mode (the flute
+    sounding 1558 Hz against a D4 name) has a strongest line 5 or more harmonic numbers above anything at the
+    fundamental, so there is no note to compare, whatever the harmonic-sum estimator was able to place.
+    """
+    t0, t1 = (0.05, 0.6) if kind == "decaying" else (0.15, 1.5)
+    seg = y[int(t0 * SR):int(t1 * SR)]
+    if len(seg) < SR // 10:
+        seg = y
+    n = 1 << 18
+    A = np.abs(np.fft.rfft(seg * np.hanning(len(seg)), n))
+    fr = np.fft.rfftfreq(n, 1 / SR)
+    band = (fr > 50.0) & (fr < 10000.0)
+    top = float(A[band].max())
+    near = (fr > f0 * 0.98) & (fr < f0 * 1.02)
+    lvl = 20 * math.log10(float(A[near].max()) / top + 1e-12)
+    if lvl < FUNDAMENTAL_FLOOR_DB:
+        f_top = float(fr[band][int(np.argmax(A[band]))])
+        raise GraderRefusalError(f"IRPDECOMP_NOT_THE_NAMED_NOTE: {label or 'signal'}: the strongest spectral line is {f_top:.0f} Hz "
+                                 f"and there is nothing at the fundamental near {f0:.1f} Hz ({lvl:.0f} dB re that line)")
+
+
 def cepstral_envelope(P_db, freqs, f0, grid):
     """Smooth spectral envelope [dB] of the mean sounding spectrum, liftered below 0.6/f0, read on `grid` [Hz]."""
     n = (len(freqs) - 1) * 2
@@ -237,13 +297,16 @@ class Note:
         seg = y[int(w0 * SR):int(w1 * SR)]
         self.match_window = [w0, min(w1, self.dur)]
         self.level_db = float(10 * np.log10(np.mean(seg * seg) + 1e-18)) if len(seg) else float("nan")
-        self.desc = describe(y, kind, f0_hz, inharmonic=inharmonic, _skip_q3_heavy=True)
+        f0_m = None if inharmonic else f0_comb(y, f0_hz, kind, 400.0)
+        self.desc = describe(y, kind, f0_hz, inharmonic=inharmonic, _skip_q3_heavy=True, f0_override=f0_m)
         if self.desc is None:
             raise GraderRefusalError(f"IRPDECOMP_NO_PITCH: {label or 'signal'} has no pitch near {f0_hz:.1f} Hz")
         self.f0 = float(self.desc["f0"])
         off_c = 1200 * math.log2(self.f0 / f0_hz)
         if abs(off_c) > max_cents:
             raise GraderRefusalError(f"IRPDECOMP_PITCH_MISMATCH: {label or 'signal'} measures {off_c:+.0f} cents from the named note")
+        if not inharmonic:
+            check_fundamental(y, self.f0, kind, label)
         n = 8192 if self.f0 < 80 else 4096
         self.S, self.sf = stft_db(y, n)
         self.C, self.cf = cwt_db(y)
@@ -749,6 +812,7 @@ def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand
     off = real.level_db - ours.level_db if ours else 0.0
     out = Path(root) / family / note_name
     out.mkdir(parents=True, exist_ok=True)
+    supersede_existing(out)  # a regrade moves the earlier files aside; it never overwrites them
     ns = int(round(dur * SR))
     yr, yo = ref_y[:ns], (cand_y[:ns] * 10 ** (off / 20) if ours else None)
     peak = max(np.abs(yr).max(), np.abs(yo).max() if yo is not None else 0.0)
@@ -832,17 +896,73 @@ def _init(lib, wav, refs_json):
     _REFS = Refs(lib, wav, refs_json)
 
 
-def _ref_job(args):
-    c, root = args
+REFUSALS = (OnsetMisaligned, GraderRefusalError, SystemExit, ValueError, IndexError, KeyError, OSError)
+
+
+def supersede_existing(d):
+    """Move everything in note directory `d` (bar a superseded/ folder) into superseded/<UTC>/; nothing is deleted or
+    overwritten. Returns the folder it moved into, or None if there was nothing to move."""
+    old = [p for p in Path(d).iterdir() if p.name != "superseded"] if Path(d).is_dir() else []
+    if not old:
+        return None
+    stamp, k = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"), 1
+    keep = Path(d) / "superseded" / stamp
+    while keep.exists():  # never rename over an earlier superseded file
+        k += 1
+        keep = Path(d) / "superseded" / f"{stamp}-{k}"
+    keep.mkdir(parents=True)
+    for p in old:
+        p.rename(keep / p.name)
+    return keep
+
+
+def refuse_pair(root, family, note, reason, render_sha=None, render_wav=None, dyn=None):
+    """Record that a note could not be graded, without deleting anything.
+
+    Everything already in <root>/<family>/<note>/ (the old pair.json, audio, maps) is MOVED into
+    superseded/<UTC>/, and pair.json is rewritten as a refusal record in the same contract: ours null,
+    and a top-level `refused` {reason, render_sha, render_wav, time}. The page then says the note was
+    refused and why, and leaves it out of the badge.
+    """
+    d = Path(root) / family / note
+    d.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    supersede_existing(d)
+    rec = dict(schema="frankensim.instrument-pair.v1", family=family, note=note, dynamic=dyn, ours=None, partials=None, metrics=[],
+               refused=dict(reason=str(reason), render_sha=render_sha, render_wav=str(render_wav) if render_wav else None,
+                            time=now.strftime("%Y-%m-%dT%H:%M:%SZ"), decompose_version=DECOMPOSE_VERSION))
+    (d / "pair.json").write_text(json.dumps(clean(rec), indent=1, allow_nan=False))
+    return rec
+
+
+def has_render(root, family, note):
+    """True if <root>/<family>/<note>/pair.json already holds a render (ours filled in): a reference-only run never replaces it."""
     try:
-        pj = run_pair(_REFS, c, root)
-        return dict(family=c["family"], note=c["note"], ok=True, metrics=len(pj["metrics"]))
-    except (OnsetMisaligned, GraderRefusalError, ValueError, IndexError, KeyError, SystemExit) as e:
-        return dict(family=c["family"], note=c["note"], ok=False, error=str(e))
+        return json.loads((Path(root) / family / note / "pair.json").read_text()).get("ours") is not None
+    except (OSError, ValueError):
+        return False
+
+
+def _ref_job(args):
+    """Reference-only pair for the first note of `notes` whose onset and pitch verify; every refusal is reported."""
+    c, root = args
+    refused = []
+    for name in c["notes"]:
+        if has_render(root, c["family"], name):
+            return dict(family=c["family"], art=c["art"], note=name, ok=True, kept="graded render pair left untouched", refused=refused)
+        try:
+            pj = run_pair(_REFS, dict(c, note=name), root)
+            return dict(family=c["family"], art=c["art"], note=name, ok=True, metrics=len(pj["metrics"]), refused=refused)
+        except REFUSALS as e:
+            refused.append(dict(note=name, reason=str(e)))
+            if (Path(root) / c["family"] / name / "pair.json").exists():  # an older pair of this note is stale: supersede it
+                refuse_pair(root, c["family"], name, e, dyn=c.get("dyn"))
+    return dict(family=c["family"], art=c["art"], ok=False, refused=refused)
 
 
 def cmd_refs(a):
-    """Reference-only pairs (ours null): spread notes per family, mf, canonical articulation."""
+    """Reference-only pairs (ours null): four spread notes per family, mf, canonical articulation. A note whose
+    onset or pitch does not verify emits nothing and the next-nearest note stands in; the refusal is printed."""
     refs = Refs(a.lib, a.wav_dir, a.refs_json)
     jobs = []
     for inst in sorted({e["inst"] for e in refs.lib}):
@@ -852,17 +972,22 @@ def cmd_refs(a):
         es = [e for e in refs.lib if e["inst"] == inst and e["dyn"] == "mf"]
         art = canon_art({e["art"] for e in es})
         notes = sorted({e["note"] for e in es if e["art"] == art})
-        want = sorted({notes[min(len(notes) - 1, int(q * len(notes)))] for q in (0.1, 0.35, 0.6, 0.85)}) if not a.all else notes
-        jobs += [(dict(family=fam, note=name_of(m), dyn="mf", art=art, review=a.review), a.out) for m in want]
+        centres = list(range(len(notes))) if a.all else sorted({min(len(notes) - 1, int(q * len(notes))) for q in (0.1, 0.35, 0.6, 0.85)})
+        reach = 0 if a.all else min(4, max(1, len(notes) // 8))
+        for ci in centres:
+            order = [ci] + [ci + d * s_ for d in range(1, reach + 1) for s_ in (1, -1)]
+            order = [k for k in order if 0 <= k < len(notes)]
+            jobs.append((dict(family=fam, art=art, dyn="mf", notes=[name_of(notes[k]) for k in order], review=a.review), a.out))
     if a.jobs > 1:
-        with ProcessPoolExecutor(a.jobs, mp_context=multiprocessing.get_context("fork"), initializer=_init, initargs=(a.lib, a.wav_dir, a.refs_json)) as pool:
+        with ProcessPoolExecutor(min(a.jobs, 16), mp_context=multiprocessing.get_context("fork"), initializer=_init,
+                                 initargs=(a.lib, a.wav_dir, a.refs_json)) as pool:
             res = list(pool.map(_ref_job, jobs, chunksize=1))
     else:
         _init(a.lib, a.wav_dir, a.refs_json)
         res = [_ref_job(j) for j in jobs]
     for r in res:
         print(json.dumps(r))
-    raise SystemExit(1 if any(not r["ok"] for r in res) else 0)
+    raise SystemExit(0 if any(r["ok"] for r in res) else 1)
 
 
 def cmd_pair(a):
@@ -870,7 +995,11 @@ def cmd_pair(a):
     c = dict(family=a.family, note=a.note, dyn=a.dyn, art=a.art, ref_contains=a.ref_contains, wav=a.render, git_sha=a.git_sha, observer=a.observer, recipe=a.recipe, review=a.review)
     if not all((a.render, a.git_sha, a.observer, a.recipe)):
         raise SystemExit("IRPDECOMP_USAGE: a render needs --git-sha, --observer and --recipe (the page shows them)")
-    pj = run_pair(refs, c, a.out)
+    try:
+        pj = run_pair(refs, c, a.out)
+    except REFUSALS as e:
+        refuse_pair(a.out, a.family, a.note, e, a.git_sha, a.render, a.dyn)
+        raise SystemExit(f"{e}\n(recorded as a refusal in {a.out}/{a.family}/{a.note}/pair.json)")
     for m in pj["metrics"]:
         top = max((r["value"] for r in m["ruler"]), default=None)
         verdict = "no ruler" if top is None else ("inside" if m["gap"] is not None and m["gap"] <= top else "outside")
@@ -882,7 +1011,8 @@ def _batch_job(args):
     try:
         pj = run_pair(_REFS, c, root)
         return dict(family=c["family"], note=c["note"], wav=c["wav"], ok=True, metrics=len(pj["metrics"]))
-    except (SystemExit, OnsetMisaligned, GraderRefusalError, ValueError, IndexError, KeyError) as e:
+    except REFUSALS as e:
+        refuse_pair(root, c["family"], c["note"], e, c.get("git_sha"), c.get("wav"), c.get("dyn"))
         return dict(family=c["family"], note=c["note"], wav=c["wav"], ok=False, error=str(e))
 
 
