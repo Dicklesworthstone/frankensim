@@ -421,6 +421,24 @@ homogenization, the P2 milestone.
   positive-part structural energy. Other sets return `None`; no numerical
   spot check upgrades an unknown result to a proof. Log-squared bulk is
   certified only on declared J<=e, where its second derivative is nonnegative.
+- `active_tissue::ActiveTissue` composes a passive `Hyperelastic` with a
+  prescribed `ActiveFibreStress` along a reference fibre `a0` (unit; for an
+  HGO passive card it must be one of its fibre families). The active Cauchy
+  stress is `T_max a f_L(lambda_f) m (x) m` with `lambda_f = |F a0|` and the
+  activation `a` in `[0, 1]`; its first Piola image is
+  `(J / lambda_f^2) T_max a f_L (F a0) (x) a0`. The factor `f_L` is a Gaussian,
+  a parabola or a tabulated piecewise-linear family (at most 64 knots). The
+  law refuses a fibre stretch outside its declared inclusive domain (eight ULPs
+  of roundoff at the bound) and an activation outside `[0, 1]`
+  (`MaterialError::State`), and a non-positive or non-finite `T_max`, a non-unit
+  fibre or an invalid family (`MaterialError::Parameters`). Zero activation
+  returns the passive stress and tangent bit for bit and does not consult the
+  domain. The active stress is a PRESCRIBED, non-conservative input: the tangent
+  is the passive (symmetric) tangent plus the exact forward-mode derivative of
+  the active stress, which is not symmetric (`tangent_symmetric: false`), and
+  its work `P_a : Fdot` is booked as an external power input, never as stored
+  energy. Activation is a performance control that no law input, card or pack
+  sets here.
 - `Uniaxial` trait + the RC flagship pair: `MenegottoPintoSteel`
   (R0/a1/a2 curvature degradation, Bauschinger via branch-state
   asymptote intersection) and `ManderConcrete` (confined envelope
@@ -692,6 +710,16 @@ None.
 
 ## Conformance tests
 
+`tests/active_tissue.rs` (suite `irp-s0-materials`, bead M0.3-W3): zero
+activation bitwise equal to the passive law (1000 random F, stress and
+tangent), the isometric Cauchy stress `T_max a f_L` against closed forms of
+three force-length fixtures on a 50-point stretch grid (1e-12, orthogonal
+components exactly zero), the traction-free free-contraction root at prescribed
+J = 1 against an analytic balance (1e-10, three activations), the active-work
+ledger `W_total = Delta Psi_passive + W_active` over a time-varying activation
+(1e-10), objectivity, the finite-difference tangent of the active stress and of
+the total, and the refusals above at the bound and just beyond it.
+
 `tests/conformance.rs` (JSON verdicts, suite `fs-material/conformance`):
 mt-001 FD tangent gate (every law, cyclic states); mt-002 objectivity;
 mt-003 return-map consistency + dissipation; mt-004 hysteresis fixtures;
@@ -803,6 +831,13 @@ bitwise determinism.
   (1972) paper was not opened: its coefficients were read from an open reproduction
   (Twizell and Ogden 1981, Table I, no unit printed). Literature coefficients are
   not a calibrated tissue card.
+- **The active fibre stress is isometric, prescribed and uncalibrated.** There is
+  no force-velocity factor, no fatigue or length history, and no activation
+  dynamics. The force-length families in `tests/active_tissue.rs` are test
+  fixtures, not muscle data; no vocal-fold or lip active curve is gated, and no
+  `T_max` is sourced here (none was found for orbicularis oris). The G2 gate
+  that reproduces a published force-length or prestress curve with its source's
+  own parameters is not shipped yet.
 - **Mander cyclic rules are the simplified elastic-unload variant**
   (declared on the card): no cyclic stiffness degradation beyond the
   residual-strain rule, no tension stiffening. Full Mander cyclic rules

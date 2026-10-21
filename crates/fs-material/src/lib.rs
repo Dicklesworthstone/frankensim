@@ -15,6 +15,8 @@
 //! material/model cards), fs-qty, fs-math, fs-thermal (shared transport),
 //! and fs-thermochem (species thermodynamics).
 
+/// Prescribed active fibre stress on top of the passive hyperelastic laws (M0.3-W3).
+pub mod active_tissue;
 pub mod calibrate;
 /// Irreversible mixed-mode cohesive interfaces with work and fracture accounting.
 pub mod cohesive;
