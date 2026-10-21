@@ -279,6 +279,32 @@ structured errors rather than panicking.
   interaction effects, physical conditioning and base-MC identity, independently
   reconstructed variance costs, permutation/affine behavior, paid-call replay,
   admission, undefined variance, unclipped effects and terminal failures.
+- `product_importance::ImportanceExecution` executes physical rare-event
+  failure probabilities under explicit Independent/JointGaussian Gaussian laws,
+  including singular covariance. A fixed, prechosen independent-germ shift mu
+  defines q(z)=epsilon*phi(z)+(1-epsilon)*phi(z-mu), with 0<epsilon<=1 and finite
+  reciprocal. The separate Philox component stream preserves original normal
+  addressing. Zero shift or epsilon=1 retains ordinary-MC input bits and unit
+  weights. Physical units, admitted factor and the fixed QoI ceiling are retained.
+  Failure means QoI>ceiling. Log-sum-exp yields target/proposal weights; invalid
+  configurations and unrepresentable draw weights refuse before model calls.
+  Ordinary weighted means are neither self-normalized nor clipped to [0,1].
+  Scaled reductions expose descriptive standard error, weighted-failure ESS and
+  mean likelihood weight; these diagnostics are not confidence guarantees.
+  `assess_failure_probability` sends epsilon*weight*failure in [0,1] to the
+  existing sigma=1/2 Gaussian-mixture confidence sequence and rescales by
+  epsilon; proposals equal to the target retain the ordinary unit-indicator CS.
+  This range-based anytime bound can be much broader than empirical
+  rare-event error. Clipping probability bounds never creates convergence.
+  Fix proposal/model/threshold/alpha independently of these outcomes; population
+  transfer, finite-grid/rounding and solver/model error are not covered. No
+  outward certificate, adaptive proposal fitting or durable checkpoint is minted.
+  Budgeted chunks, cancellation and cloning retain paid observations; unfinished
+  calls retry identical inputs/weights. Numerical/model failures are terminal
+  and cannot expose a selected-prefix estimate or confidence. Evidence remains
+  Estimated. `tests/product_importance.rs` covers analytic five-sigma events,
+  physical correlations/singularity, independently reconstructed likelihood
+  moments and CS, MC identity, paid-call resumption and terminal refusals.
 - `SobolExecution::checkpoint` / `restore` retain exact ordered observations,
   including partial rows, in bounded `FSSOB001` bytes. Identity binds every
   `UqPlan` field, original evaluation cap, Philox addressing, A/B/hybrid pairing
