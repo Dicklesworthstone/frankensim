@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Instrument review — Struck · FrankenSim</title>
+  <meta name="description" content="A private review build of the instruments section: each instrument family's render beside the real recording of the same note." />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="theme-color" content="#08090c" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2308090c'/%3E%3Cpath d='M5 20h22' stroke='%23d9a94f' stroke-width='1.6'/%3E%3Ccircle cx='16' cy='11' r='4.2' fill='none' stroke='%2363d2c0' stroke-width='1.6'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="topbar">
+    <a class="brand" href="#top"><b>Struck</b><span>FrankenSim instrument review</span></a>
+  </header>
+
+  <main id="main">
+    <!-- The same section as index.html, alone. Built by vite.instruments.config.ts; tools/build-review.sh stages its data. -->
+    <section id="instruments">
+      <div class="wrap">
+        <header>
+          <div class="rule"></div>
+          <p class="eyebrow"><span class="tag offline">Offline reference</span> <span class="tag plain">Real recording</span></p>
+          <h2>Every instrument family: listen, compare, say what you hear.</h2>
+          <p class="lede">Each card sets a render beside the real recording of the same note from the University of Iowa's instrument library: a spectrogram and a wavelet scalogram of each and of their difference, the strongest partials followed through the note, and a list of measures set against how much real recordings differ from one another. It also lists the physics the render runs and the physics it lacks. A family with no render says so. A badge only reports where the measured gaps fall; none of them is a claim that the sound is real.</p>
+          <p class="small muted" style="margin-top: 14px">This is a private review build with only this section. Your notes stay in this browser; “Copy all my notes” puts them on the clipboard so you can send them back.</p>
+        </header>
+        <div id="instruments-root" class="ir-root" style="min-height: 420px"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site">
+    <div class="wrap">
+      <p>Built from <a href="https://github.com/Dicklesworthstone/frankensim">FrankenSim</a> at commit <code>%VITE_REVIEW_SHA%</code>. Every number on this page is computed from the renders and their grades by <code>tools/build_instruments.py</code>; none was typed in.</p>
+      <p>Audio is level-matched per pair by the grader, and no clip was equalized or reverberated. Nobody has formally adjudicated these sounds against real instruments, and no realism claim is made beyond what each card states.</p>
+    </div>
+  </footer>
+  <script type="module" src="/src/review-instruments.ts"></script>
+</body>
+</html>

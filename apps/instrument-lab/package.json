@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "data": "uv run --with numpy --with pillow python tools/build_data.py",
-    "data:instruments": "uv run --with numpy --with pillow python tools/build_instruments.py"
+    "data:instruments": "uv run --with numpy --with pillow python tools/build_instruments.py",
+    "review": "bash tools/build-review.sh"
   },
   "devDependencies": {
     "@types/three": "^0.186.0",
