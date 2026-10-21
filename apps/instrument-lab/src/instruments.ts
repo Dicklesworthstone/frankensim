@@ -18,7 +18,7 @@ interface Side { level_db: (number | null)[]; cents: (number | null)[] }
 interface Track { n: number; ref_hz: number | null; real: Side | null; ours: Side | null }
 interface Pair {
   note: string; dynamic: string; duration_s: number;
-  real: { source: { name: string; credit: string; licence: string; licence_url: string | null; url: string; external: boolean }; reference_id: string; file: string; segment_s: [number, number] | null; url: string; licence: string; mic: string | null; pattern: string | null; distance_m: number | null; distance_status: string | null; room: string | null; format: string | null };
+  real: { source: { name: string; credit: string; licence: string; licence_url: string | null; url: string | null; external: boolean }; reference_id: string; file: string; segment_s: [number, number] | null; url: string | null; licence: string; mic: string | null; pattern: string | null; distance_m: number | null; distance_status: string | null; room: string | null; format: string | null };
   ours: { wav: string; git_sha: string; observer: string; sample_rate: number; recipe: string } | null;
   audio: { real: string; ours: string | null }; level_match: string;
   alignment: { onset_real_s: number; onset_ours_s: number | null; highpass_hz: number; level_offset_db: number | null } | null;
@@ -139,7 +139,7 @@ function sourceLines(p: Pair): HTMLElement {
   const seg = r.segment_s ? `, ${num(r.segment_s[0], "")}–${num(r.segment_s[1], "s")} of the file` : "";
   const a = p.alignment;
   return el("div", { class: "small muted ir-source" },
-    el("p", {}, "Recording: ", el("a", { href: r.url, rel: "noopener" }, r.file), `${seg}. ${mic}${r.format ? `; ${r.format}` : ""}.`),
+    el("p", {}, "Recording: ", r.url ? el("a", { href: r.url, rel: "noopener" }, r.file) : r.file, `${seg}. ${mic}${r.format ? `; ${r.format}` : ""}.`),
     p.ours ? el("p", {}, `Render: commit ${p.ours.git_sha.slice(0, 12)}, observed at ${p.ours.observer}, ${fmt(p.ours.sample_rate / 1000)} kHz; recipe ${p.ours.recipe}.`) : el("p", {}, "Render: none for this note."),
     el("p", {}, `${p.level_match.charAt(0).toUpperCase()}${p.level_match.slice(1)}.${a ? ` ${p.ours ? "Both signals are" : "The recording is"} high-passed at ${num(a.highpass_hz, "Hz")}; onsets ${num(a.onset_real_s, "s")} (recording)${a.onset_ours_s !== null ? ` and ${num(a.onset_ours_s, "s")} (render)` : ""} aligned.` : ""}`));
 }

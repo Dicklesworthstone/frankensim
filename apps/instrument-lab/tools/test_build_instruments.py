@@ -224,12 +224,17 @@ class Credits(unittest.TestCase):
                 problems = B.validate_pair(pj, "clarinet", "D3", base, {REF_ID: entry})
                 self.assertTrue(any("no credit line in CREDITS" in p for p in problems), entry)
 
-    def test_a_library_entry_without_a_url_is_a_problem_never_an_exception(self):
+    def test_a_library_entry_without_a_url_is_accepted_and_has_no_link(self):
+        # P2's contract tests use synthetic references with a licence and no url: still a valid, creditable recording.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             pj = make_pair(root)
-            problems = B.validate_pair(pj, "clarinet", "D3", root / "clarinet" / "D3", {REF_ID: {"licence": "uiowa-mis"}})
-            self.assertTrue(any("no url" in p for p in problems))
+            base = root / "clarinet" / "D3"
+            entry = {"licence": "uiowa-mis"}
+            self.assertEqual(B.validate_pair(pj, "clarinet", "D3", base, {REF_ID: entry}), [])
+            pair = B.build_pair(pj, base, root / "out" / "clarinet" / "D3", {REF_ID: entry}, {}, {l["id"]: l for l in REFS["licences"]})
+            self.assertIsNone(pair["real"]["url"])
+            self.assertEqual(pair["real"]["source"]["credit"], "University of Iowa Electronic Music Studios")
 
     def test_a_minimal_library_entry_that_validates_also_builds(self):
         # P2's contract tests give the generator synthetic references with only an id, a licence and a url.

@@ -254,8 +254,6 @@ def validate_pair(pj: dict, family: str, note: str, base: Path, refs_by_id: dict
         lic = entry.get("licence") if isinstance(entry, dict) else None
         if lic not in CREDITS:
             problems.append(f"reference {real['reference_id']!r} has licence {lic!r}, which has no credit line in CREDITS (a library entry needs a licence id that CREDITS knows)")
-        if not isinstance(entry, dict) or not isinstance(entry.get("url"), str) or not entry["url"]:
-            problems.append(f"reference {real['reference_id']!r} has no url to link the recording to")
     else:
         src = real.get("source")
         if not isinstance(src, dict):
