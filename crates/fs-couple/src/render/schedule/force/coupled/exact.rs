@@ -163,6 +163,22 @@ impl ExactNetwork {
         Ok((record, x, u))
     }
 
+    /// The free prediction of the next sample: (end state, start state). With the prepared owner and `verify == false` the
+    /// loss Gramians and the trajectory energy-residual check are skipped (see `PreparedNetwork::predict_free`); `verify`
+    /// runs the full `advance`. Every other owner always runs the full `advance`.
+    pub(super) fn predict(&self, models: &[ModalAcousticTimeModel], external: &[f64], dt: f64, verify: bool)
+        -> Result<(Vec<f64>, Vec<f64>), ModalCouplingError>
+    {
+        if let (Some(prepared), false) = (&self.prepared, verify) {
+            if external.len() != self.count || external.iter().any(|v| !v.is_finite()) {
+                return Err(invalid("external forces must match every original modal coordinate"));
+            }
+            return prepared.predict_free(models, external, dt);
+        }
+        let (record, x, _) = self.advance(models, external, dt)?;
+        Ok((record.x, x))
+    }
+
     pub(super) fn response(&self, column: &[f64], dt: f64) -> Result<Vec<f64>, ModalCouplingError> {
         if column.len() != self.count {
             return Err(invalid("complete contact force column"));

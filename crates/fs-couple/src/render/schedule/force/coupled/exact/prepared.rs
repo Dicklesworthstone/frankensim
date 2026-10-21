@@ -35,6 +35,16 @@ pub struct PreparedModalBudget {
 /// The quadratic loss forms z^T W z of every channel for ONE state/input vector, and the exact bits of that vector.
 /// One stage evaluates the identical vector in `advance`, in `losses` and in `connection_work`; they share this sweep
 /// instead of each streaming every dense Gramian again. The values are the very ones a fresh evaluation returns.
+/// One exact step before any energy accounting: the held input, the propagated end state and its finite increments.
+struct Propagation {
+    x: Vec<f64>,
+    u: Vec<f64>,
+    z: Vec<f64>,
+    endpoint: Vec<f64>,
+    y: Vec<f64>,
+    supplied: f64,
+}
+
 struct LossSweep {
     z: Vec<f64>,
     component: f64,
@@ -240,8 +250,8 @@ impl PreparedNetwork {
         energy
     }
 
-    pub(super) fn advance(&self, models: &[ModalAcousticTimeModel], external: &[f64], dt: f64)
-        -> Result<(StepRecord, Vec<f64>, Vec<f64>), ModalCouplingError>
+    fn propagate(&self, models: &[ModalAcousticTimeModel], external: &[f64], dt: f64)
+        -> Result<Propagation, ModalCouplingError>
     {
         if external.len() != self.count {
             return Err(invalid("prepared external force layout"));
@@ -261,6 +271,22 @@ impl PreparedNetwork {
             y[i] = finite(dq / dt)?;
             supplied = finite(supplied + u[i] * dq)?;
         }
+        Ok(Propagation { x, u, z, endpoint, y, supplied })
+    }
+
+    /// The end state of the free (contact-free) step, without the loss Gramians and the trajectory energy-residual check.
+    /// Every finiteness check of the propagation still runs. Returns (end state, start state).
+    pub(super) fn predict_free(&self, models: &[ModalAcousticTimeModel], external: &[f64], dt: f64)
+        -> Result<(Vec<f64>, Vec<f64>), ModalCouplingError>
+    {
+        let step = self.propagate(models, external, dt)?;
+        Ok((step.endpoint, step.x))
+    }
+
+    pub(super) fn advance(&self, models: &[ModalAcousticTimeModel], external: &[f64], dt: f64)
+        -> Result<(StepRecord, Vec<f64>, Vec<f64>), ModalCouplingError>
+    {
+        let Propagation { x, u, z, endpoint, y, supplied } = self.propagate(models, external, dt)?;
         let (component, connection) = self.loss_sums(&z)?;
         let dissipated = finite(component + connection)?;
         let before = finite(self.hamiltonian(&x))?;
