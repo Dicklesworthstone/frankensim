@@ -2,6 +2,8 @@
 //! Store claim identities, never temperatures, coefficients or physical history.
 use super::*;
 
+mod extension;
+
 /// Immutable transport-source choices tied to one borrowed material network.
 ///
 /// Construction resolves the supplied initial state once. Every later resolve

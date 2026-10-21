@@ -50,9 +50,32 @@ in accepted thermal states; they are not mutated into hidden persistent inputs.
 the existing atomic interval/birth semantics. Its prepared network describes the
 pre-event interval. After new cells or contacts are born, explicitly prepare a
 complete network for the next interval. The old topology refuses rather than
-ignoring a new cell or contact. Explicit preparation is a new selection epoch;
-callers requiring unchanged old claims across epochs must carry explicit pins.
+ignoring a new cell or contact. Use the existing prepared network's
+`extend_thermal(&successor_network, born.thermal(), cancelled)` to preserve old
+conductivity claims while admitting new cells and newly requested conductivity.
+Ordinary `prepare` remains an explicit new selection epoch.
 There is no inferred contact or newborn thermal/mechanical aging in Newton trials.
+
+### Source continuity during growth
+
+`PreparedMaterialNetwork::extend_thermal` accepts a complete successor network
+after the original timeline has applied births or contact changes. Existing
+cells retain their material card, actual caloric object, material ID, fixed
+conditions, conductivity key and selected claim. Another claim becoming eligible
+at the current temperature cannot change those cells' constitutive model.
+An expired original source refuses rather than falling back to a different fit.
+
+Only new cells or previously unrequested conductivity use the successor's
+selection policies. Existing pins take precedence by this method's contract;
+use `prepare` for an intentional source-selection change. Links and distances
+remain explicit successor data. No electrical state is migrated: old or new
+resistor branches refuse. No physical history is modified or cached, and late
+cancellation leaves the previous prepared network usable.
+
+Five additional integration regressions exercise actual birth and further
+self-heating while competing hot-source claims appear, first contact on isolated
+cells, expired-source refusal, fixed-context/electrical refusal, and cancellation
+with replay. These Rust tests have not been executed in the editing environment.
 
 ## Verification and boundary
 

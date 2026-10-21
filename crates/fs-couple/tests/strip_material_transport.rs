@@ -1,6 +1,8 @@
 //! G0/G3 composition: original material, conduction, section and nonlinear owners.
 #[path = "strip_enthalpy/common.rs"]
 mod common;
+#[path = "strip_material_transport/growth_sources.rs"]
+mod growth_sources;
 use common::*;
 use fs_couple::circuit_enthalpy::ResistorCell;
 use fs_couple::circuit_enthalpy::material::{CellResistor, ConductionLink, MaterialCell, MaterialNetwork};

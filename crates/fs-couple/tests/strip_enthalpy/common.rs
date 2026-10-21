@@ -33,6 +33,11 @@ pub fn material(cp: f64, branch_pa: f64, hot_shift: f64, free_at_320: f64) -> Ma
 }
 pub fn material_with_conductivity(cp: f64, branch_pa: f64, hot_shift: f64,
     free_at_320: f64, conductivity: Vec<(f64,f64)>) -> Material {
+    material_with_conductivity_alternative(cp, branch_pa, hot_shift, free_at_320,
+        conductivity, None)
+}
+pub fn material_with_conductivity_alternative(cp: f64, branch_pa: f64, hot_shift: f64,
+    free_at_320: f64, conductivity: Vec<(f64,f64)>, alternative: Option<Vec<(f64,f64)>>) -> Material {
     let mut claims = ClaimSet::new();
     for (name, dims, knots) in [
         ("equilibrium", Pressure::DIMS, vec![(280.0,1e8),(320.0,1e8)]),
@@ -45,7 +50,8 @@ pub fn material_with_conductivity(cp: f64, branch_pa: f64, hot_shift: f64,
         ("cp", SPECIFIC_HEAT_CAPACITY_DIMS, vec![(280.0,cp),(320.0,cp)]),
         ("conductivity", THERMAL_CONDUCTIVITY_DIMS, conductivity),
         ("electrical_resistivity", ELECTRICAL_RESISTIVITY_DIMS, vec![(280.0,0.1),(320.0,0.1)]),
-    ] {
+    ].into_iter().chain(alternative.into_iter().map(|knots|
+        ("conductivity", THERMAL_CONDUCTIVITY_DIMS, knots))) {
         let low = knots[0].0;
         let high = knots[knots.len()-1].0;
         claims.insert_claim(PropertyClaim { key:PropertyKey::new(name,dims),
