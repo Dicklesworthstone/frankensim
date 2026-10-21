@@ -2,8 +2,8 @@
 //!
 //! FORMULATION (disclosed conservation class). Mass and momentum are carried by the D3Q27 populations of an
 //! ISOTHERMAL lattice (equilibrium at the reference lattice temperature `theta0 = 1/3`, the lattice `c_s^2`,
-//! regularised collision with the shear rate `1 / (mu(T) / (rho theta0) + 1/2)`, a DECLARED trace (bulk) rate and
-//! the third-order non-equilibrium part rebuilt recursively from the deviatoric stress). The thermodynamic
+//! regularised collision with the shear rate `1 / (mu(T) / (rho theta0) + 1/2)`, the trace (bulk) rate derived from a
+//! SOURCED bulk-to-shear viscosity ratio and the third-order non-equilibrium part rebuilt recursively from the deviatoric stress). The thermodynamic
 //! pressure difference `p' = rho (theta - theta0)` of the ideal gas `p = rho theta` enters the momentum as the
 //! Guo body force `F = -grad p'`, in conservative face form (fourth-order face values away from walls, a
 //! zero-gradient wall face), with the half-force velocity `u = (sum c f + F/2) / rho`. The equilibrium therefore
@@ -45,6 +45,10 @@ pub const THETA0: f64 = 1.0 / 3.0;
 const Q: usize = 27;
 /// Predictor-corrector passes of the energy/force coupling per step.
 pub const COUPLING_PASSES: usize = 3;
+/// Largest lattice viscosity `mu / rho0` of the transport tables for which the Bloch scan of this scheme was run and found
+/// stable at the sourced bulk ratio (|lambda| <= 1.0000 on eight oblique modes for 1e-5 <= nu <= 0.03; 1.146 at nu = 0.1). A
+/// larger one is refused, not adjusted.
+pub const MAX_VERIFIED_LATTICE_VISCOSITY: f64 = 0.03;
 /// Version of the arithmetic order, coefficients and coupling (bump on any change that moves bits).
 pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 2;
 
@@ -91,6 +95,13 @@ pub enum NsfError {
         /// Declared bound.
         maximum: f64,
     },
+    /// Lattice viscosity above the verified stable envelope for this dx (refine fewer cells per metre, i.e. enlarge dx).
+    Viscosity {
+        /// Largest `mu / rho0` of the transport tables.
+        observed: f64,
+        /// `MAX_VERIFIED_LATTICE_VISCOSITY`.
+        maximum: f64,
+    },
     /// A non-finite or non-positive density or energy.
     NonFinite {
         /// Offending cell index.
@@ -134,8 +145,11 @@ pub struct NsfSpec {
     pub maximum_mach: f64,
     /// Bound of `|theta / theta0 - 1|`.
     pub maximum_temperature_ratio: f64,
-    /// Trace (bulk) relaxation rate in (0, 2); the bulk viscosity is `(2/3) theta0 (1/w - 1/2)` per density.
-    pub bulk_rate: f64,
+    /// Bulk-to-shear viscosity ratio `mu_b / mu` of the gas: a SOURCED input (dry air near 293 K: 0.73, Cramer 2012 for N2,
+    /// range 0.67 to 0.84; see the CONTRACT). The trace rate follows from `(2/3) theta0 (1/w_b - 1/2) = ratio * mu / rho`.
+    pub bulk_to_shear_ratio: f64,
+    /// Citation of the ratio; must be non-empty so that no ratio is anonymous.
+    pub bulk_ratio_source: &'static str,
     /// Cap on the number of cells (cap admitted, cap + 1 refused).
     pub maximum_cells: usize,
     /// Thermal condition of every wall face.
@@ -382,10 +396,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         let ok = spec.dx_m.is_finite() && spec.dx_m > 0.0 && spec.maximum_mach.is_finite() && spec.maximum_mach > 0.0
             && spec.maximum_temperature_ratio.is_finite() && spec.maximum_temperature_ratio > 0.0
-            && spec.bulk_rate > 0.0 && spec.bulk_rate < 2.0 && spec.workers >= 1 && spec.transport_points >= 2
+            && spec.bulk_to_shear_ratio.is_finite() && spec.bulk_to_shear_ratio > 0.0 && !spec.bulk_ratio_source.is_empty()
+            && spec.workers >= 1 && spec.transport_points >= 2
             && spec.temperature_window_k[0] < spec.temperature_window_k[1];
         if !ok {
-            return Err(NsfError::Input("dx, Mach and temperature bounds, bulk rate in (0,2), workers, table points, window"));
+            return Err(NsfError::Input("dx, Mach and temperature bounds, a cited positive bulk-to-shear ratio, workers, table points, window"));
         }
         if let WallThermal::Isothermal(t) = spec.wall {
             if !(t.is_finite() && t >= spec.temperature_window_k[0] && t <= spec.temperature_window_k[1]) {
@@ -404,6 +419,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             let g = GasState::try_new(&spec.gas, t, spec.pressure_pa).map_err(|e| NsfError::Gas(e.to_string()))?;
             mu.push(g.dynamic_viscosity * sc);
             kappa.push(g.thermal_conductivity * sc / r);
+        }
+        let max_nu = mu.iter().fold(0.0f64, |a, &v| a.max(v)); // rho0 = 1 in lattice units
+        if max_nu > MAX_VERIFIED_LATTICE_VISCOSITY {
+            return Err(NsfError::Viscosity { observed: max_nu, maximum: MAX_VERIFIED_LATTICE_VISCOSITY });
         }
         let law = NsfLaw {
             gamma: state.gamma,
@@ -522,7 +541,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 
     fn rates(&self, rho: f64, theta: f64) -> (f64, f64) {
         let mu = self.law.mu_lattice(theta);
-        (1.0 / (mu / (rho * THETA0) + 0.5), self.spec.bulk_rate)
+        let nu = mu / (rho * THETA0);
+        (1.0 / (nu + 0.5), 1.0 / (0.5 + 1.5 * self.spec.bulk_to_shear_ratio * nu))
     }
 
     /// `F = -grad p'`, `p' = rho (theta - theta0)`, in conservative face form: fourth-order face values where the four

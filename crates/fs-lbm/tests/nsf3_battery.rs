@@ -3,8 +3,9 @@
 //! Gauntlet tiers are named per test. The heavy rungs (1e4-step closed box, the 192-point acoustic rung) are
 //! release-lane runs; every number asserted here is the bead's band or an observed order, never a tuned value.
 use fs_lbm::d3q27::D3q27;
-use fs_lbm::nsf3::{equilibrium, NsfError, NsfGrid3, NsfSpec, WallThermal, THETA0};
-use fs_material::gas::GasSpec;
+use fs_lbm::nsf3::{equilibrium, EnergyLedger, NsfError, NsfGrid3, NsfSpec, WallThermal, THETA0};
+use fs_material::gas::{GasSpec, GasState};
+use std::time::Instant;
 
 fn spec(dims: [usize; 3], periodic: [bool; 3], wall: WallThermal, dx_m: f64) -> NsfSpec {
     NsfSpec {
@@ -17,12 +18,38 @@ fn spec(dims: [usize; 3], periodic: [bool; 3], wall: WallThermal, dx_m: f64) -> 
         temperature_window_k: [273.15, 333.15],
         maximum_mach: 0.3,
         maximum_temperature_ratio: 0.2,
-        bulk_rate: 1.98,
+        bulk_to_shear_ratio: 0.73,
+        bulk_ratio_source: "Cramer 2012, Phys. Fluids 24, 066102: mu_b = 0.73 mu for N2 at 293 K",
         maximum_cells: 10_000_000,
         wall,
         workers: 4,
         transport_points: 33,
     }
+}
+
+/// Execution receipt of the nsf-energy lane: one JSON line per physics test, parsed by `scripts/e2e/music/lbm_qualification.sh`.
+fn receipt(stage: &str, dx_m: f64, ledger: Option<EnergyLedger>, sound_error: Option<f64>, observed: &str, tolerance: f64, start: Instant) {
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+    let bytes: Vec<u8> = [gas.temperature, gas.pressure, gas.density, gas.dynamic_viscosity, gas.thermal_conductivity, gas.gamma, gas.specific_gas_constant]
+        .into_iter()
+        .flat_map(|v| v.to_bits().to_le_bytes())
+        .collect();
+    let blake3 = fs_blake3::hash_domain("org.frankensim.lbm.gas-fixture.v1", &bytes).to_hex();
+    let dt_s = dx_m / (3.0 * gas.specific_gas_constant * gas.temperature).sqrt();
+    let ledger_json = match ledger {
+        Some(l) => format!(
+            "{{\"internal_j\":{:e},\"kinetic_j\":{:e},\"viscous_heating_j\":{:e},\"pressure_work_j\":{:e},\"wall_heat_j\":{:e},\"residual_rel\":{:e}}}",
+            l.internal_j, l.kinetic_j, l.viscous_heating_j, l.pressure_work_j, l.wall_heat_j, l.residual_rel
+        ),
+        None => "null".to_string(),
+    };
+    let sound_json = sound_error.map_or("null".to_string(), |e| format!("{e:e}"));
+    println!(
+        "{{\"suite\":\"fs-lbm/nsf3\",\"lane\":\"nsf-energy\",\"stage\":\"{stage}\",\"verdict\":\"pass\",\"formulation\":\"isothermal D3Q27 LBM + thermal-pressure body force + conservative FV total energy\",\"conservation_class\":\"total-energy conservative (flux telescoping)\",\"gas\":{{\"spec\":\"dry_air_ussa1976\",\"T_K\":{},\"p_Pa\":{},\"blake3\":\"{blake3}\"}},\"rungs\":[{{\"dx_m\":{dx_m:e},\"dt_s\":{dt_s:e}}}],\"ledger\":{ledger_json},\"sound_speed_rel_err\":{sound_json},\"observed\":{{{observed}}},\"tolerance\":{tolerance:e},\"elapsed_s\":{}}}",
+        gas.temperature,
+        gas.pressure,
+        start.elapsed().as_secs_f64()
+    );
 }
 
 struct Lcg(u64);
@@ -114,6 +141,21 @@ fn refusals_cap_and_cap_plus_one() {
     s.temperature_window_k = [273.15, 400.0];
     assert!(matches!(NsfGrid3::<D3q27>::new(s, free, move |_| (1.0, [0.0; 3], t_hi)), Err(NsfError::TemperatureRatio { .. })));
     assert!(matches!(NsfGrid3::<D3q27>::new(base(), free, |_| (1.0, [0.0; 3], 400.0)), Err(NsfError::Window { .. })));
+    // verified viscosity envelope (lattice mu / rho0 <= 0.03): 1.2 um cells admitted (0.023 at the 333 K window end), 0.5 um refused
+    let fine = |dx: f64| {
+        let mut s = base();
+        s.dx_m = dx;
+        s
+    };
+    assert!(NsfGrid3::<D3q27>::new(fine(1.2e-6), free, rest).is_ok());
+    assert!(matches!(NsfGrid3::<D3q27>::new(fine(5.0e-7), free, rest), Err(NsfError::Viscosity { .. })));
+    // an anonymous or non-positive bulk ratio is refused
+    let mut s = base();
+    s.bulk_ratio_source = "";
+    assert!(matches!(NsfGrid3::<D3q27>::new(s, free, rest), Err(NsfError::Input(_))));
+    let mut s = base();
+    s.bulk_to_shear_ratio = 0.0;
+    assert!(matches!(NsfGrid3::<D3q27>::new(s, free, rest), Err(NsfError::Input(_))));
     // non-finite input
     assert!(matches!(NsfGrid3::<D3q27>::new(base(), free, |_| (f64::NAN, [0.0; 3], 293.15)), Err(NsfError::NonFinite { .. })));
     assert!(matches!(NsfGrid3::<D3q27>::new(base(), free, |_| (1.0, [f64::INFINITY, 0.0, 0.0], 293.15)), Err(NsfError::NonFinite { .. })));
@@ -124,6 +166,7 @@ fn closed_box_energy_budget_closes() {
     // G0. Adiabatic rigid box (all six faces halfway bounce-back walls) from a random velocity + temperature state:
     // total energy (internal + kinetic) conserved to <= 1e-11 relative over 1e4 steps (flux telescoping), and the
     // per-step ledger residual closes at the same band.
+    let start = Instant::now();
     let mut rng = Lcg(7);
     let n = 10usize;
     let noise: Vec<(f64, [f64; 3], f64)> = (0..n * n * n)
@@ -146,6 +189,7 @@ fn closed_box_energy_budget_closes() {
     assert!(worst_drift <= 1e-11, "total energy drift {worst_drift}");
     assert!(worst_resid <= 1e-11, "ledger residual {worst_resid}");
     assert!(ledger.wall_heat_j.abs() <= 1e-11 * e0, "adiabatic walls must exchange no heat");
+    receipt("closed-box", 5.0e-5, Some(EnergyLedger { residual_rel: worst_resid, ..ledger }), None, &format!("\"max_energy_drift_rel\":{worst_drift:e},\"steps\":10000"), 1e-11, start);
 }
 
 fn taylor_green(n: usize, dx: f64, workers: usize) -> NsfGrid3<D3q27> {
@@ -166,8 +210,10 @@ fn viscous_heating_equals_kinetic_loss() {
     // from total-energy conservation and is bookkeeping; the round-off lives in the large internal energy, not in the small kinetic one).
     // G1 physical content: on a 2-D Taylor-Green vortex, after an initial acoustic adjustment (the start has uniform pressure), the heating
     // accumulated per step equals the continuum dissipation 4 nu k^2 KE, with the observed deviation shrinking as the grid refines.
+    let start = Instant::now();
     let mut deviations = Vec::new();
     let mut rate_deviations = Vec::new();
+    let mut last_ledger = EnergyLedger::default();
     for n in [16usize, 32] {
         let mut g = taylor_green(n, 2.0e-5, 4);
         let k = 2.0 * core::f64::consts::PI / n as f64;
@@ -180,6 +226,7 @@ fn viscous_heating_equals_kinetic_loss() {
         let mut worst_identity = 0.0f64;
         for s in 0..steps {
             let l = g.step().unwrap();
+            last_ledger = l;
             let d_kin = l.kinetic_j - kin;
             let id = (l.viscous_heating_j - (-d_kin - l.pressure_work_j)).abs() / g.total_energy_j();
             worst_identity = worst_identity.max(id);
@@ -210,6 +257,7 @@ fn viscous_heating_equals_kinetic_loss() {
     assert!(deviations[1] <= 2e-2, "heating vs continuum dissipation at n=32: {}", deviations[1]);
     assert!(deviations[1] < deviations[0], "deviation must shrink with refinement: {deviations:?}");
     assert!(rate_deviations[1] <= 5e-3, "kinetic-energy decay rate at n=32: {rate_deviations:?}");
+    receipt("viscous-heating", 2.0e-5, Some(last_ledger), None, &format!("\"decay_rate_deviation_n16\":{:e},\"decay_rate_deviation_n32\":{:e},\"heating_deviation_n16\":{:e},\"heating_deviation_n32\":{:e}", rate_deviations[0], rate_deviations[1], deviations[0], deviations[1]), 5e-3, start);
 }
 
 #[test]
@@ -217,6 +265,7 @@ fn isothermal_wall_heat_ledger() {
     // G0. Isothermal walls 10 K above a gas at rest: the heat that crossed the walls (time integral of the wall flux) equals
     // the change of total energy to <= 1e-11 relative and it is positive; the semi-infinite-wall estimate Q = 2 kappa dT sqrt(t / (pi alpha))
     // per area is printed for orientation, not asserted (closed box: the heated layer compresses the bulk).
+    let start = Instant::now();
     let n = 24usize;
     let mut s = spec([n, n, n], [false; 3], WallThermal::Isothermal(303.15), 5.0e-6);
     s.temperature_window_k = [273.15, 333.15];
@@ -241,6 +290,9 @@ fn isothermal_wall_heat_ledger() {
     let want = q_lattice * law.energy_unit_j();
     println!("semi-infinite-wall estimate {want:.6e} J, ratio {:.3}", wall / want);
     // informational only: the estimate ignores the closed-box piston effect and the boundary layer is about 2 cells thick here
+    let mut l = g.cumulative_ledger();
+    l.residual_rel = ((wall - d_total) / d_total).abs();
+    receipt("wall-heat", 5.0e-6, Some(l), None, &format!("\"wall_heat_j\":{wall:e},\"total_energy_change_j\":{d_total:e},\"ratio_to_semi_infinite_estimate\":{:e}", wall / want), 1e-11, start);
 }
 
 fn sound_error(lambda: usize) -> f64 {
@@ -281,6 +333,7 @@ fn adiabatic_sound_speed() {
     // sqrt(R T) (ratio sqrt(gamma)), with dispersion error that converges at second order. The bead's band, 1e-4, is
     // asserted at the finest rung of the 48 / 96 / 192 / 288 points-per-wavelength ladder; the 32-point value is printed
     // and not asserted (the athermal D3Q27 LBM alone has about -1.8e-4 there).
+    let start = Instant::now();
     let e32 = sound_error(32);
     println!("32 points per wavelength: relative error {e32:+.3e}");
     let rungs = [48usize, 96, 192, 288];
@@ -297,6 +350,7 @@ fn adiabatic_sound_speed() {
     let c_ratio = errs[3] + 1.0; // measured / sqrt(gamma theta0)
     let iso = 1.0 / 1.4f64.sqrt();
     assert!((c_ratio / iso - 1.0).abs() > 0.1, "measured speed is isothermal-like: {c_ratio}");
+    receipt("sound-speed", 5.0e-5, None, Some(errs[3]), &format!("\"rel_err_32_ppw\":{e32:e},\"rel_err_48\":{:e},\"rel_err_96\":{:e},\"rel_err_192\":{:e},\"rel_err_288\":{:e},\"order_192_288\":{order:e}", errs[0], errs[1], errs[2], errs[3]), 1e-4, start);
 }
 
 #[test]

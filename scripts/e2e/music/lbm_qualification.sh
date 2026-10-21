@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # IRP M3.2-W1: central release qualification, no Mac builds.
-# Usage: lbm_qualification.sh --lane d3q27-invariance|dissipation-ladder \
+# Usage: lbm_qualification.sh --lane d3q27-invariance|dissipation-ladder|nsf-energy \
 #        --out DIR [--runner native|rch]
 # The optional rch runner is for central Linux scheduling, never this Mac.
 # Each lane retains the real test output and execution-stamped JSONL.
+# nsf-energy (M3.2-W3a) runs tests/nsf3_battery.rs whole and requires one passing receipt per physics stage.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 LANE="" OUT="" RUNNER="native"
@@ -12,12 +13,14 @@ while (($#)); do
     --lane) LANE="${2:?missing lane}"; shift 2 ;;
     --out|--out-dir) OUT="${2:?missing output directory}"; shift 2 ;;
     --runner) RUNNER="${2:?missing runner}"; shift 2 ;;
-    *) echo "usage: $0 --lane d3q27-invariance|dissipation-ladder --out DIR [--runner native|rch]" >&2; exit 2 ;;
+    *) echo "usage: $0 --lane d3q27-invariance|dissipation-ladder|nsf-energy --out DIR [--runner native|rch]" >&2; exit 2 ;;
   esac
 done
+BIN=d3q27_battery SUITE=fs-lbm/d3q27 EXACT=(--exact)
 case "$LANE" in
   d3q27-invariance) TEST=rotational_invariance_d3q27_vs_d3q19_control ;;
   dissipation-ladder) TEST=collision_dissipation_ladder ;;
+  nsf-energy) TEST="" BIN=nsf3_battery SUITE=fs-lbm/nsf3 EXACT=() ;;
   *) echo "LBM qualification: declare one supported --lane" >&2; exit 2 ;;
 esac
 [[ -n "$OUT" ]] || { echo "LBM qualification: --out required" >&2; exit 2; }
@@ -27,7 +30,7 @@ case "$RUNNER" in native|rch) ;; *) echo "unknown runner: $RUNNER" >&2; exit 2 ;
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 cd "$ROOT"
-CMD=(env CARGO_BUILD_JOBS=12 cargo test --release --locked -p fs-lbm --test d3q27_battery "$TEST" -- --exact --nocapture)
+CMD=(env CARGO_BUILD_JOBS=12 cargo test --release --locked -p fs-lbm --test "$BIN" ${TEST:+"$TEST"} -- "${EXACT[@]}" --nocapture)
 if [[ "$RUNNER" == rch ]]; then
   export RCH_REQUIRE_REMOTE=1
   CMD=(rch exec -- "${CMD[@]}")
@@ -37,9 +40,9 @@ set +e
 "${CMD[@]}" 2>&1 | tee "$OUT/native.log"
 CODE=${PIPESTATUS[0]}
 set -e
-python3 -I - "$ROOT" "$OUT" "$LANE" "$STARTED" "$CODE" "${CMD[@]}" <<'PY'
+python3 -I - "$ROOT" "$OUT" "$LANE" "$STARTED" "$CODE" "$SUITE" "${CMD[@]}" <<'PY'
 import json,pathlib,platform,subprocess,sys,time
-root,out,lane,started,code,*command=sys.argv[1:]
+root,out,lane,started,code,suite,*command=sys.argv[1:]
 out=pathlib.Path(out)
 sha=subprocess.check_output(['git','-C',root,'rev-parse','HEAD'],text=True).strip()
 dirty=bool(subprocess.check_output(['git','-C',root,'status','--porcelain'],text=True).strip())
@@ -47,7 +50,7 @@ context=dict(git_sha=sha,host=platform.node(),command=command,profile='release',
              native_exit_code=int(code),lane=lane)
 rows=[]
 for line in (out/'native.log').read_text().splitlines():
-    at=line.find('{"suite":"fs-lbm/d3q27"')
+    at=line.find('{"suite":"'+suite+'"')
     if at<0:continue
     r=json.loads(line[at:])
     if r.get('lane')!=lane:continue
@@ -58,10 +61,14 @@ for line in (out/'native.log').read_text().splitlines():
     for key in ('rungs','observed_order','rate_spread_per_rung','control_ratio','tolerance'):
         r.setdefault(key,None)
     rows.append(r)
-terminal=[r for r in rows if r.get('stage')=='terminal']
-expected=2 if lane=='dissipation-ladder' else 1
-passed=(int(code)==0 and len(terminal)==expected and all(r['verdict']=='pass' for r in rows))
-rows.append(dict(context,suite='fs-lbm/d3q27',stage='execution-terminal',
+if lane=='nsf-energy':
+    stages=sorted(r.get('stage') for r in rows)
+    passed=(int(code)==0 and stages==['closed-box','sound-speed','viscous-heating','wall-heat'] and all(r['verdict']=='pass' for r in rows))
+else:
+    terminal=[r for r in rows if r.get('stage')=='terminal']
+    expected=2 if lane=='dissipation-ladder' else 1
+    passed=(int(code)==0 and len(terminal)==expected and all(r['verdict']=='pass' for r in rows))
+rows.append(dict(context,suite=suite,stage='execution-terminal',
                  verdict='pass' if passed else 'fail',elapsed_s=time.monotonic()-float(started),
                  acceptance=False,reason='module qualification only; no jet/edge-tone/NSF instrument claim'))
 with (out/'run.jsonl').open('x') as f:

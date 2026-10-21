@@ -772,9 +772,10 @@ The formulation and its conservation class are stated here because the bead requ
 
 **Formulation.** Mass and momentum are carried by the populations of an ISOTHERMAL lattice: equilibrium at the lattice
 reference `theta0 = 1/3` (`THETA0`, the lattice `c_s^2`), a regularised collision whose shear rate is
-`1 / (mu(T) / (rho theta0) + 1/2)`, a DECLARED trace (bulk) rate (`NsfSpec::bulk_rate`; bulk viscosity
-`(2/3) theta0 (1/w - 1/2)` per density) and the third-order non-equilibrium part rebuilt recursively from the deviatoric
-stress. The thermodynamic pressure difference `p' = rho (theta - theta0)` of `p = rho theta` enters as the Guo body force
+`1 / (mu(T) / (rho theta0) + 1/2)`, a trace (bulk) rate derived from a SOURCED bulk-to-shear viscosity ratio
+(`NsfSpec::bulk_to_shear_ratio` with a mandatory citation string; `1/w_b = 1/2 + 1.5 ratio mu / (rho theta0)`, from the
+bulk viscosity `(2/3) rho theta0 (1/w_b - 1/2)` of the lattice, checked against the measured sound attenuation of the
+scheme) and the third-order non-equilibrium part rebuilt recursively from the deviatoric stress. The thermodynamic pressure difference `p' = rho (theta - theta0)` of `p = rho theta` enters as the Guo body force
 `F = -grad p'` in conservative face form with the half-force velocity `u = (sum c f + F/2) / rho`; the first-moment
 non-equilibrium `-F/2` that the regularised projection drops is added back so that the momentum receives exactly `F`.
 Total energy `E = rho (c_v theta + |u|^2 / 2)` is a conservative finite-volume field on the same cells with the face flux
@@ -803,11 +804,24 @@ temperature window (`transport_points`, linear interpolation) and converted with
 `kappa_lat = kappa dt / (R rho0 dx^2)`. No transport value is a literal. `NsfLaw::energy_unit_j()` converts lattice
 energy to joules; the API reports joules.
 
+**Bulk viscosity (sourced, dx-dependent like the shear rate).** The ratio `mu_b / mu` is a declared, cited input, not a lattice
+constant: dry air near 293 K, 0.73 (M. S. Cramer, Phys. Fluids 24, 066102 (2012), doi 10.1063/1.4729611: "mu_b about
+0.73 mu for N2 at 293 K", from the acoustic absorption of Prangsma, Alberga and Beenakker; shock-thickness value 0.67;
+curve fit `mu_b = 0.778e-5 (T/200 K)^1.376 kg/(m s)` for N2, 77 to 1073 K). A Rayleigh-Brillouin measurement at
+hypersonic frequency gives 1.527 / 1.826 = 0.84 for air at 295.8 K (Z. Gu and W. Ubachs, arXiv:1409.3014, Table II), so the
+range carried is 0.67 to 0.84; the audio-frequency N2 value is used because instrument acoustics is far below the
+relaxation frequency. The ratio is taken temperature-independent over the declared window (Cramer: it rises gradually with
+T). The lattice rate therefore follows dx exactly like the shear rate: `w_b` is 1.9922 at dx 50 um (lattice viscosity 6.0e-4) and 1.9804 at dx 20 um (1.5e-3).
+Stability scan (Bloch, 28 x 28, eight oblique modes, ratio 0.73): max |lambda| = 1.0000, 1.0000, 0.9999, 0.9998, 0.9984,
+0.9953 for lattice viscosity 1e-5, 1e-4, 5e-4, 1.5e-3, 1e-2, 3e-2 and 1.146 at 0.1; ratio 0.84 at 5e-4 gives 0.9999.
+The verified envelope is therefore `MAX_VERIFIED_LATTICE_VISCOSITY` = 0.03 and a finer dx is REFUSED (`NsfError::Viscosity`),
+not compensated with inflated bulk viscosity.
+
 **Refusals.** `new` and `step` refuse: a gas state outside the receipt window (T in [50, 2000] K: 50 K admitted, 49.999 K
 refused); a temperature outside the declared run window; more cells than `maximum_cells` (cap admitted, cap + 1
 refused); a local Mach number `|u| / sqrt(gamma theta)` above `maximum_mach`; `|theta / theta0 - 1|` above
 `maximum_temperature_ratio`; non-finite or non-positive density, energy or temperature; malformed bounds, bulk rate
-outside (0, 2), zero workers. A failed `step` leaves the published state unchanged.
+empty citation or non-positive ratio, a lattice viscosity above the verified envelope (above), zero workers. A failed `step` leaves the published state unchanged.
 
 **Determinism.** Every cell pass is a pure function of read-only arrays written by `par_fill` over fixed contiguous
 chunks; every reduction is serial in cell order. The result is bitwise independent of `NsfSpec::workers`
@@ -822,22 +836,26 @@ round-off. THAT IDENTITY IS BOOKKEEPING. The physical content (the heating is th
 Taylor-Green kinetic-energy decay rate in the battery.
 
 **Conformance (`tests/nsf3_battery.rs`).** `equilibrium_recovers_conserved_moments` (G0: mass, momentum, the second moment
-and every third moment the lattice can represent, 1e-13), `refusals_cap_and_cap_plus_one` (G0),
+and every third moment the lattice can represent, 1e-13), `refusals_cap_and_cap_plus_one` (G0, including the viscosity envelope and the anonymous ratio),
 `closed_box_energy_budget_closes` (G0: random velocity + temperature state, six bounce-back walls, 1e4 steps at the
 viscosity of dx 50 um, total energy <= 1e-11 relative), `viscous_heating_equals_kinetic_loss` (G0 identity <= 1e-13 of
 the total energy per step; G1: kinetic-energy decay rate within 5e-3 of `4 nu k^2` and accumulated heating within 2e-2,
 shrinking with refinement), `isothermal_wall_heat_ledger` (G0: wall heat equals the energy change to 1e-11),
 `adiabatic_sound_speed` (G1: 48 / 96 / 192 / 288 points per wavelength, relative error <= 1e-4 at the finest rung,
 second order observed >= 1.8, and the isothermal speed fails; the 32-point value is printed, not asserted),
-`nsf3_bitwise_worker_count_invariance` (G5).
+`nsf3_bitwise_worker_count_invariance` (G5). Each physics test prints one execution receipt (JSON line: lane, stage, verdict,
+formulation, conservation class, gas receipt with blake3, rungs `{dx_m, dt_s}`, ledger, sound-speed error, observed values,
+tolerance, elapsed); `scripts/e2e/music/lbm_qualification.sh --lane nsf-energy --out DIR` runs the battery natively and requires
+one passing receipt per stage (closed-box, viscous-heating, wall-heat, sound-speed). Native evidence of the first landing:
+`wa.sh test 295c9c4d5 --release -p fs-lbm --test nsf3_battery` on trj, 7 passed, exit 0.
 
 **No-claim boundaries (`nsf3`).** The sound-speed band of 1e-4 is met at 288 points per wavelength, NOT at 32:
 dispersion is second order (observed order 2.00 between 192 and 288), and the athermal D3Q27 scheme alone is already
 about -1.8e-4 at 32 points. Not turbulence-resolved, not shock-capturing, no open or moving boundary, no entropic or
 energy-population thermal LBM (the thermal pressure is a force), no temperature-dependent equilibrium. The force-coupled
 lattice resolves the sound speed `sqrt(gamma theta)` only while it stays below the lattice speed: the Mach and
-temperature-ratio bounds are refusals, not tuning. The bulk rate is a declared input; the physical bulk viscosity of air
-is not asserted by the module. No recording, graded or instrument claim.
+temperature-ratio bounds are refusals, not tuning. The bulk-to-shear ratio is a cited input, not a module result; its
+uncertainty (0.67 to 0.84) is not propagated. No recording, graded or instrument claim.
 
 ## No-claim boundaries
 
