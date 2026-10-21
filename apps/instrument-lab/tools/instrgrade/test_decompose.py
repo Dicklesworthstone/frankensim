@@ -504,6 +504,32 @@ class ContractTests(unittest.TestCase):
         self.assertIn("I/O error", res["refused"][0]["reason"])
         self.assertEqual((root / "syn" / "Bb3" / "pair.json").read_bytes(), before)  # the earlier pair is untouched
 
+    def test_a_slot_gives_one_note_several_pairs(self):
+        import json
+        root = self.tmp / "slots"
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="s", observer="o", recipe="r.sh")
+        a = dc.run_pair(self.refs, dict(c, slot="Bb3-a"), root)
+        b = dc.run_pair(self.refs, dict(c, slot="Bb3-e"), root)
+        self.assertEqual((a["note"], b["note"]), ("Bb3-a", "Bb3-e"))
+        self.assertEqual(json.loads((root / "syn" / "Bb3-e" / "pair.json").read_text())["note"], "Bb3-e")
+        self.assertTrue((root / "syn" / "Bb3-a" / "ours.wav").exists())
+
+    def test_an_io_error_in_a_render_job_is_not_recorded_as_a_refusal_and_leaves_the_pair(self):
+        import json
+        from unittest import mock
+        root = self.tmp / "ioerr2"
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="ok", observer="o", recipe="r.sh")
+        dc._REFS = self.refs
+        self.assertTrue(dc._batch_job((c, root))["ok"])
+        before = (root / "syn" / "Bb3" / "pair.json").read_bytes()
+        with mock.patch.object(dc, "_write_pair_staged", side_effect=OSError("staging directory vanished")):
+            res = dc._batch_job((dict(c, git_sha="bad"), root))
+        self.assertFalse(res["ok"])
+        self.assertIn("not a refusal", res["error"])
+        d = root / "syn" / "Bb3"
+        self.assertEqual((d / "pair.json").read_bytes(), before)
+        self.assertIsNone(json.loads((d / "pair.json").read_text()).get("refused"))
+
     def test_a_refused_render_batch_job_writes_the_record(self):
         import json
         root = self.tmp / "refbatch"

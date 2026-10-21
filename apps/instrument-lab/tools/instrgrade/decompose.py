@@ -974,7 +974,10 @@ def run_pair(refs, c, root):
     cand_y = cand_info = ours_meta = None
     if c.get("wav"):  # the render first: it is cheap, and a render that is not the note should be refused for that
         f0 = hz_of(ref_e["note"])
-        raw = load(Path(c["wav"]))
+        try:
+            raw = load(Path(c["wav"]))
+        except OSError as e:
+            raise GraderRefusalError(f"IRPDECOMP_RENDER_UNREADABLE: {c['wav']}: {e}") from None
         if refs.band_hz:
             raw = lowpass(raw, refs.band_hz)
         hp = highpass(raw, f0)
@@ -983,7 +986,8 @@ def run_pair(refs, c, root):
         cand_y, cand_info = _labelled("render", align, raw, f0, render_floor(hp, f0))
         ours_meta = dict(wav=c["wav"], git_sha=c["git_sha"], observer=c["observer"], recipe=c["recipe"], sample_rate=wav_sample_rate(c["wav"]))
     ref_y, ref_info = _labelled(f"reference {ref_e['file']}@{ref_e['name']}", refs.aligned, ref_e)
-    return write_pair(root, c["family"], c["note"], ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, c.get("review", False))
+    # `slot` names the pair's directory and note id when one musical note has several pairs (a vowel at C3: "C3-a")
+    return write_pair(root, c["family"], c.get("slot") or c["note"], ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, c.get("review", False))
 
 
 _REFS = None
@@ -994,8 +998,11 @@ def _init(lib, wav, refs_json):
     _REFS = Refs(lib, wav, refs_json)
 
 
-REFUSALS = (OnsetMisaligned, GraderRefusalError, SystemExit, ValueError, IndexError, KeyError, OSError)
-NOTE_REFUSALS = REFUSALS[:-1]  # what is a fact about a note; an OSError in a run is not (a missing render file is: _batch_job)
+# What is a fact about a note. An OSError is not (a moved directory, a full disk): it is the run's trouble and is never
+# written into the data as a refusal. A render file that cannot be read IS a fact about the candidate: run_pair turns
+# that one OSError into IRPDECOMP_RENDER_UNREADABLE.
+REFUSALS = (OnsetMisaligned, GraderRefusalError, SystemExit, ValueError, IndexError, KeyError)
+NOTE_REFUSALS = REFUSALS
 
 
 def supersede_existing(d):
@@ -1125,10 +1132,12 @@ def _batch_job(args):
     c, root = args
     try:
         pj = run_pair(_REFS, c, root)
-        return dict(family=c["family"], note=c["note"], wav=c["wav"], ok=True, metrics=len(pj["metrics"]))
+        return dict(family=c["family"], note=c.get("slot") or c["note"], wav=c["wav"], ok=True, metrics=len(pj["metrics"]))
     except REFUSALS as e:
-        refuse_pair(root, c["family"], c["note"], e, c.get("git_sha"), c.get("wav"), c.get("dyn"))
-        return dict(family=c["family"], note=c["note"], wav=c["wav"], ok=False, error=str(e))
+        refuse_pair(root, c["family"], c.get("slot") or c["note"], e, c.get("git_sha"), c.get("wav"), c.get("dyn"))
+        return dict(family=c["family"], note=c.get("slot") or c["note"], wav=c["wav"], ok=False, error=str(e))
+    except OSError as e:  # the run's own trouble: reported here, never recorded as a refusal, the note's pair untouched
+        return dict(family=c["family"], note=c.get("slot") or c["note"], wav=c["wav"], ok=False, error=f"I/O error, not a refusal: {e}")
 
 
 def cmd_batch(a):
