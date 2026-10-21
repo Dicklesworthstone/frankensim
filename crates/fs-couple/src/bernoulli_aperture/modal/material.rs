@@ -6,7 +6,7 @@ use super::{
     ModalApertureSpec, PairedApertureLimits, invalid,
 };
 use crate::plate_viscosity::{PlateViscosity, PlateViscosityLimits};
-use crate::thin_plate::{PlateChartRadiation, ResolvedPlateChart};
+use crate::thin_plate::{PlateChartRadiation, ResolvedPlateChart, RetainedPlateBasis};
 use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
@@ -48,6 +48,8 @@ pub struct MaterialModalPlate {
     slit_weights: Vec<f64>,
     viscosity: Option<PlateViscosity>,
     viscosity_matrix: Option<Vec<f64>>,
+    basis: RetainedPlateBasis,
+    coordinate_scale: Vec<f64>,
 }
 fn poll(gate: &CancelGate) -> Result<(), AcousticRealizeError> {
     if gate.is_requested() {
@@ -125,6 +127,10 @@ impl MaterialModalPlate {
     /// Full local C [N s/m] in this plate's retained physical modal coordinates.
     pub fn viscosity_matrix_n_s_m(&self) -> Option<&[f64]> {
         self.viscosity_matrix.as_deref()
+    }
+
+    pub(super) fn constitutive_basis(&self) -> (&RetainedPlateBasis, &[f64]) {
+        (&self.basis, &self.coordinate_scale)
     }
 
     fn reduce(
@@ -212,28 +218,11 @@ impl MaterialModalPlate {
             row[i] = 1.0;
         }
         poll(gate)?;
-        let (bodies, ports, projected) = if let Some((law, limits)) = &tensor {
-            let (image, ports) = source.certified_viscous_radiators_with_force_ports(
-                &options.reduction,
-                &nodal_ports,
-                options.max_projection_terms,
-                law,
-                *limits,
-                gate,
-            )?;
-            (
-                image.radiators().to_vec(),
-                ports,
-                Some(image.damping().matrix_per_s().to_vec()),
-            )
-        } else {
-            let (bodies, ports) = source.certified_radiators_with_force_ports(
-                &options.reduction,
-                &nodal_ports,
-                options.max_projection_terms,
-            )?;
-            (bodies, ports, None)
-        };
+        let (bodies, ports, damping, basis) = source.material_radiators_with_basis_and_force_ports(
+            &options.reduction, &nodal_ports, options.max_projection_terms,
+            tensor.as_ref().map(|(law, limits)| (law, *limits, gate)), gate,
+        )?;
+        let projected = damping.map(|c| c.matrix_per_s().to_vec());
         poll(gate)?;
         if bodies.len() != options.reduction.n_modes
             || ports.len() != n
@@ -305,6 +294,8 @@ impl MaterialModalPlate {
             slit_weights: weights,
             viscosity: tensor.map(|(law, _)| law),
             viscosity_matrix,
+            basis,
+            coordinate_scale,
         })
     }
 

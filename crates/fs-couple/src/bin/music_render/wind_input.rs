@@ -330,7 +330,11 @@ fn load_with_all_sources(
             fs_couple::bernoulli_aperture::paired::BladePropagator::Midpoint =>
                 ("midpoint", "original material structure with loaded one-cent midpoint admission"),
             fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh =>
-                ("exact-zoh", "original M/K and selected full C or proportional Maxwell internal strains; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"),
+                ("exact-zoh", if valve.material_relaxation().is_some_and(|memory| memory.is_regional()) {
+                    "original M/K and full cross-mode regional Maxwell internal strains; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"
+                } else {
+                    "original M/K and selected full C or proportional Maxwell internal strains; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"
+                }),
         };
         let relaxation_json = valve.material_relaxation().map_or_else(String::new, |memory| {
             let initial = match memory.initial_memory() {
@@ -346,7 +350,9 @@ fn load_with_all_sources(
                 })
             }).collect::<Vec<_>>().join(",");
             let arms: usize = memory.memory_sqrt_j().iter().map(Vec::len).sum();
-            format!(",\"proportional_material_relaxation\":{{\"initial_memory\":\"{initial}\",\"live_arms\":{arms},\"regional_spectra\":[{spectra}]}}")
+            let kind = if memory.is_regional() { "regional_material_relaxation" }
+                else { "proportional_material_relaxation" };
+            format!(",\"{kind}\":{{\"initial_memory\":\"{initial}\",\"live_arms\":{arms},\"regional_spectra\":[{spectra}]}}")
         });
         let (radiation_scope, mimo_json) = if p.mimo_radiation_records().is_empty()
             && p.computed_radiation_records().is_empty() {

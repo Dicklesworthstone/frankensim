@@ -30,6 +30,16 @@ use fs_scenario::{
 use fs_vfit::FitOptions;
 use fs_vfit::discretize::{DigitalFilter, DigitalFilterState, realize_tabulated_impedance};
 
+/// Full DKT coordinates from the SAME solve as a material image's ports.
+/// Internal consumers use rotations for constitutive projection; a transverse
+/// nodal trace alone cannot reconstruct curvature or material memory.
+#[derive(Clone, Debug)]
+pub(crate) struct RetainedPlateBasis {
+    pub(crate) source_identity: ContentHash,
+    pub(crate) dof_map: Vec<Option<usize>>,
+    pub(crate) mass_normalized_modes: Vec<Vec<f64>>,
+}
+
 /// One driven compact radiator harvested from a certified plate mode.
 #[derive(Debug, Clone)]
 pub struct CompactBody {

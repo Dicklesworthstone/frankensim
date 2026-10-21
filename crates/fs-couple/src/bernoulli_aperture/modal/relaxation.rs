@@ -4,7 +4,8 @@
 //! and no prestress contributes to K, the retained modal branch stiffness is
 //! exactly k_ij=(E_j/E_inf) k_i. This is a constitutive restriction, not weak
 //! damping or a fitted modal decay. Nonproportional regions need full matrix
-//! projection and are refused. All source claims remain on the original chart.
+//! projection in `with_regional_material_relaxation`. All source claims remain
+//! on the original chart; the original proportional entry point is unchanged.
 
 use super::super::paired::ExactArm;
 use super::{AcousticRealizeError, BladePropagator, BladeState, ModalAperture, invalid};
@@ -14,6 +15,8 @@ use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_material::visco::GeneralizedMaxwell;
 use fs_math::det;
 use fs_qty::{Density, Dims, Pressure, QuantitySpec};
+
+mod regional;
 
 /// Initial internal strain of each physical Maxwell arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +33,7 @@ pub struct ModalRelaxation {
     initial: InitialModalMemory,
     pub(super) arms: Vec<Vec<ExactArm>>,
     pub(super) states: Vec<Vec<f64>>,
+    pub(super) coupled_arms: Option<Vec<super::exact::CoupledArm>>,
 }
 impl ModalRelaxation {
     /// Original reference Young moduli and branches, in plate/region order.
@@ -41,12 +45,33 @@ impl ModalRelaxation {
     pub const fn initial_memory(&self) -> InitialModalMemory {
         self.initial
     }
-    /// Accepted z=sqrt(k_arm)*viscous_displacement, by original mode and arm.
-    /// Positive arms retain separate states; exact-zero arms store no energy.
+    /// Accepted energy-normalized viscous coordinates. Proportional selection
+    /// uses one row per original mode; regional selection uses one row with
+    /// every coupled material channel. No positive channel is truncated.
     pub fn memory_sqrt_j(&self) -> &[Vec<f64>] {
         &self.states
     }
+    /// Whether separate original regions retain full cross-mode memory.
+    pub fn is_regional(&self) -> bool { self.coupled_arms.is_some() }
+    /// A regional channel's original physical-coordinate row c, in sqrt(N/m).
+    /// Its positive energy is `(c^T q - z)^2/2`; exact-zero rows are absent.
+    pub fn regional_coupling_row(&self, channel: usize) -> Option<&[f64]> {
+        self.coupled_arms.as_ref()?.get(channel).map(|arm| arm.coupling.as_slice())
+    }
+    /// Relaxation time [s] of that original regional material channel.
+    pub fn regional_relaxation_time_s(&self, channel: usize) -> Option<f64> {
+        self.coupled_arms.as_ref()?.get(channel).map(|arm| arm.relaxation_time_s)
+    }
     pub(super) fn energy(&self, modes: &[BladeState], states: &[Vec<f64>]) -> f64 {
+        if let Some(arms) = &self.coupled_arms {
+            let memory = states.first().map_or(&[][..], Vec::as_slice);
+            if memory.len() != arms.len() { return f64::NAN; }
+            return arms.iter().zip(memory).map(|(arm, z)| {
+                let strain = arm.coupling.iter().zip(modes)
+                    .map(|(c, mode)| c * mode.displacement_m).sum::<f64>() - z;
+                0.5 * strain * strain
+            }).sum();
+        }
         self.arms
             .iter()
             .zip(modes)
@@ -273,6 +298,7 @@ impl ModalAperture {
             initial,
             arms,
             states,
+            coupled_arms: None,
         };
         let energy = self.energy(&self.state) + relaxation.energy(&self.state, &relaxation.states);
         if !energy.is_finite() || energy > self.spec.limits.maximum_energy_j {
