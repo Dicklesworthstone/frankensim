@@ -276,11 +276,35 @@ impl<'a> Bridge<'a> {
             additional_downward_n_m, &[], config, cancelled)
     }
 
+    /// The identical gravity/dead-load solve, retaining each original section
+    /// layer's extensive energy [J] under `(axial_cell_id, layer_id)`.
+    /// Heat consumers use `dissipated`, not numerical loss or elastic storage.
+    /// Accounts come from the actual point updates, never a second material
+    /// advance or an assumed mass-weighted partition of whole-beam dissipation.
+    pub fn advance_with_cell_energy(&self, target_s: f64,
+        temperatures_k: &BTreeMap<(u64, u64), f64>, gravity_m_s2: f64,
+        additional_downward_n_m: &[f64], config: Config,
+        cancelled: &mut impl FnMut() -> bool)
+        -> Result<(Self, Report, BTreeMap<(u64, u64), Energy>), Error> {
+        let mut accounts = BTreeMap::new();
+        let (next, report) = self.advance_recorded(target_s, temperatures_k,
+            gravity_m_s2, additional_downward_n_m, &[], config, Some(&mut accounts), cancelled)?;
+        Ok((next, report, accounts))
+    }
+
     // Point forces are upward N at REFERENCE x. They come from the checked
     // support solve, and enter both the moment diagram and displacement work.
     fn advance_with_point_forces(&self, target_s: f64, temperatures_k: &BTreeMap<(u64, u64), f64>,
         gravity_m_s2: f64, additional_downward_n_m: &[f64], point_forces: &[(f64, f64)],
         config: Config, cancelled: &mut impl FnMut() -> bool) -> Result<(Self, Report), Error> {
+        self.advance_recorded(target_s, temperatures_k, gravity_m_s2,
+            additional_downward_n_m, point_forces, config, None, cancelled)
+    }
+
+    fn advance_recorded(&self, target_s: f64, temperatures_k: &BTreeMap<(u64, u64), f64>,
+        gravity_m_s2: f64, additional_downward_n_m: &[f64], point_forces: &[(f64, f64)],
+        config: Config, mut accounts: Option<&mut BTreeMap<(u64, u64), Energy>>,
+        cancelled: &mut impl FnMut() -> bool) -> Result<(Self, Report), Error> {
         poll(cancelled)?;
         positive(finite(target_s-self.time_s)?)?;
         if !gravity_m_s2.is_finite() || gravity_m_s2 < 0.0 { return Err(Error::Invalid("gravity must be finite and nonnegative")); }
@@ -304,8 +328,17 @@ impl<'a> Bridge<'a> {
                 temperatures.insert(layer, t);
             }
             let control = Control { axial: AxialControl::ForceN(0.0), bending: BendingControl::MomentNm(moment) };
-            let (section, report) = cell.section.advance_to(target_s, &temperatures, control, section_config,
-                || if cancelled() { Err(deposition::Error::Cancelled) } else { Ok(()) })
+            let checkpoint = || if cancelled() { Err(deposition::Error::Cancelled) } else { Ok(()) };
+            let result = if let Some(local) = accounts.as_deref_mut() {
+                cell.section.advance_with_layer_energy(target_s, &temperatures, control,
+                    section_config, checkpoint).map(|(section, report, layers)| {
+                        for (layer, energy) in layers { local.insert((cell.id, layer), energy); }
+                        (section, report)
+                    })
+            } else {
+                cell.section.advance_to(target_s, &temperatures, control, section_config, checkpoint)
+            };
+            let (section, report) = result
                 .map_err(|error| if error == deposition::Error::Cancelled { Error::Cancelled }
                     else { Error::Section { cell: cell.id, error } })?;
             cell.section = section;
