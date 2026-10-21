@@ -11,6 +11,8 @@
 
 use super::*;
 use fs_phs::linear_exact::{DenseExponentialBudget, exponential_with_budget};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Explicit upper bound on complete mechanical modes in the cold dense path.
 /// Each mode retains displacement, velocity and its independent held input.
@@ -30,6 +32,15 @@ pub struct PreparedModalBudget {
     pub max_multiply_terms: u64,
 }
 
+/// The quadratic loss forms z^T W z of every channel for ONE state/input vector, and the exact bits of that vector.
+/// One stage evaluates the identical vector in `advance`, in `losses` and in `connection_work`; they share this sweep
+/// instead of each streaming every dense Gramian again. The values are the very ones a fresh evaluation returns.
+struct LossSweep {
+    z: Vec<f64>,
+    component: f64,
+    connection: Vec<Option<f64>>,
+}
+
 pub(super) struct PreparedNetwork {
     count: usize,
     dt: f64,
@@ -39,6 +50,8 @@ pub(super) struct PreparedNetwork {
     transition: Vec<f64>,
     component_loss: Option<Vec<f64>>,
     connection_loss: Vec<Option<Vec<f64>>>,
+    sweep: Mutex<Option<LossSweep>>,
+    sweeps: AtomicU64,
 }
 
 const MATRIX_TOL: f64 = 1e-11;
@@ -194,7 +207,8 @@ impl PreparedNetwork {
             connection_loss.push(Some(gramian(&generator, &resistance, &levels, h, d, exp_budget, gate)?));
         }
         let transition = levels.pop().unwrap();
-        let result = Self { count, dt, weights, stiffness, rest_force, transition, component_loss, connection_loss };
+        let result = Self { count, dt, weights, stiffness, rest_force, transition, component_loss, connection_loss,
+            sweep: Mutex::new(None), sweeps: AtomicU64::new(0) };
         result.validate_energy_identity(gate)?;
         poll(Some(gate))?;
         Ok(result)
@@ -270,14 +284,43 @@ impl PreparedNetwork {
         (0..self.count).map(|i| finite(end[2 * i] / self.weights[i])).collect()
     }
 
-    fn loss_sums(&self, z: &[f64]) -> Result<(f64, f64), ModalCouplingError> {
+    /// Every channel's quadratic form for `z`, in the order the sums have always used: the component Gramian, then the links.
+    fn compute_sweep(&self, z: &[f64]) -> Result<LossSweep, ModalCouplingError> {
+        self.sweeps.fetch_add(1, Ordering::Relaxed);
         let component = match &self.component_loss { Some(w) => quadratic(w, z)?, None => 0.0 };
-        let mut connection = 0.0;
-        for matrix in self.connection_loss.iter().flatten() {
-            connection = finite(connection + quadratic(matrix, z)?)?;
+        let mut connection = Vec::with_capacity(self.connection_loss.len());
+        for matrix in &self.connection_loss {
+            connection.push(match matrix { Some(w) => Some(quadratic(w, z)?), None => None });
         }
-        Ok((component, connection))
+        Ok(LossSweep { z: z.to_vec(), component, connection })
     }
+
+    /// Run `read` on the sweep for exactly this vector (bitwise), evaluating the Gramians only when it is a new vector.
+    fn with_sweep<T>(&self, z: &[f64], read: impl FnOnce(&LossSweep) -> Result<T, ModalCouplingError>)
+        -> Result<T, ModalCouplingError>
+    {
+        let mut slot = self.sweep.lock().map_err(|_| invalid("prepared loss sweep lock poisoned"))?;
+        let same = slot.as_ref().is_some_and(|s| s.z.len() == z.len()
+            && s.z.iter().zip(z).all(|(a, b)| a.to_bits() == b.to_bits()));
+        if !same { *slot = Some(self.compute_sweep(z)?); }
+        match slot.as_ref() {
+            Some(sweep) => read(sweep),
+            None => Err(invalid("prepared loss sweep unavailable")),
+        }
+    }
+
+    fn loss_sums(&self, z: &[f64]) -> Result<(f64, f64), ModalCouplingError> {
+        self.with_sweep(z, |sweep| {
+            let mut connection = 0.0;
+            for loss in sweep.connection.iter().flatten() {
+                connection = finite(connection + loss)?;
+            }
+            Ok((sweep.component, connection))
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn sweeps(&self) -> u64 { self.sweeps.load(Ordering::Relaxed) }
 
     pub(super) fn losses(&self, x: &[f64], u: &[f64], dt: f64, total: f64)
         -> Result<(f64, f64), ModalCouplingError>
@@ -300,9 +343,11 @@ impl PreparedNetwork {
             return Err(invalid("prepared connection observation layout"));
         }
         let z = self.state_input(x, u, dt)?;
+        // The same vector `advance` and `losses` just evaluated: no second pass over the Gramians.
+        let losses: Vec<f64> = self.with_sweep(&z, |sweep| Ok(sweep.connection.iter().map(|l| l.unwrap_or(0.0)).collect()))?;
         let mut transfers = Vec::with_capacity(links.len());
         let mut total = 0.0;
-        for ((column, link), matrix) in columns.iter().zip(links).zip(&self.connection_loss) {
+        for (k, (column, link)) in columns.iter().zip(links).enumerate() {
             poll(gate)?;
             let coordinate = |state: &[f64]| -> Result<f64, ModalCouplingError> {
                 column.iter().enumerate().try_fold(-link.rest_extension_m,
@@ -310,7 +355,7 @@ impl PreparedNetwork {
             };
             let before = coordinate(x)?;
             let after = coordinate(endpoint)?;
-            let loss = match matrix { Some(w) => quadratic(w, &z)?, None => 0.0 };
+            let loss = losses[k];
             total = finite(total + loss)?;
             let work = finite(-0.5 * link.stiffness_n_m * (after - before) * (after + before) - loss)?;
             transfers.push(crate::port_adoption::PortTransfer::work(work, false));

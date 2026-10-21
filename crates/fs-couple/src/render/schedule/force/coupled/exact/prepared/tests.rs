@@ -208,3 +208,36 @@ fn explicit_preparation_refusals_and_negative_loss_gate_do_not_invent_accuracy()
     assert_eq!(flatten(&system.models), before);
     assert_eq!(system.samples_rendered(), 0);
 }
+
+#[test]
+fn one_stage_costs_one_loss_sweep_and_the_shared_values_equal_a_direct_evaluation_bit_for_bit() {
+    let mut system = fixture(48_000, true);
+    let sweeps = |s: &CoupledModalSystem| s.exact.as_ref().unwrap().prepared.as_ref().unwrap().sweeps();
+    let before = sweeps(&system);
+    let steps = 6u64;
+    for tick in 0..steps {
+        let external = [0.003, if tick % 2 == 0 { -0.002 } else { 0.004 }, 0.001];
+        system.step(&external).unwrap();
+    }
+    // `advance`, `losses` and `connection_work` of a stage evaluate the same vector: one sweep per step, not three.
+    assert_eq!(sweeps(&system) - before, steps);
+    let prepared = system.exact.as_ref().unwrap().prepared.as_ref().unwrap();
+    let x = flatten(&system.models);
+    for u in [[0.003, -0.002, 0.001], [0.0, 0.0, 0.0], [0.003, -0.002, 0.001]] {
+        let z = prepared.state_input(&x, &u, prepared.dt).unwrap();
+        let direct_component = quadratic(prepared.component_loss.as_ref().unwrap(), &z).unwrap();
+        let mut direct_connection = 0.0;
+        for w in prepared.connection_loss.iter().flatten() {
+            direct_connection = finite(direct_connection + quadratic(w, &z).unwrap()).unwrap();
+        }
+        let (component, connection) = prepared.loss_sums(&z).unwrap();
+        assert_eq!(component.to_bits(), direct_component.to_bits());
+        assert_eq!(connection.to_bits(), direct_connection.to_bits());
+        assert!(component > 0.0 && connection > 0.0);
+        // A second request for the same vector is served from the sweep, bit for bit.
+        let count = prepared.sweeps();
+        let (again_component, again_connection) = prepared.loss_sums(&z).unwrap();
+        assert_eq!(prepared.sweeps(), count);
+        assert_eq!((again_component.to_bits(), again_connection.to_bits()), (component.to_bits(), connection.to_bits()));
+    }
+}
