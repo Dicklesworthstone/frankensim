@@ -885,14 +885,38 @@ def metric_rows(gaps, real: Note, ours: Note | None, ruler):
                       if r["gaps"].get(mid) is not None]
         context = [dict(label=r["label"], value=r["gaps"][mid] * k) for c in ("other_articulation", "other_instrument") for r in ruler.get(c, [])
                    if r["gaps"].get(mid) is not None]
+        # the STRICT ruler: real recordings of the SAME note only (other dynamics, other takes); neighbouring notes excluded
+        strict_rows = [dict(label=r["label"], value=r["gaps"][mid] * k) for c in spec["cats"] if c in SAME_NOTE for r in ruler.get(c, [])
+                       if r["gaps"].get(mid) is not None]
         note = spec["note"]
         if mid == "inharmonicity_B" and ruler_rows and max(r["value"] for r in ruler_rows) < B_RESOLUTION:
             ruler_rows, note = [], note + " Real recordings of this note differ by less than the fit resolves, so no ruler is offered."
+        if mid == "inharmonicity_B" and strict_rows and max(r["value"] for r in strict_rows) < B_RESOLUTION:
+            strict_rows = []
+        gap = sc(gp) if ours else None
         rows.append(dict(id=mid, label=spec["label"], unit=spec["unit"], gap_unit=spec["gap_unit"], real=sc(rs.get(key)) if key else None,
-                         ours=sc(rv.get(key)) if key and ours else None, gap=sc(gp) if ours else None,
-                         signed_gap=sc(gaps[mid][1]) if gaps else None, ruler=ruler_rows,
+                         ours=sc(rv.get(key)) if key and ours else None, gap=gap,
+                         signed_gap=sc(gaps[mid][1]) if gaps else None, ruler=ruler_rows, ruler_strict=strict_rows,
+                         inside_loose=_inside(gap, ruler_rows), inside_strict=_inside(gap, strict_rows),
                          other_instruments_and_articulations=context, note=note))
     return rows
+
+
+def _inside(gap, rows):
+    """True/False: is the gap no larger than the largest ruler value? None: no gap (no render) or no ruler to judge by."""
+    if gap is None or not rows:
+        return None
+    return bool(gap <= max(r["value"] for r in rows))
+
+
+def verdict_counts(metrics):
+    """Per-pair counts of the two verdicts: against the loose ruler (this note, other dynamics and takes, neighbouring notes)
+    and the strict one (this note only). no_ruler = measures with a gap but nothing to judge it by."""
+    out = {"measures": sum(1 for m in metrics if m["gap"] is not None)}
+    for kind in ("loose", "strict"):
+        v = [m[f"inside_{kind}"] for m in metrics if m["gap"] is not None]
+        out[kind] = {"inside": sum(1 for x in v if x is True), "outside": sum(1 for x in v if x is False), "no_ruler": sum(1 for x in v if x is None)}
+    return out
 
 
 def staged(final, build):
@@ -920,7 +944,7 @@ def staged(final, build):
         raise
 
 
-def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand_y=None, cand_info=None, ours_meta=None, review=False):
+def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand_y=None, cand_info=None, ours_meta=None, review=False, cand_meta=None):
     """Write <root>/<family>/<note>/pair.json and the files it names (the P8 site contract).
 
     Everything is built in a staging directory inside the note's directory and swapped in only when complete, so a
@@ -929,10 +953,10 @@ def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand
     """
     final = Path(root) / family / note_name
     return staged(final, lambda stage: _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_info,
-                                                          cand_y, cand_info, ours_meta, review))
+                                                          cand_y, cand_info, ours_meta, review, cand_meta))
 
 
-def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, review):
+def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, review, cand_meta=None):
     f0 = hz_of(ref_e["note"])
     inh = ref_e["inst"] in ("xylophone", "marimba")
     n = len(ref_y) if cand_y is None else min(len(ref_y), len(cand_y))
@@ -955,6 +979,7 @@ def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_
         write_wav(out / "ours.wav", yo * g)
     gaps = compare(ours, real) if ours else None
     ruler = refs.ruler(ref_e)
+    metrics = metric_rows(gaps, real, ours, ruler)
     top_hz = float(refs.band_hz) if refs.band_hz else F_HI
     figs = dict(spectrogram=map_images("spectrogram", real, ours, off, out, F_LO, top_hz),
                 scalogram=map_images("scalogram", real, ours, off, out, 60.0, top_hz))
@@ -980,9 +1005,11 @@ def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_
         alignment=dict(onset_real_s=ref_info["source_onset_s"], onset_ours_s=cand_info["onset_s"] if cand_info else None, highpass_hz=hp,
                        level_offset_db=off if ours else None, band_hz=refs.band_hz, preroll_ms=ref_info["preroll_s"] * 1000, tolerance_ms=ALIGN_TOL_MS,
                        onset_criteria_spread_ms=dict(real=ref_info["criteria_spread_ms"], ours=cand_info["criteria_spread_ms"] if cand_info else None)),
-        figures=figs, partials=parts, metrics=metric_rows(gaps, real, ours, ruler),
+        figures=figs, partials=parts, metrics=metrics,
+        verdicts=verdict_counts(metrics) if ours else None,
         ruler_with={c: [r["with_"] for r in rs] for c, rs in ruler.items()},
-        decompose=dict(version=DECOMPOSE_VERSION, grader=GRADER_VERSION, library_note=f'{ref_e["file"]}@{ref_e["name"]}.{ref_e["dyn"]}'),
+        decompose=dict(version=DECOMPOSE_VERSION, grader=GRADER_VERSION, library_note=f'{ref_e["file"]}@{ref_e["name"]}.{ref_e["dyn"]}',
+                       candidate=cand_meta),
     )
     (out / "pair.json").write_text(json.dumps(clean(pj), indent=1, allow_nan=False))
     if review and ours:
@@ -1097,7 +1124,10 @@ def run_pair(refs, c, root):
         ours_meta = dict(wav=c["wav"], git_sha=c["git_sha"], observer=c["observer"], recipe=c["recipe"], sample_rate=wav_sample_rate(c["wav"]))
     ref_y, ref_info = _labelled(f"reference {ref_e['file']}@{ref_e['name']}", refs.aligned, ref_e)
     # `slot` names the pair's directory and note id when one musical note has several pairs (a vowel at C3: "C3-a")
-    return write_pair(root, c["family"], c.get("slot") or c["note"], ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, c.get("review", False))
+    cand_meta = dict(note=c["note"], slot=c.get("slot"), art=ref_e["art"], dyn=ref_e["dyn"], band_hz=c.get("band_hz"),
+                     ref_contains=Path(ref_e["file"]).stem) if c.get("wav") else None  # what a regrade needs to rebuild the same candidate
+    return write_pair(root, c["family"], c.get("slot") or c["note"], ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, c.get("review", False),
+                      cand_meta)
 
 
 _REFS = None

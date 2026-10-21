@@ -417,6 +417,54 @@ class ListeningOnlyTests(unittest.TestCase):
         self.assertIn("low-passed at 3900 Hz", pj["audio"]["level_match"])
 
 
+class StrictRulerTests(unittest.TestCase):
+    def rows(self, gap_spec, ruler):
+        real, ours = note_of(tone()), note_of(tone(cents=5))
+        gaps = {m: (1.0, None) for m in dc.METRICS}
+        gaps["spec_db"] = (gap_spec, None)
+        gaps["f0_cents"] = (gap_spec, None)
+        full = {c: [] for c in ("other_dynamic", "other_take", "neighbour", "other_articulation", "other_instrument")}
+        full.update(ruler)
+        return {m["id"]: m for m in dc.metric_rows(gaps, real, ours, full)}
+
+    def test_a_neighbouring_note_widens_only_the_loose_ruler(self):
+        ruler = dict(other_dynamic=[dict(label="ff", with_="x", gaps=dict(spec_db=2.0, f0_cents=2.0))],
+                     neighbour=[dict(label="next note", with_="y", gaps=dict(spec_db=10.0, f0_cents=10.0))])
+        r = self.rows(5.0, ruler)
+        s = r["spec_db"]
+        self.assertEqual([x["value"] for x in s["ruler"]], [2.0, 10.0])
+        self.assertEqual([x["value"] for x in s["ruler_strict"]], [2.0])
+        self.assertTrue(s["inside_loose"])  # 5 <= 10: flattering, because a neighbouring note is in the ruler
+        self.assertFalse(s["inside_strict"])  # 5 > 2: further from the recording than the same note's other dynamic is from it
+        f = r["f0_cents"]  # pitch-absolute measures never had neighbours in the ruler: strict equals loose
+        self.assertEqual(f["ruler"], f["ruler_strict"])
+        self.assertEqual(f["inside_loose"], f["inside_strict"])
+
+    def test_no_same_note_recording_means_no_strict_claim_not_a_failure(self):
+        ruler = dict(neighbour=[dict(label="next note", with_="y", gaps=dict(spec_db=10.0))])
+        s = self.rows(5.0, ruler)["spec_db"]
+        self.assertEqual(s["ruler_strict"], [])
+        self.assertTrue(s["inside_loose"])
+        self.assertIsNone(s["inside_strict"])
+
+    def test_a_reference_only_pair_has_the_strict_ruler_and_no_verdicts(self):
+        real = note_of(tone())
+        gaps = None
+        ruler = dict(other_dynamic=[dict(label="ff", with_="x", gaps={m: 1.0 for m in dc.METRICS})], neighbour=[])
+        full = {c: [] for c in ("other_dynamic", "other_take", "neighbour", "other_articulation", "other_instrument")}
+        full.update(ruler)
+        rows = dc.metric_rows(gaps, real, None, full)
+        self.assertTrue(all(m["inside_loose"] is None and m["inside_strict"] is None for m in rows))
+        self.assertTrue(any(m["ruler_strict"] for m in rows))
+
+    def test_verdict_counts_add_up(self):
+        ms = [dict(gap=1.0, inside_loose=True, inside_strict=True), dict(gap=2.0, inside_loose=True, inside_strict=False),
+              dict(gap=3.0, inside_loose=False, inside_strict=False), dict(gap=4.0, inside_loose=True, inside_strict=None),
+              dict(gap=None, inside_loose=None, inside_strict=None)]
+        v = dc.verdict_counts(ms)
+        self.assertEqual(v, {"measures": 4, "loose": {"inside": 3, "outside": 1, "no_ruler": 0}, "strict": {"inside": 1, "outside": 2, "no_ruler": 1}})
+
+
 class ContractTests(unittest.TestCase):
     """write_pair against P8's validator (tools/build_instruments.py) on a synthetic library."""
 
@@ -672,6 +720,24 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertIn("I/O error", res["refused"][0]["reason"])
         self.assertEqual((root / "syn" / "Bb3" / "pair.json").read_bytes(), before)  # the earlier pair is untouched
+
+    def test_pair_json_carries_both_verdicts_and_the_candidate_record(self):
+        import json
+        root = self.tmp / "strict"
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="s", observer="o", recipe="r.sh", band_hz=None)
+        pj = dc.run_pair(self.refs, c, root)
+        self.validate(root, "syn", "Bb3")  # P8's validator still accepts it
+        for m in pj["metrics"]:
+            self.assertIn("ruler_strict", m)
+            self.assertIn(m["inside_strict"], (True, False, None))
+        v = pj["verdicts"]
+        self.assertEqual(v["measures"], sum(1 for m in pj["metrics"] if m["gap"] is not None))
+        for kind in ("loose", "strict"):
+            self.assertEqual(sum(v[kind].values()), v["measures"])
+        self.assertLessEqual(v["strict"]["inside"] + v["strict"]["outside"], v["loose"]["inside"] + v["loose"]["outside"])  # strict judges no more measures
+        cand = pj["decompose"]["candidate"]
+        self.assertEqual((cand["note"], cand["dyn"], cand["art"]), ("Bb3", "mf", ""))
+        self.assertEqual(cand["ref_contains"], "Syn.mf.A3B3")  # enough to rebuild the same candidate
 
     def test_a_slot_gives_one_note_several_pairs(self):
         import json
