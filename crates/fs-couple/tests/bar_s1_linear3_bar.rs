@@ -13,13 +13,18 @@
 
 use fs_bem::helmholtz::{Formulation, Medium, exterior_pressure_at_points, solve_radiation_batch};
 use fs_bem::panel3d::SpherePanels;
+use fs_couple::modal_acoustic_time::broadband::{
+    BroadbandModalControls, BroadbandModalObserver, ModalTransferSamples,
+};
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel, ModalAcousticWorkspace,
 };
 use fs_exec::Cx;
 use fs_material::OrthotropicElastic;
 use fs_math::{c64::C64, det};
-use fs_modal::{ModePair, SliceOptions, SliceReport, eigh_gen_dense, slice_window};
+use fs_modal::{
+    ModePair, SliceOptions, SliceReport, WindowPlan, eigh_gen_dense, slice_window, slice_windows,
+};
 use fs_solid::linear3::tet10::{
     BoundaryProjection, QuadraticTetProblem, TetQuadrature, promote_p1_to_p2,
 };
@@ -28,6 +33,7 @@ use fs_solid::linear3::{
     TetLinearElasticProblem, TetMaterialField,
 };
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -1213,13 +1219,24 @@ fn boundary(mesh: &Mesh) -> Vec<[usize; 3]> {
 /// selected coarse node has an exact corresponding finest node; no nearest
 /// point search or shape-fit can fabricate pressure convergence.
 fn surface_and_shapes(ladder: &Ladder, refinement: usize) -> (SpherePanels, Vec<Vec<f64>>) {
+    let modes: Vec<&ModePair> = ladder.selected.iter().map(|&m| &ladder.modes[m]).collect();
+    surface_for(ladder.design, &ladder.mesh, &modes, refinement)
+}
+
+/// [`surface_and_shapes`] for any list of finest-rung modes.
+fn surface_for(
+    design: Design,
+    finest: &Mesh,
+    modes: &[&ModePair],
+    refinement: usize,
+) -> (SpherePanels, Vec<Vec<f64>>) {
     let counts = [12 * refinement, 2 * refinement, refinement];
-    let coarse = mesh(counts, ladder.design);
+    let coarse = mesh(counts, design);
     let faces = boundary(&coarse);
     let surface =
         SpherePanels::from_triangles(faces.iter().map(|f| f.map(|v| coarse.nodes[v])).collect())
             .unwrap();
-    let fine = ladder.mesh.counts;
+    let fine = finest.counts;
     let map: Vec<_> = (0..coarse.nodes.len())
         .map(|node| {
             let k = node % (counts[2] + 1);
@@ -1230,10 +1247,9 @@ fn surface_and_shapes(ladder: &Ladder, refinement: usize) -> (SpherePanels, Vec<
                 + k * fine[2] / counts[2]
         })
         .collect();
-    let shapes = ladder
-        .selected
+    let shapes = modes
         .iter()
-        .map(|&m| {
+        .map(|mode| {
             faces
                 .iter()
                 .zip(surface.normals())
@@ -1241,7 +1257,7 @@ fn surface_and_shapes(ladder: &Ladder, refinement: usize) -> (SpherePanels, Vec<
                     face.iter()
                         .map(|&v| {
                             (0..3)
-                                .map(|c| ladder.modes[m].phi[3 * map[v] + c] * normal[c])
+                                .map(|c| mode.phi[3 * map[v] + c] * normal[c])
                                 .sum::<f64>()
                         })
                         .sum::<f64>()
@@ -2299,4 +2315,661 @@ fn boxwood_contact_on_coarse_rung_against_measured_duration_and_silicone_levels(
                 .all(|e| e.is_finite() && *e > 0.0)
         );
     });
+}
+
+/// Step D: the receiver band is the grader's (apps/instrument-lab/tools/instrgrade/descriptors.py,
+/// ERB_FMAX_HZ = 16000). Every elastic mode of the designed bar below it is retained.
+const RECEIVER_BAND_HZ: f64 = 16_000.0;
+/// Lower edge of the elastic window: above the six rigid modes, below the first elastic one.
+const ELASTIC_LOW_HZ: f64 = 20.0;
+/// Ordered parallel slicing windows across the band (one worker each).
+const BAND_WINDOWS: usize = 8;
+/// Parallel BEM frequency solves.
+const BEM_THREADS: usize = 16;
+/// Transfer training grid: log-spaced to the split, then a linear step that keeps
+/// several samples per period of the path-difference ripple across a 0.3 m bar.
+const GRID_LOW_HZ: f64 = 50.0;
+const GRID_SPLIT_HZ: f64 = 2_000.0;
+const GRID_PER_OCTAVE: f64 = 6.0;
+const GRID_STEP_HZ: f64 = 250.0;
+/// Observer fit orders tried; the lowest inside the budget is used.
+const FIT_ORDERS: [usize; 3] = [16, 32, 48];
+/// Declared held-out relative error budget of the broadband fit.
+const FIT_BUDGET: f64 = 0.05;
+/// Substep ladder of the band render.
+const BAND_SUBSTEPS: [u32; 3] = [8, 16, 32];
+
+static BAND: OnceLock<BandModes> = OnceLock::new();
+static BAND_RADIATION: OnceLock<BandRadiation> = OnceLock::new();
+
+/// Every elastic mode of the designed bar in the receiver band, on each TET10 rung.
+struct BandModes {
+    design: Design,
+    rung_h: Vec<f64>,
+    rung_frequencies: Vec<Vec<f64>>,
+    rung_eigen_errors: Vec<Vec<f64>>,
+    mesh: Mesh,
+    modes: Vec<ModePair>,
+    rigid_projectors: Vec<f64>,
+}
+
+fn band_options() -> SliceOptions {
+    let mut o = options();
+    // A window holds a few modes: a bounded Krylov budget per window.
+    o.max_lanczos = 512;
+    o.ldlt.max_factor_bytes = Some(8 << 30);
+    o
+}
+
+fn band_modes() -> &'static BandModes {
+    BAND.get_or_init(|| {
+        let design = tune_design();
+        with_cx(|cx| {
+            let mat = material(HONDURAS);
+            let edges: Vec<f64> = (0..=BAND_WINDOWS)
+                .map(|i| {
+                    ELASTIC_LOW_HZ
+                        + (RECEIVER_BAND_HZ - ELASTIC_LOW_HZ) * i as f64 / BAND_WINDOWS as f64
+                })
+                .collect();
+            let plan = WindowPlan {
+                windows: edges
+                    .windows(2)
+                    .map(|w| ((TAU * w[0]).powi(2), (TAU * w[1]).powi(2)))
+                    .collect(),
+                threads: BAND_WINDOWS,
+                maximum_windows: BAND_WINDOWS,
+                maximum_bytes: 64 << 30,
+                maximum_relative_halfwidth: 1e-8,
+                coordinates: None,
+            };
+            let (mut rung_h, mut rung_frequencies, mut rung_eigen_errors) =
+                (Vec::new(), Vec::new(), Vec::new());
+            let mut last = None;
+            for r in TET10_RUNGS {
+                let started = Instant::now();
+                cx.checkpoint().expect("cancel before rung");
+                let mesh = mesh([24 * r, 2 * r, r], design);
+                let (nodes, n_tets, a) = tet10_assemble(&mesh, design, &mat, cx);
+                let report = slice_windows(&a.stiffness, &a.mass, &plan, &band_options(), cx)
+                    .expect("certified band windows");
+                let (nnz, wall) = (report.symbolic_nnz_l, report.receipt.wall_s);
+                let mut modes: Vec<ModePair> =
+                    report.reports.into_iter().flat_map(|w| w.modes).collect();
+                canonical_phase(&mut modes);
+                let frequencies: Vec<f64> = modes.iter().map(hz).collect();
+                let errors: Vec<f64> = modes.iter().map(hz_error).collect();
+                let h = (L / (24 * r) as f64)
+                    .max(W / (2 * r) as f64)
+                    .max(T / r as f64)
+                    * design.scale;
+                row(
+                    "band-structural-rung",
+                    "h",
+                    "pass",
+                    &format!(
+                        "{{\"bar_id\":\"B-undercut\",\"element\":\"TET10\",\"rung_h_m\":{h},\"n_tets\":{n_tets},\"free_dofs\":{},\"band_hz\":[{ELASTIC_LOW_HZ},{RECEIVER_BAND_HZ}],\"windows\":{BAND_WINDOWS},\"mode_count\":{},\"f_modes_hz\":{frequencies:?},\"eigen_uncertainty_hz\":{errors:?},\"symbolic_nnz_l\":{nnz},\"slice_wall_s\":{wall}}}",
+                        a.free_dofs.len(),
+                        frequencies.len()
+                    ),
+                    started,
+                );
+                rung_h.push(h);
+                rung_frequencies.push(frequencies);
+                rung_eigen_errors.push(errors);
+                if r == *TET10_RUNGS.last().unwrap() {
+                    let rigid = rigid_projectors(&mesh, &nodes, &a);
+                    last = Some((mesh, modes, rigid));
+                }
+            }
+            let (mesh, modes, rigid_projectors) = last.unwrap();
+            BandModes {
+                design,
+                rung_h,
+                rung_frequencies,
+                rung_eigen_errors,
+                mesh,
+                modes,
+                rigid_projectors,
+            }
+        })
+    })
+}
+
+/// Mode-by-mode TET10 Richardson over the three finest rungs, matched by rank in
+/// frequency (crossing modes would mismatch), when those rungs hold the same
+/// number of band modes; `None` otherwise.
+fn band_estimates(b: &BandModes) -> Option<Vec<Estimate>> {
+    let n = b.rung_frequencies.len();
+    let count = b.modes.len();
+    if b.rung_frequencies[n - 3..].iter().any(|f| f.len() != count) {
+        return None;
+    }
+    Some(
+        (0..count)
+            .map(|m| {
+                let f = |i: usize| b.rung_frequencies[i][m];
+                let (h1, h2, h3) = (b.rung_h[n - 3], b.rung_h[n - 2], b.rung_h[n - 1]);
+                let orders = [
+                    f64::NAN,
+                    observed_order([h1, h2, h3], [f(n - 3), f(n - 2), f(n - 1)]),
+                ];
+                let last = f(n - 2) - f(n - 1);
+                let weight = h_pow(h3, 4.0) / (h_pow(h2, 4.0) - h_pow(h3, 4.0));
+                let correction = last * weight;
+                let (e2, e3) = (b.rung_eigen_errors[n - 2][m], b.rung_eigen_errors[n - 1][m]);
+                Estimate {
+                    orders,
+                    limit_hz: f(n - 1) - correction,
+                    uncertainty_hz: 2.0 * correction.abs() + e3 + (e2 + e3) * weight,
+                    asymptotic: f(n - 3) > f(n - 2)
+                        && f(n - 2) > f(n - 1)
+                        && (3.5..=4.3).contains(&orders[1])
+                        && e2 + e3 < 0.1 * last,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Computed broadband receiver transfers of every band mode (Pa s/(m sqrt(kg)),
+/// exp(-iwt)), plus the BEM panel ladder where the coarser surface is admitted.
+struct BandRadiation {
+    samples: ModalTransferSamples,
+    panel_counts: [usize; 2],
+    /// (Hz, max over modes of |H_fine - H_coarse| / max over modes of |H_fine|).
+    ladder_change: Vec<(f64, f64)>,
+    /// Panels per wavelength of the fine surface at the top training frequency.
+    top_panels_per_wavelength: f64,
+}
+
+/// Training grid and an independent held-out grid inside it (Hz).
+fn band_grid() -> (Vec<f64>, Vec<f64>) {
+    let mut training = Vec::new();
+    let mut f = GRID_LOW_HZ;
+    while f < GRID_SPLIT_HZ {
+        training.push(f);
+        f *= det::pow(2.0, 1.0 / GRID_PER_OCTAVE);
+    }
+    let mut f = GRID_SPLIT_HZ;
+    while f <= RECEIVER_BAND_HZ {
+        training.push(f);
+        f += GRID_STEP_HZ;
+    }
+    let held = training
+        .windows(2)
+        .step_by(4)
+        .map(|w| det::sqrt(w[0] * w[1]))
+        .collect();
+    (training, held)
+}
+
+/// Receiver pressure of every field at one frequency, or `None` when the surface
+/// is below the BEM panels-per-wavelength floor there.
+fn band_solve(surface: &SpherePanels, shapes: &[Vec<f64>], hz: f64) -> Option<(Vec<C64>, f64)> {
+    let fields: Vec<Vec<C64>> = shapes
+        .iter()
+        .map(|s| s.iter().map(|&v| C64::from_re(v)).collect())
+        .collect();
+    let refs: Vec<&[C64]> = fields.iter().map(Vec::as_slice).collect();
+    let k = TAU * hz / Medium::air().sound_speed;
+    match solve_radiation_batch(surface, k, Medium::air(), &refs, Formulation::BurtonMiller) {
+        Ok(solved) => {
+            let ppw = solved[0].panels_per_wavelength;
+            let p = solved
+                .iter()
+                .map(|s| {
+                    exterior_pressure_at_points(surface, s, Medium::air(), &[RECEIVER]).unwrap()[0]
+                })
+                .collect();
+            Some((p, ppw))
+        }
+        Err(fs_bem::helmholtz::HelmholtzError::TooCoarse { .. }) => None,
+        Err(e) => panic!("band BEM solve at {hz} Hz: {e}"),
+    }
+}
+
+fn band_radiation() -> &'static BandRadiation {
+    BAND_RADIATION.get_or_init(|| {
+        let started = Instant::now();
+        let b = band_modes();
+        let modes: Vec<&ModePair> = b.modes.iter().collect();
+        let coarse = surface_for(b.design, &b.mesh, &modes, 2);
+        let fine = surface_for(b.design, &b.mesh, &modes, 4);
+        let (training, held) = band_grid();
+        let all: Vec<f64> = training.iter().chain(&held).copied().collect();
+        let next = AtomicUsize::new(0);
+        let results: Vec<Mutex<Option<BandSolve>>> = all.iter().map(|_| Mutex::new(None)).collect();
+        std::thread::scope(|scope| {
+            for _ in 0..BEM_THREADS {
+                scope.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, AtomicOrdering::Relaxed);
+                        if i >= all.len() {
+                            break;
+                        }
+                        let (p_fine, ppw) =
+                            band_solve(&fine.0, &fine.1, all[i]).expect("fine BEM surface admitted");
+                        let p_coarse = band_solve(&coarse.0, &coarse.1, all[i]).map(|(p, _)| p);
+                        *results[i].lock().unwrap() = Some((p_fine, p_coarse, ppw));
+                    }
+                });
+            }
+        });
+        let solved: Vec<BandSolve> = results
+            .into_iter()
+            .map(|m| m.into_inner().unwrap().expect("every frequency solved"))
+            .collect();
+        let rigid = b.rigid_projectors.len();
+        let row_of = |p: &[C64]| -> Vec<C64> {
+            p.iter().copied().chain(std::iter::repeat_n(C64::ZERO, rigid)).collect()
+        };
+        let mut ladder_change = Vec::new();
+        for (hz, (p_fine, p_coarse, _)) in all.iter().zip(&solved) {
+            if let Some(p_coarse) = p_coarse {
+                let scale = p_fine.iter().map(|p| p.abs()).fold(0.0, f64::max);
+                let change = p_fine
+                    .iter()
+                    .zip(p_coarse)
+                    .map(|(a, b)| (*a - *b).abs())
+                    .fold(0.0, f64::max)
+                    / scale;
+                ladder_change.push((*hz, change));
+            }
+        }
+        let modes_total = b.modes.len() + rigid;
+        let mut per_mode = vec![Vec::with_capacity(training.len()); modes_total];
+        for (p_fine, _, _) in &solved[..training.len()] {
+            for (column, value) in per_mode.iter_mut().zip(row_of(p_fine)) {
+                column.push(value);
+            }
+        }
+        let held_out = held
+            .iter()
+            .zip(&solved[training.len()..])
+            .map(|(&hz, (p_fine, _, _))| (TAU * hz, row_of(p_fine)))
+            .collect();
+        // The declared delay is the earliest possible arrival: the receiver's
+        // distance to the bar's bounding box. The fitted remainder stays causal.
+        let extent = [L * b.design.scale, W * b.design.scale, T * b.design.scale];
+        let nearest = [
+            RECEIVER[0].clamp(0.0, extent[0]),
+            RECEIVER[1].clamp(-0.5 * extent[1], 0.5 * extent[1]),
+            RECEIVER[2].clamp(-0.5 * extent[2], 0.5 * extent[2]),
+        ];
+        let distance = det::sqrt((0..3).map(|i| (RECEIVER[i] - nearest[i]).powi(2)).sum::<f64>());
+        let producer = ladder_change.iter().map(|c| c.1).fold(0.0, f64::max);
+        let top = solved[training.len() - 1].2;
+        row(
+            "band-radiation",
+            "bem",
+            "pass",
+            &format!(
+                "{{\"panel_counts\":[{},{}],\"training_hz\":{training:?},\"held_out_hz\":{held:?},\"ladder_change\":{ladder_change:?},\"coarse_admitted_up_to_hz\":{},\"top_panels_per_wavelength\":{top},\"propagation_delay_s\":{},\"formulation\":\"BurtonMiller\",\"rigid_transfers\":\"zero: direct rigid-body radiation not modelled\"}}",
+                coarse.0.centroids().len(),
+                fine.0.centroids().len(),
+                ladder_change.iter().map(|c| c.0).fold(0.0, f64::max),
+                distance / Medium::air().sound_speed
+            ),
+            started,
+        );
+        BandRadiation {
+            samples: ModalTransferSamples {
+                source_id: format!(
+                    "fs-bem:BurtonMiller:bar-s1-B-undercut:{}-panels:receiver-{RECEIVER:?}",
+                    fine.0.centroids().len()
+                ),
+                omega_rad_s: training.iter().map(|&f| TAU * f).collect(),
+                per_mode,
+                held_out,
+                propagation_delay_s: distance / Medium::air().sound_speed,
+                producer_relative_error_estimate: producer,
+            },
+            panel_counts: [coarse.0.centroids().len(), fine.0.centroids().len()],
+            ladder_change,
+            top_panels_per_wavelength: top,
+        }
+    })
+}
+
+/// (fine-surface receiver pressures, coarse ones when admitted, fine panels per wavelength).
+type BandSolve = (Vec<C64>, Option<Vec<C64>>, f64);
+
+fn band_controls(order: usize) -> BroadbandModalControls {
+    BroadbandModalControls {
+        fit_order: order,
+        fit_iterations: 32,
+        delay_kernel_half_len: 32,
+        // Every fit is built and reported; the declared budget is asserted afterwards.
+        max_held_out_rel_error: 1e9,
+    }
+}
+
+/// The band body: every band mode with the sourced rosewood loss law, plus the six free coordinates.
+fn band_body(b: &BandModes, rate: u32) -> ModalAcousticTimeModel {
+    let mut modes: Vec<_> = b
+        .modes
+        .iter()
+        .map(|m| ModalAcousticMode {
+            angular_frequency_rad_s: TAU * hz(m),
+            damping_ratio: modal_damping_ratio(hz(m)),
+            pressure_per_modal_velocity: C64::ZERO,
+        })
+        .collect();
+    modes.extend(b.rigid_projectors.iter().map(|_| ModalAcousticMode {
+        angular_frequency_rad_s: 0.0,
+        damping_ratio: 0.0,
+        pressure_per_modal_velocity: C64::ZERO,
+    }));
+    ModalAcousticTimeModel::try_new_with_free_coordinates(
+        rate,
+        modes,
+        ModalAcousticTimeBudget::audible_reference(),
+    )
+    .unwrap()
+}
+
+/// The strike of [`render_stroke`] on the band body, heard through the broadband
+/// observer driven by the same held modal forces. Returns the pressure history,
+/// contact time, peak force and the fit's held-out error.
+fn render_band(
+    b: &BandModes,
+    radiation: &BandRadiation,
+    order: usize,
+    substeps: u32,
+    stroke: &Stroke<'_>,
+) -> (Vec<f64>, f64, f64, f64) {
+    let rate = RATE * substeps;
+    let mut body = band_body(b, rate);
+    let (mut observer, report) =
+        BroadbandModalObserver::build(&body, &radiation.samples, band_controls(order), rate)
+            .expect("band observer");
+    let node = strike_node(&b.mesh);
+    let mut phi: Vec<f64> = b.modes.iter().map(|m| -m.phi[3 * node + 2]).collect();
+    phi.extend_from_slice(&b.rigid_projectors);
+    let mut workspace = ModalAcousticWorkspace::new(&body);
+    let mut forces = vec![0.0; phi.len()];
+    let h = 1.0 / f64::from(rate);
+    let (mut position, mut speed) = (0.0, stroke.speed);
+    let (mut detached, mut contact_time, mut peak_force) = (false, 0.0, 0.0_f64);
+    let mut samples = Vec::with_capacity(6 * RATE as usize);
+    for sample in 0..6 * RATE as usize {
+        let mut pressure = 0.0;
+        for substep in 0..substeps {
+            let displacement: f64 = body
+                .states()
+                .iter()
+                .zip(&phi)
+                .map(|(s, p)| s.displacement_m_sqrt_kg * p)
+                .sum();
+            let overlap = position - displacement;
+            if !detached && overlap < 0.0 && speed < 0.0 {
+                detached = true;
+                contact_time = (sample as f64 * f64::from(substeps) + f64::from(substep)) * h;
+            }
+            let load = if detached {
+                0.0
+            } else {
+                (stroke.force)(overlap)
+            };
+            peak_force = peak_force.max(load);
+            for (f, p) in forces.iter_mut().zip(&phi) {
+                *f = p * load;
+            }
+            body.step_into(&forces, &mut workspace)
+                .expect("band strike on 3-D modes");
+            pressure = observer.step(&forces).expect("broadband observation");
+            speed -= h * load / stroke.mass;
+            position += h * speed;
+        }
+        samples.push(pressure);
+    }
+    assert!(detached && contact_time > 0.0);
+    (
+        samples,
+        contact_time,
+        peak_force,
+        report.held_out_max_rel_error,
+    )
+}
+
+/// Step D (p9.md): every elastic mode of the designed bar below the receiver band,
+/// the sourced loss law on each, broadband Burton-Miller radiation through the
+/// existing broadband modal observer, and the boxwood mallet SURROGATE at the
+/// player speeds; the silicone head on the same model for comparison. Supports,
+/// resonator and head loss are still absent.
+#[test]
+fn bar_s1_band_modes_broadband_boxwood_render() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let started = Instant::now();
+    let b = band_modes();
+    let estimates = band_estimates(b);
+    let frequencies: Vec<f64> = b.modes.iter().map(hz).collect();
+    let damping: Vec<f64> = frequencies
+        .iter()
+        .map(|&f| modal_damping_ratio(f))
+        .collect();
+    let (uncertainty_cents, non_asymptotic): (Vec<f64>, Vec<usize>) =
+        estimates.as_ref().map_or((Vec::new(), Vec::new()), |e| {
+            (
+                e.iter()
+                    .zip(&frequencies)
+                    .map(|(e, f)| 1200.0 * det::ln(1.0 + e.uncertainty_hz / f) / det::ln(2.0))
+                    .collect(),
+                e.iter()
+                    .enumerate()
+                    .filter(|(_, e)| !e.asymptotic)
+                    .map(|(i, _)| i)
+                    .collect::<Vec<_>>(),
+            )
+        });
+    let counts: Vec<usize> = b.rung_frequencies.iter().map(Vec::len).collect();
+    row(
+        "band-modes",
+        "h",
+        if estimates.is_some() {
+            "pass"
+        } else {
+            "refuse"
+        },
+        &format!(
+            "{{\"rung_mode_counts\":{counts:?},\"f_modes_hz\":{frequencies:?},\"damping_ratio\":{damping:?},\"richardson_uncertainty_cents\":{uncertainty_cents:?},\"non_asymptotic_modes\":{non_asymptotic:?},\"matching\":\"rank in frequency\"}}"
+        ),
+        started,
+    );
+    let radiation = band_radiation();
+    let fits: Vec<(usize, f64)> = FIT_ORDERS
+        .iter()
+        .map(|&order| {
+            let rate = RATE * BAND_SUBSTEPS[0];
+            let body = band_body(b, rate);
+            let (_, report) = BroadbandModalObserver::build(
+                &body,
+                &radiation.samples,
+                band_controls(order),
+                rate,
+            )
+            .expect("band observer fit");
+            (order, report.held_out_max_rel_error)
+        })
+        .collect();
+    let order = fits
+        .iter()
+        .find(|f| f.1 <= FIT_BUDGET)
+        .or_else(|| fits.iter().min_by(|a, c| a.1.total_cmp(&c.1)))
+        .unwrap()
+        .0;
+    row(
+        "band-fit-orders",
+        "fit",
+        "pass",
+        &format!(
+            "{{\"held_out_max_rel_error_by_order\":{fits:?},\"order_used\":{order},\"budget\":{FIT_BUDGET}}}"
+        ),
+        started,
+    );
+
+    let card = fs_matdb::ContactLawCard::parse(BOXWOOD_CONTACT_PACK, BOXWOOD_CONTACT)
+        .expect("boxwood contact card");
+    let mass = scalar(BOXWOOD_MALLET, "mallet_equivalent_mass");
+    let k = card.k_n_per_m_alpha;
+    let boxwood = |overlap: f64| {
+        if overlap > 0.0 {
+            k * det::pow(overlap, card.alpha)
+        } else {
+            0.0
+        }
+    };
+    let silicone_law = hertz_law(HEAD_E, HEAD_NU);
+    let interface = hertz_interface();
+    let silicone = |overlap: f64| force(silicone_law, &interface, overlap);
+    let finest = *BAND_SUBSTEPS.last().unwrap();
+    // (name, role, boxwood head?, speed, substeps)
+    let mut jobs: Vec<(String, &str, bool, f64, u32)> = BAND_SUBSTEPS
+        .iter()
+        .map(|&s| {
+            (
+                format!("time-s{s}"),
+                "time-ladder",
+                true,
+                NOMINAL_SPEED_M_S,
+                s,
+            )
+        })
+        .collect();
+    jobs.push(("replay".into(), "replay", true, NOMINAL_SPEED_M_S, finest));
+    for v in PLAYER_SPEEDS_M_S {
+        if v.to_bits() != NOMINAL_SPEED_M_S.to_bits() {
+            jobs.push((format!("boxwood-v{v}"), "speed-sweep", true, v, finest));
+        }
+    }
+    jobs.push((
+        "silicone-v0.1".into(),
+        "silicone-comparison",
+        false,
+        STROKE,
+        finest,
+    ));
+    let renders: Vec<(Vec<f64>, f64, f64, f64)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = jobs
+            .iter()
+            .map(|(_, _, wooden, v, s)| {
+                let (boxwood, silicone) = (&boxwood, &silicone);
+                scope.spawn(move || {
+                    let stroke = if *wooden {
+                        Stroke {
+                            mass,
+                            speed: *v,
+                            force: boxwood,
+                        }
+                    } else {
+                        Stroke {
+                            mass: HEAD_MASS,
+                            speed: *v,
+                            force: silicone,
+                        }
+                    };
+                    render_band(b, radiation, order, *s, &stroke)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let ladder: Vec<&Vec<f64>> = renders[..BAND_SUBSTEPS.len()]
+        .iter()
+        .map(|r| &r.0)
+        .collect();
+    let relative = |a: &[f64], c: &[f64]| {
+        (a.iter().zip(c).map(|(x, y)| (x - y) * (x - y)).sum::<f64>()
+            / c.iter().map(|y| y * y).sum::<f64>())
+        .sqrt()
+    };
+    let differences: Vec<f64> = ladder
+        .windows(2)
+        .map(|w| relative(w[0].as_slice(), w[1].as_slice()))
+        .collect();
+    let nominal = &renders[BAND_SUBSTEPS.len() - 1];
+    let replay = &renders[BAND_SUBSTEPS.len()];
+
+    if let Some(out) = artifact_dir() {
+        std::fs::create_dir_all(&out).unwrap();
+        for ((name, role, wooden, v, s), (signal, contact, peak, held)) in jobs.iter().zip(&renders)
+        {
+            if *role == "replay" || (*role == "time-ladder" && *s != finest) {
+                continue;
+            }
+            let wav = fs_couple::pcm_wav::high_resolution::encode_pressure_wav(
+                signal,
+                RATE,
+                1,
+                FULL_SCALE_PA,
+                fs_couple::pcm_wav::high_resolution::Encoding::Float32,
+            )
+            .unwrap();
+            let hash = fs_blake3::hash_domain("org.frankensim.music-render.wav.v1", &wav).to_hex();
+            let stem = if *role == "time-ladder" {
+                format!("bar-s1-band-boxwood-v{v}")
+            } else {
+                format!("bar-s1-band-{name}")
+            };
+            std::fs::write(out.join(format!("{stem}-f32.wav")), wav).unwrap();
+            let head = if *wooden {
+                "SURROGATE: boxwood head of Doutaut and Chaigne 1994 (J. Phys. IV C5-613) for the recording's rosewood mallets, contact card K 4.1e8 N/m^1.5, 11.2 g"
+            } else {
+                "previous silicone sphere (Johnston 2014 E), 2 g, for comparison"
+            };
+            let metadata = format!(
+                "{{\"render\":\"{stem}\",\"role\":\"{}\",\"head\":\"{head}\",\"speed_m_s\":{v},\"contact_time_s\":{contact},\"peak_force_n\":{peak},\"substeps\":{s},\"band_hz\":[{ELASTIC_LOW_HZ},{RECEIVER_BAND_HZ}],\"band_modes\":{},\"f_modes_hz\":{frequencies:?},\"damping_ratio\":{damping:?},\"loss_law\":\"Chaigne and Doutaut 1997 rosewood-bar law on every mode, a scenario (another bar; torsion and lateral modes included)\",\"richardson_uncertainty_cents\":{uncertainty_cents:?},\"observer\":\"broadband BroadbandModalObserver, fit order {order}, held-out max relative error {held}\",\"bem_panels\":{:?},\"bem_ladder_change\":{:?},\"bem_top_panels_per_wavelength\":{},\"time_axis_relative_l2\":{differences:?},\"design_depth\":{},\"design_scale\":{},\"wav_blake3\":\"{hash}\",\"sample_rate_hz\":{RATE},\"full_scale_pa\":{FULL_SCALE_PA},\"encoding\":\"float32\",\"receiver_m\":{RECEIVER:?},\"rigid_body_radiation\":false,\"supports\":false,\"resonator\":false,\"same_specimen\":false,\"acceptance\":false}}\n",
+                if *role == "time-ladder" {
+                    "nominal"
+                } else {
+                    *role
+                },
+                frequencies.len(),
+                radiation.panel_counts,
+                radiation.ladder_change,
+                radiation.top_panels_per_wavelength,
+                b.design.depth,
+                b.design.scale
+            );
+            std::fs::write(out.join(format!("{stem}-render.json")), metadata).unwrap();
+        }
+    }
+    for ((name, role, wooden, v, s), (_, contact, peak, held)) in jobs.iter().zip(&renders) {
+        row(
+            "band-render",
+            role,
+            "pass",
+            &format!(
+                "{{\"render\":\"{name}\",\"boxwood\":{wooden},\"speed_m_s\":{v},\"substeps\":{s},\"contact_time_s\":{contact},\"peak_force_n\":{peak},\"held_out_max_rel_error\":{held},\"acceptance\":false}}"
+            ),
+            started,
+        );
+        if *wooden {
+            card.lookup(*peak, *v)
+                .expect("boxwood stroke inside the card's validity");
+        }
+    }
+    assert!(
+        nominal
+            .0
+            .iter()
+            .zip(&replay.0)
+            .all(|(a, c)| a.to_bits() == c.to_bits()),
+        "same-host exact replay"
+    );
+    assert!(
+        differences.windows(2).all(|d| d[1] < d[0]) && *differences.last().unwrap() < 0.01,
+        "band strike time ladder needs refinement: {differences:?}"
+    );
+    assert!(nominal.1 > 0.0 && nominal.1 < 1e-3);
+    assert!(
+        estimates.is_some(),
+        "the three finest rungs disagree on the band mode count: {counts:?}"
+    );
+    let held = fits.iter().find(|f| f.0 == order).unwrap().1;
+    assert!(
+        held <= FIT_BUDGET,
+        "broadband fit outside its declared budget: {held} > {FIT_BUDGET}"
+    );
 }
