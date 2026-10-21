@@ -292,6 +292,7 @@ fn a_mesh_and_mode_count_beyond_every_former_ceiling_run_through_the_whole_pipel
     let mut spec = input::Spec::parse(performance.as_bytes()).unwrap();
     spec.body.modes = 70;
     scoped(|cx, gate| {
+        let constructing = std::time::Instant::now();
         let mut r = spec.compile_with_body(cx, gate, Some(profile), |name| Ok(if name == "body.fsmatpk" {
             pack_with_shear(name, 1.0, 1.0, None) } else { pack(name, 1.0, None) })).unwrap();
         let source = r.performance.bank().source().bank();
@@ -301,7 +302,16 @@ fn a_mesh_and_mode_count_beyond_every_former_ceiling_run_through_the_whole_pipel
         assert_eq!(image.physical_modes().len(), 70);
         assert!(image.physical_modes().iter().all(|v| v.len() == 6 * nx * ny));
         assert_eq!(image.damping().mode_count(), 70);
-        let samples = pressure(&mut r, 7);
+        // Progress lines (stderr, visible with --nocapture): a 98-coordinate dense network is the costly part of this
+        // test, so report construction and every 512 samples instead of leaving a long render silent.
+        eprintln!("ceiling e2e: constructed in {:.1?}", constructing.elapsed());
+        let mut samples = vec![0.0; r.spec.samples as usize];
+        let total = samples.len();
+        let rendering = std::time::Instant::now();
+        for (i, block) in samples.chunks_mut(7).enumerate() {
+            r.performance.block(block).unwrap();
+            if (7 * i) % 511 < 7 { eprintln!("ceiling e2e: {} of {total} samples after {:.1?}", 7 * i + block.len(), rendering.elapsed()); }
+        }
         assert!(samples.iter().all(|p| p.is_finite()));
         assert!(samples.iter().any(|p| p.abs() > 1e-14), "the body radiated nothing");
     });
