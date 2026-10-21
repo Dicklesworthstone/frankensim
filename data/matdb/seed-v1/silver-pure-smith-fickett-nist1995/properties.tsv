@@ -1,0 +1,30 @@
+frankensim.matdb-source.v1
+observation	sf95-table-1	Pure silver (a critical review of low-temperature properties; the table gives values from secondary sources): density at 20 C, Young's modulus and Poisson ratio at 293 K, single-crystal elastic constants at 0 K	Table 1 of the review, values as printed; the single-crystal constants are for 0 K and are kept only to check the polycrystal modulus against the Voigt and Reuss bounds	Bulk pure silver, not a drawn wire or a plated copper wire: the string-winding silver of musical strings is an alloy or plated and work-hardened and its loss is not in this pack; no uncertainty is printed in the table
+observation	sf95-annealed	Fully annealed silver specimens (room temperature assumed by the review)	Stress-strain tests quoted in the review: annealed as received, and annealed for 1 h at 700 C after 5 percent overstrain in tension	Pure silver annealed shows no proportionality of stress to strain over the whole diagram; the limit of proportionality was 17.9 MPa and the 0.01 percent proof stress 45.5 MPa
+scalar	density	sf95-table-1	density	10492	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	293.15	293.15	K
+scalar	young-modulus	sf95-table-1	young_modulus	82500000000	Pa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	T	293	293	K
+scalar	poisson-ratio	sf95-table-1	poisson_ratio	0.364	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	T	293	293	K
+scalar	young-modulus-annealed-as-received	sf95-annealed	young_modulus_annealed_as_received	71000000000	Pa	constant
+uncertainty	young-modulus-annealed-as-received	unstated	-	-	-	-
+validity	young-modulus-annealed-as-received	temperature_known	0	0	1
+scalar	young-modulus-annealed-after-overstrain	sf95-annealed	young_modulus_annealed_700c_after_5_percent_overstrain	78000000000	Pa	constant
+uncertainty	young-modulus-annealed-after-overstrain	unstated	-	-	-	-
+validity	young-modulus-annealed-after-overstrain	temperature_known	0	0	1
+scalar	young-modulus-0k	sf95-table-1	young_modulus_at_0_k	91300000000	Pa	constant
+uncertainty	young-modulus-0k	unstated	-	-	-	-
+validity	young-modulus-0k	T	0	0	K
+scalar	c11-0k	sf95-table-1	single_crystal_c11_at_0_k	131500000000	Pa	constant
+uncertainty	c11-0k	unstated	-	-	-	-
+validity	c11-0k	T	0	0	K
+scalar	c12-0k	sf95-table-1	single_crystal_c12_at_0_k	97330000000	Pa	constant
+uncertainty	c12-0k	unstated	-	-	-	-
+validity	c12-0k	T	0	0	K
+scalar	c44-0k	sf95-table-1	single_crystal_c44_at_0_k	51100000000	Pa	constant
+uncertainty	c44-0k	unstated	-	-	-	-
+validity	c44-0k	T	0	0	K
