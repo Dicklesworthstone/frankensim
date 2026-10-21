@@ -24,6 +24,7 @@ pub mod product_compliance;
 pub mod product_control_variate;
 pub mod product_copula;
 pub mod product_copula_qmc;
+pub mod product_epistemic;
 pub mod product_execution;
 pub mod product_importance;
 pub mod product_lhs;
@@ -43,6 +44,9 @@ pub use product_compliance::UqComplianceError;
 pub use product_control_variate::{LinearControlEstimate, LinearControlVariate, UqControlError};
 pub use product_copula::GaussianCopulaExecution;
 pub use product_copula_qmc::GaussianCopulaQmcExecution;
+pub use product_epistemic::{
+    EpistemicConfig, EpistemicExecution, EpistemicReport, EpistemicStatus, EpistemicWitness,
+};
 pub use product_execution::UqExecution;
 pub use product_importance::{
     ImportanceConfig, ImportanceEstimate, ImportanceExecution, ImportanceObservation,
