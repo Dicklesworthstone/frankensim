@@ -70,3 +70,81 @@ failed/cancelled work, budget extension, and concurrent batch equivalence.
 These Rust tests were authored but not executed in the authoring environment:
 Cargo/rustc and DSR/RCH were unavailable. Independent Python/Decimal aggregation
 checks are not execution of the Rust implementation.
+
+## Population optimization and executable workflow
+
+`scan_power_fit::scenarios::ScenarioPopulationStudy` connects the evaluator to
+`ConstrainedDifferentialEvolutionState`. The existing DE implementation still
+owns sampling, mutation, feasibility ranking, frozen generations, parallel
+publication and successful-sibling caches. Every case's rows enter selection.
+A failed physical case remains an error, not an infeasible/penalty score.
+
+The driver requires enough remaining physical work in **each case** for every
+remaining search attempt plus one replay. Failed partial candidates retain their
+individual counts. Serial and parallel advances bound dispatch by the least
+remaining case allowance, excluding that replay. Extension validates the whole
+set of search/physical totals before mutating them. Parallel execution uses the
+existing TilePool, worker-local Cx and all original case batches; candidates,
+not cases within a candidate, run in parallel. There is no extra nested pool.
+
+`replay_best` runs every case again and requires the aggregate objective and
+feasibility score to match their selected values bit-for-bit before returning
+the common sources and full case reports. The DE score does not store earlier
+full fields, so this is not a bitwise comparison of every old nodal value.
+Factories must retain their original deterministic model semantics.
+
+`aggregate_target_met` refers to the search's declared aggregate loss threshold.
+`every_case_target_met` additionally requires every original case loss to meet
+that threshold. Under mean loss, the former must not be called recovery of every
+case. Neither says the sample set covers a continuous uncertainty distribution.
+
+Run the synthetic example from the repository root:
+
+```bash
+# Single starting state: recover the familiar approximately 30 W / 20 W fit.
+cargo run --manifest-path examples/scan_power_fit/Cargo.toml \
+  --example scenario_scan_fit -- --cases 80
+
+# Two starting states, with ALL physical limits retained; parallel candidates.
+cargo run --manifest-path examples/scan_power_fit/Cargo.toml \
+  --example scenario_scan_fit -- --cases 80,90 --workers 4 60 0.38 2400
+
+# Minimize worst-case original loss instead of weighted-mean loss.
+cargo run --manifest-path examples/scan_power_fit/Cargo.toml \
+  --example scenario_scan_fit -- --cases 80,90 --worst-case 60 0.32 2400
+```
+
+`--cases` gives initial specific enthalpies in J/kg, `--weights` gives matching
+positive case preferences, and positional arguments are the per-case absorbed
+energy cap in joules, sampled peak liquid mass fraction, and search-attempt cap.
+Default cases are 80 and 90 J/kg with equal weights. Each original specimen is a
+unit-volume/density cube with a 100 J/kg latent plateau, heated uniformly for
+two one-second intervals. Both cases target liquid mass fractions 0.1 then 0.3.
+Their exact targets cannot be met simultaneously by one common schedule.
+
+Consequently the two-case default prints its feasible compromise and exits
+unsuccessfully for missed individual targets. This is deliberate: exhausting
+a search, producing a feasible candidate, and exactly recovering every target
+are three different outcomes. The executable reports all of them without an
+optimum claim. A single-case invocation can recover its targets.
+
+Independent analytical phase-balance/Python DE checks give approximately:
+
+| Policy / limits | Common watts, first then second second | Aggregate loss |
+| --- | --- | --- |
+| Equal-weight mean, loose limits | 25, 20 | 0.25 |
+| Mean with cold:warm weights 1:3, loose limits | 22.5, 20 | 0.1875 |
+| Worst case, loose limits | 25, 20 | 0.25 |
+| Worst case, peak envelope capped at 0.32 | 28.2079, 13.5841 | 0.35291 |
+
+The cold-only 30/20 W schedule produces final fractions 0.3 and 0.4 in the cold
+and warm cases. Its warm envelope is approximately 0.40207944, violating a 0.38
+cap even though the cold case passes. The joint 25/20 W design produces 0.25
+and 0.35, with warm envelope approximately 0.35207944. These are independent
+uniform-P1 analytical references, not native Rust execution or experimental data.
+
+One driver unit test covers replay reservation. Four executable regressions
+cover the compromise, worst-case hot-spot limits, serial/parallel continuation,
+and command/cancellation admission. Together with the evaluator, eleven Rust
+tests are authored. Native compilation/execution remains unverified because
+DSR, its documented fallback, RCH, Cargo and rustc were unavailable.
