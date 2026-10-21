@@ -181,7 +181,7 @@ function buildCard(c: Card, notes: Record<string, string>): HTMLElement {
     const kind = c.status.badge === "blocked" ? "blocked" : c.status.badge === "ungraded" ? "ungraded" : "none";
     root.append(el("div", { class: "ir-empty" }, el("h4", {}, kind === "blocked" ? "Blocked" : kind === "ungraded" ? "Rendered, nothing to compare" : "No render yet"),
       el("p", {}, kind === "blocked" ? c.status.blocked ?? "" : kind === "ungraded" ? c.status.line : "Nothing has been rendered for this family, so there is nothing to hear or measure. The comparison with a real recording appears here when there is."),
-      c.reference ? el("p", { class: "small muted" }, "The real recordings are in the reference library; their spectrograms, scalograms and the real-vs-real ruler appear here once they have been analysed.") : null),
+      c.reference && !c.withheld?.length ? el("p", { class: "small muted" }, "The real recordings are in the reference library; their spectrograms, scalograms and the real-vs-real ruler appear here once they have been analysed.") : null),
       el("h4", { class: "ir-h" }, "What the description says"), physicsLists(c));
     return root;
   }

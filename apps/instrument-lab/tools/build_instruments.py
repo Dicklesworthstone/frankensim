@@ -75,6 +75,9 @@ reference to grade against". Next to graded notes they do not change the family'
 
 --only FAMILY=NOTE,NOTE shows just those notes of a family (the review build's file limit). The others get no files, are
 listed on the card as card.withheld, and are in no badge: the badge covers exactly the notes the page shows.
+--recordings-only-if-rendered does the same for a family with no render at all: its recording-only notes (a real note
+and its pictures, no FrankenSim) get no files and are listed as withheld, so a file-limited build spends its files on
+what has been rendered.
 
 status.json (frankensim.instrument-status.v1), written by the family lane, prose only (no measured numbers):
   family, title, reference_instrument (a references.json files[].instrument, or null), summary,
@@ -421,6 +424,15 @@ def grader_refusal(pj, family: str, note: str) -> dict | None:
     return {"note": note, "kind": "grader", "reason": rec["reason"].strip(), "render_sha": rec.get("render_sha"), "time": rec.get("time"), "problems": [rec["reason"].strip()]}
 
 
+def holds_a_render(pj_path: Path) -> bool:
+    """True when this pair.json carries a render (a graded pair or a listening-only note), not a grader refusal."""
+    try:
+        pj = json.loads(pj_path.read_text())
+    except json.JSONDecodeError:
+        return False
+    return isinstance(pj, dict) and pj.get("ours") is not None and pj.get("refused") is None
+
+
 def check_audio(base: Path, pj: dict) -> list[str]:
     problems = []
     for side in ("real", "ours"):
@@ -618,6 +630,7 @@ def main() -> int:
     ap.add_argument("--descriptions", type=Path, default=DESCRIPTIONS, help="where <family>/status.json live")
     ap.add_argument("--audio-ext", choices=("m4a", "mp4"), default="m4a", help="extension of the A/B clips; the codec is AAC either way (mp4 for a host that serves no .m4a)")
     ap.add_argument("--only", action="append", default=[], metavar="FAMILY=NOTE,NOTE", help="show only these notes of a family; the rest are listed on its card as withheld and get no files")
+    ap.add_argument("--recordings-only-if-rendered", action="store_true", help="a family with no render shows none of its recording-only notes; they are listed as withheld and get no files")
     args = ap.parse_args()
     only: dict[str, set[str]] = {}
     for spec in args.only:
@@ -647,7 +660,9 @@ def main() -> int:
         status = load_status(fid, args.descriptions)
         pairs, refused, withheld = [], [], []
         fam_dir = args.analysis / fid
-        for pj_path in sorted(fam_dir.glob("*/pair.json")) if fam_dir.is_dir() else []:
+        pair_files = sorted(fam_dir.glob("*/pair.json")) if fam_dir.is_dir() else []
+        has_render = any(holds_a_render(p) for p in pair_files)
+        for pj_path in pair_files:
             note = pj_path.parent.name
             base = pj_path.parent
             try:
@@ -656,7 +671,7 @@ def main() -> int:
                 if refusal:
                     refused.append(refusal)
                     continue
-                if fid in only and note not in only[fid]:
+                if (fid in only and note not in only[fid]) or (args.recordings_only_if_rendered and pj.get("ours") is None and not has_render):
                     withheld.append(note)
                     continue
                 problems = validate_pair(pj, fid, note, base, refs_by_id)

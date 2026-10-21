@@ -483,6 +483,29 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(card["status"]["counts"]["notes_with_render"], 1, "the badge covers the notes shown")
             self.assertIn("clarinet=G9", err.getvalue(), "a note named in --only that does not exist is reported")
 
+    def test_recording_only_notes_are_left_out_of_a_family_with_no_render_and_only_then(self):
+        def build(root: Path, out: Path, *flag: str) -> dict:
+            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out), *flag]):
+                self.assertEqual(B.main(), 0)
+            return json.loads((out / "clarinet" / "card.json").read_text())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "analysis"
+            make_pair(root, with_ours=False)  # a recording-only note, and nothing rendered in the family
+            card = build(root, Path(tmp) / "all")
+            self.assertEqual(([p["note"] for p in card["pairs"]], card["withheld"]), (["D3"], []))
+            card = build(root, Path(tmp) / "lean", "--recordings-only-if-rendered")
+            self.assertEqual(([p["note"] for p in card["pairs"]], card["withheld"]), ([], ["D3"]))
+            self.assertFalse((Path(tmp) / "lean" / "clarinet" / "D3").exists(), "a withheld note ships no files")
+            # Once the family has a render, its recording-only notes are shown again.
+            e3 = root / "clarinet" / "E3"
+            shutil.copytree(root / "clarinet" / "D3", e3)
+            make_listening(root, "clarinet", "F3")
+            e3_pair = json.loads((e3 / "pair.json").read_text())
+            (e3 / "pair.json").write_text(json.dumps(dict(e3_pair, note="E3")))
+            card = build(root, Path(tmp) / "rendered", "--recordings-only-if-rendered")
+            self.assertEqual(([p["note"] for p in card["pairs"]], card["withheld"]), (["F3", "D3", "E3"], []))
+
     def test_a_refused_pair_is_listed_and_the_exit_code_says_so(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, out = Path(tmp) / "analysis", Path(tmp) / "out"
