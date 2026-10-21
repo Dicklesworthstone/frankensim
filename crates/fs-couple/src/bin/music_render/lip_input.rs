@@ -15,9 +15,12 @@ use fs_material::gas_species::input::ThermochemicalSources;
 
 use super::{WAV_HASH_DOMAIN, create_outputs, json_string};
 
-fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
+type Options<'a> = (&'a str, &'a str, usize, Option<&'a str>);
+
+fn options(args: &[String]) -> Result<Options<'_>, String> {
     let mut paths = Vec::new();
     let mut block = None;
+    let mut mouthpiece = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -32,6 +35,17 @@ fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
                         .ok_or_else(|| "--block needs an integer in 1..=65536".to_string())?,
                 );
             }
+            "--mouthpiece-wav" => {
+                if mouthpiece.is_some() {
+                    return Err("--mouthpiece-wav may only be supplied once".into());
+                }
+                mouthpiece = Some(
+                    iter.next()
+                        .map(String::as_str)
+                        .filter(|v| !v.starts_with('-'))
+                        .ok_or_else(|| "--mouthpiece-wav needs a path".to_string())?,
+                );
+            }
             value if value.starts_with('-') => {
                 return Err(format!(
                     "unsupported lip option {value:?}; geometry, lip, pressure, duration and full-scale belong to the source file"
@@ -41,9 +55,12 @@ fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
         }
     }
     let [input, output] = paths.as_slice() else {
-        return Err("usage: music_render lip INPUT.performance OUT.wav [--block N]".into());
+        return Err(
+            "usage: music_render lip INPUT.performance OUT.wav [--block N] [--mouthpiece-wav PATH]"
+                .into(),
+        );
     };
-    Ok((*input, *output, block.unwrap_or(512)))
+    Ok((*input, *output, block.unwrap_or(512), mouthpiece))
 }
 
 struct Rendered {
@@ -201,7 +218,7 @@ pub(super) fn run_with_gas_sources(
     args: &[String],
     sources: Option<&ThermochemicalSources<'_>>,
 ) -> Result<(), String> {
-    let (input, output, block) = options(args)?;
+    let (input, output, block, mouthpiece_path) = options(args)?;
     let output = Path::new(output);
     let sidecar = output.with_extension("provenance.json");
     if output == sidecar.as_path() || output.exists() || sidecar.exists() {
@@ -218,6 +235,9 @@ pub(super) fn run_with_gas_sources(
     let samples =
         usize::try_from(info.samples).map_err(|_| "sample count exceeds this host".to_string())?;
     let (mut audio, mut metadata) = create_outputs(output, &sidecar)?;
+    if mouthpiece_path.is_some() {
+        performance.record_mouthpiece();
+    }
     let rendered = render_at_rate(
         &mut performance,
         &mut audio,
@@ -271,6 +291,32 @@ pub(super) fn run_with_gas_sources(
     writeln!(metadata, "{provenance}")
         .and_then(|_| metadata.flush())
         .map_err(|e| format!("sidecar write failed: {e}"))?;
+    if let Some(path) = mouthpiece_path {
+        // Diagnostic output: the INTERNAL pressure at the mouthpiece, mean (the mouth's DC operating point) removed. The
+        // PCM scale is the next power of ten above its peak, printed here because the render's own scale is far too small.
+        let mut signal = performance.mouthpiece_pressure().to_vec();
+        let mean = signal.iter().sum::<f64>() / signal.len().max(1) as f64;
+        for p in &mut signal {
+            *p -= mean;
+        }
+        let peak = signal.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
+        let full_scale = 10f64.powf((peak * 1.01).max(1.0).log10().ceil());
+        let (wav, clipped) =
+            fs_couple::pcm_wav::encode_pcm16_wav(&signal, info.sample_rate_hz, full_scale)
+                .map_err(|e| format!("mouthpiece wav encode failed: {e:?}"))?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| format!("mouthpiece wav create refused: {e}"))?;
+        file.write_all(&wav)
+            .and_then(|()| file.flush())
+            .map_err(|e| format!("mouthpiece wav write failed: {e}"))?;
+        println!(
+            "{{\"suite\":\"music-render\",\"mouthpiece_wav\":{},\"full_scale_pa\":{full_scale:e},\"dc_removed_pa\":{mean:e},\"peak_ac_pa\":{peak:e},\"clipped\":{clipped}}}",
+            json_string(path)
+        );
+    }
     println!(
         "{{\"suite\":\"music-render\",\"verdict\":\"rendered\",\"fixture\":\"lip-input\",\
          \"wav\":{},\"sample_rate_hz\":{},\"samples\":{samples},\"clipped\":{},\"peak_pa\":{:e},\
@@ -293,6 +339,24 @@ mod tests {
     fn options_refuse_physical_overrides_and_missing_paths() {
         let args = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
         assert!(options(&args(&["in.performance", "out.wav"])).is_ok());
+        assert_eq!(
+            options(&args(&["a", "b", "--mouthpiece-wav", "m.wav"]))
+                .unwrap()
+                .3,
+            Some("m.wav")
+        );
+        assert!(options(&args(&["a", "b", "--mouthpiece-wav"])).is_err());
+        assert!(
+            options(&args(&[
+                "a",
+                "b",
+                "--mouthpiece-wav",
+                "m.wav",
+                "--mouthpiece-wav",
+                "n.wav"
+            ]))
+            .is_err()
+        );
         assert_eq!(options(&args(&["a", "b", "--block", "64"])).unwrap().2, 64);
         assert!(options(&args(&["a", "b", "--seconds", "3"])).is_err());
         assert!(options(&args(&["a"])).is_err());

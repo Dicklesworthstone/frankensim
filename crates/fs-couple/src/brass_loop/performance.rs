@@ -681,6 +681,7 @@ impl LipDescription {
             trace: [0.0],
             window_len: u64::from(self.rate_hz / 10).max(1),
             acc: Vec::new(),
+            tap: None,
         })
     }
 }
@@ -805,6 +806,7 @@ pub struct LipPerformance {
     trace: [f64; 1],
     window_len: u64,
     acc: Vec<WindowAcc>,
+    tap: Option<Vec<f64>>,
 }
 
 fn refusal(what: String) -> RenderError {
@@ -822,6 +824,18 @@ impl LipPerformance {
     #[must_use]
     pub fn diagnostics(&self) -> &[super::BrassBlockDiag] {
         self.voice.diagnostics()
+    }
+
+    /// Start recording the pressure at the mouthpiece (the internal pressure the
+    /// lip sees, DC included) for every sample rendered from now on.
+    pub fn record_mouthpiece(&mut self) {
+        self.tap.get_or_insert_with(Vec::new);
+    }
+
+    /// The recorded mouthpiece pressure [Pa] (empty unless [`Self::record_mouthpiece`] ran).
+    #[must_use]
+    pub fn mouthpiece_pressure(&self) -> &[f64] {
+        self.tap.as_deref().unwrap_or(&[])
     }
 
     /// Lip and bore statistics per tenth of a second rendered so far.
@@ -896,6 +910,9 @@ impl LipPerformance {
             let window = usize::try_from(n / self.window_len).unwrap_or(usize::MAX);
             while self.acc.len() <= window {
                 self.acc.push(WindowAcc::new());
+            }
+            if let Some(tap) = self.tap.as_mut() {
+                tap.extend_from_slice(&self.mouthpiece[..chunk]);
             }
             let acc = &mut self.acc[window];
             for &p in &self.mouthpiece[..chunk] {
@@ -1264,6 +1281,23 @@ mod tests {
         assert!((0.0..=1.0).contains(&w.closed_chunk_fraction));
         assert!(w.bore_ac_rms_pa.is_finite() && w.bore_ac_rms_pa <= w.bore_ac_peak_pa + 1e-9);
         assert!(w.bore_mean_pa.is_finite());
+    }
+
+    #[test]
+    fn the_mouthpiece_tap_records_every_rendered_sample_only_when_asked() {
+        let description = LipDescription::from_bytes(fixture("").as_bytes()).expect("parses");
+        let mut performance = description.build().expect("builds");
+        assert!(performance.mouthpiece_pressure().is_empty());
+        let mut block = vec![0.0; 600];
+        performance.block(&mut block).expect("block");
+        assert!(performance.mouthpiece_pressure().is_empty());
+        performance.record_mouthpiece();
+        for _ in 0..3 {
+            performance.block(&mut block).expect("block");
+        }
+        let tap = performance.mouthpiece_pressure();
+        assert_eq!(tap.len(), 1800);
+        assert!(tap.iter().all(|p| p.is_finite()));
     }
 
     #[test]
