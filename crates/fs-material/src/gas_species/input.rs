@@ -18,6 +18,8 @@ pub enum ThermochemicalPhase {
     /// Frozen gas; no statement about condensation or phase equilibrium.
     FrozenGas,
     /// Enforce the existing liquid-water saturation law in its stated window.
+    /// A record excluding the explicitly identified water species is known dry;
+    /// its own thermodynamic and transport source domains still apply.
     LiquidWaterLimit,
 }
 
@@ -105,6 +107,10 @@ pub fn read_gas_state(
 /// Thermochemical input requires an already-loaded registry; missing sources,
 /// ambiguous ids and out-of-domain coefficients refuse without consuming input.
 /// The returned record, rather than its GasState view, owns source receipts.
+/// With LiquidWaterLimit, the registry must explicitly identify water. A dry
+/// selection need not fabricate a zero-fraction component or evaluate a water
+/// saturation curve; records containing that identity retain the original phase
+/// check. This allows a dry exterior and humid bore to share one source policy.
 pub fn read_gas_record(
     fields: &mut SplitAsciiWhitespace<'_>,
     inherited_pressure_pa: Option<f64>,
@@ -189,6 +195,12 @@ pub fn read_gas_record(
         }
         let resolved = match sources.phase {
             ThermochemicalPhase::FrozenGas => model.evaluate(&point),
+            // The source explicitly identifies water, and no selected species
+            // has that canonical identity: the record is dry, not unknown.
+            // Do not add a zero-fraction species or query an irrelevant water
+            // saturation window. All selected source domains remain enforced.
+            ThermochemicalPhase::LiquidWaterLimit
+                if sources.water_species.is_some() && water.is_none() => model.evaluate(&point),
             ThermochemicalPhase::LiquidWaterLimit => model.evaluate_with_liquid_water_limit(&point),
         }
         .map_err(GasInputError::Material)?;
