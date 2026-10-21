@@ -157,6 +157,24 @@ changes on a latent plateau, equivalent electrical source bases and rollback.
   with forcing, both-dimensional constant-material equivalence, a source-card
   viscosity curve against its analytic constitutive root, actual material-swap
   momentum response, and transactional refusals.
+- `MaterialSlab::step_with_material_rheology_and_viscous_heating` (2-D and
+  3-D) explicitly adds `mu * rate^2 = 2 mu D:D` from those same cached
+  initial material/shear samples to the existing source/transport step.
+  Authored heat must exclude this molecular loss. Per-cell physical power,
+  integrated viscous heat, authored heat and their checked source partition
+  accompany the original material receipts and independently measured
+  source/storage/wall balance. Endpoint material evaluation sees the heated
+  temperature, and repeated calls feed it back into viscosity and flow.
+  No second constitutive query or parallel thermal solver is introduced.
+  All conversion, temperature, accounting, endpoint and cancellation refusals
+  precede publication. This remains fixed-density/Cp, incompressible,
+  generalized-Newtonian, low-Mach BGK with explicitly frozen initial loss;
+  numerical momentum dissipation, pressure work, compressible/bulk-viscosity
+  heating and elastic storage are excluded. A sensible-heat balance is not
+  a transient total-energy conservation proof or an implicit-time claim.
+  The material rheology tests compare both dimensions with independently
+  prescribed shear power, check the exact zero-stress limit, exercise actual
+  source-card temperature/viscosity feedback, and cover atomic refusals.
 - `MaterialSlab::step_with_boussinesq_material_transport` (2-D and 3-D) —
   evaluates actual local material density for `(rho(T)-rho0)*gravity`, and
   the same evaluation's dynamic viscosity and conductivity for
