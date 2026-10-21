@@ -555,6 +555,15 @@ class ContractTests(unittest.TestCase):
         self.assertAlmostEqual(f0["gap_new"], 60.0, delta=2.0)
         self.assertGreater(f0["gap_new"], f0["gap_old"])
         self.assertNotEqual(old["ours"]["git_sha"], new["ours"]["git_sha"])
+        import argparse, io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            dc.cmd_diff(argparse.Namespace(out=str(root), family=None, against="old1"))
+        self.assertIn("old1 -> new2", buf.getvalue())
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            dc.cmd_diff(argparse.Namespace(out=str(root), family=None, against="nomatch"))
+        self.assertEqual(buf.getvalue(), "")
         self.assertEqual(sum(tot["old"]), sum(tot["new"]))  # the same measures are judged both times
 
     def test_a_band_limited_render_is_graded_only_inside_its_band(self):

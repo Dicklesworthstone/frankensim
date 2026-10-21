@@ -1310,6 +1310,8 @@ def cmd_diff(a):
             continue
         prev = sorted((p.parent / "superseded").glob("*/pair.json")) if (p.parent / "superseded").is_dir() else []
         prev = [q for q in prev if (json.loads(q.read_text()).get("ours") or {}).get("git_sha") != pj["ours"]["git_sha"] and json.loads(q.read_text()).get("ours")]
+        if a.against:  # compare with the newest earlier grading of a named render sha, not merely the latest different one
+            prev = [q for q in prev if json.loads(q.read_text())["ours"]["git_sha"].startswith(a.against)]
         if not prev:
             continue
         old = json.loads(prev[-1].read_text())
@@ -1380,6 +1382,7 @@ def main():
     p = sub.add_parser("diff", help="for every re-graded note, what moved against the real-vs-real ruler since the grading in superseded/")
     p.add_argument("--out", default=DEFAULTS["out"])
     p.add_argument("--family", action="append")
+    p.add_argument("--against", help="sha (prefix) of the earlier grading to compare with")
     p.set_defaults(fn=cmd_diff)
     p = sub.add_parser("report", help="print each graded pair as a table, worst gap against its ruler first")
     p.add_argument("--out", default=DEFAULTS["out"])
