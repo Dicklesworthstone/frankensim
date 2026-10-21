@@ -1,0 +1,50 @@
+frankensim.matdb-source.v1
+observation	bcg10-padauk	Pterocarpus soyauxii (African padauk) heartwood, specimens 12 x 2 x 150 mm (R x T x L) cut parallel to the trunk axis, grain angle 0-25 degrees (interlocked grain), specific gravity 0.76 +- 0.02	Non-contact forced vibration of free-free bars at 200-400 Hz after at least 3 weeks at 20 +- 1 C and 65 +- 2 percent RH; E/rho from f1 (Euler-Bernoulli), tan delta from Q and log decrement, 3 repetitions, mean error at most 5 percent; fibre-axis properties identified by fitting the grain-angle model of Eqs. 1-3	rho denotes specific gravity, so specific moduli are per unit specific gravity; apparent values include the mass of extractives, corrected values remove it; a' = E3/G32 - 2 nu32 and b' = E3/E2 with nu32 about 0.46; a'' = a' (tan delta G32/tan delta 3)(1 + q) with q 0 to 8 percent and b'' = b' tan delta 2/tan delta 3 (Eq. 2); fit rmse printed, no confidence level; one band only, no frequency dependence
+scalar	specific-storage-modulus-fibre-apparent	bcg10-padauk	specific_storage_modulus_along_fibre_per_specific_gravity_apparent	17300	MPa	constant
+uncertainty	specific-storage-modulus-fibre-apparent	unstated	-	-	-	-
+validity	specific-storage-modulus-fibre-apparent	frequency	200	400	Hz
+scalar	specific-storage-modulus-fibre-corrected	bcg10-padauk	specific_storage_modulus_along_fibre_per_specific_gravity_corrected_for_extractives	19000	MPa	constant
+uncertainty	specific-storage-modulus-fibre-corrected	unstated	-	-	-	-
+validity	specific-storage-modulus-fibre-corrected	frequency	200	400	Hz
+scalar	specific-loss-modulus-fibre-apparent	bcg10-padauk	specific_loss_modulus_along_fibre_per_specific_gravity_apparent	82	MPa	constant
+uncertainty	specific-loss-modulus-fibre-apparent	unstated	-	-	-	-
+validity	specific-loss-modulus-fibre-apparent	frequency	200	400	Hz
+scalar	specific-loss-modulus-fibre-corrected	bcg10-padauk	specific_loss_modulus_along_fibre_per_specific_gravity_corrected_for_extractives	90	MPa	constant
+uncertainty	specific-loss-modulus-fibre-corrected	unstated	-	-	-	-
+validity	specific-loss-modulus-fibre-corrected	frequency	200	400	Hz
+scalar	loss-tangent-fibre	bcg10-padauk	loss_tangent_along_fibre	0.0048	1	constant
+uncertainty	loss-tangent-fibre	unstated	-	-	-	-
+validity	loss-tangent-fibre	frequency	200	400	Hz
+scalar	loss-tangent-shear-32	bcg10-padauk	loss_tangent_shear_fibre_tangential	0.0101	1	constant
+uncertainty	loss-tangent-shear-32	unstated	-	-	-	-
+validity	loss-tangent-shear-32	frequency	200	400	Hz
+scalar	loss-tangent-ratio-shear-over-fibre	bcg10-padauk	loss_tangent_shear_over_loss_tangent_fibre	2.13	1	constant
+uncertainty	loss-tangent-ratio-shear-over-fibre	unstated	-	-	-	-
+validity	loss-tangent-ratio-shear-over-fibre	frequency	200	400	Hz
+scalar	a-prime	bcg10-padauk	anisotropy_a_prime_e3_over_g32_minus_2nu32	8.8	1	constant
+uncertainty	a-prime	unstated	-	-	-	-
+validity	a-prime	frequency	200	400	Hz
+scalar	a-double-prime	bcg10-padauk	anisotropy_a_double_prime	18.6	1	constant
+uncertainty	a-double-prime	unstated	-	-	-	-
+validity	a-double-prime	frequency	200	400	Hz
+scalar	b-prime	bcg10-padauk	anisotropy_b_prime_e3_over_e2	11.5	1	constant
+uncertainty	b-prime	unstated	-	-	-	-
+validity	b-prime	frequency	200	400	Hz
+scalar	b-double-prime	bcg10-padauk	anisotropy_b_double_prime	3.5	1	constant
+uncertainty	b-double-prime	unstated	-	-	-	-
+validity	b-double-prime	frequency	200	400	Hz
+scalar	poisson-32-about	bcg10-padauk	poisson_ratio_32_about	0.46	1	constant
+uncertainty	poisson-32-about	unstated	-	-	-	-
+validity	poisson-32-about	frequency	200	400	Hz
+scalar	fit-rmse-specific-modulus	bcg10-padauk	fit_rmse_specific_storage_modulus	1400	MPa	constant
+uncertainty	fit-rmse-specific-modulus	unstated	-	-	-	-
+validity	fit-rmse-specific-modulus	frequency	200	400	Hz
+scalar	fit-rmse-loss-tangent	bcg10-padauk	fit_rmse_loss_tangent	0.0008	1	constant
+uncertainty	fit-rmse-loss-tangent	unstated	-	-	-	-
+validity	fit-rmse-loss-tangent	frequency	200	400	Hz
+scalar	specific-gravity	bcg10-padauk	specific_gravity	0.76	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+validity	specific-gravity	relative_humidity	65	65	%
+scalar	specific-gravity-printed-half-width	bcg10-padauk	specific_gravity_printed_half_width	0.02	1	constant
+uncertainty	specific-gravity-printed-half-width	unstated	-	-	-	-
+validity	specific-gravity-printed-half-width	relative_humidity	65	65	%

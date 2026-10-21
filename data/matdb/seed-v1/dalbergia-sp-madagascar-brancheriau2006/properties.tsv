@@ -1,0 +1,17 @@
+frankensim.matdb-source.v1
+observation	bra06-dalbergia-16211	Dalbergia sp. from Madagascar, CIRAD database No. 16211 (species unidentified, not stated to be D. stevensonii), prismatic straight-grained specimen 350 x 45 x 20 mm (L x R x T), stabilised at 65 percent RH and 20 C (12 percent theoretical EMC)	Two elastic supports below 10 Hz; end impact by a 12 g, 14 mm metal ball pendulum; microphone at the other end; Steiglitz-McBride fit of the first damped sinusoid; tan delta = 2 alpha1/(pi f1) by Eq. 3 as printed	Printed determination accuracy 4.3 percent (alpha1) and 4.4 percent (tan delta), kept as their own scalars without a confidence level; f1 of this specimen is not printed; tan delta must be inverted with Eq. 3 as printed; density from Ann. For. Sci. Table I, basis not stated beyond the stabilisation climate
+scalar	density	bra06-dalbergia-16211	density	916	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	moisture_content	12	12	%
+scalar	first-mode-temporal-damping	bra06-dalbergia-16211	first_flexural_mode_temporal_damping_alpha1	12.17	s^-1	constant
+uncertainty	first-mode-temporal-damping	unstated	-	-	-	-
+validity	first-mode-temporal-damping	moisture_content	12	12	%
+scalar	first-mode-temporal-damping-stated-relative-error	bra06-dalbergia-16211	first_mode_temporal_damping_determination_accuracy	0.043	1	constant
+uncertainty	first-mode-temporal-damping-stated-relative-error	unstated	-	-	-	-
+validity	first-mode-temporal-damping-stated-relative-error	moisture_content	12	12	%
+scalar	loss-tangent-eq3	bra06-dalbergia-16211	loss_tangent_first_mode_eq3_two_alpha_over_pi_f	0.0082	1	constant
+uncertainty	loss-tangent-eq3	unstated	-	-	-	-
+validity	loss-tangent-eq3	moisture_content	12	12	%
+scalar	loss-tangent-eq3-stated-relative-error	bra06-dalbergia-16211	loss_tangent_determination_accuracy	0.044	1	constant
+uncertainty	loss-tangent-eq3-stated-relative-error	unstated	-	-	-	-
+validity	loss-tangent-eq3-stated-relative-error	moisture_content	12	12	%

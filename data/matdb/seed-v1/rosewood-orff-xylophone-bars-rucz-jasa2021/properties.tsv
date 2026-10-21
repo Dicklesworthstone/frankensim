@@ -1,0 +1,5 @@
+frankensim.matdb-source.v1
+observation	rucz21-orff-rosewood	Rosewood (species not stated) of the 13-bar Sonor Orff primary-series soprano xylophone; eight untuned samples of the same material, 270 x 31 x 16 mm	Mass and dimensions; mean and standard deviation printed	SD of eight samples recorded as a one-sigma absolute band after the reed-blank pack precedent; moisture and climate not stated; the orthotropic constants in the same section are cited to the Wood Handbook, not measured, and are not part of this pack
+scalar	density	rucz21-orff-rosewood	density	1116	kg/m3	constant
+uncertainty	density	absolute	20	kg/m3	0.68	1
+validity	density	moisture_content_known	0	0	1

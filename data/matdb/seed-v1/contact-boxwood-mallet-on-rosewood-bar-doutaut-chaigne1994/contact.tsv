@@ -1,0 +1,8 @@
+frankensim.matdb-contact.v1
+pair	material_a	boxwood-mallet-head	material_b	rosewood-xylophone-bar	geometry	mallet-head-on-bar-top-face
+law	penalty-power	k_n_per_m_alpha	4.1e8	alpha	1.5	chi_s_per_m	0.0
+identification	measured-contact-duration-hertz-inversion	Doutaut and Chaigne 1994 p. C5-615: measured contact duration 0.16 ms of a boxwood mallet head striking a free rosewood bar at 2.1 m/s; K by inverting Eq. 3 tau = 3.21 (mu^2/(K^2 V))^(1/5), mu the reduced mass of bar and mallet; Eq. 1 F = K delta^1.5. One head, one speed, one bar; no uncertainty stated. chi is 0 because the paper's law is elastic and no contact loss was identified, not because the contact is known to be lossless. The force bound 525 N is derived (Hertz energy balance at 2.1 m/s with mu at most the 11.2 g equivalent mass), not printed. The velocity range is the identified 2.1 m/s extended down to rest on the Hertz claim that an elastic K does not depend on approach speed; the rate dependence of boxwood is UNKNOWN.
+validity	force_n	0.0	525.0
+validity	velocity_m_s	0.0	2.1
+graze-advisory	alpha = 1.5 (Hertz) has an unbounded contact Hessian at the boundary; a mallet impact separates after one contact, so this card is for impacts, not for held or grazing contact (a dead stroke needs its own identification)
+citation	Doutaut V., Chaigne A. (1994), Numerical simulations of bar percussion instruments, Journal de Physique IV Colloque C5, C5-613 to C5-616, doi 10.1051/jp4:19945131, HAL jpa-00252808; Eqs. 1-4 and text pp. C5-614 and C5-615, Table I p. C5-615; numerical facts only
