@@ -7,11 +7,13 @@
 //!
 //! These are section integrals, not a three-dimensional composite law. The
 //! optional shear/torsion binding adds a uniform-shear rod reduction with an
-//! explicit correction factor; the Kelvin-Voigt binding adds sourced bending
-//! loss. Slip, winding geometry, damage and axial viscous loss are not modeled.
+//! explicit correction factor; Kelvin-Voigt bindings add sourced bending and
+//! linear axial loss. Slip, winding geometry and damage are not modeled.
 //! The explicit [`thermal`] binding adds per-layer thermal eigenstrain and
 //! axial stress. Source validity applies at retained states, not future states.
 
+/// Explicit uniaxial viscosity and longitudinal modal loss.
+pub mod axial;
 pub mod thermal;
 pub mod transport;
 /// Rotary inertia and explicitly sourced torsional shear loss.
