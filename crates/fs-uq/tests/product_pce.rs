@@ -286,7 +286,7 @@ fn unsupported_laws_oversampling_storage_and_conditioning_refuse_before_work() {
     assert!(PceExecution::new(&invalid, PceConfig::new(2, 24)).is_err());
     invalid.correlation = CorrelationModel::Independent;
     for kind in [
-        UncertaintyKind::AleatoryUniform { lo: 1.0, hi: 2.0 },
+        UncertaintyKind::AleatoryUniform { lo: 2.0, hi: 1.0 },
         UncertaintyKind::EpistemicInterval { lo: 1.0, hi: 2.0 },
         UncertaintyKind::AleatoryGaussian {
             mean: 0.0,

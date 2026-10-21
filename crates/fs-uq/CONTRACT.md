@@ -27,8 +27,10 @@ for QMC Gaussian germs instead of duplicating the polynomial.
   normal equations (ridge 1e−12) with an oversampling assertion
   (n ≥ 2·basis); mean/variance drop out of coefficients.
 - `product_pce::{PceConfig, PceExecution, PceReport, PceSummary}` — fixed
-  Gaussian Hermite regression from physical-model callbacks, with disjoint
-  held-out physical validation. Reuses the same basis and `PceModel`, with
+  Hermite/shifted-Legendre product regression from physical-model callbacks,
+  with disjoint held-out physical validation. `ProductPceModel` retains each
+  independent germ law alongside its coefficients, sharing Hermite and ANOVA
+  algebra with the unchanged standalone `PceModel`. Execution retains
   product admission and bounded, scaled `fs-la` QR least squares. Numerical
   rank/conditioning are screened before the first physical solve; no ridge
   changes the declared least-squares problem.
@@ -189,12 +191,14 @@ structured errors rather than panicking.
   finest-level expectation, independent reconstruction of correction statistics,
   one-level MC equivalence, correlated inputs, paired-call continuation,
   compliance, admission failures and terminal numerical/model refusals.
-- `product_pce::PceExecution` admits only finite Gaussian marginals under
-  explicit independence or an admitted joint Gaussian law, preserving unknown
-  dependence refusals. Its independent standard-normal germs use the existing
-  Philox seed/kernel/ordinal sampler. The callback receives the exact declared
-  affine physical transformation, also exposed by `physical_parameters`;
-  singular covariance and zero physical standard deviations require no inverse.
+- `product_pce::PceExecution` admits independent finite Gaussian/uniform
+  mixtures or an admitted joint Gaussian law, preserving unknown dependence
+  and non-Gaussian correlated-law refusals. Standard-normal and U(0,1) germs
+  use the existing Philox seed/kernel/ordinal sampler in declaration order.
+  The callback receives the declared physical transformation, also exposed by
+  `physical_parameters`; singular covariance and constant marginals require no
+  inverse. Uniform values use bounded convex endpoint interpolation, not a
+  potentially overflowing interval width. Germs outside [0,1] refuse.
   The envelope is 1..=16 declared parameters, degree 0..=8, <=128 total-degree
   terms, <=65,536 physical calls, and <=16,777,216 training row/term/term
   products. At least twice the basis count is reserved for training; at least
@@ -205,8 +209,8 @@ structured errors rather than panicking.
   Every paid finite observation survives chunks, cancellation and clone resume.
   Interrupted unfinished callbacks retry identical inputs without consuming an
   ordinal. Model/sampling/fit failures are terminal; no data is replaced.
-  Only the full allocation exposes the fitted `PceModel` and summary. Its mean,
-  variance and gradients belong to the Hermite surrogate; coefficient variance
+  Only the full allocation exposes the fitted `ProductPceModel` and summary.
+  Its mean, variance and gradients belong to the product surrogate; coefficient variance
   is response variance, not an estimator standard error or confidence interval.
   Unrepresentable variance is absent. Training and held-out RMS residuals and
   held-out mean error are descriptive checks against physics, not error bounds.
@@ -222,6 +226,12 @@ structured errors rather than panicking.
   moments, usable surrogate derivatives, joint/singular Gaussian MC sample
   identity, held-out separation, zero uncertainty, chunk/interruption/fit-boundary
   continuation, design admission and terminal physical/numerical refusals.
+  `tests/product_pce_model.rs` adds shifted-Legendre orthogonality, endpoint
+  derivatives, mixed-law coefficient sensitivity and Gaussian arithmetic
+  identity. `tests/product_pce_mixed.rs` adds uniform/mixed physical moments,
+  ordinary-MC draw identity, held-out separation and paid-work continuation.
+  `MIXED_PCE.md` documents use and the return-type/accessor migration. These
+  new tests require native execution; their presence is not a runtime pass.
 - Slice-1 scope. The bead's split lanes: seismic machinery
   (Kanai–Tajimi spectra via fs-scenario, response-spectrum CQC fast
   path, IDA fragility curves — needs fs-solid-advanced), e-process
