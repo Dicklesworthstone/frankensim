@@ -32,6 +32,7 @@ pub mod product_mlmc;
 pub mod product_mlmc_allocation;
 pub mod product_mlmc_pilot;
 pub mod product_pce;
+pub mod product_pce_control;
 pub mod product_pce_model;
 pub mod product_plan;
 pub mod product_qmc;
@@ -61,6 +62,7 @@ pub use product_mlmc_allocation::{
 };
 pub use product_mlmc_pilot::{PilotMlmcConfig, PilotMlmcExecution, PilotMlmcReport, PilotMlmcStage};
 pub use product_pce::{PceConfig, PceExecution, PceReport, PceSummary};
+pub use product_pce_control::{PceControlError, PceMeanControl, PceMeanEstimate};
 pub use product_pce_model::{PceBasis, ProductPceModel};
 pub use product_sensitivity::{SobolEffect, SobolEstimate, SobolExecution, SobolReport};
 pub use product_shapley::{ShapleyEffect, ShapleyEstimate, ShapleyExecution, ShapleyReport};
