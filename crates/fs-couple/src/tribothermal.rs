@@ -23,6 +23,8 @@
 pub mod material;
 /// Force-driven finite-body motion using the same material/thermal contact.
 pub mod dynamics;
+/// Native electric/magnetic field motion with material guide friction and heat.
+pub mod field_motion;
 pub use material::{MaterialSlidingContact, SlidingInterface, SlidingMaterialSample};
 
 use fs_contact::interface_binding::InterfaceBindingError;

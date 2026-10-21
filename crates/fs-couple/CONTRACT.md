@@ -43,12 +43,50 @@ publication of velocities, original slip/work history and finite temperatures.
 Original friction work is an internal transfer; external force work is measured
 on each body's endpoint displacement. Physical friction alone is partitioned
 as heat, while backward-Euler kinetic loss remains an explicit numerical account.
-The fixed patch/normal-load reduction admits positive sliding along the first
-original tangent axis. Stopping/reversal trials refuse without a velocity floor
-or invented sticking reaction. It adds no normal/rotational/contact-geometry
-evolution. Source-backed synthetic regressions cover unequal masses, coupled
-heat-capacity/force response, continuation, replay and atomic refusal; native
-execution remains required for qualification.
+The fixed patch/normal-load reduction passes released motion and inertial
+compliance `dt²(1/mA + 1/mB)` to the original tangential return map. That owner
+selects exact sticking or signed sliding; the source speed and accumulated
+distance converge to its solved slip. A stuck branch queries exact zero speed
+and leaves slip/work history unchanged. Bodies can accelerate together, stop
+and restart in the opposite direction, under the native endpoint static-first
+convention. It does not locate the physical stopping instant within a coarse
+interval: a backward-Euler stop may have numerical kinetic loss and zero endpoint
+friction heat. Refine time to resolve stopping heat; numerical loss is never
+thermalized. Zero-speed material support is required. No normal, rotational or
+contact-geometry evolution is added. Focused synthetic regressions cover static
+capacity, signed source feedback, stopping/restart, continuation and rollback;
+native execution remains required for qualification. The internal same-trial
+friction callback allows other energy owners to share this original solve;
+compliant consumers must gate queried motion against the native solved slip.
+
+### Material contact loads on a field actuator
+
+`tribothermal::field_motion` closes the existing dry-contact active-set/enthalpy
+owner with `MaterialFieldMotion`, including optional sourced axial support.
+Two displacement residuals identify actual field gap change, original solved
+contact slip, and the motion used to query interface material data. The native
+traction supplies the opposing field force. Field/circuit/body/support history
+and contact/thermal history publish together; inertia is not integrated twice.
+
+The same thermal trial resolves bulk electrical transport, pinned electrical
+contacts, and pinned mechanical friction. Original conductor/contact losses and
+the original friction heat partition enter explicit receivers exactly once.
+External thermal supply is independently evaluated before either internal loss.
+Field, kinetic, support elastic, interface and thermal storage plus exported
+friction work must close original electrical, mechanical and thermal supplies.
+A single descriptor budget includes all discarded outer and thermal trials.
+
+Surface A must match the single-region field body's source card, mass and
+reference volume; surface B is a stationary finite thermal guide. Normal force,
+area and tangent frame are fixed. Static reaction at rest uses an exact zero
+speed/history source query; uninterrupted sliding in either direction is
+supported. An unresolved stop/reversal refuses;
+there is no velocity clamp, impact impulse, moving thermal mesh, or new normal
+contact law. Focused `tribothermal::field_motion` regressions cover independent
+constant-charge trajectories, both static reaction directions, body/source
+inventory matching, authored/callback external heat, caloric/resistance/friction
+feedback including electrical contacts, cancellation and global-budget refusal.
+Syntax parsing and independent numeric checks passed; native execution is pending.
 
 ### Typed gesture consumer bindings
 
@@ -3481,6 +3519,34 @@ supply combustion, jet thrust, moving-mesh conduction or a simultaneous nozzle
 residual. Regression sources cover material/mixture interventions, both flow
 directions, one withdrawal during repeated trials, full storage balance,
 closed-path parity and complete rollback; native execution remains unverified.
+
+### Molecular diffusion through the complete material assembly
+
+`MaterialExchangeState::diffusion_step_candidate` and `advance_with_diffusion`
+connect the original source-backed Maxwell–Stefan network to the same reacting
+gas, finite thermal cells, electrical circuit and moving pistons. Every face
+reads the original accepted composition/T/p, resolves explicit binary-pair
+diffusivity and transfers species plus their partial enthalpies once. All
+outgoing inventories are admitted jointly before incoming species can replenish
+them. Each chamber retains its existing caloric solver. Changed composition
+therefore enters actual chemistry, wall heat, charge/flux and momentum feedback.
+
+The whole-interval mass/energy balance starts before diffusion. A gross inlet or
+outlet makes the chamber's closed two-port audit unavailable even if net mass
+is zero; the enclosing account retains actual storage and external work/heat.
+All owners publish atomically after the original source, entropy, withdrawal,
+nonlinear and conservation checks. Chemical formation energy and carried
+enthalpy are never added again as heat.
+
+This is a first-order diffusion/reaction/coupled-heat-motion split over one
+interval, retaining the original ideal-gas, molar-average, approximately
+isothermal/isobaric face domain and explicit temperature/pressure limits.
+It supplies no thermal/pressure diffusion, membrane forces, resolved bulk flow
+or simultaneous nozzle/diffusion solve. Arrivals may react now but cannot cross
+a second diffusion face until the next interval. Focused regressions cover
+the binary limit, diffusivity-only physical response, post-mixing reaction,
+zero-net-mass stream accounting, closed faces and transactional refusal.
+Native execution and experimental qualification remain separate requirements.
 
 ### Curved material shell bodies in the reciprocal string network
 

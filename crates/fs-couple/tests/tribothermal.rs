@@ -4,6 +4,8 @@
 mod common;
 #[path = "tribothermal/dynamics.rs"]
 mod dynamics;
+#[path = "tribothermal/field_motion.rs"]
+mod field_motion;
 
 use fs_couple::tribothermal::material::{KINETIC_FRICTION_PROPERTY, STATIC_FRICTION_PROPERTY};
 use fs_couple::tribothermal::*;
