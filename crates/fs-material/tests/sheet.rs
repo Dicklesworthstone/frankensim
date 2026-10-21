@@ -30,7 +30,7 @@ fn try_card(rows: &[(&str,f64,Dims)]) -> Result<MaterialCard, fs_matdb::MatDbErr
         })?;
     }
     MaterialCard::assemble(MaterialStateId {chemistry:"synthetic sheet".into(),phase:"solid".into(),
-        process:"characterized construction".into(),revision:1},claims,vec![])
+        process:"characterized construction".into(),revision:0},claims,vec![])
 }
 fn card(rows: &[(&str,f64,Dims)]) -> MaterialCard { try_card(rows).unwrap() }
 fn adopt(rows: &[(&str,f64,Dims)]) -> ResolvedSheet {

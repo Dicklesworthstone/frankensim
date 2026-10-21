@@ -16,7 +16,7 @@ fn thermal_card(interpolation:InterpolationPolicy) -> MaterialCard {
         }).unwrap();
     }
     MaterialCard::assemble(MaterialStateId {chemistry:"synthetic sheet".into(),phase:"solid".into(),
-        process:"same specimen".into(),revision:1},claims,vec![]).unwrap()
+        process:"same specimen".into(),revision:0},claims,vec![]).unwrap()
 }
 fn bundle(c:&MaterialCard,specimen:f64) -> ResolvedSheet {
     let mut requirements=Vec::new();
