@@ -146,8 +146,8 @@ fn g2_tissue_packs_pass_physicality_and_register_gates() {
         "the lip value's hard-teeth-in-series caveat is load-bearing"
     );
     assert!(
-        lip.scalars["young_modulus_effective_upper_lip"]
-            > lip.scalars["young_modulus_effective_cheek_left"]
+        lip.scalars["young_modulus_upper_lip_apparatus_effective"]
+            > lip.scalars["young_modulus_cheek_left_apparatus_effective"]
     );
 
     // THE MODEL-CARD FIREWALL: the two-mass pack must declare itself
@@ -192,7 +192,7 @@ fn g2_tissue_packs_pass_physicality_and_register_gates() {
         "{{\"suite\":\"fs-material\",\"case\":\"g2-tissue-packs\",\"verdict\":\"pass\",\
          \"human_gradient_kpa\":[{sup},{med},{inf}],\"tan_delta\":[{td_tiger},{td_lion}],\
          \"lip_kpa\":{},\"packs\":6}}",
-        lip.scalars["young_modulus_effective_upper_lip"]
+        lip.scalars["young_modulus_upper_lip_apparatus_effective"]
     );
 }
 

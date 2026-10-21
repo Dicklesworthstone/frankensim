@@ -2080,8 +2080,9 @@ Young's modulus of the lower lip, 33.7 +- 7.3 kPa, from an aspiration device and
 Neo-Hookean inverse analysis on 16 young subjects (abstract values; the statistic behind the
 +- is not named there). Chu, Barlow and colleagues give the lateral stiffness of relaxed mouth
 corners, 0.073 N/mm on average and a quadratic regression on a 24 mm stretch, with the unit of
-the regression variable inferred, not printed. The Takemoto upper-lip pack remains the
-teeth-backed indentation it always was. No layered lip constitutive law, no loss tangent, no
+the regression variable inferred, not printed. The Takemoto upper-lip pack is the
+teeth-backed indentation it always was; its observation id and property names now carry the same
+apparatus form (`apparatus-` prefix, `_apparatus_effective` suffix), and the cheek values with them. No layered lip constitutive law, no loss tangent, no
 orbicularis oris active stress and no lip mass or density has a measured value here: they are
 UNKNOWN, and the ledger rows of this tranche record what was read and what was not (one lip-tissue
 source sits behind a paywall and is a `pending-permission` row).
