@@ -206,20 +206,32 @@ def stft_db(y, n):
 
 def cwt_db(y, per_oct=24, f_lo=60.0, f_hi=F_HI, w0=20.0):
     """Analytic Morlet scalogram [dB, a full-scale sine reads -6 dB]: 24 scales per octave, Gaussian bandwidth f/20
-    (about a semitone, so the low partials of a pitched note stay resolved), 10 ms frames."""
+    (about a semitone, so the low partials of a pitched note stay resolved), 10 ms frames.
+
+    Each scale occupies a narrow band of the spectrum and only its envelope power per frame is wanted, so the
+    band is inverse-transformed on its own at a reduced sample rate (at least ~500 Hz, enough for 10 ms frames)
+    instead of at the full rate: a magnitude is unchanged by moving the band to baseband, and the 10 ms frame mean
+    is taken from the integral of that envelope power. About 30 times less work than one full-length inverse FFT
+    per scale, which cost 50 ms each on a loaded trj.
+    """
     n = len(y)
     nfft = 1 << int(math.ceil(math.log2(n + SR // 4)))
     X = np.fft.rfft(y, nfft)
     f = np.fft.rfftfreq(nfft, 1 / SR)
     fc = f_lo * 2 ** (np.arange(int(per_oct * math.log2(f_hi / f_lo)) + 1) / per_oct)
     frames = n // HOP
+    edges = np.arange(frames + 1) * HOP / SR
     out = np.empty((len(fc), frames), np.float32)
     for i, c in enumerate(fc):
         lo, hi = np.searchsorted(f, c * (1 - 6 / w0)), np.searchsorted(f, c * (1 + 6 / w0))
-        Y = np.zeros(nfft, complex)
-        Y[lo:hi] = X[lo:hi] * np.exp(-0.5 * ((f[lo:hi] - c) / (c / w0)) ** 2)
-        z = np.fft.ifft(Y)[:n]
-        out[i] = ((z.real ** 2 + z.imag ** 2)[: frames * HOP].reshape(frames, HOP)).mean(1)
+        band = X[lo:hi] * np.exp(-0.5 * ((f[lo:hi] - c) / (c / w0)) ** 2)
+        m = max(4096, 1 << int(math.ceil(math.log2(max(hi - lo, 2)))))
+        w = np.fft.ifft(band, m)  # numpy normalises by 1/m; the full-rate envelope is (m / nfft) times this
+        p = (m / nfft) ** 2 * (w.real ** 2 + w.imag ** 2)
+        dt = nfft / (m * SR)  # seconds per decimated sample; sample l sits at l * dt
+        cum = np.concatenate([[0.0], np.cumsum(p)]) * dt
+        e = np.interp(edges, (np.arange(m + 1) - 0.5) * dt, cum)
+        out[i] = (e[1:] - e[:-1]) / (HOP / SR)
     return (10 * np.log10(out + 1e-20)).astype(np.float32), fc
 
 

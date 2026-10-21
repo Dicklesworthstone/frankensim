@@ -202,6 +202,43 @@ class PitchTests(unittest.TestCase):
 REFERENCE_ENTRIES = {i: dict(id=i, licence="uiowa-mis", url=f"https://theremin.music.uiowa.edu/{i}.aiff") for i in ("syn-mf", "syn-ff")}
 
 
+def cwt_db_full_rate(y, per_oct=24, f_lo=60.0, f_hi=dc.F_HI, w0=20.0):
+    """The scalogram as first written: one full-length inverse FFT per scale (the reference the fast one must match)."""
+    import math
+    n = len(y)
+    nfft = 1 << int(math.ceil(math.log2(n + SR // 4)))
+    X = np.fft.rfft(y, nfft)
+    f = np.fft.rfftfreq(nfft, 1 / SR)
+    fc = f_lo * 2 ** (np.arange(int(per_oct * math.log2(f_hi / f_lo)) + 1) / per_oct)
+    frames = n // dc.HOP
+    out = np.empty((len(fc), frames), np.float32)
+    for i, c in enumerate(fc):
+        lo, hi = np.searchsorted(f, c * (1 - 6 / w0)), np.searchsorted(f, c * (1 + 6 / w0))
+        Y = np.zeros(nfft, complex)
+        Y[lo:hi] = X[lo:hi] * np.exp(-0.5 * ((f[lo:hi] - c) / (c / w0)) ** 2)
+        z = np.fft.ifft(Y)[:n]
+        out[i] = ((z.real ** 2 + z.imag ** 2)[: frames * dc.HOP].reshape(frames, dc.HOP)).mean(1)
+    return (10 * np.log10(out + 1e-20)).astype(np.float32), fc
+
+
+class ScalogramTests(unittest.TestCase):
+    def test_fast_scalogram_matches_the_full_rate_one_where_it_matters(self):
+        import time
+        x = tone(f0=196.0, dur=2.2, lead=0.1, attack=0.05, noise_db=-70)[: int(2.0 * SR)]
+        t = time.time()
+        ref, fc = cwt_db_full_rate(x)
+        t_ref = time.time() - t
+        t = time.time()
+        new, fc2 = dc.cwt_db(x)
+        t_new = time.time() - t
+        self.assertEqual(ref.shape, new.shape)
+        live = ref > ref.max() - 60.0  # cells within 60 dB of the peak: the ones every metric and figure uses
+        err = (new - ref)[live]
+        self.assertLess(float(np.sqrt(np.mean(err ** 2))), 0.6, "rms dB difference over live cells")
+        self.assertLess(float(np.abs(err).max()), 3.0)
+        self.assertLess(t_new, t_ref)
+
+
 class FloorTests(unittest.TestCase):
     def test_block_wise_floor_matches_the_whole_file_floor_and_is_faster(self):
         import time
