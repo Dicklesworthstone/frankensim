@@ -22,7 +22,7 @@ impl CoupledModalSystem {
     /// The larger prepared mechanical-only backend is explicitly unsupported;
     /// neither attachment order may silently lose constitutive state.
     pub fn with_material_relaxation(
-        mut self,
+        self,
         branches: Vec<RelaxationBranch>,
         initial_memory: Option<Vec<f64>>,
         gate: &CancelGate,
@@ -30,6 +30,29 @@ impl CoupledModalSystem {
         poll(Some(gate))?;
         if self.samples_rendered() != 0 || !self.relaxation_branches.is_empty() {
             return Err(invalid("material relaxation requires one cold binding"));
+        }
+        self.with_additional_material_relaxation(branches, initial_memory, gate)
+    }
+
+    /// Compose another explicitly selected material spectrum before playback.
+    /// Existing branches and their accepted internal strains remain an unchanged
+    /// prefix. `initial_memory` addresses ONLY the additional branches; `None`
+    /// relaxes those new branches at the existing mechanical displacement, never
+    /// the already bound material. All branches join one exact propagator and
+    /// share its original total-energy, work, memory and bandwidth limits.
+    ///
+    /// This is a cold constitutive addition, not a hot material replacement.
+    /// Callers retain source identities and must not add the same physical loss
+    /// twice. Empty additions are a no-op only before the first accepted sample.
+    pub fn with_additional_material_relaxation(
+        mut self,
+        branches: Vec<RelaxationBranch>,
+        initial_memory: Option<Vec<f64>>,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        poll(Some(gate))?;
+        if self.samples_rendered() != 0 {
+            return Err(invalid("additional material relaxation requires cold construction"));
         }
         if branches.is_empty() {
             if initial_memory.as_ref().is_some_and(|z| !z.is_empty()) {
@@ -42,14 +65,16 @@ impl CoupledModalSystem {
         }
         let base = self.mode_count().checked_mul(2)
             .ok_or_else(|| invalid("material base-state extent overflow"))?;
-        let state = base.checked_add(branches.len())
+        let count = self.relaxation_branches.len().checked_add(branches.len())
+            .ok_or_else(|| invalid("material branch count overflow"))?;
+        let state = base.checked_add(count)
             .ok_or_else(|| invalid("material augmented-state extent overflow"))?;
         // Bound assembly independently of the per-island hard exponential
         // capacity. No caller's old setup budget silently grows with memory.
         let links = self.connections.len() + 1;
         let terms = self.mode_count().checked_mul(links).and_then(|n| n.checked_mul(links))
             .and_then(|n| n.checked_add(state.checked_mul(state)?))
-            .and_then(|n| n.checked_add(base.checked_mul(branches.len())?))
+            .and_then(|n| n.checked_add(base.checked_mul(count)?))
             .ok_or_else(|| invalid("material augmented setup overflow"))?;
         if terms > self.config.max_setup_terms {
             return Err(invalid("material augmented setup exceeds max_setup_terms"));
@@ -94,14 +119,21 @@ impl CoupledModalSystem {
         let material_energy = stored_energy(&branches, &self.models, &memory)?;
         limit("total initial material energy", finite(self.total_energy_j()? + material_energy)?,
             self.config.maximum_total_energy_j)?;
+        // Existing history is neither reinitialized nor inferred from q. The
+        // frequency bound above already includes its instantaneous stiffness;
+        // only the newly admitted increments were added to that bound.
+        let mut all_branches = self.relaxation_branches.clone();
+        all_branches.extend(branches);
+        let mut all_memory = self.material_memory.clone();
+        all_memory.extend(memory);
         let exact = exact::ExactNetwork::new_with_relaxation(
-            &self.models, &self.columns, &self.connections, self.mode_count(), &branches, gate,
+            &self.models, &self.columns, &self.connections, self.mode_count(), &all_branches, gate,
         )?;
         poll(Some(gate))?;
         self.exact = Some(exact);
-        self.relaxation_branches = branches;
-        self.candidate_material_memory = memory.clone();
-        self.material_memory = memory;
+        self.relaxation_branches = all_branches;
+        self.candidate_material_memory = all_memory.clone();
+        self.material_memory = all_memory;
         self.linear_frequency_upper_bound_rad_s = bound;
         Ok(self)
     }
