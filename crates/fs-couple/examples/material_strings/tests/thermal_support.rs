@@ -10,7 +10,11 @@ fn input() -> String {
 }
 
 fn wire(factor: f64) -> NormalizedPack {
-    let mut claims = pack("wire.fsmatpk", 7800.0, 200_000.0, None).claims().clone();
+    with_expansion(pack("wire.fsmatpk", 7800.0, 200_000.0, None), factor)
+}
+
+fn with_expansion(base: NormalizedPack, factor: f64) -> NormalizedPack {
+    let mut claims = base.claims().clone();
     let provenance = Provenance { source: "synthetic piecewise thermal expansion".into(),
         license: "CC0-1.0".into(), artifact: Some(fs_blake3::ContentHash([8;32])) };
     let observation = claims.register_observation(ObservationDataset {
@@ -90,13 +94,12 @@ fn integrated_expansion_changes_tension_modes_and_bowed_pressure_with_original_s
 }
 
 #[test]
-fn thermal_support_is_explicit_and_refuses_missing_paths_slack_or_unsupported_sections() {
+fn thermal_support_is_explicit_and_refuses_missing_paths_slack_or_invalid_prescriptions() {
     let block = "thermal-supports 1\nthermal-support 0 290\n";
     for text in [input().replace("thermal-supports 1", "thermal-supports 2"),
         input().replace("thermal-support 0 290", "thermal-support 1 290"),
         input().replace("thermal-support 0 290", "thermal-support 0 0"),
-        input().replace("extension 0.49975 0.001", "tension 20"),
-        input().replace("section homogeneous", "section bonded 0.0002 1\nlayer sleeve.fsmatpk 0.0003")] {
+        input().replace("extension 0.49975 0.001", "tension 20")] {
         assert!(input::Spec::parse(text.as_bytes()).is_err());
     }
     scoped(|cx, gate| {
@@ -115,3 +118,6 @@ fn thermal_support_is_explicit_and_refuses_missing_paths_slack_or_unsupported_se
         assert!(ready(cx,gate,&input(),3.0).is_err(), "thermal slack must not be clamped to a tuned tension");
     });
 }
+
+#[path = "thermal_support/layered.rs"]
+mod layered;

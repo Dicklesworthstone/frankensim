@@ -18,6 +18,7 @@ pub struct Wire {
     pub pack: String, pub length: f64, pub radius: f64, pub prestress: StringPrestress,
     pub section: WireSection,
     /// With fixed extension, L0 is stress-free at this explicit reference T.
+    /// Bonded layers share that reference but retain their own expansion curves.
     /// None preserves the original same-temperature mechanical prescription.
     pub thermal_reference_kelvin: Option<f64>,
     pub bending_modes: usize, pub twist_modes: usize, pub bridge: SharedPlateBridge,
@@ -162,9 +163,8 @@ impl Spec {
                 let string = row.count(count - 1)?; let reference = row.positive()?; row.end()?;
                 let wire = &mut strings[string];
                 if wire.thermal_reference_kelvin.is_some()
-                    || !matches!(wire.prestress, StringPrestress::FixedExtension { .. })
-                    || !matches!(&wire.section, WireSection::Homogeneous) {
-                    return Err("thermal support requires one declaration per homogeneous fixed-extension string".into());
+                    || !matches!(wire.prestress, StringPrestress::FixedExtension { .. }) {
+                    return Err("thermal support requires one declaration per fixed-extension string".into());
                 }
                 wire.thermal_reference_kelvin = Some(reference);
             }
