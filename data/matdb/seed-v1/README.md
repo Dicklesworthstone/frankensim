@@ -2085,3 +2085,25 @@ teeth-backed indentation it always was. No layered lip constitutive law, no loss
 orbicularis oris active stress and no lip mass or density has a measured value here: they are
 UNKNOWN, and the ledger rows of this tranche record what was read and what was not (one lip-tissue
 source sits behind a paywall and is a `pending-permission` row).
+
+## Human vocal-fold tranche, October 2026 (pexfp.194, M8-W2d, lane P1)
+
+Four packs hold the measured mechanical numbers this program has found for the human vocal fold, typed
+from publisher-copyright papers read as text (numeric facts with attribution, licence token
+`Published-Scientific-Facts-Attribution-Retained`, no table layout reproduced).
+`vocalfold-human-layers-kelleher-bmmb-pmc3745772` has the cover and the contralateral ligament of six
+subjects measured separately (longitudinal modulus from cyclic tension with optical strain; transverse
+modulus and longitudinal shear modulus from an inverse fit of an anisotropic contact model, which are
+strongly coupled: a 10 percent change of one moves the other by up to 30 percent). `vocalfold-human-elastic-set-alipour-jvoice-pmc3508138`
+has true and false fold moduli, a Poisson ratio and the first measured human fold density (Archimedes,
+N = 10). `vocalfold-human-cover-shear-chan-rodriguez-jasa-pmc2561277` has the shear rheology of seven
+covers at 1 to 250 Hz as power laws fitted to the mean, with the G'/G'' crossover near 50 Hz and a loss
+factor G''/G' of 0.74 at 100 to 250 Hz. `vocalfold-human-indentation-layers-chhetri-jvoice-pmc2891297`
+has indentation moduli of the intact hemilarynx, the isolated cover and the isolated thyroarytenoid
+muscle; it is an **apparatus response** (properties end `_apparatus_effective`, observations start
+`apparatus-`), each row carrying its indenter regime. Layer thickness is geometry and is not stored in
+any of them. Every number comes from 1 Hz cyclic or quasi-static loading except the cover rheology; donors are mostly
+geriatric and cadaveric; test temperature is unstated in three of the four. No constitutive law family,
+no active stress of the muscle, no tongue and no fingertip value is admitted here: they are UNKNOWN. The
+fold model's per-mass damping ratio of 0.1 in `glottis.rs` has no counterpart in these packs (the cover
+loss factor is a different quantity).

@@ -775,7 +775,7 @@ fn g2_human_indentation_pack_pins_the_rows_and_records_the_source_inconsistency(
         assert!(h > 0.0 && d > 0.0);
     }
     for lx in ["m49", "f19", "m30"] {
-        let state = &pack.observation[&format!("larynx-{lx}")];
+        let state = &pack.observation[&format!("apparatus-larynx-{lx}")];
         assert!(
             state.contains("postmortem") && state.contains("AN EFFECTIVE INDENTATION MODULUS"),
             "{lx}: the apparatus-response register and the specimen state must be carried"
@@ -823,7 +823,9 @@ fn g2_human_indentation_pack_pins_the_rows_and_records_the_source_inconsistency(
                 row_hi > hi,
                 "the source's TA range excludes its own Table 3 value"
             );
-            assert!(pack.observation["printed-location-summary"].contains("does NOT contain"));
+            assert!(
+                pack.observation["apparatus-printed-location-summary"].contains("does NOT contain")
+            );
         } else {
             assert!(
                 near(row_hi, hi),
@@ -841,13 +843,47 @@ fn g2_human_indentation_pack_pins_the_rows_and_records_the_source_inconsistency(
             && mean("medial-cover") > mean("superior-cover")
             && mean("superior-cover") > mean("ta-muscle")
     );
-    // Layer thicknesses as stated: muscle > lamina propria > epithelium.
-    assert!(
-        pack.value("thickness-ta-muscle") > pack.value("thickness-lamina-propria")
-            && pack.value("thickness-lamina-propria") > pack.value("thickness-epithelium-high")
-            && pack.value("thickness-epithelium-high") > pack.value("thickness-epithelium-low")
+    // The bead's marking rules: an apparatus response is stored under `*_apparatus_effective` with `apparatus-*`
+    // observations, and layer thickness is geometry, never a material row.
+    let text = std::fs::read_to_string(repo_root().join(
+        "data/matdb/seed-v1/vocalfold-human-indentation-layers-chhetri-jvoice-pmc2891297/properties.tsv",
+    ))
+    .expect("properties");
+    let mut scalars = 0;
+    for line in text.lines() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        match cols[0] {
+            "scalar" => {
+                scalars += 1;
+                assert!(
+                    cols[3].ends_with("_apparatus_effective"),
+                    "{} must be an apparatus property",
+                    cols[3]
+                );
+                assert!(
+                    cols[2].starts_with("apparatus-"),
+                    "{} must name an apparatus observation",
+                    cols[2]
+                );
+                assert!(
+                    !cols[3].contains("thickness"),
+                    "{}: layer thickness is geometry, not material data",
+                    cols[3]
+                );
+            }
+            "observation" => assert!(
+                cols[1].starts_with("apparatus-"),
+                "observation id {}",
+                cols[1]
+            ),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        scalars,
+        INDENTATION.len() + 15,
+        "22 rows and 5 printed location summaries of three values"
     );
-    assert!(pack.observation["stated-layer-thickness"].contains("not measured"));
 
     // Two independent labs, two methods: the transverse stiffness of the cover (indentation of isolated cover,
     // effective) and the transverse E_T of the layered pack's cover specimens agree within a factor 3.
