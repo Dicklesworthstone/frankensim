@@ -336,11 +336,30 @@ fn step_with_opening_and_junction(
     for _ in 0..=64 {
         let (low_key, high_key) = (velocity_key(lo), velocity_key(hi));
         if resolved(left) || resolved(right) || high_key - low_key <= 1 {
-            return finish(if left.residual.abs() <= right.residual.abs() {
+            let best = if left.residual.abs() <= right.residual.abs() {
                 left
             } else {
                 right
-            });
+            };
+            let outcome = finish(best);
+            if outcome.is_err() {
+                // Diagnostic of an unresolved step (bead 228): the context and the residual around the root.
+                let root = from_velocity_key(low_key);
+                eprintln!(
+                    "IRPCONTACT unresolved y={y:e} v={v:e} p_m={p_m:e} p_minus={p_minus:e} u_body={u_body:e} lo={lo:e} hi={hi:e} res_lo={:e} res_hi={:e} scale={:e} floor={:e}",
+                    left.residual, right.residual, best.scale, best.floor
+                );
+                for k in [-1e-3, -1e-6, -1e-9, 0.0, 1e-9, 1e-6, 1e-3] {
+                    let probe = root + k * (1.0 + root.abs());
+                    if let Ok(t) = evaluate(probe) {
+                        eprintln!(
+                            "IRPCONTACT probe v={probe:e} residual={:e} outgoing={:e} next_y={:e} next_v={:e}",
+                            t.residual, t.state.0, t.state.1, t.state.2
+                        );
+                    }
+                }
+            }
+            return outcome;
         }
         let mid = from_velocity_key(low_key + (high_key - low_key) / 2);
         let trial = evaluate(mid)?;
