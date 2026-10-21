@@ -40,6 +40,9 @@ use crate::lattice3::Lattice3;
 use core::fmt;
 use fs_material::gas::{GasSpec, GasState};
 
+/// Exact linearized Navier-Stokes-Fourier modes (test support of the qualification, shipped for reuse).
+pub mod dispersion;
+
 /// Reference lattice temperature `theta0 = r T0` in lattice units; equals the lattice `c_s^2`.
 pub const THETA0: f64 = 1.0 / 3.0;
 const Q: usize = 27;
@@ -175,6 +178,8 @@ pub struct NsfLaw {
     pub dt_s: f64,
     /// Reference temperature [K] (lattice `theta0 = 1/3`).
     pub temperature_ref_k: f64,
+    /// The declared bulk-to-shear viscosity ratio in force.
+    pub bulk_to_shear_ratio: f64,
     t_low: f64,
     t_high: f64,
     mu: Vec<f64>,
@@ -432,6 +437,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             dx_m: spec.dx_m,
             dt_s,
             temperature_ref_k: state.temperature,
+            bulk_to_shear_ratio: spec.bulk_to_shear_ratio,
             t_low: spec.temperature_window_k[0],
             t_high: spec.temperature_window_k[1],
             mu,

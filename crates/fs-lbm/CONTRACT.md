@@ -824,6 +824,15 @@ Stability scan (Bloch, 28 x 28, eight oblique modes, ratio 0.73): max |lambda| =
 0.9953 for lattice viscosity 1e-5, 1e-4, 5e-4, 1.5e-3, 1e-2, 3e-2 and 1.146 at 0.1; ratio 0.84 at 5e-4 gives 0.9999.
 The verified envelope is therefore `MAX_VERIFIED_LATTICE_VISCOSITY` = 0.03 and a finer dx is REFUSED (`NsfError::Viscosity`),
 not compensated with inflated bulk viscosity.
+Round-off scan (the four-digit values above hide the last digits). Complex-step Bloch matrix (`Im f(x + i 1e-30 e) / 1e-30`,
+no subtraction error, so the 28 x 28 matrix is exact to machine precision) of the numpy prototype of this scheme (same
+algorithm, not the Rust code), at EVERY wavevector of a 16 x 16 x 4 periodic box (242 modes: Nyquist and the short axis
+included), ratio 0.73, eight coupling passes, self-conjugate Nyquist modes projected with 1/N. `max |lambda| - 1`:
+-2.2e-16 (lattice viscosity 1e-5), +8.9e-16 (1e-4), +6.7e-16 (5e-4), -3.3e-16 (1.5e-3), -1.1e-16 (1e-2), -2.2e-16 (3e-2).
+The extremum is a self-conjugate Nyquist mode whose eigenvalue is exactly neutral (`lambda = 1`), so +8.9e-16 and +6.7e-16 are
+3 to 4 ULP of eigen-solver round-off, not growth; were it real it would be 9e-9 relative amplitude after 1e7 steps, nine
+orders below the 1e-6 energy-ledger band. The smallest-k modes damp at -1.562e-6, -1.562e-5, -7.809e-5, -2.342e-4, -1.558e-3
+and -4.656e-3 per step for the same six viscosities. No range is refused beyond the 0.03 envelope.
 
 **Refusals.** `new` and `step` refuse: a gas state outside the receipt window (T in [50, 2000] K: 50 K admitted, 49.999 K
 refused); a temperature outside the declared run window; more cells than `maximum_cells` (cap admitted, cap + 1
