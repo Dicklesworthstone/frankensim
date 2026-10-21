@@ -54,6 +54,7 @@
 
 use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;
+use fs_material::hyper::cards::HyperelasticMaterial;
 use fs_solver::krylov::PminresState;
 use fs_solver::op::CsrOp;
 use fs_sparse::precond::{Precond, ilu0, pcg};
@@ -91,15 +92,56 @@ impl Default for HyperTetSettings {
     }
 }
 
+/// Uniform or per-element hyperelastic laws in tetrahedron connectivity order.
+///
+/// A field may borrow native laws or complete source-bound laws. Each element
+/// uses its own law for every trial energy, stress and tangent; coefficients
+/// remain fixed over the load path and are never homogenized by the solver.
+#[derive(Debug)]
+pub enum HyperelasticLawField<'a, L: HyperelasticMaterial = Hyperelastic> {
+    /// One law shared by every tetrahedron.
+    Uniform(&'a L),
+    /// Exactly one law for each tetrahedron.
+    PerElement(&'a [L]),
+}
+
+impl<L: HyperelasticMaterial> Copy for HyperelasticLawField<'_, L> {}
+impl<L: HyperelasticMaterial> Clone for HyperelasticLawField<'_, L> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<L: HyperelasticMaterial> HyperelasticLawField<'_, L> {
+    fn validate_count(&self, expected: usize) -> Result<(), HyperTetError> {
+        if let Self::PerElement(laws) = self
+            && laws.len() != expected
+        {
+            return Err(HyperTetError::LawCountMismatch {
+                expected,
+                got: laws.len(),
+            });
+        }
+        Ok(())
+    }
+
+    fn at(&self, element: usize) -> &Hyperelastic {
+        match self {
+            Self::Uniform(law) => law.hyperelastic(),
+            Self::PerElement(laws) => laws[element].hyperelastic(),
+        }
+    }
+}
+
 /// A static finite-strain problem on a tetrahedral mesh.
-#[derive(Debug, Clone, Copy)]
-pub struct HyperTetProblem<'a> {
+#[derive(Debug)]
+pub struct HyperTetProblem<'a, L: HyperelasticMaterial = Hyperelastic> {
     /// Reference vertex coordinates, m.
     pub nodes_m: &'a [[f64; 3]],
     /// Four vertex indices per conforming tetrahedron.
     pub tetrahedra: &'a [[usize; 4]],
-    /// The hyperelastic card (uniform over the mesh).
-    pub material: &'a Hyperelastic,
+    /// Uniform or per-element native or source-bound hyperelastic laws.
+    pub material: HyperelasticLawField<'a, L>,
     /// Prescribed displacements at full load: (`3 node + component`, m).
     pub prescribed_m: &'a [(usize, f64)],
     /// Dead nodal forces at full load: (`3 node + component`, N).
@@ -110,6 +152,13 @@ pub struct HyperTetProblem<'a> {
     pub budget: TetAssemblyBudget,
     /// Newton controls.
     pub settings: HyperTetSettings,
+}
+
+impl<L: HyperelasticMaterial> Copy for HyperTetProblem<'_, L> {}
+impl<L: HyperelasticMaterial> Clone for HyperTetProblem<'_, L> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 /// Evidence of one load step.
@@ -152,6 +201,13 @@ pub enum HyperTetError {
         /// What was refused.
         what: String,
     },
+    /// A per-element law field does not cover exactly the mesh connectivity.
+    LawCountMismatch {
+        /// Number of tetrahedra.
+        expected: usize,
+        /// Number of supplied laws.
+        got: usize,
+    },
     /// A reference tetrahedron is degenerate or inverted.
     DegenerateElement {
         /// Element index.
@@ -189,6 +245,10 @@ impl core::fmt::Display for HyperTetError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidInput { what } => write!(f, "FS-SOLID-HYPER3-INPUT: {what}"),
+            Self::LawCountMismatch { expected, got } => write!(
+                f,
+                "FS-SOLID-HYPER3-MATERIAL-FIELD: expected {expected} laws, got {got}"
+            ),
             Self::DegenerateElement {
                 element,
                 scaled_jacobian,
@@ -256,13 +316,14 @@ fn triple(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
         + (a[0] * b[1] - a[1] * b[0]) * c[2]
 }
 
-impl HyperTetProblem<'_> {
+impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
     fn validate(&self) -> Result<Vec<Element>, HyperTetError> {
         let invalid = |what: String| Err(HyperTetError::InvalidInput { what });
         let n = self.nodes_m.len();
         if n == 0 || self.tetrahedra.is_empty() {
             return invalid("empty mesh".into());
         }
+        self.material.validate_count(self.tetrahedra.len())?;
         if n > self.budget.maximum_nodes || self.tetrahedra.len() > self.budget.maximum_tetrahedra {
             return invalid(format!(
                 "{n} nodes / {} tetrahedra exceed the budget {:?}",
@@ -382,11 +443,12 @@ impl HyperTetProblem<'_> {
             let j = f[0] * (f[4] * f[8] - f[5] * f[7]) - f[1] * (f[3] * f[8] - f[5] * f[6])
                 + f[2] * (f[3] * f[7] - f[4] * f[6]);
             min_det_f = min_det_f.min(j);
-            let p = match self.material.piola(&f) {
+            let material = self.material.at(index);
+            let p = match material.piola(&f) {
                 Ok(p) => p,
                 Err(error) => return Ok(Err((index, error.to_string()))),
             };
-            let w = self.material.energy(&f);
+            let w = material.energy(&f);
             if !w.is_finite() {
                 return Ok(Err((
                     index,
@@ -424,7 +486,7 @@ impl HyperTetProblem<'_> {
                 checkpoint(cx)?;
             }
             let f = Self::deformation_gradient(element, u);
-            let a4 = match self.material.tangent(&f) {
+            let a4 = match self.material.at(index).tangent(&f) {
                 Ok(a4) => a4,
                 Err(error) => return Ok(Err((index, error.to_string()))),
             };

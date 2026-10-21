@@ -14,7 +14,8 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
 use fs_solid::linear3::{TetLinearElasticProblem, TetMaterialField};
 use fs_solid::{
-    HyperTetError, HyperTetProblem, HyperTetSettings, TetAssemblyBudget, TetElasticMaterial,
+    HyperTetError, HyperTetProblem, HyperTetSettings, HyperelasticLawField, TetAssemblyBudget,
+    TetElasticMaterial,
 };
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -102,7 +103,7 @@ fn problem<'a>(
     HyperTetProblem {
         nodes_m: nodes,
         tetrahedra: tets,
-        material,
+        material: HyperelasticLawField::Uniform(material),
         prescribed_m: prescribed,
         nodal_forces_n: forces,
         body_force_n_m3: [0.0; 3],
@@ -511,4 +512,245 @@ fn refusals_are_structured() {
         problem(&nodes, &tets, &material, &fixed, &[(21, 0.1)], 1).solve(&cx)
     });
     assert_eq!(err.unwrap_err(), HyperTetError::Cancelled);
+}
+
+fn layered_source_card(scale: f64) -> fs_matdb::ConstitutiveModelCard {
+    use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance};
+    use fs_qty::Dims;
+    let pressure = Dims([-1, 1, -2, 0, 0, 0]);
+    let artifact = fs_blake3::hash_bytes(
+        format!("synthetic Ogden alpha=2 layer fixture; modulus scale={scale}").as_bytes(),
+    );
+    ConstitutiveModelCard {
+        law: LawId("ogden-decoupled".into()),
+        law_version: 1,
+        parameters: [
+            ("stretch_limit", 5.0, Dims::NONE),
+            ("volumetric_kind", 0.0, Dims::NONE),
+            ("term_count", 1.0, Dims::NONE),
+            ("mu_0", 3.0 * scale, pressure),
+            ("alpha_0", 2.0, Dims::NONE),
+            ("kappa", 8.0 * scale, pressure),
+        ]
+        .into_iter()
+        .map(|(name, value, dims)| (name.into(), LawParameter { value, dims }))
+        .collect(),
+        state_schema_version: 1,
+        initial_state: InitialStatePolicy::ZeroInternalState,
+        validity: fs_evidence::ValidityDomain::unconstrained(),
+        sources: vec![artifact],
+        provenance: Provenance {
+            source: "manufactured two-layer finite-strain material; not measured data".into(),
+            license: "test-only".into(),
+            artifact: Some(artifact),
+        },
+    }
+}
+
+fn layered_constraints(nodes: &[[f64; 3]], extension: f64) -> Vec<(usize, f64)> {
+    let mut prescribed = Vec::new();
+    for (node, x) in nodes.iter().enumerate() {
+        // The transverse rollers impose F22=F33=1. The internal x=1 face
+        // remains free axially, so its displacement must come from equilibrium.
+        prescribed.extend([(3 * node + 1, 0.0), (3 * node + 2, 0.0)]);
+        if x[0] == 0.0 {
+            prescribed.push((3 * node, 0.0));
+        } else if x[0] == 2.0 {
+            prescribed.push((3 * node, extension));
+        }
+    }
+    prescribed
+}
+
+#[test]
+fn heterogeneous_source_cards_drive_the_independent_layer_equilibrium() {
+    use fs_material::hyper::cards::ResolvedHyperelastic;
+    let (nodes, tets) = box_mesh([2, 1, 1], [2.0, 1.0, 1.0]);
+    let extension = 0.4;
+    let prescribed = layered_constraints(&nodes, extension);
+    // For the alpha=2 Ogden source and F=diag(lambda,1,1), differentiating
+    // W=mu/2*(lambda^(4/3)+2 lambda^(-2/3)-3)+kappa/2*(lambda-1)^2 gives
+    // P11=2 mu/3*(lambda^(1/3)-lambda^(-5/3))+kappa*(lambda-1).
+    // Neither reference calls the constitutive implementation or its AD path.
+    let stress = |stretch: f64, scale: f64| {
+        scale * (2.0 * (stretch.powf(1.0 / 3.0) - stretch.powf(-5.0 / 3.0)) + 8.0 * (stretch - 1.0))
+    };
+    let energy = |stretch: f64, scale: f64| {
+        scale
+            * (1.5 * (stretch.powf(4.0 / 3.0) + 2.0 * stretch.powf(-2.0 / 3.0) - 3.0)
+                + 4.0 * (stretch - 1.0).powi(2))
+    };
+    let mut prior_interface = 0.0;
+    let mut prior_force = 0.0;
+    for right_scale in [2.0, 5.0] {
+        let cards = [layered_source_card(1.0), layered_source_card(right_scale)];
+        let sources: Vec<_> = tets
+            .iter()
+            .map(|tet| {
+                let x = tet.iter().map(|&n| nodes[n][0]).sum::<f64>() / 4.0;
+                ResolvedHyperelastic::try_from_model_card(&cards[usize::from(x > 1.0)]).unwrap()
+            })
+            .collect();
+        let p = HyperTetProblem {
+            nodes_m: &nodes,
+            tetrahedra: &tets,
+            material: HyperelasticLawField::PerElement(&sources),
+            prescribed_m: &prescribed,
+            nodal_forces_n: &[],
+            body_force_n_m3: [0.0; 3],
+            budget: TetAssemblyBudget::standard(),
+            settings: HyperTetSettings {
+                load_steps: 4,
+                ..HyperTetSettings::default()
+            },
+        };
+        let solved = with_cx(|cx| p.solve(cx)).unwrap();
+        // Two unit-length, unit-area layers in series: lambda1+lambda2=2+du
+        // and P1(lambda1)=P2(lambda2). Both stress laws are strictly increasing.
+        let (mut lo, mut hi) = (0.0, extension);
+        for _ in 0..100 {
+            let mid = 0.5 * (lo + hi);
+            if stress(1.0 + mid, 1.0) > stress(1.0 + extension - mid, right_scale) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        let interface = 0.5 * (lo + hi);
+        for (node, x) in nodes.iter().enumerate() {
+            if x[0] == 1.0 {
+                assert!((solved.displacement_m[node][0] - interface).abs() < 1e-9);
+            }
+        }
+        let force: f64 = solved
+            .reactions_n
+            .iter()
+            .filter(|(dof, _)| dof % 3 == 0 && nodes[dof / 3][0] == 2.0)
+            .map(|(_, force)| force)
+            .sum();
+        assert!((force - stress(1.0 + interface, 1.0)).abs() < 1e-9);
+        let exact_energy =
+            energy(1.0 + interface, 1.0) + energy(1.0 + extension - interface, right_scale);
+        assert!((solved.strain_energy_j - exact_energy).abs() < 1e-9);
+        assert!(interface > prior_interface && force > prior_force);
+        prior_interface = interface;
+        prior_force = force;
+        for (tet, source) in tets.iter().zip(&sources) {
+            let x = tet.iter().map(|&n| nodes[n][0]).sum::<f64>() / 4.0;
+            assert_eq!(source.model_card(), &cards[usize::from(x > 1.0)]);
+            assert_eq!(
+                source.model_card().content_hash(),
+                cards[usize::from(x > 1.0)].content_hash()
+            );
+        }
+    }
+}
+
+#[test]
+fn source_fields_preserve_uniform_results_and_each_elements_domain() {
+    use fs_material::hyper::cards::ResolvedHyperelastic;
+    let (nodes, tets) = box_mesh([2, 1, 1], [2.0, 1.0, 1.0]);
+    let prescribed = layered_constraints(&nodes, 0.4);
+    let card = layered_source_card(1.0);
+    let source = ResolvedHyperelastic::try_from_model_card(&card).unwrap();
+    let native = problem(&nodes, &tets, source.law(), &prescribed, &[], 4);
+    let mut sourced = HyperTetProblem {
+        nodes_m: &nodes,
+        tetrahedra: &tets,
+        material: HyperelasticLawField::Uniform(&source),
+        prescribed_m: &prescribed,
+        nodal_forces_n: &[],
+        body_force_n_m3: [0.0; 3],
+        budget: native.budget,
+        settings: native.settings,
+    };
+    let field = vec![source.clone(); tets.len()];
+    with_cx(|cx| {
+        let baseline = native.solve(cx).unwrap();
+        assert_eq!(baseline, sourced.solve(cx).unwrap());
+        sourced.material = HyperelasticLawField::PerElement(&field);
+        assert_eq!(baseline, sourced.solve(cx).unwrap());
+        sourced.material = HyperelasticLawField::PerElement(&field[..field.len() - 1]);
+        assert_eq!(
+            sourced.solve(cx).unwrap_err(),
+            HyperTetError::LawCountMismatch {
+                expected: tets.len(),
+                got: tets.len() - 1,
+            }
+        );
+    });
+    let mut limited = card.clone();
+    limited.parameters.get_mut("stretch_limit").unwrap().value = 1.05;
+    let mut limited_field = field.clone();
+    limited_field[5] = ResolvedHyperelastic::try_from_model_card(&limited).unwrap();
+    sourced.material = HyperelasticLawField::PerElement(&limited_field);
+    let u: Vec<_> = nodes.iter().flat_map(|x| [0.2 * x[0], 0.0, 0.0]).collect();
+    with_cx(|cx| {
+        assert!(matches!(
+            sourced.internal_force(&u, cx),
+            Err(HyperTetError::MaterialRefused { element: 5, .. })
+        ));
+        assert!(matches!(
+            sourced.tangent_matrix(&u, cx),
+            Err(HyperTetError::MaterialRefused { element: 5, .. })
+        ));
+    });
+    let mut wrong_units = card;
+    wrong_units.parameters.get_mut("mu_0").unwrap().dims = fs_qty::Dims::NONE;
+    assert!(ResolvedHyperelastic::try_from_model_card(&wrong_units).is_err());
+}
+
+#[test]
+fn source_context_requires_supported_fixed_conditions_inside_the_exact_domain() {
+    use fs_matdb::QueryPoint;
+    use fs_material::hyper::cards::ResolvedHyperelastic;
+    use fs_qty::QuantitySpec;
+    use fs_qty::semantic::{QuantityKind, SemanticType, StrainBasis, StrainComponent, ValueForm};
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    let mut card = layered_source_card(1.0);
+    card.validity = card
+        .validity
+        .with_quantity("temperature", absolute, 290.0, 310.0);
+    let inside = QueryPoint::new()
+        .with_quantity("temperature", absolute, 300.0)
+        .unwrap();
+    let source = ResolvedHyperelastic::try_from_model_card_at(&card, &inside).unwrap();
+    assert_eq!(source.context(), &inside);
+    assert_eq!(source.model_card(), &card);
+    assert!(ResolvedHyperelastic::try_from_model_card(&card).is_err());
+    assert!(
+        ResolvedHyperelastic::try_from_model_card_at(
+            &card,
+            &inside.clone().with("temperature", 311.0).unwrap()
+        )
+        .is_err()
+    );
+    let difference = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::TemperatureDifference,
+        ValueForm::Static,
+    ));
+    let wrong_kind = QueryPoint::new()
+        .with_quantity("temperature", difference, 300.0)
+        .unwrap();
+    assert!(ResolvedHyperelastic::try_from_model_card_at(&card, &wrong_kind).is_err());
+    // A caller-supplied strain is not the strain evolving inside hyper3.
+    let strain = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Strain {
+            basis: StrainBasis::Tensor,
+            component: StrainComponent::Normal,
+        },
+        ValueForm::Static,
+    ));
+    card.validity = card
+        .validity
+        .with_quantity("axial_strain", strain, 0.0, 0.1);
+    let frozen = inside.with_quantity("axial_strain", strain, 0.05).unwrap();
+    assert!(
+        card.validity
+            .contains_typed(frozen.axes(), frozen.axis_quantities())
+    );
+    assert!(ResolvedHyperelastic::try_from_model_card_at(&card, &frozen).is_err());
 }

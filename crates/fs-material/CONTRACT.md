@@ -416,6 +416,16 @@ homogenization, the P2 milestone.
   Moduli require Pa, exponents/directions/counts/selectors are dimensionless;
   missing/extra parameters, fractional counts, versions and undeclared
   invariant selectors refuse. FSMODPK v1 remains unchanged.
+  `hyper::cards::ResolvedHyperelastic` retains the exact source model card and
+  admitted `QueryPoint` beside its native law. `try_from_model_card_at` requires
+  the typed source domain to contain that fixed query; bounded conditions
+  support static temperature, pressure, composition, moisture and concentration
+  quantities, plus legacy kelvin `T`. The context-free constructor admits only
+  unconstrained domains. Evolving kinematic calibration axes refuse until an
+  actual coordinate owner exists. `HyperelasticMaterial` lets spatial consumers
+  borrow this same energy/Piola/tangent owner. Native parameter and actual
+  principal-stretch checks remain unchanged; the wrapper adds no thermal
+  evolution or uncertainty propagation.
   The offline `xtask matdb-pack` `constitutive-v1` profile accepts explicit
   model/law/state/initialization/validity declarations and dimensioned
   parameter/validity rows, normalizes through fs-qty, retains each transform

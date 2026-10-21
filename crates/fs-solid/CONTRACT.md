@@ -904,6 +904,28 @@ admitted against `TetAssemblyBudget`; refusals are `HyperTetError`
 (`InvalidInput`, `DegenerateElement`, `MaterialRefused`, `NewtonStalled`,
 `LinearSolveFailed`, `Cancelled`).
 
+`HyperelasticLawField::Uniform` and `PerElement` use this same owner. A
+per-element field follows tetrahedron connectivity order and must cover the
+mesh exactly (`LawCountMismatch` otherwise). Each local law supplies every
+trial energy, Piola stress and consistent tangent, including line-search and
+final evaluations. Regional materials are not averaged. Fields may borrow
+native `Hyperelastic` laws or `ResolvedHyperelastic` values retaining the exact
+admitted constitutive model cards, including parameters, validity, source hashes
+and provenance. Its explicit fixed external query must satisfy every source
+bound and exact quantity descriptor. Static temperature, pressure, composition,
+moisture and concentration conditions are supported; evolving mechanical axes
+require their own owner and refuse. The context-free constructor only accepts
+unconstrained source domains. The source wrapper delegates constitutive parameter
+and native stretch checks to the existing hyperelastic owner; it introduces no
+additional energy model.
+The focused heterogeneous regression solves two source-defined Ogden layers in
+series against an independent axial stress/energy formula and traction-balance
+root, changes only the second layer's material data, and checks actual interface
+motion and reaction. Uniform native/source/element fields agree bit for bit;
+wrong cardinality and a single element's unsupported stretch refuse. Material
+conditions remain fixed over the load path; thermal evolution, dynamic inertia
+and source uncertainty propagation remain outside this static reduction.
+
 Conformance (`tests/hyper3.rs`, all executed): the affine finite-strain
 patch test is reproduced to 1.2e-14 m with the exact stored energy; the
 compressible Neo-Hookean uniaxial stretch to 1.6 (rollers) matches the

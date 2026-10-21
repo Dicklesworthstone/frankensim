@@ -76,6 +76,7 @@ pub use frame2d::{
 pub use hyper2d::{HyperProblem, NewtonReport, NewtonSettings};
 pub use hyper3::{
     HyperLoadStep, HyperTetError, HyperTetProblem, HyperTetSettings, HyperTetSolution,
+    HyperelasticLawField,
 };
 pub use linear::{Formulation, LinearProblem, PlaneKind};
 pub use linear3::hex::{HexConnectivity, HexElasticProblem, HexFamily, HexQuadrature};

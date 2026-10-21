@@ -11,12 +11,125 @@ use crate::graph::{
     Differentiability, EnergyBehavior, GraphError, LawNode, LawRegistry, NodeDeclaration,
     NodeOutput, NodeRole, Port, TimeParity,
 };
-use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId};
-use fs_qty::Dims;
+use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, QueryPoint};
+use fs_qty::semantic::{QuantityKind, ValueForm};
+use fs_qty::{Dims, QuantitySpec, Temperature};
 use std::collections::BTreeSet;
 
 const ONE: Dims = Dims([0, 0, 0, 0, 0, 0]);
 const PA: Dims = Dims([-1, 1, -2, 0, 0, 0]);
+
+/// Immutable access to the existing hyperelastic energy/stress/tangent owner.
+///
+/// A spatial solver may borrow a native law or a source-bound law without
+/// extracting bare parameters or introducing another constitutive update.
+pub trait HyperelasticMaterial {
+    /// The same law must supply energy, Piola stress and consistent tangent.
+    fn hyperelastic(&self) -> &Hyperelastic;
+}
+
+impl HyperelasticMaterial for Hyperelastic {
+    fn hyperelastic(&self) -> &Hyperelastic {
+        self
+    }
+}
+
+/// A native hyperelastic law retaining the exact admitted model card.
+///
+/// Parameters and their physical context stay fixed over the mechanical load
+/// path. This does not evolve temperature or grant additional calibration,
+/// uncertainty or source-domain authority beyond the supplied model card.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedHyperelastic {
+    card: ConstitutiveModelCard,
+    context: QueryPoint,
+    law: Hyperelastic,
+}
+
+impl ResolvedHyperelastic {
+    /// Admit a model with unconstrained external source conditions.
+    /// Bounded cards require [`Self::try_from_model_card_at`]; an empty context
+    /// cannot satisfy a temperature or other source-domain constraint.
+    pub fn try_from_model_card(card: &ConstitutiveModelCard) -> Result<Self, MaterialError> {
+        Self::try_from_model_card_at(card, &QueryPoint::new())
+    }
+
+    /// Admit a model at fixed external conditions in its exact typed domain.
+    ///
+    /// Source bounds may constrain static temperature, pressure, composition,
+    /// moisture or concentration. Legacy `T` retains its kelvin convention.
+    /// Mechanical strain, stress, stretch and rate axes require an evolving
+    /// coordinate owner and are refused here, even when supplied in `context`.
+    /// The native law's separate principal-stretch bound still gates actual F.
+    /// Extra context coordinates not constrained by this card are retained but
+    /// make no additional source-coverage claim.
+    pub fn try_from_model_card_at(
+        card: &ConstitutiveModelCard,
+        context: &QueryPoint,
+    ) -> Result<Self, MaterialError> {
+        let law = Hyperelastic::from_model_card(card)?;
+        if !card
+            .validity
+            .contains_typed(context.axes(), context.axis_quantities())
+        {
+            return Err(refusal(
+                "hyperelastic source context is missing, mistyped or outside the model domain",
+            ));
+        }
+        for axis in card.validity.bounds().keys() {
+            let quantity = context.axis_quantities().get(axis).copied();
+            let semantic = quantity.and_then(QuantitySpec::semantic_type);
+            let static_external = semantic.is_some_and(|ty| {
+                ty.form() == ValueForm::Static
+                    && matches!(
+                        ty.kind(),
+                        QuantityKind::AbsoluteTemperature
+                            | QuantityKind::Pressure
+                            | QuantityKind::Composition(_)
+                            | QuantityKind::Moisture(_)
+                            | QuantityKind::MassConcentration
+                            | QuantityKind::AmountConcentration
+                    )
+            });
+            let legacy_temperature = axis == "T"
+                && semantic.is_none()
+                && (quantity.is_none()
+                    || quantity == Some(QuantitySpec::dimensional(Temperature::DIMS)))
+                && context.axes().get(axis).is_some_and(|value| *value > 0.0);
+            if !static_external && !legacy_temperature {
+                return Err(refusal(format!(
+                    "hyperelastic source axis {axis} is not a supported fixed external condition; evolving mechanical coordinates require an explicit owner"
+                )));
+            }
+        }
+        Ok(Self {
+            card: card.clone(),
+            context: context.clone(),
+            law,
+        })
+    }
+
+    /// Complete immutable source, including validity, provenance and identity.
+    pub const fn model_card(&self) -> &ConstitutiveModelCard {
+        &self.card
+    }
+
+    /// Exact external query admitted for this fixed-condition mechanical path.
+    pub const fn context(&self) -> &QueryPoint {
+        &self.context
+    }
+
+    /// Existing native energy, exact Piola stress and consistent tangent.
+    pub const fn law(&self) -> &Hyperelastic {
+        &self.law
+    }
+}
+
+impl HyperelasticMaterial for ResolvedHyperelastic {
+    fn hyperelastic(&self) -> &Hyperelastic {
+        &self.law
+    }
+}
 
 struct Parameters<'a> {
     card: &'a ConstitutiveModelCard,
