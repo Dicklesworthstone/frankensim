@@ -265,7 +265,7 @@ impl BroadbandModalObserver {
         &self.report
     }
     pub fn last_modal_frame(&self) -> &ModalAcousticFrame {
-        &self.workspace.frame
+        self.workspace.frame()
     }
     /// Physical exp(-i*w*t) fitted operator INCLUDING the sampled delay kernel.
     /// This is a sampled held-out diagnostic, not a continuum error bound or
@@ -346,7 +346,7 @@ impl BroadbandModalObserver {
             });
         }
         let pressure = self.delay.preview(raw)?;
-        if pressure.abs() > self.model.budget.maximum_abs_pressure_pa {
+        if pressure.abs() > self.model.budget().maximum_abs_pressure_pa {
             return Err(BroadbandModalError::Invalid(
                 "broadband observer exceeds the declared pressure ceiling",
             ));

@@ -7,7 +7,8 @@ inertia-certified spectrum slicing. Layer: **L1 BEDROCK** (peers: fs-la,
 fs-sparse, fs-math — the same tier fs-cheb occupies). Consumers: the
 plates/shells, viscoelastic-damping, and vibroacoustic beads of the
 musical-acoustics program, and any structural-dynamics caller.
-Bead frankensim-fsim-vibration-eig-jw6yq.
+Bead frankensim-fsim-vibration-eig-jw6yq. Since IRP M1.1-W1a the crate also owns the time-domain realization of
+mass-normalized damped modes (`time`, moved from fs-couple under owner decision OD10; it needs only `std` and `fs-math`).
 
 ## Public types and semantics
 - `slice_window(k, m, (low, high], opts) -> SliceReport` — the certified
@@ -61,6 +62,59 @@ Bead frankensim-fsim-vibration-eig-jw6yq.
   fs-sparse `FS-SPARSE-DIRECT-*` code and the shift), invalid window,
   window-unresolved (the count-certificate mutation gate), unrepresentable
   mass-coordinate equilibration, quadratic-eig failure.
+
+### `time` (IRP M1.1-W1a; moved from `fs-couple::modal_acoustic_time`)
+
+`ModalAcousticTimeModel` is the generic fixed-rate realization of independent,
+mass-normalized structural modes. It consumes generalized force in
+`N / sqrt(kg)`, advances viscously damped modal coordinates by the exact
+zero-order-hold transition in underdamped, critically damped, and overdamped
+regimes, and emits physical observer pressure in pascals. Acoustic observation
+uses a caller-supplied complex pressure-per-modal-velocity transfer at each
+natural frequency under `exp(-i omega t)`; no material names, digital gains,
+or mastering values occur in this layer. Energy/work diagnostics and
+transactional state/pressure budgets accompany every sample.
+`held_force_for_port_velocity` solves the exact-ZOH scalar endpoint constraint
+using free modal motion plus unit-port-force mobility, with conjugate force
+and velocity projections. It refuses invalid/nonpositive mobility and
+nonfinite inputs/results without changing state. The ordinary step still
+admits state and energy budgets. The bowed runtime's set-valued contact uses
+the same free-motion plus unit-force endpoint response, cached per bow station
+(see the Bow bullet under the string paths).
+G1 compares an independent oscillator solution
+and demonstrates the old pinning error; G3 checks mixed-sign multimode ports
+in all damping regimes and full/half/subsample durations. This enforces only
+endpoint velocity: continuous no-slip motion, exact within-step event times,
+and a passive contact discretization are not claimed.
+Each frame additionally retains mode-local viscous work-minus-energy differences
+and their scale-aware roundoff allowances. Negative loss beyond a mode's allowance
+refuses the entire step, even when another mode could mask it in the aggregate.
+The aggregate work/energy calculation is unchanged; summing the mode-local
+differences can differ by floating-point roundoff. Neither an undamped mode's
+energy drift nor a negative value within its allowance is physical heating.
+The default initial state is zero displacement and velocity. A caller whose
+window begins after a load has already settled may explicitly initialize the
+exact static compliance `q = F/omega^2`, `qdot = 0`; using that operation to
+erase a real load-on transient is outside the contract.
+`observer_pressure_with_transfers_about_static_equilibrium` additionally
+removes the exact held-force compliance `F/omega^2` before applying the
+complex transfer's displacement-quadrature term. This prevents a static load
+from being misreported as DC acoustic pressure while leaving free modal motion
+unchanged; the caller must provide the same generalized ZOH force that drove
+the structural transition.
+
+The acoustic realization is explicitly narrow-band: one complex transfer value
+per mode is exact only at that mode's natural frequency. Broadband radiation,
+propagation delay, and feedback impedance require the separately tracked stable
+rational-fitting path; this module does not claim them or passivity.
+
+Ownership and visibility: the module needs only `std` and `fs_math` (`det` transcendentals), so it sits at L1 below every
+consumer. Mode cap `MAX_TIME_DOMAIN_ACOUSTIC_MODES = 4096`; `try_new` refuses 0 modes and more than 4096 with
+`InvalidInput { what: "mode count must be in 1..=4096" }`. `advance_exact_zoh` and
+`ModalAcousticTimeModel::advance_exact_zoh_step` are public (they were crate-private in fs-couple) because the bow contact,
+the compact radiator and fs-couple's broadband observer take single exact steps; `ModalAcousticWorkspace::frame()` exposes the
+last published diagnostics. The opt-in `broadband` observer is not part of this crate; it stays in
+`fs_couple::modal_acoustic_time::broadband`. Determinism: one-host bitwise; no cross-ISA claim is made for the music stack.
 
 ## Invariants
 1. A returned `SliceReport` satisfies `modes.len() == expected ==

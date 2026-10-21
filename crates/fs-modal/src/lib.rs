@@ -32,12 +32,18 @@
 //! Determinism: deterministic start vectors (integer LCG, no platform libm),
 //! fixed reorthogonalization order, index-ordered tie-breaks; repeat runs are
 //! bitwise identical (tested).
+//!
+//! The [`time`] module is the time-domain realization of mass-normalized damped modes (exact zero-order-hold stepping and
+//! observer pressure); it moved here from `fs-couple` (IRP M1.1-W1a) so that strings, solids and couplers share one acyclic owner.
 
 use fs_la::eigen::jacobi_eigh;
 use fs_la::eigen_complex::eig as complex_eig;
 use fs_la::factor::cholesky;
 use fs_math::c64::C64;
 use fs_sparse::{Coo, Csr, DirectOrdering, LdltError, LdltFactor, LdltOptions, SymbolicLdlt};
+
+/// Exact zero-order-hold realization of mass-normalized damped modes (moved from fs-couple, M1.1-W1a).
+pub mod time;
 
 mod windows;
 pub use windows::{MultiSliceReport, SliceTimingReceipt, WindowPlan, slice_windows};

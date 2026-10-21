@@ -56,7 +56,14 @@ pub mod material_assembly;
 /// Material-resolved branch heat and finite charge/flux storage on Kirchhoff circuits.
 pub mod material_circuit;
 pub mod mm_line;
-pub mod modal_acoustic_time;
+/// Time-domain modal realization. The exact zero-order-hold core is owned by `fs_modal::time` (IRP M1.1-W1a, owner decision OD10) and
+/// every former name of this path still resolves. The opt-in broadband observer stays here: it needs `fs-vfit`, `fs-phs` and the
+/// broadband radiation owner, none of which `fs-modal` may depend on.
+pub mod modal_acoustic_time {
+    pub use fs_modal::time::*;
+    /// Opt-in broadband pressure observation using the original exact modal step.
+    pub mod broadband;
+}
 pub mod pcm_wav;
 pub mod piano_vertical;
 pub mod pickup;

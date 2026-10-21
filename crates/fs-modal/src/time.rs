@@ -21,13 +21,14 @@
 //! exchange physical forces through the same modal ports, but have no direct
 //! narrow-band pressure transfer. This is translation in a supplied fixed
 //! coordinate, not a rotating six-degree-of-freedom rigid-body model.
+//!
+//! Owner: `fs-modal` (layer L1), moved here from `fs-couple` under owner decision OD10 (IRP M1.1-W1a) so that strings, solids
+//! and couplers share one acyclic owner. `fs_couple::modal_acoustic_time` re-exports this module under every former name and
+//! keeps the opt-in `broadband` observer, which needs `fs-vfit`, `fs-phs` and the broadband radiation owner.
 
 use std::sync::Arc;
 
 use fs_math::{c64::C64, det};
-
-/// Opt-in broadband pressure observation using the original exact modal step.
-pub mod broadband;
 
 /// Maximum number of modes admitted by one runtime model.
 pub const MAX_TIME_DOMAIN_ACOUSTIC_MODES: usize = 4_096;
@@ -152,6 +153,12 @@ impl ModalAcousticWorkspace {
                 dissipation_roundoff_tolerance_j: 0.0,
             },
         }
+    }
+
+    /// Diagnostics published by the last successful `step_into` (all zero before the first).
+    #[must_use]
+    pub fn frame(&self) -> &ModalAcousticFrame {
+        &self.frame
     }
 
     /// Number of modes this workspace can stage without resizing.
@@ -538,8 +545,11 @@ impl ModalAcousticTimeModel {
         self.states.copy_from_slice(&source.states);
     }
 
+    /// One exact zero-order-hold step of mode `mode_index` from `state` under the held generalized `force`, with this model's
+    /// cached full-step coefficients. Public so that single-mode consumers (the bow contact, compact radiators and the
+    /// broadband observer in `fs-couple`) take the very same step the model takes.
     #[inline]
-    pub(crate) fn advance_exact_zoh_step(
+    pub fn advance_exact_zoh_step(
         &self,
         mode_index: usize,
         state: ModalAcousticState,
@@ -1295,7 +1305,8 @@ fn advance_undamped_zoh(
     }
 }
 
-pub(crate) fn advance_exact_zoh(
+/// One exact zero-order-hold step of a single mode from `state` under the held generalized `force` over `dt`.
+pub fn advance_exact_zoh(
     mode: ModalAcousticMode,
     state: ModalAcousticState,
     force: f64,

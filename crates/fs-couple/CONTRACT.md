@@ -417,48 +417,13 @@ cavity (composes with the BEM's outward panel velocities).
 
 ### `modal_acoustic_time`
 
-`ModalAcousticTimeModel` is the generic fixed-rate realization of independent,
-mass-normalized structural modes. It consumes generalized force in
-`N / sqrt(kg)`, advances viscously damped modal coordinates by the exact
-zero-order-hold transition in underdamped, critically damped, and overdamped
-regimes, and emits physical observer pressure in pascals. Acoustic observation
-uses a caller-supplied complex pressure-per-modal-velocity transfer at each
-natural frequency under `exp(-i omega t)`; no material names, digital gains,
-or mastering values occur in this layer. Energy/work diagnostics and
-transactional state/pressure budgets accompany every sample.
-`held_force_for_port_velocity` solves the exact-ZOH scalar endpoint constraint
-using free modal motion plus unit-port-force mobility, with conjugate force
-and velocity projections. It refuses invalid/nonpositive mobility and
-nonfinite inputs/results without changing state. The ordinary step still
-admits state and energy budgets. The bowed runtime's set-valued contact uses
-the same free-motion plus unit-force endpoint response, cached per bow station
-(see the Bow bullet under the string paths).
-G1 compares an independent oscillator solution
-and demonstrates the old pinning error; G3 checks mixed-sign multimode ports
-in all damping regimes and full/half/subsample durations. This enforces only
-endpoint velocity: continuous no-slip motion, exact within-step event times,
-and a passive contact discretization are not claimed.
-Each frame additionally retains mode-local viscous work-minus-energy differences
-and their scale-aware roundoff allowances. Negative loss beyond a mode's allowance
-refuses the entire step, even when another mode could mask it in the aggregate.
-The aggregate work/energy calculation is unchanged; summing the mode-local
-differences can differ by floating-point roundoff. Neither an undamped mode's
-energy drift nor a negative value within its allowance is physical heating.
-The default initial state is zero displacement and velocity. A caller whose
-window begins after a load has already settled may explicitly initialize the
-exact static compliance `q = F/omega^2`, `qdot = 0`; using that operation to
-erase a real load-on transient is outside the contract.
-`observer_pressure_with_transfers_about_static_equilibrium` additionally
-removes the exact held-force compliance `F/omega^2` before applying the
-complex transfer's displacement-quadrature term. This prevents a static load
-from being misreported as DC acoustic pressure while leaving free modal motion
-unchanged; the caller must provide the same generalized ZOH force that drove
-the structural transition.
-
-The acoustic realization is explicitly narrow-band: one complex transfer value
-per mode is exact only at that mode's natural frequency. Broadband radiation,
-propagation delay, and feedback impedance require the separately tracked stable
-rational-fitting path; this module does not claim them or passivity.
+A re-export of `fs_modal::time` (IRP M1.1-W1a, owner decision OD10): the exact zero-order-hold modal realization, its types, caps and
+semantics are specified in `crates/fs-modal/CONTRACT.md` (`### time`), and every former path `fs_couple::modal_acoustic_time::*`
+still resolves. fs-couple keeps `modal_acoustic_time::broadband` (the opt-in broadband receiver observation; it needs `fs-vfit`,
+`fs-phs` and `broadband_radiation`, so it cannot live in L1). Consumer facts that stay here: `AcousticRealizeError::Modal` wraps
+`ModalAcousticTimeError`; the bowed runtime's set-valued contact uses the free-motion plus unit-force endpoint response, cached per
+bow station (see the Bow bullet under the string paths); the plate and bowed-string paths call the single-mode steps
+`advance_exact_zoh` and `ModalAcousticTimeModel::advance_exact_zoh_step`, which are public in fs-modal for that reason.
 
 ### `render`
 
