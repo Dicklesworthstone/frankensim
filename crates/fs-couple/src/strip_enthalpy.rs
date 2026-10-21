@@ -1,19 +1,21 @@
 //! Layered thermal coupling.
-mod api { include!("layered_feedback_api.rs"); }
-mod state {
-    mod error { include!("layered_feedback_error.rs"); }
-    mod result { include!("layered_feedback_result.rs"); }
-    pub use error::StripEnthalpyError;
-    pub use result::{StripEnthalpyReport,StripEnthalpyCandidate};
-}
+#[path = "layered_feedback_api.rs"]
+mod api;
+#[path = "layered_feedback_error.rs"]
+mod error;
+#[path = "layered_feedback_result.rs"]
+mod result;
 mod types {
     pub(super) use super::api::*;
-    pub(super) use super::state::*;
+    pub(super) use super::error::*;
+    pub(super) use super::result::*;
 }
-mod solve { include!("layered_feedback_impl.rs"); }
+#[path = "layered_feedback_impl.rs"]
+mod solve;
 
 pub use api::{LayerThermalBinding,ThermalCoefficients,StripEnthalpyConfig};
-pub use state::{StripEnthalpyError,StripEnthalpyReport,StripEnthalpyCandidate};
+pub use error::StripEnthalpyError;
+pub use result::{StripEnthalpyReport,StripEnthalpyCandidate};
 pub use solve::step_candidate;
 
 /// Atomic coupled intervals and actual scheduled layer births.
