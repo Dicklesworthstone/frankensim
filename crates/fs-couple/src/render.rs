@@ -34,6 +34,7 @@ pub mod schedule;
 pub mod plate;
 /// Realized resolution and explicit solver-tolerance study seams.
 pub mod ladder;
+mod scattering;
 pub use plate::{CompactPlateVoice, PlateVoiceConfig};
 use schedule::force::coupled::{ModalCouplingError, render::{CoupledModalVoice, contact::ContactModalVoice}};
 use schedule::force::coupled::render::contact::multiple::MultiContactModalVoice;
@@ -628,9 +629,9 @@ impl ReedBoreVoice {
 
     /// Advance exactly `out.len()` samples, writing observer pascals.
     ///
-    /// The per-sample sequence is byte-for-byte the one-shot realizer's
-    /// loop body; a block boundary performs no arithmetic, which is the
-    /// whole block-size-invariance contract.
+    /// Source pressure, flow and reflected wave use the same sample of the
+    /// original line, including instantaneous reflection. The one-shot path
+    /// shares this loop; a block boundary performs no arithmetic.
     ///
     /// # Errors
     /// Solver or finite-set refusals; on refusal the voice must be
@@ -639,23 +640,11 @@ impl ReedBoreVoice {
         for slot in out.iter_mut() {
             let t = self.sample_index as f64 * self.dt;
             let p_m = blowing_envelope(self.reed, t);
-            let p_minus = self.line.incoming();
+            let boundary = self.line.boundary_response().map_err(|_|
+                AcousticRealizeError::Reed { what: "characteristic boundary left the finite set" })?;
             let u_body = self.plates.volume_velocity();
             let p_plus = if self.reed.mass_kg > 0.0 {
-                let (pp, y, v) = crate::reed_bore::step_massive_reed(
-                    self.reed,
-                    self.rho,
-                    self.zc,
-                    p_minus,
-                    p_m,
-                    self.reed_y,
-                    self.reed_v,
-                    self.dt,
-                    u_body,
-                    self.lay.as_ref(),
-                    self.solver_mode,
-                    &mut self.fast_stats,
-                )?;
+                let (pp, y, v) = self.step_massive_scattering(boundary, p_m, u_body)?;
                 self.reed_y = y;
                 self.reed_v = v;
                 pp
@@ -665,8 +654,8 @@ impl ReedBoreVoice {
                         self.reed,
                         self.rho,
                         self.zc,
-                        0.0,
-                        p_minus,
+                        boundary.direct,
+                        boundary.history,
                         p_m,
                         self.p_plus_prev,
                         u_body,
@@ -675,8 +664,8 @@ impl ReedBoreVoice {
                         self.reed,
                         self.rho,
                         self.zc,
-                        0.0,
-                        p_minus,
+                        boundary.direct,
+                        boundary.history,
                         p_m,
                         self.p_plus_prev,
                         u_body,
@@ -688,7 +677,7 @@ impl ReedBoreVoice {
             self.p_plus_prev = p_plus;
             if self.reed.mass_kg == 0.0 {
                 let residual = crate::reed_bore::reed_flow_mismatch(
-                    self.reed, self.rho, self.zc, 0.0, p_minus, p_m, p_plus, u_body,
+                    self.reed, self.rho, self.zc, boundary.direct, boundary.history, p_m, p_plus, u_body,
                 ).abs();
                 self.junction_residual_max = Some(self.junction_residual_max.unwrap_or(0.0).max(residual));
             }
@@ -720,15 +709,15 @@ impl ReedBoreVoice {
                 / (4.0 * core::f64::consts::PI * self.listener_m * self.sound_speed);
             *slot = p_obs;
             self.sample_index += 1;
-            // Same incoming characteristic used by the junction solve, before
-            // push changes the line history. This is the actual boundary work,
-            // not an inferred stored-energy or filter-dissipation account.
-            let volume = self.dt*(p_plus-p_minus)/self.zc;
+            // Current accepted incoming wave, matching the affine boundary used
+            // by the source up to convolution summation roundoff. This is port
+            // work, not an inferred line storage or filter-dissipation account.
+            let volume = self.dt*(p_plus-p_minus_now)/self.zc;
             self.ports.accept(crate::port_adoption::StepAccount {
                 tick:self.sample_index,duration_s:self.dt,storage_change_j:None,
                 loss_j:None,included_work_j:0.0,entropy_change_j_k:0.0,tolerance_j:None,
                 unavailable:Some("ReedBoreVoice/DelayedFilter has no physical line storage/loss owner or energy tolerance [J]"),
-            },[crate::port_adoption::PortTransfer::work((p_plus+p_minus)*volume,true)]);
+            },[crate::port_adoption::PortTransfer::work(p_bore*volume,true)]);
         }
         Ok(())
     }
