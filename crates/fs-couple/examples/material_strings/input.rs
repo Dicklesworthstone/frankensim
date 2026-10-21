@@ -331,6 +331,11 @@ impl Spec {
                     characteristic_speed:row.positive()?,viscous_per_speed:row.scalar()? };
                 row.end()?; bow_interfaces::Inputs::research(law)?
             },
+            "hyperbolic" => {
+                let law=FrictionLaw::Hyperbolic { static_mu:row.scalar()?,kinetic_mu:row.scalar()?,
+                    characteristic_speed:row.positive()? };
+                row.end()?; bow_interfaces::Inputs::research(law)?
+            },
             "interfaces" => {
                 let count=row.count(16)?; row.end()?;
                 if count==0 { return Err("source-bound friction requires one interface per bow track".into()); }
@@ -343,7 +348,8 @@ impl Spec {
                     let model=match row.word()? {
                         "coulomb"=>bow_interfaces::Model::Coulomb,
                         "stribeck"=>bow_interfaces::Model::Stribeck,
-                        _=>return Err("bow interface model must be coulomb or stribeck".into()),
+                        "hyperbolic"=>bow_interfaces::Model::Hyperbolic,
+                        _=>return Err("bow interface model must be coulomb, stribeck or hyperbolic".into()),
                     };
                     let names=(0..model.property_count()).map(|_|row.word().map(str::to_string))
                         .collect::<Result<Vec<_>>>()?;

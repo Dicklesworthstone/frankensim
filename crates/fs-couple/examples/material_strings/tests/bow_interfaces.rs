@@ -378,3 +378,94 @@ fn absent_sources_and_runtime_pressure_outside_the_source_domain_refuse() {
         ));
     });
 }
+
+mod hyperbolic {
+    use super::*;
+
+    fn source_spec_hyperbolic() -> input::Spec {
+        // The existing fixture is synthetic. Its speed property is explicitly
+        // selected for this manufactured law; no measured Stribeck fit is reused.
+        let text = String::from_utf8(source_spec().bytes).unwrap().replace(
+            "coulomb mu_static mu_kinetic",
+            "hyperbolic mu_static mu_kinetic stribeck_speed",
+        );
+        input::Spec::parse(text.as_bytes()).unwrap()
+    }
+    fn numeric_text() -> String {
+        let source = source_spec_hyperbolic();
+        String::from_utf8(source.bytes).unwrap().replace(
+            "friction interfaces 1\nbow-interface bow bow.fsintpk 293.15 0.0001 2 0 hyperbolic mu_static mu_kinetic stribeck_speed",
+            "friction hyperbolic 0.8 0.4 0.1",
+        )
+    }
+
+    #[test]
+    fn hyperbolic_source_and_numeric_inputs_share_pressure_and_callback_history() {
+        scoped(|cx, gate| {
+            let mut source = sourced(cx,gate,source_spec_hyperbolic(),0.4,"wire.fsmatpk");
+            let mut numeric = compile(cx,gate,input::Spec::parse(numeric_text().as_bytes()).unwrap(),7800.0);
+            assert_eq!(source.spec.bow_law(0).unwrap(), &FrictionLaw::Hyperbolic {
+                static_mu:0.8, kinetic_mu:0.4, characteristic_speed:0.1,
+            });
+            let binding = source.performance.bank().bow_interface(0).unwrap();
+            assert_eq!(binding.card().interface().history_id(), "synthetic fixed history");
+            assert_eq!(binding.nominal_area_m2(), 0.0001);
+            assert!(numeric.performance.bank().bow_interface(0).is_none());
+            let expected = pressure(&mut source,37);
+            assert!(expected.iter().all(|p|p.is_finite()));
+            assert!(expected.iter().any(|p|p.abs()>1e-15));
+            assert_eq!(expected,pressure(&mut numeric,128));
+            let mut replay = sourced(cx,gate,source_spec_hyperbolic(),0.4,"wire.fsmatpk");
+            assert_eq!(expected,pressure(&mut replay,1));
+        });
+    }
+
+    #[test]
+    fn hyperbolic_interface_change_reaches_motion_without_replacing_bulk_material() {
+        scoped(|cx, gate| {
+            let mut a = sourced(cx,gate,source_spec_hyperbolic(),0.4,"wire.fsmatpk");
+            let mut b = sourced(cx,gate,source_spec_hyperbolic(),0.2,"wire.fsmatpk");
+            assert_eq!(a.spec.bytes,b.spec.bytes);
+            for name in ["wire.fsmatpk","body.fsmatpk"] {
+                assert_eq!(a.catalog[name].pack.content_hash(),b.catalog[name].pack.content_hash());
+            }
+            for (x,y) in a.performance.bank().system().components().iter()
+                .zip(b.performance.bank().system().components()) {
+                assert_eq!(x.modes(),y.modes());
+            }
+            let x=pressure(&mut a,19); let y=pressure(&mut b,128);
+            assert!(x.iter().zip(&y).any(|(x,y)|(x-y).abs()>1e-15));
+            assert_ne!(a.performance.bank().system().components()[0].states(),
+                b.performance.bank().system().components()[0].states());
+            for ready in [&a,&b] {
+                let frame=ready.performance.bank().system().last_frame().unwrap();
+                assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j);
+            }
+        });
+    }
+
+    #[test]
+    fn hyperbolic_selection_keeps_source_and_runtime_refusals() {
+        let numeric=numeric_text();
+        for record in ["hyperbolic 0.8 0.4 0", "hyperbolic 0.8 0.9 0.1",
+            "hyperbolic -0.8 0.4 0.1", "hyperbolic 0.8 0.4 NaN",
+            "hyperbolic 0.8 0.4 0.1 0"] {
+            assert!(input::Spec::parse(numeric.replace("hyperbolic 0.8 0.4 0.1",record).as_bytes()).is_err());
+        }
+        scoped(|cx,gate| {
+            let text=String::from_utf8(source_spec_hyperbolic().bytes).unwrap();
+            let mut missing=input::Spec::parse(text.replace("stribeck_speed","missing_speed").as_bytes()).unwrap();
+            assert!(missing.friction.load(gate,|_|Ok(interface(0.4,"wire.fsmatpk",0.1))).is_err());
+            let mut invalid=source_spec_hyperbolic();
+            invalid.friction.load(gate,|_|Ok(interface(0.4,"wire.fsmatpk",2.0))).unwrap();
+            let mut ready=compile(cx,gate,invalid,7800.0);
+            assert!(ready.performance.block(&mut [0.0;1]).is_err());
+            assert_eq!(ready.performance.samples_rendered(),0);
+            let mut reads=0;
+            assert!(source_spec_hyperbolic().compile(cx,gate,|name| {
+                reads+=1; Ok(pack(name,7800.0,200_000.0,None))
+            }).is_err());
+            assert_eq!(reads,0);
+        });
+    }
+}

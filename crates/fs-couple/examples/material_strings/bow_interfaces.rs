@@ -16,18 +16,21 @@ use fs_tribo::{
 pub enum Model {
     Coulomb,
     Stribeck,
+    Hyperbolic,
 }
 impl Model {
     pub const fn property_count(self) -> usize {
         match self {
             Self::Coulomb => 2,
             Self::Stribeck => 4,
+            Self::Hyperbolic => 3,
         }
     }
 }
 
-/// Property names are in law order: static mu, kinetic mu, then (Stribeck)
-/// characteristic speed [m/s] and viscous coefficient per speed [s/m].
+/// Property names are in law order: static mu, kinetic mu, then the physical
+/// weakening speed [m/s] for Stribeck/Hyperbolic, and (Stribeck only) viscous
+/// coefficient per speed [s/m]. A selected name never supplies a fallback value.
 #[derive(Clone, Debug)]
 pub struct Declaration {
     pub track: String,
@@ -296,6 +299,11 @@ fn resolve(d: &Declaration, pack: &NormalizedInterfacePack) -> Result<Bound> {
             kinetic_mu: value(1)?,
             characteristic_speed: value(2)?,
             viscous_per_speed: value(3)?,
+        },
+        Model::Hyperbolic => FrictionLaw::Hyperbolic {
+            static_mu: value(0)?,
+            kinetic_mu: value(1)?,
+            characteristic_speed: value(2)?,
         },
     };
     let range = |i: usize| ApplicabilityRange::new(ranges[i].0, ranges[i].1);
