@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	dan15-hr-plates	Honduran rosewood (named only as Honduran rosewood), radially sawn thin plates h 5 mm, b 110 mm, a 180 mm, n 18; moisture content of these plates not stated	Modal analysis with harmonic loudspeaker excitation and Chladni patterns (VIBROVIZER); E_L from the (2,0) mode frequency by Eq. 2.1 with Poisson ratios that are not printed; acoustical constant A = sqrt(E_L/rho^3) = c_L/rho by Eq. 2.2	Printed mean value, standard deviation and coefficient of variation over 18 specimens; the SD is specimen spread, recorded as a one-sigma absolute band after the reed-blank pack precedent; no loss factor was measured; the 8 +- 1 percent moisture statement of Sec. 2 concerns the black locust specimens, not these plates
+scalar	density	dan15-hr-plates	density	992	kg/m3	constant
+uncertainty	density	absolute	22.68	kg/m3	0.68	1
+validity	density	moisture_content_known	0	0	1
+scalar	young-modulus-longitudinal	dan15-hr-plates	young_modulus_longitudinal	24190	MPa	constant
+uncertainty	young-modulus-longitudinal	absolute	1170	MPa	0.68	1
+validity	young-modulus-longitudinal	moisture_content_known	0	0	1
+scalar	acoustical-constant	dan15-hr-plates	acoustical_constant_sqrt_e_over_rho_cubed	4.98	m^4/kg/s	constant
+uncertainty	acoustical-constant	absolute	0.12	m^4/kg/s	0.68	1
+validity	acoustical-constant	moisture_content_known	0	0	1
+scalar	longitudinal-wave-speed	dan15-hr-plates	longitudinal_wave_speed	4936	m/s	constant
+uncertainty	longitudinal-wave-speed	absolute	89.69	m/s	0.68	1
+validity	longitudinal-wave-speed	moisture_content_known	0	0	1

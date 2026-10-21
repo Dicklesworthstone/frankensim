@@ -1,0 +1,24 @@
+frankensim.matdb-source.v1
+observation	dc94-boxwood-mallet	One mallet with a boxwood head, hand-held, striking a free rosewood bar (weakly coupled lossy springs) at a given impact position	Accelerometer near the head; equivalent mass from force (rigid impedance head) over acceleration; contact duration from the measured mallet acceleration; Hertz constant by inverting Eq. 3 tau = 3.21 (mu^2/(K^2 V))^(1/5) with mu the reduced mass of bar and mallet	One head, one speed, one bar; no uncertainty stated; Table I lists Mm 11.2 g among the values used for the simulations; the text says the equivalent mass is roughly 20 percent above the head mass because the mallet is held by hand
+scalar	equivalent-mass	dc94-boxwood-mallet	mallet_equivalent_mass	0.0112	kg	constant
+uncertainty	equivalent-mass	unstated	-	-	-	-
+validity	equivalent-mass	impact_speed	2.1	2.1	m/s
+scalar	equivalent-to-head-mass-ratio	dc94-boxwood-mallet	equivalent_mass_over_head_mass_roughly	1.2	1	constant
+uncertainty	equivalent-to-head-mass-ratio	unstated	-	-	-	-
+validity	equivalent-to-head-mass-ratio	impact_speed	2.1	2.1	m/s
+scalar	impact-speed	dc94-boxwood-mallet	initial_mallet_velocity	2.1	m/s	constant
+uncertainty	impact-speed	unstated	-	-	-	-
+validity	impact-speed	impact_speed	2.1	2.1	m/s
+scalar	contact-duration	dc94-boxwood-mallet	measured_contact_duration	0.00016	s	constant
+uncertainty	contact-duration	unstated	-	-	-	-
+validity	contact-duration	impact_speed	2.1	2.1	m/s
+observation	dc94-rosewood-bar	Rosewood xylophone bar of constant section, b 3.9 cm, L 27.4 cm, supplied by the company Rythmes & Sons (acknowledgment); species and thickness not printed	Table I values used for the simulations; the paper does not state how E, eta and rho were obtained	eta enters Eq. 4 as eta/E (5.0e3/2.13e10 = 2.35e-7 s); no uncertainty stated
+scalar	young-modulus-longitudinal	dc94-rosewood-bar	young_modulus_longitudinal	21300	MPa	constant
+uncertainty	young-modulus-longitudinal	unstated	-	-	-	-
+validity	young-modulus-longitudinal	moisture_content_known	0	0	1
+scalar	density	dc94-rosewood-bar	density	1015	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	moisture_content_known	0	0	1
+scalar	viscoelastic-constant	dc94-rosewood-bar	viscoelastic_constant_eta	5000	Pa*s	constant
+uncertainty	viscoelastic-constant	unstated	-	-	-	-
+validity	viscoelastic-constant	moisture_content_known	0	0	1

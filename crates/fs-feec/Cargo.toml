@@ -11,6 +11,8 @@ description = "FEEC core: cochains on tet complexes, Whitney forms, Hodge stars,
 layer = "L3"
 
 [features]
+# The DVTD driver example (pexfp.211) reads Gmsh meshes through fs-io; default builds do not compile it.
+dvtd-driver = ["dep:fs-io"]
 # I13.2a (ambition [F]): terminal-relative winding topology stays
 # default-off until its independent reproduction and promotion deck exist.
 terminal-relative = ["dep:fs-blake3", "dep:fs-ports"]
@@ -20,6 +22,7 @@ moonshot-integral-topology = ["terminal-relative"]
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3", optional = true }
+fs-io = { path = "../fs-io", optional = true }
 fs-ports = { path = "../fs-ports", optional = true }
 fs-ivl = { path = "../fs-ivl" }
 fs-la = { path = "../fs-la" }
@@ -45,6 +48,11 @@ required-features = ["terminal-relative"]
 name = "integral_topology"
 path = "tests/integral_topology.rs"
 required-features = ["moonshot-integral-topology"]
+
+[[example]]
+name = "dvtd_vvtf"
+path = "examples/dvtd_vvtf.rs"
+required-features = ["dvtd-driver"]
 
 [lints]
 workspace = true
