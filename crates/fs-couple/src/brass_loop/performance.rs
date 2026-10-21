@@ -577,6 +577,60 @@ impl LipDescription {
         &self.gas
     }
 
+    /// The passive bore (no lip, no cup shunt, no radiation observer) scanned at `frequencies_hz`: the multimodal and the
+    /// plane-wave input impedance and the mouth-to-input flow ratio, from the same duct, gas and termination the render uses.
+    ///
+    /// # Errors
+    /// The duct owner's refusal at any frequency (loss-model or radiation validity).
+    pub fn bore_scan(&self, frequencies_hz: &[f64]) -> Result<BoreScan, String> {
+        let gas = self.gas.state();
+        let radius = self
+            .duct
+            .segments
+            .first()
+            .map(Segment::inlet_radius)
+            .ok_or_else(|| "empty bore".to_string())?;
+        let [x, y, z] = self.microphone.position_m;
+        let mut rows = Vec::with_capacity(frequencies_hz.len());
+        for &frequency_hz in frequencies_hz {
+            let omega = core::f64::consts::TAU * frequency_hz;
+            let multimodal = fs_duct::modal::mm_input_impedance(
+                &self.duct,
+                gas,
+                omega,
+                LossModel::Bessel,
+                self.termination,
+                self.modes,
+                self.extra_slices,
+            )
+            .map_err(|e| format!("multimodal bore at {frequency_hz} Hz refused: {e}"))?;
+            let scalar = fs_duct::input_impedance(
+                &self.duct,
+                gas,
+                omega,
+                LossModel::Bessel,
+                self.termination,
+            )
+            .map_err(|e| format!("plane-wave bore at {frequency_hz} Hz refused: {e}"))?;
+            rows.push(BoreResponse {
+                frequency_hz,
+                impedance_multimodal: [
+                    multimodal.plane_impedance.re,
+                    multimodal.plane_impedance.im,
+                ],
+                impedance_scalar: [scalar.impedance.re, scalar.impedance.im],
+                mouth_over_input_flow: [scalar.u_mouth_over_u_in.re, scalar.u_mouth_over_u_in.im],
+            });
+        }
+        Ok(BoreScan {
+            input_characteristic_impedance: gas.density * gas.sound_speed
+                / (core::f64::consts::PI * radius * radius),
+            density_kg_m3: gas.density,
+            microphone_distance_m: x.hypot(y).hypot(z),
+            rows,
+        })
+    }
+
     /// Realize the bore line, the mouth-flow line and the microphone.
     ///
     /// # Errors
@@ -732,6 +786,32 @@ pub struct LipInfo {
     pub control_rate_hz: u32,
     /// Whether a pre-stress (lip tension) track drives the lip.
     pub has_lip_tension_track: bool,
+}
+
+/// The passive bore's response at one frequency, at its input plane (the mouthpiece cup rim).
+#[derive(Debug, Clone, Copy)]
+pub struct BoreResponse {
+    /// Frequency [Hz].
+    pub frequency_hz: f64,
+    /// Multimodal plane-mode input impedance `[re, im]` [Pa s/m^3]: what the playing loop's reflectance is built from.
+    pub impedance_multimodal: [f64; 2],
+    /// Plane-wave (scalar transfer-matrix) input impedance `[re, im]` [Pa s/m^3]: what the radiation observer's mouth flow uses.
+    pub impedance_scalar: [f64; 2],
+    /// Mouth volume flow over input volume flow `[re, im]` (scalar chain).
+    pub mouth_over_input_flow: [f64; 2],
+}
+
+/// A scan of the passive bore with the quantities needed to read it.
+#[derive(Debug, Clone)]
+pub struct BoreScan {
+    /// Plane-wave characteristic impedance of the input plane `rho c / (pi r^2)` [Pa s/m^3].
+    pub input_characteristic_impedance: f64,
+    /// Gas density [kg/m^3].
+    pub density_kg_m3: f64,
+    /// Distance from the outlet plane to the microphone [m].
+    pub microphone_distance_m: f64,
+    /// One row per requested frequency.
+    pub rows: Vec<BoreResponse>,
 }
 
 /// Lip and bore statistics over one tenth of a second of a render: whether the lip closes and how large
@@ -1298,6 +1378,28 @@ mod tests {
         let tap = performance.mouthpiece_pressure();
         assert_eq!(tap.len(), 1800);
         assert!(tap.iter().all(|p| p.is_finite()));
+    }
+
+    #[test]
+    fn the_bore_scan_reads_the_passive_bore_without_building_the_loop() {
+        let description = LipDescription::from_bytes(fixture("").as_bytes()).expect("parses");
+        let scan = description
+            .bore_scan(&[150.0, 300.0, 450.0])
+            .expect("scans");
+        assert_eq!(scan.rows.len(), 3);
+        assert!(scan.input_characteristic_impedance > 0.0 && scan.microphone_distance_m > 0.0);
+        for row in &scan.rows {
+            let z = row.impedance_multimodal[0].hypot(row.impedance_multimodal[1]);
+            assert!(z.is_finite() && z > 0.0);
+            // a passive load: the real part of both input impedances is not negative
+            assert!(row.impedance_multimodal[0] >= -1e-6 * z);
+            assert!(row.impedance_scalar[0] >= -1e-6 * z);
+            assert!(
+                row.mouth_over_input_flow[0]
+                    .hypot(row.mouth_over_input_flow[1])
+                    .is_finite()
+            );
+        }
     }
 
     #[test]

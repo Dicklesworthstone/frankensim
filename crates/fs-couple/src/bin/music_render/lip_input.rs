@@ -15,12 +15,13 @@ use fs_material::gas_species::input::ThermochemicalSources;
 
 use super::{WAV_HASH_DOMAIN, create_outputs, json_string};
 
-type Options<'a> = (&'a str, &'a str, usize, Option<&'a str>);
+type Options<'a> = (&'a str, &'a str, usize, Option<&'a str>, Option<&'a str>);
 
 fn options(args: &[String]) -> Result<Options<'_>, String> {
     let mut paths = Vec::new();
     let mut block = None;
     let mut mouthpiece = None;
+    let mut impedance = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -33,6 +34,17 @@ fn options(args: &[String]) -> Result<Options<'_>, String> {
                         .and_then(|v| v.parse::<usize>().ok())
                         .filter(|v| (1..=65_536).contains(v))
                         .ok_or_else(|| "--block needs an integer in 1..=65536".to_string())?,
+                );
+            }
+            "--impedance" => {
+                if impedance.is_some() {
+                    return Err("--impedance may only be supplied once".into());
+                }
+                impedance = Some(
+                    iter.next()
+                        .map(String::as_str)
+                        .filter(|v| !v.starts_with('-'))
+                        .ok_or_else(|| "--impedance needs a path".to_string())?,
                 );
             }
             "--mouthpiece-wav" => {
@@ -56,11 +68,11 @@ fn options(args: &[String]) -> Result<Options<'_>, String> {
     }
     let [input, output] = paths.as_slice() else {
         return Err(
-            "usage: music_render lip INPUT.performance OUT.wav [--block N] [--mouthpiece-wav PATH]"
+            "usage: music_render lip INPUT.performance OUT.wav [--block N] [--mouthpiece-wav PATH] [--impedance PATH.tsv]"
                 .into(),
         );
     };
-    Ok((*input, *output, block.unwrap_or(512), mouthpiece))
+    Ok((*input, *output, block.unwrap_or(512), mouthpiece, impedance))
 }
 
 struct Rendered {
@@ -218,7 +230,7 @@ pub(super) fn run_with_gas_sources(
     args: &[String],
     sources: Option<&ThermochemicalSources<'_>>,
 ) -> Result<(), String> {
-    let (input, output, block, mouthpiece_path) = options(args)?;
+    let (input, output, block, mouthpiece_path, impedance_path) = options(args)?;
     let output = Path::new(output);
     let sidecar = output.with_extension("provenance.json");
     if output == sidecar.as_path() || output.exists() || sidecar.exists() {
@@ -230,6 +242,48 @@ pub(super) fn run_with_gas_sources(
         .read_to_end(&mut bytes)
         .map_err(|e| format!("lip input read failed: {e}"))?;
     let description = LipDescription::from_bytes_with_gas_sources(&bytes, sources)?;
+    if let Some(path) = impedance_path {
+        // Passive-bore scan, 20 Hz to 3 kHz in 1 Hz steps; no loop, lines or render are built and OUT.wav is not created.
+        let frequencies: Vec<f64> = (20..=3000).map(f64::from).collect();
+        let scan = description.bore_scan(&frequencies)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| format!("impedance table create refused: {e}"))?;
+        let mut text = format!(
+            "# bore scan of {input}: zc_in {:e} Pa s/m3, rho {:e} kg/m3, microphone distance {:e} m\n\
+             f_hz\tzmm_re\tzmm_im\tzsc_re\tzsc_im\tflow_re\tflow_im\tradiated_per_input_pa_per_pa\n",
+            scan.input_characteristic_impedance, scan.density_kg_m3, scan.microphone_distance_m
+        );
+        for r in &scan.rows {
+            let z = r.impedance_scalar[0].hypot(r.impedance_scalar[1]);
+            let flow = r.mouth_over_input_flow[0].hypot(r.mouth_over_input_flow[1]);
+            // far field of a baffled piston on axis: p = rho omega Q / (2 pi r), Q = mouth flow = flow_ratio * p_in / Z_in
+            let radiated = scan.density_kg_m3 * core::f64::consts::TAU * r.frequency_hz * flow
+                / (core::f64::consts::TAU * scan.microphone_distance_m * z);
+            text.push_str(&format!(
+                "{}\t{:e}\t{:e}\t{:e}\t{:e}\t{:e}\t{:e}\t{:e}\n",
+                r.frequency_hz,
+                r.impedance_multimodal[0],
+                r.impedance_multimodal[1],
+                r.impedance_scalar[0],
+                r.impedance_scalar[1],
+                r.mouth_over_input_flow[0],
+                r.mouth_over_input_flow[1],
+                radiated
+            ));
+        }
+        file.write_all(text.as_bytes())
+            .and_then(|()| file.flush())
+            .map_err(|e| format!("impedance table write failed: {e}"))?;
+        println!(
+            "{{\"suite\":\"music-render\",\"impedance_table\":{},\"rows\":{}}}",
+            json_string(path),
+            scan.rows.len()
+        );
+        return Ok(());
+    }
     let mut performance = description.build()?;
     let info = performance.info().clone();
     let samples =
@@ -346,6 +400,13 @@ mod tests {
             Some("m.wav")
         );
         assert!(options(&args(&["a", "b", "--mouthpiece-wav"])).is_err());
+        assert_eq!(
+            options(&args(&["a", "b", "--impedance", "z.tsv"]))
+                .unwrap()
+                .4,
+            Some("z.tsv")
+        );
+        assert!(options(&args(&["a", "b", "--impedance"])).is_err());
         assert!(
             options(&args(&[
                 "a",
