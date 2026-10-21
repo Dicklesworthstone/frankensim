@@ -14,6 +14,18 @@ pub struct PreparedElectricalContactNetwork<'n,'a> {
     pins:BTreeMap<u64,MaterialPropertySelection>,
 }
 impl PreparedElectricalContactNetwork<'_,'_> {
+    /// Original bulk heat destinations, without a second caller-authored map.
+    pub fn resistor_destinations(&self) -> Vec<ResistorCell> {
+        self.bulk.resistor_destinations()
+    }
+
+    /// Original two-sided interface partitions in stable contact-ID order.
+    /// Thermal links remain the authority for side order and active cells.
+    pub fn heat_destinations(&self, thermal: &DepositionSimulation<'_>)
+        -> Result<Vec<ContactHeatCells>, ElectricalContactNetworkError> {
+        self.network.heat_destinations(thermal)
+    }
+
     /// Fresh material snapshots and contacts at the actual thermal trial state.
     /// All original identity, geometry, phase, quantity and source checks remain.
     pub fn resolve(&self,thermal:&DepositionSimulation<'_>,mut cancelled:impl FnMut()->bool)

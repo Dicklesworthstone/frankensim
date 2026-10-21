@@ -12,7 +12,11 @@
 use core::convert::Infallible;
 use super::*;
 use crate::circuit_enthalpy::{self, CircuitEnthalpyError, CircuitEnthalpyInput,
-    CircuitEnthalpySolve, CircuitThermalCoefficients};
+    CircuitEnthalpySolve, CircuitThermalCoefficients, ResistorCell};
+use crate::circuit_enthalpy::contacts::{ContactHeatCells, ContactThermalCoefficients};
+use crate::circuit_enthalpy::contacts::material::{
+    ElectricalContactNetworkError, PreparedElectricalContactNetwork,
+};
 use crate::material_circuit::{MaterialCircuit, MaterialCircuitSolve, MaterialCircuitStep};
 use crate::circuit_enthalpy::material::MaterialNetworkError;
 use fs_material::thermovisco::source::SourceError;
@@ -30,6 +34,7 @@ pub struct ElectricalConfig {
 #[derive(Debug)]
 pub enum EvaluationError {
     Material(MaterialNetworkError),
+    Contact(ElectricalContactNetworkError),
     Context { cell: CellId, error: SourceError },
     Mechanical(solid::Error),
     Thermal(DepositionError),
@@ -62,6 +67,9 @@ impl std::error::Error for ElectricalError {}
 
 pub struct ElectricalReport {
     pub electrical: MaterialCircuitStep,
+    /// Original explicit A/B contact heat fractions; no default partition.
+    /// Contact losses and source snapshots are in `electrical.contacts`.
+    pub contact_heat_destinations: Vec<ContactHeatCells>,
     pub mechanical: solid::Report,
     pub layer_energy_j: BTreeMap<(u64,u64), Energy>,
     /// Includes both physical Joule and Maxwell heat; neither is added again.
@@ -122,6 +130,60 @@ pub fn step_candidate<'t,'m>(
     config: ElectricalConfig, guess_j: &[f64], cancelled: impl FnMut()->bool,
 ) -> Result<ElectricalCandidate<'t,'m>,ElectricalError> {
     let cancel=RefCell::new(cancelled);
+    let destinations=transport.resistor_destinations();
+    driven_candidate(thermal,bridge,bindings,circuit,&destinations,&[],ports,
+        target_s,gravity_m_s2,loads_n_m,config,guess_j,|endpoint| {
+            let bulk=transport.resolve(endpoint,||(*cancel.borrow_mut())())
+                .map_err(EvaluationError::Material)?;
+            Ok(ContactThermalCoefficients {bulk,contacts:Vec::new()})
+        },||(*cancel.borrow_mut())())
+}
+
+/// The same joint electrical/beam/thermal solve, including interface Joule heat.
+///
+/// Contact resistance is evaluated at both actual endpoint material states by
+/// the existing ordered-interface owner. Bulk and two-sided contact heat routes
+/// come from this SAME prepared network. Physical contact and Maxwell losses
+/// are each deposited once by their original owners. Retain `transport` across
+/// accepted steps to preserve bulk and interface source selections.
+///
+/// The thermal link provides fixed area and A/B order; its explicitly supplied
+/// heat fraction is not a predicted effusivity partition. No adhesion, pressure
+/// evolution, opening, arc, field force or contact storage is inferred here.
+#[allow(clippy::too_many_arguments)]
+pub fn step_with_contacts_candidate<'t,'m>(
+    thermal: &DepositionSimulation<'t>, bridge: &solid::Bridge<'m>,
+    bindings: &[BridgeThermalBinding<'_>], circuit: &MaterialCircuit,
+    transport: &PreparedElectricalContactNetwork<'_,'_>, ports: &[f64],
+    target_s: f64, gravity_m_s2: f64, loads_n_m: &[f64],
+    config: ElectricalConfig, guess_j: &[f64], cancelled: impl FnMut()->bool,
+) -> Result<ElectricalCandidate<'t,'m>,ElectricalError> {
+    let cancel=RefCell::new(cancelled);
+    if (*cancel.borrow_mut())() { return Err(ElectricalError::Cancelled); }
+    let destinations=transport.resistor_destinations();
+    let contacts=transport.heat_destinations(thermal).map_err(|error|
+        ElectricalError::Coupled(CircuitEnthalpyError::Source(EvaluationError::Contact(error))))?;
+    driven_candidate(thermal,bridge,bindings,circuit,&destinations,&contacts,ports,
+        target_s,gravity_m_s2,loads_n_m,config,guess_j,
+        |endpoint|transport.resolve(endpoint,||(*cancel.borrow_mut())()).map_err(EvaluationError::Contact),
+        ||(*cancel.borrow_mut())())
+}
+
+// Both entry points use the original contact-capable circuit driver. With no
+// contacts that driver calls the original bulk-only circuit update unchanged.
+// Share beam admission, physical heat generation and combined energy accounting.
+#[allow(clippy::too_many_arguments)]
+fn driven_candidate<'t,'m>(
+    thermal: &DepositionSimulation<'t>, bridge: &solid::Bridge<'m>,
+    bindings: &[BridgeThermalBinding<'_>], circuit: &MaterialCircuit,
+    destinations: &[ResistorCell], contact_routes: &[ContactHeatCells], ports: &[f64],
+    target_s: f64, gravity_m_s2: f64, loads_n_m: &[f64],
+    config: ElectricalConfig, guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'t>)
+        -> Result<ContactThermalCoefficients<MaterialNetworkSample>,EvaluationError>,
+    cancelled: impl FnMut()->bool,
+) -> Result<ElectricalCandidate<'t,'m>,ElectricalError> {
+    let cancel=RefCell::new(cancelled);
     let checkpoint=|| if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
     checkpoint().map_err(|_|ElectricalError::Cancelled)?;
     let c=config.bridge.feedback;
@@ -131,7 +193,6 @@ pub fn step_candidate<'t,'m>(
     let bound=super::admit_bindings::<Infallible>(thermal,bridge,bindings,checkpoint)
         .map_err(ElectricalError::Binding)?;
     let by_heat:BTreeMap<_,_>=bindings.iter().map(|b|(b.section.cell,b)).collect();
-    let destinations=transport.resistor_destinations();
     let routes:BTreeMap<_,_>=destinations.iter().map(|r|(r.branch,r.cell)).collect();
     let dt=target_s-thermal.time_s();
     let mechanics=solid::Config {section:c.mechanics,maximum_deflection_m:config.bridge.maximum_deflection_m};
@@ -141,13 +202,12 @@ pub fn step_candidate<'t,'m>(
         thermal_energy_tolerance_j:c.thermal_energy_tolerance_j,total_energy_tolerance_j:c.total_energy_tolerance_j,
         circuit:config.circuit,newton:c.newton};
     let trials=Cell::new(0usize);
-    let candidate=circuit_enthalpy::step_candidate(thermal,target_s,
-        CircuitEnthalpyInput {circuit,ports,destinations:&destinations},controls,guess_j,|endpoint| {
+    let candidate=circuit_enthalpy::contacts::step_candidate(thermal,target_s,
+        CircuitEnthalpyInput {circuit,ports,destinations},contact_routes,controls,guess_j,|endpoint| {
         checkpoint()?;
         if trials.get()>=c.maximum_structural_trials { return Err(EvaluationError::StructuralBudget); }
         trials.set(trials.get()+1);
-        let mut material=transport.resolve(endpoint,||(*cancel.borrow_mut())())
-            .map_err(EvaluationError::Material)?;
+        let ContactThermalCoefficients {bulk:mut material,contacts}=resolve(endpoint)?;
         // Conductive and electrical-only cells both need the original mechanical
         // source context; absence of k does not bypass electrical admission.
         for sample in &material.source.cells {
@@ -196,12 +256,14 @@ pub fn step_candidate<'t,'m>(
             return Err(EvaluationError::Invalid("local and total physical mechanical heat differ"));
         }
         checkpoint()?;
-        Ok(CircuitThermalCoefficients {resistors:material.resistors,sources_w:material.sources_w,
+        Ok(ContactThermalCoefficients {contacts,bulk:CircuitThermalCoefficients {
+            resistors:material.resistors,sources_w:material.sources_w,
             conductances_w_k:material.conductances_w_k,source:Trial {bridge:next,mechanical,local,
-                material:material.source,heat_j,other_j}})
+                material:material.source,heat_j,other_j}}})
     },||(*cancel.borrow_mut())()).map_err(ElectricalError::Coupled)?;
     let (thermal,next_circuit,r)=candidate.into_parts();
-    let trial=r.source;
+    let contact_heat_destinations=r.source.destinations;
+    let trial=r.source.material;
     let total=(r.electrical.stored_after_j-r.electrical.stored_before_j)
         +(trial.bridge.stored_energy_j()-bridge.stored_energy_j())+r.thermal.stored_energy_change_j
         +trial.mechanical.energy_j.numerical_dissipation-r.electrical.native.supplied
@@ -213,7 +275,7 @@ pub fn step_candidate<'t,'m>(
     }
     checkpoint().map_err(|_|ElectricalError::Cancelled)?;
     Ok(ElectricalCandidate {thermal,bridge:trial.bridge,circuit:next_circuit,
-        report:ElectricalReport {electrical:r.electrical,mechanical:trial.mechanical,
+        report:ElectricalReport {electrical:r.electrical,contact_heat_destinations,mechanical:trial.mechanical,
             layer_energy_j:trial.local,thermal:r.thermal,material:trial.material,nonlinear:r.nonlinear,
             circuit_trials:r.circuit_trials,structural_trials:trials.get(),
             maximum_cell_residual_j:r.maximum_cell_residual_j,deposited_joule_j:r.deposited_joule_j,
