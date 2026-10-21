@@ -24,7 +24,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::{
 use fs_couple::bowed_string::runtime::reciprocal::bank::plate::{SharedMaterialPlateBody,SharedPlateBridge};
 use fs_couple::bowed_string::runtime::reciprocal::bank::torsion::{StringBodyRotationConnection,StringBridgeLocation};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::MaterialBowContact;
-use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::LongitudinalStringResolution;
+use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::{LongitudinalStringResolution,LongitudinalMaterialLoss};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::{MultiBowPerformance,MultiBowPerformanceConfig};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::force::{StringForceCoupling,StringForcePort,StringForceProgram};
 use fs_couple::bowed_string::runtime::reciprocal::plate::MaterialBodyCavity;
@@ -96,6 +96,9 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
         requirements.push(Requirement::try_new(SHEAR,Pressure::DIMS,Admit::StrictlyPositive)?);
         requirements.push(Requirement::try_new(SHEAR_ETA,DynViscosity::DIMS,Admit::Finite)?);
     }
+    if !body && let LongitudinalMaterialLoss::KelvinVoigt { viscosity_property } = &spec.longitudinal_loss {
+        requirements.push(Requirement::try_new(viscosity_property.as_str(),DynViscosity::DIMS,Admit::Finite)?);
+    }
     resolve_properties(name,catalog,loader,spec,&requirements)
 }
 fn resolve_properties(name:&str, catalog:&mut Catalog,
@@ -130,6 +133,10 @@ impl input::Spec {
         stop_profile:Option<stops::Profile>,
         mut loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
         poll(gate)?;
+        if self.longitudinal_waves.is_none()
+            && !matches!(&self.longitudinal_loss, LongitudinalMaterialLoss::Elastic) {
+            return Err("longitudinal material loss requires explicit axial coordinates".into());
+        }
         if self.gas != *self.gas_record.state() {
             return Err("material-string gas coefficients must retain their original source record".into());
         }
@@ -235,7 +242,8 @@ impl input::Spec {
             bank.with_geometric_stretching(slope, config, gate)?
         } else { bank };
         let bank = if let Some((resolution, config)) = &self.longitudinal_waves {
-            bank.with_longitudinal_waves(vec![resolution.clone(); self.strings.len()], *config, gate)?
+            bank.with_longitudinal_waves_and_loss(vec![resolution.clone(); self.strings.len()],
+                self.longitudinal_loss.clone(), *config, gate)?
         } else { bank };
         let joint=MultiFrictionConfig { max_ports:self.bow_contact_count(),max_sweeps:128,
             max_setup_terms:1_048_576 };

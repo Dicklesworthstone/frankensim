@@ -1,5 +1,6 @@
 //! The ordinary material-string file selects axial physics through to PCM.
 use super::*;
+mod loss;
 const RECORD: &str = "longitudinal-waves 0.2 0.01 64 100000 1e-11 1e-10 2 1 2";
 fn text() -> String {
     include_str!("../longitudinal-cylinder-bow.material-strings")

@@ -67,6 +67,7 @@ pub struct Spec {
     pub prepared_linear: Option<PreparedModalBudget>,
     pub geometric_stretching: Option<(f64, NonlinearModalConfig)>,
     pub longitudinal_waves: Option<(LongitudinalStringResolution, NonlinearModalConfig)>,
+    pub longitudinal_loss: LongitudinalMaterialLoss,
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<StringForceProgram>,
     pub schedule: GestureSchedule,
@@ -264,6 +265,22 @@ impl Spec {
             }
             Some((resolution, config))
         } else { None };
+        let longitudinal_loss = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("longitudinal-loss") {
+            if longitudinal_waves.is_none() {
+                return Err("longitudinal-loss requires explicit longitudinal-waves".into());
+            }
+            let mut row = r.row("longitudinal-loss")?;
+            let loss = match row.word()? {
+                "elastic" => LongitudinalMaterialLoss::Elastic,
+                "kelvin-voigt" => LongitudinalMaterialLoss::KelvinVoigt {
+                    viscosity_property: fs_material::section::axial::YOUNG_VISCOSITY_PROPERTY.into(),
+                },
+                _ => return Err("longitudinal-loss must be elastic or kelvin-voigt".into()),
+            };
+            row.end()?;
+            loss
+        } else { LongitudinalMaterialLoss::Elastic };
         let mut row = r.row("cavity")?;
         let cavity = match row.word()? {
             "none" => None,
@@ -436,7 +453,8 @@ impl Spec {
         friction.validate_tracks(&schedule)?;
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
-            rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, longitudinal_waves, cavity, friction, bow_ribbon, forces, schedule };
+            rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, longitudinal_waves,
+            longitudinal_loss, cavity, friction, bow_ribbon, forces, schedule };
         spec.network_dimensions(false)?;
         Ok(spec)
     }

@@ -16,9 +16,13 @@ use crate::render::schedule::force::coupled::contact::friction::nonlinear::{
 };
 use fs_exec::CancelGate;
 use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_material::section::axial::ConcentricAxialViscosity;
 use fs_math::{c64::C64, det};
 use fs_nlmodal::{KcStringParams, longitudinal::LongitudinalString};
 use fs_phs::Storage;
+
+mod loss;
+pub use loss::LongitudinalMaterialLoss;
 
 /// Explicit retained physics and constitutive domain, independent of instrument.
 #[derive(Clone, Debug, PartialEq)]
@@ -70,6 +74,7 @@ pub struct MaterialLongitudinalString {
     prestress_n: f64,
     axial_component: usize,
     elastic_frequency_band_rad_s: Option<(f64, f64)>,
+    axial_material_loss: Option<ConcentricAxialViscosity>,
 }
 impl MaterialLongitudinalString {
     /// Existing finite-strain owner, including the material axial frequencies.
@@ -95,6 +100,11 @@ impl MaterialLongitudinalString {
     /// Intersection of explicit elasticity/density frequency applicability.
     pub const fn elastic_frequency_band_rad_s(&self) -> Option<(f64, f64)> {
         self.elastic_frequency_band_rad_s
+    }
+    /// Original per-layer axial loss, absent only for an explicit elastic selection.
+    /// The retained law supplies linear u_xt loss, not finite-slope strain-rate loss.
+    pub const fn axial_material_loss(&self) -> Option<&ConcentricAxialViscosity> {
+        self.axial_material_loss.as_ref()
     }
     /// Declared modal selection and finite-motion envelope.
     pub const fn resolution(&self) -> &LongitudinalStringResolution {
@@ -295,8 +305,28 @@ impl ReciprocalStringBank {
     /// source bands, mode ceilings, strain limits and nonlinear iteration can
     /// refuse rather than drop modes, clip strain or invent a missing property.
     pub fn with_longitudinal_waves(
+        self,
+        resolutions: Vec<LongitudinalStringResolution>,
+        config: NonlinearModalConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, ImpactError> {
+        self.with_longitudinal_waves_and_loss(resolutions, LongitudinalMaterialLoss::Elastic, config, gate)
+    }
+
+    /// Retain the same nonlinear axial/transverse coupling with explicit axial loss.
+    /// Every solid layer supplies its own uniaxial viscosity; missing data refuses.
+    /// The original exact linear owner integrates the derived modal damping and
+    /// includes its dissipation in the same friction/body/fluid energy account.
+    /// No output filtering, second damping step or extra state is introduced.
+    ///
+    /// Kelvin--Voigt here is the small-strain linear u_xt operator. The nonlinear
+    /// elastic strain law is unchanged, but finite-slope viscous y_x*y_xt terms,
+    /// creep, heat evolution and interlayer slip are not modeled. Source bands
+    /// screen retained linear axial frequencies, not all nonlinear harmonics.
+    pub fn with_longitudinal_waves_and_loss(
         mut self,
         resolutions: Vec<LongitudinalStringResolution>,
+        loss: LongitudinalMaterialLoss,
         config: NonlinearModalConfig,
         gate: &CancelGate,
     ) -> Result<Self, ImpactError> {
@@ -332,6 +362,7 @@ impl ReciprocalStringBank {
             let mut band = None;
             let solid_mass = member.source.longitudinal_material(&mut band)?;
             let ea = member.source.axial_rigidity_n()?;
+            let axial_material_loss = loss.bind(&member.source)?;
             let planes = if matches!(&member.source, MaterialStringSource::WithPolarizations(_)) {
                 2
             } else {
@@ -361,12 +392,19 @@ impl ReciprocalStringBank {
             let modes = model
                 .axial_omegas()
                 .iter()
-                .map(|&omega| ModalAcousticMode {
-                    angular_frequency_rad_s: omega,
-                    damping_ratio: 0.0,
-                    pressure_per_modal_velocity: C64::ZERO,
+                .map(|&omega| -> Result<ModalAcousticMode, ImpactError> {
+                    let damping_ratio = match &axial_material_loss {
+                        Some(law) => law.longitudinal_damping_ratio(omega)
+                            .map_err(|e| ImpactError::Owner(e.to_string()))?,
+                        None => 0.0, // Explicit Elastic selection; never missing data.
+                    };
+                    Ok(ModalAcousticMode {
+                        angular_frequency_rad_s: omega,
+                        damping_ratio,
+                        pressure_per_modal_velocity: C64::ZERO,
+                    })
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             components.push(
                 ModalAcousticTimeModel::try_new(
                     self.source.options.sample_rate_hz,
@@ -394,6 +432,7 @@ impl ReciprocalStringBank {
                 prestress_n: card.tension_n,
                 axial_component: self.system.components().len() + index,
                 elastic_frequency_band_rad_s: band,
+                axial_material_loss,
             };
             let transverse = law.transverse_count();
             if self.system.components()[index].modes().len() != member.source.modes()
