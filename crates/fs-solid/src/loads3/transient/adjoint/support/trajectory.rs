@@ -3,8 +3,8 @@
 //! The linear motion Jacobian depends on the interval and frozen operators,
 //! not on the primal state. Control recording therefore retains O(steps) times.
 //! Material design optionally retains bounded full endpoint motion. Sparse
-//! observations seed any accepted endpoint; one reverse sweep returns all
-//! requested material, force and support-displacement derivatives.
+//! motion and support-reaction observations seed any accepted endpoint; one
+//! reverse sweep returns material, force and support-displacement derivatives.
 use super::super::material::{MaterialGradientBudget3, MaterialScaleGradient3};
 use super::super::trajectory::{ControlForceKind3, ForceCotangent3};
 use super::super::{TransientAdjointConfig3, TransientAdjointError3, check, number};
@@ -20,7 +20,7 @@ pub struct PrescribedRecordingBudget3 {
     /// All returned q/v/a, force, displacement-control and thermal scalars.
     /// Times and vector metadata are instead bounded by `maximum_steps`.
     pub maximum_gradient_values: usize,
-    /// Number of caller-owned node/endpoint observation rows per reverse sweep.
+    /// Total caller-owned motion and reaction observation rows per reverse sweep.
     pub maximum_observations: usize,
 }
 impl Default for PrescribedRecordingBudget3 {
@@ -44,6 +44,26 @@ pub struct NodalMotionObservation3 {
     pub q: [f64; 3],
     pub v: [f64; 3],
     pub a: [f64; 3],
+}
+
+/// Derivative of an objective with respect to a support-on-solid reaction [N].
+/// `state == 0` is initialization; later states are accepted endpoints. `dof`
+/// must be a constrained global component. Duplicate rows add in caller order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReactionObservation3 {
+    pub state: usize,
+    pub dof: usize,
+    pub value: f64,
+}
+
+/// Direct derivative with respect to an external nodal force on a fixed DOF.
+/// Rows retain the reaction observations' order and duplicates add. The free
+/// force derivatives, including reaction-induced motion, are in `design`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReactionLoadCotangent3 {
+    pub state: usize,
+    pub dof: usize,
+    pub value: f64,
 }
 
 /// Derivatives of absolute world-component prescribed displacement [objective/m].
@@ -103,6 +123,32 @@ pub struct PrescribedDesignGradient3 {
     pub material: MaterialScaleGradient3,
 }
 
+/// Complete fixed-grid derivatives of mixed motion and support-load objectives.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrescribedReactionGradient3 {
+    /// Includes both reaction's direct material derivative and its derivative
+    /// through the original trajectory and initialization solve.
+    pub design: PrescribedDesignGradient3,
+    pub fixed_forces: Vec<ReactionLoadCotangent3>,
+    /// Direct derivative of the one frozen full thermal equivalent force on
+    /// constrained DOFs, in `adjoint().fixed_dofs()` order, summed over states.
+    /// Free components are in `design.controls.thermal_equivalent_force`.
+    /// Material derivatives already include stiffness-induced thermal changes;
+    /// do not chain those changes through either thermal cotangent again.
+    pub thermal_fixed_force: Vec<f64>,
+}
+
+enum ReverseVisit3<'a> {
+    Observation {
+        state: usize,
+        seed: &'a mut NodalMotionCotangent3,
+    },
+    Residual {
+        state: usize,
+        force: &'a [f64],
+    },
+}
+
 #[derive(Clone)]
 struct MaterialTape3 {
     motion: Vec<[Vec<[f64; 3]>; 3]>,
@@ -130,7 +176,7 @@ pub struct RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
 impl<'g, 'm, 'p, 's> TetTransientRun3<'g, 'm, 'p, 's> {
     /// Record a prescribed-support trajectory before its first finite step.
     /// The original primal and transpose policies remain independent. This
-    /// derives fixed-grid motion objectives, not event times, reactions,
+    /// derives fixed-grid motion and reaction objectives, not event times,
     /// stresses, physical work reports or derivatives of acceptance decisions.
     pub fn record_prescribed_controls(
         self,
@@ -294,7 +340,7 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
         observations: &[NodalMotionObservation3],
         cx: &Cx<'_>,
     ) -> Result<PrescribedControlGradient3, TransientAdjointError3> {
-        self.reverse_accumulating(terminal, observations, |_, _| Ok(()), cx)
+        self.reverse_accumulating(terminal, observations, |_| Ok(()), cx)
     }
 
     /// Differentiate a terminal motion objective with respect to controls,
@@ -337,21 +383,15 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
         let controls = self.reverse_accumulating(
             terminal,
             observations,
-            |state, force| {
-                let row = self.run.material_scale_pullback_nodal_at(
-                    &tape.motion[state],
-                    force,
-                    tape.budget.gradient,
-                    cx,
-                )?;
-                for (sum, value) in material.element_scales.iter_mut().zip(row.element_scales) {
-                    check(cx)?;
-                    for axis in 0..2 {
-                        sum[axis] = number(sum[axis] + value[axis])?;
-                    }
-                }
-                for axis in 0..2 {
-                    material.rayleigh[axis] = number(material.rayleigh[axis] + row.rayleigh[axis])?;
+            |visit| {
+                if let ReverseVisit3::Residual { state, force } = visit {
+                    let row = self.run.material_scale_pullback_nodal_at(
+                        &tape.motion[state],
+                        force,
+                        tape.budget.gradient,
+                        cx,
+                    )?;
+                    add_material(&mut material, row, cx)?;
                 }
                 Ok(())
             },
@@ -361,11 +401,169 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
         Ok(PrescribedDesignGradient3 { controls, material })
     }
 
+    /// Reverse sparse support-reaction and motion objectives together through
+    /// the original accepted trajectory. Requires material recording before
+    /// advancement. Reaction means the support-on-solid constrained residual
+    /// `M a + (eta M + zeta K) v + K q - f_thermal - f_external`.
+    ///
+    /// Supply derivatives of the objective with respect to these signed
+    /// reactions. This method includes the direct dependence on material,
+    /// damping and constrained loads, as well as all implicit motion changes.
+    /// External loads and free thermal strain are independent of material.
+    /// The time grid, geometry and restraint axes remain fixed. Refusal or
+    /// cancellation returns no partial result and leaves the tape reusable.
+    pub fn reverse_design_with_reactions(
+        &self,
+        terminal: &NodalMotionCotangent3,
+        motion_observations: &[NodalMotionObservation3],
+        reaction_observations: &[ReactionObservation3],
+        cx: &Cx<'_>,
+    ) -> Result<PrescribedReactionGradient3, TransientAdjointError3> {
+        check(cx)?;
+        let tape = self
+            .material
+            .as_ref()
+            .ok_or(TransientAdjointError3::Invalid(
+                "reaction design needs motion recording enabled before advancement",
+            ))?;
+        let count = motion_observations
+            .len()
+            .checked_add(reaction_observations.len())
+            .ok_or(TransientAdjointError3::Budget)?;
+        if count > self.budget.maximum_observations {
+            return Err(TransientAdjointError3::Budget);
+        }
+        let fixed = self.adjoint.fixed_dofs();
+        let extra = reaction_observations
+            .len()
+            .checked_add(fixed.len())
+            .ok_or(TransientAdjointError3::Budget)?;
+        let mut remaining = self.budget;
+        remaining.maximum_gradient_values = remaining
+            .maximum_gradient_values
+            .checked_sub(extra)
+            .ok_or(TransientAdjointError3::Budget)?;
+        admit_gradient_size(
+            self.intervals.len(),
+            self.run.problem.nodes_m.len(),
+            self.run.free_dofs().len(),
+            remaining,
+        )?;
+        for row in reaction_observations {
+            check(cx)?;
+            if row.state >= self.sample_count() || fixed.binary_search(&row.dof).is_err() {
+                return Err(TransientAdjointError3::Invalid(
+                    "reaction observation must name an accepted state and constrained global DOF",
+                ));
+            }
+            number(row.value)?;
+        }
+        let mut heads = filled(self.sample_count(), usize::MAX)?;
+        let mut next = filled(reaction_observations.len(), usize::MAX)?;
+        for (i, row) in reaction_observations.iter().enumerate().rev() {
+            check(cx)?;
+            next[i] = heads[row.state];
+            heads[row.state] = i;
+        }
+        let mut fixed_forces = reserved(reaction_observations.len())?;
+        let mut thermal_fixed_force = filled(fixed.len(), 0.0)?;
+        for row in reaction_observations {
+            check(cx)?;
+            // Validated above; retain caller row order without hiding duplicate
+            // terms or pretending constrained forces drive free equilibrium.
+            let index = fixed
+                .binary_search(&row.dof)
+                .map_err(|_| TransientAdjointError3::Invalid("constrained reaction DOF"))?;
+            fixed_forces.push(ReactionLoadCotangent3 {
+                state: row.state,
+                dof: row.dof,
+                value: -row.value,
+            });
+            thermal_fixed_force[index] = number(thermal_fixed_force[index] - row.value)?;
+        }
+        let mut material = MaterialScaleGradient3 {
+            element_scales: filled(self.run.geometry.tets.len(), [0.0; 2])?,
+            rayleigh: [0.0; 2],
+        };
+        let mut weights = filled(fixed.len(), 0.0)?;
+        let mut rows = reserved(fixed.len())?;
+        let controls = self.reverse_accumulating(
+            terminal,
+            motion_observations,
+            |visit| {
+                match visit {
+                    ReverseVisit3::Observation { state, seed } => {
+                        if heads[state] == usize::MAX {
+                            return Ok(());
+                        }
+                        weights.fill(0.0);
+                        rows.clear();
+                        let mut index = heads[state];
+                        while index != usize::MAX {
+                            check(cx)?;
+                            let row = reaction_observations[index];
+                            let slot = fixed.binary_search(&row.dof).map_err(|_| {
+                                TransientAdjointError3::Invalid("constrained reaction DOF")
+                            })?;
+                            weights[slot] = number(weights[slot] + row.value)?;
+                            index = next[index];
+                        }
+                        for (&dof, &value) in fixed.iter().zip(&weights) {
+                            check(cx)?;
+                            if value != 0.0 {
+                                rows.push((dof, value));
+                            }
+                        }
+                        if rows.is_empty() {
+                            return Ok(());
+                        }
+                        let motion = self.adjoint.reaction_motion_pullback(&rows, cx)?;
+                        for field in [&mut seed.q, &mut seed.v, &mut seed.a]
+                            .into_iter()
+                            .zip([motion.q, motion.v, motion.a])
+                        {
+                            for (sum, value) in field.0.iter_mut().zip(field.1) {
+                                check(cx)?;
+                                for c in 0..3 {
+                                    sum[c] = number(sum[c] + value[c])?;
+                                }
+                            }
+                        }
+                        let direct = self.run.reaction_material_pullback_nodal_at(
+                            &tape.motion[state],
+                            &rows,
+                            tape.budget.gradient,
+                            cx,
+                        )?;
+                        add_material(&mut material, direct, cx)?;
+                    }
+                    ReverseVisit3::Residual { state, force } => {
+                        let implicit = self.run.material_scale_pullback_nodal_at(
+                            &tape.motion[state],
+                            force,
+                            tape.budget.gradient,
+                            cx,
+                        )?;
+                        add_material(&mut material, implicit, cx)?;
+                    }
+                }
+                Ok(())
+            },
+            cx,
+        )?;
+        check(cx)?;
+        Ok(PrescribedReactionGradient3 {
+            design: PrescribedDesignGradient3 { controls, material },
+            fixed_forces,
+            thermal_fixed_force,
+        })
+    }
+
     fn reverse_accumulating(
         &self,
         terminal: &NodalMotionCotangent3,
         observations: &[NodalMotionObservation3],
-        mut residual: impl FnMut(usize, &[f64]) -> Result<(), TransientAdjointError3>,
+        mut visit: impl FnMut(ReverseVisit3<'_>) -> Result<(), TransientAdjointError3>,
         cx: &Cx<'_>,
     ) -> Result<PrescribedControlGradient3, TransientAdjointError3> {
         check(cx)?;
@@ -415,10 +613,17 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
             &next,
             cx,
         )?;
+        visit(ReverseVisit3::Observation {
+            state: self.intervals.len(),
+            seed: &mut seed,
+        })?;
         for (i, interval) in self.intervals.iter().enumerate().rev() {
             check(cx)?;
             let pb = self.adjoint.pullback_step(interval.h_s, &seed, cx)?;
-            residual(i + 1, &pb.force)?;
+            visit(ReverseVisit3::Residual {
+                state: i + 1,
+                force: &pb.force,
+            })?;
             add_thermal(&mut thermal, &pb.force, cx)?;
             iterations = iterations
                 .checked_add(pb.iterations)
@@ -435,9 +640,16 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
             });
             seed = pb.previous;
             inject(&mut seed, i, observations, &heads, &next, cx)?;
+            visit(ReverseVisit3::Observation {
+                state: i,
+                seed: &mut seed,
+            })?;
         }
         let mut initial = self.adjoint.pullback_initialization(&seed, cx)?;
-        residual(0, &initial.force)?;
+        visit(ReverseVisit3::Residual {
+            state: 0,
+            force: &initial.force,
+        })?;
         add_thermal(&mut thermal, &initial.force, cx)?;
         iterations = iterations
             .checked_add(initial.iterations)
@@ -536,6 +748,22 @@ fn add_thermal(
             check(cx)?;
         }
         *sum = number(*sum + value)?;
+    }
+    Ok(())
+}
+fn add_material(
+    target: &mut MaterialScaleGradient3,
+    source: MaterialScaleGradient3,
+    cx: &Cx<'_>,
+) -> Result<(), TransientAdjointError3> {
+    for (sum, value) in target.element_scales.iter_mut().zip(source.element_scales) {
+        check(cx)?;
+        for c in 0..2 {
+            sum[c] = number(sum[c] + value[c])?;
+        }
+    }
+    for c in 0..2 {
+        target.rayleigh[c] = number(target.rayleigh[c] + source.rayleigh[c])?;
     }
     Ok(())
 }
