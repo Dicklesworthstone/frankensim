@@ -37,6 +37,33 @@ impl BinaryComplianceScanOptions3 {
             void_stiffness: self.void_stiffness, max_load_cases: self.max_load_cases }
     }
 }
+/// Every threshold at which any of the three binary masks can change.
+/// Because material uses `projected >= threshold`, each open interval between
+/// consecutive positive projected values has the same masks as its upper end.
+/// Adding 1.0 covers the final interval. This enumerates MATERIAL states only;
+/// feasibility still requires a fresh physical solve for every threshold.
+pub(in crate::sdf3::robust::envelope) fn critical_thresholds(
+    source: &[Design3; 3], max_candidates: usize,
+) -> Result<Vec<f64>, BinaryComplianceError3> {
+    if max_candidates == 0 { return Err(invalid("binary candidate allowance must be positive")); }
+    let mut thresholds = Vec::new();
+    for design in source {
+        for &value in &design.projected {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return Err(invalid("binary source projection left [0,1]"));
+            }
+            if value > 0.0 { thresholds.push(value); }
+        }
+    }
+    thresholds.push(1.0);
+    thresholds.sort_by(f64::total_cmp);
+    thresholds.dedup_by(|a, b| *a == *b);
+    if thresholds.len() > max_candidates {
+        return Err(invalid("distinct binary material states exceed candidate allowance"));
+    }
+    Ok(thresholds)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BinaryComplianceCandidate3 {
     pub index: usize,
@@ -108,6 +135,51 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             Ok(())
         })();
         if let Err(error) = attempt { report.error = Some(error); report.stop = BinaryComplianceScanStop3::EvaluationStopped; }
+        report.work = control.work();
+        Ok(report)
+    }
+
+    /// Exhaustively evaluate every distinct three-field binary material state
+    /// admitted by the current gray source, up to `max_candidates`. The source
+    /// is filtered/projected once; every distinct threshold still receives fresh
+    /// binary-eroded load solves. Refusal after source construction leaves spent
+    /// work observable through `control`; no sampled subset is substituted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn scan_all_binary_compliance_caps(&mut self, rho: &[f64], forces: &[&[f64]],
+        caps: &ComplianceCaps3, options: BinaryComplianceScanOptions3,
+        control: &mut SolveControl<'_>) -> Result<BinaryComplianceScan3, BinaryComplianceError3> {
+        options.validate(self.params(), &[1.0])?;
+        admit(self, rho, forces, caps, options.endpoint(1.0))?;
+        let source = self.binary_cap_source(rho, options.robustness, control)?;
+        let thresholds = critical_thresholds(&source, options.max_candidates)?;
+        let mut report = BinaryComplianceScan3 { options, candidates: Vec::new(), best: None,
+            selected_index: None, stop: BinaryComplianceScanStop3::ScheduleComplete,
+            error: None, work: control.work() };
+        let attempt = (|| -> Result<(), BinaryComplianceError3> {
+            for (index, &threshold) in thresholds.iter().enumerate() {
+                control.checkpoint("sdf3-binary-cap-scan-candidate")?;
+                let endpoint = self.binary_caps_from_source(&source, forces, caps,
+                    options.endpoint(threshold), control)?;
+                let feasible = endpoint.feasible(options.smooth_tolerance)
+                    && endpoint.dilated.volume_fraction <= options.dilated_volume_limit;
+                report.candidates.push(BinaryComplianceCandidate3 { index, threshold,
+                    eroded_volume: endpoint.eroded.volume_fraction,
+                    nominal_volume: endpoint.nominal.volume_fraction,
+                    dilated_volume: endpoint.dilated.volume_fraction,
+                    case_compliances: endpoint.case_compliances.clone(),
+                    envelope: endpoint.envelope.value, maximum_ratio: endpoint.envelope.maximum,
+                    physical_caps_satisfied: caps.satisfied_by(&endpoint.case_compliances), feasible });
+                if feasible && report.best.as_ref().is_none_or(|best|
+                    endpoint.dilated.volume_fraction < best.dilated.volume_fraction) {
+                    report.best = Some(endpoint); report.selected_index = Some(index);
+                }
+                control.checkpoint("sdf3-binary-cap-scan-accepted")?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = attempt {
+            report.error = Some(error); report.stop = BinaryComplianceScanStop3::EvaluationStopped;
+        }
         report.work = control.work();
         Ok(report)
     }

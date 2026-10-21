@@ -148,3 +148,30 @@ fn cumulative_krylov_limit_retains_the_complete_first_candidate() {
     assert_eq!(a.worst_displacement, b.worst_displacement);
     assert_eq!(study.operator().scales(), scales);
 }
+
+#[test]
+fn exhaustive_load_space_scan_uses_every_distinct_material_state() {
+    let (mut study, y, z) = fixture(2.0);
+    let raw: Vec<_> = (0..study.cells()).map(|i| 0.31 + 0.052*i as f64).collect();
+    let basis = [&y[..], &z[..]];
+    let options = BinaryLoadSpaceScanOptions3 { max_candidates: 128, ..Default::default() };
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
+    let source = study.binary_cap_source(&raw, options.robustness, &mut control).unwrap();
+    let expected = crate::sdf3::robust::envelope::limits::binary::critical_thresholds(
+        &source, options.max_candidates).unwrap();
+    let report = study.scan_all_binary_load_space_cap(&raw, &basis, &loose(), options, &mut control).unwrap();
+    let actual: Vec<_> = report.candidates.iter().map(|c| c.threshold).collect();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.last(), Some(&1.0));
+    assert!(actual.windows(2).all(|w| w[0] < w[1]));
+
+    for row in &report.candidates {
+        let fresh = study.evaluate_binary_load_space_cap(&raw, &basis, &loose(),
+            options.endpoint(row.threshold), &mut control).unwrap();
+        assert_eq!(row.worst_compliance, fresh.worst_compliance);
+        assert_eq!(row.dilated_volume, fresh.physical.dilated.volume_fraction);
+        assert_eq!(row.feasible, fresh.feasible(options.smooth_tolerance)
+            && fresh.physical.dilated.volume_fraction <= options.dilated_volume_limit);
+    }
+}

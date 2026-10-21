@@ -11,6 +11,7 @@ use crate::sdf3::robust::envelope::EnvelopeValue3;
 use crate::{EvaluationStop, SimpParams, SolveControl, SolveWork};
 mod scan;
 pub use scan::{BinaryComplianceCandidate3, BinaryComplianceScan3, BinaryComplianceScanOptions3, BinaryComplianceScanStop3};
+pub(in crate::sdf3::robust::envelope) use scan::critical_thresholds;
 
 
 #[derive(Debug, Clone, Copy)]

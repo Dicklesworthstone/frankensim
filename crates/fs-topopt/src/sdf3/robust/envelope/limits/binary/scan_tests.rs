@@ -130,3 +130,31 @@ fn cancelling_an_unpublished_load_family_keeps_only_complete_candidates() {
     assert!(report.work.linear_iterations > retained.work.linear_iterations);
     assert_eq!(study.operator().scales(), scales);
 }
+
+#[test]
+fn exhaustive_scan_enumerates_every_distinct_three_field_material_state() {
+    let (mut study, y, z) = fixture(2.0);
+    let raw: Vec<_> = (0..study.cells()).map(|i| 0.31 + 0.052*i as f64).collect();
+    let options = BinaryComplianceScanOptions3 { max_candidates: 128, ..Default::default() };
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
+    let source = study.binary_cap_source(&raw, options.robustness, &mut control).unwrap();
+    let mut expected = Vec::new();
+    for design in &source {
+        expected.extend(design.projected.iter().copied().filter(|v| *v > 0.0));
+    }
+    expected.push(1.0);
+    expected.sort_by(f64::total_cmp);
+    expected.dedup_by(|a,b| *a == *b);
+    let report = study.scan_all_binary_compliance_caps(&raw, &[&y,&z], &caps(), options, &mut control).unwrap();
+    let actual: Vec<_> = report.candidates.iter().map(|c| c.threshold).collect();
+    assert_eq!(actual, expected);
+    assert!(actual.windows(2).all(|w| w[0] < w[1]));
+    assert_eq!(actual.last(), Some(&1.0));
+
+    let mut limited = options;
+    limited.max_candidates = expected.len()-1;
+    let before = control.work();
+    assert!(study.scan_all_binary_compliance_caps(&raw, &[&y,&z], &caps(), limited, &mut control).is_err());
+    assert!(control.work().linear_solves > before.linear_solves);
+}
