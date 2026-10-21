@@ -588,6 +588,12 @@ class Refs:
         if refs_json:
             manifest = json.loads(Path(refs_json).read_text())
             self.external = manifest.get("external")  # a recording set that is not in references.json (VocalSet)
+            foreign = sorted({e["licence"] for e in manifest["files"] if e.get("licence")} - {"uiowa-mis"})
+            if foreign:  # a set under another licence cannot be graded without the attribution its licence requires
+                missing = [k for k in ("name", "url", "licence", "licence_url", "credit") if not (self.external or {}).get(k)]
+                if missing:
+                    raise ValueError(f"IRPDECOMP_SOURCE_MISSING: {refs_json} lists recordings under {foreign} but its `external` block "
+                                     f"lacks {missing}: a pair would carry no attribution, and the page refuses it")
             for e in manifest["files"]:
                 self.meta[Path(e["path"]).stem.replace(" ", "")] = dict(page=e["page"], chain=e["chain"], id=e["id"], name=Path(e["path"]).name)
         self._raw, self._floor, self._notes = OrderedDict(), {}, OrderedDict()

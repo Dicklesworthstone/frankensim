@@ -530,6 +530,22 @@ class ContractTests(unittest.TestCase):
         self.assertEqual((d / "pair.json").read_bytes(), before)
         self.assertIsNone(json.loads((d / "pair.json").read_text()).get("refused"))
 
+    def test_a_manifest_of_another_recording_set_must_carry_its_attribution(self):
+        import json
+        man = self.tmp / "vocalset.json"
+        entry = dict(path="VocalSet/x.wav", page="p", chain="c", id="vs-1", licence="vocalset-cc-by-4.0")
+        man.write_text(json.dumps({"files": [entry]}))
+        with self.assertRaisesRegex(ValueError, "SOURCE_MISSING"):
+            dc.Refs(self.tmp / "lib.json", self.tmp / "wav", man)
+        man.write_text(json.dumps({"files": [entry], "external": {"name": "VocalSet", "url": "u", "licence": "CC BY 4.0"}}))
+        with self.assertRaisesRegex(ValueError, "credit"):  # CC BY needs the credit line
+            dc.Refs(self.tmp / "lib.json", self.tmp / "wav", man)
+        man.write_text(json.dumps({"files": [entry], "external": {"name": "VocalSet", "url": "u", "licence": "CC BY 4.0",
+                                                                  "licence_url": "lu", "credit": "Wilkins et al."}}))
+        self.assertEqual(dc.Refs(self.tmp / "lib.json", self.tmp / "wav", man).external["credit"], "Wilkins et al.")
+        man.write_text(json.dumps({"files": [dict(entry, licence="uiowa-mis")]}))  # the UIowa set needs none
+        self.assertIsNone(dc.Refs(self.tmp / "lib.json", self.tmp / "wav", man).external)
+
     def test_a_refused_render_batch_job_writes_the_record(self):
         import json
         root = self.tmp / "refbatch"
