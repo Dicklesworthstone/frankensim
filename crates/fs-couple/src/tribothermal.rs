@@ -10,8 +10,9 @@
 //! trial starts from the same accepted slip history; only a balanced candidate
 //! can publish both histories. Heat exported elsewhere remains in the balance.
 //!
-//! This is a fixed-footprint, isotropic, prescribed-motion reduction. No normal
-//! contact solve, body dynamics, inferred interface temperature, flash estimate,
+//! This entry is a fixed-footprint, isotropic, prescribed-motion reduction;
+//! [`dynamics`] closes the same contact with finite-body tangent inertia.
+//! No normal contact solve, inferred interface temperature, flash estimate,
 //! wear geometry, lubricant, adhesion or friction entropy law is introduced.
 //! Dry contact refuses liquid material states. Source curves remain their
 //! original one-dimensional laws and validity domains; no multivariable law is
@@ -20,6 +21,8 @@
 //! accuracy, uniqueness or experimental-validation certificate.
 
 pub mod material;
+/// Force-driven finite-body motion using the same material/thermal contact.
+pub mod dynamics;
 pub use material::{MaterialSlidingContact, SlidingInterface, SlidingMaterialSample};
 
 use fs_contact::interface_binding::InterfaceBindingError;
@@ -75,6 +78,7 @@ pub enum SlidingError<E = Infallible> {
     NotConverged(NewtonReport),
     Interrupted(SolverRunProgress),
     FrictionBudget,
+    MotionBudget,
     Cancelled,
 }
 impl<E> From<DepositionError> for SlidingError<E> {

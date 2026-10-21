@@ -2,6 +2,8 @@
 //! measured friction calibration. Native execution is required for qualification.
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
+#[path = "tribothermal/dynamics.rs"]
+mod dynamics;
 
 use fs_couple::tribothermal::material::{KINETIC_FRICTION_PROPERTY, STATIC_FRICTION_PROPERTY};
 use fs_couple::tribothermal::*;
