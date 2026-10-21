@@ -10,6 +10,7 @@ use crate::sdf3::PhysicalRegion3;
 
 mod scan;
 pub use scan::{BinaryCandidate3, BinaryScan3, BinaryScanOptions3};
+pub mod strength;
 
 /// Independent endpoint policy; changing void stiffness changes the physics.
 #[derive(Debug, Clone, Copy)]

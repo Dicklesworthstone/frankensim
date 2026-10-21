@@ -205,7 +205,7 @@ fn power(r: f64, p: f64) -> f64 {
 // Scale first so a finite large stress does not overflow merely on squaring.
 // Hydrostatic and zero stress have the zero subgradient of the Euclidean norm;
 // their aggregate contribution is differentiable for every admitted p >= 2.
-fn von_mises(s: &[f64; 6]) -> (f64, [f64; 6]) {
+pub(in crate::sdf3) fn von_mises(s: &[f64; 6]) -> (f64, [f64; 6]) {
     let scale = s.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
     if scale == 0.0 {
         return (0.0, [0.0; 6]);
