@@ -1,8 +1,10 @@
 //! Gas connectivity on the same live electrical/thermal/reactive assembly.
-//! Stage the original conservative nozzle graph once, then call the original
-//! assembled reaction/exchange advance. All stages use ONE physical interval.
+//! Stage the original conservative species-transport graph once, then call the
+//! original assembled reaction/exchange advance. All stages use ONE interval.
 /// Shared-state nozzle exchange on the same complete physical assembly.
 pub mod snapshot;
+/// Source-backed molecular diffusion on the same complete physical assembly.
+pub mod diffusion;
 
 use super::*;
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::network::{
@@ -15,6 +17,7 @@ pub enum MaterialFlowError {
     Invalid(&'static str),
     Flow(GasNetworkError),
     SnapshotFlow(network::snapshot::SnapshotNozzleError),
+    Diffusion(fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::DiffusionNetworkError),
     Exchange(ReactiveExchangeError),
     Gas { chamber: u64, error: fs_material::MaterialError },
     Cancelled,
@@ -43,6 +46,14 @@ impl From<ReactiveExchangeError> for MaterialFlowError {
         match error { ReactiveExchangeError::Cancelled => Self::Cancelled, other => Self::Exchange(other) }
     }
 }
+impl From<fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::DiffusionNetworkError>
+    for MaterialFlowError
+{
+    fn from(error: fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::DiffusionNetworkError) -> Self {
+        use fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::DiffusionNetworkError;
+        match error { DiffusionNetworkError::Cancelled => Self::Cancelled, other => Self::Diffusion(other) }
+    }
+}
 /// Full-interval extensive changes, including flow and any subsequent reaction.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlowChamberStep {
@@ -56,14 +67,14 @@ pub struct FlowChamberStep {
 pub struct MaterialFlowAdvance<F = GasNetworkStep> {
     /// The actual selected transport owner's report, before reaction/heat/motion.
     pub flow: F,
-    /// This unchanged report starts AFTER the nozzle graph stage.
+    /// This unchanged report starts AFTER the selected species-transport stage.
     pub exchange: MaterialExchangeAdvance,
     pub chambers: Vec<FlowChamberStep>,
     pub total_mass_residual_kg: f64,
     pub total_energy_residual_j: f64,
 }
 
-// Both transport discretizations feed the same whole-interval balance and
+// All transport discretizations feed the same whole-interval balance and
 // atomic state publication. No second chemistry, circuit or thermal solve.
 struct FlowStage<F> {
     parcels: BTreeMap<u64, fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel>,
