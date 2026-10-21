@@ -510,3 +510,361 @@ fn g2_human_elastic_set_pins_the_table_and_agrees_with_the_layered_pack() {
          \"rho_true_fold\":{rho_t},\"rho_false_fold\":{rho_f},\"el_over_et\":{anisotropy}}}"
     );
 }
+
+/// Chhetri et al. 2011 Tables 1-3: (larynx, side, sample, location group, D mm, T mm (0 = not printed), h_max mm, E kPa, iqr kPa).
+const INDENTATION: [(&str, &str, &str, &str, f64, f64, f64, f64, f64); 22] = [
+    (
+        "m49",
+        "s1",
+        "hemilarynx-medial-surface",
+        "hemilarynx",
+        0.5,
+        0.0,
+        0.8,
+        7.4,
+        1.6,
+    ),
+    (
+        "m49",
+        "s1",
+        "cover-medial-surface",
+        "medial-cover",
+        0.5,
+        2.0,
+        0.5,
+        5.4,
+        2.0,
+    ),
+    (
+        "m49",
+        "s1",
+        "cover-inferior-medial-surface",
+        "inferior-medial-cover",
+        0.5,
+        3.0,
+        0.75,
+        7.9,
+        4.6,
+    ),
+    (
+        "m49",
+        "s1",
+        "ta-attached-to-cartilage",
+        "ta-muscle",
+        0.5,
+        5.0,
+        0.6,
+        2.0,
+        2.1,
+    ),
+    (
+        "m49",
+        "s1",
+        "ta-attached-to-cartilage",
+        "ta-muscle",
+        2.0,
+        5.0,
+        0.8,
+        1.5,
+        0.8,
+    ),
+    (
+        "m49",
+        "s2",
+        "hemilarynx-medial-surface",
+        "hemilarynx",
+        0.5,
+        0.0,
+        0.75,
+        5.3,
+        0.5,
+    ),
+    (
+        "m49",
+        "s2",
+        "ta-attached-to-cartilage",
+        "ta-muscle",
+        0.5,
+        5.0,
+        0.75,
+        1.3,
+        2.4,
+    ),
+    (
+        "m49",
+        "s2",
+        "ta-isolated",
+        "ta-muscle",
+        0.5,
+        5.0,
+        0.75,
+        2.1,
+        1.0,
+    ),
+    (
+        "m49",
+        "s2",
+        "ta-isolated",
+        "ta-muscle",
+        1.0,
+        5.0,
+        0.75,
+        1.6,
+        1.0,
+    ),
+    (
+        "f19",
+        "s1",
+        "hemilarynx",
+        "hemilarynx",
+        0.5,
+        0.0,
+        1.0,
+        13.1,
+        1.5,
+    ),
+    (
+        "f19",
+        "s1",
+        "cover-superior-surface",
+        "superior-cover",
+        0.5,
+        2.0,
+        0.75,
+        2.9,
+        1.1,
+    ),
+    (
+        "f19",
+        "s1",
+        "cover-medial-surface",
+        "medial-cover",
+        0.5,
+        2.0,
+        0.75,
+        4.7,
+        1.2,
+    ),
+    (
+        "f19",
+        "s2",
+        "vocal-fold-medial-surface",
+        "medial-cover",
+        0.5,
+        0.0,
+        1.0,
+        3.9,
+        0.7,
+    ),
+    (
+        "f19",
+        "s2",
+        "vocal-fold-inferior-medial-surface",
+        "inferior-medial-cover",
+        0.5,
+        0.0,
+        1.0,
+        7.0,
+        0.9,
+    ),
+    (
+        "m30",
+        "s1",
+        "cover-superior-surface",
+        "superior-cover",
+        1.0,
+        1.6,
+        0.4,
+        3.2,
+        1.8,
+    ),
+    (
+        "m30",
+        "s1",
+        "cover-medial-surface",
+        "medial-cover",
+        1.0,
+        2.0,
+        0.4,
+        5.7,
+        2.0,
+    ),
+    (
+        "m30",
+        "s1",
+        "cover-medial-surface-lp-layer-up",
+        "",
+        1.0,
+        2.0,
+        0.4,
+        2.7,
+        2.3,
+    ),
+    (
+        "m30",
+        "s1",
+        "ta-isolated",
+        "ta-muscle",
+        1.0,
+        3.3,
+        0.5,
+        2.7,
+        1.5,
+    ),
+    (
+        "m30",
+        "s2",
+        "cover-superior-surface",
+        "superior-cover",
+        1.0,
+        1.6,
+        0.4,
+        2.7,
+        1.6,
+    ),
+    (
+        "m30",
+        "s2",
+        "cover-medial-surface",
+        "medial-cover",
+        1.0,
+        1.6,
+        0.4,
+        4.3,
+        1.9,
+    ),
+    (
+        "m30",
+        "s2",
+        "cover-medial-surface-lp-layer-up",
+        "",
+        1.0,
+        1.6,
+        0.4,
+        4.4,
+        1.9,
+    ),
+    (
+        "m30",
+        "s2",
+        "ta-isolated",
+        "ta-muscle",
+        1.0,
+        4.0,
+        0.4,
+        3.1,
+        1.4,
+    ),
+];
+
+#[test]
+fn g2_human_indentation_pack_pins_the_rows_and_records_the_source_inconsistency() {
+    let pack = load_human_pack("vocalfold-human-indentation-layers-chhetri-jvoice-pmc2891297");
+
+    // Every typed row equals the printed one, with its indenter regime carried as validity.
+    for (lx, side, sample, _group, d, t, h, e, iqr) in INDENTATION {
+        let id = format!("{lx}-{side}-{sample}-d{d}");
+        assert!(near(pack.value(&id), e), "{id} E");
+        assert_eq!(pack.scalar[&id].1, "kPa");
+        assert_eq!(pack.uncertainty[&id].1, Some(iqr), "{id} iqr");
+        let expected_validity = if t > 0.0 { 5 } else { 3 };
+        assert_eq!(
+            pack.validity[&id], expected_validity,
+            "{id}: h/D and D/T regime rows"
+        );
+        assert!(h > 0.0 && d > 0.0);
+    }
+    for lx in ["m49", "f19", "m30"] {
+        let state = &pack.observation[&format!("larynx-{lx}")];
+        assert!(
+            state.contains("postmortem") && state.contains("AN EFFECTIVE INDENTATION MODULUS"),
+            "{lx}: the apparatus-response register and the specimen state must be carried"
+        );
+    }
+
+    // The printed location means (and N) are reproduced by the typed rows; the ranges too, except the one the source
+    // gets wrong: the printed TA range 1.3-2.7 kPa does not contain the Table 3 value 3.1 kPa.
+    let printed = [
+        ("hemilarynx", 8.6, 5.3, 13.1, 3_usize),
+        ("inferior-medial-cover", 7.5, 7.0, 7.9, 2),
+        ("medial-cover", 4.8, 3.9, 5.7, 5),
+        ("superior-cover", 2.9, 2.7, 3.2, 3),
+        ("ta-muscle", 2.0, 1.3, 2.7, 7),
+    ];
+    for (group, mean_printed, lo, hi, n) in printed {
+        let rows: Vec<f64> = INDENTATION
+            .iter()
+            .filter(|r| r.3 == group)
+            .map(|r| r.7)
+            .collect();
+        assert_eq!(rows.len(), n, "{group}: N");
+        let mean = rows.iter().sum::<f64>() / n as f64;
+        assert!(
+            (mean - mean_printed).abs() < 0.06,
+            "{group}: recomputed {mean} vs printed {mean_printed}"
+        );
+        assert!(near(
+            pack.value(&format!("summary-{group}-mean")),
+            mean_printed
+        ));
+        assert!(near(pack.value(&format!("summary-{group}-low")), lo));
+        assert!(near(pack.value(&format!("summary-{group}-high")), hi));
+        let (row_lo, row_hi) = rows
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+                (a.min(v), b.max(v))
+            });
+        assert!(
+            near(row_lo, lo),
+            "{group}: printed low {lo} vs rows {row_lo}"
+        );
+        if group == "ta-muscle" {
+            assert!(
+                row_hi > hi,
+                "the source's TA range excludes its own Table 3 value"
+            );
+            assert!(pack.observation["printed-location-summary"].contains("does NOT contain"));
+        } else {
+            assert!(
+                near(row_hi, hi),
+                "{group}: printed high {hi} vs rows {row_hi}"
+            );
+        }
+    }
+
+    // The stiffness order the authors report: intact hemilarynx, then the isolated cover from inferior to superior,
+    // then the isolated thyroarytenoid muscle.
+    let mean = |g: &str| pack.value(&format!("summary-{g}-mean"));
+    assert!(
+        mean("hemilarynx") > mean("inferior-medial-cover")
+            && mean("inferior-medial-cover") > mean("medial-cover")
+            && mean("medial-cover") > mean("superior-cover")
+            && mean("superior-cover") > mean("ta-muscle")
+    );
+    // Layer thicknesses as stated: muscle > lamina propria > epithelium.
+    assert!(
+        pack.value("thickness-ta-muscle") > pack.value("thickness-lamina-propria")
+            && pack.value("thickness-lamina-propria") > pack.value("thickness-epithelium-high")
+            && pack.value("thickness-epithelium-high") > pack.value("thickness-epithelium-low")
+    );
+    assert!(pack.observation["stated-layer-thickness"].contains("not measured"));
+
+    // Two independent labs, two methods: the transverse stiffness of the cover (indentation of isolated cover,
+    // effective) and the transverse E_T of the layered pack's cover specimens agree within a factor 3.
+    let cover_et: Vec<f64> = TABLE_2
+        .iter()
+        .filter(|r| r.1 == "cover")
+        .map(|r| r.3)
+        .collect();
+    let cover_et_mean = cover_et.iter().sum::<f64>() / 6.0;
+    let ratio = mean("medial-cover") / cover_et_mean;
+    assert!(
+        (0.3..3.0).contains(&ratio),
+        "Chhetri medial cover vs Kelleher cover E_T mean {cover_et_mean}"
+    );
+    println!(
+        "{{\"suite\":\"fs-material\",\"case\":\"g2-human-indentation\",\"verdict\":\"pass\",\
+         \"cover_vs_kelleher_et\":{ratio},\"ta_mean_kpa\":{}}}",
+        mean("ta-muscle")
+    );
+}

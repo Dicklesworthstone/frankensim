@@ -1,0 +1,207 @@
+frankensim.matdb-source.v1
+observation	larynx-m49	Excised adult human larynx, Male, 49 y (Table 1); both sides measured at the mid-membranous vocal fold or the centre of the thyroarytenoid muscle	Flat cylindrical indenter driven normal to the sample at 12.7 mm/s in steps (0.025 mm below 2 mm depth) with a 1.5 s wait per step and the force averaged over the last 0.5 s, five loading-unloading cycles; E from the slope dF/dh of the initial unloading curve (fourth-order polynomial fit over the first half of the unloading points) by a Hertzian cylindrical-contact formula E = (1 - nu^2)/(2R) dF/dh with nu = 0.47 ASSUMED; value = mean of the five cycles, spread = interquartile range of the five. Specimens harvested at autopsy within 48 h postmortem, quick-frozen and kept at -80 C, thawed overnight in a refrigerator (printed as -4 C), bisected at the commissures; layers separated by sharp dissection under 3.5x loupe, kept moist with 0.9 percent saline	AN EFFECTIVE INDENTATION MODULUS OF A THIN SAMPLE, NOT A CONSTITUTIVE CONSTANT: on a multilayer sample indentation gives an effective modulus, and on the authors' own silicone-rubber calibration the modulus is overestimated when depth exceeds the indenter diameter (h/D above 1) or the indenter is not small against the sample thickness (they advise D/T below 0.22 and h/D below 0.5); the h/D and D/T of every row are carried as validity so none is used outside its calibrated regime unknowingly. Transverse (normal to the surface) direction only. Quasi-static. The spread is an interquartile range (a full width, not a half-width). Large spreads on thin specimens (low signal to noise). Only three larynges. Attached-to-cartilage samples read stiffer than isolated ones
+observation	larynx-f19	Excised adult human larynx, Female, 19 y (Table 2); both sides measured at the mid-membranous vocal fold or the centre of the thyroarytenoid muscle	Flat cylindrical indenter driven normal to the sample at 12.7 mm/s in steps (0.025 mm below 2 mm depth) with a 1.5 s wait per step and the force averaged over the last 0.5 s, five loading-unloading cycles; E from the slope dF/dh of the initial unloading curve (fourth-order polynomial fit over the first half of the unloading points) by a Hertzian cylindrical-contact formula E = (1 - nu^2)/(2R) dF/dh with nu = 0.47 ASSUMED; value = mean of the five cycles, spread = interquartile range of the five. Specimens harvested at autopsy within 48 h postmortem, quick-frozen and kept at -80 C, thawed overnight in a refrigerator (printed as -4 C), bisected at the commissures; layers separated by sharp dissection under 3.5x loupe, kept moist with 0.9 percent saline	AN EFFECTIVE INDENTATION MODULUS OF A THIN SAMPLE, NOT A CONSTITUTIVE CONSTANT: on a multilayer sample indentation gives an effective modulus, and on the authors' own silicone-rubber calibration the modulus is overestimated when depth exceeds the indenter diameter (h/D above 1) or the indenter is not small against the sample thickness (they advise D/T below 0.22 and h/D below 0.5); the h/D and D/T of every row are carried as validity so none is used outside its calibrated regime unknowingly. Transverse (normal to the surface) direction only. Quasi-static. The spread is an interquartile range (a full width, not a half-width). Large spreads on thin specimens (low signal to noise). Only three larynges. Attached-to-cartilage samples read stiffer than isolated ones
+observation	larynx-m30	Excised adult human larynx, Male, 30 y (Table 3); both sides measured at the mid-membranous vocal fold or the centre of the thyroarytenoid muscle	Flat cylindrical indenter driven normal to the sample at 12.7 mm/s in steps (0.025 mm below 2 mm depth) with a 1.5 s wait per step and the force averaged over the last 0.5 s, five loading-unloading cycles; E from the slope dF/dh of the initial unloading curve (fourth-order polynomial fit over the first half of the unloading points) by a Hertzian cylindrical-contact formula E = (1 - nu^2)/(2R) dF/dh with nu = 0.47 ASSUMED; value = mean of the five cycles, spread = interquartile range of the five. Specimens harvested at autopsy within 48 h postmortem, quick-frozen and kept at -80 C, thawed overnight in a refrigerator (printed as -4 C), bisected at the commissures; layers separated by sharp dissection under 3.5x loupe, kept moist with 0.9 percent saline	AN EFFECTIVE INDENTATION MODULUS OF A THIN SAMPLE, NOT A CONSTITUTIVE CONSTANT: on a multilayer sample indentation gives an effective modulus, and on the authors' own silicone-rubber calibration the modulus is overestimated when depth exceeds the indenter diameter (h/D above 1) or the indenter is not small against the sample thickness (they advise D/T below 0.22 and h/D below 0.5); the h/D and D/T of every row are carried as validity so none is used outside its calibrated regime unknowingly. Transverse (normal to the surface) direction only. Quasi-static. The spread is an interquartile range (a full width, not a half-width). Large spreads on thin specimens (low signal to noise). Only three larynges. Attached-to-cartilage samples read stiffer than isolated ones
+scalar	m49-s1-hemilarynx-medial-surface-d0.5	larynx-m49	young_modulus_effective_indentation_m49_s1_hemilarynx-medial-surface_d0p5	7.4	kPa	constant
+uncertainty	m49-s1-hemilarynx-medial-surface-d0.5	absolute	1.6	kPa	0.5	1
+validity	m49-s1-hemilarynx-medial-surface-d0.5	indenter_diameter	0.5	0.5	mm
+validity	m49-s1-hemilarynx-medial-surface-d0.5	max_indentation_depth	0.8	0.8	mm
+validity	m49-s1-hemilarynx-medial-surface-d0.5	indentation_depth_over_diameter	1.6	1.6	1
+scalar	m49-s1-cover-medial-surface-d0.5	larynx-m49	young_modulus_effective_indentation_m49_s1_cover-medial-surface_d0p5	5.4	kPa	constant
+uncertainty	m49-s1-cover-medial-surface-d0.5	absolute	2	kPa	0.5	1
+validity	m49-s1-cover-medial-surface-d0.5	indenter_diameter	0.5	0.5	mm
+validity	m49-s1-cover-medial-surface-d0.5	max_indentation_depth	0.5	0.5	mm
+validity	m49-s1-cover-medial-surface-d0.5	indentation_depth_over_diameter	1	1	1
+validity	m49-s1-cover-medial-surface-d0.5	sample_thickness	2	2	mm
+validity	m49-s1-cover-medial-surface-d0.5	indenter_diameter_over_thickness	0.25	0.25	1
+scalar	m49-s1-cover-inferior-medial-surface-d0.5	larynx-m49	young_modulus_effective_indentation_m49_s1_cover-inferior-medial-surface_d0p5	7.9	kPa	constant
+uncertainty	m49-s1-cover-inferior-medial-surface-d0.5	absolute	4.6	kPa	0.5	1
+validity	m49-s1-cover-inferior-medial-surface-d0.5	indenter_diameter	0.5	0.5	mm
+validity	m49-s1-cover-inferior-medial-surface-d0.5	max_indentation_depth	0.75	0.75	mm
+validity	m49-s1-cover-inferior-medial-surface-d0.5	indentation_depth_over_diameter	1.5	1.5	1
+validity	m49-s1-cover-inferior-medial-surface-d0.5	sample_thickness	3	3	mm
+validity	m49-s1-cover-inferior-medial-surface-d0.5	indenter_diameter_over_thickness	0.1667	0.1667	1
+scalar	m49-s1-ta-attached-to-cartilage-d0.5	larynx-m49	young_modulus_effective_indentation_m49_s1_ta-attached-to-cartilage_d0p5	2	kPa	constant
+uncertainty	m49-s1-ta-attached-to-cartilage-d0.5	absolute	2.1	kPa	0.5	1
+validity	m49-s1-ta-attached-to-cartilage-d0.5	indenter_diameter	0.5	0.5	mm
+validity	m49-s1-ta-attached-to-cartilage-d0.5	max_indentation_depth	0.6	0.6	mm
+validity	m49-s1-ta-attached-to-cartilage-d0.5	indentation_depth_over_diameter	1.2	1.2	1
+validity	m49-s1-ta-attached-to-cartilage-d0.5	sample_thickness	5	5	mm
+validity	m49-s1-ta-attached-to-cartilage-d0.5	indenter_diameter_over_thickness	0.1	0.1	1
+scalar	m49-s1-ta-attached-to-cartilage-d2	larynx-m49	young_modulus_effective_indentation_m49_s1_ta-attached-to-cartilage_d2	1.5	kPa	constant
+uncertainty	m49-s1-ta-attached-to-cartilage-d2	absolute	0.8	kPa	0.5	1
+validity	m49-s1-ta-attached-to-cartilage-d2	indenter_diameter	2	2	mm
+validity	m49-s1-ta-attached-to-cartilage-d2	max_indentation_depth	0.8	0.8	mm
+validity	m49-s1-ta-attached-to-cartilage-d2	indentation_depth_over_diameter	0.4	0.4	1
+validity	m49-s1-ta-attached-to-cartilage-d2	sample_thickness	5	5	mm
+validity	m49-s1-ta-attached-to-cartilage-d2	indenter_diameter_over_thickness	0.4	0.4	1
+scalar	m49-s2-hemilarynx-medial-surface-d0.5	larynx-m49	young_modulus_effective_indentation_m49_s2_hemilarynx-medial-surface_d0p5	5.3	kPa	constant
+uncertainty	m49-s2-hemilarynx-medial-surface-d0.5	absolute	0.5	kPa	0.5	1
+validity	m49-s2-hemilarynx-medial-surface-d0.5	indenter_diameter	0.5	0.5	mm
+validity	m49-s2-hemilarynx-medial-surface-d0.5	max_indentation_depth	0.75	0.75	mm
+validity	m49-s2-hemilarynx-medial-surface-d0.5	indentation_depth_over_diameter	1.5	1.5	1
+scalar	m49-s2-ta-attached-to-cartilage-d0.5	larynx-m49	young_modulus_effective_indentation_m49_s2_ta-attached-to-cartilage_d0p5	1.3	kPa	constant
+uncertainty	m49-s2-ta-attached-to-cartilage-d0.5	absolute	2.4	kPa	0.5	1
+validity	m49-s2-ta-attached-to-cartilage-d0.5	indenter_diameter	0.5	0.5	mm
+validity	m49-s2-ta-attached-to-cartilage-d0.5	max_indentation_depth	0.75	0.75	mm
+validity	m49-s2-ta-attached-to-cartilage-d0.5	indentation_depth_over_diameter	1.5	1.5	1
+validity	m49-s2-ta-attached-to-cartilage-d0.5	sample_thickness	5	5	mm
+validity	m49-s2-ta-attached-to-cartilage-d0.5	indenter_diameter_over_thickness	0.1	0.1	1
+scalar	m49-s2-ta-isolated-d0.5	larynx-m49	young_modulus_effective_indentation_m49_s2_ta-isolated_d0p5	2.1	kPa	constant
+uncertainty	m49-s2-ta-isolated-d0.5	absolute	1	kPa	0.5	1
+validity	m49-s2-ta-isolated-d0.5	indenter_diameter	0.5	0.5	mm
+validity	m49-s2-ta-isolated-d0.5	max_indentation_depth	0.75	0.75	mm
+validity	m49-s2-ta-isolated-d0.5	indentation_depth_over_diameter	1.5	1.5	1
+validity	m49-s2-ta-isolated-d0.5	sample_thickness	5	5	mm
+validity	m49-s2-ta-isolated-d0.5	indenter_diameter_over_thickness	0.1	0.1	1
+scalar	m49-s2-ta-isolated-d1	larynx-m49	young_modulus_effective_indentation_m49_s2_ta-isolated_d1	1.6	kPa	constant
+uncertainty	m49-s2-ta-isolated-d1	absolute	1	kPa	0.5	1
+validity	m49-s2-ta-isolated-d1	indenter_diameter	1	1	mm
+validity	m49-s2-ta-isolated-d1	max_indentation_depth	0.75	0.75	mm
+validity	m49-s2-ta-isolated-d1	indentation_depth_over_diameter	0.75	0.75	1
+validity	m49-s2-ta-isolated-d1	sample_thickness	5	5	mm
+validity	m49-s2-ta-isolated-d1	indenter_diameter_over_thickness	0.2	0.2	1
+scalar	f19-s1-hemilarynx-d0.5	larynx-f19	young_modulus_effective_indentation_f19_s1_hemilarynx_d0p5	13.1	kPa	constant
+uncertainty	f19-s1-hemilarynx-d0.5	absolute	1.5	kPa	0.5	1
+validity	f19-s1-hemilarynx-d0.5	indenter_diameter	0.5	0.5	mm
+validity	f19-s1-hemilarynx-d0.5	max_indentation_depth	1	1	mm
+validity	f19-s1-hemilarynx-d0.5	indentation_depth_over_diameter	2	2	1
+scalar	f19-s1-cover-superior-surface-d0.5	larynx-f19	young_modulus_effective_indentation_f19_s1_cover-superior-surface_d0p5	2.9	kPa	constant
+uncertainty	f19-s1-cover-superior-surface-d0.5	absolute	1.1	kPa	0.5	1
+validity	f19-s1-cover-superior-surface-d0.5	indenter_diameter	0.5	0.5	mm
+validity	f19-s1-cover-superior-surface-d0.5	max_indentation_depth	0.75	0.75	mm
+validity	f19-s1-cover-superior-surface-d0.5	indentation_depth_over_diameter	1.5	1.5	1
+validity	f19-s1-cover-superior-surface-d0.5	sample_thickness	2	2	mm
+validity	f19-s1-cover-superior-surface-d0.5	indenter_diameter_over_thickness	0.25	0.25	1
+scalar	f19-s1-cover-medial-surface-d0.5	larynx-f19	young_modulus_effective_indentation_f19_s1_cover-medial-surface_d0p5	4.7	kPa	constant
+uncertainty	f19-s1-cover-medial-surface-d0.5	absolute	1.2	kPa	0.5	1
+validity	f19-s1-cover-medial-surface-d0.5	indenter_diameter	0.5	0.5	mm
+validity	f19-s1-cover-medial-surface-d0.5	max_indentation_depth	0.75	0.75	mm
+validity	f19-s1-cover-medial-surface-d0.5	indentation_depth_over_diameter	1.5	1.5	1
+validity	f19-s1-cover-medial-surface-d0.5	sample_thickness	2	2	mm
+validity	f19-s1-cover-medial-surface-d0.5	indenter_diameter_over_thickness	0.25	0.25	1
+scalar	f19-s2-vocal-fold-medial-surface-d0.5	larynx-f19	young_modulus_effective_indentation_f19_s2_vocal-fold-medial-surface_d0p5	3.9	kPa	constant
+uncertainty	f19-s2-vocal-fold-medial-surface-d0.5	absolute	0.7	kPa	0.5	1
+validity	f19-s2-vocal-fold-medial-surface-d0.5	indenter_diameter	0.5	0.5	mm
+validity	f19-s2-vocal-fold-medial-surface-d0.5	max_indentation_depth	1	1	mm
+validity	f19-s2-vocal-fold-medial-surface-d0.5	indentation_depth_over_diameter	2	2	1
+scalar	f19-s2-vocal-fold-inferior-medial-surface-d0.5	larynx-f19	young_modulus_effective_indentation_f19_s2_vocal-fold-inferior-medial-surface_d0p5	7	kPa	constant
+uncertainty	f19-s2-vocal-fold-inferior-medial-surface-d0.5	absolute	0.9	kPa	0.5	1
+validity	f19-s2-vocal-fold-inferior-medial-surface-d0.5	indenter_diameter	0.5	0.5	mm
+validity	f19-s2-vocal-fold-inferior-medial-surface-d0.5	max_indentation_depth	1	1	mm
+validity	f19-s2-vocal-fold-inferior-medial-surface-d0.5	indentation_depth_over_diameter	2	2	1
+scalar	m30-s1-cover-superior-surface-d1	larynx-m30	young_modulus_effective_indentation_m30_s1_cover-superior-surface_d1	3.2	kPa	constant
+uncertainty	m30-s1-cover-superior-surface-d1	absolute	1.8	kPa	0.5	1
+validity	m30-s1-cover-superior-surface-d1	indenter_diameter	1	1	mm
+validity	m30-s1-cover-superior-surface-d1	max_indentation_depth	0.4	0.4	mm
+validity	m30-s1-cover-superior-surface-d1	indentation_depth_over_diameter	0.4	0.4	1
+validity	m30-s1-cover-superior-surface-d1	sample_thickness	1.6	1.6	mm
+validity	m30-s1-cover-superior-surface-d1	indenter_diameter_over_thickness	0.625	0.625	1
+scalar	m30-s1-cover-medial-surface-d1	larynx-m30	young_modulus_effective_indentation_m30_s1_cover-medial-surface_d1	5.7	kPa	constant
+uncertainty	m30-s1-cover-medial-surface-d1	absolute	2	kPa	0.5	1
+validity	m30-s1-cover-medial-surface-d1	indenter_diameter	1	1	mm
+validity	m30-s1-cover-medial-surface-d1	max_indentation_depth	0.4	0.4	mm
+validity	m30-s1-cover-medial-surface-d1	indentation_depth_over_diameter	0.4	0.4	1
+validity	m30-s1-cover-medial-surface-d1	sample_thickness	2	2	mm
+validity	m30-s1-cover-medial-surface-d1	indenter_diameter_over_thickness	0.5	0.5	1
+scalar	m30-s1-cover-medial-surface-lp-layer-up-d1	larynx-m30	young_modulus_effective_indentation_m30_s1_cover-medial-surface-lp-layer-up_d1	2.7	kPa	constant
+uncertainty	m30-s1-cover-medial-surface-lp-layer-up-d1	absolute	2.3	kPa	0.5	1
+validity	m30-s1-cover-medial-surface-lp-layer-up-d1	indenter_diameter	1	1	mm
+validity	m30-s1-cover-medial-surface-lp-layer-up-d1	max_indentation_depth	0.4	0.4	mm
+validity	m30-s1-cover-medial-surface-lp-layer-up-d1	indentation_depth_over_diameter	0.4	0.4	1
+validity	m30-s1-cover-medial-surface-lp-layer-up-d1	sample_thickness	2	2	mm
+validity	m30-s1-cover-medial-surface-lp-layer-up-d1	indenter_diameter_over_thickness	0.5	0.5	1
+scalar	m30-s1-ta-isolated-d1	larynx-m30	young_modulus_effective_indentation_m30_s1_ta-isolated_d1	2.7	kPa	constant
+uncertainty	m30-s1-ta-isolated-d1	absolute	1.5	kPa	0.5	1
+validity	m30-s1-ta-isolated-d1	indenter_diameter	1	1	mm
+validity	m30-s1-ta-isolated-d1	max_indentation_depth	0.5	0.5	mm
+validity	m30-s1-ta-isolated-d1	indentation_depth_over_diameter	0.5	0.5	1
+validity	m30-s1-ta-isolated-d1	sample_thickness	3.3	3.3	mm
+validity	m30-s1-ta-isolated-d1	indenter_diameter_over_thickness	0.303	0.303	1
+scalar	m30-s2-cover-superior-surface-d1	larynx-m30	young_modulus_effective_indentation_m30_s2_cover-superior-surface_d1	2.7	kPa	constant
+uncertainty	m30-s2-cover-superior-surface-d1	absolute	1.6	kPa	0.5	1
+validity	m30-s2-cover-superior-surface-d1	indenter_diameter	1	1	mm
+validity	m30-s2-cover-superior-surface-d1	max_indentation_depth	0.4	0.4	mm
+validity	m30-s2-cover-superior-surface-d1	indentation_depth_over_diameter	0.4	0.4	1
+validity	m30-s2-cover-superior-surface-d1	sample_thickness	1.6	1.6	mm
+validity	m30-s2-cover-superior-surface-d1	indenter_diameter_over_thickness	0.625	0.625	1
+scalar	m30-s2-cover-medial-surface-d1	larynx-m30	young_modulus_effective_indentation_m30_s2_cover-medial-surface_d1	4.3	kPa	constant
+uncertainty	m30-s2-cover-medial-surface-d1	absolute	1.9	kPa	0.5	1
+validity	m30-s2-cover-medial-surface-d1	indenter_diameter	1	1	mm
+validity	m30-s2-cover-medial-surface-d1	max_indentation_depth	0.4	0.4	mm
+validity	m30-s2-cover-medial-surface-d1	indentation_depth_over_diameter	0.4	0.4	1
+validity	m30-s2-cover-medial-surface-d1	sample_thickness	1.6	1.6	mm
+validity	m30-s2-cover-medial-surface-d1	indenter_diameter_over_thickness	0.625	0.625	1
+scalar	m30-s2-cover-medial-surface-lp-layer-up-d1	larynx-m30	young_modulus_effective_indentation_m30_s2_cover-medial-surface-lp-layer-up_d1	4.4	kPa	constant
+uncertainty	m30-s2-cover-medial-surface-lp-layer-up-d1	absolute	1.9	kPa	0.5	1
+validity	m30-s2-cover-medial-surface-lp-layer-up-d1	indenter_diameter	1	1	mm
+validity	m30-s2-cover-medial-surface-lp-layer-up-d1	max_indentation_depth	0.4	0.4	mm
+validity	m30-s2-cover-medial-surface-lp-layer-up-d1	indentation_depth_over_diameter	0.4	0.4	1
+validity	m30-s2-cover-medial-surface-lp-layer-up-d1	sample_thickness	1.6	1.6	mm
+validity	m30-s2-cover-medial-surface-lp-layer-up-d1	indenter_diameter_over_thickness	0.625	0.625	1
+scalar	m30-s2-ta-isolated-d1	larynx-m30	young_modulus_effective_indentation_m30_s2_ta-isolated_d1	3.1	kPa	constant
+uncertainty	m30-s2-ta-isolated-d1	absolute	1.4	kPa	0.5	1
+validity	m30-s2-ta-isolated-d1	indenter_diameter	1	1	mm
+validity	m30-s2-ta-isolated-d1	max_indentation_depth	0.4	0.4	mm
+validity	m30-s2-ta-isolated-d1	indentation_depth_over_diameter	0.4	0.4	1
+validity	m30-s2-ta-isolated-d1	sample_thickness	4	4	mm
+validity	m30-s2-ta-isolated-d1	indenter_diameter_over_thickness	0.25	0.25	1
+observation	printed-location-summary	Mean and range over the N specimens of the same location pooled over the three larynges, as printed in the Results text	Pooled over the larynges and indenter sizes of Tables 1-3 (recomputing each location mean from the typed rows reproduces the printed mean)	The printed TA muscle range 1.3-2.7 kPa does NOT contain the Table 3 side-2 value 3.1 kPa, although the printed TA mean 2.0 with N=7 reproduces only when 3.1 is included (mean of the seven typed TA rows 2.04): an inconsistency inside the source, recorded not resolved. The 'medial cover' group includes the intact vocal fold of the female larynx, and the 'inferior medial cover' group includes its intact vocal fold, as the printed N requires
+scalar	summary-hemilarynx-mean	printed-location-summary	young_modulus_effective_printed_mean_hemilarynx	8.6	kPa	constant
+uncertainty	summary-hemilarynx-mean	unstated	-	-	-	-
+validity	summary-hemilarynx-mean	measured_ex_vivo_frozen_stored	1	1	1
+scalar	summary-hemilarynx-low	printed-location-summary	young_modulus_effective_printed_range_low_hemilarynx	5.3	kPa	constant
+uncertainty	summary-hemilarynx-low	unstated	-	-	-	-
+validity	summary-hemilarynx-low	measured_ex_vivo_frozen_stored	1	1	1
+scalar	summary-hemilarynx-high	printed-location-summary	young_modulus_effective_printed_range_high_hemilarynx	13.1	kPa	constant
+uncertainty	summary-hemilarynx-high	unstated	-	-	-	-
+validity	summary-hemilarynx-high	measured_ex_vivo_frozen_stored	1	1	1
+scalar	summary-inferior-medial-cover-mean	printed-location-summary	young_modulus_effective_printed_mean_inferior_medial_cover	7.5	kPa	constant
+uncertainty	summary-inferior-medial-cover-mean	unstated	-	-	-	-
+validity	summary-inferior-medial-cover-mean	measured_ex_vivo_frozen_stored	1	1	1
+scalar	summary-inferior-medial-cover-low	printed-location-summary	young_modulus_effective_printed_range_low_inferior_medial_cover	7	kPa	constant
+uncertainty	summary-inferior-medial-cover-low	unstated	-	-	-	-
+validity	summary-inferior-medial-cover-low	measured_ex_vivo_frozen_stored	1	1	1
+scalar	summary-inferior-medial-cover-high	printed-location-summary	young_modulus_effective_printed_range_high_inferior_medial_cover	7.9	kPa	constant
+uncertainty	summary-inferior-medial-cover-high	unstated	-	-	-	-
+validity	summary-inferior-medial-cover-high	measured_ex_vivo_frozen_stored	1	1	1
+scalar	summary-medial-cover-mean	printed-location-summary	young_modulus_effective_printed_mean_medial_cover	4.8	kPa	constant
+uncertainty	summary-medial-cover-mean	unstated	-	-	-	-
+validity	summary-medial-cover-mean	measured_ex_vivo_frozen_stored	1	1	1
+scalar	summary-medial-cover-low	printed-location-summary	young_modulus_effective_printed_range_low_medial_cover	3.9	kPa	constant
+uncertainty	summary-medial-cover-low	unstated	-	-	-	-
+validity	summary-medial-cover-low	measured_ex_vivo_frozen_stored	1	1	1
+scalar	summary-medial-cover-high	printed-location-summary	young_modulus_effective_printed_range_high_medial_cover	5.7	kPa	constant
+uncertainty	summary-medial-cover-high	unstated	-	-	-	-
+validity	summary-medial-cover-high	measured_ex_vivo_frozen_stored	1	1	1
+scalar	summary-superior-cover-mean	printed-location-summary	young_modulus_effective_printed_mean_superior_cover	2.9	kPa	constant
+uncertainty	summary-superior-cover-mean	unstated	-	-	-	-
+validity	summary-superior-cover-mean	measured_ex_vivo_frozen_stored	1	1	1
+scalar	summary-superior-cover-low	printed-location-summary	young_modulus_effective_printed_range_low_superior_cover	2.7	kPa	constant
+uncertainty	summary-superior-cover-low	unstated	-	-	-	-
+validity	summary-superior-cover-low	measured_ex_vivo_frozen_stored	1	1	1
+scalar	summary-superior-cover-high	printed-location-summary	young_modulus_effective_printed_range_high_superior_cover	3.2	kPa	constant
+uncertainty	summary-superior-cover-high	unstated	-	-	-	-
+validity	summary-superior-cover-high	measured_ex_vivo_frozen_stored	1	1	1
+scalar	summary-ta-muscle-mean	printed-location-summary	young_modulus_effective_printed_mean_ta_muscle	2	kPa	constant
+uncertainty	summary-ta-muscle-mean	unstated	-	-	-	-
+validity	summary-ta-muscle-mean	measured_ex_vivo_frozen_stored	1	1	1
+scalar	summary-ta-muscle-low	printed-location-summary	young_modulus_effective_printed_range_low_ta_muscle	1.3	kPa	constant
+uncertainty	summary-ta-muscle-low	unstated	-	-	-	-
+validity	summary-ta-muscle-low	measured_ex_vivo_frozen_stored	1	1	1
+scalar	summary-ta-muscle-high	printed-location-summary	young_modulus_effective_printed_range_high_ta_muscle	2.7	kPa	constant
+uncertainty	summary-ta-muscle-high	unstated	-	-	-	-
+validity	summary-ta-muscle-high	measured_ex_vivo_frozen_stored	1	1	1
+observation	stated-layer-thickness	Human vocal fold layers as described in the Introduction (stated with the literature, not measured in this study)	Typical thickness of the layers of the vocal fold as stated in the Introduction	Stated without a measurement here; the isolated cover samples of this study were 1.6-3 mm thick and the TA samples 3.3-5 mm (T column of Tables 1-3)
+scalar	thickness-ta-muscle	stated-layer-thickness	layer_thickness_stated_ta_muscle	6	mm	constant
+uncertainty	thickness-ta-muscle	unstated	-	-	-	-
+validity	thickness-ta-muscle	stated_not_measured	1	1	1
+scalar	thickness-lamina-propria	stated-layer-thickness	layer_thickness_stated_lamina_propria	2	mm	constant
+uncertainty	thickness-lamina-propria	unstated	-	-	-	-
+validity	thickness-lamina-propria	stated_not_measured	1	1	1
+scalar	thickness-epithelium-low	stated-layer-thickness	layer_thickness_stated_epithelium_low	0.1	mm	constant
+uncertainty	thickness-epithelium-low	unstated	-	-	-	-
+validity	thickness-epithelium-low	stated_not_measured	1	1	1
+scalar	thickness-epithelium-high	stated-layer-thickness	layer_thickness_stated_epithelium_high	0.2	mm	constant
+uncertainty	thickness-epithelium-high	unstated	-	-	-	-
+validity	thickness-epithelium-high	stated_not_measured	1	1	1
