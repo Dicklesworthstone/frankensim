@@ -31,6 +31,7 @@ pub mod product_lhs;
 pub mod product_mlmc;
 pub mod product_mlmc_allocation;
 pub mod product_mlmc_pilot;
+pub mod product_multi;
 pub mod product_pce;
 pub mod product_pce_control;
 pub mod product_pce_model;
@@ -66,6 +67,7 @@ pub use product_mlmc_allocation::{
     allocate_mlmc, MlmcAllocation, MlmcAllocationError, MlmcAllocationPolicy,
 };
 pub use product_mlmc_pilot::{PilotMlmcConfig, PilotMlmcExecution, PilotMlmcReport, PilotMlmcStage};
+pub use product_multi::{MultiQoiExecution, MultiQoiReport, QoiDefinition, QoiReport};
 pub use product_pce::{PceConfig, PceExecution, PceReport, PceSummary};
 pub use product_pce_control::{
     PceControlError, PceMeanConfig, PceMeanControl, PceMeanEstimate, PceMeanExecution,
