@@ -244,6 +244,41 @@ structured errors rather than panicking.
   or optional-stopping guarantee. Only a complete predeclared design exposes
   estimates; finite-sample indices are not clipped, and zero sampled variance
   remains undefined rather than implying zero sensitivity.
+- `product_shapley::ShapleyExecution` attributes physical QoI variance to
+  1..=8 nonconstant Gaussian inputs under explicit Independent or JointGaussian
+  dependence. The original Monte Carlo plan budget must equal
+  `N*2*(2^d-1)`, with N>=2 and at most one million physical calls. Every proper
+  coalition S receives a permuted copy of the original law, admitted under the
+  existing numerical PSD and singular-pivot policy before physical work. The
+  conditioned coordinates come first in that factor; sharing their normal
+  prefix between two otherwise independent draws freezes the physical X_S
+  exactly. Callback inputs return to original parameter order and physical
+  units. No covariance inversion, physical-coordinate swap, jitter or hidden
+  independence assumption substitutes for conditional sampling. Constant
+  physical parameters remain in the caller's fixed model so conditioning on
+  them cannot reveal an unobserved latent variable.
+  Half the mean squared conditional-pair difference estimates
+  `c(S)=E[Var(Y|X_S)]`; the empty subset estimates output variance and the full
+  subset has zero conditional variance under the fixed deterministic-model
+  contract. Each physical effect sums `c(S)-c(S union {i})` with weights
+  `1/(d*choose(d-1,|S|))`, normalized by c(empty). These Shapley effects share
+  both dependence and interaction contributions; they are not causal effects
+  or independent-input Sobol indices. Conditional variance fractions and
+  finite-sample effects remain unclipped even when sample noise violates
+  monotonicity or [0,1]. The effect sum is an algebraic identity up to rounding,
+  not evidence of estimator accuracy. Zero/unrepresentable sampled variance
+  leaves effects unavailable after completion, never a false zero sensitivity.
+  Shared Sobol compensated reductions and scaled/centered normalization retain
+  small changes on large offsets and handle opposite finite extremes.
+  Paid calls, including one half of a pair, survive chunks, cancellation and
+  clone resumption. Unfinished callbacks retry identical inputs; model/sampling
+  failures are terminal and never skip a draw. Only the full allocation exposes
+  effects. Evidence stays Estimated with infinite dispersion; no confidence
+  interval, optional-stopping rule, durable checkpoint or adaptive subset search
+  is claimed. `tests/product_shapley.rs` checks analytical correlated and
+  interaction effects, physical conditioning and base-MC identity, independently
+  reconstructed variance costs, permutation/affine behavior, paid-call replay,
+  admission, undefined variance, unclipped effects and terminal failures.
 - `SobolExecution::checkpoint` / `restore` retain exact ordered observations,
   including partial rows, in bounded `FSSOB001` bytes. Identity binds every
   `UqPlan` field, original evaluation cap, Philox addressing, A/B/hybrid pairing

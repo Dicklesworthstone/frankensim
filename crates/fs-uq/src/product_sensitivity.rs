@@ -267,9 +267,9 @@ impl SobolExecution {
 }
 
 #[derive(Default)]
-struct Sum { value: f64, correction: f64 }
+pub(crate) struct Sum { pub(crate) value: f64, correction: f64 }
 impl Sum {
-    fn add(&mut self, value: f64) {
+    pub(crate) fn add(&mut self, value: f64) {
         let adjusted = value - self.correction;
         let next = self.value + adjusted;
         self.correction = (next - self.value) - adjusted;
@@ -280,9 +280,9 @@ impl Sum {
 // Center BEFORE scaling when representable, retaining small variations on a
 // large common offset. Opposite f64 extremes instead need scaling first. Both
 // operations cancel from the indices; no dimensional square is ever required.
-struct Normalization { origin: f64, scale: f64, scale_first: bool }
+pub(crate) struct Normalization { origin: f64, pub(crate) scale: f64, scale_first: bool }
 impl Normalization {
-    fn new(values: &[f64]) -> Self {
+    pub(crate) fn new(values: &[f64]) -> Self {
         let origin = values[0];
         let centered_scale = values.iter().fold(0.0_f64, |s, &x| s.max((x - origin).abs()));
         let scale_first = !centered_scale.is_finite();
@@ -291,7 +291,7 @@ impl Normalization {
         } else { centered_scale };
         Self { origin, scale: if scale == 0.0 { 1.0 } else { scale }, scale_first }
     }
-    fn value(&self, x: f64) -> f64 {
+    pub(crate) fn value(&self, x: f64) -> f64 {
         if self.scale_first { x / self.scale - self.origin / self.scale }
         else { (x - self.origin) / self.scale }
     }

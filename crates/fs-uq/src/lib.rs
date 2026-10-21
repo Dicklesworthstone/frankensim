@@ -31,6 +31,7 @@ pub mod product_pce;
 pub mod product_plan;
 pub mod product_qmc;
 pub mod product_sensitivity;
+pub mod product_shapley;
 pub mod seismic;
 
 pub use fs_robust::{EmpiricalCvarReport, RobustError, cvar, empirical_cvar};
@@ -44,6 +45,7 @@ pub use product_lhs::{LhsEstimate, LhsExecution, LhsPlan, LhsReport};
 pub use product_mlmc::{MlmcEstimate, MlmcExecution, MlmcExecutionReport, MlmcLevelReport};
 pub use product_pce::{PceConfig, PceExecution, PceReport, PceSummary};
 pub use product_sensitivity::{SobolEffect, SobolEstimate, SobolExecution, SobolReport};
+pub use product_shapley::{ShapleyEffect, ShapleyEstimate, ShapleyExecution, ShapleyReport};
 pub use product_qmc::{QmcConfig, QmcEstimate, QmcExecution, QmcReport};
 pub use product_plan::{
     CorrelationModel, ParameterUncertainty, PropagationMethod, UncertaintyKind, UqPlan,
