@@ -1,0 +1,531 @@
+//! Manufactured bonded rods exercise canonical sources through the original
+//! section, tuning, modal bank and live receiver. No measured alloy is implied.
+use super::*;
+use fs_blake3::hash_bytes;
+use fs_evidence::ValidityDomain;
+use fs_live_piano::{
+    preparation::materials::{StringMaterials, operating_point},
+    refmods::{bank_string_losses, linear::Bank},
+};
+use fs_matdb::{
+    ClaimSet, InterpolationPolicy, MATDB_PACK_TARGET_BASIS, MaterialStateId, NormalizationReceipt,
+    NormalizationTarget, NormalizedMaterialCardPack, NormalizedPack, ObservationDataset,
+    PropertyClaim, PropertyKey, PropertyValue, Provenance, StatisticMember, UncertaintyModel,
+};
+use fs_material::{
+    gas::{GasSpec, GasState},
+    state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY},
+};
+use fs_qty::{
+    Density, DynViscosity, Frequency, Pressure, QuantitySpec,
+    semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm},
+};
+use std::{
+    f64::consts::{PI, TAU},
+    sync::Arc,
+};
+
+const ETA: &str = "declared_bending_viscosity";
+const INNER: f64 = 0.00035;
+const OUTER: f64 = 0.0005;
+const CORE: [f64; 3] = [8000.0, 2e11, 1e8];
+const COATING: [f64; 3] = [10000.0, 1e11, 4e8];
+const MAX_HZ: f64 = 1e6;
+fn typed(kind: QuantityKind) -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
+}
+fn point() -> fs_matdb::QueryPoint {
+    // Use the actual browser/native helper with source-defined axis names.
+    operating_point("bath_kelvin", 293.15, "oscillation_hz", 1000.0).unwrap()
+}
+fn validity(lo: f64, hi: f64) -> ValidityDomain {
+    ValidityDomain::unconstrained()
+        .with_quantity(
+            "bath_kelvin",
+            typed(QuantityKind::AbsoluteTemperature),
+            280.0,
+            320.0,
+        )
+        .with_quantity(
+            "oscillation_hz",
+            typed(QuantityKind::Frequency(FrequencyConvention::Cyclic)),
+            lo,
+            hi,
+        )
+}
+fn pack(values: [f64; 3]) -> NormalizedMaterialCardPack {
+    pack_with(values, |_| {})
+}
+fn pack_with(
+    values: [f64; 3],
+    mut edit: impl FnMut(&mut PropertyClaim),
+) -> NormalizedMaterialCardPack {
+    let artifact = hash_bytes(format!("manufactured SI coefficients {values:?}").as_bytes());
+    let provenance = Provenance {
+        source: "authored bonded-rod fixture".into(),
+        license: "test fixture; no measured evidence".into(),
+        artifact: Some(artifact),
+    };
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "manufactured concentric rod".into(),
+            method: "analytic test data".into(),
+            artifact,
+            caveats: "not an alloy calibration".into(),
+            provenance: provenance.clone(),
+        })
+        .unwrap();
+    let mut receipts = Vec::new();
+    for ((name, dims), value) in [
+        (DENSITY_PROPERTY, Density::DIMS),
+        (YOUNG_MODULUS_PROPERTY, Pressure::DIMS),
+        (ETA, DynViscosity::DIMS),
+    ]
+    .into_iter()
+    .zip(values)
+    {
+        let mut claim = PropertyClaim {
+            key: PropertyKey::new(name, dims),
+            value: PropertyValue::Scalar { value, dims },
+            validity: validity(0.0, MAX_HZ),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![observation],
+            provenance: provenance.clone(),
+        };
+        edit(&mut claim);
+        let scalar = match &claim.value {
+            PropertyValue::Scalar { value, dims } => Some((*value, *dims)),
+            _ => None,
+        };
+        let id = claims.insert_claim(claim).unwrap();
+        if let Some((value, dims)) = scalar {
+            receipts.push(NormalizationReceipt::new(
+                NormalizationTarget::ClaimValue(StatisticMember::scalar(id)),
+                hash_bytes(value.to_string().as_bytes()),
+                dims,
+                1.0,
+                0.0,
+                MATDB_PACK_TARGET_BASIS,
+                MATDB_PACK_TARGET_BASIS,
+                None,
+                None,
+            ));
+        }
+    }
+    let claims = NormalizedPack::new(
+        "manufactured-bonded-rod",
+        "test-v1",
+        artifact,
+        "test redistribution",
+        claims,
+        vec![],
+        receipts,
+    )
+    .unwrap();
+    NormalizedMaterialCardPack::new(
+        MaterialStateId {
+            chemistry: "manufactured".into(),
+            phase: "solid".into(),
+            process: "authored".into(),
+            revision: 0,
+        },
+        claims,
+    )
+    .unwrap()
+}
+fn small_description() -> Description {
+    let mut desc = description();
+    desc.courses.retain(|c| [57, 69, 81].contains(&c.midi));
+    for c in &mut desc.courses {
+        c.unison = 1;
+        c.detune_cents = 0.0;
+        c.duplex_length_m = 0.0;
+    }
+    desc
+}
+fn section_geometry(courses: &[Course]) -> String {
+    let mut rows = "frankensim-piano-materials-v1\nkey,outer_radius_m,material_index\n".to_owned();
+    for course in courses {
+        rows.push_str(&format!(
+            "{},{INNER},0\n{},{OUTER},1\n",
+            course.midi, course.midi
+        ));
+    }
+    rows
+}
+fn load(
+    courses: &[Course],
+    core: &NormalizedMaterialCardPack,
+    coating: &NormalizedMaterialCardPack,
+) -> Arc<StringMaterials> {
+    Arc::new(
+        StringMaterials::from_packs(
+            &[&core.to_bytes(), &coating.to_bytes()],
+            &section_geometry(courses),
+            &point(),
+            ETA,
+        )
+        .unwrap(),
+    )
+}
+fn config() -> Config {
+    let mut cfg = Config::live(48_000);
+    cfg.max_partials = 12;
+    cfg.course_mode_budget = 12;
+    cfg.max_dynamic_modes = 36;
+    cfg.max_courses = 3;
+    cfg.duplex = false;
+    cfg.partial_band_hz = 6000.0;
+    cfg.silent_bank_hz = 0.0;
+    cfg.rt0425_string_damping = false;
+    cfg
+}
+fn gas() -> GasState {
+    GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap()
+}
+fn near(actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() <= 3e-13 * actual.abs().max(expected.abs()),
+        "{actual} != {expected}"
+    );
+}
+
+#[test]
+fn canonical_layers_drive_mass_axial_bending_and_original_modal_loss_integrals() {
+    let desc = small_description();
+    let core = pack(CORE);
+    let coating = pack(COATING);
+    let source = load(&desc.courses, &core, &coating);
+    let changed = source.apply(&desc.courses).unwrap();
+    // Independent annular integrals; do not use the section's cached geometry.
+    let areas = [PI * INNER.powi(2), PI * (OUTER.powi(2) - INNER.powi(2))];
+    let moments = [
+        PI * INNER.powi(4) / 4.0,
+        PI * (OUTER.powi(4) - INNER.powi(4)) / 4.0,
+    ];
+    let mu = CORE[0] * areas[0] + COATING[0] * areas[1];
+    let ea = CORE[1] * areas[0] + COATING[1] * areas[1];
+    let ei = CORE[1] * moments[0] + COATING[1] * moments[1];
+    let cb = CORE[2] * moments[0] + COATING[2] * moments[1];
+    for (old, new) in desc.courses.iter().zip(&changed) {
+        near(new.linear_density_kg_m, mu);
+        near(new.flexural_rigidity_nm2, ei);
+        let bonded = new.bonded_section.unwrap();
+        near(bonded.axial_rigidity_n(), ea);
+        near(bonded.bending_loss().unwrap().viscous_rigidity_nm2s(), cb);
+        assert_eq!(
+            *old,
+            Course {
+                linear_density_kg_m: old.linear_density_kg_m,
+                flexural_rigidity_nm2: old.flexural_rigidity_nm2,
+                bonded_section: old.bonded_section,
+                ..*new
+            }
+        );
+        let section = &source.sections()[&old.midi];
+        assert_eq!(section.omega_band_rad_s(), (0.0, TAU * MAX_HZ));
+        for (layer, original) in section.elastic().layers().iter().zip([&core, &coating]) {
+            assert_eq!(
+                layer.material.card_identity(),
+                original.card().content_hash()
+            );
+            for property in layer.material.properties() {
+                let receipt = &property.answer().receipt;
+                assert!(original.card().claims().claim(receipt.selected).is_some());
+                assert_eq!(
+                    receipt.axis_quantities["bath_kelvin"],
+                    typed(QuantityKind::AbsoluteTemperature)
+                );
+            }
+        }
+    }
+    assert_eq!(source.packs()[0].to_bytes(), core.to_bytes());
+    assert_eq!(source.packs()[1].to_bytes(), coating.to_bytes());
+    assert_eq!(source.packs()[0].claims_pack().normalizations().len(), 3);
+    let bank =
+        Bank::new_with_string_damping(&changed, &desc.board, 48_000, 6000.0, 12, true, None, false)
+            .unwrap();
+    let (losses, endpoint_drag) = bank_string_losses(&bank);
+    assert!(endpoint_drag.iter().all(|drag| *drag == 0.0));
+    for string in &bank.strings {
+        let course = &changed[string.course];
+        for (n, index) in string.modes.clone().enumerate() {
+            near(
+                losses[index].strain_rate,
+                cb * ((n + 1) as f64 * PI / course.length_m).powi(4) / mu,
+            );
+            assert_eq!(losses[index].mass_rate, 0.0);
+        }
+    }
+    // Explicitly lossless source data must not regain the demonstration's
+    // constant velocity drag or its bending spectrum in the original bank.
+    let zero = load(
+        &desc.courses,
+        &pack([CORE[0], CORE[1], 0.0]),
+        &pack([COATING[0], COATING[1], 0.0]),
+    );
+    let lossless = zero.apply(&desc.courses).unwrap();
+    let bank = Bank::new_with_string_damping(
+        &lossless,
+        &desc.board,
+        48_000,
+        6000.0,
+        12,
+        true,
+        None,
+        false,
+    )
+    .unwrap();
+    let (losses, endpoint_drag) = bank_string_losses(&bank);
+    assert!(
+        losses
+            .iter()
+            .all(|loss| loss.mass_rate == 0.0 && loss.strain_rate == 0.0)
+    );
+    assert!(endpoint_drag.iter().all(|drag| *drag == 0.0));
+    // Changing one input property cannot quietly change another section integral.
+    for (index, value) in [(0, 16000.0), (1, 4e11), (2, 1.6e9)] {
+        let mut values = CORE;
+        values[index] = value;
+        let alternative = load(&desc.courses, &pack(values), &coating);
+        let section = &alternative.sections()[&69];
+        let expected = [
+            mu + (values[0] - CORE[0]) * areas[0],
+            ea + (values[1] - CORE[1]) * areas[0],
+            ei + (values[1] - CORE[1]) * moments[0],
+            cb + (values[2] - CORE[2]) * moments[0],
+        ];
+        for (a, b) in [
+            section.elastic().line_density_kg_m(),
+            section.elastic().axial_stiffness_n(),
+            section.elastic().bending_stiffness_n_m2(),
+            section.viscous_stiffness_n_m2_s(),
+        ]
+        .into_iter()
+        .zip(expected)
+        {
+            near(a, b);
+        }
+    }
+}
+
+#[test]
+fn material_preparation_preserves_installed_tension_then_tunes_the_changed_pde() {
+    let mut desc = small_description();
+    let original = desc.courses.clone();
+    let board = desc.board_bytes();
+    let source = load(&original, &pack(CORE), &pack(COATING));
+    preparation::prepare_with_materials(&mut desc, None, None, Some(&source)).unwrap();
+    for (a, b) in original.iter().zip(&desc.courses) {
+        assert_eq!(a.tension_n, b.tension_n);
+    }
+    assert_eq!(desc.board_bytes(), board);
+    let mut expected = source.apply(&original).unwrap();
+    stretch_tuning::partials::tune(&mut expected, 442.0, tuning().profile()).unwrap();
+    let csv = geometry::write_scale(&original);
+    preparation::prepare_with_materials(&mut desc, Some(&csv), Some(tuning()), Some(&source))
+        .unwrap();
+    assert_eq!(desc.courses, expected);
+    assert_eq!(desc.board_bytes(), board);
+    let a4 = desc.courses.iter().find(|c| c.midi == 69).unwrap();
+    // Independent inversion of the newly integrated stiff-string equation.
+    let k = PI / a4.length_m;
+    near(
+        a4.tension_n,
+        (TAU * 442.0 / k).powi(2) * a4.linear_density_kg_m - a4.flexural_rigidity_nm2 * k * k,
+    );
+    near(a4.partial_hz(1, a4.tension_n), 442.0);
+    let native = LivePiano::new_with_materials(&desc, config(), gas(), source.clone()).unwrap();
+    for c in &desc.courses {
+        near(native.partials_hz(c.midi)[0], c.partial_hz(1, c.tension_n));
+    }
+    assert!(std::ptr::eq(
+        native.string_materials().unwrap(),
+        source.as_ref()
+    ));
+    assert!(std::ptr::eq(
+        native.clone().string_materials().unwrap(),
+        source.as_ref()
+    ));
+}
+
+#[test]
+fn each_material_only_change_reaches_live_pressure_and_cloned_audio_at_all_clocks() {
+    let coating = pack(COATING);
+    for ratio in [1, 2, 4] {
+        let mut pcm = Vec::new();
+        let mut fundamentals = Vec::new();
+        for values in [
+            CORE,
+            [16000.0, CORE[1], CORE[2]],
+            [CORE[0], 4e11, CORE[2]],
+            [CORE[0], CORE[1], 1.6e9],
+        ] {
+            let mut desc = small_description();
+            let source = load(&desc.courses, &pack(values), &coating);
+            preparation::prepare_with_materials(&mut desc, None, None, Some(&source)).unwrap();
+            let mut audio =
+                PianoAudio::new_with_materials(&desc, config(), ratio, gas(), source.clone())
+                    .unwrap();
+            fundamentals.push(audio.piano().partials_hz(69)[0]);
+            assert_eq!(audio.mechanical_rate(), 48_000 * ratio as u32);
+            assert_eq!(audio.piano().courses(), desc.courses.as_slice());
+            audio.note_on(69, 1.0).unwrap();
+            audio.render(&mut [0.0_f32; 193]).unwrap();
+            let mut split = audio.clone();
+            assert!(std::ptr::eq(
+                split.piano().string_materials().unwrap(),
+                source.as_ref()
+            ));
+            let mut a = vec![0.0_f32; 768];
+            let mut b = a.clone();
+            audio.render(&mut a).unwrap();
+            for chunk in b.chunks_mut(37) {
+                split.render(chunk).unwrap();
+            }
+            assert_eq!(a, b);
+            assert!(a.iter().any(|x| *x != 0.0));
+            assert!(a.iter().all(|x| x.is_finite()));
+            assert_eq!(audio.piano().counters.contact_failures, 0);
+            let ledger = audio.close_ledger();
+            assert!(ledger.input_j > 0.0 && ledger.string_loss_j > 0.0);
+            assert_eq!(format!("{ledger:?}"), format!("{:?}", split.close_ledger()));
+            let metadata = fs_live_piano::describe_audio(&audio);
+            assert!(metadata.contains("\"stringDamping\":\"source-kelvin-voigt\""));
+            assert!(metadata.contains(&format!("\"stringMaterials\":{}", source.json())));
+            pcm.push(a);
+        }
+        assert!(fundamentals[1] < fundamentals[0]); // only rho increased
+        assert!(fundamentals[2] > fundamentals[0]); // only E increased
+        assert_eq!(fundamentals[3], fundamentals[0]); // eta changes loss, not elastic frequency
+        for alternative in &pcm[1..] {
+            assert_ne!(&pcm[0], alternative);
+        }
+    }
+}
+
+#[test]
+fn unsupported_source_geometry_framing_and_actual_mode_band_refuse() {
+    let desc = small_description();
+    let core = pack(CORE).to_bytes();
+    let coating = pack(COATING).to_bytes();
+    let geometry = section_geometry(&desc.courses);
+    let bad_sources = [
+        pack_with(CORE, |claim| {
+            if claim.key.name() == ETA {
+                claim.key = PropertyKey::new("missing_bending_eta", DynViscosity::DIMS);
+            }
+        }),
+        pack_with(CORE, |claim| {
+            if claim.key.name() == ETA {
+                claim.key = PropertyKey::new(ETA, Pressure::DIMS);
+                claim.value = PropertyValue::Scalar {
+                    value: CORE[2],
+                    dims: Pressure::DIMS,
+                };
+            }
+        }),
+        pack_with(CORE, |claim| {
+            if claim.key.name() == ETA {
+                claim.validity = ValidityDomain::unconstrained();
+            }
+        }),
+        pack_with(CORE, |claim| {
+            if claim.key.name() == ETA {
+                claim.value = PropertyValue::Curve {
+                    abscissa: "oscillation_hz".into(),
+                    abscissa_dims: Frequency::DIMS,
+                    knots: vec![(0.0, CORE[2]), (MAX_HZ, 2.0 * CORE[2])],
+                    dims: DynViscosity::DIMS,
+                };
+                claim.interpolation = InterpolationPolicy::LinearInside;
+            }
+        }),
+        pack([CORE[0], CORE[1], -1.0]),
+    ];
+    for bad in bad_sources {
+        assert!(
+            StringMaterials::from_packs(&[&bad.to_bytes(), &coating], &geometry, &point(), ETA)
+                .is_err()
+        );
+    }
+    for rows in [
+        "69,0,0",
+        "69,NaN,0",
+        "69,0.0005,0\n69,0.0004,1",
+        "69,0.0005,2",
+    ] {
+        let bad =
+            format!("frankensim-piano-materials-v1\nkey,outer_radius_m,material_index\n{rows}\n");
+        assert!(StringMaterials::from_packs(&[&core, &coating], &bad, &point(), ETA).is_err());
+    }
+    let outside = operating_point("bath_kelvin", 500.0, "oscillation_hz", 1000.0).unwrap();
+    assert!(StringMaterials::from_packs(&[&core, &coating], &geometry, &outside, ETA).is_err());
+    let bytes = [core.clone(), coating.clone()].concat();
+    let lengths = [core.len() as u32, coating.len() as u32];
+    let framed =
+        StringMaterials::from_packed_bytes(&bytes, &lengths, &geometry, &point(), ETA).unwrap();
+    assert_eq!(framed.packs()[0].to_bytes(), core);
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(
+        StringMaterials::from_packed_bytes(&trailing, &lengths, &geometry, &point(), ETA).is_err()
+    );
+    assert!(
+        StringMaterials::from_packed_bytes(
+            &bytes[..bytes.len() - 1],
+            &lengths,
+            &geometry,
+            &point(),
+            ETA
+        )
+        .is_err()
+    );
+    let mut bad_pack = core.clone();
+    bad_pack.push(0);
+    assert!(StringMaterials::from_packs(&[&bad_pack, &coating], &geometry, &point(), ETA).is_err());
+    // A valid sampled state is insufficient: actual constructed modes must fit
+    // every source coefficient's frequency band, including cyclic-Hz conversion.
+    let narrow = pack_with(CORE, |claim| {
+        claim.validity = validity(999.0, 1001.0);
+    });
+    let source = load(&desc.courses, &narrow, &pack(COATING));
+    let mut prepared = small_description();
+    preparation::prepare_with_materials(&mut prepared, None, None, Some(&source)).unwrap();
+    assert!(LivePiano::new_with_materials(&prepared, config(), gas(), source).is_err());
+}
+
+#[test]
+fn partial_coverage_preset_and_late_tuning_failure_do_not_publish_partial_preparation() {
+    let mut desc = small_description();
+    let before = desc.courses.clone();
+    let board = desc.board_bytes();
+    let pointer = desc.courses.as_ptr();
+    let partial = load(&before[..2], &pack(CORE), &pack(COATING));
+    assert!(preparation::prepare_with_materials(&mut desc, None, None, Some(&partial)).is_err());
+    assert_eq!(desc.courses, before);
+    assert_eq!(desc.courses.as_ptr(), pointer);
+    let complete = load(&before, &pack(CORE), &pack(COATING));
+    let band = Tuning::new(442.0, [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], Some(1.0)).unwrap();
+    let mut imported = before.clone();
+    imported[0].hammer_mass_kg *= 1.25;
+    let csv = geometry::write_scale(&imported);
+    assert!(
+        preparation::prepare_with_materials(&mut desc, Some(&csv), Some(band), Some(&complete))
+            .is_err()
+    );
+    assert_eq!(desc.courses, before);
+    assert_eq!(desc.courses.as_ptr(), pointer);
+    assert_eq!(desc.board_bytes(), board);
+    assert!(LivePiano::new_with_materials(&desc, config(), gas(), complete.clone()).is_err());
+    preparation::prepare_with_materials(&mut desc, None, None, Some(&complete)).unwrap();
+    let mut preset = config();
+    preset.rt0425_string_damping = true;
+    assert!(LivePiano::new_with_materials(&desc, preset, gas(), complete.clone()).is_err());
+    let other = load(&before, &pack([16000.0, CORE[1], CORE[2]]), &pack(COATING));
+    assert!(PianoAudio::new_with_materials(&desc, config(), 2, gas(), other).is_err());
+    assert!(PianoAudio::new_with_materials(&desc, config(), 2, gas(), complete).is_ok());
+    assert_eq!(desc.board_bytes(), board);
+}

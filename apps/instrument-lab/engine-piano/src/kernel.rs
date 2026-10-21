@@ -1479,6 +1479,8 @@ pub struct LivePiano {
     cfg: Config,
     /// Exact admitted acoustic medium used by the Rayleigh receiver.
     acoustic_gas: fs_material::gas::GasState,
+    /// Full immutable source packs and the section integrals actually installed.
+    string_materials: Option<std::sync::Arc<crate::preparation::materials::StringMaterials>>,
     r: usize,
     dt: f64,
     courses: Vec<Course>,
@@ -1581,6 +1583,7 @@ impl Clone for LivePiano {
         Self {
             cfg: self.cfg.clone(),
             acoustic_gas: self.acoustic_gas,
+            string_materials: self.string_materials.clone(),
             r: self.r,
             dt: self.dt,
             courses: self.courses.clone(),
@@ -1657,6 +1660,29 @@ fn validate_acoustic_gas(gas: &fs_material::gas::GasState) -> Result<(), String>
 }
 
 impl LivePiano {
+    /// Construct from a completely prepared source-bound scale. The same
+    /// reference Bank owns string frequencies, losses, bridge inertia and
+    /// hammer projections. Source viscosity replaces the per-key loss preset;
+    /// a mismatched or only partially prepared description refuses.
+    pub fn new_with_materials(desc: &Description, cfg: Config,
+        gas: fs_material::gas::GasState,
+        materials: std::sync::Arc<crate::preparation::materials::StringMaterials>)
+        -> Result<Self, String> {
+        materials.verify_courses(&desc.courses)?;
+        if cfg.rt0425_string_damping {
+            return Err("source-bound string sections require their own material damping".into());
+        }
+        let mut piano = Self::new_with_gas(desc, cfg, gas)?;
+        piano.string_materials = Some(materials);
+        Ok(piano)
+    }
+
+    /// Original normalized material and resolved-state owners retained by the
+    /// actual running engine, including performance and worker-timing clones.
+    pub fn string_materials(&self) -> Option<&crate::preparation::materials::StringMaterials> {
+        self.string_materials.as_deref()
+    }
+
     /// Build with the historical declared room-air convenience medium.
     pub fn new(desc: &Description, cfg: Config) -> Result<Self, String> {
         let gas = fs_material::gas::GasState::try_new(
@@ -1986,6 +2012,7 @@ impl LivePiano {
         let n_courses = courses.len();
         let mut piano = Self {
             acoustic_gas: gas,
+            string_materials: None,
             r,
             dt,
             courses,

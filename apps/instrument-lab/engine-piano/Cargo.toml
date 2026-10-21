@@ -27,12 +27,18 @@ layer = "L6"
 [dependencies]
 fs-couple = { path = "../../../crates/fs-couple" }
 fs-material = { path = "../../../crates/fs-material" }
+fs-matdb = { path = "../../../crates/fs-matdb" }
+fs-qty = { path = "../../../crates/fs-qty" }
 fs-math = { path = "../../../crates/fs-math" }
 fs-modal = { path = "../../../crates/fs-modal" }
 fs-plate = { path = "../../../crates/fs-plate" }
 fs-la = { path = "../../../crates/fs-la" }
 fs-nlmodal = { path = "../../../crates/fs-nlmodal" }
 fs-phs = { path = "../../../crates/fs-phs" }
+
+[dev-dependencies]
+fs-blake3 = { path = "../../../crates/fs-blake3" }
+fs-evidence = { path = "../../../crates/fs-evidence" }
 
 # Native only: the complete reference engine (validation oracle) names fs-bem.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

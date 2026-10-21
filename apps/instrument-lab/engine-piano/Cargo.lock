@@ -793,14 +793,18 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fs-bem",
+ "fs-blake3",
  "fs-couple",
+ "fs-evidence",
  "fs-la",
+ "fs-matdb",
  "fs-material",
  "fs-math",
  "fs-modal",
  "fs-nlmodal",
  "fs-phs",
  "fs-plate",
+ "fs-qty",
  "getrandom 0.4.3",
  "wasm-bindgen",
 ]

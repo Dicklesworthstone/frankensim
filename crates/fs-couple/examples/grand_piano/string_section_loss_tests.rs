@@ -58,11 +58,12 @@ fn layered_viscosity_drives_every_member_span_and_transverse_direction() {
         for (i, index) in string.modes.clone().enumerate() {
             let k = (i + 1) as f64 * PI / length;
             near(rates.strain_rate[index], cb * k.powi(4) / bound.linear_density_kg_m);
-            // Existing separately authored velocity drag is not represented
-            // as an internal material law, nor counted twice.
-            assert_eq!(rates.mass_rate[index], 0.60);
+            // The source supplies bending loss; no legacy velocity-drag
+            // estimate is inferred for this substituted material.
+            assert_eq!(rates.mass_rate[index], 0.0);
         }
     }
+    assert!(rates.endpoint_drag.iter().all(|rate| *rate == 0.0));
 }
 
 #[test]
@@ -148,9 +149,9 @@ fn zero_is_explicit_missing_loss_refuses_and_replacement_clears_old_binding() {
         assert!(apply(&invalid, &source).is_err());
     }
     let zero = course(0.0);
-    let image = bank(zero, 0.0, 3).gpu_image().unwrap().string_loss.unwrap();
-    assert!(image.strain_rate.iter().all(|rate| *rate == 0.0));
-    assert!(image.mass_rate.iter().all(|rate| *rate == 0.60));
+    // A zero-viscosity section has no intrinsic loss operator at all, on the
+    // same GPU image path as nonzero material damping and the native bank.
+    assert!(bank(zero, 0.0, 3).gpu_image().unwrap().string_loss.is_none());
     let legacy = format!("{HEADER}\n{ROW}\nlayer,69,0.001,8000,80000000000,synthetic,CC0-1.0\n");
     let replaced = apply(&legacy, &[zero]).unwrap()[0];
     assert!(replaced.bonded_section.unwrap().bending_loss().is_none());

@@ -5,6 +5,8 @@
 use crate::{Description, refmods::{geometry, stretch_tuning}};
 pub use stretch_tuning::partials::{OctaveReport, OctaveWeights, Profile};
 
+pub mod materials;
+
 /// Bound the text ingress before parsing. The canonical 88-course SI scale is
 /// much smaller; this also leaves room for authored source comments.
 pub const MAX_SCALE_BYTES: usize = 256 * 1024;
@@ -103,9 +105,18 @@ impl PreparationReport {
 /// PianoAudio from this prepared Description so all physical loads are rebuilt.
 pub fn prepare(description: &mut Description, scale_csv: Option<&str>, tuning: Option<Tuning>)
     -> Result<PreparationReport, String> {
+    prepare_with_materials(description, scale_csv, tuning, None)
+}
+
+/// Resolve the complete physical string scale before optional tension tuning.
+/// Source sections, imported geometry and tuning publish together. A failed
+/// material binding or later tuning proposal leaves the description untouched.
+pub fn prepare_with_materials(description: &mut Description, scale_csv: Option<&str>,
+    tuning: Option<Tuning>, materials: Option<&materials::StringMaterials>)
+    -> Result<PreparationReport, String> {
     let mut report = PreparationReport { imported_scale: scale_csv.is_some(),
         courses: description.courses.len(), tuning, octaves: Vec::new() };
-    if scale_csv.is_none() && tuning.is_none() { return Ok(report); }
+    if scale_csv.is_none() && tuning.is_none() && materials.is_none() { return Ok(report); }
     let mut courses = match scale_csv {
         Some(text) => {
             if text.len() > MAX_SCALE_BYTES {
@@ -115,6 +126,7 @@ pub fn prepare(description: &mut Description, scale_csv: Option<&str>, tuning: O
         }
         None => description.courses.clone(),
     };
+    if let Some(materials) = materials { courses = materials.apply(&courses)?; }
     if let Some(t) = tuning {
         report.octaves = stretch_tuning::partials::tune(&mut courses, t.concert_a_hz, t.profile)?;
     }

@@ -355,7 +355,11 @@ impl Bank {
                     let bridge: Vec<f64> = if polarization==0 {
                         board.iter().map(|b| b.bridge[usize::from(c.midi-21)]).collect()
                     } else {secondary.expect("admitted transverse rows")[ci].clone()};
-                    let (mass_rate,strain_time)=if !damping {(0.0,0.0)}
+                    // A sourced Kelvin-Voigt section owns its physical loss.
+                    // Do not add the legacy 0.60/s velocity-drag estimate to a
+                    // new material. Gas loading/drag needs a sourced medium
+                    // coupling; the section law supplies bending loss only.
+                    let (mass_rate,strain_time)=if !damping || material_loss.is_some() {(0.0,0.0)}
                     else if rt0425_string_damping {
                         let (r_u,eta_u)=steinway_scale::string_damping_rt0425(c.midi)?;
                         (2.0*r_u,2.0*eta_u)

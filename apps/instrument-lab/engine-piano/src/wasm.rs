@@ -2,6 +2,8 @@
 //! construction; hot-path failures poison continuation and are readable via lastError.
 use crate::{Config, Description, LivePiano, PianoAudio};
 use crate::preparation::{self, PreparationReport, Tuning};
+use crate::preparation::materials::{self, StringMaterials};
+use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -100,6 +102,41 @@ fn config(sample_rate: u32, course_mode_budget: usize, max_dynamic_modes: usize,
     cfg
 }
 
+/// One cold lowering path for authored scales, tuning, canonical sections and
+/// acoustic gases. Every source enters before the original live Bank is built.
+#[allow(clippy::too_many_arguments)]
+fn prepared_engine(sample_rate: u32, board: &[u8], board_coordinates: usize,
+    course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
+    substeps: usize, scale_csv: &str, tuning: &[f64], gas_record: &str,
+    materials: Option<Arc<StringMaterials>>) -> Result<PianoEngine, JsError> {
+    let gas = preparation::resolve_atmosphere(gas_record).map_err(|e| JsError::new(&e))?;
+    let policy = Tuning::from_values(tuning).map_err(|e| JsError::new(&e))?;
+    if !board.is_empty() && board_coordinates != 0 {
+        return Err(JsError::new("supplied board preparation requires board_coordinates = 0"));
+    }
+    let mut desc = if board.is_empty() { Description::embedded() }
+        else { Description::from_board(board) }.map_err(|e| JsError::new(&e))?;
+    if board_coordinates > 0 && board_coordinates < desc.board.len() {
+        desc = desc.truncated(board_coordinates).map_err(|e| JsError::new(&e))?;
+    }
+    let report = preparation::prepare_with_materials(&mut desc,
+        if scale_csv.is_empty() { None } else { Some(scale_csv) }, policy, materials.as_deref())
+        .map_err(|e| JsError::new(&e))?;
+    let mut cfg = config(sample_rate, course_mode_budget, max_dynamic_modes, full_scale_pa);
+    // Published per-key string losses describe the original Model D strings.
+    // Imported sections supply their own physical loss; an authored CSV keeps
+    // the original reference reader's authored law. Tension-only tuning of the
+    // built-in scale preserves its published losses.
+    cfg.rt0425_string_damping = scale_csv.is_empty() && materials.is_none();
+    let piano = match (substeps, materials) {
+        (1, Some(materials)) => LivePiano::new_with_materials(&desc, cfg, gas, materials).map(Playback::Single),
+        (_, Some(materials)) => PianoAudio::new_with_materials(&desc, cfg, substeps, gas, materials).map(Playback::Multirate),
+        (1, None) => LivePiano::new_with_gas(&desc, cfg, gas).map(Playback::Single),
+        (_, None) => PianoAudio::new_with_gas(&desc, cfg, substeps, gas).map(Playback::Multirate),
+    }.map_err(|e| JsError::new(&e))?;
+    Ok(PianoEngine { piano, snap: Vec::with_capacity(4096), preparation: Some(report) })
+}
+
 #[wasm_bindgen]
 impl PianoEngine {
     /// Original single-rate constructor: embedded board or its exact low prefix.
@@ -168,30 +205,31 @@ impl PianoEngine {
     pub fn with_atmosphere(sample_rate: u32, board: &[u8], board_coordinates: usize,
         course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
         substeps: usize, scale_csv: &str, tuning: &[f64], gas_record: &str) -> Result<PianoEngine, JsError> {
-        let gas = preparation::resolve_atmosphere(gas_record).map_err(|e| JsError::new(&e))?;
-        let policy = Tuning::from_values(tuning).map_err(|e| JsError::new(&e))?;
-        if !board.is_empty() && board_coordinates != 0 {
-            return Err(JsError::new("supplied board preparation requires board_coordinates = 0"));
-        }
-        let mut desc = if board.is_empty() { Description::embedded() }
-            else { Description::from_board(board) }.map_err(|e| JsError::new(&e))?;
-        if board_coordinates > 0 && board_coordinates < desc.board.len() {
-            desc = desc.truncated(board_coordinates).map_err(|e| JsError::new(&e))?;
-        }
-        let report = preparation::prepare(&mut desc,
-            if scale_csv.is_empty() { None } else { Some(scale_csv) }, policy)
-            .map_err(|e| JsError::new(&e))?;
-        let mut cfg = config(sample_rate, course_mode_budget, max_dynamic_modes, full_scale_pa);
-        // RT-0425's per-key losses describe the Model D's own strings. An imported scale keeps the
-        // authored law, as the reference refuses --rt0425-string-damping with a supplied scale;
-        // retuning the built-in scale (tension only, same strings) keeps the published losses.
-        cfg.rt0425_string_damping = scale_csv.is_empty();
-        let piano = if substeps == 1 {
-            LivePiano::new_with_gas(&desc, cfg, gas).map(Playback::Single)
-        } else {
-            PianoAudio::new_with_gas(&desc, cfg, substeps, gas).map(Playback::Multirate)
-        }.map_err(|e| JsError::new(&e))?;
-        Ok(Self { piano, snap: Vec::with_capacity(4096), preparation: Some(report) })
+        prepared_engine(sample_rate, board, board_coordinates, course_mode_budget,
+            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas_record, None)
+    }
+
+    /// Canonical material packs and explicit concentric geometry determine the
+    /// actual strings. Source μ/EA/EI/ηI reach active and silent modes, bridge
+    /// loading and hammer response before optional physical tension tuning.
+    /// Every selected key must be covered. The supplied Kelvin–Voigt property
+    /// must support every retained mode; no old per-key damping fallback runs.
+    /// Material temperature is fixed here, independently of the acoustic gas.
+    #[wasm_bindgen(js_name = withStringMaterials)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_string_materials(sample_rate: u32, board: &[u8], board_coordinates: usize,
+        course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
+        substeps: usize, scale_csv: &str, tuning: &[f64], gas_record: &str,
+        pack_bytes: &[u8], pack_lengths: &[u32], geometry: &str,
+        temperature_axis: &str, temperature_k: f64, viscosity_property: &str,
+        frequency_axis: &str, frequency_hz: f64) -> Result<PianoEngine, JsError> {
+        let point = materials::operating_point(temperature_axis, temperature_k,
+            frequency_axis, frequency_hz).map_err(|e| JsError::new(&e))?;
+        let materials = StringMaterials::from_packed_bytes(pack_bytes, pack_lengths,
+            geometry, &point, viscosity_property).map_err(|e| JsError::new(&e))?;
+        prepared_engine(sample_rate, board, board_coordinates, course_mode_budget,
+            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas_record,
+            Some(Arc::new(materials)))
     }
 
     /// Copy the physical engine AND pressure-filter history; a timed copy and

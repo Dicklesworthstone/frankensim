@@ -73,7 +73,8 @@ fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
             "\"microphoneLatencyMs\":{:.3},\"microphoneMultipliesPerSample\":{},",
             "\"fullScalePa\":{},\"midiMaxVelocityMS\":{},\"stations\":{},",
             "\"silentBankHz\":{},\"silentBankModes\":{},",
-            "\"retireRingingJ\":{:e},\"retireDampedJ\":{:e},\"stringDamping\":\"{}\",\"hammerLaw\":\"{}\"}}"
+            "\"retireRingingJ\":{:e},\"retireDampedJ\":{:e},\"stringDamping\":\"{}\",\"hammerLaw\":\"{}\",",
+            "\"stringMaterials\":{}}}"
         ),
         output_rate, c.sample_rate, substeps, piano.courses().len(), piano.total_strings(), piano.table_modes(),
         piano.board_modes(), piano.board_exact_low_modes(), freqs.first().copied().unwrap_or(0.0), freqs.last().copied().unwrap_or(0.0),
@@ -86,8 +87,10 @@ fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
         c.full_scale_pa, MIDI_MAXIMUM_VELOCITY_M_S, LivePiano::stations(),
         c.silent_bank_hz, piano.bank_modes(),
         c.retire_ringing_j, c.retire_damped_j,
-        if c.rt0425_string_damping { "rt0425" } else { "authored" },
+        if piano.string_materials().is_some() { "source-kelvin-voigt" }
+            else if c.rt0425_string_damping { "rt0425" } else { "authored" },
         if c.rt0425_hammer_dissipation { "rt0425 K_H and R_H" }
             else if c.rt0425_hammer_stiffness { "rt0425 K_H, estimated Prony" } else { "legacy" },
+        piano.string_materials().map_or_else(|| "null".into(), |materials| materials.json()),
     )
 }

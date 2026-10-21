@@ -234,6 +234,78 @@ agrees with the reference engine to 4e-12 in bridge velocity (8 keys, 3 speeds, 
 without the flags after changing the reference's felt, contact or string-loss code, whose fast paths
 the live kernel re-implements.
 
+### Live piano strings from canonical material packs
+
+In the live piano's start panel, expand **Choose string materials**, enable the custom construction,
+select the original `NormalizedMaterialCardPack` files and the concentric geometry CSV, then enter the
+exact temperature axis, temperature in kelvin, solid-viscosity property, cyclic-frequency axis and
+query frequency in hertz. The displayed file order defines `material_index`, starting at zero. All
+inputs are required for this path and are fixed when Start constructs the engine. The keyboard uses
+the embedded 88-key scale, so its geometry must cover every MIDI key from 21 through 108.
+
+The geometry file begins with these two exact lines. Each subsequent row gives a key, the **outer**
+radius of one layer in metres and its pack index. Rows for each key run from the solid core outward,
+with strictly increasing radii; the same pack may be used by several layers or keys. For a separately
+imported scale containing only MIDI key 69, a two-layer section would be:
+
+```csv
+frankensim-piano-materials-v1
+key,outer_radius_m,material_index
+69,0.0004,0
+69,0.0006,1
+```
+
+Every course of the selected scale needs exactly one complete section; missing or extra keys refuse.
+Names never imply a radius, an alloy or a source coefficient. Up to 128 nonempty packs are admitted,
+with 16 MiB combined bytes and 256 KiB of UTF-8 geometry. Axes and the viscosity property must be
+explicit, trimmed names of at most 128 UTF-8 bytes; the two axes must differ, and both numeric query
+values must be finite and positive. The original cards must supply coherent, dimensioned density,
+Young's modulus and nonnegative solid Kelvin–Voigt viscosity at that state, with a source band covering
+the simulated string partials. Missing, ambiguous or out-of-domain source data refuse in Rust.
+
+For programmatic playback, `LivePianoOptions` and `PianoLane` share `PianoEngineOptions`. This example
+accepts user-selected files and an existing physical scale CSV. It assumes the supplied packs declare
+typed axes named `T` and `frequency`, and a viscosity property named `solid_viscosity`; use the exact
+names in your own cards. Call it with an audio context resumed from a user gesture:
+
+```ts
+import { LivePianoClient, type PianoEngineOptions } from './src/live/pianoClient';
+
+async function startMaterialPiano(
+  context: AudioContext, packFiles: File[], geometryFile: File, scaleCsv: string,
+) {
+  const options: PianoEngineOptions = {
+    boardCoordinates: 'auto', substeps: 2, scaleCsv,
+    stretchTuning: { concertAHz: 440 },
+    gas: 'mixture 293.15 101325 mole 2 N2 0.8 O2 0.2',
+    stringMaterials: {
+      packs: await Promise.all(packFiles.map((file) => file.arrayBuffer())),
+      geometry: await geometryFile.text(),
+      temperatureAxis: 'T', temperatureK: 293.15,
+      viscosityProperty: 'solid_viscosity', frequencyAxis: 'frequency', frequencyHz: 1000,
+    },
+  };
+  return LivePianoClient.create(context, options);
+  // The same options can be passed as new PianoLane(mix, { options }).
+}
+```
+
+This models **perfectly bonded solid/concentric sections at a fixed material state**. Original source
+integrals determine line density, axial rigidity, flexural rigidity and bending viscosity in the live
+strings, silent-string bank, bridge and hammer coupling. The source path replaces the legacy string
+loss law; it adds no unexplained material damping. Length, installed tension, unison and duplex
+geometry remain the chosen scale's data, with optional stretch tuning applied to the material-derived
+partials. Helical winding, interlayer slip and temperature evolution need additional physical owners.
+The atmosphere controls the Rayleigh receiver's pressure and propagation delay; it does not introduce
+air loading into the mechanical string model. `piano.info.stringMaterials` reports the actual source
+state identities and section coefficients installed in playback.
+
+The same source packet reaches timing probes, copied engines, larger soundboards and 1×/2×/4× mechanical
+clocks (up to 192 kHz). With no `stringMaterials`, the existing constructor routes remain available.
+A requested material construction requires WASM rebuilt with `withStringMaterials`; an older build
+or a material-owner refusal is reported to the caller. Omitting `gas` on the material path selects the
+explicit standard declaration `293.15 101325 0`.
+
 ## The live kit
 
 `engine-kit/build-wasm.sh` compiles `fs_vkplate::live` (wasm-bindgen) into `public/live/kit/`. Each

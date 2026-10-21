@@ -46,6 +46,23 @@ export interface PianoInfo {
   acousticGas?: { temperatureK: number; pressurePa: number; densityKgM3: number; soundSpeedMS: number; gamma: number };
   /** Hammer felt law (engines built before it was reported omit it). */
   hammerLaw?: string;
+  /** The loaded string-loss owner; source sections use source-kelvin-voigt. */
+  stringDamping?: string;
+  /** Actual source-state identities and section integrals installed in every playback clone. */
+  stringMaterials?: {
+    model: 'bonded-concentric-kelvin-voigt';
+    importedPacks: number;
+    sections: Array<{
+      key: number;
+      stateIdentities: string[];
+      outerRadiiM: number[];
+      lineDensityKgM: number;
+      axialRigidityN: number;
+      flexuralRigidityNm2: number;
+      viscousRigidityNm2S: number;
+      omegaBandRadS: [number, number];
+    }>;
+  } | null;
   /** String partials above this frequency are not retained [Hz]. */
   partialBandHz: number;
   maxPartialsPerString: number;
@@ -195,10 +212,32 @@ export interface PianoBenchRow {
   error: string | null;
 }
 
-export interface LivePianoOptions {
-  /** Defaults to LIVE_BASE_URL (`live/<hash>/` in a build). */
-  baseUrl?: string;
-  destination?: AudioNode;
+/** Physical tension preparation; octave weights are ordered 2:1, 4:2, 6:3, 8:4. */
+export interface PianoStretchTuning {
+  concertAHz: number;
+  bassOctaveWeights?: readonly number[] | Float32Array | Float64Array;
+  trebleOctaveWeights?: readonly number[] | Float32Array | Float64Array;
+  maxPartialHz?: number;
+}
+
+/** Perfectly bonded concentric string sections, resolved from original source packs at a fixed state. */
+export interface PianoStringMaterials {
+  /** Original NormalizedMaterialCardPack bytes, in geometry material_index order; 1..128, total <=16 MiB. */
+  packs: Array<Uint8Array | ArrayBuffer>;
+  /** frankensim-piano-materials-v1 CSV: key,outer_radius_m,material_index; complete selected scale, <=256 KiB. */
+  geometry: string;
+  /** Exact typed temperature-axis name in every pack. */
+  temperatureAxis: string;
+  temperatureK: number;
+  /** Source property for solid Kelvin–Voigt bending viscosity [Pa s]. */
+  viscosityProperty: string;
+  /** Exact cyclic-frequency-axis name in every pack. */
+  frequencyAxis: string;
+  frequencyHz: number;
+}
+
+/** Shared constructor options for standalone playback and scheduled PianoLane playback. */
+export interface PianoEngineOptions {
   /**
    * 0/undefined = the complete embedded board (32 coordinates); 1..16 = that many exact low FE modes only;
    * 48/64/96/128 = that larger reduction of the same FE slice, fetched from `live/piano/boards/`;
@@ -210,8 +249,21 @@ export interface LivePianoOptions {
   maxDynamicModes?: number;
   /** Pressure mapped to 1.0 [Pa] (default 10). */
   fullScalePa?: number;
+  /** Mechanical steps per audio sample, with a mechanical rate <=192 kHz. */
+  substeps?: 1 | 2 | 4;
+  /** Original physical SI scale CSV; omitted selects the embedded scale. */
+  scaleCsv?: string;
+  stretchTuning?: PianoStretchTuning;
   /** T[K] P[Pa] RH, or mixture T P mole|mass N SPECIES FRACTION…; resolved in Rust. */
   gas?: string;
+  /** Canonical source data and explicit concentric geometry; no material or radius guessing. */
+  stringMaterials?: PianoStringMaterials;
+}
+
+export interface LivePianoOptions extends PianoEngineOptions {
+  /** Defaults to LIVE_BASE_URL (`live/<hash>/` in a build). */
+  baseUrl?: string;
+  destination?: AudioNode;
   /** Render-ahead target [ms] (default 18). */
   targetMs?: number;
   /** Snapshot cadence [Hz] (default 30; 0 disables). */

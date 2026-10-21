@@ -8,7 +8,7 @@
 
 import './live-piano.css';
 import { resumeContext } from '../audio';
-import { LivePianoClient, midiVelocityToMS, type PianoInfo, type PianoSnapshot, type PianoStats } from './pianoClient';
+import { LivePianoClient, midiVelocityToMS, type PianoInfo, type PianoSnapshot, type PianoStats, type PianoStringMaterials } from './pianoClient';
 import { LiveRefusal } from './liveAudio';
 import { PianoStage, noteName, type PianoView, type StageScales } from './pianoStage';
 
@@ -207,12 +207,43 @@ export class LivePianoSection {
     </div>
     <div class="stage-hud"><span class="lp-hud-strings"></span><span class="lp-hud-board"></span></div>
     <div class="stage-note lp-note">
-      <div class="lp-note-body">
+      <div class="lp-note-body" style="max-height:100%;overflow:auto;min-width:0">
         <span class="tag live">Live engine</span>
         <p class="lp-note-title">A concert grand solved in your browser while you play it.</p>
         <p class="small lp-note-text">Starting downloads FrankenSim's reduced piano engine as WebAssembly (about 700&nbsp;kB
           compressed, the Model&nbsp;D soundboard included) and assembles all 88 keys from the published string scale.
           The piano starts silent and at rest.</p>
+        <details class="evidence lp-materials" style="width:100%;text-align:left">
+          <summary>Choose string materials</summary>
+          <div class="evidence-body">
+            <label class="small"><input type="checkbox" class="lp-material-enabled"> Use my canonical material packs and section geometry</label>
+            <p class="small muted">Perfectly bonded solid or concentric layers, with source bending viscosity at a fixed temperature.
+              Choose every value before Start; the construction stays fixed during playback.</p>
+            <fieldset class="lp-material-fields" disabled style="display:grid;gap:10px;border:0;padding:0;min-width:0">
+              <legend class="sr-only">String material source data</legend>
+              <div class="field"><label for="${id}-material-packs">Canonical packs · up to 128, 16 MiB total</label>
+                <input id="${id}-material-packs" class="lp-material-packs" type="file" multiple required style="width:100%;min-width:0"></div>
+              <p class="small num lp-material-index" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere">Material indices will appear here in file selection order.</p>
+              <div class="field"><label for="${id}-material-geometry">Concentric geometry CSV · up to 256 KiB</label>
+                <input id="${id}-material-geometry" class="lp-material-geometry" type="file" accept=".csv,text/csv,text/plain" required style="width:100%;min-width:0"></div>
+              <p class="small muted">Start with <code>frankensim-piano-materials-v1</code>, then <code>key,outer_radius_m,material_index</code>.
+                Supply each MIDI key 21–108; list its layers from inner to outer, using the pack indices above.</p>
+              <div class="lp-controls">
+                <div class="field"><label for="${id}-material-t-axis">Temperature axis in the packs</label>
+                  <input id="${id}-material-t-axis" class="lp-material-t-axis" type="text" placeholder="e.g. T" maxlength="128" required></div>
+                <div class="field"><label for="${id}-material-t">String temperature [K]</label>
+                  <input id="${id}-material-t" class="lp-material-t" type="number" step="any" min="0" placeholder="e.g. 293.15" required></div>
+                <div class="field"><label for="${id}-material-viscosity">Solid viscosity property [Pa s]</label>
+                  <input id="${id}-material-viscosity" class="lp-material-viscosity" type="text" placeholder="Exact property name in the packs" maxlength="128" required></div>
+                <div class="field"><label for="${id}-material-f-axis">Cyclic-frequency axis in the packs</label>
+                  <input id="${id}-material-f-axis" class="lp-material-f-axis" type="text" placeholder="e.g. frequency" maxlength="128" required></div>
+                <div class="field"><label for="${id}-material-f">Source query frequency [Hz]</label>
+                  <input id="${id}-material-f" class="lp-material-f" type="number" step="any" min="0" placeholder="e.g. 1000" required></div>
+              </div>
+              <p class="small muted">The supplied source band must cover the simulated partials. Helical winding, interlayer slip and evolving string temperature need additional physical models.</p>
+            </fieldset>
+          </div>
+        </details>
         <button type="button" class="btn live lp-start">Start the live piano</button>
         <p class="small lp-note-status" role="status"></p>
       </div>
@@ -396,10 +427,14 @@ export class LivePianoSection {
     // Capabilities come from the loaded engine, including older engines without a bank.
     const bank = info?.silentBankHz ?? 0;
     const bankModes = info?.silentBankModes ?? 0;
+    const materials = info?.stringMaterials;
     const details = el('details', 'evidence');
     details.append(el('summary', undefined, 'What this live model is — and is not'));
     const body = el('div', 'evidence-body lp-evidence');
     body.append(el('p', undefined, 'The reduced real-time model. It steps the same equations, with the same time discretisation, as FrankenSim\'s offline grand-piano reference, compiled from the reference\'s own source files: stiff strings whose partials follow from tension, bending stiffness, mass and length (never assigned pitches), a moving bridge coupled reciprocally to the soundboard, a felt hammer with crush memory and relaxation solved implicitly against the strings, and sound pressure from the Rayleigh integral over the moving board. What it reduces is listed here, with the measured cost of each reduction.'));
+    if (materials) {
+      body.append(el('p', undefined, `This engine uses ${materials.importedPacks} imported canonical material packs across ${materials.sections.length} explicit string sections. Their density, elastic modulus and solid bending viscosity determine the line mass, axial and bending stiffness, and Kelvin–Voigt loss of the bonded concentric layers. Their resolved temperature stays fixed during playback. Helical winding and interlayer slip need additional physical models. The measurements below describe the default published-string configuration; imported sections define a different physical instrument.`));
+    }
     const lists = el('div', 'lp-incl');
     const column = (title: string, items: string[], cls: string): HTMLElement => {
       const box = el('div');
@@ -439,7 +474,7 @@ export class LivePianoSection {
     body.append(lists);
     body.append(el('h4', undefined, 'Checked against the offline reference'));
     body.append(el('p', undefined, 'The comparisons below concern specific isolated-key kernels and labelled offline renders. They are not a real-instrument fidelity score for the device-dependent live engine loaded in this tab. Its soundboard reduction, silent-string bank and rendering budget also affect the result.'));
-    body.append(el('p', undefined, 'With nothing but one key on the bridge, the live kernel and the reference engine (the same source files) agree on bridge velocity to within 4 × 10⁻¹² relative over one second, for eight keys at three hammer speeds, with the published string, felt and hammer laws this page plays; their energy books agree to about ten digits. The WebAssembly build in this tab reproduces the native build sample for sample on an isolated C6; on A3 one sample in 144,000 differs, by one float32 step (7.5 × 10⁻⁹ of full scale). Against the full offline render, the first 15 partials of A3 mf sit within 3 cents on every board and the fitted inharmonicity is 2.41–2.44 × 10⁻⁴ (offline 2.41 × 10⁻⁴). Against the offline render with the live physics on the 128-coordinate board (no air loading, no string waves) they sit within 0.4 cents on 64 and 128 coordinates and within 2.5 on the others.'));
+    body.append(el('p', undefined, 'With nothing but one key on the bridge, the live kernel and the reference engine (the same source files) agree on bridge velocity to within 4 × 10⁻¹² relative over one second, for eight keys at three hammer speeds, with the default published string, felt and hammer laws; their energy books agree to about ten digits. That configuration reproduces the native build sample for sample on an isolated C6; on A3 one sample in 144,000 differs, by one float32 step (7.5 × 10⁻⁹ of full scale). Against the full offline render, the first 15 partials of A3 mf sit within 3 cents on every board and the fitted inharmonicity is 2.41–2.44 × 10⁻⁴ (offline 2.41 × 10⁻⁴). Against the offline render with the live physics on the 128-coordinate board (no air loading, no string waves) they sit within 0.4 cents on 64 and 128 coordinates and within 2.5 on the others.'));
     const chips = (title: string, cls: string, items: string[]): HTMLElement => {
       const row = el('div', 'lp-chiprow');
       row.append(el('h4', undefined, title));
@@ -449,13 +484,13 @@ export class LivePianoSection {
       return row;
     };
     body.append(
-      chips('Published', 'pub', ['RT-0425 string scale, 84 keys', 'RT-0425 hammer mass, exponent, stiffness, dissipation', 'RT-0425 string losses', 'RT-0425 bridge coupling points', 'Model D dimensions', 'Model D board drawing (Boutillon et al.)', 'Hammer shank geometry (Chabassier & Durufle)']),
+      chips('Published', 'pub', ['RT-0425 string scale, 84 keys', 'RT-0425 hammer mass, exponent, stiffness, dissipation', ...(materials ? [] : ['RT-0425 string losses']), 'RT-0425 bridge coupling points', 'Model D dimensions', 'Model D board drawing (Boutillon et al.)', 'Hammer shank geometry (Chabassier & Durufle)']),
       chips('Estimated', 'est', ['4 end keys of the scale', 'Unison detune 0.8 cents', 'Damper pads, 0.4 N s/m', 'Board damping 1.5 %', 'Rib and bridge widths']),
       chips('Not modelled live', 'not', [...(!info ? [] : bank > 0 ? [`Silent strings above ${bank} Hz`] : ['Silent-string resonance', 'Silent-string damper loss']), ...(!board ? ['Board beyond what the device affords'] : board < 128 ? [`Board above ${board} coordinates`] : []), 'Action beyond the shank', 'Room, lid, case']),
     );
     if (info) {
       const prov = el('p', 'small muted');
-      prov.textContent = `Engine statement: ${info.boardCoordinates} board coordinates (${info.boardExactLowModes} exact); ${info.speakingStrings} strings on the bridge; ${info.tablePartials.toLocaleString('en-US')} partials in the string tables; microphone at ${info.microphoneM.join(', ')} m.${info.hammerLaw ? ` Hammers: ${info.hammerLaw}.` : ''} Board: ${info.boardProvenance}.`;
+      prov.textContent = `Engine statement: ${info.boardCoordinates} board coordinates (${info.boardExactLowModes} exact); ${info.speakingStrings} strings on the bridge; ${info.tablePartials.toLocaleString('en-US')} partials in the string tables; microphone at ${info.microphoneM.join(', ')} m.${info.hammerLaw ? ` Hammers: ${info.hammerLaw}.` : ''}${info.stringDamping ? ` String loss: ${info.stringDamping}.` : ''} Board: ${info.boardProvenance}.`;
       body.append(prov);
     }
     details.append(body);
@@ -472,6 +507,13 @@ export class LivePianoSection {
 
   private wire(): void {
     q<HTMLButtonElement>(this.root, '.lp-start').addEventListener('click', () => void this.start());
+    q<HTMLInputElement>(this.root, '.lp-material-enabled').addEventListener('change', () => this.syncMaterialControls());
+    q<HTMLInputElement>(this.root, '.lp-material-packs').addEventListener('change', (event) => {
+      const files = Array.from((event.target as HTMLInputElement).files ?? []);
+      q<HTMLElement>(this.root, '.lp-material-index').textContent = files.length
+        ? files.map((file, index) => `${index}: ${file.name} (${file.size.toLocaleString('en-US')} bytes)`).join('\n')
+        : 'Material indices will appear here in file selection order.';
+    });
 
     for (const button of this.root.querySelectorAll<HTMLButtonElement>('.lp-view button')) {
       button.addEventListener('click', () => {
@@ -603,19 +645,62 @@ export class LivePianoSection {
   }
 
   // ------------------------------------------------------------------ start
+  private syncMaterialControls(): void {
+    const enabled = q<HTMLInputElement>(this.root, '.lp-material-enabled');
+    enabled.disabled = this.starting || this.client !== null;
+    q<HTMLFieldSetElement>(this.root, '.lp-material-fields').disabled = enabled.disabled || !enabled.checked;
+  }
+
+  private async readStringMaterials(): Promise<PianoStringMaterials | undefined> {
+    if (!q<HTMLInputElement>(this.root, '.lp-material-enabled').checked) return undefined;
+    const files = Array.from(q<HTMLInputElement>(this.root, '.lp-material-packs').files ?? []);
+    if (!files.length || files.length > 128 || files.some((file) => file.size === 0)
+        || files.reduce((sum, file) => sum + file.size, 0) > 16 * 1024 * 1024) {
+      throw new RangeError('Select 1–128 nonempty canonical material packs, with at most 16 MiB in total.');
+    }
+    const geometryFile = q<HTMLInputElement>(this.root, '.lp-material-geometry').files?.[0];
+    if (!geometryFile || !geometryFile.size || geometryFile.size > 256 * 1024) {
+      throw new RangeError('Select a nonempty concentric geometry CSV of at most 256 KiB.');
+    }
+    const name = (selector: string, label: string): string => {
+      const value = q<HTMLInputElement>(this.root, selector).value;
+      if (!value || value !== value.trim() || new TextEncoder().encode(value).length > 128) {
+        throw new RangeError(`Enter the exact ${label}, with no surrounding spaces and at most 128 UTF-8 bytes.`);
+      }
+      return value;
+    };
+    const positive = (selector: string, label: string): number => {
+      const value = q<HTMLInputElement>(this.root, selector).valueAsNumber;
+      if (!Number.isFinite(value) || value <= 0) throw new RangeError(`Enter a finite positive ${label}.`);
+      return value;
+    };
+    const temperatureAxis = name('.lp-material-t-axis', 'temperature-axis name');
+    const frequencyAxis = name('.lp-material-f-axis', 'cyclic-frequency-axis name');
+    const viscosityProperty = name('.lp-material-viscosity', 'solid-viscosity property name');
+    const temperatureK = positive('.lp-material-t', 'string temperature in kelvin');
+    const frequencyHz = positive('.lp-material-f', 'source query frequency in hertz');
+    if (temperatureAxis === frequencyAxis) throw new RangeError('The temperature and frequency axes must have distinct names.');
+    const [geometry, packs] = await Promise.all([geometryFile.text(), Promise.all(files.map((file) => file.arrayBuffer()))]);
+    return { packs, geometry, temperatureAxis, temperatureK, viscosityProperty, frequencyAxis, frequencyHz };
+  }
+
   private async start(): Promise<void> {
     if (this.starting || this.client || this.disposed) return;
     this.starting = true;
     const button = q<HTMLButtonElement>(this.root, '.lp-start');
     const status = q<HTMLElement>(this.root, '.lp-note-status');
     button.disabled = true;
+    this.syncMaterialControls();
     status.textContent = 'Starting the audio clock…';
     try {
       const ctx = await resumeContext();
+      const stringMaterials = await this.readStringMaterials();
+      if (this.disposed) return;
       status.textContent = 'Loading the engine, assembling 88 keys and timing the soundboards this device can afford…';
       // the largest soundboard this device computes 1.4x faster than real time (public/live/piano/boards.js);
       // the load governor lowers the string-mode budget if playing gets heavier than the probe
-      const client = await LivePianoClient.create(ctx, { boardCoordinates: 'auto' });
+      const client = await LivePianoClient.create(ctx, { boardCoordinates: 'auto',
+        ...(stringMaterials ? { stringMaterials } : {}) });
       if (this.disposed) {
         client.dispose();
         return;
@@ -643,6 +728,7 @@ export class LivePianoSection {
       button.textContent = 'Try again';
     } finally {
       this.starting = false;
+      this.syncMaterialControls();
     }
   }
 

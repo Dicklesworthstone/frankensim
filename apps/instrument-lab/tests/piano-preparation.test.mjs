@@ -13,10 +13,128 @@ function recording() {
     static withBoardOversampling(...args) { calls.push(['board-rate', ...args]); return { kind: 'board-rate' }; }
     static withPreparation(...args) { calls.push(['prepared', ...args]); return { kind: 'prepared' }; }
     static withAtmosphere(...args) { calls.push(['atmosphere', ...args]); return { kind: 'atmosphere' }; }
+    static withStringMaterials(...args) { calls.push(['materials', ...args]); return { kind: 'materials' }; }
   }
   return { Engine, calls };
 }
 const scale = '# supplied SI scale text is passed to Rust, never interpreted here\n';
+const geometry = 'frankensim-piano-materials-v1\nkey,outer_radius_m,material_index\n69,0.0004,0\n69,0.0006,1\n';
+const materialInput = () => ({ packs: [new Uint8Array([1, 2, 3]), new Uint8Array([4, 5]).buffer],
+  geometry, temperatureAxis: 'T', temperatureK: 293.15, viscosityProperty: 'solid_viscosity',
+  frequencyAxis: 'frequency', frequencyHz: 1000 });
+
+test('canonical material framing preserves byte views and identities through every board and clock', () => {
+  const { Engine, calls } = recording();
+  const original = new Uint8Array([90, 1, 2, 3, 91]);
+  const packs = Object.freeze([original.subarray(1, 4), new Uint8Array([4, 5]).buffer]);
+  const stringMaterials = Object.freeze({ ...materialInput(), packs });
+  const board = new Uint8Array([7, 8, 9]);
+  const gas = 'mixture 300 90000 mole 2 N2 0.75 O2 0.25';
+  for (const substeps of [1, 2, 4]) {
+    for (const bytes of [null, board]) {
+      for (const boardCoordinates of [0, 16, 64]) {
+        const options = Object.freeze({ stringMaterials, scaleCsv: scale,
+          stretchTuning: Object.freeze({ concertAHz: 442, maxPartialHz: 18000 }), gas, substeps,
+          boardCoordinates, courseModeBudget: 180, maxDynamicModes: 2100, fullScalePa: 7 });
+        assert.equal(createPianoEngine(Engine, 48000, options, bytes).kind, 'materials');
+        assert.deepEqual(calls.at(-1), ['materials', 48000, bytes ?? new Uint8Array(),
+          bytes || boardCoordinates > 16 ? 0 : boardCoordinates, 180, 2100, 7, substeps, scale,
+          new Float64Array([442,1,0,0,0,1,0,0,0,18000]), gas,
+          new Uint8Array([1,2,3,4,5]), new Uint32Array([3,2]), geometry,
+          'T', 293.15, 'solid_viscosity', 'frequency', 1000]);
+        if (bytes) assert.equal(calls.at(-1)[2], board);
+      }
+    }
+  }
+  calls.at(-1)[11][0] = 255;
+  assert.deepEqual(original, new Uint8Array([90,1,2,3,91]));
+  assert.deepEqual(new Uint8Array(packs[1]), new Uint8Array([4,5]));
+});
+
+test('material-only construction keeps the embedded scale and an explicit standard atmosphere', () => {
+  const { Engine, calls } = recording();
+  Engine.withPreparation = Engine.withAtmosphere = undefined;
+  createPianoEngine(Engine, 48000, { stringMaterials: materialInput() });
+  assert.equal(calls[0][8], '');
+  assert.deepEqual(calls[0][9], new Float64Array());
+  assert.equal(calls[0][10], '293.15 101325 0');
+});
+
+test('only the Rust owner interprets geometry syntax, source bytes and section coverage', () => {
+  const { Engine, calls } = recording();
+  for (const text of [`# original source receipt\n\n ${geometry.replaceAll('\n', '\r\n')}\n`,
+    'nonempty text whose geometry validity belongs to Rust']) {
+    createPianoEngine(Engine, 48000, { stringMaterials: { ...materialInput(), geometry: text } });
+    assert.equal(calls.at(-1)[13], text);
+  }
+});
+
+test('requested materials never fall back on old WASM or swallow a canonical-owner refusal', () => {
+  const { Engine, calls } = recording();
+  const options = { stringMaterials: materialInput(), scaleCsv: scale, gas: '293.15 50000 0' };
+  Engine.withStringMaterials = undefined;
+  assert.throws(() => createPianoEngine(Engine, 48000, options), /rebuilding.*WASM.*withStringMaterials/);
+  const refusal = new Error('selected material geometry does not cover every scale key');
+  Engine.withStringMaterials = () => { throw refusal; };
+  assert.throws(() => createPianoEngine(Engine, 48000, options), (error) => error === refusal);
+  assert.equal(calls.length, 0);
+  // An old engine still supports every previously exposed route when materials were not requested.
+  createPianoEngine(Engine, 48000);
+  createPianoEngine(Engine, 48000, { scaleCsv: scale });
+  createPianoEngine(Engine, 48000, { gas: options.gas });
+  assert.deepEqual(calls.map((call) => call[0]), ['legacy', 'prepared', 'atmosphere']);
+});
+
+test('malformed or incomplete material controls refuse before any engine allocation', () => {
+  const { Engine, calls } = recording();
+  const valid = materialInput();
+  const invalid = [null, [], '', {}, { ...valid, temperature: 300 }];
+  for (const key of Object.keys(valid)) {
+    invalid.push(Object.fromEntries(Object.entries(valid).filter(([name]) => name !== key)));
+  }
+  for (const packs of [null, [], new Uint8Array([1]), [new Uint8Array()], [new ArrayBuffer(0)],
+    [new Uint16Array([1])], [new DataView(new ArrayBuffer(1))], [[1,2]], new Array(2),
+    Array.from({ length: 129 }, () => new Uint8Array([1]))]) invalid.push({ ...valid, packs });
+  for (const geometry of [null, '', ' ', 42]) invalid.push({ ...valid, geometry });
+  for (const key of ['temperatureAxis', 'frequencyAxis', 'viscosityProperty']) {
+    for (const value of ['', ' ', ' T', 'T ', null, 123, 'é'.repeat(65)]) invalid.push({ ...valid, [key]: value });
+  }
+  invalid.push({ ...valid, frequencyAxis: valid.temperatureAxis });
+  for (const key of ['temperatureK', 'frequencyHz']) {
+    for (const value of [0, -1, Infinity, NaN, '300', null]) invalid.push({ ...valid, [key]: value });
+  }
+  for (const stringMaterials of invalid) {
+    assert.throws(() => createPianoEngine(Engine, 48000, { stringMaterials }));
+  }
+  for (const gas of ['', null, 'é'.repeat(4097)]) {
+    assert.throws(() => createPianoEngine(Engine, 48000, { stringMaterials: valid, gas }));
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('material count and UTF-8/pack byte budgets admit exact limits and refuse overflow', () => {
+  const { Engine, calls } = recording();
+  const valid = materialInput();
+  const prefix = geometry + '#';
+  const remaining = 256 * 1024 - new TextEncoder().encode(prefix).length;
+  const exactGeometry = prefix + 'é'.repeat(Math.floor(remaining / 2)) + (remaining % 2 ? 'x' : '');
+  const largePack = new Uint8Array(16 * 1024 * 1024);
+  largePack[0] = 8; largePack[largePack.length - 1] = 9;
+  createPianoEngine(Engine, 48000, { stringMaterials: { ...valid, geometry: exactGeometry,
+    packs: [largePack], temperatureAxis: 'é'.repeat(64) } });
+  assert.equal(calls[0][11].length, largePack.length);
+  assert.equal(calls[0][11][0], 8); assert.equal(calls[0][11].at(-1), 9);
+  assert.deepEqual(calls[0][12], new Uint32Array([largePack.length]));
+  assert.equal(calls[0][13], exactGeometry);
+  assert.throws(() => createPianoEngine(Engine, 48000, { stringMaterials: { ...valid,
+    packs: [largePack, new Uint8Array([1])] } }), /16 MiB/);
+  assert.throws(() => createPianoEngine(Engine, 48000, { stringMaterials: { ...valid,
+    geometry: exactGeometry + 'x' } }), /256 KiB/);
+  createPianoEngine(Engine, 48000, { stringMaterials: { ...valid,
+    packs: Array.from({ length: 128 }, () => new Uint8Array([1])) } });
+  assert.equal(calls[1][12].length, 128);
+  assert.equal(calls.length, 2);
+});
 
 test('one atmosphere reaches both board paths, physical preparation and every audio clock', () => {
   const { Engine, calls } = recording();

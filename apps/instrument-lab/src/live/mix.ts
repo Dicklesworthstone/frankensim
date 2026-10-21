@@ -3,6 +3,7 @@
 // AudioContext clock. See public/live/lane.js for the Worker side.
 
 import { LIVE_BASE_URL, LIVE_SAMPLE_RATE, LiveRefusal, loadWorkletModule } from "./liveAudio";
+import type { PianoEngineOptions } from "./pianoClient";
 
 export interface LaneStats {
   queuedFrames: number;
@@ -336,7 +337,7 @@ export class PianoLane {
   private readonly worker: Worker;
 
   /** `chunk`: most frames per audio message (default 128; a score lane far ahead can send larger ones, see lane.js). */
-  constructor(mix: LiveMix, opts: { aheadFrames?: number; chunk?: number; options?: Record<string, number>; gain?: number; minRealtime?: number; snapshotHz?: number; governor?: boolean } = {}) {
+  constructor(mix: LiveMix, opts: { aheadFrames?: number; chunk?: number; options?: PianoEngineOptions; gain?: number; minRealtime?: number; snapshotHz?: number; governor?: boolean } = {}) {
     this.lane = new LaneWorker<PianoReady>(`${LIVE_BASE_URL}/piano/lane-worker.js`, "piano-lane", "the piano engine", mix, "piano", (m) => {
       if (m.type === "snapshot") this.onSnapshot?.(m.frame as number, m.data as Float32Array, (m.epoch as number) ?? 0);
       else if (m.type === "stats") this.onStats?.(m as unknown as LaneWorkerStats);

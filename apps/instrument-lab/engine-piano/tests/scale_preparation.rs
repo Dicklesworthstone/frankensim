@@ -3,6 +3,9 @@
 use fs_live_piano::{Config, Description, LivePiano, PianoAudio, preparation::{self, Tuning},
     refmods::{geometry::{self, Course}, linear::BoardMode, stretch_tuning}};
 
+#[path = "scale_preparation/materials.rs"]
+mod materials;
+
 fn description() -> Description {
     let mut bridge = [0.0; 88];
     bridge.fill(0.08);

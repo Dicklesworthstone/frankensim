@@ -35,16 +35,26 @@ impl PianoAudio {
     /// passed unchanged to LivePiano, whose time-dependent maps use the higher
     /// clock. The original room-air convenience constructor owns the medium.
     pub fn new(desc: &Description, cfg: Config, substeps: usize) -> Result<Self, String> {
-        Self::build(desc, cfg, substeps, None)
+        Self::build(desc, cfg, substeps, None, None)
     }
 
     /// Same preparation with an explicitly admitted physical acoustic gas.
     pub fn new_with_gas(desc: &Description, cfg: Config, substeps: usize, gas: GasState)
         -> Result<Self, String> {
-        Self::build(desc, cfg, substeps, Some(gas))
+        Self::build(desc, cfg, substeps, Some(gas), None)
     }
 
-    fn build(desc: &Description, mut cfg: Config, substeps: usize, gas: Option<GasState>)
+    /// Canonical source-bound strings follow the same complete mechanical
+    /// clock and pressure decimator at 1×, 2× or 4×. No material path bypasses
+    /// the original observer or reconstructs coefficients after preparation.
+    pub fn new_with_materials(desc: &Description, cfg: Config, substeps: usize, gas: GasState,
+        materials: std::sync::Arc<crate::preparation::materials::StringMaterials>)
+        -> Result<Self, String> {
+        Self::build(desc, cfg, substeps, Some(gas), Some(materials))
+    }
+
+    fn build(desc: &Description, mut cfg: Config, substeps: usize, gas: Option<GasState>,
+        materials: Option<std::sync::Arc<crate::preparation::materials::StringMaterials>>)
         -> Result<Self, String> {
         let output_rate = cfg.sample_rate;
         if !matches!(substeps, 1 | 2 | 4) || !(8_000..=192_000).contains(&output_rate) {
@@ -60,9 +70,11 @@ impl PianoAudio {
         // Clock/filter admission precedes any physical preparation.
         let decimator = Decimator::new(substeps, 1).map_err(str::to_owned)?;
         cfg.sample_rate = mechanical_rate;
-        let piano = match gas {
-            Some(gas) => LivePiano::new_with_gas(desc, cfg, gas)?,
-            None => LivePiano::new(desc, cfg)?,
+        let piano = match (gas, materials) {
+            (Some(gas), Some(materials)) => LivePiano::new_with_materials(desc, cfg, gas, materials)?,
+            (Some(gas), None) => LivePiano::new_with_gas(desc, cfg, gas)?,
+            (None, None) => LivePiano::new(desc, cfg)?,
+            (None, Some(_)) => return Err("material playback requires an admitted acoustic gas".into()),
         };
         Ok(Self { piano, output_rate, substeps, decimator, pressure: [0.0; 4],
             frames: 0, peak_pa: 0.0, clipped_frames: 0, failure: None, last_error: None })
