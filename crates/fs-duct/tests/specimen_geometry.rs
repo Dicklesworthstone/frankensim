@@ -58,6 +58,15 @@ const CORRESPONDENCE_RADIUS_M: f64 = 0.0005;
 const COARSE_HZ: f64 = 2.0;
 const SEARCH_HI_HZ: f64 = 4000.0;
 const LADDER_FINGERINGS: [&str; 4] = ["e3", "a3", "d4", "g5"];
+/// Passive-impedance report grid: 100 Hz up to the 4.8 kHz band of the clarinet
+/// render, in 2 Hz steps; the band in which fingerings with several open
+/// holes were seen to leave their fundamental in the time-domain render.
+const REPORT_LO_HZ: f64 = 100.0;
+const REPORT_HI_HZ: f64 = 4800.0;
+const REPORT_STEP_HZ: f64 = 2.0;
+const REPORT_BAND_LO_HZ: f64 = 800.0;
+const REPORT_BAND_HI_HZ: f64 = 2600.0;
+const REPORT_PEAKS: usize = 8;
 
 // ------------------------------------------------------------------ loading
 
@@ -1086,4 +1095,76 @@ fn buffet_ledger_rows_cover_every_source() {
         r.emit("pass");
     }
     assert_eq!(checked, 3, "Buffet cites two sources, the Yamaha one");
+}
+
+/// Passive |Z_in| of every chart fingering (open holes as flanged side
+/// branches, Bessel losses, flanged bell): the first maxima with heights in dB
+/// relative to the sounding maximum, and the strongest maximum between 800 Hz
+/// and 2.6 kHz. A measurement printed as `IRPZIN {json}`, not a pass/fail
+/// claim; the only assertions are that every fingering has its sounding
+/// maximum and that heights are finite.
+#[test]
+fn buffet_open_hole_impedance_spectrum_report() {
+    let desc = load(BUFFET);
+    let build = clarinet_duct(&desc, 1, None).unwrap();
+    let chart = desc.fingerings.as_ref().unwrap();
+    let table = fingering_table(&build, chart).unwrap();
+    let air = air();
+    let steps = ((REPORT_HI_HZ - REPORT_LO_HZ) / REPORT_STEP_HZ).round() as usize;
+    let mut rows = Vec::new();
+    for row in chart.rows() {
+        let duct = label_duct(&table, &row.fingering);
+        let spectrum: Vec<(f64, f64)> = (0..=steps)
+            .map(|i| {
+                let hz = REPORT_LO_HZ + REPORT_STEP_HZ * i as f64;
+                (hz, z_abs(&duct, &air, hz))
+            })
+            .collect();
+        let maxima: Vec<(f64, f64)> = (1..spectrum.len() - 1)
+            .filter(|&i| spectrum[i].1 > spectrum[i - 1].1 && spectrum[i].1 >= spectrum[i + 1].1)
+            .map(|i| spectrum[i])
+            .collect();
+        let k = sounding_peak(&row.register);
+        assert!(
+            maxima.len() > k,
+            "{}: only {} impedance maxima below {REPORT_HI_HZ} Hz",
+            row.fingering,
+            maxima.len()
+        );
+        let reference = maxima[k].1;
+        let db = |z: f64| 20.0 * (z / reference).log10();
+        let band = maxima
+            .iter()
+            .filter(|m| (REPORT_BAND_LO_HZ..=REPORT_BAND_HI_HZ).contains(&m.0))
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        assert!(
+            maxima.iter().all(|m| db(m.1).is_finite()),
+            "{}: non-finite impedance height",
+            row.fingering
+        );
+        let band_json = band.map_or_else(
+            || "null".to_owned(),
+            |m| format!("[{:.1},{:.2}]", m.0, db(m.1)),
+        );
+        let peaks: Vec<String> = maxima
+            .iter()
+            .take(REPORT_PEAKS)
+            .map(|m| format!("[{:.1},{:.2}]", m.0, db(m.1)))
+            .collect();
+        rows.push(format!(
+            "{{\"fingering\":{},\"concert\":{},\"register\":{},\"sounding_hz\":{:.2},\"sounding_z_pa_s_per_m3\":{:.4e},\"band_800_2600_hz_db\":{},\"peaks_hz_db\":[{}]}}",
+            json(&row.fingering),
+            json(&row.concert),
+            json(&row.register),
+            maxima[k].0,
+            reference,
+            band_json,
+            peaks.join(",")
+        ));
+    }
+    println!(
+        "IRPZIN {{\"test\":\"buffet_open_hole_impedance_spectrum_report\",\"loss\":\"bessel\",\"termination\":\"flanged\",\"grid_hz\":[{REPORT_LO_HZ},{REPORT_HI_HZ},{REPORT_STEP_HZ}],\"fingerings\":[{}]}}",
+        rows.join(",")
+    );
+    assert_eq!(rows.len(), chart.rows().len());
 }
