@@ -31,10 +31,16 @@ use fs_thermal::enthalpy::{CellId, DepositionSimulation, MaterialId};
 use std::collections::BTreeMap;
 
 const FIELD: Dims = Dims([1, 1, -3, 0, -1, 0]);
+const CURRENT_DENSITY: Dims = Dims([-2, 0, 0, 0, 1, 0]);
 const AXES: [ConductionAxis<'static>; 1] = [ConductionAxis {
     name: "E",
     coordinate: ConductionCoordinate::ElectricFieldMagnitude,
 }];
+const CURRENT_AXIS: ConductionAxis<'static> = ConductionAxis {
+    name: "J",
+    coordinate: ConductionCoordinate::CurrentDensityMagnitude,
+};
+const FIELD_AND_CURRENT_AXES: [ConductionAxis<'static>; 2] = [AXES[0], CURRENT_AXIS];
 
 fn query(t: f64) -> QueryPoint {
     point(t)
@@ -199,13 +205,32 @@ fn coefficients(
 // Independent series-RC and two-cell BE equations, analytically reduced to I.
 // R_a=1+beta*E_a, E_a=I*R_a, R_b=3*(1+alpha*(T_b-300)).
 fn reference(beta: f64, alpha: f64, dt: f64) -> (f64, f64, f64) {
+    transport_reference(beta, alpha, 0.0, AXES[0], dt)
+}
+
+// k_a=1+kappa*x, x=|E_a| or |J_a|, k_b=1 and two half-metre layers.
+// Eliminate the two BE temperatures and solve the remaining series-RC equation.
+fn transport_reference(
+    beta: f64,
+    alpha: f64,
+    kappa: f64,
+    axis: ConductionAxis<'_>,
+    dt: f64,
+) -> (f64, f64, f64) {
     let values = |current: f64| {
         let ra = 1.0 / (1.0 - beta * current);
-        let determinant = (1.0 + dt) * (2.0 + dt) - dt * dt;
-        let tb = dt * current * current * (dt * ra + (1.0 + dt) * 3.0)
-            / (determinant - dt * current * current * (1.0 + dt) * 3.0 * alpha);
+        let coordinate = if axis.name == "E" {
+            current * ra
+        } else {
+            current
+        };
+        let k = 1.0 + kappa * coordinate;
+        let transfer = dt / (0.5 / k + 0.5);
+        let determinant = (1.0 + transfer) * (2.0 + transfer) - transfer * transfer;
+        let tb = dt * current * current * (transfer * ra + (1.0 + transfer) * 3.0)
+            / (determinant - dt * current * current * (1.0 + transfer) * 3.0 * alpha);
         let rb = 3.0 * (1.0 + alpha * tb);
-        let ta = dt * current * current * ((2.0 + dt) * ra + dt * rb) / determinant;
+        let ta = dt * current * current * ((2.0 + transfer) * ra + transfer * rb) / determinant;
         (ra, rb, ta, tb)
     };
     let (mut low, mut high) = (0.0, 3.0);
@@ -642,22 +667,33 @@ fn g3_prepared_material_data_drives_conduction_heat_and_continuation_without_cal
     );
 }
 
-fn field_dependent_heat_material() -> (MaterialCard, ResolvedHeatCapacityCurve) {
+fn operating_heat_material(
+    axis: ConductionAxis<'_>,
+    slope: f64,
+    maximum: f64,
+) -> (MaterialCard, ResolvedHeatCapacityCurve) {
+    let dimensions = if axis.name == "E" {
+        FIELD
+    } else {
+        CURRENT_DENSITY
+    };
     let (base, _) = field_material(0.05, 2000.0);
     let mut claims = ClaimSet::new();
     for (_, original) in base.claims().claims_ordered() {
         let mut claim = original.clone();
         if claim.key.name() == "thermal_conductivity" {
             claim.value = PropertyValue::Curve {
-                abscissa: "E".into(),
-                abscissa_dims: FIELD,
-                knots: vec![(0.0, 1.0), (20.0, 2.0)],
+                abscissa: axis.name.into(),
+                abscissa_dims: dimensions,
+                knots: vec![(0.0, 1.0), (maximum, 1.0 + maximum * slope)],
                 dims: THERMAL_CONDUCTIVITY_DIMS,
             };
-            claim.validity =
-                claim
-                    .validity
-                    .with_quantity("E", QuantitySpec::dimensional(FIELD), 0.0, 20.0);
+            claim.validity = claim.validity.with_quantity(
+                axis.name,
+                QuantitySpec::dimensional(dimensions),
+                0.0,
+                maximum,
+            );
         }
         claims.insert_claim(claim).unwrap();
     }
@@ -667,15 +703,171 @@ fn field_dependent_heat_material() -> (MaterialCard, ResolvedHeatCapacityCurve) 
 }
 
 #[test]
-fn g4_prepared_data_refuses_unbound_fields_frozen_heat_transport_and_heated_source_limits() {
+fn g3_solved_field_and_current_heat_transport_close_data_only_feedback_and_continuation() {
+    for (axis, dimensions, operating_axes) in [
+        (AXES[0], FIELD, AXES.as_slice()),
+        (
+            CURRENT_AXIS,
+            CURRENT_DENSITY,
+            FIELD_AND_CURRENT_AXES.as_slice(),
+        ),
+    ] {
+        let mut endpoints = Vec::new();
+        for kappa in [0.0, 0.5] {
+            let (a, ca) = operating_heat_material(axis, kappa, 20.0);
+            let (b, cb) = common::material(3.0, 2.0, 0.005);
+            let cards = [a, b];
+            let curves = [ca, cb];
+            let thermal = initial(&curves, 1.0, None);
+            let context = [
+                query(300.0)
+                    .with_quantity(axis.name, QuantitySpec::dimensional(dimensions), 0.0)
+                    .unwrap(),
+                point(300.0),
+            ];
+            let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+            let cells = network_cells(&cards, &curves, &context, &key);
+            let resistors = network_resistors();
+            let network = MaterialNetwork {
+                cells: &cells,
+                resistors: &resistors,
+                links: &NETWORK_LINKS,
+            };
+            let mut responses = network_responses();
+            responses[0].axes = operating_axes;
+            let prepared = network
+                .prepare_conductivity(&thermal, &responses, || false)
+                .unwrap();
+            let seeds = prepared
+                .resolve_conductivity_seeds(&thermal, &responses, || false)
+                .unwrap();
+            near(seeds.source.links[0].conductance_w_k, 1.0);
+            let electrical = circuit_from_complete_seeds(seeds.resistors);
+            let mut old_circuit = electrical.clone();
+            let mut old_thermal = thermal.clone();
+            for interval in 1..=2 {
+                let result = prepared
+                    .conductivity_candidate(
+                        &old_thermal,
+                        f64::from(interval) * 0.2,
+                        &old_circuit,
+                        &[],
+                        &responses,
+                        config(),
+                        conductivity_controls(),
+                        &[0.0; 2],
+                        || false,
+                    )
+                    .unwrap();
+                let ta = result
+                    .thermal()
+                    .temperature_k(DESTINATIONS[0].cell)
+                    .unwrap();
+                let tb = result
+                    .thermal()
+                    .temperature_k(DESTINATIONS[1].cell)
+                    .unwrap();
+                let q = result.circuit().charges_c()[0];
+                let current = (old_circuit.charges_c()[0] - q) / 0.2;
+                let ra = 1.0 / (1.0 - 0.05 * current);
+                let rb = 3.0 * (1.0 + 0.005 * (tb - 300.0));
+                let coordinate = if axis.name == "E" {
+                    current * ra
+                } else {
+                    current
+                };
+                let k = 1.0 + kappa * coordinate;
+                let g = 1.0 / (0.5 / k + 0.5);
+                near(current * (ra + rb), 0.5 * (old_circuit.charges_c()[0] + q));
+                near(
+                    ta - old_thermal.temperature_k(DESTINATIONS[0].cell).unwrap(),
+                    0.2 * (current * current * ra + g * (tb - ta)),
+                );
+                near(
+                    2.0 * (tb - old_thermal.temperature_k(DESTINATIONS[1].cell).unwrap()),
+                    0.2 * (current * current * rb + g * (ta - tb)),
+                );
+                let report = result.report();
+                near(report.source.links[0].conductance_w_k, g);
+                near(report.source.links[0].conductivity_w_m_k[0], k);
+                near(report.source.links[0].conductivity_w_m_k[1], 1.0);
+                near(report.total_energy_residual_j, 0.0);
+                near(
+                    report.deposited_joule_j,
+                    report.electrical.electrical.heat_j,
+                );
+                for (evaluation, original) in report
+                    .electrical
+                    .evaluated
+                    .iter()
+                    .zip(electrical.resistors())
+                {
+                    let destination = DESTINATIONS
+                        .iter()
+                        .find(|d| d.branch == evaluation.point.branch)
+                        .unwrap();
+                    let sample = report
+                        .source
+                        .cells
+                        .iter()
+                        .find(|s| s.cell == destination.cell)
+                        .unwrap();
+                    assert_eq!(
+                        sample.conductivity.as_ref().unwrap(),
+                        evaluation.conductor.material()
+                    );
+                    for (actual, pinned) in evaluation
+                        .conductor
+                        .material()
+                        .properties()
+                        .iter()
+                        .zip(original.conductor.material().properties())
+                    {
+                        assert_eq!(
+                            actual.answer().receipt.selected,
+                            pinned.answer().receipt.selected
+                        );
+                    }
+                }
+                near(
+                    report.electrical.evaluated[0]
+                        .conductor
+                        .material()
+                        .state_coordinate(axis.name)
+                        .unwrap(),
+                    coordinate,
+                );
+                if interval == 1 {
+                    let expected = transport_reference(0.05, 0.005, kappa, axis, 0.2);
+                    near(q, expected.0);
+                    near(ta, expected.1);
+                    near(tb, expected.2);
+                    endpoints.push((q, ta, tb));
+                }
+                let (warm, charged, _) = result.into_parts();
+                old_thermal = warm;
+                old_circuit = charged;
+            }
+            assert_eq!(electrical.charges_c(), &[10.0]);
+            assert_eq!(thermal.time_s(), 0.0);
+        }
+        assert!(endpoints[1].0 < endpoints[0].0 - 1e-6);
+        assert!(endpoints[1].1 > endpoints[0].1);
+        assert!(endpoints[1].2 < endpoints[0].2);
+    }
+}
+
+#[test]
+fn g4_prepared_data_refuses_unowned_fields_and_actual_transport_source_limits() {
     const WRONG_AXES: [ConductionAxis<'static>; 1] = [ConductionAxis {
         name: "E",
         coordinate: ConductionCoordinate::CurrentDensityMagnitude,
     }];
-    for case in 0..3 {
+    for case in 0..4 {
         let (a, ca) = match case {
-            1 => field_dependent_heat_material(),
+            1 => operating_heat_material(AXES[0], 0.5, 0.1),
             2 => field_material(0.05, 300.1),
+            3 => operating_heat_material(AXES[0], 0.5, 20.0),
             _ => field_material(0.05, 2000.0),
         };
         let (b, cb) = common::material(3.0, 2.0, 0.005);
@@ -689,7 +881,11 @@ fn g4_prepared_data_refuses_unbound_fields_frozen_heat_transport_and_heated_sour
         let resistors = network_resistors();
         let network = MaterialNetwork {
             cells: &cells,
-            resistors: &resistors,
+            resistors: if case == 3 {
+                &resistors[1..]
+            } else {
+                &resistors
+            },
             links: &NETWORK_LINKS,
         };
         let mut responses = network_responses();
@@ -706,12 +902,12 @@ fn g4_prepared_data_refuses_unbound_fields_frozen_heat_transport_and_heated_sour
                     .prepare_conductivity(&thermal, &responses, || false)
                     .is_err()
             );
-        } else if case == 1 {
+        } else if case == 3 {
             assert!(
                 network
-                    .prepare_conductivity(&thermal, &responses, || false)
+                    .prepare_conductivity(&thermal, &responses[1..], || false)
                     .is_err(),
-                "thermal k(E) must not be frozen at the seed field"
+                "a passive cell cannot invent an electric-field owner for its heat transport"
             );
         } else {
             let prepared = network

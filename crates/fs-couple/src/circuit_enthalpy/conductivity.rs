@@ -101,6 +101,51 @@ pub fn step_candidate<'m, S, E>(
     resolve: impl Fn(&DepositionSimulation<'m>) -> Result<CircuitThermalCoefficients<S>, E>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<ConductivityEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
+    step_candidate_with_transport(
+        thermal,
+        target_s,
+        input,
+        responses,
+        controls,
+        conductivity,
+        initial_energy_increments_j,
+        resolve,
+        |_, _, transport| Ok(transport),
+        cancelled,
+    )
+}
+
+/// Resolve thermal transport at the SAME solved electrical operating point.
+///
+/// The seed callback has the same contract as [`step_candidate`]. After its
+/// complete bundles have been refreshed by the original electrical owner,
+/// `transport` receives that admitted candidate and the seed thermal data.
+/// It must replace any field/current-dependent heat conductances and source
+/// observations before the shared backward-Euler residual is evaluated.
+/// `StepCoefficients::payload` retains the updated source observations.
+/// Its powers are independent external sources, never additional Joule heat.
+///
+/// This callback advances no state and introduces no additional electrical or
+/// thermal solve. Every nonlinear stencil and final admission performs it again;
+/// refusal leaves both accepted histories unchanged. The ordinary entry point
+/// uses the identity transport update for coefficients independent of E/J.
+#[allow(clippy::too_many_arguments)]
+pub fn step_candidate_with_transport<'m, S, E>(
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    input: CircuitEnthalpyInput<'_>,
+    responses: &[ConductorResponse<'_>],
+    controls: CircuitEnthalpySolve,
+    conductivity: ConductivitySolve,
+    initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<CircuitThermalCoefficients<S>, E>,
+    transport: impl Fn(
+        &DepositionSimulation<'m>,
+        &MaterialConductivityStep,
+        StepCoefficients<S>,
+    ) -> Result<StepCoefficients<S>, E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ConductivityEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
     // Validate the authored policy before the outer work budget narrows it.
     conductivity.validate()?;
     let cancel = RefCell::new(cancelled);
@@ -137,11 +182,21 @@ pub fn step_candidate<'m, S, E>(
                     other => CircuitEnthalpyError::from(other),
                 })?;
             let circuit_trials = circuit.step().iterations;
+            let transport = transport(
+                state,
+                circuit.step(),
+                StepCoefficients {
+                    sources_w: coefficients.sources_w,
+                    conductances_w_k: coefficients.conductances_w_k,
+                    payload: coefficients.source,
+                },
+            )
+            .map_err(CircuitEnthalpyError::Source)?;
             Ok(DrivenCoefficients {
                 circuit,
-                sources_w: coefficients.sources_w,
-                conductances_w_k: coefficients.conductances_w_k,
-                source: coefficients.source,
+                sources_w: transport.sources_w,
+                conductances_w_k: transport.conductances_w_k,
+                source: transport.payload,
                 circuit_trials,
             })
         },

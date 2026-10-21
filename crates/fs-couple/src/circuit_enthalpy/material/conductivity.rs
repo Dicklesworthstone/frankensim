@@ -11,6 +11,7 @@ use crate::circuit_enthalpy::conductivity::{
 };
 use crate::material_circuit::conductivity::{
     ConductionAxis, ConductionCoordinate, ConductivitySolve, ConductorResponse,
+    MaterialConductivityStep,
 };
 
 /// Electrical response of an existing whole-cell resistor.
@@ -164,14 +165,75 @@ fn response_plan<'a>(
 }
 
 impl<'a> MaterialNetwork<'a> {
+    fn resolve_conductivity_transport(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        electrical: &MaterialConductivityStep,
+        coefficients: StepCoefficients<MaterialNetworkSample>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StepCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
+        check_cancelled(&mut cancelled)?;
+        let invalid = MaterialNetworkError::Invalid;
+        let evaluated: BTreeMap<_, _> = electrical
+            .evaluated
+            .iter()
+            .map(|sample| (sample.point.branch, sample))
+            .collect();
+        if evaluated.len() != electrical.evaluated.len() || evaluated.len() != self.resistors.len()
+        {
+            return Err(invalid(
+                "exactly one solved-field sample per resistor is required",
+            ));
+        }
+        let bindings: BTreeMap<_, _> = self.cells.iter().map(|cell| (cell.cell, cell)).collect();
+        let mut samples: BTreeMap<_, _> = coefficients
+            .payload
+            .cells
+            .into_iter()
+            .map(|sample| (sample.cell, sample))
+            .collect();
+        for resistor in self.resistors {
+            check_cancelled(&mut cancelled)?;
+            let source = evaluated
+                .get(&resistor.destination.branch)
+                .ok_or(invalid("resistor has no solved-field material sample"))?;
+            let sample = samples
+                .get_mut(&resistor.destination.cell)
+                .ok_or(invalid("resistor has no thermal material sample"))?;
+            if let Some(material) = &mut sample.conductivity {
+                // The electrical owner refreshed the complete pinned bundle at
+                // E=V/L and J=I/A, including its thermal conductivity. Reuse it;
+                // a second query could select a different source or time level.
+                *material = source.conductor.material().clone();
+            }
+        }
+        let (conductances_w_k, links) =
+            self.resolve_links(thermal, &bindings, &samples, &mut || {
+                if cancelled() {
+                    Err(DepositionError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            })?;
+        Ok(StepCoefficients {
+            sources_w: coefficients.sources_w,
+            conductances_w_k,
+            payload: MaterialNetworkSample {
+                cells: samples.into_values().collect(),
+                links,
+            },
+        })
+    }
+
     /// Pin the original complete thermal/electrical source bundle while admitting
-    /// the declared electrical operating axes on its electrical property only.
+    /// declared electrical operating axes throughout each resistor's bundle.
     ///
     /// Use resolve_conductivity_seeds to construct the original MaterialCircuit;
     /// its resistor bundles must include these same thermal properties and pins.
     /// The ordinary prepare/resolve routes retain their static thermal admission.
-    /// Thermal conductivity depending on E/J is refused: heat conductances are
-    /// resolved before the inner electrical iteration and cannot freeze its fields.
+    /// Thermal conductivity may depend on E/J only where an original resistor
+    /// supplies those coordinates. Its solved-field value drives the same heat
+    /// residual; passive thermal cells cannot invent an electrical field owner.
     pub fn prepare_conductivity<'n>(
         &'n self,
         thermal: &DepositionSimulation<'_>,
@@ -190,7 +252,8 @@ impl PreparedMaterialNetwork<'_, '_> {
     /// Build the initial MaterialCircuit from these resistors. Seed coordinates
     /// are starting values, not a claim that they satisfy Kirchhoff/constitutive
     /// equations. conductivity_candidate closes them at every thermal trial;
-    /// its electrical report retains the actual solved-field source evaluations.
+    /// both its electrical and thermal reports retain the actual solved-field
+    /// source evaluations and the resulting heat conductances.
     /// The requested property bases must match this prepared network exactly.
     pub fn resolve_conductivity_seeds(
         &self,
@@ -220,8 +283,9 @@ impl PreparedMaterialNetwork<'_, '_> {
     /// destinations. The existing electrical owner closes E=V/L and J=I/A at
     /// the proposed thermal state and the shared enthalpy owner receives its
     /// native Joule heat once. Trial histories remain private until acceptance.
-    /// Thermal network samples retain the seed E/J context; actual applied and
-    /// evaluated electrical bundles are in the candidate's electrical report.
+    /// Thermal links and their samples use the complete original bundles at that
+    /// solved field/current, so electrical operating response also drives heat
+    /// transport. Seed E/J coordinates never stand in for the accepted fields.
     ///
     /// Source/domain refusal, work-budget exhaustion and cancellation publish
     /// neither circuit nor thermal state. This inherits the scalar, fixed-geometry
@@ -255,7 +319,7 @@ impl PreparedMaterialNetwork<'_, '_> {
             )));
         }
         let destinations = self.resistor_destinations();
-        let result = coupled_conductivity::step_candidate(
+        let result = coupled_conductivity::step_candidate_with_transport(
             thermal,
             target_s,
             CircuitEnthalpyInput {
@@ -275,6 +339,12 @@ impl PreparedMaterialNetwork<'_, '_> {
                     Some(&plan.axes),
                     || (*cancel.borrow_mut())(),
                 )
+            },
+            |state, electrical, coefficients| {
+                self.network
+                    .resolve_conductivity_transport(state, electrical, coefficients, || {
+                        (*cancel.borrow_mut())()
+                    })
             },
             || (*cancel.borrow_mut())(),
         );

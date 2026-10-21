@@ -3162,16 +3162,25 @@ Cards, geometry, destinations, caloric instances and selected source claims
 come from the same retained network; accepted continuation preserves those
 pins while re-evaluating the actual thermal and electrical state.
 
-The shared static-property admission admits extra physical axes only for the
-explicitly bound electrical property. Ordinary thermal-only resolution stays
-strict. Thermal conductivity curves depending on electrical field/current
-refuse: the present outer thermal network does not refresh link coefficients
-inside the inner electrical iteration. Missing, duplicate or incorrectly typed
-electrical axis plans also refuse rather than holding a curve at its seed.
-Regression sources cover data-only law substitution, independent coupled
-equations, complete-bundle initialization, continued discharge/heating,
-selection continuity and atomic source-domain/admission failures. Native
-execution remains pending.
+The explicit operating axes apply to each resistor's complete source bundle.
+After the original electrical owner resolves its actual E=V/L and J=I/A, the
+thermal network reuses that same evaluated bundle to lower its half-cell series
+conductances. Those coefficients enter the existing backward-Euler residual
+before acceptance, including every nonlinear stencil and final admission.
+Reported thermal samples and links describe the same coefficients used by the
+residual. `step_candidate_with_transport` exposes this post-electrical update
+through the original `StepCoefficients` type; the ordinary generic entry point
+retains the identity update for independent thermal coefficients.
+
+Ordinary thermal-only resolution stays strict. Passive thermal cells have no
+electrical field owner and cannot admit k(E/J) by inventing coordinates. Missing,
+duplicate or incorrectly typed electrical axis plans refuse. Native Joule heat,
+external sources, work limits and atomic publication retain their existing
+owners. Focused regressions cover k(E) and k(J) substitutions, independently
+eliminated coupled equations over two accepted intervals, exact source-sample
+equality, series conductance, native Joule accounting and solved-field source
+refusal. These synthetic numerical cases do not establish measured material
+accuracy or extend the fixed-geometry, scalar conduction model.
 
 ## Reciprocal material electric and magnetic gap motion
 

@@ -158,11 +158,14 @@ impl MaterialNetwork<'_> {
         Ok(bases)
     }
 
-    fn resolve_bound(&self, thermal:&DepositionSimulation<'_>,
-        bases:&BTreeMap<usize,ElectricalPropertyBasis>,
-        pinned:Option<&BTreeMap<CellId,MaterialPropertySelection>>,
-        electrical_axes:Option<&ElectricalAxes>, mut cancelled:impl FnMut()->bool)
-        -> Result<CircuitThermalCoefficients<MaterialNetworkSample>,MaterialNetworkError> {
+    fn resolve_bound(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        bases: &BTreeMap<usize, ElectricalPropertyBasis>,
+        pinned: Option<&BTreeMap<CellId, MaterialPropertySelection>>,
+        electrical_axes: Option<&ElectricalAxes>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CircuitThermalCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
         let invalid=MaterialNetworkError::Invalid;
         let mut check=|| if cancelled() {Err(DepositionError::Cancelled)} else {Ok(())};
         check()?;
@@ -177,7 +180,8 @@ impl MaterialNetwork<'_> {
                 return Err(invalid("duplicate whole-cell resistor or branch binding"));
             }
         }
-        let mut bindings=BTreeMap::new(); let mut samples=BTreeMap::new();let mut materials=BTreeMap::new();
+        let mut bindings=BTreeMap::new(); let mut samples=BTreeMap::new();
+        let mut materials=BTreeMap::new();
         for binding in self.cells {
             check()?;
             let cell=thermal.cells().get(&binding.cell).ok_or(invalid("inactive material cell"))?;
@@ -188,7 +192,6 @@ impl MaterialNetwork<'_> {
             let phase=binding.curve.state_at_specific_enthalpy(cell.specific_h_j_kg).map_err(MaterialNetworkError::Phase)?;
             let point=binding.point.at(phase).map_err(MaterialNetworkError::Material)?;
             let mut requested=Vec::new();
-            let mut electrical_property = None;
             let operating_axes = resistor_cells
                 .get(&binding.cell)
                 .map(|resistor| {
@@ -209,7 +212,6 @@ impl MaterialNetwork<'_> {
                 let basis=bases[&resistor.destination.branch];
                 let requirement=basis.requirement()
                     .map_err(|e|MaterialNetworkError::Material(ThermalMaterialError::Material(e)))?;
-                electrical_property = Some(requirement.name().to_owned());
                 requested.push((requirement,resistor.selection.clone()));
             }
             let conductivity=if requested.is_empty() {None} else {
@@ -230,19 +232,13 @@ impl MaterialNetwork<'_> {
                 let material=resolve_material_state_point(binding.point.material,&point,&requirements,selection)
                     .map_err(|e|MaterialNetworkError::Material(ThermalMaterialError::Material(e)))?;
                 for property in material.properties() {
-                    if electrical_property.as_deref() == Some(property.requirement().name()) {
-                        binding
-                            .point
-                            .admit_static_with_axes(property, &operating_axes)
-                            .map_err(MaterialNetworkError::Material)?;
-                    } else {
-                        // Heat conductances are resolved before the electrical
-                        // field iterator: k(E/J) must not freeze at seed fields.
-                        binding
-                            .point
-                            .admit_static(property)
-                            .map_err(MaterialNetworkError::Material)?;
-                    }
+                    // Only the explicit conductivity route supplies E/J axes.
+                    // Its complete bundle is refreshed at the solved electrical
+                    // point before the thermal residual lowers these links.
+                    binding
+                        .point
+                        .admit_static_with_axes(property, &operating_axes)
+                        .map_err(MaterialNetworkError::Material)?;
                 }
                 let conductivity=binding.conductivity.as_ref().map(|_|material.clone());
                 materials.insert(binding.cell,material);
@@ -271,29 +267,84 @@ impl MaterialNetwork<'_> {
                 .map_err(MaterialNetworkError::Conductor)?;
             resistors.push(MaterialResistor {branch:d.branch,conductor});
         }
-        let mut conductances=BTreeMap::new();let mut links=BTreeMap::new();
+        let (conductances, links) = self.resolve_links(thermal, &bindings, &samples, &mut check)?;
+        check()?;
+        Ok(CircuitThermalCoefficients {
+            resistors,
+            sources_w: BTreeMap::new(),
+            conductances_w_k: conductances,
+            source: MaterialNetworkSample {
+                cells: samples.into_values().collect(),
+                links,
+            },
+        })
+    }
+
+    // One canonical half-cell lowering serves seed resolution and actual-field
+    // transport. The returned observations describe the coefficients supplied
+    // to the same backward-Euler residual.
+    fn resolve_links(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        bindings: &BTreeMap<CellId, &MaterialCell<'_>>,
+        samples: &BTreeMap<CellId, CellMaterialSample>,
+        check: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(BTreeMap<u64, f64>, Vec<LinkMaterialSample>), MaterialNetworkError> {
+        let invalid = MaterialNetworkError::Invalid;
+        let mut conductances = BTreeMap::new();
+        let mut links = BTreeMap::new();
         for source in self.links {
             check()?;
-            let link=thermal.links().get(&source.link).ok_or(invalid("inactive material thermal link"))?;
-            if !source.distance_a_m.is_finite() || source.distance_a_m<=0.0
-                || !source.distance_b_m.is_finite() || source.distance_b_m<=0.0 || links.contains_key(&source.link) {
-                return Err(invalid("unique links and positive finite conduction distances required"));
+            let link = thermal
+                .links()
+                .get(&source.link)
+                .ok_or(invalid("inactive material thermal link"))?;
+            if !source.distance_a_m.is_finite()
+                || source.distance_a_m <= 0.0
+                || !source.distance_b_m.is_finite()
+                || source.distance_b_m <= 0.0
+                || links.contains_key(&source.link)
+            {
+                return Err(invalid(
+                    "unique links and positive finite conduction distances required",
+                ));
             }
-            let mut k=[0.0;2];
-            for (i,id) in [link.a,link.b].into_iter().enumerate() {
-                let (key,_)=bindings[&id].conductivity.as_ref().ok_or(invalid("linked cell has no conductivity binding"))?;
-                k[i]=samples[&id].conductivity.as_ref().ok_or(invalid("linked conductivity is absent"))?
-                    .property(key.name()).ok_or(invalid("linked conductivity key is absent"))?.value_si();
+            let mut k = [0.0; 2];
+            for (i, id) in [link.a, link.b].into_iter().enumerate() {
+                let (key, _) = bindings
+                    .get(&id)
+                    .ok_or(invalid("linked cell has no material binding"))?
+                    .conductivity
+                    .as_ref()
+                    .ok_or(invalid("linked cell has no conductivity binding"))?;
+                k[i] = samples
+                    .get(&id)
+                    .ok_or(invalid("linked material sample is absent"))?
+                    .conductivity
+                    .as_ref()
+                    .ok_or(invalid("linked conductivity is absent"))?
+                    .property(key.name())
+                    .ok_or(invalid("linked conductivity key is absent"))?
+                    .value_si();
             }
-            let g=fs_thermal::enthalpy::series_conductance_w_k(
-                link.area_m2,[source.distance_a_m,source.distance_b_m],k)?;
-            conductances.insert(source.link,g);
-            links.insert(source.link,LinkMaterialSample {link:source.link,cells:[link.a,link.b],
-                conductivity_w_m_k:k,conductance_w_k:g});
+            let g = fs_thermal::enthalpy::series_conductance_w_k(
+                link.area_m2,
+                [source.distance_a_m, source.distance_b_m],
+                k,
+            )?;
+            conductances.insert(source.link, g);
+            links.insert(
+                source.link,
+                LinkMaterialSample {
+                    link: source.link,
+                    cells: [link.a, link.b],
+                    conductivity_w_m_k: k,
+                    conductance_w_k: g,
+                },
+            );
         }
         check()?;
-        Ok(CircuitThermalCoefficients {resistors,sources_w:BTreeMap::new(),conductances_w_k:conductances,
-            source:MaterialNetworkSample {cells:samples.into_values().collect(),links:links.into_values().collect()}})
+        Ok((conductances, links.into_values().collect()))
     }
 
     /// Data-only network advance. External authored cell boundaries remain active;
