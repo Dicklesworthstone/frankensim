@@ -38,18 +38,12 @@ lip_source Cullen (2000) PhD Edinburgh Table A.2 p.253 embouchure 7: fL1 204.5 H
 cup_volume_m3 1e-9
 termination flanged
 modes 3 1
-# Mouth-flow line ladder. The first native render (6f2e42ec7) was REFUSED by the owner's default ladder
-# (relative tail energy 1e-10): at the 65536-tap cap (3.4 s on this clock) the last quarter of the
-# mouth-flow impulse response still held 1.9e-8 of its energy. With this tolerance declared the ladder
-# stops at 8192 taps and the sidecar records every rung: tail energy 4.4e-7 (2048 taps), 2.4e-7 (4096),
-# 1.4e-7 (8192). The tail HALVES per doubling, an algebraic 1/N decay, which is the signature of an
-# endpoint discontinuity of the sampled response (the 20 Hz stand-in for the DC bin, or the real Nyquist
-# bin), NOT of a long physical ring-down: a physical ring would fall exponentially. UNVERIFIED (no code
-# was run to test it). Because the receiver differentiates the flow, a DC-side step is suppressed in the
-# radiated pressure. Declared instead of hidden: 1e-6 relative energy is about -60 dB of wrap-around
-# amplitude, far below the tens of dB the grading measures resolve. The default 1e-10 stays the default
-# for every other file, and the default can never be met by doubling while the tail falls only as 1/N.
-mouth_flow_tail_tol 1e-6
+# Mouth-flow line ladder: the owner's DEFAULT (relative tail energy 1e-10), no declared tolerance. On the binary
+# before the DC-bin fix the placeholder-leadpipe bore was refused at the 65536-tap cap (tail 1.9e-8), its declared
+# 1e-6 rungs halved per doubling (4.4e-7, 2.4e-7, 1.4e-7 at 2048, 4096, 8192 taps: an algebraic 1/N tail, the
+# signature of the 20 Hz stand-in for the DC bin), and the digitized-leadpipe bore was refused again (1.25e-6 at
+# the cap). With P1's DC-bin fix (bin da31fbd67ee9) the digitized bore converges under the default: tail energy
+# 8.4e-4 (1024 taps), 3.2e-5, 5.7e-8, 8.0e-10 (8192), 1.4e-11, 1.4e-12, 4.9e-13 (65536), falling exponentially.
 #
 # --- bore -------------------------------------------------------------------------
 # A. C. P. Braden, "Bore Optimisation and Impedance Modelling of Brass Musical

@@ -26,6 +26,9 @@
 # the flow stayed steady and the differentiating receiver radiated exactly zero. This lip needs several
 # kPa, so the ramps measure the threshold of the model directly instead of assuming a mouth pressure.
 #
+# Needs a music_render with the DC-bin fix of the mouth-flow line (bin da31fbd67ee9 or later): without it the
+# default mouth-flow ladder cannot converge on this bore (see the head).
+#
 # Clock: 19.2 kHz mechanics = output, not 48 kHz. The fs-duct flanged radiation load is admitted only
 # to ka = 20, and the 0.1086 m bell reaches ka = 20 at 10.05 kHz, so a 19.2 kHz clock (Nyquist 9.6 kHz,
 # ka 19.1) is the admitted choice; 48 kHz mechanics would be refused. The radiation receiver's resolved
