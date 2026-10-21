@@ -207,13 +207,14 @@ def pressure_for(curve, note, reach, step):
 
 def gesture(desc, pressure):
     attack = float(need(desc, "gesture.attack_s"))
+    start = float(need(desc, "gesture.attack_start_s"))
     release_at = float(need(desc, "gesture.release_start_s"))
     release = float(need(desc, "gesture.release_s"))
     return (
         "frankensim-gesture-schedule-v1\n"
         f"control_rate_hz\t{need(desc, 'gesture.control_rate_hz')}\n"
         "tracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\n"
-        f"event\t0e0\t{exp(attack)}\tpressure-pa\t{exp(pressure)}\n"
+        f"event\t{exp(start)}\t{exp(attack)}\tpressure-pa\t{exp(pressure)}\n"
         f"event\t{exp(release_at)}\t{exp(release)}\tpressure-pa\t0e0\n"
     )
 

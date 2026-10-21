@@ -27,11 +27,12 @@ observer.record	baffled_outlet 0 0 0.5 32 128 4800	-	authored	X-Obs1 (data/instr
 observer.termination	flanged	-	authored	required by the baffled_outlet receiver; a clarinet bell is not a flanged pipe
 audio.rate_hz	48000	Hz	authored	-
 audio.full_scale_pa	20	Pa	authored	PCM scale at the microphone, never a gain; clipped_samples must be 0
-audio.duration_s	2.5	s	authored	-
+audio.duration_s	2.65	s	authored	includes the 0.15 s rest before the attack
 compile_limits	100000 4096	-	authored	reed.rs admission budget (visits, stored controls)
 gesture.control_rate_hz	700	Hz	authored	same control clock as the committed reed examples
+gesture.attack_start_s	0.15	s	authored	UNKNOWN real onset; a rest before the blow so the clip has a quiet lead-in for the grader's onset detector. A player timing input, not fitted to any recording
 gesture.attack_s	0.02	s	authored	UNKNOWN real attack ramp; continues the X-Obs1 audit setting, not fitted to any recording
-gesture.release_start_s	2.3	s	authored	-
+gesture.release_start_s	2.45	s	authored	-
 gesture.release_s	0.06	s	authored	UNKNOWN real release ramp; continues the X-Obs1 audit setting, not fitted to any recording
 player.level	mf	-	published-measured	fuks-sundberg-1996-blowing-pressures arpeggio task level mf
 player.instrument_group	Bb clarinet	-	published-measured	Cl1 and Cl2 both played a Buffet-Crampon Prestige (source Table B1)
