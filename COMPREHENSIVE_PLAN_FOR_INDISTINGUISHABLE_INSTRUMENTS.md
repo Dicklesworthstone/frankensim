@@ -2382,13 +2382,14 @@ Each milestone records measured progress in its scorecard.
 | OD7 | Render host for multi-hour jobs | ts1 (not ts2) |
 | OD8 | About 30-minute blind listening sessions per family; adjudicate the seven old receipts (q61wp.24) in the first | first at clarinet Q2 |
 | OD9 | Realism to recordings before extreme-regime material work for instruments (breath gas state stays in) | yes |
-| OD10 | Approve new crate fs-string, the M2.4 home (fs-feec extension, superseding 0ja4's interior scope), and **express permission to move/delete the files enumerated in §5.1**, per item | **ask** (RULE 1: no default for deletion) |
+| OD10 | Approve new crate fs-string, the M2.4 home (fs-feec extension, superseding 0ja4's interior scope), and **express permission to move/delete the files enumerated in §5.1**, per item | **Decided by the owner 2026-10-21:** (i) fs-string approved; (ii) M2.4 home = fs-feec extension; (iii) moves of the §5.1 files with `git mv` approved, and removal of an old entry point approved only after bitwise parity is proven |
 | OD11 | May closures (accelerations) ever be the shipped render, or only accelerations checked against resolved reference renders? | accelerations only |
 | OD12 | Supersede music plan v8 (COMPREHENSIVE_PLAN_FOR_OPTIMAL_MUSIC_ORIENTED_BUILDING_BLOCKS.md), DECISION_MUSIC_MEAN_FLOW.md and BAFFLED_INSTRUMENT_ENVIRONMENT.md where they conflict | yes |
 | OD13 | **Urgent.** Direct the remote no-toolchain lane to stop touching IRP paths or to adopt OD3. Its commits run from 6113eca8c through b1efe209e and later, and now include `engine-piano/**`, `public/live/piano/**` and `.github/workflows/instrument-materials.yml`. Meanwhile IRP beads verify, ladder and consolidate the lane's existing owners; they never reimplement them | **ask** |
 | OD14 | Which further instruments from §6.13 to add (shakuhachi, didgeridoo, uilleann pipes, sitar, erhu, handpan, mbira, ocarina, bansuri/ney) | **ask** |
 | OD15 | Budget for specimens and measurement services: metal and wooden bars, Clare D tin whistle, duduk with reeds, siku; CT scanning; impedance and admittance measurement; an artificial mouth; a quiet characterized room for specimen recordings | **ask** |
 | OD16 | May the owner's own anatomy be scanned for the player description (intraoral scan, face and lip scan, MRI if available)? | **ask** |
+| OD17 | May numbers read off published figures be retained under facts-only redistribution? | **Decided by the owner 2026-10-21: yes**, when the ledger row states the reading error (stated or bounded uncertainty); unstated error stays refused |
 
 ---
 
