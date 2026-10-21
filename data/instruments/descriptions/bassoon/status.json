@@ -1,0 +1,21 @@
+{
+  "schema": "frankensim.instrument-status.v1",
+  "family": "bassoon",
+  "title": "Bassoon",
+  "reference_instrument": "Bassoon",
+  "summary": "No render yet. No complete bassoon air column is published in open sources: only ten tone holes of one German bassoon and nine of a different French one, a straight test bocal and a few global dimensions.",
+  "physics_present": [
+    "generic fs-duct conical and cylindrical segments, tone-hole side branches and a flanged bell load, the lumped single-reed owner and the physical baffled outlet receiver already run for the clarinet; none has been given this instrument's geometry",
+    "Fuks and Sundberg 1996 blowing pressures for two professional bassoon players are retained as player data"
+  ],
+  "physics_missing": [
+    "bore profile of the bocal, wing, boot, long joint and bell",
+    "positions and sizes of most tone holes, pads and key rise, and a fingering chart",
+    "a double-reed valve driving this bore",
+    "a single specimen: the two partial hole tables belong to different instruments and must not be merged"
+  ],
+  "blocked": "No complete published bassoon geometry; needs the measured bore and hole tables from the authors of the Detmold, Marseille or Bordeaux bassoon studies, or an owner measurement.",
+  "beads": [
+    "pexfp.246"
+  ]
+}

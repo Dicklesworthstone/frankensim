@@ -1,0 +1,21 @@
+{
+  "schema": "frankensim.instrument-status.v1",
+  "family": "saxophone",
+  "title": "Alto saxophone",
+  "reference_instrument": "Alto saxophone",
+  "summary": "No render yet. Open sources give only fragments of an alto saxophone air column (a neck cone, two tone-hole positions and a bell cone, from different or unnamed specimens), so the conical bore, the tone-hole lattice and the fingering chart cannot be built from cited numbers without inventing them.",
+  "physics_present": [
+    "generic fs-duct conical and cylindrical segments, tone-hole side branches and a flanged bell load, the lumped single-reed owner and the physical baffled outlet receiver already run for the clarinet; none has been given this instrument's geometry",
+    "Fuks and Sundberg 1996 blowing pressures for two professional alto saxophone players are retained as player data"
+  ],
+  "physics_missing": [
+    "measured bore diameter profile along the whole air column",
+    "tone-hole positions, diameters and chimney heights, pads and key rise, and a fingering chart",
+    "mouthpiece chamber volume and geometry",
+    "a same-specimen impedance for comparison"
+  ],
+  "blocked": "No published measured alto saxophone air column was found; it needs an owner measurement of a specimen, or the geometry table behind the Buffet Crampon alto study of Petersen and co-authors 2020 from its authors.",
+  "beads": [
+    "pexfp.241"
+  ]
+}

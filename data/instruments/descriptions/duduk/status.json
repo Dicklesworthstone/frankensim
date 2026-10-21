@@ -1,0 +1,21 @@
+{
+  "schema": "frankensim.instrument-status.v1",
+  "family": "duduk",
+  "title": "Duduk",
+  "reference_instrument": null,
+  "summary": "No render yet and no real recording to compare with: the University of Iowa library has no duduk. The best documented specimen (Maugeais and Dalmont 2024) gives hole positions, the bore, and reed opening, stiffness, resonance and closing pressure, but not the hole diameters or undercut.",
+  "physics_present": [
+    "generic fs-duct conical and cylindrical segments, tone-hole side branches and a flanged bell load, the lumped single-reed owner and the physical baffled outlet receiver already run for the clarinet; none has been given this instrument's geometry"
+  ],
+  "physics_missing": [
+    "tone-hole diameters and undercut or chimney geometry (not published)",
+    "which two holes are on the back",
+    "reed volume and channel interior",
+    "a double-reed valve driving this bore",
+    "a real-versus-ours comparison: no duduk reference recording is in the library"
+  ],
+  "blocked": "Hole diameters are unpublished; rendering would mean inventing them. Needs the corresponding author's data (stated available on request) or an owner measurement; and a separate reference recording would be needed for any comparison.",
+  "beads": [
+    "pexfp.331"
+  ]
+}

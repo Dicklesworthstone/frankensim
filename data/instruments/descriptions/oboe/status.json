@@ -1,0 +1,22 @@
+{
+  "schema": "frankensim.instrument-status.v1",
+  "family": "oboe",
+  "title": "Oboe",
+  "reference_instrument": "Oboe",
+  "summary": "No render yet. One complete oboe tone-hole table exists (Nederveen and de Bruijn 1967, a Munnich oboe), but its bore is published only as graphs with diameters at the hole stations, and it carries no pad heights or fingering chart; the double reed also needs the paired-reed valve driver wired to a bore.",
+  "physics_present": [
+    "generic fs-duct conical and cylindrical segments, tone-hole side branches and a flanged bell load, the lumped single-reed owner and the physical baffled outlet receiver already run for the clarinet; none has been given this instrument's geometry",
+    "Fuks and Sundberg 1996 blowing pressures for two professional oboe players are retained as player data"
+  ],
+  "physics_missing": [
+    "continuous bore profile and bell flare as numbers",
+    "pad and key heights, undercut geometry and a full fingering chart",
+    "a double-reed valve driving this bore (paired reed or the material-modal valve)",
+    "staple and reed channel geometry",
+    "a modern specimen: the only complete table is from 1967"
+  ],
+  "blocked": "Bore profile is published only as figures; the 1967 transcription is also still unverified against the page images. Needs a digitised and checked bore, or a newer measured oboe from its authors.",
+  "beads": [
+    "pexfp.246"
+  ]
+}
